@@ -856,6 +856,28 @@ class Handler(BaseHTTPRequestHandler):
                 try: p.unlink(missing_ok=True)
                 except Exception: pass
                 return j(self, {'ok': True})
+            if parsed.path == '/api/session/clear':
+                # Wipe all messages from a session, keep session metadata
+                try: require(body, 'session_id')
+                except ValueError as e: return bad(self, str(e))
+                try: s = get_session(body['session_id'])
+                except KeyError: return bad(self, 'Session not found', 404)
+                s.messages = []
+                s.title = 'Untitled'
+                s.save()
+                return j(self, {'ok': True, 'session': s.compact()})
+            if parsed.path == '/api/session/truncate':
+                # Truncate messages at a given index (keep messages[:index])
+                # Used by edit+regenerate: trim everything from the edited message onward
+                try: require(body, 'session_id')
+                except ValueError as e: return bad(self, str(e))
+                if body.get('keep_count') is None: return bad(self, 'Missing required field(s): keep_count')
+                try: s = get_session(body['session_id'])
+                except KeyError: return bad(self, 'Session not found', 404)
+                keep = int(body['keep_count'])
+                s.messages = s.messages[:keep]
+                s.save()
+                return j(self, {'ok': True, 'session': s.compact() | {'messages': s.messages}})
             if parsed.path == '/api/chat/start':
                 try: require(body, 'session_id')
                 except ValueError as e: return bad(self, str(e))

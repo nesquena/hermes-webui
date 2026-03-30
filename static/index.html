@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hermes</title>
 <link rel="stylesheet" href="/static/style.css">
+  <!-- Prism.js syntax highlighting (loaded async, non-blocking) -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-core.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/plugins/autoloader/prism-autoloader.min.js" defer></script>
 </head>
 <body>
 <div class="layout">
@@ -138,6 +142,7 @@
           <div class="chip ws-chip" id="wsChip" onclick="toggleWsDropdown()" title="Switch workspace" style="cursor:pointer">&#128193; test-workspace &#9662;</div>
           <div class="ws-dropdown" id="wsDropdown"></div>
         </div>
+        <button class="chip clear-btn" id="btnClearConv" onclick="clearConversation()" title="Clear all messages in this conversation" style="display:none">&#128465; Clear</button>
       </div>
     </div>
     <div class="messages" id="messages">

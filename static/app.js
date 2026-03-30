@@ -127,9 +127,16 @@ async function checkInflightOnBoot(sid) {
     // Check if stream is still active
     const status = await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId || '')}`);
     if (status.active) {
+      // Stream is genuinely still running -- show the banner
       showReconnectBanner('A response is still being generated. Reload when ready?');
     } else {
-      showReconnectBanner('A response was in progress when you last left. Messages may have updated.');
+      // Stream finished. Only show banner if reload happened within 90 seconds
+      // (longer gap = normal completed session, not a mid-stream reload)
+      if (Date.now() - ts < 90 * 1000) {
+        showReconnectBanner('A response was in progress when you last left. Messages may have updated.');
+      } else {
+        clearInflight();  // completed normally, no banner needed
+      }
     }
   } catch(e) { clearInflight(); }
 }
@@ -149,6 +156,9 @@ function syncTopbar(){
   const m=S.session.model||'';
   const MODEL_LABELS={'openai/gpt-5.4-mini':'GPT-5.4 Mini','openai/gpt-4o':'GPT-4o','openai/o3':'o3','openai/o4-mini':'o4-mini','anthropic/claude-sonnet-4.6':'Sonnet 4.6','anthropic/claude-sonnet-4-5':'Sonnet 4.5','anthropic/claude-haiku-3-5':'Haiku 3.5','google/gemini-2.5-pro':'Gemini 2.5 Pro','deepseek/deepseek-chat-v3-0324':'DeepSeek V3','meta-llama/llama-4-scout':'Llama 4 Scout'};
   $('modelSelect').value=m;  // set dropdown first so chip reads consistent value
+  // Show Clear button only when session has messages
+  const clearBtn=$('btnClearConv');
+  if(clearBtn) clearBtn.style.display=(S.messages&&S.messages.filter(m=>m.role!=='tool').length>0)?'':'none';
   const displayModel=$('modelSelect').value||m;
   $('modelChip').textContent=MODEL_LABELS[displayModel]||(displayModel.split('/').pop()||'Unknown');
   const ws=S.session.workspace||'';
@@ -180,29 +190,148 @@ function msgContent(m){
 
 function renderMessages(){
   const inner=$('msgInner');
-  // Show user/assistant messages; skip tool turns and blank-content turns
-  // BUT always show user messages that have attachments even if text is empty
   const vis=S.messages.filter(m=>{
     if(!m||!m.role||m.role==='tool')return false;
     return msgContent(m)||m.attachments?.length;
   });
   $('emptyState').style.display=vis.length?'none':'';
   inner.innerHTML='';
-  for(const m of vis){
+  // Track original indices (in S.messages) so truncate knows the cut point
+  const visWithIdx=[];
+  let rawIdx=0;
+  for(const m of S.messages){
+    if(!m||!m.role||m.role==='tool'){rawIdx++;continue;}
+    if(msgContent(m)||m.attachments?.length) visWithIdx.push({m,rawIdx});
+    rawIdx++;
+  }
+  for(let vi=0;vi<visWithIdx.length;vi++){
+    const {m,rawIdx}=visWithIdx[vi];
     let content=m.content||'';
     if(Array.isArray(content))content=content.filter(p=>p&&p.type==='text').map(p=>p.text||p.content||'').join('\n');
     const isUser=m.role==='user';
+    const isLastAssistant=!isUser&&vi===visWithIdx.length-1;
     const row=document.createElement('div');row.className='msg-row';
+    row.dataset.msgIdx=rawIdx;
     let filesHtml='';
     if(m.attachments&&m.attachments.length)
       filesHtml=`<div class="msg-files">${m.attachments.map(f=>`<div class="msg-file-badge">&#128206; ${esc(f)}</div>`).join('')}</div>`;
     const bodyHtml = isUser ? esc(String(content)).replace(/\n/g,'<br>') : renderMd(String(content));
-    row.innerHTML=`<div class="msg-role ${m.role}"><div class="role-icon ${m.role}">${isUser?'You':'H'}</div><span style="font-size:12px">${isUser?'You':'Hermes'}</span><button class="msg-copy-btn" title="Copy" onclick="copyMsg(this)">&#128203;</button></div>${filesHtml}<div class="msg-body">${bodyHtml}</div>`;
-    // store raw text on the row for copy
+    // Action buttons for this bubble
+    const editBtn  = isUser  ? `<button class="msg-action-btn" title="Edit message" onclick="editMessage(this)">&#9998;</button>` : '';
+    const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="Regenerate response" onclick="regenerateResponse(this)">&#8635;</button>` : '';
+    row.innerHTML=`<div class="msg-role ${m.role}"><div class="role-icon ${m.role}">${isUser?'You':'H'}</div><span style="font-size:12px">${isUser?'You':'Hermes'}</span><span class="msg-actions">${editBtn}<button class="msg-copy-btn msg-action-btn" title="Copy" onclick="copyMsg(this)">&#128203;</button>${retryBtn}</span></div>${filesHtml}<div class="msg-body">${bodyHtml}</div>`;
     row.dataset.rawText = String(content).trim();
     inner.appendChild(row);
   }
   $('messages').scrollTop=$('messages').scrollHeight;
+  // Apply syntax highlighting after DOM is built
+  requestAnimationFrame(()=>highlightCode());
+}
+
+// ── Edit + Regenerate ──
+
+function editMessage(btn) {
+  if(S.busy) return;
+  const row = btn.closest('.msg-row');
+  if(!row) return;
+  const msgIdx = parseInt(row.dataset.msgIdx, 10);
+  const originalText = row.dataset.rawText || '';
+  const body = row.querySelector('.msg-body');
+  if(!body || row.dataset.editing) return;
+  row.dataset.editing = '1';
+
+  // Replace msg-body with an editable textarea
+  const ta = document.createElement('textarea');
+  ta.className = 'msg-edit-area';
+  ta.value = originalText;
+  body.replaceWith(ta);
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+  autoResizeTextarea(ta);
+  ta.addEventListener('input', () => autoResizeTextarea(ta));
+
+  // Action bar below the textarea
+  const bar = document.createElement('div');
+  bar.className = 'msg-edit-bar';
+  bar.innerHTML = `<button class="msg-edit-send">Send edit</button><button class="msg-edit-cancel">Cancel</button>`;
+  ta.after(bar);
+
+  bar.querySelector('.msg-edit-send').onclick = async () => {
+    const newText = ta.value.trim();
+    if(!newText) return;
+    await submitEdit(msgIdx, newText);
+  };
+  bar.querySelector('.msg-edit-cancel').onclick = () => cancelEdit(row, originalText, body);
+
+  ta.addEventListener('keydown', e => {
+    if(e.key==='Enter' && !e.shiftKey) { e.preventDefault(); bar.querySelector('.msg-edit-send').click(); }
+    if(e.key==='Escape') { e.preventDefault(); cancelEdit(row, originalText, body); }
+  });
+}
+
+function cancelEdit(row, originalText, originalBody) {
+  delete row.dataset.editing;
+  const ta = row.querySelector('.msg-edit-area');
+  const bar = row.querySelector('.msg-edit-bar');
+  if(ta) ta.replaceWith(originalBody);
+  if(bar) bar.remove();
+}
+
+function autoResizeTextarea(ta) {
+  ta.style.height = 'auto';
+  ta.style.height = Math.min(ta.scrollHeight, 300) + 'px';
+}
+
+async function submitEdit(msgIdx, newText) {
+  if(!S.session || S.busy) return;
+  // Truncate session at msgIdx (keep messages before the edited one)
+  // then re-send the edited text
+  try {
+    await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
+      session_id: S.session.session_id,
+      keep_count: msgIdx  // keep messages[0..msgIdx-1], discard from msgIdx onward
+    })});
+    S.messages = S.messages.slice(0, msgIdx);
+    renderMessages();
+    // Now send the edited message as a new chat
+    $('msg').value = newText;
+    await send();
+  } catch(e) { setStatus('Edit failed: ' + e.message); }
+}
+
+async function regenerateResponse(btn) {
+  if(!S.session || S.busy) return;
+  // Find the last user message and re-run it
+  // Remove the last assistant message first (truncate to before it)
+  const row = btn.closest('.msg-row');
+  if(!row) return;
+  const assistantIdx = parseInt(row.dataset.msgIdx, 10);
+  // Find the last user message text (one before this assistant message)
+  let lastUserText = '';
+  for(let i = assistantIdx - 1; i >= 0; i--) {
+    const m = S.messages[i];
+    if(m && m.role === 'user') { lastUserText = msgContent(m); break; }
+  }
+  if(!lastUserText) return;
+  try {
+    await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
+      session_id: S.session.session_id,
+      keep_count: assistantIdx  // remove the assistant message
+    })});
+    S.messages = S.messages.slice(0, assistantIdx);
+    renderMessages();
+    $('msg').value = lastUserText;
+    await send();
+  } catch(e) { setStatus('Regenerate failed: ' + e.message); }
+}
+
+function highlightCode(container) {
+  // Apply Prism.js syntax highlighting to all code blocks in container (or whole messages area)
+  if(typeof Prism === 'undefined') return;
+  const el = container || $('msgInner');
+  if(!el) return;
+  // Prism autoloader handles language detection via class="language-xxx"
+  Prism.highlightAllUnder(el);
 }
 
 function appendThinking(){
@@ -483,7 +612,7 @@ async function loadSession(sid){
     setBusy(true);setStatus('Hermes is thinking\u2026');
   }else{
     S.messages=data.session.messages||[];
-    syncTopbar();await loadDir('.');renderMessages();
+    syncTopbar();await loadDir('.');renderMessages();highlightCode();
   }
 }
 
@@ -749,6 +878,7 @@ async function send(){
       syncTopbar();renderMessages();loadDir('.');
     }
     renderSessionList();setBusy(false);setStatus('');
+    highlightCode();
   });
 
   es.addEventListener('error',e=>{
@@ -1038,6 +1168,20 @@ async function cronDelete(id) {
     showToast('Job deleted');
     await loadCrons();
   } catch(e) { showToast('Delete failed: ' + e.message, 4000); }
+}
+
+async function clearConversation() {
+  if(!S.session) return;
+  if(!confirm('Clear all messages in this conversation? This cannot be undone.')) return;
+  try {
+    const data = await api('/api/session/clear', {method:'POST',
+      body: JSON.stringify({session_id: S.session.session_id})});
+    S.session = data.session;
+    S.messages = [];
+    syncTopbar();
+    renderMessages();
+    showToast('Conversation cleared');
+  } catch(e) { setStatus('Clear failed: ' + e.message); }
 }
 
 // ── Skills panel ──

@@ -3,8 +3,8 @@
 > Goal: Full 1:1 parity with the Hermes CLI experience via a clean dark web UI.
 > Everything you can do from the CLI terminal, you can do from this UI.
 >
-> Last updated: Sprint 7 complete (March 31, 2026)
-> Tests: 125/125 passing
+> Last updated: Sprint 8 complete (March 31, 2026)
+> Tests: 139/139 passing
 > Source: /home/hermes/webui-mvp/
 
 ---
@@ -21,6 +21,7 @@
 | Test hardening | Isolated test environment | Port 8788 test server, conftest autouse, cleanup_zero_message, 5 test files rewritten | 90 |
 | Sprint 6 | Polish + Phase E complete | HTML to static/, resizable panels, cron create, session JSON export, Escape from editor | 106 |
 | Sprint 7 | Wave 2 Core: CRUD + Search | Cron edit/delete, skill create/edit/delete, memory write, session content search, health improvements, git init | 125 |
+| Sprint 8 | Daily Driver Finish Line | Edit+regenerate user messages, regenerate last response, clear conversation, Prism.js syntax highlighting, reconnect banner fix, session list scroll fix | 139 |
 
 ---
 
@@ -28,7 +29,7 @@
 
 | Layer | Location | Status |
 |-------|----------|--------|
-| Python server | /home/hermes/webui-mvp/server.py (~990 lines) | Pure Python, no inline HTML/CSS/JS |
+| Python server | /home/hermes/webui-mvp/server.py (~1100 lines) | Pure Python, no inline HTML/CSS/JS |
 | HTML template | /home/hermes/webui-mvp/static/index.html | Served from disk |
 | CSS | /home/hermes/webui-mvp/static/style.css | Served from disk |
 | JavaScript | /home/hermes/webui-mvp/static/app.js | Served from disk |
@@ -52,7 +53,7 @@
 - [x] Session restores from localStorage on page load
 - [x] Reconnect banner if page reloaded mid-stream
 - [x] Copy message to clipboard (hover icon on each bubble)
-- [ ] Edit last user message and regenerate (Wave 3)
+- [x] Edit last user message and regenerate
 - [ ] Branch/fork conversation (Wave 3)
 - [ ] Token/cost estimate per message (Wave 3)
 
@@ -71,7 +72,7 @@
 - [x] Delete file (hover trash, confirm dialog)
 - [x] File name truncation with tooltip for long names
 - [x] Right panel resizable (drag inner edge)
-- [ ] Syntax highlighted code preview (Wave 3)
+- [x] Syntax highlighted code preview (Prism.js)
 - [ ] Rename file (Wave 3)
 - [ ] Create folder (Wave 3)
 
@@ -89,7 +90,7 @@
 - [x] Session content search (search message text across sessions)
 - [ ] Session tags / labels (Wave 5)
 - [ ] Archive sessions (Wave 5)
-- [ ] Clear conversation (wipe messages, keep session) (Wave 3)
+- [x] Clear conversation (wipe messages, keep session) (Wave 3)
 - [ ] Import session from JSON (Wave 3)
 
 ### Workspace Management
@@ -241,13 +242,13 @@ Both sidebar and workspace panel are drag-resizable with localStorage persistenc
 ### Sprint 3.3: Workspace File Actions
 - [ ] Rename file (inline, double-click)
 - [ ] Create folder
-- [ ] Syntax highlighted code preview (Prism.js CDN)
+- [x] Syntax highlighted code preview (Prism.js)
 
 ### Sprint 3.4: Conversation Controls
 - [x] Copy message (Sprint 5)
-- [ ] Edit last user message + regenerate
-- [ ] Regenerate last assistant response
-- [ ] Clear conversation (wipe messages, keep session)
+- [x] Edit last user message + regenerate
+- [x] Regenerate last assistant response
+- [x] Clear conversation (wipe messages, keep session)
 
 ---
 

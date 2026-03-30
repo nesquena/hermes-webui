@@ -985,6 +985,12 @@ Resolution: Phase B replaces with thread-local or explicit parameter passing.
             Bug fix: Escape from file editor now cancels edits
             New endpoints: POST /api/crons/create, GET /api/session/export
             Tests: 16 new, 106/106 total
+    v1.0  Sprint 8 (March 31, 2026):
+            Features: edit+regenerate messages, regenerate last response, clear conversation,
+                       Prism.js syntax highlighting
+            Bug fixes: A1 (reconnect banner false positive), A2 (session list scroll clip)
+            New endpoints: POST /api/session/clear, POST /api/session/truncate
+            Tests: 14 new, 139/139 total
     v0.9  Sprint 7 (March 31, 2026):
             Features: cron edit+delete, skill create/edit/delete, memory write, session content search
             Arch: Phase G partial (active_streams+uptime in /health), git init

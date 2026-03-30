@@ -13,7 +13,7 @@
   .sidebar-section{padding:14px 14px 8px;}
   .new-chat-btn{width:100%;padding:9px 12px;border-radius:9px;background:rgba(124,185,255,0.07);border:1px solid rgba(124,185,255,0.18);color:var(--blue);font-size:13px;cursor:pointer;display:flex;align-items:center;gap:8px;transition:all .15s;margin-bottom:8px;font-weight:500;}
   .new-chat-btn:hover{background:rgba(124,185,255,0.13);border-color:rgba(124,185,255,.3);}
-  .session-list{flex:1;overflow-y:auto;padding:0 8px 8px;}
+  .session-list{flex:1;overflow-y:auto;padding:0 8px 8px;min-height:0;}
   .session-search{padding:4px 10px 8px;flex-shrink:0;}
   .session-search input{width:100%;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:8px;color:var(--text);padding:7px 12px;font-size:12px;outline:none;transition:all .15s;}
   .session-search input:focus{border-color:rgba(124,185,255,.35);background:rgba(255,255,255,.06);box-shadow:0 0 0 2px rgba(124,185,255,.07);}
@@ -105,7 +105,7 @@
   .memory-content{font-size:12px;line-height:1.7;color:var(--text);}
   .memory-content p{margin-bottom:6px;}
   .memory-empty{color:var(--muted);font-size:12px;font-style:italic;}
-  .sidebar-bottom{border-top:1px solid var(--border);padding:12px 14px;}
+  .sidebar-bottom{border-top:1px solid var(--border);padding:12px 14px;flex-shrink:0;}
   .field-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:5px;opacity:.8;}
   select{width:100%;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,.1);border-radius:8px;color:var(--text);padding:7px 28px 7px 10px;font-size:12px;outline:none;appearance:none;margin-bottom:6px;cursor:pointer;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238888aa' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;}
   select:focus{border-color:rgba(124,185,255,.4);box-shadow:0 0 0 2px rgba(124,185,255,.08);}
@@ -259,10 +259,26 @@
 .ws-action-btn:hover{background:rgba(255,255,255,.1);color:var(--text);}
 .ws-action-btn.danger:hover{background:rgba(233,69,96,.12);color:var(--accent);border-color:rgba(233,69,96,.3);}
 .ws-add-row{display:flex;gap:8px;align-items:center;padding:10px 0 4px;}
+/* ── Message action buttons (copy, edit, retry) ── */
+.msg-actions{display:flex;align-items:center;gap:2px;opacity:0;transition:opacity .15s;margin-left:auto;}
+.msg-row:hover .msg-actions{opacity:1;}
+.msg-action-btn{background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:2px 5px;border-radius:5px;transition:color .12s,background .12s;line-height:1;}
+.msg-action-btn:hover{color:var(--blue);background:rgba(124,185,255,.1);}
+
+/* ── Edit message inline ── */
+.msg-edit-area{width:100%;background:rgba(255,255,255,.05);border:1px solid rgba(124,185,255,.35);border-radius:8px;color:var(--text);padding:10px 12px;font-size:14px;font-family:inherit;line-height:1.6;resize:none;outline:none;min-height:60px;box-sizing:border-box;box-shadow:0 0 0 3px rgba(124,185,255,.07);margin-top:4px;}
+.msg-edit-bar{display:flex;gap:8px;margin-top:8px;margin-bottom:4px;}
+.msg-edit-send{background:var(--blue);color:#fff;border:none;border-radius:7px;padding:6px 16px;font-size:13px;font-weight:600;cursor:pointer;transition:opacity .15s;}
+.msg-edit-send:hover{opacity:.85;}
+.msg-edit-cancel{background:rgba(255,255,255,.06);color:var(--muted);border:1px solid var(--border2);border-radius:7px;padding:6px 12px;font-size:13px;cursor:pointer;transition:background .15s;}
+.msg-edit-cancel:hover{background:rgba(255,255,255,.1);}
+
+/* ── Clear conversation chip ── */
+.clear-btn{background:rgba(201,168,76,.06);border:1px solid rgba(201,168,76,.2) !important;color:var(--gold) !important;font-size:11px;padding:4px 10px;cursor:pointer;transition:background .15s;}
+.clear-btn:hover{background:rgba(201,168,76,.12);}
+
 /* ── Copy button on messages ── */
-.msg-copy-btn{margin-left:auto;background:none;border:none;color:var(--muted);cursor:pointer;font-size:12px;padding:0 2px;opacity:0;transition:opacity .15s;}
-.msg-row:hover .msg-copy-btn{opacity:1;}
-.msg-copy-btn:hover{color:var(--blue);}
+/* msg-copy-btn styles moved to msg-action-btn */
 /* ── Nav tab nowrap ── */
 .nav-tab{white-space:nowrap;overflow:hidden;font-size:10px;}
 
@@ -307,8 +323,7 @@
 /* Topbar: border should match the subtle sidebar border */
 .topbar{border-bottom:1px solid rgba(255,255,255,.07);}
 
-/* Message copy btn: position fix for long messages */
-.msg-role{position:relative;}
+
 
 /* Suggestion grid: consistent width */
 .suggestion-grid{width:100%;max-width:400px;}

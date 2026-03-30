@@ -1266,10 +1266,7 @@ Manual-only for Sprint 6:
 
 ---
 
-*Last updated: Sprint 7, March 31, 2026*
-*Total automated tests: 125/125*
-*Run: cd /home/hermes/.hermes/hermes-agent && venv/bin/python -m pytest /home/hermes/webui-mvp/tests/ -v*
-*Source: /home/hermes/webui-mvp/*
+
 *Static: static/index.html + static/style.css + static/app.js*
 
 
@@ -1390,7 +1387,149 @@ Manual-only for Sprint 7:
 
 ---
 
-*Last updated: Sprint 7, March 31, 2026*
-*Total automated tests: 125/125*
+
+
+---
+
+## Section 32: Edit User Message + Regenerate (Sprint 8)
+
+### T32.1: Edit Icon Appears on Hover
+SETUP: Active session with at least one user message.
+STEPS:
+  1. Hover over any user message bubble
+EXPECT:
+  - A pencil (edit) icon appears in the message header row, right side
+  - Icon not visible when not hovering
+FAIL: No icon, always visible, wrong position.
+
+### T32.2: Click Edit Opens Textarea
+STEPS:
+  1. Hover over a user message and click the pencil icon
+EXPECT:
+  - Message body is replaced by an editable textarea pre-filled with the original text
+  - "Send edit" and "Cancel" buttons appear below
+  - Textarea has a blue border glow (focused style)
+FAIL: Nothing happens, empty textarea, crash.
+
+### T32.3: Cancel Restores Original
+STEPS (continued from T32.2):
+  1. Make a change in the textarea
+  2. Click Cancel
+EXPECT:
+  - Original message text restored exactly
+  - No messages sent, no API call
+FAIL: Original text lost, message sent.
+
+### T32.4: Escape Also Cancels
+STEPS:
+  1. Enter edit mode on a user message
+  2. Press Escape
+EXPECT:
+  - Textarea dismissed, original restored
+FAIL: Escape does nothing.
+
+### T32.5: Send Edit Truncates and Regenerates
+STEPS:
+  1. Click edit on a user message that has a response after it
+  2. Change the text
+  3. Click "Send edit" (or press Enter)
+EXPECT:
+  - All messages after the edited message are removed
+  - The edited text is sent as a new user message
+  - Hermes streams a fresh response
+FAIL: Old messages remain, double messages, crash.
+
+---
+
+## Section 33: Regenerate Last Response (Sprint 8)
+
+### T33.1: Retry Icon on Last Assistant Bubble Only
+SETUP: Session with at least one complete exchange.
+EXPECT:
+  - A retry (↻) icon appears on hover over the LAST assistant message only
+  - Not on user messages
+  - Not on older assistant messages
+FAIL: Icon on every message, or not on last.
+
+### T33.2: Regenerate Re-Runs Last User Message
+STEPS:
+  1. Hover the last assistant bubble and click the retry icon
+EXPECT:
+  - The last assistant message is removed
+  - The previous user message is re-sent
+  - Hermes streams a new response
+FAIL: Both messages removed, wrong message sent, crash.
+
+---
+
+## Section 34: Clear Conversation (Sprint 8)
+
+### T34.1: Clear Button Appears When Session Has Messages
+SETUP: Session with at least one message.
+EXPECT:
+  - A "🗑 Clear" chip appears in the topbar right side (next to the workspace chip)
+  - Button NOT visible when session has no messages / empty state
+FAIL: Button always visible, never visible.
+
+### T34.2: Clear Wipes Messages and Resets Title
+STEPS:
+  1. Click the Clear button in the topbar
+  2. Confirm the dialog
+EXPECT:
+  - All messages disappear from the chat area
+  - Empty state ("What can I help with?") reappears
+  - Session title in sidebar resets to "Untitled"
+  - Toast: "Conversation cleared"
+  - Session still in the sidebar (not deleted)
+FAIL: Session deleted, messages remain, title not reset.
+
+### T34.3: Cancel Clear Does Nothing
+STEPS:
+  1. Click Clear, then click Cancel in the confirm dialog
+EXPECT:
+  - All messages still present
+  - No toast, no change
+FAIL: Messages cleared despite cancel.
+
+---
+
+## Section 35: Syntax Highlighting (Sprint 8)
+
+### T35.1: Code Blocks Have Syntax Colors
+SETUP: Ask Hermes something that produces a code response (e.g. "Show me a Python hello world").
+EXPECT:
+  - The code block has syntax-colored tokens (keywords in one color, strings in another)
+  - NOT all plain white/gray monospace text
+  - Dark background with Prism Tomorrow theme colors
+FAIL: All plain text, no colors, broken layout.
+
+### T35.2: Code in Workspace Preview Also Highlighted
+SETUP: Open a .py or .js file in the workspace panel.
+EXPECT:
+  - File content has syntax highlighting (Prism autoloader)
+FAIL: Plain monospace text only.
+
+---
+
+## Automated Test Coverage (Updated Sprint 8)
+
+Sprint 8 tests (test_sprint8.py) - 14 tests:
+  - session/clear: requires session_id, unknown 404, wipes messages+resets title, returns compact
+  - session/truncate: requires session_id, requires keep_count, unknown 404, returns messages array
+  - Static file checks: app.js has editMessage, regenerateResponse, clearConversation, highlightCode
+  - index.html: contains Prism CDN link, contains btnClearConv + clearConversation
+
+Total automated: 139/139 passing.
+
+Manual-only for Sprint 8:
+  - T32.1-T32.5: edit message UX
+  - T33.1-T33.2: regenerate UX
+  - T34.1-T34.3: clear conversation UX
+  - T35.1-T35.2: syntax highlighting visual
+
+---
+
+*Last updated: Sprint 8, March 31, 2026*
+*Total automated tests: 139/139*
 *Run: cd /home/hermes/.hermes/hermes-agent && venv/bin/python -m pytest /home/hermes/webui-mvp/tests/ -v*
 *Source: /home/hermes/webui-mvp/*
