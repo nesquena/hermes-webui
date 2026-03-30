@@ -1,5 +1,6 @@
 const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[]};
 const INFLIGHT={};  // keyed by session_id while request in-flight
+const MSG_QUEUE=[];  // messages queued while a request is in-flight
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
