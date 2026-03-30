@@ -26,8 +26,10 @@ $('btnClearPreview').onclick=()=>{
 // workspacePath click handler removed -- use topbar workspace chip dropdown instead
 $('modelSelect').onchange=async()=>{
   if(!S.session)return;
-  await api('/api/session/update',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,workspace:S.session.workspace,model:$('modelSelect').value})});
-  S.session.model=$('modelSelect').value;syncTopbar();
+  const selectedModel=$('modelSelect').value;
+  localStorage.setItem('hermes-webui-model', selectedModel);
+  await api('/api/session/update',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,workspace:S.session.workspace,model:selectedModel})});
+  S.session.model=selectedModel;syncTopbar();
 };
 $('msg').addEventListener('input',autoResize);
 $('msg').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}});
@@ -118,6 +120,13 @@ document.querySelectorAll('.suggestion').forEach(btn=>{
 })();
 
 (async()=>{
+  // Restore last-used model preference
+  const savedModel=localStorage.getItem('hermes-webui-model');
+  if(savedModel && $('modelSelect')){
+    $('modelSelect').value=savedModel;
+    // If the value didn't take (model not in list), clear the bad pref
+    if($('modelSelect').value!==savedModel) localStorage.removeItem('hermes-webui-model');
+  }
   // Pre-load workspace list so sidebar name is correct from first render
   await loadWorkspaceList();
   _initResizePanels();
