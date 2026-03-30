@@ -514,6 +514,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             parsed = urlparse(self.path)
             if parsed.path in ('/', '/index.html'): return t(self, _INDEX_HTML_PATH.read_text(encoding='utf-8'), content_type='text/html; charset=utf-8')
+            if parsed.path == '/favicon.ico':
+                self.send_response(204); self.end_headers(); return
             if parsed.path == '/health':
                 with STREAMS_LOCK: n_streams = len(STREAMS)
                 return j(self, {'status':'ok','sessions':len(SESSIONS),'active_streams':n_streams,'uptime_seconds':round(time.time()-SERVER_START_TIME,1)})

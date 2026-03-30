@@ -75,7 +75,7 @@
   .cron-body{display:none;padding:0 11px 10px;border-top:1px solid var(--border);overflow:hidden;}
   .cron-body.open{display:block;}
   .cron-schedule{font-size:11px;color:var(--muted);margin:8px 0 6px;}
-  .cron-prompt{font-size:11px;color:var(--muted);line-height:1.55;max-height:80px;overflow-y:auto;background:rgba(0,0,0,.2);padding:6px 8px;border-radius:6px;white-space:pre-wrap;margin-bottom:8px;}
+  .cron-prompt{font-size:11px;color:var(--muted);line-height:1.55;max-height:80px;overflow-y:auto;background:rgba(0,0,0,.2);padding:6px 8px;border-radius:6px;white-space:pre-wrap;margin-bottom:8px;box-sizing:border-box;}
   .cron-actions{display:flex;gap:6px;margin-bottom:8px;}
   .cron-btn{padding:4px 10px;border-radius:6px;font-size:11px;font-weight:600;border:1px solid var(--border2);background:rgba(255,255,255,.05);color:var(--muted);cursor:pointer;transition:all .15s;}
   .cron-btn:hover{background:rgba(255,255,255,.1);color:var(--text);}
@@ -239,7 +239,7 @@
 
 /* ── Workspace dropdown (topbar) ── */
 .ws-chip{user-select:none;}
-.ws-dropdown{display:none;position:absolute;top:calc(100% + 6px);right:0;min-width:240px;background:#1a2535;border:1px solid var(--border2);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.4);z-index:200;overflow:hidden;}
+.ws-dropdown{display:none;position:absolute;top:calc(100% + 6px);right:0;min-width:240px;background:#1a2535;border:1px solid var(--border2);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.4);z-index:200;overflow:hidden;max-height:320px;overflow-y:auto;}
 .ws-dropdown.open{display:block;}
 .ws-opt{padding:9px 14px;cursor:pointer;transition:background .12s;}
 .ws-opt:hover{background:rgba(255,255,255,.07);}
@@ -414,3 +414,10 @@
 .rightpanel .resize-handle{left:-2px;}
 /* Prevent text selection during drag */
 body.resizing{user-select:none;cursor:col-resize;}
+
+/* ── Scrollbar polish ── */
+::-webkit-scrollbar{width:5px;height:5px;}
+::-webkit-scrollbar-track{background:transparent;}
+::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:3px;}
+::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.22);}
+* { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.12) transparent; }

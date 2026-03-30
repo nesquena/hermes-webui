@@ -269,9 +269,8 @@ function editMessage(btn) {
   ta.className = 'msg-edit-area';
   ta.value = originalText;
   body.replaceWith(ta);
-  ta.focus();
-  ta.setSelectionRange(ta.value.length, ta.value.length);
-  autoResizeTextarea(ta);
+  // Resize after DOM insertion so scrollHeight is correct
+  requestAnimationFrame(() => { autoResizeTextarea(ta); ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); });
   ta.addEventListener('input', () => autoResizeTextarea(ta));
 
   // Action bar below the textarea
@@ -635,6 +634,7 @@ async function loadSession(sid){
     S.messages=INFLIGHT[sid].messages;
     syncTopbar();await loadDir('.');renderMessages();appendThinking();
     setBusy(true);setStatus('Hermes is thinking\u2026');
+    startApprovalPolling(sid);
   }else{
     MSG_QUEUE.length=0;updateQueueBadge();  // clear queue when switching sessions
     S.messages=data.session.messages||[];
@@ -796,6 +796,8 @@ async function deleteSession(sid){
 async function send(){
   const text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length)return;
+  // Don't send while an inline message edit is active
+  if(document.querySelector('.msg-edit-area'))return;
   // If busy, queue the message instead of dropping it
   if(S.busy){
     if(text){
@@ -1570,6 +1572,19 @@ document.addEventListener('keydown',async e=>{
   if((e.metaKey||e.ctrlKey)&&e.key==='k'){
     e.preventDefault();
     if(!S.busy){await newSession();await renderSessionList();$('msg').focus();}
+  }
+  if(e.key==='Escape'){
+    // Close workspace dropdown
+    closeWsDropdown();
+    // Clear session search
+    const ss=$('sessionSearch');
+    if(ss&&ss.value){ss.value='';filterSessions();}
+    // Cancel any active message edit
+    const editArea=document.querySelector('.msg-edit-area');
+    if(editArea){
+      const bar=editArea.closest('.msg-row')&&editArea.closest('.msg-row').querySelector('.msg-edit-bar');
+      if(bar){const cancel=bar.querySelector('.msg-edit-cancel');if(cancel)cancel.click();}
+    }
   }
 });
 $('msg').addEventListener('paste',e=>{
