@@ -1,0 +1,22 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Backup and temporary files
+*.bak
+*.swp
+*.swo
+
+# Local environment and secrets
+.env
+.env.*
+
+# Generated screenshots and transient artifacts
+screenshot-*.png
+full-UI.png
+
+# OS files
+.DS_Store
+Thumbs.db
