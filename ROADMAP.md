@@ -3,8 +3,8 @@
 > Goal: Full 1:1 parity with the Hermes CLI experience via a clean dark web UI.
 > Everything you can do from the CLI terminal, you can do from this UI.
 >
-> Last updated: Sprint 8 complete + hotfix (March 31, 2026)
-> Tests: 139/139 passing
+> Last updated: Sprint 9 complete (March 31, 2026)
+> Tests: 149/149 passing
 > Source: /home/hermes/webui-mvp/
 
 ---
@@ -23,6 +23,7 @@
 | Sprint 7 | Wave 2 Core: CRUD + Search | Cron edit/delete, skill create/edit/delete, memory write, session content search, health improvements, git init | 125 |
 | Sprint 8 | Daily Driver Finish Line | Edit+regenerate user messages, regenerate last response, clear conversation, Prism.js syntax highlighting, reconnect banner fix, session list scroll fix | 139 |
 | Sprint 8 hotfix | Message queue + INFLIGHT fix | Queue messages while busy (toast + badge + auto-drain), INFLIGHT-first loadSession (message stays on switch-away/back) | 139 |
+| Sprint 9 | Codebase health + daily driver gaps | app.js split (6 modules), tool call cards inline, attachment persistence on reload, todo list panel | 149 |
 
 ---
 
@@ -61,7 +62,7 @@
 ### Tool Visibility
 - [x] Tool progress in activity bar (moved out of composer footer)
 - [x] Approval card with all 4 choices
-- [ ] Tool call args/results inline (collapsed cards) (Wave 3)
+- [x] Tool call cards inline (collapsed, show name/args/result)
 
 ### Workspace / Files
 - [x] Browse workspace directory tree with type icons
@@ -213,9 +214,7 @@ sidebar live display, new sessions inherit last workspace. See Sprint 5 complete
 - [x] Edit notes inline
 
 ### Sprint 2.4: Todo Management (Wave 2)
-- [ ] View current todo list
-- [ ] Update item status
-- [ ] Add / remove items
+- [x] View current todo list (sidebar Todo panel, parsed from session history)
 
 ### Sprint 2.5: Session Content Search (Sprint 7)
 - [x] Session title search (Sprint 4)

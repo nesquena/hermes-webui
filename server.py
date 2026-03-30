@@ -385,7 +385,7 @@ def _sse(handler, event, data):
     handler.wfile.flush()
 
 
-def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id):
+def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, attachments=None):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id]."""
     q = STREAMS.get(stream_id)
     if q is None:
@@ -466,8 +466,36 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id):
             )
             s.messages = result.get('messages') or s.messages
             s.title = title_from(s.messages, s.title)
+            # Extract tool call metadata for the UI to display inline
+            tool_calls = []
+            pending_names = {}
+            for m in s.messages:
+                if m.get('role') == 'assistant':
+                    c = m.get('content', '')
+                    if isinstance(c, list):
+                        for p in c:
+                            if isinstance(p, dict) and p.get('type') == 'tool_use':
+                                pending_names[p.get('id', '')] = p.get('name', 'tool')
+                elif m.get('role') == 'tool':
+                    tid = m.get('tool_call_id') or m.get('tool_use_id', '')
+                    name = pending_names.get(tid, 'tool')
+                    raw = str(m.get('content', ''))
+                    try:
+                        import json as _j2
+                        rd = _j2.loads(raw)
+                        snippet = str(rd.get('output') or rd.get('result') or rd.get('error') or raw)[:200]
+                    except Exception:
+                        snippet = raw[:200]
+                    tool_calls.append({'name': name, 'snippet': snippet, 'tid': tid})
+            s.tool_calls = tool_calls
+            # Tag the last user message with attachment filenames for display on reload
+            if attachments:
+                for m in reversed(s.messages):
+                    if m.get('role') == 'user':
+                        m['attachments'] = attachments
+                        break
             s.save()
-            put('done', {'session': s.compact() | {'messages': s.messages}})
+            put('done', {'session': s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}})
           finally:
             if old_cwd is None: os.environ.pop('TERMINAL_CWD', None)
             else: os.environ['TERMINAL_CWD'] = old_cwd
@@ -865,6 +893,7 @@ class Handler(BaseHTTPRequestHandler):
                 try: s = get_session(body['session_id'])
                 except KeyError: return bad(self, 'Session not found', 404)
                 s.messages = []
+                s.tool_calls = []
                 s.title = 'Untitled'
                 s.save()
                 return j(self, {'ok': True, 'session': s.compact()})
@@ -887,6 +916,7 @@ class Handler(BaseHTTPRequestHandler):
                 except KeyError: return bad(self, 'Session not found', 404)
                 msg = str(body.get('message', '')).strip()
                 if not msg: return bad(self, 'message is required')
+                attachments = [str(a) for a in (body.get('attachments') or [])][:20]
                 workspace = str(Path(body.get('workspace') or s.workspace).expanduser().resolve())
                 model = body.get('model') or s.model
                 s.workspace = workspace; s.model = model; s.save()
@@ -895,7 +925,7 @@ class Handler(BaseHTTPRequestHandler):
                 q = queue.Queue()
                 with STREAMS_LOCK: STREAMS[stream_id] = q
                 t = threading.Thread(target=_run_agent_streaming,
-                    args=(s.session_id, msg, model, workspace, stream_id), daemon=True)
+                    args=(s.session_id, msg, model, workspace, stream_id, attachments), daemon=True)
                 t.start()
                 return j(self, {'stream_id': stream_id, 'session_id': s.session_id})
             if parsed.path == '/api/chat':

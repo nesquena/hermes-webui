@@ -1,5 +1,6 @@
 async function newSession(flash){
   MSG_QUEUE.length=0;updateQueueBadge();
+  S.toolCalls=[];
   const inheritWs=S.session?S.session.workspace:null;
   const data=await api('/api/session/new',{method:'POST',body:JSON.stringify({model:$('modelSelect').value,workspace:inheritWs})});
   S.session=data.session;S.messages=data.session.messages||[];
@@ -23,12 +24,14 @@ async function loadSession(sid){
   });
   if(INFLIGHT[sid]){
     S.messages=INFLIGHT[sid].messages;
+    // Keep S.toolCalls as-is (accumulated during streaming)
     syncTopbar();await loadDir('.');renderMessages();appendThinking();
     setBusy(true);setStatus('Hermes is thinking\u2026');
     startApprovalPolling(sid);
   }else{
     MSG_QUEUE.length=0;updateQueueBadge();  // clear queue when switching sessions
     S.messages=data.session.messages||[];
+    S.toolCalls=(data.session.tool_calls||[]).map(tc=>({...tc,done:true}));
     syncTopbar();await loadDir('.');renderMessages();highlightCode();
   }
 }

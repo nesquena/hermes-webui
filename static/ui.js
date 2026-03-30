@@ -1,4 +1,4 @@
-const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[]};
+const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[]};
 const INFLIGHT={};  // keyed by session_id while request in-flight
 const MSG_QUEUE=[];  // messages queued while a request is in-flight
 const $=id=>document.getElementById(id);
@@ -247,9 +247,62 @@ function renderMessages(){
     row.dataset.rawText = String(content).trim();
     inner.appendChild(row);
   }
+  // Insert tool call cards between last user message and last assistant response
+  if(S.toolCalls && S.toolCalls.length){
+    // Find the position to insert: after the last user message row
+    const allRows = Array.from(inner.querySelectorAll('.msg-row'));
+    let insertBefore = null;
+    for(let i = allRows.length-1; i >= 0; i--){
+      const idx = parseInt(allRows[i].dataset.msgIdx||'-1',10);
+      if(idx >= 0 && S.messages[idx] && S.messages[idx].role === 'assistant'){
+        insertBefore = allRows[i]; // insert tool cards before last assistant row
+      } else if(insertBefore){
+        break;
+      }
+    }
+    // Remove any existing tool-card rows to avoid duplicates
+    inner.querySelectorAll('.tool-card-row').forEach(el=>el.remove());
+    // Render tool cards
+    const cardsFragment = document.createDocumentFragment();
+    for(const tc of S.toolCalls){
+      const row = document.createElement('div');
+      row.className = 'msg-row tool-card-row';
+      const icon = toolIcon(tc.name);
+      const hasDetail = tc.snippet || tc.args;
+      row.innerHTML = `
+        <div class="tool-card${tc.done===false?' tool-card-running':''}">
+          <div class="tool-card-header" onclick="this.closest('.tool-card').classList.toggle('open')">
+            <span class="tool-card-icon">${icon}</span>
+            <span class="tool-card-name">${esc(tc.name)}</span>
+            <span class="tool-card-preview">${esc(tc.preview||tc.snippet||'')}</span>
+            ${hasDetail?'<span class="tool-card-toggle">▸</span>':''}
+          </div>
+          ${hasDetail?`<div class="tool-card-detail">
+            ${tc.args&&Object.keys(tc.args).length?`<div class="tool-card-args">${
+              Object.entries(tc.args).map(([k,v])=>`<div><span class="tool-arg-key">${esc(k)}</span> <span class="tool-arg-val">${esc(String(v))}</span></div>`).join('')
+            }</div>`:''}
+            ${tc.snippet?`<div class="tool-card-result"><pre>${esc(tc.snippet)}</pre></div>`:''}
+          </div>`:''}
+        </div>`;
+      cardsFragment.appendChild(row);
+    }
+    if(insertBefore){
+      inner.insertBefore(cardsFragment, insertBefore);
+    } else {
+      inner.appendChild(cardsFragment);
+    }
+  }
   $('messages').scrollTop=$('messages').scrollHeight;
   // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>highlightCode());
+}
+
+function toolIcon(name){
+  const icons={terminal:'⬛',read_file:'📄',write_file:'✏️',search_files:'🔍',
+    web_search:'🌐',web_extract:'🌐',execute_code:'⚙️',patch:'🔧',
+    memory:'🧠',skill_manage:'📚',todo:'✅',cronjob:'⏱️',delegate_task:'🤖',
+    send_message:'💬',browser_navigate:'🌐',vision_analyze:'👁️'};
+  return icons[name]||'🔧';
 }
 
 // ── Edit + Regenerate ──

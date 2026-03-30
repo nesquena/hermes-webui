@@ -20,6 +20,7 @@
       <button class="nav-tab" data-panel="skills" data-label="Skills" onclick="switchPanel('skills')" title="Skills">&#129513;</button>
       <button class="nav-tab" data-panel="memory" data-label="Memory" onclick="switchPanel('memory')" title="Memory">&#129504;</button>
       <button class="nav-tab" data-panel="workspaces" data-label="Spaces" onclick="switchPanel('workspaces')" title="Spaces">&#128193;</button>
+      <button class="nav-tab" data-panel="todos" data-label="Todos" onclick="switchPanel('todos')" title="Current task list">&#9989;</button>
     </div>
     <!-- Chat panel -->
     <div class="panel-view active" id="panelChat">
@@ -92,6 +93,11 @@
         </div>
         <div id="memEditError" style="font-size:11px;color:var(--accent);margin-top:6px;display:none"></div>
       </div>
+    </div>
+    <!-- Todo panel -->
+    <div class="panel-view" id="panelTodos">
+      <div style="padding:10px 12px 4px;font-size:11px;color:var(--muted);flex-shrink:0">Current task list</div>
+      <div id="todoPanel" style="flex:1;overflow-y:auto;padding:8px 12px"></div>
     </div>
     <!-- Workspaces panel -->
     <div class="panel-view" id="panelWorkspaces">

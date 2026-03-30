@@ -30,6 +30,7 @@ async function send(){
   $('msg').value='';autoResize();
   const displayText=text||(uploaded.length?`Uploaded: ${uploaded.join(', ')}`:'(file upload)');
   const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploaded:undefined};
+  S.toolCalls=[];  // clear tool calls from previous turn
   S.messages.push(userMsg);renderMessages();appendThinking();setBusy(true);  // activity bar shown via setBusy
   INFLIGHT[activeSid]={messages:[...S.messages],uploaded};
   startApprovalPolling(activeSid);
@@ -39,7 +40,8 @@ async function send(){
   try{
     const startData=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
       session_id:activeSid,message:msgText,
-      model:$('modelSelect').value,workspace:S.session.workspace
+      model:$('modelSelect').value,workspace:S.session.workspace,
+      attachments:uploaded.length?uploaded:undefined
     })});
     streamId=startData.stream_id;
     markInflight(activeSid, streamId);
@@ -83,22 +85,14 @@ async function send(){
 
   es.addEventListener('tool',e=>{
     const d=JSON.parse(e.data);
-    // B10: replace thinking dots with a tool-running indicator (not both at once)
     removeThinking();
     setStatus(`${d.name}${d.preview?' · '+d.preview.slice(0,55):''}`);
-    // Show a compact "working" row if no tokens have arrived yet
-    if(!assistantRow){
-      const toolRow=document.createElement('div');toolRow.id='toolRunningRow';toolRow.className='msg-row';
-      const icon=document.createElement('div');icon.className='role-icon assistant';icon.textContent='H';
-      const lbl=document.createElement('div');lbl.className='msg-role assistant';lbl.appendChild(icon);lbl.appendChild(document.createTextNode('Hermes'));
-      const body=document.createElement('div');body.className='msg-body';body.style.cssText='color:var(--muted);font-size:13px;font-style:italic;';
-      body.innerHTML=`&#9881; ${d.name} <span style="opacity:.55;font-size:12px">running…</span>`;
-      toolRow.appendChild(lbl);toolRow.appendChild(body);
-      // Remove any existing tool row before adding new one
-      const old=$('toolRunningRow');if(old)old.remove();
-      $('msgInner').appendChild(toolRow);
-      $('messages').scrollTop=$('messages').scrollHeight;
-    }
+    // Add to live tool calls for inline display
+    S.toolCalls.push({name:d.name, preview:d.preview||'', args:d.args||{}, snippet:'', done:false});
+    renderMessages();
+    // Remove old "running" placeholder
+    const oldRow=$('toolRunningRow');if(oldRow)oldRow.remove();
+    $('messages').scrollTop=$('messages').scrollHeight;
   });
 
   es.addEventListener('approval',e=>{
@@ -114,6 +108,12 @@ async function send(){
     stopApprovalPolling();hideApprovalCard();
     if(S.session&&S.session.session_id===activeSid){
       S.session=d.session;S.messages=d.session.messages||[];
+      // Populate tool calls from server-extracted metadata (has snippets)
+      if(d.session.tool_calls&&d.session.tool_calls.length){
+        S.toolCalls=d.session.tool_calls.map(tc=>({...tc,done:true}));
+      } else {
+        S.toolCalls=S.toolCalls.map(tc=>({...tc,done:true}));
+      }
       if(uploaded.length){
         const lastUser=[...S.messages].reverse().find(m=>m.role==='user');
         if(lastUser)lastUser.attachments=uploaded;
