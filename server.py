@@ -425,7 +425,11 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 put('token', {'text': text})
 
             def on_tool(name, preview, args):
-                put('tool', {'name': name, 'preview': preview})
+                args_snap = {}
+                if isinstance(args, dict):
+                    for k, v in list(args.items())[:4]:
+                        s2 = str(v); args_snap[k] = s2[:120]+('...' if len(s2)>120 else '')
+                put('tool', {'name': name, 'preview': preview, 'args': args_snap})
                 # also check for pending approval and surface it immediately
                 if has_pending(session_id):
                     from tools.approval import _pending, _lock
@@ -566,7 +570,7 @@ class Handler(BaseHTTPRequestHandler):
                 sid = parse_qs(parsed.query).get('session_id', [''])[0]
                 if not sid:
                     return j(self, {'error': 'session_id is required'}, status=400)
-                s = get_session(sid); return j(self, {'session': s.compact() | {'messages': s.messages}})
+                s = get_session(sid); return j(self, {'session': s.compact() | {'messages': s.messages, 'tool_calls': getattr(s, 'tool_calls', [])}})
             if parsed.path == '/api/sessions': return j(self, {'sessions': all_sessions()})
             if parsed.path == '/api/session/export':
                 sid = parse_qs(parsed.query).get('session_id', [''])[0]
