@@ -1533,3 +1533,62 @@ Manual-only for Sprint 8:
 *Total automated tests: 139/139*
 *Run: cd /home/hermes/.hermes/hermes-agent && venv/bin/python -m pytest /home/hermes/webui-mvp/tests/ -v*
 *Source: /home/hermes/webui-mvp/*
+
+---
+
+## Section 36: Message Queue (Sprint 8 hotfix)
+
+### T36.1: Typing While Busy Queues the Message
+SETUP: Active session, a response is currently streaming (thinking dots visible).
+STEPS:
+  1. While Hermes is responding, type a new message and press Enter
+EXPECT:
+  - Input clears immediately
+  - A small toast appears: "Queued: [your message]"
+  - A badge appears in the bottom-right: "1 message queued"
+  - The current response continues uninterrupted
+FAIL: Message dropped silently, duplicate send triggered, error.
+
+### T36.2: Queued Message Sends Automatically After Response
+STEPS (continued from T36.1):
+  1. Wait for the current response to finish
+EXPECT:
+  - As soon as the response completes, the queued message is automatically sent
+  - Badge disappears
+  - New thinking dots appear for the queued message
+FAIL: Queued message never sends, badge stays, double-send.
+
+### T36.3: Queue Badge Shows Count for Multiple Messages
+STEPS:
+  1. While busy, type and send two separate messages
+EXPECT:
+  - Badge reads "2 messages queued"
+  - They drain one at a time, each waiting for the previous response
+FAIL: Only first message queued, count wrong.
+
+### T36.4: Switch Session Clears Queue
+STEPS:
+  1. Queue a message in session A
+  2. Click to session B before it drains
+EXPECT:
+  - Queue badge disappears
+  - The queued message does NOT fire in session B
+FAIL: Queued message fires in session B.
+
+---
+
+## Section 37: Message Persists on Switch-Away (Sprint 8 hotfix)
+
+### T37.1: Sent Message Stays Visible After Switch-Away and Back
+SETUP: Active session.
+STEPS:
+  1. Send a message (thinking dots appear)
+  2. Immediately click to a different session
+  3. Click back to the original session
+EXPECT:
+  - The user message you sent is still visible in the chat
+  - Thinking dots are still animating
+  - Session is still in busy state (Send button disabled)
+  - When response arrives, it appears normally
+FAIL: User message gone, blank chat, response lands in wrong session.
+

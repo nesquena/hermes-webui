@@ -116,9 +116,9 @@
   .sm-btn:hover{background:rgba(255,255,255,0.09);color:var(--text);border-color:rgba(255,255,255,.15);}
   .main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0;background:rgba(26,26,46,0.5);}
   .topbar{padding:12px 20px;border-bottom:1px solid var(--border);background:rgba(22,33,62,.98);backdrop-filter:blur(12px);display:flex;align-items:center;justify-content:space-between;flex-shrink:0;}
-  .topbar-title{font-size:15px;font-weight:600;letter-spacing:-.01em;}
-  .topbar-meta{font-size:11px;color:var(--muted);margin-top:3px;opacity:.75;}
-  .topbar-chips{display:flex;gap:6px;}
+  .topbar-title{font-size:15px;font-weight:600;letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .topbar-meta{font-size:11px;color:var(--muted);margin-top:3px;opacity:.75;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .topbar-chips{display:flex;gap:6px;align-items:center;flex-shrink:0;}
   .chip{font-size:11px;padding:4px 10px;border-radius:999px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,.1);color:var(--muted);font-weight:500;}
   .chip.model{color:var(--blue);border-color:rgba(124,185,255,0.35);background:rgba(124,185,255,0.1);}
   .messages{flex:1;overflow-y:auto;display:flex;flex-direction:column;min-height:0;}
