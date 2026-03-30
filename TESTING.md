@@ -1266,8 +1266,131 @@ Manual-only for Sprint 6:
 
 ---
 
-*Last updated: Sprint 6, March 31, 2026*
-*Total automated tests: 106/106*
+*Last updated: Sprint 7, March 31, 2026*
+*Total automated tests: 125/125*
 *Run: cd /home/hermes/.hermes/hermes-agent && venv/bin/python -m pytest /home/hermes/webui-mvp/tests/ -v*
 *Source: /home/hermes/webui-mvp/*
 *Static: static/index.html + static/style.css + static/app.js*
+
+
+---
+
+## Section 29: Cron Edit and Delete (Sprint 7)
+
+### T29.1: Edit Button Opens Inline Form
+SETUP: At least one cron job exists. Tasks tab open.
+STEPS:
+  1. Click a cron job to expand it
+  2. Click the "Edit" (pencil) button
+EXPECT:
+  - An inline form appears inside the expanded cron body
+  - Name, schedule, and prompt fields are pre-filled with current values
+FAIL: Nothing happens, new form not shown.
+
+### T29.2: Save Edit Updates the Job
+STEPS (continued from T29.1):
+  1. Change the name field to "Renamed Job"
+  2. Click Save
+EXPECT:
+  - Form closes, toast "Job updated ✓"
+  - Job header shows new name
+FAIL: Save fails, name unchanged.
+
+### T29.3: Delete Button Removes the Job
+SETUP: A cron job you can safely delete (or a test job created for this).
+STEPS:
+  1. Expand the job, click "Delete"
+  2. Confirm the dialog
+EXPECT:
+  - Toast: "Job deleted"
+  - Job disappears from the list
+FAIL: Job stays, no confirmation dialog.
+
+---
+
+## Section 30: Skill Create and Edit (Sprint 7)
+
+### T30.1: New Skill Button Opens Form
+STEPS:
+  1. Click the Skills tab
+  2. Click "+ New skill" button
+EXPECT:
+  - A form appears with name, category, and content textarea fields
+FAIL: Nothing happens.
+
+### T30.2: Create a Skill and See it in List
+STEPS:
+  1. Fill in: Name "test-ui-skill", Content "---
+name: test-ui-skill
+description: UI test.
+tags: [test]
+---
+
+# Test"
+  2. Click Save skill
+EXPECT:
+  - Toast "Skill created ✓", form closes
+  - Skill appears in the skills list
+FAIL: Error, skill not in list.
+
+### T30.3: Cancel Closes Form Without Creating
+STEPS:
+  1. Open new skill form, fill some fields, click Cancel
+EXPECT:
+  - Form closes, no skill created
+FAIL: Skill created, form stays.
+
+---
+
+## Section 31: Memory Inline Edit (Sprint 7)
+
+### T31.1: Edit Button Opens Memory Edit Form
+STEPS:
+  1. Click the Memory tab
+  2. Click the "Edit" (pencil) button in the header
+EXPECT:
+  - An edit form appears below the memory panel with a textarea pre-filled with MEMORY.md content
+FAIL: Nothing happens, no form.
+
+### T31.2: Save Writes Changes
+STEPS:
+  1. In edit mode, add a line to the textarea
+  2. Click Save
+EXPECT:
+  - Toast "Memory saved ✓", form closes
+  - Memory panel reloads showing the updated content
+FAIL: Save fails, content unchanged.
+
+### T31.3: Cancel Discards Changes
+STEPS:
+  1. Open edit form, change content, click Cancel
+EXPECT:
+  - Form closes, original content unchanged
+FAIL: Changes saved despite cancel.
+
+---
+
+## Automated Test Coverage (Updated Sprint 7)
+
+Sprint 7 tests (test_sprint7.py) - 19 tests:
+  - Health: active_streams field, uptime_seconds field
+  - Session search: empty query, content+depth params accepted, count returned
+  - Cron update: requires job_id, unknown job 404
+  - Cron delete: requires job_id, unknown job 404
+  - Skill save: requires name, requires content, invalid name rejected, create+delete roundtrip
+  - Skill delete: requires name, unknown skill 404
+  - Memory write: requires section, requires content, invalid section, write+read roundtrip
+
+Total automated: 125/125 passing.
+
+Manual-only for Sprint 7:
+  - T29.1-T29.3: cron edit/delete UX
+  - T30.1-T30.3: skill create UX
+  - T31.1-T31.3: memory edit UX
+
+---
+
+*Last updated: Sprint 7, March 31, 2026*
+*Total automated tests: 125/125*
+*Run: cd /home/hermes/.hermes/hermes-agent && venv/bin/python -m pytest /home/hermes/webui-mvp/tests/ -v*
+*Source: /home/hermes/webui-mvp/*

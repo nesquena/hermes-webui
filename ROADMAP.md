@@ -3,8 +3,8 @@
 > Goal: Full 1:1 parity with the Hermes CLI experience via a clean dark web UI.
 > Everything you can do from the CLI terminal, you can do from this UI.
 >
-> Last updated: Sprint 6 complete (March 31, 2026)
-> Tests: 106/106 passing
+> Last updated: Sprint 7 complete (March 31, 2026)
+> Tests: 125/125 passing
 > Source: /home/hermes/webui-mvp/
 
 ---
@@ -20,6 +20,7 @@
 | Sprint 5 | Phase A complete + workspace | JS extracted (server.py 1778->1042 lines), workspace management, copy message, file editor, session index | 86 |
 | Test hardening | Isolated test environment | Port 8788 test server, conftest autouse, cleanup_zero_message, 5 test files rewritten | 90 |
 | Sprint 6 | Polish + Phase E complete | HTML to static/, resizable panels, cron create, session JSON export, Escape from editor | 106 |
+| Sprint 7 | Wave 2 Core: CRUD + Search | Cron edit/delete, skill create/edit/delete, memory write, session content search, health improvements, git init | 125 |
 
 ---
 
@@ -27,7 +28,7 @@
 
 | Layer | Location | Status |
 |-------|----------|--------|
-| Python server | /home/hermes/webui-mvp/server.py (932 lines) | Pure Python, no inline HTML/CSS/JS |
+| Python server | /home/hermes/webui-mvp/server.py (~990 lines) | Pure Python, no inline HTML/CSS/JS |
 | HTML template | /home/hermes/webui-mvp/static/index.html | Served from disk |
 | CSS | /home/hermes/webui-mvp/static/style.css | Served from disk |
 | JavaScript | /home/hermes/webui-mvp/static/app.js | Served from disk |
@@ -51,7 +52,7 @@
 - [x] Session restores from localStorage on page load
 - [x] Reconnect banner if page reloaded mid-stream
 - [x] Copy message to clipboard (hover icon on each bubble)
-- [ ] Edit last user message and regenerate (Sprint 7)
+- [ ] Edit last user message and regenerate (Wave 3)
 - [ ] Branch/fork conversation (Wave 3)
 - [ ] Token/cost estimate per message (Wave 3)
 
@@ -85,7 +86,7 @@
 - [x] Download session as Markdown transcript
 - [x] Export session as JSON (full messages + metadata)
 - [x] Session inherits last-used workspace on creation
-- [ ] Session content search (search message text) (Sprint 7)
+- [x] Session content search (search message text across sessions)
 - [ ] Session tags / labels (Wave 5)
 - [ ] Archive sessions (Wave 5)
 - [ ] Clear conversation (wipe messages, keep session) (Wave 3)
@@ -108,25 +109,25 @@
 - [x] Run job manually (Run now button)
 - [x] Pause / Resume job
 - [x] Create cron job from UI (+ New job form with name, schedule, prompt, delivery)
-- [ ] Edit existing cron job (Sprint 7)
-- [ ] Delete cron job (Sprint 7)
-- [ ] View full run history (Sprint 7)
-- [ ] Skill picker in cron create form (Sprint 7)
+- [x] Edit existing cron job
+- [x] Delete cron job
+- [ ] View full run history (Wave 3)
+- [ ] Skill picker in cron create form (Wave 3)
 
 ### Skills
 - [x] List all skills grouped by category (Skills sidebar tab)
 - [x] Search/filter skills by name, description, category
 - [x] View full SKILL.md content in right preview panel
-- [ ] Create skill (Sprint 7)
-- [ ] Edit skill (Sprint 7)
-- [ ] Delete skill (Sprint 7)
-- [ ] View skill linked files (Sprint 7)
+- [x] Create skill
+- [x] Edit skill
+- [x] Delete skill
+- [ ] View skill linked files (Wave 3)
 
 ### Memory
 - [x] View personal notes (MEMORY.md) rendered as markdown (Memory tab)
 - [x] View user profile (USER.md) rendered as markdown (Memory tab)
 - [x] Last-modified timestamp on each section
-- [ ] Add/edit memory entry inline (Sprint 7)
+- [x] Add/edit memory entry inline
 
 ### Configuration
 - [ ] Settings panel (default model, workspace, toolsets) (Wave 4)
@@ -149,7 +150,7 @@
 
 ---
 
-## Upcoming: Sprint 7 Plan (PENDING APPROVAL)
+## Sprint 7: Wave 2 Core -- Cron/Skill/Memory CRUD + Session Content Search (COMPLETED)
 
 **Theme:** "Wave 2 Core -- Cron/Skill/Memory CRUD + Session Content Search"
 

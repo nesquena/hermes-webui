@@ -1025,6 +1025,48 @@ class Handler(BaseHTTPRequestHandler):
                             approve_session(sid, k); approve_permanent(k)
                         save_permanent_allowlist(_permanent_approved)
                 return j(self, {'ok': True, 'choice': choice})
+            if parsed.path == '/api/skills/save':
+                # Create or update a skill's SKILL.md content
+                try: require(body, 'name', 'content')
+                except ValueError as e: return bad(self, str(e))
+                skill_name = body['name'].strip().lower().replace(' ', '-')
+                if not skill_name or '/' in skill_name or '..' in skill_name:
+                    return bad(self, 'Invalid skill name')
+                category = body.get('category', '').strip()
+                from tools.skills_tool import SKILLS_DIR
+                if category:
+                    skill_dir = SKILLS_DIR / category / skill_name
+                else:
+                    skill_dir = SKILLS_DIR / skill_name
+                skill_dir.mkdir(parents=True, exist_ok=True)
+                skill_file = skill_dir / 'SKILL.md'
+                skill_file.write_text(body['content'], encoding='utf-8')
+                return j(self, {'ok': True, 'name': skill_name, 'path': str(skill_file)})
+            if parsed.path == '/api/skills/delete':
+                try: require(body, 'name')
+                except ValueError as e: return bad(self, str(e))
+                from tools.skills_tool import SKILLS_DIR
+                import shutil as _shutil
+                matches = list(SKILLS_DIR.rglob(f'{body["name"]}/SKILL.md'))
+                if not matches: return bad(self, 'Skill not found', 404)
+                skill_dir = matches[0].parent
+                _shutil.rmtree(str(skill_dir))
+                return j(self, {'ok': True, 'name': body['name']})
+            if parsed.path == '/api/memory/write':
+                # Write to MEMORY.md or USER.md
+                try: require(body, 'section', 'content')
+                except ValueError as e: return bad(self, str(e))
+                mem_dir = Path.home() / '.hermes' / 'memories'
+                mem_dir.mkdir(parents=True, exist_ok=True)
+                section = body['section']
+                if section == 'memory':
+                    target = mem_dir / 'MEMORY.md'
+                elif section == 'user':
+                    target = mem_dir / 'USER.md'
+                else:
+                    return bad(self, 'section must be "memory" or "user"')
+                target.write_text(body['content'], encoding='utf-8')
+                return j(self, {'ok': True, 'section': section, 'path': str(target)})
             return j(self, {'error':'not found'}, status=404)
         except Exception as e:
             self._log_request(self.command, self.path, 500, (time.time()-_t0)*1000)

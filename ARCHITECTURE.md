@@ -985,7 +985,13 @@ Resolution: Phase B replaces with thread-local or explicit parameter passing.
             Bug fix: Escape from file editor now cancels edits
             New endpoints: POST /api/crons/create, GET /api/session/export
             Tests: 16 new, 106/106 total
-    v0.9  [Planned] Sprint 7: cron edit/delete, skill CRUD, memory write, todo panel
+    v0.9  Sprint 7 (March 31, 2026):
+            Features: cron edit+delete, skill create/edit/delete, memory write, session content search
+            Arch: Phase G partial (active_streams+uptime in /health), git init
+            Bug fixes: A1 (activity bar min-height), A2 (model chip sync), A3 (cron output overflow)
+            New endpoints: /api/crons/update, /api/crons/delete, /api/skills/save, /api/skills/delete,
+                           /api/memory/write, /api/sessions/search (extended)
+            Tests: 19 new, 125/125 total
 
 
 ---
@@ -1091,7 +1097,7 @@ Quick-reference table for prioritizing architecture work. Phases are from Sectio
 | D     | Input Validation            | Medium   | Low    | nothing        | COMPLETE Sprint 6 (approval/respond + file/raw hardened; all endpoints validated) |
 | E     | Frontend Modularization     | Medium   | High   | requires A     | Pending    |
 | F     | API Design Cleanup          | Low      | Medium | requires A     | Pending    |
-| G     | Observability               | Low      | Low    | nothing        | Partial(*) |
+| G     | Observability               | Low      | Low    | nothing        | Partial (Sprint 7: active_streams+uptime added to /health; log rotation still pending) |
 | H     | Authentication              | Low      | Medium | nothing        | Pending    |
 | I     | Test Infrastructure         | High     | High   | requires A,D   | Partial(*) |
 | J     | Performance                 | Low      | High   | requires C     | Pending    |
