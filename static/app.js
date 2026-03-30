@@ -350,7 +350,7 @@ async function regenerateResponse(btn) {
 
 function highlightCode(container) {
   // Apply Prism.js syntax highlighting to all code blocks in container (or whole messages area)
-  if(typeof Prism === 'undefined') return;
+  if(typeof Prism === 'undefined' || !Prism.highlightAllUnder) return;
   const el = container || $('msgInner');
   if(!el) return;
   // Prism autoloader handles language detection via class="language-xxx"
@@ -913,7 +913,6 @@ async function send(){
       syncTopbar();renderMessages();loadDir('.');
     }
     renderSessionList();setBusy(false);setStatus('');
-    highlightCode();
   });
 
   es.addEventListener('error',e=>{
@@ -1281,6 +1280,71 @@ async function openSkill(name, el) {
     $('previewArea').classList.add('visible');
     $('fileTree').style.display = 'none';
   } catch(e) { setStatus('Could not load skill: ' + e.message); }
+}
+
+// ── Skill create/edit form ──
+let _editingSkillName = null;
+
+function toggleSkillForm(prefillName, prefillCategory, prefillContent) {
+  const form = $('skillCreateForm');
+  if (!form) return;
+  const open = form.style.display !== 'none';
+  if (open) { form.style.display = 'none'; _editingSkillName = null; return; }
+  $('skillFormName').value = prefillName || '';
+  $('skillFormCategory').value = prefillCategory || '';
+  $('skillFormContent').value = prefillContent || '';
+  $('skillFormError').style.display = 'none';
+  _editingSkillName = prefillName || null;
+  form.style.display = '';
+  $('skillFormName').focus();
+}
+
+async function submitSkillSave() {
+  const name = ($('skillFormName').value||'').trim().toLowerCase().replace(/\s+/g, '-');
+  const category = ($('skillFormCategory').value||'').trim();
+  const content = $('skillFormContent').value;
+  const errEl = $('skillFormError');
+  errEl.style.display = 'none';
+  if (!name) { errEl.textContent = 'Skill name is required'; errEl.style.display = ''; return; }
+  if (!content.trim()) { errEl.textContent = 'Content is required'; errEl.style.display = ''; return; }
+  try {
+    await api('/api/skills/save', {method:'POST', body: JSON.stringify({name, category: category||undefined, content})});
+    showToast(_editingSkillName ? 'Skill updated ✓' : 'Skill created ✓');
+    _skillsData = null;
+    toggleSkillForm();
+    await loadSkills();
+  } catch(e) { errEl.textContent = 'Error: ' + e.message; errEl.style.display = ''; }
+}
+
+// ── Memory inline edit ──
+let _memoryData = null;
+
+function toggleMemoryEdit() {
+  const form = $('memoryEditForm');
+  if (!form) return;
+  const open = form.style.display !== 'none';
+  if (open) { form.style.display = 'none'; return; }
+  $('memEditSection').textContent = 'memory (notes)';
+  $('memEditContent').value = _memoryData ? (_memoryData.memory || '') : '';
+  $('memEditError').style.display = 'none';
+  form.style.display = '';
+}
+
+function closeMemoryEdit() {
+  const form = $('memoryEditForm');
+  if (form) form.style.display = 'none';
+}
+
+async function submitMemorySave() {
+  const content = $('memEditContent').value;
+  const errEl = $('memEditError');
+  errEl.style.display = 'none';
+  try {
+    await api('/api/memory/write', {method:'POST', body: JSON.stringify({section: 'memory', content})});
+    showToast('Memory saved ✓');
+    closeMemoryEdit();
+    await loadMemory(true);
+  } catch(e) { errEl.textContent = 'Error: ' + e.message; errEl.style.display = ''; }
 }
 
 // ── Workspace management ──
