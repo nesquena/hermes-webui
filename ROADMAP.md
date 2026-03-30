@@ -195,20 +195,20 @@ sidebar live display, new sessions inherit last workspace. See Sprint 5 complete
 - [x] View all jobs (Sprint 3)
 - [x] Run / pause / resume (Sprint 3)
 - [x] Create job from UI (Sprint 6)
-- [ ] Edit job (Sprint 7)
-- [ ] Delete job (Sprint 7)
+- [x] Edit job
+- [x] Delete job
 - [ ] Full run history (Sprint 7)
 
 ### Sprint 2.2: Skill Management (Partial -- Sprint 7 for remaining)
 - [x] List all skills with categories (Sprint 3)
 - [x] View SKILL.md content (Sprint 3)
-- [ ] Create skill (Sprint 7)
-- [ ] Edit skill (Sprint 7)
-- [ ] Delete skill (Sprint 7)
+- [x] Create skill
+- [x] Edit skill
+- [x] Delete skill
 
 ### Sprint 2.3: Memory Write (Sprint 7)
 - [x] View notes + profile (Sprint 3)
-- [ ] Edit notes inline (Sprint 7)
+- [x] Edit notes inline
 
 ### Sprint 2.4: Todo Management (Wave 2)
 - [ ] View current todo list
@@ -217,7 +217,7 @@ sidebar live display, new sessions inherit last workspace. See Sprint 5 complete
 
 ### Sprint 2.5: Session Content Search (Sprint 7)
 - [x] Session title search (Sprint 4)
-- [ ] Message content search across sessions (Sprint 7)
+- [x] Message content search across sessions
 
 ### Sprint 2.6: Session Rename (COMPLETE Sprint 4)
 Double-click any session title in the left sidebar to edit inline.
