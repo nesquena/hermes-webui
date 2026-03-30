@@ -67,10 +67,33 @@ function setStatus(t){
 function setBusy(v){
   S.busy=v;
   $('btnSend').disabled=v;
-  // Show/hide activity dots
   const dots=$('activityDots');
   if(dots) dots.style.display=v?'flex':'none';
-  if(!v) setStatus('');
+  if(!v){
+    setStatus('');
+    updateQueueBadge();
+    // Drain one queued message after UI settles
+    if(MSG_QUEUE.length>0){
+      const next=MSG_QUEUE.shift();
+      updateQueueBadge();
+      setTimeout(()=>{ $('msg').value=next; send(); }, 120);
+    }
+  }
+}
+
+function updateQueueBadge(){
+  let badge=$('queueBadge');
+  if(MSG_QUEUE.length>0){
+    if(!badge){
+      badge=document.createElement('div');
+      badge.id='queueBadge';
+      badge.style.cssText='position:fixed;bottom:80px;right:24px;background:rgba(124,185,255,.18);border:1px solid rgba(124,185,255,.4);color:var(--blue);font-size:12px;font-weight:600;padding:6px 14px;border-radius:20px;z-index:50;pointer-events:none;backdrop-filter:blur(8px);';
+      document.body.appendChild(badge);
+    }
+    badge.textContent=MSG_QUEUE.length===1?'1 message queued':`${MSG_QUEUE.length} messages queued`;
+  } else {
+    if(badge) badge.remove();
+  }
 }
 function showToast(msg,ms){const el=$('toast');el.textContent=msg;el.classList.add('show');clearTimeout(el._t);el._t=setTimeout(()=>el.classList.remove('show'),ms||2800);}
 
@@ -585,6 +608,7 @@ async function openFile(path){
 }
 
 async function newSession(flash){
+  MSG_QUEUE.length=0;updateQueueBadge();
   const inheritWs=S.session?S.session.workspace:null;
   const data=await api('/api/session/new',{method:'POST',body:JSON.stringify({model:$('modelSelect').value,workspace:inheritWs})});
   S.session=data.session;S.messages=data.session.messages||[];
@@ -611,6 +635,7 @@ async function loadSession(sid){
     syncTopbar();await loadDir('.');renderMessages();appendThinking();
     setBusy(true);setStatus('Hermes is thinking\u2026');
   }else{
+    MSG_QUEUE.length=0;updateQueueBadge();  // clear queue when switching sessions
     S.messages=data.session.messages||[];
     syncTopbar();await loadDir('.');renderMessages();highlightCode();
   }
@@ -667,7 +692,7 @@ function renderSessionListFromCache(){
     if(group!==lastGroup){
       lastGroup=group;
       const hdr=document.createElement('div');
-      hdr.style.cssText='font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:10px 10px 4px;opacity:.6;';
+      hdr.style.cssText='font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:10px 10px 4px;opacity:.8;';
       hdr.textContent=group;
       list.appendChild(hdr);
     }
@@ -769,7 +794,17 @@ async function deleteSession(sid){
 
 async function send(){
   const text=$('msg').value.trim();
-  if((!text&&!S.pendingFiles.length)||S.busy)return;
+  if(!text&&!S.pendingFiles.length)return;
+  // If busy, queue the message instead of dropping it
+  if(S.busy){
+    if(text){
+      MSG_QUEUE.push(text);
+      $('msg').value='';autoResize();
+      updateQueueBadge();
+      showToast(`Queued: "${text.slice(0,40)}${text.length>40?'\u2026':''}"`,2000);
+    }
+    return;
+  }
   if(!S.session){await newSession();await renderSessionList();}
 
   const activeSid=S.session.session_id;

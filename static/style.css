@@ -52,10 +52,10 @@
   .approval-btn.deny{border-color:rgba(233,69,96,0.5);color:var(--accent);}
   .approval-btn.deny:hover{background:rgba(233,69,96,0.12);}
   /* Sidebar navigation tabs */
-  .sidebar-nav{display:flex;border-bottom:1px solid var(--border);flex-shrink:0;padding:4px 6px 0;}
-  .nav-tab{flex:1;padding:8px 2px 7px;font-size:17px;text-align:center;cursor:pointer;color:var(--muted);border:none;background:none;transition:color .15s;border-bottom:2px solid transparent;white-space:nowrap;overflow:hidden;position:relative;}
+  .sidebar-nav{display:flex;border-bottom:1px solid var(--border);flex-shrink:0;padding:6px 8px 0;gap:2px;}
+  .nav-tab{flex:1;padding:10px 4px 8px;font-size:20px;text-align:center;cursor:pointer;color:var(--muted);border:none;background:none;transition:color .15s;border-bottom:2px solid transparent;white-space:nowrap;overflow:hidden;position:relative;}
   .nav-tab:hover{color:var(--text);}
-  .nav-tab:hover::after{content:attr(data-label);position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);background:rgba(20,28,46,.97);border:1px solid var(--border2);color:var(--text);font-size:11px;font-weight:600;padding:4px 9px;border-radius:6px;white-space:nowrap;pointer-events:none;z-index:50;box-shadow:0 4px 12px rgba(0,0,0,.3);}
+  .nav-tab:hover::after{content:attr(data-label);position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:rgba(15,22,40,.98);border:1px solid rgba(124,185,255,0.3);color:var(--blue);font-size:12px;font-weight:700;letter-spacing:.02em;padding:5px 11px;border-radius:7px;white-space:nowrap;pointer-events:none;z-index:50;box-shadow:0 4px 12px rgba(0,0,0,.3);}
   .nav-tab.active{color:var(--blue);}
   .nav-tab.active::before{content:'';position:absolute;bottom:0;left:50%;transform:translateX(-50%);width:20px;height:2px;background:var(--blue);border-radius:2px 2px 0 0;}
   /* Panel content areas (swapped by tab) */
@@ -274,13 +274,13 @@
 .msg-edit-cancel:hover{background:rgba(255,255,255,.1);}
 
 /* ── Clear conversation chip ── */
-.clear-btn{background:rgba(201,168,76,.06);border:1px solid rgba(201,168,76,.2) !important;color:var(--gold) !important;font-size:11px;padding:4px 10px;cursor:pointer;transition:background .15s;}
+.clear-btn{background:rgba(201,168,76,.06);border:1px solid rgba(201,168,76,.18);color:var(--gold);font-size:11px;padding:4px 10px;cursor:pointer;transition:background .15s;}
 .clear-btn:hover{background:rgba(201,168,76,.12);}
 
 /* ── Copy button on messages ── */
 /* msg-copy-btn styles moved to msg-action-btn */
 /* ── Nav tab nowrap ── */
-.nav-tab{white-space:nowrap;overflow:hidden;font-size:10px;}
+/* nav-tab-nowrap-handled-above */
 
 /* ── Final polish additions ── */
 
