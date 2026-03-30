@@ -243,7 +243,7 @@ function renderMessages(){
     // Action buttons for this bubble
     const editBtn  = isUser  ? `<button class="msg-action-btn" title="Edit message" onclick="editMessage(this)">&#9998;</button>` : '';
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="Regenerate response" onclick="regenerateResponse(this)">&#8635;</button>` : '';
-    row.innerHTML=`<div class="msg-role ${m.role}"><div class="role-icon ${m.role}">${isUser?'You':'H'}</div><span style="font-size:12px">${isUser?'You':'Hermes'}</span><span class="msg-actions">${editBtn}<button class="msg-copy-btn msg-action-btn" title="Copy" onclick="copyMsg(this)">&#128203;</button>${retryBtn}</span></div>${filesHtml}<div class="msg-body">${bodyHtml}</div>`;
+    row.innerHTML=`<div class="msg-role ${m.role}"><div class="role-icon ${m.role}">${isUser?'Y':'H'}</div><span style="font-size:12px">${isUser?'You':'Hermes'}</span><span class="msg-actions">${editBtn}<button class="msg-copy-btn msg-action-btn" title="Copy" onclick="copyMsg(this)">&#128203;</button>${retryBtn}</span></div>${filesHtml}<div class="msg-body">${bodyHtml}</div>`;
     row.dataset.rawText = String(content).trim();
     inner.appendChild(row);
   }

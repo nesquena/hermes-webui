@@ -90,25 +90,25 @@ def test_session_truncate_returns_messages(cleanup_test_sessions):
 # ── Static files contain new features ─────────────────────────────
 
 def test_app_js_contains_edit_message(cleanup_test_sessions):
-    """Verify editMessage function is present in app.js."""
-    with urllib.request.urlopen(BASE + "/static/app.js", timeout=10) as r:
+    """Verify editMessage function is present in ui.js (Sprint 9: module split)."""
+    with urllib.request.urlopen(BASE + "/static/ui.js", timeout=10) as r:
         src = r.read().decode()
     assert "editMessage" in src
     assert "msg-edit-area" in src
 
 def test_app_js_contains_regenerate(cleanup_test_sessions):
-    with urllib.request.urlopen(BASE + "/static/app.js", timeout=10) as r:
+    with urllib.request.urlopen(BASE + "/static/ui.js", timeout=10) as r:
         src = r.read().decode()
     assert "regenerateResponse" in src
 
 def test_app_js_contains_clear_conversation(cleanup_test_sessions):
-    with urllib.request.urlopen(BASE + "/static/app.js", timeout=10) as r:
+    with urllib.request.urlopen(BASE + "/static/panels.js", timeout=10) as r:
         src = r.read().decode()
     assert "clearConversation" in src
     assert "api/session/clear" in src
 
 def test_app_js_contains_highlight_code(cleanup_test_sessions):
-    with urllib.request.urlopen(BASE + "/static/app.js", timeout=10) as r:
+    with urllib.request.urlopen(BASE + "/static/ui.js", timeout=10) as r:
         src = r.read().decode()
     assert "highlightCode" in src
     assert "Prism" in src
