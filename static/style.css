@@ -123,8 +123,8 @@
   .chip.model{color:var(--blue);border-color:rgba(124,185,255,0.35);background:rgba(124,185,255,0.1);}
   .messages{flex:1;overflow-y:auto;display:flex;flex-direction:column;min-height:0;}
   .messages-inner{max-width:800px;margin:0 auto;width:100%;padding:20px 24px 32px;display:flex;flex-direction:column;}
-  .msg-row{padding:18px 0;}
-  .msg-row+.msg-row{border-top:1px solid rgba(255,255,255,.04);}
+  .msg-row{padding:10px 0;}
+  .msg-row+.msg-row{border-top:none;}
   .msg-role{font-size:12px;font-weight:500;letter-spacing:.01em;margin-bottom:8px;display:flex;align-items:center;gap:8px;}
   .msg-role.user{color:rgba(124,185,255,0.65);}
   .msg-role.assistant{color:rgba(201,168,76,0.6);}
@@ -421,11 +421,11 @@ body.resizing{user-select:none;cursor:col-resize;}
 /* Show more button inside tool card result */
 .tool-card-more{background:none;border:none;color:var(--blue);font-size:10px;cursor:pointer;padding:3px 0 0;opacity:.7;display:block;}
 .tool-card-more:hover{opacity:1;}
-.tool-card-row{margin:0;}
-.tool-card{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);border-radius:8px;margin:3px 0 3px 40px;overflow:hidden;transition:border-color .15s;}
+.tool-card-row{margin:0;padding:1px 0;}
+.tool-card{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);border-radius:6px;margin:2px 0 2px 40px;overflow:hidden;transition:border-color .15s;}
 .tool-card:hover{border-color:rgba(255,255,255,.12);}
 .tool-card-running{border-color:rgba(124,185,255,.25);background:rgba(124,185,255,.04);}
-.tool-card-header{display:flex;align-items:center;gap:8px;padding:7px 12px;cursor:pointer;user-select:none;}
+.tool-card-header{display:flex;align-items:center;gap:7px;padding:4px 10px;cursor:pointer;user-select:none;}
 .tool-card-icon{font-size:13px;flex-shrink:0;opacity:.8;}
 .tool-card-name{font-size:12px;font-weight:600;color:var(--muted);font-family:'SF Mono',ui-monospace,monospace;flex-shrink:0;}
 .tool-card-preview{font-size:11px;color:var(--muted);opacity:.6;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}

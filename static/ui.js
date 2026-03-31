@@ -493,10 +493,12 @@ function fileIcon(name, type){
   const e=fileExt(name);
   if(IMAGE_EXTS.has(e)) return '📷';
   if(MD_EXTS.has(e))    return '📝';
+  if(typeof DOWNLOAD_EXTS!=='undefined'&&DOWNLOAD_EXTS.has(e)) return '⬇️';
   if(e==='.py')   return '🐍';
   if(e==='.js'||e==='.ts'||e==='.jsx'||e==='.tsx') return '⚡';
   if(e==='.json'||e==='.yaml'||e==='.yml'||e==='.toml') return '⚙';
   if(e==='.sh'||e==='.bash') return '💻';
+  if(e==='.pdf') return '⬇️';
   return '📄';
 }
 

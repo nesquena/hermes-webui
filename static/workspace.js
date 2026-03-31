@@ -16,6 +16,15 @@ async function loadDir(path){
 // File extension sets for preview routing (must match server-side sets)
 const IMAGE_EXTS  = new Set(['.png','.jpg','.jpeg','.gif','.svg','.webp','.ico','.bmp']);
 const MD_EXTS     = new Set(['.md','.markdown','.mdown']);
+// Binary formats that should download rather than preview
+const DOWNLOAD_EXTS = new Set([
+  '.docx','.doc','.xlsx','.xls','.pptx','.ppt','.odt','.ods','.odp',
+  '.pdf','.zip','.tar','.gz','.bz2','.7z','.rar',
+  '.mp3','.mp4','.wav','.m4a','.ogg','.flac','.mov','.avi','.mkv','.webm',
+  '.exe','.dmg','.pkg','.deb','.rpm',
+  '.woff','.woff2','.ttf','.otf','.eot',
+  '.bin','.dat','.db','.sqlite','.pyc','.class','.so','.dylib','.dll',
+]);
 
 function fileExt(p){ const i=p.lastIndexOf('.'); return i>=0?p.slice(i).toLowerCase():''; }
 
@@ -97,21 +106,16 @@ function cancelEditMode(){
   updateEditBtn();
 }
 
-function downloadFile(path){
-  if(!S.session||!path)return;
-  const url=`/api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}&download=1`;
-  const a=document.createElement('a');
-  a.href=url;
-  // filename hint (browser may override with Content-Disposition from server)
-  a.download=path.split('/').pop()||'file';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-}
-
 async function openFile(path){
   if(!S.session)return;
   const ext=fileExt(path);
+
+  // Binary/download-only formats: trigger browser download, don't preview
+  if(DOWNLOAD_EXTS.has(ext)){
+    downloadFile(path);
+    return;
+  }
+
   $('previewPathText').textContent=path;
   $('previewArea').classList.add('visible');
   $('fileTree').style.display='none';
@@ -133,12 +137,32 @@ async function openFile(path){
       $('previewMd').innerHTML=renderMd(data.content);
     }catch(e){setStatus('Could not open file');}
   } else {
-    // Plain code / text
+    // Plain code / text -- but fall back to download if server signals binary
     try{
       const data=await api(`/api/file?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}`);
+      if(data.binary){
+        // Server flagged this as binary content
+        downloadFile(path);
+        return;
+      }
       showPreview('code');
       $('previewCode').textContent=data.content;
-    }catch(e){setStatus('Could not open file');}
+    }catch(e){
+      // If it's a 400/too-large error, offer download instead
+      downloadFile(path);
+    }
   }
+}
+
+function downloadFile(path){
+  if(!S.session)return;
+  // Trigger browser download via the raw file endpoint with content-disposition attachment
+  const url=`/api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}&download=1`;
+  const filename=path.split('/').pop();
+  const a=document.createElement('a');
+  a.href=url;a.download=filename;
+  document.body.appendChild(a);a.click();
+  setTimeout(()=>document.body.removeChild(a),100);
+  showToast(`Downloading ${filename}\u2026`,2000);
 }
 
