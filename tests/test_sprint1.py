@@ -4,7 +4,7 @@ Sprint 1 test suite for the Hermes Co-Work Web UI.
 Tests use the ISOLATED test server running on http://127.0.0.1:8788.
 Production server (port 8787) and your real conversations are never touched.
 Start the server before running:
-    /home/hermes/.hermes/hermes-agent/webui-mvp/start.sh
+    <repo>/start.sh
     # wait 2 seconds
     pytest webui-mvp/tests/test_sprint1.py -v
 

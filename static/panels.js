@@ -516,7 +516,7 @@ function renderWorkspacesPanel(workspaces){
   }
   const addRow=document.createElement('div');addRow.className='ws-add-row';
   addRow.innerHTML=`
-    <input id="wsAddInput" placeholder="Add workspace path (e.g. /home/hermes/CodePath)" style="flex:1;background:rgba(255,255,255,.06);border:1px solid var(--border2);border-radius:7px;color:var(--text);padding:7px 10px;font-size:12px;outline:none;">
+    <input id="wsAddInput" placeholder="Add workspace path (e.g. /home/user/my-project)" style="flex:1;background:rgba(255,255,255,.06);border:1px solid var(--border2);border-radius:7px;color:var(--text);padding:7px 10px;font-size:12px;outline:none;">
     <button class="ws-action-btn" onclick="addWorkspace()">&#43; Add</button>`;
   panel.appendChild(addRow);
   const hint=document.createElement('div');

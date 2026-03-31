@@ -1,6 +1,6 @@
 """
 Sprint 9 Tests: app.js module split verification, tool cards, todo panel.
-Run: cd /home/hermes/.hermes/hermes-agent && venv/bin/python -m pytest /home/hermes/webui-mvp/tests/test_sprint9.py -v
+Run: python -m pytest tests/test_sprint9.py -v
 """
 import json, pathlib, urllib.error, urllib.request
 

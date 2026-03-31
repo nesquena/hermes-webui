@@ -119,7 +119,7 @@ def _wait_for_server(base, timeout=20):
 def test_server():
     """
     Start an isolated test server on TEST_PORT with a clean state directory.
-    Paths are discovered dynamically -- no hardcoded /home/hermes assumptions.
+    Paths are discovered dynamically -- no hardcoded absolute path assumptions.
     """
     # Clean slate
     if TEST_STATE_DIR.exists():
