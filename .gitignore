@@ -12,9 +12,10 @@ __pycache__/
 # Archive directory (pre-git backups, kept on disk but not tracked)
 archive/
 
-# Local environment and secrets
+# Local environment and secrets (but keep the example template)
 .env
 .env.*
+!.env.example
 
 # Generated screenshots and transient artifacts
 screenshot-*.png
