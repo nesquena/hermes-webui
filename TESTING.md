@@ -1529,10 +1529,11 @@ Manual-only for Sprint 8:
 
 ---
 
-*Last updated: Sprint 8, March 31, 2026*
-*Total automated tests: 139/139*
+*Last updated: Sprint 9, March 31, 2026*
+*Total automated tests: 149/149*
 *Run: cd /home/hermes/.hermes/hermes-agent && venv/bin/python -m pytest /home/hermes/webui-mvp/tests/ -v*
 *Source: /home/hermes/webui-mvp/*
+*Modules: ui.js, workspace.js, sessions.js, messages.js, panels.js, boot.js (app.js deleted)*
 
 ---
 

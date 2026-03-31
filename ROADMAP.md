@@ -200,7 +200,7 @@ sidebar live display, new sessions inherit last workspace. See Sprint 5 complete
 - [x] Create job from UI (Sprint 6)
 - [x] Edit job
 - [x] Delete job
-- [ ] Full run history (Sprint 7)
+- [ ] Full run history (Sprint 7 deferred -> Wave 3)
 
 ### Sprint 2.2: Skill Management (Partial -- Sprint 7 for remaining)
 - [x] List all skills with categories (Sprint 3)

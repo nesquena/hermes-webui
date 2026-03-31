@@ -26,11 +26,10 @@ the feature set expands.
 ## 2. File Inventory
 
     /home/hermes/.hermes/hermes-agent/webui-mvp/
-    server.py          Main server file. ~1130 lines. Contains everything:
-                       Python HTTP server, all API handlers, the Session model,
-                       the SSE streaming engine, the approval wiring, the file
-                       upload parser, AND the entire HTML/CSS/JS frontend as a
-                       Python raw string called HTML.
+    server.py          Main server file. ~1150 lines. Pure Python.
+                       HTTP server, all API handlers, Session model, SSE engine,
+                       approval wiring, file upload parser. No inline HTML/CSS/JS.
+                       (Phase A+E complete: HTML/CSS/JS all extracted to static/)
     server.py.bak      Backup from a prior iteration. Kept for reference.
     server_new.py      Intermediate ~900-line draft. Superseded by server.py.
                        Safe to delete once Wave 1 begins.
@@ -550,7 +549,7 @@ restriction from the UI yet (see ROADMAP.md Wave 4 for the plan).
 | TD1 | Critical | Env vars are process-global (concurrent request bug) | PARTIAL Sprint 5 | Thread-local _set_thread_env() added. Per-session lock from Sprint 4. Process-level env still written as fallback. Full fix needs terminal tool to read thread-local. |
 | TD2 | High     | SESSIONS cache: no eviction, locking missing         | FIXED Sprint 5   | OrderedDict + LRU cap 100 + move_to_end on access. LOCK from Sprint 1. Complete. |
 | TD3 | High     | No test coverage                                     | PARTIAL Sprint 1 | 19 HTTP integration tests added; unit tests pending Phase A split |
-| TD4 | Medium   | All code in one file (HTML/CSS/JS/Python mingled)    | FIXED Sprint 5   | JS extracted to static/app.js in Sprint 5. server.py is now pure Python + HTML skeleton. Phase A complete. |
+| TD4 | Medium   | All code in one file (HTML/CSS/JS/Python mingled)    | FIXED Sprint 5   | JS extracted to static/app.js in Sprint 5 (Sprint 9: app.js deleted, replaced by 6 modules). Phase A complete. |
 | TD5 | Medium   | No request validation (KeyError -> 500 + traceback)  | FIXED Sprint 4   | All endpoints hardened: /api/list, /api/file, /api/crons/* all return clean 400/404 |
 | TD6 | Low      | all_sessions() full directory scan every call        | FIXED Sprint 5   | Session index file (_index.json) built on every save. all_sessions() reads index O(1). Phase C partial. |
 | TD7 | Low      | No structured logging                                | FIXED Sprint 1   | log_request() override emits JSON per request |
@@ -582,7 +581,8 @@ Target structure:
       static/
         index.html            HTML document (served directly from disk)
         style.css             All CSS
-        app.js                All JavaScript
+        [app.js deleted]      Replaced by 6 modules: ui.js, workspace.js, sessions.js,
+                              messages.js, panels.js, boot.js
       tests/
         test_session_crud.py
         test_upload.py
@@ -596,7 +596,7 @@ Target structure:
 Implementation steps:
 1. Extract CSS and HTML to static/style.css and static/index.html. No content changes.
    Server serves index.html from disk: handler reads Path('static/index.html').read_text()
-2. Extract JS to static/app.js. Reference via <script src="/static/app.js">
+2. Extract JS to 6 static modules (complete -- app.js deleted Sprint 9)
    Add GET /static/* handler in do_GET.
 3. Extract Session class and helpers to api/session_store.py
 4. Extract _run_agent_streaming and SSE helpers to api/streaming.py
@@ -682,7 +682,7 @@ Three problems to fix:
 After Phase A splits the HTML/JS into files, Phase E improves the JavaScript itself.
 
 1. Switch to ES Modules (type="module"):
-   Split app.js into:
+   app.js deleted Sprint 9 -- replaced by 6 modules:
    - state.js: export S, INFLIGHT
    - sessions.js: session CRUD functions
    - chat.js: send(), SSE handling
@@ -819,7 +819,7 @@ Endpoint that calls Hermes Python modules:
     jobs = list_jobs(include_disabled=True)
     return j(self, {'jobs': jobs})
 
-### Frontend (static/app.js -> future module)
+### Frontend (6 static JS modules: ui.js, workspace.js, sessions.js, messages.js, panels.js, boot.js)
 
 Simple GET fetch:
 
@@ -1105,7 +1105,7 @@ Quick-reference table for prioritizing architecture work. Phases are from Sectio
 
 | Phase | Name                        | Priority | Effort | Blocks         | Status     |
 |-------|-----------------------------|----------|--------|----------------|------------|
-| A+E   | File Separation + Frontend  | High     | Medium | F              | COMPLETE Sprint 6 (HTML to static/index.html; server.py is now pure Python 903 lines) |
+| A+E   | File Separation + Frontend  | High     | Medium | F              | COMPLETE Sprint 6+9 (HTML->index.html, JS->6 modules, app.js deleted; server.py pure Python ~1150 lines) |
 | B     | Thread-Safe Request Context | Critical | Medium | nothing        | PARTIAL (Sprint 4: per-session lock added; global env vars still used) |
 | C     | Session Store Improvements  | Medium   | Medium | J              | PARTIAL Sprint 5 (index file + LRU cache; LRU eviction policy and pagination still open) |
 | D     | Input Validation            | Medium   | Low    | nothing        | COMPLETE Sprint 6 (approval/respond + file/raw hardened; all endpoints validated) |
