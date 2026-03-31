@@ -995,7 +995,7 @@ Resolution: Phase B replaces with thread-local or explicit parameter passing.
             JS: MSG_QUEUE global, updateQueueBadge(), setBusy drain logic, send() queues when busy,
                 loadSession checks INFLIGHT before server fetch
     v1.1  Sprint 9 (March 31, 2026):
-            Arch: app.js split into ui.js, workspace.js, sessions.js, messages.js, panels.js, boot.js
+            Arch: app.js deleted; replaced by ui.js, workspace.js, sessions.js, messages.js, panels.js, boot.js
             Features: tool call cards (inline collapsible, live + history), attachment persistence,
                        todo list panel (parses tool results from session history)
             Tests: 10 new, 149/149 total

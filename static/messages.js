@@ -17,7 +17,7 @@ async function send(){
 
   const activeSid=S.session.session_id;
 
-  setStatus('Uploading…');
+  setStatus(S.pendingFiles&&S.pendingFiles.length?'Uploading…':'Sending…');
   let uploaded=[];
   try{uploaded=await uploadPendingFiles();}
   catch(e){if(!text){setStatus(`❌ ${e.message}`);return;}}

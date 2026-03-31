@@ -142,7 +142,8 @@ def test_static_index_has_resize_handles():
     assert b"rightpanelResize" in raw
 
 def test_app_js_has_resize_logic():
-    raw, _, status = get_raw("/static/app.js")
+    """Sprint 9: app.js replaced by modules. Resize logic lives in boot.js."""
+    raw, _, status = get_raw("/static/boot.js")
     assert status == 200
     assert b"_initResizePanels" in raw
     assert b"hermes-sidebar-w" in raw

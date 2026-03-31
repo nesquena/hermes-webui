@@ -12,9 +12,11 @@
 The sprint that closed the last gaps for heavy agentic use.
 
 ### Architecture
-- **app.js split into 6 modules.** The 1,669-line monolith is gone. Files:
+- **app.js replaced by 6 modules.** `app.js` is deleted. The browser now loads 6 focused files:
   `ui.js` (530), `workspace.js` (132), `sessions.js` (189), `messages.js` (221),
-  `panels.js` (555), `boot.js` (142). Zero behavior change. Character-verified against original.
+  `panels.js` (555), `boot.js` (142). The modules are a superset of the original app.js
+  (two functions -- `loadTodos`, `toolIcon` -- were added directly to the modules after the split).
+  No single file exceeds 555 lines.
 
 ### Features
 - **Tool call cards inline.** Every tool Hermes uses now appears as a collapsible card

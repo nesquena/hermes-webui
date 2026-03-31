@@ -36,7 +36,8 @@ def test_server_running_from_new_location():
     assert status == 200 and data["status"] == "ok"
 
 def test_app_js_served():
-    raw, ct, status = get_raw("/static/app.js")
+    """Sprint 9: app.js replaced by modules. Verify ui.js (contains renderMd) is served."""
+    raw, ct, status = get_raw("/static/ui.js")
     assert status == 200 and "javascript" in ct and b"renderMd" in raw
 
 def test_workspaces_list():
