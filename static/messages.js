@@ -81,6 +81,8 @@ async function send(){
   const es=new EventSource(`/api/chat/stream?stream_id=${encodeURIComponent(streamId)}`);
 
   es.addEventListener('token',e=>{
+    // Guard: if the user switched sessions, don't write tokens to the wrong DOM
+    if(!S.session||S.session.session_id!==activeSid) return;
     const d=JSON.parse(e.data);
     assistantText+=d.text;
     ensureAssistantRow();
@@ -90,12 +92,13 @@ async function send(){
 
   es.addEventListener('tool',e=>{
     const d=JSON.parse(e.data);
-    removeThinking();
+    // Always update activity bar status (visible regardless of which session is viewed)
     setStatus(`${d.name}${d.preview?' · '+d.preview.slice(0,55):''}`);
-    // Add to live tool calls for inline display
+    // Only update DOM if still viewing this session
+    if(!S.session||S.session.session_id!==activeSid) return;
+    removeThinking();
     S.toolCalls.push({name:d.name, preview:d.preview||'', args:d.args||{}, snippet:'', done:false});
     renderMessages();
-    // Remove old "running" placeholder
     const oldRow=$('toolRunningRow');if(oldRow)oldRow.remove();
     $('messages').scrollTop=$('messages').scrollHeight;
   });

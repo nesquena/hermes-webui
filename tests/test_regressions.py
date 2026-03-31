@@ -245,3 +245,68 @@ def test_cancel_button_not_cleared_across_sessions(cleanup_test_sessions):
     # Both clear operations must be inside the activeSid === S.session guard
     # We check for the pattern added by the fix
     assert "S.session.session_id===activeSid" in src,         "messages.js must guard activeStreamId/Cancel clearing with session identity check"
+
+# ── R8: Session delete does not invalidate index (ghost sessions) ─────────────
+
+def test_deleted_session_does_not_appear_in_list(cleanup_test_sessions):
+    """R8: After deleting a session, it must not appear in /api/sessions.
+    When _index.json was not invalidated on delete, the session reappeared
+    in the list even after the JSON file was removed.
+    """
+    # Create a session with a title so it shows in the list
+    d, _ = post("/api/session/new", {})
+    sid = d["session"]["session_id"]
+    post("/api/session/rename", {"session_id": sid, "title": "regression-test-delete-R8"})
+
+    # Verify it appears
+    sessions, _ = get("/api/sessions")
+    ids_before = [s["session_id"] for s in sessions["sessions"]]
+    assert sid in ids_before, "Session must appear in list before delete"
+
+    # Delete it
+    result, status = post("/api/session/delete", {"session_id": sid})
+    assert status == 200 and result.get("ok") is True
+
+    # Verify it no longer appears -- even after a second fetch (index rebuild)
+    sessions2, _ = get("/api/sessions")
+    ids_after = [s["session_id"] for s in sessions2["sessions"]]
+    assert sid not in ids_after,         f"Deleted session {sid} still appears in list -- index not invalidated on delete"
+
+
+def test_server_delete_invalidates_index(cleanup_test_sessions):
+    """R8b: server.py session/delete handler must unlink _index.json.
+    Static check that the fix is in place.
+    """
+    src = pathlib.Path("/home/hermes/webui-mvp/server.py").read_text()
+    # Find the delete handler and verify it unlinks the index
+    delete_idx = src.find("if parsed.path == '/api/session/delete':")
+    assert delete_idx >= 0, "session/delete handler not found"
+    delete_block = src[delete_idx:delete_idx+600]
+    assert "SESSION_INDEX_FILE" in delete_block,         "server.py session/delete must invalidate SESSION_INDEX_FILE"
+
+
+# ── R9: Token/tool SSE events write to wrong session after switch ─────────────
+
+def test_token_handler_guards_session_id(cleanup_test_sessions):
+    """R9a: The SSE token event handler must check activeSid before writing to DOM.
+    When missing, tokens from session A would render into session B's message area
+    if the user switched sessions mid-stream.
+    """
+    src = pathlib.Path("/home/hermes/webui-mvp/static/messages.js").read_text()
+    # Find the token event handler
+    token_idx = src.find("es.addEventListener('token'")
+    assert token_idx >= 0, "token event handler not found"
+    token_block = src[token_idx:token_idx+300]
+    assert "activeSid" in token_block,         "token handler must check activeSid before writing to DOM"
+    assert "S.session.session_id!==activeSid" in token_block or            "S.session.session_id===activeSid" in token_block,         "token handler must compare current session to activeSid"
+
+
+def test_tool_handler_guards_session_id(cleanup_test_sessions):
+    """R9b: The SSE tool event handler must check activeSid before writing to DOM.
+    When missing, tool cards from session A would render into session B's message area.
+    """
+    src = pathlib.Path("/home/hermes/webui-mvp/static/messages.js").read_text()
+    tool_idx = src.find("es.addEventListener('tool'")
+    assert tool_idx >= 0, "tool event handler not found"
+    tool_block = src[tool_idx:tool_idx+400]
+    assert "activeSid" in tool_block,         "tool handler must check activeSid before writing to DOM"

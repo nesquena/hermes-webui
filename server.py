@@ -426,6 +426,9 @@ class Handler(BaseHTTPRequestHandler):
                 p = SESSION_DIR / f'{sid}.json'
                 try: p.unlink(missing_ok=True)
                 except Exception: pass
+                # Invalidate index so the deleted session stops appearing in lists
+                try: SESSION_INDEX_FILE.unlink(missing_ok=True)
+                except Exception: pass
                 return j(self, {'ok': True})
             if parsed.path == '/api/session/clear':
                 # Wipe all messages from a session, keep session metadata
