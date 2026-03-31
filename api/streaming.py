@@ -123,19 +123,25 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             )
             s.messages = result.get('messages') or s.messages
             s.title = title_from(s.messages, s.title)
-            # Extract tool call metadata for the UI to display inline
+            # Extract tool call metadata grouped by assistant message index
+            # Each tool call gets assistant_msg_idx so the client can render
+            # cards inline with the assistant bubble that triggered them.
             tool_calls = []
-            pending_names = {}
-            for m in s.messages:
+            pending_names = {}   # tool_call_id -> name
+            pending_asst_idx = {} # tool_call_id -> index in s.messages
+            for msg_idx, m in enumerate(s.messages):
                 if m.get('role') == 'assistant':
                     c = m.get('content', '')
                     if isinstance(c, list):
                         for p in c:
                             if isinstance(p, dict) and p.get('type') == 'tool_use':
-                                pending_names[p.get('id', '')] = p.get('name', 'tool')
+                                tid = p.get('id', '')
+                                pending_names[tid] = p.get('name', 'tool')
+                                pending_asst_idx[tid] = msg_idx
                 elif m.get('role') == 'tool':
                     tid = m.get('tool_call_id') or m.get('tool_use_id', '')
                     name = pending_names.get(tid, 'tool')
+                    asst_idx = pending_asst_idx.get(tid, -1)
                     raw = str(m.get('content', ''))
                     try:
                         import json as _j2
@@ -143,7 +149,10 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                         snippet = str(rd.get('output') or rd.get('result') or rd.get('error') or raw)[:200]
                     except Exception:
                         snippet = raw[:200]
-                    tool_calls.append({'name': name, 'snippet': snippet, 'tid': tid})
+                    tool_calls.append({
+                        'name': name, 'snippet': snippet, 'tid': tid,
+                        'assistant_msg_idx': asst_idx,
+                    })
             s.tool_calls = tool_calls
             # Tag the matching user message with attachment filenames for display on reload
             # Only tag a user message whose content relates to this turn's text

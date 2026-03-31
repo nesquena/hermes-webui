@@ -247,24 +247,58 @@ function renderMessages(){
     row.dataset.rawText = String(content).trim();
     inner.appendChild(row);
   }
-  // Insert tool call cards between last user message and last assistant response
+  // Insert tool call cards inline -- grouped by assistant message they belong to.
+  // tool calls with assistant_msg_idx=-1 (live streaming) go before the last assistant row.
   if(S.toolCalls && S.toolCalls.length){
-    // Find the position to insert: after the last user message row
-    const allRows = Array.from(inner.querySelectorAll('.msg-row'));
-    let insertBefore = null;
-    for(let i = allRows.length-1; i >= 0; i--){
-      const idx = parseInt(allRows[i].dataset.msgIdx||'-1',10);
-      if(idx >= 0 && S.messages[idx] && S.messages[idx].role === 'assistant'){
-        insertBefore = allRows[i]; // insert tool cards before last assistant row
-      } else if(insertBefore){
-        break;
-      }
-    }
-    // Remove any existing tool-card rows to avoid duplicates
+    // Remove any existing tool-card rows first (avoids duplicates on re-render)
     inner.querySelectorAll('.tool-card-row').forEach(el=>el.remove());
-    // Render tool cards
-    const cardsFragment = document.createDocumentFragment();
+
+    // Build a map: assistant_msg_idx -> [tool_calls]
+    // -1 = current streaming turn (no assistant msg yet)
+    const byAssistant = {};
     for(const tc of S.toolCalls){
+      const key = tc.assistant_msg_idx !== undefined ? tc.assistant_msg_idx : -1;
+      if(!byAssistant[key]) byAssistant[key] = [];
+      byAssistant[key].push(tc);
+    }
+
+    // Find all assistant message rows by their msgIdx
+    const allRows = Array.from(inner.querySelectorAll('.msg-row[data-msg-idx]'));
+    const rowByIdx = {};
+    for(const r of allRows) rowByIdx[parseInt(r.dataset.msgIdx)] = r;
+
+    // For each group, insert its tool cards before the corresponding assistant row.
+    // For streaming (-1): insert before the last assistant row.
+    for(const [key, cards] of Object.entries(byAssistant)){
+      const aIdx = parseInt(key);
+      let insertBefore = null;
+      if(aIdx === -1){
+        // Live streaming: insert before the last assistant row
+        for(let i = allRows.length-1; i >= 0; i--){
+          const idx = parseInt(allRows[i].dataset.msgIdx||'-1',10);
+          if(idx >= 0 && S.messages[idx] && S.messages[idx].role === 'assistant'){
+            insertBefore = allRows[i];
+            break;
+          }
+        }
+        if(!insertBefore) insertBefore = null; // append at end
+      } else {
+        // History: insert before the assistant row at aIdx
+        // Find the NEXT assistant row after aIdx (the one whose text follows these tool calls)
+        let foundNext = false;
+        for(const r of allRows){
+          const ri = parseInt(r.dataset.msgIdx||'-1');
+          if(ri > aIdx && S.messages[ri] && S.messages[ri].role === 'assistant'){
+            insertBefore = r;
+            foundNext = true;
+            break;
+          }
+        }
+        if(!foundNext) insertBefore = null;
+      }
+
+      const cardsFragment = document.createDocumentFragment();
+      for(const tc of cards){
       const row = document.createElement('div');
       row.className = 'msg-row tool-card-row';
       const icon = toolIcon(tc.name);
@@ -310,10 +344,11 @@ function renderMessages(){
         </div>`;
       cardsFragment.appendChild(row);
     }
-    if(insertBefore){
-      inner.insertBefore(cardsFragment, insertBefore);
-    } else {
-      inner.appendChild(cardsFragment);
+      if(insertBefore){
+        inner.insertBefore(cardsFragment, insertBefore);
+      } else {
+        inner.appendChild(cardsFragment);
+      }
     }
   }
   $('messages').scrollTop=$('messages').scrollHeight;
