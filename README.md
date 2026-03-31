@@ -22,6 +22,16 @@ From the Hermes environment, start the web UI with:
 
 The app listens on the local Hermes port configured in the server, typically `127.0.0.1:8787`.
 
+## Accessing from a local browser (SSH tunnel)
+
+If the app is running on a remote server, forward the port to your local machine with:
+
+```bash
+ssh -N -L 8787:127.0.0.1:8787 hermes@<SERVER_IP>
+```
+
+Then open `http://localhost:8787` in your local browser. The `-N` flag keeps the tunnel open without running a remote command.
+
 ## Development notes
 
 - This repo is intentionally simple and file-based, with no frontend build step.
