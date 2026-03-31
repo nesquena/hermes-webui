@@ -68,7 +68,9 @@ async function send(){
     if(cancelBtn) cancelBtn.style.display='';
   }catch(e){
     delete INFLIGHT[activeSid];
-    stopApprovalPolling();hideApprovalCard();removeThinking();
+    stopApprovalPolling();
+    // Only hide approval card if it belongs to the session that just finished
+    if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard();removeThinking();
     S.messages.push({role:'assistant',content:`**Error:** ${e.message}`});
     renderMessages();setBusy(false);setStatus('Error: '+e.message);
     return;
@@ -108,7 +110,10 @@ async function send(){
 
   es.addEventListener('tool',e=>{
     const d=JSON.parse(e.data);
-    setStatus(`${d.name}${d.preview?' · '+d.preview.slice(0,55):''}`);
+    // Only update activity bar if viewing this session
+    if(S.session&&S.session.session_id===activeSid){
+      setStatus(`${d.name}${d.preview?' · '+d.preview.slice(0,55):''}`);
+    }
     if(!S.session||S.session.session_id!==activeSid) return;
     removeThinking();
     const oldRow=$('toolRunningRow');if(oldRow)oldRow.remove();
@@ -121,6 +126,8 @@ async function send(){
 
   es.addEventListener('approval',e=>{
     const d=JSON.parse(e.data);
+    // Tag the approval with the session that owns it so respondApproval uses correct sid
+    d._session_id=activeSid;
     showApprovalCard(d);
   });
 
@@ -129,7 +136,9 @@ async function send(){
     const d=JSON.parse(e.data);
     delete INFLIGHT[activeSid];
     clearInflight();
-    stopApprovalPolling();hideApprovalCard();
+    stopApprovalPolling();
+    // Only hide approval card if it belongs to the session that just finished
+    if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard();
     // Only clear active stream state if this is the currently viewed session
     if(S.session&&S.session.session_id===activeSid){
       S.activeStreamId=null;
@@ -157,7 +166,9 @@ async function send(){
     es.close();
     delete INFLIGHT[activeSid];
     clearInflight();
-    stopApprovalPolling();hideApprovalCard();
+    stopApprovalPolling();
+    // Only hide approval card if it belongs to the session that just finished
+    if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard();
     if(S.session&&S.session.session_id===activeSid){
       S.activeStreamId=null;
       const _cbe=$('btnCancel');if(_cbe)_cbe.style.display='none';
@@ -179,7 +190,9 @@ async function send(){
     es.close();
     delete INFLIGHT[activeSid];
     clearInflight();
-    stopApprovalPolling();hideApprovalCard();
+    stopApprovalPolling();
+    // Only hide approval card if it belongs to the session that just finished
+    if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard();
     if(S.session&&S.session.session_id===activeSid){
       S.activeStreamId=null;
       const _cbc=$('btnCancel');if(_cbc)_cbc.style.display='none';
@@ -200,7 +213,9 @@ async function send(){
   es.onerror=()=>{
     if(es.readyState===EventSource.CLOSED){
       delete INFLIGHT[activeSid];
-      stopApprovalPolling();hideApprovalCard();
+      stopApprovalPolling();
+    // Only hide approval card if it belongs to the session that just finished
+    if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard();
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;
         const _cbo=$('btnCancel');if(_cbo)_cbo.style.display='none';
@@ -238,14 +253,7 @@ function autoResize(){const el=$('msg');el.style.height='auto';el.style.height=M
 // ── Approval polling ──
 let _approvalPollTimer = null;
 
-function showApprovalCard(pending) {
-  $("approvalDesc").textContent = pending.description || "";
-  $("approvalCmd").textContent = pending.command || "";
-  // show pattern key(s) for context
-  const keys = pending.pattern_keys || (pending.pattern_key ? [pending.pattern_key] : []);
-  $("approvalDesc").textContent = (pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : "");
-  $("approvalCard").classList.add("visible");
-}
+// showApprovalCard moved above respondApproval
 
 function hideApprovalCard() {
   $("approvalCard").classList.remove("visible");
@@ -253,13 +261,27 @@ function hideApprovalCard() {
   $("approvalDesc").textContent = "";
 }
 
+// Track session_id of the active approval so respond goes to the right session
+let _approvalSessionId = null;
+
+function showApprovalCard(pending) {
+  $("approvalDesc").textContent = pending.description || "";
+  $("approvalCmd").textContent = pending.command || "";
+  const keys = pending.pattern_keys || (pending.pattern_key ? [pending.pattern_key] : []);
+  $("approvalDesc").textContent = (pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : "");
+  _approvalSessionId = pending._session_id || (S.session && S.session.session_id) || null;
+  $("approvalCard").classList.add("visible");
+}
+
 async function respondApproval(choice) {
-  if (!S.session) return;
+  const sid = _approvalSessionId || (S.session && S.session.session_id);
+  if (!sid) return;
   hideApprovalCard();
+  _approvalSessionId = null;
   try {
     await api("/api/approval/respond", {
       method: "POST",
-      body: JSON.stringify({ session_id: S.session.session_id, choice })
+      body: JSON.stringify({ session_id: sid, choice })
     });
   } catch(e) { setStatus("Approval error: " + e.message); }
 }
@@ -272,7 +294,7 @@ function startApprovalPolling(sid) {
     }
     try {
       const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid));
-      if (data.pending) { showApprovalCard(data.pending); }
+      if (data.pending) { data.pending._session_id=sid; showApprovalCard(data.pending); }
       else { hideApprovalCard(); }
     } catch(e) { /* ignore poll errors */ }
   }, 1500);

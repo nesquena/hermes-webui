@@ -310,3 +310,57 @@ def test_tool_handler_guards_session_id(cleanup_test_sessions):
     assert tool_idx >= 0, "tool event handler not found"
     tool_block = src[tool_idx:tool_idx+400]
     assert "activeSid" in tool_block,         "tool handler must check activeSid before writing to DOM"
+
+# ── R10: respondApproval uses wrong session_id after switch (multi-session) ─
+
+def test_respond_approval_uses_approval_session_id(cleanup_test_sessions):
+    """R10: respondApproval must use the session_id of the session that triggered
+    the approval, not S.session.session_id (which may be a different session
+    if the user switched while approval was pending).
+    """
+    src = pathlib.Path("/home/hermes/webui-mvp/static/messages.js").read_text()
+    # The fix introduces _approvalSessionId to track the correct session
+    assert "_approvalSessionId" in src,         "messages.js must use _approvalSessionId in respondApproval"
+    # respondApproval must use _approvalSessionId, not S.session.session_id directly
+    idx = src.find("async function respondApproval(")
+    assert idx >= 0, "respondApproval not found"
+    fn_body = src[idx:idx+300]
+    assert "_approvalSessionId" in fn_body,         "respondApproval must read _approvalSessionId, not S.session.session_id"
+
+
+# ── R11: Activity bar shows cross-session tool status ─────────────────────
+
+def test_tool_status_only_shown_for_current_session(cleanup_test_sessions):
+    """R11: The activity bar setStatus() call in the tool SSE handler must only
+    fire when the user is viewing the session that triggered the tool.
+    When missing, session A's tool names would appear in session B's activity bar.
+    """
+    src = pathlib.Path("/home/hermes/webui-mvp/static/messages.js").read_text()
+    # Find the tool event handler
+    tool_idx = src.find("es.addEventListener('tool'")
+    assert tool_idx >= 0
+    tool_block = src[tool_idx:tool_idx+400]
+    # setStatus must be inside the activeSid guard, not before it
+    status_pos = tool_block.find("setStatus(")
+    guard_pos  = tool_block.find("S.session.session_id===activeSid")
+    assert guard_pos >= 0, "tool handler must guard with activeSid check"
+    # The guard must appear BEFORE or AROUND the setStatus call
+    # (status only fires for the current session)
+    assert status_pos > tool_block.find("activeSid"),         "setStatus in tool handler must be inside the activeSid guard"
+
+
+# ── R12: Live tool cards lost on switch-away and switch-back ──────────────
+
+def test_loadSession_inflight_restores_live_tool_cards(cleanup_test_sessions):
+    """R12: When switching back to an in-flight session, live tool cards in
+    #liveToolCards must be restored from S.toolCalls.
+    When missing, tool cards disappeared on switch-away even though the session
+    was still processing.
+    """
+    src = pathlib.Path("/home/hermes/webui-mvp/static/sessions.js").read_text()
+    # INFLIGHT branch must call appendLiveToolCard
+    inflight_idx = src.find("if(INFLIGHT[sid]){")
+    assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
+    inflight_block = src[inflight_idx:inflight_idx+500]
+    assert "appendLiveToolCard" in inflight_block,         "loadSession INFLIGHT branch must restore live tool cards via appendLiveToolCard"
+    assert "clearLiveToolCards" in inflight_block,         "loadSession INFLIGHT branch must clear old live cards before restoring"

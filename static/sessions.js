@@ -24,7 +24,11 @@ async function loadSession(sid){
   });
   if(INFLIGHT[sid]){
     S.messages=INFLIGHT[sid].messages;
-    // Keep S.toolCalls as-is (accumulated during streaming)
+    // Restore live tool cards for this in-flight session
+    clearLiveToolCards();
+    for(const tc of (S.toolCalls||[])){
+      if(tc&&tc.name) appendLiveToolCard(tc);
+    }
     syncTopbar();await loadDir('.');renderMessages();appendThinking();
     setBusy(true);setStatus('Hermes is thinking\u2026');
     startApprovalPolling(sid);
