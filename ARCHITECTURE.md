@@ -444,11 +444,549 @@ or unlocking the Send button on the wrong session.
 
 Step-by-step trace of what happens when you type a message and press Send:
 
-1.  User types, presses Enter. sen
+1.  User types, presses Enter. send() is called.
+2.  Guard: return if (!text && !pendingFiles) || S.busy
+3.  If S.session is null: await newSession(), await renderSessionList()
+4.  Capture activeSid = S.session.session_id (before any awaits)
+5.  uploadPendingFiles(): POST each file in S.pendingFiles to /api/upload
+    - Shows upload progress bar
+    - Clears S.pendingFiles on completion
+    - Returns array of uploaded filenames
+6.  Build msgText from text + file note
+7.  Build userMsg {role:'user', content: displayText, attachments?: filenames}
+8.  Push userMsg to S.messages, call renderMessages(), appendThinking()
+9.  setBusy(true), setStatus('Hermes is thinking...')
+10. INFLIGHT[activeSid] = {messages: [...S.messages], uploaded}
+11. startApprovalPolling(activeSid)
+12. POST /api/chat/start {session_id, message, model, workspace}
+    Server: saves session, creates queue.Queue, starts daemon thread, returns {stream_id}
+13. Browser opens EventSource('/api/chat/stream?stream_id=X')
+14. In the SSE loop:
+    - 'token': assistantText += d.text, ensureAssistantRow(), render markdown
+    - 'tool': setStatus('tool name...')
+    - 'approval': showApprovalCard(d)
+    - 'done': sync S from d.session, renderMessages(), loadDir, renderSessionList,
+               setBusy(false), delete INFLIGHT[activeSid]
+    - 'error': show error message, setBusy(false)
+    - es.onerror: handle network drops (show error, setBusy(false))
+15. If approval needed: user clicks a button, respondApproval() fires
+    POST /api/approval/respond -> server pops _pending, calls approve_*
+    Agent retries the command (now is_approved() returns True) and continues
 
-... [OUTPUT TRUNCATED - 25716 chars omitted out of 75716 total] ...
+---
 
-nerate last response, clear conversation,
+## 7. Dependency Map
+
+Direct imports in server.py:
+
+    run_agent.AIAgent              Main agent class. Wraps LLM + tool execution.
+    tools.approval.*               Module-level approval state.
+    yaml                           Config loading.
+    Standard library: json, os, re, sys, threading, time, traceback, uuid,
+                      http.server, pathlib, urllib.parse, email.parser, queue
+
+AIAgent constructor parameters used:
+
+    model=               OpenRouter model ID string
+    platform='cli'       Sets the platform context for tool selection
+    quiet_mode=True      Suppresses agent's own stdout output
+    enabled_toolsets=    List of toolset names from config.yaml
+    session_id=          Used for tool state keying (memory, todos, etc.)
+    stream_delta_callback=   Called per token delta (or None as sentinel)
+    tool_progress_callback=  Called per tool invocation (name, preview, args)
+
+AIAgent.run_conversation() parameters:
+
+    user_message=           The human turn text
+    conversation_history=   Prior messages list (OpenAI format)
+    task_id=                Session ID (NOTE: NOT session_id=, it is task_id=)
+
+Return value:
+
+    {
+      'messages': [...],          Full conversation including new turns
+      'final_response': '...',    Last assistant text response
+      'completed': True/False,    Whether the conversation completed normally
+      ...other fields
+    }
+
+---
+
+## 8. Configuration Loading
+
+On startup, server.py reads ~/.hermes/config.yaml:
+
+    cfg = yaml.safe_load(CONFIG_PATH.read_text())
+    CLI_TOOLSETS = cfg.get('platform_toolsets', {}).get('cli', [...default...])
+
+Default toolset list (hardcoded fallback):
+    browser, clarify, code_execution, cronjob, delegation, file,
+    image_gen, memory, session_search, skills, terminal, todo, tts, vision, web
+
+The web UI always runs with the full CLI toolset. There is no per-session toolset
+restriction from the UI yet (see ROADMAP.md Wave 4 for the plan).
+
+---
+
+## 9. Known Bugs and Technical Debt Summary
+
+| ID  | Severity | Description                                          | Status           | Fix              |
+|-----|----------|------------------------------------------------------|------------------|------------------|
+| B1  | Critical | Approval wiring untested; pattern_keys not shown     | FIXED Sprint 1   | Card shows keys; inject_test endpoint added for verification |
+| B2  | High     | File input no accept attribute                       | FIXED Sprint 1   | accept= added with image/*, text/*, pdf, code extensions |
+| B3  | High     | Model chip label hardcodes sonnet substring check    | FIXED Sprint 1   | MODEL_LABELS map; fallback to short model ID |
+| B4  | High     | Reload mid-stream: stream_id lost, no reconnect      | FIXED Sprint 1   | stream/status endpoint; reconnect banner via localStorage |
+| B5  | High     | INFLIGHT in-memory only, lost on reload              | FIXED Sprint 1   | markInflight/clearInflight in localStorage |
+| B6  | Medium   | New sessions always use DEFAULT_WORKSPACE            | FIXED Sprint 3   | newSession() passes S.session.workspace to /api/session/new |
+| B7  | Medium   | Sidebar title overflow: missing min-width:0          | FIXED Sprint 1   | min-width:0 on .session-item |
+| B8  | Medium   | renderMd missing tables, nested lists                | PARTIAL Sprint 4 | Tables Sprint 2; nested lists improved Sprint 4; full fix still Phase E |
+| B9  | Medium   | Empty assistant messages can render                  | FIXED Sprint 1   | loadSession() filters empty-text assistant messages |
+| B10 | Low      | Thinking dots stay during tool-running               | FIXED Sprint 3   | removeThinking() on first tool event; compact 'Running X...' row shown |
+| B11 | Low      | GET /api/session no-ID silently creates session      | FIXED Sprint 1   | Returns 400 with error message |
+| B12 | Low      | Preview panel display:none to flex layout jump       | FIXED Sprint 4   | visibility/opacity transition replaces display:none toggle |
+| B13 | Low      | No CORS headers                                      | Open             | Phase H |
+| B14 | Low      | No keyboard shortcut for new chat                    | FIXED Sprint 3   | Cmd/Ctrl+K triggers newSession() from anywhere |
+| TD1 | Critical | Env vars are process-global (concurrent request bug) | PARTIAL Sprint 5 | Thread-local _set_thread_env() added. Per-session lock from Sprint 4. Process-level env still written as fallback. Full fix needs terminal tool to read thread-local. |
+| TD2 | High     | SESSIONS cache: no eviction, locking missing         | FIXED Sprint 5   | OrderedDict + LRU cap 100 + move_to_end on access. LOCK from Sprint 1. Complete. |
+| TD3 | High     | No test coverage                                     | PARTIAL Sprint 1 | 19 HTTP integration tests added; unit tests pending Phase A split |
+| TD4 | Medium   | All code in one file (HTML/CSS/JS/Python mingled)    | FIXED Sprint 5   | JS extracted to static/app.js in Sprint 5 (Sprint 9: app.js deleted, replaced by 6 modules). Phase A complete. |
+| TD5 | Medium   | No request validation (KeyError -> 500 + traceback)  | FIXED Sprint 4   | All endpoints hardened: /api/list, /api/file, /api/crons/* all return clean 400/404 |
+| TD6 | Low      | all_sessions() full directory scan every call        | FIXED Sprint 5   | Session index file (_index.json) built on every save. all_sessions() reads index O(1). Phase C partial. |
+| TD7 | Low      | No structured logging                                | FIXED Sprint 1   | log_request() override emits JSON per request |
+
+---
+
+## 10. Architecture Improvement Roadmap
+
+These phases run in parallel with the feature roadmap. Each phase targets software
+quality: testability, resilience, maintainability, and modularity.
+
+### Phase A: File Separation (Priority: High, Effort: Medium)
+
+Split server.py into a proper package.
+
+Target structure:
+
+    webui-mvp/
+      server.py               Entry point: starts server, imports api/
+      api/
+        __init__.py
+        handlers.py           do_GET / do_POST routing and dispatch
+        session_store.py      Session class, get_session, new_session, all_sessions, SESSIONS
+        streaming.py          _run_agent_streaming, STREAMS, STREAMS_LOCK, _sse()
+        upload.py             parse_multipart, handle_upload
+        files.py              safe_resolve, list_dir, read_file_content
+        approval.py           Thin wrapper around tools.approval for the HTTP API
+        config.py             Configuration loading (env vars, config.yaml)
+      static/
+        index.html            HTML document (served directly from disk)
+        style.css             All CSS
+        [app.js deleted]      Replaced by 6 modules: ui.js, workspace.js, sessions.js,
+                              messages.js, panels.js, boot.js
+      tests/
+        test_session_crud.py
+        test_upload.py
+        test_streaming.py
+        test_approval.py
+        test_files.py
+        frontend/
+          test_markdown.html
+          test_session_state.html
+
+Implementation steps:
+1. Extract CSS and HTML to static/style.css and static/index.html. No content changes.
+   Server serves index.html from disk: handler reads Path('static/index.html').read_text()
+2. Extract JS to 6 static modules (complete -- app.js deleted Sprint 9)
+   Add GET /static/* handler in do_GET.
+3. Extract Session class and helpers to api/session_store.py
+4. Extract _run_agent_streaming and SSE helpers to api/streaming.py
+5. Extract parse_multipart and handle_upload to api/upload.py
+6. Extract list_dir and friends to api/files.py
+7. Refactor handlers.py to import from the above modules
+8. server.py becomes: config setup, start server, import Handler from handlers.py
+
+Benefit: Each file is under ~200 lines. Agents can read and modify individual files
+without loading the full 1100-line blob.
+
+### Phase B: Thread-Safe Request Context (Priority: Critical, Effort: Medium)
+
+Replace process-global env vars with thread-local or explicit parameter passing.
+
+Root cause: TERMINAL_CWD, HERMES_EXEC_ASK, HERMES_SESSION_KEY are set via os.environ
+in _run_agent_streaming(). Two concurrent sessions clobber each other.
+
+Fix options (in order of preference):
+
+Option 1 (best): Check if AIAgent constructor accepts a context dict. Pass workspace,
+exec_ask, and session_key directly. Zero env var usage in server code.
+
+Option 2: Use threading.local():
+    _ctx = threading.local()
+    # In _run_agent_streaming:
+    _ctx.workspace = str(workspace)
+    _ctx.session_key = session_id
+    # In tools that read env vars: check _ctx first, fall back to os.environ
+
+Option 3 (interim, safe for single-user): Wrap the env var block in a per-session lock:
+    SESSION_AGENT_LOCKS = {}  # session_id -> Lock
+    # Only one agent run per session at a time
+    with SESSION_AGENT_LOCKS.setdefault(session_id, threading.Lock()):
+        os.environ[...] = ...
+        result = agent.run_conversation(...)
+
+Phase B also includes: review all other os.environ reads/writes in the codebase for
+similar thread-safety issues.
+
+### Phase C: Session Store Improvements (Priority: Medium, Effort: Medium)
+
+Three problems to fix:
+
+1. Unbounded SESSIONS cache:
+   Replace dict with functools.lru_cache wrapper or a simple OrderedDict with max size.
+   Evict LRU entries when size exceeds 100.
+
+2. No locking around SESSIONS:
+   Wrap all SESSIONS dict reads and writes with LOCK (already defined, just unused).
+   Pattern: with LOCK: s = SESSIONS.get(sid)
+
+3. O(n) directory scan in all_sessions():
+   Add an index file: SESSION_DIR/index.json
+   Contents: list of compact() dicts, sorted by updated_at
+   Maintained on every Session.save() and every delete.
+   all_sessions() reads index.json (one file read) instead of scanning all JSONs.
+   get_session() still loads the full {session_id}.json on cache miss.
+   Index rebuild tool: a function that regenerates index.json from all *.json files.
+
+### Phase D: Input Validation and Error Handling (Priority: Medium, Effort: Low)
+
+1. Add a validate() helper:
+   def validate(body, *required_fields):
+       missing = [f for f in required_fields if not body.get(f)]
+       if missing: raise ValueError(f"Missing required fields: {missing}")
+
+2. Refine the outer try/except in do_GET and do_POST:
+   except ValueError as e:
+       return j(self, {'error': str(e)}, status=400)
+   except KeyError as e:
+       return j(self, {'error': f'Not found: {e}'}, status=404)
+   except Exception as e:
+       log.exception('Unhandled error')
+       return j(self, {'error': 'Internal server error'}, status=500)
+   # Never expose tracebacks to the client (security risk even on localhost)
+
+3. Add request duration logging:
+   Log at INFO level: {method} {path} -> {status} in {duration}ms
+
+### Phase E: Frontend Modularization (Priority: Medium, Effort: High)
+
+After Phase A splits the HTML/JS into files, Phase E improves the JavaScript itself.
+
+1. Switch to ES Modules (type="module"):
+   app.js deleted Sprint 9 -- replaced by 6 modules:
+   - state.js: export S, INFLIGHT
+   - sessions.js: session CRUD functions
+   - chat.js: send(), SSE handling
+   - files.js: loadDir(), openFile()
+   - upload.js: uploadPendingFiles(), addFiles(), renderTray()
+   - approval.js: approval card and polling
+   - markdown.js: renderMd()
+   - ui.js: setStatus, setBusy, showToast, syncTopbar
+   Each module imports what it needs from state.js and other modules.
+
+2. Replace renderMd with marked.js:
+   CDN: https://cdn.jsdelivr.net/npm/marked/marked.min.js
+   No bundler needed, ~50KB, handles tables, nested lists, HTML sanitization.
+   Usage: marked.parse(raw) -- drop-in replacement.
+   Add DOMPurify alongside for XSS sanitization of rendered HTML.
+
+3. Add Prism.js for syntax highlighting:
+   CDN: https://cdn.jsdelivr.net/npm/prismjs
+   Apply after renderMd: Prism.highlightAllUnder(element)
+   Supports 200+ languages with auto-detection.
+
+### Phase F: API Design Cleanup (Priority: Low, Effort: Medium)
+
+1. Version prefix: add /api/v1/ to all new endpoints.
+   Keep /api/* as aliases for backward compatibility.
+
+2. Standard response envelope:
+   Success: {"ok": true, "data": {...}}
+   Error: {"ok": false, "error": "message", "code": "ERROR_CODE"}
+
+3. Session list pagination:
+   GET /api/v1/sessions?limit=30&offset=0
+   Response: {"ok": true, "data": {"sessions": [...], "total": N, "has_more": false}}
+
+4. Consistent naming: use snake_case for all JSON keys.
+
+### Phase G: Observability (Priority: Low, Effort: Low)
+
+1. Structured JSON logging to /tmp/webui-mvp.log:
+   {"ts": "...", "method": "POST", "path": "/api/chat/start", "status": 200, "ms": 12}
+
+2. Enhanced /health response:
+   {"status": "ok", "sessions": 10, "active_streams": 2, "uptime_s": 3600, "version": "0.3"}
+
+3. GET /api/debug/stats (localhost only):
+   {"sessions_cached": N, "streams_active": M, "memory_mb": X}
+
+### Phase H: Authentication (Priority: Low, Effort: Medium)
+
+Optional password gate for non-SSH-tunnel deployments.
+
+1. HERMES_WEBUI_PASSWORD env var enables auth
+2. Login page: minimal dark form, POST /api/auth/login
+3. Server sets HttpOnly + SameSite=Strict cookie on successful login
+4. All API endpoints check cookie if HERMES_WEBUI_PASSWORD is set
+5. Cookie validity: 30 days from last activity
+
+### Phase I: Test Infrastructure (Priority: High, Effort: High)
+
+No tests exist today. This is the highest-risk technical debt.
+
+1. Python unit tests (pytest):
+   - tests/test_session_crud.py: Session class, get_session, new_session, all_sessions
+   - tests/test_upload.py: parse_multipart directly with known byte payloads
+   - tests/test_files.py: safe_resolve, list_dir, read_file_content with tmp dirs
+   - tests/test_streaming.py: mock AIAgent, verify event sequence
+   - tests/test_approval.py: approval state machine
+
+2. HTTP integration tests:
+   - Start a test server on a random port
+   - Drive it with httpx or requests
+   - Verify all API endpoints return correct shapes and status codes
+
+3. Frontend tests (no build step):
+   - tests/frontend/test_markdown.html: known input -> expected HTML output assertions
+   - Run via: python3 -m http.server and open in browser, or use playwright
+
+4. CI (GitHub Actions):
+   - .github/workflows/test.yml: on push, run pytest + ruff lint
+   - Target: zero test failures before merging any feature branch
+
+### Phase J: Performance (Priority: Low, Effort: High)
+
+For scale beyond single-user casual use.
+
+1. Session index (Phase C prerequisite): O(1) session list loads
+2. Message pagination: /api/session returns last 50 messages, paginate older ones
+3. Frontend virtual scroll: IntersectionObserver for both message list and session list
+4. Stream cleanup background thread: evict STREAMS entries older than 5 minutes
+5. File tree lazy loading: expand-on-click fetches subdirectory contents
+
+---
+
+## 11. How To Add a New API Endpoint
+
+Follow this exact pattern. Review existing handlers in do_GET/do_POST for reference.
+
+### Backend (server.py -> future: api/handlers.py)
+
+GET endpoint:
+
+    # Inside do_GET, before the 404 fallback line:
+    if parsed.path == '/api/your/endpoint':
+        qs = parse_qs(parsed.query)
+        param = qs.get('param', [''])[0]
+        if not param:
+            return j(self, {'error': 'param is required'}, status=400)
+        # do work
+        return j(self, {'result': value})
+
+POST endpoint (AFTER /api/upload check, body already parsed):
+
+    if parsed.path == '/api/your/endpoint':
+        value = body.get('field', '')
+        if not value:
+            return j(self, {'error': 'field is required'}, status=400)
+        # do work
+        return j(self, {'ok': True, 'data': result})
+
+Endpoint requiring a valid session:
+
+    sid = body.get('session_id', '')
+    try:
+        s = get_session(sid)
+    except KeyError:
+        return j(self, {'error': 'Session not found'}, status=404)
+
+Endpoint that calls Hermes Python modules:
+
+    # Example: calling cron.jobs
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    from cron.jobs import list_jobs
+    jobs = list_jobs(include_disabled=True)
+    return j(self, {'jobs': jobs})
+
+### Frontend (6 static JS modules: ui.js, workspace.js, sessions.js, messages.js, panels.js, boot.js)
+
+Simple GET fetch:
+
+    const data = await api('/api/your/endpoint?param=' + encodeURIComponent(value));
+    // data is parsed JSON response, throws on error
+
+POST:
+
+    const data = await api('/api/your/endpoint', {
+      method: 'POST',
+      body: JSON.stringify({field: value})
+    });
+
+The api() helper:
+
+    async function api(path, opts={}) {
+      const r = await fetch(path, {headers:{'Content-Type':'application/json'},...opts});
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || r.statusText);
+      return d;
+    }
+
+---
+
+## 12. Common Debugging Commands
+
+    # Server health and session count
+    curl -s http://127.0.0.1:8787/health | python3 -m json.tool
+
+    # Tail the server log live
+    tail -f /tmp/webui-mvp.log
+
+    # List all sessions (metadata only)
+    curl -s http://127.0.0.1:8787/api/sessions | python3 -m json.tool
+
+    # Inspect a full session with messages
+    SID=your_session_id_here
+    curl -s "http://127.0.0.1:8787/api/session?session_id=$SID" | python3 -m json.tool
+
+    # Kill and restart server cleanly
+    pkill -f "python.*webui-mvp/server.py"
+    <agent-dir>/webui-mvp/start.sh
+
+    # Check if server process is running
+    ps aux | grep "webui-mvp/server.py"
+
+    # Inspect session files on disk
+    ls -lt ~/.hermes/webui-mvp/sessions/
+    cat ~/.hermes/webui-mvp/sessions/SESSION_ID.json | python3 -m json.tool
+
+    # Count messages in a session
+    python3 -c "import json; d=json.load(open('sessions/SID.json')); print(len(d['messages']))"
+
+    # Check approval module state
+    cd <agent-dir>
+    venv/bin/python -c "from tools.approval import _pending; print(_pending)"
+
+    # Check active SSE streams (requires server access)
+    curl -s http://127.0.0.1:8787/health  # streams not exposed yet, add in Phase G
+
+    # Find all sessions with messages (not Untitled empty)
+    ls ~/.hermes/webui-mvp/sessions/ | xargs -I{} python3 -c "
+    import json, sys
+    d = json.load(open('~/.hermes/webui-mvp/sessions/{}'))
+    if d['messages']: print('{}', d['title'][:50])
+    " 2>/dev/null
+
+---
+
+## 13. Architecture Decision Records
+
+### ADR-001: Single-File Server
+Decision: All code in server.py
+Rationale: No build step, easy agent modification, zero deployment complexity.
+Trade-off: Maintenance burden grows with file size.
+Resolution: Phase A splits the file.
+
+### ADR-002: HTML as Python Raw String
+Decision: Frontend embedded in server.py as r"""..."""
+Rationale: Simplest way to serve frontend without static file server or build system.
+Trade-off: No editor syntax highlighting, complex patching, base64 gymnastics for large edits.
+Resolution: Phase A moves to static/index.html served from disk.
+
+### ADR-003: ThreadingHTTPServer
+Decision: Python stdlib, synchronous threads, not asyncio.
+Rationale: No dependencies, synchronous agent calls fit naturally in threads.
+Trade-off: Memory scales linearly with concurrent users. Thread pool is unbounded.
+Resolution: Acceptable for single-user. Phase J adds concurrency limits if needed.
+
+### ADR-004: SSE over WebSockets
+Decision: Server-Sent Events for streaming.
+Rationale: Simpler than WebSockets, unidirectional, no upgrade handshake, EventSource is
+standard browser API.
+Trade-off: Server-to-client only. Approval events use SSE from agent thread + polling fallback.
+Resolution: No plan to switch. SSE is sufficient.
+
+### ADR-005: Module-Level Approval State
+Decision: tools/approval.py uses module-level _pending dict shared across all threads.
+Rationale: The approval system was pre-existing; sharing state via same Python process works.
+Trade-off: Breaks if ever moved to multi-process (gunicorn workers) or subprocess.
+Resolution: Document the constraint. Move to SQLite if scaling is ever needed.
+
+### ADR-006: No Authentication
+Decision: No auth initially.
+Rationale: Localhost-only via SSH tunnel. Auth adds complexity without security benefit
+when the transport layer (SSH) is already authenticated.
+Trade-off: Anyone on the VPS with localhost access can use the server.
+Resolution: Phase H adds optional password gate for direct-access deployments.
+
+### ADR-007: Approval State via Environment Variables
+Decision: HERMES_EXEC_ASK and HERMES_SESSION_KEY passed via os.environ.
+Rationale: tools/approval.py and terminal_tool.py already read these env vars.
+Trade-off: Process-global. Two concurrent chat requests clobber each other.
+Resolution: Phase B replaces with thread-local or explicit parameter passing.
+
+---
+
+## 14. Version History
+
+    v0.1  Initial MVP: single-file server, sync /api/chat, no streaming
+    v0.2  SSE streaming via /api/chat/start + /api/chat/stream
+    v0.2  INFLIGHT session guard, session delete rules, toast UI
+    v0.2  Binary file upload fixed (replaced cgi.FieldStorage with parse_multipart)
+    v0.2  Approval card UI wired to tools/approval.py
+    v0.2  Approval SSE event (immediate surface on tool invocation)
+    v0.3  Sprint 1 (March 30, 2026):
+            Bug fixes: B1 B2 B3 B4/B5 B7 B9 B11 all resolved
+            Architecture: LOCK on SESSIONS, section headers, structured JSON logging
+            Tests: 19/19 HTTP integration tests passing
+            Features: 10-model dropdown with provider groups, reconnect banner,
+                       GET /api/chat/stream/status, GET /api/approval/inject_test
+    v0.4  Sprint 2 (March 30, 2026):
+            Features: image preview via /api/file/raw, rendered markdown in right panel,
+                       table support in renderMd(), smart file icons, type badge in path bar
+            Tests: 8 new tests, 27/27 total passing
+    v0.5  [Planned] Wave 1 features: cron viewer, skills viewer, memory viewer
+    v0.5  Sprint 3 (March 30, 2026):
+            Features: sidebar nav tabs (Chat/Tasks/Skills/Memory), cron viewer,
+                       skills viewer (search + SKILL.md preview), memory viewer
+            Bug fixes: B6, B10, B14
+            Arch: Phase D partial (require()/bad() validation helpers)
+            New endpoints: /api/crons, /api/crons/output, /api/crons/run, /api/crons/pause,
+                           /api/crons/resume, /api/skills, /api/skills/content, /api/memory
+            Tests: 21 new tests, 48/48 total
+    v0.6  Sprint 4 (March 30, 2026):
+            Relocation: source moved to <repo>/, symlink back
+            Phase A partial: CSS extracted to static/style.css, served from disk
+            Phase B partial: per-session agent lock (SESSION_AGENT_LOCKS)
+            Features: session rename (inline), session search, file delete, file create
+            Bug fixes: B12, B8 improved, TD5 completed
+            New endpoints: /api/session/rename, /api/sessions/search, /api/file/delete, /api/file/create, GET /static/*
+            Tests: 20 new tests, 68/68 total
+    v0.7  Sprint 5 (March 30, 2026):
+            Arch: Phase A complete (JS -> static/app.js), TD2 LRU cache, TD1 thread-local, Phase C index
+            Features: workspace management panel + topbar quick-switch, copy message, inline file editor
+            New endpoints: /api/workspaces, /api/workspaces/add, /api/workspaces/remove, /api/workspaces/rename, /api/file/save
+            New state files: workspaces.json, last_workspace.txt, sessions/_index.json
+            Tests: 18 new tests, 86/86 total
+    v0.8  Sprint 6 (March 31, 2026):
+            Phase E complete: HTML to static/index.html (server.py now 903 lines, pure Python)
+            Phase D complete: all endpoints validated
+            Features: resizable panels (localStorage), cron create from UI, session JSON export
+            Bug fix: Escape from file editor now cancels edits
+            New endpoints: POST /api/crons/create, GET /api/session/export
+            Tests: 16 new, 106/106 total
+    v1.0  Sprint 8 (March 31, 2026):
+            Features: edit+regenerate messages, regenerate last response, clear conversation,
                        Prism.js syntax highlighting, message queue (MSG_QUEUE + drain on idle),
                        INFLIGHT-first loadSession (message persists on switch-away/back)
             Bug fixes: A1 (reconnect banner false positive), A2 (session list scroll clip)
