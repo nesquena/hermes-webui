@@ -498,3 +498,959 @@ Sprint 1 tests (test_sprint1.py):
   - Server health, session CRUD (create/load/update/delete/sort)
   - B11 footgun fix (/api/session 400 on missing ID)
   - Multipart parser: text file, binary PNG
+  - HTTP upload: success, too large, no file field, bad session
+  - Approval API: pending, inject+deny, inject+session-approve
+  - Stream status endpoint
+  - File listing, path traversal block
+
+Sprint 2 tests (test_sprint2.py):
+  - GET /api/file/raw: PNG, JPEG, SVG content-types
+  - GET /api/file/raw: path traversal blocked, missing file 404
+  - GET /api/file: markdown content returned as text
+  - GET /api/file: markdown with table content preserved
+  - GET /api/list: image and markdown files appear in directory listing
+
+Manual-only tests (not covered by automation):
+  - All browser rendering tests (T5.5, T5.6, T5.7 -- visual verification)
+  - T7.1-T7.3 -- tool approval card (requires live agent execution)
+  - T9.1 -- reconnect banner timing
+  - T10.1 -- concurrent session switching
+  - T11.1, T11.2 -- responsive layout
+  - T11.3 -- log output verification
+  - All visual/CSS checks
+
+---
+
+## Claude Browser Agent Instructions
+
+If you are a Claude agent with browser access, follow these instructions:
+
+1. Navigate to http://localhost:8787 (assumes SSH tunnel is active from your Mac).
+2. Execute tests in order. For each test:
+   a. Follow SETUP instructions.
+   b. Perform each STEP using browser tools (click, type, navigate).
+   c. Use browser_vision or browser_snapshot to verify EXPECT conditions.
+   d. Record PASS or FAIL with a brief note on what you observed.
+3. For tests requiring file uploads: use the browser's file picker; you may need to
+   create test files in /tmp first via terminal.
+4. For T7.x (approval tests): the agent running inside Hermes needs to detect a
+   dangerous command. Ask Hermes to "run: rm -rf /tmp/test_hermes_approval" and watch
+   for the card. The actual rm will not run in a safe test workspace.
+5. Skip T9.1 (reconnect banner) unless you can precisely time a page reload during an
+   active SSE stream.
+6. Report results as a checklist at the end.
+
+---
+
+*Last updated: Sprint 2, March 30, 2026*
+*Server version: v0.
+
+... [OUTPUT TRUNCATED - 4912 chars omitted out of 54912 total] ...
+
+ tool row disappears, streaming text begins
+  - NOT: thinking dots AND "Running..." AND streaming text all visible at once
+FAIL: Thinking dots stay while tool runs, or multiple rows stacked confusingly.
+
+### T17.3: B14 - Cmd/Ctrl+K Creates New Chat
+STEPS:
+  1. Press Cmd+K (Mac) or Ctrl+K (Windows/Linux) while on the Chat tab
+EXPECT:
+  - A new "Untitled" session is created
+  - Empty state shown, input focused
+  - Does NOT work if a request is in-flight (Send is disabled)
+FAIL: Nothing happens, browser intercepts shortcut for its own purpose, crash.
+
+---
+
+## Automated Test Coverage (Updated Sprint 3)
+
+Sprint 3 tests (test_sprint3.py) - 21 tests:
+  - Cron API: list, required fields, output, pause/resume validation, run nonexistent
+  - Skills API: list, required fields, content for known skill, name required
+  - Memory API: both files returned, string types, mtime keys present
+  - Input validation: session/update, session/delete, chat/start require fields;
+    chat/start requires message; session/update unknown ID returns 404
+  - B6: new session with workspace param sets it correctly
+
+Manual-only (not covered by automation):
+  - T13.x - T16.x: all visual panel rendering tests
+  - T17.1-T17.3: bug fix verification (B6/B10/B14)
+  - All previous manual tests from Sections 1-12
+
+---
+
+*Last updated: Sprint 3, March 30, 2026*
+*Total automated tests: 48/48*
+*Run: cd <agent-dir> && venv/bin/python -m pytest webui-mvp/tests/ -v*
+
+---
+
+## Section 18: Source Relocation Verification (Sprint 4)
+
+### T18.1: UI Loads and CSS Renders Correctly After Relocation
+STEPS:
+  1. Open http://localhost:8787
+EXPECT:
+  - Dark background, correct colors, sidebar visible
+  - Open DevTools Network tab: verify style.css loads from /static/style.css (not inline)
+  - No CSS errors in console
+FAIL: Plain unstyled HTML, white background, console errors about missing stylesheet.
+
+---
+
+## Section 19: Session Rename (Sprint 4)
+
+### T19.1: Double-Click to Rename a Session
+SETUP: At least one session in the sidebar.
+STEPS:
+  1. Double-click on a session title in the sidebar
+EXPECT:
+  - The title text is replaced by an editable input field, pre-selected
+  - Input has a blue border style
+  - Sidebar click does NOT navigate away (click is stopped)
+FAIL: Nothing happens, navigation fires, input not focused.
+
+### T19.2: Enter Commits the Rename
+STEPS (continued from T19.1):
+  1. Clear the input and type "My Renamed Session"
+  2. Press Enter
+EXPECT:
+  - Input disappears, replaced by the new title text
+  - Sidebar shows "My Renamed Session"
+  - If this was the active session, topbar title also updates immediately
+  - Page reload: title persists
+FAIL: Title reverts, topbar doesn't update, enter not handled.
+
+### T19.3: Escape Cancels the Rename
+STEPS:
+  1. Double-click a session to start editing
+  2. Type some changes
+  3. Press Escape
+EXPECT:
+  - Input disappears, original title restored (no change)
+FAIL: Title changed despite Escape, crash.
+
+### T19.4: Blur (Click Away) Commits the Rename
+STEPS:
+  1. Double-click a session, type a new name
+  2. Click somewhere else on the page (not the input)
+EXPECT:
+  - New title is committed (same as pressing Enter)
+FAIL: Title reverts on blur.
+
+---
+
+## Section 20: Session Search (Sprint 4)
+
+### T20.1: Search Box Filters Sessions
+SETUP: Multiple sessions with different titles (including at least one you renamed in T19).
+STEPS:
+  1. Verify the Chat tab is active in the sidebar
+  2. Type part of a known session title in the "Filter conversations..." box
+EXPECT:
+  - List updates live as you type, showing only matching sessions
+  - Non-matching sessions disappear
+  - No network request (filtering is instant, client-side)
+FAIL: All sessions shown regardless, search causes page reload, error.
+
+### T20.2: Clear Search Restores Full List
+STEPS (continued):
+  1. Clear the search input
+EXPECT:
+  - Full session list returns immediately
+FAIL: List stays filtered after clearing.
+
+### T20.3: No Match Shows Empty List
+STEPS:
+  1. Type "zzznomatch9999" in the search box
+EXPECT:
+  - Session list is empty (no items)
+  - No error message, just empty
+FAIL: Error shown, crash, or unfiltered list still displayed.
+
+---
+
+## Section 21: Workspace File Operations (Sprint 4)
+
+### T21.1: Delete Button Appears on File Hover
+SETUP: Workspace has at least one file.
+STEPS:
+  1. Hover over a file in the right panel file tree
+EXPECT:
+  - A small trash icon appears on the right side of the file row
+  - Hovering away hides it again
+FAIL: No icon ever appears, icon always visible (not hover-only).
+
+### T21.2: Delete a File with Confirmation
+STEPS:
+  1. Hover over a file and click its trash icon
+  2. A browser confirm dialog appears: "Delete [filename]?"
+  3. Click OK
+EXPECT:
+  - Toast: "Deleted [filename]"
+  - File disappears from the tree
+  - If the file was open in the preview panel, preview closes
+FAIL: File not deleted, no confirmation dialog, error.
+
+### T21.3: Cancel Delete Does Nothing
+STEPS:
+  1. Hover over a file and click its trash icon
+  2. Click Cancel on the confirm dialog
+EXPECT:
+  - File remains in the tree
+  - No toast, no error
+FAIL: File deleted despite cancel.
+
+### T21.4: Create a New File
+STEPS:
+  1. Click the + button in the workspace panel header
+  2. A prompt dialog appears: "New file name (e.g. notes.md):"
+  3. Type "test-sprint4.md" and click OK
+EXPECT:
+  - Toast: "Created test-sprint4.md"
+  - File appears in the tree
+  - File opens immediately in the preview panel
+  - File is empty (no content)
+FAIL: Nothing happens, error, file not created.
+
+### T21.5: Create File Validates Name
+STEPS:
+  1. Click + for a new file
+  2. Press Cancel or leave name empty
+EXPECT:
+  - Nothing created, no error
+FAIL: Empty-named file created, crash.
+
+---
+
+## Automated Test Coverage (Updated Sprint 4)
+
+Sprint 4 tests (test_sprint4.py) - 20 tests:
+  - Relocation: server health, static CSS served, unknown static 404
+  - Session rename: success, persistence, truncation, missing fields, unknown ID
+  - Session search: matches found, empty query, no results
+  - File create: success, missing fields, duplicate rejected
+  - File delete: success, missing file 404, path traversal blocked
+  - Validation: /api/list and /api/file require session_id and path
+
+Total automated: 68/68 passing.
+
+Manual-only for Sprint 4:
+  - T18.1: visual CSS verification
+  - T19.1-T19.4: inline rename UX
+  - T20.1-T20.3: live search UX
+  - T21.1-T21.5: file operations UX
+
+---
+
+
+
+---
+
+## Section 22: Workspace Management (Sprint 5)
+
+### T22.1: Spaces Tab Shows Configured Workspaces
+STEPS:
+  1. Click the "Spaces" tab in the sidebar (folder icon)
+EXPECT:
+  - A list of workspaces with name and path
+  - At least the default workspace (test-workspace) listed
+  - An "Add workspace path" input at the bottom
+  - Each workspace has "Use" and X (remove) buttons
+FAIL: Empty panel, loading forever, error.
+
+### T22.2: Add a Valid Workspace Path
+STEPS:
+  1. Type "/tmp" in the add input and click + Add
+EXPECT:
+  - "/tmp" appears in the list with name "tmp"
+  - Toast: "Workspace added"
+FAIL: Error shown, path not saved, no feedback.
+
+### T22.3: Add an Invalid Path is Rejected
+STEPS:
+  1. Type "/this/path/does/not/exist" in the add input and click + Add
+EXPECT:
+  - Status bar shows an error (e.g. "Path does not exist")
+  - Path is NOT added to the list
+FAIL: Invalid path added, no error.
+
+### T22.4: Remove a Workspace
+STEPS:
+  1. Click the X button next to any non-default workspace
+  2. Confirm the dialog
+EXPECT:
+  - Workspace disappears from the list
+  - Toast: "Workspace removed"
+FAIL: Workspace stays, no confirmation, error.
+
+### T22.5: Topbar Workspace Chip is a Dropdown
+STEPS:
+  1. In any active chat session, look at the topbar right side
+  2. Click the workspace chip (shows folder icon + workspace name + arrow)
+EXPECT:
+  - A dropdown appears listing all configured workspaces
+  - Current workspace is highlighted
+  - A "Manage workspaces" link at the bottom
+FAIL: Nothing happens, no dropdown, error.
+
+### T22.6: Quick-Switch Workspace via Topbar
+SETUP: At least two workspaces configured (add /tmp if needed via Spaces tab).
+STEPS:
+  1. Click the workspace chip to open the dropdown
+  2. Click a different workspace than the current one
+EXPECT:
+  - Dropdown closes
+  - Toast: "Switched to [name]"
+  - Workspace chip in topbar updates to the new workspace name
+  - File tree in right panel refreshes to show files in the new workspace
+  - Current session is now using the new workspace
+FAIL: Workspace chip doesn't update, file tree unchanged, error.
+
+### T22.7: New Session Inherits Last Used Workspace
+SETUP: Switch to a non-default workspace (e.g. /tmp) via the topbar dropdown.
+STEPS:
+  1. Click + New conversation
+EXPECT:
+  - New session's workspace chip shows the same workspace you last switched to (/tmp)
+  - File tree shows files from /tmp
+FAIL: New session defaults back to test-workspace.
+
+---
+
+## Section 23: Copy Message to Clipboard (Sprint 5)
+
+### T23.1: Copy Icon Appears on Hover
+SETUP: A chat session with at least one message.
+STEPS:
+  1. Hover over any chat message (user or assistant)
+EXPECT:
+  - A small clipboard icon appears in the message header row (right side of "You" or "Hermes")
+  - Icon is not visible when not hovering
+FAIL: No icon ever appears, always visible.
+
+### T23.2: Copy Puts Text in Clipboard
+STEPS:
+  1. Hover over an assistant message
+  2. Click the clipboard icon
+EXPECT:
+  - Icon briefly shows a checkmark (✓) then reverts to clipboard
+  - Paste (Cmd+V) elsewhere shows the full text of that message
+FAIL: No visual feedback, clipboard empty or wrong content.
+
+---
+
+## Section 24: Inline File Editor (Sprint 5)
+
+### T24.1: Code File Opens in Read-Only Mode
+STEPS:
+  1. Click any .py, .js, or .txt file in the workspace file tree
+EXPECT:
+  - File content shows in read-only monospace view
+  - An "✎ Edit" button is visible in the preview path bar
+  - Content is NOT editable (clicking in it does nothing)
+FAIL: Content immediately editable, no Edit button.
+
+### T24.2: Edit Button Enters Edit Mode
+STEPS:
+  1. Click "✎ Edit" on a code file preview
+EXPECT:
+  - Read-only view replaced by an editable textarea
+  - Content of the file is pre-populated in the textarea
+  - Button changes to "💾 Save"
+FAIL: Nothing changes, button doesn't change.
+
+### T24.3: Save Writes Changes to Disk
+STEPS:
+  1. In edit mode, change some text
+  2. Click "💾 Save"
+EXPECT:
+  - Read-only view returns, showing the updated content
+  - Toast: "Saved"
+  - Verify: refreshing the file tree and reopening the file shows the new content
+FAIL: Save does nothing, content reverts, error.
+
+### T24.4: Dirty Indicator Shows Unsaved Changes
+STEPS:
+  1. Enter edit mode on a file
+  2. Make any change (type a character)
+EXPECT:
+  - Button shows "💾 Save*" (asterisk indicates unsaved changes)
+FAIL: No asterisk, button stays as "💾 Save".
+
+### T24.5: Markdown File Edit-Save Roundtrip
+STEPS:
+  1. Click a .md file in the workspace
+  2. Click Edit
+  3. Add a new line: "## Added by Sprint 5 test"
+  4. Click Save
+EXPECT:
+  - Save succeeds (toast)
+  - Markdown view re-renders showing the new heading
+FAIL: Save fails, markdown not re-rendered.
+
+---
+
+## Automated Test Coverage (Updated Sprint 5)
+
+Sprint 5 tests (test_sprint5.py) - 18 tests:
+  - Phase A: app.js served correctly
+  - Workspace CRUD: list, add valid, add invalid path, add invalid dir, add duplicate, requires path, remove, rename, rename unknown
+  - Last workspace tracking: updates on session/update, new session inherits last
+  - File save: success, missing fields, nonexistent file 404, path traversal blocked
+  - Session index: created after save, sessions sorted correctly
+
+Total automated: 86/86 passing.
+
+Manual-only for Sprint 5:
+  - T22.1-T22.7: workspace UI (tabs, dropdown, switching, inheritance)
+  - T23.1-T23.2: copy to clipboard UX
+  - T24.1-T24.5: inline file editor UX
+
+---
+
+*Last updated: Sprint 5, March 30, 2026*
+*Total automated tests: 86/86*
+*Run: cd <agent-dir> && venv/bin/python -m pytest <repo>/tests/ -v*
+*Source: <repo>/ | Static: static/style.css + static/app.js*
+
+---
+
+## Section 25: UI Polish Pass (Post-Sprint 5 Visual Audit)
+
+These are visual regression checks. Take a screenshot after loading the UI and compare
+against each criterion below. A Claude browser agent can verify these with browser_vision.
+
+### T25.1: Sidebar Nav Tabs are Icon-Only
+EXPECT:
+  - Five icon-only tabs in the sidebar nav row: 💬 ⏱️ 📚 🧠 📁
+  - No text labels visible by default (text removed to prevent overflow)
+  - Hovering a tab shows a tooltip with the label (Chat/Tasks/Skills/Memory/Spaces)
+  - Active tab has a blue underline, icon brighter blue
+  - All five icons fit in the sidebar width without clipping
+FAIL: Text labels showing alongside icons causing overflow, "Spaces" tab cut off.
+
+### T25.2: Message Role Labels are Softer
+EXPECT:
+  - "You" and "Hermes" labels appear in slightly muted blue/gold (not full-brightness)
+  - Labels use Title Case not ALL CAPS
+  - Role icons are circles (not squares) with a subtle border
+  - The role label area does not visually overpower the message content below
+FAIL: Bright gold "HERMES" and blue "YOU" in caps drawing eye away from content.
+
+### T25.3: Code Blocks Have a Connected Language Header
+EXPECT:
+  - When a code block has a language, the header bar is connected (no gap) to the code
+  - Header has a small colored dot on the left and the language name
+  - Background: slightly lighter than the code body to distinguish it
+FAIL: Header floats above the code block with visible gap.
+
+### T25.4: Send Button Has Depth
+EXPECT:
+  - Send button has a subtle gradient (lighter at top, slightly darker at bottom)
+  - Hover: button shifts very slightly upward (1px transform)
+  - Visual distinction from the blue link/chip color
+FAIL: Send button is same flat blue as all other blue elements.
+
+### T25.5: Session List Shows Date Groups
+EXPECT:
+  - Sessions grouped under "Today", "Yesterday", "Earlier" headers
+  - Headers are small, all-caps, muted gray
+  - Active session has a blue left border accent
+FAIL: No grouping, flat list, no visual hierarchy.
+
+### T25.6: Empty State Logo is Distinct
+EXPECT:
+  - The "H" logo on the empty state is a frosted-glass circle outline style (blue tint)
+  - NOT the same orange/red gradient as the sidebar header logo
+  - They should look different so it's clear they're two different things
+FAIL: Both logos look identical.
+
+### T25.7: New Conversation Button is Blue-Tinted
+EXPECT:
+  - The "New conversation" button has a subtle blue background tint
+  - Blue-colored text (not plain white/muted)
+  - Feels clickable and primary (not the same style as the secondary sm-btn buttons)
+FAIL: Button looks same as other secondary buttons.
+
+### T25.8: Suggestion Buttons Slide on Hover
+EXPECT:
+  - On the empty state, hovering a suggestion button shifts it slightly right (2px)
+  - Border turns blue on hover
+  - Subtle background tint on hover
+FAIL: No hover movement, generic hover state.
+
+### T25.9: Toast Notification is Premium
+EXPECT:
+  - Toast appears at bottom center with blur/frosted-glass background
+  - Subtle shadow behind the toast
+  - Toast slightly floats up (translateY) when appearing
+FAIL: Plain flat dark box, no blur, no movement.
+
+### T25.10: Composer Input Has Glow on Focus
+EXPECT:
+  - Clicking in the composer/message input shows a blue glow ring around the box
+  - (box-shadow: 0 0 0 3px rgba(124,185,255,0.08))
+  - Border also brightens to a stronger blue
+FAIL: Only border color change, no glow ring.
+
+---
+
+## Section 26: Resizable Panels (Sprint 6)
+
+### T26.1: Sidebar Can Be Resized by Dragging
+STEPS:
+  1. Hover over the right edge of the left sidebar (between sidebar and chat area)
+EXPECT:
+  - Cursor changes to col-resize (double-headed horizontal arrow)
+  - A subtle blue glow appears on the edge
+STEPS (continued):
+  2. Click and drag the edge to the right
+EXPECT:
+  - Sidebar widens in real time as you drag
+  - Chat area compresses to compensate
+  - Minimum width ~180px, maximum ~420px
+  - Releasing the mouse commits the new width
+  - Hard-refreshing the page restores the saved width
+FAIL: Cursor doesn't change, panel doesn't resize, width not saved.
+
+### T26.2: Workspace Panel Can Be Resized by Dragging
+STEPS:
+  1. Hover over the left edge of the right workspace panel
+  2. Drag left to narrow, drag right to widen
+EXPECT:
+  - Panel resizes within 180-500px range
+  - Width persists across page reload (stored in localStorage)
+FAIL: Panel not resizable.
+
+---
+
+## Section 27: Cron Job Create (Sprint 6)
+
+### T27.1: New Job Button Opens Form
+STEPS:
+  1. Click the Tasks tab in the sidebar
+  2. Click the "+ New job" button at the top of the Tasks panel
+EXPECT:
+  - A form slides in below the header with:
+    - Name input (optional)
+    - Schedule input (cron expression or natural language)
+    - Prompt textarea
+    - Delivery target dropdown
+    - Create job and Cancel buttons
+FAIL: Nothing happens, no form appears.
+
+### T27.2: Create a Job Successfully
+STEPS:
+  1. Open the create form (T27.1)
+  2. Fill in: Name "Test Job", Schedule "every 999h", Prompt "Say hello"
+  3. Click Create job
+EXPECT:
+  - Form closes
+  - Toast: "Job created ✓"
+  - New job appears in the cron list with status "active"
+FAIL: Error shown, job not created, form stays open.
+
+### T27.3: Invalid Schedule Shows Error
+STEPS:
+  1. Open the create form
+  2. Leave schedule empty or type "not_a_schedule"
+  3. Click Create job
+EXPECT:
+  - Error message appears below the form: "Schedule is required" or parse error
+  - Form stays open (not dismissed)
+FAIL: Form closes without feedback, generic error.
+
+### T27.4: Cancel Closes Form Without Creating
+STEPS:
+  1. Open the create form, fill in some fields
+  2. Click Cancel
+EXPECT:
+  - Form closes
+  - No new job created
+  - No toast
+FAIL: Job created, form doesn't close.
+
+---
+
+## Section 28: Session JSON Export (Sprint 6)
+
+### T28.1: JSON Export Button Downloads File
+SETUP: Active session with at least a few messages.
+STEPS:
+  1. Click the "JSON" button in the sidebar footer (next to Transcript)
+EXPECT:
+  - Browser downloads a file named hermes-{session_id}.json
+  - Opening the file shows valid JSON with: session_id, title, messages array,
+    workspace, model, created_at, updated_at
+  - messages array contains objects with role and content fields
+FAIL: No download triggered, file is empty, file is not valid JSON.
+
+### T28.2: Escape Cancels File Editor
+SETUP: Open a text file in the workspace right panel (click any .py or .md file).
+STEPS:
+  1. Click "Edit" button in the preview path bar
+  2. Make some changes in the textarea
+  3. Press Escape
+EXPECT:
+  - Textarea disappears, read-only view returns
+  - Original content is shown (changes discarded)
+  - File on disk is unchanged (verify by closing and reopening the file)
+FAIL: Escape does nothing, changes are saved, crash.
+
+---
+
+## Automated Test Coverage (Updated Sprint 6)
+
+Sprint 6 tests (test_sprint6.py) - 16 tests:
+  - Phase E: HTML served from static/index.html, server.py has no inline HTML
+  - Phase D: approval/respond requires session_id and valid choice; file/raw validates session
+  - Cron create: requires prompt, requires schedule, invalid schedule returns 400, success
+  - Session export: requires session_id, unknown session 404, valid JSON with session_id
+  - Resize: static files contain resize handles and resize JS logic
+
+Total automated: 106/106 passing.
+
+Manual-only for Sprint 6:
+  - T26.1-T26.2: resize drag UX
+  - T27.1-T27.4: cron create form UX
+  - T28.1: JSON export download
+  - T28.2: Escape from file editor
+
+---
+
+
+*Static: static/index.html + static/style.css + static/app.js*
+
+
+---
+
+## Section 29: Cron Edit and Delete (Sprint 7)
+
+### T29.1: Edit Button Opens Inline Form
+SETUP: At least one cron job exists. Tasks tab open.
+STEPS:
+  1. Click a cron job to expand it
+  2. Click the "Edit" (pencil) button
+EXPECT:
+  - An inline form appears inside the expanded cron body
+  - Name, schedule, and prompt fields are pre-filled with current values
+FAIL: Nothing happens, new form not shown.
+
+### T29.2: Save Edit Updates the Job
+STEPS (continued from T29.1):
+  1. Change the name field to "Renamed Job"
+  2. Click Save
+EXPECT:
+  - Form closes, toast "Job updated ✓"
+  - Job header shows new name
+FAIL: Save fails, name unchanged.
+
+### T29.3: Delete Button Removes the Job
+SETUP: A cron job you can safely delete (or a test job created for this).
+STEPS:
+  1. Expand the job, click "Delete"
+  2. Confirm the dialog
+EXPECT:
+  - Toast: "Job deleted"
+  - Job disappears from the list
+FAIL: Job stays, no confirmation dialog.
+
+---
+
+## Section 30: Skill Create and Edit (Sprint 7)
+
+### T30.1: New Skill Button Opens Form
+STEPS:
+  1. Click the Skills tab
+  2. Click "+ New skill" button
+EXPECT:
+  - A form appears with name, category, and content textarea fields
+FAIL: Nothing happens.
+
+### T30.2: Create a Skill and See it in List
+STEPS:
+  1. Fill in: Name "test-ui-skill", Content "---
+name: test-ui-skill
+description: UI test.
+tags: [test]
+---
+
+# Test"
+  2. Click Save skill
+EXPECT:
+  - Toast "Skill created ✓", form closes
+  - Skill appears in the skills list
+FAIL: Error, skill not in list.
+
+### T30.3: Cancel Closes Form Without Creating
+STEPS:
+  1. Open new skill form, fill some fields, click Cancel
+EXPECT:
+  - Form closes, no skill created
+FAIL: Skill created, form stays.
+
+---
+
+## Section 31: Memory Inline Edit (Sprint 7)
+
+### T31.1: Edit Button Opens Memory Edit Form
+STEPS:
+  1. Click the Memory tab
+  2. Click the "Edit" (pencil) button in the header
+EXPECT:
+  - An edit form appears below the memory panel with a textarea pre-filled with MEMORY.md content
+FAIL: Nothing happens, no form.
+
+### T31.2: Save Writes Changes
+STEPS:
+  1. In edit mode, add a line to the textarea
+  2. Click Save
+EXPECT:
+  - Toast "Memory saved ✓", form closes
+  - Memory panel reloads showing the updated content
+FAIL: Save fails, content unchanged.
+
+### T31.3: Cancel Discards Changes
+STEPS:
+  1. Open edit form, change content, click Cancel
+EXPECT:
+  - Form closes, original content unchanged
+FAIL: Changes saved despite cancel.
+
+---
+
+## Automated Test Coverage (Updated Sprint 7)
+
+Sprint 7 tests (test_sprint7.py) - 19 tests:
+  - Health: active_streams field, uptime_seconds field
+  - Session search: empty query, content+depth params accepted, count returned
+  - Cron update: requires job_id, unknown job 404
+  - Cron delete: requires job_id, unknown job 404
+  - Skill save: requires name, requires content, invalid name rejected, create+delete roundtrip
+  - Skill delete: requires name, unknown skill 404
+  - Memory write: requires section, requires content, invalid section, write+read roundtrip
+
+Total automated: 125/125 passing.
+
+Manual-only for Sprint 7:
+  - T29.1-T29.3: cron edit/delete UX
+  - T30.1-T30.3: skill create UX
+  - T31.1-T31.3: memory edit UX
+
+---
+
+
+
+---
+
+## Section 32: Edit User Message + Regenerate (Sprint 8)
+
+### T32.1: Edit Icon Appears on Hover
+SETUP: Active session with at least one user message.
+STEPS:
+  1. Hover over any user message bubble
+EXPECT:
+  - A pencil (edit) icon appears in the message header row, right side
+  - Icon not visible when not hovering
+FAIL: No icon, always visible, wrong position.
+
+### T32.2: Click Edit Opens Textarea
+STEPS:
+  1. Hover over a user message and click the pencil icon
+EXPECT:
+  - Message body is replaced by an editable textarea pre-filled with the original text
+  - "Send edit" and "Cancel" buttons appear below
+  - Textarea has a blue border glow (focused style)
+FAIL: Nothing happens, empty textarea, crash.
+
+### T32.3: Cancel Restores Original
+STEPS (continued from T32.2):
+  1. Make a change in the textarea
+  2. Click Cancel
+EXPECT:
+  - Original message text restored exactly
+  - No messages sent, no API call
+FAIL: Original text lost, message sent.
+
+### T32.4: Escape Also Cancels
+STEPS:
+  1. Enter edit mode on a user message
+  2. Press Escape
+EXPECT:
+  - Textarea dismissed, original restored
+FAIL: Escape does nothing.
+
+### T32.5: Send Edit Truncates and Regenerates
+STEPS:
+  1. Click edit on a user message that has a response after it
+  2. Change the text
+  3. Click "Send edit" (or press Enter)
+EXPECT:
+  - All messages after the edited message are removed
+  - The edited text is sent as a new user message
+  - Hermes streams a fresh response
+FAIL: Old messages remain, double messages, crash.
+
+---
+
+## Section 33: Regenerate Last Response (Sprint 8)
+
+### T33.1: Retry Icon on Last Assistant Bubble Only
+SETUP: Session with at least one complete exchange.
+EXPECT:
+  - A retry (↻) icon appears on hover over the LAST assistant message only
+  - Not on user messages
+  - Not on older assistant messages
+FAIL: Icon on every message, or not on last.
+
+### T33.2: Regenerate Re-Runs Last User Message
+STEPS:
+  1. Hover the last assistant bubble and click the retry icon
+EXPECT:
+  - The last assistant message is removed
+  - The previous user message is re-sent
+  - Hermes streams a new response
+FAIL: Both messages removed, wrong message sent, crash.
+
+---
+
+## Section 34: Clear Conversation (Sprint 8)
+
+### T34.1: Clear Button Appears When Session Has Messages
+SETUP: Session with at least one message.
+EXPECT:
+  - A "🗑 Clear" chip appears in the topbar right side (next to the workspace chip)
+  - Button NOT visible when session has no messages / empty state
+FAIL: Button always visible, never visible.
+
+### T34.2: Clear Wipes Messages and Resets Title
+STEPS:
+  1. Click the Clear button in the topbar
+  2. Confirm the dialog
+EXPECT:
+  - All messages disappear from the chat area
+  - Empty state ("What can I help with?") reappears
+  - Session title in sidebar resets to "Untitled"
+  - Toast: "Conversation cleared"
+  - Session still in the sidebar (not deleted)
+FAIL: Session deleted, messages remain, title not reset.
+
+### T34.3: Cancel Clear Does Nothing
+STEPS:
+  1. Click Clear, then click Cancel in the confirm dialog
+EXPECT:
+  - All messages still present
+  - No toast, no change
+FAIL: Messages cleared despite cancel.
+
+---
+
+## Section 35: Syntax Highlighting (Sprint 8)
+
+### T35.1: Code Blocks Have Syntax Colors
+SETUP: Ask Hermes something that produces a code response (e.g. "Show me a Python hello world").
+EXPECT:
+  - The code block has syntax-colored tokens (keywords in one color, strings in another)
+  - NOT all plain white/gray monospace text
+  - Dark background with Prism Tomorrow theme colors
+FAIL: All plain text, no colors, broken layout.
+
+### T35.2: Code in Workspace Preview Also Highlighted
+SETUP: Open a .py or .js file in the workspace panel.
+EXPECT:
+  - File content has syntax highlighting (Prism autoloader)
+FAIL: Plain monospace text only.
+
+---
+
+## Automated Test Coverage (Updated Sprint 8)
+
+Sprint 8 tests (test_sprint8.py) - 14 tests:
+  - session/clear: requires session_id, unknown 404, wipes messages+resets title, returns compact
+  - session/truncate: requires session_id, requires keep_count, unknown 404, returns messages array
+  - Static file checks: app.js has editMessage, regenerateResponse, clearConversation, highlightCode
+  - index.html: contains Prism CDN link, contains btnClearConv + clearConversation
+
+Total automated: 139/139 passing.
+
+Manual-only for Sprint 8:
+  - T32.1-T32.5: edit message UX
+  - T33.1-T33.2: regenerate UX
+  - T34.1-T34.3: clear conversation UX
+  - T35.1-T35.2: syntax highlighting visual
+
+---
+
+*Last updated: Sprint 10 complete, March 31, 2026*
+*Total automated tests: 177/177*
+*Regression gate: tests/test_regressions.py (10 tests, one per introduced bug)*
+*Run: cd <agent-dir> && venv/bin/python -m pytest <repo>/tests/ -v*
+*Source: <repo>/*
+*Modules: ui.js, workspace.js, sessions.js, messages.js, panels.js, boot.js (app.js deleted)*
+
+---
+
+## Section 36: Message Queue (Sprint 8 hotfix)
+
+### T36.1: Typing While Busy Queues the Message
+SETUP: Active session, a response is currently streaming (thinking dots visible).
+STEPS:
+  1. While Hermes is responding, type a new message and press Enter
+EXPECT:
+  - Input clears immediately
+  - A small toast appears: "Queued: [your message]"
+  - A badge appears in the bottom-right: "1 message queued"
+  - The current response continues uninterrupted
+FAIL: Message dropped silently, duplicate send triggered, error.
+
+### T36.2: Queued Message Sends Automatically After Response
+STEPS (continued from T36.1):
+  1. Wait for the current response to finish
+EXPECT:
+  - As soon as the response completes, the queued message is automatically sent
+  - Badge disappears
+  - New thinking dots appear for the queued message
+FAIL: Queued message never sends, badge stays, double-send.
+
+### T36.3: Queue Badge Shows Count for Multiple Messages
+STEPS:
+  1. While busy, type and send two separate messages
+EXPECT:
+  - Badge reads "2 messages queued"
+  - They drain one at a time, each waiting for the previous response
+FAIL: Only first message queued, count wrong.
+
+### T36.4: Switch Session Clears Queue
+STEPS:
+  1. Queue a message in session A
+  2. Click to session B before it drains
+EXPECT:
+  - Queue badge disappears
+  - The queued message does NOT fire in session B
+FAIL: Queued message fires in session B.
+
+---
+
+## Section 37: Message Persists on Switch-Away (Sprint 8 hotfix)
+
+### T37.1: Sent Message Stays Visible After Switch-Away and Back
+SETUP: Active session.
+STEPS:
+  1. Send a message (thinking dots appear)
+  2. Immediately click to a different session
+  3. Click back to the original session
+EXPECT:
+  - The user message you sent is still visible in the chat
+  - Thinking dots are still animating
+  - Session is still in busy state (Send button disabled)
+  - When response arrives, it appears normally
+FAIL: User message gone, blank chat, response lands in wrong session.
+
+---
+
+*Last updated: Post-Sprint 10 concurrency sweeps, March 31, 2026*
+*Total automated tests: 190/190*
+*Regression gate: tests/test_regressions.py (23 tests, one per introduced bug)*
+*Run: cd <agent-dir> && venv/bin/python -m pytest <repo>/tests/ -v*
+*Source: <repo>/*
