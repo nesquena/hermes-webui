@@ -6,6 +6,31 @@
 
 ---
 
+## [v1.2] Sprint 10 -- Server Health + Operational Polish
+*March 31, 2026 | 167 tests*
+
+### Architecture
+- **server.py split into api/ modules.** 1,150 lines -> 673 lines in server.py.
+  Extracted modules: `api/config.py` (101), `api/helpers.py` (57), `api/models.py` (114),
+  `api/workspace.py` (77), `api/upload.py` (77), `api/streaming.py` (187).
+  server.py is now the thin routing shell only. All business logic is independently importable.
+
+### Features
+- **Background task cancel.** Red "Cancel" button appears in the activity bar while a task
+  is running. Calls `GET /api/chat/cancel?stream_id=X`. The agent thread receives a cancel
+  event, emits a 'cancel' SSE event, and the UI shows "*Task cancelled.*" in the conversation.
+  Note: a tool call already in progress (e.g. a long terminal command) completes before
+  the cancel takes effect -- same behavior as CLI Ctrl+C.
+- **Cron run history viewer.** Each job in the Tasks panel now has an "All runs" button.
+  Click to expand a list of up to 20 past runs with timestamps, each collapsible to show
+  the full output. Click again to hide.
+- **Tool card UX polish.** Three improvements:
+  1. Pulsing blue dot on cards for in-progress tools (distinct from completed cards)
+  2. Smart snippet truncation at sentence boundaries instead of hard byte cutoff
+  3. "Show more / Show less" toggle on tool results longer than 220 chars
+
+---
+
 ## [v1.1] Sprint 9 -- Codebase Health + Daily Driver Gaps
 *March 31, 2026 | 149 tests*
 

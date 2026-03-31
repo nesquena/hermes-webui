@@ -1,3 +1,13 @@
+async function cancelStream(){
+  const streamId = S.activeStreamId;
+  if(!streamId) return;
+  try{
+    await fetch(`/api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`);
+    const btn=$('btnCancel');if(btn)btn.style.display='none';
+    setStatus('Cancelling…');
+  }catch(e){setStatus('Cancel failed: '+e.message);}
+}
+
 $('btnSend').onclick=send;
 $('btnAttach').onclick=()=>$('fileInput').click();
 $('fileInput').onchange=e=>{addFiles(Array.from(e.target.files));e.target.value='';};

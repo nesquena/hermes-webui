@@ -416,6 +416,11 @@
 body.resizing{user-select:none;cursor:col-resize;}
 
 /* ── Tool call cards ── */
+/* Running indicator dot (pulsing) */
+.tool-card-running-dot{width:7px;height:7px;border-radius:50%;background:var(--blue);opacity:.8;flex-shrink:0;animation:pulse 1.2s ease-in-out infinite;}
+/* Show more button inside tool card result */
+.tool-card-more{background:none;border:none;color:var(--blue);font-size:10px;cursor:pointer;padding:3px 0 0;opacity:.7;display:block;}
+.tool-card-more:hover{opacity:1;}
 .tool-card-row{margin:0;}
 .tool-card{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);border-radius:8px;margin:3px 0 3px 40px;overflow:hidden;transition:border-color .15s;}
 .tool-card:hover{border-color:rgba(255,255,255,.12);}

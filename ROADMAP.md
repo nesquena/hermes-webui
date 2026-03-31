@@ -3,8 +3,8 @@
 > Goal: Full 1:1 parity with the Hermes CLI experience via a clean dark web UI.
 > Everything you can do from the CLI terminal, you can do from this UI.
 >
-> Last updated: Sprint 9 complete (March 31, 2026)
-> Tests: 149/149 passing
+> Last updated: Sprint 10 complete (March 31, 2026)
+> Tests: 167/167 passing
 > Source: /home/hermes/webui-mvp/
 
 ---
@@ -24,6 +24,7 @@
 | Sprint 8 | Daily Driver Finish Line | Edit+regenerate user messages, regenerate last response, clear conversation, Prism.js syntax highlighting, reconnect banner fix, session list scroll fix | 139 |
 | Sprint 8 hotfix | Message queue + INFLIGHT fix | Queue messages while busy (toast + badge + auto-drain), INFLIGHT-first loadSession (message stays on switch-away/back) | 139 |
 | Sprint 9 | Codebase health + daily driver gaps | app.js deleted and replaced by 6 modules, tool call cards inline, attachment persistence on reload, todo list panel | 149 |
+| Sprint 10 | Server health + operational polish | server.py split into api/ modules, background task cancel, cron run history viewer, tool card UX polish | 167 |
 
 ---
 
@@ -114,7 +115,7 @@
 - [x] Create cron job from UI (+ New job form with name, schedule, prompt, delivery)
 - [x] Edit existing cron job
 - [x] Delete cron job
-- [ ] View full run history (Wave 3)
+- [x] View full cron run history (expandable per job)
 - [ ] Skill picker in cron create form (Wave 3)
 
 ### Skills
@@ -144,7 +145,7 @@
 - [ ] Voice input via Whisper (Wave 6)
 - [ ] TTS playback of responses (Wave 6)
 - [ ] Subagent delegation cards (Wave 6)
-- [ ] Background task monitor / cancel (Wave 6)
+- [x] Background task cancel (activity bar Cancel button)
 - [ ] Code execution cell (Wave 6)
 - [ ] Password authentication (Wave 7)
 - [ ] HTTPS / reverse proxy (Wave 7)
@@ -200,7 +201,7 @@ sidebar live display, new sessions inherit last workspace. See Sprint 5 complete
 - [x] Create job from UI (Sprint 6)
 - [x] Edit job
 - [x] Delete job
-- [ ] Full run history (Sprint 7 deferred -> Wave 3)
+- [x] Full cron run history
 
 ### Sprint 2.2: Skill Management (Partial -- Sprint 7 for remaining)
 - [x] List all skills with categories (Sprint 3)

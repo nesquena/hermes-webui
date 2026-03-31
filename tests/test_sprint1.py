@@ -222,7 +222,7 @@ def test_parse_multipart_text_file():
     )
     # We only need parse_multipart; import it without running the server
     # Parse manually by reading the source and exec only the function
-    src = pathlib.Path(__file__).parent.parent.joinpath("server.py").read_text()
+    src = pathlib.Path(__file__).parent.parent.joinpath("api/upload.py").read_text()
     # Extract and exec parse_multipart
     import re
     # Find the function
@@ -258,7 +258,7 @@ def test_parse_multipart_text_file():
 
 def test_parse_multipart_binary_file():
     """parse_multipart handles binary (PNG header bytes) without corruption."""
-    src = pathlib.Path(__file__).parent.parent.joinpath("server.py").read_text()
+    src = pathlib.Path(__file__).parent.parent.joinpath("api/upload.py").read_text()
     import re
     m = re.search(r"(def parse_multipart\(.*?)(?=\ndef )", src, re.DOTALL)
     ns = {}

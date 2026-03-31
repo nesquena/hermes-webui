@@ -34,6 +34,7 @@ async function send(){
   S.messages.push(userMsg);renderMessages();appendThinking();setBusy(true);  // activity bar shown via setBusy
   INFLIGHT[activeSid]={messages:[...S.messages],uploaded};
   startApprovalPolling(activeSid);
+  S.activeStreamId = null;  // will be set after stream starts
 
   // Start the agent via POST, get a stream_id back
   let streamId;
@@ -44,7 +45,11 @@ async function send(){
       attachments:uploaded.length?uploaded:undefined
     })});
     streamId=startData.stream_id;
+    S.activeStreamId = streamId;
     markInflight(activeSid, streamId);
+    // Show Cancel button
+    const cancelBtn=$('btnCancel');
+    if(cancelBtn) cancelBtn.style.display='';
   }catch(e){
     delete INFLIGHT[activeSid];
     stopApprovalPolling();hideApprovalCard();removeThinking();
@@ -106,6 +111,8 @@ async function send(){
     delete INFLIGHT[activeSid];
     clearInflight();
     stopApprovalPolling();hideApprovalCard();
+    S.activeStreamId=null;
+    const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
     if(S.session&&S.session.session_id===activeSid){
       S.session=d.session;S.messages=d.session.messages||[];
       // Populate tool calls from server-extracted metadata (has snippets)
@@ -128,6 +135,8 @@ async function send(){
     delete INFLIGHT[activeSid];
     clearInflight();
     stopApprovalPolling();hideApprovalCard();
+    S.activeStreamId=null;
+    const _cbe=$('btnCancel');if(_cbe)_cbe.style.display='none';
     let msg='Connection error';
     try{const d=JSON.parse(e.data);msg=d.message||msg;}catch(_){}
     if(S.session&&S.session.session_id===activeSid){
@@ -136,6 +145,21 @@ async function send(){
       renderMessages();
     }
     setBusy(false);setStatus('Error: '+msg);
+  });
+
+  es.addEventListener('cancel',e=>{
+    es.close();
+    delete INFLIGHT[activeSid];
+    clearInflight();
+    stopApprovalPolling();hideApprovalCard();
+    S.activeStreamId=null;
+    const _cbc=$('btnCancel');if(_cbc)_cbc.style.display='none';
+    if(S.session&&S.session.session_id===activeSid){
+      if(!assistantText){removeThinking();}
+      S.messages.push({role:'assistant',content:'*Task cancelled.*'});
+      renderMessages();
+    }
+    renderSessionList();setBusy(false);setStatus('');
   });
 
   // Handle SSE connection errors (network drop etc)

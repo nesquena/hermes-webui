@@ -994,6 +994,10 @@ Resolution: Phase B replaces with thread-local or explicit parameter passing.
             Tests: 14 new, 139/139 total
             JS: MSG_QUEUE global, updateQueueBadge(), setBusy drain logic, send() queues when busy,
                 loadSession checks INFLIGHT before server fetch
+    v1.2  Sprint 10 (March 31, 2026):
+            Arch: server.py split into api/ modules (config, helpers, models, workspace, upload, streaming)
+            Features: background task cancel, cron run history, tool card UX polish
+            Tests: 18 new, 167/167 total
     v1.1  Sprint 9 (March 31, 2026):
             Arch: app.js deleted; replaced by ui.js, workspace.js, sessions.js, messages.js, panels.js, boot.js
             Features: tool call cards (inline collapsible, live + history), attachment persistence,

@@ -63,8 +63,12 @@ async function loadCrons() {
             </div>
           </div>
           <div id="cron-output-${job.id}">
-            <div class="cron-last-header">Last output</div>
+            <div class="cron-last-header" style="display:flex;align-items:center;justify-content:space-between">
+              <span>Last output</span>
+              <button class="cron-btn" style="padding:1px 8px;font-size:10px" onclick="loadCronHistory('${job.id}',this)">All runs</button>
+            </div>
             <div class="cron-last" id="cron-out-text-${job.id}" style="color:var(--muted);font-size:11px">Loading…</div>
+            <div id="cron-history-${job.id}" style="display:none"></div>
           </div>
         </div>`;
       box.appendChild(item);
@@ -108,6 +112,14 @@ async function submitCronCreate(){
   }
 }
 
+function _cronOutputSnippet(content) {
+  // Extract the response body from a cron output .md file
+  const lines = content.split('\n');
+  const responseIdx = lines.findIndex(l => l.startsWith('## Response') || l.startsWith('# Response'));
+  const body = (responseIdx >= 0 ? lines.slice(responseIdx + 1) : lines).join('\n').trim();
+  return body.slice(0, 600) || '(empty)';
+}
+
 async function loadCronOutput(jobId) {
   try {
     const data = await api(`/api/crons/output?job_id=${encodeURIComponent(jobId)}&limit=1`);
@@ -115,11 +127,44 @@ async function loadCronOutput(jobId) {
     if (!el) return;
     if (!data.outputs || !data.outputs.length) { el.textContent = '(no runs yet)'; return; }
     const out = data.outputs[0];
-    // Show filename (timestamp) and trimmed content
-    const lines = out.content.split('\n');
-    const body = lines.slice(lines.findIndex(l => l.startsWith('## Response')) + 1).join('\n').trim();
-    el.textContent = out.filename.replace('.md','') + '\n\n' + (body.slice(0, 600) || '(empty)');
+    const ts = out.filename.replace('.md','').replace(/_/g,' ');
+    el.textContent = ts + '\n\n' + _cronOutputSnippet(out.content);
   } catch(e) { /* ignore */ }
+}
+
+async function loadCronHistory(jobId, btn) {
+  const histEl = $('cron-history-' + jobId);
+  if (!histEl) return;
+  // Toggle: if already open, close it
+  if (histEl.style.display !== 'none') {
+    histEl.style.display = 'none';
+    if (btn) btn.textContent = 'All runs';
+    return;
+  }
+  if (btn) btn.textContent = 'Loading…';
+  try {
+    const data = await api(`/api/crons/output?job_id=${encodeURIComponent(jobId)}&limit=20`);
+    if (!data.outputs || !data.outputs.length) {
+      histEl.innerHTML = '<div style="font-size:11px;color:var(--muted);padding:4px 0">(no runs yet)</div>';
+    } else {
+      histEl.innerHTML = data.outputs.map((out, i) => {
+        const ts = out.filename.replace('.md','').replace(/_/g,' ');
+        const snippet = _cronOutputSnippet(out.content);
+        const id = `cron-hist-run-${jobId}-${i}`;
+        return `<div style="border-top:1px solid var(--border);padding:6px 0">
+          <div style="display:flex;align-items:center;justify-content:space-between;cursor:pointer" onclick="document.getElementById('${id}').style.display=document.getElementById('${id}').style.display==='none'?'':'none'">
+            <span style="font-size:11px;font-weight:600;color:var(--muted)">${esc(ts)}</span>
+            <span style="font-size:10px;color:var(--muted);opacity:.6">▸</span>
+          </div>
+          <div id="${id}" style="display:none;font-size:11px;color:var(--muted);white-space:pre-wrap;line-height:1.5;margin-top:4px;max-height:200px;overflow-y:auto">${esc(snippet)}</div>
+        </div>`;
+      }).join('');
+    }
+    histEl.style.display = '';
+    if (btn) btn.textContent = 'Hide runs';
+  } catch(e) {
+    if (btn) btn.textContent = 'All runs';
+  }
 }
 
 function toggleCron(id) {

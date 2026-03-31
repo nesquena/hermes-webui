@@ -192,6 +192,7 @@
       <div id="activityBarInner" style="display:flex;align-items:center;gap:8px;padding:6px 12px;border-radius:8px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.07);font-size:12px;color:var(--muted);animation:fadeIn .15s ease;">
         <span id="activityIcon" style="font-size:13px;opacity:.6">&#9881;</span>
         <span id="activityText" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+        <button id="btnCancel" onclick="cancelStream()" style="display:none;background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.35);color:#e94560;font-size:11px;font-weight:600;padding:3px 10px;border-radius:6px;cursor:pointer;flex-shrink:0;transition:background .15s" title="Cancel this task">&#9632; Cancel</button>
         <span id="activityDots" style="display:flex;gap:3px;align-items:center">
           <span style="width:4px;height:4px;border-radius:50%;background:var(--blue);opacity:.3;animation:pulse 1.4s ease-in-out infinite"></span>
           <span style="width:4px;height:4px;border-radius:50%;background:var(--blue);opacity:.3;animation:pulse 1.4s ease-in-out .22s infinite"></span>
