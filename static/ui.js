@@ -1,4 +1,4 @@
-const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[]};
+const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null};
 const INFLIGHT={};  // keyed by session_id while request in-flight
 const MSG_QUEUE=[];  // messages queued while a request is in-flight
 const $=id=>document.getElementById(id);
@@ -72,6 +72,8 @@ function setBusy(v){
   if(dots) dots.style.display=v?'flex':'none';
   if(!v){
     setStatus('');
+    // Always hide Cancel button when not busy
+    const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
     updateQueueBadge();
     // Drain one queued message after UI settles
     if(MSG_QUEUE.length>0){
@@ -338,7 +340,7 @@ function renderMessages(){
             }</div>`:''}
             ${displaySnippet?`<div class="tool-card-result">
               <pre>${esc(displaySnippet)}</pre>
-              ${hasMore?`<button class="tool-card-more" onclick="event.stopPropagation();const p=this.previousElementSibling;const full=${JSON.stringify(tc.snippet||'')};p.textContent=p.textContent.length<full.length?full:${JSON.stringify(displaySnippet||'')};this.textContent=p.textContent.length<full.length?'Show more':'Show less'">Show more</button>`:''}
+              ${hasMore?`<button class="tool-card-more" data-full="${esc(tc.snippet||'').replace(/"/g,'&quot;')}" data-short="${esc(displaySnippet||'').replace(/"/g,'&quot;')}" onclick="event.stopPropagation();const p=this.previousElementSibling;const full=this.dataset.full;const short=this.dataset.short;p.textContent=p.textContent===short?full:short;this.textContent=p.textContent===short?'Show more':'Show less'">Show more</button>`:''}
             </div>`:''}
           </div>`:''}
         </div>`;

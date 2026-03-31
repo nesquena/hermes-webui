@@ -141,8 +141,8 @@ def base_url():
 def cleanup_test_sessions():
     """
     Yields a list for tests to register created session IDs.
-    After each test, deletes all registered sessions.
-    Falls back to cleanup_zero_message for anything missed.
+    After each test, deletes all registered sessions and resets
+    last_workspace to the test workspace to prevent bleed between tests.
     """
     created: list[str] = []
     yield created
@@ -154,6 +154,12 @@ def cleanup_test_sessions():
     # Belt-and-suspenders: also wipe all 0-message sessions from the test dir
     try:
         _post(TEST_BASE, "/api/sessions/cleanup_zero_message")
+    except Exception:
+        pass
+    # Reset last_workspace to the test workspace so tests don't bleed workspace state
+    try:
+        last_ws_file = TEST_STATE_DIR / "last_workspace.txt"
+        last_ws_file.write_text(str(TEST_WORKSPACE), encoding='utf-8')
     except Exception:
         pass
 

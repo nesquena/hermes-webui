@@ -3,7 +3,7 @@
 > Goal: Full 1:1 parity with the Hermes CLI experience via a clean dark web UI.
 > Everything you can do from the CLI terminal, you can do from this UI.
 >
-> Last updated: Sprint 10 complete (March 31, 2026)
+> Last updated: Sprint 10 + bug sweep (March 31, 2026)
 > Tests: 167/167 passing
 > Source: /home/hermes/webui-mvp/
 

@@ -9,6 +9,18 @@
 ## [v1.2] Sprint 10 -- Server Health + Operational Polish
 *March 31, 2026 | 167 tests*
 
+### Post-sprint Bug Fixes
+- SSE loop now breaks on `cancel` event (was hanging after cancel)
+- `setBusy(false)` now always hides the Cancel button
+- `S.activeStreamId` properly initialized in the S global state object
+- Tool card "Show more" button uses data attributes instead of inline JSON.stringify (XSS/parse safety)
+- Version label updated to v1.2
+- `Session.__init__` accepts `**kwargs` for forward-compatibility with future JSON fields
+- Test cron jobs now isolated via `HERMES_HOME` env var in conftest (no more pollution of real jobs.json)
+- `last_workspace` reset after each test in conftest (prevents workspace state bleed between tests)
+- Tool cards now grouped per assistant turn instead of piled before last message
+- Tool card insertion uses `data-msg-idx` attribute correctly (was `msgIdx`, matching HTML5 dataset API)
+
 ### Architecture
 - **server.py split into api/ modules.** 1,150 lines -> 673 lines in server.py.
   Extracted modules: `api/config.py` (101), `api/helpers.py` (57), `api/models.py` (114),

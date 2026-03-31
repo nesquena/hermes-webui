@@ -181,7 +181,7 @@ class Handler(BaseHTTPRequestHandler):
                         except queue.Empty:
                             self.wfile.write(b': heartbeat\n\n'); self.wfile.flush(); continue
                         _sse(self, event, data)
-                        if event in ('done', 'error'): break
+                        if event in ('done', 'error', 'cancel'): break
                 except (BrokenPipeError, ConnectionResetError): pass
                 return
             if parsed.path == '/api/file/raw':

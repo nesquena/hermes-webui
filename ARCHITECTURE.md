@@ -997,6 +997,10 @@ Resolution: Phase B replaces with thread-local or explicit parameter passing.
     v1.2  Sprint 10 (March 31, 2026):
             Arch: server.py split into api/ modules (config, helpers, models, workspace, upload, streaming)
             Features: background task cancel, cron run history, tool card UX polish
+            Post-sprint fixes: SSE cancel event breaks loop, Cancel button always hidden on setBusy(false),
+              S.activeStreamId initialized, tool-card show-more uses data attributes, version label v1.2,
+              Session.__init__ **kwargs forward-compat, test cron isolation via HERMES_HOME,
+              last_workspace reset in conftest between tests, tool cards grouped by assistant turn
             Tests: 18 new, 167/167 total
     v1.1  Sprint 9 (March 31, 2026):
             Arch: app.js deleted; replaced by ui.js, workspace.js, sessions.js, messages.js, panels.js, boot.js

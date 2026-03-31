@@ -294,7 +294,7 @@ def test_parse_multipart_binary_file():
 
 def test_upload_text_file(cleanup_test_sessions):
     """Upload a text file to a session workspace, verify it appears in /api/list."""
-    sid, _ = make_session_tracked(cleanup_test_sessions)
+    sid, ws = make_session_tracked(cleanup_test_sessions)
 
     result, status = post_multipart("/api/upload", {"session_id": sid}, {
         "file": ("test_upload.txt", b"sprint1 test content")
@@ -307,6 +307,8 @@ def test_upload_text_file(cleanup_test_sessions):
     listing = get(f"/api/list?session_id={sid}&path=.")
     names = [e["name"] for e in listing["entries"]]
     assert result["filename"] in names, f"{result['filename']} not in {names}"
+    # Cleanup the uploaded file
+    post("/api/file/delete", {"session_id": sid, "path": result["filename"]})
 
 
 def test_upload_too_large(cleanup_test_sessions):
