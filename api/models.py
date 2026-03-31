@@ -33,8 +33,8 @@ def _write_session_index():
 
 
 class Session:
-    def __init__(self, session_id=None, title='Untitled', workspace=str(DEFAULT_WORKSPACE), model=DEFAULT_MODEL, messages=None, created_at=None, updated_at=None):
-        self.session_id = session_id or uuid.uuid4().hex[:12]; self.title = title; self.workspace = str(Path(workspace).expanduser().resolve()); self.model = model; self.messages = messages or []; self.created_at = created_at or time.time(); self.updated_at = updated_at or time.time()
+    def __init__(self, session_id=None, title='Untitled', workspace=str(DEFAULT_WORKSPACE), model=DEFAULT_MODEL, messages=None, created_at=None, updated_at=None, tool_calls=None, **kwargs):
+        self.session_id = session_id or uuid.uuid4().hex[:12]; self.title = title; self.workspace = str(Path(workspace).expanduser().resolve()); self.model = model; self.messages = messages or []; self.tool_calls = tool_calls or []; self.created_at = created_at or time.time(); self.updated_at = updated_at or time.time()
     @property
     def path(self): return SESSION_DIR / f'{self.session_id}.json'
     def save(self): self.updated_at = time.time(); self.path.write_text(json.dumps(self.__dict__, ensure_ascii=False, indent=2), encoding='utf-8'); _write_session_index()
