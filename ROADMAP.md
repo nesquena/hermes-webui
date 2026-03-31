@@ -3,8 +3,8 @@
 > Goal: Full 1:1 parity with the Hermes CLI experience via a clean dark web UI.
 > Everything you can do from the CLI terminal, you can do from this UI.
 >
-> Last updated: Sprint 10 complete (March 31, 2026)
-> Tests: 177/177 passing
+> Last updated: Post-Sprint 10 bug sweeps (March 31, 2026)
+> Tests: 190/190 passing
 > Source: /home/hermes/webui-mvp/
 
 ---
@@ -26,6 +26,7 @@
 | Sprint 9 | Codebase health + daily driver gaps | app.js deleted and replaced by 6 modules, tool call cards inline, attachment persistence on reload, todo list panel | 149 |
 | Sprint 10 | Server health + operational polish | server.py split into api/ modules, background task cancel, cron run history viewer, tool card UX polish | 167 |
 | Sprint 10 fixes | Import regressions + regression tests | uuid, AIAgent, has_pending, SSE cancel loop, Session.__init__ tool_calls; test_regressions.py | 177 |
+| Concurrency sweeps | Multi-session correctness | Approval cross-session (R10), activity bar per-session (R11), live cards on switch-back (R12), tool cards after done (R13), session model authoritative (R14), newSession cards (R15) | 190 |
 
 ---
 

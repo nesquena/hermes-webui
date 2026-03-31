@@ -887,10 +887,7 @@ Manual-only for Sprint 4:
 
 ---
 
-*Last updated: Sprint 4, March 30, 2026*
-*Total automated tests: 68/68*
-*Run: cd /home/hermes/.hermes/hermes-agent && venv/bin/python -m pytest /home/hermes/webui-mvp/tests/ -v*
-*Source: /home/hermes/webui-mvp/*
+
 
 ---
 
@@ -1594,3 +1591,10 @@ EXPECT:
   - When response arrives, it appears normally
 FAIL: User message gone, blank chat, response lands in wrong session.
 
+---
+
+*Last updated: Post-Sprint 10 concurrency sweeps, March 31, 2026*
+*Total automated tests: 190/190*
+*Regression gate: tests/test_regressions.py (23 tests, one per introduced bug)*
+*Run: cd /home/hermes/.hermes/hermes-agent && venv/bin/python -m pytest /home/hermes/webui-mvp/tests/ -v*
+*Source: /home/hermes/webui-mvp/*

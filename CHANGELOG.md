@@ -6,6 +6,38 @@
 
 ---
 
+## [v1.2.2] Concurrency + Correctness Sweeps
+*March 31, 2026 | 190 tests*
+
+Two systematic audits of all concurrent multi-session scenarios. Each finding
+became a regression test so it cannot silently return.
+
+### Sweep 1 (R10-R12)
+- **R10: Approval response to wrong session.** `respondApproval()` used
+  `S.session.session_id` -- whoever you were viewing. If session A triggered
+  a dangerous command requiring approval and you switched to B then clicked
+  Allow, the approval went to B's session_id. Agent on A stayed stuck. Fixed:
+  approval events tag `_approvalSessionId`; `respondApproval()` uses that.
+- **R11: Activity bar showed cross-session tool status.** Session A's tool
+  name appeared in session B's activity bar while you were viewing B. Fixed:
+  `setStatus()` in the tool SSE handler is now inside the `activeSid` guard.
+- **R12: Live tool cards vanished on switch-away and back.** Switching back to
+  an in-flight session showed empty live cards even though tools had fired.
+  Fixed: `loadSession()` INFLIGHT branch now restores cards from `S.toolCalls`.
+
+### Sweep 2 (R13-R15)
+- **R13: Settled tool cards never rendered after response completes.**
+  `renderMessages()` has a `!S.busy` guard on tool card rendering. It was
+  called with `S.busy=true` in the done handler -- tool cards were skipped
+  every time. Fixed: `S.busy=false` set inline before `renderMessages()`.
+- **R14: Wrong model sent for sessions with unlisted model.** `send()` used
+  `$('modelSelect').value` which could be stale if the session's model isn't
+  in the dropdown. Fixed: now uses `S.session.model || $('modelSelect').value`.
+- **R15: Stale live tool cards in new sessions.** `newSession()` didn't call
+  `clearLiveToolCards()`. Fixed.
+
+---
+
 ## [v1.2.1] Sprint 10 Post-Release Fixes
 *March 31, 2026 | 177 tests*
 

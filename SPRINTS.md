@@ -1,6 +1,6 @@
 # Hermes Cowork -- Forward Sprint Plan
 
-> Current state: v1.2.1 | 184 tests | Daily driver ready
+> Current state: v1.2.2 | 190 tests | Daily driver ready
 > This document plans the path from here to two targets:
 >
 > Target A: 1:1 feature parity with the Hermes CLI (everything you can do from the
@@ -403,5 +403,5 @@ address.
 ---
 
 *Last updated: March 31, 2026*
-*Current version: v1.2.1 | 184 tests*
+*Current version: v1.2.2 | 190 tests*
 *Next sprint: Sprint 11 (streaming smoothness + api/routes.py split)*

@@ -994,6 +994,10 @@ Resolution: Phase B replaces with thread-local or explicit parameter passing.
             Tests: 14 new, 139/139 total
             JS: MSG_QUEUE global, updateQueueBadge(), setBusy drain logic, send() queues when busy,
                 loadSession checks INFLIGHT before server fetch
+    v1.2.2 Concurrency sweeps (March 31, 2026):
+            R10-R15: approval cross-session, activity bar per-session, live card
+            restore on switch-back, settled cards after done, model source,
+            newSession card clear. 190/190 tests.
     v1.2  Sprint 10 (March 31, 2026):
             Arch: server.py split into api/ modules (config, helpers, models, workspace, upload, streaming)
             Features: background task cancel, cron run history, tool card UX polish
