@@ -14,6 +14,12 @@ from api.config import (
     STREAMS, STREAMS_LOCK, CANCEL_FLAGS, CLI_TOOLSETS,
     _get_session_agent_lock, _set_thread_env, _clear_thread_env,
 )
+
+# Lazy import to avoid circular deps -- hermes-agent is on sys.path via api/config.py
+try:
+    from run_agent import AIAgent
+except ImportError:
+    AIAgent = None
 from api.models import get_session, title_from
 from api.workspace import set_last_workspace
 
@@ -84,13 +90,15 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                         s2 = str(v); args_snap[k] = s2[:120]+('...' if len(s2)>120 else '')
                 put('tool', {'name': name, 'preview': preview, 'args': args_snap})
                 # also check for pending approval and surface it immediately
-                if has_pending(session_id):
-                    from tools.approval import _pending, _lock
+                from tools.approval import has_pending as _has_pending, _pending, _lock
+                if _has_pending(session_id):
                     with _lock:
                         p = dict(_pending.get(session_id, {}))
                     if p:
                         put('approval', p)
 
+            if AIAgent is None:
+                raise ImportError("AIAgent not available -- check that hermes-agent is on sys.path")
             agent = AIAgent(
                 model=model,
                 platform='cli',
