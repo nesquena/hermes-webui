@@ -678,12 +678,26 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    STATE_DIR.mkdir(parents=True, exist_ok=True); SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    from api.config import print_startup_config, verify_hermes_imports, _HERMES_FOUND
+    print_startup_config()
+
+    if not _HERMES_FOUND:
+        ok, missing = verify_hermes_imports()
+    else:
+        ok, missing = verify_hermes_imports()
+        if not ok:
+            print(f'[!!] Warning: Hermes agent found but missing modules: {missing}', flush=True)
+            print('     Agent features may not work correctly.', flush=True)
+
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    SESSION_DIR.mkdir(parents=True, exist_ok=True)
     DEFAULT_WORKSPACE.mkdir(parents=True, exist_ok=True)
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f'Hermes Co-Work MVP listening on http://{HOST}:{PORT}')
-    print(f'Default workspace: {DEFAULT_WORKSPACE}')
-    print(f'Default model: {DEFAULT_MODEL}')
+    print(f'  Hermes Co-Work listening on http://{HOST}:{PORT}', flush=True)
+    if HOST == '127.0.0.1':
+        print(f'  Remote access: ssh -N -L {PORT}:127.0.0.1:{PORT} <user>@<your-server>', flush=True)
+    print(f'  Then open:     http://localhost:{PORT}', flush=True)
+    print('', flush=True)
     httpd.serve_forever()
 
 if __name__ == '__main__':
