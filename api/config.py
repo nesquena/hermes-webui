@@ -206,7 +206,6 @@ def verify_hermes_imports():
     Returns (ok: bool, missing: list[str]).
     """
     required = ['run_agent']
-    optional = ['tools.approval']
     missing  = []
     for mod in required:
         try:
