@@ -364,3 +364,52 @@ def test_loadSession_inflight_restores_live_tool_cards(cleanup_test_sessions):
     inflight_block = src[inflight_idx:inflight_idx+500]
     assert "appendLiveToolCard" in inflight_block,         "loadSession INFLIGHT branch must restore live tool cards via appendLiveToolCard"
     assert "clearLiveToolCards" in inflight_block,         "loadSession INFLIGHT branch must clear old live cards before restoring"
+
+# ── R13: renderMessages() called before S.busy=false in done handler ────────
+
+def test_done_handler_sets_busy_false_before_renderMessages(cleanup_test_sessions):
+    """R13: In the done handler, S.busy must be set to false BEFORE renderMessages()
+    is called for the active session. The !S.busy guard in renderMessages() controls
+    whether settled tool cards are rendered. When S.busy=true during renderMessages(),
+    tool cards are skipped entirely after a response completes.
+    """
+    src = pathlib.Path("/home/hermes/webui-mvp/static/messages.js").read_text()
+    done_idx = src.find("es.addEventListener('done'")
+    assert done_idx >= 0
+    done_block = src[done_idx:done_idx+1500]
+    # S.busy=false must appear before renderMessages() within the done handler
+    busy_pos = done_block.find("S.busy=false;")
+    render_pos = done_block.find("renderMessages()")
+    assert busy_pos >= 0, "done handler must set S.busy=false before renderMessages()"
+    assert busy_pos < render_pos,         f"S.busy=false (pos {busy_pos}) must come before renderMessages() (pos {render_pos})"
+
+
+# ── R14: send() uses stale modelSelect.value instead of session model ────────
+
+def test_send_uses_session_model_as_authoritative_source(cleanup_test_sessions):
+    """R14: send() must use S.session.model as the authoritative model, not just
+    $('modelSelect').value. When a session was created with a model not in the
+    current dropdown list, the select value would be stale after switching sessions,
+    causing the wrong model to be sent.
+    """
+    src = pathlib.Path("/home/hermes/webui-mvp/static/messages.js").read_text()
+    # The model field in the chat/start payload must prefer S.session.model
+    chat_start_idx = src.find("/api/chat/start")
+    assert chat_start_idx >= 0
+    payload_block = src[chat_start_idx:chat_start_idx+300]
+    assert "S.session.model" in payload_block,         "send() must use S.session.model in the chat/start payload"
+
+
+# ── R15: newSession does not clear live tool cards ────────────────────────────
+
+def test_newSession_clears_live_tool_cards(cleanup_test_sessions):
+    """R15: newSession() must call clearLiveToolCards() so live cards from a
+    previous in-flight session don't persist when starting a fresh conversation.
+    """
+    src = pathlib.Path("/home/hermes/webui-mvp/static/sessions.js").read_text()
+    new_sess_idx = src.find("async function newSession(")
+    assert new_sess_idx >= 0
+    # Find end of newSession (next async function)
+    next_fn = src.find("async function ", new_sess_idx + 10)
+    new_sess_body = src[new_sess_idx:next_fn]
+    assert "clearLiveToolCards" in new_sess_body,         "newSession() must call clearLiveToolCards() to clear stale live cards"

@@ -1,6 +1,7 @@
 async function newSession(flash){
   MSG_QUEUE.length=0;updateQueueBadge();
   S.toolCalls=[];
+  clearLiveToolCards();
   const inheritWs=S.session?S.session.workspace:null;
   const data=await api('/api/session/new',{method:'POST',body:JSON.stringify({model:$('modelSelect').value,workspace:inheritWs})});
   S.session=data.session;S.messages=data.session.messages||[];

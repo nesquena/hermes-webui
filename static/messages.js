@@ -57,7 +57,7 @@ async function send(){
   try{
     const startData=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
       session_id:activeSid,message:msgText,
-      model:$('modelSelect').value,workspace:S.session.workspace,
+      model:S.session.model||$('modelSelect').value,workspace:S.session.workspace,
       attachments:uploaded.length?uploaded:undefined
     })});
     streamId=startData.stream_id;
@@ -157,6 +157,9 @@ async function send(){
         if(lastUser)lastUser.attachments=uploaded;
       }
       clearLiveToolCards();
+      // Set S.busy=false BEFORE renderMessages so the settled tool card
+      // block (!S.busy guard) can render the final grouped cards.
+      S.busy=false;
       syncTopbar();renderMessages();loadDir('.');
     }
     renderSessionList();setBusy(false);setStatus('');
