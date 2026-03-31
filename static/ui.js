@@ -254,108 +254,36 @@ function renderMessages(){
     row.dataset.rawText = String(content).trim();
     inner.appendChild(row);
   }
-  // Insert tool call cards inline -- grouped by assistant message they belong to.
-  // tool calls with assistant_msg_idx=-1 (live streaming) go before the last assistant row.
-  if(S.toolCalls && S.toolCalls.length){
-    // Remove any existing tool-card rows first (avoids duplicates on re-render)
+  // Insert settled tool call cards (history view only).
+  // During live streaming, tool cards are rendered in #liveToolCards by the
+  // tool SSE handler and never mixed into the message list until done fires.
+  if(!S.busy && S.toolCalls && S.toolCalls.length){
     inner.querySelectorAll('.tool-card-row').forEach(el=>el.remove());
-
-    // Build a map: assistant_msg_idx -> [tool_calls]
-    // -1 = current streaming turn (no assistant msg yet)
     const byAssistant = {};
     for(const tc of S.toolCalls){
       const key = tc.assistant_msg_idx !== undefined ? tc.assistant_msg_idx : -1;
       if(!byAssistant[key]) byAssistant[key] = [];
       byAssistant[key].push(tc);
     }
-
-    // Find all assistant message rows by their msgIdx
     const allRows = Array.from(inner.querySelectorAll('.msg-row[data-msg-idx]'));
-    const rowByIdx = {};
-    for(const r of allRows) rowByIdx[parseInt(r.dataset.msgIdx)] = r;
-
-    // For each group, insert its tool cards before the corresponding assistant row.
-    // For streaming (-1): insert before the last assistant row.
     for(const [key, cards] of Object.entries(byAssistant)){
       const aIdx = parseInt(key);
       let insertBefore = null;
       if(aIdx === -1){
-        // Live streaming: insert before the last assistant row
-        for(let i = allRows.length-1; i >= 0; i--){
-          const idx = parseInt(allRows[i].dataset.msgIdx||'-1',10);
-          if(idx >= 0 && S.messages[idx] && S.messages[idx].role === 'assistant'){
-            insertBefore = allRows[i];
-            break;
-          }
+        for(let i=allRows.length-1;i>=0;i--){
+          const ri=parseInt(allRows[i].dataset.msgIdx||'-1',10);
+          if(ri>=0&&S.messages[ri]&&S.messages[ri].role==='assistant'){insertBefore=allRows[i];break;}
         }
-        if(!insertBefore) insertBefore = null; // append at end
       } else {
-        // History: insert before the assistant row at aIdx
-        // Find the NEXT assistant row after aIdx (the one whose text follows these tool calls)
-        let foundNext = false;
         for(const r of allRows){
-          const ri = parseInt(r.dataset.msgIdx||'-1');
-          if(ri > aIdx && S.messages[ri] && S.messages[ri].role === 'assistant'){
-            insertBefore = r;
-            foundNext = true;
-            break;
-          }
-        }
-        if(!foundNext) insertBefore = null;
-      }
-
-      const cardsFragment = document.createDocumentFragment();
-      for(const tc of cards){
-      const row = document.createElement('div');
-      row.className = 'msg-row tool-card-row';
-      const icon = toolIcon(tc.name);
-      const hasDetail = tc.snippet || (tc.args && Object.keys(tc.args).length > 0);
-      // Smarter snippet truncation at sentence boundary
-      let displaySnippet = '';
-      if(tc.snippet){
-        const s = tc.snippet;
-        if(s.length <= 220){
-          displaySnippet = s;
-        } else {
-          // Find last sentence break within 220 chars
-          const cutoff = s.slice(0, 220);
-          const lastBreak = Math.max(
-            cutoff.lastIndexOf('. '), cutoff.lastIndexOf('\n'),
-            cutoff.lastIndexOf('; ')
-          );
-          displaySnippet = lastBreak > 80 ? s.slice(0, lastBreak + 1) : cutoff;
+          const ri=parseInt(r.dataset.msgIdx||'-1');
+          if(ri>aIdx&&S.messages[ri]&&S.messages[ri].role==='assistant'){insertBefore=r;break;}
         }
       }
-      const hasMore = tc.snippet && tc.snippet.length > displaySnippet.length;
-      const runIndicator = tc.done===false
-        ? '<span class="tool-card-running-dot"></span>'
-        : '';
-      row.innerHTML = `
-        <div class="tool-card${tc.done===false?' tool-card-running':''}">
-          <div class="tool-card-header" onclick="this.closest('.tool-card').classList.toggle('open')">
-            ${runIndicator}
-            <span class="tool-card-icon">${icon}</span>
-            <span class="tool-card-name">${esc(tc.name)}</span>
-            <span class="tool-card-preview">${esc(tc.preview||displaySnippet||'')}</span>
-            ${hasDetail?'<span class="tool-card-toggle">▸</span>':''}
-          </div>
-          ${hasDetail?`<div class="tool-card-detail">
-            ${tc.args&&Object.keys(tc.args).length?`<div class="tool-card-args">${
-              Object.entries(tc.args).map(([k,v])=>`<div><span class="tool-arg-key">${esc(k)}</span> <span class="tool-arg-val">${esc(String(v))}</span></div>`).join('')
-            }</div>`:''}
-            ${displaySnippet?`<div class="tool-card-result">
-              <pre>${esc(displaySnippet)}</pre>
-              ${hasMore?`<button class="tool-card-more" data-full="${esc(tc.snippet||'').replace(/"/g,'&quot;')}" data-short="${esc(displaySnippet||'').replace(/"/g,'&quot;')}" onclick="event.stopPropagation();const p=this.previousElementSibling;const full=this.dataset.full;const short=this.dataset.short;p.textContent=p.textContent===short?full:short;this.textContent=p.textContent===short?'Show more':'Show less'">Show more</button>`:''}
-            </div>`:''}
-          </div>`:''}
-        </div>`;
-      cardsFragment.appendChild(row);
-    }
-      if(insertBefore){
-        inner.insertBefore(cardsFragment, insertBefore);
-      } else {
-        inner.appendChild(cardsFragment);
-      }
+      const frag=document.createDocumentFragment();
+      for(const tc of cards){frag.appendChild(buildToolCard(tc));}
+      if(insertBefore) inner.insertBefore(frag,insertBefore);
+      else inner.appendChild(frag);
     }
   }
   $('messages').scrollTop=$('messages').scrollHeight;
@@ -373,6 +301,65 @@ function toolIcon(name){
     memory:'🧠',skill_manage:'📚',todo:'✅',cronjob:'⏱️',delegate_task:'🤖',
     send_message:'💬',browser_navigate:'🌐',vision_analyze:'👁️'};
   return icons[name]||'🔧';
+}
+
+function buildToolCard(tc){
+  const row=document.createElement('div');
+  row.className='msg-row tool-card-row';
+  const icon=toolIcon(tc.name);
+  const hasDetail=tc.snippet||(tc.args&&Object.keys(tc.args).length>0);
+  let displaySnippet='';
+  if(tc.snippet){
+    const s=tc.snippet;
+    if(s.length<=220){displaySnippet=s;}
+    else{
+      const cutoff=s.slice(0,220);
+      const lastBreak=Math.max(cutoff.lastIndexOf('. '),cutoff.lastIndexOf('\n'),cutoff.lastIndexOf('; '));
+      displaySnippet=lastBreak>80?s.slice(0,lastBreak+1):cutoff;
+    }
+  }
+  const hasMore=tc.snippet&&tc.snippet.length>displaySnippet.length;
+  const runIndicator=tc.done===false?'<span class="tool-card-running-dot"></span>':'';
+  row.innerHTML=`
+    <div class="tool-card${tc.done===false?' tool-card-running':''}">
+      <div class="tool-card-header" onclick="this.closest('.tool-card').classList.toggle('open')">
+        ${runIndicator}
+        <span class="tool-card-icon">${icon}</span>
+        <span class="tool-card-name">${esc(tc.name)}</span>
+        <span class="tool-card-preview">${esc(tc.preview||displaySnippet||'')}</span>
+        ${hasDetail?'<span class="tool-card-toggle">▸</span>':''}
+      </div>
+      ${hasDetail?`<div class="tool-card-detail">
+        ${tc.args&&Object.keys(tc.args).length?`<div class="tool-card-args">${
+          Object.entries(tc.args).map(([k,v])=>`<div><span class="tool-arg-key">${esc(k)}</span> <span class="tool-arg-val">${esc(String(v))}</span></div>`).join('')
+        }</div>`:''}
+        ${displaySnippet?`<div class="tool-card-result">
+          <pre>${esc(displaySnippet)}</pre>
+          ${hasMore?`<button class="tool-card-more" data-full="${esc(tc.snippet||'').replace(/"/g,'&quot;')}" data-short="${esc(displaySnippet||'').replace(/"/g,'&quot;')}" onclick="event.stopPropagation();const p=this.previousElementSibling;const full=this.dataset.full;const short=this.dataset.short;p.textContent=p.textContent===short?full:short;this.textContent=p.textContent===short?'Show more':'Show less'">Show more</button>`:''}
+        </div>`:''}
+      </div>`:''}
+    </div>`;
+  return row;
+}
+
+// ── Live tool card helpers (called during SSE streaming) ──
+function appendLiveToolCard(tc){
+  const container=$('liveToolCards');
+  if(!container)return;
+  container.style.display='';
+  // Update existing card if same tool call id (e.g. snippet arrives after done)
+  const existing=container.querySelector(`[data-tid="${CSS.escape(tc.tid||'')}"]`);
+  if(existing){existing.replaceWith(buildToolCard(tc));return;}
+  const card=buildToolCard(tc);
+  if(tc.tid)card.dataset.tid=tc.tid;
+  container.appendChild(card);
+}
+
+function clearLiveToolCards(){
+  const container=$('liveToolCards');
+  if(!container)return;
+  container.innerHTML='';
+  container.style.display='none';
 }
 
 // ── Edit + Regenerate ──
