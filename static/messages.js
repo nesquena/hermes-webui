@@ -111,8 +111,11 @@ async function send(){
     delete INFLIGHT[activeSid];
     clearInflight();
     stopApprovalPolling();hideApprovalCard();
-    S.activeStreamId=null;
-    const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
+    // Only clear active stream state if this is the currently viewed session
+    if(S.session&&S.session.session_id===activeSid){
+      S.activeStreamId=null;
+      const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
+    }
     if(S.session&&S.session.session_id===activeSid){
       S.session=d.session;S.messages=d.session.messages||[];
       // Populate tool calls from server-extracted metadata (has snippets)
@@ -135,8 +138,10 @@ async function send(){
     delete INFLIGHT[activeSid];
     clearInflight();
     stopApprovalPolling();hideApprovalCard();
-    S.activeStreamId=null;
-    const _cbe=$('btnCancel');if(_cbe)_cbe.style.display='none';
+    if(S.session&&S.session.session_id===activeSid){
+      S.activeStreamId=null;
+      const _cbe=$('btnCancel');if(_cbe)_cbe.style.display='none';
+    }
     let msg='Connection error';
     try{const d=JSON.parse(e.data);msg=d.message||msg;}catch(_){}
     if(S.session&&S.session.session_id===activeSid){
@@ -144,7 +149,9 @@ async function send(){
       S.messages.push({role:'assistant',content:`**Error:** ${msg}`});
       renderMessages();
     }
-    setBusy(false);setStatus('Error: '+msg);
+    if(!S.session || !INFLIGHT[S.session.session_id]){
+      setBusy(false);setStatus('Error: '+msg);
+    }
   });
 
   es.addEventListener('cancel',e=>{
@@ -152,14 +159,19 @@ async function send(){
     delete INFLIGHT[activeSid];
     clearInflight();
     stopApprovalPolling();hideApprovalCard();
-    S.activeStreamId=null;
-    const _cbc=$('btnCancel');if(_cbc)_cbc.style.display='none';
+    if(S.session&&S.session.session_id===activeSid){
+      S.activeStreamId=null;
+      const _cbc=$('btnCancel');if(_cbc)_cbc.style.display='none';
+    }
     if(S.session&&S.session.session_id===activeSid){
       if(!assistantText){removeThinking();}
       S.messages.push({role:'assistant',content:'*Task cancelled.*'});
       renderMessages();
     }
-    renderSessionList();setBusy(false);setStatus('');
+    renderSessionList();
+    if(!S.session || !INFLIGHT[S.session.session_id]){
+      setBusy(false);setStatus('');
+    }
   });
 
   // Handle SSE connection errors (network drop etc)
@@ -167,12 +179,18 @@ async function send(){
     if(es.readyState===EventSource.CLOSED){
       delete INFLIGHT[activeSid];
       stopApprovalPolling();hideApprovalCard();
+      if(S.session&&S.session.session_id===activeSid){
+        S.activeStreamId=null;
+        const _cbo=$('btnCancel');if(_cbo)_cbo.style.display='none';
+      }
       if(!assistantText&&S.session&&S.session.session_id===activeSid){
         removeThinking();
         S.messages.push({role:'assistant',content:'**Error:** Connection lost'});
         renderMessages();
       }
-      setBusy(false);setStatus('');
+      if(!S.session || !INFLIGHT[S.session.session_id]){
+        setBusy(false);setStatus('');
+      }
     }
   };
 }

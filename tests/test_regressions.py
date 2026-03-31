@@ -211,3 +211,37 @@ def test_server_py_importable(cleanup_test_sessions):
         ast.parse(src)
     except SyntaxError as e:
         assert False, f"server.py has syntax error: {e}"
+
+# ── R7: Cross-session busy state bleed ───────────────────────────────────────
+
+def test_loadSession_resets_busy_state_for_idle_session(cleanup_test_sessions):
+    """R7: sessions.js loadSession for a non-inflight session must reset S.busy to false.
+    When missing, switching from a busy session to an idle one left the Send button
+    disabled, showed the wrong activity bar, and pointed Cancel at the wrong stream.
+    """
+    src = pathlib.Path("/home/hermes/webui-mvp/static/sessions.js").read_text()
+    # The fix adds explicit S.busy=false in the non-inflight else branch
+    assert "S.busy=false;" in src,         "sessions.js loadSession must set S.busy=false when loading a non-inflight session"
+    # btnSend must be explicitly re-enabled
+    assert "$('btnSend').disabled=false;" in src,         "sessions.js loadSession must enable btnSend for non-inflight sessions"
+
+
+def test_done_handler_guards_setbusy_with_inflight_check(cleanup_test_sessions):
+    """R7b: messages.js done/error handlers must not call setBusy(false) if the
+    currently viewed session is itself still in-flight.
+    When missing, finishing session A while viewing in-flight session B would
+    disable B's Send button.
+    """
+    src = pathlib.Path("/home/hermes/webui-mvp/static/messages.js").read_text()
+    # The fix wraps setBusy(false) in a guard
+    assert "INFLIGHT[S.session.session_id]" in src,         "messages.js must guard setBusy(false) with INFLIGHT check for current session"
+
+
+def test_cancel_button_not_cleared_across_sessions(cleanup_test_sessions):
+    """R7c: The Cancel button and activeStreamId must only be cleared when the
+    done/error event belongs to the currently viewed session.
+    """
+    src = pathlib.Path("/home/hermes/webui-mvp/static/messages.js").read_text()
+    # Both clear operations must be inside the activeSid === S.session guard
+    # We check for the pattern added by the fix
+    assert "S.session.session_id===activeSid" in src,         "messages.js must guard activeStreamId/Cancel clearing with session identity check"

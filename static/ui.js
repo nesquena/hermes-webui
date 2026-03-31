@@ -56,13 +56,18 @@ function renderMd(raw){
 function setStatus(t){
   const bar=$('activityBar');
   const txt=$('activityText');
+  const dismiss=$('btnDismissStatus');
   if(!bar||!txt)return;
   if(!t){
     bar.style.display='none';
     txt.textContent='';
+    if(dismiss)dismiss.style.display='none';
   } else {
     txt.textContent=t;
     bar.style.display='';
+    // Show dismiss X only for static/error messages, not transient busy ones
+    const transient = t.endsWith('…') || t === 'Hermes is thinking…';
+    if(dismiss)dismiss.style.display=(!transient && !S.busy)?'inline':'none';
   }
 }
 function setBusy(v){

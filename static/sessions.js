@@ -29,9 +29,20 @@ async function loadSession(sid){
     setBusy(true);setStatus('Hermes is thinking\u2026');
     startApprovalPolling(sid);
   }else{
-    MSG_QUEUE.length=0;updateQueueBadge();  // clear queue when switching sessions
+    MSG_QUEUE.length=0;updateQueueBadge();  // clear queue for the viewed session
     S.messages=data.session.messages||[];
     S.toolCalls=(data.session.tool_calls||[]).map(tc=>({...tc,done:true}));
+    // Reset per-session visual state: the viewed session is idle even if another
+    // session's stream is still running in the background.
+    // We directly update the DOM instead of calling setBusy(false), because
+    // setBusy(false) drains MSG_QUEUE which we don't want here.
+    S.busy=false;
+    S.activeStreamId=null;
+    $('btnSend').disabled=false;
+    $('btnSend').style.opacity='1';
+    const _dots=$('activityDots');if(_dots)_dots.style.display='none';
+    const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
+    setStatus('');
     syncTopbar();await loadDir('.');renderMessages();highlightCode();
   }
 }
