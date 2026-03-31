@@ -77,6 +77,16 @@ def test_server():
     TEST_STATE_DIR.mkdir(parents=True)
     TEST_WORKSPACE.mkdir(parents=True)
 
+    # Symlink real skills into test HERMES_HOME so skills tests pass
+    # but cron jobs and other write-heavy state stay isolated
+    real_skills = pathlib.Path.home() / '.hermes' / 'skills'
+    test_skills = TEST_STATE_DIR / 'skills'
+    if real_skills.exists() and not test_skills.exists():
+        test_skills.symlink_to(real_skills)
+
+    # Create an empty cron dir so cron jobs go to the isolated location
+    (TEST_STATE_DIR / 'cron').mkdir(parents=True, exist_ok=True)
+
     env = os.environ.copy()
     env.update({
         "HERMES_WEBUI_PORT":              str(TEST_PORT),
@@ -84,6 +94,9 @@ def test_server():
         "HERMES_WEBUI_STATE_DIR":         str(TEST_STATE_DIR),
         "HERMES_WEBUI_DEFAULT_WORKSPACE": str(TEST_WORKSPACE),
         "HERMES_WEBUI_DEFAULT_MODEL":     "openai/gpt-5.4-mini",
+        # Redirect HERMES_HOME so cron/jobs.json, skills, and memory
+        # go to the isolated test dir -- never polluting ~/.hermes/
+        "HERMES_HOME":                    str(TEST_STATE_DIR),
     })
 
     proc = subprocess.Popen(
