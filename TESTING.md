@@ -447,7 +447,7 @@ EXPECT:
 FAIL: Sidebar causes layout overflow or blocks chat.
 
 ### T11.3: Structured Log Output
-SETUP: SSH access to VPS.
+SETUP: SSH access to the server.
 STEPS:
   1. In a terminal: tail -f /tmp/webui-mvp.log
   2. In browser: perform any action (load page, send message, click file)
@@ -543,11 +543,155 @@ If you are a Claude agent with browser access, follow these instructions:
 ---
 
 *Last updated: Sprint 2, March 30, 2026*
-*Server version: v0.
+*Server version: v0.4 (server.py in webui-mvp/)*
+*Run automated tests: python -m pytest tests/ -v*
 
-... [OUTPUT TRUNCATED - 4912 chars omitted out of 54912 total] ...
+---
 
- tool row disappears, streaming text begins
+## Section 13: Sidebar Panel Navigation (Sprint 3)
+
+### T13.1: Four Tabs Visible in Sidebar
+EXPECT:
+  - Four tabs at top of sidebar: Chat, Tasks, Skills, Memory (with icons)
+  - Chat tab is active/highlighted by default on load
+FAIL: Only one section visible, no tabs shown.
+
+### T13.2: Tab Switching Preserves Chat State
+STEPS:
+  1. Send a message, get a response (so chat has content)
+  2. Click the "Tasks" tab
+  3. Click the "Chat" tab
+EXPECT:
+  - When on Tasks tab: session list disappears, cron list appears
+  - When back on Chat: full conversation is still there, session list returns
+  - Send button still works after switching back
+FAIL: Messages lost, session list blank, Send button broken.
+
+---
+
+## Section 14: Tasks Panel (Cron Viewer) (Sprint 3)
+
+### T14.1: Tasks Tab Shows Cron Jobs
+STEPS:
+  1. Click the "Tasks" tab in the sidebar
+EXPECT:
+  - A list of scheduled jobs appears
+  - Each job shows its name and a status badge (active/paused/error/off)
+  - At least one job visible ("Morning Crypto Update" or similar)
+FAIL: Empty list, loading spinner forever, error message.
+
+### T14.2: Expand a Job Row
+STEPS:
+  1. Click a job name/row in the Tasks panel
+EXPECT:
+  - Row expands to show: schedule string, prompt text (truncated), action buttons
+  - "Run now" button (blue), "Pause" or "Resume" button
+  - Last output section showing timestamp and content from the last run
+FAIL: Click does nothing, no expansion, buttons missing.
+
+### T14.3: Pause and Resume a Job
+STEPS:
+  1. Expand an active job
+  2. Click "Pause"
+EXPECT:
+  - Toast: job paused
+  - Job list reloads, status badge changes to "paused"
+  - Button changes to "Resume"
+STEPS (continued):
+  3. Click "Resume"
+EXPECT:
+  - Toast: job resumed
+  - Status badge returns to "active"
+FAIL: Status doesn't change, error toast.
+
+### T14.4: Last Output Shows Real Content
+SETUP: At least one job has run at least once.
+STEPS:
+  1. Expand a job that has run
+EXPECT:
+  - Last output section shows a timestamp (e.g. "2026-03-30_16-00-37")
+  - Content preview of the last run output (first ~600 chars)
+FAIL: "(no runs yet)" shown even though job has run, or content is garbled.
+
+---
+
+## Section 15: Skills Panel (Sprint 3)
+
+### T15.1: Skills Tab Shows Categorized List
+STEPS:
+  1. Click the "Skills" tab
+EXPECT:
+  - A search box at the top
+  - Skills grouped by category with folder icons and count (e.g. "autonomous-ai-agents (4)")
+  - Individual skill items with name and short description excerpt
+FAIL: Loading forever, empty list, uncategorized blob.
+
+### T15.2: Search Filters Skills
+STEPS:
+  1. Click the Skills tab
+  2. Type "github" in the search box
+EXPECT:
+  - List narrows to only skills matching "github" in name, description, or category
+  - Categories with no matches are hidden
+STEPS (continued):
+  3. Clear the search box
+EXPECT:
+  - Full list returns
+FAIL: Search does nothing, list disappears entirely.
+
+### T15.3: Click Skill Opens SKILL.md in Right Panel
+STEPS:
+  1. Click the Skills tab
+  2. Click any skill name (e.g. "dogfood")
+EXPECT:
+  - The right workspace panel switches to preview mode
+  - The skill's SKILL.md content renders as formatted markdown
+  - Path bar shows the skill name with gold "skill" badge
+  - Headings, bold, lists all render correctly (not raw asterisks)
+FAIL: Nothing happens in right panel, raw markdown text shown, error.
+
+---
+
+## Section 16: Memory Panel (Sprint 3)
+
+### T16.1: Memory Tab Shows Personal Notes
+STEPS:
+  1. Click the "Memory" tab
+EXPECT:
+  - Two sections: "My Notes" and "User Profile"
+  - Each section has a last-modified timestamp in the header
+  - Content renders as formatted markdown (not raw text)
+FAIL: Blank, loading forever, error, raw text with § symbols.
+
+### T16.2: Memory Content is Accurate
+STEPS:
+  1. Open Memory tab
+  2. Check a fact you know is in memory (e.g. your Pacific Time preference)
+EXPECT:
+  - The fact appears in the correct section (User Profile or My Notes)
+FAIL: Wrong content shown, different user's data, empty even though memory exists.
+
+---
+
+## Section 17: Bug Fix Verification (Sprint 3)
+
+### T17.1: B6 - New Session Inherits Workspace
+SETUP: Active session with workspace changed to a non-default path (e.g. /tmp).
+STEPS:
+  1. Click + New conversation while workspace is set to /tmp
+EXPECT:
+  - New session shows /tmp in the workspace chip and path display
+  - File tree shows files from /tmp
+FAIL: New session resets to default test-workspace.
+
+### T17.2: B10 - Tool Events Replace Thinking Dots
+SETUP: Send a message that will trigger tool use (e.g. "What files are in /tmp?").
+STEPS:
+  1. Watch the chat area carefully after sending
+EXPECT:
+  - Thinking dots appear immediately
+  - When first tool fires: dots disappear, replaced by a compact "Running terminal..." row
+  - When first token arrives: tool row disappears, streaming text begins
   - NOT: thinking dots AND "Running..." AND streaming text all visible at once
 FAIL: Thinking dots stay while tool runs, or multiple rows stacked confusingly.
 
@@ -581,7 +725,7 @@ Manual-only (not covered by automation):
 
 *Last updated: Sprint 3, March 30, 2026*
 *Total automated tests: 48/48*
-*Run: cd <agent-dir> && venv/bin/python -m pytest webui-mvp/tests/ -v*
+*Run: python -m pytest tests/ -v*
 
 ---
 
@@ -911,7 +1055,7 @@ Manual-only for Sprint 5:
 
 *Last updated: Sprint 5, March 30, 2026*
 *Total automated tests: 86/86*
-*Run: cd <agent-dir> && venv/bin/python -m pytest <repo>/tests/ -v*
+*Run: python -m pytest tests/ -v*
 *Source: <repo>/ | Static: static/style.css + static/app.js*
 
 ---
@@ -1385,7 +1529,7 @@ Manual-only for Sprint 8:
 *Last updated: Sprint 10 complete, March 31, 2026*
 *Total automated tests: 177/177*
 *Regression gate: tests/test_regressions.py (10 tests, one per introduced bug)*
-*Run: cd <agent-dir> && venv/bin/python -m pytest <repo>/tests/ -v*
+*Run: python -m pytest tests/ -v*
 *Source: <repo>/*
 *Modules: ui.js, workspace.js, sessions.js, messages.js, panels.js, boot.js (app.js deleted)*
 
@@ -1452,5 +1596,5 @@ FAIL: User message gone, blank chat, response lands in wrong session.
 *Last updated: Post-Sprint 10 concurrency sweeps, March 31, 2026*
 *Total automated tests: 190/190*
 *Regression gate: tests/test_regressions.py (23 tests, one per introduced bug)*
-*Run: cd <agent-dir> && venv/bin/python -m pytest <repo>/tests/ -v*
+*Run: python -m pytest tests/ -v*
 *Source: <repo>/*
