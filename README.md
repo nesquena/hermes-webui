@@ -5,7 +5,7 @@ Full parity with the CLI experience -- everything you can do from a terminal,
 you can do from this UI. No build step, no framework, no bundler. Just Python
 and vanilla JS.
 
-Layout: three-panel Cowork-style. Left sidebar for sessions and tools,
+Layout: three-panel Claude-style. Left sidebar for sessions and tools,
 center for chat, right for workspace file browsing.
 
 <img width="1392" height="854" alt="image" src="https://github.com/user-attachments/assets/79cd3c0d-3167-42ed-9434-447a742c25c3" />
