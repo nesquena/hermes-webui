@@ -268,7 +268,7 @@ function renderMessages(){
       const row = document.createElement('div');
       row.className = 'msg-row tool-card-row';
       const icon = toolIcon(tc.name);
-      const hasDetail = tc.snippet || tc.args;
+      const hasDetail = tc.snippet || (tc.args && Object.keys(tc.args).length > 0);
       row.innerHTML = `
         <div class="tool-card${tc.done===false?' tool-card-running':''}">
           <div class="tool-card-header" onclick="this.closest('.tool-card').classList.toggle('open')">
@@ -295,6 +295,10 @@ function renderMessages(){
   $('messages').scrollTop=$('messages').scrollHeight;
   // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>highlightCode());
+  // Refresh todo panel if it's currently open
+  if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){
+    loadTodos();
+  }
 }
 
 function toolIcon(name){

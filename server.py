@@ -492,12 +492,18 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                         snippet = raw[:200]
                     tool_calls.append({'name': name, 'snippet': snippet, 'tid': tid})
             s.tool_calls = tool_calls
-            # Tag the last user message with attachment filenames for display on reload
+            # Tag the matching user message with attachment filenames for display on reload
+            # Only tag a user message whose content relates to this turn's text
+            # (msg_text is the full message including the [Attached files: ...] suffix)
             if attachments:
                 for m in reversed(s.messages):
                     if m.get('role') == 'user':
-                        m['attachments'] = attachments
-                        break
+                        content = str(m.get('content', ''))
+                        # Match if content is part of the sent message or vice-versa
+                        base_text = msg_text.split('\n\n[Attached files:')[0].strip()
+                        if base_text[:60] in content or content[:60] in msg_text:
+                            m['attachments'] = attachments
+                            break
             s.save()
             put('done', {'session': s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}})
           finally:
