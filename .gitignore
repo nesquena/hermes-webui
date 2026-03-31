@@ -9,6 +9,9 @@ __pycache__/
 *.swp
 *.swo
 
+# Archive directory (pre-git backups, kept on disk but not tracked)
+archive/
+
 # Local environment and secrets
 .env
 .env.*
