@@ -186,23 +186,29 @@ class Handler(BaseHTTPRequestHandler):
                 except (BrokenPipeError, ConnectionResetError): pass
                 return
             if parsed.path == '/api/file/raw':
-                # Serve raw file bytes (for images). No MAX_FILE_BYTES limit for images.
+                # Serve raw file bytes (for images and downloads).
+                # Pass ?download=1 to force Content-Disposition: attachment (save to disk).
                 qs = parse_qs(parsed.query)
                 _raw_sid = qs.get('session_id', [''])[0]
                 if not _raw_sid: return bad(self, 'session_id is required')
                 try: s = get_session(_raw_sid)
                 except KeyError: return bad(self, 'Session not found', 404)
                 rel = qs.get('path', [''])[0]
+                force_download = qs.get('download', [''])[0] == '1'
                 target = safe_resolve(Path(s.workspace), rel)
                 if not target.exists() or not target.is_file():
                     return j(self, {'error': 'not found'}, status=404)
                 ext = target.suffix.lower()
                 mime = MIME_MAP.get(ext, 'application/octet-stream')
                 raw_bytes = target.read_bytes()
+                import urllib.parse as _up
+                safe_name = _up.quote(target.name, safe='')
                 self.send_response(200)
                 self.send_header('Content-Type', mime)
                 self.send_header('Content-Length', str(len(raw_bytes)))
                 self.send_header('Cache-Control', 'no-store')
+                if force_download:
+                    self.send_header('Content-Disposition', f'attachment; filename="{target.name}"; filename*=UTF-8\'\'{safe_name}')
                 self.end_headers()
                 self.wfile.write(raw_bytes)
                 return

@@ -97,6 +97,18 @@ function cancelEditMode(){
   updateEditBtn();
 }
 
+function downloadFile(path){
+  if(!S.session||!path)return;
+  const url=`/api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}&download=1`;
+  const a=document.createElement('a');
+  a.href=url;
+  // filename hint (browser may override with Content-Disposition from server)
+  a.download=path.split('/').pop()||'file';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
 async function openFile(path){
   if(!S.session)return;
   const ext=fileExt(path);

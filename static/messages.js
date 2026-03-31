@@ -36,6 +36,21 @@ async function send(){
   startApprovalPolling(activeSid);
   S.activeStreamId = null;  // will be set after stream starts
 
+  // Set provisional title from user message immediately so session appears
+  // in the sidebar right away with a meaningful name (server may refine later)
+  if(S.session&&(S.session.title==='Untitled'||!S.session.title)){
+    const provisionalTitle=displayText.slice(0,64);
+    S.session.title=provisionalTitle;
+    syncTopbar();
+    // Persist it and refresh the sidebar now -- don't wait for done
+    api('/api/session/rename',{method:'POST',body:JSON.stringify({
+      session_id:activeSid, title:provisionalTitle
+    })}).catch(()=>{});  // fire-and-forget, server refines on done
+    renderSessionList();  // session appears in sidebar immediately
+  } else {
+    renderSessionList();  // ensure it's visible even if already titled
+  }
+
   // Start the agent via POST, get a stream_id back
   let streamId;
   try{
