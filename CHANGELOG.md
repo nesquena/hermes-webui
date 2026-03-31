@@ -6,6 +6,20 @@
 
 ---
 
+## [v1.2.1] Sprint 10 Post-Release Fixes
+*March 31, 2026 | 177 tests*
+
+Critical regressions introduced during the server.py split, caught by users and fixed immediately.
+
+- **`uuid` not imported in server.py** -- `chat/start` returned 500 (NameError) on every new message
+- **`AIAgent` not imported in api/streaming.py** -- agent thread crashed immediately, SSE returned 404
+- **`has_pending` not imported in api/streaming.py** -- NameError during tool approval checks
+- **`Session.__init__` missing `tool_calls` param** -- 500 on any session with tool history
+- **SSE loop did not break on `cancel` event** -- connection hung after cancel
+- **Regression test file added** (`tests/test_regressions.py`): 10 tests, one per introduced bug. These form a permanent regression gate so each class of error can never silently return.
+
+---
+
 ## [v1.2] Sprint 10 -- Server Health + Operational Polish
 *March 31, 2026 | 167 tests*
 

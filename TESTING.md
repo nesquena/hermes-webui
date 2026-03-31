@@ -1529,8 +1529,9 @@ Manual-only for Sprint 8:
 
 ---
 
-*Last updated: Sprint 10 + bug sweep, March 31, 2026*
-*Total automated tests: 167/167*
+*Last updated: Sprint 10 complete, March 31, 2026*
+*Total automated tests: 177/177*
+*Regression gate: tests/test_regressions.py (10 tests, one per introduced bug)*
 *Run: cd /home/hermes/.hermes/hermes-agent && venv/bin/python -m pytest /home/hermes/webui-mvp/tests/ -v*
 *Source: /home/hermes/webui-mvp/*
 *Modules: ui.js, workspace.js, sessions.js, messages.js, panels.js, boot.js (app.js deleted)*

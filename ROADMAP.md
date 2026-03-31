@@ -3,8 +3,8 @@
 > Goal: Full 1:1 parity with the Hermes CLI experience via a clean dark web UI.
 > Everything you can do from the CLI terminal, you can do from this UI.
 >
-> Last updated: Sprint 10 + bug sweep (March 31, 2026)
-> Tests: 167/167 passing
+> Last updated: Sprint 10 complete (March 31, 2026)
+> Tests: 177/177 passing
 > Source: /home/hermes/webui-mvp/
 
 ---
@@ -25,6 +25,7 @@
 | Sprint 8 hotfix | Message queue + INFLIGHT fix | Queue messages while busy (toast + badge + auto-drain), INFLIGHT-first loadSession (message stays on switch-away/back) | 139 |
 | Sprint 9 | Codebase health + daily driver gaps | app.js deleted and replaced by 6 modules, tool call cards inline, attachment persistence on reload, todo list panel | 149 |
 | Sprint 10 | Server health + operational polish | server.py split into api/ modules, background task cancel, cron run history viewer, tool card UX polish | 167 |
+| Sprint 10 fixes | Import regressions + regression tests | uuid, AIAgent, has_pending, SSE cancel loop, Session.__init__ tool_calls; test_regressions.py | 177 |
 
 ---
 
@@ -241,8 +242,8 @@ Add more models. Group by provider. Model info tooltip on hover.
 Both sidebar and workspace panel are drag-resizable with localStorage persistence.
 
 ### Sprint 3.3: Workspace File Actions
-- [ ] Rename file (inline, double-click)
-- [ ] Create folder
+- [ ] Rename file (inline, double-click) (Wave 3)
+- [ ] Create folder (Wave 3)
 - [x] Syntax highlighted code preview (Prism.js)
 
 ### Sprint 3.4: Conversation Controls

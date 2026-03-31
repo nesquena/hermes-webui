@@ -1002,6 +1002,9 @@ Resolution: Phase B replaces with thread-local or explicit parameter passing.
               Session.__init__ **kwargs forward-compat, test cron isolation via HERMES_HOME,
               last_workspace reset in conftest between tests, tool cards grouped by assistant turn
             Tests: 18 new, 167/167 total
+            Regressions fixed: uuid, AIAgent, has_pending, SSE cancel loop, Session.__init__ tool_calls
+            test_regressions.py: 10 tests -- one per introduced bug, permanent regression gate
+            Total after fixes: 177/177
     v1.1  Sprint 9 (March 31, 2026):
             Arch: app.js deleted; replaced by ui.js, workspace.js, sessions.js, messages.js, panels.js, boot.js
             Features: tool call cards (inline collapsible, live + history), attachment persistence,
