@@ -31,6 +31,7 @@ async function send(){
   const displayText=text||(uploaded.length?`Uploaded: ${uploaded.join(', ')}`:'(file upload)');
   const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploaded:undefined};
   S.toolCalls=[];  // clear tool calls from previous turn
+  clearLiveToolCards();  // clear any leftover live cards from last turn
   S.messages.push(userMsg);renderMessages();appendThinking();setBusy(true);  // activity bar shown via setBusy
   INFLIGHT[activeSid]={messages:[...S.messages],uploaded};
   startApprovalPolling(activeSid);
@@ -107,14 +108,14 @@ async function send(){
 
   es.addEventListener('tool',e=>{
     const d=JSON.parse(e.data);
-    // Always update activity bar status (visible regardless of which session is viewed)
     setStatus(`${d.name}${d.preview?' · '+d.preview.slice(0,55):''}`);
-    // Only update DOM if still viewing this session
     if(!S.session||S.session.session_id!==activeSid) return;
     removeThinking();
-    S.toolCalls.push({name:d.name, preview:d.preview||'', args:d.args||{}, snippet:'', done:false});
-    renderMessages();
     const oldRow=$('toolRunningRow');if(oldRow)oldRow.remove();
+    // Append card to the stable live container -- no renderMessages() call
+    const tc={name:d.name, preview:d.preview||'', args:d.args||{}, snippet:'', done:false};
+    S.toolCalls.push(tc);
+    appendLiveToolCard(tc);
     $('messages').scrollTop=$('messages').scrollHeight;
   });
 
@@ -146,6 +147,7 @@ async function send(){
         const lastUser=[...S.messages].reverse().find(m=>m.role==='user');
         if(lastUser)lastUser.attachments=uploaded;
       }
+      clearLiveToolCards();
       syncTopbar();renderMessages();loadDir('.');
     }
     renderSessionList();setBusy(false);setStatus('');
@@ -163,6 +165,7 @@ async function send(){
     let msg='Connection error';
     try{const d=JSON.parse(e.data);msg=d.message||msg;}catch(_){}
     if(S.session&&S.session.session_id===activeSid){
+      clearLiveToolCards();
       if(!assistantText){removeThinking();}
       S.messages.push({role:'assistant',content:`**Error:** ${msg}`});
       renderMessages();
@@ -182,6 +185,7 @@ async function send(){
       const _cbc=$('btnCancel');if(_cbc)_cbc.style.display='none';
     }
     if(S.session&&S.session.session_id===activeSid){
+      clearLiveToolCards();
       if(!assistantText){removeThinking();}
       S.messages.push({role:'assistant',content:'*Task cancelled.*'});
       renderMessages();

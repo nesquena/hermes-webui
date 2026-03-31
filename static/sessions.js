@@ -43,6 +43,7 @@ async function loadSession(sid){
     const _dots=$('activityDots');if(_dots)_dots.style.display='none';
     const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
     setStatus('');
+    clearLiveToolCards();
     syncTopbar();await loadDir('.');renderMessages();highlightCode();
   }
 }
