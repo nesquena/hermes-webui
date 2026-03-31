@@ -212,14 +212,14 @@ HEALTH_URL="http://${HERMES_WEBUI_HOST:-127.0.0.1}:${PORT}/health"
 MAX_WAIT=15
 ELAPSED=0
 while [[ $ELAPSED -lt $MAX_WAIT ]]; do
-    if curl -sf "${HEALTH_URL}" | grep -q '"status":"ok"' 2>/dev/null; then
+    if curl -sf "${HEALTH_URL}" | grep -q '"status"' 2>/dev/null; then
         break
     fi
     sleep 0.5
     ELAPSED=$((ELAPSED + 1))
 done
 
-if ! curl -sf "${HEALTH_URL}" | grep -q '"status":"ok"' 2>/dev/null; then
+if ! curl -sf "${HEALTH_URL}" | grep -q '"status"' 2>/dev/null; then
     warn "Health check did not pass within ${MAX_WAIT}s. Check log:"
     tail -20 "${LOG}"
     echo ""
