@@ -13,7 +13,7 @@ from pathlib import Path
 from api.config import (
     STREAMS, STREAMS_LOCK, CANCEL_FLAGS, CLI_TOOLSETS,
     _get_session_agent_lock, _set_thread_env, _clear_thread_env,
-    DEFAULT_PROVIDER, DEFAULT_BASE_URL,
+    resolve_model_provider,
 )
 
 # Lazy import to avoid circular deps -- hermes-agent is on sys.path via api/config.py
@@ -100,10 +100,11 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
 
             if AIAgent is None:
                 raise ImportError("AIAgent not available -- check that hermes-agent is on sys.path")
+            resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(model)
             agent = AIAgent(
-                model=model,
-                provider=DEFAULT_PROVIDER or None,
-                base_url=DEFAULT_BASE_URL or None,
+                model=resolved_model,
+                provider=resolved_provider,
+                base_url=resolved_base_url,
                 platform='cli',
                 quiet_mode=True,
                 enabled_toolsets=CLI_TOOLSETS,

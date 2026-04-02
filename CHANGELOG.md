@@ -1,8 +1,44 @@
 # Hermes Web UI -- Changelog
 
 > Living document. Updated at the end of every sprint.
-> Source: <repo>/
-> Repository: https://github.com/<your-username>/hermes-webui
+> Repository: https://github.com/nesquena/hermes-webui
+
+---
+
+## [v0.16.2] Model List Updates + base_url Passthrough
+*April 1, 2026 | 247 tests*
+
+### Bug Fixes
+- **MiniMax model list updated.** Replaced stale ABAB 6.5 models with current
+  MiniMax-M2.7, M2.7-highspeed, M2.5, M2.5-highspeed, M2.1 lineup matching
+  hermes-agent upstream. (Fixes #6)
+- **Z.AI/GLM model list updated.** Replaced GLM-4 series with current GLM-5,
+  GLM-5 Turbo, GLM-4.7, GLM-4.5, GLM-4.5 Flash lineup.
+- **base_url passthrough to AIAgent.** `resolve_model_provider()` now reads
+  `base_url` from config.yaml and passes it to AIAgent, so providers with
+  custom endpoints (MiniMax, Z.AI, local LLMs) route to the correct API.
+
+---
+
+## [v0.16.1] Community Fixes -- Mobile + Auth + Provider Routing
+*April 1, 2026 | 247 tests*
+
+Community contributions from @deboste, reviewed and refined.
+
+### Bug Fixes
+- **Mobile responsive layout.** Comprehensive `@media(max-width:640px)` rules
+  for topbar, messages, composer, tool cards, approval cards, and settings modal.
+  Uses `100dvh` with `100vh` fallback to fix composer cutoff on mobile browsers.
+  Textarea `font-size:16px` prevents iOS/Android auto-zoom on focus.
+- **Reverse proxy basic auth support.** All `fetch()` and `EventSource` URLs now
+  constructed via `new URL(path, location.origin)` to strip embedded credentials
+  per Fetch spec. `credentials:'include'` on fetch, `withCredentials:true` on
+  EventSource ensure auth headers are forwarded through reverse proxies.
+- **Model provider routing.** New `resolve_model_provider()` helper in
+  `api/config.py` strips provider prefix from dropdown model IDs (e.g.
+  `anthropic/claude-sonnet-4.6` → `claude-sonnet-4.6`) and passes the correct
+  `provider` to AIAgent. Handles cross-provider selection by matching against
+  known direct-API providers.
 
 ---
 
@@ -405,4 +441,4 @@ Three-panel layout: sessions sidebar, chat area, workspace panel.
 
 ---
 
-*Last updated: Sprint 14, March 31, 2026 | Tests: 224/224*
+*Last updated: v0.16.2, April 1, 2026 | Tests: 247*

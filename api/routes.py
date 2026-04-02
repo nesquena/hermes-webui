@@ -129,6 +129,9 @@ def handle_get(handler, parsed):
         return _handle_approval_pending(handler, parsed)
 
     if parsed.path == '/api/approval/inject_test':
+        # Loopback-only: used by automated tests; blocked from any remote client
+        if handler.client_address[0] != '127.0.0.1':
+            return j(handler, {'error': 'not found'}, status=404)
         return _handle_approval_inject(handler, parsed)
 
     # ── Cron API (GET) ──
@@ -358,7 +361,14 @@ def handle_post(handler, parsed):
 # ── GET route helpers ─────────────────────────────────────────────────────────
 
 def _serve_static(handler, parsed):
-    static_file = Path(__file__).parent.parent / parsed.path.lstrip('/')
+    static_root = (Path(__file__).parent.parent / 'static').resolve()
+    # Strip the leading '/static/' prefix, then resolve and sandbox
+    rel = parsed.path[len('/static/'):]
+    static_file = (static_root / rel).resolve()
+    try:
+        static_file.relative_to(static_root)
+    except ValueError:
+        return j(handler, {'error': 'not found'}, status=404)
     if not static_file.exists() or not static_file.is_file():
         return j(handler, {'error': 'not found'}, status=404)
     ext = static_file.suffix.lower()
@@ -510,6 +520,7 @@ def _handle_approval_pending(handler, parsed):
 
 
 def _handle_approval_inject(handler, parsed):
+    """Inject a fake pending approval -- loopback-only, used by automated tests."""
     qs = parse_qs(parsed.query)
     sid = qs.get('session_id', [''])[0]
     key = qs.get('pattern_key', ['test_pattern'])[0]
@@ -653,7 +664,10 @@ def _handle_chat_sync(handler, body):
     try:
         from run_agent import AIAgent
         with CHAT_LOCK:
-            agent = AIAgent(model=s.model, platform='cli', quiet_mode=True,
+            from api.config import resolve_model_provider
+            _model, _provider, _base_url = resolve_model_provider(s.model)
+            agent = AIAgent(model=_model, provider=_provider, base_url=_base_url,
+                           platform='cli', quiet_mode=True,
                            enabled_toolsets=CLI_TOOLSETS, session_id=s.session_id)
             workspace_ctx = f"[Workspace: {s.workspace}]\n"
             workspace_system_msg = (
@@ -892,6 +906,8 @@ def _handle_skill_save(handler, body):
     if not skill_name or '/' in skill_name or '..' in skill_name:
         return bad(handler, 'Invalid skill name')
     category = body.get('category', '').strip()
+    if category and ('/' in category or '..' in category):
+        return bad(handler, 'Invalid category')
     from tools.skills_tool import SKILLS_DIR
     if category:
         skill_dir = SKILLS_DIR / category / skill_name

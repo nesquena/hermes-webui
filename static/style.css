@@ -4,8 +4,8 @@
     --text:#e8e8f0;--muted:#8888aa;--accent:#e94560;--blue:#7cb9ff;--gold:#c9a84c;--code-bg:#0d1117;
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;font-size:14px;line-height:1.6;
   }
-  body{background:var(--bg);color:var(--text);height:100vh;overflow:hidden;display:flex;}
-  .layout{display:flex;width:100%;height:100vh;}
+  body{background:var(--bg);color:var(--text);height:100vh;height:100dvh;overflow:hidden;display:flex;}
+  .layout{display:flex;width:100%;height:100vh;height:100dvh;}
   .sidebar{width:300px;background:var(--sidebar);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;flex-shrink:0;}
   .sidebar-header{padding:16px 18px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;}
   .logo{width:32px;height:32px;border-radius:9px;background:linear-gradient(145deg,#e8a030,var(--accent));display:flex;align-items:center;justify-content:center;font-weight:800;font-size:14px;color:#fff;flex-shrink:0;box-shadow:0 2px 8px rgba(233,69,96,.3);}
@@ -235,7 +235,39 @@
   ::-webkit-scrollbar-track{background:transparent}
   ::-webkit-scrollbar-thumb{background:rgba(255,255,255,.1);border-radius:99px;transition:background .2s}
   ::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.22)}
-  @media(max-width:900px){.rightpanel{display:none}}@media(max-width:640px){.sidebar{display:none}}
+  @media(max-width:900px){.rightpanel{display:none}}
+  @media(max-width:640px){
+    .sidebar{display:none}
+    /* Topbar: stack title + chips vertically, allow wrapping */
+    .topbar{padding:8px 12px;gap:6px;flex-wrap:wrap;}
+    .topbar-left{min-width:0;flex:1 1 100%;}
+    .topbar-title{font-size:14px;}
+    .topbar-meta{font-size:10px;}
+    .topbar-chips{flex-wrap:wrap;gap:4px;}
+    .topbar-chips .chip,.topbar-chips .ws-chip,.topbar-chips button{font-size:11px!important;padding:3px 8px!important;}
+    /* Messages area */
+    .messages-inner{padding:12px 10px 20px;}
+    .msg-body{padding-left:0;max-width:100%;}
+    .msg-role{font-size:12px;}
+    /* Composer */
+    .composer-wrap{padding:8px 10px 12px!important;}
+    .composer-box{border-radius:12px;}
+    .composer-box textarea{font-size:16px;min-height:40px;}
+    .send-btn{padding:6px 14px;font-size:13px;}
+    /* Empty state */
+    .empty-state h2{font-size:18px;}
+    .empty-state p{font-size:13px;}
+    .suggestion-grid{max-width:100%!important;}
+    .suggestion-btn{font-size:12px;padding:8px 10px;}
+    /* Approval card */
+    .approval-card{padding:0 10px 8px;}
+    .approval-btns{gap:6px;}
+    .approval-btn{padding:5px 10px;font-size:11px;}
+    /* Tool cards */
+    .tool-card{margin-left:0!important;font-size:12px;}
+    /* Settings modal */
+    .settings-panel{width:95vw;max-width:95vw;}
+  }
 
 /* ── Workspace dropdown (topbar) ── */
 .ws-chip{user-select:none;}

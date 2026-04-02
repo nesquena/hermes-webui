@@ -1,5 +1,6 @@
 async function api(path,opts={}){
-  const res=await fetch(path,{headers:{'Content-Type':'application/json'},...opts});
+  const url=new URL(path,location.origin);
+  const res=await fetch(url.href,{credentials:'include',headers:{'Content-Type':'application/json'},...opts});
   if(!res.ok)throw new Error(await res.text());
   const ct=res.headers.get('content-type')||'';
   return ct.includes('application/json')?res.json():res.text();

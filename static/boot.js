@@ -2,7 +2,7 @@ async function cancelStream(){
   const streamId = S.activeStreamId;
   if(!streamId) return;
   try{
-    await fetch(`/api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`);
+    await fetch(new URL(`/api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,location.origin).href,{credentials:'include'});
     const btn=$('btnCancel');if(btn)btn.style.display='none';
     setStatus('Cancelling…');
   }catch(e){setStatus('Cancel failed: '+e.message);}

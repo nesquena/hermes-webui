@@ -720,7 +720,7 @@ async function send(){
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
             if(st.active){
               setStatus('Reconnected');
-              _wireSSE(new EventSource(`/api/chat/stream?stream_id=${encodeURIComponent(streamId)}`));
+              _wireSSE(new EventSource(new URL(`/api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,location.origin).href,{withCredentials:true}));
               return;
             }
           }catch(_){}
@@ -765,7 +765,7 @@ async function send(){
     if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setStatus('Error: Connection lost');}
   }
 
-  _wireSSE(new EventSource(`/api/chat/stream?stream_id=${encodeURIComponent(streamId)}`));
+  _wireSSE(new EventSource(new URL(`/api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,location.origin).href,{withCredentials:true}));
 
 }
 

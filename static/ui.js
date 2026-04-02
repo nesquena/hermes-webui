@@ -11,7 +11,7 @@ async function populateModelDropdown(){
   const sel=$('modelSelect');
   if(!sel) return;
   try{
-    const data=await fetch('/api/models').then(r=>r.json());
+    const data=await fetch(new URL('/api/models',location.origin).href,{credentials:'include'}).then(r=>r.json());
     if(!data.groups||!data.groups.length) return; // keep HTML defaults
     // Clear existing options
     sel.innerHTML='';
@@ -88,12 +88,12 @@ function renderMd(raw){
   });
   s=s.replace(/```([\w+-]*)\n?([\s\S]*?)```/g,(_,lang,code)=>{const h=lang?`<div class="pre-header">${esc(lang)}</div>`:'';return `${h}<pre><code>${esc(code.replace(/\n$/,''))}</code></pre>`;});
   s=s.replace(/`([^`\n]+)`/g,(_,c)=>`<code>${esc(c)}</code>`);
-  s=s.replace(/\*\*\*(.+?)\*\*\*/g,'<strong><em>$1</em></strong>');
-  s=s.replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>');
-  s=s.replace(/\*([^*\n]+)\*/g,'<em>$1</em>');
-  s=s.replace(/^### (.+)$/gm,'<h3>$1</h3>').replace(/^## (.+)$/gm,'<h2>$1</h2>').replace(/^# (.+)$/gm,'<h1>$1</h1>');
+  s=s.replace(/\*\*\*(.+?)\*\*\*/g,(_,t)=>`<strong><em>${esc(t)}</em></strong>`);
+  s=s.replace(/\*\*(.+?)\*\*/g,(_,t)=>`<strong>${esc(t)}</strong>`);
+  s=s.replace(/\*([^*\n]+)\*/g,(_,t)=>`<em>${esc(t)}</em>`);
+  s=s.replace(/^### (.+)$/gm,(_,t)=>`<h3>${esc(t)}</h3>`).replace(/^## (.+)$/gm,(_,t)=>`<h2>${esc(t)}</h2>`).replace(/^# (.+)$/gm,(_,t)=>`<h1>${esc(t)}</h1>`);
   s=s.replace(/^---+$/gm,'<hr>');
-  s=s.replace(/^> (.+)$/gm,'<blockquote>$1</blockquote>');
+  s=s.replace(/^> (.+)$/gm,(_,t)=>`<blockquote>${esc(t)}</blockquote>`);
   // B8: improved list handling supporting up to 2 levels of indentation
   s=s.replace(/((?:^(?:  )?[-*+] .+\n?)+)/gm,block=>{
     const lines=block.trimEnd().split('\n');
@@ -101,8 +101,8 @@ function renderMd(raw){
     for(const l of lines){
       const indent=/^ {2,}/.test(l);
       const text=l.replace(/^ {0,4}[-*+] /,'');
-      if(indent) html+=`<li style="margin-left:16px">${text}</li>`;
-      else html+=`<li>${text}</li>`;
+      if(indent) html+=`<li style="margin-left:16px">${esc(text)}</li>`;
+      else html+=`<li>${esc(text)}</li>`;
     }
     return html+'</ul>';
   });
@@ -111,19 +111,19 @@ function renderMd(raw){
     let html='<ol>';
     for(const l of lines){
       const text=l.replace(/^ {0,4}\d+\. /,'');
-      html+=`<li>${text}</li>`;
+      html+=`<li>${esc(text)}</li>`;
     }
     return html+'</ol>';
   });
-  s=s.replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+  s=s.replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g,(_,label,url)=>`<a href="${esc(url)}" target="_blank" rel="noopener">${esc(label)}</a>`);
   // Tables: | col | col | header row followed by | --- | --- | separator then data rows
   s=s.replace(/((?:^\|.+\|\n?)+)/gm,block=>{
     const rows=block.trim().split('\n').filter(r=>r.trim());
     if(rows.length<2)return block;
     const isSep=r=>/^\|[\s|:-]+\|$/.test(r.trim());
     if(!isSep(rows[1]))return block;
-    const parseRow=r=>r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>`<td>${c.trim()}</td>`).join('');
-    const parseHeader=r=>r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>`<th>${c.trim()}</th>`).join('');
+    const parseRow=r=>r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>`<td>${esc(c.trim())}</td>`).join('');
+    const parseHeader=r=>r.trim().replace(/^\|/,'').replace(/\|$/,'').split('|').map(c=>`<th>${esc(c.trim())}</th>`).join('');
     const header=`<tr>${parseHeader(rows[0])}</tr>`;
     const body=rows.slice(2).map(r=>`<tr>${parseRow(r)}</tr>`).join('');
     return `<table><thead>${header}</thead><tbody>${body}</tbody></table>`;
@@ -568,7 +568,9 @@ function renderMermaidBlocks(){
     if(!_mermaidLoading){
       _mermaidLoading=true;
       const script=document.createElement('script');
-      script.src='https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js';
+      script.src='https://cdn.jsdelivr.net/npm/mermaid@10.9.3/dist/mermaid.min.js';
+      script.integrity='sha384-R63zfMfSwJF4xCR11wXii+QUsbiBIdiDzDbtxia72oGWfkT7WHJfmD/I/eeHPJyT';
+      script.crossOrigin='anonymous';
       script.onload=()=>{
         if(typeof mermaid!=='undefined'){
           mermaid.initialize({startOnLoad:false,theme:'dark',themeVariables:{
@@ -745,7 +747,7 @@ async function uploadPendingFiles(){
     const f=S.pendingFiles[i];const fd=new FormData();
     fd.append('session_id',S.session.session_id);fd.append('file',f,f.name);
     try{
-      const res=await fetch('/api/upload',{method:'POST',body:fd});
+      const res=await fetch(new URL('/api/upload',location.origin).href,{method:'POST',credentials:'include',body:fd});
       if(!res.ok){const err=await res.text();throw new Error(err);}
       const data=await res.json();
       if(data.error)throw new Error(data.error);

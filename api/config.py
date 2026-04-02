@@ -306,8 +306,10 @@ _PROVIDER_MODELS = {
     'zai': [
         {'id': 'glm-5.1',            'label': 'GLM-5.1'},
         {'id': 'glm-5',              'label': 'GLM-5'},
+        {'id': 'glm-5-turbo',        'label': 'GLM-5 Turbo'},
         {'id': 'glm-4.7',            'label': 'GLM-4.7'},
-        {'id': 'glm-4.5-air',        'label': 'GLM-4.5 Air'},
+        {'id': 'glm-4.5',            'label': 'GLM-4.5'},
+        {'id': 'glm-4.5-flash',      'label': 'GLM-4.5 Flash'},
     ],
     'kimi-coding': [
         {'id': 'moonshot-v1-8k',     'label': 'Moonshot v1 8k'},
@@ -316,10 +318,49 @@ _PROVIDER_MODELS = {
         {'id': 'kimi-latest',        'label': 'Kimi Latest'},
     ],
     'minimax': [
-        {'id': 'abab6.5s-chat',      'label': 'MiniMax ABAB 6.5S'},
-        {'id': 'abab6.5g-chat',      'label': 'MiniMax ABAB 6.5G'},
+        {'id': 'MiniMax-M2.7',           'label': 'MiniMax M2.7'},
+        {'id': 'MiniMax-M2.7-highspeed', 'label': 'MiniMax M2.7 Highspeed'},
+        {'id': 'MiniMax-M2.5',           'label': 'MiniMax M2.5'},
+        {'id': 'MiniMax-M2.5-highspeed', 'label': 'MiniMax M2.5 Highspeed'},
+        {'id': 'MiniMax-M2.1',           'label': 'MiniMax M2.1'},
     ],
 }
+
+
+def resolve_model_provider(model_id: str):
+    """Resolve bare model name, provider, and base_url for AIAgent.
+
+    Model IDs from the dropdown may include a provider prefix
+    (e.g. 'anthropic/claude-sonnet-4.6').  Direct-API providers expect
+    bare model names, while OpenRouter expects the full provider/model path.
+
+    Also reads base_url from config.yaml so providers with custom endpoints
+    (e.g. MiniMax, Z.AI) are routed correctly.
+
+    Returns (model, provider, base_url) where provider and base_url may be None.
+    """
+    config_provider = None
+    config_base_url = None
+    model_cfg = cfg.get('model', {})
+    if isinstance(model_cfg, dict):
+        config_provider = model_cfg.get('provider')
+        config_base_url = model_cfg.get('base_url')
+
+    model_id = (model_id or '').strip()
+    if not model_id:
+        return model_id, config_provider, config_base_url
+
+    if '/' in model_id:
+        prefix, bare = model_id.split('/', 1)
+        # If prefix matches config provider, strip it
+        if config_provider and prefix == config_provider:
+            return bare, config_provider, config_base_url
+        # If prefix is a known direct-API provider, use it
+        # (base_url only applies when matching config provider)
+        if prefix in _PROVIDER_MODELS:
+            return bare, prefix, None
+
+    return model_id, config_provider, config_base_url
 
 
 def get_available_models() -> dict:
