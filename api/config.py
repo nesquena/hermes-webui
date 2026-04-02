@@ -262,6 +262,7 @@ _PROVIDER_DISPLAY = {
     'zai': 'Z.AI / GLM', 'kimi-coding': 'Kimi / Moonshot', 'deepseek': 'DeepSeek',
     'minimax': 'MiniMax', 'google': 'Google', 'meta-llama': 'Meta Llama',
     'huggingface': 'HuggingFace', 'alibaba': 'Alibaba',
+    'ollama': 'Ollama', 'lmstudio': 'LM Studio',
 }
 
 # Well-known models per provider (used to populate dropdown for direct API providers)
@@ -443,6 +444,7 @@ def get_available_models() -> dict:
 
    # 3. Fetch models from custom endpoint if base_url is configured
     if cfg_base_url:
+        auto_detected_models = []  # Store models fetched from endpoint
         try:
             import requests as _req
             import ipaddress
@@ -465,7 +467,13 @@ def get_available_models() -> dict:
                 try:
                     addr = ipaddress.ip_address(parsed.hostname)
                     if addr.is_private or addr.is_loopback or addr.is_link_local:
-                        provider = 'local'
+                        # Detect specific local provider based on hostname
+                        if 'ollama' in host or '127.0.0.1' in host or 'localhost' in host:
+                            provider = 'ollama'
+                        elif 'lmstudio' in host or 'lm-studio' in host:
+                            provider = 'lmstudio'
+                        else:
+                            provider = 'local'
                 except ValueError:
                     pass
             
@@ -512,15 +520,10 @@ def get_available_models() -> dict:
                     model_id = model.get('id', '') or model.get('name', '') or model.get('model', '')
                     model_name = model.get('name', '') or model.get('model', '') or model_id
                     if model_id and model_name:
-                        # Detect provider from model_id
-                        detected_provider = 'Custom'
-                        for pid in _PROVIDER_DISPLAY:
-                            if pid in model_id.lower():
-                                detected_provider = _PROVIDER_DISPLAY.get(pid, pid.title())
-                                break
-                        groups.append({
-                            'provider': detected_provider,
-                            'models': [{'id': model_id, 'label': model_name}],
+                        # Store model in auto_detected_models for later use
+                        auto_detected_models.append({
+                            'id': model_id, 
+                            'label': model_name
                         })
                         detected_providers.add(provider.lower())
             except Exception as e:
@@ -547,11 +550,26 @@ def get_available_models() -> dict:
                     'models': _PROVIDER_MODELS[pid],
                 })
             else:
-                # Unknown provider with key -- add a placeholder with the default model
-                groups.append({
-                    'provider': provider_name,
-                    'models': [{'id': default_model, 'label': default_model.split('/')[-1]}],
-                })
+                # Unknown provider with key
+                # If we have auto-detected models from base_url, use those instead of hardcoded default
+                if cfg_base_url and cfg_default:
+                    # Use the default model from config
+                    groups.append({
+                        'provider': provider_name,
+                        'models': [{'id': default_model, 'label': default_model.split('/')[-1]}],
+                    })
+                elif cfg_base_url:
+                    # Use auto-detected models from the endpoint
+                    groups.append({
+                        'provider': provider_name,
+                        'models': [{'id': model['id'], 'label': model['label']} for model in auto_detected_models],
+                    })
+                else:
+                    # Fallback to placeholder with default model
+                    groups.append({
+                        'provider': provider_name,
+                        'models': [{'id': default_model, 'label': default_model.split('/')[-1]}],
+                    })
     else:
         # No providers detected -- use fallback grouped list
         by_provider = {}
