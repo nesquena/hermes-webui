@@ -360,7 +360,8 @@ def get_available_models() -> dict:
     Discovery order:
       1. Read config.yaml 'model' section for active provider info
       2. Check for known API keys in env or ~/.hermes/.env
-      3. Fall back to hardcoded model list (OpenRouter-style)
+      3. Fetch models from custom endpoint if base_url is configured
+      4. Fall back to hardcoded model list (OpenRouter-style)
 
     Returns: {
         'active_provider': str|None,
@@ -379,6 +380,7 @@ def get_available_models() -> dict:
     elif isinstance(model_cfg, dict):
         active_provider = model_cfg.get('provider')
         cfg_default = model_cfg.get('default', '')
+        cfg_base_url = model_cfg.get('base_url', '')
         if cfg_default:
             default_model = cfg_default
 
@@ -438,6 +440,96 @@ def get_available_models() -> dict:
         detected_providers.add('minimax')
     if all_env.get('DEEPSEEK_API_KEY'):
         detected_providers.add('deepseek')
+
+   # 3. Fetch models from custom endpoint if base_url is configured
+    if cfg_base_url:
+        try:
+            import requests as _req
+            import ipaddress
+            
+            # Normalize the base_url
+            base_url = cfg_base_url.strip()
+            if base_url.endswith('/v1'):
+                endpoint_url = base_url[:-3] + '/models'
+            else:
+                endpoint_url = base_url + '/v1/models'
+            
+            # Detect provider from base_url
+            provider = 'custom'
+            normalized = base_url.strip('/')
+            parsed = urlparse(normalized if '://' in normalized else f'http://{normalized}')
+            host = parsed.netloc.lower() or parsed.path.lower()
+            
+            # Check if it's a local/private IP
+            if parsed.hostname:
+                try:
+                    addr = ipaddress.ip_address(parsed.hostname)
+                    if addr.is_private or addr.is_loopback or addr.is_link_local:
+                        provider = 'local'
+                except ValueError:
+                    pass
+            
+            # Get the API key for this provider
+            headers = {}
+            
+            # Try hermes-agent style API key resolution
+            if provider == 'local':
+                # For local endpoints, check common API key env vars
+                for key in ('HERMES_API_KEY', 'HERMES_OPENAI_API_KEY', 'OPENAI_API_KEY', 
+                           'LOCAL_API_KEY', 'OPENROUTER_API_KEY', 'API_KEY'):
+                    api_key = os.getenv(key)
+                    if api_key:
+                        headers['Authorization'] = f'Bearer {api_key}'
+                        break
+            else:
+                # For known providers, use their specific key env vars
+                for key in ('OPENROUTER_API_KEY', 'OPENAI_API_KEY', 'API_KEY'):
+                    api_key = os.getenv(key)
+                    if api_key:
+                        headers['Authorization'] = f'Bearer {api_key}'
+                        break
+            
+            # Make the request
+            try:
+                resp = _req.get(endpoint_url, headers=headers, timeout=10)
+                resp.raise_for_status()
+                data = resp.json()
+                
+                # Parse the response - handle both OpenAI-compatible and llama.cpp formats
+                models_list = []
+                
+                # OpenAI-compatible format: data is in 'data' key
+                if 'data' in data and isinstance(data['data'], list):
+                    models_list = data['data']
+                
+                # llama.cpp format: data is 'models' array at root
+                elif 'models' in data and isinstance(data['models'], list):
+                    models_list = data['models']
+                
+                for model in models_list:
+                    if not isinstance(model, dict):
+                        continue
+                    model_id = model.get('id', '') or model.get('name', '') or model.get('model', '')
+                    model_name = model.get('name', '') or model.get('model', '') or model_id
+                    if model_id and model_name:
+                        # Detect provider from model_id
+                        detected_provider = 'Custom'
+                        for pid in _PROVIDER_DISPLAY:
+                            if pid in model_id.lower():
+                                detected_provider = _PROVIDER_DISPLAY.get(pid, pid.title())
+                                break
+                        groups.append({
+                            'provider': detected_provider,
+                            'models': [{'id': model_id, 'label': model_name}],
+                        })
+                        detected_providers.add(provider.lower())
+            except Exception as e:
+                # Endpoint unavailable, fall through to fallback list
+                logger.debug(f"Failed to fetch models from {endpoint_url}: {e}")
+                pass
+        except Exception:
+            # Import failed, fall through to fallback list
+            pass
 
     # 5. Build model groups
     if detected_providers:

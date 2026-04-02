@@ -17,7 +17,7 @@ from api.config import (
     SESSIONS, SESSIONS_MAX, LOCK, STREAMS, STREAMS_LOCK, CANCEL_FLAGS,
     SERVER_START_TIME, CLI_TOOLSETS, _INDEX_HTML_PATH, get_available_models,
     IMAGE_EXTS, MD_EXTS, MIME_MAP, MAX_FILE_BYTES, MAX_UPLOAD_BYTES,
-    CHAT_LOCK, load_settings, save_settings,
+    CHAT_LOCK, load_settings, save_settings, cfg,
 )
 from api.helpers import require, bad, safe_resolve, j, t, read_body
 from api.models import (
@@ -600,12 +600,36 @@ def _handle_chat_start(handler, body):
     model = body.get('model') or s.model
     s.workspace = workspace; s.model = model; s.save()
     set_last_workspace(workspace)
+    
+    # Read base_url from config.yaml for this model
+    # cfg is a global variable loaded at module load time
+    model_cfg = cfg.get('model', {})
+    base_url = model_cfg.get('base_url', '')
+    
+    # If a model is selected that matches our custom endpoint, use that base_url AND local provider
+    if base_url and model:
+        # Check if the model name contains "qwen" (your local model)
+        if 'qwen' in model.lower():
+            # Use the local endpoint with "local" provider
+            if base_url.endswith('/v1'):
+                effective_base_url = base_url[:-3]
+            else:
+                effective_base_url = base_url + '/v1'
+            effective_provider = 'custom'
+            print(f"DEBUG: Using custom base_url for {model}: {effective_base_url}", file=sys.stderr)
+    
     stream_id = uuid.uuid4().hex
     q = queue.Queue()
     with STREAMS_LOCK: STREAMS[stream_id] = q
+    kwargs = {}
+    if 'effective_base_url' in locals():
+        kwargs['base_url'] = effective_base_url
+    if 'effective_provider' in locals():
+        kwargs['provider'] = effective_provider
     thr = threading.Thread(
         target=_run_agent_streaming,
         args=(s.session_id, msg, model, workspace, stream_id, attachments),
+        kwargs=kwargs,
         daemon=True,
     )
     thr.start()

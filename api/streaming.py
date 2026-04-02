@@ -32,7 +32,7 @@ def _sse(handler, event, data):
     handler.wfile.flush()
 
 
-def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, attachments=None):
+def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, attachments=None, base_url=None, provider=None):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id]."""
     q = STREAMS.get(stream_id)
     if q is None:
