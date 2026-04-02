@@ -442,12 +442,13 @@ def get_available_models() -> dict:
     if all_env.get('DEEPSEEK_API_KEY'):
         detected_providers.add('deepseek')
 
-   # 3. Fetch models from custom endpoint if base_url is configured
+    # 3. Fetch models from custom endpoint if base_url is configured
     if cfg_base_url:
         auto_detected_models = []  # Store models fetched from endpoint
         try:
-            import requests as _req
             import ipaddress
+            import urllib.request
+            import urllib.parse
             
             # Normalize the base_url
             base_url = cfg_base_url.strip()
@@ -477,7 +478,7 @@ def get_available_models() -> dict:
                 except ValueError:
                     pass
             
-            # Get the API key for this provider
+          # Get the API key for this provider
             headers = {}
             
             # Try hermes-agent style API key resolution
@@ -497,11 +498,19 @@ def get_available_models() -> dict:
                         headers['Authorization'] = f'Bearer {api_key}'
                         break
             
-            # Make the request
+            # Make the request using urllib.request
             try:
-                resp = _req.get(endpoint_url, headers=headers, timeout=10)
-                resp.raise_for_status()
-                data = resp.json()
+                # Build request URL
+                url = endpoint_url
+                
+                # Prepare request
+                req = urllib.request.Request(url, method='GET')
+                for key, value in headers.items():
+                    req.add_header(key, value)
+                
+                # Send request with timeout
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    data = json.loads(response.read().decode('utf-8'))
                 
                 # Parse the response - handle both OpenAI-compatible and llama.cpp formats
                 models_list = []
