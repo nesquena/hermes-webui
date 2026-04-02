@@ -250,21 +250,21 @@
     .msg-body{padding-left:0;max-width:100%;}
     .msg-role{font-size:12px;}
     /* Composer */
-    .composer-wrap{padding:8px 10px 12px;}
+    .composer-wrap{padding:8px 10px 12px!important;}
     .composer-box{border-radius:12px;}
     .composer-box textarea{font-size:16px;min-height:40px;}
     .send-btn{padding:6px 14px;font-size:13px;}
     /* Empty state */
     .empty-state h2{font-size:18px;}
     .empty-state p{font-size:13px;}
-    .suggestion-grid{max-width:100%;}
+    .suggestion-grid{max-width:100%!important;}
     .suggestion-btn{font-size:12px;padding:8px 10px;}
     /* Approval card */
     .approval-card{padding:0 10px 8px;}
     .approval-btns{gap:6px;}
     .approval-btn{padding:5px 10px;font-size:11px;}
     /* Tool cards */
-    .tool-card{margin-left:0;font-size:12px;}
+    .tool-card{margin-left:0!important;font-size:12px;}
     /* Settings modal */
     .settings-panel{width:95vw;max-width:95vw;}
   }
