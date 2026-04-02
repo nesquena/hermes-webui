@@ -334,7 +334,15 @@ def handle_post(handler, parsed):
 # ── GET route helpers ─────────────────────────────────────────────────────────
 
 def _serve_static(handler, parsed):
-    static_file = Path(__file__).parent.parent / parsed.path.lstrip('/')
+    static_root = (Path(__file__).parent.parent / 'static').resolve()
+    # Strip the leading '/static/' prefix and resolve the full path
+    rel = parsed.path[len('/static/'):]
+    static_file = (static_root / rel).resolve()
+    # Sandbox check: resolved path must stay inside static_root
+    try:
+        static_file.relative_to(static_root)
+    except ValueError:
+        return j(handler, {'error': 'not found'}, status=404)
     if not static_file.exists() or not static_file.is_file():
         return j(handler, {'error': 'not found'}, status=404)
     ext = static_file.suffix.lower()
