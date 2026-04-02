@@ -239,6 +239,15 @@ CLI_TOOLSETS = cfg.get('platform_toolsets', {}).get('cli', [
     'web', 'webhook',
 ])
 
+# ── Provider / base_url from config.yaml model section ───────────────────────
+_model_cfg = cfg.get('model', {})
+if isinstance(_model_cfg, dict):
+    DEFAULT_PROVIDER = _model_cfg.get('provider', '')
+    DEFAULT_BASE_URL = _model_cfg.get('base_url', '')
+else:
+    DEFAULT_PROVIDER = ''
+    DEFAULT_BASE_URL = ''
+
 # ── Model / provider discovery ───────────────────────────────────────────────
 
 # Hardcoded fallback models (used when no config.yaml or agent is available)
@@ -295,9 +304,10 @@ _PROVIDER_MODELS = {
         {'id': 'gemini-2.5-pro',    'label': 'Gemini 2.5 Pro (via Nous)'},
     ],
     'zai': [
-        {'id': 'glm-4-plus',         'label': 'GLM-4 Plus'},
-        {'id': 'glm-4-air',          'label': 'GLM-4 Air'},
-        {'id': 'glm-z1-flash',       'label': 'GLM-Z1 Flash'},
+        {'id': 'glm-5.1',            'label': 'GLM-5.1'},
+        {'id': 'glm-5',              'label': 'GLM-5'},
+        {'id': 'glm-4.7',            'label': 'GLM-4.7'},
+        {'id': 'glm-4.5-air',        'label': 'GLM-4.5 Air'},
     ],
     'kimi-coding': [
         {'id': 'moonshot-v1-8k',     'label': 'Moonshot v1 8k'},

@@ -13,6 +13,7 @@ from pathlib import Path
 from api.config import (
     STREAMS, STREAMS_LOCK, CANCEL_FLAGS, CLI_TOOLSETS,
     _get_session_agent_lock, _set_thread_env, _clear_thread_env,
+    DEFAULT_PROVIDER, DEFAULT_BASE_URL,
 )
 
 # Lazy import to avoid circular deps -- hermes-agent is on sys.path via api/config.py
@@ -101,6 +102,8 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 raise ImportError("AIAgent not available -- check that hermes-agent is on sys.path")
             agent = AIAgent(
                 model=model,
+                provider=DEFAULT_PROVIDER or None,
+                base_url=DEFAULT_BASE_URL or None,
                 platform='cli',
                 quiet_mode=True,
                 enabled_toolsets=CLI_TOOLSETS,
@@ -174,8 +177,33 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                         if base_text[:60] in content or content[:60] in msg_text:
                             m['attachments'] = attachments
                             break
+            # Extract usage stats from the agent result
+            usage_stats = {
+                'prompt_tokens': result.get('prompt_tokens', 0),
+                'completion_tokens': result.get('completion_tokens', 0),
+                'total_tokens': result.get('total_tokens', 0),
+                'input_tokens': result.get('input_tokens', 0),
+                'output_tokens': result.get('output_tokens', 0),
+                'cache_read_tokens': result.get('cache_read_tokens', 0),
+                'cache_write_tokens': result.get('cache_write_tokens', 0),
+                'reasoning_tokens': result.get('reasoning_tokens', 0),
+                'estimated_cost_usd': result.get('estimated_cost_usd', 0),
+                'api_calls': result.get('api_calls', 0),
+            }
+            # Accumulate usage on the session object for /usage endpoint
+            if not hasattr(s, 'usage_stats') or not isinstance(s.usage_stats, dict):
+                s.usage_stats = {'prompt_tokens': 0, 'completion_tokens': 0,
+                                 'total_tokens': 0, 'input_tokens': 0,
+                                 'output_tokens': 0, 'cache_read_tokens': 0,
+                                 'cache_write_tokens': 0, 'reasoning_tokens': 0,
+                                 'estimated_cost_usd': 0, 'api_calls': 0}
+            for k in list(s.usage_stats):
+                s.usage_stats[k] = s.usage_stats.get(k, 0) + usage_stats.get(k, 0)
             s.save()
-            put('done', {'session': s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}})
+            put('done', {
+                'session': s.compact() | {'messages': s.messages, 'tool_calls': tool_calls},
+                'usage': usage_stats,
+            })
           finally:
             if old_cwd is None: os.environ.pop('TERMINAL_CWD', None)
             else: os.environ['TERMINAL_CWD'] = old_cwd

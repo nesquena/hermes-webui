@@ -162,6 +162,22 @@ def handle_get(handler, parsed):
     if parsed.path == '/api/memory':
         return _handle_memory_read(handler)
 
+    # ── Usage API (GET) ──
+    if parsed.path == '/api/session/usage':
+        return _handle_session_usage(handler, parsed)
+
+    # ── Personalities API (GET) ──
+    if parsed.path == '/api/personalities':
+        return _handle_personalities(handler)
+
+    # ── Session snapshots (GET) ──
+    if parsed.path == '/api/session/snapshots':
+        return _handle_session_snapshots(handler, parsed)
+
+    # ── Hermes insights (GET) -- reads from ~/.hermes/state.db ──
+    if parsed.path == '/api/hermes/insights':
+        return _handle_hermes_insights(handler, parsed)
+
     return False  # 404
 
 
@@ -327,6 +343,14 @@ def handle_post(handler, parsed):
     # ── Session import from JSON (POST) ──
     if parsed.path == '/api/session/import':
         return _handle_session_import(handler, body)
+
+    # ── Session snapshot (POST) ──
+    if parsed.path == '/api/session/snapshot':
+        return _handle_session_snapshot_create(handler, body)
+
+    # ── Session rollback (POST) ──
+    if parsed.path == '/api/session/rollback':
+        return _handle_session_rollback(handler, body)
 
     return False  # 404
 
@@ -930,3 +954,291 @@ def _handle_session_import(handler, body):
             SESSIONS.popitem(last=False)
     s.save()
     return j(handler, {'ok': True, 'session': s.compact() | {'messages': s.messages}})
+
+
+# ── Session usage (token estimation) ─────────────────────────────────────────
+
+def _handle_session_usage(handler, parsed):
+    """Return estimated token usage for a session."""
+    sid = parse_qs(parsed.query).get('session_id', [''])[0]
+    if not sid:
+        return j(handler, {'error': 'session_id is required'}, status=400)
+    try:
+        s = get_session(sid)
+    except KeyError:
+        return bad(handler, 'Session not found', 404)
+
+    # Estimate tokens from message content (~4 chars/token heuristic)
+    total_chars = 0
+    user_chars = 0
+    assistant_chars = 0
+    tool_chars = 0
+    for m in s.messages:
+        c = m.get('content', '')
+        if isinstance(c, list):
+            text = ' '.join(p.get('text', '') for p in c
+                           if isinstance(p, dict) and p.get('type') == 'text')
+        else:
+            text = str(c)
+        chars = len(text)
+        total_chars += chars
+        role = m.get('role', '')
+        if role == 'user':
+            user_chars += chars
+        elif role == 'assistant':
+            assistant_chars += chars
+        elif role == 'tool':
+            tool_chars += chars
+
+    est_tokens = total_chars // 4
+    user_tokens = user_chars // 4
+    assistant_tokens = assistant_chars // 4
+    tool_tokens = tool_chars // 4
+
+    # If the session has accumulated usage from agent runs, prefer those
+    usage = getattr(s, 'usage_stats', None) or {}
+
+    return j(handler, {
+        'session_id': sid,
+        'model': s.model,
+        'message_count': len(s.messages),
+        'estimated_tokens': {
+            'total': est_tokens,
+            'user': user_tokens,
+            'assistant': assistant_tokens,
+            'tool': tool_tokens,
+        },
+        'agent_usage': usage,
+        'workspace': s.workspace,
+        'created_at': s.created_at,
+        'updated_at': s.updated_at,
+        'duration_seconds': round(s.updated_at - s.created_at, 1) if s.created_at else 0,
+    })
+
+
+# ── Personalities ────────────────────────────────────────────────────────────
+
+def _handle_personalities(handler):
+    """Return available personality profiles from config.yaml."""
+    try:
+        personalities = cfg.get('personalities', {})
+        if not isinstance(personalities, dict):
+            personalities = {}
+        # Also check CLI sub-config
+        cli_personalities = cfg.get('cli', {}).get('personalities', {}) if isinstance(cfg.get('cli'), dict) else {}
+        if isinstance(cli_personalities, dict):
+            personalities = {**personalities, **cli_personalities}
+        return j(handler, {'personalities': personalities})
+    except Exception:
+        return j(handler, {'personalities': {}})
+
+
+# ── Session snapshots ────────────────────────────────────────────────────────
+
+_SNAPSHOT_DIR = STATE_DIR / 'snapshots'
+
+def _handle_session_snapshots(handler, parsed):
+    """List available snapshots for a session."""
+    sid = parse_qs(parsed.query).get('session_id', [''])[0]
+    if not sid:
+        return j(handler, {'error': 'session_id is required'}, status=400)
+    snap_dir = _SNAPSHOT_DIR / sid
+    snapshots = []
+    if snap_dir.exists():
+        for p in sorted(snap_dir.glob('*.json')):
+            try:
+                data = json.loads(p.read_text(encoding='utf-8'))
+                snapshots.append({
+                    'index': data.get('snapshot_index', 0),
+                    'label': data.get('label', ''),
+                    'message_count': len(data.get('messages', [])),
+                    'created_at': data.get('created_at', 0),
+                })
+            except Exception:
+                pass
+    return j(handler, {'session_id': sid, 'snapshots': snapshots})
+
+
+def _handle_session_snapshot_create(handler, body):
+    """Create a snapshot of the current session state."""
+    try:
+        require(body, 'session_id')
+    except ValueError as e:
+        return bad(handler, str(e))
+    try:
+        s = get_session(body['session_id'])
+    except KeyError:
+        return bad(handler, 'Session not found', 404)
+
+    snap_dir = _SNAPSHOT_DIR / s.session_id
+    snap_dir.mkdir(parents=True, exist_ok=True)
+
+    # Determine snapshot index
+    existing = sorted(snap_dir.glob('*.json'))
+    idx = len(existing)
+    label = body.get('label', f'Snapshot {idx}')
+
+    snap_data = {
+        'snapshot_index': idx,
+        'label': label,
+        'messages': s.messages,
+        'tool_calls': s.tool_calls,
+        'title': s.title,
+        'created_at': time.time(),
+    }
+    snap_file = snap_dir / f'{idx:03d}.json'
+    snap_file.write_text(json.dumps(snap_data, ensure_ascii=False, indent=2), encoding='utf-8')
+
+    return j(handler, {
+        'ok': True,
+        'snapshot_index': idx,
+        'label': label,
+        'message_count': len(s.messages),
+    })
+
+
+def _handle_session_rollback(handler, body):
+    """Roll back a session to a previous snapshot."""
+    try:
+        require(body, 'session_id')
+    except ValueError as e:
+        return bad(handler, str(e))
+    try:
+        s = get_session(body['session_id'])
+    except KeyError:
+        return bad(handler, 'Session not found', 404)
+
+    # Default to the most recent snapshot if no index specified
+    snap_index = body.get('snapshot_index')
+    snap_dir = _SNAPSHOT_DIR / s.session_id
+
+    if not snap_dir.exists():
+        return bad(handler, 'No snapshots available for this session', 404)
+
+    if snap_index is None:
+        # Use the most recent
+        existing = sorted(snap_dir.glob('*.json'), reverse=True)
+        if not existing:
+            return bad(handler, 'No snapshots available', 404)
+        snap_file = existing[0]
+    else:
+        snap_file = snap_dir / f'{int(snap_index):03d}.json'
+        if not snap_file.exists():
+            return bad(handler, f'Snapshot {snap_index} not found', 404)
+
+    try:
+        snap_data = json.loads(snap_file.read_text(encoding='utf-8'))
+    except Exception:
+        return bad(handler, 'Failed to read snapshot', 500)
+
+    # Create a pre-rollback snapshot so user can undo the rollback
+    pre_idx = len(sorted(snap_dir.glob('*.json')))
+    pre_snap = {
+        'snapshot_index': pre_idx,
+        'label': f'Pre-rollback (was {len(s.messages)} msgs)',
+        'messages': s.messages,
+        'tool_calls': s.tool_calls,
+        'title': s.title,
+        'created_at': time.time(),
+    }
+    (snap_dir / f'{pre_idx:03d}.json').write_text(
+        json.dumps(pre_snap, ensure_ascii=False, indent=2), encoding='utf-8')
+
+    # Apply snapshot
+    s.messages = snap_data.get('messages', [])
+    s.tool_calls = snap_data.get('tool_calls', [])
+    if snap_data.get('title'):
+        s.title = snap_data['title']
+    s.save()
+
+    return j(handler, {
+        'ok': True,
+        'rolled_back_to': snap_data.get('snapshot_index', snap_index),
+        'label': snap_data.get('label', ''),
+        'message_count': len(s.messages),
+        'session': s.compact() | {'messages': s.messages},
+    })
+
+
+# ── Hermes-wide insights from state.db ──────────────────────────────────────
+
+_HERMES_DB = Path(os.path.expanduser('~/.hermes')) / 'state.db'
+
+def _handle_hermes_insights(handler, parsed):
+    """Read session stats from the Hermes CLI agent's SQLite database."""
+    if not _HERMES_DB.exists():
+        return j(handler, {'error': 'Hermes state.db not found', 'sessions': [], 'totals': {}})
+
+    days = int(parse_qs(parsed.query).get('days', ['7'])[0])
+    cutoff = time.time() - (days * 86400)
+
+    try:
+        import sqlite3
+        conn = sqlite3.connect(f'file:{_HERMES_DB}?mode=ro', uri=True)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+
+        # Fetch sessions in the time window
+        cur.execute('''
+            SELECT id, source, model, started_at, ended_at, message_count,
+                   tool_call_count, input_tokens, output_tokens,
+                   cache_read_tokens, cache_write_tokens, reasoning_tokens,
+                   estimated_cost_usd, actual_cost_usd, title
+            FROM sessions
+            WHERE started_at >= ?
+            ORDER BY started_at DESC
+        ''', (cutoff,))
+        rows = cur.fetchall()
+
+        sessions = []
+        totals = {
+            'sessions': 0, 'messages': 0, 'tool_calls': 0,
+            'input_tokens': 0, 'output_tokens': 0,
+            'cache_read_tokens': 0, 'cache_write_tokens': 0,
+            'reasoning_tokens': 0, 'estimated_cost_usd': 0.0,
+        }
+        by_model = {}
+        by_source = {}
+
+        for r in rows:
+            s = {k: r[k] for k in r.keys()}
+            sessions.append(s)
+            totals['sessions'] += 1
+            totals['messages'] += r['message_count'] or 0
+            totals['tool_calls'] += r['tool_call_count'] or 0
+            totals['input_tokens'] += r['input_tokens'] or 0
+            totals['output_tokens'] += r['output_tokens'] or 0
+            totals['cache_read_tokens'] += r['cache_read_tokens'] or 0
+            totals['cache_write_tokens'] += r['cache_write_tokens'] or 0
+            totals['reasoning_tokens'] += r['reasoning_tokens'] or 0
+            totals['estimated_cost_usd'] += r['estimated_cost_usd'] or 0.0
+
+            m = r['model'] or 'unknown'
+            by_model[m] = by_model.get(m, 0) + 1
+            src = r['source'] or 'unknown'
+            by_source[src] = by_source.get(src, 0) + 1
+
+        # All-time totals
+        cur.execute('''
+            SELECT COUNT(*) as sessions,
+                   COALESCE(SUM(message_count),0) as messages,
+                   COALESCE(SUM(tool_call_count),0) as tool_calls,
+                   COALESCE(SUM(input_tokens),0) as input_tokens,
+                   COALESCE(SUM(output_tokens),0) as output_tokens,
+                   COALESCE(SUM(estimated_cost_usd),0) as estimated_cost_usd
+            FROM sessions
+        ''')
+        all_time = dict(cur.fetchone())
+
+        conn.close()
+
+        return j(handler, {
+            'days': days,
+            'sessions': sessions,
+            'totals': totals,
+            'by_model': by_model,
+            'by_source': by_source,
+            'all_time': all_time,
+        })
+    except Exception as e:
+        return j(handler, {'error': str(e), 'sessions': [], 'totals': {}})
