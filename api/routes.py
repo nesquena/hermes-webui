@@ -614,29 +614,21 @@ def _handle_chat_start(handler, body):
     model_cfg = cfg.get('model', {})
     base_url = model_cfg.get('base_url', '')
     
-    # If a model is selected that matches our custom endpoint, use that base_url AND local provider
-    if base_url and model:
-        # Check if the model name contains "qwen" (your local model)
-        if 'qwen' in model.lower():
-            # Use the local endpoint with "local" provider
-            if base_url.endswith('/v1'):
-                effective_base_url = base_url[:-3]
-            else:
-                effective_base_url = base_url + '/v1'
-            effective_provider = 'custom'
-            print(f"DEBUG: Using custom base_url for {model}: {effective_base_url}", file=sys.stderr)
+    # Use resolve_model_provider to get the correct model, provider, and base_url
+    # This handles all providers including local Ollama/LM Studio endpoints
+    from api.config import resolve_model_provider
+    resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(model)
     
     stream_id = uuid.uuid4().hex
     q = queue.Queue()
     with STREAMS_LOCK: STREAMS[stream_id] = q
     kwargs = {}
-    if 'effective_base_url' in locals():
-        kwargs['base_url'] = effective_base_url
-    if 'effective_provider' in locals():
-        kwargs['provider'] = effective_provider
+    # Pass resolved provider and base_url to the streaming handler
+    kwargs['provider'] = resolved_provider
+    kwargs['base_url'] = resolved_base_url
     thr = threading.Thread(
         target=_run_agent_streaming,
-        args=(s.session_id, msg, model, workspace, stream_id, attachments),
+        args=(s.session_id, msg, resolved_model, workspace, stream_id, attachments),
         kwargs=kwargs,
         daemon=True,
     )
