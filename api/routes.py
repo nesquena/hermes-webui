@@ -131,33 +131,6 @@ def handle_get(handler, parsed):
         msgs = get_cli_session_messages(sid)
         return j(handler, {'messages': msgs, 'is_cli': True})
 
-    if parsed.path == '/api/session/import_cli':
-        # Convert a CLI session (SQLite) to a WebUI session (JSON).
-        # This is called by the frontend when a CLI session is first opened.
-        # If the session is already imported this is a no-op.
-        try: require(body, 'session_id')
-        except ValueError as e: return bad(handler, str(e))
-        sid = str(body['session_id'])
-        # Check if already imported
-        try:
-            already = get_session(sid)
-            return j(handler, {'session': already.compact() | {'messages': already.messages, 'is_cli_session': True}})
-        except KeyError:
-            pass
-        # Not yet in WebUI store — fetch from SQLite and import
-        msgs = get_cli_session_messages(sid)
-        if not msgs:
-            return bad(handler, 'Session not found in CLI store', 404)
-        title = msgs[0].get('content', 'CLI Session')[:64]
-        if isinstance(title, list):
-            title = 'CLI Session'
-        model = 'unknown'
-        s = import_cli_session(sid, title, msgs, model)
-        s.is_cli_session = True
-        s._cli_origin = sid
-        s.save()
-        return j(handler, {'session': s.compact() | {'messages': msgs, 'is_cli_session': True}, 'imported': True})
-
     if parsed.path == '/api/projects':
         return j(handler, {'projects': load_projects()})
 
@@ -263,6 +236,31 @@ def handle_post(handler, parsed):
         s.title = str(body['title']).strip()[:80] or 'Untitled'
         s.save()
         return j(handler, {'session': s.compact()})
+
+    if parsed.path == '/api/session/import_cli':
+        from api.models import import_cli_session
+        try: require(body, 'session_id')
+        except ValueError as e: return bad(handler, str(e))
+        sid = str(body['session_id'])
+        # Check if already imported
+        try:
+            already = get_session(sid)
+            return j(handler, {'session': already.compact() | {'messages': already.messages, 'is_cli_session': True}})
+        except KeyError:
+            pass
+        # Not yet in WebUI store -- fetch from SQLite and import
+        msgs = get_cli_session_messages(sid)
+        if not msgs:
+            return bad(handler, 'Session not found in CLI store', 404)
+        title = msgs[0].get('content', 'CLI Session')[:64]
+        if isinstance(title, list):
+            title = 'CLI Session'
+        model = 'unknown'
+        s = import_cli_session(sid, title, msgs, model)
+        s.is_cli_session = True
+        s._cli_origin = sid
+        s.save()
+        return j(handler, {'session': s.compact() | {'messages': msgs, 'is_cli_session': True}, 'imported': True})
 
     if parsed.path == '/api/session/update':
         try: require(body, 'session_id')
