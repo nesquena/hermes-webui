@@ -195,9 +195,10 @@ function renderSessionListFromCache(){
         list.appendChild(hdr);
       }
     }
+    const isCli=!!s.is_cli_session;
     const el=document.createElement('div');
     const isActive=S.session&&s.session_id===S.session.session_id;
-    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'');
+    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(isCli?' cli-session':'');
     if(isActive&&S.session&&S.session._flash)delete S.session._flash;
     const rawTitle=s.title||'Untitled';
     const tags=(rawTitle.match(/#[\w-]+/g)||[]);
@@ -335,23 +336,49 @@ function renderSessionListFromCache(){
     el.appendChild(actions);
 
     // Use a click timer to distinguish single-click (navigate) from double-click (rename).
-    // This prevents loadSession from firing on the first click of a double-click,
-    // which would re-render the list and destroy the dblclick target before it fires.
+    // CLI sessions are read-only: no double-click rename.
     let _clickTimer=null;
     el.onclick=async(e)=>{
-      if(_renamingSid) return; // ignore while any rename is active
+      if(_renamingSid) return;
       if(actions.contains(e.target)) return;
       clearTimeout(_clickTimer);
       _clickTimer=setTimeout(async()=>{
         _clickTimer=null;
         if(_renamingSid) return;
-        await loadSession(s.session_id);renderSessionListFromCache();
+        if(isCli){
+          try{
+            const data=await api(`/api/sessions/cli_messages?session_id=${encodeURIComponent(s.session_id)}`);
+            S.session={
+              session_id:s.session_id,
+              title:s.title,
+              workspace:'cli',
+              model:s.model||'unknown',
+              messages:data.messages||[],
+              tool_calls:[],
+              is_cli_session:true,
+            };
+            S.messages=data.messages||[];
+            S.toolCalls=[];
+            MSG_QUEUE.length=0;updateQueueBadge();
+            S.busy=false;
+            S.activeStreamId=null;
+            $('btnSend').disabled=false;
+            $('btnSend').style.opacity='1';
+            const _dots=$('activityDots');if(_dots)_dots.style.display='none';
+            const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
+            setStatus('');clearLiveToolCards();
+            syncTopbar();renderMessages();
+          }catch(err){showToast('Failed to load CLI session: '+err.message);}
+        }else{
+          await loadSession(s.session_id);renderSessionListFromCache();
+        }
       }, 220);
     };
     el.ondblclick=async(e)=>{
+      if(isCli) return;
       e.stopPropagation();
       e.preventDefault();
-      clearTimeout(_clickTimer); // cancel the pending single-click navigation
+      clearTimeout(_clickTimer);
       _clickTimer=null;
       startRename();
     };

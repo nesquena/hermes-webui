@@ -23,7 +23,7 @@ from api.helpers import require, bad, safe_resolve, j, t, read_body
 from api.models import (
     Session, get_session, new_session, all_sessions, title_from,
     _write_session_index, SESSION_INDEX_FILE,
-    load_projects, save_projects,
+    load_projects, save_projects, get_cli_sessions, get_cli_session_messages,
 )
 from api.workspace import (
     load_workspaces, save_workspaces, get_last_workspace, set_last_workspace,
@@ -85,14 +85,50 @@ def handle_get(handler, parsed):
         sid = parse_qs(parsed.query).get('session_id', [''])[0]
         if not sid:
             return j(handler, {'error': 'session_id is required'}, status=400)
-        s = get_session(sid)
-        return j(handler, {'session': s.compact() | {
-            'messages': s.messages,
-            'tool_calls': getattr(s, 'tool_calls', []),
-        }})
+        try:
+            s = get_session(sid)
+            return j(handler, {'session': s.compact() | {
+                'messages': s.messages,
+                'tool_calls': getattr(s, 'tool_calls', []),
+            }})
+        except KeyError:
+            # Not a WebUI session -- try CLI store
+            msgs = get_cli_session_messages(sid)
+            if msgs:
+                sess = {
+                    'session_id': sid,
+                    'title': 'CLI Session',
+                    'workspace': 'cli',
+                    'model': 'unknown',
+                    'message_count': len(msgs),
+                    'created_at': msgs[0].get('timestamp', 0),
+                    'updated_at': msgs[-1].get('timestamp', 0),
+                    'pinned': False,
+                    'archived': False,
+                    'project_id': None,
+                    'is_cli_session': True,
+                    'messages': msgs,
+                    'tool_calls': [],
+                }
+                return j(handler, {'session': sess})
+            return bad(handler, 'Session not found', 404)
 
     if parsed.path == '/api/sessions':
-        return j(handler, {'sessions': all_sessions()})
+        webui_sessions = all_sessions()
+        cli = get_cli_sessions()
+        # Deduplicate: WebUI sessions always win if same session_id
+        webui_ids = {s['session_id'] for s in webui_sessions}
+        deduped_cli = [s for s in cli if s['session_id'] not in webui_ids]
+        merged = webui_sessions + deduped_cli
+        merged.sort(key=lambda s: s.get('updated_at', 0) or 0, reverse=True)
+        return j(handler, {'sessions': merged, 'cli_count': len(deduped_cli)})
+
+    if parsed.path == '/api/sessions/cli_messages':
+        sid = parse_qs(parsed.query).get('session_id', [''])[0]
+        if not sid:
+            return bad(handler, 'session_id is required', 400)
+        msgs = get_cli_session_messages(sid)
+        return j(handler, {'messages': msgs, 'is_cli': True})
 
     if parsed.path == '/api/projects':
         return j(handler, {'projects': load_projects()})
