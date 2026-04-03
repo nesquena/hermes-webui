@@ -24,6 +24,7 @@ from api.models import (
     Session, get_session, new_session, all_sessions, title_from,
     _write_session_index, SESSION_INDEX_FILE,
     load_projects, save_projects, get_cli_sessions, get_cli_session_messages,
+    import_cli_session,
 )
 from api.workspace import (
     load_workspaces, save_workspaces, get_last_workspace, set_last_workspace,
@@ -129,6 +130,33 @@ def handle_get(handler, parsed):
             return bad(handler, 'session_id is required', 400)
         msgs = get_cli_session_messages(sid)
         return j(handler, {'messages': msgs, 'is_cli': True})
+
+    if parsed.path == '/api/session/import_cli':
+        # Convert a CLI session (SQLite) to a WebUI session (JSON).
+        # This is called by the frontend when a CLI session is first opened.
+        # If the session is already imported this is a no-op.
+        try: require(body, 'session_id')
+        except ValueError as e: return bad(handler, str(e))
+        sid = str(body['session_id'])
+        # Check if already imported
+        try:
+            already = get_session(sid)
+            return j(handler, {'session': already.compact() | {'messages': already.messages, 'is_cli_session': True}})
+        except KeyError:
+            pass
+        # Not yet in WebUI store — fetch from SQLite and import
+        msgs = get_cli_session_messages(sid)
+        if not msgs:
+            return bad(handler, 'Session not found in CLI store', 404)
+        title = msgs[0].get('content', 'CLI Session')[:64]
+        if isinstance(title, list):
+            title = 'CLI Session'
+        model = 'unknown'
+        s = import_cli_session(sid, title, msgs, model)
+        s.is_cli_session = True
+        s._cli_origin = sid
+        s.save()
+        return j(handler, {'session': s.compact() | {'messages': msgs, 'is_cli_session': True}, 'imported': True})
 
     if parsed.path == '/api/projects':
         return j(handler, {'projects': load_projects()})

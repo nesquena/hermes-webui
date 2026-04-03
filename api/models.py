@@ -132,6 +132,24 @@ def save_projects(projects):
     PROJECTS_FILE.write_text(json.dumps(projects, ensure_ascii=False, indent=2), encoding='utf-8')
 
 
+def import_cli_session(session_id, title, messages, model='unknown'):
+    """Create a new WebUI session populated with CLI messages.
+    Returns the Session object.
+    """
+    import time
+    s = Session(
+        session_id=session_id,
+        title=title,
+        workspace='cli',
+        model=model,
+        messages=messages,
+        created_at=time.time(),
+        updated_at=time.time(),
+    )
+    s.save()
+    return s
+
+
 # ── CLI session bridge ──────────────────────────────────────────────────────
 
 def get_cli_sessions():

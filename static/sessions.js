@@ -345,29 +345,14 @@ function renderSessionListFromCache(){
       _clickTimer=setTimeout(async()=>{
         _clickTimer=null;
         if(isCli){
-          // CLI session -- fetch messages from the SQLite bridge
+          // CLI session: import into WebUI store (creates JSON file with history),
+          // then load it normally so replies work.
           try{
-            const data=await api(`/api/sessions/cli_messages?session_id=${encodeURIComponent(s.session_id)}`);
-            S.session={
-              session_id:s.session_id,
-              title:s.title,
-              workspace:'cli',
-              model:s.model||'unknown',
-              messages:data.messages||[],
-              tool_calls:[],
-              is_cli_session:true,
-            };
-            S.messages=data.messages||[];
-            S.toolCalls=[];
-            MSG_QUEUE.length=0;updateQueueBadge();
-            S.busy=false;
-            S.activeStreamId=null;
-            $('btnSend').disabled=true;
-            $('btnSend').style.opacity='0.4';
-            const _dots=$('activityDots');if(_dots)_dots.style.display='none';
-            const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
-            setStatus('');clearLiveToolCards();
-            syncTopbar();renderMessages();
+            const imp=await api('/api/session/import_cli',{
+              method:'POST',
+              body:JSON.stringify({session_id:s.session_id})
+            });
+            await loadSession(s.session_id);
             renderSessionListFromCache();
           }catch(err){showToast('Failed to load CLI session: '+err.message);}
         }else{
