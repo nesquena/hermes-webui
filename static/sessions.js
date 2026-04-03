@@ -344,8 +344,8 @@ function renderSessionListFromCache(){
       clearTimeout(_clickTimer);
       _clickTimer=setTimeout(async()=>{
         _clickTimer=null;
-        if(_renamingSid) return;
         if(isCli){
+          // CLI session -- fetch messages from the SQLite bridge
           try{
             const data=await api(`/api/sessions/cli_messages?session_id=${encodeURIComponent(s.session_id)}`);
             S.session={
@@ -362,12 +362,13 @@ function renderSessionListFromCache(){
             MSG_QUEUE.length=0;updateQueueBadge();
             S.busy=false;
             S.activeStreamId=null;
-            $('btnSend').disabled=false;
-            $('btnSend').style.opacity='1';
+            $('btnSend').disabled=true;
+            $('btnSend').style.opacity='0.4';
             const _dots=$('activityDots');if(_dots)_dots.style.display='none';
             const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
             setStatus('');clearLiveToolCards();
             syncTopbar();renderMessages();
+            renderSessionListFromCache();
           }catch(err){showToast('Failed to load CLI session: '+err.message);}
         }else{
           await loadSession(s.session_id);renderSessionListFromCache();
