@@ -5,6 +5,36 @@
 
 ---
 
+## [v0.31] UI Polish + Deployment Hardening
+*April 4, 2026 | 424 tests*
+
+### Bug Fixes
+- **Profile dropdown overlaps chat messages.** `.topbar` had no stacking context,
+  causing the dropdown to paint over `.messages`. Added `position:relative;z-index:10`
+  to `.topbar`. (#71)
+- **Workspace dropdown clipped by sidebar.** `.sidebar overflow:hidden` swallowed
+  the upward-opening workspace dropdown entirely. Changed to `overflow:visible`
+  (scroll lives on `.session-list`); added `position:relative;z-index:10` to
+  `.sidebar-bottom`. (#71)
+- **Slash-command autocomplete behind tool cards.** `.composer-wrap` had
+  `position:relative` but no `z-index`, letting tool cards bleed over it.
+  Added `z-index:10`. (#71)
+- **Skill picker clipped inside Settings modal.** `.settings-panel overflow-y:auto`
+  clipped the absolute-positioned skill picker. Moved scroll to `.settings-body`,
+  set panel to `overflow:visible`, raised skill picker to `z-index:1100`. (#71)
+- **CLI session badge blocks action buttons on hover.** Added
+  `.session-item.cli-session:hover::after { display:none }` so the gold "cli"
+  label hides on hover, making archive/delete/pin fully reachable. (#71)
+- **Workspace dropdown name and path crowded on same line.** `.ws-opt` was a plain
+  block with inline spans. Added `flex-direction:column;gap:4px` so name and path
+  stack cleanly. (#71)
+- **Both servers sharing same state directory.** `api/config.py` and `start.sh`
+  both defaulted to `~/.hermes/webui-mvp` (an internal dev name). Changed default
+  to `~/.hermes/webui` -- generic, appropriate for any deployment. Override with
+  `HERMES_WEBUI_STATE_DIR`. (#72, #73)
+
+---
+
 ## [v0.30.1] CLI Session Bridge Fixes
 *April 4, 2026 | 424 tests*
 
