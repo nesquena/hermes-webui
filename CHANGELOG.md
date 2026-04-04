@@ -6,7 +6,7 @@
 ---
 
 ## [v0.30] CLI Session Bridge (Community: @thadreber-web)
-*April 4, 2026 | 426 tests*
+*April 4, 2026 | 424 tests*
 
 ### Features
 - **CLI session bridge.** The WebUI now reads sessions from the hermes-agent's
