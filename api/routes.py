@@ -219,8 +219,9 @@ def handle_get(handler, parsed):
         sid = qs.get('session_id', [''])[0]
         if not sid:
             return bad(handler, 'session_id required')
-        s = get_session(sid)
-        if not s:
+        try:
+            s = get_session(sid)
+        except KeyError:
             return bad(handler, 'Session not found', 404)
         from api.workspace import git_info_for_workspace
         info = git_info_for_workspace(Path(s.workspace))

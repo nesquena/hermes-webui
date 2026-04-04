@@ -192,7 +192,7 @@
   /* Context usage indicator */
   .ctx-indicator{display:flex;align-items:center;gap:6px;padding:2px 4px;flex-shrink:1;min-width:0;}
   .ctx-bar-wrap{width:70px;height:5px;border-radius:3px;background:rgba(255,255,255,.08);overflow:hidden;flex-shrink:0;}
-  .ctx-bar{display:block;height:100%;border-radius:3px;transition:width .4s ease,background .4s ease;min-width:2px;background:var(--teal);}
+  .ctx-bar{display:block;height:100%;border-radius:3px;transition:width .4s ease,background .4s ease;min-width:2px;background:var(--blue);}
   .ctx-bar.ctx-mid{background:#e6a817;}
   .ctx-bar.ctx-high{background:#e05252;}
   .ctx-label{font-size:9px;color:var(--muted);white-space:nowrap;font-variant-numeric:tabular-nums;}
