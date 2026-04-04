@@ -259,7 +259,7 @@ def get_cli_sessions():
             cur = conn.cursor()
             cur.execute("""
                 SELECT s.id, s.title, s.model, s.message_count,
-                       s.started_at, s.source, s.profile,
+                       s.started_at, s.source,
                        MAX(m.timestamp) AS last_activity
                 FROM sessions s
                 LEFT JOIN messages m ON m.session_id = s.id
@@ -272,7 +272,7 @@ def get_cli_sessions():
                 raw_ts = row['last_activity'] or row['started_at']
                 # Prefer the CLI session's own profile from the DB; fall back to
                 # the active CLI profile so sidebar filtering works either way.
-                profile = row.get('profile') or _cli_profile
+                profile = _cli_profile  # CLI DB has no profile column; use active profile
 
                 cli_sessions.append({
                     'session_id': sid,
