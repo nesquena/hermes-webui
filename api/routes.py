@@ -188,10 +188,13 @@ def handle_get(handler, parsed):
 
     if parsed.path == '/api/sessions':
         webui_sessions = all_sessions()
-        cli = get_cli_sessions()
-        # Deduplicate: WebUI sessions always win if same session_id
-        webui_ids = {s['session_id'] for s in webui_sessions}
-        deduped_cli = [s for s in cli if s['session_id'] not in webui_ids]
+        settings = load_settings()
+        if settings.get('show_cli_sessions'):
+            cli = get_cli_sessions()
+            webui_ids = {s['session_id'] for s in webui_sessions}
+            deduped_cli = [s for s in cli if s['session_id'] not in webui_ids]
+        else:
+            deduped_cli = []
         merged = webui_sessions + deduped_cli
         merged.sort(key=lambda s: s.get('updated_at', 0) or 0, reverse=True)
         return j(handler, {'sessions': merged, 'cli_count': len(deduped_cli)})
