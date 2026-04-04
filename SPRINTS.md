@@ -1,6 +1,6 @@
 # Hermes Web UI -- Forward Sprint Plan
 
-> Current state: v0.28.1 | 426 tests | Daily driver ready
+> Current state: v0.28.1 | 424 tests | Daily driver ready
 > This document plans the path from here to two targets:
 >
 > Target A: 1:1 feature parity with the Hermes CLI (everything you can do from the
@@ -567,25 +567,260 @@ and switchToProfile() didn't refresh workspaces or sessions.
 
 ---
 
-## Sprint 24 -- Desktop Application (PLANNED)
+## Sprint 24 -- Web Polish + Bug Fix Pass (PLANNED)
 
-**Theme:** Native desktop experience.
+**Theme:** Stabilize, harden, and close the last meaningful web UI gaps before
+shifting focus to distribution. Goal is a release that's genuinely ready for
+wider user adoption -- no rough edges, no obvious missing pieces.
+
+**Why now:** Sprint 23 completed the core agentic transparency features. The
+remaining web roadmap items are diminishing-returns polish. Rather than
+grinding through marginal features, this sprint cleans up what's there, fixes
+bugs users will actually hit, and closes a few real gaps before recommending
+the app to others.
+
+### Track A: Bug Fixes
+- **Cron edit form has no skill picker.** Sprint 23 added skill picker to the
+  create form but not the edit form. cronEditSave() doesn't include skills in
+  the update body, so existing skills survive an edit but can't be changed.
+  Fix: add the same skill picker UI to the inline edit form and include
+  `skills` in the update POST body.
+- **S.lastUsage dead code.** messages.js sets `S.lastUsage` from `d.usage` at
+  done-time, but nothing reads it. The usage badge reads cumulative session
+  totals from `S.session.input_tokens` instead. Either wire `S.lastUsage` into
+  a per-turn display or remove the dead assignment.
+- **_cronSkillsCache never invalidated.** Skills picker shows stale data if
+  skills are added/removed mid-session. Add a cache-bust when the skills panel
+  is opened or a skill is saved/deleted.
+- **Tool args not shown on session reload.** Tool call cards in history show
+  name and result snippet but not the args (args only exist in the live SSE
+  event). Sprint 23 added args to the session JSON -- verify they're actually
+  rendering in the settled history cards.
 
 ### Track B: Features
-- **Electron or Tauri wrapper.** Native window, menu bar, notifications.
-- **Auto-start option.** Launch on login.
-- **Packaged distribution.** .dmg (macOS), .exe (Windows).
+- **Cron edit: skill picker parity.** As above -- make create and edit forms
+  identical in capability.
+- **Per-turn cost display.** The current usage badge shows cumulative session
+  totals attached to the last message, which is misleading. Either: (a) show
+  per-turn cost from `S.lastUsage` immediately after each response instead of
+  cumulative, or (b) show cumulative in the session topbar/header instead of
+  attached to a message bubble. Pick the cleaner UX.
+- **Virtual scroll for long session/skill lists.** When session count or skill
+  count gets large (100+), the sidebar becomes sluggish. Add a simple virtual
+  scroll or windowed render -- only render visible items + a buffer above/below.
+  CSS `contain: strict` + IntersectionObserver approach, no library needed.
+
+### Track C: Code Quality
+- **SPRINTS.md + ROADMAP.md + CHANGELOG.md updated** to reflect Sprint 23
+  completion (agentic transparency) and correct test counts.
+- **Remove stale Sprint 23 description** from SPRINTS.md (the "Profile/Workspace
+  coherence" text is from an older plan; Sprint 23 actually shipped agentic
+  transparency features).
+- **CHANGELOG entry for v0.29** covering Sprint 23 deliverables.
+
+**Estimated tests:** ~10 new. Target total: ~435.
+**Hermes CLI parity impact:** Low
+**Claude parity impact:** Low
+**User-facing value:** Medium -- removes rough edges that would bother new users
 
 ---
 
-## Sprint 24 -- Extended Command Support (PLANNED)
+## Sprint 25 -- macOS Desktop Application (PLANNED)
 
-**Theme:** Deeper slash command and skill integration.
+**Theme:** Native Mac desktop app. Single download, runs entirely offline,
+feels like a real application -- not a browser tab.
 
-### Track B: Features
-- **Skill-aware autocomplete.** `/skill-name` triggers installed skills.
-- **Command chaining.** Compose multi-step commands.
-- **Agent tool exposure.** Surface agent capabilities as slash commands.
+**Why this matters:** The web UI requires an SSH tunnel or a server setup to
+use. A .app bundle that a user can double-click and immediately have a working
+Hermes interface is genuinely differentiating. No other open-source Hermes
+interface ships as a native Mac app. This is the highest-leverage remaining
+investment for user adoption.
+
+**Approach: Swift + WKWebView (not Electron)**
+
+The right architecture is a thin native Swift shell (~300-500 lines) that:
+1. Bundles the existing Python server and all api/ modules inside the .app
+2. Spawns the server as a subprocess on a random local port at launch
+3. Opens a WKWebView window pointed at that localhost port
+4. Handles Mac app lifecycle natively (dock icon, cmd+Q, window management,
+   app menu, about box)
+5. Bridges a small set of native Mac capabilities that WKWebView can't do
+
+**Why not Electron:** WKWebView is Safari's engine -- dramatically lighter than
+Chromium. No 200MB node_modules. No separate update daemon. The .app is ~30MB
+including the Python runtime, vs 150MB+ for Electron.
+
+**Why not full native Swift UI:** Would require rewriting the entire frontend
+from scratch. The web UI is already fast, dark-themed, and feature-complete.
+The thin shell approach gets 95% of the benefit at 5% of the cost.
+
+### Track A: Swift App Shell
+
+**Files to create:**
+```
+desktop/
+  HermesApp.swift          -- @main entry point, NSApp delegate
+  AppDelegate.swift        -- lifecycle: start server on launch, stop on quit
+  WindowController.swift   -- NSWindow + WKWebView setup, cmd shortcuts
+  ServerManager.swift      -- spawn/monitor Python subprocess, pick free port
+  MenuBuilder.swift        -- native app menu (File, Edit, View, Window, Help)
+  Info.plist               -- bundle ID, display name, version, icon
+  Assets.xcassets/         -- app icon (1024x1024 + all required sizes)
+  HermesApp.xcodeproj/     -- Xcode project file
+```
+
+**ServerManager.swift responsibilities:**
+- Find Python: check bundled runtime first, fall back to system python3
+- Pick a free port (bind to :0, read assigned port, close, use it)
+- Spawn: `python3 server.py --port {port}` as a child Process
+- Monitor: if server crashes, show an error sheet and offer restart
+- Shutdown: SIGTERM on app quit, wait up to 3s, then SIGKILL
+
+**WKWebView configuration:**
+- `allowsBackForwardNavigationGestures = false` (it's a single-page app)
+- `WKUserContentController` for JS bridge (native notifications, file picker)
+- Wait for server health check before loading (poll /health, show loading
+  spinner in the native window while waiting, typically <1s)
+- `userAgent` override so the server can detect desktop app context
+
+**Native menu items (beyond defaults):**
+- File > New Session (Cmd+N) -- calls JS `newSession()`
+- File > New Window (Cmd+Shift+N) -- opens second window with its own WKWebView
+- View > Toggle Sidebar (Cmd+Shift+S)
+- Window > Zoom, Minimize (standard)
+- Help > About Hermes, Check for Updates (links to GitHub releases page)
+
+### Track B: Python Bundling
+
+Two options, in order of preference:
+
+**Option A: Require system Python (simpler, recommended for v1)**
+- Check for `python3` at known paths: `/usr/bin/python3`, homebrew paths,
+  pyenv paths
+- If not found: show a one-time setup sheet with instructions
+- Pros: tiny download (~5MB for the Swift app + web assets), no bundling complexity
+- Cons: user needs Python installed (most developers do; target audience does too)
+
+**Option B: Bundle python-standalone (self-contained, larger)**
+- Use `python-build-standalone` (from Astral/uv project): pre-built Python
+  3.11 binaries, ~30MB compressed, no Xcode toolchain needed to build
+- Extract to `~/Library/Application Support/Hermes/python/` on first launch
+- Install `requirements.txt` via bundled pip into a local venv
+- Pros: zero dependencies, works on a clean Mac
+- Cons: first launch takes ~10-20s for extraction + pip install; ~30MB download
+
+**Recommendation:** Ship v1 with Option A. Add Option B as an optional
+"standalone" download for non-developers.
+
+### Track C: Distribution
+
+**GitHub Releases (primary):**
+- Build with `xcodebuild -scheme HermesApp -configuration Release -archivePath`
+- `xcodebuild -exportArchive` to produce a .app bundle
+- `hdiutil create` to produce a .dmg with drag-to-Applications installer UI
+- Upload .dmg as a GitHub Release asset via `gh release create`
+- CI: add `.github/workflows/mac-release.yml` -- trigger on `vX.Y.Z-mac` tag
+
+**Code signing:**
+- Without an Apple Developer account: distribute as unsigned, users must
+  right-click > Open on first launch (standard for open-source Mac apps)
+- With a free Apple Developer account: ad-hoc signing removes the Gatekeeper
+  warning without paying $99/year (no notarization, but much better UX)
+- With paid account ($99/year): full notarization, no warnings, direct download
+
+**Recommended for v1:** ad-hoc signing (free, good enough for early adopters).
+Document the right-click > Open workaround in the README for unsigned builds.
+
+**Universal binary (Intel + Apple Silicon):**
+```bash
+xcodebuild archive -scheme HermesApp -destination "generic/platform=macOS"
+```
+Both architectures in one .app. No separate downloads needed.
+
+### Track D: Native Integrations (v1 scope)
+
+**System notifications for cron completion:**
+- The web UI polls `/api/cron/alerts` and shows in-page banners
+- The Mac app can additionally post `UNUserNotificationCenter` notifications
+- JS bridge: `window.webkit.messageHandlers.notify.postMessage({title, body})`
+- Swift handler: posts a native notification with the cron job name and output
+  summary -- appears in Notification Center, works even when app is in background
+
+**File picker for workspace add:**
+- Currently: user types a path string into the workspace add form
+- Mac app: intercept workspace-add form submission, open `NSOpenPanel` instead,
+  return the selected path to the JS via `evaluateJavaScript`
+- Much better UX -- standard Mac folder picker, no typing paths
+
+**Dock badge for pending approvals:**
+- When an agent approval is waiting, set `NSApp.dockTile.badgeLabel = "1"`
+- Clear badge when approval is resolved
+- JS bridge fires when approval card appears/disappears
+
+**Menu bar mode (optional, v2):**
+- A small status bar item (⚗️ icon in menu bar) that opens a compact popover
+- Popover shows current session status, last message, quick-compose field
+- Useful for running Hermes in the background without a full window
+
+### Track E: Testing
+
+Since the Swift app is thin glue, most testing remains in the existing pytest
+suite (server still runs identically). New Swift-specific tests:
+- `ServerManagerTests.swift`: verify port picking, process spawn, health wait
+- UI tests via `XCUITest`: launch app, wait for WKWebView to load, verify
+  title bar shows "Hermes", verify /health responds
+- Smoke test in CI: `xcodebuild test -scheme HermesApp`
+
+### Implementation Order
+
+1. `ServerManager.swift` + basic `AppDelegate` -- get Python server spawning
+   and health-check working from Swift
+2. `WindowController.swift` -- WKWebView loading, loading spinner while
+   server starts
+3. App icon + Info.plist -- make it look like a real app
+4. `MenuBuilder.swift` -- native menus + keyboard shortcuts
+5. JS bridge for notifications -- most impactful native integration
+6. DMG build script + GitHub Actions CI
+7. (Optional) File picker bridge, dock badge
+
+### What to NOT do in v1
+
+- Windows or Linux wrapper (different toolchain; do Mac first, assess demand)
+- Full Swift/SwiftUI rewrite of the frontend (months of work, wrong tradeoff)
+- App Store submission (sandboxing breaks local server; not worth the effort)
+- Auto-update mechanism (GitHub releases + manual download is fine for v1)
+- Menu bar mode (cool but not v1 scope)
+
+### Files to create in the repo
+
+```
+desktop/mac/
+  HermesApp/
+    HermesApp.swift
+    AppDelegate.swift
+    WindowController.swift
+    ServerManager.swift
+    MenuBuilder.swift
+    Assets.xcassets/
+    Info.plist
+  HermesApp.xcodeproj/
+  README.md              -- build instructions, requirements, signing notes
+.github/workflows/
+  mac-release.yml        -- build + sign + upload DMG on tag push
+```
+
+The server code (`server.py`, `api/`, `static/`, `requirements.txt`) is
+referenced from the repo root -- no duplication. The .app bundle copies them
+at build time.
+
+**Estimated effort:** 2-3x a typical web sprint (new language, new toolchain,
+bundling complexity). Realistic for a focused weekend or a dedicated agent run
+with clear instructions.
+
+**Hermes CLI parity impact:** N/A (different distribution channel)
+**Claude parity impact:** Medium (Claude.app is a native Mac app)
+**User-facing value:** Very high -- lowers barrier to entry dramatically,
+genuinely differentiating for an open-source project
 
 ---
 
@@ -662,6 +897,7 @@ and switchToProfile() didn't refresh workspaces or sessions.
 
 ---
 
-*Last updated: April 3, 2026*
-*Current version: v0.28.1 | 426 tests*
-*Next sprint: Sprint 24 (Desktop Application)*
+*Last updated: April 4, 2026*
+*Current version: v0.28.1 (Sprint 23 pending merge) | 424 tests*
+*Next sprint: Sprint 24 (Web Polish + Bug Fix Pass)*
+*Horizon sprint: Sprint 25 (macOS Desktop Application)*

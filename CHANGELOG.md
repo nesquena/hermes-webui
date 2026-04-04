@@ -5,6 +5,104 @@
 
 ---
 
+## [v0.29] Sprint 23: Agentic Transparency + Polish
+*April 4, 2026 | 424 tests*
+
+### Features
+
+- **Token/cost display.** Agent usage (input tokens, output tokens, estimated
+  cost) is now read after each conversation and persisted on the session.
+  A muted badge appears below the last assistant message when enabled.
+  Off by default — toggle via the Settings panel checkbox or `/usage` slash
+  command. Persists server-side across refreshes.
+
+- **Subagent delegation cards.** `subagent_progress` events now render with
+  a 🔀 icon and a blue indented left border to visually distinguish child
+  tool activity from parent tool calls. `delegate_task` cards display as
+  "Delegate task" with cleaner formatting.
+
+- **Skill picker in cron create form.** The "New Job" form now has a search
+  input + tag chip picker for attaching skills to cron jobs. Skills fetched
+  from `/api/skills`, filtered on keyup, added/removed as tag chips.
+  `submitCronCreate()` sends `skills` array in the POST body. Backend already
+  supported the field — this was a pure frontend gap.
+
+- **Skill linked files viewer.** Skill preview panel now renders a "Linked
+  Files" section below SKILL.md content when a skill has `references/`,
+  `templates/`, `scripts/`, or `assets/` subdirectories. Clicking a file
+  loads it in the preview panel with syntax highlighting.
+  New `file` query param on `GET /api/skills/content` serves linked files
+  with path traversal protection.
+
+- **Workspace tree state persists across refreshes.** Expanded directory
+  paths are saved to `localStorage` keyed by workspace path
+  (`hermes-webui-expanded:{path}`). On every root load (page refresh,
+  session switch), the saved state is restored and previously-expanded
+  directories are pre-fetched so the tree renders fully on first paint.
+
+- **Timestamps fixed.** `api/streaming.py` now stamps `timestamp` on every
+  message that lacks one at conversation completion. The `done` SSE event
+  also stamps `_ts` on the last assistant message immediately. Timestamps
+  were already rendered in the UI (Sprint 14, hover-to-reveal) but most
+  messages had no timestamp field, so nothing ever showed.
+
+- **`/usage` slash command.** Instant toggle for token usage display.
+  Shows a toast, persists to server, updates the Settings checkbox if open,
+  re-renders immediately.
+
+### Bug Fixes
+
+- **XSS via inline onclick + esc().** Skill names and file paths embedded in
+  `onclick` HTML attributes used `esc()` for encoding. `esc()` converts `'`
+  to `&#39;` (HTML-safe) but browsers decode it back before executing JS,
+  allowing skill names with apostrophes to break out of string literals.
+  Fixed by switching to `data-*` attributes + `addEventListener`.
+
+- **rglob wildcard injection.** The `name` query param for
+  `/api/skills/content?file=` was passed directly to `SKILLS_DIR.rglob()`,
+  which accepts glob patterns. `name=*` would match an arbitrary directory
+  and use it as the trust base for path traversal checking.
+  Fixed by rejecting names containing `* ? [ ]` metacharacters with 400.
+
+- **`_fmtTokens(null)` returned "null".** `String(null)` = `"null"` would
+  appear in the usage badge for sessions missing fields. Fixed with a
+  `!n || n < 0` guard returning `'0'`.
+
+- **Usage badge on wrong row.** Badge used `:last-child` which could target
+  a user message row. Fixed by adding `data-role` to message rows and
+  scanning backwards for the last `assistant` row.
+
+- **Tool name resolution.** Tool call entries in session JSON sometimes
+  stored the literal string `"tool"` as the name when the call ID couldn't
+  be resolved. Fixed: defaults to empty string and skips unresolvable entries.
+
+- **Inline import inside loop.** `import json as _j2` inside the done-handler
+  loop in `streaming.py` moved to module-level.
+
+### Session Model
+
+- Added `input_tokens`, `output_tokens`, `estimated_cost` fields to Session
+  (defaults: 0, 0, None). Included in `compact()`, session JSON, and all
+  API responses. Backward-compatible via `**kwargs`.
+
+- Added `args` capture to `tool_calls` session JSON entries (truncated
+  snapshot of tool inputs, up to 6 keys / 120 chars each).
+
+### Settings
+
+- New `show_token_usage` boolean setting (default: `false`). Stored in
+  `settings.json`, loaded on boot alongside `send_key`.
+
+### Tests
+
+- Renamed `test_sprint24.py` → `test_sprint23.py`.
+- Strengthened session usage assertions (explicit field presence checks).
+- Added: path traversal rejection test, wildcard name rejection test,
+  cron create with skills array test.
+- Total: 424 tests (up from 415).
+
+---
+
 ## [v0.28.1] CI Pipeline + Multi-Arch Docker Builds
 *April 3, 2026 | 426 tests*
 

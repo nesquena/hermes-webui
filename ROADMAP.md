@@ -3,8 +3,8 @@
 > Goal: Full 1:1 parity with the Hermes CLI experience via a clean dark web UI.
 > Everything you can do from the CLI terminal, you can do from this UI.
 >
-> Last updated: v0.28.1 (April 3, 2026)
-> Tests: 426 total (403 passing, 23 pre-existing failures)
+> Last updated: v0.29 (April 4, 2026)
+> Tests: 424 total (401 passing, 23 pre-existing failures)
 > Source: <repo>/
 
 ---
@@ -39,6 +39,7 @@
 | Sprint 20 | Voice input + send button | Voice input (Web Speech API), send button icon-circle with pop-in animation | 415 |
 | Sprint 21 | Mobile responsive + Docker | Hamburger sidebar, bottom nav, files slide-over, Docker support (#21, #7) | 415 |
 | Sprint 22 | Multi-profile support | Profile picker, management panel, seamless switching, per-session tracking (#28) | 415 |
+| Sprint 23 | Agentic transparency | Token/cost display, subagent cards, skill picker in cron, skill linked files, workspace tree persistence, timestamp fixes | 424 |
 
 ---
 
@@ -76,7 +77,7 @@
 - [x] Copy message to clipboard (hover icon on each bubble)
 - [x] Edit last user message and regenerate
 - [ ] Branch/fork conversation (Wave 3)
-- [ ] Token/cost estimate per message (Wave 3)
+- [x] Token/cost estimate per message (Sprint 23)
 
 ### Tool Visibility
 - [x] Tool progress in activity bar (moved out of composer footer)
@@ -137,7 +138,7 @@
 - [x] Edit existing cron job
 - [x] Delete cron job
 - [x] View full cron run history (expandable per job)
-- [ ] Skill picker in cron create form (Wave 3)
+- [x] Skill picker in cron create form (Sprint 23)
 
 ### Skills
 - [x] List all skills grouped by category (Skills sidebar tab)
@@ -146,7 +147,7 @@
 - [x] Create skill
 - [x] Edit skill
 - [x] Delete skill
-- [ ] View skill linked files (Wave 3)
+- [x] View skill linked files (Sprint 23)
 
 ### Memory
 - [x] View personal notes (MEMORY.md) rendered as markdown (Memory tab)
