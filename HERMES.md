@@ -104,16 +104,62 @@ session. All are adding memory and scheduling features to varying degrees (see c
 but the core model is still session-scoped: you invoke it, it works, it stops.
 
 ### Category 4: Persistent Autonomous Agents
-*Hermes*
+*Hermes, OpenClaw*
 
 All the tool use of Category 3, plus memory that accumulates across sessions automatically,
 plus always-on autonomous scheduling, plus multi-modal access from any device or messaging app.
-Gets more useful over time rather than resetting to zero. Hermes is currently the only tool in
-this category that is open-source, self-hosted, and provider-agnostic.
+Gets more useful over time rather than resetting to zero. Hermes and OpenClaw are the two
+primary open-source, self-hosted tools in this category. The key distinction: OpenClaw is a
+gateway-centric automation platform; Hermes is a self-improving agent that writes and reuses
+its own procedures from experience.
 
 ---
 
 ## How Hermes Compares
+
+### vs. OpenClaw
+
+OpenClaw is the most direct comparison to Hermes and the question most people ask first.
+Both are open-source, self-hosted, always-on agents with persistent memory, cron scheduling,
+and messaging app integration. If you're evaluating Hermes, you should evaluate OpenClaw too.
+
+OpenClaw (MIT, 347k+ GitHub stars) is built around a **Gateway** control plane written in
+Node.js/TypeScript. It excels at broad personal automation: native Chrome/Chromium control for
+browser automation, the widest messaging platform support in the space (WhatsApp, Telegram,
+Signal, iMessage, LINE, WeChat, Slack, Discord, Teams, Matrix, and more), voice wake words,
+and a ClawHub skill marketplace where users share pre-built automations.
+
+Hermes takes a different approach. It is built in Python and centers on a **self-improving
+agent loop** rather than a gateway control plane. The defining difference is the skills system:
+where OpenClaw skills are human-authored plugins installed from a marketplace, Hermes
+**discovers and writes its own skills** from experience. When Hermes solves a problem a clever
+way, it saves the procedure and reuses it automatically. The agent gets more capable the longer
+it runs, without you authoring anything.
+
+Hermes also lives natively in the Python/ML ecosystem -- every data science library, every
+model inference tool, every research framework is one import away. And it has a full web UI
+(this project) that OpenClaw lacks.
+
+The honest summary: if you want the broadest messaging coverage and native browser/computer
+control out of the box, OpenClaw is excellent. If you want an agent that self-improves from
+experience, lives in a Python environment, has a web UI, and can orchestrate other agents like
+Claude Code and Codex as sub-agents, Hermes is the better fit.
+
+| | OpenClaw | Hermes |
+|---|---|---|
+| Persistent memory | Yes | Yes |
+| Scheduled jobs (cron) | Yes | Yes |
+| Messaging app access | Yes (15+ platforms, incl. iMessage/WeChat) | Yes (10+ platforms) |
+| Self-hosted | Yes | Yes |
+| Open source | Yes (MIT) | Yes |
+| Web UI | No | Yes |
+| Self-improving skills system | No (human-authored plugins) | Yes (agent writes and saves its own) |
+| Browser / computer control | Yes (native Chrome CDP) | Via shell / tools |
+| Voice wake words | Yes (macOS/iOS) | No |
+| Python / ML ecosystem | No (Node.js) | Yes |
+| Orchestrates Claude Code / Codex | No | Yes |
+| Multi-profile support | No | Yes |
+| Provider-agnostic | Yes | Yes |
 
 ### vs. Open Interpreter
 
@@ -316,20 +362,22 @@ reasoning accumulates into something durable.
 
 ## Quick Reference
 
-| | Claude Code | Codex CLI | OpenCode | Open Interpreter | Cursor | Claude.ai | **Hermes** |
-|---|---|---|---|---|---|---|---|
-| Persistent memory (auto) | Partial | Partial | Partial | No | No | Shallow | **Yes** |
-| Scheduled / background jobs | Partial† | Partial‡ | No | No | No | No | **Yes** |
-| Messaging app access | No | No | No | No | No | No | **Yes** |
-| Web UI | Yes (Anthropic cloud) | No | Yes | No | No | Yes | **Yes (self-hosted)** |
-| Self-hosted | No | Yes | Yes | Yes | No | No | **Yes** |
-| Provider-agnostic | No (Claude only) | Yes | Yes | Yes | Partial | No | **Yes** |
-| Skills system | No | No | No | No | No | No | **Yes** |
-| In-editor autocomplete | No | No | No | No | Yes | No | No |
-| Mobile / messaging access | No | No | No | No | No | Yes | **Yes** |
-| Orchestrates other agents | No | No | No | No | No | No | **Yes** |
-| Open source | No | Yes | Yes | Yes | No | No | **Yes** |
-| Always-on / autonomous | No | No | No | No | No | No | **Yes** |
+| | OpenClaw | Claude Code | Codex CLI | OpenCode | Open Interpreter | Cursor | Claude.ai | **Hermes** |
+|---|---|---|---|---|---|---|---|---|
+| Persistent memory (auto) | Yes | Partial† | Partial | Partial | No | No | Shallow | **Yes** |
+| Scheduled / background jobs | Yes | Partial‡ | Partial§ | No | No | No | No | **Yes (self-hosted)** |
+| Messaging app access | Yes (15+ platforms) | No | No | No | No | No | No | **Yes (10+ platforms)** |
+| Web UI | No | Yes (Anthropic cloud) | No | Yes | No | No | Yes | **Yes (self-hosted)** |
+| Self-hosted | Yes | No | Yes | Yes | Yes | No | No | **Yes** |
+| Provider-agnostic | Yes | No (Claude only) | Yes | Yes | Yes | Partial | No | **Yes** |
+| Self-improving skills | No | No | No | No | No | No | No | **Yes** |
+| Browser / computer control | Yes (Chrome CDP) | No | No | No | No | No | No | Via shell |
+| Python / ML ecosystem | No (Node.js) | No | No | No | Yes | No | No | **Yes** |
+| In-editor autocomplete | No | No | No | No | No | Yes | No | No |
+| Orchestrates other agents | No | No | No | No | No | No | No | **Yes** |
+| Open source | Yes (MIT) | No | Yes | Yes | Yes | No | No | **Yes** |
+| Always-on / autonomous | Yes | No | No | No | No | No | No | **Yes** |
 
-† Claude Code scheduling: cloud-managed (Anthropic infrastructure) or session-scoped `/loop`; not self-hosted  
-‡ Codex scheduling: desktop app Automations only; CLI has no native scheduling
+† Claude Code has CLAUDE.md / MEMORY.md project context and rolling auto-memory, but not full automatic cross-session recall  
+‡ Claude Code scheduling: cloud-managed (Anthropic infrastructure) or session-scoped `/loop`; no self-hosted cron  
+§ Codex scheduling: desktop app Automations only; CLI has no native scheduling

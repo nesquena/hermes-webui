@@ -50,23 +50,23 @@ persistent memory, autonomous scheduling, and multi-modal access in one package.
   the results back into its own memory
 - **Fully self-hosted** — your conversations, your memory, your hardware; not Anthropic's cloud
 
-**vs. the field** *(accurate as of mid-2025; Claude Code and Codex are actively adding features)*:
+**vs. the field** *(accurate as of mid-2025; landscape is actively shifting)*:
 
-| | Claude Code | Codex CLI | OpenCode | Open Interpreter | **Hermes** |
+| | OpenClaw | Claude Code | Codex CLI | Open Interpreter | **Hermes** |
 |---|---|---|---|---|---|
-| Persistent memory (auto) | Partial† | Partial | Partial | No | **Yes** |
-| Scheduled jobs (self-hosted) | No‡ | No | No | No | **Yes** |
-| Messaging app access | No | No | No | No | **Yes** |
-| Web UI (self-hosted) | No | No | Yes | No | **Yes** |
-| Provider-agnostic | No (Claude only) | Yes | Yes | Yes | **Yes** |
-| Self-hosted | No | Yes | Yes | Yes | **Yes** |
-| Skills system | No | No | No | No | **Yes** |
-| Open source | No | Yes | Yes | Yes | **Yes** |
+| Persistent memory (auto) | Yes | Partial† | Partial | No | **Yes** |
+| Scheduled jobs (self-hosted) | Yes | No‡ | No | No | **Yes** |
+| Messaging app access | Yes (15+ platforms) | No | No | No | **Yes** |
+| Web UI (self-hosted) | No | No | No | No | **Yes** |
+| Self-improving skills | No | No | No | No | **Yes** |
+| Python / ML ecosystem | No (Node.js) | No | No | Yes | **Yes** |
+| Provider-agnostic | Yes | No (Claude only) | Yes | Yes | **Yes** |
+| Open source | Yes (MIT) | No | Yes | Yes | **Yes** |
 
 † Claude Code has CLAUDE.md / MEMORY.md project context and rolling auto-memory, but not full automatic cross-session recall  
 ‡ Claude Code has cloud-managed scheduling (Anthropic infrastructure) and session-scoped `/loop`; no self-hosted cron
 
-For the full breakdown — mental model, four-category framework, and per-tool deep dives including Open Interpreter — see [HERMES.md](HERMES.md).
+OpenClaw is the closest direct competitor — both are always-on, self-hosted, open-source agents. The key difference: OpenClaw uses human-authored plugins from a marketplace; Hermes **writes and improves its own skills from experience**. See [HERMES.md](HERMES.md) for the full breakdown including a detailed OpenClaw comparison.
 
 ---
 
