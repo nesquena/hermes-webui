@@ -24,6 +24,28 @@ except ImportError:
 from api.models import get_session, title_from
 from api.workspace import set_last_workspace
 
+# Fields that are safe to send to LLM provider APIs.
+# Everything else (attachments, timestamp, _ts, etc.) is display-only
+# metadata added by the webui and must be stripped before the API call.
+_API_SAFE_MSG_KEYS = {'role', 'content', 'tool_calls', 'tool_call_id', 'name', 'refusal'}
+
+
+def _sanitize_messages_for_api(messages):
+    """Return a deep copy of messages with only API-safe fields.
+
+    The webui stores extra metadata on messages (attachments, timestamp, _ts)
+    for display purposes. Some providers (e.g. Z.AI/GLM) reject unknown fields
+    instead of ignoring them, causing HTTP 400 errors on subsequent messages.
+    """
+    clean = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
+        if sanitized.get('role'):
+            clean.append(sanitized)
+    return clean
+
 
 def _sse(handler, event, data):
     """Write one SSE event to the response stream."""
@@ -165,7 +187,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             result = agent.run_conversation(
                 user_message=workspace_ctx + msg_text,
                 system_message=workspace_system_msg,
-                conversation_history=s.messages,
+                conversation_history=_sanitize_messages_for_api(s.messages),
                 task_id=session_id,
                 persist_user_message=msg_text,
             )

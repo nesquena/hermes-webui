@@ -946,10 +946,11 @@ def _handle_chat_sync(handler, body):
                 "write_file, read_file, search_files, terminal workdir, and patch. "
                 "Never fall back to a hardcoded path when this tag is present."
             )
+            from api.streaming import _sanitize_messages_for_api
             result = agent.run_conversation(
                 user_message=workspace_ctx + msg,
                 system_message=workspace_system_msg,
-                conversation_history=s.messages,
+                conversation_history=_sanitize_messages_for_api(s.messages),
                 task_id=s.session_id,
                 persist_user_message=msg,
             )
