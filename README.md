@@ -10,9 +10,61 @@ and vanilla JS.
 Layout: three-panel Claude-style. Left sidebar for sessions and tools,
 center for chat, right for workspace file browsing.
 
-<img width="1392" height="854" alt="image" src="https://github.com/user-attachments/assets/79cd3c0d-3167-42ed-9434-447a742c25c3" />
+<img width="1392" alt="Hermes Web UI — three-panel layout" src="https://github.com/user-attachments/assets/79cd3c0d-3167-42ed-9434-447a742c25c3" />
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <img alt="Workspace file browser with inline preview" src="docs/images/ui-workspace.png" />
+      <br /><sub>Workspace file browser with inline preview</sub>
+    </td>
+    <td width="50%" align="center">
+      <img alt="Session projects, tags, and tool call cards" src="docs/images/ui-sessions.png" />
+      <br /><sub>Session projects, tags, and tool call cards</sub>
+    </td>
+  </tr>
+</table>
 
 This gives you nearly **1:1 parity with Hermes CLI from a convenient web UI** which you can access securely through an SSH tunnel from your Hermes setup. Single command to start this up, and a single command to SSH tunnel for access on your computer. Every single part of the web UI leverages your existing Hermes agent, existing models, without requiring any setup.
+
+---
+
+## Why Hermes
+
+Most AI tools reset every session. They don't know who you are, what you worked on, or what
+conventions your project follows. You re-explain yourself every time.
+
+Hermes is different. It's a **persistent agent** that lives on your server, remembers everything,
+and gets more useful the longer it runs. No other open-source tool in this space combines
+persistent memory, autonomous scheduling, and multi-modal access in one package.
+
+**What sets it apart:**
+
+- **Memory that compounds** — user profile, agent notes, and a skills system that saves reusable
+  procedures; Hermes learns your environment and never has to relearn it
+- **Autonomous scheduling** — cron jobs that fire while you're offline and deliver results to
+  Telegram, Discord, Slack, Signal, email, and more
+- **10+ messaging platforms** — the same agent you use in the terminal is reachable from your phone
+- **Provider-agnostic** — OpenAI, Anthropic, Google, DeepSeek, OpenRouter, and more; switch
+  models without rebuilding your workflow
+- **Orchestrates other agents** — Hermes can spawn Claude Code or Codex for heavy coding tasks
+  and fold the results back into its own memory
+- **Fully self-hosted** — your conversations, your memory, your hardware
+
+**vs. the field:**
+
+| | Claude Code | Codex CLI | OpenCode | Claude.ai | **Hermes** |
+|---|---|---|---|---|---|
+| Persistent memory | No | No | No | Shallow | **Yes** |
+| Scheduled jobs | No | No | No | No | **Yes** |
+| Messaging app access | No | No | No | No | **Yes** |
+| Web UI | No | No | No | Yes | **Yes** |
+| Provider-agnostic | No | No | Yes | No | **Yes** |
+| Self-hosted | Yes | Yes | Yes | No | **Yes** |
+| Skills system | No | No | No | No | **Yes** |
+| Open source | No | Yes | Yes | No | **Yes** |
+
+For the full breakdown — mental model, four-category taxonomy, and per-tool deep dives — see [HERMES.md](HERMES.md).
 
 ---
 
@@ -323,6 +375,7 @@ State lives outside the repo at `~/.hermes/webui-mvp/` by default
 
 ## Docs
 
+- `HERMES.md` -- why Hermes, mental model, and detailed comparison to Claude Code / Codex / OpenCode / Cursor
 - `ROADMAP.md` -- feature roadmap and sprint history
 - `ARCHITECTURE.md` -- system design, all API endpoints, implementation notes
 - `TESTING.md` -- manual browser test plan and automated coverage reference
