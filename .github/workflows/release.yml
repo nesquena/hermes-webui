@@ -33,16 +33,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Extract semver tags: e.g. v0.28 -> 0.28, latest
+      # Extract tags from the git ref (supports vX.Y and vX.Y.Z formats)
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=match,pattern=v(\d+\.\d+(?:\.\d+)?),group=1
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'master') }}
 
       # Build and push multi-arch image (amd64 + arm64)
       - name: Build and push Docker image
