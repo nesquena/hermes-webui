@@ -96,7 +96,7 @@ launched early-access per-repo memory in late 2025. Cursor has no native memory.
 scheduling or messaging access. Tied to one machine and one editor.
 
 ### Category 3: Agentic CLI Tools
-*Claude Code, Codex CLI, OpenCode, Open Interpreter*
+*Claude Code, Codex CLI, OpenCode, Aider*
 
 The current frontier for most developers. Can use real tools -- run shell commands, read and
 write files, search the web, call APIs. Great for deep, multi-step tasks in a single terminal
@@ -131,63 +131,60 @@ and a ClawHub skill marketplace where users share pre-built automations.
 
 Hermes takes a different approach. It is built in Python and centers on a **self-improving
 agent loop** rather than a gateway control plane. The defining difference is the skills system:
-where OpenClaw skills are human-authored plugins installed from a marketplace, Hermes
-**discovers and writes its own skills** from experience. When Hermes solves a problem a clever
-way, it saves the procedure and reuses it automatically. The agent gets more capable the longer
-it runs, without you authoring anything.
+where OpenClaw skills are primarily human-authored plugins installed from a marketplace, Hermes
+**discovers and writes its own skills** as a core first-class behavior. Every time Hermes solves
+a problem a new way, it saves the procedure automatically and reuses it in future sessions. The
+agent gets smarter about your specific environment and workflows without you having to author
+anything.
 
-Hermes also lives natively in the Python/ML ecosystem -- every data science library, every
-model inference tool, every research framework is one import away. And it has a full web UI
-(this project) that OpenClaw lacks.
+**Where OpenClaw wins:**
+- Broader messaging coverage -- 15+ platforms including iMessage, LINE, WeChat, Teams
+- Native Chrome/Chromium browser and computer control via CDP
+- Voice wake words (macOS/iOS)
+- Massive community skill library (13,700+ on ClawHub)
+- Larger community (347k stars)
+
+**Where Hermes wins:**
+- **Self-improving by default** -- skills are written and saved automatically from experience,
+  not installed from a marketplace; the agent compounds over time without user effort
+- **Reliability** -- Hermes is significantly more stable; OpenClaw has a documented history of
+  update-breaking regressions, persistent messaging failures (Telegram broke across multiple
+  releases in early 2026), and an unofficial WhatsApp protocol that frequently disconnects
+- **Security** -- OpenClaw's ClawHub marketplace has had repeated supply chain attacks (1,184
+  malicious skills identified in one audit, 156 CVEs tracked, one scored 9.9/10); Hermes does
+  not have a third-party skill marketplace and has a much smaller attack surface
+- **Python / ML ecosystem** -- Hermes runs natively in Python; every data science library,
+  model inference framework, and research tool is one import away; OpenClaw is Node.js
+- **Web UI** -- Hermes ships a full-featured three-panel chat interface (this project);
+  OpenClaw has a basic gateway dashboard for monitoring but no full chat UI
+- **Orchestrates other agents** -- Hermes can spawn Claude Code or Codex as sub-agents for
+  heavy implementation tasks and fold results back into its own memory; OpenClaw runs its
+  own agent sessions but does not wrap Claude Code or Codex specifically
+- **Multi-profile support** -- Hermes has first-class named profiles, each with its own
+  config, models, memory, and skills; OpenClaw uses complex binding-rule routing
 
 The honest summary: if you want the broadest messaging coverage and native browser/computer
-control out of the box, OpenClaw is excellent. If you want an agent that self-improves from
-experience, lives in a Python environment, has a web UI, and can orchestrate other agents like
-Claude Code and Codex as sub-agents, Hermes is the better fit.
+control, and you're comfortable managing the operational overhead, OpenClaw is a powerful choice.
+If you want an agent that self-improves reliably from experience, lives in the Python ecosystem,
+has a polished web UI, and stays stable across updates, Hermes is the better fit.
 
 | | OpenClaw | Hermes |
 |---|---|---|
 | Persistent memory | Yes | Yes |
 | Scheduled jobs (cron) | Yes | Yes |
 | Messaging app access | Yes (15+ platforms, incl. iMessage/WeChat) | Yes (10+ platforms) |
+| Web UI | Dashboard only (no full chat UI) | Yes (full three-panel chat UI) |
 | Self-hosted | Yes | Yes |
 | Open source | Yes (MIT) | Yes |
-| Web UI | No | Yes |
-| Self-improving skills system | No (human-authored plugins) | Yes (agent writes and saves its own) |
+| Self-improving skills (automatic) | Partial (AI can generate skills, not default loop) | Yes (first-class, automatic) |
 | Browser / computer control | Yes (native Chrome CDP) | Via shell / tools |
 | Voice wake words | Yes (macOS/iOS) | No |
 | Python / ML ecosystem | No (Node.js) | Yes |
 | Orchestrates Claude Code / Codex | No | Yes |
-| Multi-profile support | No | Yes |
+| Multi-profile support | Complex (binding-rule routing) | Yes (first-class named profiles) |
 | Provider-agnostic | Yes | Yes |
-
-### vs. Open Interpreter
-
-Open Interpreter is probably the most common first question: "why not just use this?" It lets
-LLMs run code locally -- Python, JavaScript, shell -- with full system access. It's powerful,
-open-source, and has a growing desktop app for document automation tasks.
-
-But Open Interpreter is fundamentally a **reactive, session-scoped tool**. Their own
-documentation is explicit: it "will not remember previous conversations." There is no scheduler,
-no background daemon, no messaging integration. Each session starts fresh. It excels at
-one-shot complex tasks -- filling PDFs, running data pipelines, automating file operations --
-but it is not designed for ongoing ambient operation.
-
-To get Hermes-like behavior from Open Interpreter you would need to build: external persistent
-memory, a scheduler or daemon wrapper, a messaging bridge, and persistent state management.
-None of those are built-in. Hermes ships all of it.
-
-| | Open Interpreter | Hermes |
-|---|---|---|
-| Persistent memory across sessions | No (manual save only) | Yes (automatic, layered) |
-| Scheduled / background jobs | No | Yes |
-| Messaging app access | No | Yes (10+ platforms) |
-| Web UI | No (terminal / desktop app only) | Yes |
-| Always-on daemon | No | Yes |
-| Provider-agnostic | Yes (via LiteLLM) | Yes (10+ providers) |
-| Self-hosted | Yes | Yes |
-| Local code execution | Yes | Yes |
-| Open source | Yes | Yes |
+| Stability / update reliability | Moderate (documented regressions) | High |
+| Supply chain security | Moderate (ClawHub has had malicious skills) | High (no third-party marketplace) |
 
 ### vs. Claude Code (Anthropic)
 
@@ -195,20 +192,31 @@ Claude Code is Anthropic's official agentic CLI and one of the best tools in Cat
 In a single focused session it is exceptionally capable -- deep code understanding, shell access,
 file editing, multi-step reasoning.
 
-Claude Code is actively adding features in this space. It now has:
+Claude Code has been adding features rapidly and the gap is narrowing:
 
-- **`/loop`** -- reruns a prompt on an interval, session-scoped (your machine must be on and
-  the session open)
-- **Web scheduled tasks** -- cloud-managed cron via `claude.ai/code/scheduled`; your machine
-  does not need to be on; minimum 1-hour interval; runs on Anthropic infrastructure
-- **Desktop app automations** -- machine-local scheduling via the desktop app
-- **CLAUDE.md and MEMORY.md** -- project-level persistent context that loads every session;
-  auto-memory is rolling out but is not yet fully automatic cross-session recall
+- **Hooks system** -- 13 event types (SessionStart, PreToolUse, PostToolUse, Stop, etc.) with
+  4 handler types (shell command, HTTP endpoint, LLM prompt, sub-agent); deterministic
+  non-LLM control over the agent lifecycle
+- **Plugins / Skills** -- installable via `/plugin install`, hot-reloaded from `~/.claude/skills`,
+  with a marketplace; skills and slash commands unified as of v2.1.0
+- **Scheduling** -- `/loop` (session-scoped), cloud-managed cron via `claude.ai/code/scheduled`
+  (Anthropic infrastructure, 1-hour minimum), and desktop app automations
+- **Messaging channels** -- Telegram, Discord, iMessage, and webhooks via the Channels feature
+  (research preview, v2.1.80+); deep Slack integration that triggers cloud sessions and creates PRs
+- **Claude Cowork** -- a separate but related product for knowledge workers; connects to 38+
+  services via MCP including Slack, Gmail, Microsoft Teams, Notion, Jira, Salesforce, and more
+- **Memory** -- CLAUDE.md and MEMORY.md for project-level context; auto-memory rolling out
 
-These are real features and the gap is narrowing. The key differences that remain: Claude Code's
-scheduling runs on Anthropic's cloud (not your server), its memory is project-file-based rather
-than a living knowledge graph, it has no messaging app access, and it is not open source. Hermes
-runs entirely on your own hardware and is provider-agnostic across all models, not just Claude.
+These are real features. The key differences that remain:
+
+- Claude Code's scheduling runs on **Anthropic's cloud**, not your server; your data leaves
+  your hardware; there is a 1-hour minimum interval for cloud jobs
+- Memory is **project-file-based** (CLAUDE.md / MEMORY.md), not a living knowledge graph that
+  accumulates automatically across all your work
+- Not **provider-agnostic** -- routes through Bedrock or Vertex but always hits a Claude model;
+  you cannot switch to GPT, Gemini, or a local model
+- **Not open source** -- proprietary; the CLI ships obfuscated JavaScript
+- Messaging channels are a **research preview** requiring Bun runtime; not yet production-grade
 
 Hermes can also use Claude Code as a sub-agent. For large implementation tasks, Hermes can
 spawn Claude Code to handle the coding heavy-lifting, then fold the result back into its own
@@ -217,14 +225,15 @@ memory and history.
 | | Claude Code | Hermes |
 |---|---|---|
 | Persistent memory (automatic) | Partial (CLAUDE.md / MEMORY.md, rolling out) | Yes |
-| Skills (saved reusable procedures) | No | Yes |
-| Scheduled jobs | Partial (cloud-managed or session-scoped `/loop`) | Yes (self-hosted, any interval) |
-| Messaging app access | No | Yes (10+ platforms) |
+| Skills / hooks system | Yes (Hooks + Plugin/Skills marketplace) | Yes (auto-generated from experience) |
+| Scheduled jobs (self-hosted) | No (cloud-managed or session-scoped only) | Yes |
+| Messaging access | Partial (Telegram/Discord/iMessage via research preview; Slack native) | Yes (10+ platforms, production) |
+| Cowork connectors (Slack, Gmail, etc.) | Yes (via Claude Cowork, separate product) | Via agent tool use |
 | Web UI | Yes (claude.ai/code, Anthropic-hosted) | Yes (self-hosted) |
 | Provider-agnostic | No (Claude models only, via Bedrock/Vertex) | Yes (any provider) |
-| Self-hosted | No (cloud-managed scheduling) | Yes |
-| Agentic tool use | Yes | Yes |
+| Self-hosted scheduling | No | Yes |
 | Open source | No | Yes |
+| Runs as sub-agent of Hermes | Yes | N/A |
 
 ### vs. Codex CLI (OpenAI)
 
@@ -233,8 +242,8 @@ genuinely provider-agnostic -- supports 10+ providers including Anthropic, Googl
 Groq, and local models via Ollama. It added persistent session memory in v0.100.0 with
 `codex resume`. The desktop app has an Automations feature for scheduled local tasks.
 
-The CLI itself still has no native scheduling (open feature request as of early 2026). Memory
-is session-history-based, not a living knowledge graph. No messaging app access. Strong tool
+The CLI itself has no native scheduling (open feature request as of early 2026). Memory is
+session-history-based, not a living knowledge graph. No messaging app access. Strong tool
 for single-session coding; Hermes adds the always-on layer on top.
 
 | | Codex CLI | Hermes |
@@ -250,8 +259,8 @@ for single-session coding; Hermes adds the always-on layer on top.
 ### vs. OpenCode
 
 OpenCode is an open-source TUI agentic coding assistant, provider-agnostic across 75+ providers.
-It recently added a WebUI embedded in its binary and has an official desktop app. It uses SQLite
-for session history and AGENTS.md for project context.
+It has a WebUI embedded in its binary and an official desktop app. It uses SQLite for session
+history and AGENTS.md for project context.
 
 It has no native scheduled jobs (a community background plugin exists), no first-party messaging
 integration (community Telegram bots exist but require manual setup), and no automatic
@@ -362,22 +371,24 @@ reasoning accumulates into something durable.
 
 ## Quick Reference
 
-| | OpenClaw | Claude Code | Codex CLI | OpenCode | Open Interpreter | Cursor | Claude.ai | **Hermes** |
-|---|---|---|---|---|---|---|---|---|
-| Persistent memory (auto) | Yes | Partial† | Partial | Partial | No | No | Shallow | **Yes** |
-| Scheduled / background jobs | Yes | Partial‡ | Partial§ | No | No | No | No | **Yes (self-hosted)** |
-| Messaging app access | Yes (15+ platforms) | No | No | No | No | No | No | **Yes (10+ platforms)** |
-| Web UI | No | Yes (Anthropic cloud) | No | Yes | No | No | Yes | **Yes (self-hosted)** |
-| Self-hosted | Yes | No | Yes | Yes | Yes | No | No | **Yes** |
-| Provider-agnostic | Yes | No (Claude only) | Yes | Yes | Yes | Partial | No | **Yes** |
-| Self-improving skills | No | No | No | No | No | No | No | **Yes** |
-| Browser / computer control | Yes (Chrome CDP) | No | No | No | No | No | No | Via shell |
-| Python / ML ecosystem | No (Node.js) | No | No | No | Yes | No | No | **Yes** |
-| In-editor autocomplete | No | No | No | No | No | Yes | No | No |
-| Orchestrates other agents | No | No | No | No | No | No | No | **Yes** |
-| Open source | Yes (MIT) | No | Yes | Yes | Yes | No | No | **Yes** |
-| Always-on / autonomous | Yes | No | No | No | No | No | No | **Yes** |
+| | OpenClaw | Claude Code | Codex CLI | OpenCode | Cursor | Claude.ai | **Hermes** |
+|---|---|---|---|---|---|---|---|
+| Persistent memory (auto) | Yes | Partial† | Partial | Partial | No | Shallow | **Yes** |
+| Scheduled / background jobs | Yes | Partial‡ | Partial§ | No | No | No | **Yes (self-hosted)** |
+| Messaging app access | Yes (15+ platforms) | Partial (Telegram/Discord preview; Slack native) | No | No | No | No | **Yes (10+ platforms)** |
+| Web UI | Dashboard only | Yes (Anthropic cloud) | No | Yes | No | Yes | **Yes (self-hosted)** |
+| Skills system | Yes (marketplace) | Yes (Hooks + Plugins) | No | No | No | No | **Yes (self-improving)** |
+| Self-improving skills | Partial | No | No | No | No | No | **Yes** |
+| Browser / computer control | Yes (Chrome CDP) | No | No | No | No | No | Via shell |
+| Python / ML ecosystem | No (Node.js) | No | No | No | No | No | **Yes** |
+| In-editor autocomplete | No | No | No | No | Yes | No | No |
+| Orchestrates other agents | No | No | No | No | No | No | **Yes** |
+| Provider-agnostic | Yes | No (Claude only) | Yes | Yes | Partial | No | **Yes** |
+| Self-hosted | Yes | No | Yes | Yes | No | No | **Yes** |
+| Open source | Yes (MIT) | No | Yes | Yes | No | No | **Yes** |
+| Always-on / autonomous | Yes | No | No | No | No | No | **Yes** |
+| Stability / reliability | Moderate | High | High | High | High | High | **High** |
 
 † Claude Code has CLAUDE.md / MEMORY.md project context and rolling auto-memory, but not full automatic cross-session recall  
-‡ Claude Code scheduling: cloud-managed (Anthropic infrastructure) or session-scoped `/loop`; no self-hosted cron  
+‡ Claude Code scheduling: cloud-managed (Anthropic infrastructure, 1hr min) or session-scoped `/loop`; no self-hosted cron  
 § Codex scheduling: desktop app Automations only; CLI has no native scheduling
