@@ -31,7 +31,7 @@ PORT = int(os.getenv('HERMES_WEBUI_PORT', '8787'))
 # ── State directory (env-overridable, never inside repo) ──────────────────────
 STATE_DIR = Path(os.getenv(
     'HERMES_WEBUI_STATE_DIR',
-    str(HOME / '.hermes' / 'webui-mvp')
+    str(HOME / '.hermes' / 'webui')
 )).expanduser().resolve()
 
 SESSION_DIR           = STATE_DIR / 'sessions'
