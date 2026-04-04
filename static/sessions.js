@@ -118,7 +118,7 @@ function renderSessionListFromCache(){
   // Filter by active profile (unless "All profiles" is toggled on)
   // Server backfills profile='default' for legacy sessions, so every session has a profile.
   // Show only sessions tagged to the active profile; 'All profiles' toggle overrides.
-  const profileFiltered=_showAllProfiles?allMatched:allMatched.filter(s=>s.profile===S.activeProfile);
+  const profileFiltered=_showAllProfiles?allMatched:allMatched.filter(s=>s.is_cli_session||s.profile===S.activeProfile);
   // Filter by active project
   const projectFiltered=_activeProject?profileFiltered.filter(s=>s.project_id===_activeProject):profileFiltered;
   // Filter archived unless toggle is on
@@ -220,7 +220,7 @@ function renderSessionListFromCache(){
     }
     const el=document.createElement('div');
     const isActive=S.session&&s.session_id===S.session.session_id;
-    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'');
+    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(s.is_cli_session?' cli-session':'');
     if(isActive&&S.session&&S.session._flash)delete S.session._flash;
     const rawTitle=s.title||'Untitled';
     const tags=(rawTitle.match(/#[\w-]+/g)||[]);
@@ -368,6 +368,12 @@ function renderSessionListFromCache(){
       _clickTimer=setTimeout(async()=>{
         _clickTimer=null;
         if(_renamingSid) return;
+        // For CLI sessions, import into WebUI store first (idempotent)
+        if(s.is_cli_session){
+          try{
+            await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:s.session_id})});
+          }catch(e){ /* import failed -- fall through to read-only view */ }
+        }
         await loadSession(s.session_id);renderSessionListFromCache();
         if(typeof closeMobileSidebar==='function')closeMobileSidebar();
       }, 220);
