@@ -69,7 +69,6 @@ def main():
         print('     Agent features may not work correctly.', flush=True)
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    SESSION_DIR.mkdir(parents=True, exist_ok=True)
     DEFAULT_WORKSPACE.mkdir(parents=True, exist_ok=True)
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f'  Hermes Web UI listening on http://{HOST}:{PORT}', flush=True)

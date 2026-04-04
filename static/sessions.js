@@ -1,26 +1,11 @@
-// ── Session action icons (SVG, monochrome, inherit currentColor) ──
-const ICONS={
-  pin:'<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" stroke="none"><polygon points="8,1.5 9.8,5.8 14.5,6.2 11,9.4 12,14 8,11.5 4,14 5,9.4 1.5,6.2 6.2,5.8"/></svg>',
-  unpin:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><polygon points="8,2 9.8,6.2 14.2,6.2 10.7,9.2 12,13.8 8,11 4,13.8 5.3,9.2 1.8,6.2 6.2,6.2"/></svg>',
-  folder:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M2 4.5h4l1.5 1.5H14v7H2z"/></svg>',
-  archive:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="1.5" y="2" width="13" height="3" rx="1"/><path d="M2.5 5v8h11V5"/><line x1="6" y1="8.5" x2="10" y2="8.5"/></svg>',
-  unarchive:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="1.5" y="2" width="13" height="3" rx="1"/><path d="M2.5 5v8h11V5"/><polyline points="6.5,7 8,5.5 9.5,7"/></svg>',
-  dup:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="4.5" y="4.5" width="8.5" height="8.5" rx="1.5"/><path d="M3 11.5V3h8.5"/></svg>',
-  trash:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3.5 4.5h9M6.5 4.5V3h3v1.5M4.5 4.5v8.5h7v-8.5"/><line x1="7" y1="7" x2="7" y2="11"/><line x1="9" y1="7" x2="9" y2="11"/></svg>',
-};
-
 async function newSession(flash){
   MSG_QUEUE.length=0;updateQueueBadge();
   S.toolCalls=[];
-  clearLiveToolCards();
-  // Use profile default workspace for new sessions after a profile switch (one-shot),
-  // otherwise inherit from the current session (or let server pick the default)
-  const inheritWs=S._profileDefaultWorkspace||(S.session?S.session.workspace:null);
-  S._profileDefaultWorkspace=null; // consume — only applies to the first new session after switch
+  const inheritWs=S.session?S.session.workspace:null;
   const data=await api('/api/session/new',{method:'POST',body:JSON.stringify({model:$('modelSelect').value,workspace:inheritWs})});
   S.session=data.session;S.messages=data.session.messages||[];
   if(flash)S.session._flash=true;
-  localStorage.setItem('hermes-webui-session',S.session.session_id);
+  history.replaceState({s:S.session.session_id},'','?s='+encodeURIComponent(S.session.session_id));
   syncTopbar();await loadDir('.');renderMessages();
   // don't call renderSessionList here - callers do it when needed
 }
@@ -29,7 +14,7 @@ async function loadSession(sid){
   stopApprovalPolling();hideApprovalCard();
   const data=await api(`/api/session?session_id=${encodeURIComponent(sid)}`);
   S.session=data.session;
-  localStorage.setItem('hermes-webui-session',S.session.session_id);
+  history.pushState({s:sid},'','?s='+encodeURIComponent(sid));
   // B9: sanitize empty assistant messages that can appear when agent only ran tool calls
   data.session.messages=(data.session.messages||[]).filter(m=>{
     if(!m||!m.role)return false;
@@ -39,12 +24,16 @@ async function loadSession(sid){
   });
   if(INFLIGHT[sid]){
     S.messages=INFLIGHT[sid].messages;
-    // Restore live tool cards for this in-flight session
-    clearLiveToolCards();
+    // Render messages first, then append in-flight tool cards directly into msgInner
+    syncTopbar();await loadDir('.');renderMessages();
     for(const tc of (S.toolCalls||[])){
-      if(tc&&tc.name) appendLiveToolCard(tc);
+      if(tc&&tc.name){
+        const card=buildToolCard(tc);
+        if(tc.tid) card.dataset.tid=tc.tid;
+        $('msgInner').appendChild(card);
+      }
     }
-    syncTopbar();await loadDir('.');renderMessages();appendThinking();
+    appendThinking();
     setBusy(true);setStatus('Hermes is thinking\u2026');
     startApprovalPolling(sid);
   }else{
@@ -62,7 +51,6 @@ async function loadSession(sid){
     const _dots=$('activityDots');if(_dots)_dots.style.display='none';
     const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
     setStatus('');
-    clearLiveToolCards();
     syncTopbar();await loadDir('.');renderMessages();highlightCode();
   }
 }
@@ -70,21 +58,207 @@ async function loadSession(sid){
 let _allSessions = [];  // cached for search filter
 let _renamingSid = null;  // session_id currently being renamed (blocks list re-renders)
 let _showArchived = false;  // toggle to show archived sessions
-let _allProjects = [];  // cached project list
-let _activeProject = null;  // project_id filter (null = show all)
-let _showAllProfiles = false;  // false = filter to active profile only
+let _subagentMap = {};   // parent_session_id -> [child session objects]
+let _childSessionIds = new Set();  // session_ids that are subagents (hidden from main list)
+let _expandedParents = {};  // parent_session_id -> true/false collapse state
+try{_expandedParents=JSON.parse(localStorage.getItem('hermes-subagent-expanded')||'{}');}catch(e){}
+function _saveExpandedParents(){try{localStorage.setItem('hermes-subagent-expanded',JSON.stringify(_expandedParents));}catch(e){}}
+
+function _buildSubagentMap(){
+  _subagentMap={};
+  _childSessionIds=new Set();
+  for(const s of _allSessions){
+    if(s.parent_session_id){
+      if(!_subagentMap[s.parent_session_id]) _subagentMap[s.parent_session_id]=[];
+      _subagentMap[s.parent_session_id].push(s);
+      _childSessionIds.add(s.session_id);
+    }
+  }
+}
+
+// ── Session item renderer (extracted helper) ─────────────────────────────────
+function _renderSessionItem(s){
+  const el=document.createElement('div');
+  const isActive=S.session&&s.session_id===S.session.session_id;
+  el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'');
+  if(isActive&&S.session&&S.session._flash)delete S.session._flash;
+  const rawTitle=(s.title||'Untitled').replace(/ #(\d+)$/, ' $1');
+  const tags=(rawTitle.match(/#[\w-]+/g)||[]);
+  const cleanTitle=tags.length?rawTitle.replace(/#[\w-]+/g,'').trim():rawTitle;
+  const title=document.createElement('span');
+  title.className='session-title';
+  title.textContent=cleanTitle||'Untitled';
+  title.title='Double-click to rename';
+  if(s.source==='cli'){
+    const cliChip=document.createElement('span');
+    cliChip.className='session-source-cli';
+    cliChip.innerHTML='<i class="fas fa-terminal"></i>';
+    cliChip.title='Started from CLI';
+    title.prepend(cliChip);
+  }
+  if(s.source==='telegram'){
+    const tgChip=document.createElement('span');
+    tgChip.className='session-source-telegram';
+    tgChip.innerHTML='<i class="fab fa-telegram"></i>';
+    tgChip.title='Started from Telegram';
+    title.prepend(tgChip);
+  }
+  for(const tag of tags){
+    const chip=document.createElement('span');
+    chip.className='session-tag';
+    chip.textContent=tag;
+    chip.title='Click to filter by '+tag;
+    chip.onclick=(e)=>{
+      e.stopPropagation();
+      const searchBox=$('sessionSearch');
+      if(searchBox){searchBox.value=tag;filterSessions();}
+    };
+    title.appendChild(chip);
+  }
+  const startRename=()=>{
+    _renamingSid=s.session_id;
+    const inp=document.createElement('input');
+    inp.className='session-title-input';
+    inp.value=s.title||'Untitled';
+    ['click','mousedown','dblclick','pointerdown'].forEach(ev=>
+      inp.addEventListener(ev,e2=>e2.stopPropagation())
+    );
+    const finish=async(save)=>{
+      _renamingSid=null;
+      if(save){
+        const newTitle=inp.value.trim()||'Untitled';
+        title.textContent=newTitle;
+        s.title=newTitle;
+        if(S.session&&S.session.session_id===s.session_id){S.session.title=newTitle;syncTopbar();}
+        try{await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:s.session_id,title:newTitle})});}
+        catch(err){setStatus('Rename failed: '+err.message);}
+      }
+      inp.replaceWith(title);
+      setTimeout(()=>{if(_renamingSid===null) renderSessionListFromCache();},50);
+    };
+    inp.onkeydown=e2=>{
+      if(e2.key==='Enter'){e2.preventDefault();e2.stopPropagation();finish(true);}
+      if(e2.key==='Escape'){e2.preventDefault();e2.stopPropagation();finish(false);}
+    };
+    inp.onblur=()=>{if(_renamingSid===s.session_id) finish(false);};
+    title.replaceWith(inp);
+    setTimeout(()=>{inp.focus();inp.select();},10);
+  };
+  const pin=document.createElement('span');
+  pin.className='session-pin'+(s.pinned?' pinned':'');
+  pin.innerHTML=s.pinned?'<i class="fas fa-star"></i>':'<i class="far fa-star"></i>';
+  pin.title=s.pinned?'Unpin':'Pin to top';
+  pin.onclick=async(e)=>{
+    e.stopPropagation();e.preventDefault();
+    const newPinned=!s.pinned;
+    try{
+      await api('/api/session/pin',{method:'POST',body:JSON.stringify({session_id:s.session_id,pinned:newPinned})});
+      s.pinned=newPinned;
+      if(S.session&&S.session.session_id===s.session_id) S.session.pinned=newPinned;
+      refreshSessionList();
+    }catch(err){showToast('Pin failed: '+err.message);}
+  };
+  const dup=document.createElement('button');
+  dup.className='session-dup';dup.innerHTML='<i class="fas fa-copy"></i>';dup.title='Duplicate';
+  dup.onclick=async(e)=>{
+    e.stopPropagation();e.preventDefault();
+    try{
+      const res=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:s.workspace,model:s.model})});
+      if(res.session){
+        const copyTitle=(s.title||'Untitled')+' (copy)';
+        await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:res.session.session_id,title:copyTitle})});
+        res.session.title=copyTitle;
+        _allSessions.unshift(res.session);
+        await loadSession(res.session.session_id);refreshSessionList();
+        showToast('Session duplicated');
+      }
+    }catch(err){showToast('Duplicate failed: '+err.message);}
+  };
+  const trash=document.createElement('button');
+  trash.className='session-trash';trash.innerHTML='<i class="fas fa-trash"></i>';trash.title='Delete';
+  trash.onclick=async(e)=>{e.stopPropagation();e.preventDefault();await deleteSession(s.session_id);};
+  el.appendChild(pin);el.appendChild(title);el.appendChild(dup);el.appendChild(trash);
+  let _clickTimer=null;
+  el.onclick=async(e)=>{
+    if(_renamingSid) return;
+    if([trash,dup].some(b=>e.target===b||b.contains(e.target))) return;
+    clearTimeout(_clickTimer);
+    _clickTimer=setTimeout(async()=>{
+      _clickTimer=null;
+      if(_renamingSid) return;
+      await loadSession(s.session_id);renderSessionListFromCache();
+    },220);
+  };
+  el.ondblclick=async(e)=>{
+    e.stopPropagation();
+    e.preventDefault();
+    clearTimeout(_clickTimer);
+    _clickTimer=null;
+    startRename();
+  };
+
+  // Subagent expand/collapse: wrap parent + children in a container
+  const children=_subagentMap[s.session_id];
+  if(children&&children.length){
+    const wrap=document.createElement('div');
+    wrap.className='session-parent-wrap';
+
+    // Add expand chevron before title
+    const expandBtn=document.createElement('span');
+    expandBtn.className='session-expand-btn'+(_expandedParents[s.session_id]?' open':'');
+    expandBtn.innerHTML='<i class="fas fa-chevron-right"></i>';
+    expandBtn.title=children.length+' subagent'+(children.length>1?'s':'');
+    el.insertBefore(expandBtn,el.firstChild);
+
+    const childContainer=document.createElement('div');
+    childContainer.className='subagent-list'+(_expandedParents[s.session_id]?'':' hidden');
+
+    for(const child of children){
+      const childEl=document.createElement('div');
+      const isChildActive=S.session&&child.session_id===S.session.session_id;
+      childEl.className='session-item subagent-item'+(isChildActive?' active':'');
+      childEl.dataset.session=child.session_id;
+      const childTitle=document.createElement('span');
+      childTitle.className='session-title';
+      childTitle.innerHTML='<i class="fas fa-robot subagent-icon"></i> '+(child.title||'Untitled');
+      const childCount=document.createElement('span');
+      childCount.className='session-count';
+      childCount.textContent=child.message_count||'';
+      childEl.appendChild(childTitle);
+      childEl.appendChild(childCount);
+      childEl.onclick=async()=>{await loadSession(child.session_id);renderSessionListFromCache();};
+      childContainer.appendChild(childEl);
+    }
+
+    expandBtn.onclick=(e)=>{
+      e.stopPropagation();
+      const nowExpanded=childContainer.classList.toggle('hidden');
+      expandBtn.classList.toggle('open',!nowExpanded);
+      _expandedParents[s.session_id]=!nowExpanded;
+      _saveExpandedParents();
+    };
+
+    wrap.appendChild(el);
+    wrap.appendChild(childContainer);
+    return wrap;
+  }
+
+  return el;
+}
 
 async function renderSessionList(){
   try{
-    if(!($('sessionSearch').value||'').trim()) _contentSearchResults = [];
-    const [sessData, projData] = await Promise.all([
-      api('/api/sessions'),
-      api('/api/projects'),
-    ]);
-    _allSessions = sessData.sessions||[];
-    _allProjects = projData.projects||[];
-    renderSessionListFromCache();  // no-ops if rename is in progress
+    if(!($('sessionSearch').value||'').trim()) _contentSearchResults=[];
+    const data=await api('/api/sessions');
+    _allSessions=data.sessions||[];
+    renderSessionListFromCache();
   }catch(e){console.warn('renderSessionList',e);}
+}
+
+// Re-render from cache without a network call.
+// Use this after mutations that already patch _allSessions in-memory.
+function refreshSessionList(){
+  renderSessionListFromCache();
 }
 
 let _searchDebounceTimer = null;
@@ -110,283 +284,172 @@ function filterSessions(){
 function renderSessionListFromCache(){
   // Don't re-render while user is actively renaming a session (would destroy the input)
   if(_renamingSid) return;
+  _buildSubagentMap();
   const q=($('sessionSearch').value||'').toLowerCase();
   const titleMatches=q?_allSessions.filter(s=>(s.title||'Untitled').toLowerCase().includes(q)):_allSessions;
-  // Merge content matches (deduped): content matches appended after title matches
   const titleIds=new Set(titleMatches.map(s=>s.session_id));
   const allMatched=q?[...titleMatches,..._contentSearchResults.filter(s=>!titleIds.has(s.session_id))]:titleMatches;
-  // Filter by active profile (unless "All profiles" is toggled on)
-  // Server backfills profile='default' for legacy sessions, so every session has a profile.
-  // Show only sessions tagged to the active profile; 'All profiles' toggle overrides.
-  const profileFiltered=_showAllProfiles?allMatched:allMatched.filter(s=>s.is_cli_session||s.profile===S.activeProfile);
-  // Filter by active project
-  const projectFiltered=_activeProject?profileFiltered.filter(s=>s.project_id===_activeProject):profileFiltered;
-  // Filter archived unless toggle is on
-  const sessions=_showArchived?projectFiltered:projectFiltered.filter(s=>!s.archived);
-  const archivedCount=projectFiltered.filter(s=>s.archived).length;
+  // Filter out child sessions from main list (they render under their parent)
+  // When searching, show all matches including children (for discoverability)
+  const sessions=allMatched.filter(s=>!s.archived&&(q||!_childSessionIds.has(s.session_id)));
   const list=$('sessionList');list.innerHTML='';
-  // Project filter bar (only when projects exist)
-  if(_allProjects.length>0){
-    const bar=document.createElement('div');
-    bar.className='project-bar';
-    // "All" chip
-    const allChip=document.createElement('span');
-    allChip.className='project-chip'+(!_activeProject?' active':'');
-    allChip.textContent='All';
-    allChip.onclick=()=>{_activeProject=null;renderSessionListFromCache();};
-    bar.appendChild(allChip);
-    // Project chips
-    for(const p of _allProjects){
-      const chip=document.createElement('span');
-      chip.className='project-chip'+(p.project_id===_activeProject?' active':'');
-      if(p.color){
-        const dot=document.createElement('span');
-        dot.className='color-dot';
-        dot.style.background=p.color;
-        chip.appendChild(dot);
-      }
-      const nameSpan=document.createElement('span');
-      nameSpan.textContent=p.name;
-      chip.appendChild(nameSpan);
-      chip.onclick=()=>{_activeProject=p.project_id;renderSessionListFromCache();};
-      chip.ondblclick=(e)=>{e.stopPropagation();_startProjectRename(p,chip);};
-      chip.oncontextmenu=(e)=>{e.preventDefault();_confirmDeleteProject(p);};
-      bar.appendChild(chip);
-    }
-    // Create button
-    const addBtn=document.createElement('button');
-    addBtn.className='project-create-btn';
-    addBtn.textContent='+';
-    addBtn.title='New project';
-    addBtn.onclick=(e)=>{e.stopPropagation();_startProjectCreate(bar,addBtn);};
-    bar.appendChild(addBtn);
-    list.appendChild(bar);
-  }
-  // Profile filter toggle (show sessions from other profiles)
-  const otherProfileCount=allMatched.filter(s=>s.profile&&s.profile!==S.activeProfile).length;
-  if(otherProfileCount>0&&!_showAllProfiles){
-    const pfToggle=document.createElement('div');
-    pfToggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
-    pfToggle.textContent='Show '+otherProfileCount+' from other profiles';
-    pfToggle.onclick=()=>{_showAllProfiles=true;renderSessionListFromCache();};
-    list.appendChild(pfToggle);
-  } else if(_showAllProfiles&&otherProfileCount>0){
-    const pfToggle=document.createElement('div');
-    pfToggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
-    pfToggle.textContent='Show active profile only';
-    pfToggle.onclick=()=>{_showAllProfiles=false;renderSessionListFromCache();};
-    list.appendChild(pfToggle);
-  }
-  // Show/hide archived toggle if there are archived sessions
-  if(archivedCount>0){
-    const toggle=document.createElement('div');
-    toggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
-    toggle.textContent=_showArchived?'Hide archived':'Show '+archivedCount+' archived';
-    toggle.onclick=()=>{_showArchived=!_showArchived;renderSessionListFromCache();};
-    list.appendChild(toggle);
-  }
-  // Empty state for active project filter
-  if(_activeProject&&sessions.length===0){
-    const empty=document.createElement('div');
-    empty.style.cssText='padding:20px 14px;color:var(--muted);font-size:12px;text-align:center;opacity:.7;';
-    empty.textContent='No sessions in this project yet.';
-    list.appendChild(empty);
-  }
-  // Separate pinned from unpinned
   const pinned=sessions.filter(s=>s.pinned);
   const unpinned=sessions.filter(s=>!s.pinned);
-  // Date grouping: Pinned / Today / Yesterday / Earlier
+
+  // Load collapse state from localStorage
+  let collapsed={};
+  try{collapsed=JSON.parse(localStorage.getItem('hermes-session-groups-collapsed')||'{}');}catch(e){}
+  const saveCollapsed=()=>{
+    try{localStorage.setItem('hermes-session-groups-collapsed',JSON.stringify(collapsed));}catch(e){}
+  };
+
   const now=Date.now();
   const ONE_DAY=86400000;
-  let lastGroup='';
-  const ordered=[...pinned,...unpinned].slice(0,50);
+  const getGroupLabel=(s)=>{
+    const ts=(s.created_at||s.updated_at||0)*1000;
+    if(ts>now-ONE_DAY) return 'Today';
+    if(ts>now-2*ONE_DAY) return 'Yesterday';
+    const d=new Date(ts);
+    return d.toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'});
+  };
+
+  const renderGroup=(label,items,isPinned)=>{
+    const groupDiv=document.createElement('div');
+    groupDiv.className='session-date-group';
+
+    const header=document.createElement('div');
+    const colorClass=isPinned?'pinned':label==='Today'?'today':label==='Yesterday'?'yesterday':'older';
+    header.className='session-date-header '+colorClass;
+
+    const caret=document.createElement('i');
+    caret.className='fas fa-chevron-down session-date-caret';
+
+    const labelSpan=document.createElement('span');
+    labelSpan.textContent=isPinned?'\u2605 Pinned':label;
+
+    header.appendChild(caret);
+    header.appendChild(labelSpan);
+
+    const body=document.createElement('div');
+    body.className='session-date-body';
+
+    if(collapsed[label]){
+      body.style.display='none';
+      caret.classList.add('collapsed');
+    }
+
+    header.onclick=()=>{
+      const isNowCollapsed=body.style.display==='none';
+      body.style.display=isNowCollapsed?'':'none';
+      caret.classList.toggle('collapsed',!isNowCollapsed);
+      collapsed[label]=!isNowCollapsed;
+      saveCollapsed();
+    };
+
+    for(const s of items){
+      body.appendChild(_renderSessionItem(s));
+    }
+
+    groupDiv.appendChild(header);
+    groupDiv.appendChild(body);
+    return groupDiv;
+  };
+
+  // Pinned group
   if(pinned.length){
-    const hdr=document.createElement('div');
-    hdr.style.cssText='font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#f5c542;padding:10px 10px 4px;opacity:.9;';
-    hdr.textContent='\u2605 Pinned';
-    list.appendChild(hdr);
+    list.appendChild(renderGroup('Pinned',pinned,true));
   }
-  for(const s of ordered){
-    if(!s.pinned){
-      const ts=(s.updated_at||s.created_at||0)*1000;  // group by last activity, not creation
-      const group=ts>now-ONE_DAY?'Today':ts>now-2*ONE_DAY?'Yesterday':'Earlier';
-      if(group!==lastGroup){
-        lastGroup=group;
-        const hdr=document.createElement('div');
-        hdr.style.cssText='font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:10px 10px 4px;opacity:.8;';
-        hdr.textContent=group;
-        list.appendChild(hdr);
-      }
-    }
-    const el=document.createElement('div');
-    const isActive=S.session&&s.session_id===S.session.session_id;
-    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(s.is_cli_session?' cli-session':'');
-    if(isActive&&S.session&&S.session._flash)delete S.session._flash;
-    const rawTitle=s.title||'Untitled';
-    const tags=(rawTitle.match(/#[\w-]+/g)||[]);
-    const cleanTitle=tags.length?rawTitle.replace(/#[\w-]+/g,'').trim():rawTitle;
-    const title=document.createElement('span');
-    title.className='session-title';
-    title.textContent=cleanTitle||'Untitled';
-    title.title='Double-click to rename';
-    // Append tag chips after the title text
-    for(const tag of tags){
-      const chip=document.createElement('span');
-      chip.className='session-tag';
-      chip.textContent=tag;
-      chip.title='Click to filter by '+tag;
-      chip.onclick=(e)=>{
-        e.stopPropagation();
-        const searchBox=$('sessionSearch');
-        if(searchBox){searchBox.value=tag;filterSessions();}
-      };
-      title.appendChild(chip);
-    }
 
-    // Rename: called directly when we confirm it's a double-click
-    const startRename=()=>{
-      _renamingSid = s.session_id;
-      const inp=document.createElement('input');
-      inp.className='session-title-input';
-      inp.value=s.title||'Untitled';
-      ['click','mousedown','dblclick','pointerdown'].forEach(ev=>
-        inp.addEventListener(ev, e2=>e2.stopPropagation())
-      );
-      const finish=async(save)=>{
-        _renamingSid = null;
-        if(save){
-          const newTitle=inp.value.trim()||'Untitled';
-          title.textContent=newTitle;
-          s.title=newTitle;
-          if(S.session&&S.session.session_id===s.session_id){S.session.title=newTitle;syncTopbar();}
-          try{await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:s.session_id,title:newTitle})});}
-          catch(err){setStatus('Rename failed: '+err.message);}
-        }
-        inp.replaceWith(title);
-        // Allow list re-renders again after a short delay
-        setTimeout(()=>{ if(_renamingSid===null) renderSessionListFromCache(); },50);
-      };
-      inp.onkeydown=e2=>{
-        if(e2.key==='Enter'){e2.preventDefault();e2.stopPropagation();finish(true);}
-        if(e2.key==='Escape'){e2.preventDefault();e2.stopPropagation();finish(false);}
-      };
-      // onblur: cancel only -- no accidental saves
-      inp.onblur=()=>{ if(_renamingSid===s.session_id) finish(false); };
-      title.replaceWith(inp);
-      setTimeout(()=>{inp.focus();inp.select();},10);
-    };
-
-    // Pin indicator (inline, only when pinned — no space reserved otherwise)
-    if(s.pinned){
-      const pinInd=document.createElement('span');
-      pinInd.className='session-pin-indicator';
-      pinInd.innerHTML=ICONS.pin;
-      el.appendChild(pinInd);
+  // Group unpinned by date label
+  const dateGroups=[];
+  let curLabel=null;
+  let curItems=[];
+  for(const s of unpinned){
+    const lbl=getGroupLabel(s);
+    if(lbl!==curLabel){
+      if(curItems.length) dateGroups.push({label:curLabel,items:curItems});
+      curLabel=lbl;
+      curItems=[s];
+    } else {
+      curItems.push(s);
     }
-    // Project indicator: colored left border (active item keeps its own gold color)
-    if(s.project_id){
-      const proj=_allProjects.find(p=>p.project_id===s.project_id);
-      if(proj){
-        if(!isActive) el.style.borderLeftColor=proj.color||'var(--blue)';
-        const dot=document.createElement('span');
-        dot.className='session-project-dot';
-        dot.style.background=proj.color||'var(--blue)';
-        dot.title=proj.name;
-        title.appendChild(dot);
-      }
-    }
-    el.appendChild(title);
-    // Action buttons overlay (appears on hover with gradient fade)
-    const actions=document.createElement('div');
-    actions.className='session-actions';
-    // Pin toggle
-    const pinBtn=document.createElement('button');
-    pinBtn.className='act-pin'+(s.pinned?' pinned':'');
-    pinBtn.innerHTML=s.pinned?ICONS.pin:ICONS.unpin;
-    pinBtn.title=s.pinned?'Unpin':'Pin to top';
-    pinBtn.onclick=async(e)=>{
-      e.stopPropagation();e.preventDefault();
-      const newPinned=!s.pinned;
-      try{
-        await api('/api/session/pin',{method:'POST',body:JSON.stringify({session_id:s.session_id,pinned:newPinned})});
-        s.pinned=newPinned;
-        if(S.session&&S.session.session_id===s.session_id) S.session.pinned=newPinned;
-        renderSessionList();
-      }catch(err){showToast('Pin failed: '+err.message);}
-    };
-    actions.appendChild(pinBtn);
-    // Move to project
-    const move=document.createElement('button');
-    move.className='act-move';move.innerHTML=ICONS.folder;move.title='Move to project';
-    move.onclick=async(e)=>{e.stopPropagation();e.preventDefault();_showProjectPicker(s,move);};
-    actions.appendChild(move);
-    // Archive
-    const archive=document.createElement('button');
-    archive.className='act-archive';archive.innerHTML=s.archived?ICONS.unarchive:ICONS.archive;
-    archive.title=s.archived?'Unarchive':'Archive';
-    archive.onclick=async(e)=>{
-      e.stopPropagation();e.preventDefault();
-      try{
-        await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:s.session_id,archived:!s.archived})});
-        s.archived=!s.archived;
-        if(S.session&&S.session.session_id===s.session_id) S.session.archived=s.archived;
-        await renderSessionList();
-        showToast(s.archived?'Session archived':'Session restored');
-      }catch(err){showToast('Archive failed: '+err.message);}
-    };
-    actions.appendChild(archive);
-    // Duplicate
-    const dup=document.createElement('button');
-    dup.className='act-dup';dup.innerHTML=ICONS.dup;dup.title='Duplicate';
-    dup.onclick=async(e)=>{
-      e.stopPropagation();e.preventDefault();
-      try{
-        const res=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:s.workspace,model:s.model})});
-        if(res.session){
-          await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:res.session.session_id,title:(s.title||'Untitled')+' (copy)'})});
-          await loadSession(res.session.session_id);await renderSessionList();
-          showToast('Session duplicated');
-        }
-      }catch(err){showToast('Duplicate failed: '+err.message);}
-    };
-    actions.appendChild(dup);
-    // Trash
-    const trash=document.createElement('button');
-    trash.className='act-trash';trash.innerHTML=ICONS.trash;trash.title='Delete';
-    trash.onclick=async(e)=>{e.stopPropagation();e.preventDefault();await deleteSession(s.session_id);};
-    actions.appendChild(trash);
-    el.appendChild(actions);
-
-    // Use a click timer to distinguish single-click (navigate) from double-click (rename).
-    // This prevents loadSession from firing on the first click of a double-click,
-    // which would re-render the list and destroy the dblclick target before it fires.
-    let _clickTimer=null;
-    el.onclick=async(e)=>{
-      if(_renamingSid) return; // ignore while any rename is active
-      if(actions.contains(e.target)) return;
-      clearTimeout(_clickTimer);
-      _clickTimer=setTimeout(async()=>{
-        _clickTimer=null;
-        if(_renamingSid) return;
-        // For CLI sessions, import into WebUI store first (idempotent)
-        if(s.is_cli_session){
-          try{
-            await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:s.session_id})});
-          }catch(e){ /* import failed -- fall through to read-only view */ }
-        }
-        await loadSession(s.session_id);renderSessionListFromCache();
-        if(typeof closeMobileSidebar==='function')closeMobileSidebar();
-      }, 220);
-    };
-    el.ondblclick=async(e)=>{
-      e.stopPropagation();
-      e.preventDefault();
-      clearTimeout(_clickTimer); // cancel the pending single-click navigation
-      _clickTimer=null;
-      startRename();
-    };
-    list.appendChild(el);
   }
+  if(curItems.length) dateGroups.push({label:curLabel,items:curItems});
+
+  for(const g of dateGroups){
+    list.appendChild(renderGroup(g.label,g.items,false));
+  }
+
+  // Scroll active item into view (needed on page load)
+  const activeEl=list.querySelector('.session-item.active');
+  if(activeEl) activeEl.scrollIntoView({block:'nearest',behavior:'instant'});
+}
+
+// ── Topbar inline rename ─────────────────────────────────────────────────────
+function startTopbarRename(){
+  if(!S.session) return;
+  const titleEl=$('topbarTitle');
+  const renameBtn=$('btnRenameSession');
+  if(!titleEl) return;
+  const current=S.session.title||'Untitled';
+  
+  // Create a container for the input + buttons
+  const cont=document.createElement('div');
+  cont.style.cssText='display:flex;align-items:center;gap:6px;min-width:0;';
+  
+  const inp=document.createElement('input');
+  inp.value=current;
+  inp.style.cssText='background:rgba(255,255,255,.08);border:1px solid rgba(0,122,204,.6);border-radius:4px;color:var(--text);font-size:15px;font-weight:600;padding:2px 8px;outline:none;flex:1;min-width:120px;max-width:400px;font-family:inherit;letter-spacing:-.01em;';
+  
+  // Define finish function first so button onclick can reference it
+  const finish=async(save)=>{
+    const newTitle=inp.value.trim();
+    cont.replaceWith(titleEl);
+    if(renameBtn) renameBtn.style.display='';
+    if(save && newTitle && newTitle!==current){
+      S.session.title=newTitle;
+      titleEl.textContent=newTitle;
+      document.title=newTitle+' \u2014 Hermes';
+      try{
+        await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,title:newTitle})});
+        // Update the in-memory cache so renderSessionListFromCache reflects the new name immediately
+        const cached=_allSessions.find(s=>s.session_id===S.session.session_id);
+        if(cached) cached.title=newTitle;
+        renderSessionListFromCache();
+      }catch(e){showToast('Rename failed: '+e.message);}
+    }
+  };
+  
+  const btnOk=document.createElement('button');
+  btnOk.innerHTML='<i class="fas fa-check"></i>';
+  btnOk.style.cssText='background:none;border:none;color:var(--green);cursor:pointer;font-size:13px;padding:2px 4px;opacity:.8;transition:opacity .15s;flex-shrink:0;';
+  btnOk.title='Accept (Enter)';
+  // onmousedown + preventDefault keeps focus on the input so blur doesn't fire first
+  btnOk.onmousedown=(e)=>{e.preventDefault();finish(true);};
+
+  const btnCancel=document.createElement('button');
+  btnCancel.innerHTML='<i class="fas fa-xmark"></i>';
+  btnCancel.style.cssText='background:none;border:none;color:var(--accent);cursor:pointer;font-size:13px;padding:2px 4px;opacity:.8;transition:opacity .15s;flex-shrink:0;';
+  btnCancel.title='Cancel (Esc)';
+  btnCancel.onmousedown=(e)=>{e.preventDefault();finish(false);};
+  
+  cont.appendChild(inp);
+  cont.appendChild(btnOk);
+  cont.appendChild(btnCancel);
+  
+  if(renameBtn) renameBtn.style.display='none';
+  
+  inp.onkeydown=e=>{
+    if(e.key==='Enter'){e.preventDefault();finish(true);}
+    if(e.key==='Escape'){e.preventDefault();finish(false);}
+  };
+  inp.onblur=()=>{
+    // Small delay to let button click register before blur
+    setTimeout(()=>finish(false), 50);
+  };
+  
+  titleEl.replaceWith(cont);
+  setTimeout(()=>{inp.focus();inp.select();},10);
 }
 
 async function deleteSession(sid){
@@ -394,14 +457,19 @@ async function deleteSession(sid){
   try{
     await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
   }catch(e){setStatus(`Delete failed: ${e.message}`);return;}
+  // Remove from in-memory cache immediately
+  const idx=_allSessions.findIndex(s=>s.session_id===sid);
+  if(idx!==-1) _allSessions.splice(idx,1);
   if(S.session&&S.session.session_id===sid){
     S.session=null;S.messages=[];S.entries=[];
-    localStorage.removeItem('hermes-webui-session');
-    // load the most recent remaining session, or show blank if none left
-    const remaining=await api('/api/sessions');
-    if(remaining.sessions&&remaining.sessions.length){
-      await loadSession(remaining.sessions[0].session_id);
+    history.replaceState({},'','/');
+    // Find next session from cache (already mutated above)
+    const visible=_allSessions.filter(s=>!s.archived);
+    if(visible.length){
+      await loadSession(visible[0].session_id);
     }else{
+      const btnRename=$('btnRenameSession');
+      if(btnRename) btnRename.style.display='none';
       $('topbarTitle').textContent='Hermes';
       $('topbarMeta').textContent='Start a new conversation';
       $('msgInner').innerHTML='';
@@ -410,153 +478,7 @@ async function deleteSession(sid){
     }
   }
   showToast('Conversation deleted');
-  await renderSessionList();
-}
-
-// ── Project helpers ─────────────────────────────────────────────────────
-
-const PROJECT_COLORS=['#7cb9ff','#f5c542','#e94560','#50c878','#c084fc','#fb923c','#67e8f9','#f472b6'];
-
-function _showProjectPicker(session, anchorEl){
-  // Close any existing picker
-  document.querySelectorAll('.project-picker').forEach(p=>p.remove());
-  const picker=document.createElement('div');
-  picker.className='project-picker';
-  // "No project" option
-  const none=document.createElement('div');
-  none.className='project-picker-item'+(!session.project_id?' active':'');
-  none.textContent='No project';
-  none.onclick=async()=>{
-    picker.remove();
-    document.removeEventListener('click',close);
-    await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:null})});
-    session.project_id=null;
-    renderSessionListFromCache();
-    showToast('Removed from project');
-  };
-  picker.appendChild(none);
-  // Project options
-  for(const p of _allProjects){
-    const item=document.createElement('div');
-    item.className='project-picker-item'+(session.project_id===p.project_id?' active':'');
-    if(p.color){
-      const dot=document.createElement('span');
-      dot.className='color-dot';
-      dot.style.cssText='width:6px;height:6px;border-radius:50%;background:'+p.color+';flex-shrink:0;';
-      item.appendChild(dot);
-    }
-    const name=document.createElement('span');
-    name.textContent=p.name;
-    item.appendChild(name);
-    item.onclick=async()=>{
-      picker.remove();
-      document.removeEventListener('click',close);
-      await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:p.project_id})});
-      session.project_id=p.project_id;
-      renderSessionListFromCache();
-      showToast('Moved to '+p.name);
-    };
-    picker.appendChild(item);
-  }
-  // "+ New project" shortcut at the bottom
-  const createItem=document.createElement('div');
-  createItem.className='project-picker-item project-picker-create';
-  createItem.textContent='+ New project';
-  createItem.onclick=async()=>{
-    picker.remove();
-    document.removeEventListener('click',close);
-    // Prompt for name inline
-    const name=prompt('Project name:');
-    if(!name||!name.trim()) return;
-    const color=PROJECT_COLORS[_allProjects.length%PROJECT_COLORS.length];
-    const res=await api('/api/projects/create',{method:'POST',body:JSON.stringify({name:name.trim(),color})});
-    if(res.project){
-      _allProjects.push(res.project);
-      // Now move session into it
-      await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:res.project.project_id})});
-      session.project_id=res.project.project_id;
-      await renderSessionList();
-      showToast('Created "'+res.project.name+'" and moved session');
-    }
-  };
-  picker.appendChild(createItem);
-  // Append to body and position using getBoundingClientRect so it isn't clipped
-  // by overflow:hidden on .session-item ancestors
-  document.body.appendChild(picker);
-  const rect=anchorEl.getBoundingClientRect();
-  picker.style.position='fixed';
-  picker.style.zIndex='999';
-  // Prefer opening below; flip above if too close to bottom of viewport
-  const spaceBelow=window.innerHeight-rect.bottom;
-  if(spaceBelow<160&&rect.top>160){
-    picker.style.bottom=(window.innerHeight-rect.top+4)+'px';
-    picker.style.top='auto';
-  }else{
-    picker.style.top=(rect.bottom+4)+'px';
-    picker.style.bottom='auto';
-  }
-  // Align right edge of picker with right edge of button; keep within viewport
-  const pickerW=Math.min(220,Math.max(160,picker.scrollWidth||160));
-  let left=rect.right-pickerW;
-  if(left<8) left=8;
-  picker.style.left=left+'px';
-  // Close on outside click
-  const close=(e)=>{if(!picker.contains(e.target)&&e.target!==anchorEl){picker.remove();document.removeEventListener('click',close);}};
-  setTimeout(()=>document.addEventListener('click',close),0);
-}
-
-function _startProjectCreate(bar, addBtn){
-  const inp=document.createElement('input');
-  inp.className='project-create-input';
-  inp.placeholder='Project name';
-  const finish=async(save)=>{
-    if(save&&inp.value.trim()){
-      const color=PROJECT_COLORS[_allProjects.length%PROJECT_COLORS.length];
-      await api('/api/projects/create',{method:'POST',body:JSON.stringify({name:inp.value.trim(),color})});
-      await renderSessionList();
-      showToast('Project created');
-    }else{
-      inp.replaceWith(addBtn);
-    }
-  };
-  inp.onkeydown=(e)=>{
-    if(e.key==='Enter'){e.preventDefault();finish(true);}
-    if(e.key==='Escape'){e.preventDefault();finish(false);}
-  };
-  inp.onblur=()=>finish(false);
-  addBtn.replaceWith(inp);
-  setTimeout(()=>inp.focus(),10);
-}
-
-function _startProjectRename(proj, chip){
-  const inp=document.createElement('input');
-  inp.className='project-create-input';
-  inp.value=proj.name;
-  const finish=async(save)=>{
-    if(save&&inp.value.trim()&&inp.value.trim()!==proj.name){
-      await api('/api/projects/rename',{method:'POST',body:JSON.stringify({project_id:proj.project_id,name:inp.value.trim()})});
-      await renderSessionList();
-      showToast('Project renamed');
-    }else{
-      renderSessionListFromCache();
-    }
-  };
-  inp.onkeydown=(e)=>{
-    if(e.key==='Enter'){e.preventDefault();finish(true);}
-    if(e.key==='Escape'){e.preventDefault();finish(false);}
-  };
-  inp.onblur=()=>finish(false);
-  inp.onclick=(e)=>e.stopPropagation();
-  chip.replaceWith(inp);
-  setTimeout(()=>{inp.focus();inp.select();},10);
-}
-
-async function _confirmDeleteProject(proj){
-  if(!confirm('Delete project "'+proj.name+'"? Sessions will be unassigned but not deleted.')){return;}
-  await api('/api/projects/delete',{method:'POST',body:JSON.stringify({project_id:proj.project_id})});
-  if(_activeProject===proj.project_id) _activeProject=null;
-  await renderSessionList();
-  showToast('Project deleted');
+  refreshSessionList();
 }
 
 

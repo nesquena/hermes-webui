@@ -300,35 +300,37 @@ def test_token_handler_guards_session_id(cleanup_test_sessions):
     """R9a: The SSE token event handler must check activeSid before writing to DOM.
     When missing, tokens from session A would render into session B's message area
     if the user switched sessions mid-stream.
-    Sprint 12: handler moved into _wireSSE(source), so search source.addEventListener.
+    The handler (handleToken or inline) must guard with isActiveSession/activeSid.
     """
     src = (REPO_ROOT / "static/messages.js").read_text()
-    # Sprint 12 refactored es.addEventListener -> source.addEventListener inside _wireSSE()
-    token_idx = src.find("source.addEventListener('token'")
+    # Look for handleToken function or inline token handler
+    token_idx = src.find("function handleToken(")
+    if token_idx < 0:
+        token_idx = src.find("source.addEventListener('token'")
     if token_idx < 0:
         token_idx = src.find("es.addEventListener('token'")
     assert token_idx >= 0, "token event handler not found"
     token_block = src[token_idx:token_idx+300]
-    assert "activeSid" in token_block, \
-        "token handler must check activeSid before writing to DOM"
-    assert "S.session.session_id!==activeSid" in token_block or \
-           "S.session.session_id===activeSid" in token_block, \
-    "token handler must compare current session to activeSid"
+    assert "isActiveSession" in token_block or "activeSid" in token_block, \
+        "token handler must check activeSid/isActiveSession before writing to DOM"
 
 
 def test_tool_handler_guards_session_id(cleanup_test_sessions):
     """R9b: The SSE tool event handler must check activeSid before writing to DOM.
     When missing, tool cards from session A would render into session B's message area.
-    Sprint 12: handler moved into _wireSSE(source), so search source.addEventListener.
+    The handler (handleTool or inline) must guard with isActiveSession/activeSid.
     """
     src = (REPO_ROOT / "static/messages.js").read_text()
-    tool_idx = src.find("source.addEventListener('tool'")
+    # Look for handleTool function or inline tool handler
+    tool_idx = src.find("function handleTool(")
+    if tool_idx < 0:
+        tool_idx = src.find("source.addEventListener('tool'")
     if tool_idx < 0:
         tool_idx = src.find("es.addEventListener('tool'")
     assert tool_idx >= 0, "tool event handler not found"
     tool_block = src[tool_idx:tool_idx+400]
-    assert "activeSid" in tool_block, \
-        "tool handler must check activeSid before writing to DOM"
+    assert "isActiveSession" in tool_block or "activeSid" in tool_block, \
+        "tool handler must check activeSid/isActiveSession before writing to DOM"
 
 
 # ── R10: respondApproval uses wrong session_id after switch (multi-session) ─
@@ -356,36 +358,40 @@ def test_tool_status_only_shown_for_current_session(cleanup_test_sessions):
     When missing, session A's tool names would appear in session B's activity bar.
     """
     src = (REPO_ROOT / "static/messages.js").read_text()
-    # Sprint 12: handler moved into _wireSSE(source)
-    tool_idx = src.find("source.addEventListener('tool'")
+    # Look for handleTool function or inline tool handler
+    tool_idx = src.find("function handleTool(")
+    if tool_idx < 0:
+        tool_idx = src.find("source.addEventListener('tool'")
     if tool_idx < 0:
         tool_idx = src.find("es.addEventListener('tool'")
     assert tool_idx >= 0
     tool_block = src[tool_idx:tool_idx+400]
-    # setStatus must be inside the activeSid guard, not before it
+    # setStatus must be inside an activeSid/isActiveSession guard
     status_pos = tool_block.find("setStatus(")
-    guard_pos  = tool_block.find("S.session.session_id===activeSid")
-    assert guard_pos >= 0, "tool handler must guard with activeSid check"
-    # The guard must appear BEFORE or AROUND the setStatus call
-    # (status only fires for the current session)
-    assert status_pos > tool_block.find("activeSid"), \
-        "setStatus in tool handler must be inside the activeSid guard"
+    assert status_pos >= 0, "tool handler must call setStatus"
+    # Guard must appear before setStatus (isActiveSession or activeSid check)
+    guard_pos = tool_block.find("isActiveSession")
+    if guard_pos < 0:
+        guard_pos = tool_block.find("activeSid")
+    assert guard_pos >= 0, "tool handler must guard with activeSid/isActiveSession check"
+    assert guard_pos < status_pos, \
+        "setStatus in tool handler must be inside the session guard"
 
 # ── R12: Live tool cards lost on switch-away and switch-back ──────────────
 
 def test_loadSession_inflight_restores_live_tool_cards(cleanup_test_sessions):
-    """R12: When switching back to an in-flight session, live tool cards in
-    #liveToolCards must be restored from S.toolCalls.
+    """R12: When switching back to an in-flight session, live tool cards
+    must be restored inline in #msgInner via buildToolCard.
     When missing, tool cards disappeared on switch-away even though the session
     was still processing.
     """
     src = (REPO_ROOT / "static/sessions.js").read_text()
-    # INFLIGHT branch must call appendLiveToolCard
+    # INFLIGHT branch must render tool cards inline via buildToolCard
     inflight_idx = src.find("if(INFLIGHT[sid]){")
     assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = src[inflight_idx:inflight_idx+500]
-    assert "appendLiveToolCard" in inflight_block,         "loadSession INFLIGHT branch must restore live tool cards via appendLiveToolCard"
-    assert "clearLiveToolCards" in inflight_block,         "loadSession INFLIGHT branch must clear old live cards before restoring"
+    inflight_block = src[inflight_idx:inflight_idx+600]
+    assert "buildToolCard" in inflight_block,         "loadSession INFLIGHT branch must restore live tool cards inline via buildToolCard"
+    assert "msgInner" in inflight_block,         "loadSession INFLIGHT branch must append tool cards to msgInner"
 
 # ── R13: renderMessages() called before S.busy=false in done handler ────────
 
@@ -396,8 +402,10 @@ def test_done_handler_sets_busy_false_before_renderMessages(cleanup_test_session
     tool cards are skipped entirely after a response completes.
     """
     src = (REPO_ROOT / "static/messages.js").read_text()
-    # Sprint 12: handler moved into _wireSSE(source)
-    done_idx = src.find("source.addEventListener('done'")
+    # Look for handleDone function or inline done handler
+    done_idx = src.find("function handleDone(")
+    if done_idx < 0:
+        done_idx = src.find("source.addEventListener('done'")
     if done_idx < 0:
         done_idx = src.find("es.addEventListener('done'")
     assert done_idx >= 0
@@ -427,9 +435,9 @@ def test_send_uses_session_model_as_authoritative_source(cleanup_test_sessions):
 
 # ── R15: newSession does not clear live tool cards ────────────────────────────
 
-def test_newSession_clears_live_tool_cards(cleanup_test_sessions):
-    """R15: newSession() must call clearLiveToolCards() so live cards from a
-    previous in-flight session don't persist when starting a fresh conversation.
+def test_newSession_clears_tool_calls(cleanup_test_sessions):
+    """R15: newSession() must reset S.toolCalls so stale tool cards from a
+    previous session don't persist when starting a fresh conversation.
     """
     src = (REPO_ROOT / "static/sessions.js").read_text()
     new_sess_idx = src.find("async function newSession(")
@@ -437,7 +445,8 @@ def test_newSession_clears_live_tool_cards(cleanup_test_sessions):
     # Find end of newSession (next async function)
     next_fn = src.find("async function ", new_sess_idx + 10)
     new_sess_body = src[new_sess_idx:next_fn]
-    assert "clearLiveToolCards" in new_sess_body,         "newSession() must call clearLiveToolCards() to clear stale live cards"
+    assert "S.toolCalls=[]" in new_sess_body or "clearLiveToolCards" in new_sess_body, \
+        "newSession() must reset S.toolCalls or call clearLiveToolCards() to clear stale tool cards"
 
 
 # ── R16: Stack traces must not leak to clients in 500 responses ────────────

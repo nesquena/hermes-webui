@@ -9,12 +9,14 @@ paths are used as fallback when no profile module is available.
 """
 import json
 import os
+import subprocess
 from pathlib import Path
 
 from api.config import (
     WORKSPACES_FILE as _GLOBAL_WS_FILE,
     LAST_WORKSPACE_FILE as _GLOBAL_LW_FILE,
     DEFAULT_WORKSPACE as _BOOT_DEFAULT_WORKSPACE,
+    WORKSPACE_LABELS_FILE,
     MAX_FILE_BYTES, IMAGE_EXTS, MD_EXTS
 )
 
@@ -217,17 +219,142 @@ def safe_resolve_ws(root: Path, requested: str) -> Path:
     return resolved
 
 
+def _is_git_repo(path: Path) -> bool:
+    """Return True if path is the root of a git repository."""
+    return (path / '.git').exists()
+
+
+def git_info(repo_path: Path) -> dict:
+    """Return git status, branch, log and remote info for a repo directory."""
+    def run(*args, cwd=None):
+        try:
+            r = subprocess.run(
+                args, cwd=str(cwd or repo_path),
+                capture_output=True, text=True, timeout=5
+            )
+            return r.stdout.strip() if r.returncode == 0 else None
+        except Exception:
+            return None
+
+    branch      = run('git', 'rev-parse', '--abbrev-ref', 'HEAD')
+    status_raw  = run('git', 'status', '--short')
+    ahead_behind= run('git', 'rev-list', '--left-right', '--count', '@{u}...HEAD')
+    # Structured log: hash|subject|author|relative-date|iso-date
+    log_structured = run('git', 'log', '--format=%h\x1f%s\x1f%an\x1f%ar\x1f%aI', '-10')
+    log_raw     = run('git', 'log', '--oneline', '--decorate', '-10')
+    remotes_raw = run('git', 'remote', '-v')
+    stash_raw   = run('git', 'stash', 'list')
+    last_commit = run('git', 'log', '-1', '--format=%h %s (%ar)')
+    last_commit_epoch = run('git', 'log', '-1', '--format=%at')
+    # Remote origin URL for linking
+    remote_url  = run('git', 'remote', 'get-url', 'origin')
+
+    # Parse ahead/behind
+    ahead = behind = 0
+    if ahead_behind:
+        parts = ahead_behind.split()
+        if len(parts) == 2:
+            try:
+                behind, ahead = int(parts[0]), int(parts[1])
+            except ValueError:
+                pass
+
+    # Summarise status counts
+    status_lines = [l for l in (status_raw or '').splitlines() if l.strip()]
+    modified  = sum(1 for l in status_lines if l[1] == 'M' or l[0] == 'M')
+    added     = sum(1 for l in status_lines if l[0] == 'A')
+    untracked = sum(1 for l in status_lines if l[:2] == '??')
+    deleted   = sum(1 for l in status_lines if l[0] == 'D' or l[1] == 'D')
+
+    # Parse structured commits into dicts
+    commits = []
+    for line in (log_structured or '').splitlines():
+        parts = line.split('\x1f')
+        if len(parts) == 5:
+            commits.append({
+                'hash':    parts[0],
+                'subject': parts[1],
+                'author':  parts[2],
+                'rel':     parts[3],
+                'iso':     parts[4],
+            })
+
+    # Normalise remote URL to a browseable HTTPS URL
+    def _normalise_remote(url):
+        if not url:
+            return None
+        url = url.strip()
+        # git@github.com:owner/repo.git -> https://github.com/owner/repo
+        if url.startswith('git@'):
+            url = url.replace(':', '/', 1).replace('git@', 'https://', 1)
+        if url.endswith('.git'):
+            url = url[:-4]
+        return url
+
+    remote_browse = _normalise_remote(remote_url)
+
+    return {
+        'branch':       branch,
+        'last_commit':  last_commit,
+        'ahead':        ahead,
+        'behind':       behind,
+        'modified':     modified,
+        'added':        added,
+        'untracked':    untracked,
+        'deleted':      deleted,
+        'status_lines': status_lines[:30],
+        'log':          [l for l in (log_raw or '').splitlines() if l][:10],
+        'commits':      commits,
+        'remotes':      [l for l in (remotes_raw or '').splitlines() if l],
+        'stashes':      [l for l in (stash_raw or '').splitlines() if l],
+        'remote_url':      remote_browse,
+        'last_commit_ts':  int(last_commit_epoch) if last_commit_epoch and last_commit_epoch.strip().isdigit() else None,
+    }
+
+
 def list_dir(workspace: Path, rel='.'):
     target = safe_resolve_ws(workspace, rel)
     if not target.is_dir():
         raise FileNotFoundError(f"Not a directory: {rel}")
     entries = []
     for item in sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
+        # Skip symlinks and hidden git internals
+        if item.is_symlink():
+            continue
+        if item.name == '.git':
+            continue
+        is_git = item.is_dir() and _is_git_repo(item)
+        last_commit_ts = None
+        git_behind = 0
+        if is_git:
+            try:
+                r = subprocess.run(
+                    ['git', 'log', '-1', '--format=%at'],
+                    cwd=str(item), capture_output=True, text=True, timeout=3
+                )
+                ts = r.stdout.strip()
+                if ts.isdigit():
+                    last_commit_ts = int(ts)
+            except Exception:
+                pass
+            try:
+                # Count commits in remote but not local (incoming changes)
+                rb = subprocess.run(
+                    ['git', 'rev-list', '--count', 'HEAD..@{u}'],
+                    cwd=str(item), capture_output=True, text=True, timeout=3
+                )
+                if rb.returncode == 0 and rb.stdout.strip().isdigit():
+                    git_behind = int(rb.stdout.strip())
+            except Exception:
+                pass
         entries.append({
-            'name': item.name,
-            'path': str(item.relative_to(workspace)),
-            'type': 'dir' if item.is_dir() else 'file',
-            'size': item.stat().st_size if item.is_file() else None,
+            'name':   item.name,
+            'path':   str(item.relative_to(workspace)),
+            'type':   'dir' if item.is_dir() else 'file',
+            'size':   item.stat().st_size if item.is_file() else None,
+            'is_git': is_git,
+            'last_commit_ts': last_commit_ts,
+            'git_behind': git_behind,
         })
         if len(entries) >= 200:
             break
@@ -243,3 +370,36 @@ def read_file_content(workspace: Path, rel: str):
         raise ValueError(f"File too large ({size} bytes, max {MAX_FILE_BYTES})")
     content = target.read_text(encoding='utf-8', errors='replace')
     return {'path': rel, 'content': content, 'size': size, 'lines': content.count('\n') + 1}
+
+
+# ── Workspace labels / tags persistence ──────────────────────────────────────
+
+def _load_all_labels() -> dict:
+    """Load the full workspace-labels store."""
+    if WORKSPACE_LABELS_FILE.exists():
+        try:
+            return json.loads(WORKSPACE_LABELS_FILE.read_text(encoding='utf-8'))
+        except Exception:
+            pass
+    return {}
+
+
+def _save_all_labels(data: dict):
+    WORKSPACE_LABELS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    WORKSPACE_LABELS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
+def load_workspace_labels(workspace: str) -> dict:
+    """Return {path: label} dict for the given workspace."""
+    return _load_all_labels().get(workspace, {})
+
+
+def save_workspace_label(workspace: str, path: str, label: str):
+    """Set or clear a label for a path within a workspace."""
+    data = _load_all_labels()
+    ws_labels = data.setdefault(workspace, {})
+    if label:
+        ws_labels[path] = label
+    else:
+        ws_labels.pop(path, None)
+    _save_all_labels(data)

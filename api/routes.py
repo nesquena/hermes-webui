@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.parse import parse_qs
 
 from api.config import (
-    STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE, DEFAULT_MODEL,
+    STATE_DIR, DEFAULT_WORKSPACE, DEFAULT_MODEL,
     SESSIONS, SESSIONS_MAX, LOCK, STREAMS, STREAMS_LOCK, CANCEL_FLAGS,
     SERVER_START_TIME, CLI_TOOLSETS, _INDEX_HTML_PATH, get_available_models,
     IMAGE_EXTS, MD_EXTS, MIME_MAP, MAX_FILE_BYTES, MAX_UPLOAD_BYTES,
@@ -22,23 +22,33 @@ from api.config import (
 from api.helpers import require, bad, safe_resolve, j, t, read_body, _security_headers
 from api.models import (
     Session, get_session, new_session, all_sessions, title_from,
-    _write_session_index, SESSION_INDEX_FILE,
+    derive_tool_calls,
     load_projects, save_projects, import_cli_session,
     get_cli_sessions, get_cli_session_messages,
 )
+# Lazy import to avoid circular -- streaming imports models, not the other way
+def _maybe_generate_title(session_id, messages):
+    """Backfill title for Untitled sessions that already have messages."""
+    try:
+        from api.streaming import _generate_title_async
+        _generate_title_async(session_id, messages, put_fn=None)
+    except Exception:
+        pass
 from api.workspace import (
     load_workspaces, save_workspaces, get_last_workspace, set_last_workspace,
-    list_dir, read_file_content, safe_resolve_ws,
+    list_dir, read_file_content, safe_resolve_ws, git_info,
+    load_workspace_labels, save_workspace_label,
 )
 from api.upload import handle_upload
-from api.streaming import _sse, _run_agent_streaming, cancel_stream
+from api.streaming import _sse, _run_agent_streaming, cancel_stream, respond_clarify
 
 # Approval system (optional -- graceful fallback if agent not available)
 try:
     from tools.approval import (
         has_pending, pop_pending, submit_pending,
         approve_session, approve_permanent, save_permanent_allowlist,
-        is_approved, _pending, _lock, _permanent_approved,
+        is_approved, resolve_gateway_approval, get_blocking_approval_data,
+        _pending, _lock, _permanent_approved,
     )
 except ImportError:
     has_pending = lambda *a, **k: False
@@ -48,6 +58,8 @@ except ImportError:
     approve_permanent = lambda *a, **k: None
     save_permanent_allowlist = lambda *a, **k: None
     is_approved = lambda *a, **k: True
+    resolve_gateway_approval = lambda *a, **k: 0
+    get_blocking_approval_data = lambda *a, **k: None
     _pending = {}
     _lock = threading.Lock()
     _permanent_approved = set()
@@ -154,9 +166,12 @@ def handle_get(handler, parsed):
             return j(handler, {'error': 'session_id is required'}, status=400)
         try:
             s = get_session(sid)
+            # Always re-derive tool_calls from messages so names and positions
+            # are correct even for sessions saved before the extraction fix.
+            tool_calls = derive_tool_calls(s.messages)
             return j(handler, {'session': s.compact() | {
                 'messages': s.messages,
-                'tool_calls': getattr(s, 'tool_calls', []),
+                'tool_calls': tool_calls,
             }})
         except KeyError:
             # Not a WebUI session -- try CLI store
@@ -208,11 +223,18 @@ def handle_get(handler, parsed):
     if parsed.path == '/api/workspaces':
         return j(handler, {'workspaces': load_workspaces(), 'last': get_last_workspace()})
 
+    if parsed.path == '/api/workspace/labels':
+        ws = parse_qs(parsed.query).get('workspace', [''])[0]
+        return j(handler, {'labels': load_workspace_labels(ws) if ws else {}})
+
     if parsed.path == '/api/sessions/search':
         return _handle_sessions_search(handler, parsed)
 
     if parsed.path == '/api/list':
         return _handle_list_dir(handler, parsed)
+
+    if parsed.path == '/api/git-info':
+        return _handle_git_info(handler, parsed)
 
     if parsed.path == '/api/chat/stream/status':
         stream_id = parse_qs(parsed.query).get('stream_id', [''])[0]
@@ -323,6 +345,17 @@ def handle_post(handler, parsed):
     if parsed.path == '/api/sessions/cleanup_zero_message':
         return _handle_sessions_cleanup(handler, body, zero_only=True)
 
+    if parsed.path == '/api/session/generate-title':
+        # Manually trigger title generation for an Untitled session
+        try: require(body, 'session_id')
+        except ValueError as e: return bad(handler, str(e))
+        try: s = get_session(body['session_id'])
+        except KeyError: return bad(handler, 'Session not found', 404)
+        if not s.messages:
+            return bad(handler, 'Session has no messages', 400)
+        _maybe_generate_title(s.session_id, s.messages)
+        return j(handler, {'ok': True})
+
     if parsed.path == '/api/session/rename':
         try: require(body, 'session_id', 'title')
         except ValueError as e: return bad(handler, str(e))
@@ -346,11 +379,18 @@ def handle_post(handler, parsed):
         sid = body.get('session_id', '')
         if not sid: return bad(handler, 'session_id is required')
         with LOCK: SESSIONS.pop(sid, None)
-        p = SESSION_DIR / f'{sid}.json'
-        try: p.unlink(missing_ok=True)
-        except Exception: pass
-        try: SESSION_INDEX_FILE.unlink(missing_ok=True)
-        except Exception: pass
+        # Delete from SessionDB (shared with CLI)
+        try:
+            from api.models import _get_session_db
+            db = _get_session_db()
+            db._execute_write(
+                lambda conn: conn.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
+            )
+            db._execute_write(
+                lambda conn: conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
+            )
+        except Exception:
+            pass  # Non-critical if SessionDB delete fails
         return j(handler, {'ok': True})
 
     if parsed.path == '/api/session/clear':
@@ -403,6 +443,8 @@ def handle_post(handler, parsed):
 
     if parsed.path == '/api/file/save':
         return _handle_file_save(handler, body)
+    if parsed.path == '/api/file/open-in-vscode':
+        return _handle_file_open_vscode(handler, body)
 
     if parsed.path == '/api/file/create':
         return _handle_file_create(handler, body)
@@ -414,6 +456,12 @@ def handle_post(handler, parsed):
         return _handle_create_dir(handler, body)
 
     # ── Workspace management (POST) ──
+    if parsed.path == '/api/workspace/label':
+        return _handle_workspace_label_set(handler, body)
+
+    if parsed.path == '/api/git-pull':
+        return _handle_git_pull(handler, body)
+
     if parsed.path == '/api/workspaces/add':
         return _handle_workspace_add(handler, body)
 
@@ -422,6 +470,15 @@ def handle_post(handler, parsed):
 
     if parsed.path == '/api/workspaces/rename':
         return _handle_workspace_rename(handler, body)
+
+    # ── Clarify (POST) ──
+    if parsed.path == '/api/clarify/respond':
+        stream_id = body.get('stream_id', '')
+        response = body.get('response', '')
+        if not stream_id:
+            return bad(handler, 'stream_id is required')
+        ok = respond_clarify(stream_id, response)
+        return j(handler, {'ok': ok, 'stream_id': stream_id})
 
     # ── Approval (POST) ──
     if parsed.path == '/api/approval/respond':
@@ -706,6 +763,22 @@ def _handle_list_dir(handler, parsed):
         return bad(handler, str(e), 404)
 
 
+def _handle_git_info(handler, parsed):
+    qs = parse_qs(parsed.query)
+    sid  = qs.get('session_id', [''])[0]
+    path = qs.get('path', ['.'])[0]
+    if not sid: return bad(handler, 'session_id is required')
+    try: s = get_session(sid)
+    except KeyError: return bad(handler, 'Session not found', 404)
+    try:
+        target = safe_resolve_ws(Path(s.workspace), path)
+        if not target.is_dir():
+            return bad(handler, 'Not a directory', 400)
+        return j(handler, git_info(target))
+    except (FileNotFoundError, ValueError) as e:
+        return bad(handler, str(e), 404)
+
+
 def _handle_sse_stream(handler, parsed):
     stream_id = parse_qs(parsed.query).get('stream_id', [''])[0]
     q = STREAMS.get(stream_id)
@@ -774,6 +847,11 @@ def _handle_file_read(handler, parsed):
 
 def _handle_approval_pending(handler, parsed):
     sid = parse_qs(parsed.query).get('session_id', [''])[0]
+    # Check blocking gateway approval first (agent thread is waiting)
+    blocking = get_blocking_approval_data(sid)
+    if blocking:
+        return j(handler, {'pending': blocking})
+    # Fall back to non-blocking submit_pending path
     if has_pending(sid):
         with _lock:
             p = dict(_pending.get(sid, {}))
@@ -868,23 +946,48 @@ def _handle_memory_read(handler):
 # ── POST route helpers ────────────────────────────────────────────────────────
 
 def _handle_sessions_cleanup(handler, body, zero_only=False):
+    """Clean up empty or untitled sessions from SessionDB."""
     cleaned = 0
-    for p in SESSION_DIR.glob('*.json'):
-        if p.name.startswith('_'): continue
-        try:
-            s = Session.load(p.stem)
+    try:
+        from api.models import _get_session_db
+        db = _get_session_db()
+        
+        # Query SessionDB for all sessions (CLI + WebUI + cron)
+        # Exclude platform-specific sessions (telegram, whatsapp)
+        with db._lock:
+            cursor = db._conn.execute(
+                "SELECT id, title, message_count FROM sessions "
+                "WHERE source IN ('cli', 'webui', 'cron') OR source IS NULL"
+            )
+            rows = cursor.fetchall()
+        
+        for row in rows:
+            sid = row["id"]
+            title = row["title"] or "Untitled"
+            msg_count = row["message_count"]
+            
+            should_delete = False
             if zero_only:
-                should_delete = s and len(s.messages) == 0
+                should_delete = msg_count == 0
             else:
-                should_delete = s and s.title == 'Untitled' and len(s.messages) == 0
+                should_delete = title == "Untitled" and msg_count == 0
+            
             if should_delete:
-                with LOCK: SESSIONS.pop(p.stem, None)
-                p.unlink(missing_ok=True)
-                cleaned += 1
-        except Exception:
-            pass
-    if SESSION_INDEX_FILE.exists():
-        SESSION_INDEX_FILE.unlink(missing_ok=True)
+                with LOCK:
+                    SESSIONS.pop(sid, None)
+                # Delete from SessionDB
+                try:
+                    db._execute_write(
+                        lambda conn: conn.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
+                    )
+                    db._execute_write(
+                        lambda conn: conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
+                    )
+                    cleaned += 1
+                except Exception:
+                    pass
+    except Exception:
+        pass  # Non-critical if cleanup fails
     return j(handler, {'ok': True, 'cleaned': cleaned})
 
 
@@ -923,29 +1026,14 @@ def _handle_chat_sync(handler, body):
     old_cwd = os.environ.get('TERMINAL_CWD')
     os.environ['TERMINAL_CWD'] = str(workspace)
     old_exec_ask = os.environ.get('HERMES_EXEC_ASK')
-    old_session_key = os.environ.get('HERMES_SESSION_KEY')
     os.environ['HERMES_EXEC_ASK'] = '1'
-    os.environ['HERMES_SESSION_KEY'] = s.session_id
     try:
         from run_agent import AIAgent
         with CHAT_LOCK:
             from api.config import resolve_model_provider
             _model, _provider, _base_url = resolve_model_provider(s.model)
-            # Resolve API key via Hermes runtime provider (matches gateway behaviour)
-            _api_key = None
-            try:
-                from hermes_cli.runtime_provider import resolve_runtime_provider
-                _rt = resolve_runtime_provider()
-                _api_key = _rt.get("api_key")
-                # Also use runtime provider/base_url if the webui config didn't resolve them
-                if not _provider:
-                    _provider = _rt.get("provider")
-                if not _base_url:
-                    _base_url = _rt.get("base_url")
-            except Exception as _e:
-                print(f"[webui] WARNING: resolve_runtime_provider failed: {_e}", flush=True)
             agent = AIAgent(model=_model, provider=_provider, base_url=_base_url,
-                           api_key=_api_key, platform='cli', quiet_mode=True,
+                           platform='cli', quiet_mode=True,
                            enabled_toolsets=CLI_TOOLSETS, session_id=s.session_id)
             workspace_ctx = f"[Workspace: {s.workspace}]\n"
             workspace_system_msg = (
@@ -972,8 +1060,6 @@ def _handle_chat_sync(handler, body):
         else: os.environ['TERMINAL_CWD'] = old_cwd
         if old_exec_ask is None: os.environ.pop('HERMES_EXEC_ASK', None)
         else: os.environ['HERMES_EXEC_ASK'] = old_exec_ask
-        if old_session_key is None: os.environ.pop('HERMES_SESSION_KEY', None)
-        else: os.environ['HERMES_SESSION_KEY'] = old_session_key
     s.messages = result.get('messages') or s.messages
     s.title = title_from(s.messages, s.title); s.save()
     return j(handler, {
@@ -1059,6 +1145,80 @@ def _handle_file_delete(handler, body):
         target.unlink()
         return j(handler, {'ok': True, 'path': body['path']})
     except (ValueError, PermissionError) as e: return bad(handler, str(e))
+
+
+def _handle_git_pull(handler, body):
+    """Run git pull in a repository path."""
+    path = body.get('path', '')
+    sid  = body.get('session_id', '')
+    if not path: return bad(handler, 'path is required')
+    try: s = get_session(sid)
+    except KeyError: return bad(handler, 'Session not found', 404)
+    ws = Path(s.workspace)
+    repo = ws / path if not Path(path).is_absolute() else Path(path)
+    if not repo.exists(): return bad(handler, 'Path not found', 404)
+    try:
+        import subprocess
+        r = subprocess.run(['git', 'pull'], cwd=str(repo), capture_output=True, text=True, timeout=30)
+        if r.returncode == 0:
+            return j(handler, {'ok': True, 'output': r.stdout.strip()})
+        return j(handler, {'ok': False, 'error': r.stderr.strip() or r.stdout.strip()})
+    except Exception as e:
+        return bad(handler, str(e))
+
+
+def _load_workspace_labels(workspace):
+    """Return labels dict for a workspace path."""
+    try:
+        return load_workspace_labels(workspace)
+    except Exception:
+        return {}
+
+
+def _handle_workspace_label_set(handler, body):
+    """Set or clear a folder label for a workspace path."""
+    try: require(body, 'workspace', 'path')
+    except ValueError as e: return bad(handler, str(e))
+    try:
+        save_workspace_label(body['workspace'], body['path'], body.get('label', ''))
+        return j(handler, {'ok': True})
+    except Exception as e:
+        return bad(handler, str(e))
+
+
+def _handle_file_open_vscode(handler, body):
+    """Open a file in VS Code on the server machine via the `code` CLI."""
+    try: require(body, 'session_id', 'path')
+    except ValueError as e: return bad(handler, str(e))
+    try: s = get_session(body['session_id'])
+    except KeyError: return bad(handler, 'Session not found', 404)
+    try:
+        import subprocess
+        target = safe_resolve(Path(s.workspace), body['path'])
+        if not target.exists(): return bad(handler, 'File not found', 404)
+        # Launch VS Code detached as the desktop user, not root.
+        # The service runs as root but 'code' is a user-space WSL2 shim that
+        # requires the user environment (PATH, WSL_DISTRO_NAME, DISPLAY, etc.).
+        # Use 'su -l <user> -c ...' so bash loads the user's login profile.
+        # The desktop user is detected from env vars or set via HERMES_DESKTOP_USER.
+        import shlex
+        _desktop_user = os.environ.get('HERMES_DESKTOP_USER', os.environ.get('SUDO_USER', os.environ.get('USER', '')))
+        cmd = f'code {shlex.quote(str(target))}'
+        if _desktop_user and _desktop_user != 'root':
+            subprocess.Popen(
+                ['su', '-l', _desktop_user, '-c', cmd],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        else:
+            subprocess.Popen(
+                ['code', '--goto', str(target)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        return j(handler, {'ok': True, 'path': str(target)})
+    except (ValueError, PermissionError, FileNotFoundError) as e:
+        return bad(handler, f'Could not open VS Code: {e}')
 
 
 def _handle_file_save(handler, body):
@@ -1165,16 +1325,23 @@ def _handle_approval_respond(handler, body):
     choice = body.get('choice', 'deny')
     if choice not in ('once', 'session', 'always', 'deny'):
         return bad(handler, f'Invalid choice: {choice}')
-    with _lock:
-        pending = _pending.pop(sid, None)
-    if pending:
-        keys = pending.get('pattern_keys') or [pending.get('pattern_key', '')]
-        if choice in ('once', 'session'):
-            for k in keys: approve_session(sid, k)
-        elif choice == 'always':
-            for k in keys:
-                approve_session(sid, k); approve_permanent(k)
-            save_permanent_allowlist(_permanent_approved)
+    # Primary path: unblock the agent thread that is waiting for approval.
+    # resolve_gateway_approval sets entry.result + entry.event so the blocked
+    # agent thread in streaming.py continues execution.
+    resolved = resolve_gateway_approval(sid, choice)
+    # Legacy fallback: non-blocking submit_pending path (no notify_cb registered).
+    # Handles edge cases where the agent was not running the blocking path.
+    if not resolved:
+        with _lock:
+            pending = _pending.pop(sid, None)
+        if pending:
+            keys = pending.get('pattern_keys') or [pending.get('pattern_key', '')]
+            if choice in ('once', 'session'):
+                for k in keys: approve_session(sid, k)
+            elif choice == 'always':
+                for k in keys:
+                    approve_session(sid, k); approve_permanent(k)
+                save_permanent_allowlist(_permanent_approved)
     return j(handler, {'ok': True, 'choice': choice})
 
 

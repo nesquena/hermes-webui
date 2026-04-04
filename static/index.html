@@ -4,24 +4,28 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hermes</title>
+<link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
 <link rel="stylesheet" href="/static/style.css">
+  <!-- Font Awesome 6 icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.0/css/all.min.css">
   <!-- Prism.js syntax highlighting (loaded async, non-blocking) -->
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css" integrity="sha384-wFjoQjtV1y5jVHbt0p35Ui8aV8GVpEZkyF99OXWqP/eNJDU93D3Ugxkoyh6Y2I4A" crossorigin="anonymous">
-  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-core.min.js" integrity="sha384-MXybTpajaBV0AkcBaCPT4KIvo0FzoCiWXgcihYsw4FUkEz0Pv3JGV6tk2G8vJtDc" crossorigin="anonymous" defer></script>
-  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/plugins/autoloader/prism-autoloader.min.js" integrity="sha384-Uq05+JLko69eOiPr39ta9bh7kld5PKZoU+fF7g0EXTAriEollhZ+DrN8Q/Oi8J2Q" crossorigin="anonymous" defer></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-core.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/plugins/autoloader/prism-autoloader.min.js" defer></script>
 </head>
 <body>
+<div id="bootOverlay"><div class="boot-spinner"></div></div>
 <div class="layout">
   <aside class="sidebar">
-    <div class="sidebar-header"><div class="logo">H</div><div><h1 style="margin:0;font-size:15px;font-weight:700;letter-spacing:-.01em">Hermes</h1><div style="font-size:10px;color:var(--muted);opacity:.8;margin-top:1px">v0.31</div></div></div>
+    <div class="sidebar-header"><div class="logo">H</div><div style="display:flex;flex-direction:column;gap:0;line-height:1"><h1 style="margin:0;font-size:15px;font-weight:700;letter-spacing:-.01em;line-height:1">Hermes Agent</h1><div style="font-size:10px;color:var(--muted);opacity:.8;margin-top:1px;line-height:1">v0.2</div></div></div>
     <div class="sidebar-nav">
-      <button class="nav-tab active" data-panel="chat" data-label="Chat" onclick="switchPanel('chat')" title="Chat">&#128172;</button>
-      <button class="nav-tab" data-panel="tasks" data-label="Tasks" onclick="switchPanel('tasks')" title="Tasks">&#128197;</button>
-      <button class="nav-tab" data-panel="skills" data-label="Skills" onclick="switchPanel('skills')" title="Skills">&#129513;</button>
-      <button class="nav-tab" data-panel="memory" data-label="Memory" onclick="switchPanel('memory')" title="Memory">&#129504;</button>
-      <button class="nav-tab" data-panel="workspaces" data-label="Spaces" onclick="switchPanel('workspaces')" title="Spaces">&#128193;</button>
-      <button class="nav-tab" data-panel="profiles" data-label="Profiles" onclick="switchPanel('profiles')" title="Agent profiles"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></button>
-      <button class="nav-tab" data-panel="todos" data-label="Todos" onclick="switchPanel('todos')" title="Current task list">&#9989;</button>
+      <button class="nav-tab active" data-panel="chat" data-label="Chat" onclick="switchPanel('chat')" title="Chat"><i class="fas fa-comments"></i></button>
+      <button class="nav-tab" data-panel="tasks" data-label="Tasks" onclick="switchPanel('tasks')" title="Tasks"><i class="fas fa-list-check"></i></button>
+      <button class="nav-tab" data-panel="skills" data-label="Skills" onclick="switchPanel('skills')" title="Skills"><i class="fas fa-wand-magic-sparkles"></i></button>
+      <button class="nav-tab" data-panel="memory" data-label="Memory" onclick="switchPanel('memory')" title="Memory"><i class="fas fa-brain"></i></button>
+      <button class="nav-tab" data-panel="workspaces" data-label="Spaces" onclick="switchPanel('workspaces')" title="Spaces"><i class="fas fa-folder-open"></i></button>
+      <button class="nav-tab" data-panel="todos" data-label="Todos" onclick="switchPanel('todos')" title="Current task list"><i class="fas fa-clipboard-list"></i></button>
     </div>
     <!-- Chat panel -->
     <div class="panel-view active" id="panelChat">
@@ -45,16 +49,11 @@
         <input id="cronFormName" placeholder="Job name (optional)" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;margin-bottom:6px">
         <input id="cronFormSchedule" placeholder="Schedule: '0 9 * * *' or 'every 1h'" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;margin-bottom:6px">
         <textarea id="cronFormPrompt" rows="3" placeholder="Prompt (must be self-contained)" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;resize:none;font-family:inherit;margin-bottom:6px"></textarea>
-        <select id="cronFormDeliver" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;margin-bottom:6px">
+        <select id="cronFormDeliver" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;margin-bottom:8px">
           <option value="local">Local (save output only)</option>
           <option value="discord">Discord</option>
           <option value="telegram">Telegram</option>
         </select>
-        <div class="skill-picker-wrap" style="margin-bottom:8px">
-          <input id="cronFormSkillSearch" placeholder="Add skills (optional)..." style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none" autocomplete="off">
-          <div id="cronFormSkillDropdown" class="skill-picker-dropdown" style="display:none"></div>
-          <div id="cronFormSkillTags" class="skill-picker-tags"></div>
-        </div>
         <div style="display:flex;gap:6px">
           <button class="cron-btn run" style="flex:1" onclick="submitCronCreate()">Create job</button>
           <button class="cron-btn" style="flex:1" onclick="toggleCronForm()">Cancel</button>
@@ -110,29 +109,14 @@
       <div style="padding:10px 12px 4px;font-size:11px;color:var(--muted)">Add and switch workspaces for your sessions.</div>
       <div style="flex:1;overflow-y:auto;padding:0 12px 12px" id="workspacesPanel"><div style="color:var(--muted);font-size:12px">Loading...</div></div>
     </div>
-    <!-- Profiles panel -->
-    <div class="panel-view" id="panelProfiles">
-      <div class="sidebar-section" style="padding-bottom:4px;display:flex;align-items:center;justify-content:space-between">
-        <div style="font-size:11px;color:var(--muted)">Agent profiles</div>
-        <button class="cron-btn run" style="padding:3px 8px;font-size:10px" onclick="toggleProfileForm()">+ New profile</button>
-      </div>
-      <!-- Profile create form (hidden by default) -->
-      <div id="profileCreateForm" style="display:none;padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0">
-        <input id="profileFormName" placeholder="Profile name (lowercase, a-z 0-9 hyphens)" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;margin-bottom:6px;box-sizing:border-box">
-        <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);margin-bottom:8px;cursor:pointer">
-          <input type="checkbox" id="profileFormClone" style="accent-color:var(--accent)"> Clone config from active profile
-        </label>
-        <div style="display:flex;gap:6px">
-          <button class="cron-btn run" style="flex:1" onclick="submitProfileCreate()">Create</button>
-          <button class="cron-btn" style="flex:1" onclick="toggleProfileForm()">Cancel</button>
-        </div>
-        <div id="profileFormError" style="font-size:11px;color:var(--accent);margin-top:6px;display:none"></div>
-      </div>
-      <div style="flex:1;overflow-y:auto;padding:0 12px 12px" id="profilesPanel"><div style="color:var(--muted);font-size:12px">Loading...</div></div>
-    </div>
     <div class="sidebar-bottom">
+      <div id="sidebarBottomToggle" onclick="toggleSidebarBottom()" style="display:flex;align-items:center;gap:4px;cursor:pointer;margin-bottom:8px;opacity:.5;user-select:none;font-size:10px;font-weight:600;letter-spacing:.07em;color:var(--muted)">
+        <i class="fas fa-chevron-up" id="sidebarBottomCaret" style="font-size:9px;transition:transform .2s"></i>
+        <span>MODEL &amp; WORKSPACE</span>
+      </div>
+      <div id="sidebarBottomBody">
       <div class="field-label" style="font-size:10px;letter-spacing:.07em;margin-bottom:4px">MODEL</div>
-      <select id="modelSelect">
+      <select id="modelSelect" style="display:none">
         <optgroup label="OpenAI">
           <option value="openai/gpt-5.4-mini">GPT-5.4 Mini</option>
           <option value="openai/gpt-4o">GPT-4o</option>
@@ -140,7 +124,7 @@
           <option value="openai/o4-mini">o4-mini</option>
         </optgroup>
         <optgroup label="Anthropic">
-          <option value="anthropic/claude-sonnet-4.6">Claude Sonnet 4.6</option>
+          <option value="anthropic/claude-sonnet-4-6">Claude Sonnet 4.6</option>
           <option value="anthropic/claude-sonnet-4-5">Claude Sonnet 4.5</option>
           <option value="anthropic/claude-haiku-3-5">Claude Haiku 3.5</option>
         </optgroup>
@@ -150,63 +134,76 @@
           <option value="meta-llama/llama-4-scout">Llama 4 Scout</option>
         </optgroup>
       </select>
-      <div style="position:relative">
-        <div id="sidebarWsDisplay" style="display:flex;align-items:center;gap:7px;padding:0 0 8px;cursor:pointer;border-radius:8px;transition:background .15s" onclick="toggleWsDropdown()" title="Switch workspace">
-          <span style="font-size:14px;opacity:.7">&#128193;</span>
-          <div style="min-width:0;flex:1">
-            <div style="font-size:11px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" id="sidebarWsName">Workspace</div>
-            <div style="font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:1px" id="sidebarWsPath"></div>
-          </div>
-          <span style="font-size:10px;color:var(--muted);flex-shrink:0">&#9662;</span>
+      <div class="model-cselect" id="modelCSelect">
+        <div class="model-cselect-trigger" id="modelCSelectTrigger" onclick="toggleModelCSelect()">
+          <span id="modelCSelectLabel">Claude Sonnet 4.6</span>
+          <i class="fas fa-chevron-down model-cselect-arrow"></i>
         </div>
-        <div class="ws-dropdown" id="wsDropdown"></div>
+        <div class="model-cselect-menu" id="modelCSelectMenu"></div>
+      </div>
+      <div class="field-label" style="font-size:10px;letter-spacing:.07em;margin-bottom:4px;margin-top:2px">WORKSPACE</div>
+      <div class="model-cselect" id="wsCSelect">
+        <div class="model-cselect-trigger" id="wsCSelectTrigger" onclick="toggleWsCSelect()">
+          <span id="sidebarWsName" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1">Workspace</span>
+          <i class="fas fa-chevron-down model-cselect-arrow"></i>
+        </div>
+        <div class="model-cselect-menu" id="wsCSelectMenu"></div>
       </div>
       <div class="sidebar-actions">
-        <button class="sm-btn" id="btnDownload" title="Download as Markdown">&#8595; Transcript</button>
-        <button class="sm-btn" id="btnExportJSON" title="Export full session as JSON">&#10092;/&#10093; JSON</button>
-        <button class="sm-btn" id="btnImportJSON" title="Import session from JSON">&#8593; Import</button>
+        <button class="sm-btn" id="btnDownload" title="Download as Markdown"><i class="fas fa-file-arrow-down"></i> Transcript</button>
+        <button class="sm-btn" id="btnExportJSON" title="Export full session as JSON"><i class="fas fa-code"></i> JSON</button>
+        <button class="sm-btn" id="btnImportJSON" title="Import session from JSON"><i class="fas fa-file-arrow-up"></i> Import</button>
         <input type="file" id="importFileInput" accept=".json" style="display:none">
       </div>
+      </div><!-- /sidebarBottomBody -->
     </div>
   <div class="resize-handle" id="sidebarResize"></div>
   </aside>
   <main class="main">
     <div class="topbar">
-      <button class="mobile-hamburger" id="btnHamburger" onclick="toggleMobileSidebar()" title="Menu">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
-      </button>
-      <div style="flex:1;min-width:0;overflow:hidden"><div class="topbar-title" id="topbarTitle">Hermes</div><div class="topbar-meta" id="topbarMeta">Start a new conversation</div></div>
+      <button id="btnToggleSidebar" onclick="toggleSidebar()" title="Toggle sidebar" class="topbar-panel-btn"><i class="fas fa-bars"></i></button>
+      <div style="display:flex;align-items:center;gap:6px;min-width:0;flex:1;overflow:hidden">
+        <div class="topbar-title" id="topbarTitle">Hermes</div>
+        <button id="btnRenameSession" onclick="startTopbarRename()" title="Rename conversation" style="display:none;background:none;border:none;color:var(--muted);cursor:pointer;padding:2px 4px;border-radius:4px;font-size:12px;flex-shrink:0;opacity:.6;transition:opacity .15s,color .15s"><i class="fas fa-pen"></i></button>
+        <button id="btnAutoTitle" onclick="triggerAutoTitle()" title="Auto-generate title" style="display:none;background:none;border:none;color:var(--teal);cursor:pointer;padding:2px 4px;border-radius:4px;font-size:12px;flex-shrink:0;opacity:.7;transition:opacity .15s,color .15s"><i class="fas fa-wand-magic-sparkles"></i></button>
+      </div>
       <div class="topbar-chips">
-        <div id="profileChipWrap" style="position:relative">
-          <div class="chip profile-chip" id="profileChip" onclick="toggleProfileDropdown()" title="Switch profile" style="cursor:pointer"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg><span id="profileChipLabel">default</span> &#9662;</div>
-          <div class="profile-dropdown" id="profileDropdown"></div>
-        </div>
-        <div class="chip model" id="modelChip">GPT-5.4 Mini</div>
-
-        <button class="chip clear-btn" id="btnClearConv" onclick="clearConversation()" title="Clear all messages in this conversation" style="display:none">&#128465; Clear</button>
-        <button class="chip gear-btn" id="btnSettings" onclick="toggleSettings()" title="Settings">&#9881;</button>
-        <button class="chip mobile-files-btn" id="btnMobileFiles" onclick="toggleMobileFiles()" title="Files">&#128193;</button>
+        <span class="topbar-meta" id="topbarMeta">Start a new conversation</span>
+        <button class="chip clear-btn" id="btnClearConv" onclick="clearConversation()" title="Clear all messages in this conversation" style="display:none"><i class="fas fa-trash-can"></i> Clear</button>
+        <button class="chip gear-btn" id="btnSettings" onclick="toggleSettings()" title="Settings"><i class="fas fa-gear"></i></button>
+        <button id="btnToggleRightPanel" onclick="toggleRightPanel()" title="Toggle explorer" class="topbar-panel-btn"><i class="fas fa-table-columns"></i></button>
       </div>
     </div>
     <div class="messages" id="messages">
       <div class="empty-state" id="emptyState">
-        <div class="empty-logo">🦉</div>
-        <h2>What can I help with?</h2>
-        <p>Ask anything, run commands, explore files, or manage your scheduled tasks.</p>
-        <div class="suggestion-grid">
-          <button class="suggestion" data-msg="What files are in this workspace?">📁 What files are in this workspace?</button>
-          <button class="suggestion" data-msg="What's on my schedule today?">📋 What's on my schedule today?</button>
-          <button class="suggestion" data-msg="Help me plan a small project.">🗺 Help me plan a small project.</button>
+        <div class="empty-logo">H</div>
+        <h2>Hermes</h2>
+        <p>Start a new conversation, or pick a quick action below.</p>
+        <div class="quick-actions">
+          <button class="qa-btn qa-feature" onclick="qaStart('feature')">
+            <span class="qa-icon">&#9672;</span>
+            <span class="qa-label">Feature</span>
+            <span class="qa-desc">Implement new functionality</span>
+          </button>
+          <button class="qa-btn qa-debug" onclick="qaStart('debug')">
+            <span class="qa-icon">&#9650;</span>
+            <span class="qa-label">Debug</span>
+            <span class="qa-desc">Investigate and fix an issue</span>
+          </button>
+          <button class="qa-btn qa-plan" onclick="qaStart('plan')">
+            <span class="qa-icon">&#9632;</span>
+            <span class="qa-label">Plan</span>
+            <span class="qa-desc">Map out a masterplan</span>
+          </button>
         </div>
       </div>
       <div class="messages-inner" id="msgInner"></div>
-      <div id="liveToolCards" style="display:none;max-width:800px;margin:0 auto;width:100%;padding:0 24px;"></div>
     </div>
     <div class="reconnect-banner" id="reconnectBanner">
       <span id="reconnectMsg">&#9888; A response may have been in progress when you last left. Reload messages?</span>
       <div style="display:flex;gap:8px;flex-shrink:0">
         <button class="reconnect-btn" onclick="dismissReconnect()">Dismiss</button>
-        <button class="reconnect-btn" onclick="refreshSession()">&#8635; Reload</button>
+        <button class="reconnect-btn" onclick="refreshSession()"><i class="fas fa-rotate"></i> Reload</button>
       </div>
     </div>
     <div class="approval-card" id="approvalCard">
@@ -218,20 +215,20 @@
         <div class="approval-desc" id="approvalDesc"></div>
         <div class="approval-cmd" id="approvalCmd"></div>
         <div class="approval-btns">
-          <button class="approval-btn once" onclick="respondApproval('once')">&#10003; Allow once</button>
-          <button class="approval-btn session" onclick="respondApproval('session')">&#128274; Allow this session</button>
-          <button class="approval-btn always" onclick="respondApproval('always')">&#9734; Always allow</button>
-          <button class="approval-btn deny" onclick="respondApproval('deny')">&#10005; Deny</button>
+          <button class="approval-btn once" onclick="respondApproval('once')"><i class="fas fa-check"></i> Allow once</button>
+          <button class="approval-btn session" onclick="respondApproval('session')"><i class="fas fa-lock"></i> Allow this session</button>
+          <button class="approval-btn always" onclick="respondApproval('always')"><i class="fas fa-star"></i> Always allow</button>
+          <button class="approval-btn deny" onclick="respondApproval('deny')"><i class="fas fa-xmark"></i> Deny</button>
         </div>
       </div>
     </div>
     <!-- Activity bar: shows tool progress / status above composer (not inside input) -->
     <div id="activityBar" style="display:none;max-width:800px;margin:0 auto;width:100%;padding:0 24px;">
       <div id="activityBarInner" style="display:flex;align-items:center;gap:8px;padding:6px 12px;border-radius:8px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.07);font-size:12px;color:var(--muted);animation:fadeIn .15s ease;">
-        <span id="activityIcon" style="font-size:13px;opacity:.6">&#9881;</span>
+        <span id="activityIcon" style="font-size:13px;opacity:.6"><i class="fas fa-bolt"></i></span>
         <span id="activityText" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
-        <button id="btnCancel" onclick="cancelStream()" style="display:none;background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.35);color:#e94560;font-size:11px;font-weight:600;padding:3px 10px;border-radius:6px;cursor:pointer;flex-shrink:0;transition:background .15s" title="Cancel this task">&#9632; Cancel</button>
-        <button id="btnDismissStatus" onclick="setStatus('')" style="display:none;background:none;border:none;color:var(--muted);font-size:14px;line-height:1;cursor:pointer;padding:0 2px;opacity:.5;flex-shrink:0" title="Dismiss">&#x2715;</button>
+        <button id="btnCancel" onclick="cancelStream()" style="display:none;background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.35);color:#e94560;font-size:11px;font-weight:600;padding:3px 10px;border-radius:6px;cursor:pointer;flex-shrink:0;transition:background .15s" title="Cancel this task"><i class="fas fa-stop"></i> Cancel</button>
+        <button id="btnDismissStatus" onclick="setStatus('')" style="display:none;background:none;border:none;color:var(--muted);font-size:13px;line-height:1;cursor:pointer;padding:0 2px;opacity:.5;flex-shrink:0" title="Dismiss"><i class="fas fa-xmark"></i></button>
         <span id="activityDots" style="display:flex;gap:3px;align-items:center">
           <span style="width:4px;height:4px;border-radius:50%;background:var(--blue);opacity:.3;animation:pulse 1.4s ease-in-out infinite"></span>
           <span style="width:4px;height:4px;border-radius:50%;background:var(--blue);opacity:.3;animation:pulse 1.4s ease-in-out .22s infinite"></span>
@@ -240,14 +237,12 @@
       </div>
     </div>
     <div class="composer-wrap" id="composerWrap">
-      <div class="cmd-dropdown" id="cmdDropdown"></div>
       <div class="composer-box" id="composerBox">
         <div class="drop-hint" id="dropHint">
           <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
           Drop files to upload to workspace
         </div>
         <div class="attach-tray" id="attachTray"></div>
-        <div class="mic-status" id="micStatus" style="display:none"><span class="mic-dot"></span> Listening…</div>
         <textarea id="msg" rows="1" placeholder="Message Hermes…"></textarea>
         <div class="composer-footer">
           <div class="composer-left">
@@ -255,18 +250,15 @@
             <button class="icon-btn" id="btnAttach" title="Attach files">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
             </button>
-            <button class="icon-btn mic-btn" id="btnMic" title="Voice input" style="display:none">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <rect x="9" y="1" width="6" height="12" rx="3"/>
-                <path d="M5 10a7 7 0 0 0 14 0"/>
-                <line x1="12" y1="19" x2="12" y2="23"/>
-                <line x1="8" y1="23" x2="16" y2="23"/>
-              </svg>
+            <button class="context-indicator" id="ctxIndicator" title="Context usage - click to compress" onclick="sendCompress()" style="display:none">
+              <span class="ctx-bar-wrap"><span class="ctx-bar" id="ctxBar"></span></span>
+              <span class="ctx-label" id="ctxLabel"></span>
             </button>
           </div>
           <div class="composer-right">
-            <button class="send-btn" id="btnSend" title="Send message" style="display:none">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+            <button class="send-btn" id="btnSend">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+              Send
             </button>
           </div>
         </div>
@@ -277,24 +269,23 @@
   <aside class="rightpanel">
     <div class="resize-handle" id="rightpanelResize"></div>
     <div class="panel-header">
-      <span>Workspace</span>
+      <button class="panel-icon-btn" id="btnDirUp" title="Go up" onclick="dirUp()" style="display:none;margin-right:4px"><i class="fas fa-chevron-left"></i></button>
+      <span id="explorerBreadcrumb">Explorer</span>
       <div class="panel-actions">
-        <button class="panel-icon-btn" id="btnUpDir" title="Parent directory" onclick="navigateUp()" style="display:none">&#8593;</button>
-        <button class="panel-icon-btn" id="btnNewFile" title="New file" onclick="promptNewFile()">&#43;</button>
-        <button class="panel-icon-btn" id="btnNewFolder" title="New folder" onclick="promptNewFolder()">&#128193;</button>
-        <button class="panel-icon-btn" id="btnRefreshPanel" title="Refresh" onclick="if(S.session)loadDir(S.currentDir)">&#8635;</button>
-        <button class="panel-icon-btn close-preview" id="btnClearPreview" title="Close preview">&#10005;</button>
+
+        <button class="panel-icon-btn" id="btnRefreshPanel" title="Refresh" onclick="if(S.session){const _d=_currentDir||'.';_lastDirWorkspace=null;loadDir(_d)}"><i class="fas fa-rotate"></i></button>
+        <button class="panel-icon-btn close-preview" id="btnClearPreview" title="Close preview" style="display:none"><i class="fas fa-xmark"></i></button>
       </div>
     </div>
-    <div class="breadcrumb-bar" id="breadcrumbBar" style="display:none"></div>
     <div class="file-tree" id="fileTree"></div>
     <div class="preview-area" id="previewArea">
       <div class="preview-path" id="previewPath">
-        <span id="previewPathText"></span>
+        <span id="previewFilename" style="font-weight:600;font-size:12px;color:var(--text);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
         <span class="preview-badge" id="previewBadge"></span>
-        <button id="btnDownloadFile" class="panel-icon-btn" style="margin-left:auto;font-size:12px;width:auto;padding:2px 8px" onclick="downloadFile(_previewCurrentPath)" title="Download file to your computer">&#8681; Download</button>
-        <button id="btnEditFile" class="panel-icon-btn" style="font-size:12px;width:auto;padding:2px 8px;display:none" onclick="toggleEditMode()">&#9998; Edit</button>
+        <button id="btnDownloadFile" class="panel-icon-btn" onclick="downloadFile(_previewCurrentPath)" title="Download file"><i class="fas fa-download"></i></button>
+        <button id="btnEditFile" class="panel-icon-btn" style="display:none" onclick="toggleEditMode()" title="Open in VS Code"><i class="fas fa-code"></i></button>
       </div>
+      <div id="previewPathBreadcrumb" style="font-size:10px;color:var(--muted);padding:0 12px 4px;word-break:break-all;display:none"></div>
       <pre class="preview-code" id="previewCode"></pre>
       <div class="preview-img-wrap" id="previewImgWrap" style="display:none"><img class="preview-img" id="previewImg" src="" alt=""></div>
       <div class="preview-md" id="previewMd" style="display:none"></div>
@@ -302,11 +293,22 @@
     </div>
   </aside>
 </div>
+<!-- Git info modal -->
+<div id="gitModal" style="display:none" class="git-modal-backdrop" onclick="if(event.target===this){this.style.display='none';document.body.style.overflow='';}">
+  <div class="git-modal">
+    <div class="git-modal-header">
+      <span><i class="fas fa-code-branch"></i> <span id="gitModalTitle">repo</span></span>
+      <button class="git-modal-close" onclick="$('gitModal').style.display='none';document.body.style.overflow='';"><i class="fas fa-xmark"></i></button>
+    </div>
+    <div class="git-modal-body" id="gitModalBody"></div>
+  </div>
+</div>
+
 <div class="settings-overlay" id="settingsOverlay" style="display:none">
   <div class="settings-panel">
     <div class="settings-header">
       <h3 style="margin:0;font-size:16px">Settings</h3>
-      <button class="panel-icon-btn" onclick="toggleSettings()" title="Close">&#10005;</button>
+      <button class="panel-icon-btn" onclick="toggleSettings()" title="Close"><i class="fas fa-xmark"></i></button>
     </div>
     <div class="settings-body">
       <div class="settings-field">
@@ -317,66 +319,14 @@
         <label for="settingsWorkspace">Default Workspace</label>
         <select id="settingsWorkspace" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
       </div>
-      <div class="settings-field">
-        <label for="settingsSendKey">Send Key</label>
-        <select id="settingsSendKey" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
-          <option value="enter">Enter (Shift+Enter for newline)</option>
-          <option value="ctrl+enter">Ctrl+Enter (Enter for newline)</option>
-        </select>
-      </div>
-      <div class="settings-field">
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-          <input type="checkbox" id="settingsShowTokenUsage" style="width:15px;height:15px;accent-color:var(--accent)">
-          Show token usage after responses
-        </label>
-        <div style="font-size:11px;color:var(--muted);margin-top:4px">Displays input/output token count below each assistant reply. Also toggled with <code>/usage</code>.</div>
-      </div>
-      <div class="settings-field">
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-          <input type="checkbox" id="settingsShowCliSessions" style="width:15px;height:15px;accent-color:var(--accent)">
-          Show CLI sessions in sidebar
-        </label>
-        <div style="font-size:11px;color:var(--muted);margin-top:4px">Merges sessions from the Hermes CLI (state.db) into the session list. Click a CLI session to import it and continue the conversation.</div>
-      </div>
-      <div class="settings-field" style="border-top:1px solid var(--border);padding-top:12px;margin-top:8px">
-        <label for="settingsPassword">Access Password</label>
-        <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Enter a new password to set or change it. Leave blank to keep current setting.</div>
-        <input type="password" id="settingsPassword" placeholder="Enter new password…" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
-      </div>
       <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600">Save Settings</button>
-      <button class="sm-btn" id="btnDisableAuth" onclick="disableAuth()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:#e8a030;border-color:rgba(232,160,48,.3);display:none">Disable Auth</button>
-      <button class="sm-btn" id="btnSignOut" onclick="signOut()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:var(--accent);border-color:rgba(233,69,96,.3);display:none">Sign Out</button>
     </div>
   </div>
 </div>
-<div class="mobile-overlay" id="mobileOverlay" onclick="closeMobileSidebar()"></div>
-<nav class="mobile-bottom-nav" id="mobileBottomNav">
-  <button class="mobile-nav-btn active" data-panel="chat" onclick="mobileSwitchPanel('chat')">
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-    <span>Chat</span>
-  </button>
-  <button class="mobile-nav-btn" data-panel="tasks" onclick="mobileSwitchPanel('tasks')">
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-    <span>Tasks</span>
-  </button>
-  <button class="mobile-nav-btn" data-panel="skills" onclick="mobileSwitchPanel('skills')">
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-    <span>Skills</span>
-  </button>
-  <button class="mobile-nav-btn" data-panel="memory" onclick="mobileSwitchPanel('memory')">
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2a7 7 0 0 1 7 7c0 2.5-1.3 4.7-3.2 6H8.2C6.3 13.7 5 11.5 5 9a7 7 0 0 1 7-7z"/><line x1="9" y1="17" x2="15" y2="17"/><line x1="10" y1="20" x2="14" y2="20"/></svg>
-    <span>Memory</span>
-  </button>
-  <button class="mobile-nav-btn" data-panel="workspaces" onclick="mobileSwitchPanel('workspaces')">
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 4h8l2 2h10v14H2z"/></svg>
-    <span>Spaces</span>
-  </button>
-</nav>
 <div class="toast" id="toast"></div>
 <script src="/static/ui.js"></script>
 <script src="/static/workspace.js"></script>
 <script src="/static/sessions.js"></script>
-<script src="/static/commands.js"></script>
 <script src="/static/messages.js"></script>
 <script src="/static/panels.js"></script>
 <script src="/static/boot.js"></script>

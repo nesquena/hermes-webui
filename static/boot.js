@@ -1,139 +1,27 @@
+// ── Restore panel collapse states before boot overlay hides ──────────────────
+(function(){
+  if(localStorage.getItem('hermes-sidebar-collapsed')==='1'){
+    const sb=document.querySelector('.sidebar');
+    if(sb) sb.classList.add('collapsed');
+  }
+  if(localStorage.getItem('hermes-rightpanel-collapsed')==='1'){
+    const rp=document.querySelector('.rightpanel');
+    if(rp) rp.classList.add('collapsed');
+  }
+})();
+
 async function cancelStream(){
   const streamId = S.activeStreamId;
   if(!streamId) return;
   try{
-    await fetch(new URL(`/api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,location.origin).href,{credentials:'include'});
+    await fetch(`/api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,{credentials:'include'});
     const btn=$('btnCancel');if(btn)btn.style.display='none';
     setStatus('Cancelling…');
   }catch(e){setStatus('Cancel failed: '+e.message);}
 }
 
-// ── Mobile navigation ──────────────────────────────────────────────────────
-function toggleMobileSidebar(){
-  const sidebar=document.querySelector('.sidebar');
-  const overlay=$('mobileOverlay');
-  if(!sidebar)return;
-  const isOpen=sidebar.classList.contains('mobile-open');
-  if(isOpen){closeMobileSidebar();}
-  else{sidebar.classList.add('mobile-open');if(overlay)overlay.classList.add('visible');}
-}
-function closeMobileSidebar(){
-  const sidebar=document.querySelector('.sidebar');
-  const overlay=$('mobileOverlay');
-  if(sidebar)sidebar.classList.remove('mobile-open');
-  if(overlay)overlay.classList.remove('visible');
-}
-function toggleMobileFiles(){
-  const panel=document.querySelector('.rightpanel');
-  if(!panel)return;
-  panel.classList.toggle('mobile-open');
-}
-function mobileSwitchPanel(name){
-  // Switch the panel content view
-  switchPanel(name);
-  // For non-chat panels (tasks, skills, memory, spaces), open the sidebar
-  // so the panel is visible. For 'chat', the content is in the main area —
-  // just close the sidebar so the chat view is unobstructed.
-  if(name==='chat'){
-    closeMobileSidebar();
-  } else {
-    const sidebar=document.querySelector('.sidebar');
-    const overlay=$('mobileOverlay');
-    if(sidebar){
-      sidebar.classList.add('mobile-open');
-      if(overlay)overlay.classList.add('visible');
-    }
-  }
-  // Update bottom nav active state
-  document.querySelectorAll('.mobile-nav-btn').forEach(btn=>{
-    btn.classList.toggle('active',btn.dataset.panel===name);
-  });
-}
-
-$('btnSend').onclick=()=>{if(window._micActive)_stopMic();send();};
+$('btnSend').onclick=send;
 $('btnAttach').onclick=()=>$('fileInput').click();
-
-// ── Voice input (Web Speech API) ─────────────────────────────────────────
-(function(){
-  const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
-  if(!SpeechRecognition) return; // Browser unsupported — mic button stays hidden
-
-  const btn=$('btnMic');
-  const status=$('micStatus');
-  const ta=$('msg');
-  btn.style.display=''; // Show button — browser supports speech
-
-  const recognition=new SpeechRecognition();
-  recognition.continuous=false;
-  recognition.interimResults=true;
-  recognition.lang='en-US';
-
-  let _finalText='';
-  let _prefix='';
-
-  function _setRecording(on){
-    window._micActive=on;
-    btn.classList.toggle('recording',on);
-    status.style.display=on?'':'none';
-    if(!on){ _finalText=''; _prefix=''; }
-  }
-
-  recognition.onstart=()=>{ _finalText=''; };
-
-  recognition.onresult=(event)=>{
-    let interim='';
-    let final=_finalText;
-    for(let i=event.resultIndex;i<event.results.length;i++){
-      const t=event.results[i][0].transcript;
-      if(event.results[i].isFinal){ final+=t; _finalText=final; }
-      else{ interim+=t; }
-    }
-    // Append to whatever was already in the textarea before mic started
-    ta.value=_prefix+(final||interim);
-    autoResize();
-  };
-
-  recognition.onend=()=>{
-    // Commit: prefix + final transcription; trim trailing space if prefix was non-empty
-    const committed=_finalText
-      ? (_prefix&&!_prefix.endsWith(' ')&&!_prefix.endsWith('\n')
-          ? _prefix+' '+_finalText.trimStart()
-          : _prefix+_finalText)
-      : ta.value; // no speech detected — leave whatever is there
-    _setRecording(false);
-    ta.value=committed;
-    autoResize();
-  };
-
-  recognition.onerror=(event)=>{
-    _setRecording(false);
-    const msgs={
-      'not-allowed':'Microphone access denied. Check browser permissions.',
-      'no-speech':'No speech detected. Try again.',
-      'network':'Speech recognition unavailable.',
-    };
-    showToast(msgs[event.error]||'Voice input error: '+event.error);
-  };
-
-  function _stopMic(){
-    if(window._micActive){ recognition.stop(); }
-  }
-  window._stopMic=_stopMic; // expose for send-guard above
-
-  btn.onclick=()=>{
-    if(window._micActive){
-      recognition.stop();
-      // _setRecording(false) will be called by onend
-    } else {
-      _finalText='';
-      // Snapshot existing textarea content so we append rather than replace
-      _prefix=ta.value;
-      recognition.start();
-      _setRecording(true);
-    }
-  };
-})();
-window._micActive=window._micActive||false;
 $('fileInput').onchange=e=>{addFiles(Array.from(e.target.files));e.target.value='';};
 $('btnNewChat').onclick=async()=>{await newSession();await renderSessionList();$('msg').focus();};
 $('btnDownload').onclick=()=>{
@@ -167,16 +55,20 @@ $('importFileInput').onchange=async(e)=>{
   }
 };
 // btnRefreshFiles is now panel-icon-btn in header (see HTML)
-function clearPreview(){
-  const pa=$('previewArea');if(pa)pa.classList.remove('visible');
-  const pi=$('previewImg');if(pi){pi.onerror=null;pi.src='';}
-  const pm=$('previewMd');if(pm)pm.innerHTML='';
-  const pc=$('previewCode');if(pc)pc.textContent='';
-  const pp=$('previewPathText');if(pp)pp.textContent='';
-  const ft=$('fileTree');if(ft)ft.style.display='';
-  _previewCurrentPath='';_previewCurrentMode='';_previewDirty=false;
-}
-$('btnClearPreview').onclick=clearPreview;
+$('btnClearPreview').onclick=()=>{
+  $('previewArea').classList.remove('visible');
+  $('previewImg').src='';
+  $('previewMd').innerHTML='';
+  $('previewCode').textContent='';
+  if($('previewPathText')) $('previewPathText').textContent='';
+  if($('previewFilename')) $('previewFilename').textContent='';
+  const crumb=$('previewPathBreadcrumb'); if(crumb) crumb.style.display='none';
+  $('fileTree').style.display='';
+  $('btnClearPreview').style.display='none';
+  // Restore the up button (visible state based on current directory)
+  const upBtn=document.getElementById('btnDirUp');
+  if(upBtn) upBtn.style.display=(typeof _currentDir!=='undefined'&&_currentDir&&_currentDir!=='.'&&_currentDir!==''&&_currentDir!=='/')?'':'none';
+};
 // workspacePath click handler removed -- use topbar workspace chip dropdown instead
 $('modelSelect').onchange=async()=>{
   if(!S.session)return;
@@ -184,39 +76,95 @@ $('modelSelect').onchange=async()=>{
   localStorage.setItem('hermes-webui-model', selectedModel);
   await api('/api/session/update',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,workspace:S.session.workspace,model:selectedModel})});
   S.session.model=selectedModel;syncTopbar();
+  // Sync custom selector label
+  syncModelCSelect();
 };
-$('msg').addEventListener('input',()=>{
-  autoResize();
-  updateSendBtn();
-  const text=$('msg').value;
-  if(text.startsWith('/')&&text.indexOf('\n')===-1){
-    const prefix=text.slice(1);
-    const matches=getMatchingCommands(prefix);
-    if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
+
+// ── Custom model selector ────────────────────────────────────────────────────
+function buildModelCSelect(){
+  const sel=$('modelSelect');
+  const menu=$('modelCSelectMenu');
+  if(!sel||!menu) return;
+  menu.innerHTML='';
+  const groups=sel.querySelectorAll('optgroup');
+  if(groups.length){
+    groups.forEach((g,gi)=>{
+      if(gi>0){const d=document.createElement('div');d.className='model-cselect-divider';menu.appendChild(d);}
+      const gl=document.createElement('div');gl.className='model-cselect-group-label';gl.textContent=g.label;menu.appendChild(gl);
+      const grp=document.createElement('div');grp.className='model-cselect-group';
+      g.querySelectorAll('option').forEach(o=>{
+        const el=document.createElement('div');el.className='model-cselect-opt';el.textContent=o.textContent;el.dataset.value=o.value;
+        if(o.value===sel.value) el.classList.add('selected');
+        el.onclick=()=>selectModelCSelect(o.value);
+        grp.appendChild(el);
+      });
+      menu.appendChild(grp);
+    });
   } else {
-    hideCmdDropdown();
+    // Flat option list (no groups)
+    const grp=document.createElement('div');grp.className='model-cselect-group';
+    sel.querySelectorAll('option').forEach(o=>{
+      const el=document.createElement('div');el.className='model-cselect-opt';el.textContent=o.textContent;el.dataset.value=o.value;
+      if(o.value===sel.value) el.classList.add('selected');
+      el.onclick=()=>selectModelCSelect(o.value);
+      grp.appendChild(el);
+    });
+    menu.appendChild(grp);
   }
+  syncModelCSelect();
+}
+function syncModelCSelect(){
+  const sel=$('modelSelect');
+  const lbl=$('modelCSelectLabel');
+  if(!sel||!lbl) return;
+  const cur=sel.options[sel.selectedIndex];
+  lbl.textContent=cur?cur.textContent:sel.value;
+  // Mark selected option
+  document.querySelectorAll('.model-cselect-opt').forEach(el=>{
+    el.classList.toggle('selected',el.dataset.value===sel.value);
+  });
+}
+function selectModelCSelect(val){
+  const sel=$('modelSelect');
+  sel.value=val;
+  sel.dispatchEvent(new Event('change'));
+  closeModelCSelect();
+}
+function toggleModelCSelect(){
+  const c=$('modelCSelect');
+  if(c.classList.contains('open')) closeModelCSelect();
+  else c.classList.add('open');
+}
+function closeModelCSelect(){
+  const c=$('modelCSelect');
+  if(c) c.classList.remove('open');
+}
+
+// Sidebar bottom (model/workspace/transcript) collapsible
+(function initSidebarBottom(){
+  const collapsed=localStorage.getItem('sidebarBottomCollapsed')==='1';
+  if(collapsed) _applySidebarBottomState(true);
+})();
+function _applySidebarBottomState(collapsed){
+  const body=$('sidebarBottomBody');
+  const caret=$('sidebarBottomCaret');
+  if(!body)return;
+  body.style.display=collapsed?'none':'';
+  if(caret) caret.style.transform=collapsed?'rotate(180deg)':'';
+}
+function toggleSidebarBottom(){
+  const body=$('sidebarBottomBody');
+  if(!body)return;
+  const collapsed=body.style.display==='none';
+  _applySidebarBottomState(!collapsed);
+  localStorage.setItem('sidebarBottomCollapsed',collapsed?'0':'1');
+}
+// Close on outside click
+document.addEventListener('click',e=>{
+  if(!e.target.closest('#modelCSelect')) closeModelCSelect();
 });
-$('msg').addEventListener('keydown',e=>{
-  // Autocomplete navigation when dropdown is open
-  const dd=$('cmdDropdown');
-  const dropdownOpen=dd&&dd.classList.contains('open');
-  if(dropdownOpen){
-    if(e.key==='ArrowUp'){e.preventDefault();navigateCmdDropdown(-1);return;}
-    if(e.key==='ArrowDown'){e.preventDefault();navigateCmdDropdown(1);return;}
-    if(e.key==='Tab'){e.preventDefault();selectCmdDropdownItem();return;}
-    if(e.key==='Escape'){e.preventDefault();hideCmdDropdown();return;}
-    if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();selectCmdDropdownItem();return;}
-  }
-  // Send key: respect user preference
-  if(e.key==='Enter'){
-    if(window._sendKey==='ctrl+enter'){
-      if(e.ctrlKey||e.metaKey){e.preventDefault();send();}
-    } else {
-      if(!e.shiftKey){e.preventDefault();send();}
-    }
-  }
-});
+$('msg').addEventListener('input',autoResize);
+$('msg').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}});
 // B14: Cmd/Ctrl+K creates a new chat from anywhere
 document.addEventListener('keydown',async e=>{
   if((e.metaKey||e.ctrlKey)&&e.key==='k'){
@@ -224,6 +172,9 @@ document.addEventListener('keydown',async e=>{
     if(!S.busy){await newSession();await renderSessionList();$('msg').focus();}
   }
   if(e.key==='Escape'){
+    // Close git modal if open
+    const gitModal=$('gitModal');
+    if(gitModal&&gitModal.style.display!=='none'){gitModal.style.display='none';return;}
     // Close settings overlay if open
     const settingsOverlay=$('settingsOverlay');
     if(settingsOverlay&&settingsOverlay.style.display!=='none'){toggleSettings();return;}
@@ -256,6 +207,22 @@ $('msg').addEventListener('paste',e=>{
 document.querySelectorAll('.suggestion').forEach(btn=>{
   btn.onclick=()=>{$('msg').value=btn.dataset.msg;send();};
 });
+
+// Quick action starter buttons on empty state
+const QA_PROMPTS = {
+  feature: `I want to implement a new feature. Let's start by gathering context.\n\nWhat type of work is this? Feature.`,
+  debug:   `I have a bug to investigate and fix. Let's start by gathering context.\n\nWhat type of work is this? Debug.`,
+  plan:    `I want to map out a masterplan before starting implementation. Let's begin.\n\nWhat type of work is this? Plan / Refactor.`,
+};
+function qaStart(type) {
+  const prompt = QA_PROMPTS[type];
+  if (!prompt) return;
+  const ta = $('msg');
+  ta.value = prompt;
+  autoResize();
+  ta.focus();
+  ta.setSelectionRange(prompt.length, prompt.length);
+}
 
 // Boot: restore last session or start fresh
 // ── Resizable panels ──────────────────────────────────────────────────────
@@ -306,16 +273,19 @@ document.querySelectorAll('.suggestion').forEach(btn=>{
   };
 })();
 
+// Handle browser back/forward -- restore session from popstate
+window.addEventListener('popstate',async(e)=>{
+  const sid=(e.state&&e.state.s)||new URLSearchParams(location.search).get('s');
+  if(sid){
+    try{await loadSession(sid);renderSessionListFromCache();}
+    catch(err){console.warn('popstate loadSession failed',err);}
+  }
+});
+
 (async()=>{
-  // Load send key preference
-  try{const s=await api('/api/settings');window._sendKey=s.send_key||'enter';window._showTokenUsage=!!s.show_token_usage;window._showCliSessions=!!s.show_cli_sessions;}catch(e){window._sendKey='enter';window._showTokenUsage=false;window._showCliSessions=false;}
-  // Fetch active profile
-  try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';}catch(e){S.activeProfile='default';}
-  // Update profile chip label immediately
-  const profileLabel=$('profileChipLabel');
-  if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
   // Fetch available models from server and populate dropdown dynamically
   await populateModelDropdown();
+  buildModelCSelect();
   // Restore last-used model preference
   const savedModel=localStorage.getItem('hermes-webui-model');
   if(savedModel && $('modelSelect')){
@@ -323,16 +293,33 @@ document.querySelectorAll('.suggestion').forEach(btn=>{
     // If the value didn't take (model not in list), clear the bad pref
     if($('modelSelect').value!==savedModel) localStorage.removeItem('hermes-webui-model');
   }
+  syncModelCSelect();
   // Pre-load workspace list so sidebar name is correct from first render
   await loadWorkspaceList();
   _initResizePanels();
-  const saved=localStorage.getItem('hermes-webui-session');
-  if(saved){
-    try{await loadSession(saved);await renderSessionList();await checkInflightOnBoot(saved);return;}
-    catch(e){localStorage.removeItem('hermes-webui-session');}
+  // Restore session from URL ?s= param (URL is now the only source of truth)
+  const _bootParams=new URLSearchParams(location.search);
+  const urlSid=_bootParams.get('s');
+  const urlDir=_bootParams.get('dir');
+  if(urlSid){
+    try{
+      await loadSession(urlSid);
+      await renderSessionList();
+      // Restore dir position after session is loaded so workspace is set
+      if(urlDir) await loadDir(urlDir).catch(()=>loadDir('.'));
+      await checkInflightOnBoot(urlSid);
+    }
+    catch(e){
+      history.replaceState({},'','/');
+      await renderSessionList();
+    }
+  } else {
+    // no saved session - show empty state, wait for user to hit +
+    $('emptyState').style.display='';
+    await renderSessionList();
   }
-  // no saved session - show empty state, wait for user to hit +
-  $('emptyState').style.display='';
-  await renderSessionList();
+  // Dismiss boot overlay - all data is ready, no more flicker
+  const ov=document.getElementById('bootOverlay');
+  if(ov){ov.classList.add('done');setTimeout(()=>ov.remove(),300);}
 })();
 

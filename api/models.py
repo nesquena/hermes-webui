@@ -1,5 +1,17 @@
 """
-Hermes Web UI -- Session model and in-memory session store.
+Hermes Web UI -- Session model backed by Hermes' SQLite SessionDB.
+
+Previously: separate JSON file storage in ~/.hermes/webui-mvp/sessions/
+Now: unified SQLite storage in ~/.hermes/state.db (shared with CLI)
+
+This enables:
+- Sessions created in WebUI are visible to CLI (hermes session_search)
+- Sessions created in CLI are visible in WebUI sidebar
+- Single source of truth for session metadata and messages
+- Inherited message persistence and FTS5 search
+
+The Session class wraps Hermes' SessionDB to present a compatible API
+for WebUI routes that expect get_session(), new_session(), all_sessions().
 """
 import collections
 import json
@@ -14,36 +26,72 @@ from api.config import (
 )
 from api.workspace import get_last_workspace
 
+try:
+    from hermes_state import SessionDB
+except ImportError:
+    SessionDB = None
 
-def _write_session_index():
-    """Rebuild the session index file for O(1) future reads."""
-    entries = []
-    for p in SESSION_DIR.glob('*.json'):
-        if p.name.startswith('_'): continue
+# Global SessionDB instance (lazy-initialized on first use)
+_session_db = None
+
+
+def _get_session_db() -> SessionDB:
+    """Get or initialize the global SessionDB instance."""
+    global _session_db
+    if _session_db is None:
+        if SessionDB is None:
+            raise RuntimeError(
+                "hermes_state module not available. "
+                "Ensure hermes-agent is in PYTHONPATH."
+            )
+        _session_db = SessionDB()
+    return _session_db
+
+
+def _reload_session_db():
+    """Force re-initialization of SessionDB (useful after hermes updates)."""
+    global _session_db
+    if _session_db:
         try:
-            s = Session.load(p.stem)
-            if s: entries.append(s.compact())
+            _session_db.close()
         except Exception:
             pass
-    with LOCK:
-        for s in SESSIONS.values():
-            if not any(e['session_id'] == s.session_id for e in entries):
-                entries.append(s.compact())
-    entries.sort(key=lambda s: s['updated_at'], reverse=True)
-    SESSION_INDEX_FILE.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding='utf-8')
+    _session_db = None
 
 
 class Session:
-    def __init__(self, session_id=None, title='Untitled',
-                 workspace=str(DEFAULT_WORKSPACE), model=DEFAULT_MODEL,
-                 messages=None, created_at=None, updated_at=None,
-                 tool_calls=None, pinned=False, archived=False,
-                 project_id=None, profile=None,
-                 input_tokens=0, output_tokens=0, estimated_cost=None,
-                 **kwargs):
+    """
+    Wraps a Hermes SessionDB entry to present a WebUI-compatible API.
+
+    Bridges the gap between:
+    - WebUI's view: session_id, title, workspace, model, messages, created_at, updated_at, pinned, archived
+    - Hermes' view: id, source='webui', title, model, message_count, started_at, ended_at
+
+    Note: Hermes stores full message objects in the messages table; WebUI loads them
+    separately via get_messages(). This class composes them on read.
+    """
+
+    def __init__(
+        self,
+        session_id=None,
+        title="Untitled",
+        workspace=None,
+        model=DEFAULT_MODEL,
+        messages=None,
+        created_at=None,
+        updated_at=None,
+        tool_calls=None,
+        pinned=False,
+        archived=False,
+        project_id=None,
+        profile=None,
+        input_tokens=0, output_tokens=0, estimated_cost=None,
+        **kwargs,
+    ):
+        db = _get_session_db()
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
-        self.workspace = str(Path(workspace).expanduser().resolve())
+        self.workspace = str(Path(workspace or DEFAULT_WORKSPACE).expanduser().resolve())
         self.model = model
         self.messages = messages or []
         self.tool_calls = tool_calls or []
@@ -57,66 +105,155 @@ class Session:
         self.output_tokens = output_tokens or 0
         self.estimated_cost = estimated_cost
 
-    @property
-    def path(self):
-        return SESSION_DIR / f'{self.session_id}.json'
+    def save(self, touch_updated_at=True):
+        """Persist session to SessionDB.
 
-    def save(self):
-        self.updated_at = time.time()
-        self.path.write_text(
-            json.dumps(self.__dict__, ensure_ascii=False, indent=2),
-            encoding='utf-8',
-        )
-        _write_session_index()
+        Pass touch_updated_at=False when saving metadata-only changes (e.g.
+        auto-generated title) that should not move the session to the top of
+        the list or change its date group.
+        """
+        db = _get_session_db()
+        if touch_updated_at:
+            self.updated_at = time.time()
+
+        # Ensure session exists in SessionDB (create if not present)
+        session_row = db.get_session(self.session_id)
+        if not session_row:
+            db.create_session(
+                session_id=self.session_id,
+                source="webui",
+                model=self.model,
+            )
+
+        # Set title if not Untitled
+        if self.title != "Untitled":
+            try:
+                db.set_session_title(self.session_id, self.title)
+            except (ValueError, Exception):
+                pass  # Title conflict or validation failure; keep existing
+
+        # Store workspace and metadata in model_config (JSON)
+        try:
+            config = {
+                "workspace": self.workspace,
+                "pinned": self.pinned,
+                "archived": self.archived,
+            }
+            # SessionDB doesn't directly support custom fields, so we store in model_config
+            db._execute_write(
+                lambda conn: conn.execute(
+                    "UPDATE sessions SET model_config = ? WHERE id = ?",
+                    (json.dumps(config), self.session_id),
+                )
+            )
+        except Exception:
+            pass  # Non-critical; session still persists even if metadata fails
+
+        # Sync messages to SessionDB (add missing ones)
+        existing_messages = db.get_messages(self.session_id)
+        existing_count = len(existing_messages)
+
+        # If we have more messages than SessionDB knows about, add the new ones
+        if len(self.messages) > existing_count:
+            for msg in self.messages[existing_count:]:
+                try:
+                    db.append_message(
+                        session_id=self.session_id,
+                        role=msg.get("role", ""),
+                        content=msg.get("content", ""),
+                        tool_call_id=msg.get("tool_call_id"),
+                        tool_calls=msg.get("tool_calls"),
+                        tool_name=msg.get("tool_name"),
+                        token_count=msg.get("token_count"),
+                        finish_reason=msg.get("finish_reason"),
+                    )
+                except Exception:
+                    pass  # Skip any problematic messages
 
     @classmethod
     def load(cls, sid):
-        p = SESSION_DIR / f'{sid}.json'
-        if not p.exists():
+        """Load a session from SessionDB by ID."""
+        try:
+            db = _get_session_db()
+            session_row = db.get_session(sid)
+            if not session_row:
+                return None
+
+            # Parse metadata from model_config
+            metadata = {}
+            try:
+                if session_row.get("model_config"):
+                    metadata = json.loads(session_row["model_config"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+            # Load messages
+            messages = db.get_messages(sid)
+
+            return cls(
+                session_id=sid,
+                title=session_row.get("title") or "Untitled",
+                workspace=metadata.get("workspace", DEFAULT_WORKSPACE),
+                model=session_row.get("model") or DEFAULT_MODEL,
+                messages=messages,
+                created_at=session_row.get("started_at", time.time()),
+                updated_at=session_row.get("started_at", time.time()),
+                pinned=metadata.get("pinned", False),
+                archived=metadata.get("archived", False),
+            )
+        except Exception:
             return None
-        return cls(**json.loads(p.read_text(encoding='utf-8')))
 
     def compact(self):
+        """Return a compact dict for list views."""
         return {
-            'session_id': self.session_id,
-            'title': self.title,
-            'workspace': self.workspace,
-            'model': self.model,
-            'message_count': len(self.messages),
-            'created_at': self.created_at,
-            'updated_at': self.updated_at,
-            'pinned': self.pinned,
-            'archived': self.archived,
-            'project_id': self.project_id,
-            'profile': self.profile,
-            'input_tokens': self.input_tokens,
-            'output_tokens': self.output_tokens,
-            'estimated_cost': self.estimated_cost,
+            "session_id": self.session_id,
+            "title": self.title,
+            "workspace": self.workspace,
+            "model": self.model,
+            "message_count": len(self.messages),
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "pinned": self.pinned,
+            "archived": self.archived,
+            "project_id": self.project_id,
+            "profile": self.profile,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "estimated_cost": self.estimated_cost,
         }
 
 def get_session(sid):
+    """Load a session by ID, with LRU caching."""
     with LOCK:
         if sid in SESSIONS:
-            SESSIONS.move_to_end(sid)  # LRU: mark as recently used
+            SESSIONS.move_to_end(sid)
             return SESSIONS[sid]
+
     s = Session.load(sid)
     if s:
         with LOCK:
             SESSIONS[sid] = s
             SESSIONS.move_to_end(sid)
             while len(SESSIONS) > SESSIONS_MAX:
-                SESSIONS.popitem(last=False)  # evict least recently used
+                SESSIONS.popitem(last=False)
         return s
     raise KeyError(sid)
 
+
 def new_session(workspace=None, model=None):
+    """Create a new session in SessionDB and cache it."""
     # Use _cfg.DEFAULT_MODEL (not the import-time snapshot) so save_settings() changes take effect
     try:
         from api.profiles import get_active_profile_name
         _profile = get_active_profile_name()
     except ImportError:
         _profile = None
-    s = Session(workspace=workspace or get_last_workspace(), model=model or _cfg.DEFAULT_MODEL, profile=_profile)
+    s = Session(
+        workspace=workspace or get_last_workspace(),
+        model=model or _cfg.DEFAULT_MODEL,
+        profile=_profile,
+    )
     with LOCK:
         SESSIONS[s.session_id] = s
         SESSIONS.move_to_end(s.session_id)
@@ -125,53 +262,162 @@ def new_session(workspace=None, model=None):
     s.save()
     return s
 
+
 def all_sessions():
-    # Phase C: try index first for O(1) read; fall back to full scan
-    if SESSION_INDEX_FILE.exists():
-        try:
-            index = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
-            # Overlay any in-memory sessions that may be newer than the index
-            index_map = {s['session_id']: s for s in index}
+    """List all sessions from SessionDB, sorted by updated_at (descending).
+    
+    Includes sessions from CLI, WebUI, telegram gateway, and other sources.
+    Excludes cron (automated, not user-initiated) and whatsapp/other platform UIs.
+    """
+    try:
+        db = _get_session_db()
+
+        # Query SessionDB for CLI + WebUI + telegram sessions.
+        # Exclude cron (automated, not user-initiated) and whatsapp/other platform UIs.
+        with db._lock:
+            cursor = db._conn.execute(
+                "SELECT id, title, model, started_at, message_count, source, parent_session_id FROM sessions "
+                "WHERE source IN ('cli', 'webui', 'telegram') OR source IS NULL "
+                "ORDER BY started_at DESC"
+            )
+            rows = cursor.fetchall()
+
+        result = []
+        for row in rows:
+            sid = row["id"]
+            row_source = row["source"] if "source" in row.keys() else None
+            row_parent = row["parent_session_id"] if "parent_session_id" in row.keys() else None
+            # Check in-memory cache first
             with LOCK:
-                for s in SESSIONS.values():
-                    index_map[s.session_id] = s.compact()
-            result = sorted(index_map.values(), key=lambda s: (s.get('pinned', False), s['updated_at']), reverse=True)
-            # Hide empty Untitled sessions from the UI (created by tests, page refreshes, etc.)
-            result = [s for s in result if not (s.get('title','Untitled')=='Untitled' and s.get('message_count',0)==0)]
-            # Backfill: sessions created before Sprint 22 have no profile tag.
-            # Attribute them to 'default' so the client profile filter works correctly.
-            for s in result:
-                if not s.get('profile'):
-                    s['profile'] = 'default'
-            return result
-        except Exception:
-            pass  # fall through to full scan
-    # Full scan fallback
-    out = []
-    for p in SESSION_DIR.glob('*.json'):
-        if p.name.startswith('_'): continue
-        try:
-            s = Session.load(p.stem)
-            if s: out.append(s)
-        except Exception:
-            pass
-    for s in SESSIONS.values():
-        if all(s.session_id != x.session_id for x in out): out.append(s)
-    out.sort(key=lambda s: (getattr(s, 'pinned', False), s.updated_at), reverse=True)
-    result = [s.compact() for s in out if not (s.title=='Untitled' and len(s.messages)==0)]
-    for s in result:
-        if not s.get('profile'):
-            s['profile'] = 'default'
-    return result
+                if sid in SESSIONS:
+                    s = SESSIONS[sid]
+                    c = s.compact()
+                    c["source"] = row_source
+                    c["parent_session_id"] = row_parent
+                    result.append(c)
+                    continue
+
+            # Load from DB if not cached
+            s = Session.load(sid)
+            if s:
+                with LOCK:
+                    SESSIONS[sid] = s
+                    SESSIONS.move_to_end(sid)
+                    while len(SESSIONS) > SESSIONS_MAX:
+                        SESSIONS.popitem(last=False)
+                # Hide empty Untitled sessions
+                if not (s.title == "Untitled" and len(s.messages) == 0):
+                    c = s.compact()
+                    c["source"] = row_source
+                    c["parent_session_id"] = row_parent
+                    result.append(c)
+
+        # Add any in-memory sessions not yet persisted
+        with LOCK:
+            for s in SESSIONS.values():
+                if not any(c["session_id"] == s.session_id for c in result):
+                    if not (s.title == "Untitled" and len(s.messages) == 0):
+                        result.append(s.compact())
+
+        # Sort by pinned, then created_at (descending).
+        # Using created_at (== started_at from DB) rather than updated_at so
+        # that auto-title, pin, and other metadata writes don't shuffle sessions
+        # into the wrong date group. Sessions stay in chronological order.
+        result.sort(
+            key=lambda s: (s.get("pinned", False), s["created_at"]),
+            reverse=True,
+        )
+        # Backfill: sessions created before Sprint 22 have no profile tag.
+        # Attribute them to 'default' so the client profile filter works correctly.
+        for s in result:
+            if not s.get('profile'):
+                s['profile'] = 'default'
+        return result
+    except Exception as e:
+        # Fallback: return in-memory sessions only
+        result = []
+        with LOCK:
+            for s in SESSIONS.values():
+                if not (s.title == "Untitled" and len(s.messages) == 0):
+                    result.append(s.compact())
+        result.sort(
+            key=lambda s: (s.get("pinned", False), s["created_at"]),
+            reverse=True,
+        )
+        for s in result:
+            if not s.get('profile'):
+                s['profile'] = 'default'
+        return result
 
 
-def title_from(messages, fallback='Untitled'):
+def derive_tool_calls(messages):
+    """Extract tool call metadata from conversation messages.
+
+    Walks through messages pairing assistant tool invocations with their
+    tool-result messages.  Handles both Anthropic format (content blocks
+    with type=tool_use) and OpenAI format (top-level tool_calls list).
+    Returns a list of dicts with name, snippet, tid, assistant_msg_idx.
+    """
+    tool_calls = []
+    pending_names = {}  # tool_call_id -> name
+    pending_asst_idx = {}  # tool_call_id -> index in messages
+    pending_args = {}  # tool_call_id -> args dict
+    for msg_idx, m in enumerate(messages):
+        if m.get("role") == "assistant":
+            # Anthropic format: content is a list of blocks
+            c = m.get("content", "")
+            if isinstance(c, list):
+                for p in c:
+                    if isinstance(p, dict) and p.get("type") == "tool_use":
+                        tid = p.get("id", "")
+                        pending_names[tid] = p.get("name", "tool")
+                        pending_asst_idx[tid] = msg_idx
+                        pending_args[tid] = p.get("input", {})
+            # OpenAI format: top-level tool_calls key
+            for tc in (m.get("tool_calls") or []):
+                if isinstance(tc, dict):
+                    tid = tc.get("id") or tc.get("call_id", "")
+                    fn = tc.get("function", {})
+                    pending_names[tid] = fn.get("name", "tool")
+                    pending_asst_idx[tid] = msg_idx
+                    # OpenAI stores arguments as JSON string
+                    raw_args = fn.get("arguments", "{}")
+                    try:
+                        pending_args[tid] = (
+                            json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                        )
+                    except (json.JSONDecodeError, TypeError):
+                        pending_args[tid] = {}
+        elif m.get("role") == "tool":
+            tid = m.get("tool_call_id") or m.get("tool_use_id", "")
+            name = pending_names.get(tid, "tool")
+            asst_idx = pending_asst_idx.get(tid, -1)
+            args = pending_args.get(tid, {})
+            raw = str(m.get("content", ""))
+            snippet = raw[:4000]
+            tool_calls.append(
+                {
+                    "name": name,
+                    "snippet": snippet,
+                    "tid": tid,
+                    "assistant_msg_idx": asst_idx,
+                    "args": args,
+                }
+            )
+    return tool_calls
+
+
+def title_from(messages, fallback="Untitled"):
     """Derive a session title from the first user message."""
     for m in messages:
-        if m.get('role') == 'user':
-            c = m.get('content', '')
+        if m.get("role") == "user":
+            c = m.get("content", "")
             if isinstance(c, list):
-                c = ' '.join(p.get('text', '') for p in c if isinstance(p, dict) and p.get('type') == 'text')
+                c = " ".join(
+                    p.get("text", "")
+                    for p in c
+                    if isinstance(p, dict) and p.get("type") == "text"
+                )
             text = str(c).strip()
             if text:
                 return text[:64]

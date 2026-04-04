@@ -1,49 +1,146 @@
-const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default'};
+const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null};
 const INFLIGHT={};  // keyed by session_id while request in-flight
 const MSG_QUEUE=[];  // messages queued while a request is in-flight
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
-// Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
-let _dynamicModelLabels={};
-
-// ── Smart model resolver ────────────────────────────────────────────────────
-// Finds the best matching option value in a <select> for a given model ID.
-// Handles mismatches like 'claude-sonnet-4-6' vs 'anthropic/claude-sonnet-4.6'.
-// Returns the matched option's value (already in the list), or null if no match.
-function _findModelInDropdown(modelId, sel){
-  if(!modelId||!sel) return null;
-  const opts=Array.from(sel.options).map(o=>o.value);
-  // 1. Exact match
-  if(opts.includes(modelId)) return modelId;
-  // 2. Normalize: lowercase, strip namespace prefix, replace hyphens→dots
-  const norm=s=>s.toLowerCase().replace(/^[^/]+\//,'').replace(/-/g,'.');
-  const target=norm(modelId);
-  const exact=opts.find(o=>norm(o)===target);
-  if(exact) return exact;
-  // 3. Prefix/substring: target starts with or contains a significant chunk
-  const base=target.replace(/\.\d+$/,'');  // strip trailing version number
-  const partial=opts.find(o=>norm(o).startsWith(base)||norm(o).includes(base));
-  return partial||null;
+// Relative time helper -- "just now", "5m ago", "3h ago", "2 days ago", etc.
+function _relTime(tsMs){
+  const diff=Date.now()-tsMs;
+  if(diff<60000) return 'just now';
+  if(diff<3600000) return Math.floor(diff/60000)+'m ago';
+  if(diff<86400000) return Math.floor(diff/3600000)+'h ago';
+  if(diff<86400000*2) return 'yesterday';
+  if(diff<86400000*30) return Math.floor(diff/86400000)+' days ago';
+  if(diff<86400000*365) return Math.floor(diff/86400000/30)+'mo ago';
+  return Math.floor(diff/86400000/365)+'y ago';
 }
 
-// Set the model picker to the best match for modelId.
-// Returns the resolved value that was actually set, or null if nothing matched.
-function _applyModelToDropdown(modelId, sel){
-  if(!modelId||!sel) return null;
-  const resolved=_findModelInDropdown(modelId,sel);
-  if(resolved){
-    sel.value=resolved;
-    return resolved;
+function _fmtTokens(n){
+  if(n>=1000000) return (n/1000000).toFixed(1)+'M';
+  if(n>=1000) return (n/1000).toFixed(1)+'k';
+  return String(n);
+}
+
+// ── JSON syntax highlighter ──
+function highlightJSON(str){
+  // tokenise the already-escaped string coming back from JSON.stringify
+  // We re-escape it ourselves so we control the markup.
+  let raw;
+  try{ raw=JSON.stringify(JSON.parse(str),null,2); }
+  catch(e){ return `<span class="jh-str">${esc(str)}</span>`; }
+  return esc(raw).replace(
+    /(&quot;)((?:[^&]|&(?!quot;))*?)(&quot;)(\s*:)?|(\btrue\b|\bfalse\b|\bnull\b)|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g,
+    (m,oq,key,cq,colon,kw,num)=>{
+      if(oq&&colon) return `<span class="jh-key">${oq}${key}${cq}</span>${colon}`;
+      if(oq)        return `<span class="jh-str">${oq}${key}${cq}</span>`;
+      if(kw)        return `<span class="jh-kw">${kw}</span>`;
+      if(num!==undefined) return `<span class="jh-num">${num}</span>`;
+      return m;
+    }
+  );
+}
+
+// Try to pretty-print a value for display in a tool arg or result.
+// Returns HTML string.
+function fmtArgVal(v){
+  if(v===null||v===undefined) return `<span class="jh-kw">null</span>`;
+  if(typeof v==='boolean')    return `<span class="jh-kw">${v}</span>`;
+  if(typeof v==='number')     return `<span class="jh-num">${esc(String(v))}</span>`;
+  if(typeof v==='object')     return highlightJSON(JSON.stringify(v));
+  // string -- try to detect embedded JSON
+  const trimmed=v.trim();
+  if((trimmed.startsWith('{')||trimmed.startsWith('['))&&trimmed.length<8000){
+    try{ JSON.parse(trimmed); return highlightJSON(trimmed); }catch(e){}
   }
+  return `<span class="jh-str">${esc(v)}</span>`;
+}
+
+// Try to extract a clean display string from a tool result JSON envelope.
+// Tools like terminal return {"output": "...", "exit_code": 0, ...}.
+// Returns {text, isTerminal} if detected, null otherwise.
+function _extractToolOutput(raw, toolName){
+  if(!raw) return null;
+  const t=raw.trim();
+  if(!t.startsWith('{')) return null;
+  try{
+    const obj=JSON.parse(t);
+    // Detect success:false on any JSON result -- treated like a soft error
+    const isSoftError=(obj.success===false);
+    // Terminal / execute_code results: show output as terminal text
+    if(typeof obj.output==='string' && (toolName==='terminal'||toolName==='execute_code')){
+      const exitCode=obj.exit_code!=null?obj.exit_code:'';
+      const errStr=(obj.error&&typeof obj.error==='string')?'\n'+obj.error:'';
+      return {text:obj.output+errStr, exitCode, isTerminal:true, isSoftError};
+    }
+    // read_file results: show content directly
+    if(typeof obj.content==='string' && toolName==='read_file'){
+      return {text:obj.content, isTerminal:false, isSoftError};
+    }
+    // search_files: show matches as plain text
+    if(Array.isArray(obj.matches) && (toolName==='search_files')){
+      const lines=obj.matches.map(m=>{
+        if(m.line!=null) return `${m.path||''}:${m.line}: ${m.content||''}`;
+        return m.path||m.file||JSON.stringify(m);
+      });
+      return {text:lines.join('\n'), isTerminal:false, isSoftError};
+    }
+    // web_search: show results cleanly
+    if(obj.data&&Array.isArray(obj.data.web)&&toolName==='web_search'){
+      const lines=obj.data.web.map(r=>`${r.title||''}\n  ${r.url||''}\n  ${r.description||''}`);
+      return {text:lines.join('\n\n'), isTerminal:false, isSoftError};
+    }
+    // browser_navigate result
+    if(toolName==='browser_navigate'){
+      const title=obj.title||obj.page_title||'';
+      const url=obj.url||'';
+      const text=(title&&url)?`${title}\n${url}`:title||url||JSON.stringify(obj,null,2);
+      return {text, isTerminal:false, isSoftError};
+    }
+    // web_extract: show title + first chunk of content
+    if(toolName==='web_extract'&&Array.isArray(obj.results)){
+      const lines=obj.results.map(r=>`${r.title||r.url||''}${r.content?'\n'+r.content.slice(0,300):''}`);
+      return {text:lines.join('\n\n---\n'), isTerminal:false, isSoftError};
+    }
+    // mcp_todo result: render todo list as structured HTML
+    if(toolName==='todo'&&Array.isArray(obj.todos)){
+      const sum=obj.summary;
+      const summary=sum?`${sum.total||obj.todos.length} tasks · ${sum.completed||0} done · ${sum.in_progress||0} active · ${sum.pending||0} pending`:'';
+      return {text:summary, isTodoHtml:true, todos:obj.todos, isSoftError};
+    }
+    // patch result: render as diff (handled specially in buildToolCard)
+    if(toolName==='patch'&&typeof obj.diff==='string'){
+      return {text:obj.diff, isTerminal:false, isSoftError, isDiff:true,
+              files:Array.isArray(obj.files_modified)?obj.files_modified:[],
+              lint:obj.lint||null};
+    }
+    // Any other JSON with success:false -- show error message or raw
+    if(isSoftError){
+      const msg=obj.error||obj.message||obj.detail||JSON.stringify(obj,null,2);
+      return {text:String(msg), isTerminal:false, isSoftError:true};
+    }
+  }catch(e){}
   return null;
 }
+
+// Format the snippet (tool result). Detect JSON, pretty-print, highlight.
+function fmtSnippet(raw){
+  if(!raw) return '';
+  const t=raw.trim();
+  if((t.startsWith('{')||t.startsWith('['))&&t.length<16000){
+    try{ return highlightJSON(t); }catch(e){}
+  }
+  return esc(raw);
+}
+
+// Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
+let _dynamicModelLabels={};
 
 async function populateModelDropdown(){
   const sel=$('modelSelect');
   if(!sel) return;
   try{
-    const data=await fetch(new URL('/api/models',location.origin).href,{credentials:'include'}).then(r=>r.json());
+    const data=await fetch('/api/models',{credentials:'include'}).then(r=>r.json());
     if(!data.groups||!data.groups.length) return; // keep HTML defaults
     // Clear existing options
     sel.innerHTML='';
@@ -62,12 +159,22 @@ async function populateModelDropdown(){
     }
     // Set default model from server if no localStorage preference
     if(data.default_model && !localStorage.getItem('hermes-webui-model')){
-      _applyModelToDropdown(data.default_model, sel);
+      sel.value=data.default_model;
+      // If the default isn't in the list, add it
+      if(sel.value!==data.default_model){
+        const opt=document.createElement('option');
+        opt.value=data.default_model;
+        opt.textContent=data.default_model.split('/').pop();
+        sel.insertBefore(opt,sel.firstChild);
+        sel.value=data.default_model;
+      }
     }
   }catch(e){
     // API unavailable -- keep the hardcoded HTML options as fallback
     console.warn('Failed to load models from server:',e.message);
   }
+  // Rebuild the custom dropdown to reflect any server-populated options
+  if(typeof buildModelCSelect==='function') buildModelCSelect();
 }
 
 // ── Scroll pinning ──────────────────────────────────────────────────────────
@@ -82,8 +189,6 @@ let _scrollPinned=true;
     _scrollPinned=nearBottom;
   });
 })();
-function _fmtTokens(n){if(!n||n<0)return'0';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'k';return String(n);}
-
 function scrollIfPinned(){
   if(!_scrollPinned) return;
   const el=$('messages');
@@ -100,7 +205,7 @@ function getModelLabel(modelId){
   // Check dynamic labels first, then fall back to splitting the ID
   if(_dynamicModelLabels[modelId]) return _dynamicModelLabels[modelId];
   // Static fallback for common models
-  const STATIC_LABELS={'openai/gpt-5.4-mini':'GPT-5.4 Mini','openai/gpt-4o':'GPT-4o','openai/o3':'o3','openai/o4-mini':'o4-mini','anthropic/claude-sonnet-4.6':'Sonnet 4.6','anthropic/claude-sonnet-4-5':'Sonnet 4.5','anthropic/claude-haiku-3-5':'Haiku 3.5','google/gemini-2.5-pro':'Gemini 2.5 Pro','deepseek/deepseek-chat-v3-0324':'DeepSeek V3','meta-llama/llama-4-scout':'Llama 4 Scout'};
+  const STATIC_LABELS={'openai/gpt-5.4-mini':'GPT-5.4 Mini','openai/gpt-4o':'GPT-4o','openai/o3':'o3','openai/o4-mini':'o4-mini','anthropic/claude-sonnet-4-6':'Sonnet 4.6','anthropic/claude-sonnet-4-5':'Sonnet 4.5','anthropic/claude-haiku-3-5':'Haiku 3.5','google/gemini-2.5-pro':'Gemini 2.5 Pro','deepseek/deepseek-chat-v3-0324':'DeepSeek V3','meta-llama/llama-4-scout':'Llama 4 Scout'};
   if(STATIC_LABELS[modelId]) return STATIC_LABELS[modelId];
   return modelId.split('/').pop()||'Unknown';
 }
@@ -213,25 +318,9 @@ function setStatus(t){
     if(dismiss)dismiss.style.display=(!transient && !S.busy)?'inline':'none';
   }
 }
-function updateSendBtn(){
-  const btn=$('btnSend');
-  if(!btn) return;
-  const hasContent=$('msg').value.trim().length>0||S.pendingFiles.length>0;
-  const shouldShow=hasContent&&!S.busy;
-  if(shouldShow&&btn.style.display==='none'){
-    btn.style.display='';
-    // Remove then re-add class to retrigger animation each time
-    btn.classList.remove('visible');
-    requestAnimationFrame(()=>btn.classList.add('visible'));
-  } else if(!shouldShow&&btn.style.display!=='none'){
-    btn.style.display='none';
-    btn.classList.remove('visible');
-  }
-}
 function setBusy(v){
   S.busy=v;
   $('btnSend').disabled=v;
-  updateSendBtn();
   const dots=$('activityDots');
   if(dots) dots.style.display=v?'flex':'none';
   if(!v){
@@ -269,7 +358,7 @@ function copyMsg(btn){
   const text=row?row.dataset.rawText:'';
   if(!text)return;
   navigator.clipboard.writeText(text).then(()=>{
-    const orig=btn.innerHTML;btn.innerHTML='&#10003;';btn.style.color='var(--blue)';
+    const orig=btn.innerHTML;btn.innerHTML='<i class="fas fa-check"></i>';btn.style.color='var(--blue)';
     setTimeout(()=>{btn.innerHTML=orig;btn.style.color='';},1500);
   }).catch(()=>showToast('Copy failed'));
 }
@@ -331,9 +420,38 @@ async function checkInflightOnBoot(sid) {
   } catch(e) { clearInflight(); }
 }
 
+// ── Context indicator (in composer, next to attach) ──
+function _syncContextIndicator(){
+  const el=$('ctxIndicator');
+  if(!el) return;
+  const u=S.usage;
+  if(!u||!u.last_prompt_tokens){el.style.display='none';return;}
+  el.style.display='';
+  const used=u.last_prompt_tokens;
+  const max=u.context_length||200000; // fallback to 200k if unknown
+  const pct=Math.min(used/max,1);
+  const bar=$('ctxBar');
+  const lbl=$('ctxLabel');
+  bar.style.width=Math.max(pct*100,2)+'%';
+  // Color coding: green <50%, yellow 50-80%, red >80%
+  bar.className='ctx-bar '+(pct<0.5?'ctx-low':pct<0.8?'ctx-mid':'ctx-high');
+  lbl.textContent=_fmtTokens(used)+'/'+_fmtTokens(max);
+  // Update title with details
+  const costStr=u.estimated_cost_usd?` | $${u.estimated_cost_usd.toFixed(u.estimated_cost_usd<0.01?4:2)}`:'';
+  el.title=`Context: ${used.toLocaleString()} / ${max.toLocaleString()} tokens (${(pct*100).toFixed(1)}%)${costStr}\nClick to compress context`;
+}
+
+function sendCompress(){
+  if(S.busy) return;
+  const ta=$('msg');
+  if(ta){ta.value='/compress';send();}
+}
+
 function syncTopbar(){
   if(!S.session){
     document.title='Hermes';
+    const renameBtn=$('btnRenameSession');
+    if(renameBtn) renameBtn.style.display='none';
     // Show default workspace name even without a session
     const sidebarName=$('sidebarWsName');
     if(sidebarName && sidebarName.textContent==='Workspace'){
@@ -344,45 +462,97 @@ function syncTopbar(){
   const sessionTitle=S.session.title||'Untitled';
   $('topbarTitle').textContent=sessionTitle;
   document.title=sessionTitle+' \u2014 Hermes';
+  const renameBtn=$('btnRenameSession');
+  if(renameBtn) renameBtn.style.display='';
+  // Show auto-title wand only when session title is still "Untitled" and has messages
+  const autoTitleBtn=$('btnAutoTitle');
+  if(autoTitleBtn){
+    const hasMessages=S.messages&&S.messages.filter(m=>m&&m.role&&m.role!=='tool').length>0;
+    autoTitleBtn.style.display=(sessionTitle==='Untitled'&&hasMessages)?'':'none';
+  }
   const vis=S.messages.filter(m=>m&&m.role&&m.role!=='tool');
-  $('topbarMeta').textContent=`${vis.length} messages`;
-  // If a profile switch just happened, apply its model rather than the session's stale value.
-  // S._pendingProfileModel is set by switchToProfile() and cleared here after one application.
-  const modelOverride=S._pendingProfileModel;
-  if(modelOverride){
-    S._pendingProfileModel=null;
-    _applyModelToDropdown(modelOverride,$('modelSelect'));
-  } else {
-    const m=S.session.model||'';
-    const applied=_applyModelToDropdown(m,$('modelSelect'));
-    // If the model isn't in the list at all, add it so the session value is preserved
-    if(!applied && m){
-      const opt=document.createElement('option');
-      opt.value=m;
-      opt.textContent=getModelLabel(m);
-      $('modelSelect').appendChild(opt);
-      $('modelSelect').value=m;
-    }
+  const ts=(S.session.updated_at||S.session.created_at||0)*1000;
+  const relTime=ts?_relTime(ts):'';
+  $('topbarMeta').textContent=`${vis.length} messages${relTime?' \u00b7 '+relTime:''}`;
+  // Update context indicator in composer
+  _syncContextIndicator();
+  const m=S.session.model||'';
+  $('modelSelect').value=m;  // set dropdown first so chip reads consistent value
+  // If session model isn't in the dropdown, add it dynamically
+  if(m && $('modelSelect').value!==m){
+    const opt=document.createElement('option');
+    opt.value=m;
+    opt.textContent=getModelLabel(m);
+    $('modelSelect').appendChild(opt);
+    $('modelSelect').value=m;
   }
   // Show Clear button only when session has messages
   const clearBtn=$('btnClearConv');
   if(clearBtn) clearBtn.style.display=(S.messages&&S.messages.filter(msg=>msg.role!=='tool').length>0)?'':'none';
-  const displayModel=$('modelSelect').value||m;
-  $('modelChip').textContent=getModelLabel(displayModel);
+  syncModelCSelect();
   const ws=S.session.workspace||'';
-  // Update sidebar workspace display
+  const wsFriendly=getWorkspaceFriendlyName(ws);
+
+  // Update sidebar workspace custom selector label
   const sidebarName=$('sidebarWsName');
-  const sidebarPath=$('sidebarWsPath');
-  if(sidebarName){
-    sidebarName.textContent=getWorkspaceFriendlyName(ws);
-  }
-  if(sidebarPath){
-    sidebarPath.textContent=ws;
-  }
+  if(sidebarName) sidebarName.textContent=wsFriendly||ws.split('/').pop()||'Workspace';
   // modelSelect already set above
-  // Update profile chip label
-  const profileLabel=$('profileChipLabel');
-  if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
+}
+
+async function triggerAutoTitle(){
+  if(!S.session||S.session.title!=='Untitled')return;
+  const btn=$('btnAutoTitle');
+  if(btn){
+    btn.innerHTML='<i class="fas fa-spinner fa-spin"></i>';
+    btn.style.opacity='1';
+    btn.style.pointerEvents='none';
+  }
+  const restoreBtn=()=>{
+    if(btn){
+      btn.innerHTML='<i class="fas fa-wand-magic-sparkles"></i>';
+      btn.style.opacity='';
+      btn.style.pointerEvents='';
+    }
+  };
+  try{
+    await api('/api/session/generate-title',{method:'POST',body:JSON.stringify({session_id:S.session.session_id})});
+    showToast('Generating title...');
+    // Poll for title update -- the generation is async (runs in background thread)
+    let tries=0;
+    const poll=setInterval(async()=>{
+      tries++;
+      if(tries>20){clearInterval(poll);restoreBtn();return;}
+      try{
+        const data=await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`);
+        if(data.session&&data.session.title&&data.session.title!=='Untitled'){
+          S.session.title=data.session.title;
+          syncTopbar(); // hides btnAutoTitle via display:none logic
+          const cached=_allSessions.find(s=>s.session_id===S.session.session_id);
+          if(cached)cached.title=data.session.title;
+          refreshSessionList();
+          clearInterval(poll);
+        }
+      }catch(e){clearInterval(poll);restoreBtn();}
+    },1500);
+  }catch(e){
+    setStatus('Auto-title failed: '+e.message);
+    restoreBtn();
+  }
+}
+
+// ── Panel collapse toggles ────────────────────────────────────────────────────
+function toggleSidebar(){
+  const sidebar=document.querySelector('.sidebar');
+  if(!sidebar)return;
+  const collapsed=sidebar.classList.toggle('collapsed');
+  localStorage.setItem('hermes-sidebar-collapsed',collapsed?'1':'0');
+}
+
+function toggleRightPanel(){
+  const rp=document.querySelector('.rightpanel');
+  if(!rp)return;
+  const collapsed=rp.classList.toggle('collapsed');
+  localStorage.setItem('hermes-rightpanel-collapsed',collapsed?'1':'0');
 }
 
 function msgContent(m){
@@ -411,38 +581,44 @@ function renderMessages(){
   for(let vi=0;vi<visWithIdx.length;vi++){
     const {m,rawIdx}=visWithIdx[vi];
     let content=m.content||'';
-    // Extract thinking/reasoning blocks from structured content (Claude extended thinking, o3)
-    let thinkingText='';
-    if(Array.isArray(content)){
-      thinkingText=content.filter(p=>p&&(p.type==='thinking'||p.type==='reasoning')).map(p=>p.thinking||p.reasoning||p.text||'').join('\n');
-      content=content.filter(p=>p&&p.type==='text').map(p=>p.text||p.content||'').join('\n');
-    }
+    if(Array.isArray(content))content=content.filter(p=>p&&p.type==='text').map(p=>p.text||p.content||'').join('\n');
     const isUser=m.role==='user';
     const isLastAssistant=!isUser&&vi===visWithIdx.length-1;
-    // Render thinking card before the assistant message (collapsed by default)
-    if(thinkingText&&!isUser){
-      const thinkRow=document.createElement('div');thinkRow.className='msg-row thinking-card-row';
-      thinkRow.innerHTML=`<div class="thinking-card"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">&#128161;</span><span class="thinking-card-label">Thinking</span><span class="thinking-card-toggle">&#9656;</span></div><div class="thinking-card-body"><pre>${esc(thinkingText)}</pre></div></div>`;
-      inner.appendChild(thinkRow);
-    }
-    const row=document.createElement('div');row.className='msg-row';
-    row.dataset.msgIdx=rawIdx;row.dataset.role=m.role||'assistant';
+    // Detect consecutive assistant messages for visual grouping
+    const prevM=vi>0?visWithIdx[vi-1].m:null;
+    const nextM=vi<visWithIdx.length-1?visWithIdx[vi+1].m:null;
+    const isContinued=!isUser&&prevM&&prevM.role==='assistant';  // not first in a run
+    const isLastInRun=!isUser&&(!nextM||nextM.role!=='assistant'); // last in a run
+    const row=document.createElement('div');
+    let rowClass='msg-row '+(isUser?'user-row':'assistant-row');
+    if(isContinued) rowClass+=' assistant-continued';
+    row.className=rowClass;
+    row.dataset.msgIdx=rawIdx;
     let filesHtml='';
     if(m.attachments&&m.attachments.length)
       filesHtml=`<div class="msg-files">${m.attachments.map(f=>`<div class="msg-file-badge">&#128206; ${esc(f)}</div>`).join('')}</div>`;
     const bodyHtml = isUser ? esc(String(content)).replace(/\n/g,'<br>') : renderMd(String(content));
     // Action buttons for this bubble
-    const editBtn  = isUser  ? `<button class="msg-action-btn" title="Edit message" onclick="editMessage(this)">&#9998;</button>` : '';
-    const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="Regenerate response" onclick="regenerateResponse(this)">&#8635;</button>` : '';
+    const editBtn  = isUser  ? `<button class="msg-action-btn" title="Edit message" onclick="editMessage(this)"><i class="fas fa-pen"></i></button>` : '';
+    const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="Regenerate response" onclick="regenerateResponse(this)"><i class="fas fa-rotate-right"></i></button>` : '';
     const tsVal=m._ts||m.timestamp;
     const tsTitle=tsVal?new Date(tsVal*1000).toLocaleString():'';
-    row.innerHTML=`<div class="msg-role ${m.role}" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon ${m.role}">${isUser?'Y':'H'}</div><span style="font-size:12px">${isUser?'You':'Hermes'}</span>${tsTitle?`<span class="msg-time">${new Date(tsVal*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</span>`:''}<span class="msg-actions">${editBtn}<button class="msg-copy-btn msg-action-btn" title="Copy" onclick="copyMsg(this)">&#128203;</button>${retryBtn}</span></div>${filesHtml}<div class="msg-body">${bodyHtml}</div>`;
+    // If this is the last assistant message overall, always show the full
+    // Hermes header (teal) even if it's in the middle of a consecutive run --
+    // that's where the regenerate button lives and it must be discoverable.
+    const forceFullHeader = isLastAssistant && !isUser;
+    const roleHtml=(isContinued && !forceFullHeader)
+      // Continued assistant message: hide avatar/name, only show copy button on last in run
+      ? `<div class="msg-role ${m.role} msg-role-hidden"><span class="msg-actions">${isLastInRun?`<button class="msg-copy-btn msg-action-btn" title="Copy" onclick="copyMsg(this)"><i class="fas fa-copy"></i></button>`:''}${retryBtn}</span></div>`
+      // First message in run, last message overall, or user: full header
+      : `<div class="msg-role ${m.role}" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon ${m.role}">${isUser?'Y':'H'}</div><span style="font-size:12px">${isUser?'You':'Hermes'}</span>${tsTitle?`<span class="msg-time">${new Date(tsVal*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</span>`:''}<span class="msg-actions">${editBtn}<button class="msg-copy-btn msg-action-btn" title="Copy" onclick="copyMsg(this)"><i class="fas fa-copy"></i></button>${retryBtn}</span></div>`;
+    row.innerHTML=`${roleHtml}${filesHtml}<div class="msg-body">${bodyHtml}</div>`;
     row.dataset.rawText = String(content).trim();
     inner.appendChild(row);
   }
-  // Insert settled tool call cards (history view only).
-  // During live streaming, tool cards are rendered in #liveToolCards by the
-  // tool SSE handler and never mixed into the message list until done fires.
+  // Insert tool call cards into the correct position relative to assistant messages.
+  // During streaming, tool cards are appended directly to #msgInner by SSE handlers.
+  // On done, renderMessages() rebuilds everything from S.messages + S.toolCalls.
   if(!S.busy && S.toolCalls && S.toolCalls.length){
     inner.querySelectorAll('.tool-card-row').forEach(el=>el.remove());
     const byAssistant = {};
@@ -456,58 +632,37 @@ function renderMessages(){
       const aIdx = parseInt(key);
       let insertBefore = null;
       if(aIdx === -1){
+        // Fallback: last assistant row
         for(let i=allRows.length-1;i>=0;i--){
           const ri=parseInt(allRows[i].dataset.msgIdx||'-1',10);
           if(ri>=0&&S.messages[ri]&&S.messages[ri].role==='assistant'){insertBefore=allRows[i];break;}
         }
       } else {
+        // Find the assistant DOM row at exactly aIdx (the one that contained the tool_use calls).
+        // If that message had no text (tool-only turn, filtered from visWithIdx), look for the
+        // NEXT assistant row after aIdx instead. This ensures tool cards always appear before
+        // the assistant text that followed them, never after.
         for(const r of allRows){
           const ri=parseInt(r.dataset.msgIdx||'-1');
-          if(ri>aIdx&&S.messages[ri]&&S.messages[ri].role==='assistant'){insertBefore=r;break;}
+          if(ri>=aIdx && S.messages[ri] && S.messages[ri].role==='assistant'){insertBefore=r;break;}
+        }
+        // Final fallback: last assistant row (handles edge cases)
+        if(!insertBefore){
+          for(let i=allRows.length-1;i>=0;i--){
+            const ri=parseInt(allRows[i].dataset.msgIdx||'-1',10);
+            if(ri>=0&&S.messages[ri]&&S.messages[ri].role==='assistant'){insertBefore=allRows[i];break;}
+          }
         }
       }
       const frag=document.createDocumentFragment();
       for(const tc of cards){frag.appendChild(buildToolCard(tc));}
-      // Add expand/collapse toggle for groups with 2+ cards
-      if(cards.length>=2){
-        const toggle=document.createElement('div');
-        toggle.className='tool-cards-toggle';
-        // Collect card elements before they get moved to DOM
-        const cardEls=Array.from(frag.querySelectorAll('.tool-card'));
-        const expandBtn=document.createElement('button');
-        expandBtn.textContent='Expand all';
-        expandBtn.onclick=()=>cardEls.forEach(c=>c.classList.add('open'));
-        const collapseBtn=document.createElement('button');
-        collapseBtn.textContent='Collapse all';
-        collapseBtn.onclick=()=>cardEls.forEach(c=>c.classList.remove('open'));
-        toggle.appendChild(expandBtn);
-        toggle.appendChild(collapseBtn);
-        frag.insertBefore(toggle,frag.firstChild);
-      }
       if(insertBefore) inner.insertBefore(frag,insertBefore);
       else inner.appendChild(frag);
     }
   }
-  // Render usage badge on the last assistant message row (if enabled and usage data exists)
-  if(window._showTokenUsage&&S.session&&(S.session.input_tokens||S.session.output_tokens)){
-    const rows=inner.querySelectorAll('.msg-row');
-    let lastAssist=null;
-    for(let i=rows.length-1;i>=0;i--){if(rows[i].dataset.role==='assistant'){lastAssist=rows[i];break;}}
-    if(lastAssist&&!lastAssist.querySelector('.msg-usage')){
-      const usage=document.createElement('div');
-      usage.className='msg-usage';
-      const inTok=S.session.input_tokens||0;
-      const outTok=S.session.output_tokens||0;
-      const cost=S.session.estimated_cost;
-      let text=`${_fmtTokens(inTok)} in · ${_fmtTokens(outTok)} out`;
-      if(cost) text+=` · ~$${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
-      usage.textContent=text;
-      lastAssist.appendChild(usage);
-    }
-  }
   scrollToBottom();
   // Apply syntax highlighting after DOM is built
-  requestAnimationFrame(()=>{highlightCode();addCopyButtons();renderMermaidBlocks();});
+  requestAnimationFrame(()=>{highlightCode();renderMermaidBlocks();});
   // Refresh todo panel if it's currently open
   if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){
     loadTodos();
@@ -517,9 +672,10 @@ function renderMessages(){
 function toolIcon(name){
   const icons={terminal:'⬛',read_file:'📄',write_file:'✏️',search_files:'🔍',
     web_search:'🌐',web_extract:'🌐',execute_code:'⚙️',patch:'🔧',
-    memory:'🧠',skill_manage:'📚',todo:'✅',cronjob:'⏱️',delegate_task:'🤖',
+    memory:'🧠',skill_manage:'📚',skill_view:'📚',skills_list:'📚',
+    todo:'✅',cronjob:'⏱️',delegate_task:'🤖',session_search:'🔍',
     send_message:'💬',browser_navigate:'🌐',vision_analyze:'👁️',
-    subagent_progress:'🔀'};
+    honcho_conclude:'🧠',honcho_context:'🧠',honcho_search:'🧠',honcho_profile:'🧠'};
   return icons[name]||'🔧';
 }
 
@@ -527,68 +683,215 @@ function buildToolCard(tc){
   const row=document.createElement('div');
   row.className='msg-row tool-card-row';
   const icon=toolIcon(tc.name);
-  const hasDetail=tc.snippet||(tc.args&&Object.keys(tc.args).length>0);
-  let displaySnippet='';
-  if(tc.snippet){
-    const s=tc.snippet;
-    if(s.length<=220){displaySnippet=s;}
-    else{
-      const cutoff=s.slice(0,220);
-      const lastBreak=Math.max(cutoff.lastIndexOf('. '),cutoff.lastIndexOf('\n'),cutoff.lastIndexOf('; '));
-      displaySnippet=lastBreak>80?s.slice(0,lastBreak+1):cutoff;
+  const hasArgs=tc.args&&Object.keys(tc.args).length>0;
+  const hasSnippet=!!tc.snippet;
+  const hasDetail=hasSnippet||hasArgs;
+  // Build a meaningful preview for the collapsed card header
+  const _extracted=hasSnippet?_extractToolOutput(tc.snippet, tc.name):null;
+  let previewText=tc.preview||'';
+  let previewHtml=null; // if set, overrides previewText with raw html in the header
+  let headerExitBadge='';
+  if(!previewText){
+    // Show the command/input, not the output
+    const a=tc.args||{};
+    if(tc.name==='execute_code'&&a.code){
+      // Show first non-comment, non-blank line of code as preview
+      const firstLine=(a.code.split('\n').find(l=>l.trim()&&!l.trim().startsWith('#'))||a.code).trim();
+      previewText=firstLine.slice(0,100);
+    } else if(tc.name==='terminal'&&a.command){
+      previewText=a.command.slice(0,100);
+    } else if(tc.name==='read_file'&&a.path){
+      previewText=a.path.slice(0,100);
+    } else if(tc.name==='search_files'&&a.pattern){
+      previewText=`/${a.pattern.slice(0,80)}`+(a.path&&a.path!=='.'?' in '+a.path:'');
+    } else if(tc.name==='web_search'&&a.query){
+      previewText=a.query.slice(0,100);
+    } else if(tc.name==='web_extract'&&a.urls){
+      const urls=Array.isArray(a.urls)?a.urls:[a.urls];
+      previewText=urls[0]?String(urls[0]).replace(/^https?:\/\//,'').slice(0,100):'';
+    } else if((tc.name==='write_file'||tc.name==='read_file')&&a.path){
+      previewText=a.path.slice(0,100);
+    } else if(tc.name==='todo'){
+      // Build mini progress bar from summary or todos array
+      const todos=(_extracted&&_extracted.todos)||a.todos||[];
+      if(todos.length>0){
+        const total=todos.length;
+        const done=todos.filter(t=>t.status==='completed').length;
+        const pct=Math.round(done/total*100);
+        const inprog=todos.filter(t=>t.status==='in_progress').length;
+        previewHtml=`<span class="todo-preview-bar" style="display:flex;align-items:center;gap:6px;overflow:hidden;flex:1;min-width:0">` +
+          `<span style="flex:1;height:4px;border-radius:2px;background:rgba(255,255,255,.12);overflow:hidden">` +
+          `<span style="display:block;height:100%;width:${pct}%;background:var(--teal);border-radius:2px;transition:width .3s"></span>` +
+          `</span>` +
+          `<span style="font-size:10px;color:var(--muted);opacity:.7;white-space:nowrap">${done}/${total}${inprog>0?` · ${inprog} active`:''}</span>` +
+          `</span>`;
+      }
+    } else if(tc.name==='patch'&&a.path){
+      previewText=a.path.slice(0,100);
+    } else if(tc.name==='browser_navigate'&&a.url){
+      previewText=String(a.url).replace(/^https?:\/\//,'').slice(0,100);
+    } else if((tc.name==='browser_click'||tc.name==='browser_type')&&a.ref){
+      previewText=a.ref+(a.text?' -> '+String(a.text).slice(0,60):'');
+    } else if(tc.name==='browser_snapshot'){
+      previewText=a.full?'full page':'interactive elements';
+    } else if(tc.name==='browser_vision'&&a.question){
+      previewText=a.question.slice(0,100);
+    } else if(tc.name==='vision_analyze'&&(a.image_url||a.question)){
+      previewText=(a.question||a.image_url||'').slice(0,100);
+    } else if((tc.name==='honcho_conclude'||tc.name==='honcho_context'||tc.name==='honcho_search')&&(a.conclusion||a.query||a.question)){
+      previewText=(a.conclusion||a.query||a.question||'').slice(0,100);
+    } else if(tc.name==='memory'&&a.content){
+      previewText=a.content.slice(0,100);
+    } else if(tc.name==='send_message'&&a.message){
+      previewText=a.message.slice(0,100);
+    } else if(tc.name==='delegate_task'&&(a.goal||a.context)){
+      previewText=(a.goal||a.context||'').slice(0,100);
+    } else if(tc.name==='session_search'){
+      previewText=a.query?('"'+String(a.query).slice(0,90)+'"'):(a.limit?`last ${a.limit} sessions`:'recent sessions');
+    } else if(tc.name==='skill_view'&&a.name){
+      previewText=a.name+(a.file_path?' / '+a.file_path:'');
+    } else if(tc.name==='skill_manage'&&(a.name||a.action)){
+      previewText=(a.action?a.action+': ':'')+(a.name||'');
+    } else if(tc.name==='skills_list'){
+      previewText=a.category?'category: '+a.category:'all skills';
+    } else if(tc.snippet){
+      // Last-resort: try to extract something meaningful from JSON output
+      const snip=tc.snippet.trim();
+      if(snip.startsWith('{')||snip.startsWith('[')){
+        try{
+          const obj=JSON.parse(snip);
+          // Pick the most meaningful short field
+          const label=obj.title||obj.name||obj.path||obj.url||obj.content?.slice?.(0,80)||
+                       obj.result?.slice?.(0,80)||obj.message||obj.error||null;
+          previewText=label?String(label).slice(0,100):snip.slice(0,60)+'…';
+        }catch(e){previewText=snip.slice(0,100);}
+      } else {
+        previewText=snip.split('\n')[0].slice(0,100);
+      }
     }
   }
-  const hasMore=tc.snippet&&tc.snippet.length>displaySnippet.length;
+  // Show exit code badge on collapsed header ONLY for non-zero (failures)
+  if(_extracted&&_extracted.isTerminal&&_extracted.exitCode!==''&&_extracted.exitCode!==0&&tc.done!==false){
+    headerExitBadge=`<span class="tool-header-exit exit-err">${esc(String(_extracted.exitCode))}</span>`;
+  }
   const runIndicator=tc.done===false?'<span class="tool-card-running-dot"></span>':'';
-  const isSubagent=tc.name==='subagent_progress';
-  const isDelegation=tc.name==='delegate_task';
-  const cardClass='tool-card'+(tc.done===false?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'');
-  // Clean up subagent preview: strip leading 🔀 emoji since the icon already shows it
-  let displayName=tc.name;
-  if(isSubagent) displayName='Subagent';
-  if(isDelegation) displayName='Delegate task';
-  let previewText=tc.preview||displaySnippet||'';
-  if(isSubagent) previewText=previewText.replace(/^🔀\s*/,'');
+
+  // Build result snippet HTML (reuse _extracted from preview)
+  let snippetHtml='';
+  if(hasSnippet){
+    const extracted=_extracted;
+    if(extracted&&extracted.isDiff){
+      // Diff result -- render as color-coded diff view; hide old_string/new_string in advanced
+      const filesBadge=extracted.files.map(f=>{
+        const fname=f.replace(/.*\//,'');
+        return `<span class="diff-file-badge tool-file-link" title="${esc(f)}" onclick="_prOpenVscode(${_prSet(f)},event)">${esc(fname)}</span>`;
+      }).join('');
+      const lintBadge=extracted.lint&&extracted.lint.status&&extracted.lint.status!=='ok'&&extracted.lint.status!=='skipped'
+        ?`<span class="diff-lint-err">lint: ${esc(extracted.lint.status)}</span>`:'';
+      const diffLines=extracted.text.split('\n').map(l=>{
+        if(l.startsWith('+++') || l.startsWith('---')) return `<div class="diff-line diff-header">${esc(l)}</div>`;
+        if(l.startsWith('@@')) return `<div class="diff-line diff-hunk">${esc(l)}</div>`;
+        if(l.startsWith('+')) return `<div class="diff-line diff-add"><span class="diff-sign">+</span>${esc(l.slice(1))}</div>`;
+        if(l.startsWith('-')) return `<div class="diff-line diff-del"><span class="diff-sign">-</span>${esc(l.slice(1))}</div>`;
+        return `<div class="diff-line diff-ctx">${esc(l)}</div>`;
+      }).join('');
+      snippetHtml=`<div class="tool-card-result">
+        <div class="diff-meta">${filesBadge}${lintBadge}</div>
+        <div class="diff-view">${diffLines}</div>
+      </div>`;
+    } else if(extracted&&extracted.isTodoHtml){
+      // Todo list -- render as proper HTML with FontAwesome icons
+      const statusIcon={
+        pending:'<i class="fas fa-circle" style="font-size:8px;color:var(--muted);opacity:.5"></i>',
+        in_progress:'<i class="fas fa-circle-notch" style="color:var(--blue)"></i>',
+        completed:'<i class="fas fa-check-circle" style="color:var(--teal)"></i>',
+        cancelled:'<i class="fas fa-times-circle" style="color:var(--muted);opacity:.4"></i>',
+      };
+      const items=(extracted.todos||[]).map(t=>{
+        const st=t.status||'pending';
+        const icon2=statusIcon[st]||statusIcon.pending;
+        return `<li class="todo-item todo-item--${esc(st)}">
+          <span class="todo-item-icon">${icon2}</span>
+          <span class="todo-item-content">${esc(t.content||t.id||'')}<span class="todo-item-id"> #${esc(t.id||'')}</span></span>
+        </li>`;
+      }).join('');
+      const summary=extracted.text?`<div class="todo-summary-line">${esc(extracted.text)}</div>`:'';
+      snippetHtml=`<div class="tool-card-result">${summary}<ul class="todo-list">${items}</ul></div>`;
+    } else if(extracted){
+      // Render clean extracted output
+      const full=extracted.text;
+      const termClass=extracted.isTerminal?' tool-result-terminal':'';
+      const isError=(extracted.isTerminal&&extracted.exitCode!==''&&extracted.exitCode!==0)||extracted.isSoftError;
+      const exitBadge=isError?`<span class="tool-exit-code tool-exit-error">exit ${esc(String(extracted.exitCode))}</span>`:'';
+      // Make file paths clickable for read_file / search_files
+      const pathArg=tc.args&&(tc.args.path||tc.args.urls);
+      const pathLink=(tc.name==='read_file'||tc.name==='write_file')&&tc.args&&tc.args.path
+        ?`<span class="tool-file-link" onclick="_prOpenVscode(${_prSet(tc.args.path)},event)">${esc(tc.args.path)}</span>`
+        :'';
+      snippetHtml=`<div class="tool-card-result" data-exit-error="${isError?'1':''}">
+        ${pathLink?`<div style="margin-bottom:4px;">${pathLink}</div>`:''}
+        ${exitBadge}
+        <pre class="tool-card-result-pre${termClass}">${esc(full)}</pre>
+      </div>`;
+    } else {
+      snippetHtml=`<div class="tool-card-result">
+        <pre class="tool-card-result-pre">${fmtSnippet(tc.snippet)}</pre>
+      </div>`;
+    }
+  }
+
+  // Build "Show advanced" section containing raw args (replaces old argsHtml at top)
+  let advancedHtml='';
+  if(hasArgs){
+    const uid='adv_'+Math.random().toString(36).slice(2);
+    const rows=Object.entries(tc.args).map(([k,v])=>{
+      const valHtml=fmtArgVal(v);
+      const isMultiLine=typeof v==='object'||(typeof v==='string'&&v.length>80);
+      return isMultiLine
+        ? `<div class="tool-arg-row tool-arg-row--block"><span class="tool-arg-key">${esc(k)}</span><pre class="tool-arg-val tool-arg-val--pre">${valHtml}</pre></div>`
+        : `<div class="tool-arg-row"><span class="tool-arg-key">${esc(k)}</span><span class="tool-arg-val">${valHtml}</span></div>`;
+    }).join('');
+    advancedHtml=`<div class="tool-advanced-toggle" onclick="(function(el){const b=el.nextElementSibling;b.classList.toggle('open');el.querySelector('i').className=b.classList.contains('open')?'fas fa-chevron-down':'fas fa-chevron-right';})(this)"><i class="fas fa-chevron-right"></i> Show advanced</div><div class="tool-advanced-body"><div class="tool-card-args">${rows}</div></div>`;
+  }
+
+  const _isErr=_extracted&&(
+    (_extracted.isTerminal&&_extracted.exitCode!==''&&_extracted.exitCode!==0)||
+    _extracted.isSoftError
+  );
   row.innerHTML=`
-    <div class="${cardClass}">
+    <div class="tool-card${tc.done===false?' tool-card-running':''}${_isErr?' tool-card-error':''}">
       <div class="tool-card-header" onclick="this.closest('.tool-card').classList.toggle('open')">
         ${runIndicator}
         <span class="tool-card-icon">${icon}</span>
-        <span class="tool-card-name">${esc(displayName)}</span>
-        <span class="tool-card-preview">${esc(previewText)}</span>
+        <span class="tool-card-name">${esc(tc.name)}</span>
+        ${headerExitBadge}
+        ${previewHtml!==null?previewHtml:`<span class="tool-card-preview">${esc(previewText)}</span>`}
         ${hasDetail?'<span class="tool-card-toggle">▸</span>':''}
       </div>
-      ${hasDetail?`<div class="tool-card-detail">
-        ${tc.args&&Object.keys(tc.args).length?`<div class="tool-card-args">${
-          Object.entries(tc.args).map(([k,v])=>`<div><span class="tool-arg-key">${esc(k)}</span> <span class="tool-arg-val">${esc(String(v))}</span></div>`).join('')
-        }</div>`:''}
-        ${displaySnippet?`<div class="tool-card-result">
-          <pre>${esc(displaySnippet)}</pre>
-          ${hasMore?`<button class="tool-card-more" data-full="${esc(tc.snippet||'').replace(/"/g,'&quot;')}" data-short="${esc(displaySnippet||'').replace(/"/g,'&quot;')}" onclick="event.stopPropagation();const p=this.previousElementSibling;const full=this.dataset.full;const short=this.dataset.short;p.textContent=p.textContent===short?full:short;this.textContent=p.textContent===short?'Show more':'Show less'">Show more</button>`:''}
-        </div>`:''}
-      </div>`:''}
+      ${hasDetail?`<div class="tool-card-detail">${snippetHtml}${advancedHtml}</div>`:''}
     </div>`;
+  if(tc.tid) row.dataset.tid=tc.tid;
   return row;
 }
 
-// ── Live tool card helpers (called during SSE streaming) ──
-function appendLiveToolCard(tc){
-  const container=$('liveToolCards');
-  if(!container)return;
-  container.style.display='';
-  // Update existing card if same tool call id (e.g. snippet arrives after done)
-  const existing=container.querySelector(`[data-tid="${CSS.escape(tc.tid||'')}"]`);
-  if(existing){existing.replaceWith(buildToolCard(tc));return;}
-  const card=buildToolCard(tc);
-  if(tc.tid)card.dataset.tid=tc.tid;
-  container.appendChild(card);
-}
+// Open a file path in VS Code from tool card click
+// Path registry: avoid putting raw JSON.stringify strings in html onclick attrs
+// (double-quotes in JSON break the attribute boundary).
+// Usage: _pathReg.set(idx, path); onclick="_prCall('fn',idx,event)"
+const _pathReg = new Map();
+let _pathRegIdx = 0;
+function _prSet(path){ const i=_pathRegIdx++; _pathReg.set(i,path); return i; }
+function _prGet(i){ return _pathReg.get(i)||''; }
+window._prOpenVscode=(i,e)=>_openFileInVscode(_prGet(i),e);
+window._prGitPull=(i,btn)=>gitPull(_prGet(i),btn);
 
-function clearLiveToolCards(){
-  const container=$('liveToolCards');
-  if(!container)return;
-  container.innerHTML='';
-  container.style.display='none';
+async function _openFileInVscode(path, event){
+  if(event){event.stopPropagation();event.preventDefault();}
+  if(!S.session) return;
+  try{
+    await api('/api/file/open-in-vscode',{method:'POST',body:JSON.stringify({session_id:S.session.session_id, path})});
+    showToast('Opening in VS Code...');
+  }catch(e){ setStatus('VS Code open failed: '+e.message); }
 }
 
 // ── Edit + Regenerate ──
@@ -695,36 +998,6 @@ function highlightCode(container) {
   Prism.highlightAllUnder(el);
 }
 
-function addCopyButtons(container){
-  const el=container||$('msgInner');
-  if(!el) return;
-  el.querySelectorAll('pre > code').forEach(codeEl=>{
-    const pre=codeEl.parentElement;
-    if(pre.querySelector('.code-copy-btn')) return;
-    const btn=document.createElement('button');
-    btn.className='code-copy-btn';
-    btn.textContent='Copy';
-    btn.onclick=(e)=>{
-      e.stopPropagation();
-      navigator.clipboard.writeText(codeEl.textContent).then(()=>{
-        btn.textContent='Copied!';
-        setTimeout(()=>{btn.textContent='Copy';},1500);
-      });
-    };
-    const header=pre.previousElementSibling;
-    if(header&&header.classList.contains('pre-header')){
-      header.style.display='flex';
-      header.style.justifyContent='space-between';
-      header.style.alignItems='center';
-      header.appendChild(btn);
-    }else{
-      pre.style.position='relative';
-      btn.style.cssText='position:absolute;top:6px;right:6px;';
-      pre.appendChild(btn);
-    }
-  });
-}
-
 let _mermaidLoading=false;
 let _mermaidReady=false;
 
@@ -735,9 +1008,7 @@ function renderMermaidBlocks(){
     if(!_mermaidLoading){
       _mermaidLoading=true;
       const script=document.createElement('script');
-      script.src='https://cdn.jsdelivr.net/npm/mermaid@10.9.3/dist/mermaid.min.js';
-      script.integrity='sha384-R63zfMfSwJF4xCR11wXii+QUsbiBIdiDzDbtxia72oGWfkT7WHJfmD/I/eeHPJyT';
-      script.crossOrigin='anonymous';
+      script.src='https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js';
       script.onload=()=>{
         if(typeof mermaid!=='undefined'){
           mermaid.initialize({startOnLoad:false,theme:'dark',themeVariables:{
@@ -789,195 +1060,343 @@ function fileIcon(name, type){
   return '📄';
 }
 
-function renderBreadcrumb(){
-  const bar=$('breadcrumbBar');
-  const upBtn=$('btnUpDir');
-  if(!bar)return;
-  if(S.currentDir==='.'){
-    bar.style.display='none';
-    if(upBtn)upBtn.style.display='none';
-    return;
-  }
-  bar.style.display='flex';
-  if(upBtn)upBtn.style.display='';
-  bar.innerHTML='';
-  // Root segment
-  const root=document.createElement('span');
-  root.className='breadcrumb-seg breadcrumb-link';
-  root.textContent='~';
-  root.onclick=()=>loadDir('.');
-  bar.appendChild(root);
-  // Path segments
-  const parts=S.currentDir.split('/');
-  let accumulated='';
-  for(let i=0;i<parts.length;i++){
-    const sep=document.createElement('span');
-    sep.className='breadcrumb-sep';sep.textContent='/';
-    bar.appendChild(sep);
-    accumulated+=(accumulated?'/':'')+parts[i];
-    const seg=document.createElement('span');
-    seg.textContent=parts[i];
-    if(i<parts.length-1){
-      seg.className='breadcrumb-seg breadcrumb-link';
-      const target=accumulated;
-      seg.onclick=()=>loadDir(target);
-    } else {
-      seg.className='breadcrumb-seg breadcrumb-current';
-    }
-    bar.appendChild(seg);
-  }
+// ── Folder label storage (server-persisted, workspace-scoped) ──
+// In-memory cache: {workspace: {path: label}}
+let _labelCache = null;
+let _labelCacheWs = null;
+
+async function _ensureLabelCache(){
+  const ws=S.session&&S.session.workspace;
+  if(!ws) return;
+  if(_labelCache && _labelCacheWs===ws) return;
+  try{
+    const d=await api(`/api/workspace/labels?workspace=${encodeURIComponent(ws)}`);
+    _labelCache=d.labels||{};_labelCacheWs=ws;
+  }catch(e){_labelCache=_labelCache||{};_labelCacheWs=ws;}
 }
 
-// Track expanded directories for tree view
-if(!S._expandedDirs) S._expandedDirs=new Set();
-// Cache of fetched directory contents: path -> entries[]
-if(!S._dirCache) S._dirCache={};
+function getFolderLabel(path){
+  if(!_labelCache||!path) return '';
+  return _labelCache[path]||'';
+}
+
+function setFolderLabel(path, label){
+  if(!S.session||!path) return;
+  const ws=S.session.workspace;
+  if(!_labelCache||_labelCacheWs!==ws){_labelCache={};_labelCacheWs=ws;}
+  if(label.trim()) _labelCache[path]=label.trim();
+  else delete _labelCache[path];
+  // Fire-and-forget persist to server
+  api('/api/workspace/label',{method:'POST',body:JSON.stringify({workspace:ws,path,label:label.trim()})}).catch(()=>{});
+}
+function getFileTags(path){
+  if(!S.session || !path) return [];
+  const key=`fileTags-${S.session.session_id}-${path}`;
+  const stored=localStorage.getItem(key)||'';
+  return stored ? stored.split(',').map(t=>t.trim()).filter(t=>t) : [];
+}
+function setFileTags(path, tags){
+  if(!S.session || !path) return;
+  const key=`fileTags-${S.session.session_id}-${path}`;
+  const normalized = Array.isArray(tags) ? tags : (typeof tags==='string' ? tags.split(',').map(t=>t.trim()) : []);
+  const filtered = normalized.filter(t=>t.trim()).map(t=>t.trim());
+  if(filtered.length) localStorage.setItem(key, filtered.join(','));
+  else localStorage.removeItem(key);
+}
 
 function renderFileTree(){
   const box=$('fileTree');box.innerHTML='';
-  // Cache current dir entries
-  S._dirCache[S.currentDir||'.']=S.entries;
-  _renderTreeItems(box, S.entries, 0);
-}
+  const nowSec2=Date.now()/1000;
+  // Sort entries: git repos by last_commit_ts desc (recent first), then non-git dirs, then files
+  const sorted=[...S.entries].sort((a,b)=>{
+    const aIsGit=a.type==='dir'&&a.is_git;
+    const bIsGit=b.type==='dir'&&b.is_git;
+    if(aIsGit&&bIsGit) return (b.last_commit_ts||0)-(a.last_commit_ts||0);
+    if(aIsGit) return -1; if(bIsGit) return 1;
+    if(a.type==='dir'&&b.type==='file') return -1;
+    if(a.type==='file'&&b.type==='dir') return 1;
+    return a.name.localeCompare(b.name);
+  });
+  // Split git repos into active and inactive (>90 days)
+  const activeItems=sorted.filter(i=>!i.is_git||(nowSec2-i.last_commit_ts)/86400<=90||!i.last_commit_ts);
+  const inactiveItems=sorted.filter(i=>i.is_git&&i.last_commit_ts&&(nowSec2-i.last_commit_ts)/86400>90);
+  let _inactiveSectionOpen=false;
 
-function _renderTreeItems(container, entries, depth){
-  for(const item of entries){
+  const renderItem=(item)=>{
     const el=document.createElement('div');el.className='file-item';
-    el.style.paddingLeft=(8+depth*16)+'px';
-
-    if(item.type==='dir'){
-      // Toggle arrow for directories
-      const arrow=document.createElement('span');
-      arrow.className='file-tree-toggle';
-      const isExpanded=S._expandedDirs.has(item.path);
-      arrow.textContent=isExpanded?'\u25BE':'\u25B8';
-      el.appendChild(arrow);
-    }
 
     // Icon
     const iconEl=document.createElement('span');
     iconEl.className='file-icon';iconEl.textContent=fileIcon(item.name,item.type);
     el.appendChild(iconEl);
 
-    // Name
+    // Name -- takes all remaining space, truncates with ellipsis
     const nameEl=document.createElement('span');
-    nameEl.className='file-name';nameEl.textContent=item.name;nameEl.title='Double-click to rename';
-    nameEl.ondblclick=(e)=>{
-      e.stopPropagation();
-      // For directories, double-click navigates (breadcrumb view)
-      if(item.type==='dir'){loadDir(item.path);return;}
-      const inp=document.createElement('input');
-      inp.className='file-rename-input';inp.value=item.name;
-      inp.onclick=(e2)=>e2.stopPropagation();
-      const finish=async(save)=>{
-        inp.onblur=null;
-        if(save){
-          const newName=inp.value.trim();
-          if(newName&&newName!==item.name){
-            try{
-              await api('/api/file/rename',{method:'POST',body:JSON.stringify({
-                session_id:S.session.session_id,path:item.path,new_name:newName
-              })});
-              showToast(`Renamed to ${newName}`);
-              // Invalidate cache and re-render
-              delete S._dirCache[S.currentDir];
-              await loadDir(S.currentDir);
-            }catch(err){showToast('Rename failed: '+err.message);}
-          }
-        }
-        inp.replaceWith(nameEl);
-      };
-      inp.onkeydown=(e2)=>{
-        if(e2.key==='Enter'){e2.preventDefault();finish(true);}
-        if(e2.key==='Escape'){e2.preventDefault();finish(false);}
-      };
-      inp.onblur=()=>finish(false);
-      nameEl.replaceWith(inp);
-      setTimeout(()=>{inp.focus();inp.select();},10);
-    };
+    nameEl.className='file-name';nameEl.textContent=item.name;
     el.appendChild(nameEl);
 
-    // Size -- only for files
-    if(item.type==='file'&&item.size){
+    // Label -- folder: FA tag icon on hover; shows text badge when label is set
+    // Rendered BEFORE git badge so git icon is always the rightmost element
+    if(item.type==='dir'){
+      const curLabel=getFolderLabel(item.path);
+      const labelEl=document.createElement('span');
+      labelEl.className='folder-label'+(curLabel?'':' folder-label--empty');
+      labelEl.innerHTML=curLabel
+        ?`<i class="fas fa-tag"></i> ${esc(curLabel)}`
+        :'<i class="fas fa-tag"></i>';
+      labelEl.title=curLabel?'Click to edit label':'Click to add label';
+      labelEl.onclick=(e)=>{e.stopPropagation();editFolderLabel(item.path,labelEl);};
+      el.appendChild(labelEl);
+    }
+
+    // Git badge -- folders that are git repos get a branch icon colored by activity age
+    // Always appended last so it stays on the far right
+    if(item.type==='dir' && item.is_git){
+      const gitEl=document.createElement('span');
+      gitEl.className='folder-git-badge';
+      // Color by days since last commit using theme colors
+      const nowSec=Date.now()/1000;
+      const ageDays=item.last_commit_ts?((nowSec-item.last_commit_ts)/86400):999;
+      let gitColor;
+      if(ageDays<=5)       gitColor='var(--teal)';
+      else if(ageDays<=10) gitColor='var(--green-dull)';
+      else if(ageDays<=30) gitColor='var(--gold)';
+      else if(ageDays<=90) gitColor='var(--accent)';
+      else                 gitColor='rgba(168,168,168,0.35)';  // very stale -- muted grey, visually unimportant
+      gitEl.style.color=gitColor;
+      const behindCount=item.git_behind||0;
+      gitEl.innerHTML=behindCount>0
+        ?`<i class="fas fa-code-branch"></i><span class="git-behind-pill" title="${behindCount} incoming commit${behindCount>1?'s':''}">${behindCount}</span>`
+        :'<i class="fas fa-code-branch"></i>';
+      gitEl.title=behindCount>0?`Git repo · ${behindCount} incoming commit${behindCount>1?'s':''}  — click for details`:'Git repository — click for details';
+      gitEl.onclick=(e)=>{e.stopPropagation();openGitModal(item.path,item.name);};
+      el.appendChild(gitEl);
+    }
+
+    // Tags -- file: FA tags icon on hover; shows text badge when tags are set
+    if(item.type==='file'){
+      const curTags=getFileTags(item.path);
+      const tagsEl=document.createElement('span');
+      tagsEl.className='file-tags'+(curTags.length?'':' file-tags--empty');
+      tagsEl.innerHTML=curTags.length
+        ?`<i class="fas fa-tags"></i> ${esc(curTags.join(', '))}`
+        :'<i class="fas fa-tags"></i>';
+      tagsEl.title=curTags.length?'Click to edit tags':'Click to add tags';
+      tagsEl.onclick=(e)=>{e.stopPropagation();editFileTags(item.path,tagsEl);};
+      el.appendChild(tagsEl);
+    }
+
+    // Size -- human readable (B / KB / MB)
+    if(item.type==='file' && item.size != null){
       const sizeEl=document.createElement('span');
       sizeEl.className='file-size';
-      sizeEl.textContent=`${(item.size/1024).toFixed(1)}k`;
+      const sz=item.size;
+      sizeEl.textContent=sz<1024?`${sz} B`:sz<1024*1024?`${(sz/1024).toFixed(1)} KB`:`${(sz/(1024*1024)).toFixed(1)} MB`;
       el.appendChild(sizeEl);
     }
 
-    // Delete button -- for files
-    if(item.type==='file'){
-      const del=document.createElement('button');
-      del.className='file-del-btn';del.title='Delete';del.textContent='\u00d7';
-      del.onclick=async(e)=>{e.stopPropagation();await deleteWorkspaceFile(item.path,item.name);};
-      el.appendChild(del);
-    }
+    el.onclick=async()=>item.type==='dir'?loadDir(item.path):openFile(item.path);
+    return el;
+  };
 
-    if(item.type==='dir'){
-      // Single-click toggles expand/collapse
-      el.onclick=async(e)=>{
-        e.stopPropagation();
-        if(S._expandedDirs.has(item.path)){
-          S._expandedDirs.delete(item.path);
-          if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();
-          renderFileTree();
-        }else{
-          S._expandedDirs.add(item.path);
-          if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();
-          // Fetch children if not cached
-          if(!S._dirCache[item.path]){
-            try{
-              const data=await api(`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(item.path)}`);
-              S._dirCache[item.path]=data.entries||[];
-            }catch(e2){S._dirCache[item.path]=[];}
-          }
-          renderFileTree();
-        }
-      };
-    }else{
-      el.onclick=async()=>openFile(item.path);
-    }
+  // Render active items
+  for(const item of activeItems) box.appendChild(renderItem(item));
 
-    container.appendChild(el);
-
-    // Render children if directory is expanded
-    if(item.type==='dir'&&S._expandedDirs.has(item.path)){
-      const children=S._dirCache[item.path]||[];
-      if(children.length){
-        _renderTreeItems(container, children, depth+1);
-      }else{
-        const empty=document.createElement('div');
-        empty.className='file-item file-empty';
-        empty.style.paddingLeft=(8+(depth+1)*16)+'px';
-        empty.textContent='(empty)';
-        container.appendChild(empty);
-      }
+  // Render inactive section (git repos > 90 days)
+  if(inactiveItems.length){
+    const sectionHdr=document.createElement('div');
+    sectionHdr.style.cssText='font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:rgba(120,120,120,0.5);padding:8px 8px 3px;cursor:pointer;user-select:none;display:flex;align-items:center;gap:4px;';
+    const caretEl=document.createElement('i');
+    caretEl.className=_inactiveSectionOpen?'fas fa-chevron-down':'fas fa-chevron-right';
+    caretEl.style.cssText='font-size:8px;';
+    sectionHdr.appendChild(caretEl);
+    sectionHdr.appendChild(document.createTextNode('Inactive ('+inactiveItems.length+')'));
+    const sectionBody=document.createElement('div');
+    sectionBody.style.display=_inactiveSectionOpen?'':'none';
+    sectionHdr.onclick=()=>{
+      _inactiveSectionOpen=!_inactiveSectionOpen;
+      caretEl.className=_inactiveSectionOpen?'fas fa-chevron-down':'fas fa-chevron-right';
+      sectionBody.style.display=_inactiveSectionOpen?'':'none';
+    };
+    box.appendChild(sectionHdr);
+    for(const item of inactiveItems){
+      const el=renderItem(item);
+      el.style.opacity='0.55';
+      sectionBody.appendChild(el);
     }
+    box.appendChild(sectionBody);
   }
 }
 
-async function deleteWorkspaceFile(relPath, name){
-  if(!S.session)return;
-  if(!confirm(`Delete ${name}?`))return;
+function editFolderLabel(path, labelEl){
+  const curLabel=getFolderLabel(path);
+  const inp=document.createElement('input');
+  inp.className='folder-label-input';
+  inp.type='text';inp.maxLength='50';inp.placeholder='Label (optional)';
+  inp.value=curLabel;
+  inp.onclick=(e)=>e.stopPropagation();
+  inp.onkeydown=(e)=>{
+    if(e.key==='Enter'){e.preventDefault();saveFolderLabel();}
+    if(e.key==='Escape'){e.preventDefault();cancelFolderLabel();}
+  };
+  inp.onblur=()=>saveFolderLabel();
+  const saveFolderLabel=()=>{
+    const newLabel=inp.value.trim();
+    setFolderLabel(path,newLabel);
+    labelEl.className='folder-label'+(newLabel?'':' folder-label--empty');
+    labelEl.innerHTML=newLabel?`<i class="fas fa-tag"></i> ${esc(newLabel)}`:'<i class="fas fa-tag"></i>';
+    labelEl.title=newLabel?'Click to edit label':'Click to add label';
+    inp.replaceWith(labelEl);
+  };
+  const cancelFolderLabel=()=>{
+    inp.replaceWith(labelEl);
+  };
+  labelEl.replaceWith(inp);
+  inp.focus();inp.select();
+}
+
+function editFileTags(path, tagsEl){
+  const curTags=getFileTags(path);
+  const inp=document.createElement('input');
+  inp.className='file-tags-input';
+  inp.type='text';inp.maxLength='200';inp.placeholder='Tags, comma-separated (optional)';
+  inp.value=curTags.join(', ');
+  inp.onclick=(e)=>e.stopPropagation();
+  inp.onkeydown=(e)=>{
+    if(e.key==='Enter'){e.preventDefault();saveFileTags();}
+    if(e.key==='Escape'){e.preventDefault();cancelFileTags();}
+  };
+  inp.onblur=()=>saveFileTags();
+  const saveFileTags=()=>{
+    const newTags=inp.value.split(',').map(t=>t.trim()).filter(t=>t);
+    setFileTags(path,newTags);
+    tagsEl.className='file-tags'+(newTags.length?'':' file-tags--empty');
+    tagsEl.innerHTML=newTags.length?`<i class="fas fa-tags"></i> ${esc(newTags.join(', '))}`:'<i class="fas fa-tags"></i>';
+    tagsEl.title=newTags.length?'Click to edit tags':'Click to add tags';
+    inp.replaceWith(tagsEl);
+  };
+  const cancelFileTags=()=>{
+    inp.replaceWith(tagsEl);
+  };
+  tagsEl.replaceWith(inp);
+  inp.focus();inp.select();
+}
+
+async function openGitModal(repoPath, repoName){
+  const modal=$('gitModal');
+  if(!modal) return;
+  const body=$('gitModalBody');
+  body.innerHTML='<div class="git-modal-loading"><i class="fas fa-circle-notch fa-spin"></i> Loading git info...</div>';
+  $('gitModalTitle').textContent=repoName;
+  modal.style.display='flex';
+  document.body.style.overflow='hidden';
+
+  let info;
   try{
-    await api('/api/file/delete',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath})});
-    showToast(`Deleted ${name}`);
-    // Close preview if we just deleted the viewed file
-    if($('previewPathText').textContent===relPath)$('btnClearPreview').onclick();
-    await loadDir(S.currentDir);
-  }catch(e){setStatus('Delete failed: '+e.message);}
+    info=await api(`/api/git-info?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(repoPath)}`);
+  }catch(e){
+    body.innerHTML=`<div class="git-modal-err"><i class="fas fa-circle-exclamation"></i> ${esc(e.message)}</div>`;
+    return;
+  }
+
+  const aheadBehind=info.ahead||info.behind
+    ?`<span class="git-pill git-ahead" title="Commits ahead of remote"><i class="fas fa-arrow-up"></i> ${info.ahead}</span><span class="git-pill git-behind" title="Commits behind remote"><i class="fas fa-arrow-down"></i> ${info.behind}</span>`
+    :'<span class="git-pill git-clean">up to date</span>';
+
+  const statusBadges=[
+    info.modified  ?`<span class="git-pill git-mod" title="Modified">${info.modified} modified</span>`:'',
+    info.added     ?`<span class="git-pill git-add" title="Staged">${info.added} staged</span>`:'',
+    info.untracked ?`<span class="git-pill git-unt" title="Untracked">${info.untracked} untracked</span>`:'',
+    info.deleted   ?`<span class="git-pill git-del" title="Deleted">${info.deleted} deleted</span>`:'',
+  ].filter(Boolean).join('') || '<span class="git-pill git-clean">clean</span>';
+
+  // Branch link -- if we have a remote, link to the branch on the remote
+  const branchUrl=info.remote_url&&info.branch&&info.branch!=='HEAD'
+    ?`${info.remote_url}/tree/${encodeURIComponent(info.branch)}`
+    :null;
+  const branchEl=branchUrl
+    ?`<a class="git-branch-name git-link" href="${branchUrl}" target="_blank" rel="noopener"><i class="fas fa-code-branch"></i> ${esc(info.branch)}</a>`
+    :`<span class="git-branch-name"><i class="fas fa-code-branch"></i> ${esc(info.branch||'(detached)')}</span>`;
+
+  // Commits table
+  const commits=info.commits&&info.commits.length?info.commits:[];
+  const commitRows=commits.map(c=>{
+    const commitUrl=info.remote_url?`${info.remote_url}/commit/${c.hash}`:null;
+    const hashEl=commitUrl
+      ?`<a class="git-commit-hash git-link" href="${commitUrl}" target="_blank" rel="noopener">${esc(c.hash)}</a>`
+      :`<span class="git-commit-hash">${esc(c.hash)}</span>`;
+    return `<tr><td class="git-td-hash">${hashEl}</td><td class="git-td-subject">${esc(c.subject)}</td><td class="git-td-meta">${esc(c.rel)}</td></tr>`;
+  }).join('');
+  const commitsHtml=commitRows
+    ?`<table class="git-commits-table"><tbody>${commitRows}</tbody></table>`
+    :'<div class="git-log-line git-muted">No commits</div>';
+
+  const stashHtml=info.stashes.length
+    ?`<div class="git-section-label" style="margin-top:8px">Stashes (${info.stashes.length})</div>`+info.stashes.map(l=>`<div class="git-log-line git-muted">${esc(l)}</div>`).join('')
+    :'';
+
+  // Sync section -- branch + ahead/behind + pull button
+  const pullBtn=info.behind>0
+    ?`<button class="git-pull-btn" onclick="_prGitPull(${_prSet(repoPath)},this)"><i class="fas fa-arrow-down"></i> Pull ${info.behind} commit${info.behind!==1?'s':''}</button>`
+    :'';
+  const pushNote=info.ahead>0
+    ?`<span class="git-push-disabled" title="Push manually in terminal"><i class="fas fa-ban"></i> ${info.ahead} commit${info.ahead!==1?'s':''} ahead (push manually)</span>`
+    :'';
+
+  const workingTreeHtml=info.status_lines.length
+    ?`<div class="git-log">${info.status_lines.map(l=>`<div class="git-log-line">${esc(l)}</div>`).join('')}</div>`
+    :`<span class="git-status-clean"><i class="fas fa-check-circle"></i> Clean working tree</span>`;
+
+  body.innerHTML=`
+    <div class="git-section-block">
+      <div class="git-section-title">Branch &amp; Sync</div>
+      <div class="git-row" style="flex-wrap:wrap;gap:8px">
+        ${branchEl}
+        <span style="margin-left:auto;display:flex;gap:6px;align-items:center">${pullBtn}${pushNote}${!pullBtn&&!pushNote?'<span class="git-pill git-clean">up to date</span>':''}</span>
+      </div>
+    </div>
+    <div class="git-section-block">
+      <div class="git-section-title">Working Tree</div>
+      <div class="git-row" style="flex-wrap:wrap;gap:4px;margin-bottom:6px">${statusBadges}</div>
+      ${workingTreeHtml}
+    </div>
+    <div class="git-section-block">
+      <div class="git-section-title">Recent Commits</div>
+      ${commitsHtml}
+    </div>
+    ${info.stashes.length?`<div class="git-section-block"><div class="git-section-title">Stashes (${info.stashes.length})</div>${info.stashes.map(l=>`<div class="git-log-line git-muted">${esc(l)}</div>`).join('')}</div>`:''}
+  `;
+}
+
+async function gitPull(repoPath, btn){
+  btn.disabled=true;btn.innerHTML='<i class="fas fa-spinner fa-spin"></i> Pulling...';
+  try{
+    const res=await api('/api/git-pull',{method:'POST',body:JSON.stringify({path:repoPath,session_id:S.session&&S.session.session_id})});
+    if(res.ok) btn.innerHTML='<i class="fas fa-check"></i> Done';
+    else btn.innerHTML='<i class="fas fa-exclamation-triangle"></i> '+esc(res.error||'Failed');
+    // Reload git modal + explorer after short delay
+    setTimeout(()=>{
+      const title=$('gitModalTitle').textContent;
+      openGitModal(repoPath,title);
+      // Refresh explorer so the file tree reflects pulled changes
+      if(typeof loadDir==='function'&&typeof _currentDir!=='undefined'){
+        _lastDirWorkspace=null; // bust guard so loadDir re-fetches
+        loadDir(_currentDir||'.');
+      }
+    },1200);
+  }catch(e){btn.innerHTML='Error: '+esc(e.message);btn.disabled=false;}
 }
 
 async function promptNewFile(){
   if(!S.session)return;
   const name=prompt('New file name (e.g. notes.md):','');
   if(!name||!name.trim())return;
-  const relPath=S.currentDir==='.'?name.trim():(S.currentDir+'/'+name.trim());
   try{
-    await api('/api/file/create',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath,content:''})});
+    await api('/api/file/create',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:name.trim(),content:''})});
     showToast(`Created ${name.trim()}`);
-    await loadDir(S.currentDir);
-    openFile(relPath);
+    await loadDir('.');
+    // Open the new file immediately
+    openFile(name.trim());
   }catch(e){setStatus('Create failed: '+e.message);}
 }
 
@@ -985,19 +1404,17 @@ async function promptNewFolder(){
   if(!S.session)return;
   const name=prompt('New folder name:','');
   if(!name||!name.trim())return;
-  const relPath=S.currentDir==='.'?name.trim():(S.currentDir+'/'+name.trim());
   try{
-    await api('/api/file/create-dir',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath})});
+    await api('/api/file/create-dir',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:name.trim()})});
     showToast(`Created folder ${name.trim()}`);
-    await loadDir(S.currentDir);
+    await loadDir('.');
   }catch(e){setStatus('Create folder failed: '+e.message);}
 }
 
 function renderTray(){
   const tray=$('attachTray');tray.innerHTML='';
-  if(!S.pendingFiles.length){tray.classList.remove('has-files');updateSendBtn();return;}
+  if(!S.pendingFiles.length){tray.classList.remove('has-files');return;}
   tray.classList.add('has-files');
-  updateSendBtn();
   S.pendingFiles.forEach((f,i)=>{
     const chip=document.createElement('div');chip.className='attach-chip';
     chip.innerHTML=`&#128206; ${esc(f.name)} <button title="Remove">&#10005;</button>`;
@@ -1017,7 +1434,7 @@ async function uploadPendingFiles(){
     const f=S.pendingFiles[i];const fd=new FormData();
     fd.append('session_id',S.session.session_id);fd.append('file',f,f.name);
     try{
-      const res=await fetch(new URL('/api/upload',location.origin).href,{method:'POST',credentials:'include',body:fd});
+      const res=await fetch('/api/upload',{method:'POST',body:fd,credentials:'include'});
       if(!res.ok){const err=await res.text();throw new Error(err);}
       const data=await res.json();
       if(data.error)throw new Error(data.error);

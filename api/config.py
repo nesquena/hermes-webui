@@ -35,11 +35,12 @@ STATE_DIR = Path(os.getenv(
 )).expanduser().resolve()
 
 SESSION_DIR           = STATE_DIR / 'sessions'
-WORKSPACES_FILE       = STATE_DIR / 'workspaces.json'
 SESSION_INDEX_FILE    = SESSION_DIR / '_index.json'
+WORKSPACES_FILE       = STATE_DIR / 'workspaces.json'
 SETTINGS_FILE         = STATE_DIR / 'settings.json'
 LAST_WORKSPACE_FILE   = STATE_DIR / 'last_workspace.txt'
 PROJECTS_FILE         = STATE_DIR / 'projects.json'
+WORKSPACE_LABELS_FILE = STATE_DIR / 'workspace-labels.json'
 
 # ── Hermes agent directory discovery ─────────────────────────────────────────
 def _discover_agent_dir() -> Path:
@@ -294,7 +295,7 @@ _FALLBACK_MODELS = [
     {'provider': 'OpenAI',    'id': 'openai/gpt-4o',                    'label': 'GPT-4o'},
     {'provider': 'OpenAI',    'id': 'openai/o3',                        'label': 'o3'},
     {'provider': 'OpenAI',    'id': 'openai/o4-mini',                   'label': 'o4-mini'},
-    {'provider': 'Anthropic', 'id': 'anthropic/claude-sonnet-4.6',      'label': 'Claude Sonnet 4.6'},
+    {'provider': 'Anthropic', 'id': 'anthropic/claude-sonnet-4-6',      'label': 'Claude Sonnet 4.6'},
     {'provider': 'Anthropic', 'id': 'anthropic/claude-sonnet-4-5',      'label': 'Claude Sonnet 4.5'},
     {'provider': 'Anthropic', 'id': 'anthropic/claude-haiku-3-5',       'label': 'Claude Haiku 3.5'},
     {'provider': 'Other',     'id': 'google/gemini-2.5-pro',            'label': 'Gemini 2.5 Pro'},
@@ -315,8 +316,8 @@ _PROVIDER_DISPLAY = {
 # Well-known models per provider (used to populate dropdown for direct API providers)
 _PROVIDER_MODELS = {
     'anthropic': [
-        {'id': 'claude-opus-4.6',    'label': 'Claude Opus 4.6'},
-        {'id': 'claude-sonnet-4.6',  'label': 'Claude Sonnet 4.6'},
+        {'id': 'claude-opus-4-6',    'label': 'Claude Opus 4.6'},
+        {'id': 'claude-sonnet-4-6',  'label': 'Claude Sonnet 4.6'},
         {'id': 'claude-sonnet-4-5',  'label': 'Claude Sonnet 4.5'},
         {'id': 'claude-haiku-3-5',   'label': 'Claude Haiku 3.5'},
     ],
@@ -337,8 +338,8 @@ _PROVIDER_MODELS = {
         {'id': 'deepseek-reasoner',     'label': 'DeepSeek Reasoner'},
     ],
     'nous': [
-        {'id': 'claude-opus-4.6',    'label': 'Claude Opus 4.6 (via Nous)'},
-        {'id': 'claude-sonnet-4.6',  'label': 'Claude Sonnet 4.6 (via Nous)'},
+        {'id': 'claude-opus-4-6',    'label': 'Claude Opus 4.6 (via Nous)'},
+        {'id': 'claude-sonnet-4-6',  'label': 'Claude Sonnet 4.6 (via Nous)'},
         {'id': 'gpt-5.4-mini',      'label': 'GPT-5.4 Mini (via Nous)'},
         {'id': 'gemini-2.5-pro',    'label': 'Gemini 2.5 Pro (via Nous)'},
     ],

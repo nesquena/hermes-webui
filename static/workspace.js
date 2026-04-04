@@ -1,72 +1,88 @@
 async function api(path,opts={}){
-  const url=new URL(path,location.origin);
-  const res=await fetch(url.href,{credentials:'include',headers:{'Content-Type':'application/json'},...opts});
-  if(!res.ok){
-    const text=await res.text();
-    // Parse JSON error body and surface the human-readable message,
-    // rather than showing raw JSON like {"error":"Profile 'x' does not exist."}
-    try{const j=JSON.parse(text);throw new Error(j.error||j.message||text);}
-    catch(e){if(e instanceof SyntaxError)throw new Error(text);throw e;}
-  }
+  const res=await fetch(path,{headers:{'Content-Type':'application/json'},credentials:'include',...opts});
+  if(!res.ok)throw new Error(await res.text());
   const ct=res.headers.get('content-type')||'';
   return ct.includes('application/json')?res.json():res.text();
 }
 
-// Persist/restore expanded directory state per workspace in localStorage
-function _wsExpandKey(){
-  const ws=S.session&&S.session.workspace;
-  return ws?'hermes-webui-expanded:'+ws:null;
-}
-function _saveExpandedDirs(){
-  const key=_wsExpandKey();if(!key)return;
-  try{localStorage.setItem(key,JSON.stringify([...(S._expandedDirs||new Set())]));}catch(e){}
-}
-function _restoreExpandedDirs(){
-  const key=_wsExpandKey();
-  if(!key){S._expandedDirs=new Set();return;}
-  try{
-    const raw=localStorage.getItem(key);
-    S._expandedDirs=raw?new Set(JSON.parse(raw)):new Set();
-  }catch(e){S._expandedDirs=new Set();}
-}
+let _currentDir = '.';
+let _lastDirWorkspace = null; // tracks which workspace the current file tree belongs to
 
 async function loadDir(path){
   if(!S.session)return;
+  // Skip if workspace and path are unchanged
+  const ws=S.session.workspace||'';
+  if(path===_currentDir && ws===_lastDirWorkspace) return;
+  // Pre-load label cache so getFolderLabel() works synchronously in renderFileTree
+  await _ensureLabelCache();
   try{
-    if(!path||path==='.'){
-      S._dirCache={};
-      _restoreExpandedDirs();  // restore per-workspace expanded state on root load
-    }
-    S.currentDir=path||'.';
     const data=await api(`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}`);
-    S.entries=data.entries||[];renderBreadcrumb();renderFileTree();
-    // Pre-fetch contents of restored expanded dirs so they render without a second click
-    if(!path||path==='.'){
-      for(const dirPath of (S._expandedDirs||[])){
-        if(!S._dirCache[dirPath]){
-          try{
-            const dc=await api(`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(dirPath)}`);
-            S._dirCache[dirPath]=dc.entries||[];
-          }catch(e2){S._dirCache[dirPath]=[];}
-        }
-      }
-      if(S._expandedDirs&&S._expandedDirs.size>0)renderFileTree();
-    }
-    if(typeof clearPreview==='function'){
-      if(typeof _previewDirty!=='undefined'&&_previewDirty){
-        if(confirm('You have unsaved changes in the preview. Discard and navigate?'))clearPreview();
-      }else{
-        clearPreview();
-      }
-    }
+    _currentDir = path;
+    _lastDirWorkspace = ws;
+    S.entries=data.entries||[];renderFileTree();
+    // Show/hide back button depending on whether we're at root
+    const isRoot=(path==='.'||path===''||path==='/');
+    const btn=document.getElementById('btnDirUp');
+    if(btn) btn.style.display = isRoot ? 'none' : '';
+    // Update breadcrumb in panel header
+    _updateExplorerBreadcrumb(path, isRoot);
+    // Persist dir in URL so refresh restores position
+    _syncDirToUrl(path);
   }catch(e){console.warn('loadDir',e);}
 }
 
-function navigateUp(){
-  if(!S.session||S.currentDir==='.')return;
-  const parts=S.currentDir.split('/');
+function _updateExplorerBreadcrumb(path, isRoot){
+  const el=document.getElementById('explorerBreadcrumb');
+  if(!el)return;
+  if(isRoot){
+    el.textContent='Explorer';
+    return;
+  }
+  // Build breadcrumb: Explorer > part1 > part2 ...
+  const parts=path.replace(/^\.?\//,'').replace(/\/+$/,'').split('/').filter(Boolean);
+  el.innerHTML='';
+  const root=document.createElement('span');
+  root.textContent='Explorer';
+  root.style.cssText='cursor:pointer;opacity:.6';
+  root.onclick=()=>loadDir('.');
+  el.appendChild(root);
+  let cumPath='';
+  parts.forEach((part,i)=>{
+    cumPath=cumPath?cumPath+'/'+part:part;
+    const sep=document.createElement('span');
+    sep.textContent=' / ';
+    sep.style.cssText='opacity:.4;margin:0 2px;';
+    el.appendChild(sep);
+    const seg=document.createElement('span');
+    seg.textContent=part;
+    const isCurrent=(i===parts.length-1);
+    seg.style.cssText=isCurrent?'font-weight:600':'cursor:pointer;opacity:.6';
+    if(!isCurrent){
+      const capPath=cumPath;
+      seg.onclick=()=>loadDir(capPath);
+    }
+    el.appendChild(seg);
+  });
+}
+
+function _syncDirToUrl(path){
+  const sp=new URLSearchParams(location.search);
+  if(path==='.'||path===''||path==='/'){
+    sp.delete('dir');
+  } else {
+    sp.set('dir',path);
+  }
+  const qs=sp.toString();
+  const newUrl=qs?'?'+qs:location.pathname;
+  if(location.search!==('?'+qs)) history.replaceState(history.state,'',newUrl);
+}
+
+function dirUp(){
+  if(_currentDir==='.'||_currentDir===''||_currentDir==='/') return;
+  const parts=_currentDir.replace(/\/+$/,'').split('/');
   parts.pop();
-  loadDir(parts.length?parts.join('/'):'.');
+  const parent=parts.length===0?'.':parts.join('/');
+  loadDir(parent);
 }
 
 // File extension sets for preview routing (must match server-side sets)
@@ -96,7 +112,7 @@ function showPreview(mode){
   $('previewEditArea').style.display = 'none';  // start in read-only
   const badge=$('previewBadge');
   badge.className='preview-badge '+mode;
-  badge.textContent = mode==='image'?'image':mode==='md'?'md':fileExt($('previewPathText').textContent)||'text';
+  badge.textContent = mode==='image'?'image':mode==='md'?'md':fileExt($('previewPathText')?.textContent||_previewCurrentPath)||'text';
   _previewCurrentMode = mode;
   _previewDirty = false;
   updateEditBtn();
@@ -107,47 +123,22 @@ function updateEditBtn(){
   if(!btn)return;
   const editable = _previewCurrentMode==='code'||_previewCurrentMode==='md';
   btn.style.display = editable?'':'none';
-  const editing = $('previewEditArea').style.display!=='none';
-  btn.innerHTML = editing ? '&#128190; Save' : '&#9998; Edit';
-  btn.title = editing ? 'Save changes' : 'Edit this file';
-  btn.style.color = editing ? 'var(--blue)' : '';
-  if(_previewDirty) btn.innerHTML = '&#128190; Save*';
+  btn.innerHTML = '<i class="fas fa-code"></i>';
+  btn.title = 'Open in VS Code';
+  btn.style.color = '';
 }
 
 async function toggleEditMode(){
-  const editing = $('previewEditArea').style.display!=='none';
-  if(editing){
-    // Save
-    if(!S.session||!_previewCurrentPath)return;
-    const content=$('previewEditArea').value;
-    try{
-      await api('/api/file/save',{method:'POST',body:JSON.stringify({
-        session_id:S.session.session_id, path:_previewCurrentPath, content
-      })});
-      _previewDirty=false;
-      // Update read-only views
-      if(_previewCurrentMode==='code') $('previewCode').textContent=content;
-      else $('previewMd').innerHTML=renderMd(content);
-      $('previewEditArea').style.display='none';
-      if(_previewCurrentMode==='code') $('previewCode').style.display='';
-      else $('previewMd').style.display='';
-      showToast('Saved');
-    }catch(e){setStatus('Save failed: '+e.message);}
-  }else{
-    // Enter edit mode: populate textarea with current content
-    const currentText = _previewCurrentMode==='code'
-      ? $('previewCode').textContent
-      : _previewRawContent||'';
-    $('previewEditArea').value=currentText;
-    $('previewEditArea').style.display='';
-    if(_previewCurrentMode==='code') $('previewCode').style.display='none';
-    else $('previewMd').style.display='none';
-    // Escape cancels the edit without saving
-    $('previewEditArea').onkeydown=e=>{
-      if(e.key==='Escape'){e.preventDefault();cancelEditMode();}
-    };
+  // Open in VS Code instead of inline editing
+  if(!S.session||!_previewCurrentPath) return;
+  try{
+    await api('/api/file/open-in-vscode',{method:'POST',body:JSON.stringify({
+      session_id:S.session.session_id, path:_previewCurrentPath
+    })});
+    showToast('Opening in VS Code...');
+  }catch(e){
+    setStatus('VS Code open failed: '+e.message);
   }
-  updateEditBtn();
 }
 
 let _previewRawContent = '';  // raw text for md files (to populate editor)
@@ -172,9 +163,22 @@ async function openFile(path){
     return;
   }
 
-  $('previewPathText').textContent=path;
+  // Show filename in header, path as breadcrumb below
+  const parts=path.split('/');
+  const filename=parts[parts.length-1];
+  const dirPart=parts.length>1?parts.slice(0,-1).join('/'):'';
+  if($('previewFilename')) $('previewFilename').textContent=filename;
+  const crumb=$('previewPathBreadcrumb');
+  if(crumb){ crumb.textContent=dirPart?'WORKSPACE / '+dirPart.replace(/\//g,' / '):'WORKSPACE'; crumb.style.display=''; }
+  // Keep previewPathText in sync (used by toggleEditMode etc)
+  if($('previewPathText')) $('previewPathText').textContent=path;
   $('previewArea').classList.add('visible');
   $('fileTree').style.display='none';
+  // Hide back (up) button while viewing file -- it navigates the file tree not the file
+  const upBtn=document.getElementById('btnDirUp');
+  if(upBtn) upBtn.style.display='none';
+  const closeBtn=document.getElementById('btnClearPreview');
+  if(closeBtn) closeBtn.style.display='';
 
   _previewCurrentPath = path;
   if(IMAGE_EXTS.has(ext)){

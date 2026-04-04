@@ -1,10 +1,6 @@
 async function send(){
   const text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length)return;
-  // Slash command intercept -- local commands handled without agent round-trip
-  if(text.startsWith('/')&&!S.pendingFiles.length&&executeCommand(text)){
-    $('msg').value='';autoResize();hideCmdDropdown();return;
-  }
   // Don't send while an inline message edit is active
   if(document.querySelector('.msg-edit-area'))return;
   // If busy, queue the message instead of dropping it
@@ -31,11 +27,33 @@ async function send(){
   else if(uploaded.length)msgText=`${text}\n\n[Attached files: ${uploaded.join(', ')}]`;
   if(!msgText){setStatus('Nothing to send');return;}
 
+  // Append workspace file/dir context if user has navigated somewhere
+  const _wsCtxFile = typeof _previewCurrentPath==='string' && _previewCurrentPath ? _previewCurrentPath : null;
+  const _wsCtxDir  = typeof _currentDir==='string' && _currentDir && _currentDir!=='.' ? _currentDir : null;
+  const _wsCtx = _wsCtxFile || _wsCtxDir;
+  if(_wsCtx){
+    let ctxStr=`[Workspace context: ${_wsCtx}`;
+    
+    // If viewing a file, append its tags if any exist
+    if(_wsCtxFile && typeof getFileTags==='function'){
+      const fileTags = getFileTags(_wsCtxFile);
+      if(fileTags.length) ctxStr+=` (tags: ${fileTags.join(', ')})`;
+    }
+    
+    // Append folder label if one exists for the directory
+    // When viewing a file, also include the parent folder's label
+    const pathForLabel = _wsCtxFile || _wsCtx;
+    const folderLabel = typeof getFolderLabel==='function' ? getFolderLabel(pathForLabel) : '';
+    if(folderLabel) ctxStr+=` (folder-label: ${folderLabel})`;
+    
+    ctxStr+=']';
+    msgText += `\n\n${ctxStr}`;
+  }
+
   $('msg').value='';autoResize();
   const displayText=text||(uploaded.length?`Uploaded: ${uploaded.join(', ')}`:'(file upload)');
   const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploaded:undefined,_ts:Date.now()/1000};
   S.toolCalls=[];  // clear tool calls from previous turn
-  clearLiveToolCards();  // clear any leftover live cards from last turn
   S.messages.push(userMsg);renderMessages();appendThinking();setBusy(true);  // activity bar shown via setBusy
   INFLIGHT[activeSid]={messages:[...S.messages],uploaded};
   startApprovalPolling(activeSid);
@@ -51,9 +69,12 @@ async function send(){
     api('/api/session/rename',{method:'POST',body:JSON.stringify({
       session_id:activeSid, title:provisionalTitle
     })}).catch(()=>{});  // fire-and-forget, server refines on done
-    renderSessionList();  // session appears in sidebar immediately
+    // Patch cache and re-render without a network call
+    const _cached=_allSessions.find(s=>s.session_id===activeSid);
+    if(_cached) _cached.title=provisionalTitle;
+    refreshSessionList();
   } else {
-    renderSessionList();  // ensure it's visible even if already titled
+    refreshSessionList();
   }
 
   // Start the agent via POST, get a stream_id back
@@ -84,131 +105,204 @@ async function send(){
   let assistantText='';
   let assistantRow=null;
   let assistantBody=null;
+  let _renderPending=false; // rAF throttle flag
 
   function ensureAssistantRow(){
     if(assistantRow)return;
     removeThinking();
     const tr=$('toolRunningRow');if(tr)tr.remove();
     $('emptyState').style.display='none';
-    assistantRow=document.createElement('div');assistantRow.className='msg-row';
+    assistantRow=document.createElement('div');assistantRow.className='msg-row assistant-row';
     assistantBody=document.createElement('div');assistantBody.className='msg-body';
     const role=document.createElement('div');role.className='msg-role assistant';
     const icon=document.createElement('div');icon.className='role-icon assistant';icon.textContent='H';
     const lbl=document.createElement('span');lbl.style.fontSize='12px';lbl.textContent='Hermes';
     role.appendChild(icon);role.appendChild(lbl);
     assistantRow.appendChild(role);assistantRow.appendChild(assistantBody);
+    // Tool cards are now appended directly into msgInner (inline), no flush needed.
     $('msgInner').appendChild(assistantRow);
   }
 
-  // ── Shared SSE handler wiring (used for initial connection and reconnect) ──
+  // Throttled render: batch token updates to one DOM write per animation frame
+  function scheduleRender(){
+    if(_renderPending) return;
+    _renderPending=true;
+    requestAnimationFrame(()=>{
+      _renderPending=false;
+      if(assistantBody) assistantBody.innerHTML=renderMd(assistantText);
+      scrollIfPinned();
+    });
+  }
+
+  // ── SSE event handlers ──
+  // Each handler is a named function for readability. They close over
+  // activeSid, streamId, uploaded, and the assistant* streaming state.
+
+  function isActiveSession(){
+    return S.session && S.session.session_id===activeSid;
+  }
+
+  // Shared cleanup for done/cancel/error: tear down inflight tracking,
+  // approval polling, cancel button, and activeStreamId.
+  function cleanupStream(){
+    delete INFLIGHT[activeSid];
+    clearInflight();
+    stopApprovalPolling();
+    if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard();
+    if(isActiveSession()){
+      S.activeStreamId=null;
+      const cb=$('btnCancel'); if(cb) cb.style.display='none';
+    }
+  }
+
+  function handleToken(e){
+    if(!isActiveSession()) return;
+    const d=JSON.parse(e.data);
+    assistantText+=d.text;
+    ensureAssistantRow();
+    scheduleRender();
+  }
+
+  function handleTool(e){
+    const d=JSON.parse(e.data);
+    if(isActiveSession()){
+      setStatus(`${d.name}${d.preview?' · '+d.preview.slice(0,55):''}`);
+    }
+    if(!isActiveSession()) return;
+    removeThinking();
+    const oldRow=$('toolRunningRow'); if(oldRow) oldRow.remove();
+    const tc={tid:d.tid||'', name:d.name, preview:d.preview||'', args:d.args||{}, snippet:'', done:false};
+    S.toolCalls.push(tc);
+    // Append tool card directly into msgInner (inline with messages)
+    const card=buildToolCard(tc);
+    if(tc.tid) card.dataset.tid=tc.tid;
+    $('msgInner').appendChild(card);
+    scrollIfPinned();
+  }
+
+  function handleToolDone(e){
+    const d=JSON.parse(e.data);
+    if(!isActiveSession()) return;
+    // Find the matching tool call by tid (if available) or by name (fallback)
+    let tc=null;
+    if(d.tid){
+      tc=S.toolCalls.find(t=>t.tid===d.tid);
+    }
+    if(!tc){
+      // Fallback: match by name, preferring the last incomplete one
+      tc=[...S.toolCalls].reverse().find(t=>t.name===d.name&&!t.done);
+    }
+    if(tc){
+      tc.done=true;
+      tc.snippet=d.snippet||'';
+      // Update the live tool card inline in msgInner
+      const container=$('msgInner');
+      if(container){
+        const card=container.querySelector(`.tool-card-row[data-tid="${CSS.escape(d.tid||'')}"]`);
+        if(card){
+          const updated=buildToolCard(tc);
+          if(tc.tid) updated.dataset.tid=tc.tid;
+          card.replaceWith(updated);
+        }
+      }
+    }
+    scrollIfPinned();
+  }
+
+  function handleTurnEnd(e){
+    if(!isActiveSession()) return;
+    // Reset for potential next assistant turn (agent may emit more text after tools)
+    assistantText='';
+    assistantRow=null;
+    assistantBody=null;
+  }
+
+  function handleApproval(e){
+    const d=JSON.parse(e.data);
+    d._session_id=activeSid;
+    showApprovalCard(d);
+  }
+
+  function handleClarify(e){
+    const d=JSON.parse(e.data);
+    showClarifyDialog(d.question, d.choices||[], d.stream_id||streamId);
+  }
+
+  function handleTitle(e){
+    const d=JSON.parse(e.data);
+    if(!d.title) return;
+    if(S.session&&S.session.session_id===d.session_id){
+      S.session.title=d.title;
+      syncTopbar();
+    }
+    const cached=_allSessions.find(s=>s.session_id===d.session_id);
+    if(cached) cached.title=d.title;
+    refreshSessionList();
+  }
+
+  function handleDone(source, e){
+    source.close();
+    const d=JSON.parse(e.data);
+    cleanupStream();
+    if(isActiveSession()){
+      S.session=d.session; S.messages=d.session.messages||[];
+      if(d.usage) S.usage=d.usage;
+      if(d.session.tool_calls&&d.session.tool_calls.length){
+        S.toolCalls=d.session.tool_calls.map(tc=>({...tc,done:true}));
+      } else {
+        S.toolCalls=S.toolCalls.map(tc=>({...tc,done:true}));
+      }
+      if(uploaded.length){
+        const lastUser=[...S.messages].reverse().find(m=>m.role==='user');
+        if(lastUser) lastUser.attachments=uploaded;
+      }
+      S.busy=false;
+      syncTopbar(); renderMessages();
+      loadDir(_currentDir||'.');
+    }
+    refreshSessionList(); setBusy(false); setStatus('');
+  }
+
+  function handleCancel(source, e){
+    source.close();
+    cleanupStream();
+    if(isActiveSession()){
+      if(!assistantText) removeThinking();
+      S.messages.push({role:'assistant',content:'*Task cancelled.*'}); renderMessages();
+    }
+    refreshSessionList();
+    if(!S.session||!INFLIGHT[S.session.session_id]){ setBusy(false); setStatus(''); }
+  }
+
+  function _handleStreamError(){
+    cleanupStream();
+    if(isActiveSession()){
+      if(!assistantText) removeThinking();
+      S.messages.push({role:'assistant',content:'**Error:** Connection lost'}); renderMessages();
+    }else{
+      if(typeof trackBackgroundError==='function'){
+        const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
+        trackBackgroundError(activeSid,_errTitle,'Connection lost');
+      }
+    }
+    if(!S.session||!INFLIGHT[S.session.session_id]){ setBusy(false); setStatus('Error: Connection lost'); }
+  }
+
+  // ── Wire SSE events (used for initial connection and reconnect) ──
   let _reconnectAttempted=false;
 
   function _wireSSE(source){
-    source.addEventListener('token',e=>{
-      if(!S.session||S.session.session_id!==activeSid) return;
-      const d=JSON.parse(e.data);
-      assistantText+=d.text;
-      ensureAssistantRow();
-      assistantBody.innerHTML=renderMd(assistantText);
-      scrollIfPinned();
-    });
-
-    source.addEventListener('tool',e=>{
-      const d=JSON.parse(e.data);
-      if(S.session&&S.session.session_id===activeSid){
-        setStatus(`${d.name}${d.preview?' · '+d.preview.slice(0,55):''}`);
-      }
-      if(!S.session||S.session.session_id!==activeSid) return;
-      removeThinking();
-      const oldRow=$('toolRunningRow');if(oldRow)oldRow.remove();
-      const tc={name:d.name, preview:d.preview||'', args:d.args||{}, snippet:'', done:false};
-      S.toolCalls.push(tc);
-      appendLiveToolCard(tc);
-      scrollIfPinned();
-    });
-
-    source.addEventListener('approval',e=>{
-      const d=JSON.parse(e.data);
-      d._session_id=activeSid;
-      showApprovalCard(d);
-    });
-
-    source.addEventListener('done',e=>{
+    source.addEventListener('token', handleToken);
+    source.addEventListener('tool', handleTool);
+    source.addEventListener('tool_done', handleToolDone);
+    source.addEventListener('turn_end', handleTurnEnd);
+    source.addEventListener('approval', handleApproval);
+    source.addEventListener('clarify', handleClarify);
+    source.addEventListener('title', handleTitle);
+    source.addEventListener('done', e => handleDone(source, e));
+    source.addEventListener('cancel', e => handleCancel(source, e));
+    source.addEventListener('error', e=>{
       source.close();
-      const d=JSON.parse(e.data);
-      delete INFLIGHT[activeSid];
-      clearInflight();
-      stopApprovalPolling();
-      if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard();
-      if(S.session&&S.session.session_id===activeSid){
-        S.activeStreamId=null;
-        const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
-      }
-      if(S.session&&S.session.session_id===activeSid){
-        S.session=d.session;S.messages=d.session.messages||[];
-        // Stamp _ts on the last assistant message if it has no timestamp
-        const lastAsst=[...S.messages].reverse().find(m=>m.role==='assistant');
-        if(lastAsst&&!lastAsst._ts&&!lastAsst.timestamp) lastAsst._ts=Date.now()/1000;
-        if(d.usage) S.lastUsage=d.usage;
-        if(d.session.tool_calls&&d.session.tool_calls.length){
-          S.toolCalls=d.session.tool_calls.map(tc=>({...tc,done:true}));
-        } else {
-          S.toolCalls=S.toolCalls.map(tc=>({...tc,done:true}));
-        }
-        if(uploaded.length){
-          const lastUser=[...S.messages].reverse().find(m=>m.role==='user');
-          if(lastUser)lastUser.attachments=uploaded;
-        }
-        clearLiveToolCards();
-        S.busy=false;
-        syncTopbar();renderMessages();loadDir('.');
-      }
-      renderSessionList();setBusy(false);setStatus('');
-    });
-
-    source.addEventListener('apperror',e=>{
-      // Application-level error sent explicitly by the server (rate limit, crash, etc.)
-      // This is distinct from the SSE network 'error' event below.
-      source.close();
-      delete INFLIGHT[activeSid];clearInflight();stopApprovalPolling();
-      if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard();
-      if(S.session&&S.session.session_id===activeSid){
-        S.activeStreamId=null;const _cbe=$('btnCancel');if(_cbe)_cbe.style.display='none';
-        clearLiveToolCards();if(!assistantText)removeThinking();
-        try{
-          const d=JSON.parse(e.data);
-          const isRateLimit=d.type==='rate_limit';
-          const icon=isRateLimit?'⏱️':'⚠️';
-          const label=isRateLimit?'Rate limit reached':'Error';
-          const hint=d.hint?`\n\n*${d.hint}*`:'';
-          S.messages.push({role:'assistant',content:`**${icon} ${label}:** ${d.message}${hint}`});
-        }catch(_){
-          S.messages.push({role:'assistant',content:'**⚠️ Error:** An error occurred. Check server logs.'});
-        }
-        renderMessages();
-      }else if(typeof trackBackgroundError==='function'){
-        const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
-        try{const d=JSON.parse(e.data);trackBackgroundError(activeSid,_errTitle,d.message||'Error');}
-        catch(_){trackBackgroundError(activeSid,_errTitle,'Error');}
-      }
-      if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setStatus('');}
-    });
-
-    source.addEventListener('warning',e=>{
-      // Non-fatal warning from server (e.g. fallback activated, retrying)
-      if(!S.session||S.session.session_id!==activeSid) return;
-      try{
-        const d=JSON.parse(e.data);
-        // Show as a small inline notice, not a full error
-        setStatus(`⚠️ ${d.message||'Warning'}`);
-        // If it's a fallback notice, show it briefly then clear
-        if(d.type==='fallback') setTimeout(()=>setStatus(''),4000);
-      }catch(_){}
-    });
-
-    source.addEventListener('error',e=>{
-      source.close();
-      // Attempt one reconnect if the stream is still active server-side
       if(!_reconnectAttempted && streamId){
         _reconnectAttempted=true;
         setStatus('Connection lost \u2014 reconnecting\u2026');
@@ -217,7 +311,7 @@ async function send(){
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
             if(st.active){
               setStatus('Reconnected');
-              _wireSSE(new EventSource(new URL(`/api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,location.origin).href,{withCredentials:true}));
+              _wireSSE(new EventSource(`/api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,{withCredentials:true}));
               return;
             }
           }catch(_){}
@@ -227,42 +321,9 @@ async function send(){
       }
       _handleStreamError();
     });
-
-    source.addEventListener('cancel',e=>{
-      source.close();
-      delete INFLIGHT[activeSid];clearInflight();stopApprovalPolling();
-      if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard();
-      if(S.session&&S.session.session_id===activeSid){
-        S.activeStreamId=null;const _cbc=$('btnCancel');if(_cbc)_cbc.style.display='none';
-      }
-      if(S.session&&S.session.session_id===activeSid){
-        clearLiveToolCards();if(!assistantText)removeThinking();
-        S.messages.push({role:'assistant',content:'*Task cancelled.*'});renderMessages();
-      }
-      renderSessionList();
-      if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setStatus('');}
-    });
   }
 
-  function _handleStreamError(){
-    delete INFLIGHT[activeSid];clearInflight();stopApprovalPolling();
-    if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard();
-    if(S.session&&S.session.session_id===activeSid){
-      S.activeStreamId=null;const _cbe=$('btnCancel');if(_cbe)_cbe.style.display='none';
-      clearLiveToolCards();if(!assistantText)removeThinking();
-      S.messages.push({role:'assistant',content:'**Error:** Connection lost'});renderMessages();
-    }else{
-      // User switched away — show background error banner
-      if(typeof trackBackgroundError==='function'){
-        // Look up session title from the session list cache so the banner names it correctly
-        const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
-        trackBackgroundError(activeSid,_errTitle,'Connection lost');
-      }
-    }
-    if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setStatus('Error: Connection lost');}
-  }
-
-  _wireSSE(new EventSource(new URL(`/api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,location.origin).href,{withCredentials:true}));
+  _wireSSE(new EventSource(`/api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,{withCredentials:true}));
 
 }
 
@@ -281,7 +342,7 @@ function transcript(){
   return lines.join('\n');
 }
 
-function autoResize(){const el=$('msg');el.style.height='auto';el.style.height=Math.min(el.scrollHeight,200)+'px';updateSendBtn();}
+function autoResize(){const el=$('msg');el.style.height='auto';el.style.height=Math.min(el.scrollHeight,200)+'px';}
 
 
 // ── Approval polling ──
@@ -331,11 +392,84 @@ function startApprovalPolling(sid) {
       if (data.pending) { data.pending._session_id=sid; showApprovalCard(data.pending); }
       else { hideApprovalCard(); }
     } catch(e) { /* ignore poll errors */ }
-  }, 1500);
+  }, 5000);
 }
 
 function stopApprovalPolling() {
   if (_approvalPollTimer) { clearInterval(_approvalPollTimer); _approvalPollTimer = null; }
 }
+// ── Clarify dialog ──
+let _clarifyStreamId = null;
+
+function showClarifyDialog(question, choices, streamId) {
+  _clarifyStreamId = streamId;
+  // Create or reuse overlay
+  let overlay = $('clarifyOverlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'clarifyOverlay';
+    overlay.className = 'clarify-overlay';
+    document.body.appendChild(overlay);
+  }
+  let choicesHtml = '';
+  if (choices && choices.length) {
+    choicesHtml = '<div class="clarify-choices">' +
+      choices.map((c, i) => `<button class="clarify-choice-btn" onclick="respondClarify(this.textContent)">${esc(c)}</button>`).join('') +
+      '<button class="clarify-choice-btn clarify-other" onclick="showClarifyFreeform()">Other...</button>' +
+      '</div>';
+  }
+  overlay.innerHTML = `
+    <div class="clarify-card">
+      <div class="clarify-header"><span class="clarify-icon">&#10067;</span> Hermes needs your input</div>
+      <div class="clarify-question">${esc(question)}</div>
+      ${choicesHtml}
+      <div class="clarify-freeform" ${choices && choices.length ? 'style="display:none"' : ''}>
+        <textarea class="clarify-input" placeholder="Type your answer..." rows="2"></textarea>
+        <button class="clarify-submit" onclick="respondClarifyFreeform()">Submit</button>
+      </div>
+    </div>`;
+  overlay.style.display = 'flex';
+  // Focus textarea if no choices
+  if (!choices || !choices.length) {
+    const ta = overlay.querySelector('.clarify-input');
+    if (ta) setTimeout(() => ta.focus(), 100);
+  }
+  // Enter key submits freeform
+  const ta = overlay.querySelector('.clarify-input');
+  if (ta) ta.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); respondClarifyFreeform(); }
+  });
+}
+
+function showClarifyFreeform() {
+  const overlay = $('clarifyOverlay');
+  if (!overlay) return;
+  const ff = overlay.querySelector('.clarify-freeform');
+  if (ff) { ff.style.display = ''; }
+  const ta = overlay.querySelector('.clarify-input');
+  if (ta) ta.focus();
+}
+
+async function respondClarify(text) {
+  const overlay = $('clarifyOverlay');
+  if (overlay) overlay.style.display = 'none';
+  if (!_clarifyStreamId) return;
+  try {
+    await api('/api/clarify/respond', {
+      method: 'POST',
+      body: JSON.stringify({ stream_id: _clarifyStreamId, response: text })
+    });
+  } catch(e) { setStatus('Clarify error: ' + e.message); }
+  _clarifyStreamId = null;
+}
+
+async function respondClarifyFreeform() {
+  const overlay = $('clarifyOverlay');
+  if (!overlay) return;
+  const ta = overlay.querySelector('.clarify-input');
+  const text = (ta ? ta.value.trim() : '') || 'Use your best judgement.';
+  await respondClarify(text);
+}
+
 // ── Panel navigation (Chat / Tasks / Skills / Memory) ──
 
