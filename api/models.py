@@ -227,7 +227,20 @@ def get_cli_sessions():
     except ImportError:
         return cli_sessions
 
-    hermes_home = Path(os.getenv('HERMES_HOME', str(HOME / '.hermes'))).expanduser()
+    # Use the active WebUI profile's HERMES_HOME to find state.db.
+    # The active profile is determined by what the user has selected in the UI
+    # (stored in the server's runtime config). This means:
+    #   - default profile  -> ~/.hermes/state.db
+    #   - named profile X  -> ~/.hermes/profiles/X/state.db
+    # We resolve the active profile's home directory rather than just using
+    # HERMES_HOME (which is the server's launch profile, not necessarily the
+    # active one after a profile switch).
+    try:
+        from api.profiles import get_active_hermes_home
+        hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
+    except Exception:
+        hermes_home = Path(os.getenv('HERMES_HOME', str(HOME / '.hermes'))).expanduser().resolve()
+
     db_path = hermes_home / 'state.db'
     if not db_path.exists():
         return cli_sessions
@@ -294,7 +307,11 @@ def get_cli_session_messages(sid):
     except ImportError:
         return []
 
-    hermes_home = Path(os.getenv('HERMES_HOME', str(HOME / '.hermes'))).expanduser()
+    try:
+        from api.profiles import get_active_hermes_home
+        hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
+    except Exception:
+        hermes_home = Path(os.getenv('HERMES_HOME', str(HOME / '.hermes'))).expanduser().resolve()
     db_path = hermes_home / 'state.db'
     if not db_path.exists():
         return []
