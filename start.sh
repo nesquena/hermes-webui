@@ -198,7 +198,7 @@ hdr "Starting Hermes Web UI..."
 
 LOG="/tmp/hermes-webui-${PORT}.log"
 export HERMES_WEBUI_HOST="${HERMES_WEBUI_HOST:-127.0.0.1}"
-export HERMES_WEBUI_STATE_DIR="${HERMES_WEBUI_STATE_DIR:-${HERMES_HOME}/webui-mvp}"
+export HERMES_WEBUI_STATE_DIR="${HERMES_WEBUI_STATE_DIR:-${HERMES_HOME}/webui}"
 
 nohup "${PYTHON}" "${REPO_ROOT}/server.py" \
     > "${LOG}" 2>&1 &
