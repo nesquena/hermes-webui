@@ -42,29 +42,31 @@ persistent memory, autonomous scheduling, and multi-modal access in one package.
 
 - **Memory that compounds** — user profile, agent notes, and a skills system that saves reusable
   procedures; Hermes learns your environment and never has to relearn it
-- **Autonomous scheduling** — cron jobs that fire while you're offline and deliver results to
-  Telegram, Discord, Slack, Signal, email, and more
+- **Autonomous scheduling** — self-hosted cron jobs that fire while you're offline and deliver
+  results to Telegram, Discord, Slack, Signal, email, and more
 - **10+ messaging platforms** — the same agent you use in the terminal is reachable from your phone
-- **Provider-agnostic** — OpenAI, Anthropic, Google, DeepSeek, OpenRouter, and more; switch
-  models without rebuilding your workflow
-- **Orchestrates other agents** — Hermes can spawn Claude Code or Codex for heavy coding tasks
-  and fold the results back into its own memory
-- **Fully self-hosted** — your conversations, your memory, your hardware
+- **Provider-agnostic** — OpenAI, Anthropic, Google, DeepSeek, OpenRouter, and more
+- **Orchestrates other agents** — can spawn Claude Code or Codex for heavy coding tasks and fold
+  the results back into its own memory
+- **Fully self-hosted** — your conversations, your memory, your hardware; not Anthropic's cloud
 
-**vs. the field:**
+**vs. the field** *(accurate as of mid-2025; Claude Code and Codex are actively adding features)*:
 
-| | Claude Code | Codex CLI | OpenCode | Claude.ai | **Hermes** |
+| | Claude Code | Codex CLI | OpenCode | Open Interpreter | **Hermes** |
 |---|---|---|---|---|---|
-| Persistent memory | No | No | No | Shallow | **Yes** |
-| Scheduled jobs | No | No | No | No | **Yes** |
+| Persistent memory (auto) | Partial† | Partial | Partial | No | **Yes** |
+| Scheduled jobs (self-hosted) | No‡ | No | No | No | **Yes** |
 | Messaging app access | No | No | No | No | **Yes** |
-| Web UI | No | No | No | Yes | **Yes** |
-| Provider-agnostic | No | No | Yes | No | **Yes** |
-| Self-hosted | Yes | Yes | Yes | No | **Yes** |
+| Web UI (self-hosted) | No | No | Yes | No | **Yes** |
+| Provider-agnostic | No (Claude only) | Yes | Yes | Yes | **Yes** |
+| Self-hosted | No | Yes | Yes | Yes | **Yes** |
 | Skills system | No | No | No | No | **Yes** |
-| Open source | No | Yes | Yes | No | **Yes** |
+| Open source | No | Yes | Yes | Yes | **Yes** |
 
-For the full breakdown — mental model, four-category taxonomy, and per-tool deep dives — see [HERMES.md](HERMES.md).
+† Claude Code has CLAUDE.md / MEMORY.md project context and rolling auto-memory, but not full automatic cross-session recall  
+‡ Claude Code has cloud-managed scheduling (Anthropic infrastructure) and session-scoped `/loop`; no self-hosted cron
+
+For the full breakdown — mental model, four-category framework, and per-tool deep dives including Open Interpreter — see [HERMES.md](HERMES.md).
 
 ---
 

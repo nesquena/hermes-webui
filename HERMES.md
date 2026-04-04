@@ -61,14 +61,12 @@ Things Hermes can do while you sleep:
 - Watch a competitor's blog for new posts and summarize them
 - Monitor a datasource and notify you when a threshold is crossed
 
-No other open-source tool in this space does this.
-
 ### 3. Reach It From Anywhere
 
 Hermes runs on your server and is reachable from every surface:
 
 - **Terminal / SSH** -- the native interface; full power, full tool use
-- **Web UI** -- this project; Claude-style three-panel browser interface, works over SSH tunnel
+- **Web UI** -- Claude-style three-panel browser interface, works over SSH tunnel
 - **Messaging apps** -- Telegram, Discord, Slack, WhatsApp, Signal, Matrix, and more
 
 Start a task from your phone on Telegram, check it from the web UI on your laptop, finish it
@@ -85,36 +83,65 @@ everything about what a tool can and cannot do -- and where its ceiling is.
 *Claude.ai, ChatGPT, Gemini*
 
 The original model. You open a window, ask something, get an answer. Extremely capable in
-the moment. No memory beyond the current conversation, no ability to run code or touch files,
+the moment. No persistent memory beyond the conversation, no ability to run code or touch files,
 no way to act on your behalf. Excellent for Q&A, drafting, and brainstorming. You re-explain
 your context every session.
 
 ### Category 2: IDE Integrations
 *GitHub Copilot, Cursor, Windsurf, Zed AI*
 
-Deep inside your editor. Autocomplete, inline diffs, refactors -- all excellent. Stateful within
-a project session but not across them. Tied to one machine and one editor. No scheduling, no
-cross-session memory, no way to reach them from a phone or a terminal on another box.
+Deep inside your editor. Autocomplete, inline diffs, refactors -- all excellent. Windsurf
+has the most mature built-in memory of this group (Cascade Memories, workspace-scoped). Copilot
+launched early-access per-repo memory in late 2025. Cursor has no native memory. None have
+scheduling or messaging access. Tied to one machine and one editor.
 
 ### Category 3: Agentic CLI Tools
-*Claude Code, Codex CLI, OpenCode, Aider*
+*Claude Code, Codex CLI, OpenCode, Open Interpreter*
 
 The current frontier for most developers. Can use real tools -- run shell commands, read and
 write files, search the web, call APIs. Great for deep, multi-step tasks in a single terminal
-session. But when the session ends, so does the context. No scheduling, no background operation,
-no memory of what you worked on yesterday.
+session. All are adding memory and scheduling features to varying degrees (see comparisons below),
+but the core model is still session-scoped: you invoke it, it works, it stops.
 
 ### Category 4: Persistent Autonomous Agents
 *Hermes*
 
-All the tool use of Category 3, plus memory that accumulates across sessions, plus autonomous
-scheduling, plus multi-modal access. Gets more useful over time rather than resetting to zero.
-Hermes is currently the only tool in this category that is open-source, self-hosted, and
-provider-agnostic.
+All the tool use of Category 3, plus memory that accumulates across sessions automatically,
+plus always-on autonomous scheduling, plus multi-modal access from any device or messaging app.
+Gets more useful over time rather than resetting to zero. Hermes is currently the only tool in
+this category that is open-source, self-hosted, and provider-agnostic.
 
 ---
 
 ## How Hermes Compares
+
+### vs. Open Interpreter
+
+Open Interpreter is probably the most common first question: "why not just use this?" It lets
+LLMs run code locally -- Python, JavaScript, shell -- with full system access. It's powerful,
+open-source, and has a growing desktop app for document automation tasks.
+
+But Open Interpreter is fundamentally a **reactive, session-scoped tool**. Their own
+documentation is explicit: it "will not remember previous conversations." There is no scheduler,
+no background daemon, no messaging integration. Each session starts fresh. It excels at
+one-shot complex tasks -- filling PDFs, running data pipelines, automating file operations --
+but it is not designed for ongoing ambient operation.
+
+To get Hermes-like behavior from Open Interpreter you would need to build: external persistent
+memory, a scheduler or daemon wrapper, a messaging bridge, and persistent state management.
+None of those are built-in. Hermes ships all of it.
+
+| | Open Interpreter | Hermes |
+|---|---|---|
+| Persistent memory across sessions | No (manual save only) | Yes (automatic, layered) |
+| Scheduled / background jobs | No | Yes |
+| Messaging app access | No | Yes (10+ platforms) |
+| Web UI | No (terminal / desktop app only) | Yes |
+| Always-on daemon | No | Yes |
+| Provider-agnostic | Yes (via LiteLLM) | Yes (10+ providers) |
+| Self-hosted | Yes | Yes |
+| Local code execution | Yes | Yes |
+| Open source | Yes | Yes |
 
 ### vs. Claude Code (Anthropic)
 
@@ -122,89 +149,111 @@ Claude Code is Anthropic's official agentic CLI and one of the best tools in Cat
 In a single focused session it is exceptionally capable -- deep code understanding, shell access,
 file editing, multi-step reasoning.
 
-The ceiling is the session boundary. Next time you open it, it does not know you. It has no
-memory of your codebase conventions, the bugs you fixed last week, or the fact that you prefer
-concise responses without preamble. You start from scratch every time.
+Claude Code is actively adding features in this space. It now has:
 
-Hermes can use Claude Code as a sub-agent. For a large implementation task, Hermes can spawn
-Claude Code to handle the coding heavy-lifting, then fold the result back into its own memory
-and history. You get Claude Code's full capability *plus* everything Hermes adds on top.
+- **`/loop`** -- reruns a prompt on an interval, session-scoped (your machine must be on and
+  the session open)
+- **Web scheduled tasks** -- cloud-managed cron via `claude.ai/code/scheduled`; your machine
+  does not need to be on; minimum 1-hour interval; runs on Anthropic infrastructure
+- **Desktop app automations** -- machine-local scheduling via the desktop app
+- **CLAUDE.md and MEMORY.md** -- project-level persistent context that loads every session;
+  auto-memory is rolling out but is not yet fully automatic cross-session recall
+
+These are real features and the gap is narrowing. The key differences that remain: Claude Code's
+scheduling runs on Anthropic's cloud (not your server), its memory is project-file-based rather
+than a living knowledge graph, it has no messaging app access, and it is not open source. Hermes
+runs entirely on your own hardware and is provider-agnostic across all models, not just Claude.
+
+Hermes can also use Claude Code as a sub-agent. For large implementation tasks, Hermes can
+spawn Claude Code to handle the coding heavy-lifting, then fold the result back into its own
+memory and history.
 
 | | Claude Code | Hermes |
 |---|---|---|
-| Persistent memory across sessions | No | Yes |
+| Persistent memory (automatic) | Partial (CLAUDE.md / MEMORY.md, rolling out) | Yes |
 | Skills (saved reusable procedures) | No | Yes |
-| Scheduled / background jobs | No | Yes |
+| Scheduled jobs | Partial (cloud-managed or session-scoped `/loop`) | Yes (self-hosted, any interval) |
 | Messaging app access | No | Yes (10+ platforms) |
-| Web UI | No | Yes |
-| Provider-agnostic | No | Yes (10+ providers) |
-| Self-hosted | Yes | Yes |
-| Agentic tool use (shell, files, web) | Yes | Yes |
-| Can orchestrate Claude Code | N/A | Yes |
+| Web UI | Yes (claude.ai/code, Anthropic-hosted) | Yes (self-hosted) |
+| Provider-agnostic | No (Claude models only, via Bedrock/Vertex) | Yes (any provider) |
+| Self-hosted | No (cloud-managed scheduling) | Yes |
+| Agentic tool use | Yes | Yes |
 | Open source | No | Yes |
 
 ### vs. Codex CLI (OpenAI)
 
-Same category and similar positioning to Claude Code. Excellent for focused single-session
-coding tasks, resets on exit, OpenAI-only. Hermes can orchestrate Codex as a sub-agent the
-same way it can with Claude Code.
+Codex CLI is OpenAI's open-source agentic terminal tool (Apache 2.0, 73k+ GitHub stars). It is
+genuinely provider-agnostic -- supports 10+ providers including Anthropic, Google, Mistral,
+Groq, and local models via Ollama. It added persistent session memory in v0.100.0 with
+`codex resume`. The desktop app has an Automations feature for scheduled local tasks.
+
+The CLI itself still has no native scheduling (open feature request as of early 2026). Memory
+is session-history-based, not a living knowledge graph. No messaging app access. Strong tool
+for single-session coding; Hermes adds the always-on layer on top.
 
 | | Codex CLI | Hermes |
 |---|---|---|
-| Persistent memory | No | Yes |
-| Scheduled jobs | No | Yes |
+| Persistent memory | Partial (session history + AGENTS.md) | Yes (automatic, layered) |
+| Scheduled jobs | Partial (desktop app only; CLI has none) | Yes |
 | Messaging app access | No | Yes |
-| Web UI | No | Yes |
-| Provider-agnostic | No (OpenAI only) | Yes |
+| Web UI | No | Yes (self-hosted) |
+| Provider-agnostic | Yes (10+ providers) | Yes (10+ providers) |
 | Self-hosted | Yes | Yes |
-| Open source | Yes | Yes |
+| Open source | Yes (Apache 2.0) | Yes |
 
 ### vs. OpenCode
 
-Open-source TUI agentic coding assistant. Provider-agnostic like Hermes, which is a real
-differentiator in this space. Good for interactive terminal coding sessions. Falls in Category 3:
-no persistent memory, no scheduling, no messaging, no web UI.
+OpenCode is an open-source TUI agentic coding assistant, provider-agnostic across 75+ providers.
+It recently added a WebUI embedded in its binary and has an official desktop app. It uses SQLite
+for session history and AGENTS.md for project context.
+
+It has no native scheduled jobs (a community background plugin exists), no first-party messaging
+integration (community Telegram bots exist but require manual setup), and no automatic
+cross-session semantic memory. Good for interactive terminal coding; Hermes adds the
+persistence, scheduling, and reach layers.
 
 | | OpenCode | Hermes |
 |---|---|---|
-| Persistent memory | No | Yes |
-| Scheduled jobs | No | Yes |
-| Messaging app access | No | Yes |
-| Web UI | No (TUI only) | Yes |
+| Persistent memory | Partial (session history + AGENTS.md) | Yes (automatic, layered) |
+| Scheduled jobs | No (community plugin only) | Yes |
+| Messaging app access | No (community Telegram bot only) | Yes (first-party, 10+ platforms) |
+| Web UI | Yes (embedded + desktop app) | Yes (self-hosted) |
 | Mobile access | No | Yes |
 | Skills system | No | Yes |
-| Provider-agnostic | Yes | Yes |
+| Provider-agnostic | Yes (75+ providers) | Yes |
 | Open source | Yes | Yes |
 
 ### vs. Cursor / Windsurf / Copilot
 
-These are Category 2 tools and exceptional at what they do. If your primary workflow is
-in-editor autocomplete and PR review inside an IDE, they will serve you better than Hermes
-for that specific use case. They are not competing for the same job.
+Category 2 tools -- exceptional at in-editor autocomplete, inline diffs, and code review.
+Windsurf has the most mature memory in this group (workspace-scoped Cascade Memories).
+Copilot launched early-access repo-level memory in late 2025. Cursor has no native memory.
+None have scheduling or messaging access. They are not competing for the same job as Hermes.
 
-For teams running Hermes, the two are complementary: Cursor or Copilot for in-editor work,
-Hermes for everything outside the editor -- terminal tasks, scheduling, monitoring, cross-session
-memory, mobile access.
+For teams using Hermes, these are complementary: Cursor or Windsurf for in-editor work,
+Hermes for everything outside the editor.
 
-| | Cursor / Windsurf / Copilot | Hermes |
-|---|---|---|
-| In-editor autocomplete | Excellent | No |
-| Inline diff / refactor | Yes | Via shell |
-| Persistent cross-session memory | No | Yes |
-| Scheduled background jobs | No | Yes |
-| Messaging app / mobile access | No | Yes |
-| Terminal tool use | Limited | Full |
-| Self-hosted | No | Yes |
-| Open source | No | Yes |
+| | Cursor | Windsurf | Copilot | Hermes |
+|---|---|---|---|---|
+| In-editor autocomplete | Excellent | Excellent | Excellent | No |
+| Inline diff / refactor | Yes | Yes | Yes | Via shell |
+| Cross-session memory | No | Yes (workspace) | Partial (repo, early access) | Yes (full) |
+| Scheduled background jobs | No | No | No | Yes |
+| Messaging app / mobile | No | No | No | Yes |
+| Terminal tool use | Limited | Limited | Limited | Full |
+| Self-hosted | No | No | No | Yes |
+| Provider-agnostic | Partial | Partial | No | Yes |
+| Open source | No | No | No | Yes |
 
 ### vs. Claude.ai / ChatGPT
 
 Category 1. Stateless assistants. Great for drafting, Q&A, and brainstorming in the moment.
-The gap with Hermes is wide on every dimension that matters for ongoing technical work.
+Claude.ai has optional memory but it is shallow, user-curated, and has no ability to run
+code or take real actions on your behalf.
 
 | | Claude.ai / ChatGPT | Hermes |
 |---|---|---|
-| Memory across conversations | Shallow / opt-in | Yes (deep, layered) |
+| Memory across conversations | Shallow / opt-in | Yes (deep, automatic) |
 | Runs shell commands | No | Yes |
 | Reads / writes files | No | Yes |
 | Schedules background jobs | No | Yes |
@@ -213,6 +262,21 @@ The gap with Hermes is wide on every dimension that matters for ongoing technica
 | Self-hosted | No | Yes |
 | Provider-agnostic | No | Yes |
 | Open source | No | Yes |
+
+---
+
+## The Compounding Advantage
+
+The most important thing about Hermes is not any single feature. It is that Hermes improves
+over time.
+
+Every time Hermes encounters a new environment, it saves facts to memory. Every time it solves
+a problem a clever way, it saves the approach as a skill. Every time you correct it, it updates
+its profile of you. Every session, every scheduled job, every tool call -- the agent gets more
+calibrated to you, your environment, and your workflow.
+
+A Claude Code session on day one and day one hundred are identical.
+A Hermes agent on day one and day one hundred is meaningfully smarter about you.
 
 ---
 
@@ -228,7 +292,7 @@ paying for a separate subscription or running local tooling.
 results to your phone, without you babysitting it.
 
 **Privacy-conscious users** who want their conversations, memory, and files on their own
-hardware -- not inside a SaaS provider's cloud.
+hardware -- not inside Anthropic's or OpenAI's cloud.
 
 **Multi-model users** who want to switch between OpenAI, Anthropic, Google, DeepSeek, and
 others based on cost, capability, or rate limits, without rebuilding their workflow each time.
@@ -238,7 +302,7 @@ others based on cost, capability, or rate limits, without rebuilding their workf
 ## What Hermes Is Not
 
 **Not an IDE.** If in-editor autocomplete and inline diffs are your primary workflow,
-Cursor or Copilot will be better for that specific use case. Hermes lives in the terminal,
+Cursor or Windsurf will be better for that specific use case. Hermes lives in the terminal,
 the browser, and your messaging apps -- not inside VS Code.
 
 **Not a hosted SaaS.** You run it on your own server. That is the point -- your data stays
@@ -252,17 +316,20 @@ reasoning accumulates into something durable.
 
 ## Quick Reference
 
-| | Claude Code | Codex CLI | OpenCode | Cursor | Claude.ai | **Hermes** |
-|---|---|---|---|---|---|---|
-| Persistent memory | No | No | No | No | Shallow | **Yes** |
-| Scheduled / background jobs | No | No | No | No | No | **Yes** |
-| Messaging app access | No | No | No | No | No | **Yes** |
-| Web UI | No | No | No | No | Yes | **Yes** |
-| Self-hosted | Yes | Yes | Yes | No | No | **Yes** |
-| Provider-agnostic | No | No | Yes | No | No | **Yes** |
-| Skills system | No | No | No | No | No | **Yes** |
-| In-editor autocomplete | No | No | No | Yes | No | No |
-| Mobile / messaging access | No | No | No | No | Yes | **Yes** |
-| Orchestrates other agents | No | No | No | No | No | **Yes** |
-| Open source | No | Yes | Yes | No | No | **Yes** |
-| Always-on / autonomous | No | No | No | No | No | **Yes** |
+| | Claude Code | Codex CLI | OpenCode | Open Interpreter | Cursor | Claude.ai | **Hermes** |
+|---|---|---|---|---|---|---|---|
+| Persistent memory (auto) | Partial | Partial | Partial | No | No | Shallow | **Yes** |
+| Scheduled / background jobs | Partial† | Partial‡ | No | No | No | No | **Yes** |
+| Messaging app access | No | No | No | No | No | No | **Yes** |
+| Web UI | Yes (Anthropic cloud) | No | Yes | No | No | Yes | **Yes (self-hosted)** |
+| Self-hosted | No | Yes | Yes | Yes | No | No | **Yes** |
+| Provider-agnostic | No (Claude only) | Yes | Yes | Yes | Partial | No | **Yes** |
+| Skills system | No | No | No | No | No | No | **Yes** |
+| In-editor autocomplete | No | No | No | No | Yes | No | No |
+| Mobile / messaging access | No | No | No | No | No | Yes | **Yes** |
+| Orchestrates other agents | No | No | No | No | No | No | **Yes** |
+| Open source | No | Yes | Yes | Yes | No | No | **Yes** |
+| Always-on / autonomous | No | No | No | No | No | No | **Yes** |
+
+† Claude Code scheduling: cloud-managed (Anthropic infrastructure) or session-scoped `/loop`; not self-hosted  
+‡ Codex scheduling: desktop app Automations only; CLI has no native scheduling
