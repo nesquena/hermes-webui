@@ -5,6 +5,21 @@
 
 ---
 
+## [v0.31.1] CLI session delete fix
+*April 5, 2026 | 424 tests*
+
+### Bug Fixes
+- **CLI sessions could not be deleted from the sidebar.** The delete handler only
+  removed the WebUI JSON session file, so CLI-backed sessions came back on refresh.
+  Added `delete_cli_session(sid)` in `api/models.py` and call it from
+  `/api/session/delete` so the SQLite `state.db` row and messages are removed too.
+  (#87, #88)
+
+### Notes
+- The public test suite still passes at 424/424.
+- Issue #87 already had a comment confirming the root cause, so no new issue comment
+  was needed here.
+
 ## [v0.31] UI Polish + Deployment Hardening
 *April 4, 2026 | 424 tests*
 

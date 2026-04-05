@@ -897,6 +897,6 @@ genuinely differentiating for an open-source project
 
 ---
 
-*Last updated: April 4, 2026*
-*Current version: v0.31 | 424 tests*
+*Last updated: April 5, 2026*
+*Current version: v0.31.1 | 424 tests*
 *Next sprint: Sprint 24 (Web Polish + Bug Fix Pass)*
