@@ -18,11 +18,12 @@ from pathlib import Path
 
 
 def _get_state_db():
-    """Get a HermesState instance for the active profile's state.db.
+    """Get a SessionDB instance for the active profile's state.db.
     Returns None if hermes_state is not importable or DB is unavailable.
+    Each caller is responsible for calling db.close() when done.
     """
     try:
-        from hermes_state import HermesState
+        from hermes_state import SessionDB
     except ImportError:
         return None
 
@@ -37,7 +38,7 @@ def _get_state_db():
         return None
 
     try:
-        return HermesState(str(db_path))
+        return SessionDB(db_path)
     except Exception:
         return None
 
@@ -46,10 +47,10 @@ def sync_session_start(session_id, model=None):
     """Register a WebUI session in state.db (idempotent).
     Called when a session's first message is sent.
     """
+    db = _get_state_db()
+    if not db:
+        return
     try:
-        db = _get_state_db()
-        if not db:
-            return
         db.ensure_session(
             session_id=session_id,
             source='webui',
@@ -57,6 +58,11 @@ def sync_session_start(session_id, model=None):
         )
     except Exception:
         pass  # never crash the WebUI for sync failures
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
 
 
 def sync_session_usage(session_id, input_tokens=0, output_tokens=0,
@@ -65,10 +71,10 @@ def sync_session_usage(session_id, input_tokens=0, output_tokens=0,
     Called after each turn completes. Uses absolute=True to set totals
     (the WebUI Session already accumulates across turns).
     """
+    db = _get_state_db()
+    if not db:
+        return
     try:
-        db = _get_state_db()
-        if not db:
-            return
         # Ensure session exists first (idempotent)
         db.ensure_session(session_id=session_id, source='webui', model=model)
         # Set absolute token counts
@@ -80,14 +86,16 @@ def sync_session_usage(session_id, input_tokens=0, output_tokens=0,
             model=model,
             absolute=True,
         )
-        # Update title if we have one
+        # Update title if we have one, using the public API
         if title:
             try:
-                db._execute_write(
-                    "UPDATE sessions SET title = ? WHERE id = ?",
-                    (title, session_id),
-                )
+                db.set_session_title(session_id, title)
             except Exception:
                 pass
     except Exception:
         pass  # never crash the WebUI for sync failures
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
