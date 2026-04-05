@@ -3,7 +3,7 @@
 > Goal: Full 1:1 parity with the Hermes CLI experience via a clean dark web UI.
 > Everything you can do from the CLI terminal, you can do from this UI.
 >
-> Last updated: v0.34.3 (April 5, 2026)
+> Last updated: v0.35 (April 5, 2026)
 > Tests: 433 total (433 passing, 0 failures)
 > Source: <repo>/
 
@@ -46,6 +46,7 @@
 | v0.34.1 | Theme variable polish | 30+ hardcoded dark-navy colors replaced with theme-aware CSS variables | 433 |
 | v0.34.2 | Theme text colors | 5 new per-theme typography variables (--strong, --em, --code-text, --code-inline-bg, --pre-text) | 433 |
 | v0.34.3 | Light theme final polish | 46 light-scoped selector overrides for sidebar, roles, chips, interactive elements | 433 |
+| v0.35 | Security hardening | Env race fix, random signing key, upload path traversal, PBKDF2 password hash | 433 |
 
 ---
 

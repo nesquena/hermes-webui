@@ -5,6 +5,19 @@
 
 ---
 
+## [v0.35] Security hardening
+*April 5, 2026 | 433 tests*
+
+### Security fixes
+- **ENV race condition (HIGH):** Two concurrent sessions could interleave `os.environ` writes, clobbering workspace and session keys. Fixed with a global `_ENV_LOCK` in `streaming.py` that serializes the env save/restore block across all sessions. (#108)
+- **Predictable signing key (MEDIUM):** Session cookies were signed with `sha256(STATE_DIR)` -- deterministic and forgeable if the install path is known. Now generates a cryptographically random 32-byte key on first startup, persisted to `STATE_DIR/.signing_key` (chmod 600). (#108)
+- **Upload path traversal (MEDIUM):** Filenames like `..` survived the `[^\w.\-]` sanitization regex because dots are allowed. Fixed by rejecting dot-only filenames and validating the resolved path stays within the workspace sandbox via `safe_resolve_ws()`. (#108)
+- **Weak password hashing (MEDIUM):** Bare SHA-256 with a predictable salt replaced with PBKDF2-SHA256 at 600k iterations (OWASP recommendation) using the random signing key as salt. No new dependencies (stdlib `hashlib.pbkdf2_hmac`). (#108)
+
+**Breaking change:** Existing session cookies and password hashes are invalidated on first restart after upgrade. Users with password auth enabled will need to re-set their password.
+
+---
+
 ## [v0.34.3] Light theme final polish
 *April 5, 2026 | 433 tests*
 

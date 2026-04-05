@@ -1,6 +1,6 @@
 # Hermes Web UI -- Forward Sprint Plan
 
-> Current state: v0.34.3 | 433 tests | Daily driver ready
+> Current state: v0.35 | 433 tests | Daily driver ready
 > This document plans the path from here to two targets:
 >
 > Target A: 1:1 feature parity with the Hermes CLI (everything you can do from the
@@ -1156,6 +1156,6 @@ New test cases in `tests/test_sprint26.py`:
 ---
 
 *Last updated: April 5, 2026*
-*Current version: v0.34.3 | 433 tests*
+*Current version: v0.35 | 433 tests*
 *Next sprint: Sprint 24 (Web Polish + Bug Fix Pass)*
 *Horizon sprint: Sprint 25 (macOS Desktop Application)*
