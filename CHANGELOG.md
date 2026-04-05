@@ -5,6 +5,15 @@
 
 ---
 
+## [v0.34.3] Light theme final polish
+*April 5, 2026 | 433 tests*
+
+### Bug Fixes
+- **Light theme: sidebar, role labels, chips, and interactive elements all broken.** Session titles were too faint, active session used washed-out gold, pin stars were near-invisible bright yellow, and all hover/border effects used dark-theme white `rgba(255,255,255,.XX)` values invisible on cream. Fixed with 46 scoped `[data-theme="light"]` selector overrides covering session items, role labels, project chips, topbar chips, composer, suggestions, tool cards, cron list, and more. (#105)
+- Active session now uses blue accent (`#2d6fa3`) for strong contrast. Pin stars use deep gold (`#996b15`). Role labels are solid and high contrast.
+
+---
+
 ## [v0.34.2] Theme text colors
 *April 5, 2026 | 433 tests*
 
