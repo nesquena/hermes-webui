@@ -54,7 +54,7 @@ Every color in the UI comes from these CSS variables:
   --gold: #c9a84c;         /* Secondary accent (pinned items, gold highlights) */
   --code-bg: #0d1117;      /* Code block background */
 
-  /* Surface and chrome (required for full polish) */
+  /* Surface and chrome (required for full theme polish) */
   --surface: #1a2535;      /* Dropdowns, popups, toast, approval card */
   --topbar-bg: rgba(22,33,62,.98);   /* Topbar background */
   --main-bg: rgba(26,26,46,0.5);    /* Main chat area background */
@@ -63,19 +63,25 @@ Every color in the UI comes from these CSS variables:
   --focus-ring: rgba(124,185,255,.35); /* Focus border color */
   --focus-glow: rgba(124,185,255,.08); /* Focus box-shadow glow */
 
-  /* Text / code styling (required since PR #102) */
-  --strong: #fff;        /* strong/bold text */
-  --em: #c9c9e8;         /* italic text */
-  --code-text: #f0c27f;  /* inline code + code blocks accent text */
-  --code-inline-bg: rgba(0,0,0,.35); /* inline code chip background */
-  --pre-text: #e2e8f0;   /* code block / approval text */
+  /* Typography (required for readable text across themes) */
+  --strong: #fff;          /* Bold text in messages */
+  --em: #c9c9e8;           /* Italic text in messages */
+  --code-text: #f0c27f;    /* Inline code text color */
+  --code-inline-bg: rgba(0,0,0,.35); /* Inline code background */
+  --pre-text: #e2e8f0;     /* Code block text color */
 }
 ```
 
 The **core palette** controls the overall mood. The **surface/chrome** and
-**text/code styling** variables are now part of the standard theme contract,
-not optional extras. If you want a built-in theme to look complete, define all
-of them.
+**typography** variables are part of the standard theme contract — define all
+of them for a complete theme.
+
+For **light themes**, you also need `:root[data-theme="name"]` overrides
+for elements that use `rgba(255,255,255,.XX)` hover/border effects (these
+are invisible on light backgrounds). See the built-in light theme for the
+full pattern — it overrides ~45 selectors for proper dark-on-light contrast
+on hover states, borders, chips, role labels, session items, and
+interactive elements.
 
 ### Step 2: Add it to the theme picker (optional)
 
