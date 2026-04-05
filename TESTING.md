@@ -1,14 +1,14 @@
 # Hermes Web UI: Browser Testing Plan
 
 > This document is for manual browser testing by you or by a Claude browser agent.
-> It covers user-facing features of the UI through Sprint 22 (v0.24).
+> It covers user-facing features of the UI through Sprint 26 (v0.34.3).
 > Each section is written as a step-by-step test procedure with expected outcomes.
 > A browser agent (e.g. Claude with Chrome access) can execute this plan directly.
 >
-> Prerequisites: SSH tunnel is active on port 8787. Open http://localhost:8787 in browser.
-> Server health check: curl http://127.0.0.1:8787/health should return {"status":"ok"}.
+> Prerequisites: SSH tunnel is active on port 8786. Open http://localhost:8786 in browser.
+> Server health check: curl http://127.0.0.1:8786/health should return {"status":"ok"}.
 >
-> Automated tests: 424 total (424 passing, 0 failures)
+> Automated tests: 433 total (433 passing, 0 failures)
 > Run: `pytest tests/ -v --timeout=60`
 
 ---
@@ -1708,8 +1708,8 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 
 ---
 
-*Last updated: Sprint 22 / v0.24, April 3, 2026*
-*Total automated tests: 415 (392 passing, 23 pre-existing failures)*
-*Regression gate: tests/test_regressions.py (23 tests)*
+*Last updated: Sprint 26 / v0.34.3, April 5, 2026*
+*Total automated tests: 433 (433 passing, 0 failures)*
+*Regression gate: tests/test_regressions.py*
 *Run: pytest tests/ -v --timeout=60*
 *Source: <repo>/*

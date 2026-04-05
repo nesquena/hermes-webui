@@ -1,6 +1,6 @@
 # Hermes Web UI -- Forward Sprint Plan
 
-> Current state: v0.34 | 433 tests | Daily driver ready
+> Current state: v0.34.3 | 433 tests | Daily driver ready
 > This document plans the path from here to two targets:
 >
 > Target A: 1:1 feature parity with the Hermes CLI (everything you can do from the
@@ -893,7 +893,7 @@ genuinely differentiating for an open-source project
 
 ---
 
-## Sprint 26 -- Pluggable UI Themes (PLANNED)
+## Sprint 26 -- Pluggable UI Themes (COMPLETED)
 
 **Theme:** Let users choose how the app looks -- light, dark, and custom color
 schemes. One-click switching, persistent preference, zero flicker on load.
@@ -1156,6 +1156,6 @@ New test cases in `tests/test_sprint26.py`:
 ---
 
 *Last updated: April 5, 2026*
-*Current version: v0.34 | 433 tests*
+*Current version: v0.34.3 | 433 tests*
 *Next sprint: Sprint 24 (Web Polish + Bug Fix Pass)*
-*Horizon sprint: Sprint 26 (Pluggable UI Themes)*
+*Horizon sprint: Sprint 25 (macOS Desktop Application)*
