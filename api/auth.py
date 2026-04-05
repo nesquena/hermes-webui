@@ -47,8 +47,12 @@ def _signing_key():
 
 
 def _hash_password(password):
-    """PBKDF2-SHA256 with a stable salt. 600k iterations per OWASP recommendation."""
-    salt = str(STATE_DIR).encode()
+    """PBKDF2-SHA256 with 600k iterations (OWASP recommendation).
+    Salt is the persisted random signing key, which is secret and unique per
+    installation. This keeps the stored hash format a plain hex string
+    (no format change to settings.json) while replacing the predictable
+    STATE_DIR-derived salt from the original implementation."""
+    salt = _signing_key()
     dk = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 600_000)
     return dk.hex()
 
