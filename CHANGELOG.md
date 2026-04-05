@@ -5,6 +5,15 @@
 
 ---
 
+## [v0.35.1] Model dropdown fixes
+*April 5, 2026 | 433 tests*
+
+### Bug Fixes
+- **Custom providers invisible in model dropdown (#117).** `cfg_base_url` was scoped inside a conditional block but referenced unconditionally, causing a `NameError` for users with a `base_url` in config.yaml. Fix: initialize to `''` before the block. (#118)
+- **Configured default model missing from dropdown (#116).** OpenRouter and other providers replaced the model list with a hardcoded fallback that didn't include `model.default` values like `openrouter/free` or custom local model names. Fix: after building all groups, inject the configured `default_model` at the top of its provider group if absent. (#119)
+
+---
+
 ## [v0.35] Security hardening
 *April 5, 2026 | 433 tests*
 
