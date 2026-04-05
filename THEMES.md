@@ -27,6 +27,7 @@ preview is instant — the UI updates as you click through options.
 | **Solarized Dark** | Ethan Schoonover's classic dark palette. Teal background, warm accents. |
 | **Monokai** | Warm dark theme inspired by the Monokai editor scheme. Green/pink accents. |
 | **Nord** | Arctic blue-gray palette from the Nord color system. Calm and minimal. |
+| **Custom themes** | Any string accepted by `settings.json`, `POST /api/settings`, and `/theme` if added to the picker/command list. Pure CSS variables only. |
 
 ---
 
@@ -53,7 +54,7 @@ Every color in the UI comes from these CSS variables:
   --gold: #c9a84c;         /* Secondary accent (pinned items, gold highlights) */
   --code-bg: #0d1117;      /* Code block background */
 
-  /* Surface and chrome (optional — inherit from core palette if omitted) */
+  /* Surface and chrome (required for full polish) */
   --surface: #1a2535;      /* Dropdowns, popups, toast, approval card */
   --topbar-bg: rgba(22,33,62,.98);   /* Topbar background */
   --main-bg: rgba(26,26,46,0.5);    /* Main chat area background */
@@ -61,12 +62,20 @@ Every color in the UI comes from these CSS variables:
   --hover-bg: rgba(255,255,255,.06); /* Hover state backgrounds */
   --focus-ring: rgba(124,185,255,.35); /* Focus border color */
   --focus-glow: rgba(124,185,255,.08); /* Focus box-shadow glow */
+
+  /* Text / code styling (required since PR #102) */
+  --strong: #fff;        /* strong/bold text */
+  --em: #c9c9e8;         /* italic text */
+  --code-text: #f0c27f;  /* inline code + code blocks accent text */
+  --code-inline-bg: rgba(0,0,0,.35); /* inline code chip background */
+  --pre-text: #e2e8f0;   /* code block / approval text */
 }
 ```
 
-The **core palette** (first 10 variables) controls 90% of the UI. The
-**surface/chrome** variables are optional — if omitted, they fall back to
-defaults that work for dark themes. Light themes should override all of them.
+The **core palette** controls the overall mood. The **surface/chrome** and
+**text/code styling** variables are now part of the standard theme contract,
+not optional extras. If you want a built-in theme to look complete, define all
+of them.
 
 ### Step 2: Add it to the theme picker (optional)
 
@@ -92,8 +101,9 @@ Check these areas:
 
 ### Tips
 
-- **Light themes** need additional scrollbar overrides to avoid dark scrollbars
-  on a light background. See the built-in light theme for the pattern.
+- **Light themes** need scrollbar and selection overrides, plus the full
+  text/code set (`--strong`, `--em`, `--code-text`, `--code-inline-bg`,
+  `--pre-text`) or they will look broken.
 - The **logo gradient** uses `--accent` automatically, so it adapts to your
   theme without extra work.
 - **Prism.js syntax highlighting** uses its own CDN stylesheet (Tomorrow theme).
