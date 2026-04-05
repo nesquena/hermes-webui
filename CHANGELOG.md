@@ -5,6 +5,15 @@
 
 ---
 
+## [v0.36.2] OpenRouter model routing fix
+*April 5, 2026 | 440 tests*
+
+### Bug Fixes
+- **OpenRouter models sent without prefix, causing 404 (#116).** `resolve_model_provider()` was stripping the `openrouter/` prefix from model IDs (e.g. sending `free` instead of `openrouter/free`) when `config_provider == 'openrouter'`. OpenRouter requires the full `provider/model` path to route upstream correctly. Fixed with an early return that preserves the complete model ID for all OpenRouter configs. (#127)
+- Added 7 unit tests for `resolve_model_provider()` — first coverage on this function. Tests the regression, cross-provider routing, direct-API prefix stripping, bare models, and empty model.
+
+---
+
 ## [v0.36.1] Login form Enter key fix
 *April 5, 2026 | 433 tests*
 

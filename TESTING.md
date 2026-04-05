@@ -1709,7 +1709,7 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 ---
 
 *Last updated: Sprint 26 / v0.36, April 5, 2026*
-*Total automated tests: 433 (433 passing, 0 failures)*
+*Total automated tests: 440 (440 passing, 0 failures)*
 *Regression gate: tests/test_regressions.py*
 *Run: pytest tests/ -v --timeout=60*
 *Source: <repo>/*
