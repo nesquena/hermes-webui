@@ -75,7 +75,7 @@ heavy agentic work.
 
 ---
 
-## Sprint 12 -- Settings Panel + Reliability + Session QoL
+## Sprint 12 -- Settings Panel + Reliability + Session QoL (COMPLETED)
 
 **Theme:** Persist your preferences, survive network blips, and organize sessions.
 
@@ -118,7 +118,7 @@ to keep important conversations accessible.
 
 ---
 
-## Sprint 13 -- Alerts, Session QoL, Polish
+## Sprint 13 -- Alerts, Session QoL, Polish (COMPLETED)
 
 **Theme:** Know what Hermes is doing, and small quality-of-life wins.
 
@@ -511,15 +511,14 @@ single default profile, blocking multi-persona workflows.
 
 ---
 
-## Sprint 23 -- Profile/Workspace/Model Coherence (COMPLETED)
+## Sprint 23 -- Agentic Transparency + Context Visibility (COMPLETED)
 
-**Theme:** Make profiles, workspaces, models, and sessions coherent across
-profile switches.
+**Theme:** Surface what the agent is doing and how much context it's using.
 
-**Why now:** Sprint 22 added profile switching but five coherence bugs remained:
-the model picker ignored the profile's default, workspaces were a global file,
-DEFAULT_WORKSPACE was a startup singleton, the session list showed all profiles,
-and switchToProfile() didn't refresh workspaces or sessions.
+**Why now:** Users had no visibility into tool call arguments, session token
+usage, or context window fill. Sprint 22 left five coherence bugs in the
+profile/workspace/model flow that also needed closing before the UI felt
+reliable.
 
 ### Track A: Bugs
 - **Model picker ignores profile on switch.** `populateModelDropdown()` skipped
@@ -611,12 +610,9 @@ the app to others.
   CSS `contain: strict` + IntersectionObserver approach, no library needed.
 
 ### Track C: Code Quality
-- **SPRINTS.md + ROADMAP.md + CHANGELOG.md updated** to reflect Sprint 23
-  completion (agentic transparency) and correct test counts.
-- **Remove stale Sprint 23 description** from SPRINTS.md (the "Profile/Workspace
-  coherence" text is from an older plan; Sprint 23 actually shipped agentic
-  transparency features).
-- **CHANGELOG entry for v0.29** covering Sprint 23 deliverables.
+- Audit and remove any remaining dead code introduced by Sprint 23 (e.g. `S.lastUsage` assignment in messages.js that nothing reads).
+- Verify tool call args render correctly in settled history cards on session reload.
+- Update test count in all docs to match actual pytest output after sprint merges.
 
 **Estimated tests:** ~10 new. Target total: ~435.
 **Hermes CLI parity impact:** Low
@@ -897,6 +893,269 @@ genuinely differentiating for an open-source project
 
 ---
 
+## Sprint 26 -- Pluggable UI Themes (PLANNED)
+
+**Theme:** Let users choose how the app looks -- light, dark, and custom color
+schemes. One-click switching, persistent preference, zero flicker on load.
+
+**Difficulty: Low-Medium.** The existing CSS is already 100% CSS-variable-driven
+off a single `:root` block. Every color, background, and accent in the entire UI
+is already a variable. Adding themes is mostly a matter of defining alternative
+`:root` overrides and wiring a picker -- not a rewrite. The main engineering
+work is flicker prevention on load and the settings UI.
+
+**Estimated effort:** 1 sprint, ~2 days of implementation. 8-12 new tests.
+
+---
+
+### Why now
+
+The UI ships only one dark theme. Contributors have asked for light mode. Power
+users want to match their terminal colorscheme. This is low-risk, high-value
+polish that makes the app feel more finished and more personal. It's also a
+good precedent-setter: once the theme system exists, community members can
+contribute new themes as a pure CSS addition with no Python changes needed.
+
+---
+
+### Design decisions
+
+**Themes are CSS-variable overrides, not separate stylesheets.** Each theme is
+a named `:root[data-theme="name"]` block. The base stylesheet stays untouched.
+Switching themes sets `document.documentElement.dataset.theme = name` in JS.
+No FOUC (flash of unstyled content), no stylesheet swap latency.
+
+**Theme preference persists server-side in `settings.json`.** Same mechanism
+as `send_key` and `show_token_usage`. The server includes `theme` in the
+`GET /api/settings` response. Boot.js reads it and applies before first paint.
+
+**Flicker prevention.** A tiny inline `<script>` in `<head>` (before the
+stylesheet link) reads `localStorage.getItem('hermes-theme')` and sets
+`document.documentElement.dataset.theme` synchronously. This prevents a
+dark-flash on light-mode users during the round-trip to `/api/settings`.
+The localStorage value is kept in sync whenever the user changes themes.
+
+**No third-party dependencies.** Pure CSS + vanilla JS. No theme library.
+
+---
+
+### Track A: Core theme system
+
+**1. CSS variable blocks in `static/style.css`**
+
+The existing `:root` block becomes the `dark` (default) theme. Add named
+theme blocks immediately after:
+
+```css
+/* ── Default (dark) theme ── already in :root ── */
+
+:root[data-theme="light"] {
+  --bg: #f5f5f7;
+  --sidebar: #e8e8ed;
+  --border: rgba(0,0,0,0.10);
+  --border2: rgba(0,0,0,0.16);
+  --text: #1c1c1e;
+  --muted: #6e6e80;
+  --accent: #c0392b;
+  --blue: #0a6dc2;
+  --gold: #a07a20;
+  --code-bg: #f0f0f5;
+}
+
+:root[data-theme="solarized"] {
+  --bg: #002b36;
+  --sidebar: #073642;
+  --border: rgba(255,255,255,0.08);
+  --border2: rgba(255,255,255,0.13);
+  --text: #839496;
+  --muted: #657b83;
+  --accent: #dc322f;
+  --blue: #268bd2;
+  --gold: #b58900;
+  --code-bg: #073642;
+}
+
+:root[data-theme="monokai"] {
+  --bg: #272822;
+  --sidebar: #1e1f1c;
+  --border: rgba(255,255,255,0.07);
+  --border2: rgba(255,255,255,0.12);
+  --text: #f8f8f2;
+  --muted: #75715e;
+  --accent: #f92672;
+  --blue: #66d9e8;
+  --gold: #e6db74;
+  --code-bg: #1e1f1c;
+}
+
+:root[data-theme="nord"] {
+  --bg: #2e3440;
+  --sidebar: #272c36;
+  --border: rgba(255,255,255,0.07);
+  --border2: rgba(255,255,255,0.12);
+  --text: #eceff4;
+  --muted: #9099aa;
+  --accent: #bf616a;
+  --blue: #81a1c1;
+  --gold: #ebcb8b;
+  --code-bg: #272c36;
+}
+```
+
+Additional theming notes:
+- `syntax-highlight` colors (Prism.js) are theme-independent (they come from the
+  CDN stylesheet) -- acceptable for v1.
+- The logo gradient (`linear-gradient(145deg,#e8a030,var(--accent))`) uses
+  `--accent` already so it adapts automatically.
+- Scrollbar colors and `::selection` backgrounds need explicit overrides in the
+  light theme to avoid dark scrollbars on a light background.
+
+**2. Flicker-prevention inline script in `static/index.html`**
+
+Immediately after `<head>` opens, before the stylesheet `<link>`:
+
+```html
+<script>
+(function(){
+  var t=localStorage.getItem('hermes-theme');
+  if(t && t!=='dark') document.documentElement.dataset.theme=t;
+})();
+</script>
+```
+
+This runs synchronously before the stylesheet parses. Zero flicker.
+
+**3. Theme loading in `static/boot.js`**
+
+In the existing `api('/api/settings')` call, read and apply the theme:
+
+```js
+const s = await api('/api/settings');
+window._sendKey = s.send_key || 'enter';
+window._showTokenUsage = !!s.show_token_usage;
+window._showCliSessions = !!s.show_cli_sessions;
+// Theme: apply server preference, update localStorage for flicker prevention
+const theme = s.theme || 'dark';
+document.documentElement.dataset.theme = theme;
+localStorage.setItem('hermes-theme', theme);
+```
+
+**4. Theme setting in `api/config.py`**
+
+```python
+_SETTINGS_DEFAULTS = {
+    ...
+    'theme': 'dark',  # active UI theme name
+    ...
+}
+_SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {'password_hash'}
+```
+
+No enum constraint on `theme` -- allows user-defined theme names to work
+without server changes.
+
+---
+
+### Track B: Theme picker UI
+
+**Settings panel addition (`static/index.html` + `static/panels.js`)**
+
+A `<select>` in the Settings panel, below the send-key picker:
+
+```html
+<div class="settings-field">
+  <label for="settingsTheme">Theme</label>
+  <select id="settingsTheme" ...>
+    <option value="dark">Dark (default)</option>
+    <option value="light">Light</option>
+    <option value="solarized">Solarized Dark</option>
+    <option value="monokai">Monokai</option>
+    <option value="nord">Nord</option>
+  </select>
+</div>
+```
+
+In `loadSettingsPanel()`:
+```js
+const themeSel = $('settingsTheme');
+if(themeSel) themeSel.value = settings.theme || 'dark';
+```
+
+In `saveSettings()`:
+```js
+body.theme = $('settingsTheme').value;
+```
+
+**Live preview on select change (no save required):**
+```js
+$('settingsTheme').addEventListener('change', e => {
+  document.documentElement.dataset.theme = e.target.value;
+  localStorage.setItem('hermes-theme', e.target.value);
+});
+```
+
+This gives instant visual feedback as the user clicks through options.
+The full settings save then persists it server-side.
+
+**`/theme` slash command (`static/commands.js`)**
+
+```js
+async function cmdTheme(arg) {
+  const themes = ['dark','light','solarized','monokai','nord'];
+  if(!arg || !themes.includes(arg)) {
+    showToast('Usage: /theme dark|light|solarized|monokai|nord');
+    return;
+  }
+  document.documentElement.dataset.theme = arg;
+  localStorage.setItem('hermes-theme', arg);
+  try { await api('/api/settings', {method:'POST', body: JSON.stringify({theme: arg})}); } catch(e) {}
+  showToast('Theme: ' + arg);
+}
+```
+
+---
+
+### Track C: Tests
+
+New test cases in `tests/test_sprint26.py`:
+
+1. `GET /api/settings` returns `theme: 'dark'` by default
+2. `POST /api/settings` with `{theme: 'light'}` persists and round-trips
+3. `POST /api/settings` with `{theme: 'nord'}` accepts any string (no enum gate)
+4. Theme value survives server restart (reads from `settings.json`)
+5. `/theme` command fires without error for each named theme
+6. `loadSettingsPanel()` populates the select with the current theme value
+7. Settings save includes theme in the POST body
+8. `data-theme` attribute is set on `<html>` before first paint (inline script)
+
+**Estimated new tests:** 8. Target total after sprint: ~443.
+
+---
+
+### What's out of scope
+
+- **Custom color editors** (hex pickers for each variable): saves that for v2.
+  The five shipped themes cover the main use cases. A custom theme can always
+  be added by dropping a CSS block with no code changes.
+- **Per-session themes**: single global preference is the right call for v1.
+- **System `prefers-color-scheme` sync**: nice-to-have, low priority. The
+  flicker-prevention script could be extended to read the media query if no
+  explicit preference is set.
+- **Prism.js theme switching**: the code-block syntax highlighting comes from
+  a CDN stylesheet. Swapping it requires a `<link>` swap and SRI re-check.
+  Defer to a future sprint; the default Prism Tomorrow theme works on all
+  current dark themes and is acceptable on light.
+
+---
+
+**Estimated tests:** 8 new. Target total: ~443.
+**Hermes CLI parity impact:** None
+**Claude parity impact:** Medium (Claude.ai has light/dark/system sync)
+**User-facing value:** High -- first thing many users ask for
+
+---
+
 *Last updated: April 5, 2026*
 *Current version: v0.33 | 424 tests*
 *Next sprint: Sprint 24 (Web Polish + Bug Fix Pass)*
+*Horizon sprint: Sprint 26 (Pluggable UI Themes)*

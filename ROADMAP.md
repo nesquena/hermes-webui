@@ -40,6 +40,8 @@
 | Sprint 21 | Mobile responsive + Docker | Hamburger sidebar, bottom nav, files slide-over, Docker support (#21, #7) | 415 |
 | Sprint 22 | Multi-profile support | Profile picker, management panel, seamless switching, per-session tracking (#28) | 415 |
 | Sprint 23 | Agentic transparency | Token/cost display, subagent cards, skill picker in cron, skill linked files, workspace tree persistence, timestamp fixes | 424 |
+| v0.32 | Auto-compaction handling | Compression detection, /compact command, real context window indicator | 424 |
+| v0.33 | /insights sync | Opt-in state.db sync so `hermes /insights` includes WebUI sessions | 424 |
 
 ---
 
@@ -206,7 +208,8 @@
 - [ ] TTS playback of responses (deferred)
 - [x] Background task cancel (activity bar Cancel button)
 - [ ] Code execution cell (deferred)
-- [ ] Desktop application (deferred)
+- [ ] Desktop application (Sprint 25, PLANNED)
+- [ ] Pluggable UI themes -- light, dark, Solarized, Monokai, Nord (Sprint 26, PLANNED)
 - [ ] Extended slash command / skill integration (deferred)
 - [ ] Virtual scroll for large lists (deferred)
 
