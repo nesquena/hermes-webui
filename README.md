@@ -215,6 +215,40 @@ are running over SSH.
 
 ---
 
+## Accessing on your phone with Tailscale
+
+[Tailscale](https://tailscale.com) is a zero-config mesh VPN built on
+WireGuard. Install it on your server and your phone, and they join the same
+private network -- no port forwarding, no SSH tunnels, no public exposure.
+
+The Hermes Web UI is fully responsive with a mobile-optimized layout
+(hamburger sidebar, bottom navigation bar, touch-friendly controls), so it
+works well as a daily-driver agent interface from your phone.
+
+**Setup:**
+
+1. Install [Tailscale](https://tailscale.com/download) on your server and
+   your iPhone/Android.
+2. Start the WebUI listening on all interfaces with password auth enabled:
+
+```bash
+HERMES_WEBUI_HOST=0.0.0.0 HERMES_WEBUI_PASSWORD=your-secret ./start.sh
+```
+
+3. Open `http://<server-tailscale-ip>:8787` in your phone's browser
+   (find your server's Tailscale IP in the Tailscale app or with
+   `tailscale ip -4` on the server).
+
+That's it. Traffic is encrypted end-to-end by WireGuard, and password auth
+protects the UI at the application level. You can add it to your home screen
+for an app-like experience.
+
+> **Tip:** If using Docker, set `HERMES_WEBUI_HOST=0.0.0.0` in your
+> `docker-compose.yml` environment (already the default) and set
+> `HERMES_WEBUI_PASSWORD`.
+
+---
+
 ## Manual launch (without start.sh)
 
 If you prefer to launch the server directly:
