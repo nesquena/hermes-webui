@@ -10,7 +10,20 @@ and vanilla JS.
 Layout: three-panel Claude-style. Left sidebar for sessions and tools,
 center for chat, right for workspace file browsing.
 
-<img width="1392" alt="Hermes Web UI — three-panel layout" src="https://github.com/user-attachments/assets/79cd3c0d-3167-42ed-9434-447a742c25c3" />
+<img alt="Hermes Web UI — three-panel layout" width="1417" height="867" alt="image" src="https://github.com/user-attachments/assets/51adff98-53ee-4800-8508-78b6c34dd3dc" />
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <img alt="Light mode with full profile support" src="https://github.com/user-attachments/assets/9b68142f-d974-4493-a8d1-fd73e622c7fd" />
+      <br /><sub>Workspace file browser with inline preview</sub>
+    </td>
+    <td width="50%" align="center">
+      <img alt="Customize your settings, and configure a password" src="https://github.com/user-attachments/assets/941f3156-21e3-41fd-bcc8-f975d5000cb8" />
+      <br /><sub>Session projects, tags, and tool call cards</sub>
+    </td>
+  </tr>
+</table>
 
 <table>
   <tr>
