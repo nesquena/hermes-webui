@@ -41,6 +41,7 @@ Every color in the UI comes from these CSS variables:
 
 ```css
 :root[data-theme="your-theme-name"] {
+  /* Core palette */
   --bg: #1a1a2e;          /* Main background */
   --sidebar: #16213e;      /* Sidebar background */
   --border: rgba(255,255,255,0.08);   /* Subtle borders */
@@ -51,11 +52,21 @@ Every color in the UI comes from these CSS variables:
   --blue: #7cb9ff;         /* Primary action color (links, active states) */
   --gold: #c9a84c;         /* Secondary accent (pinned items, gold highlights) */
   --code-bg: #0d1117;      /* Code block background */
+
+  /* Surface and chrome (optional — inherit from core palette if omitted) */
+  --surface: #1a2535;      /* Dropdowns, popups, toast, approval card */
+  --topbar-bg: rgba(22,33,62,.98);   /* Topbar background */
+  --main-bg: rgba(26,26,46,0.5);    /* Main chat area background */
+  --input-bg: rgba(255,255,255,.04); /* Input/button subtle backgrounds */
+  --hover-bg: rgba(255,255,255,.06); /* Hover state backgrounds */
+  --focus-ring: rgba(124,185,255,.35); /* Focus border color */
+  --focus-glow: rgba(124,185,255,.08); /* Focus box-shadow glow */
 }
 ```
 
-That's it. Override any or all of these variables. The entire UI adapts
-automatically because every color reference uses `var(--name)`.
+The **core palette** (first 10 variables) controls 90% of the UI. The
+**surface/chrome** variables are optional — if omitted, they fall back to
+defaults that work for dark themes. Light themes should override all of them.
 
 ### Step 2: Add it to the theme picker (optional)
 
