@@ -309,6 +309,21 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                             m['attachments'] = attachments
                             break
             s.save()
+            # Sync to state.db for /insights (opt-in setting)
+            try:
+                from api.config import load_settings as _load_settings
+                if _load_settings().get('sync_to_insights'):
+                    from api.state_sync import sync_session_usage
+                    sync_session_usage(
+                        session_id=s.session_id,
+                        input_tokens=s.input_tokens or 0,
+                        output_tokens=s.output_tokens or 0,
+                        estimated_cost=s.estimated_cost,
+                        model=model,
+                        title=s.title,
+                    )
+            except Exception:
+                pass  # never crash the stream for sync failures
             usage = {'input_tokens': input_tokens, 'output_tokens': output_tokens, 'estimated_cost': estimated_cost}
             # Include context window data from the agent's compressor for the UI indicator
             _cc = getattr(agent, 'context_compressor', None)

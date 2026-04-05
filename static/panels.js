@@ -962,6 +962,8 @@ async function loadSettingsPanel(){
     if(showUsageCb) showUsageCb.checked=!!settings.show_token_usage;
     const showCliCb=$('settingsShowCliSessions');
     if(showCliCb) showCliCb.checked=!!settings.show_cli_sessions;
+    const syncCb=$('settingsSyncInsights');
+    if(syncCb) syncCb.checked=!!settings.sync_to_insights;
     // Password field: always blank (we don't send hash back)
     const pwField=$('settingsPassword');
     if(pwField) pwField.value='';
@@ -992,6 +994,7 @@ async function saveSettings(){
   if(sendKey) body.send_key=sendKey;
   body.show_token_usage=showTokenUsage;
   body.show_cli_sessions=showCliSessions;
+  body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;
   // Password: only act if the field has content; blank = leave auth unchanged
   if(pw && pw.trim()){
     try{

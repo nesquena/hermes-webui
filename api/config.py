@@ -652,6 +652,7 @@ _SETTINGS_DEFAULTS = {
     'send_key': 'enter',  # 'enter' or 'ctrl+enter'
     'show_token_usage': False,  # show input/output token badge below assistant messages
     'show_cli_sessions': False,  # merge CLI sessions from state.db into the sidebar
+    'sync_to_insights': False,  # mirror WebUI token usage to state.db for /insights
     'password_hash': None,  # SHA-256 hash; None = auth disabled
 }
 
@@ -671,7 +672,7 @@ _SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {'password_hash'}
 _SETTINGS_ENUM_VALUES = {
     'send_key': {'enter', 'ctrl+enter'},
 }
-_SETTINGS_BOOL_KEYS = {'show_token_usage', 'show_cli_sessions'}
+_SETTINGS_BOOL_KEYS = {'show_token_usage', 'show_cli_sessions', 'sync_to_insights'}
 
 def save_settings(settings: dict) -> dict:
     """Save settings to disk. Returns the merged settings. Ignores unknown keys."""

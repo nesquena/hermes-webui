@@ -995,6 +995,20 @@ def _handle_chat_sync(handler, body):
         else: os.environ['HERMES_SESSION_KEY'] = old_session_key
     s.messages = result.get('messages') or s.messages
     s.title = title_from(s.messages, s.title); s.save()
+    # Sync to state.db for /insights (opt-in setting)
+    try:
+        if load_settings().get('sync_to_insights'):
+            from api.state_sync import sync_session_usage
+            sync_session_usage(
+                session_id=s.session_id,
+                input_tokens=s.input_tokens or 0,
+                output_tokens=s.output_tokens or 0,
+                estimated_cost=s.estimated_cost,
+                model=s.model,
+                title=s.title,
+            )
+    except Exception:
+        pass
     return j(handler, {
         'answer': result.get('final_response') or '',
         'status': 'done' if result.get('completed', True) else 'partial',
