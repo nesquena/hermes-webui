@@ -426,6 +426,7 @@ def get_available_models() -> dict:
     groups = []
 
     # 1. Read config.yaml model section
+    cfg_base_url = ''  # must be defined before conditional blocks (#117)
     model_cfg = cfg.get('model', {})
     if isinstance(model_cfg, str):
         default_model = model_cfg
@@ -605,6 +606,25 @@ def get_available_models() -> dict:
             )
         for provider_name, models in by_provider.items():
             groups.append({'provider': provider_name, 'models': models})
+
+    # Ensure the user's configured default_model always appears in the dropdown.
+    # It may be missing if the model isn't in any hardcoded list (e.g. openrouter/free,
+    # a custom local model, or any model.default not in _FALLBACK_MODELS).
+    if default_model:
+        all_ids = {m['id'] for g in groups for m in g.get('models', [])}
+        if default_model not in all_ids:
+            # Determine which group to inject into
+            label = default_model.split('/')[-1] if '/' in default_model else default_model
+            injected = False
+            for g in groups:
+                if active_provider and active_provider.lower() in g.get('provider', '').lower():
+                    g['models'].insert(0, {'id': default_model, 'label': label})
+                    injected = True
+                    break
+            if not injected and groups:
+                groups[0]['models'].insert(0, {'id': default_model, 'label': label})
+            elif not groups:
+                groups.append({'provider': active_provider or 'Default', 'models': [{'id': default_model, 'label': label}]})
 
     return {
         'active_provider': active_provider,
