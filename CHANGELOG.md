@@ -5,6 +5,15 @@
 
 ---
 
+## [v0.34.2] Theme text colors
+*April 5, 2026 | 433 tests*
+
+### Bug Fixes
+- **Light mode text unreadable.** Bold text was hardcoded white (invisible on cream), italic was light purple on cream, inline code had a dark box on a light background. Fixed by introducing 5 new per-theme CSS variables (`--strong`, `--em`, `--code-text`, `--code-inline-bg`, `--pre-text`) defined for every theme. (#102)
+- Also replaced remaining `rgba(255,255,255,.08)` border references with `var(--border)`, and darkened light theme `--code-bg` slightly for better contrast.
+
+---
+
 ## [v0.34.1] Theme variable polish
 *April 5, 2026 | 433 tests*
 
