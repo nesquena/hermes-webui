@@ -82,8 +82,9 @@ button:hover{background:rgba(124,185,255,.25)}
   <div class="logo">H</div>
   <h1>Hermes</h1>
   <p class="sub">Enter your password to continue</p>
-  <form onsubmit="return doLogin(event)">
-    <input type="password" id="pw" placeholder="Password" autofocus>
+  <form onsubmit="doLogin(event);return false">
+    <input type="password" id="pw" placeholder="Password" autofocus
+           onkeydown="if(event.key==='Enter'){doLogin(event);event.preventDefault();}">
     <button type="submit">Sign in</button>
   </form>
   <div class="err" id="err"></div>
