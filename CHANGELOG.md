@@ -5,6 +5,14 @@
 
 ---
 
+## [v0.36.1] Login form Enter key fix
+*April 5, 2026 | 433 tests*
+
+### Bug Fixes
+- **Login form Enter key unreliable in some browsers (#124).** `onsubmit="return doLogin(event)"` returned a Promise (async functions always return a truthy Promise), which could let the browser fall through to native form submission. Fixed with `doLogin(event);return false` plus an explicit `onkeydown` Enter handler on the password input as belt-and-suspenders. (#125)
+
+---
+
 ## [v0.36] Self-Update Checker with One-Click Update
 *April 5, 2026 | 433 tests*
 
