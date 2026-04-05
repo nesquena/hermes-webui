@@ -1,6 +1,6 @@
 # Hermes Web UI — Themes
 
-Hermes Web UI supports pluggable color themes. Five themes ship built-in, and
+Hermes Web UI supports pluggable color themes. Six themes ship built-in, and
 you can create your own with pure CSS — no Python changes needed.
 
 ---

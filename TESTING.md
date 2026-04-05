@@ -1,7 +1,7 @@
 # Hermes Web UI: Browser Testing Plan
 
 > This document is for manual browser testing by you or by a Claude browser agent.
-> It covers user-facing features of the UI through Sprint 26 (v0.34.3).
+> It covers user-facing features of the UI through Sprint 26 (v0.36).
 > Each section is written as a step-by-step test procedure with expected outcomes.
 > A browser agent (e.g. Claude with Chrome access) can execute this plan directly.
 >
@@ -1708,7 +1708,7 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 
 ---
 
-*Last updated: Sprint 26 / v0.34.3, April 5, 2026*
+*Last updated: Sprint 26 / v0.36, April 5, 2026*
 *Total automated tests: 433 (433 passing, 0 failures)*
 *Regression gate: tests/test_regressions.py*
 *Run: pytest tests/ -v --timeout=60*

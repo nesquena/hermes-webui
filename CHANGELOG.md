@@ -1269,3 +1269,6 @@ Three-panel layout: sessions sidebar, chat area, workspace panel.
 ---
 
 *Last updated: v0.36, April 5, 2026 | Tests: 433*
+
+### Markdown sweep
+- ROADMAP.md, TESTING.md, SPRINTS.md, README.md, and THEMES.md refreshed to match v0.36 and 433 tests.
