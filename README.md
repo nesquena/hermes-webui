@@ -16,11 +16,11 @@ center for chat, right for workspace file browsing.
   <tr>
     <td width="50%" align="center">
       <img alt="Light mode with full profile support" src="https://github.com/user-attachments/assets/9b68142f-d974-4493-a8d1-fd73e622c7fd" />
-      <br /><sub>Workspace file browser with inline preview</sub>
+      <br /><sub>Light mode with full profile support</sub>
     </td>
     <td width="50%" align="center">
-      <img alt="Customize your settings, and configure a password" src="https://github.com/user-attachments/assets/941f3156-21e3-41fd-bcc8-f975d5000cb8" />
-      <br /><sub>Session projects, tags, and tool call cards</sub>
+      <img alt="Customize your settings, configure a password" src="https://github.com/user-attachments/assets/941f3156-21e3-41fd-bcc8-f975d5000cb8" />
+      <br /><sub>Customize your settings, configure a password</sub>
     </td>
   </tr>
 </table>
