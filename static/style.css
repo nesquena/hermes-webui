@@ -156,8 +156,8 @@
   .sidebar-actions{display:flex;gap:6px;}
   .sm-btn{flex:1;padding:7px 0;border-radius:8px;font-size:11px;font-weight:500;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,.08);color:var(--muted);cursor:pointer;transition:all .15s;text-align:center;letter-spacing:.02em;}
   .sm-btn:hover{background:rgba(255,255,255,0.09);color:var(--text);border-color:rgba(255,255,255,.15);}
-  .main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0;background:rgba(26,26,46,0.5);}
-  .topbar{padding:12px 20px;border-bottom:1px solid var(--border);background:rgba(22,33,62,.98);backdrop-filter:blur(12px);display:flex;align-items:center;justify-content:space-between;flex-shrink:0;position:relative;z-index:10;}
+  .main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0;background:var(--bg);}
+  .topbar{padding:12px 20px;border-bottom:1px solid var(--border);background:var(--sidebar);backdrop-filter:blur(12px);display:flex;align-items:center;justify-content:space-between;flex-shrink:0;position:relative;z-index:10;}
   .topbar-title{font-size:15px;font-weight:600;letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
   .topbar-meta{font-size:11px;color:var(--muted);margin-top:3px;opacity:.75;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
   .topbar-chips{display:flex;gap:6px;align-items:center;flex-shrink:0;}
@@ -499,8 +499,7 @@
 /* Workspace hint text: no intrusion */
 .sidebar-bottom > div[style*="topbar"]{pointer-events:none;}
 
-/* Topbar: border should match the subtle sidebar border */
-.topbar{border-bottom:1px solid rgba(255,255,255,.07);}
+/* Topbar border is already var(--border) from the main rule */
 
 
 
