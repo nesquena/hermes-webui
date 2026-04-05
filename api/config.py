@@ -427,6 +427,7 @@ def get_available_models() -> dict:
 
     # 1. Read config.yaml model section
     model_cfg = cfg.get('model', {})
+    cfg_base_url = ''
     if isinstance(model_cfg, str):
         default_model = model_cfg
     elif isinstance(model_cfg, dict):
