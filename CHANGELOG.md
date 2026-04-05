@@ -5,7 +5,7 @@
 
 ---
 
-## [v0.31.1] CLI session delete fix
+## [v0.31.2] CLI session delete fix
 *April 5, 2026 | 424 tests*
 
 ### Bug Fixes
