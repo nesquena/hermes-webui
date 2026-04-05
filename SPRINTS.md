@@ -1164,7 +1164,7 @@ New test cases in `tests/test_sprint26.py`:
 ---
 
 *Last updated: April 5, 2026*
-*Current version: v0.36 | 433 tests*
+*Current version: v0.36.2 | 440 tests*
 *Next sprint: Sprint 24 (Web Polish + Bug Fix Pass)*
 *Horizon sprint: Sprint 25 (macOS Desktop Application)*
 *Docs sweep policy: update markdown proactively during PR reviews and after significant releases*
