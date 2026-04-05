@@ -391,6 +391,10 @@ def resolve_model_provider(model_id: str) -> tuple:
 
     if '/' in model_id:
         prefix, bare = model_id.split('/', 1)
+        # OpenRouter always needs the full provider/model path (e.g. openrouter/free,
+        # anthropic/claude-sonnet-4.6). Never strip the prefix for OpenRouter.
+        if config_provider == 'openrouter':
+            return model_id, 'openrouter', config_base_url
         # If prefix matches config provider exactly, strip it and use that provider directly.
         # e.g. config=anthropic, model=anthropic/claude-... → bare name to anthropic API
         if config_provider and prefix == config_provider:
