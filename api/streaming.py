@@ -17,6 +17,12 @@ from api.config import (
     resolve_model_provider,
 )
 
+# Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
+# concurrent runs of the SAME session, but two DIFFERENT sessions can still
+# interleave their os.environ writes. This global lock serializes the env
+# save/restore around the entire agent run.
+_ENV_LOCK = threading.Lock()
+
 # Lazy import to avoid circular deps -- hermes-agent is on sys.path via api/config.py
 try:
     from run_agent import AIAgent
@@ -101,7 +107,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             HERMES_HOME=_profile_home,
         )
         # Still set process-level env as fallback for tools that bypass thread-local
-        with _agent_lock:
+        with _ENV_LOCK:
           old_cwd = os.environ.get('TERMINAL_CWD')
           old_exec_ask = os.environ.get('HERMES_EXEC_ASK')
           old_session_key = os.environ.get('HERMES_SESSION_KEY')

@@ -26,14 +26,31 @@ _sessions = {}
 
 
 def _signing_key():
-    """Derive a stable signing key from STATE_DIR."""
-    return hashlib.sha256(str(STATE_DIR).encode()).digest()
+    """Return a random signing key, generating and persisting one on first call."""
+    key_file = STATE_DIR / '.signing_key'
+    if key_file.exists():
+        try:
+            raw = key_file.read_bytes()
+            if len(raw) >= 32:
+                return raw[:32]
+        except Exception:
+            pass
+    # Generate a new random key
+    key = secrets.token_bytes(32)
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        key_file.write_bytes(key)
+        key_file.chmod(0o600)
+    except Exception:
+        pass  # key works for this process even if persist fails
+    return key
 
 
 def _hash_password(password):
-    """SHA-256 hash with a salt derived from STATE_DIR."""
+    """PBKDF2-SHA256 with a stable salt. 600k iterations per OWASP recommendation."""
     salt = str(STATE_DIR).encode()
-    return hashlib.sha256(salt + password.encode()).hexdigest()
+    dk = hashlib.pbkdf2_hmac('sha256', password.encode(), salt, 600_000)
+    return dk.hex()
 
 
 def get_password_hash():

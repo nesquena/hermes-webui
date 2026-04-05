@@ -70,7 +70,11 @@ def handle_upload(handler):
             return j(handler, {'error': 'Session not found'}, status=404)
         workspace = Path(s.workspace)
         safe_name = _re.sub(r'[^\w.\-]', '_', Path(filename).name)[:200]
-        dest = workspace / safe_name
+        # Reject names that are purely dots (path traversal: ".." survives regex)
+        if not safe_name or safe_name.strip('.') == '':
+            return j(handler, {'error': 'Invalid filename'}, status=400)
+        # Verify the resolved path stays within the workspace
+        dest = safe_resolve_ws(workspace, safe_name)
         dest.write_bytes(file_bytes)
         return j(handler, {'filename': safe_name, 'path': str(dest), 'size': dest.stat().st_size})
     except Exception as e:
