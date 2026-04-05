@@ -3,7 +3,7 @@
 > Goal: Full 1:1 parity with the Hermes CLI experience via a clean dark web UI.
 > Everything you can do from the CLI terminal, you can do from this UI.
 >
-> Last updated: v0.31.2 (April 5, 2026)
+> Last updated: v0.33 (April 5, 2026)
 > Tests: 424 total (424 passing, 0 failures)
 > Source: <repo>/
 

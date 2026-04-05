@@ -5,6 +5,17 @@
 
 ---
 
+## [v0.33] /insights Sync + state.db Bridge Fix
+*April 5, 2026 | 424 tests*
+
+### Features
+- **Opt-in `/insights` sync.** New "Sync usage to /insights" setting (default: off). When enabled, after each turn the WebUI mirrors session token usage, cost, model, and title into `state.db` so `hermes /insights` includes browser session activity. (#92, #93)
+
+### Bug Fixes
+- **state_sync.py correctness fixes.** Three bugs in the initial implementation caught during code review: wrong class name (`HermesState` → `SessionDB`), wrong constructor argument type (`str` → `Path`), wrong title update method (`_execute_write` with bad signature → `set_session_title`). Also fixed a SQLite connection leak (persistent connection opened per call, never closed). (#95)
+
+---
+
 ## [v0.32] Auto-Compaction Handling + /compact Command (Issue #90)
 *April 5, 2026 | 424 tests*
 
