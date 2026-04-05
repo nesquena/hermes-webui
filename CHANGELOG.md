@@ -5,6 +5,14 @@
 
 ---
 
+## [v0.34.1] Theme variable polish
+*April 5, 2026 | 433 tests*
+
+### Bug Fixes
+- **All non-dark themes had broken surfaces, topbar, and dropdowns.** 30+ hardcoded dark-navy rgba/hex values in style.css were stuck on the Dark palette regardless of active theme. Fixed by introducing 7 new CSS variables (`--surface`, `--topbar-bg`, `--main-bg`, `--input-bg`, `--hover-bg`, `--focus-ring`, `--focus-glow`) defined per-theme, replacing every hardcoded reference. (#100)
+
+---
+
 ## [v0.34] Sprint 26 -- Pluggable UI Themes
 *April 5, 2026 | 433 tests*
 
