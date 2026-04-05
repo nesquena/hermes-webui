@@ -358,11 +358,17 @@ def handle_post(handler, parsed):
     if parsed.path == '/api/session/delete':
         sid = body.get('session_id', '')
         if not sid: return bad(handler, 'session_id is required')
+        # Delete from WebUI session store
         with LOCK: SESSIONS.pop(sid, None)
         p = SESSION_DIR / f'{sid}.json'
         try: p.unlink(missing_ok=True)
         except Exception: pass
         try: SESSION_INDEX_FILE.unlink(missing_ok=True)
+        except Exception: pass
+        # Also delete from CLI state.db (for CLI sessions shown in sidebar)
+        try:
+            from api.models import delete_cli_session
+            delete_cli_session(sid)
         except Exception: pass
         return j(handler, {'ok': True})
 

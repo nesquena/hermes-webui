@@ -336,3 +336,33 @@ def get_cli_session_messages(sid):
     except Exception:
         return []
     return msgs
+
+
+def delete_cli_session(sid):
+    """Delete a CLI session from state.db (messages + session row).
+    Returns True if deleted, False if not found or error.
+    """
+    import os
+    try:
+        import sqlite3
+    except ImportError:
+        return False
+
+    try:
+        from api.profiles import get_active_hermes_home
+        hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
+    except Exception:
+        hermes_home = Path(os.getenv('HERMES_HOME', str(HOME / '.hermes'))).expanduser().resolve()
+    db_path = hermes_home / 'state.db'
+    if not db_path.exists():
+        return False
+
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
+            cur.execute("DELETE FROM sessions WHERE id = ?", (sid,))
+            conn.commit()
+            return cur.rowcount > 0
+    except Exception:
+        return False
