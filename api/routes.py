@@ -219,37 +219,23 @@ def handle_get(handler, parsed) -> bool:
         return _handle_list_dir(handler, parsed)
 
     if parsed.path == '/api/personalities':
+        # Read personalities from config.yaml agent.personalities section
+        # (matches hermes-agent CLI behavior, not filesystem SOUL.md approach)
+        from api.config import reload_config as _reload_cfg
+        _reload_cfg()  # pick up config.yaml changes without server restart
+        from api.config import get_config as _get_cfg
+        _cfg = _get_cfg()
+        agent_cfg = _cfg.get('agent', {})
+        raw_personalities = agent_cfg.get('personalities', {})
         personalities = []
-        try:
-            from api.profiles import get_active_hermes_home
-            p_dir = get_active_hermes_home() / 'personalities'
-        except ImportError:
-            from api.config import HOME
-            p_dir = HOME / '.hermes' / 'personalities'
-        if p_dir.is_dir():
-            p_dir_real = p_dir.resolve()
-            for d in sorted(p_dir.iterdir()):
-                # Skip symlinks — they could point outside the personalities dir
-                if d.is_symlink():
-                    continue
-                if not d.is_dir():
-                    continue
-                soul_file = d / 'SOUL.md'
-                if not soul_file.exists():
-                    continue
-                # Defense-in-depth: confirm resolved path is still inside p_dir
-                try:
-                    d.resolve().relative_to(p_dir_real)
-                except ValueError:
-                    continue
+        if isinstance(raw_personalities, dict):
+            for name, value in raw_personalities.items():
                 desc = ''
-                try:
-                    first_line = soul_file.read_text(errors='replace').strip().split('\n')[0]
-                    if first_line.startswith('#'):
-                        desc = first_line.lstrip('#').strip()
-                except Exception:
-                    pass
-                personalities.append({'name': d.name, 'description': desc})
+                if isinstance(value, dict):
+                    desc = value.get('description', '')
+                elif isinstance(value, str):
+                    desc = value[:80] + ('...' if len(value) > 80 else '')
+                personalities.append({'name': name, 'description': desc})
         return j(handler, {'personalities': personalities})
 
     if parsed.path == '/api/git-info':
@@ -410,34 +396,29 @@ def handle_post(handler, parsed) -> bool:
             s = get_session(sid)
         except KeyError:
             return bad(handler, 'Session not found', 404)
-        # Read the personality SOUL.md
+        # Resolve personality from config.yaml agent.personalities section
+        # (matches hermes-agent CLI behavior)
         prompt = ''
         if name:
-            # Validate name: prevent path traversal (only allow safe chars)
-            import re as _re
-            if not _re.match(r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$', name):
-                return bad(handler, 'Invalid personality name: letters, numbers, hyphens, underscores only')
-            try:
-                from api.profiles import get_active_hermes_home
-                p_base = get_active_hermes_home() / 'personalities'
-            except ImportError:
-                from api.config import HOME
-                p_base = HOME / '.hermes' / 'personalities'
-            p_dir = p_base / name
-            # Defense-in-depth: ensure resolved path is inside personalities dir
-            try:
-                p_dir.resolve().relative_to(p_base.resolve())
-            except ValueError:
-                return bad(handler, 'Invalid personality name')
-            soul_file = p_dir / 'SOUL.md'
-            if soul_file.exists():
-                from api.config import MAX_FILE_BYTES
-                raw = soul_file.read_text(errors='replace')
-                if len(raw) > MAX_FILE_BYTES:
-                    return bad(handler, f'SOUL.md for "{name}" exceeds maximum size ({MAX_FILE_BYTES} bytes)')
-                prompt = raw.strip()
+            from api.config import reload_config as _reload_cfg2
+            _reload_cfg2()  # pick up config changes without restart
+            from api.config import get_config as _get_cfg2
+            _cfg2 = _get_cfg2()
+            agent_cfg = _cfg2.get('agent', {})
+            raw_personalities = agent_cfg.get('personalities', {})
+            if not isinstance(raw_personalities, dict) or name not in raw_personalities:
+                return bad(handler, f'Personality "{name}" not found in config.yaml', 404)
+            value = raw_personalities[name]
+            # Resolve prompt using the same logic as hermes-agent cli.py
+            if isinstance(value, dict):
+                parts = [value.get('system_prompt', '') or value.get('prompt', '')]
+                if value.get('tone'):
+                    parts.append(f'Tone: {value["tone"]}')
+                if value.get('style'):
+                    parts.append(f'Style: {value["style"]}')
+                prompt = '\n'.join(p for p in parts if p)
             else:
-                return bad(handler, f'Personality "{name}" not found', 404)
+                prompt = str(value)
         s.personality = name if name else None
         s.save()
         return j(handler, {'ok': True, 'personality': s.personality, 'prompt': prompt})
