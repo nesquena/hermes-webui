@@ -363,6 +363,20 @@ _PROVIDER_MODELS = {
         {'id': 'MiniMax-M2.5-highspeed', 'label': 'MiniMax M2.5 Highspeed'},
         {'id': 'MiniMax-M2.1',           'label': 'MiniMax M2.1'},
     ],
+    # GitHub Copilot — model IDs served via the Copilot API
+    'copilot': [
+        {'id': 'gpt-5.4',           'label': 'GPT-5.4'},
+        {'id': 'gpt-5.4-mini',      'label': 'GPT-5.4 Mini'},
+        {'id': 'gpt-4o',            'label': 'GPT-4o'},
+        {'id': 'claude-opus-4.6',   'label': 'Claude Opus 4.6'},
+        {'id': 'claude-sonnet-4.6', 'label': 'Claude Sonnet 4.6'},
+        {'id': 'gemini-2.5-pro',    'label': 'Gemini 2.5 Pro'},
+    ],
+    # 'gemini' is the hermes_cli provider ID for Google AI Studio
+    'gemini': [
+        {'id': 'gemini-2.5-pro',   'label': 'Gemini 2.5 Pro'},
+        {'id': 'gemini-2.0-flash', 'label': 'Gemini 2.0 Flash'},
+    ],
 }
 
 
@@ -470,50 +484,64 @@ def get_available_models() -> dict:
             except Exception:
                 pass
 
-    # 4. Check for API keys that imply available providers
-    try:
-        from api.profiles import get_active_hermes_home as _gah2
-        hermes_env_path = _gah2() / '.env'
-    except ImportError:
-        hermes_env_path = HOME / '.hermes' / '.env'
-    env_keys = {}
-    if hermes_env_path.exists():
-        try:
-            for line in hermes_env_path.read_text().splitlines():
-                line = line.strip()
-                if line and not line.startswith('#') and '=' in line:
-                    k, v = line.split('=', 1)
-                    env_keys[k.strip()] = v.strip().strip('"').strip("'")
-        except Exception:
-            pass
-
-    # Merge with actual env
-    all_env = {**env_keys}
-    for k in ('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY',
-              'GOOGLE_API_KEY', 'GLM_API_KEY', 'KIMI_API_KEY', 'DEEPSEEK_API_KEY'):
-        val = os.getenv(k)
-        if val:
-            all_env[k] = val
-
+    # 4. Detect available providers.
+    # Primary: ask hermes-agent's auth layer — the authoritative source. It checks
+    # auth.json, credential pools, and env vars the same way the agent does at runtime,
+    # so the dropdown reflects exactly what the user has configured.
+    # Fallback: scan raw API key env vars (matches old behaviour if hermes not available).
     detected_providers = set()
     if active_provider:
         detected_providers.add(active_provider)
-    if all_env.get('ANTHROPIC_API_KEY'):
-        detected_providers.add('anthropic')
-    if all_env.get('OPENAI_API_KEY'):
-        detected_providers.add('openai')
-    if all_env.get('OPENROUTER_API_KEY'):
-        detected_providers.add('openrouter')
-    if all_env.get('GOOGLE_API_KEY'):
-        detected_providers.add('google')
-    if all_env.get('GLM_API_KEY'):
-        detected_providers.add('zai')
-    if all_env.get('KIMI_API_KEY'):
-        detected_providers.add('kimi-coding')
-    if all_env.get('MINIMAX_API_KEY') or all_env.get('MINIMAX_CN_API_KEY'):
-        detected_providers.add('minimax')
-    if all_env.get('DEEPSEEK_API_KEY'):
-        detected_providers.add('deepseek')
+
+    _hermes_auth_used = False
+    try:
+        from hermes_cli.models import list_available_providers as _lap
+        for _p in _lap():
+            if _p.get('authenticated'):
+                detected_providers.add(_p['id'])
+        _hermes_auth_used = True
+    except Exception:
+        pass
+
+    if not _hermes_auth_used:
+        # Fallback: scan .env and os.environ for known API key variables
+        try:
+            from api.profiles import get_active_hermes_home as _gah2
+            hermes_env_path = _gah2() / '.env'
+        except ImportError:
+            hermes_env_path = HOME / '.hermes' / '.env'
+        env_keys = {}
+        if hermes_env_path.exists():
+            try:
+                for line in hermes_env_path.read_text().splitlines():
+                    line = line.strip()
+                    if line and not line.startswith('#') and '=' in line:
+                        k, v = line.split('=', 1)
+                        env_keys[k.strip()] = v.strip().strip('"').strip("'")
+            except Exception:
+                pass
+        all_env = {**env_keys}
+        for k in ('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY',
+                  'GOOGLE_API_KEY', 'GLM_API_KEY', 'KIMI_API_KEY', 'DEEPSEEK_API_KEY'):
+            val = os.getenv(k)
+            if val:
+                all_env[k] = val
+        if all_env.get('ANTHROPIC_API_KEY'):
+            detected_providers.add('anthropic')
+        if all_env.get('OPENAI_API_KEY'):
+            detected_providers.add('openai')
+        if all_env.get('OPENROUTER_API_KEY'):
+            detected_providers.add('openrouter')
+        if all_env.get('GOOGLE_API_KEY'):
+            detected_providers.add('google')
+        if all_env.get('GLM_API_KEY'):
+            detected_providers.add('zai')
+        if all_env.get('KIMI_API_KEY'):
+            detected_providers.add('kimi-coding')
+        if all_env.get('MINIMAX_API_KEY') or all_env.get('MINIMAX_CN_API_KEY'):
+            detected_providers.add('minimax')
+        if all_env.get('DEEPSEEK_API_KEY'):
+            detected_providers.add('deepseek')
 
     # 3. Fetch models from custom endpoint if base_url is configured
     auto_detected_models = []
@@ -628,14 +656,11 @@ def get_available_models() -> dict:
                         'models': [{'id': default_model, 'label': default_model.split('/')[-1]}],
                     })
     else:
-        # No providers detected -- use fallback grouped list
-        by_provider = {}
-        for m in _FALLBACK_MODELS:
-            by_provider.setdefault(m['provider'], []).append(
-                {'id': m['id'], 'label': m['label']}
-            )
-        for provider_name, models in by_provider.items():
-            groups.append({'provider': provider_name, 'models': models})
+        # No providers detected. Show only the configured default model so the user
+        # can at least send messages with their current setting. Avoid showing a
+        # generic multi-provider list — those models wouldn't be routable anyway.
+        label = default_model.split('/')[-1] if '/' in default_model else default_model
+        groups.append({'provider': 'Default', 'models': [{'id': default_model, 'label': label}]})
 
     # Ensure the user's configured default_model always appears in the dropdown.
     # It may be missing if the model isn't in any hardcoded list (e.g. openrouter/free,
