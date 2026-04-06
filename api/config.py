@@ -492,6 +492,7 @@ def get_available_models() -> dict:
     detected_providers = set()
     if active_provider:
         detected_providers.add(active_provider)
+    all_env: dict = {}  # profile .env keys — populated below, used by custom endpoint auth
 
     _hermes_auth_used = False
     try:
@@ -564,9 +565,9 @@ def get_available_models() -> dict:
             # Normalize the base_url and build models endpoint
             base_url = cfg_base_url.strip()
             if base_url.endswith('/v1'):
-                endpoint_url = base_url[:-3] + '/models'
+                endpoint_url = base_url + '/models'  # /v1/models
             else:
-                endpoint_url = base_url + '/v1/models'
+                endpoint_url = base_url.rstrip('/') + '/v1/models'
 
             # Detect provider from base_url
             provider = 'custom'
@@ -586,12 +587,12 @@ def get_available_models() -> dict:
                 except ValueError:
                     pass
 
-            # Resolve API key from environment
+            # Resolve API key from environment (check profile .env keys too)
             headers = {}
             api_key_vars = ('HERMES_API_KEY', 'HERMES_OPENAI_API_KEY', 'OPENAI_API_KEY',
                             'LOCAL_API_KEY', 'OPENROUTER_API_KEY', 'API_KEY')
             for key in api_key_vars:
-                api_key = os.getenv(key)
+                api_key = all_env.get(key) or os.getenv(key)
                 if api_key:
                     headers['Authorization'] = f'Bearer {api_key}'
                     break
@@ -620,6 +621,22 @@ def get_available_models() -> dict:
                     detected_providers.add(provider.lower())
         except Exception:
             pass  # custom endpoint unreachable or misconfigured -- fail silently
+
+    # 3b. Include models from custom_providers config entries.
+    # These are explicitly configured and should always appear even when the
+    # /v1/models endpoint is unreachable or returns a subset.
+    _custom_providers_cfg = cfg.get('custom_providers', [])
+    if isinstance(_custom_providers_cfg, list):
+        _seen_custom_ids = {m['id'] for m in auto_detected_models}
+        for _cp in _custom_providers_cfg:
+            if not isinstance(_cp, dict):
+                continue
+            _cp_model = _cp.get('model', '')
+            if _cp_model and _cp_model not in _seen_custom_ids:
+                _cp_label = _cp_model.split('/')[-1] if '/' in _cp_model else _cp_model
+                auto_detected_models.append({'id': _cp_model, 'label': _cp_label})
+                _seen_custom_ids.add(_cp_model)
+                detected_providers.add('custom')
 
     # 5. Build model groups
     if detected_providers:
