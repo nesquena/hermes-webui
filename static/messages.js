@@ -93,8 +93,9 @@ async function send(){
     assistantRow=document.createElement('div');assistantRow.className='msg-row';
     assistantBody=document.createElement('div');assistantBody.className='msg-body';
     const role=document.createElement('div');role.className='msg-role assistant';
-    const icon=document.createElement('div');icon.className='role-icon assistant';icon.textContent='H';
-    const lbl=document.createElement('span');lbl.style.fontSize='12px';lbl.textContent='Hermes';
+    const icon=document.createElement('div');icon.className='role-icon assistant';icon.textContent=(window._botName||'Hermes').charAt(0).toUpperCase();
+    const lbl=document.createElement('span');lbl.style.fontSize='12px';lbl.textContent=window._botName||'Hermes';
+    const lbl=document.createElement('span');lbl.style.fontSize='12px';lbl.textContent=window._botName||'Hermes';
     role.appendChild(icon);role.appendChild(lbl);
     assistantRow.appendChild(role);assistantRow.appendChild(assistantBody);
     $('msgInner').appendChild(assistantRow);
@@ -289,7 +290,8 @@ async function send(){
 }
 
 function transcript(){
-  const lines=[`# Hermes session ${S.session?.session_id||''}`,``,
+  const bn=window._botName||'Hermes';
+  const lines=[`# ${bn} session ${S.session?.session_id||''}`,``,
     `Workspace: ${S.session?.workspace||''}`,`Model: ${S.session?.model||''}`,``];
   for(const m of S.messages){
     if(!m||m.role==='tool')continue;
@@ -298,7 +300,8 @@ function transcript(){
     const ct=String(c).trim();
     if(!ct&&!m.attachments?.length)continue;
     const attach=m.attachments?.length?`\n\n_Files: ${m.attachments.join(', ')}_`:'';
-    lines.push(`## ${m.role}`,'',ct+attach,'');
+    const label=m.role==='user'?'user':bn;
+    lines.push(`## ${label}`,'',ct+attach,'');
   }
   return lines.join('\n');
 }

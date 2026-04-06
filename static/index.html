@@ -4,7 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hermes</title>
-<script>(function(){var t=localStorage.getItem('hermes-theme');if(t&&t!=='dark')document.documentElement.dataset.theme=t;})()</script>
 <link rel="stylesheet" href="/static/style.css">
   <!-- Prism.js syntax highlighting (loaded async, non-blocking) -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css" integrity="sha384-wFjoQjtV1y5jVHbt0p35Ui8aV8GVpEZkyF99OXWqP/eNJDU93D3Ugxkoyh6Y2I4A" crossorigin="anonymous">
@@ -14,7 +13,7 @@
 <body>
 <div class="layout">
   <aside class="sidebar">
-    <div class="sidebar-header"><div class="logo">H</div><div><h1 style="margin:0;font-size:15px;font-weight:700;letter-spacing:-.01em">Hermes</h1><div style="font-size:10px;color:var(--muted);opacity:.8;margin-top:1px">v0.36.2</div></div></div>
+    <div class="sidebar-header"><div class="logo">H</div><div><h1 style="margin:0;font-size:15px;font-weight:700;letter-spacing:-.01em">Hermes</h1><div style="font-size:10px;color:var(--muted);opacity:.8;margin-top:1px">v0.33</div></div></div>
     <div class="sidebar-nav">
       <button class="nav-tab active" data-panel="chat" data-label="Chat" onclick="switchPanel('chat')" title="Chat">&#128172;</button>
       <button class="nav-tab" data-panel="tasks" data-label="Tasks" onclick="switchPanel('tasks')" title="Tasks">&#128197;</button>
@@ -203,13 +202,6 @@
       <div class="messages-inner" id="msgInner"></div>
       <div id="liveToolCards" style="display:none;max-width:800px;margin:0 auto;width:100%;padding:0 24px;"></div>
     </div>
-    <div class="update-banner" id="updateBanner">
-      <span id="updateMsg"></span>
-      <div style="display:flex;gap:8px;flex-shrink:0">
-        <button class="update-btn" onclick="dismissUpdate()">Later</button>
-        <button class="update-btn update-primary" id="btnApplyUpdate" onclick="applyUpdates()">Update Now</button>
-      </div>
-    </div>
     <div class="reconnect-banner" id="reconnectBanner">
       <span id="reconnectMsg">&#9888; A response may have been in progress when you last left. Reload messages?</span>
       <div style="display:flex;gap:8px;flex-shrink:0">
@@ -319,29 +311,37 @@
   <div class="settings-panel">
     <div class="settings-header">
       <h3 style="margin:0;font-size:16px">Settings</h3>
-      <button class="panel-icon-btn" onclick="_closeSettingsPanel()" title="Close">&#10005;</button>
+      <button class="panel-icon-btn" onclick="toggleSettings()" title="Close">&#10005;</button>
     </div>
     <div class="settings-body">
       <div class="settings-field">
+        <label for="settingsBotName">Bot Name</label>
+        <input type="text" id="settingsBotName" placeholder="Hermes" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">Display name for the assistant in the UI and transcripts.</div
+      </div>
+      <div class="settings-field">
+        <label for="settingsBotName">Bot Name</label>
+        <input type="text" id="settingsBotName" placeholder="Hermes" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">Display name for the assistant in the UI and transcripts.</div
+      </div>
+      <div class="settings-field">
+        <label for="settingsBotName">Bot Name</label>
+        <input type="text" id="settingsBotName" placeholder="Hermes" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">Display name for the assistant in the UI and transcripts.</div>
+      </div>
+      <div class="settings-field">
         <label for="settingsModel">Default Model</label>
         <select id="settingsModel" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
+      </div>
+      <div class="settings-field">
+        <label for="settingsWorkspace">Default Workspace</label>
+        <select id="settingsWorkspace" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
       </div>
       <div class="settings-field">
         <label for="settingsSendKey">Send Key</label>
         <select id="settingsSendKey" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
           <option value="enter">Enter (Shift+Enter for newline)</option>
           <option value="ctrl+enter">Ctrl+Enter (Enter for newline)</option>
-        </select>
-      </div>
-      <div class="settings-field">
-        <label for="settingsTheme">Theme</label>
-        <select id="settingsTheme" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px" onchange="document.documentElement.dataset.theme=this.value;localStorage.setItem('hermes-theme',this.value)">
-          <option value="dark">Dark (default)</option>
-          <option value="light">Light</option>
-          <option value="slate">Slate (charcoal)</option>
-          <option value="solarized">Solarized Dark</option>
-          <option value="monokai">Monokai</option>
-          <option value="nord">Nord</option>
         </select>
       </div>
       <div class="settings-field">
@@ -364,13 +364,6 @@
           Sync usage to /insights
         </label>
         <div style="font-size:11px;color:var(--muted);margin-top:4px">Mirrors WebUI token usage to state.db so <code>hermes /insights</code> includes browser session data. Off by default.</div>
-      </div>
-      <div class="settings-field">
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-          <input type="checkbox" id="settingsCheckUpdates" style="width:15px;height:15px;accent-color:var(--accent)">
-          Check for updates
-        </label>
-        <div style="font-size:11px;color:var(--muted);margin-top:4px">Show a banner when newer versions of the WebUI or Agent are available. Runs a background git fetch periodically.</div>
       </div>
       <div class="settings-field" style="border-top:1px solid var(--border);padding-top:12px;margin-top:8px">
         <label for="settingsPassword">Access Password</label>

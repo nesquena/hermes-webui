@@ -45,7 +45,7 @@ async function loadSession(sid){
       if(tc&&tc.name) appendLiveToolCard(tc);
     }
     syncTopbar();await loadDir('.');renderMessages();appendThinking();
-    setBusy(true);setStatus('Hermes is thinking\u2026');
+    setBusy(true);setStatus((window._botName||'Hermes')+' is thinking\u2026');
     startApprovalPolling(sid);
   }else{
     MSG_QUEUE.length=0;updateQueueBadge();  // clear queue for the viewed session
@@ -429,7 +429,7 @@ async function deleteSession(sid){
     if(remaining.sessions&&remaining.sessions.length){
       await loadSession(remaining.sessions[0].session_id);
     }else{
-      $('topbarTitle').textContent='Hermes';
+      $('topbarTitle').textContent=window._botName||'Hermes';
       $('topbarMeta').textContent='Start a new conversation';
       $('msgInner').innerHTML='';
       $('emptyState').style.display='';

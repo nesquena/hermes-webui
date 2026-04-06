@@ -19,6 +19,10 @@ import uuid
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+# ── Identity config (env-overridable) ─────────────────────────────────────────
+APP_NAME         = os.getenv('HERMES_WEBUI_APP_NAME', 'Hermes')
+THINKING_MESSAGE = os.getenv('HERMES_WEBUI_THINKING_MSG', 'Hermes is thinking...')
+
 # ── Basic layout ──────────────────────────────────────────────────────────────
 HOME    = Path.home()
 # REPO_ROOT is the directory that contains this file's parent (api/ -> repo root)
@@ -169,7 +173,7 @@ def get_config() -> dict:
         reload_config()
     return _cfg_cache
 
-def reload_config() -> None:
+def reload_config():
     """Reload config.yaml from the active profile's directory."""
     with _cfg_lock:
         _cfg_cache.clear()
@@ -208,7 +212,7 @@ DEFAULT_WORKSPACE = _discover_default_workspace()
 DEFAULT_MODEL     = os.getenv('HERMES_WEBUI_DEFAULT_MODEL', 'openai/gpt-5.4-mini')
 
 # ── Startup diagnostics ───────────────────────────────────────────────────────
-def print_startup_config() -> None:
+def print_startup_config():
     """Print detected configuration at startup so the user can verify what was found."""
     ok   = '\033[32m[ok]\033[0m'
     warn = '\033[33m[!!]\033[0m'
@@ -243,7 +247,7 @@ def print_startup_config() -> None:
             flush=True
         )
 
-def verify_hermes_imports() -> tuple:
+def verify_hermes_imports():
     """
     Attempt to import the key Hermes modules.
     Returns (ok: bool, missing: list[str], errors: dict[str, str]).
@@ -366,7 +370,7 @@ _PROVIDER_MODELS = {
 }
 
 
-def resolve_model_provider(model_id: str) -> tuple:
+def resolve_model_provider(model_id: str):
     """Resolve bare model name, provider, and base_url for AIAgent.
 
     Model IDs from the dropdown may include a provider prefix
@@ -391,10 +395,6 @@ def resolve_model_provider(model_id: str) -> tuple:
 
     if '/' in model_id:
         prefix, bare = model_id.split('/', 1)
-        # OpenRouter always needs the full provider/model path (e.g. openrouter/free,
-        # anthropic/claude-sonnet-4.6). Never strip the prefix for OpenRouter.
-        if config_provider == 'openrouter':
-            return model_id, 'openrouter', config_base_url
         # If prefix matches config provider exactly, strip it and use that provider directly.
         # e.g. config=anthropic, model=anthropic/claude-... → bare name to anthropic API
         if config_provider and prefix == config_provider:
@@ -430,9 +430,7 @@ def get_available_models() -> dict:
     groups = []
 
     # 1. Read config.yaml model section
-    cfg_base_url = ''  # must be defined before conditional blocks (#117)
     model_cfg = cfg.get('model', {})
-    cfg_base_url = ''
     if isinstance(model_cfg, str):
         default_model = model_cfg
     elif isinstance(model_cfg, dict):
@@ -612,25 +610,6 @@ def get_available_models() -> dict:
         for provider_name, models in by_provider.items():
             groups.append({'provider': provider_name, 'models': models})
 
-    # Ensure the user's configured default_model always appears in the dropdown.
-    # It may be missing if the model isn't in any hardcoded list (e.g. openrouter/free,
-    # a custom local model, or any model.default not in _FALLBACK_MODELS).
-    if default_model:
-        all_ids = {m['id'] for g in groups for m in g.get('models', [])}
-        if default_model not in all_ids:
-            # Determine which group to inject into
-            label = default_model.split('/')[-1] if '/' in default_model else default_model
-            injected = False
-            for g in groups:
-                if active_provider and active_provider.lower() in g.get('provider', '').lower():
-                    g['models'].insert(0, {'id': default_model, 'label': label})
-                    injected = True
-                    break
-            if not injected and groups:
-                groups[0]['models'].insert(0, {'id': default_model, 'label': label})
-            elif not groups:
-                groups.append({'provider': active_provider or 'Default', 'models': [{'id': default_model, 'label': label}]})
-
     return {
         'active_provider': active_provider,
         'default_model': default_model,
@@ -678,9 +657,9 @@ _SETTINGS_DEFAULTS = {
     'show_token_usage': False,  # show input/output token badge below assistant messages
     'show_cli_sessions': False,  # merge CLI sessions from state.db into the sidebar
     'sync_to_insights': False,  # mirror WebUI token usage to state.db for /insights
-    'check_for_updates': True,  # check if webui/agent repos are behind upstream
-    'theme': 'dark',  # active UI theme name (no enum gate -- allows custom themes)
     'password_hash': None,  # SHA-256 hash; None = auth disabled
+    'app_name': APP_NAME,
+    'thinking_message': THINKING_MESSAGE,
 }
 
 def load_settings() -> dict:
@@ -699,7 +678,7 @@ _SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {'password_hash'}
 _SETTINGS_ENUM_VALUES = {
     'send_key': {'enter', 'ctrl+enter'},
 }
-_SETTINGS_BOOL_KEYS = {'show_token_usage', 'show_cli_sessions', 'sync_to_insights', 'check_for_updates'}
+_SETTINGS_BOOL_KEYS = {'show_token_usage', 'show_cli_sessions', 'sync_to_insights'}
 
 def save_settings(settings: dict) -> dict:
     """Save settings to disk. Returns the merged settings. Ignores unknown keys."""

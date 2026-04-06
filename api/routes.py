@@ -82,9 +82,8 @@ button:hover{background:rgba(124,185,255,.25)}
   <div class="logo">H</div>
   <h1>Hermes</h1>
   <p class="sub">Enter your password to continue</p>
-  <form onsubmit="doLogin(event);return false">
-    <input type="password" id="pw" placeholder="Password" autofocus
-           onkeydown="if(event.key==='Enter'){doLogin(event);event.preventDefault();}">
+  <form onsubmit="return doLogin(event)">
+    <input type="password" id="pw" placeholder="Password" autofocus>
     <button type="submit">Sign in</button>
   </form>
   <div class="err" id="err"></div>
@@ -108,7 +107,7 @@ async function doLogin(e){
 
 # ── GET routes ────────────────────────────────────────────────────────────────
 
-def handle_get(handler, parsed) -> bool:
+def handle_get(handler, parsed):
     """Handle all GET routes. Returns True if handled, False for 404."""
 
     if parsed.path in ('/', '/index.html'):
@@ -116,7 +115,15 @@ def handle_get(handler, parsed) -> bool:
                  content_type='text/html; charset=utf-8')
 
     if parsed.path == '/login':
-        return t(handler, _LOGIN_PAGE_HTML, content_type='text/html; charset=utf-8')
+        bot_name = load_settings().get('bot_name', 'Hermes')
+        import html as _html
+        _safe = _html.escape(bot_name)
+        page = _LOGIN_PAGE_HTML.replace('Hermes — Sign in', f'{_safe} — Sign in').replace('<h1>Hermes</h1>', f'<h1>{_safe}</h1>')
+        return t(handler, page, content_type='text/html; charset=utf-8')
+
+    if parsed.path == '/api/config':
+        from api.config import APP_NAME, THINKING_MESSAGE
+        return j(handler, {'appName': APP_NAME, 'thinkingMessage': THINKING_MESSAGE})
 
     if parsed.path == '/api/auth/status':
         from api.auth import is_auth_enabled, parse_cookie, verify_session
@@ -228,22 +235,6 @@ def handle_get(handler, parsed) -> bool:
         info = git_info_for_workspace(Path(s.workspace))
         return j(handler, {'git': info})
 
-    if parsed.path == '/api/updates/check':
-        settings = load_settings()
-        if not settings.get('check_for_updates', True):
-            return j(handler, {'disabled': True})
-        qs = parse_qs(parsed.query)
-        force = qs.get('force', ['0'])[0] == '1'
-        # ?simulate=1 returns fake behind counts for UI testing (localhost only)
-        if qs.get('simulate', ['0'])[0] == '1' and handler.client_address[0] == '127.0.0.1':
-            return j(handler, {
-                'webui': {'name': 'webui', 'behind': 3, 'current_sha': 'abc1234', 'latest_sha': 'def5678', 'branch': 'master'},
-                'agent': {'name': 'agent', 'behind': 1, 'current_sha': 'aaa0001', 'latest_sha': 'bbb0002', 'branch': 'master'},
-                'checked_at': 0,
-            })
-        from api.updates import check_for_updates
-        return j(handler, check_for_updates(force=force))
-
     if parsed.path == '/api/chat/stream/status':
         stream_id = parse_qs(parsed.query).get('stream_id', [''])[0]
         return j(handler, {'active': stream_id in STREAMS, 'stream_id': stream_id})
@@ -335,7 +326,7 @@ def handle_get(handler, parsed) -> bool:
 
 # ── POST routes ───────────────────────────────────────────────────────────────
 
-def handle_post(handler, parsed) -> bool:
+def handle_post(handler, parsed):
     """Handle all POST routes. Returns True if handled, False for 404."""
 
     if parsed.path == '/api/upload':
@@ -616,14 +607,6 @@ def handle_post(handler, parsed) -> bool:
     # ── Session import from JSON (POST) ──
     if parsed.path == '/api/session/import':
         return _handle_session_import(handler, body)
-
-    # ── Self-update (POST) ──
-    if parsed.path == '/api/updates/apply':
-        target = body.get('target', '')
-        if target not in ('webui', 'agent'):
-            return bad(handler, 'target must be "webui" or "agent"')
-        from api.updates import apply_update
-        return j(handler, apply_update(target))
 
     # ── CLI session import (POST) ──
     if parsed.path == '/api/session/import_cli':

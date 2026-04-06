@@ -908,68 +908,15 @@ document.addEventListener('drop',e=>{e.preventDefault();dragCounter=0;wrap.class
 
 // ── Settings panel ───────────────────────────────────────────────────────────
 
-let _settingsDirty = false;
-let _settingsThemeOnOpen = null; // track theme at open time for discard revert
-
 function toggleSettings(){
   const overlay=$('settingsOverlay');
   if(!overlay) return;
   if(overlay.style.display==='none'){
-    _settingsDirty = false;
-    _settingsThemeOnOpen = document.documentElement.dataset.theme || 'dark';
     overlay.style.display='';
     loadSettingsPanel();
   } else {
-    _closeSettingsPanel();
+    overlay.style.display='none';
   }
-}
-
-// Close with unsaved-changes check. If dirty, show a confirm dialog.
-function _closeSettingsPanel(){
-  if(!_settingsDirty){
-    // Nothing changed -- revert any live preview and close
-    _revertSettingsPreview();
-    $('settingsOverlay').style.display='none';
-    return;
-  }
-  // Dirty -- show inline confirm bar
-  _showSettingsUnsavedBar();
-}
-
-// Revert live DOM/localStorage to what they were when the panel opened
-function _revertSettingsPreview(){
-  if(_settingsThemeOnOpen){
-    document.documentElement.dataset.theme = _settingsThemeOnOpen;
-    localStorage.setItem('hermes-theme', _settingsThemeOnOpen);
-  }
-}
-
-// Show the "Unsaved changes" bar inside the settings panel
-function _showSettingsUnsavedBar(){
-  let bar = $('settingsUnsavedBar');
-  if(bar){ bar.style.display=''; return; }
-  // Create it
-  bar = document.createElement('div');
-  bar.id = 'settingsUnsavedBar';
-  bar.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);border-radius:8px;padding:10px 14px;margin:0 0 12px;font-size:13px;';
-  bar.innerHTML = '<span style="color:var(--text)">You have unsaved changes.</span>'
-    + '<span style="display:flex;gap:8px">'
-    + '<button onclick="_discardSettings()" style="padding:5px 12px;border-radius:6px;border:1px solid var(--border2);background:rgba(255,255,255,.06);color:var(--muted);cursor:pointer;font-size:12px;font-weight:600">Discard</button>'
-    + '<button onclick="saveSettings(true)" style="padding:5px 12px;border-radius:6px;border:none;background:var(--accent);color:#fff;cursor:pointer;font-size:12px;font-weight:600">Save</button>'
-    + '</span>';
-  const body = document.querySelector('.settings-body') || document.querySelector('.settings-panel');
-  if(body) body.prepend(bar);
-}
-
-function _discardSettings(){
-  _revertSettingsPreview();
-  _settingsDirty = false;
-  $('settingsOverlay').style.display = 'none';
-}
-
-// Mark settings as dirty whenever anything changes
-function _markSettingsDirty(){
-  _settingsDirty = true;
 }
 
 async function loadSettingsPanel(){
@@ -993,25 +940,33 @@ async function loadSettingsPanel(){
         }
       }catch(e){}
       modelSel.value=settings.default_model||'';
-      modelSel.addEventListener('change',_markSettingsDirty,{once:false});
+    }
+    // Populate workspace dropdown from /api/workspaces
+    const wsSel=$('settingsWorkspace');
+    if(wsSel){
+      wsSel.innerHTML='';
+      try{
+        const wsData=await api('/api/workspaces');
+        for(const w of (wsData.workspaces||[])){
+          const opt=document.createElement('option');
+          opt.value=w.path;opt.textContent=w.name||w.path;
+          wsSel.appendChild(opt);
+        }
+      }catch(e){}
+      wsSel.value=settings.default_workspace||'';
     }
     // Send key preference
     const sendKeySel=$('settingsSendKey');
-    if(sendKeySel){sendKeySel.value=settings.send_key||'enter';sendKeySel.addEventListener('change',_markSettingsDirty,{once:false});}
-    // Theme preference
-    const themeSel=$('settingsTheme');
-    if(themeSel){themeSel.value=settings.theme||'dark';themeSel.addEventListener('change',_markSettingsDirty,{once:false});}
+    if(sendKeySel) sendKeySel.value=settings.send_key||'enter';
     const showUsageCb=$('settingsShowTokenUsage');
-    if(showUsageCb){showUsageCb.checked=!!settings.show_token_usage;showUsageCb.addEventListener('change',_markSettingsDirty,{once:false});}
+    if(showUsageCb) showUsageCb.checked=!!settings.show_token_usage;
     const showCliCb=$('settingsShowCliSessions');
-    if(showCliCb){showCliCb.checked=!!settings.show_cli_sessions;showCliCb.addEventListener('change',_markSettingsDirty,{once:false});}
+    if(showCliCb) showCliCb.checked=!!settings.show_cli_sessions;
     const syncCb=$('settingsSyncInsights');
-    if(syncCb){syncCb.checked=!!settings.sync_to_insights;syncCb.addEventListener('change',_markSettingsDirty,{once:false});}
-    const updateCb=$('settingsCheckUpdates');
-    if(updateCb){updateCb.checked=settings.check_for_updates!==false;updateCb.addEventListener('change',_markSettingsDirty,{once:false});}
+    if(syncCb) syncCb.checked=!!settings.sync_to_insights;
     // Password field: always blank (we don't send hash back)
     const pwField=$('settingsPassword');
-    if(pwField){pwField.value='';pwField.addEventListener('input',_markSettingsDirty,{once:false});}
+    if(pwField) pwField.value='';
     // Show auth buttons only when auth is active
     try{
       const authStatus=await api('/api/auth/status');
@@ -1026,22 +981,24 @@ async function loadSettingsPanel(){
   }
 }
 
-async function saveSettings(andClose){
+async function saveSettings(){
   const model=($('settingsModel')||{}).value;
+  const workspace=($('settingsWorkspace')||{}).value;
   const sendKey=($('settingsSendKey')||{}).value;
   const showTokenUsage=!!($('settingsShowTokenUsage')||{}).checked;
   const showCliSessions=!!($('settingsShowCliSessions')||{}).checked;
   const pw=($('settingsPassword')||{}).value;
-  const theme=($('settingsTheme')||{}).value||'dark';
   const body={};
   if(model) body.default_model=model;
-
+  const botName=(($('settingsBotName')||{}).value||'').trim()||'Hermes';
+  body.bot_name=botName;
+  const botName=(($('settingsBotName')||{}).value||'').trim()||'Hermes';
+  body.bot_name=botName;
+  if(workspace) body.default_workspace=workspace;
   if(sendKey) body.send_key=sendKey;
-  body.theme=theme;
   body.show_token_usage=showTokenUsage;
   body.show_cli_sessions=showCliSessions;
   body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;
-  body.check_for_updates=!!($('settingsCheckUpdates')||{}).checked;
   // Password: only act if the field has content; blank = leave auth unchanged
   if(pw && pw.trim()){
     try{
@@ -1049,9 +1006,9 @@ async function saveSettings(andClose){
       window._sendKey=sendKey||'enter';
       window._showTokenUsage=showTokenUsage;
       showToast('Settings saved (password set — login now required)');
-      _settingsDirty=false; _settingsThemeOnOpen=theme;
-      const bar=$('settingsUnsavedBar'); if(bar) bar.style.display='none';
-      $('settingsOverlay').style.display='none';
+      window._botName=botName;applyBotName();
+      window._botName=botName;applyBotName();
+      toggleSettings();
       return;
     }catch(e){showToast('Save failed: '+e.message);return;}
   }
@@ -1060,12 +1017,12 @@ async function saveSettings(andClose){
     window._sendKey=sendKey||'enter';
     window._showTokenUsage=showTokenUsage;
     window._showCliSessions=showCliSessions;
-    _settingsDirty=false; _settingsThemeOnOpen=theme;
-    const bar=$('settingsUnsavedBar'); if(bar) bar.style.display='none';
+    window._botName=botName;applyBotName();
+    window._botName=botName;applyBotName();
     renderMessages();
     if(typeof renderSessionList==='function') renderSessionList();
     showToast('Settings saved');
-    $('settingsOverlay').style.display='none';
+    toggleSettings();
   }catch(e){
     showToast('Save failed: '+e.message);
   }
@@ -1095,10 +1052,10 @@ async function disableAuth(){
   }
 }
 
-// Close settings on overlay click (not panel click) -- with unsaved-changes check
+// Close settings on overlay click (not panel click)
 document.addEventListener('click',e=>{
   const overlay=$('settingsOverlay');
-  if(overlay&&e.target===overlay) _closeSettingsPanel();
+  if(overlay&&e.target===overlay) toggleSettings();
 });
 
 // ── Cron completion alerts ────────────────────────────────────────────────────

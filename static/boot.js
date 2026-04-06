@@ -226,7 +226,7 @@ document.addEventListener('keydown',async e=>{
   if(e.key==='Escape'){
     // Close settings overlay if open
     const settingsOverlay=$('settingsOverlay');
-    if(settingsOverlay&&settingsOverlay.style.display!=='none'){_closeSettingsPanel();return;}
+    if(settingsOverlay&&settingsOverlay.style.display!=='none'){toggleSettings();return;}
     // Close workspace dropdown
     closeWsDropdown();
     // Clear session search
@@ -307,16 +307,40 @@ document.querySelectorAll('.suggestion').forEach(btn=>{
 })();
 
 (async()=>{
+
+// Apply bot name to static DOM elements (title, sidebar, topbar, placeholder)
+function applyBotName(){
+  const n=window._botName||'Hermes';
+  document.title=n;
+  const sidebarH1=document.querySelector('.sidebar-header h1');
+  if(sidebarH1) sidebarH1.textContent=n;
+  const logo=document.querySelector('.sidebar-header .logo');
+  if(logo) logo.textContent=n.charAt(0).toUpperCase();
+  const topTitle=$('topbarTitle');
+  if(topTitle&&(topTitle.textContent==='Hermes'||topTitle.textContent===topTitle.dataset.prevBotName)) topTitle.textContent=n;
+  topTitle&&(topTitle.dataset.prevBotName=n);
+  const msg=$('msg');
+  if(msg) msg.placeholder='Message '+n+'\u2026';
+}
+
+
+// Apply bot name to static DOM elements (title, sidebar, topbar, placeholder)
+function applyBotName(){
+  const n=window._botName||'Hermes';
+  document.title=n;
+  const sidebarH1=document.querySelector('.sidebar-header h1');
+  if(sidebarH1) sidebarH1.textContent=n;
+  const logo=document.querySelector('.sidebar-header .logo');
+  if(logo) logo.textContent=n.charAt(0).toUpperCase();
+  const topTitle=$('topbarTitle');
+  if(topTitle&&(topTitle.textContent==='Hermes'||topTitle.textContent===topTitle.dataset.prevBotName)) topTitle.textContent=n;
+  topTitle&&(topTitle.dataset.prevBotName=n);
+  const msg=$('msg');
+  if(msg) msg.placeholder='Message '+n+'\u2026';
+}
+
   // Load send key preference
-  let _bootSettings={};
-  try{const s=await api('/api/settings');_bootSettings=s;window._sendKey=s.send_key||'enter';window._showTokenUsage=!!s.show_token_usage;window._showCliSessions=!!s.show_cli_sessions;const _theme=s.theme||'dark';document.documentElement.dataset.theme=_theme;localStorage.setItem('hermes-theme',_theme);}catch(e){window._sendKey='enter';window._showTokenUsage=false;window._showCliSessions=false;_bootSettings={check_for_updates:false};}
-  // Non-blocking update check (fire-and-forget, once per tab session)
-  // ?test_updates=1 in URL forces banner display for testing (bypasses sessionStorage guards)
-  const _testUpdates=new URLSearchParams(location.search).get('test_updates')==='1';
-  if(_testUpdates||(_bootSettings.check_for_updates!==false&&!sessionStorage.getItem('hermes-update-checked')&&!sessionStorage.getItem('hermes-update-dismissed'))){
-    const _checkUrl='/api/updates/check'+(_testUpdates?'?simulate=1':'');
-    api(_checkUrl).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d);}).catch(()=>{});
-  }
+  try{const s=await api('/api/settings');window._sendKey=s.send_key||'enter';window._showTokenUsage=!!s.show_token_usage;window._showCliSessions=!!s.show_cli_sessions;}catch(e){window._sendKey='enter';window._showTokenUsage=false;window._showCliSessions=false;}
   // Fetch active profile
   try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';}catch(e){S.activeProfile='default';}
   // Update profile chip label immediately
