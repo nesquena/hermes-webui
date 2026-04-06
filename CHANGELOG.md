@@ -5,6 +5,18 @@
 
 ---
 
+## [v0.37.0] /personality command, model prefix routing fix, tool card reload fix
+*April 6, 2026 | 465 tests*
+
+### Features
+- **`/personality` slash command.** Set a per-session agent personality from `~/.hermes/personalities/<name>/SOUL.md`. The personality prompt is prepended to the system message for every turn. Use `/personality <name>` to activate, `/personality none` to clear, `/personality` (no args) to list available personalities. Backend: `GET /api/personalities`, `POST /api/personality/set`. (PR #143)
+
+### Bug Fixes
+- **Model dropdown routes non-default provider models correctly (#138).** When the active provider is `anthropic` and you pick a `minimax` model, its ID is now prefixed `minimax/MiniMax-M2.7` so `resolve_model_provider()` can route it through OpenRouter. Guards added: `active_provider=None` prevents all-providers-prefixed, case is normalised, shared `_PROVIDER_MODELS` list is no longer mutated by the default_model injector. (PR #142)
+- **Tool call cards persist correctly after page reload.** The reload rendering logic now anchors cards AFTER the triggering assistant row (not before the next one), handles multi-step chains sharing a filtered anchor in chronological order, and filters fallback anchor to assistant rows only. (PR #141)
+
+---
+
 ## [v0.36.3] Configurable Assistant Name
 *April 6, 2026 | 449 tests*
 
