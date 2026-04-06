@@ -522,12 +522,15 @@ function renderMessages(){
       byAssistant[key].push(tc);
     }
     const allRows = Array.from(inner.querySelectorAll('.msg-row[data-msg-idx]'));
+    // Track the last inserted node per anchor so back-to-back groups for the
+    // same (filtered) anchor row are inserted in chronological order.
+    const anchorInsertAfter = new Map();
     for(const [key, cards] of Object.entries(byAssistant)){
       const aIdx = parseInt(key);
       // Find the right insertion point: cards go AFTER the assistant message
       // that triggered them. We look for the row at aIdx, or the nearest
-      // visible row at or before aIdx (the assistant message may be filtered
-      // out if it contained only tool_use blocks with no text response).
+      // visible ASSISTANT row at or before aIdx (the assistant message may be
+      // filtered out if it contained only tool_use blocks with no text response).
       let anchorRow = null;
       if(aIdx >= 0){
         // First: exact match for the assistant row
@@ -535,15 +538,15 @@ function renderMessages(){
           const ri=parseInt(r.dataset.msgIdx||'-1');
           if(ri===aIdx){anchorRow=r;break;}
         }
-        // Fallback: nearest visible row at or before aIdx
+        // Fallback: nearest visible ASSISTANT row at or before aIdx
         if(!anchorRow){
           for(let i=allRows.length-1;i>=0;i--){
             const ri=parseInt(allRows[i].dataset.msgIdx||'-1');
-            if(ri<=aIdx){anchorRow=allRows[i];break;}
+            if(ri<=aIdx&&S.messages[ri]&&S.messages[ri].role==='assistant'){anchorRow=allRows[i];break;}
           }
         }
       }
-      // aIdx === -1: attach after the last assistant row
+      // aIdx === -1 or no assistant anchor found: attach after the last assistant row
       if(!anchorRow){
         for(let i=allRows.length-1;i>=0;i--){
           const ri=parseInt(allRows[i].dataset.msgIdx||'-1',10);
@@ -556,6 +559,7 @@ function renderMessages(){
       if(cards.length>=2){
         const toggle=document.createElement('div');
         toggle.className='tool-cards-toggle';
+        // Collect card elements before they get moved to DOM
         const cardEls=Array.from(frag.querySelectorAll('.tool-card'));
         const expandBtn=document.createElement('button');
         expandBtn.textContent='Expand all';
@@ -567,9 +571,15 @@ function renderMessages(){
         toggle.appendChild(collapseBtn);
         frag.insertBefore(toggle,frag.firstChild);
       }
-      // Insert after the anchor row, or append at the end
-      if(anchorRow&&anchorRow.nextSibling) inner.insertBefore(frag,anchorRow.nextSibling);
+      // Insert after the anchor row (or after any previously inserted group for
+      // the same anchor), preserving chronological order for multi-step chains.
+      const insertAfterNode = anchorInsertAfter.get(anchorRow) || anchorRow;
+      const refNode = insertAfterNode ? insertAfterNode.nextSibling : null;
+      if(refNode) inner.insertBefore(frag,refNode);
       else inner.appendChild(frag);
+      // Record the last child we inserted so the next group for this anchor
+      // goes after it rather than back at anchorRow.nextSibling.
+      anchorInsertAfter.set(anchorRow, inner.lastChild);
     }
   }
   // Render usage badge on the last assistant message row (if enabled and usage data exists)
