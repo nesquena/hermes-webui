@@ -477,12 +477,17 @@ function renderMessages(){
   });
   $('emptyState').style.display=vis.length?'none':'';
   inner.innerHTML='';
-  // Track original indices (in S.messages) so truncate knows the cut point
+  // Track original indices (in S.messages) so truncate knows the cut point.
+  // Also include assistant messages that have tool_calls (OpenAI format) or
+  // tool_use content (Anthropic format) even when their text is empty — these
+  // rows serve as DOM anchors for tool card insertion on page reload.
   const visWithIdx=[];
   let rawIdx=0;
   for(const m of S.messages){
     if(!m||!m.role||m.role==='tool'){rawIdx++;continue;}
-    if(msgContent(m)||m.attachments?.length) visWithIdx.push({m,rawIdx});
+    const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
+    const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
+    if(msgContent(m)||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu))) visWithIdx.push({m,rawIdx});
     rawIdx++;
   }
   for(let vi=0;vi<visWithIdx.length;vi++){
@@ -521,6 +526,28 @@ function renderMessages(){
   // Insert settled tool call cards (history view only).
   // During live streaming, tool cards are rendered in #liveToolCards by the
   // tool SSE handler and never mixed into the message list until done fires.
+  //
+  // Fallback: if S.toolCalls is empty (sessions that predate session-level tool
+  // tracking, or runs that didn't go through the normal streaming path), build
+  // a display list from per-message tool_calls (OpenAI format) stored in each
+  // assistant message. This covers the reload case described in issue #140.
+  if(!S.busy && (!S.toolCalls||!S.toolCalls.length)){
+    const derived=[];
+    S.messages.forEach((m,rawIdx)=>{
+      if(m.role!=='assistant') return;
+      (m.tool_calls||[]).forEach(tc=>{
+        if(!tc||typeof tc!=='object') return;
+        const fn=tc.function||{};
+        const name=fn.name||tc.name||'tool';
+        let args={};
+        try{ args=JSON.parse(fn.arguments||'{}'); }catch(e){}
+        let argsSnap={};
+        Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });
+        derived.push({name,snippet:'',tid:tc.id||tc.call_id||'',assistant_msg_idx:rawIdx,args:argsSnap,done:true});
+      });
+    });
+    if(derived.length) S.toolCalls=derived;
+  }
   if(!S.busy && S.toolCalls && S.toolCalls.length){
     inner.querySelectorAll('.tool-card-row').forEach(el=>el.remove());
     const byAssistant = {};

@@ -293,6 +293,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             for msg_idx, m in enumerate(s.messages):
                 if m.get('role') == 'assistant':
                     c = m.get('content', '')
+                    # Anthropic format: content is a list with type=tool_use blocks
                     if isinstance(c, list):
                         for p in c:
                             if isinstance(p, dict) and p.get('type') == 'tool_use':
@@ -300,6 +301,22 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                                 pending_names[tid] = p.get('name', '')
                                 pending_args[tid] = p.get('input', {})
                                 pending_asst_idx[tid] = msg_idx
+                    # OpenAI format: tool_calls as top-level field on the message
+                    for tc in m.get('tool_calls', []):
+                        if not isinstance(tc, dict):
+                            continue
+                        tid = tc.get('id', '') or tc.get('call_id', '')
+                        fn = tc.get('function', {})
+                        name = fn.get('name', '')
+                        try:
+                            import json as _j
+                            args = _j.loads(fn.get('arguments', '{}') or '{}')
+                        except Exception:
+                            args = {}
+                        if tid and name:
+                            pending_names[tid] = name
+                            pending_args[tid] = args
+                            pending_asst_idx[tid] = msg_idx
                 elif m.get('role') == 'tool':
                     tid = m.get('tool_call_id') or m.get('tool_use_id', '')
                     name = pending_names.get(tid, '')
