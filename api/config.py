@@ -496,9 +496,20 @@ def get_available_models() -> dict:
     _hermes_auth_used = False
     try:
         from hermes_cli.models import list_available_providers as _lap
+        from hermes_cli.auth import get_auth_status as _gas
         for _p in _lap():
-            if _p.get('authenticated'):
-                detected_providers.add(_p['id'])
+            if not _p.get('authenticated'):
+                continue
+            # Exclude providers whose credential came from an ambient token
+            # (e.g. 'gh auth token' for Copilot on a machine with gh CLI auth).
+            # Only include providers with an explicit, dedicated credential.
+            try:
+                _src = _gas(_p['id']).get('key_source', '')
+                if _src == 'gh auth token':
+                    continue
+            except Exception:
+                pass
+            detected_providers.add(_p['id'])
         _hermes_auth_used = True
     except Exception:
         pass
