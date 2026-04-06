@@ -1061,7 +1061,7 @@ def _handle_chat_sync(handler, body):
             _api_key = None
             try:
                 from hermes_cli.runtime_provider import resolve_runtime_provider
-                _rt = resolve_runtime_provider()
+                _rt = resolve_runtime_provider(requested=_provider)
                 _api_key = _rt.get("api_key")
                 # Also use runtime provider/base_url if the webui config didn't resolve them
                 if not _provider:

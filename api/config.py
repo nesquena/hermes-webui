@@ -367,14 +367,16 @@ _PROVIDER_MODELS = {
 
 
 def resolve_model_provider(model_id: str) -> tuple:
-    """Resolve bare model name, provider, and base_url for AIAgent.
+    """Resolve model name, provider, and base_url for AIAgent.
 
-    Model IDs from the dropdown may include a provider prefix
-    (e.g. 'anthropic/claude-sonnet-4.6').  Direct-API providers expect
-    bare model names, while OpenRouter expects the full provider/model path.
+    Model IDs from the dropdown can be in several formats:
+      - 'claude-sonnet-4.6'          (bare name, uses config default provider)
+      - 'anthropic/claude-sonnet-4.6' (OpenRouter format, provider/model)
+      - '@minimax:MiniMax-M2.7'       (explicit provider hint from dropdown)
 
-    Also reads base_url from config.yaml so providers with custom endpoints
-    (e.g. MiniMax, Z.AI) are routed correctly.
+    The @provider:model format is used for models from non-default provider
+    groups in the dropdown, so we can route them through the correct provider
+    via resolve_runtime_provider(requested=provider) instead of the default.
 
     Returns (model, provider, base_url) where provider and base_url may be None.
     """
@@ -389,6 +391,13 @@ def resolve_model_provider(model_id: str) -> tuple:
     if not model_id:
         return model_id, config_provider, config_base_url
 
+    # @provider:model format — explicit provider hint from the dropdown.
+    # Route through that provider directly (resolve_runtime_provider will
+    # resolve credentials in streaming.py).
+    if model_id.startswith('@') and ':' in model_id:
+        provider_hint, bare_model = model_id[1:].split(':', 1)
+        return bare_model, provider_hint, None
+
     if '/' in model_id:
         prefix, bare = model_id.split('/', 1)
         # OpenRouter always needs the full provider/model path (e.g. openrouter/free,
@@ -402,7 +411,6 @@ def resolve_model_provider(model_id: str) -> tuple:
         # If prefix does NOT match config provider, the user picked a cross-provider model
         # from the OpenRouter dropdown (e.g. config=anthropic but picked openai/gpt-5.4-mini).
         # In this case always route through openrouter with the full provider/model string.
-        # Never strip the prefix and try a direct-API call to a provider whose key may not exist.
         if prefix in _PROVIDER_MODELS and prefix != config_provider:
             return model_id, 'openrouter', None
 
@@ -585,23 +593,23 @@ def get_available_models() -> dict:
                     'models': [{'id': m['id'], 'label': m['label']} for m in _FALLBACK_MODELS],
                 })
             elif pid in _PROVIDER_MODELS:
-                # For non-default providers, prefix model IDs with provider name
-                # so resolve_model_provider() can route them correctly (e.g.
-                # \"minimax/MiniMax-M2.7\" instead of bare \"MiniMax-M2.7\").
+                # For non-default providers, prefix model IDs with @provider:model
+                # so resolve_model_provider() routes through that specific provider
+                # via resolve_runtime_provider(requested=provider).
                 # The default provider's models keep bare names for direct API routing.
-                # Guard: only prefix when we have a confirmed active_provider, and
-                # normalise case before comparing (config.yaml may use 'Anthropic').
                 raw_models = _PROVIDER_MODELS[pid]
                 _active = (active_provider or '').lower()
                 if _active and pid != _active:
-                    # Shallow copy — don't mutate the shared _PROVIDER_MODELS list.
-                    # Bare IDs get prefixed; already-prefixed IDs pass through as-is.
                     models = []
                     for m in raw_models:
                         mid = m['id']
-                        models.append({'id': mid if '/' in mid else f'{pid}/{mid}', 'label': m['label']})
+                        # Don't double-prefix; use @provider: hint for bare names
+                        if mid.startswith('@') or '/' in mid:
+                            models.append({'id': mid, 'label': m['label']})
+                        else:
+                            models.append({'id': f'@{pid}:{mid}', 'label': m['label']})
                 else:
-                    models = list(raw_models)  # shallow copy to protect against insert() mutations
+                    models = list(raw_models)
                 groups.append({
                     'provider': provider_name,
                     'models': models,

@@ -143,11 +143,12 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 raise ImportError("AIAgent not available -- check that hermes-agent is on sys.path")
             resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(model)
 
-            # Resolve API key via Hermes runtime provider (matches gateway behaviour)
+            # Resolve API key via Hermes runtime provider (matches gateway behaviour).
+            # Pass the resolved provider so non-default providers get their own credentials.
             resolved_api_key = None
             try:
                 from hermes_cli.runtime_provider import resolve_runtime_provider
-                _rt = resolve_runtime_provider()
+                _rt = resolve_runtime_provider(requested=resolved_provider)
                 resolved_api_key = _rt.get("api_key")
                 if not resolved_provider:
                     resolved_provider = _rt.get("provider")

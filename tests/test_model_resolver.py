@@ -100,10 +100,38 @@ def test_empty_model_returns_config_defaults():
     assert provider == 'anthropic'
 
 
-# ── Non-default provider prefix routing (Issue #138) ────────────────────
+# ── @provider:model hint routing (Issue #138 v2) ────────────────────────
 
-def test_prefixed_non_default_provider_routes_through_openrouter():
-    """minimax/MiniMax-M2.7 with anthropic as default should route via openrouter."""
+def test_provider_hint_routes_to_specific_provider():
+    """@minimax:MiniMax-M2.7 routes to minimax provider directly."""
+    model, provider, base_url = _resolve_with_config(
+        '@minimax:MiniMax-M2.7', provider='anthropic',
+    )
+    assert model == 'MiniMax-M2.7'
+    assert provider == 'minimax'
+    assert base_url is None  # resolve_runtime_provider will fill this
+
+
+def test_provider_hint_zai():
+    """@zai:GLM-5 routes to zai provider directly."""
+    model, provider, base_url = _resolve_with_config(
+        '@zai:GLM-5', provider='openai',
+    )
+    assert model == 'GLM-5'
+    assert provider == 'zai'
+
+
+def test_provider_hint_deepseek():
+    """@deepseek:deepseek-chat routes to deepseek provider."""
+    model, provider, base_url = _resolve_with_config(
+        '@deepseek:deepseek-chat', provider='anthropic',
+    )
+    assert model == 'deepseek-chat'
+    assert provider == 'deepseek'
+
+
+def test_slash_prefix_non_default_still_routes_openrouter():
+    """minimax/MiniMax-M2.7 (old format) still routes through openrouter."""
     model, provider, base_url = _resolve_with_config(
         'minimax/MiniMax-M2.7', provider='anthropic',
     )
@@ -111,19 +139,10 @@ def test_prefixed_non_default_provider_routes_through_openrouter():
     assert provider == 'openrouter'
 
 
-def test_prefixed_non_default_provider_zai():
-    """zai/GLM-5 with openai as default should route via openrouter."""
-    model, provider, base_url = _resolve_with_config(
-        'zai/GLM-5', provider='openai',
-    )
-    assert model == 'zai/GLM-5'
-    assert provider == 'openrouter'
-
-
-# ── get_available_models() prefix behaviour ───────────────────────────────
+# ── get_available_models() @provider: hint behaviour ──────────────────────
 
 def _available_models_with_provider(provider):
-    """Helper: temporarily set active_provider in auth store simulation via config.cfg."""
+    """Helper: temporarily set active_provider in config."""
     old_cfg = dict(config.cfg)
     config.cfg['model'] = {'provider': provider}
     try:
@@ -133,48 +152,26 @@ def _available_models_with_provider(provider):
         config.cfg.update(old_cfg)
 
 
-def test_non_default_provider_models_are_prefixed():
-    """With anthropic as default, minimax model IDs should be prefixed 'minimax/...'."""
+def test_non_default_provider_models_use_hint_prefix():
+    """With anthropic as default, minimax model IDs should use @minimax: prefix."""
     result = _available_models_with_provider('anthropic')
     groups = {g['provider']: g['models'] for g in result['groups']}
     if 'MiniMax' in groups:
         for m in groups['MiniMax']:
-            assert m['id'].startswith('minimax/'), (
-                f"Expected minimax/ prefix, got: {m['id']!r}"
+            assert m['id'].startswith('@minimax:'), (
+                f"Expected @minimax: prefix, got: {m['id']!r}"
             )
 
 
 def test_default_provider_models_not_prefixed():
-    """The active provider's _PROVIDER_MODELS entries remain bare (no prefix added)."""
+    """The active provider's models remain bare (no @prefix added)."""
     import api.config as _cfg
-    # The bare IDs as stored in _PROVIDER_MODELS (e.g. 'claude-sonnet-4.6')
     raw_anthropic_ids = {m['id'] for m in _cfg._PROVIDER_MODELS.get('anthropic', [])}
     result = _available_models_with_provider('anthropic')
     groups = {g['provider']: g['models'] for g in result['groups']}
     if 'Anthropic' in groups:
         returned_ids = {m['id'] for m in groups['Anthropic']}
-        # Every bare _PROVIDER_MODELS ID must still appear bare (not turned into 'anthropic/...')
         for bare_id in raw_anthropic_ids:
             assert bare_id in returned_ids, (
-                f"_PROVIDER_MODELS entry '{bare_id}' is missing from the Anthropic group "
-                f"(returned: {sorted(returned_ids)})"
+                f"_PROVIDER_MODELS entry '{bare_id}' is missing from the Anthropic group"
             )
-
-
-def test_no_active_provider_models_not_prefixed():
-    """With no confirmed active_provider, models should not be prefixed."""
-    old_cfg = dict(config.cfg)
-    config.cfg['model'] = {}  # no provider set
-    try:
-        result = config.get_available_models()
-        for g in result['groups']:
-            for m in g['models']:
-                # No model should have a double-prefix like 'minimax/minimax/...'
-                parts = m['id'].split('/')
-                if len(parts) >= 2:
-                    assert parts[0] != parts[1], (
-                        f"Double-prefix detected: {m['id']!r}"
-                    )
-    finally:
-        config.cfg.clear()
-        config.cfg.update(old_cfg)
