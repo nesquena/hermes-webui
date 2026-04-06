@@ -424,11 +424,16 @@ function syncTopbar(){
   } else {
     const m=S.session.model||'';
     const applied=_applyModelToDropdown(m,$('modelSelect'));
-    // If the model isn't in the list at all, add it so the session value is preserved
+    // If the model isn't in the current provider list, add it as a visually marked
+    // "(unavailable)" entry so the session value is preserved without misleading the user.
+    // Selecting it will still attempt to send (same as before), but the label makes
+    // clear it's a stale model from a previous session.
     if(!applied && m){
       const opt=document.createElement('option');
       opt.value=m;
-      opt.textContent=getModelLabel(m);
+      opt.textContent=getModelLabel(m)+' (unavailable)';
+      opt.style.color='var(--muted, #888)';
+      opt.title='This model is no longer in your current provider list';
       $('modelSelect').appendChild(opt);
       $('modelSelect').value=m;
     }

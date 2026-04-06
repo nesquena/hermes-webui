@@ -640,9 +640,12 @@ def get_available_models() -> dict:
     # Ensure the user's configured default_model always appears in the dropdown.
     # It may be missing if the model isn't in any hardcoded list (e.g. openrouter/free,
     # a custom local model, or any model.default not in _FALLBACK_MODELS).
+    # Normalize before comparing: strip provider prefix so 'anthropic/claude-opus-4.6'
+    # matches 'claude-opus-4.6' already in the list and avoids a duplicate entry.
     if default_model:
-        all_ids = {m['id'] for g in groups for m in g.get('models', [])}
-        if default_model not in all_ids:
+        _norm = lambda mid: mid.split('/', 1)[-1] if '/' in mid else mid
+        all_ids_norm = {_norm(m['id']) for g in groups for m in g.get('models', [])}
+        if _norm(default_model) not in all_ids_norm:
             # Determine which group to inject into
             label = default_model.split('/')[-1] if '/' in default_model else default_model
             injected = False

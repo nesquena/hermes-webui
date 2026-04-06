@@ -163,6 +163,33 @@ def test_non_default_provider_models_use_hint_prefix():
             )
 
 
+def test_no_duplicate_when_default_model_is_prefixed():
+    """Issue #147 Bug 2: 'anthropic/claude-opus-4.6' as default_model must not
+    inject a duplicate alongside the existing bare 'claude-opus-4.6' entry in
+    the same provider group."""
+    import api.config as _cfg
+    old_cfg = dict(_cfg.cfg)
+    _cfg.cfg['model'] = {
+        'provider': 'anthropic',
+        'default': 'anthropic/claude-opus-4.6',
+    }
+    try:
+        result = _cfg.get_available_models()
+        norm = lambda mid: mid.split('/', 1)[-1] if '/' in mid else mid
+        # Check each group individually: no group should have two entries that
+        # normalize to the same bare model name
+        for g in result['groups']:
+            bare_ids = [norm(m['id']) for m in g['models']]
+            duplicates = [mid for mid in set(bare_ids) if bare_ids.count(mid) > 1]
+            assert not duplicates, (
+                f"Provider group '{g['provider']}' has duplicate models after normalization: "
+                f"{duplicates}\nFull group: {[m['id'] for m in g['models']]}"
+            )
+    finally:
+        _cfg.cfg.clear()
+        _cfg.cfg.update(old_cfg)
+
+
 def test_default_provider_models_not_prefixed():
     """The active provider's models remain bare (no @prefix added)."""
     import api.config as _cfg
