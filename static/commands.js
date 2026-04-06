@@ -11,6 +11,7 @@ const COMMANDS=[
   {name:'new',       desc:'Start a new chat session',            fn:cmdNew},
   {name:'usage',     desc:'Toggle token usage display on/off',   fn:cmdUsage},
   {name:'theme',     desc:'Switch theme (dark/light/slate/solarized/monokai/nord)', fn:cmdTheme, arg:'name'},
+  {name:'personality', desc:'Switch agent personality', fn:cmdPersonality, arg:'name'},
 ];
 
 function parseCommand(text){
@@ -137,6 +138,36 @@ async function cmdTheme(args){
   const sel=$('settingsTheme');
   if(sel)sel.value=t;
   showToast('Theme: '+t);
+}
+
+async function cmdPersonality(args){
+  if(!S.session){showToast('No active session');return;}
+  if(!args){
+    // List available personalities
+    try{
+      const data=await api('/api/personalities');
+      if(!data.personalities||!data.personalities.length){
+        showToast('No personalities found (add them to ~/.hermes/personalities/)');
+        return;
+      }
+      const list=data.personalities.map(p=>`  **${p.name}**${p.description?' — '+p.description:''}`).join('\n');
+      S.messages.push({role:'assistant',content:'Available personalities:\n\n'+list+'\n\nUse `/personality <name>` to switch, or `/personality none` to clear.'});
+      renderMessages();
+    }catch(e){showToast('Failed to load personalities');}
+    return;
+  }
+  const name=args.trim().toLowerCase();
+  if(name==='none'||name==='default'||name==='clear'){
+    try{
+      await api('/api/personality/set',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,name:''})});
+      showToast('Personality cleared');
+    }catch(e){showToast('Failed: '+e.message);}
+    return;
+  }
+  try{
+    const res=await api('/api/personality/set',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,name})});
+    showToast('Personality: '+name);
+  }catch(e){showToast('Failed: '+e.message);}
 }
 
 // ── Autocomplete dropdown ───────────────────────────────────────────────────

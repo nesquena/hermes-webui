@@ -218,6 +218,27 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == '/api/list':
         return _handle_list_dir(handler, parsed)
 
+    if parsed.path == '/api/personalities':
+        personalities = []
+        try:
+            from api.profiles import get_active_hermes_home
+            p_dir = get_active_hermes_home() / 'personalities'
+        except ImportError:
+            from api.config import HOME
+            p_dir = HOME / '.hermes' / 'personalities'
+        if p_dir.is_dir():
+            for d in sorted(p_dir.iterdir()):
+                if d.is_dir() and (d / 'SOUL.md').exists():
+                    desc = ''
+                    try:
+                        first_line = (d / 'SOUL.md').read_text(errors='replace').strip().split('\n')[0]
+                        if first_line.startswith('#'):
+                            desc = first_line.lstrip('#').strip()
+                    except Exception:
+                        pass
+                    personalities.append({'name': d.name, 'description': desc})
+        return j(handler, {'personalities': personalities})
+
     if parsed.path == '/api/git-info':
         qs = parse_qs(parsed.query)
         sid = qs.get('session_id', [''])[0]
@@ -364,6 +385,33 @@ def handle_post(handler, parsed) -> bool:
         s.title = str(body['title']).strip()[:80] or 'Untitled'
         s.save()
         return j(handler, {'session': s.compact()})
+
+    if parsed.path == '/api/personality/set':
+        try: require(body, 'session_id', 'name')
+        except ValueError as e: return bad(handler, str(e))
+        sid = body['session_id']
+        name = body['name'].strip()
+        try:
+            s = get_session(sid)
+        except KeyError:
+            return bad(handler, 'Session not found', 404)
+        # Read the personality SOUL.md
+        prompt = ''
+        if name:
+            try:
+                from api.profiles import get_active_hermes_home
+                p_dir = get_active_hermes_home() / 'personalities' / name
+            except ImportError:
+                from api.config import HOME
+                p_dir = HOME / '.hermes' / 'personalities' / name
+            soul_file = p_dir / 'SOUL.md'
+            if soul_file.exists():
+                prompt = soul_file.read_text(errors='replace').strip()
+            else:
+                return bad(handler, f'Personality "{name}" not found', 404)
+        s.personality = name if name else None
+        s.save()
+        return j(handler, {'ok': True, 'personality': name, 'prompt': prompt})
 
     if parsed.path == '/api/session/update':
         try: require(body, 'session_id')

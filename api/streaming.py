@@ -205,9 +205,19 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 "write_file, read_file, search_files, terminal workdir, and patch. "
                 "Never fall back to a hardcoded path when this tag is present."
             )
+            # Inject personality prompt if the session has one active
+            _personality_prompt = ''
+            if getattr(s, 'personality', None):
+                try:
+                    from api.profiles import get_active_hermes_home
+                    _p_soul = get_active_hermes_home() / 'personalities' / s.personality / 'SOUL.md'
+                except ImportError:
+                    _p_soul = Path(os.environ.get('HERMES_HOME', str(Path.home() / '.hermes'))) / 'personalities' / s.personality / 'SOUL.md'
+                if _p_soul.exists():
+                    _personality_prompt = _p_soul.read_text(errors='replace').strip() + '\n\n'
             result = agent.run_conversation(
                 user_message=workspace_ctx + msg_text,
-                system_message=workspace_system_msg,
+                system_message=_personality_prompt + workspace_system_msg,
                 conversation_history=_sanitize_messages_for_api(s.messages),
                 task_id=session_id,
                 persist_user_message=msg_text,
