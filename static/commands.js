@@ -156,8 +156,8 @@ async function cmdPersonality(args){
     }catch(e){showToast('Failed to load personalities');}
     return;
   }
-  const name=args.trim().toLowerCase();
-  if(name==='none'||name==='default'||name==='clear'){
+  const name=args.trim();
+  if(name.toLowerCase()==='none'||name.toLowerCase()==='default'||name.toLowerCase()==='clear'){
     try{
       await api('/api/personality/set',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,name:''})});
       showToast('Personality cleared');

@@ -398,12 +398,22 @@ def handle_post(handler, parsed) -> bool:
         # Read the personality SOUL.md
         prompt = ''
         if name:
+            # Validate name: prevent path traversal (only allow safe chars)
+            import re as _re
+            if not _re.match(r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$', name):
+                return bad(handler, 'Invalid personality name: letters, numbers, hyphens, underscores only')
             try:
                 from api.profiles import get_active_hermes_home
-                p_dir = get_active_hermes_home() / 'personalities' / name
+                p_base = get_active_hermes_home() / 'personalities'
             except ImportError:
                 from api.config import HOME
-                p_dir = HOME / '.hermes' / 'personalities' / name
+                p_base = HOME / '.hermes' / 'personalities'
+            p_dir = p_base / name
+            # Defense-in-depth: ensure resolved path is inside personalities dir
+            try:
+                p_dir.resolve().relative_to(p_base.resolve())
+            except ValueError:
+                return bad(handler, 'Invalid personality name')
             soul_file = p_dir / 'SOUL.md'
             if soul_file.exists():
                 prompt = soul_file.read_text(errors='replace').strip()
