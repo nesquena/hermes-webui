@@ -227,16 +227,29 @@ def handle_get(handler, parsed) -> bool:
             from api.config import HOME
             p_dir = HOME / '.hermes' / 'personalities'
         if p_dir.is_dir():
+            p_dir_real = p_dir.resolve()
             for d in sorted(p_dir.iterdir()):
-                if d.is_dir() and (d / 'SOUL.md').exists():
-                    desc = ''
-                    try:
-                        first_line = (d / 'SOUL.md').read_text(errors='replace').strip().split('\n')[0]
-                        if first_line.startswith('#'):
-                            desc = first_line.lstrip('#').strip()
-                    except Exception:
-                        pass
-                    personalities.append({'name': d.name, 'description': desc})
+                # Skip symlinks — they could point outside the personalities dir
+                if d.is_symlink():
+                    continue
+                if not d.is_dir():
+                    continue
+                soul_file = d / 'SOUL.md'
+                if not soul_file.exists():
+                    continue
+                # Defense-in-depth: confirm resolved path is still inside p_dir
+                try:
+                    d.resolve().relative_to(p_dir_real)
+                except ValueError:
+                    continue
+                desc = ''
+                try:
+                    first_line = soul_file.read_text(errors='replace').strip().split('\n')[0]
+                    if first_line.startswith('#'):
+                        desc = first_line.lstrip('#').strip()
+                except Exception:
+                    pass
+                personalities.append({'name': d.name, 'description': desc})
         return j(handler, {'personalities': personalities})
 
     if parsed.path == '/api/git-info':
@@ -387,8 +400,10 @@ def handle_post(handler, parsed) -> bool:
         return j(handler, {'session': s.compact()})
 
     if parsed.path == '/api/personality/set':
-        try: require(body, 'session_id', 'name')
+        try: require(body, 'session_id')
         except ValueError as e: return bad(handler, str(e))
+        if 'name' not in body:
+            return bad(handler, 'Missing required field: name')
         sid = body['session_id']
         name = body['name'].strip()
         try:
@@ -416,12 +431,16 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, 'Invalid personality name')
             soul_file = p_dir / 'SOUL.md'
             if soul_file.exists():
-                prompt = soul_file.read_text(errors='replace').strip()
+                from api.config import MAX_FILE_BYTES
+                raw = soul_file.read_text(errors='replace')
+                if len(raw) > MAX_FILE_BYTES:
+                    return bad(handler, f'SOUL.md for "{name}" exceeds maximum size ({MAX_FILE_BYTES} bytes)')
+                prompt = raw.strip()
             else:
                 return bad(handler, f'Personality "{name}" not found', 404)
         s.personality = name if name else None
         s.save()
-        return j(handler, {'ok': True, 'personality': name, 'prompt': prompt})
+        return j(handler, {'ok': True, 'personality': s.personality, 'prompt': prompt})
 
     if parsed.path == '/api/session/update':
         try: require(body, 'session_id')

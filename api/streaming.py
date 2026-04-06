@@ -219,7 +219,10 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 try:
                     _p_soul.resolve().relative_to(_p_base.resolve())
                     if _p_soul.exists():
-                        _personality_prompt = _p_soul.read_text(errors='replace').strip() + '\n\n'
+                        from api.config import MAX_FILE_BYTES
+                        _raw = _p_soul.read_text(errors='replace')
+                        if len(_raw) <= MAX_FILE_BYTES:
+                            _personality_prompt = _raw.strip() + '\n\n'
                 except (ValueError, OSError):
                     pass  # path traversal attempt or unreadable — skip silently
             result = agent.run_conversation(

@@ -94,6 +94,7 @@ class Session:
             'input_tokens': self.input_tokens,
             'output_tokens': self.output_tokens,
             'estimated_cost': self.estimated_cost,
+            'personality': self.personality,
         }
 
 def get_session(sid):
