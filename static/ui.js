@@ -237,7 +237,7 @@ function setStatus(t){
     txt.textContent=t;
     bar.style.display='';
     // Show dismiss X only for static/error messages, not transient busy ones
-    const transient = t.endsWith('…') || t === 'Hermes is thinking…';
+    const transient = t.endsWith('…') || t === (window._botName||'Hermes')+' is thinking…';
     if(dismiss)dismiss.style.display=(!transient && !S.busy)?'inline':'none';
   }
 }
@@ -334,47 +334,6 @@ async function refreshSession() {
     showToast('Conversation refreshed');
   } catch(e) { setStatus('Refresh failed: ' + e.message); }
 }
-// ── Update banner ──
-function _showUpdateBanner(data){
-  const parts=[];
-  if(data.webui&&data.webui.behind>0) parts.push(`WebUI: ${data.webui.behind} update${data.webui.behind>1?'s':''}`);
-  if(data.agent&&data.agent.behind>0) parts.push(`Agent: ${data.agent.behind} update${data.agent.behind>1?'s':''}`);
-  if(!parts.length)return;
-  const msg=$('updateMsg');
-  if(msg) msg.textContent='\u2B06 '+parts.join(', ')+' available';
-  const banner=$('updateBanner');
-  if(banner) banner.classList.add('visible');
-  window._updateData=data;
-}
-function dismissUpdate(){
-  const b=$('updateBanner');if(b)b.classList.remove('visible');
-  sessionStorage.setItem('hermes-update-dismissed','1');
-}
-async function applyUpdates(){
-  const btn=$('btnApplyUpdate');
-  if(btn){btn.disabled=true;btn.textContent='Updating\u2026';}
-  const targets=[];
-  if(window._updateData?.webui?.behind>0) targets.push('webui');
-  if(window._updateData?.agent?.behind>0) targets.push('agent');
-  try{
-    for(const target of targets){
-      const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify({target})});
-      if(!res.ok){
-        showToast('Update failed ('+target+'): '+(res.message||'unknown error'));
-        if(btn){btn.disabled=false;btn.textContent='Update Now';}
-        return;
-      }
-    }
-    showToast('Updated! Reloading\u2026');
-    sessionStorage.removeItem('hermes-update-checked');
-    sessionStorage.removeItem('hermes-update-dismissed');
-    setTimeout(()=>location.reload(),1500);
-  }catch(e){
-    showToast('Update failed: '+e.message);
-    if(btn){btn.disabled=false;btn.textContent='Update Now';}
-  }
-}
-
 async function checkInflightOnBoot(sid) {
   const raw = localStorage.getItem(INFLIGHT_KEY);
   if (!raw) return;
@@ -400,59 +359,26 @@ async function checkInflightOnBoot(sid) {
   } catch(e) { clearInflight(); }
 }
 
-function syncTopbar(){
-  if(!S.session){
-    document.title='Hermes';
-    // Show default workspace name even without a session
-    const sidebarName=$('sidebarWsName');
-    if(sidebarName && sidebarName.textContent==='Workspace'){
-      sidebarName.textContent='No workspace';
+    // 1. Fetch configuration from the server to get the brand identity
+    let config = { appName: 'Hermes', thinkingMessage: 'Hermes is thinking...' };
+    try {
+      config = await fetch('/api/config').then(r => r.json());
+    } catch(e) {
+      console.warn('Failed to fetch brand config, using defaults:', e.message);
     }
-    return;
-  }
-  const sessionTitle=S.session.title||'Untitled';
-  $('topbarTitle').textContent=sessionTitle;
-  document.title=sessionTitle+' \u2014 Hermes';
-  const vis=S.messages.filter(m=>m&&m.role&&m.role!=='tool');
-  $('topbarMeta').textContent=`${vis.length} messages`;
-  // If a profile switch just happened, apply its model rather than the session's stale value.
-  // S._pendingProfileModel is set by switchToProfile() and cleared here after one application.
-  const modelOverride=S._pendingProfileModel;
-  if(modelOverride){
-    S._pendingProfileModel=null;
-    _applyModelToDropdown(modelOverride,$('modelSelect'));
-  } else {
-    const m=S.session.model||'';
-    const applied=_applyModelToDropdown(m,$('modelSelect'));
-    // If the model isn't in the list at all, add it so the session value is preserved
-    if(!applied && m){
-      const opt=document.createElement('option');
-      opt.value=m;
-      opt.textContent=getModelLabel(m);
-      $('modelSelect').appendChild(opt);
-      $('modelSelect').value=m;
-    }
-  }
-  // Show Clear button only when session has messages
-  const clearBtn=$('btnClearConv');
-  if(clearBtn) clearBtn.style.display=(S.messages&&S.messages.filter(msg=>msg.role!=='tool').length>0)?'':'none';
-  const displayModel=$('modelSelect').value||m;
-  $('modelChip').textContent=getModelLabel(displayModel);
-  const ws=S.session.workspace||'';
-  // Update sidebar workspace display
-  const sidebarName=$('sidebarWsName');
-  const sidebarPath=$('sidebarWsPath');
-  if(sidebarName){
-    sidebarName.textContent=getWorkspaceFriendlyName(ws);
-  }
-  if(sidebarPath){
-    sidebarPath.textContent=ws;
-  }
-  // modelSelect already set above
-  // Update profile chip label
-  const profileLabel=$('profileChipLabel');
-  if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
-}
+
+    // 2. Apply config to the UI
+    const topbarTitle = $('topbarTitle');
+    if (topbarTitle) topbarTitle.textContent = config.appName;
+    
+    const sidebarHeaderH1 = document.querySelector('.sidebar-header h1');
+    if (sidebarHeaderH1) sidebarHeaderH1.textContent = config.appName;
+
+    const titleTag = document.querySelector('title');
+    if (titleTag) titleTag.textContent = config.appName;
+
+    const msgPlaceholder = $('msg');
+    if (msgPlaceholder) msgPlaceholder.placeholder = `Message ${config.appName}…`;
 
 function msgContent(m){
   // Extract plain text content from a message for filtering
@@ -505,7 +431,8 @@ function renderMessages(){
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="Regenerate response" onclick="regenerateResponse(this)">&#8635;</button>` : '';
     const tsVal=m._ts||m.timestamp;
     const tsTitle=tsVal?new Date(tsVal*1000).toLocaleString():'';
-    row.innerHTML=`<div class="msg-role ${m.role}" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon ${m.role}">${isUser?'Y':'H'}</div><span style="font-size:12px">${isUser?'You':'Hermes'}</span>${tsTitle?`<span class="msg-time">${new Date(tsVal*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</span>`:''}<span class="msg-actions">${editBtn}<button class="msg-copy-btn msg-action-btn" title="Copy" onclick="copyMsg(this)">&#128203;</button>${retryBtn}</span></div>${filesHtml}<div class="msg-body">${bodyHtml}</div>`;
+    const assistantName = S.config?.appName || 'Hermes';
+    row.innerHTML=`<div class="msg-role ${m.role}" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon ${m.role}">${isUser?'Y':'H'}</div><span style="font-size:12px">${isUser?'You':assistantName}</span>${tsTitle?`<span class="msg-time">${new Date(tsVal*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</span>`:''}<span class="msg-actions">${editBtn}<button class="msg-copy-btn msg-action-btn" title="Copy" onclick="copyMsg(this)">&#128203;</button>${retryBtn}</span></div>${filesHtml}<div class="msg-body">${bodyHtml}</div>`;
     row.dataset.rawText = String(content).trim();
     inner.appendChild(row);
   }
@@ -839,7 +766,7 @@ function renderMermaidBlocks(){
 function appendThinking(){
   $('emptyState').style.display='none';
   const row=document.createElement('div');row.className='msg-row';row.id='thinkingRow';
-  row.innerHTML=`<div class="msg-role assistant"><div class="role-icon assistant">H</div>Hermes</div><div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
+  row.innerHTML=`<div class="msg-role assistant"><div class="role-icon assistant">${(window._botName||'Hermes').charAt(0).toUpperCase()}</div>${window._botName||'Hermes'}</div><div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
   $('msgInner').appendChild(row);scrollToBottom();
 }
 function removeThinking(){const el=$('thinkingRow');if(el)el.remove();}
