@@ -5,6 +5,13 @@
 
 ---
 
+## [v0.38.3] — 2026-04-06
+
+### Fixed
+- **Model dropdown shows only configured providers** (#155): Provider detection now uses `hermes_cli.models.list_available_providers()` — the same auth check the Hermes agent uses at runtime — instead of scanning raw API key env vars. The dropdown now reflects exactly what the user has configured (auth.json, credential pools, OAuth flows like Copilot). When no providers are detected, shows only the configured default model rather than a full generic list. Added `copilot` and `gemini` to the curated model lists. Falls back to env var scanning for standalone installs without hermes-agent.
+
+---
+
 ## [v0.38.2] — 2026-04-06
 
 ### Fixed
