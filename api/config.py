@@ -525,9 +525,9 @@ def get_available_models() -> dict:
             # Normalize the base_url and build models endpoint
             base_url = cfg_base_url.strip()
             if base_url.endswith('/v1'):
-                endpoint_url = base_url[:-3] + '/models'
+                endpoint_url = base_url + '/models'  # /v1/models
             else:
-                endpoint_url = base_url + '/v1/models'
+                endpoint_url = base_url.rstrip('/') + '/v1/models'
 
             # Detect provider from base_url
             provider = 'custom'
@@ -547,12 +547,12 @@ def get_available_models() -> dict:
                 except ValueError:
                     pass
 
-            # Resolve API key from environment
+            # Resolve API key from environment (check both os.environ and .env keys)
             headers = {}
             api_key_vars = ('HERMES_API_KEY', 'HERMES_OPENAI_API_KEY', 'OPENAI_API_KEY',
                             'LOCAL_API_KEY', 'OPENROUTER_API_KEY', 'API_KEY')
             for key in api_key_vars:
-                api_key = os.getenv(key)
+                api_key = all_env.get(key) or os.getenv(key)
                 if api_key:
                     headers['Authorization'] = f'Bearer {api_key}'
                     break
@@ -581,6 +581,23 @@ def get_available_models() -> dict:
                     detected_providers.add(provider.lower())
         except Exception:
             pass  # custom endpoint unreachable or misconfigured -- fail silently
+
+    # 3b. Include models from custom_providers config entries
+    # These are explicitly configured by the user and should always appear,
+    # even if the /v1/models endpoint fetch failed.
+    custom_providers = cfg.get('custom_providers', [])
+    if isinstance(custom_providers, list):
+        _seen_custom_ids = {m['id'] for m in auto_detected_models}
+        for cp in custom_providers:
+            if not isinstance(cp, dict):
+                continue
+            cp_model = cp.get('model', '')
+            cp_name = cp.get('name', '')
+            if cp_model and cp_model not in _seen_custom_ids:
+                label = cp_model.split('/')[-1] if '/' in cp_model else cp_model
+                auto_detected_models.append({'id': cp_model, 'label': label})
+                _seen_custom_ids.add(cp_model)
+                detected_providers.add('custom')
 
     # 5. Build model groups
     if detected_providers:
