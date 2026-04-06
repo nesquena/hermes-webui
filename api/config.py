@@ -587,13 +587,21 @@ def get_available_models() -> dict:
             elif pid in _PROVIDER_MODELS:
                 # For non-default providers, prefix model IDs with provider name
                 # so resolve_model_provider() can route them correctly (e.g.
-                # "minimax/MiniMax-M2.7" instead of bare "MiniMax-M2.7").
+                # \"minimax/MiniMax-M2.7\" instead of bare \"MiniMax-M2.7\").
                 # The default provider's models keep bare names for direct API routing.
+                # Guard: only prefix when we have a confirmed active_provider, and
+                # normalise case before comparing (config.yaml may use 'Anthropic').
                 raw_models = _PROVIDER_MODELS[pid]
-                if pid != active_provider:
-                    models = [{'id': f'{pid}/{m["id"]}', 'label': m['label']} for m in raw_models]
+                _active = (active_provider or '').lower()
+                if _active and pid != _active:
+                    # Shallow copy — don't mutate the shared _PROVIDER_MODELS list.
+                    # Bare IDs get prefixed; already-prefixed IDs pass through as-is.
+                    models = []
+                    for m in raw_models:
+                        mid = m['id']
+                        models.append({'id': mid if '/' in mid else f'{pid}/{mid}', 'label': m['label']})
                 else:
-                    models = raw_models
+                    models = list(raw_models)  # shallow copy to protect against insert() mutations
                 groups.append({
                     'provider': provider_name,
                     'models': models,
