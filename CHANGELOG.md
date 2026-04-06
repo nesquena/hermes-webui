@@ -5,6 +5,13 @@
 
 ---
 
+## [v0.38.4] — 2026-04-06
+
+### Fixed
+- **Copilot false positive in model dropdown** (#158): `list_available_providers()` reported Copilot as available on any machine with `gh` CLI auth, because the Copilot token resolver falls back to `gh auth token`. The dropdown now skips any provider whose credential source is `'gh auth token'` — only explicit, dedicated credentials count. Users with `GITHUB_TOKEN` explicitly set in their `.env` still see Copilot correctly.
+
+---
+
 ## [v0.38.3] — 2026-04-06
 
 ### Fixed
