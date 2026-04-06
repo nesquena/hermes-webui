@@ -585,9 +585,18 @@ def get_available_models() -> dict:
                     'models': [{'id': m['id'], 'label': m['label']} for m in _FALLBACK_MODELS],
                 })
             elif pid in _PROVIDER_MODELS:
+                # For non-default providers, prefix model IDs with provider name
+                # so resolve_model_provider() can route them correctly (e.g.
+                # "minimax/MiniMax-M2.7" instead of bare "MiniMax-M2.7").
+                # The default provider's models keep bare names for direct API routing.
+                raw_models = _PROVIDER_MODELS[pid]
+                if pid != active_provider:
+                    models = [{'id': f'{pid}/{m["id"]}', 'label': m['label']} for m in raw_models]
+                else:
+                    models = raw_models
                 groups.append({
                     'provider': provider_name,
-                    'models': _PROVIDER_MODELS[pid],
+                    'models': models,
                 })
             else:
                 # Unknown provider -- use auto-detected models if available,

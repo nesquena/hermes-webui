@@ -98,3 +98,23 @@ def test_empty_model_returns_config_defaults():
     )
     assert model == ''
     assert provider == 'anthropic'
+
+
+# ── Non-default provider prefix routing (Issue #138) ────────────────────
+
+def test_prefixed_non_default_provider_routes_through_openrouter():
+    """minimax/MiniMax-M2.7 with anthropic as default should route via openrouter."""
+    model, provider, base_url = _resolve_with_config(
+        'minimax/MiniMax-M2.7', provider='anthropic',
+    )
+    assert model == 'minimax/MiniMax-M2.7'
+    assert provider == 'openrouter'
+
+
+def test_prefixed_non_default_provider_zai():
+    """zai/GLM-5 with openai as default should route via openrouter."""
+    model, provider, base_url = _resolve_with_config(
+        'zai/GLM-5', provider='openai',
+    )
+    assert model == 'zai/GLM-5'
+    assert provider == 'openrouter'
