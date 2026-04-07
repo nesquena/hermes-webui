@@ -96,10 +96,12 @@ def sync_session_usage(session_id: str, input_tokens: int=0, output_tokens: int=
         # Update message count
         if message_count is not None:
             try:
-                db._execute_write(
-                    "UPDATE sessions SET message_count = ? WHERE id = ?",
-                    (message_count, session_id),
-                )
+                def _set_msg_count(conn):
+                    conn.execute(
+                        "UPDATE sessions SET message_count = ? WHERE id = ?",
+                        (message_count, session_id),
+                    )
+                db._execute_write(_set_msg_count)
             except Exception:
                 pass
     except Exception:
