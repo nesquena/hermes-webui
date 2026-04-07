@@ -5,6 +5,13 @@
 
 ---
 
+## [v0.38.6] — 2026-04-07
+
+### Fixed
+- **`/insights` message count always 0 for WebUI sessions** (#163, #164): `sync_session_usage()` wrote token counts, cost, model, and title to `state.db` but never `message_count`. Both the streaming and sync chat paths now pass `len(s.messages)`. Note: `/insights` sync is opt-in — enable **Sync to Insights** in Settings (it's off by default).
+
+---
+
 ## [v0.38.5] — 2026-04-06
 
 ### Fixed
