@@ -366,6 +366,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                         estimated_cost=s.estimated_cost,
                         model=model,
                         title=s.title,
+                        message_count=len(s.messages),
                     )
             except Exception:
                 pass  # never crash the stream for sync failures

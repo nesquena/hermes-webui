@@ -1094,6 +1094,7 @@ def _handle_chat_sync(handler, body):
                 estimated_cost=s.estimated_cost,
                 model=s.model,
                 title=s.title,
+                message_count=len(s.messages),
             )
     except Exception:
         pass

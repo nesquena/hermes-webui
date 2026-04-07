@@ -66,7 +66,8 @@ def sync_session_start(session_id: str, model=None) -> None:
 
 
 def sync_session_usage(session_id: str, input_tokens: int=0, output_tokens: int=0,
-                       estimated_cost=None, model=None, title: str=None) -> None:
+                       estimated_cost=None, model=None, title: str=None,
+                       message_count: int=None) -> None:
     """Update token usage and title for a WebUI session in state.db.
     Called after each turn completes. Uses absolute=True to set totals
     (the WebUI Session already accumulates across turns).
@@ -90,6 +91,15 @@ def sync_session_usage(session_id: str, input_tokens: int=0, output_tokens: int=
         if title:
             try:
                 db.set_session_title(session_id, title)
+            except Exception:
+                pass
+        # Update message count
+        if message_count is not None:
+            try:
+                db._execute_write(
+                    "UPDATE sessions SET message_count = ? WHERE id = ?",
+                    (message_count, session_id),
+                )
             except Exception:
                 pass
     except Exception:
