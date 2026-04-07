@@ -1,7 +1,7 @@
 # Hermes Web UI: Browser Testing Plan
 
 > This document is for manual browser testing by you or by a Claude browser agent.
-> It covers user-facing features of the UI through Sprint 26 (v0.36).
+> It covers user-facing features of the UI through Sprint 26 (v0.36.2) and later releases.
 > Each section is written as a step-by-step test procedure with expected outcomes.
 > A browser agent (e.g. Claude with Chrome access) can execute this plan directly.
 >
