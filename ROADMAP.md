@@ -3,8 +3,8 @@
 > Goal: Full 1:1 parity with the Hermes CLI experience via a clean dark web UI.
 > Everything you can do from the CLI terminal, you can do from this UI.
 >
-> Last updated: v0.36 (April 5, 2026)
-> Tests: 433 total (433 passing, 0 failures)
+> Last updated: v0.39.0 (April 8, 2026)
+> Tests: 499 total (499 passing, 0 failures)
 > Source: <repo>/
 
 ---
@@ -47,6 +47,9 @@
 | v0.34.2 | Theme text colors | 5 new per-theme typography variables (--strong, --em, --code-text, --code-inline-bg, --pre-text) | 433 |
 | v0.34.3 | Light theme final polish | 46 light-scoped selector overrides for sidebar, roles, chips, interactive elements | 433 |
 | v0.35 | Security hardening | Env race fix, random signing key, upload path traversal, PBKDF2 password hash | 433 |
+| v0.36–v0.37 | Model routing, personality config, tool card reload, duplicate model fixes | Model routing by provider prefix, personality via config.yaml, tool cards reload on page refresh | 466 |
+| v0.38.0–v0.38.6 | Model selector, custom endpoints, OLED theme, reasoning display, insights sync | Custom endpoint URL fix, OLED theme, top-level reasoning field fix, message_count sync to state.db | 466 |
+| v0.39.0 | Security hardening (Sprint 29) | CSRF, PBKDF2, rate limiting, session ID validation, SSRF, ENV_LOCK, XSS, HMAC, skills traversal, secure cookie, error sanitization, startup warning | 499 |
 
 ---
 
