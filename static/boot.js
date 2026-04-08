@@ -4,8 +4,8 @@ async function cancelStream(){
   try{
     await fetch(new URL(`/api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,location.origin).href,{credentials:'include'});
     const btn=$('btnCancel');if(btn)btn.style.display='none';
-    setStatus('Cancelling…');
-  }catch(e){setStatus('Cancel failed: '+e.message);}
+    setStatus('正在取消...');
+  }catch(e){setStatus('取消失败：'+e.message);}
 }
 
 // ── Mobile navigation ──────────────────────────────────────────────────────
@@ -66,7 +66,7 @@ $('btnAttach').onclick=()=>$('fileInput').click();
   const recognition=new SpeechRecognition();
   recognition.continuous=false;
   recognition.interimResults=true;
-  recognition.lang='en-US';
+  recognition.lang='zh-CN';
 
   let _finalText='';
   let _prefix='';
@@ -108,11 +108,11 @@ $('btnAttach').onclick=()=>$('fileInput').click();
   recognition.onerror=(event)=>{
     _setRecording(false);
     const msgs={
-      'not-allowed':'Microphone access denied. Check browser permissions.',
-      'no-speech':'No speech detected. Try again.',
-      'network':'Speech recognition unavailable.',
+      'not-allowed':'麦克风访问被拒绝，请检查浏览器权限。',
+      'no-speech':'没有检测到语音，请再试一次。',
+      'network':'语音识别当前不可用。',
     };
-    showToast(msgs[event.error]||'Voice input error: '+event.error);
+    showToast(msgs[event.error]||'语音输入出错：'+event.error);
   };
 
   function _stopMic(){
@@ -160,10 +160,10 @@ $('importFileInput').onchange=async(e)=>{
     if(res.ok&&res.session){
       await loadSession(res.session.session_id);
       await renderSessionList();
-      showToast('Session imported');
+      showToast('会话已导入');
     }
   }catch(err){
-    showToast('Import failed: '+(err.message||'Invalid JSON'));
+    showToast('导入失败：'+(err.message||'JSON 无效'));
   }
 };
 // btnRefreshFiles is now panel-icon-btn in header (see HTML)
@@ -251,7 +251,7 @@ $('msg').addEventListener('paste',e=>{
     return new File([blob],`screenshot-${Date.now()}.${ext}`,{type:i.type});
   });
   addFiles(files);
-  setStatus(`Image pasted: ${files.map(f=>f.name).join(', ')}`);
+  setStatus(`已粘贴图片：${files.map(f=>f.name).join(', ')}`);
 });
 document.querySelectorAll('.suggestion').forEach(btn=>{
   btn.onclick=()=>{$('msg').value=btn.dataset.msg;send();};
@@ -356,4 +356,3 @@ function applyBotName(){
   $('emptyState').style.display='';
   await renderSessionList();
 })();
-

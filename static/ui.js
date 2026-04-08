@@ -285,7 +285,7 @@ function updateQueueBadge(){
       badge.style.cssText='position:fixed;bottom:80px;right:24px;background:rgba(124,185,255,.18);border:1px solid rgba(124,185,255,.4);color:var(--blue);font-size:12px;font-weight:600;padding:6px 14px;border-radius:20px;z-index:50;pointer-events:none;backdrop-filter:blur(8px);';
       document.body.appendChild(badge);
     }
-    badge.textContent=MSG_QUEUE.length===1?'1 message queued':`${MSG_QUEUE.length} messages queued`;
+    badge.textContent=MSG_QUEUE.length===1?'1 条消息排队中':`${MSG_QUEUE.length} 条消息排队中`;
   } else {
     if(badge) badge.remove();
   }
@@ -299,7 +299,7 @@ function copyMsg(btn){
   navigator.clipboard.writeText(text).then(()=>{
     const orig=btn.innerHTML;btn.innerHTML='&#10003;';btn.style.color='var(--blue)';
     setTimeout(()=>{btn.innerHTML=orig;btn.style.color='';},1500);
-  }).catch(()=>showToast('Copy failed'));
+  }).catch(()=>showToast('复制失败'));
 }
 
 // ── Reconnect banner (B4/B5: reload resilience) ──
@@ -312,7 +312,7 @@ function clearInflight() {
   localStorage.removeItem(INFLIGHT_KEY);
 }
 function showReconnectBanner(msg) {
-  $('reconnectMsg').textContent = msg || 'A response may have been in progress when you last left.';
+  $('reconnectMsg').textContent = msg || '你上次离开时可能还有回复在生成。';
   $('reconnectBanner').classList.add('visible');
 }
 function dismissReconnect() {
@@ -331,17 +331,17 @@ async function refreshSession() {
       return true;
     });
     syncTopbar(); renderMessages();
-    showToast('Conversation refreshed');
-  } catch(e) { setStatus('Refresh failed: ' + e.message); }
+    showToast('对话已刷新');
+  } catch(e) { setStatus('刷新失败：' + e.message); }
 }
 // ── Update banner ──
 function _showUpdateBanner(data){
   const parts=[];
-  if(data.webui&&data.webui.behind>0) parts.push(`WebUI: ${data.webui.behind} update${data.webui.behind>1?'s':''}`);
-  if(data.agent&&data.agent.behind>0) parts.push(`Agent: ${data.agent.behind} update${data.agent.behind>1?'s':''}`);
+  if(data.webui&&data.webui.behind>0) parts.push(`WebUI：${data.webui.behind} 个更新`);
+  if(data.agent&&data.agent.behind>0) parts.push(`Agent：${data.agent.behind} 个更新`);
   if(!parts.length)return;
   const msg=$('updateMsg');
-  if(msg) msg.textContent='\u2B06 '+parts.join(', ')+' available';
+  if(msg) msg.textContent='\u2B06 可用更新：'+parts.join('，');
   const banner=$('updateBanner');
   if(banner) banner.classList.add('visible');
   window._updateData=data;
@@ -352,7 +352,7 @@ function dismissUpdate(){
 }
 async function applyUpdates(){
   const btn=$('btnApplyUpdate');
-  if(btn){btn.disabled=true;btn.textContent='Updating\u2026';}
+  if(btn){btn.disabled=true;btn.textContent='更新中...';}
   const targets=[];
   if(window._updateData?.webui?.behind>0) targets.push('webui');
   if(window._updateData?.agent?.behind>0) targets.push('agent');
@@ -360,18 +360,18 @@ async function applyUpdates(){
     for(const target of targets){
       const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify({target})});
       if(!res.ok){
-        showToast('Update failed ('+target+'): '+(res.message||'unknown error'));
-        if(btn){btn.disabled=false;btn.textContent='Update Now';}
+        showToast('更新失败（'+target+'）：'+(res.message||'未知错误'));
+        if(btn){btn.disabled=false;btn.textContent='立即更新';}
         return;
       }
     }
-    showToast('Updated! Reloading\u2026');
+    showToast('更新完成，正在重新加载...');
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
     setTimeout(()=>location.reload(),1500);
   }catch(e){
-    showToast('Update failed: '+e.message);
-    if(btn){btn.disabled=false;btn.textContent='Update Now';}
+    showToast('更新失败：'+e.message);
+    if(btn){btn.disabled=false;btn.textContent='立即更新';}
   }
 }
 
@@ -387,12 +387,12 @@ async function checkInflightOnBoot(sid) {
     const status = await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId || '')}`);
     if (status.active) {
       // Stream is genuinely still running -- show the banner
-      showReconnectBanner('A response is still being generated. Reload when ready?');
+      showReconnectBanner('回复仍在生成中，准备好后要重新加载吗？');
     } else {
       // Stream finished. Only show banner if reload happened within 90 seconds
       // (longer gap = normal completed session, not a mid-stream reload)
       if (Date.now() - ts < 90 * 1000) {
-        showReconnectBanner('A response was in progress when you last left. Messages may have updated.');
+        showReconnectBanner('你离开时有回复正在生成，消息内容可能已经更新。');
       } else {
         clearInflight();  // completed normally, no banner needed
       }
@@ -406,15 +406,15 @@ function syncTopbar(){
     // Show default workspace name even without a session
     const sidebarName=$('sidebarWsName');
     if(sidebarName && sidebarName.textContent==='Workspace'){
-      sidebarName.textContent='No workspace';
+      sidebarName.textContent='未选择工作区';
     }
     return;
   }
-  const sessionTitle=S.session.title||'Untitled';
+  const sessionTitle=S.session.title||'未命名';
   $('topbarTitle').textContent=sessionTitle;
   document.title=sessionTitle+' \u2014 '+(window._botName||'Hermes');
   const vis=S.messages.filter(m=>m&&m.role&&m.role!=='tool');
-  $('topbarMeta').textContent=`${vis.length} messages`;
+  $('topbarMeta').textContent=`${vis.length} 条消息`;
   // If a profile switch just happened, apply its model rather than the session's stale value.
   // S._pendingProfileModel is set by switchToProfile() and cleared here after one application.
   const modelOverride=S._pendingProfileModel;
@@ -431,9 +431,9 @@ function syncTopbar(){
     if(!applied && m){
       const opt=document.createElement('option');
       opt.value=m;
-      opt.textContent=getModelLabel(m)+' (unavailable)';
+      opt.textContent=getModelLabel(m)+'（不可用）';
       opt.style.color='var(--muted, #888)';
-      opt.title='This model is no longer in your current provider list';
+      opt.title='这个模型已经不在当前 provider 列表中';
       $('modelSelect').appendChild(opt);
       $('modelSelect').value=m;
     }
@@ -508,7 +508,7 @@ function renderMessages(){
     // Render thinking card before the assistant message (collapsed by default)
     if(thinkingText&&!isUser){
       const thinkRow=document.createElement('div');thinkRow.className='msg-row thinking-card-row';
-      thinkRow.innerHTML=`<div class="thinking-card"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">&#128161;</span><span class="thinking-card-label">Thinking</span><span class="thinking-card-toggle">&#9656;</span></div><div class="thinking-card-body"><pre>${esc(thinkingText)}</pre></div></div>`;
+      thinkRow.innerHTML=`<div class="thinking-card"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">&#128161;</span><span class="thinking-card-label">思考过程</span><span class="thinking-card-toggle">&#9656;</span></div><div class="thinking-card-body"><pre>${esc(thinkingText)}</pre></div></div>`;
       inner.appendChild(thinkRow);
     }
     const row=document.createElement('div');row.className='msg-row';
@@ -518,12 +518,12 @@ function renderMessages(){
       filesHtml=`<div class="msg-files">${m.attachments.map(f=>`<div class="msg-file-badge">&#128206; ${esc(f)}</div>`).join('')}</div>`;
     const bodyHtml = isUser ? esc(String(content)).replace(/\n/g,'<br>') : renderMd(String(content));
     // Action buttons for this bubble
-    const editBtn  = isUser  ? `<button class="msg-action-btn" title="Edit message" onclick="editMessage(this)">&#9998;</button>` : '';
-    const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="Regenerate response" onclick="regenerateResponse(this)">&#8635;</button>` : '';
+    const editBtn  = isUser  ? `<button class="msg-action-btn" title="编辑消息" onclick="editMessage(this)">&#9998;</button>` : '';
+    const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="重新生成回复" onclick="regenerateResponse(this)">&#8635;</button>` : '';
     const tsVal=m._ts||m.timestamp;
     const tsTitle=tsVal?new Date(tsVal*1000).toLocaleString():'';
     const _bn=window._botName||'Hermes';
-    row.innerHTML=`<div class="msg-role ${m.role}" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon ${m.role}">${isUser?'Y':esc(_bn.charAt(0).toUpperCase())}</div><span style="font-size:12px">${isUser?'You':esc(_bn)}</span>${tsTitle?`<span class="msg-time">${new Date(tsVal*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</span>`:''}<span class="msg-actions">${editBtn}<button class="msg-copy-btn msg-action-btn" title="Copy" onclick="copyMsg(this)">&#128203;</button>${retryBtn}</span></div>${filesHtml}<div class="msg-body">${bodyHtml}</div>`;
+    row.innerHTML=`<div class="msg-role ${m.role}" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon ${m.role}">${isUser?'Y':esc(_bn.charAt(0).toUpperCase())}</div><span style="font-size:12px">${isUser?'你':esc(_bn)}</span>${tsTitle?`<span class="msg-time">${new Date(tsVal*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</span>`:''}<span class="msg-actions">${editBtn}<button class="msg-copy-btn msg-action-btn" title="复制" onclick="copyMsg(this)">&#128203;</button>${retryBtn}</span></div>${filesHtml}<div class="msg-body">${bodyHtml}</div>`;
     row.dataset.rawText = String(content).trim();
     inner.appendChild(row);
   }
@@ -601,10 +601,10 @@ function renderMessages(){
         // Collect card elements before they get moved to DOM
         const cardEls=Array.from(frag.querySelectorAll('.tool-card'));
         const expandBtn=document.createElement('button');
-        expandBtn.textContent='Expand all';
+        expandBtn.textContent='全部展开';
         expandBtn.onclick=()=>cardEls.forEach(c=>c.classList.add('open'));
         const collapseBtn=document.createElement('button');
-        collapseBtn.textContent='Collapse all';
+        collapseBtn.textContent='全部折叠';
         collapseBtn.onclick=()=>cardEls.forEach(c=>c.classList.remove('open'));
         toggle.appendChild(expandBtn);
         toggle.appendChild(collapseBtn);
@@ -791,7 +791,7 @@ async function submitEdit(msgIdx, newText) {
     // Now send the edited message as a new chat
     $('msg').value = newText;
     await send();
-  } catch(e) { setStatus('Edit failed: ' + e.message); }
+  } catch(e) { setStatus('编辑失败：' + e.message); }
 }
 
 async function regenerateResponse(btn) {
@@ -817,7 +817,7 @@ async function regenerateResponse(btn) {
     renderMessages();
     $('msg').value = lastUserText;
     await send();
-  } catch(e) { setStatus('Regenerate failed: ' + e.message); }
+  } catch(e) { setStatus('重新生成失败：' + e.message); }
 }
 
 function highlightCode(container) {
@@ -836,12 +836,12 @@ function addCopyButtons(container){
     if(pre.querySelector('.code-copy-btn')) return;
     const btn=document.createElement('button');
     btn.className='code-copy-btn';
-    btn.textContent='Copy';
+    btn.textContent='复制';
     btn.onclick=(e)=>{
       e.stopPropagation();
       navigator.clipboard.writeText(codeEl.textContent).then(()=>{
-        btn.textContent='Copied!';
-        setTimeout(()=>{btn.textContent='Copy';},1500);
+        btn.textContent='已复制';
+        setTimeout(()=>{btn.textContent='复制';},1500);
       });
     };
     const header=pre.previousElementSibling;
@@ -994,7 +994,7 @@ function _renderTreeItems(container, entries, depth){
 
     // Name
     const nameEl=document.createElement('span');
-    nameEl.className='file-name';nameEl.textContent=item.name;nameEl.title='Double-click to rename';
+    nameEl.className='file-name';nameEl.textContent=item.name;nameEl.title='双击重命名';
     nameEl.ondblclick=(e)=>{
       e.stopPropagation();
       // For directories, double-click navigates (breadcrumb view)
@@ -1011,11 +1011,11 @@ function _renderTreeItems(container, entries, depth){
               await api('/api/file/rename',{method:'POST',body:JSON.stringify({
                 session_id:S.session.session_id,path:item.path,new_name:newName
               })});
-              showToast(`Renamed to ${newName}`);
+              showToast(`已重命名为 ${newName}`);
               // Invalidate cache and re-render
               delete S._dirCache[S.currentDir];
               await loadDir(S.currentDir);
-            }catch(err){showToast('Rename failed: '+err.message);}
+            }catch(err){showToast('重命名失败：'+err.message);}
           }
         }
         inp.replaceWith(nameEl);
@@ -1041,7 +1041,7 @@ function _renderTreeItems(container, entries, depth){
     // Delete button -- for files
     if(item.type==='file'){
       const del=document.createElement('button');
-      del.className='file-del-btn';del.title='Delete';del.textContent='\u00d7';
+      del.className='file-del-btn';del.title='删除';del.textContent='\u00d7';
       del.onclick=async(e)=>{e.stopPropagation();await deleteWorkspaceFile(item.path,item.name);};
       el.appendChild(del);
     }
@@ -1082,7 +1082,7 @@ function _renderTreeItems(container, entries, depth){
         const empty=document.createElement('div');
         empty.className='file-item file-empty';
         empty.style.paddingLeft=(8+(depth+1)*16)+'px';
-        empty.textContent='(empty)';
+        empty.textContent='(空)';
         container.appendChild(empty);
       }
     }
@@ -1091,39 +1091,39 @@ function _renderTreeItems(container, entries, depth){
 
 async function deleteWorkspaceFile(relPath, name){
   if(!S.session)return;
-  if(!confirm(`Delete ${name}?`))return;
+  if(!confirm(`要删除 ${name} 吗？`))return;
   try{
     await api('/api/file/delete',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath})});
-    showToast(`Deleted ${name}`);
+    showToast(`已删除 ${name}`);
     // Close preview if we just deleted the viewed file
     if($('previewPathText').textContent===relPath)$('btnClearPreview').onclick();
     await loadDir(S.currentDir);
-  }catch(e){setStatus('Delete failed: '+e.message);}
+  }catch(e){setStatus('删除失败：'+e.message);}
 }
 
 async function promptNewFile(){
   if(!S.session)return;
-  const name=prompt('New file name (e.g. notes.md):','');
+  const name=prompt('新文件名（例如 notes.md）：','');
   if(!name||!name.trim())return;
   const relPath=S.currentDir==='.'?name.trim():(S.currentDir+'/'+name.trim());
   try{
     await api('/api/file/create',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath,content:''})});
-    showToast(`Created ${name.trim()}`);
+    showToast(`已创建 ${name.trim()}`);
     await loadDir(S.currentDir);
     openFile(relPath);
-  }catch(e){setStatus('Create failed: '+e.message);}
+  }catch(e){setStatus('创建失败：'+e.message);}
 }
 
 async function promptNewFolder(){
   if(!S.session)return;
-  const name=prompt('New folder name:','');
+  const name=prompt('新文件夹名称：','');
   if(!name||!name.trim())return;
   const relPath=S.currentDir==='.'?name.trim():(S.currentDir+'/'+name.trim());
   try{
     await api('/api/file/create-dir',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath})});
-    showToast(`Created folder ${name.trim()}`);
+    showToast(`已创建文件夹 ${name.trim()}`);
     await loadDir(S.currentDir);
-  }catch(e){setStatus('Create folder failed: '+e.message);}
+  }catch(e){setStatus('创建文件夹失败：'+e.message);}
 }
 
 function renderTray(){
@@ -1133,7 +1133,7 @@ function renderTray(){
   updateSendBtn();
   S.pendingFiles.forEach((f,i)=>{
     const chip=document.createElement('div');chip.className='attach-chip';
-    chip.innerHTML=`&#128206; ${esc(f.name)} <button title="Remove">&#10005;</button>`;
+    chip.innerHTML=`&#128206; ${esc(f.name)} <button title="移除">&#10005;</button>`;
     chip.querySelector('button').onclick=()=>{S.pendingFiles.splice(i,1);renderTray();};
     tray.appendChild(chip);
   });
@@ -1155,12 +1155,11 @@ async function uploadPendingFiles(){
       const data=await res.json();
       if(data.error)throw new Error(data.error);
       names.push(data.filename);
-    }catch(e){failures++;setStatus(`\u274c Upload failed: ${f.name} \u2014 ${e.message}`);}
+    }catch(e){failures++;setStatus(`\u274c 上传失败：${f.name} - ${e.message}`);}
     bar.style.width=`${Math.round((i+1)/total*100)}%`;
   }
   barWrap.classList.remove('active');bar.style.width='0%';
   S.pendingFiles=[];renderTray();
-  if(failures===total&&total>0)throw new Error(`All ${total} upload(s) failed`);
+  if(failures===total&&total>0)throw new Error(`${total} 个文件全部上传失败`);
   return names;
 }
-

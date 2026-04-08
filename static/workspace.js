@@ -54,7 +54,7 @@ async function loadDir(path){
     }
     if(typeof clearPreview==='function'){
       if(typeof _previewDirty!=='undefined'&&_previewDirty){
-        if(confirm('You have unsaved changes in the preview. Discard and navigate?'))clearPreview();
+        if(confirm('预览区有未保存修改，要放弃更改并继续跳转吗？'))clearPreview();
       }else{
         clearPreview();
       }
@@ -131,8 +131,8 @@ function updateEditBtn(){
   const editable = _previewCurrentMode==='code'||_previewCurrentMode==='md';
   btn.style.display = editable?'':'none';
   const editing = $('previewEditArea').style.display!=='none';
-  btn.innerHTML = editing ? '&#128190; Save' : '&#9998; Edit';
-  btn.title = editing ? 'Save changes' : 'Edit this file';
+  btn.innerHTML = editing ? '&#128190; 保存' : '&#9998; 编辑';
+  btn.title = editing ? '保存修改' : '编辑此文件';
   btn.style.color = editing ? 'var(--blue)' : '';
   if(_previewDirty) btn.innerHTML = '&#128190; Save*';
 }
@@ -154,8 +154,8 @@ async function toggleEditMode(){
       $('previewEditArea').style.display='none';
       if(_previewCurrentMode==='code') $('previewCode').style.display='';
       else $('previewMd').style.display='';
-      showToast('Saved');
-    }catch(e){setStatus('Save failed: '+e.message);}
+      showToast('已保存');
+    }catch(e){setStatus('保存失败：'+e.message);}
   }else{
     // Enter edit mode: populate textarea with current content
     const currentText = _previewCurrentMode==='code'
@@ -206,7 +206,7 @@ async function openFile(path){
     const url=`/api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}`;
     $('previewImg').alt=path;
     $('previewImg').src=url;
-    $('previewImg').onerror=()=>setStatus('Could not load image');
+    $('previewImg').onerror=()=>setStatus('图片加载失败');
   } else if(MD_EXTS.has(ext)){
     // Markdown: fetch text, render with renderMd, display as formatted HTML
     try{
@@ -214,7 +214,7 @@ async function openFile(path){
       showPreview('md');
       _previewRawContent = data.content;
       $('previewMd').innerHTML=renderMd(data.content);
-    }catch(e){setStatus('Could not open file');}
+    }catch(e){setStatus('无法打开文件');}
   } else {
     // Plain code / text -- but fall back to download if server signals binary
     try{
@@ -242,6 +242,5 @@ function downloadFile(path){
   a.href=url;a.download=filename;
   document.body.appendChild(a);a.click();
   setTimeout(()=>document.body.removeChild(a),100);
-  showToast(`Downloading ${filename}\u2026`,2000);
+  showToast(`正在下载 ${filename}...`,2000);
 }
-

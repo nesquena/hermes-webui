@@ -13,7 +13,7 @@ async function send(){
       MSG_QUEUE.push(text);
       $('msg').value='';autoResize();
       updateQueueBadge();
-      showToast(`Queued: "${text.slice(0,40)}${text.length>40?'\u2026':''}"`,2000);
+      showToast(`已排队："${text.slice(0,40)}${text.length>40?'\u2026':''}"`,2000);
     }
     return;
   }
@@ -21,7 +21,7 @@ async function send(){
 
   const activeSid=S.session.session_id;
 
-  setStatus(S.pendingFiles&&S.pendingFiles.length?'Uploading…':'Sending…');
+  setStatus(S.pendingFiles&&S.pendingFiles.length?'正在上传...':'正在发送...');
   let uploaded=[];
   try{uploaded=await uploadPendingFiles();}
   catch(e){if(!text){setStatus(`❌ ${e.message}`);return;}}
@@ -29,7 +29,7 @@ async function send(){
   let msgText=text;
   if(uploaded.length&&!msgText)msgText=`I've uploaded ${uploaded.length} file(s): ${uploaded.join(', ')}`;
   else if(uploaded.length)msgText=`${text}\n\n[Attached files: ${uploaded.join(', ')}]`;
-  if(!msgText){setStatus('Nothing to send');return;}
+  if(!msgText){setStatus('没有可发送的内容');return;}
 
   $('msg').value='';autoResize();
   const displayText=text||(uploaded.length?`Uploaded: ${uploaded.join(', ')}`:'(file upload)');
@@ -183,9 +183,9 @@ async function send(){
       if(!S.session||S.session.session_id!==activeSid) return;
       try{
         const d=JSON.parse(e.data);
-        const sysMsg={role:'assistant',content:'*[Context was auto-compressed to continue the conversation]*'};
+        const sysMsg={role:'assistant',content:'*[上下文已自动压缩，以便继续对话]*'};
         S.messages.push(sysMsg);
-        showToast(d.message||'Context compressed');
+        showToast(d.message||'上下文已压缩');
       }catch(err){}
     });
 
@@ -202,11 +202,11 @@ async function send(){
           const d=JSON.parse(e.data);
           const isRateLimit=d.type==='rate_limit';
           const icon=isRateLimit?'⏱️':'⚠️';
-          const label=isRateLimit?'Rate limit reached':'Error';
+          const label=isRateLimit?'已触发速率限制':'错误';
           const hint=d.hint?`\n\n*${d.hint}*`:'';
           S.messages.push({role:'assistant',content:`**${icon} ${label}:** ${d.message}${hint}`});
         }catch(_){
-          S.messages.push({role:'assistant',content:'**⚠️ Error:** An error occurred. Check server logs.'});
+          S.messages.push({role:'assistant',content:'**⚠️ 错误：** 发生异常，请查看服务端日志。'});
         }
         renderMessages();
       }else if(typeof trackBackgroundError==='function'){
@@ -223,7 +223,7 @@ async function send(){
       try{
         const d=JSON.parse(e.data);
         // Show as a small inline notice, not a full error
-        setStatus(`⚠️ ${d.message||'Warning'}`);
+        setStatus(`⚠️ ${d.message||'警告'}`);
         // If it's a fallback notice, show it briefly then clear
         if(d.type==='fallback') setTimeout(()=>setStatus(''),4000);
       }catch(_){}
@@ -234,12 +234,12 @@ async function send(){
       // Attempt one reconnect if the stream is still active server-side
       if(!_reconnectAttempted && streamId){
         _reconnectAttempted=true;
-        setStatus('Connection lost \u2014 reconnecting\u2026');
+        setStatus('连接已断开，正在重连...');
         setTimeout(async()=>{
           try{
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
             if(st.active){
-              setStatus('Reconnected');
+              setStatus('已重新连接');
               _wireSSE(new EventSource(new URL(`/api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,location.origin).href,{withCredentials:true}));
               return;
             }
@@ -273,16 +273,16 @@ async function send(){
     if(S.session&&S.session.session_id===activeSid){
       S.activeStreamId=null;const _cbe=$('btnCancel');if(_cbe)_cbe.style.display='none';
       clearLiveToolCards();if(!assistantText)removeThinking();
-      S.messages.push({role:'assistant',content:'**Error:** Connection lost'});renderMessages();
+      S.messages.push({role:'assistant',content:'**错误：** 连接已断开'});renderMessages();
     }else{
       // User switched away — show background error banner
       if(typeof trackBackgroundError==='function'){
         // Look up session title from the session list cache so the banner names it correctly
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
-        trackBackgroundError(activeSid,_errTitle,'Connection lost');
+        trackBackgroundError(activeSid,_errTitle,'连接已断开');
       }
     }
-    if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setStatus('Error: Connection lost');}
+    if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setStatus('错误：连接已断开');}
   }
 
   _wireSSE(new EventSource(new URL(`/api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,location.origin).href,{withCredentials:true}));
@@ -291,7 +291,7 @@ async function send(){
 
 function transcript(){
   const lines=[`# Hermes session ${S.session?.session_id||''}`,``,
-    `Workspace: ${S.session?.workspace||''}`,`Model: ${S.session?.model||''}`,``];
+    `工作区：${S.session?.workspace||''}`,`模型：${S.session?.model||''}`,``];
   for(const m of S.messages){
     if(!m||m.role==='tool')continue;
     let c=m.content||'';
@@ -361,4 +361,3 @@ function stopApprovalPolling() {
   if (_approvalPollTimer) { clearInterval(_approvalPollTimer); _approvalPollTimer = null; }
 }
 // ── Panel navigation (Chat / Tasks / Skills / Memory) ──
-

@@ -74,8 +74,8 @@ except ImportError:
 
 # ── Login page (self-contained, no external deps) ────────────────────────────
 _LOGIN_PAGE_HTML = '''<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{{BOT_NAME}} — Sign in</title>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{BOT_NAME}} - 登录</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#1a1a2e;color:#e8e8f0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
@@ -100,11 +100,11 @@ button:hover{background:rgba(124,185,255,.25)}
 <div class="card">
   <div class="logo">{{BOT_NAME_INITIAL}}</div>
   <h1>{{BOT_NAME}}</h1>
-  <p class="sub">Enter your password to continue</p>
+  <p class="sub">输入密码继续使用</p>
   <form onsubmit="doLogin(event);return false">
-    <input type="password" id="pw" placeholder="Password" autofocus
+    <input type="password" id="pw" placeholder="密码" autofocus
            onkeydown="if(event.key==='Enter'){doLogin(event);event.preventDefault();}">
-    <button type="submit">Sign in</button>
+    <button type="submit">登录</button>
   </form>
   <div class="err" id="err"></div>
 </div>
@@ -120,8 +120,8 @@ async function doLogin(e){
       body:JSON.stringify({password:pw}),credentials:'include'});
     const data=await res.json();
     if(res.ok&&data.ok){window.location.href='/';}
-    else{err.textContent=data.error||'Invalid password';err.style.display='block';}
-  }catch(ex){err.textContent='Connection failed';err.style.display='block';}
+    else{err.textContent=data.error||'密码错误';err.style.display='block';}
+  }catch(ex){err.textContent='连接失败';err.style.display='block';}
 }
 </script></body></html>'''
 

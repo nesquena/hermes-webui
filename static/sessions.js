@@ -100,7 +100,7 @@ function filterSessions(){
   _searchDebounceTimer = setTimeout(async () => {
     try {
       const data = await api(`/api/sessions/search?q=${encodeURIComponent(q)}&content=1&depth=5`);
-      const titleIds = new Set(_allSessions.filter(s => (s.title||'Untitled').toLowerCase().includes(q.toLowerCase())).map(s=>s.session_id));
+      const titleIds = new Set(_allSessions.filter(s => (s.title||'未命名').toLowerCase().includes(q.toLowerCase())).map(s=>s.session_id));
       _contentSearchResults = (data.sessions||[]).filter(s => s.match_type === 'content' && !titleIds.has(s.session_id));
       renderSessionListFromCache();
     } catch(e) { /* ignore */ }
@@ -111,7 +111,7 @@ function renderSessionListFromCache(){
   // Don't re-render while user is actively renaming a session (would destroy the input)
   if(_renamingSid) return;
   const q=($('sessionSearch').value||'').toLowerCase();
-  const titleMatches=q?_allSessions.filter(s=>(s.title||'Untitled').toLowerCase().includes(q)):_allSessions;
+  const titleMatches=q?_allSessions.filter(s=>(s.title||'未命名').toLowerCase().includes(q)):_allSessions;
   // Merge content matches (deduped): content matches appended after title matches
   const titleIds=new Set(titleMatches.map(s=>s.session_id));
   const allMatched=q?[...titleMatches,..._contentSearchResults.filter(s=>!titleIds.has(s.session_id))]:titleMatches;
@@ -132,7 +132,7 @@ function renderSessionListFromCache(){
     // "All" chip
     const allChip=document.createElement('span');
     allChip.className='project-chip'+(!_activeProject?' active':'');
-    allChip.textContent='All';
+    allChip.textContent='全部';
     allChip.onclick=()=>{_activeProject=null;renderSessionListFromCache();};
     bar.appendChild(allChip);
     // Project chips
@@ -157,7 +157,7 @@ function renderSessionListFromCache(){
     const addBtn=document.createElement('button');
     addBtn.className='project-create-btn';
     addBtn.textContent='+';
-    addBtn.title='New project';
+    addBtn.title='新建项目';
     addBtn.onclick=(e)=>{e.stopPropagation();_startProjectCreate(bar,addBtn);};
     bar.appendChild(addBtn);
     list.appendChild(bar);
@@ -167,13 +167,13 @@ function renderSessionListFromCache(){
   if(otherProfileCount>0&&!_showAllProfiles){
     const pfToggle=document.createElement('div');
     pfToggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
-    pfToggle.textContent='Show '+otherProfileCount+' from other profiles';
+    pfToggle.textContent='显示来自其他配置档的 '+otherProfileCount+' 个会话';
     pfToggle.onclick=()=>{_showAllProfiles=true;renderSessionListFromCache();};
     list.appendChild(pfToggle);
   } else if(_showAllProfiles&&otherProfileCount>0){
     const pfToggle=document.createElement('div');
     pfToggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
-    pfToggle.textContent='Show active profile only';
+    pfToggle.textContent='只显示当前配置档';
     pfToggle.onclick=()=>{_showAllProfiles=false;renderSessionListFromCache();};
     list.appendChild(pfToggle);
   }
@@ -181,7 +181,7 @@ function renderSessionListFromCache(){
   if(archivedCount>0){
     const toggle=document.createElement('div');
     toggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
-    toggle.textContent=_showArchived?'Hide archived':'Show '+archivedCount+' archived';
+    toggle.textContent=_showArchived?'隐藏已归档':'显示 '+archivedCount+' 个已归档会话';
     toggle.onclick=()=>{_showArchived=!_showArchived;renderSessionListFromCache();};
     list.appendChild(toggle);
   }
@@ -189,7 +189,7 @@ function renderSessionListFromCache(){
   if(_activeProject&&sessions.length===0){
     const empty=document.createElement('div');
     empty.style.cssText='padding:20px 14px;color:var(--muted);font-size:12px;text-align:center;opacity:.7;';
-    empty.textContent='No sessions in this project yet.';
+    empty.textContent='这个项目里还没有会话。';
     list.appendChild(empty);
   }
   // Separate pinned from unpinned
@@ -205,10 +205,10 @@ function renderSessionListFromCache(){
   // Group sessions by date
   const groups=[];
   let curLabel=null,curItems=[];
-  if(pinned.length) groups.push({label:'\u2605 Pinned',items:pinned,isPinned:true});
+  if(pinned.length) groups.push({label:'\u2605 已置顶',items:pinned,isPinned:true});
   for(const s of unpinned){
     const ts=(s.updated_at||s.created_at||0)*1000;
-    const label=ts>now-ONE_DAY?'Today':ts>now-2*ONE_DAY?'Yesterday':'Earlier';
+    const label=ts>now-ONE_DAY?'今天':ts>now-2*ONE_DAY?'昨天':'更早';
     if(label!==curLabel){
       if(curItems.length) groups.push({label:curLabel,items:curItems});
       curLabel=label;curItems=[s];
@@ -261,7 +261,7 @@ function renderSessionListFromCache(){
       const chip=document.createElement('span');
       chip.className='session-tag';
       chip.textContent=tag;
-      chip.title='Click to filter by '+tag;
+      chip.title='点击按 '+tag+' 筛选';
       chip.onclick=(e)=>{
         e.stopPropagation();
         const searchBox=$('sessionSearch');
@@ -275,19 +275,19 @@ function renderSessionListFromCache(){
       _renamingSid = s.session_id;
       const inp=document.createElement('input');
       inp.className='session-title-input';
-      inp.value=s.title||'Untitled';
+      inp.value=s.title||'未命名';
       ['click','mousedown','dblclick','pointerdown'].forEach(ev=>
         inp.addEventListener(ev, e2=>e2.stopPropagation())
       );
       const finish=async(save)=>{
         _renamingSid = null;
         if(save){
-          const newTitle=inp.value.trim()||'Untitled';
+          const newTitle=inp.value.trim()||'未命名';
           title.textContent=newTitle;
           s.title=newTitle;
           if(S.session&&S.session.session_id===s.session_id){S.session.title=newTitle;syncTopbar();}
           try{await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:s.session_id,title:newTitle})});}
-          catch(err){setStatus('Rename failed: '+err.message);}
+          catch(err){setStatus('重命名失败：'+err.message);}
         }
         inp.replaceWith(title);
         // Allow list re-renders again after a short delay
@@ -330,7 +330,7 @@ function renderSessionListFromCache(){
     const pinBtn=document.createElement('button');
     pinBtn.className='act-pin'+(s.pinned?' pinned':'');
     pinBtn.innerHTML=s.pinned?ICONS.pin:ICONS.unpin;
-    pinBtn.title=s.pinned?'Unpin':'Pin to top';
+    pinBtn.title=s.pinned?'取消置顶':'置顶';
     pinBtn.onclick=async(e)=>{
       e.stopPropagation();e.preventDefault();
       const newPinned=!s.pinned;
@@ -339,18 +339,18 @@ function renderSessionListFromCache(){
         s.pinned=newPinned;
         if(S.session&&S.session.session_id===s.session_id) S.session.pinned=newPinned;
         renderSessionList();
-      }catch(err){showToast('Pin failed: '+err.message);}
+      }catch(err){showToast('置顶失败：'+err.message);}
     };
     actions.appendChild(pinBtn);
     // Move to project
     const move=document.createElement('button');
-    move.className='act-move';move.innerHTML=ICONS.folder;move.title='Move to project';
+    move.className='act-move';move.innerHTML=ICONS.folder;move.title='移动到项目';
     move.onclick=async(e)=>{e.stopPropagation();e.preventDefault();_showProjectPicker(s,move);};
     actions.appendChild(move);
     // Archive
     const archive=document.createElement('button');
     archive.className='act-archive';archive.innerHTML=s.archived?ICONS.unarchive:ICONS.archive;
-    archive.title=s.archived?'Unarchive':'Archive';
+    archive.title=s.archived?'取消归档':'归档';
     archive.onclick=async(e)=>{
       e.stopPropagation();e.preventDefault();
       try{
@@ -358,28 +358,28 @@ function renderSessionListFromCache(){
         s.archived=!s.archived;
         if(S.session&&S.session.session_id===s.session_id) S.session.archived=s.archived;
         await renderSessionList();
-        showToast(s.archived?'Session archived':'Session restored');
-      }catch(err){showToast('Archive failed: '+err.message);}
+        showToast(s.archived?'会话已归档':'会话已恢复');
+      }catch(err){showToast('归档失败：'+err.message);}
     };
     actions.appendChild(archive);
     // Duplicate
     const dup=document.createElement('button');
-    dup.className='act-dup';dup.innerHTML=ICONS.dup;dup.title='Duplicate';
+    dup.className='act-dup';dup.innerHTML=ICONS.dup;dup.title='复制';
     dup.onclick=async(e)=>{
       e.stopPropagation();e.preventDefault();
       try{
         const res=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:s.workspace,model:s.model})});
         if(res.session){
-          await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:res.session.session_id,title:(s.title||'Untitled')+' (copy)'})});
+          await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:res.session.session_id,title:(s.title||'未命名')+'（副本）'})});
           await loadSession(res.session.session_id);await renderSessionList();
-          showToast('Session duplicated');
+          showToast('会话已复制');
         }
-      }catch(err){showToast('Duplicate failed: '+err.message);}
+      }catch(err){showToast('复制失败：'+err.message);}
     };
     actions.appendChild(dup);
     // Trash
     const trash=document.createElement('button');
-    trash.className='act-trash';trash.innerHTML=ICONS.trash;trash.title='Delete';
+    trash.className='act-trash';trash.innerHTML=ICONS.trash;trash.title='删除';
     trash.onclick=async(e)=>{e.stopPropagation();e.preventDefault();await deleteSession(s.session_id);};
     actions.appendChild(trash);
     el.appendChild(actions);
@@ -417,10 +417,10 @@ function renderSessionListFromCache(){
 }
 
 async function deleteSession(sid){
-  if(!confirm('Delete this conversation?'))return;
+  if(!confirm('要删除这个对话吗？'))return;
   try{
     await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
-  }catch(e){setStatus(`Delete failed: ${e.message}`);return;}
+  }catch(e){setStatus(`删除失败：${e.message}`);return;}
   if(S.session&&S.session.session_id===sid){
     S.session=null;S.messages=[];S.entries=[];
     localStorage.removeItem('hermes-webui-session');
@@ -430,13 +430,13 @@ async function deleteSession(sid){
       await loadSession(remaining.sessions[0].session_id);
     }else{
       $('topbarTitle').textContent=window._botName||'Hermes';
-      $('topbarMeta').textContent='Start a new conversation';
+      $('topbarMeta').textContent='开始一个新对话';
       $('msgInner').innerHTML='';
       $('emptyState').style.display='';
       $('fileTree').innerHTML='';
     }
   }
-  showToast('Conversation deleted');
+  showToast('对话已删除');
   await renderSessionList();
 }
 
@@ -452,14 +452,14 @@ function _showProjectPicker(session, anchorEl){
   // "No project" option
   const none=document.createElement('div');
   none.className='project-picker-item'+(!session.project_id?' active':'');
-  none.textContent='No project';
+  none.textContent='不属于任何项目';
   none.onclick=async()=>{
     picker.remove();
     document.removeEventListener('click',close);
     await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:null})});
     session.project_id=null;
     renderSessionListFromCache();
-    showToast('Removed from project');
+    showToast('已从项目移除');
   };
   picker.appendChild(none);
   // Project options
@@ -481,19 +481,19 @@ function _showProjectPicker(session, anchorEl){
       await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:p.project_id})});
       session.project_id=p.project_id;
       renderSessionListFromCache();
-      showToast('Moved to '+p.name);
+      showToast('已移动到 '+p.name);
     };
     picker.appendChild(item);
   }
   // "+ New project" shortcut at the bottom
   const createItem=document.createElement('div');
   createItem.className='project-picker-item project-picker-create';
-  createItem.textContent='+ New project';
+  createItem.textContent='+ 新建项目';
   createItem.onclick=async()=>{
     picker.remove();
     document.removeEventListener('click',close);
     // Prompt for name inline
-    const name=prompt('Project name:');
+    const name=prompt('项目名称：');
     if(!name||!name.trim()) return;
     const color=PROJECT_COLORS[_allProjects.length%PROJECT_COLORS.length];
     const res=await api('/api/projects/create',{method:'POST',body:JSON.stringify({name:name.trim(),color})});
@@ -503,7 +503,7 @@ function _showProjectPicker(session, anchorEl){
       await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:res.project.project_id})});
       session.project_id=res.project.project_id;
       await renderSessionList();
-      showToast('Created "'+res.project.name+'" and moved session');
+      showToast('已创建“'+res.project.name+'”并移动会话');
     }
   };
   picker.appendChild(createItem);
@@ -535,13 +535,13 @@ function _showProjectPicker(session, anchorEl){
 function _startProjectCreate(bar, addBtn){
   const inp=document.createElement('input');
   inp.className='project-create-input';
-  inp.placeholder='Project name';
+  inp.placeholder='项目名称';
   const finish=async(save)=>{
     if(save&&inp.value.trim()){
       const color=PROJECT_COLORS[_allProjects.length%PROJECT_COLORS.length];
       await api('/api/projects/create',{method:'POST',body:JSON.stringify({name:inp.value.trim(),color})});
       await renderSessionList();
-      showToast('Project created');
+      showToast('项目已创建');
     }else{
       inp.replaceWith(addBtn);
     }
@@ -563,7 +563,7 @@ function _startProjectRename(proj, chip){
     if(save&&inp.value.trim()&&inp.value.trim()!==proj.name){
       await api('/api/projects/rename',{method:'POST',body:JSON.stringify({project_id:proj.project_id,name:inp.value.trim()})});
       await renderSessionList();
-      showToast('Project renamed');
+      showToast('项目已重命名');
     }else{
       renderSessionListFromCache();
     }
@@ -579,11 +579,10 @@ function _startProjectRename(proj, chip){
 }
 
 async function _confirmDeleteProject(proj){
-  if(!confirm('Delete project "'+proj.name+'"? Sessions will be unassigned but not deleted.')){return;}
+  if(!confirm('要删除项目“'+proj.name+'”吗？会话只会取消关联，不会被删除。')){return;}
   await api('/api/projects/delete',{method:'POST',body:JSON.stringify({project_id:proj.project_id})});
   if(_activeProject===proj.project_id) _activeProject=null;
   await renderSessionList();
-  showToast('Project deleted');
+  showToast('项目已删除');
 }
-
 

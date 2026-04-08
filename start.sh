@@ -112,7 +112,7 @@ else
 fi
 
 if [[ -n "${PYTHON}" ]]; then
-    ok "Python: ${PYTHON}  ($(${PYTHON} --version 2>&1))"
+    ok "Python: ${PYTHON}  ($("${PYTHON}" --version 2>&1))"
 else
     warn "No Python found. Attempting to install..."
     if command -v apt-get &>/dev/null; then
@@ -127,7 +127,7 @@ else
 fi
 
 # ── Minimum Python version check ─────────────────────────────────────────────
-PY_VER="$(${PYTHON} -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+PY_VER="$("${PYTHON}" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
 PY_MAJOR="$(echo "${PY_VER}" | cut -d. -f1)"
 PY_MINOR="$(echo "${PY_VER}" | cut -d. -f2)"
 if [[ "${PY_MAJOR}" -lt 3 || ( "${PY_MAJOR}" -eq 3 && "${PY_MINOR}" -lt 8 ) ]]; then
