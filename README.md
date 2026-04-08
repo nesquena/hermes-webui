@@ -1,6 +1,6 @@
 # Hermes Web UI
 
-[Hermes Agent](https://hermes-agent.nousresearch.com/) is a sophisticated autonomous agent that lives on your server, accessed via a terminal or messaging apps, remembers what it learns, and gets more capable the longer it runs.
+[Hermes Agent](https://hermes-agent.nousresearch.com/) is a sophisticated autonomous agent that lives on your server, accessed via a terminal or messaging apps, that remembers what it learns and gets more capable the longer it runs.
 
 Hermes WebUI is a lightweight, dark-themed web app interface in your browser for [Hermes Agent](https://hermes-agent.nousresearch.com/).
 Full parity with the CLI experience - everything you can do from a terminal,
@@ -92,7 +92,16 @@ ecosystem. See [HERMES.md](HERMES.md) for the full side-by-side.
 
 ## Quick start
 
-First, you need to install and configure [Hermes Agent](https://hermes-agent.nousresearch.com/). Once installed:
+First, you need to install and configure [Hermes Agent](https://hermes-agent.nousresearch.com/](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart) on your computer or server. This includes the following steps to complete:
+
+* [ ] Running the `curl` command to download and setup Hermes
+* [ ] Configure your [LLM provider](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart#2-set-up-a-provider) with `hermes model`
+* [ ] Configure yout [messaging gateways](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/) with `hermes gateway setup`
+* [ ] Can start chatting with hermes on command-line with `hermes`
+* [ ] Optional: [Configure your extended memory provider](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers)
+* [ ] Optional: [Configure your tools](https://hermes-agent.nousresearch.com/docs/user-guide/features/tools)
+
+Once installed, you can now setup the web UI with:
 
 ```bash
 git clone https://github.com/nesquena/hermes-webui.git hermes-webui
@@ -100,11 +109,11 @@ cd hermes-webui
 ./start.sh
 ```
 
-That is it. The script will:
+That is it! The script will:
 
-1. Locate your Hermes agent checkout automatically.
+1. Locate your Hermes agent directory automatically.
 2. Find (or create) a Python environment with the required dependencies.
-3. Start the server.
+3. Start the web server.
 4. Print the URL (and SSH tunnel command if you are on a remote machine).
 
 ---
