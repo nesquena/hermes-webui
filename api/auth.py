@@ -178,7 +178,7 @@ def set_auth_cookie(handler, cookie_value) -> None:
     cookie[COOKIE_NAME]['path'] = '/'
     cookie[COOKIE_NAME]['max-age'] = str(SESSION_TTL)
     # Set Secure flag when connection is HTTPS
-    if handler.request.getpeercert is not None or handler.headers.get('X-Forwarded-Proto', '') == 'https':
+    if getattr(handler.request, 'getpeercert', None) is not None or handler.headers.get('X-Forwarded-Proto', '') == 'https':
         cookie[COOKIE_NAME]['secure'] = True
     handler.send_header('Set-Cookie', cookie[COOKIE_NAME].OutputString())
 
