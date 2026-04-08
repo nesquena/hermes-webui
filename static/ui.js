@@ -503,6 +503,22 @@ function renderMessages(){
     if(!thinkingText && m.reasoning){
       thinkingText=m.reasoning;
     }
+    // Parse inline thinking tags from plain text: <think>...</think> (DeepSeek, QwQ, etc.)
+    // and Gemma 4 channel tokens: <|channel>thought\n...<channel|>
+    if(!thinkingText && typeof content==='string'){
+      const thinkMatch=content.match(/^<think>([\s\S]*?)<\/think>\s*/);
+      if(thinkMatch){
+        thinkingText=thinkMatch[1].trim();
+        content=content.slice(thinkMatch[0].length);
+      }
+      if(!thinkingText){
+        const gemmaMatch=content.match(/^<\|channel>thought\n([\s\S]*?)<channel\|>\s*/);
+        if(gemmaMatch){
+          thinkingText=gemmaMatch[1].trim();
+          content=content.slice(gemmaMatch[0].length);
+        }
+      }
+    }
     const isUser=m.role==='user';
     const isLastAssistant=!isUser&&vi===visWithIdx.length-1;
     // Render thinking card before the assistant message (collapsed by default)

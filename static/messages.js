@@ -84,6 +84,11 @@ async function send(){
   let assistantText='';
   let assistantRow=null;
   let assistantBody=null;
+  // Thinking tag patterns for streaming display
+  const _thinkPairs=[
+    {open:'<think>',close:'</think>'},
+    {open:'<|channel>thought\n',close:'<channel|>'}
+  ];
 
   function ensureAssistantRow(){
     if(assistantRow)return;
@@ -106,12 +111,32 @@ async function send(){
 
   // rAF-throttled rendering: buffer tokens, render at most once per frame
   let _renderPending=false;
+  // Extract display text from assistantText, stripping completed thinking blocks
+  // and hiding content still inside an open thinking block.
+  function _streamDisplay(){
+    let t=assistantText;
+    for(const {open,close} of _thinkPairs){
+      if(!t.startsWith(open)) continue;
+      const ci=t.indexOf(close,open.length);
+      if(ci!==-1){
+        // Thinking block complete — strip it, show the rest
+        return t.slice(ci+close.length).replace(/^\s+/,'');
+      }
+      // Still inside thinking block — show placeholder
+      return '';
+    }
+    return t;
+  }
   function _scheduleRender(){
     if(_renderPending) return;
     _renderPending=true;
     requestAnimationFrame(()=>{
       _renderPending=false;
-      if(assistantBody) assistantBody.innerHTML=renderMd(assistantText);
+      if(assistantBody){
+        const txt=_streamDisplay();
+        const isThinking=!txt&&assistantText.length>0;
+        assistantBody.innerHTML=txt?renderMd(txt):(isThinking?'<span style="color:var(--muted);font-size:13px">Thinking\u2026</span>':'');
+      }
       scrollIfPinned();
     });
   }
