@@ -20,7 +20,25 @@ from api.config import (
     IMAGE_EXTS, MD_EXTS, MIME_MAP, MAX_FILE_BYTES, MAX_UPLOAD_BYTES,
     CHAT_LOCK, load_settings, save_settings,
 )
-from api.helpers import require, bad, safe_resolve, j, t, read_body, _security_headers
+from api.helpers import require, bad, safe_resolve, j, t, read_body, _security_headers, _sanitize_error
+
+# ── CSRF: validate Origin/Referer on POST ────────────────────────────────────
+import re as _re
+def _check_csrf(handler) -> bool:
+    """Reject cross-origin POST requests. Returns True if OK."""
+    origin = handler.headers.get('Origin', '')
+    referer = handler.headers.get('Referer', '')
+    host = handler.headers.get('Host', '')
+    if not origin and not referer:
+        return True  # non-browser clients (curl, agent) have no Origin
+    target = origin or referer
+    # Allow same-origin: Origin must match Host
+    if host and target:
+        # Extract host:port from origin/referer
+        m = _re.match(r'^https?://([^/]+)', target)
+        if m and m.group(1) == host:
+            return True
+    return False
 from api.models import (
     Session, get_session, new_session, all_sessions, title_from,
     _write_session_index, SESSION_INDEX_FILE,
@@ -360,6 +378,9 @@ def handle_get(handler, parsed) -> bool:
 
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
+    # CSRF: reject cross-origin browser requests
+    if not _check_csrf(handler):
+        return j(handler, {'error': 'Cross-origin request rejected'}, status=403)
 
     if parsed.path == '/api/upload':
         return handle_upload(handler)
@@ -544,7 +565,7 @@ def handle_post(handler, parsed) -> bool:
             result = switch_profile(name)
             return j(handler, result)
         except (ValueError, FileNotFoundError) as e:
-            return bad(handler, str(e), 404)
+            return bad(handler, _sanitize_error(e), 404)
         except RuntimeError as e:
             return bad(handler, str(e), 409)
 
@@ -578,7 +599,7 @@ def handle_post(handler, parsed) -> bool:
             result = delete_profile_api(name)
             return j(handler, result)
         except (ValueError, FileNotFoundError) as e:
-            return bad(handler, str(e))
+            return bad(handler, _sanitize_error(e))
         except RuntimeError as e:
             return bad(handler, str(e), 409)
 
@@ -695,10 +716,15 @@ def handle_post(handler, parsed) -> bool:
     # ── Auth endpoints (POST) ──
     if parsed.path == '/api/auth/login':
         from api.auth import verify_password, create_session, set_auth_cookie, is_auth_enabled
+        from api.auth import _check_login_rate, _record_login_attempt
         if not is_auth_enabled():
             return j(handler, {'ok': True, 'message': 'Auth not enabled'})
+        client_ip = handler.client_address[0]
+        if not _check_login_rate(client_ip):
+            return j(handler, {'error': 'Too many attempts. Try again in a minute.'}, status=429)
         password = body.get('password', '')
         if not verify_password(password):
+            _record_login_attempt(client_ip)
             return bad(handler, 'Invalid password', 401)
         cookie_val = create_session()
         handler.send_response(200)
@@ -810,7 +836,7 @@ def _handle_list_dir(handler, parsed):
             'path': qs.get('path', ['.'])[0],
         })
     except (FileNotFoundError, ValueError) as e:
-        return bad(handler, str(e), 404)
+        return bad(handler, _sanitize_error(e), 404)
 
 
 def _handle_sse_stream(handler, parsed):
@@ -859,9 +885,14 @@ def _handle_file_raw(handler, parsed):
     handler.send_header('Content-Type', mime)
     handler.send_header('Content-Length', str(len(raw_bytes)))
     handler.send_header('Cache-Control', 'no-store')
-    if force_download:
+    # Security: force download for dangerous MIME types to prevent XSS
+    dangerous_types = {'text/html', 'application/xhtml+xml', 'image/svg+xml'}
+    if force_download or mime in dangerous_types:
         handler.send_header('Content-Disposition',
             f'attachment; filename="{target.name}"; filename*=UTF-8\'\'{safe_name}')
+    else:
+        handler.send_header('Content-Disposition',
+            f'inline; filename="{target.name}"; filename*=UTF-8\'\'{safe_name}')
     handler.end_headers()
     handler.wfile.write(raw_bytes)
     return True
@@ -876,7 +907,7 @@ def _handle_file_read(handler, parsed):
     rel = qs.get('path', [''])[0]
     if not rel: return bad(handler, 'path is required')
     try: return j(handler, read_file_content(Path(s.workspace), rel))
-    except (FileNotFoundError, ValueError) as e: return bad(handler, str(e), 404)
+    except (FileNotFoundError, ValueError) as e: return bad(handler, _sanitize_error(e), 404)
 
 
 def _handle_approval_pending(handler, parsed):
@@ -1027,12 +1058,14 @@ def _handle_chat_sync(handler, body):
     if not msg: return j(handler, {'error': 'empty message'}, status=400)
     workspace = Path(body.get('workspace') or s.workspace).expanduser().resolve()
     s.workspace = str(workspace); s.model = body.get('model') or s.model
-    old_cwd = os.environ.get('TERMINAL_CWD')
-    os.environ['TERMINAL_CWD'] = str(workspace)
-    old_exec_ask = os.environ.get('HERMES_EXEC_ASK')
-    old_session_key = os.environ.get('HERMES_SESSION_KEY')
-    os.environ['HERMES_EXEC_ASK'] = '1'
-    os.environ['HERMES_SESSION_KEY'] = s.session_id
+    from api.streaming import _ENV_LOCK
+    with _ENV_LOCK:
+        old_cwd = os.environ.get('TERMINAL_CWD')
+        os.environ['TERMINAL_CWD'] = str(workspace)
+        old_exec_ask = os.environ.get('HERMES_EXEC_ASK')
+        old_session_key = os.environ.get('HERMES_SESSION_KEY')
+        os.environ['HERMES_EXEC_ASK'] = '1'
+        os.environ['HERMES_SESSION_KEY'] = s.session_id
     try:
         from run_agent import AIAgent
         with CHAT_LOCK:
@@ -1075,12 +1108,13 @@ def _handle_chat_sync(handler, body):
                 persist_user_message=msg,
             )
     finally:
-        if old_cwd is None: os.environ.pop('TERMINAL_CWD', None)
-        else: os.environ['TERMINAL_CWD'] = old_cwd
-        if old_exec_ask is None: os.environ.pop('HERMES_EXEC_ASK', None)
-        else: os.environ['HERMES_EXEC_ASK'] = old_exec_ask
-        if old_session_key is None: os.environ.pop('HERMES_SESSION_KEY', None)
-        else: os.environ['HERMES_SESSION_KEY'] = old_session_key
+        with _ENV_LOCK:
+            if old_cwd is None: os.environ.pop('TERMINAL_CWD', None)
+            else: os.environ['TERMINAL_CWD'] = old_cwd
+            if old_exec_ask is None: os.environ.pop('HERMES_EXEC_ASK', None)
+            else: os.environ['HERMES_EXEC_ASK'] = old_exec_ask
+            if old_session_key is None: os.environ.pop('HERMES_SESSION_KEY', None)
+            else: os.environ['HERMES_SESSION_KEY'] = old_session_key
     s.messages = result.get('messages') or s.messages
     s.title = title_from(s.messages, s.title); s.save()
     # Sync to state.db for /insights (opt-in setting)
@@ -1179,7 +1213,7 @@ def _handle_file_delete(handler, body):
         if target.is_dir(): return bad(handler, 'Cannot delete directories via this endpoint')
         target.unlink()
         return j(handler, {'ok': True, 'path': body['path']})
-    except (ValueError, PermissionError) as e: return bad(handler, str(e))
+    except (ValueError, PermissionError) as e: return bad(handler, _sanitize_error(e))
 
 
 def _handle_file_save(handler, body):
@@ -1193,7 +1227,7 @@ def _handle_file_save(handler, body):
         if target.is_dir(): return bad(handler, 'Cannot save: path is a directory')
         target.write_text(body.get('content', ''), encoding='utf-8')
         return j(handler, {'ok': True, 'path': body['path'], 'size': target.stat().st_size})
-    except (ValueError, PermissionError) as e: return bad(handler, str(e))
+    except (ValueError, PermissionError) as e: return bad(handler, _sanitize_error(e))
 
 
 def _handle_file_create(handler, body):
@@ -1207,7 +1241,7 @@ def _handle_file_create(handler, body):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(body.get('content', ''), encoding='utf-8')
         return j(handler, {'ok': True, 'path': str(target.relative_to(Path(s.workspace)))})
-    except (ValueError, PermissionError) as e: return bad(handler, str(e))
+    except (ValueError, PermissionError) as e: return bad(handler, _sanitize_error(e))
 
 
 def _handle_file_rename(handler, body):
@@ -1226,7 +1260,7 @@ def _handle_file_rename(handler, body):
         source.rename(dest)
         new_rel = str(dest.relative_to(Path(s.workspace)))
         return j(handler, {'ok': True, 'old_path': body['path'], 'new_path': new_rel})
-    except (ValueError, PermissionError, OSError) as e: return bad(handler, str(e))
+    except (ValueError, PermissionError, OSError) as e: return bad(handler, _sanitize_error(e))
 
 
 def _handle_create_dir(handler, body):
@@ -1239,7 +1273,7 @@ def _handle_create_dir(handler, body):
         if target.exists(): return bad(handler, 'Path already exists')
         target.mkdir(parents=True)
         return j(handler, {'ok': True, 'path': str(target.relative_to(Path(s.workspace)))})
-    except (ValueError, PermissionError, OSError) as e: return bad(handler, str(e))
+    except (ValueError, PermissionError, OSError) as e: return bad(handler, _sanitize_error(e))
 
 
 def _handle_workspace_add(handler, body):
@@ -1313,6 +1347,11 @@ def _handle_skill_save(handler, body):
         skill_dir = SKILLS_DIR / category / skill_name
     else:
         skill_dir = SKILLS_DIR / skill_name
+    # Validate resolved path stays within SKILLS_DIR
+    try:
+        skill_dir.resolve().relative_to(SKILLS_DIR.resolve())
+    except ValueError:
+        return bad(handler, 'Invalid skill path')
     skill_dir.mkdir(parents=True, exist_ok=True)
     skill_file = skill_dir / 'SKILL.md'
     skill_file.write_text(body['content'], encoding='utf-8')

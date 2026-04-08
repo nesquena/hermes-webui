@@ -378,14 +378,15 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
             put('done', {'session': s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}, 'usage': usage})
           finally:
-            if old_cwd is None: os.environ.pop('TERMINAL_CWD', None)
-            else: os.environ['TERMINAL_CWD'] = old_cwd
-            if old_exec_ask is None: os.environ.pop('HERMES_EXEC_ASK', None)
-            else: os.environ['HERMES_EXEC_ASK'] = old_exec_ask
-            if old_session_key is None: os.environ.pop('HERMES_SESSION_KEY', None)
-            else: os.environ['HERMES_SESSION_KEY'] = old_session_key
-            if old_hermes_home is None: os.environ.pop('HERMES_HOME', None)
-            else: os.environ['HERMES_HOME'] = old_hermes_home
+            with _ENV_LOCK:
+              if old_cwd is None: os.environ.pop('TERMINAL_CWD', None)
+              else: os.environ['TERMINAL_CWD'] = old_cwd
+              if old_exec_ask is None: os.environ.pop('HERMES_EXEC_ASK', None)
+              else: os.environ['HERMES_EXEC_ASK'] = old_exec_ask
+              if old_session_key is None: os.environ.pop('HERMES_SESSION_KEY', None)
+              else: os.environ['HERMES_SESSION_KEY'] = old_session_key
+              if old_hermes_home is None: os.environ.pop('HERMES_HOME', None)
+              else: os.environ['HERMES_HOME'] = old_hermes_home
 
     except Exception as e:
         print('[webui] stream error:\n' + traceback.format_exc(), flush=True)

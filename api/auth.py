@@ -24,6 +24,26 @@ SESSION_TTL = 86400  # 24 hours
 # Active sessions: token -> expiry timestamp
 _sessions = {}
 
+# ── Login rate limiter ──────────────────────────────────────────────────────
+_login_attempts = {}  # ip -> [timestamp, ...]
+_LOGIN_MAX_ATTEMPTS = 5
+_LOGIN_WINDOW = 60  # seconds
+
+def _check_login_rate(ip: str) -> bool:
+    """Return True if the IP is allowed to attempt login."""
+    now = time.time()
+    attempts = _login_attempts.get(ip, [])
+    # Prune old attempts
+    attempts = [t for t in attempts if now - t < _LOGIN_WINDOW]
+    _login_attempts[ip] = attempts
+    return len(attempts) < _LOGIN_MAX_ATTEMPTS
+
+def _record_login_attempt(ip: str) -> None:
+    now = time.time()
+    attempts = _login_attempts.get(ip, [])
+    attempts.append(now)
+    _login_attempts[ip] = attempts
+
 
 def _signing_key():
     """Return a random signing key, generating and persisting one on first call."""
@@ -84,7 +104,7 @@ def create_session() -> str:
     """Create a new auth session. Returns signed cookie value."""
     token = secrets.token_hex(32)
     _sessions[token] = time.time() + SESSION_TTL
-    sig = hmac.new(_signing_key(), token.encode(), hashlib.sha256).hexdigest()[:16]
+    sig = hmac.new(_signing_key(), token.encode(), hashlib.sha256).hexdigest()[:32]
     return f"{token}.{sig}"
 
 
@@ -93,7 +113,7 @@ def verify_session(cookie_value) -> bool:
     if not cookie_value or '.' not in cookie_value:
         return False
     token, sig = cookie_value.rsplit('.', 1)
-    expected_sig = hmac.new(_signing_key(), token.encode(), hashlib.sha256).hexdigest()[:16]
+    expected_sig = hmac.new(_signing_key(), token.encode(), hashlib.sha256).hexdigest()[:32]
     if not hmac.compare_digest(sig, expected_sig):
         return False
     expiry = _sessions.get(token)
@@ -157,6 +177,9 @@ def set_auth_cookie(handler, cookie_value) -> None:
     cookie[COOKIE_NAME]['samesite'] = 'Lax'
     cookie[COOKIE_NAME]['path'] = '/'
     cookie[COOKIE_NAME]['max-age'] = str(SESSION_TTL)
+    # Set Secure flag when connection is HTTPS
+    if handler.request.getpeercert is not None or handler.headers.get('X-Forwarded-Proto', '') == 'https':
+        cookie[COOKIE_NAME]['secure'] = True
     handler.send_header('Set-Cookie', cookie[COOKIE_NAME].OutputString())
 
 

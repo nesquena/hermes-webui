@@ -73,6 +73,9 @@ class Session:
 
     @classmethod
     def load(cls, sid):
+        # Validate session ID format to prevent path traversal
+        if not sid or not all(c in '0123456789abcdef' for c in sid):
+            return None
         p = SESSION_DIR / f'{sid}.json'
         if not p.exists():
             return None
