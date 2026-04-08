@@ -18,6 +18,15 @@ def bad(handler, msg, status: int=400):
     return j(handler, {'error': msg}, status=status)
 
 
+def _sanitize_error(e: Exception) -> str:
+    """Strip filesystem paths from exception messages before returning to client."""
+    import re
+    msg = str(e)
+    # Remove absolute paths (Unix and Windows)
+    msg = re.sub(r'(?:(?:/[a-zA-Z0-9_.-]+)+|(?:[A-Z]:\\[^\s]+))', '<path>', msg)
+    return msg
+
+
 def safe_resolve(root: Path, requested: str) -> Path:
     """Resolve a relative path inside root, raising ValueError on traversal."""
     resolved = (root / requested).resolve()

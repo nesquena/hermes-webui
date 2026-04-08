@@ -597,7 +597,23 @@ def get_available_models() -> dict:
                     headers['Authorization'] = f'Bearer {api_key}'
                     break
 
-            # Fetch model list from endpoint
+            # Fetch model list from endpoint (with SSRF protection)
+            import socket
+            # Resolve hostname and check against private IPs after DNS lookup
+            parsed_url = urlparse(endpoint_url if '://' in endpoint_url else f'http://{endpoint_url}')
+            if parsed_url.hostname:
+                try:
+                    resolved_ips = socket.getaddrinfo(parsed_url.hostname, None)
+                    for _, _, _, _, addr in resolved_ips:
+                        addr_obj = ipaddress.ip_address(addr[0])
+                        if addr_obj.is_private or addr_obj.is_loopback or addr_obj.is_link_local:
+                            # Allow known local providers (ollama, lmstudio)
+                            is_known_local = any(k in (parsed_url.hostname or '').lower()
+                                                 for k in ('ollama', 'localhost', '127.0.0.1', 'lmstudio', 'lm-studio'))
+                            if not is_known_local:
+                                raise ValueError(f'SSRF: resolved hostname to private IP {addr[0]}')
+                except socket.gaierror:
+                    pass  # DNS resolution failed -- let urllib handle it
             req = urllib.request.Request(endpoint_url, method='GET')
             for k, v in headers.items():
                 req.add_header(k, v)
@@ -762,7 +778,7 @@ _SETTINGS_DEFAULTS = {
     'check_for_updates': True,  # check if webui/agent repos are behind upstream
     'theme': 'dark',  # active UI theme name (no enum gate -- allows custom themes)
     'bot_name': os.getenv('HERMES_WEBUI_BOT_NAME', 'Hermes'),  # display name for the assistant
-    'password_hash': None,  # SHA-256 hash; None = auth disabled
+    'password_hash': None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
 }
 
 def load_settings() -> dict:
@@ -785,13 +801,13 @@ _SETTINGS_BOOL_KEYS = {'show_token_usage', 'show_cli_sessions', 'sync_to_insight
 
 def save_settings(settings: dict) -> dict:
     """Save settings to disk. Returns the merged settings. Ignores unknown keys."""
-    import hashlib as _hl
     current = load_settings()
     # Handle _set_password: hash and store as password_hash
     raw_pw = settings.pop('_set_password', None)
     if raw_pw and isinstance(raw_pw, str) and raw_pw.strip():
-        salt = str(STATE_DIR).encode()
-        current['password_hash'] = _hl.sha256(salt + raw_pw.strip().encode()).hexdigest()
+        # Use PBKDF2 from auth module (600k iterations) -- never raw SHA-256
+        from api.auth import _hash_password
+        current['password_hash'] = _hash_password(raw_pw.strip())
     # Handle _clear_password: explicitly disable auth
     if settings.pop('_clear_password', False):
         current['password_hash'] = None

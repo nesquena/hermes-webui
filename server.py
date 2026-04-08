@@ -61,6 +61,14 @@ def main() -> None:
 
     print_startup_config()
 
+    # Security: warn if binding non-loopback without authentication
+    from api.auth import is_auth_enabled
+    if HOST not in ('127.0.0.1', '::1', 'localhost') and not is_auth_enabled():
+        print(f'[!!] WARNING: Binding to {HOST} with NO PASSWORD SET.', flush=True)
+        print(f'     Anyone on the network can access your filesystem and agent.', flush=True)
+        print(f'     Set a password via Settings or HERMES_WEBUI_PASSWORD env var.', flush=True)
+        print(f'     To suppress: bind to 127.0.0.1 or set a password.', flush=True)
+
     ok, missing, errors = verify_hermes_imports()
     if not ok and _HERMES_FOUND:
         print(f'[!!] Warning: Hermes agent found but missing modules: {missing}', flush=True)
