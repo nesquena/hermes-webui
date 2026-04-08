@@ -5,6 +5,28 @@
 
 ---
 
+## [v0.39.0] — 2026-04-08
+
+### Security (12 fixes — PR #171 by @betamod, reviewed by @nesquena-hermes)
+
+- **CSRF protection**: all POST endpoints now validate `Origin`/`Referer` against `Host`. Non-browser clients (curl, agent) without these headers are unaffected.
+- **PBKDF2 password hashing**: `save_settings()` was using single-iteration SHA-256. Now calls `auth._hash_password()` — PBKDF2-HMAC-SHA256 with 600,000 iterations and a per-installation random salt.
+- **Login rate limiting**: 5 failed attempts per 60 seconds per IP returns HTTP 429.
+- **Session ID validation**: `Session.load()` rejects any non-hex character before touching the filesystem, preventing path traversal via crafted session IDs.
+- **SSRF DNS resolution**: `get_available_models()` resolves DNS before checking private IPs. Prevents DNS rebinding attacks. Known-local providers (Ollama, LM Studio, localhost) are whitelisted.
+- **Non-loopback startup warning**: server prints a clear warning when binding to `0.0.0.0` without a password set — a common Docker footgun.
+- **ENV_LOCK consistency**: `_ENV_LOCK` now wraps all `os.environ` mutations in both the sync chat and streaming restore blocks, preventing races across concurrent requests.
+- **Stored XSS prevention**: files with `text/html`, `application/xhtml+xml`, or `image/svg+xml` MIME types are forced to `Content-Disposition: attachment`, preventing execution in-browser.
+- **HMAC signature**: extended from 64 bits to 128 bits (16-char to 32-char hex).
+- **Skills path validation**: `resolve().relative_to(SKILLS_DIR)` check added after skill directory construction to prevent traversal.
+- **Secure cookie flag**: auto-set when TLS or `X-Forwarded-Proto: https` is detected. Uses `getattr` safely so plain sockets don't raise `AttributeError`.
+- **Error path sanitization**: `_sanitize_error()` strips absolute filesystem paths from exception messages before they reach the client.
+
+### Tests
+- Added `tests/test_sprint29.py` — 33 tests covering all 12 security fixes.
+
+---
+
 ## [v0.38.6] — 2026-04-07
 
 ### Fixed
