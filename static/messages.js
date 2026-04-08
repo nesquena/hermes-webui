@@ -143,6 +143,8 @@ async function send(){
       const d=JSON.parse(e.data);
       d._session_id=activeSid;
       showApprovalCard(d);
+      playNotificationSound();
+      sendBrowserNotification('Approval required', d.description);
     });
 
     source.addEventListener('done',e=>{
@@ -176,6 +178,8 @@ async function send(){
         syncTopbar();renderMessages();loadDir('.');
       }
       renderSessionList();setBusy(false);setStatus('');
+      playNotificationSound();
+      sendBrowserNotification('Task Finished', assistantText.slice(0, 100) + '...');
     });
 
     source.addEventListener('compressed',e=>{
@@ -360,5 +364,29 @@ function startApprovalPolling(sid) {
 function stopApprovalPolling() {
   if (_approvalPollTimer) { clearInterval(_approvalPollTimer); _approvalPollTimer = null; }
 }
-// ── Panel navigation (Chat / Tasks / Skills / Memory) ──
 
+// ── Notifications and Sound ──
+
+const _notificationAudio = new Audio('/static/notification.mp3');
+
+function playNotificationSound() {
+  if (!window._soundEnabled) return;
+  _notificationAudio.currentTime = 0;
+  _notificationAudio.play().catch(e => console.warn("Audio playback failed:", e));
+}
+
+function sendBrowserNotification(title, body) {
+  if (!window._notificationsEnabled || !document.hidden) return;
+  if (!("Notification" in window)) return;
+
+  if (Notification.permission === "granted") {
+    new Notification(title || (window._botName || 'Hermes'), { body });
+  } else if (Notification.permission !== "denied") {
+    Notification.requestPermission().then(permission => {
+      if (permission === "granted") {
+        new Notification(title || (window._botName || 'Hermes'), { body });
+      }
+    });
+  }
+}
+// ── Panel navigation (Chat / Tasks / Skills / Memory) ──

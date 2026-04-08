@@ -1009,6 +1009,10 @@ async function loadSettingsPanel(){
     if(syncCb){syncCb.checked=!!settings.sync_to_insights;syncCb.addEventListener('change',_markSettingsDirty,{once:false});}
     const updateCb=$('settingsCheckUpdates');
     if(updateCb){updateCb.checked=settings.check_for_updates!==false;updateCb.addEventListener('change',_markSettingsDirty,{once:false});}
+    const soundCb=$('settingsSoundEnabled');
+    if(soundCb){soundCb.checked=!!settings.sound_enabled;soundCb.addEventListener('change',_markSettingsDirty,{once:false});}
+    const notifCb=$('settingsNotificationsEnabled');
+    if(notifCb){notifCb.checked=!!settings.notifications_enabled;notifCb.addEventListener('change',_markSettingsDirty,{once:false});}
     // Bot name
     const botNameField=$('settingsBotName');
     if(botNameField){botNameField.value=settings.bot_name||'Hermes';botNameField.addEventListener('input',_markSettingsDirty,{once:false});}
@@ -1045,6 +1049,8 @@ async function saveSettings(andClose){
   body.show_cli_sessions=showCliSessions;
   body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;
   body.check_for_updates=!!($('settingsCheckUpdates')||{}).checked;
+  body.sound_enabled=!!($('settingsSoundEnabled')||{}).checked;
+  body.notifications_enabled=!!($('settingsNotificationsEnabled')||{}).checked;
   const botName=(($('settingsBotName')||{}).value||'').trim();
   body.bot_name=botName||'Hermes';
   // Password: only act if the field has content; blank = leave auth unchanged
@@ -1065,6 +1071,8 @@ async function saveSettings(andClose){
     window._sendKey=sendKey||'enter';
     window._showTokenUsage=showTokenUsage;
     window._showCliSessions=showCliSessions;
+    window._soundEnabled=body.sound_enabled;
+    window._notificationsEnabled=body.notifications_enabled;
     window._botName=body.bot_name;
     if(typeof applyBotName==='function') applyBotName();
     _settingsDirty=false; _settingsThemeOnOpen=theme;

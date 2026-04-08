@@ -1,0 +1,18 @@
+
+  Hermes Web UI -- startup config
+  --------------------------------
+  repo root   : /Users/davidwork/hermes-webui
+  agent dir   : /Users/davidwork/.hermes/hermes-agent  [32m[ok][0m
+  python      : /Users/davidwork/.hermes/hermes-agent/venv/bin/python
+  state dir   : /Users/davidwork/.hermes/webui
+  workspace   : /Users/davidwork/workspace
+  host:port   : 127.0.0.1:8787
+  config file : /Users/davidwork/.hermes/config.yaml  (found)
+
+[!!] Warning: Hermes agent found but missing modules: ['run_agent']
+     run_agent: ModuleNotFoundError: No module named 'fire'
+     Agent features may not work correctly.
+  Hermes Web UI listening on http://127.0.0.1:8787
+  Remote access: ssh -N -L 8787:127.0.0.1:8787 <user>@<your-server>
+  Then open:     http://localhost:8787
+
