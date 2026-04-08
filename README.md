@@ -92,7 +92,7 @@ ecosystem. See [HERMES.md](HERMES.md) for the full side-by-side.
 
 ## Quick start
 
-First, you need to install and configure [Hermes Agent](https://hermes-agent.nousresearch.com/](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart) on your computer or server. This includes the following steps to complete:
+First, you need to install and configure [Hermes Agent](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart) on your computer or server. This includes the following steps to complete:
 
 * [ ] Running the `curl` command to download and setup Hermes
 * [ ] Configure your [LLM provider](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart#2-set-up-a-provider) with `hermes model`
