@@ -219,6 +219,17 @@ $('msg').addEventListener('keydown',e=>{
 });
 // B14: Cmd/Ctrl+K creates a new chat from anywhere
 document.addEventListener('keydown',async e=>{
+  // Enter on approval card = Allow once (when a button inside the card is focused or
+  // card is visible and focus is not on an input/textarea/select)
+  if(e.key==='Enter'&&!e.metaKey&&!e.ctrlKey&&!e.shiftKey){
+    const card=$('approvalCard');
+    const tag=(document.activeElement||{}).tagName||'';
+    if(card&&card.classList.contains('visible')&&tag!=='TEXTAREA'&&tag!=='INPUT'&&tag!=='SELECT'){
+      e.preventDefault();
+      if(typeof respondApproval==='function') respondApproval('once');
+      return;
+    }
+  }
   if((e.metaKey||e.ctrlKey)&&e.key==='k'){
     e.preventDefault();
     if(!S.busy){await newSession();await renderSessionList();$('msg').focus();}

@@ -128,6 +128,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
         # waiting for approval that the UI never knew to ask for, leaving
         # the chat stuck in "Thinking…" forever.
         _approval_registered = False
+        _unreg_notify = None
         try:
             from tools.approval import (
                 register_gateway_notify as _reg_notify,
@@ -407,7 +408,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
         finally:
             # Unregister the gateway approval callback and unblock any threads
             # still waiting on approval (e.g. stream cancelled mid-approval).
-            if _approval_registered:
+            if _approval_registered and _unreg_notify is not None:
                 try:
                     _unreg_notify(session_id)
                 except Exception:

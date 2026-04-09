@@ -217,19 +217,32 @@
         <button class="reconnect-btn" onclick="refreshSession()">&#8635; Reload</button>
       </div>
     </div>
-    <div class="approval-card" id="approvalCard">
+    <div class="approval-card" id="approvalCard" role="alertdialog" aria-labelledby="approvalHeading" aria-describedby="approvalDesc">
       <div class="approval-inner">
         <div class="approval-header">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-          Dangerous command — approval required
+          <span id="approvalHeading" data-i18n="approval_heading">Approval required</span>
         </div>
         <div class="approval-desc" id="approvalDesc"></div>
         <div class="approval-cmd" id="approvalCmd"></div>
         <div class="approval-btns">
-          <button class="approval-btn once" onclick="respondApproval('once')">&#10003; Allow once</button>
-          <button class="approval-btn session" onclick="respondApproval('session')">&#128274; Allow this session</button>
-          <button class="approval-btn always" onclick="respondApproval('always')">&#9734; Always allow</button>
-          <button class="approval-btn deny" onclick="respondApproval('deny')">&#10005; Deny</button>
+          <button class="approval-btn once" id="approvalBtnOnce" onclick="respondApproval('once')" title="Allow this one command (Enter)" data-i18n-title="approval_btn_once_title">
+            <span class="approval-btn-icon">&#10003;</span>
+            <span class="approval-btn-label" data-i18n="approval_btn_once">Allow once</span>
+            <kbd class="approval-kbd">↵</kbd>
+          </button>
+          <button class="approval-btn session" id="approvalBtnSession" onclick="respondApproval('session')" title="Allow for this session">
+            <span class="approval-btn-icon">&#128274;</span>
+            <span class="approval-btn-label" data-i18n="approval_btn_session">Allow session</span>
+          </button>
+          <button class="approval-btn always" id="approvalBtnAlways" onclick="respondApproval('always')" title="Always allow this command pattern">
+            <span class="approval-btn-icon">&#9734;</span>
+            <span class="approval-btn-label" data-i18n="approval_btn_always">Always allow</span>
+          </button>
+          <button class="approval-btn deny" id="approvalBtnDeny" onclick="respondApproval('deny')" title="Deny — do not run this command">
+            <span class="approval-btn-icon">&#10005;</span>
+            <span class="approval-btn-label" data-i18n="approval_btn_deny">Deny</span>
+          </button>
         </div>
       </div>
     </div>

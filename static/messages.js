@@ -355,25 +355,40 @@ function hideApprovalCard() {
 let _approvalSessionId = null;
 
 function showApprovalCard(pending) {
-  $("approvalDesc").textContent = pending.description || "";
-  $("approvalCmd").textContent = pending.command || "";
   const keys = pending.pattern_keys || (pending.pattern_key ? [pending.pattern_key] : []);
-  $("approvalDesc").textContent = (pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : "");
+  const desc = (pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : "");
+  $("approvalDesc").textContent = desc;
+  $("approvalCmd").textContent = pending.command || "";
   _approvalSessionId = pending._session_id || (S.session && S.session.session_id) || null;
-  $("approvalCard").classList.add("visible");
+  // Re-enable buttons in case a previous approval disabled them
+  ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
+    const b = $(id); if (b) { b.disabled = false; b.classList.remove("loading"); }
+  });
+  const card = $("approvalCard");
+  card.classList.add("visible");
+  // Apply current locale to data-i18n elements inside the card
+  if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
+  // Focus Allow once button so Enter works immediately
+  const onceBtn = $("approvalBtnOnce");
+  if (onceBtn) setTimeout(() => onceBtn.focus(), 50);
 }
 
 async function respondApproval(choice) {
   const sid = _approvalSessionId || (S.session && S.session.session_id);
   if (!sid) return;
-  hideApprovalCard();
+  // Disable all buttons immediately to prevent double-submit
+  ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
+    const b = $(id);
+    if (b) { b.disabled = true; if (b.id === "approvalBtn" + choice.charAt(0).toUpperCase() + choice.slice(1)) b.classList.add("loading"); }
+  });
   _approvalSessionId = null;
+  hideApprovalCard();
   try {
     await api("/api/approval/respond", {
       method: "POST",
       body: JSON.stringify({ session_id: sid, choice })
     });
-  } catch(e) { setStatus("Approval error: " + e.message); }
+  } catch(e) { setStatus(t("approval_responding") + " " + e.message); }
 }
 
 function startApprovalPolling(sid) {

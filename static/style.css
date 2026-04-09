@@ -164,19 +164,27 @@
   /* ── Approval card ── */
   .approval-card{display:none;max-width:780px;margin:0 auto 0;padding:0 20px 12px;}
   .approval-card.visible{display:block;}
-  .approval-inner{background:var(--surface);backdrop-filter:blur(8px);border:1px solid rgba(233,69,96,0.35);border-radius:14px;padding:14px 16px;}
+  .approval-inner{background:var(--surface);backdrop-filter:blur(8px);border:1px solid rgba(233,69,96,0.35);border-radius:14px;padding:16px 18px;}
   .approval-header{display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:13px;font-weight:600;color:#e94560;}
-  .approval-desc{font-size:12px;color:var(--muted);margin-bottom:8px;}
-  .approval-cmd{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-family:"SF Mono",ui-monospace,monospace;font-size:12px;color:var(--pre-text);white-space:pre-wrap;word-break:break-all;margin-bottom:12px;max-height:120px;overflow-y:auto;}
-  .approval-btns{display:flex;gap:8px;flex-wrap:wrap;}
-  .approval-btn{padding:6px 14px;border-radius:8px;font-size:12px;font-weight:600;border:1px solid var(--border2);background:var(--hover-bg);color:var(--text);cursor:pointer;transition:all .15s;}
-  .approval-btn:hover{background:rgba(255,255,255,0.12);}
-  .approval-btn.once{border-color:rgba(124,185,255,0.5);color:var(--blue);}
-  .approval-btn.once:hover{background:rgba(124,185,255,0.15);}
-  .approval-btn.session{border-color:rgba(124,185,255,0.3);color:var(--blue);}
+  .approval-desc{font-size:12px;color:var(--muted);margin-bottom:8px;line-height:1.5;}
+  .approval-cmd{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-family:"SF Mono",ui-monospace,monospace;font-size:12px;color:var(--pre-text);white-space:pre-wrap;word-break:break-all;margin-bottom:14px;max-height:120px;overflow-y:auto;}
+  .approval-btns{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
+  .approval-btn{display:inline-flex;align-items:center;gap:6px;padding:7px 15px;border-radius:8px;font-size:12px;font-weight:600;border:1px solid var(--border2);background:var(--hover-bg);color:var(--text);cursor:pointer;transition:all .15s;white-space:nowrap;}
+  .approval-btn:hover{background:rgba(255,255,255,0.12);transform:translateY(-1px);box-shadow:0 2px 8px rgba(0,0,0,0.2);}
+  .approval-btn:active{transform:translateY(0);box-shadow:none;}
+  .approval-btn:disabled{opacity:.5;cursor:not-allowed;transform:none;}
+  .approval-btn-icon{font-size:13px;line-height:1;}
+  .approval-btn-label{line-height:1;}
+  .approval-kbd{display:inline-flex;align-items:center;justify-content:center;padding:1px 5px;border-radius:4px;font-size:10px;font-family:inherit;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);color:var(--muted);line-height:1.4;margin-left:2px;}
+  .approval-btn.once{border-color:rgba(124,185,255,0.6);color:var(--blue);background:rgba(124,185,255,0.08);}
+  .approval-btn.once:hover{background:rgba(124,185,255,0.18);border-color:rgba(124,185,255,0.8);}
+  .approval-btn.session{border-color:rgba(124,185,255,0.35);color:var(--blue);}
+  .approval-btn.session:hover{background:rgba(124,185,255,0.12);border-color:rgba(124,185,255,0.55);}
   .approval-btn.always{border-color:rgba(201,168,76,0.5);color:var(--gold);}
+  .approval-btn.always:hover{background:rgba(201,168,76,0.12);border-color:rgba(201,168,76,0.7);}
   .approval-btn.deny{border-color:rgba(233,69,96,0.5);color:var(--accent);}
-  .approval-btn.deny:hover{background:rgba(233,69,96,0.12);}
+  .approval-btn.deny:hover{background:rgba(233,69,96,0.12);border-color:rgba(233,69,96,0.7);}
+  .approval-btn.loading{opacity:.7;cursor:wait;}
   /* Sidebar navigation tabs */
   .sidebar-nav{display:flex;border-bottom:1px solid var(--border);flex-shrink:0;padding:6px 8px 0;gap:2px;}
   .nav-tab{flex:1;padding:10px 4px 8px;font-size:20px;text-align:center;cursor:pointer;color:var(--muted);border:none;background:none;transition:color .15s;border-bottom:2px solid transparent;white-space:nowrap;overflow:hidden;position:relative;}
@@ -462,6 +470,7 @@
     .approval-card{padding:0 10px 8px;}
     .approval-btns{gap:6px;}
     .approval-btn{padding:8px 12px;font-size:12px;min-height:44px;}
+    .approval-kbd{display:none;}
     /* Tool cards */
     .tool-card{margin-left:0!important;font-size:12px;}
     /* Settings modal */
