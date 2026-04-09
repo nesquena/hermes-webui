@@ -384,13 +384,20 @@ def resolve_model_provider(model_id: str) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
     Model IDs from the dropdown can be in several formats:
-      - 'claude-sonnet-4.6'          (bare name, uses config default provider)
-      - 'anthropic/claude-sonnet-4.6' (OpenRouter format, provider/model)
-      - '@minimax:MiniMax-M2.7'       (explicit provider hint from dropdown)
+      - 'claude-sonnet-4.6'            (bare name, uses config default provider)
+      - 'anthropic/claude-sonnet-4.6'  (OpenRouter-style provider/model)
+      - '@minimax:MiniMax-M2.7'        (explicit provider hint from dropdown)
 
     The @provider:model format is used for models from non-default provider
     groups in the dropdown, so we can route them through the correct provider
     via resolve_runtime_provider(requested=provider) instead of the default.
+
+    Custom OpenAI-compatible endpoints are special: their model IDs often look
+    like provider/model (for example ``google/gemma-4-26b-a4b``), which would be
+    mistaken for an OpenRouter model if we only looked at the slash. To avoid
+    that, first check whether the selected model matches an entry in
+    config.yaml -> custom_providers and route it through that named custom
+    provider.
 
     Returns (model, provider, base_url) where provider and base_url may be None.
     """
@@ -404,6 +411,20 @@ def resolve_model_provider(model_id: str) -> tuple:
     model_id = (model_id or '').strip()
     if not model_id:
         return model_id, config_provider, config_base_url
+
+    # Custom providers declared in config.yaml should win over slash-based
+    # OpenRouter heuristics. Their model IDs commonly contain '/' too.
+    custom_providers = cfg.get('custom_providers', [])
+    if isinstance(custom_providers, list):
+        for entry in custom_providers:
+            if not isinstance(entry, dict):
+                continue
+            entry_model = (entry.get('model') or '').strip()
+            entry_name = (entry.get('name') or '').strip()
+            entry_base_url = (entry.get('base_url') or '').strip()
+            if entry_model and entry_name and model_id == entry_model:
+                provider_hint = 'custom:' + entry_name.lower().replace(' ', '-')
+                return model_id, provider_hint, entry_base_url or None
 
     # @provider:model format — explicit provider hint from the dropdown.
     # Route through that provider directly (resolve_runtime_provider will

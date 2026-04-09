@@ -6,8 +6,8 @@ tuples for different provider configurations.
 import api.config as config
 
 
-def _resolve_with_config(model_id, provider=None, base_url=None, default=None):
-    """Helper: temporarily set config.cfg model section, call resolve, restore."""
+def _resolve_with_config(model_id, provider=None, base_url=None, default=None, custom_providers=None):
+    """Helper: temporarily set config.cfg model/custom provider sections, call resolve, restore."""
     old_cfg = dict(config.cfg)
     model_cfg = {}
     if provider:
@@ -17,6 +17,8 @@ def _resolve_with_config(model_id, provider=None, base_url=None, default=None):
     if default:
         model_cfg['default'] = default
     config.cfg['model'] = model_cfg if model_cfg else {}
+    if custom_providers is not None:
+        config.cfg['custom_providers'] = custom_providers
     try:
         return config.resolve_model_provider(model_id)
     finally:
@@ -137,6 +139,23 @@ def test_slash_prefix_non_default_still_routes_openrouter():
     )
     assert model == 'minimax/MiniMax-M2.7'
     assert provider == 'openrouter'
+
+
+def test_custom_provider_model_with_slash_routes_to_named_custom_provider():
+    """Slash-containing custom endpoint model IDs must not be mistaken for OpenRouter models."""
+    model, provider, base_url = _resolve_with_config(
+        'google/gemma-4-26b-a4b',
+        provider='openrouter',
+        base_url='https://openrouter.ai/api/v1',
+        custom_providers=[{
+            'name': 'Local LM Studio',
+            'base_url': 'http://lmstudio.local:1234/v1',
+            'model': 'google/gemma-4-26b-a4b',
+        }],
+    )
+    assert model == 'google/gemma-4-26b-a4b'
+    assert provider == 'custom:local-lm-studio'
+    assert base_url == 'http://lmstudio.local:1234/v1'
 
 
 # ── get_available_models() @provider: hint behaviour ──────────────────────
