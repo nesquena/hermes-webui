@@ -16,30 +16,30 @@
   <aside class="sidebar">
     <div class="sidebar-header"><div class="logo">H</div><div><h1 style="margin:0;font-size:15px;font-weight:700;letter-spacing:-.01em">Hermes</h1><div style="font-size:10px;color:var(--muted);opacity:.8;margin-top:1px">v0.40.2</div></div></div>
     <div class="sidebar-nav">
-      <button class="nav-tab active" data-panel="chat" data-label="Chat" onclick="switchPanel('chat')" title="Chat">&#128172;</button>
-      <button class="nav-tab" data-panel="tasks" data-label="Tasks" onclick="switchPanel('tasks')" title="Tasks">&#128197;</button>
-      <button class="nav-tab" data-panel="skills" data-label="Skills" onclick="switchPanel('skills')" title="Skills">&#129513;</button>
-      <button class="nav-tab" data-panel="memory" data-label="Memory" onclick="switchPanel('memory')" title="Memory">&#129504;</button>
-      <button class="nav-tab" data-panel="workspaces" data-label="Spaces" onclick="switchPanel('workspaces')" title="Spaces">&#128193;</button>
-      <button class="nav-tab" data-panel="profiles" data-label="Profiles" onclick="switchPanel('profiles')" title="Agent profiles"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></button>
-      <button class="nav-tab" data-panel="todos" data-label="Todos" onclick="switchPanel('todos')" title="Current task list">&#9989;</button>
+      <button class="nav-tab active" data-panel="chat" data-label="Chat" onclick="switchPanel('chat')" title="Chat" data-i18n-title="tab_chat">&#128172;</button>
+      <button class="nav-tab" data-panel="tasks" data-label="Tasks" onclick="switchPanel('tasks')" title="Tasks" data-i18n-title="tab_tasks">&#128197;</button>
+      <button class="nav-tab" data-panel="skills" data-label="Skills" onclick="switchPanel('skills')" title="Skills" data-i18n-title="tab_skills">&#129513;</button>
+      <button class="nav-tab" data-panel="memory" data-label="Memory" onclick="switchPanel('memory')" title="Memory" data-i18n-title="tab_memory">&#129504;</button>
+      <button class="nav-tab" data-panel="workspaces" data-label="Spaces" onclick="switchPanel('workspaces')" title="Spaces" data-i18n-title="tab_workspaces">&#128193;</button>
+      <button class="nav-tab" data-panel="profiles" data-label="Profiles" onclick="switchPanel('profiles')" title="Agent profiles" data-i18n-title="tab_profiles"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></button>
+      <button class="nav-tab" data-panel="todos" data-label="Todos" onclick="switchPanel('todos')" title="Current task list" data-i18n-title="tab_todos">&#9989;</button>
     </div>
     <!-- Chat panel -->
     <div class="panel-view active" id="panelChat">
       <div class="sidebar-section">
         <button class="new-chat-btn" id="btnNewChat">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-          New conversation <span style="font-size:10px;opacity:.5;margin-left:4px">&#8984;K</span>
+          <span data-i18n="new_conversation">New conversation</span> <span style="font-size:10px;opacity:.5;margin-left:4px">&#8984;K</span>
         </button>
       </div>
-      <div class="session-search"><input id="sessionSearch" placeholder="Filter conversations..." oninput="filterSessions()"></div>
+      <div class="session-search"><input id="sessionSearch" placeholder="Filter conversations..." data-i18n-placeholder="filter_conversations" oninput="filterSessions()"></div>
       <div class="session-list" id="sessionList"></div>
     </div>
     <!-- Tasks (cron) panel -->
     <div class="panel-view" id="panelTasks">
       <div class="sidebar-section" style="padding-bottom:4px;display:flex;align-items:center;justify-content:space-between">
-        <div style="font-size:11px;color:var(--muted)">Scheduled jobs</div>
-        <button class="cron-btn run" style="padding:3px 8px;font-size:10px" onclick="toggleCronForm()">+ New job</button>
+        <div style="font-size:11px;color:var(--muted)" data-i18n="scheduled_jobs">Scheduled jobs</div>
+        <button class="cron-btn run" style="padding:3px 8px;font-size:10px" onclick="toggleCronForm()" data-i18n="new_job">+ New job</button>
       </div>
       <!-- Create job form (hidden by default) -->
       <div id="cronCreateForm" style="display:none;padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0">
@@ -57,18 +57,18 @@
           <div id="cronFormSkillTags" class="skill-picker-tags"></div>
         </div>
         <div style="display:flex;gap:6px">
-          <button class="cron-btn run" style="flex:1" onclick="submitCronCreate()">Create job</button>
-          <button class="cron-btn" style="flex:1" onclick="toggleCronForm()">Cancel</button>
+          <button class="cron-btn run" style="flex:1" onclick="submitCronCreate()" data-i18n="create_job">Create job</button>
+          <button class="cron-btn" style="flex:1" onclick="toggleCronForm()" data-i18n="cancel">Cancel</button>
         </div>
         <div id="cronFormError" style="font-size:11px;color:var(--accent);margin-top:6px;display:none"></div>
       </div>
-      <div class="cron-list" id="cronList"><div style="padding:12px;color:var(--muted);font-size:12px">Loading...</div></div>
+      <div class="cron-list" id="cronList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
     </div>
     <!-- Skills panel -->
     <div class="panel-view" id="panelSkills">
       <div class="sidebar-section" style="padding-bottom:4px;display:flex;align-items:center;justify-content:space-between">
-        <div class="skills-search" style="flex:1;padding:0"><input id="skillsSearch" placeholder="Search skills..." oninput="filterSkills()"></div>
-        <button class="cron-btn run" style="padding:3px 8px;font-size:10px;flex-shrink:0;margin-left:6px" onclick="toggleSkillForm()">+ New skill</button>
+        <div class="skills-search" style="flex:1;padding:0"><input id="skillsSearch" placeholder="Search skills..." data-i18n-placeholder="search_skills" oninput="filterSkills()"></div>
+        <button class="cron-btn run" style="padding:3px 8px;font-size:10px;flex-shrink:0;margin-left:6px" onclick="toggleSkillForm()" data-i18n="new_skill">+ New skill</button>
       </div>
       <!-- Skill create/edit form (hidden by default) -->
       <div id="skillCreateForm" style="display:none;padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0">
@@ -76,46 +76,46 @@
         <input id="skillFormCategory" placeholder="Category (optional, e.g. devops)" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;margin-bottom:6px;box-sizing:border-box">
         <textarea id="skillFormContent" rows="6" placeholder="SKILL.md content (YAML frontmatter + markdown body)" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;resize:vertical;font-family:'SF Mono',ui-monospace,monospace;margin-bottom:6px;box-sizing:border-box"></textarea>
         <div style="display:flex;gap:6px">
-          <button class="cron-btn run" style="flex:1" onclick="submitSkillSave()">Save skill</button>
-          <button class="cron-btn" style="flex:1" onclick="toggleSkillForm()">Cancel</button>
+          <button class="cron-btn run" style="flex:1" onclick="submitSkillSave()" data-i18n="save_skill">Save skill</button>
+          <button class="cron-btn" style="flex:1" onclick="toggleSkillForm()" data-i18n="cancel">Cancel</button>
         </div>
         <div id="skillFormError" style="font-size:11px;color:var(--accent);margin-top:6px;display:none"></div>
       </div>
-      <div class="skills-list" id="skillsList"><div style="padding:12px;color:var(--muted);font-size:12px">Loading...</div></div>
+      <div class="skills-list" id="skillsList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
     </div>
     <!-- Memory panel -->
     <div class="panel-view" id="panelMemory">
       <div style="padding:8px 12px 4px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
-        <span style="font-size:11px;color:var(--muted)">Personal memory</span>
-        <button class="cron-btn run" id="memEditBtn" style="padding:3px 8px;font-size:10px" onclick="toggleMemoryEdit()">&#9998; Edit</button>
+        <span style="font-size:11px;color:var(--muted)" data-i18n="personal_memory">Personal memory</span>
+        <button class="cron-btn run" id="memEditBtn" style="padding:3px 8px;font-size:10px" onclick="toggleMemoryEdit()">&#9998; <span data-i18n="edit">Edit</span></button>
       </div>
-      <div class="memory-panel" id="memoryPanel"><div style="color:var(--muted);font-size:12px">Loading...</div></div>
+      <div class="memory-panel" id="memoryPanel"><div style="color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
       <!-- Memory edit form (hidden by default) -->
       <div id="memoryEditForm" style="display:none;padding:8px 12px;border-top:1px solid var(--border);flex-shrink:0">
-        <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Editing: <span id="memEditSection">memory</span></div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:4px"><span data-i18n="editing">Editing</span>: <span id="memEditSection">memory</span></div>
         <textarea id="memEditContent" rows="10" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:11px;outline:none;resize:vertical;font-family:'SF Mono',ui-monospace,monospace;box-sizing:border-box;margin-bottom:6px;line-height:1.5"></textarea>
         <div style="display:flex;gap:6px">
-          <button class="cron-btn run" style="flex:1" onclick="submitMemorySave()">Save</button>
-          <button class="cron-btn" style="flex:1" onclick="closeMemoryEdit()">Cancel</button>
+          <button class="cron-btn run" style="flex:1" onclick="submitMemorySave()" data-i18n="save">Save</button>
+          <button class="cron-btn" style="flex:1" onclick="closeMemoryEdit()" data-i18n="cancel">Cancel</button>
         </div>
         <div id="memEditError" style="font-size:11px;color:var(--accent);margin-top:6px;display:none"></div>
       </div>
     </div>
     <!-- Todo panel -->
     <div class="panel-view" id="panelTodos">
-      <div style="padding:10px 12px 4px;font-size:11px;color:var(--muted);flex-shrink:0">Current task list</div>
+      <div style="padding:10px 12px 4px;font-size:11px;color:var(--muted);flex-shrink:0" data-i18n="current_task_list">Current task list</div>
       <div id="todoPanel" style="flex:1;overflow-y:auto;padding:8px 12px"></div>
     </div>
     <!-- Workspaces panel -->
     <div class="panel-view" id="panelWorkspaces">
-      <div style="padding:10px 12px 4px;font-size:11px;color:var(--muted)">Add and switch workspaces for your sessions.</div>
-      <div style="flex:1;overflow-y:auto;padding:0 12px 12px" id="workspacesPanel"><div style="color:var(--muted);font-size:12px">Loading...</div></div>
+      <div style="padding:10px 12px 4px;font-size:11px;color:var(--muted)" data-i18n="workspace_desc">Add and switch workspaces for your sessions.</div>
+      <div style="flex:1;overflow-y:auto;padding:0 12px 12px" id="workspacesPanel"><div style="color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
     </div>
     <!-- Profiles panel -->
     <div class="panel-view" id="panelProfiles">
       <div class="sidebar-section" style="padding-bottom:4px;display:flex;align-items:center;justify-content:space-between">
-        <div style="font-size:11px;color:var(--muted)">Agent profiles</div>
-        <button class="cron-btn run" style="padding:3px 8px;font-size:10px" onclick="toggleProfileForm()">+ New profile</button>
+        <div style="font-size:11px;color:var(--muted)" data-i18n="tab_profiles">Agent profiles</div>
+        <button class="cron-btn run" style="padding:3px 8px;font-size:10px" onclick="toggleProfileForm()" data-i18n="new_profile">+ New profile</button>
       </div>
       <!-- Profile create form (hidden by default) -->
       <div id="profileCreateForm" style="display:none;padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0">
@@ -163,9 +163,9 @@
         <div class="ws-dropdown" id="wsDropdown"></div>
       </div>
       <div class="sidebar-actions">
-        <button class="sm-btn" id="btnDownload" title="Download as Markdown">&#8595; Transcript</button>
+        <button class="sm-btn" id="btnDownload" title="Download as Markdown" data-i18n-title="download_transcript">&#8595; <span data-i18n="transcript">Transcript</span></button>
         <button class="sm-btn" id="btnExportJSON" title="Export full session as JSON">&#10092;/&#10093; JSON</button>
-        <button class="sm-btn" id="btnImportJSON" title="Import session from JSON">&#8593; Import</button>
+        <button class="sm-btn" id="btnImportJSON" title="Import session from JSON">&#8593; <span data-i18n="import">Import</span></button>
         <input type="file" id="importFileInput" accept=".json" style="display:none">
       </div>
     </div>
@@ -176,7 +176,7 @@
       <button class="mobile-hamburger" id="btnHamburger" onclick="toggleMobileSidebar()" title="Menu">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
       </button>
-      <div style="flex:1;min-width:0;overflow:hidden"><div class="topbar-title" id="topbarTitle">Hermes</div><div class="topbar-meta" id="topbarMeta">Start a new conversation</div></div>
+      <div style="flex:1;min-width:0;overflow:hidden"><div class="topbar-title" id="topbarTitle">Hermes</div><div class="topbar-meta" id="topbarMeta" data-i18n="new_conversation">Start a new conversation</div></div>
       <div class="topbar-chips">
         <div id="profileChipWrap" style="position:relative">
           <div class="chip profile-chip" id="profileChip" onclick="toggleProfileDropdown()" title="Switch profile" style="cursor:pointer"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg><span id="profileChipLabel">default</span> &#9662;</div>
@@ -184,20 +184,20 @@
         </div>
         <div class="chip model" id="modelChip">GPT-5.4 Mini</div>
 
-        <button class="chip clear-btn" id="btnClearConv" onclick="clearConversation()" title="Clear all messages in this conversation" style="display:none">&#128465; Clear</button>
-        <button class="chip gear-btn" id="btnSettings" onclick="toggleSettings()" title="Settings">&#9881;</button>
+        <button class="chip clear-btn" id="btnClearConv" onclick="clearConversation()" title="Clear all messages in this conversation" style="display:none">&#128465; <span data-i18n="copy">Clear</span></button>
+        <button class="chip gear-btn" id="btnSettings" onclick="toggleSettings()" title="Settings" data-i18n-title="settings_title">&#9881;</button>
         <button class="chip mobile-files-btn" id="btnMobileFiles" onclick="toggleMobileFiles()" title="Files">&#128193;</button>
       </div>
     </div>
     <div class="messages" id="messages">
       <div class="empty-state" id="emptyState">
         <div class="empty-logo">🦉</div>
-        <h2>What can I help with?</h2>
-        <p>Ask anything, run commands, explore files, or manage your scheduled tasks.</p>
+        <h2 data-i18n="empty_title">What can I help with?</h2>
+        <p data-i18n="empty_subtitle">Ask anything, run commands, explore files, or manage your scheduled tasks.</p>
         <div class="suggestion-grid">
-          <button class="suggestion" data-msg="What files are in this workspace?">📁 What files are in this workspace?</button>
-          <button class="suggestion" data-msg="What's on my schedule today?">📋 What's on my schedule today?</button>
-          <button class="suggestion" data-msg="Help me plan a small project.">🗺 Help me plan a small project.</button>
+          <button class="suggestion" data-msg="What files are in this workspace?" data-i18n="suggest_files">📁 What files are in this workspace?</button>
+          <button class="suggestion" data-msg="What's on my schedule today?" data-i18n="suggest_schedule">📋 What's on my schedule today?</button>
+          <button class="suggestion" data-msg="Help me plan a small project." data-i18n="suggest_plan">🗺 Help me plan a small project.</button>
         </div>
       </div>
       <div class="messages-inner" id="msgInner"></div>
@@ -365,58 +365,58 @@
       <div class="settings-field">
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
           <input type="checkbox" id="settingsSoundEnabled" style="width:15px;height:15px;accent-color:var(--accent)">
-          Notification sound
+          <span data-i18n="settings_label_sound">Notification sound</span>
         </label>
-        <div style="font-size:11px;color:var(--muted);margin-top:4px">Play a sound when the assistant finishes a response.</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_sound">Play a sound when the assistant finishes a response.</div>
       </div>
       <div class="settings-field">
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
           <input type="checkbox" id="settingsNotificationsEnabled" style="width:15px;height:15px;accent-color:var(--accent)">
-          Browser notifications
+          <span data-i18n="settings_label_notifications">Browser notifications</span>
         </label>
-        <div style="font-size:11px;color:var(--muted);margin-top:4px">Show a system notification when a response completes while the tab is in the background.</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_notifications">Show a system notification when a response completes while the tab is in the background.</div>
       </div>
       <div class="settings-field">
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
           <input type="checkbox" id="settingsShowTokenUsage" style="width:15px;height:15px;accent-color:var(--accent)">
           <span data-i18n="settings_label_token_usage">Show token usage after responses</span>
         </label>
-        <div style="font-size:11px;color:var(--muted);margin-top:4px">Displays input/output token count below each assistant reply. Also toggled with <code>/usage</code>.</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_token_usage">Displays input/output token count below each assistant reply. Also toggled with <code>/usage</code>.</div>
       </div>
       <div class="settings-field">
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
           <input type="checkbox" id="settingsShowCliSessions" style="width:15px;height:15px;accent-color:var(--accent)">
           <span data-i18n="settings_label_cli_sessions">Show CLI sessions in sidebar</span>
         </label>
-        <div style="font-size:11px;color:var(--muted);margin-top:4px">Merges sessions from the Hermes CLI (state.db) into the session list. Click a CLI session to import it and continue the conversation.</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_cli_sessions">Merges sessions from the Hermes CLI (state.db) into the session list. Click a CLI session to import it and continue the conversation.</div>
       </div>
       <div class="settings-field">
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
           <input type="checkbox" id="settingsSyncInsights" style="width:15px;height:15px;accent-color:var(--accent)">
           <span data-i18n="settings_label_sync_insights">Sync usage to /insights</span>
         </label>
-        <div style="font-size:11px;color:var(--muted);margin-top:4px">Mirrors WebUI token usage to state.db so <code>hermes /insights</code> includes browser session data. Off by default.</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_sync_insights">Mirrors WebUI token usage to state.db so <code>hermes /insights</code> includes browser session data. Off by default.</div>
       </div>
       <div class="settings-field">
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
           <input type="checkbox" id="settingsCheckUpdates" style="width:15px;height:15px;accent-color:var(--accent)">
           <span data-i18n="settings_label_check_updates">Check for updates</span>
         </label>
-        <div style="font-size:11px;color:var(--muted);margin-top:4px">Show a banner when newer versions of the WebUI or Agent are available. Runs a background git fetch periodically.</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_check_updates">Show a banner when newer versions of the WebUI or Agent are available. Runs a background git fetch periodically.</div>
       </div>
       <div class="settings-field">
         <label for="settingsBotName" data-i18n="settings_label_bot_name">Assistant Name</label>
-        <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Display name for the assistant throughout the UI. Defaults to Hermes.</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_bot_name">Display name for the assistant throughout the UI. Defaults to Hermes.</div>
         <input type="text" id="settingsBotName" placeholder="Hermes" maxlength="64" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
       </div>
       <div class="settings-field" style="border-top:1px solid var(--border);padding-top:12px;margin-top:8px">
         <label for="settingsPassword" data-i18n="settings_label_password">Access Password</label>
-        <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Enter a new password to set or change it. Leave blank to keep current setting.</div>
-        <input type="password" id="settingsPassword" placeholder="Enter new password…" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_password">Enter a new password to set or change it. Leave blank to keep current setting.</div>
+        <input type="password" id="settingsPassword" placeholder="Enter new password…" data-i18n-placeholder="password_placeholder" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
       </div>
       <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600" data-i18n="settings_save_btn">Save Settings</button>
-      <button class="sm-btn" id="btnDisableAuth" onclick="disableAuth()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:#e8a030;border-color:rgba(232,160,48,.3);display:none">Disable Auth</button>
-      <button class="sm-btn" id="btnSignOut" onclick="signOut()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:var(--accent);border-color:rgba(233,69,96,.3);display:none">Sign Out</button>
+      <button class="sm-btn" id="btnDisableAuth" onclick="disableAuth()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:#e8a030;border-color:rgba(232,160,48,.3);display:none" data-i18n="disable_auth">Disable Auth</button>
+      <button class="sm-btn" id="btnSignOut" onclick="signOut()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:var(--accent);border-color:rgba(233,69,96,.3);display:none" data-i18n="sign_out">Sign Out</button>
     </div>
   </div>
 </div>
@@ -424,23 +424,23 @@
 <nav class="mobile-bottom-nav" id="mobileBottomNav">
   <button class="mobile-nav-btn active" data-panel="chat" onclick="mobileSwitchPanel('chat')">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-    <span>Chat</span>
+    <span data-i18n="tab_chat">Chat</span>
   </button>
   <button class="mobile-nav-btn" data-panel="tasks" onclick="mobileSwitchPanel('tasks')">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-    <span>Tasks</span>
+    <span data-i18n="tab_tasks">Tasks</span>
   </button>
   <button class="mobile-nav-btn" data-panel="skills" onclick="mobileSwitchPanel('skills')">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-    <span>Skills</span>
+    <span data-i18n="tab_skills">Skills</span>
   </button>
   <button class="mobile-nav-btn" data-panel="memory" onclick="mobileSwitchPanel('memory')">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2a7 7 0 0 1 7 7c0 2.5-1.3 4.7-3.2 6H8.2C6.3 13.7 5 11.5 5 9a7 7 0 0 1 7-7z"/><line x1="9" y1="17" x2="15" y2="17"/><line x1="10" y1="20" x2="14" y2="20"/></svg>
-    <span>Memory</span>
+    <span data-i18n="tab_memory">Memory</span>
   </button>
   <button class="mobile-nav-btn" data-panel="workspaces" onclick="mobileSwitchPanel('workspaces')">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 4h8l2 2h10v14H2z"/></svg>
-    <span>Spaces</span>
+    <span data-i18n="tab_workspaces">Spaces</span>
   </button>
 </nav>
 <div class="toast" id="toast"></div>
