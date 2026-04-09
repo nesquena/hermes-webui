@@ -121,6 +121,25 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
           if _profile_home:
               os.environ['HERMES_HOME'] = _profile_home
         # Lock released — agent runs without holding it
+        # Register a gateway-style notify callback so the approval system can
+        # push the `approval` SSE event the moment a dangerous command is
+        # detected, without waiting for the next on_tool() poll cycle.
+        # Without this, the agent thread blocks inside the terminal tool
+        # waiting for approval that the UI never knew to ask for, leaving
+        # the chat stuck in "Thinking…" forever.
+        _approval_registered = False
+        try:
+            from tools.approval import (
+                register_gateway_notify as _reg_notify,
+                unregister_gateway_notify as _unreg_notify,
+            )
+            def _approval_notify_cb(approval_data):
+                put('approval', approval_data)
+            _reg_notify(session_id, _approval_notify_cb)
+            _approval_registered = True
+        except ImportError:
+            pass  # approval module not available — fall back to polling
+
         try:
             def on_token(text):
                 if text is None:
@@ -133,13 +152,17 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                     for k, v in list(args.items())[:4]:
                         s2 = str(v); args_snap[k] = s2[:120]+('...' if len(s2)>120 else '')
                 put('tool', {'name': name, 'preview': preview, 'args': args_snap})
-                # also check for pending approval and surface it immediately
-                from tools.approval import has_pending as _has_pending, _pending, _lock
-                if _has_pending(session_id):
-                    with _lock:
-                        p = dict(_pending.get(session_id, {}))
-                    if p:
-                        put('approval', p)
+                # Fallback: poll for pending approval in case notify_cb wasn't
+                # registered (e.g. older approval module without gateway support).
+                try:
+                    from tools.approval import has_pending as _has_pending, _pending, _lock
+                    if _has_pending(session_id):
+                        with _lock:
+                            p = dict(_pending.get(session_id, {}))
+                        if p:
+                            put('approval', p)
+                except ImportError:
+                    pass
 
             if AIAgent is None:
                 raise ImportError("AIAgent not available -- check that hermes-agent is on sys.path")
@@ -382,6 +405,13 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
             put('done', {'session': s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}, 'usage': usage})
         finally:
+            # Unregister the gateway approval callback and unblock any threads
+            # still waiting on approval (e.g. stream cancelled mid-approval).
+            if _approval_registered:
+                try:
+                    _unreg_notify(session_id)
+                except Exception:
+                    pass
             with _ENV_LOCK:
                 if old_cwd is None: os.environ.pop('TERMINAL_CWD', None)
                 else: os.environ['TERMINAL_CWD'] = old_cwd

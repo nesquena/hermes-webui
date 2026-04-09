@@ -58,6 +58,7 @@ try:
         has_pending, pop_pending, submit_pending,
         approve_session, approve_permanent, save_permanent_allowlist,
         is_approved, _pending, _lock, _permanent_approved,
+        resolve_gateway_approval,
     )
 except ImportError:
     has_pending = lambda *a, **k: False
@@ -67,6 +68,7 @@ except ImportError:
     approve_permanent = lambda *a, **k: None
     save_permanent_allowlist = lambda *a, **k: None
     is_approved = lambda *a, **k: True
+    resolve_gateway_approval = lambda *a, **k: 0
     _pending = {}
     _lock = threading.Lock()
     _permanent_approved = set()
@@ -1353,6 +1355,7 @@ def _handle_approval_respond(handler, body):
     choice = body.get('choice', 'deny')
     if choice not in ('once', 'session', 'always', 'deny'):
         return bad(handler, f'Invalid choice: {choice}')
+    # Pop the legacy polling-mode pending entry (no-op when gateway path is active).
     with _lock:
         pending = _pending.pop(sid, None)
     if pending:
@@ -1363,6 +1366,10 @@ def _handle_approval_respond(handler, body):
             for k in keys:
                 approve_session(sid, k); approve_permanent(k)
             save_permanent_allowlist(_permanent_approved)
+    # Unblock the agent thread waiting in the gateway approval queue.
+    # This is the primary signal when streaming is active — the agent
+    # thread is parked in entry.event.wait() and needs to be woken up.
+    resolve_gateway_approval(sid, choice, resolve_all=False)
     return j(handler, {'ok': True, 'choice': choice})
 
 
