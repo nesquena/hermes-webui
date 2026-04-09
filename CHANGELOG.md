@@ -5,6 +5,35 @@
 
 ---
 
+
+## [v0.40.0] — 2026-04-09
+
+### Features
+- **i18n — pluggable language switcher** (PR #179): Settings panel now has a
+  Language dropdown. Ships with English and Chinese (中文). All UI strings use
+  a `t()` helper that falls back to English for missing keys. The login page
+  also localises — title, placeholder, button, and error strings all respond to
+  the saved locale. Add a language by adding a LOCALES entry to `static/i18n.js`.
+- **Notification sound + browser notifications** (PR #180): Two new settings
+  toggles. "Notification sound" plays a short two-tone chime when the assistant
+  finishes or an approval card appears. "Browser notification" fires a system
+  notification when the tab is in the background.
+- **Thinking / reasoning block display** (PR #181, #182): Inline `<think>…</think>`
+  and Gemma 4 `<|channel>thought…<channel|>` tags are parsed out of assistant
+  messages and rendered as a collapsible 💡 "Thinking" card above the reply.
+  During streaming, the bubble shows "Thinking…" until the tag closes. Hardened
+  against partial-tag edge cases and empty thinking blocks.
+
+### Bug Fixes
+- **Stray `}` in message row HTML** (PR #183): A typo in the i18n refactor left
+  an extra `}` in the `msg-role` div template literal, producing `<div class="msg-role user" }>`.
+  Removed.
+- **JS-escape login locale strings** (PR #183): `LOGIN_INVALID_PW` and
+  `LOGIN_CONN_FAILED` were injected into a JS string context without escaping
+  single quotes or backslashes. Now uses minimal JS-string escaping.
+
+---
+
 ## [v0.39.1] — 2026-04-08
 
 ### Bug Fixes
