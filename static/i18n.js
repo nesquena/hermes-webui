@@ -271,9 +271,10 @@ function t(key, ...args) {
  * @param {string} lang
  */
 function setLocale(lang) {
-  _locale = LOCALES[lang] || LOCALES.en;
-  localStorage.setItem('hermes-lang', lang);
-  document.documentElement.lang = _locale._speech || lang;
+  const resolved = LOCALES[lang] ? lang : 'en';
+  _locale = LOCALES[resolved];
+  localStorage.setItem('hermes-lang', resolved);
+  document.documentElement.lang = _locale._speech || resolved;
 }
 
 /**
@@ -281,8 +282,8 @@ function setLocale(lang) {
  * Server-persisted preference is applied later in loadSettingsPanel().
  */
 function loadLocale() {
-  const saved = localStorage.getItem('hermes-lang') || 'en';
-  setLocale(saved);
+  const saved = localStorage.getItem('hermes-lang');
+  setLocale(saved && LOCALES[saved] ? saved : 'en');
 }
 
 /**
