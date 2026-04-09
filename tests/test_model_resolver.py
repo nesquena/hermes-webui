@@ -202,3 +202,96 @@ def test_default_provider_models_not_prefixed():
             assert bare_id in returned_ids, (
                 f"_PROVIDER_MODELS entry '{bare_id}' is missing from the Anthropic group"
             )
+
+
+# ── get_available_models(): phantom "Custom" group regression ─────────────
+#
+# When the user has model.provider set to a real provider (e.g. openai-codex)
+# AND a model.base_url set, hermes_cli reports the 'custom' pseudo-provider as
+# authenticated. The WebUI picker must NOT build a separate "Custom" group in
+# that case — the base_url belongs to the active provider.
+
+def _available_models_with_full_cfg(provider, default, base_url):
+    """Helper: set model.provider, model.default, model.base_url at once."""
+    import api.config as _cfg
+    old_cfg = dict(_cfg.cfg)
+    _cfg.cfg['model'] = {
+        'provider': provider,
+        'default': default,
+        'base_url': base_url,
+    }
+    try:
+        return _cfg.get_available_models()
+    finally:
+        _cfg.cfg.clear()
+        _cfg.cfg.update(old_cfg)
+
+
+def test_no_phantom_custom_group_when_active_provider_is_set(monkeypatch):
+    """Issue: with provider=openai-codex + base_url set, gpt-5.4 was landing
+    under a phantom "Custom" group instead of the "OpenAI Codex" group."""
+    import sys, types
+
+    # Force hermes_cli to report both the real provider and the phantom
+    # 'custom' as authenticated, simulating what list_available_providers()
+    # returns when base_url is configured.
+    fake_mod = types.ModuleType('hermes_cli.models')
+    fake_mod.list_available_providers = lambda: [
+        {'id': 'openai-codex', 'authenticated': True},
+        {'id': 'custom',       'authenticated': True},
+    ]
+    fake_auth = types.ModuleType('hermes_cli.auth')
+    fake_auth.get_auth_status = lambda pid: {'key_source': 'env'}
+    monkeypatch.setitem(sys.modules, 'hermes_cli.models', fake_mod)
+    monkeypatch.setitem(sys.modules, 'hermes_cli.auth', fake_auth)
+
+    result = _available_models_with_full_cfg(
+        provider='openai-codex',
+        default='gpt-5.4',
+        base_url='https://chatgpt.com/backend-api/codex',
+    )
+    group_names = [g['provider'] for g in result['groups']]
+    assert 'Custom' not in group_names, (
+        f"Phantom 'Custom' group present; full groups: {group_names}"
+    )
+
+
+def test_default_model_lands_under_active_provider_group(monkeypatch):
+    """The configured default_model must appear under the active provider's
+    display group, even when the model isn't in _PROVIDER_MODELS[provider]
+    AND the active provider isn't the alphabetical first detected provider.
+
+    Regression guard for a hyphen-vs-space bug in the "ensure default_model
+    appears" post-pass: the substring check `active_provider.lower() in
+    g.get('provider', '').lower()` was failing for 'openai-codex' vs
+    display name 'OpenAI Codex' (hyphen vs. space), silently falling back
+    to groups[0] — which, when another provider sorted earlier
+    alphabetically (e.g. 'anthropic'), placed gpt-5.4 in the WRONG group.
+    """
+    import sys, types
+    fake_mod = types.ModuleType('hermes_cli.models')
+    fake_mod.list_available_providers = lambda: [
+        {'id': 'anthropic',    'authenticated': True},  # sorts before openai-codex
+        {'id': 'openai-codex', 'authenticated': True},
+        {'id': 'custom',       'authenticated': True},
+    ]
+    fake_auth = types.ModuleType('hermes_cli.auth')
+    fake_auth.get_auth_status = lambda pid: {'key_source': 'env'}
+    monkeypatch.setitem(sys.modules, 'hermes_cli.models', fake_mod)
+    monkeypatch.setitem(sys.modules, 'hermes_cli.auth', fake_auth)
+
+    result = _available_models_with_full_cfg(
+        provider='openai-codex',
+        default='gpt-5.4',
+        base_url='https://chatgpt.com/backend-api/codex',
+    )
+    groups = {g['provider']: [m['id'] for m in g['models']] for g in result['groups']}
+    assert 'OpenAI Codex' in groups, f"OpenAI Codex group missing: {list(groups)}"
+    assert 'gpt-5.4' in groups['OpenAI Codex'], (
+        f"gpt-5.4 not in OpenAI Codex group; contents: {groups['OpenAI Codex']}"
+    )
+    # And crucially, it must NOT have landed in the alphabetically-first
+    # group (Anthropic) via the fallback path.
+    assert 'gpt-5.4' not in groups.get('Anthropic', []), (
+        f"gpt-5.4 leaked into Anthropic group via fallback: {groups.get('Anthropic')}"
+    )

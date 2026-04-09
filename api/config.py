@@ -654,6 +654,14 @@ def get_available_models() -> dict:
                 _seen_custom_ids.add(_cp_model)
                 detected_providers.add('custom')
 
+    # If the user configured a real model.provider, the base_url belongs to
+    # THAT provider, not to a separate "Custom" group. hermes_cli reports
+    # 'custom' as authenticated whenever base_url is set, which would otherwise
+    # build a phantom "Custom" bucket next to the real provider's group. Drop
+    # it unless the user explicitly chose 'custom' as their active provider.
+    if active_provider and active_provider != 'custom':
+        detected_providers.discard('custom')
+
     # 5. Build model groups
     if detected_providers:
         for pid in sorted(detected_providers):
@@ -715,11 +723,21 @@ def get_available_models() -> dict:
         _norm = lambda mid: mid.split('/', 1)[-1] if '/' in mid else mid
         all_ids_norm = {_norm(m['id']) for g in groups for m in g.get('models', [])}
         if _norm(default_model) not in all_ids_norm:
-            # Determine which group to inject into
+            # Determine which group to inject into. Compare against the
+            # provider's display name from _PROVIDER_DISPLAY rather than
+            # doing a substring match on active_provider — substring
+            # matching breaks on hyphenated provider IDs like 'openai-codex'
+            # vs display name 'OpenAI Codex' (hyphen vs. space), which
+            # silently falls through to groups[0] and lands the model in
+            # the wrong group.
             label = default_model.split('/')[-1] if '/' in default_model else default_model
+            target_display = (
+                _PROVIDER_DISPLAY.get(active_provider, active_provider or '').lower()
+                if active_provider else ''
+            )
             injected = False
             for g in groups:
-                if active_provider and active_provider.lower() in g.get('provider', '').lower():
+                if target_display and g.get('provider', '').lower() == target_display:
                     g['models'].insert(0, {'id': default_model, 'label': label})
                     injected = True
                     break
