@@ -28,6 +28,11 @@ REPO_ROOT = Path(__file__).parent.parent.resolve()
 HOST = os.getenv('HERMES_WEBUI_HOST', '127.0.0.1')
 PORT = int(os.getenv('HERMES_WEBUI_PORT', '8787'))
 
+# ── TLS/HTTPS config (optional, env-overridable) ────────────────────────────
+TLS_CERT = os.getenv('HERMES_WEBUI_TLS_CERT', '').strip() or None
+TLS_KEY = os.getenv('HERMES_WEBUI_TLS_KEY', '').strip() or None
+TLS_ENABLED = TLS_CERT is not None and TLS_KEY is not None
+
 # ── State directory (env-overridable, never inside repo) ──────────────────────
 STATE_DIR = Path(os.getenv(
     'HERMES_WEBUI_STATE_DIR',

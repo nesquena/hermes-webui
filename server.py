@@ -80,10 +80,26 @@ def main() -> None:
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
     DEFAULT_WORKSPACE.mkdir(parents=True, exist_ok=True)
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f'  Hermes Web UI listening on http://{HOST}:{PORT}', flush=True)
+
+    # ── TLS/HTTPS setup (optional) ─────────────────────────────────────────
+    from api.config import TLS_ENABLED, TLS_CERT, TLS_KEY
+    scheme = 'https' if TLS_ENABLED else 'http'
+    if TLS_ENABLED:
+        try:
+            import ssl
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+            ctx.load_cert_chain(TLS_CERT, TLS_KEY)
+            httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+            print(f'  TLS enabled: cert={TLS_CERT}, key={TLS_KEY}', flush=True)
+        except Exception as e:
+            print(f'[!!] WARNING: TLS setup failed ({e}), falling back to HTTP', flush=True)
+            scheme = 'http'
+
+    print(f'  Hermes Web UI listening on {scheme}://{HOST}:{PORT}', flush=True)
     if HOST == '127.0.0.1':
         print(f'  Remote access: ssh -N -L {PORT}:127.0.0.1:{PORT} <user>@<your-server>', flush=True)
-    print(f'  Then open:     http://localhost:{PORT}', flush=True)
+    print(f'  Then open:     {scheme}://localhost:{PORT}', flush=True)
     print('', flush=True)
     httpd.serve_forever()
 
