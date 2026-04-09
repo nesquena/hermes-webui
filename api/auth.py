@@ -108,10 +108,18 @@ def create_session() -> str:
     return f"{token}.{sig}"
 
 
+def _prune_expired_sessions():
+    """Remove all expired session entries to prevent unbounded memory growth."""
+    now = time.time()
+    for token in [t for t, exp in _sessions.items() if now > exp]:
+        _sessions.pop(token, None)
+
+
 def verify_session(cookie_value) -> bool:
     """Verify a signed session cookie. Returns True if valid and not expired."""
     if not cookie_value or '.' not in cookie_value:
         return False
+    _prune_expired_sessions()  # lazy cleanup on every verification attempt
     token, sig = cookie_value.rsplit('.', 1)
     expected_sig = hmac.new(_signing_key(), token.encode(), hashlib.sha256).hexdigest()[:32]
     if not hmac.compare_digest(sig, expected_sig):
