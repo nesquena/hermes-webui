@@ -64,22 +64,32 @@ def _check_repo(path, name):
     if not fetch_ok:
         return {'name': name, 'behind': 0, 'error': 'fetch failed'}
 
-    branch = _detect_default_branch(path)
+    # Use the current branch's upstream tracking branch, not the repo default.
+    # This avoids false "N updates behind" alerts when the user is on a feature
+    # branch and master/main has moved forward with unrelated commits.
+    # If no upstream is set (brand-new local branch), fall back to the default branch.
+    upstream, ok = _run_git(['rev-parse', '--abbrev-ref', '@{upstream}'], path)
+    if ok and upstream:
+        # upstream is like "origin/feat/foo" — use it directly in rev-list
+        compare_ref = upstream
+    else:
+        branch = _detect_default_branch(path)
+        compare_ref = f'origin/{branch}'
 
     # Count commits behind
-    out, ok = _run_git(['rev-list', '--count', f'HEAD..origin/{branch}'], path)
+    out, ok = _run_git(['rev-list', '--count', f'HEAD..{compare_ref}'], path)
     behind = int(out) if ok and out.isdigit() else 0
 
     # Get short SHAs for display
     current, _ = _run_git(['rev-parse', '--short', 'HEAD'], path)
-    latest, _ = _run_git(['rev-parse', '--short', f'origin/{branch}'], path)
+    latest, _ = _run_git(['rev-parse', '--short', compare_ref], path)
 
     return {
         'name': name,
         'behind': behind,
         'current_sha': current,
         'latest_sha': latest,
-        'branch': branch,
+        'branch': compare_ref,
     }
 
 
@@ -129,7 +139,14 @@ def _apply_update_inner(target):
     if path is None or not (path / '.git').exists():
         return {'ok': False, 'message': 'Not a git repository'}
 
-    branch = _detect_default_branch(path)
+    # Use the current branch's upstream for pull, matching the behaviour
+    # of _check_repo. Falls back to default branch if no upstream is set.
+    upstream, ok = _run_git(['rev-parse', '--abbrev-ref', '@{upstream}'], path)
+    if ok and upstream:
+        compare_ref = upstream
+    else:
+        branch = _detect_default_branch(path)
+        compare_ref = f'origin/{branch}'
 
     # Check for dirty working tree
     status_out, _ = _run_git(['status', '--porcelain'], path)
@@ -141,7 +158,7 @@ def _apply_update_inner(target):
         stashed = True
 
     # Pull with ff-only (no merge commits)
-    pull_out, pull_ok = _run_git(['pull', '--ff-only', 'origin', branch], path, timeout=30)
+    pull_out, pull_ok = _run_git(['pull', '--ff-only', compare_ref], path, timeout=30)
     if not pull_ok:
         if stashed:
             _run_git(['stash', 'pop'], path)
