@@ -6,6 +6,39 @@
 ---
 
 
+## [v0.40.2] — 2026-04-09
+
+### Features
+- **Full approval UI** (PR #187): When the agent triggers a dangerous command
+  (e.g. `rm -rf`, `pkill -9`), a polished approval card now appears immediately
+  instead of leaving the chat stuck in "Thinking…" forever. Four one-click buttons:
+  Allow once, Allow session, Always allow, Deny. Enter key defaults to Allow once.
+  Buttons disable immediately on click to prevent double-submit. Card auto-focuses
+  Allow once so keyboard-only users can approve in one keystroke. All labels and
+  the heading are fully i18n-translated (English + Chinese).
+
+### Bug Fixes
+- **Approval SSE event never sent** (PR #187): `register_gateway_notify()` was
+  never called before the agent ran, so the approval module had no way to push
+  the `approval` SSE event to the frontend. Fixed by registering a callback that
+  calls `put('approval', ...)` the instant a dangerous command is detected.
+- **Agent thread never unblocked** (PR #187): `/api/approval/respond` did not call
+  `resolve_gateway_approval()`, so the agent thread waited for the full 5-minute
+  gateway timeout. Now calls it on every respond, waking the thread immediately.
+- **`_unreg_notify` scoping** (PR #187): Variable was only assigned inside a `try`
+  block but referenced in `finally`. Initialised to `None` before the `try` so the
+  `finally` guard is always well-defined.
+
+### Tests
+- 32 new tests in `tests/test_sprint30.py`: approval card HTML structure, all 4
+  button IDs and data-i18n labels, keyboard shortcut in boot.js, i18n keys in both
+  locales, CSS loading/disabled/kbd states, messages.js button-disable behaviour,
+  streaming.py scoping, HTTP regression for all 4 choices.
+- 16 tests in `tests/test_approval_unblock.py` (gateway approval unit + HTTP).
+- **547 tests total** (499 → 515 → 547).
+
+---
+
 ## [v0.40.1] — 2026-04-09
 
 ### Bug Fixes
