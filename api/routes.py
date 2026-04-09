@@ -862,11 +862,25 @@ def _handle_list_dir(handler, parsed):
     qs = parse_qs(parsed.query)
     sid = qs.get('session_id', [''])[0]
     if not sid: return bad(handler, 'session_id is required')
-    try: s = get_session(sid)
-    except KeyError: return bad(handler, 'Session not found', 404)
+    try:
+        s = get_session(sid)
+        workspace = s.workspace
+    except KeyError:
+        # Fallback for CLI sessions not loaded in WebUI memory
+        try:
+            cli_meta = None
+            for cs in get_cli_sessions():
+                if cs['session_id'] == sid:
+                    cli_meta = cs
+                    break
+            if not cli_meta:
+                return bad(handler, 'Session not found', 404)
+            workspace = cli_meta.get('workspace', '')
+        except Exception:
+            return bad(handler, 'Session not found', 404)
     try:
         return j(handler, {
-            'entries': list_dir(Path(s.workspace), qs.get('path', ['.'])[0]),
+            'entries': list_dir(Path(workspace), qs.get('path', ['.'])[0]),
             'path': qs.get('path', ['.'])[0],
         })
     except (FileNotFoundError, ValueError) as e:
