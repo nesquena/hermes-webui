@@ -15,6 +15,7 @@ from api.routes import handle_get, handle_post
 
 
 class Handler(BaseHTTPRequestHandler):
+    timeout = 30  # seconds — kills idle/incomplete connections to prevent thread exhaustion
     server_version = 'HermesWebUI/0.2'
     def log_message(self, fmt, *args): pass  # suppress default Apache-style log
 
