@@ -6,6 +6,18 @@
 ---
 
 
+## [v0.40.1] — 2026-04-09
+
+### Bug Fixes
+- **Default locale on first install** (PR #185): A fresh install would start in
+  English based on the server default, but `loadLocale()` could resurrect a
+  stale or unsupported locale code from `localStorage`. Now `loadLocale()` falls
+  back to English when there is no saved code or the saved code is not in the
+  LOCALES bundle. `setLocale()` also stores the resolved code, so an unknown
+  input never persists to storage.
+
+---
+
 ## [v0.40.0] — 2026-04-09
 
 ### Features
