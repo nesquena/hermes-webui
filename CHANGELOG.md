@@ -6,6 +6,10 @@
 ---
 
 
+## [v0.44.1] — 2026-04-10
+
+- **Unskip 16 approval tests** (PR #231): `test_approval_unblock.py` was importing `has_pending` and `pop_pending` from `tools.approval`, which the agent module had removed. The import failure tripped the `APPROVAL_AVAILABLE` guard and skipped all 16 tests in the file. Neither symbol was used in any test body. Removing the stale imports restores **595/595 passing, 0 skipped**.
+
 ## [v0.44.0] — 2026-04-10
 
 ### Features
@@ -18,7 +22,7 @@
 - **Approval pending check** (PR #228): `GET /api/approval/pending` always returned `{pending: null}` after the agent module renamed `has_pending` to `has_blocking_approval`. The route now checks `_pending` directly under `_lock`, matching how `submit_pending` writes to it. Fixes `test_approval_submit_and_respond`.
 
 ### Tests
-- 579 passing, 16 skipped (up from 555 on v0.43.1 — +24 new tests across PRs #225, #227, #228)
+- 579 passing, 16 skipped at this tag (595/595 after v0.44.1 unskip — +24 new tests across PRs #225, #227, #228)
 
 ## [v0.43.1] — 2026-04-10
 
