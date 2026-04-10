@@ -4,7 +4,7 @@
 > Everything you can do from the CLI terminal, you can do from this UI.
 >
 > Last updated: v0.45.0 (April 10, 2026) — 604 tests, 604 passing
-> Tests: 499 total (499 passing, 0 failures)
+> Tests: 604 total (604 passing, 0 failures)
 > Source: <repo>/
 
 ---
