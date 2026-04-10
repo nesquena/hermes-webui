@@ -25,18 +25,6 @@ Work through sections in order. Each section builds on the previous.
 
 ---
 
-## Update Flow Regression Checks
-
-Automated coverage added for the self-update backend:
-- `tests/test_updates.py::test_run_git_returns_stderr_on_failure`
-- `tests/test_updates.py::test_apply_update_splits_remote_and_branch_for_pull`
-
-These checks prevent the one-click update flow from regressing back to:
-- empty `Pull failed:` toasts when git writes the real error to stderr
-- malformed `git pull --ff-only origin/master` invocations
-
----
-
 ## Section 1: Initial Load and Empty State
 
 ### T1.1: Fresh Load Shows Empty State

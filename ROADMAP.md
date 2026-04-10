@@ -61,11 +61,6 @@
 
 ---
 
-## Recent Maintenance
-
-- April 10, 2026: hardened the self-update flow so one-click updates surface real
-  git pull errors and invoke `git pull` with separate remote and branch arguments.
-
 ## Current Architecture Status
 
 | Layer | Location | Status |
