@@ -16,27 +16,26 @@ import shutil
 import os
 import pytest
 
+yaml = pytest.importorskip("yaml", reason="PyYAML required for config write tests")
+
 
 # ── 1-5: _write_endpoint_to_config unit tests ─────────────────────────────────
 
 class TestWriteEndpointToConfig:
     def test_writes_base_url(self, tmp_path):
         from api.profiles import _write_endpoint_to_config
-        import yaml
         _write_endpoint_to_config(tmp_path, base_url="http://localhost:11434")
         cfg = yaml.safe_load((tmp_path / "config.yaml").read_text())
         assert cfg["model"]["base_url"] == "http://localhost:11434"
 
     def test_writes_api_key(self, tmp_path):
         from api.profiles import _write_endpoint_to_config
-        import yaml
         _write_endpoint_to_config(tmp_path, api_key="sk-local-test")
         cfg = yaml.safe_load((tmp_path / "config.yaml").read_text())
         assert cfg["model"]["api_key"] == "sk-local-test"
 
     def test_writes_both(self, tmp_path):
         from api.profiles import _write_endpoint_to_config
-        import yaml
         _write_endpoint_to_config(tmp_path, base_url="http://localhost:8080", api_key="mykey")
         cfg = yaml.safe_load((tmp_path / "config.yaml").read_text())
         assert cfg["model"]["base_url"] == "http://localhost:8080"
@@ -44,7 +43,6 @@ class TestWriteEndpointToConfig:
 
     def test_merges_with_existing_config(self, tmp_path):
         """Does not clobber other top-level config keys."""
-        import yaml
         existing = {"model": {"default": "gpt-4o", "provider": "openai"}, "agent": {"max_turns": 90}}
         (tmp_path / "config.yaml").write_text(yaml.dump(existing))
         from api.profiles import _write_endpoint_to_config
