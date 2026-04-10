@@ -64,14 +64,13 @@ from api.streaming import _sse, _run_agent_streaming, cancel_stream
 # Approval system (optional -- graceful fallback if agent not available)
 try:
     from tools.approval import (
-        has_pending, pop_pending, submit_pending,
+        submit_pending,
         approve_session, approve_permanent, save_permanent_allowlist,
         is_approved, _pending, _lock, _permanent_approved,
         resolve_gateway_approval,
     )
 except ImportError:
-    has_pending = lambda *a, **k: False
-    pop_pending = lambda *a, **k: None
+
     submit_pending = lambda *a, **k: None
     approve_session = lambda *a, **k: None
     approve_permanent = lambda *a, **k: None
@@ -969,10 +968,10 @@ def _handle_file_read(handler, parsed):
 
 def _handle_approval_pending(handler, parsed):
     sid = parse_qs(parsed.query).get('session_id', [''])[0]
-    if has_pending(sid):
-        with _lock:
-            p = dict(_pending.get(sid, {}))
-        return j(handler, {'pending': p})
+    with _lock:
+        p = _pending.get(sid)
+    if p:
+        return j(handler, {'pending': dict(p)})
     return j(handler, {'pending': None})
 
 
