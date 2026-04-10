@@ -32,12 +32,21 @@ def _check_csrf(handler) -> bool:
     if not origin and not referer:
         return True  # non-browser clients (curl, agent) have no Origin
     target = origin or referer
-    # Allow same-origin: Origin must match Host
-    if host and target:
-        # Extract host:port from origin/referer
-        m = _re.match(r'^https?://([^/]+)', target)
-        if m and m.group(1) == host:
-            return True
+    # Extract host:port from origin/referer
+    m = _re.match(r'^https?://([^/]+)', target)
+    if not m:
+        return False
+    origin_host = m.group(1)
+    # Allow same-origin: check Host, X-Forwarded-Host (reverse proxy), and
+    # X-Real-Host against the origin. Reverse proxies (Caddy, nginx) set
+    # X-Forwarded-Host to the client's original Host header.
+    allowed_hosts = {h.strip() for h in [
+        host,
+        handler.headers.get('X-Forwarded-Host', ''),
+        handler.headers.get('X-Real-Host', ''),
+    ] if h.strip()}
+    if origin_host in allowed_hosts:
+        return True
     return False
 from api.models import (
     Session, get_session, new_session, all_sessions, title_from,
