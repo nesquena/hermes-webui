@@ -584,6 +584,19 @@ function _positionComposerWsDropdown(){
   dd.style.left=`${left}px`;
 }
 
+function _positionProfileDropdown(){
+  const dd=$('profileDropdown');
+  const chip=$('profileChip');
+  const footer=document.querySelector('.composer-footer');
+  if(!dd||!chip||!footer)return;
+  const chipRect=chip.getBoundingClientRect();
+  const footerRect=footer.getBoundingClientRect();
+  let left=chipRect.left-footerRect.left;
+  const maxLeft=Math.max(0, footer.clientWidth-dd.offsetWidth);
+  left=Math.max(0, Math.min(left, maxLeft));
+  dd.style.left=`${left}px`;
+}
+
 function renderWorkspaceDropdownInto(dd, workspaces, currentWs){
   if(!dd)return;
   dd.innerHTML='';
@@ -855,18 +868,28 @@ function toggleProfileDropdown() {
   if (!dd) return;
   if (dd.classList.contains('open')) { closeProfileDropdown(); return; }
   closeWsDropdown(); // close workspace dropdown if open
+  if(typeof closeModelDropdown==='function') closeModelDropdown();
   api('/api/profiles').then(data => {
     renderProfileDropdown(data);
     dd.classList.add('open');
+    _positionProfileDropdown();
+    const chip=$('profileChip');
+    if(chip) chip.classList.add('active');
   }).catch(e => { showToast('Failed to load profiles'); });
 }
 
 function closeProfileDropdown() {
   const dd = $('profileDropdown');
   if (dd) dd.classList.remove('open');
+  const chip=$('profileChip');
+  if(chip) chip.classList.remove('active');
 }
 document.addEventListener('click', e => {
-  if (!e.target.closest('#profileChipWrap')) closeProfileDropdown();
+  if (!e.target.closest('#profileChipWrap') && !e.target.closest('#profileDropdown')) closeProfileDropdown();
+});
+window.addEventListener('resize',()=>{
+  const dd=$('profileDropdown');
+  if(dd&&dd.classList.contains('open')) _positionProfileDropdown();
 });
 
 async function switchToProfile(name) {
