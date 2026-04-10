@@ -280,3 +280,107 @@ class TestApprovalRespondHTTP:
         assert status == 200
         assert "choice" in result
         assert result["choice"] == "always"
+
+
+class TestApprovalCardTimerLogic:
+    """Tests for the 30s minimum visibility guard introduced in PR #225."""
+
+    def _get_js(self):
+        return pathlib.Path(__file__).parent.parent / 'static' / 'messages.js'
+
+    def test_approval_min_visible_ms_constant_present(self):
+        """APPROVAL_MIN_VISIBLE_MS constant exists and is 30000."""
+        src = self._get_js().read_text()
+        assert 'APPROVAL_MIN_VISIBLE_MS' in src
+        import re
+        m = re.search(r'APPROVAL_MIN_VISIBLE_MS\s*=\s*(\d+)', src)
+        assert m is not None, 'APPROVAL_MIN_VISIBLE_MS not assigned'
+        assert int(m.group(1)) == 30000, f'Expected 30000, got {m.group(1)}'
+
+    def test_hide_approval_card_has_force_parameter(self):
+        """hideApprovalCard() accepts a force parameter."""
+        src = self._get_js().read_text()
+        assert 'hideApprovalCard(force=false)' in src or \
+               'hideApprovalCard(force = false)' in src, \
+            'hideApprovalCard must have force=false default parameter'
+
+    def test_hide_approval_card_checks_force_flag(self):
+        """hideApprovalCard body has a conditional on force."""
+        src = self._get_js().read_text()
+        # The guard: if (!force && _approvalVisibleSince)
+        assert '!force' in src, 'hideApprovalCard must check !force before deferred hide'
+
+    def test_approval_hide_timer_variable_present(self):
+        """Module-level _approvalHideTimer variable is declared."""
+        src = self._get_js().read_text()
+        assert '_approvalHideTimer' in src
+
+    def test_approval_visible_since_variable_present(self):
+        """Module-level _approvalVisibleSince variable is declared."""
+        src = self._get_js().read_text()
+        assert '_approvalVisibleSince' in src
+
+    def test_approval_signature_variable_present(self):
+        """Module-level _approvalSignature variable is declared."""
+        src = self._get_js().read_text()
+        assert '_approvalSignature' in src
+
+    def test_respond_approval_calls_hide_with_force(self):
+        """respondApproval must call hideApprovalCard(true) — not no-arg."""
+        src = self._get_js().read_text()
+        # Extract respondApproval function body
+        import re
+        m = re.search(r'async function respondApproval.*?(?=\nasync function|\nfunction |\Z)',
+                      src, re.DOTALL)
+        assert m, 'respondApproval function not found'
+        body = m.group(0)
+        # Must call hideApprovalCard(true), not the bare hideApprovalCard()
+        assert 'hideApprovalCard(true)' in body, \
+            'respondApproval must call hideApprovalCard(true) so card hides immediately after user clicks'
+        # Must NOT have bare hideApprovalCard() without force
+        bare_calls = re.findall(r'hideApprovalCard\((?!true)', body)
+        assert not bare_calls, \
+            f'respondApproval has bare hideApprovalCard() calls (no force=true): {bare_calls}'
+
+    def test_stream_done_calls_hide_with_force(self):
+        """Done SSE event handler must call hideApprovalCard(true)."""
+        src = self._get_js().read_text()
+        # Find the done event handler section (stopApprovalPolling followed by hideApprovalCard)
+        import re
+        # Look for pattern: stopApprovalPolling();\n + hideApprovalCard
+        matches = re.findall(
+            r'stopApprovalPolling\(\);\s*\n\s*if\(!_approvalSessionId[^)]*\)\s*hideApprovalCard\((\w*)\)',
+            src
+        )
+        # All stopApprovalPolling paths that call hideApprovalCard should use force=true
+        for match in matches:
+            assert match == 'true', \
+                f'After stopApprovalPolling(), hideApprovalCard called without force=true (got: {match!r})'
+
+    def test_poll_loop_still_uses_no_force(self):
+        """Poll loop hideApprovalCard() (when pending gone) keeps no-force — correct behavior."""
+        src = self._get_js().read_text()
+        # Line 446: else { hideApprovalCard(); } — this is the poll-loop path
+        # The 30s guard should protect this call (don't force from poll ticks)
+        assert 'else { hideApprovalCard(); }' in src or \
+               'else {hideApprovalCard();}' in src or \
+               'else { hideApprovalCard() }' in src, \
+            'Poll loop should still call hideApprovalCard() without force=true'
+
+    def test_show_approval_card_signature_dedup(self):
+        """showApprovalCard uses a signature to avoid resetting timer on repeat polls."""
+        src = self._get_js().read_text()
+        # The sig computation must use JSON.stringify on card content
+        import re
+        m = re.search(r'function showApprovalCard.*?(?=\nfunction |\nasync function |\Z)',
+                      src, re.DOTALL)
+        assert m, 'showApprovalCard function not found'
+        body = m.group(0)
+        assert 'JSON.stringify' in body, 'showApprovalCard must compute a signature via JSON.stringify'
+        assert '_approvalSignature' in body, 'showApprovalCard must check/set _approvalSignature'
+
+    def test_clear_approval_hide_timer_helper_present(self):
+        """_clearApprovalHideTimer helper exists to cancel deferred hides."""
+        src = self._get_js().read_text()
+        assert '_clearApprovalHideTimer' in src, \
+            '_clearApprovalHideTimer helper must exist to cancel deferred setTimeout'

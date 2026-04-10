@@ -74,7 +74,7 @@ async function send(){
     delete INFLIGHT[activeSid];
     stopApprovalPolling();
     // Only hide approval card if it belongs to the session that just finished
-    if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard();removeThinking();
+    if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);removeThinking();
     S.messages.push({role:'assistant',content:`**Error:** ${e.message}`});
     renderMessages();setBusy(false);setStatus('Error: '+e.message);
     return;
@@ -182,7 +182,7 @@ async function send(){
       delete INFLIGHT[activeSid];
       clearInflight();
       stopApprovalPolling();
-      if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard();
+      if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;
         const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
@@ -227,7 +227,7 @@ async function send(){
       // This is distinct from the SSE network 'error' event below.
       source.close();
       delete INFLIGHT[activeSid];clearInflight();stopApprovalPolling();
-      if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard();
+      if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;const _cbe=$('btnCancel');if(_cbe)_cbe.style.display='none';
         clearLiveToolCards();if(!assistantText)removeThinking();
@@ -287,7 +287,7 @@ async function send(){
     source.addEventListener('cancel',e=>{
       source.close();
       delete INFLIGHT[activeSid];clearInflight();stopApprovalPolling();
-      if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard();
+      if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;const _cbc=$('btnCancel');if(_cbc)_cbc.style.display='none';
       }
@@ -302,7 +302,7 @@ async function send(){
 
   function _handleStreamError(){
     delete INFLIGHT[activeSid];clearInflight();stopApprovalPolling();
-    if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard();
+    if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);
     if(S.session&&S.session.session_id===activeSid){
       S.activeStreamId=null;const _cbe=$('btnCancel');if(_cbe)_cbe.style.display='none';
       clearLiveToolCards();if(!assistantText)removeThinking();
@@ -342,11 +342,45 @@ function autoResize(){const el=$('msg');el.style.height='auto';el.style.height=M
 
 // ── Approval polling ──
 let _approvalPollTimer = null;
+let _approvalHideTimer = null;
+let _approvalVisibleSince = 0;
+let _approvalSignature = '';
+const APPROVAL_MIN_VISIBLE_MS = 30000;
 
 // showApprovalCard moved above respondApproval
 
-function hideApprovalCard() {
-  $("approvalCard").classList.remove("visible");
+function _clearApprovalHideTimer() {
+  if (_approvalHideTimer) {
+    clearTimeout(_approvalHideTimer);
+    _approvalHideTimer = null;
+  }
+}
+
+function _resetApprovalCardState() {
+  _clearApprovalHideTimer();
+  _approvalVisibleSince = 0;
+  _approvalSignature = '';
+}
+
+function hideApprovalCard(force=false) {
+  const card = $("approvalCard");
+  if (!card) return;
+  if (!force && _approvalVisibleSince) {
+    const remaining = APPROVAL_MIN_VISIBLE_MS - (Date.now() - _approvalVisibleSince);
+    if (remaining > 0) {
+      const scheduledSignature = _approvalSignature;
+      _clearApprovalHideTimer();
+      _approvalHideTimer = setTimeout(() => {
+        _approvalHideTimer = null;
+        if (_approvalSignature !== scheduledSignature) return;
+        hideApprovalCard(true);
+      }, remaining);
+      return;
+    }
+  }
+  _approvalSessionId = null;
+  _resetApprovalCardState();
+  card.classList.remove("visible");
   $("approvalCmd").textContent = "";
   $("approvalDesc").textContent = "";
 }
@@ -357,15 +391,24 @@ let _approvalSessionId = null;
 function showApprovalCard(pending) {
   const keys = pending.pattern_keys || (pending.pattern_key ? [pending.pattern_key] : []);
   const desc = (pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : "");
+  const cmd = pending.command || "";
+  const sig = JSON.stringify({desc, cmd, sid: pending._session_id || (S.session && S.session.session_id) || null});
+  const card = $("approvalCard");
+  const sameApproval = card.classList.contains("visible") && _approvalSignature === sig;
   $("approvalDesc").textContent = desc;
-  $("approvalCmd").textContent = pending.command || "";
+  $("approvalCmd").textContent = cmd;
   _approvalSessionId = pending._session_id || (S.session && S.session.session_id) || null;
+  _approvalSignature = sig;
+  if (!sameApproval) {
+    _approvalVisibleSince = Date.now();
+    _clearApprovalHideTimer();
+  }
   // Re-enable buttons in case a previous approval disabled them
   ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
     const b = $(id); if (b) { b.disabled = false; b.classList.remove("loading"); }
   });
-  const card = $("approvalCard");
   card.classList.add("visible");
+  if (!sameApproval) card.scrollIntoView({block:"nearest", behavior:"smooth"});
   // Apply current locale to data-i18n elements inside the card
   if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
   // Focus Allow once button so Enter works immediately
@@ -382,7 +425,7 @@ async function respondApproval(choice) {
     if (b) { b.disabled = true; if (b.id === "approvalBtn" + choice.charAt(0).toUpperCase() + choice.slice(1)) b.classList.add("loading"); }
   });
   _approvalSessionId = null;
-  hideApprovalCard();
+  hideApprovalCard(true);
   try {
     await api("/api/approval/respond", {
       method: "POST",
@@ -395,7 +438,7 @@ function startApprovalPolling(sid) {
   stopApprovalPolling();
   _approvalPollTimer = setInterval(async () => {
     if (!S.busy || !S.session || S.session.session_id !== sid) {
-      stopApprovalPolling(); hideApprovalCard(); return;
+      stopApprovalPolling(); hideApprovalCard(true); return;
     }
     try {
       const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid));
