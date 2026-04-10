@@ -342,13 +342,32 @@ function autoResize(){const el=$('msg');el.style.height='auto';el.style.height=M
 
 // ── Approval polling ──
 let _approvalPollTimer = null;
+let _approvalVisibleSince = 0;
+let _approvalMinVisibleMs = 30000;
+let _approvalHideTimer = null;
 
 // showApprovalCard moved above respondApproval
 
-function hideApprovalCard() {
-  $("approvalCard").classList.remove("visible");
+function hideApprovalCard(force=false) {
+  const card = $("approvalCard");
+  if (!card) return;
+  const visible = card.classList.contains("visible");
+  if (visible && !force && _approvalVisibleSince) {
+    const elapsed = Date.now() - _approvalVisibleSince;
+    if (elapsed < _approvalMinVisibleMs) {
+      if (_approvalHideTimer) clearTimeout(_approvalHideTimer);
+      _approvalHideTimer = setTimeout(() => {
+        _approvalHideTimer = null;
+        hideApprovalCard(true);
+      }, _approvalMinVisibleMs - elapsed);
+      return;
+    }
+  }
+  if (_approvalHideTimer) { clearTimeout(_approvalHideTimer); _approvalHideTimer = null; }
+  card.classList.remove("visible");
   $("approvalCmd").textContent = "";
   $("approvalDesc").textContent = "";
+  _approvalVisibleSince = 0;
 }
 
 // Track session_id of the active approval so respond goes to the right session
@@ -357,15 +376,20 @@ let _approvalSessionId = null;
 function showApprovalCard(pending) {
   const keys = pending.pattern_keys || (pending.pattern_key ? [pending.pattern_key] : []);
   const desc = (pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : "");
+  const cmd = pending.command || "";
+  const card = $("approvalCard");
+  const wasVisible = card.classList.contains("visible");
+  const sameApproval = wasVisible && $("approvalCmd").textContent === cmd && $("approvalDesc").textContent === desc;
   $("approvalDesc").textContent = desc;
-  $("approvalCmd").textContent = pending.command || "";
+  $("approvalCmd").textContent = cmd;
   _approvalSessionId = pending._session_id || (S.session && S.session.session_id) || null;
+  if (!sameApproval) _approvalVisibleSince = Date.now();
   // Re-enable buttons in case a previous approval disabled them
   ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
     const b = $(id); if (b) { b.disabled = false; b.classList.remove("loading"); }
   });
-  const card = $("approvalCard");
   card.classList.add("visible");
+  card.scrollIntoView({block:"end", behavior: sameApproval ? "auto" : "smooth"});
   // Apply current locale to data-i18n elements inside the card
   if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
   // Focus Allow once button so Enter works immediately
@@ -395,7 +419,7 @@ function startApprovalPolling(sid) {
   stopApprovalPolling();
   _approvalPollTimer = setInterval(async () => {
     if (!S.busy || !S.session || S.session.session_id !== sid) {
-      stopApprovalPolling(); hideApprovalCard(); return;
+      stopApprovalPolling(); hideApprovalCard(true); return;
     }
     try {
       const data = await api("/api/approval/pending?session_id=" + encodeURIComponent(sid));
