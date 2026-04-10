@@ -841,6 +841,8 @@ function toggleProfileForm() {
   if (form.style.display !== 'none') {
     $('profileFormName').value = '';
     $('profileFormClone').checked = false;
+    if ($('profileFormBaseUrl')) $('profileFormBaseUrl').value = '';
+    if ($('profileFormApiKey')) $('profileFormApiKey').value = '';
     const errEl = $('profileFormError');
     if (errEl) errEl.style.display = 'none';
     $('profileFormName').focus();
@@ -854,7 +856,15 @@ async function submitProfileCreate() {
   if (!name) { errEl.textContent = 'Name is required'; errEl.style.display = ''; return; }
   if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)) { errEl.textContent = 'Lowercase letters, numbers, hyphens, underscores only'; errEl.style.display = ''; return; }
   try {
-    await api('/api/profile/create', { method: 'POST', body: JSON.stringify({ name, clone_config: cloneConfig }) });
+    const baseUrl = (($('profileFormBaseUrl') && $('profileFormBaseUrl').value) || '').trim();
+    const apiKey = (($('profileFormApiKey') && $('profileFormApiKey').value) || '').trim();
+    if (baseUrl && !/^https?:\/\//.test(baseUrl)) {
+      errEl.textContent = 'Base URL must start with http:// or https://'; errEl.style.display = ''; return;
+    }
+    const payload = { name, clone_config: cloneConfig };
+    if (baseUrl) payload.base_url = baseUrl;
+    if (apiKey) payload.api_key = apiKey;
+    await api('/api/profile/create', { method: 'POST', body: JSON.stringify(payload) });
     toggleProfileForm();
     await loadProfilesPanel();
     showToast('Profile created: ' + name);

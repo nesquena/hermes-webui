@@ -123,6 +123,8 @@
         <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);margin-bottom:8px;cursor:pointer">
           <input type="checkbox" id="profileFormClone" style="accent-color:var(--accent)"> Clone config from active profile
         </label>
+        <input id="profileFormBaseUrl" placeholder="Base URL (optional, e.g. http://localhost:11434)" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;margin-bottom:6px;box-sizing:border-box">
+        <input id="profileFormApiKey" type="password" placeholder="API key (optional)" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;margin-bottom:6px;box-sizing:border-box">
         <div style="display:flex;gap:6px">
           <button class="cron-btn run" style="flex:1" onclick="submitProfileCreate()">Create</button>
           <button class="cron-btn" style="flex:1" onclick="toggleProfileForm()">Cancel</button>

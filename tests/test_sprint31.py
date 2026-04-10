@@ -133,3 +133,11 @@ class TestProfileCreateAPIWithEndpoint:
         assert err is None, f"Expected 200, got {err}: {data}"
         assert data.get("ok") is True
         assert data.get("profile", {}).get("path"), f"API response missing profile.path: {data}"
+
+    def test_api_route_rejects_invalid_base_url(self, test_server):
+        """POST /api/profile/create with a non-http base_url returns 400."""
+        data, err = _post("/api/profile/create", {
+            "name": self._PROFILE_NAME,
+            "base_url": "ftp://localhost:11434",
+        })
+        assert err == 400, f"Expected 400, got {err}: {data}"

@@ -609,6 +609,8 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, 'Invalid clone_from name')
         base_url = body.get('base_url', '').strip() if body.get('base_url') else None
         api_key = body.get('api_key', '').strip() if body.get('api_key') else None
+        if base_url and not base_url.startswith(('http://', 'https://')):
+            return bad(handler, 'base_url must start with http:// or https://')
         try:
             from api.profiles import create_profile_api
             result = create_profile_api(
