@@ -69,7 +69,7 @@ async function send(){
     markInflight(activeSid, streamId);
     // Show Cancel button
     const cancelBtn=$('btnCancel');
-    if(cancelBtn) cancelBtn.style.display='';
+    if(cancelBtn) cancelBtn.style.display='inline-flex';
   }catch(e){
     delete INFLIGHT[activeSid];
     stopApprovalPolling();
@@ -440,4 +440,3 @@ function sendBrowserNotification(title,body){
 }
 
 // ── Panel navigation (Chat / Tasks / Skills / Memory) ──
-
