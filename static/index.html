@@ -14,7 +14,7 @@
 <body>
 <div class="layout">
   <aside class="sidebar">
-    <div class="sidebar-header"><div class="logo">H</div><div><h1 style="margin:0;font-size:15px;font-weight:700;letter-spacing:-.01em">Hermes</h1><div style="font-size:10px;color:var(--muted);opacity:.8;margin-top:1px">v0.42.0</div></div></div>
+    <div class="sidebar-header"><div class="logo">H</div><div><h1 style="margin:0;font-size:15px;font-weight:700;letter-spacing:-.01em">Hermes</h1><div style="font-size:10px;color:var(--muted);opacity:.8;margin-top:1px">v0.42.1</div></div></div>
     <div class="sidebar-nav">
       <button class="nav-tab active" data-panel="chat" data-label="Chat" onclick="switchPanel('chat')" title="Chat" data-i18n-title="tab_chat">&#128172;</button>
       <button class="nav-tab" data-panel="tasks" data-label="Tasks" onclick="switchPanel('tasks')" title="Tasks" data-i18n-title="tab_tasks">&#128197;</button>
@@ -39,7 +39,7 @@
     <div class="panel-view" id="panelTasks">
       <div class="sidebar-section" style="padding-bottom:4px;display:flex;align-items:center;justify-content:space-between">
         <div style="font-size:11px;color:var(--muted)" data-i18n="scheduled_jobs">Scheduled jobs</div>
-        <button class="cron-btn run" style="padding:3px 8px;font-size:10px" onclick="toggleCronForm()" data-i18n="new_job">+ New job</button>
+        <button class="cron-btn run" style="padding:3px 8px;font-size:10px" onclick="toggleCronForm()">+ <span data-i18n="new_job">New job</span></button>
       </div>
       <!-- Create job form (hidden by default) -->
       <div id="cronCreateForm" style="display:none;padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0">
@@ -68,7 +68,7 @@
     <div class="panel-view" id="panelSkills">
       <div class="sidebar-section" style="padding-bottom:4px;display:flex;align-items:center;justify-content:space-between">
         <div class="skills-search" style="flex:1;padding:0"><input id="skillsSearch" placeholder="Search skills..." data-i18n-placeholder="search_skills" oninput="filterSkills()"></div>
-        <button class="cron-btn run" style="padding:3px 8px;font-size:10px;flex-shrink:0;margin-left:6px" onclick="toggleSkillForm()" data-i18n="new_skill">+ New skill</button>
+        <button class="cron-btn run" style="padding:3px 8px;font-size:10px;flex-shrink:0;margin-left:6px" onclick="toggleSkillForm()">+ <span data-i18n="new_skill">New skill</span></button>
       </div>
       <!-- Skill create/edit form (hidden by default) -->
       <div id="skillCreateForm" style="display:none;padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0">
@@ -115,7 +115,7 @@
     <div class="panel-view" id="panelProfiles">
       <div class="sidebar-section" style="padding-bottom:4px;display:flex;align-items:center;justify-content:space-between">
         <div style="font-size:11px;color:var(--muted)" data-i18n="tab_profiles">Agent profiles</div>
-        <button class="cron-btn run" style="padding:3px 8px;font-size:10px" onclick="toggleProfileForm()" data-i18n="new_profile">+ New profile</button>
+        <button class="cron-btn run" style="padding:3px 8px;font-size:10px" onclick="toggleProfileForm()">+ <span data-i18n="new_profile">New profile</span></button>
       </div>
       <!-- Profile create form (hidden by default) -->
       <div id="profileCreateForm" style="display:none;padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0">
@@ -195,9 +195,9 @@
         <h2 data-i18n="empty_title">What can I help with?</h2>
         <p data-i18n="empty_subtitle">Ask anything, run commands, explore files, or manage your scheduled tasks.</p>
         <div class="suggestion-grid">
-          <button class="suggestion" data-msg="What files are in this workspace?" data-i18n="suggest_files">📁 What files are in this workspace?</button>
-          <button class="suggestion" data-msg="What's on my schedule today?" data-i18n="suggest_schedule">📋 What's on my schedule today?</button>
-          <button class="suggestion" data-msg="Help me plan a small project." data-i18n="suggest_plan">🗺 Help me plan a small project.</button>
+          <button class="suggestion" data-msg="What files are in this workspace?">📁 <span data-i18n="suggest_files">What files are in this workspace?</span></button>
+          <button class="suggestion" data-msg="What's on my schedule today?">📋 <span data-i18n="suggest_schedule">What's on my schedule today?</span></button>
+          <button class="suggestion" data-msg="Help me plan a small project.">🗺 <span data-i18n="suggest_plan">Help me plan a small project.</span></button>
         </div>
       </div>
       <div class="messages-inner" id="msgInner"></div>
