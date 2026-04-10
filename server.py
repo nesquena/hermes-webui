@@ -12,6 +12,7 @@ from api.auth import check_auth
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import j
 from api.routes import handle_get, handle_post
+from api.startup import auto_install_agent_deps
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -75,7 +76,16 @@ def main() -> None:
         print(f'[!!] Warning: Hermes agent found but missing modules: {missing}', flush=True)
         for mod, err in errors.items():
             print(f'     {mod}: {err}', flush=True)
-        print('     Agent features may not work correctly.', flush=True)
+        print('     Attempting to install missing dependencies from agent requirements.txt...', flush=True)
+        auto_install_agent_deps()
+        ok, missing, errors = verify_hermes_imports()
+        if not ok:
+            print(f'[!!] Still missing after install attempt: {missing}', flush=True)
+            for mod, err in errors.items():
+                print(f'     {mod}: {err}', flush=True)
+            print('     Agent features may not work correctly.', flush=True)
+        else:
+            print('[ok] Agent dependencies installed successfully.', flush=True)
 
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     SESSION_DIR.mkdir(parents=True, exist_ok=True)

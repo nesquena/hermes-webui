@@ -40,6 +40,7 @@ This makes the code easy to modify from a terminal or by an agent.
       models.py            Session model + CRUD, per-session profile tracking (~137 lines)
       profiles.py          Profile state management, hermes_cli wrapper (~246 lines)
       routes.py            All GET + POST route handlers (~1180 lines)
+      startup.py           Startup helpers: auto_install_agent_deps() (~50 lines)
       streaming.py         SSE engine, run_agent, cancel, HERMES_HOME save/restore (~236 lines)
       upload.py            Multipart parser, file upload handler (~78 lines)
       workspace.py         File ops: list_dir, read_file_content, workspace helpers (~77 lines)
