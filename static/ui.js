@@ -34,6 +34,7 @@ function _applyModelToDropdown(modelId, sel){
   const resolved=_findModelInDropdown(modelId,sel);
   if(resolved){
     sel.value=resolved;
+    if(sel.id==='modelSelect' && typeof syncModelChip==='function') syncModelChip();
     return resolved;
   }
   return null;
@@ -66,9 +67,11 @@ async function populateModelDropdown(){
     if(data.default_model && !localStorage.getItem('hermes-webui-model')){
       _applyModelToDropdown(data.default_model, sel);
     }
+    if(typeof syncModelChip==='function') syncModelChip();
   }catch(e){
     // API unavailable -- keep the hardcoded HTML options as fallback
     console.warn('Failed to load models from server:',e.message);
+    if(typeof syncModelChip==='function') syncModelChip();
   }
 }
 
@@ -97,6 +100,106 @@ function _checkProviderMismatch(modelId){
   }
   return null;
 }
+
+function _selectedModelOption(){
+  const sel=$('modelSelect');
+  if(!sel) return null;
+  return sel.options[sel.selectedIndex]||null;
+}
+
+function syncModelChip(){
+  const sel=$('modelSelect');
+  const chip=$('composerModelChip');
+  const label=$('composerModelLabel');
+  const dd=$('composerModelDropdown');
+  if(!sel||!chip||!label) return;
+  const opt=_selectedModelOption();
+  label.textContent=opt?opt.textContent:getModelLabel(sel.value||'');
+  chip.title=sel.value||'Conversation model';
+  chip.classList.toggle('active',!!(dd&&dd.classList.contains('open')));
+}
+
+function _positionModelDropdown(){
+  const dd=$('composerModelDropdown');
+  const chip=$('composerModelChip');
+  const footer=document.querySelector('.composer-footer');
+  if(!dd||!chip||!footer) return;
+  const chipRect=chip.getBoundingClientRect();
+  const footerRect=footer.getBoundingClientRect();
+  let left=chipRect.left-footerRect.left;
+  const maxLeft=Math.max(0, footer.clientWidth-dd.offsetWidth);
+  left=Math.max(0, Math.min(left, maxLeft));
+  dd.style.left=`${left}px`;
+}
+
+function renderModelDropdown(){
+  const dd=$('composerModelDropdown');
+  const sel=$('modelSelect');
+  if(!dd||!sel) return;
+  dd.innerHTML='';
+  for(const child of Array.from(sel.children)){
+    if(child.tagName==='OPTGROUP'){
+      const heading=document.createElement('div');
+      heading.className='model-group';
+      heading.textContent=child.label||'Models';
+      dd.appendChild(heading);
+      for(const opt of Array.from(child.children)){
+        const row=document.createElement('div');
+        row.className='model-opt'+(opt.value===sel.value?' active':'');
+        row.innerHTML=`<span class="model-opt-name">${esc(opt.textContent||getModelLabel(opt.value))}</span><span class="model-opt-id">${esc(opt.value)}</span>`;
+        row.onclick=()=>selectModelFromDropdown(opt.value);
+        dd.appendChild(row);
+      }
+      continue;
+    }
+    if(child.tagName==='OPTION'){
+      const row=document.createElement('div');
+      row.className='model-opt'+(child.value===sel.value?' active':'');
+      row.innerHTML=`<span class="model-opt-name">${esc(child.textContent||getModelLabel(child.value))}</span><span class="model-opt-id">${esc(child.value)}</span>`;
+      row.onclick=()=>selectModelFromDropdown(child.value);
+      dd.appendChild(row);
+    }
+  }
+}
+
+async function selectModelFromDropdown(value){
+  const sel=$('modelSelect');
+  if(!sel||sel.value===value) { closeModelDropdown(); return; }
+  sel.value=value;
+  syncModelChip();
+  closeModelDropdown();
+  if(typeof sel.onchange==='function') await sel.onchange();
+}
+
+function toggleModelDropdown(){
+  const dd=$('composerModelDropdown');
+  const chip=$('composerModelChip');
+  const sel=$('modelSelect');
+  if(!dd||!chip||!sel) return;
+  const open=dd.classList.contains('open');
+  if(open){closeModelDropdown(); return;}
+  if(typeof closeProfileDropdown==='function') closeProfileDropdown();
+  if(typeof closeWsDropdown==='function') closeWsDropdown();
+  renderModelDropdown();
+  dd.classList.add('open');
+  _positionModelDropdown();
+  chip.classList.add('active');
+}
+
+function closeModelDropdown(){
+  const dd=$('composerModelDropdown');
+  const chip=$('composerModelChip');
+  if(dd) dd.classList.remove('open');
+  if(chip) chip.classList.remove('active');
+}
+
+document.addEventListener('click',e=>{
+  if(!e.target.closest('#composerModelChip') && !e.target.closest('#composerModelDropdown')) closeModelDropdown();
+});
+window.addEventListener('resize',()=>{
+  const dd=$('composerModelDropdown');
+  if(dd&&dd.classList.contains('open')) _positionModelDropdown();
+});
 
 // ── Scroll pinning ──────────────────────────────────────────────────────────
 // When streaming, auto-scroll only if the user hasn't manually scrolled up.
@@ -602,10 +705,13 @@ async function checkInflightOnBoot(sid) {
 function syncTopbar(){
   if(!S.session){
     document.title=window._botName||'Hermes';
-    // Show default workspace name even without a session
-    const sidebarName=$('sidebarWsName');
-    if(sidebarName && sidebarName.textContent==='Workspace'){
-      sidebarName.textContent=t('no_workspace');
+    if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
+    if(typeof syncModelChip==='function') syncModelChip();
+    else {
+      const sidebarName=$('sidebarWsName');
+      if(sidebarName && sidebarName.textContent==='Workspace'){
+        sidebarName.textContent=t('no_workspace');
+      }
     }
     return;
   }
@@ -638,19 +744,11 @@ function syncTopbar(){
       $('modelSelect').value=currentModel;
     }
   }
+  if(typeof syncModelChip==='function') syncModelChip();
   // Show Clear button only when session has messages
   const clearBtn=$('btnClearConv');
   if(clearBtn) clearBtn.style.display=(S.messages&&S.messages.filter(msg=>msg.role!=='tool').length>0)?'':'none';
-  const ws=S.session.workspace||'';
-  // Update sidebar workspace display
-  const sidebarName=$('sidebarWsName');
-  const sidebarPath=$('sidebarWsPath');
-  if(sidebarName){
-    sidebarName.textContent=getWorkspaceFriendlyName(ws);
-  }
-  if(sidebarPath){
-    sidebarPath.textContent=ws;
-  }
+  if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
   // modelSelect already set above
   // Update profile chip label
   const profileLabel=$('profileChipLabel');
