@@ -78,6 +78,7 @@
 ### Chat and Agent
 - [x] Send messages, get SSE-streaming responses
 - [x] Switch models per session (10 models, grouped by provider)
+- [x] Composer-scoped model picker in footer (moved from sidebar to align with per-conversation model selection)
 - [x] Multi-provider API support: use any Hermes agent API provider (OpenAI, Anthropic, Google, etc.) directly, not just OpenRouter (Sprint 11)
 - [x] Custom endpoint model discovery: auto-detect models from Ollama, LM Studio, and other local LLM servers via base_url (PR #18)
 - [x] Upload files to workspace (drag-drop, click, clipboard paste)
@@ -213,7 +214,7 @@
 - [x] Streaming performance -- rAF-throttled token rendering (Sprint 24, PR #81)
 - [x] Workspace git detection -- branch name and dirty status badge (Sprint 24, PR #82)
 - [x] Collapsible date groups -- click group headers to collapse (Sprint 24, PR #80)
-- [x] Context usage indicator -- token count and cost in composer footer (Sprint 24, PR #83)
+- [x] Context usage indicator -- compact circular badge in composer footer (Sprint 24, PR #83; refreshed April 10, 2026)
 - [ ] LLM-generated session titles -- auto-title via small model instead of first-message substring (PR #75)
 - [ ] Workspace git detection -- show branch name, dirty status in workspace header (PR #75)
 - [ ] Clarify dialog -- agent can ask clarifying questions that block until user responds (PR #75)
