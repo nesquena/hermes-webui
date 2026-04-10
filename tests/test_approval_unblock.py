@@ -27,9 +27,11 @@ try:
         _lock,
         _ApprovalEntry,
         submit_pending,
-        has_pending,
-        pop_pending,
     )
+    # has_pending and pop_pending were removed from tools.approval when the
+    # agent renamed has_pending -> has_blocking_approval (gateway queue check)
+    # and removed the polling-mode pop_pending. Routes now check _pending
+    # directly. These symbols are no longer part of the public API.
     APPROVAL_AVAILABLE = True
 except ImportError:
     APPROVAL_AVAILABLE = False
