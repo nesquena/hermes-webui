@@ -170,6 +170,10 @@ class TestSessionIDValidation:
             "session; rm -rf /",
             "hello world",
             "ZZZZZZZZZZZZZZZZ",
+            "session\x00evil",
+            "..\\..\\windows\\system32",
+            "session/../../etc/passwd",
+            "valid_looking.json",
         ]
         for sid in evil_ids:
             result = Session.load(sid)
