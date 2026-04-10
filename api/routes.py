@@ -129,29 +129,14 @@ button:hover{background:rgba(124,185,255,.25)}
   <div class="logo">{{BOT_NAME_INITIAL}}</div>
   <h1>{{BOT_NAME}}</h1>
   <p class="sub">{{LOGIN_SUBTITLE}}</p>
-  <form onsubmit="doLogin(event);return false">
-    <input type="password" id="pw" placeholder="{{LOGIN_PLACEHOLDER}}" autofocus
-           onkeydown="if(event.key==='Enter'){doLogin(event);event.preventDefault();}">
+  <form id="login-form" data-invalid-pw="{{LOGIN_INVALID_PW}}" data-conn-failed="{{LOGIN_CONN_FAILED}}">
+    <input type="password" id="pw" placeholder="{{LOGIN_PLACEHOLDER}}" autofocus>
     <button type="submit">{{LOGIN_BTN}}</button>
   </form>
   <div class="err" id="err"></div>
 </div>
-<script>
-async function doLogin(e){
-  e.preventDefault();
-  const pw=document.getElementById('pw').value;
-  const err=document.getElementById('err');
-  err.style.display='none';
-  try{
-    const res=await fetch('/api/auth/login',{method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({password:pw}),credentials:'include'});
-    const data=await res.json();
-    if(res.ok&&data.ok){window.location.href='/';}
-    else{err.textContent=data.error||'{{LOGIN_INVALID_PW}}';err.style.display='block';}
-  }catch(ex){err.textContent='{{LOGIN_CONN_FAILED}}';err.style.display='block';}
-}
-</script></body></html>'''
+<script src="/static/login.js"></script>
+</body></html>'''
 
 # ── GET routes ────────────────────────────────────────────────────────────────
 
@@ -176,8 +161,8 @@ def handle_get(handler, parsed) -> bool:
             .replace('{{LOGIN_SUBTITLE}}', _html.escape(_login_strings['subtitle']))
             .replace('{{LOGIN_PLACEHOLDER}}', _html.escape(_login_strings['placeholder']))
             .replace('{{LOGIN_BTN}}', _html.escape(_login_strings['btn']))
-            .replace('{{LOGIN_INVALID_PW}}', _login_strings['invalid_pw'].replace('\\','\\\\').replace("'","\\'"))
-            .replace('{{LOGIN_CONN_FAILED}}', _login_strings['conn_failed'].replace('\\','\\\\').replace("'","\\'"))
+            .replace('{{LOGIN_INVALID_PW}}', _html.escape(_login_strings['invalid_pw']))
+            .replace('{{LOGIN_CONN_FAILED}}', _html.escape(_login_strings['conn_failed']))
         )
         return t(handler, _page, content_type='text/html; charset=utf-8')
 
