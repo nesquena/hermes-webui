@@ -6,6 +6,34 @@
 ---
 
 
+## [v0.41.0] — 2026-04-10
+
+### Features
+- **Optional HTTPS/TLS support** (PR #199): Set `HERMES_WEBUI_TLS_CERT` and
+  `HERMES_WEBUI_TLS_KEY` env vars to enable HTTPS natively. Uses
+  `ssl.PROTOCOL_TLS_SERVER` with TLS 1.2 minimum. Gracefully falls back to HTTP
+  if cert loading fails. No reverse proxy required for LAN/VPN deployments.
+
+### Bug Fixes
+- **CSP blocking Mermaid and Prism** (PR #197): Added Content-Security-Policy and
+  Permissions-Policy headers to every response. CSP allows `cdn.jsdelivr.net` in
+  `script-src` and `style-src` for Mermaid.js (dynamically loaded) and Prism.js
+  (statically loaded with SRI integrity hashes). All other external origins blocked.
+- **Session memory leak** (PR #196): `api/auth.py` accumulated expired session tokens
+  indefinitely. Added `_prune_expired_sessions()` called lazily on every
+  `verify_session()` call. No background thread, no lock contention.
+- **Slow-client thread exhaustion** (PR #198): Added `Handler.timeout = 30` to kill
+  idle/stalled connections before they exhaust the thread pool.
+- **False update alerts on feature branches** (PR #201): Update checker compared
+  `HEAD..origin/master` even when on a feature branch, counting unrelated master
+  commits as missing updates. Now uses `git rev-parse --abbrev-ref @{upstream}` to
+  track the current branch's upstream. Falls back to default branch when no upstream
+  is set.
+- **CLI session file browser returning 404** (PR #204): `/api/list` only checked
+  the WebUI in-memory session dict, so CLI sessions shown in the sidebar always
+  returned 404 for file browsing. Now falls back to `get_cli_sessions()` — the same
+  pattern used by `/api/session` GET and `/api/sessions` list.
+
 ## [v0.40.2] — 2026-04-09
 
 ### Features
