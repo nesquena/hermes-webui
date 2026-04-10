@@ -210,6 +210,18 @@ def test_server():
     Start an isolated test server on TEST_PORT with a clean state directory.
     Paths are discovered dynamically -- no hardcoded absolute path assumptions.
     """
+    # Kill any leftover process on the test port before starting.
+    # Stale servers from QA harness runs or prior test sessions cause
+    # conftest to think the server is already up, producing false failures.
+    try:
+        import subprocess as _sp
+        _sp.run(['fuser', '-k', f'{TEST_PORT}/tcp'],
+                capture_output=True, timeout=5)
+    except Exception:
+        pass
+    import time as _time
+    _time.sleep(0.5)  # brief pause to let the port release
+
     # Clean slate
     if TEST_STATE_DIR.exists():
         shutil.rmtree(TEST_STATE_DIR)
