@@ -6,175 +6,267 @@
 <title>Hermes</title>
 <script>(function(){var t=localStorage.getItem('hermes-theme');if(t&&t!=='dark')document.documentElement.dataset.theme=t;})()</script>
 <link rel="stylesheet" href="/static/style.css">
-  <!-- Prism.js syntax highlighting (loaded async, non-blocking) -->
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css" integrity="sha384-wFjoQjtV1y5jVHbt0p35Ui8aV8GVpEZkyF99OXWqP/eNJDU93D3Ugxkoyh6Y2I4A" crossorigin="anonymous">
-  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-core.min.js" integrity="sha384-MXybTpajaBV0AkcBaCPT4KIvo0FzoCiWXgcihYsw4FUkEz0Pv3JGV6tk2G8vJtDc" crossorigin="anonymous" defer></script>
-  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/plugins/autoloader/prism-autoloader.min.js" integrity="sha384-Uq05+JLko69eOiPr39ta9bh7kld5PKZoU+fF7g0EXTAriEollhZ+DrN8Q/Oi8J2Q" crossorigin="anonymous" defer></script>
+<!-- Prism.js syntax highlighting (loaded async, non-blocking) -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css" integrity="sha384-wFjoQjtV1y5jVHbt0p35Ui8aV8GVpEZkyF99OXWqP/eNJDU93D3Ugxkoyh6Y2I4A" crossorigin="anonymous">
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-core.min.js" integrity="sha384-MXybTpajaBV0AkcBaCPT4KIvo0FzoCiWXgcihYsw4FUkEz0Pv3JGV6tk2G8vJtDc" crossorigin="anonymous" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/plugins/autoloader/prism-autoloader.min.js" integrity="sha384-Uq05+JLko69eOiPr39ta9bh7kld5PKZoU+fF7g0EXTAriEollhZ+DrN8Q/Oi8J2Q" crossorigin="anonymous" defer></script>
 </head>
 <body>
 <div class="layout">
-  <aside class="sidebar">
-    <div class="sidebar-header"><div class="logo">H</div><div><h1 style="margin:0;font-size:15px;font-weight:700;letter-spacing:-.01em">Hermes</h1><div style="font-size:10px;color:var(--muted);opacity:.8;margin-top:1px">v0.42.2</div></div></div>
-    <div class="sidebar-nav">
-      <button class="nav-tab active" data-panel="chat" data-label="Chat" onclick="switchPanel('chat')" title="Chat" data-i18n-title="tab_chat">&#128172;</button>
-      <button class="nav-tab" data-panel="tasks" data-label="Tasks" onclick="switchPanel('tasks')" title="Tasks" data-i18n-title="tab_tasks">&#128197;</button>
-      <button class="nav-tab" data-panel="skills" data-label="Skills" onclick="switchPanel('skills')" title="Skills" data-i18n-title="tab_skills">&#129513;</button>
-      <button class="nav-tab" data-panel="memory" data-label="Memory" onclick="switchPanel('memory')" title="Memory" data-i18n-title="tab_memory">&#129504;</button>
-      <button class="nav-tab" data-panel="workspaces" data-label="Spaces" onclick="switchPanel('workspaces')" title="Spaces" data-i18n-title="tab_workspaces">&#128193;</button>
-      <button class="nav-tab" data-panel="profiles" data-label="Profiles" onclick="switchPanel('profiles')" title="Agent profiles" data-i18n-title="tab_profiles"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></button>
-      <button class="nav-tab" data-panel="todos" data-label="Todos" onclick="switchPanel('todos')" title="Current task list" data-i18n-title="tab_todos">&#9989;</button>
-    </div>
-    <!-- Chat panel -->
-    <div class="panel-view active" id="panelChat">
-      <div class="sidebar-section">
-        <button class="new-chat-btn" id="btnNewChat">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-          <span data-i18n="new_conversation">New conversation</span> <span style="font-size:10px;opacity:.5;margin-left:4px">&#8984;K</span>
-        </button>
+  <aside class="sidebar expanded">
+    <!-- Icon Rail -->
+    <div class="rail">
+      <div class="rail-logo">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M4 20C6 16 9 12 13 9c-1.5.5-3 1.5-4.5 3C10 8 13 5 17 3c-2 1-3.5 2-5 3.5C14 3.5 17 1.5 20.5 1 17 5 15 9.5 14.5 14.5c-.3 2.5 0 4.5.5 6.5-2-1.5-3.5-3-4.5-5-.5 2-2 3.5-4.5 5z"/></svg>
       </div>
-      <div class="session-search"><input id="sessionSearch" placeholder="Filter conversations..." data-i18n-placeholder="filter_conversations" oninput="filterSessions()"></div>
-      <div class="session-list" id="sessionList"></div>
+
+      <button class="ri ri-new nav-tab" id="btnNewChat">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 5v14M5 12h14"/></svg>
+        <span class="fly" data-i18n="new_conversation">New chat</span>
+      </button>
+      <button class="ri nav-tab" id="btnSearchRail" onclick="focusSidebarSearch()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+        <span class="fly">Search</span>
+      </button>
+
+      <div class="rail-gap"></div>
+
+      <button class="ri nav-tab active" data-panel="chat" onclick="switchPanel('chat')" title="Chat" data-i18n-title="tab_chat">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+        <span class="fly" data-i18n="tab_chat">Conversations</span>
+      </button>
+      <button class="ri nav-tab" data-panel="tasks" onclick="switchPanel('tasks')" title="Tasks" data-i18n-title="tab_tasks">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10" stroke-dasharray="4 3" opacity="0.85"/><path d="M12 6v6l4 2"/></svg>
+        <span class="fly" data-i18n="tab_tasks">Scheduled tasks</span>
+      </button>
+      <button class="ri nav-tab" data-panel="skills" onclick="switchPanel('skills')" title="Skills" data-i18n-title="tab_skills">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>
+        <span class="fly" data-i18n="tab_skills">Skills</span>
+      </button>
+      <button class="ri nav-tab" data-panel="memory" onclick="switchPanel('memory')" title="Memory" data-i18n-title="tab_memory">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+        <span class="fly" data-i18n="tab_memory">Memory</span>
+      </button>
+      <button class="ri nav-tab" data-panel="todos" onclick="switchPanel('todos')" title="Current task list" data-i18n-title="tab_todos">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="5" width="6" height="6" rx="1"/><path d="M13 7h8M13 17h8"/><rect x="3" y="14" width="6" height="6" rx="1"/></svg>
+        <span class="fly" data-i18n="tab_todos">Todos</span>
+      </button>
+      <button class="ri nav-tab" data-panel="workspaces" onclick="switchPanel('workspaces')" title="Spaces" data-i18n-title="tab_workspaces">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+        <span class="fly" data-i18n="tab_workspaces">Workspaces</span>
+      </button>
+      <button class="ri nav-tab" data-panel="profiles" onclick="switchPanel('profiles')" title="Agent profiles" data-i18n-title="tab_profiles">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        <span class="fly" data-i18n="tab_profiles">Profiles</span>
+      </button>
+
+      <div class="rail-spacer"></div>
+
+      <button class="ri nav-tab" id="btnSettingsRail" onclick="toggleSettings()" title="Settings" data-i18n-title="settings_title">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.32 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+        <span class="fly" data-i18n="settings_title">Settings</span>
+      </button>
     </div>
-    <!-- Tasks (cron) panel -->
-    <div class="panel-view" id="panelTasks">
-      <div class="sidebar-section" style="padding-bottom:4px;display:flex;align-items:center;justify-content:space-between">
-        <div style="font-size:11px;color:var(--muted)" data-i18n="scheduled_jobs">Scheduled jobs</div>
-        <button class="cron-btn run" style="padding:3px 8px;font-size:10px" onclick="toggleCronForm()">+ <span data-i18n="new_job">New job</span></button>
-      </div>
-      <!-- Create job form (hidden by default) -->
-      <div id="cronCreateForm" style="display:none;padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0">
-        <input id="cronFormName" placeholder="Job name (optional)" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;margin-bottom:6px">
-        <input id="cronFormSchedule" placeholder="Schedule: '0 9 * * *' or 'every 1h'" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;margin-bottom:6px">
-        <textarea id="cronFormPrompt" rows="3" placeholder="Prompt (must be self-contained)" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;resize:none;font-family:inherit;margin-bottom:6px"></textarea>
-        <select id="cronFormDeliver" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;margin-bottom:6px">
-          <option value="local">Local (save output only)</option>
-          <option value="discord">Discord</option>
-          <option value="telegram">Telegram</option>
-        </select>
-        <div class="skill-picker-wrap" style="margin-bottom:8px">
-          <input id="cronFormSkillSearch" placeholder="Add skills (optional)..." style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none" autocomplete="off">
-          <div id="cronFormSkillDropdown" class="skill-picker-dropdown" style="display:none"></div>
-          <div id="cronFormSkillTags" class="skill-picker-tags"></div>
+
+    <!-- Sidebar Panel Content -->
+    <div class="panel">
+      <!-- Chat panel -->
+      <div class="panel-view active" id="panelChat">
+        <div class="ph">
+          <span class="ph-t" data-i18n="tab_chat">Conversations</span>
         </div>
-        <div style="display:flex;gap:6px">
-          <button class="cron-btn run" style="flex:1" onclick="submitCronCreate()" data-i18n="create_job">Create job</button>
-          <button class="cron-btn" style="flex:1" onclick="toggleCronForm()" data-i18n="cancel">Cancel</button>
+        <div class="tab-search">
+          <input class="input-search" id="sessionSearch" placeholder="Filter conversations..." data-i18n-placeholder="filter_conversations" oninput="filterSessions()">
         </div>
-        <div id="cronFormError" style="font-size:11px;color:var(--accent);margin-top:6px;display:none"></div>
+        <div class="panel-body session-list" id="sessionList"></div>
       </div>
-      <div class="cron-list" id="cronList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
-    </div>
-    <!-- Skills panel -->
-    <div class="panel-view" id="panelSkills">
-      <div class="sidebar-section" style="padding-bottom:4px;display:flex;align-items:center;justify-content:space-between">
-        <div class="skills-search" style="flex:1;padding:0"><input id="skillsSearch" placeholder="Search skills..." data-i18n-placeholder="search_skills" oninput="filterSkills()"></div>
-        <button class="cron-btn run" style="padding:3px 8px;font-size:10px;flex-shrink:0;margin-left:6px" onclick="toggleSkillForm()">+ <span data-i18n="new_skill">New skill</span></button>
-      </div>
-      <!-- Skill create/edit form (hidden by default) -->
-      <div id="skillCreateForm" style="display:none;padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0">
-        <input id="skillFormName" placeholder="Skill name (e.g. my-skill)" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;margin-bottom:6px;box-sizing:border-box">
-        <input id="skillFormCategory" placeholder="Category (optional, e.g. devops)" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;margin-bottom:6px;box-sizing:border-box">
-        <textarea id="skillFormContent" rows="6" placeholder="SKILL.md content (YAML frontmatter + markdown body)" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;resize:vertical;font-family:'SF Mono',ui-monospace,monospace;margin-bottom:6px;box-sizing:border-box"></textarea>
-        <div style="display:flex;gap:6px">
-          <button class="cron-btn run" style="flex:1" onclick="submitSkillSave()" data-i18n="save_skill">Save skill</button>
-          <button class="cron-btn" style="flex:1" onclick="toggleSkillForm()" data-i18n="cancel">Cancel</button>
+
+      <!-- Tasks (cron) panel -->
+      <div class="panel-view" id="panelTasks">
+        <div class="ph">
+          <span class="ph-t" data-i18n="scheduled_jobs">Scheduled jobs</span>
+          <button class="ph-add" onclick="toggleCronForm()" title="New job">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
         </div>
-        <div id="skillFormError" style="font-size:11px;color:var(--accent);margin-top:6px;display:none"></div>
-      </div>
-      <div class="skills-list" id="skillsList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
-    </div>
-    <!-- Memory panel -->
-    <div class="panel-view" id="panelMemory">
-      <div style="padding:8px 12px 4px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
-        <span style="font-size:11px;color:var(--muted)" data-i18n="personal_memory">Personal memory</span>
-        <button class="cron-btn run" id="memEditBtn" style="padding:3px 8px;font-size:10px" onclick="toggleMemoryEdit()">&#9998; <span data-i18n="edit">Edit</span></button>
-      </div>
-      <div class="memory-panel" id="memoryPanel"><div style="color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
-      <!-- Memory edit form (hidden by default) -->
-      <div id="memoryEditForm" style="display:none;padding:8px 12px;border-top:1px solid var(--border);flex-shrink:0">
-        <div style="font-size:11px;color:var(--muted);margin-bottom:4px"><span data-i18n="editing">Editing</span>: <span id="memEditSection">memory</span></div>
-        <textarea id="memEditContent" rows="10" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:11px;outline:none;resize:vertical;font-family:'SF Mono',ui-monospace,monospace;box-sizing:border-box;margin-bottom:6px;line-height:1.5"></textarea>
-        <div style="display:flex;gap:6px">
-          <button class="cron-btn run" style="flex:1" onclick="submitMemorySave()" data-i18n="save">Save</button>
-          <button class="cron-btn" style="flex:1" onclick="closeMemoryEdit()" data-i18n="cancel">Cancel</button>
-        </div>
-        <div id="memEditError" style="font-size:11px;color:var(--accent);margin-top:6px;display:none"></div>
-      </div>
-    </div>
-    <!-- Todo panel -->
-    <div class="panel-view" id="panelTodos">
-      <div style="padding:10px 12px 4px;font-size:11px;color:var(--muted);flex-shrink:0" data-i18n="current_task_list">Current task list</div>
-      <div id="todoPanel" style="flex:1;overflow-y:auto;padding:8px 12px"></div>
-    </div>
-    <!-- Workspaces panel -->
-    <div class="panel-view" id="panelWorkspaces">
-      <div style="padding:10px 12px 4px;font-size:11px;color:var(--muted)" data-i18n="workspace_desc">Add and switch workspaces for your sessions.</div>
-      <div style="flex:1;overflow-y:auto;padding:0 12px 12px" id="workspacesPanel"><div style="color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
-    </div>
-    <!-- Profiles panel -->
-    <div class="panel-view" id="panelProfiles">
-      <div class="sidebar-section" style="padding-bottom:4px;display:flex;align-items:center;justify-content:space-between">
-        <div style="font-size:11px;color:var(--muted)" data-i18n="tab_profiles">Agent profiles</div>
-        <button class="cron-btn run" style="padding:3px 8px;font-size:10px" onclick="toggleProfileForm()">+ <span data-i18n="new_profile">New profile</span></button>
-      </div>
-      <!-- Profile create form (hidden by default) -->
-      <div id="profileCreateForm" style="display:none;padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0">
-        <input id="profileFormName" placeholder="Profile name (lowercase, a-z 0-9 hyphens)" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;margin-bottom:6px;box-sizing:border-box">
-        <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);margin-bottom:8px;cursor:pointer">
-          <input type="checkbox" id="profileFormClone" style="accent-color:var(--accent)"> Clone config from active profile
-        </label>
-        <div style="display:flex;gap:6px">
-          <button class="cron-btn run" style="flex:1" onclick="submitProfileCreate()">Create</button>
-          <button class="cron-btn" style="flex:1" onclick="toggleProfileForm()">Cancel</button>
-        </div>
-        <div id="profileFormError" style="font-size:11px;color:var(--accent);margin-top:6px;display:none"></div>
-      </div>
-      <div style="flex:1;overflow-y:auto;padding:0 12px 12px" id="profilesPanel"><div style="color:var(--muted);font-size:12px">Loading...</div></div>
-    </div>
-    <div class="sidebar-bottom">
-      <div class="field-label" style="font-size:10px;letter-spacing:.07em;margin-bottom:4px">MODEL</div>
-      <select id="modelSelect">
-        <optgroup label="OpenAI">
-          <option value="openai/gpt-5.4-mini">GPT-5.4 Mini</option>
-          <option value="openai/gpt-4o">GPT-4o</option>
-          <option value="openai/o3">o3</option>
-          <option value="openai/o4-mini">o4-mini</option>
-        </optgroup>
-        <optgroup label="Anthropic">
-          <option value="anthropic/claude-sonnet-4.6">Claude Sonnet 4.6</option>
-          <option value="anthropic/claude-sonnet-4-5">Claude Sonnet 4.5</option>
-          <option value="anthropic/claude-haiku-3-5">Claude Haiku 3.5</option>
-        </optgroup>
-        <optgroup label="Other">
-          <option value="google/gemini-2.5-pro">Gemini 2.5 Pro</option>
-          <option value="deepseek/deepseek-chat-v3-0324">DeepSeek V3</option>
-          <option value="meta-llama/llama-4-scout">Llama 4 Scout</option>
-        </optgroup>
-      </select>
-      <div style="position:relative">
-        <div id="sidebarWsDisplay" style="display:flex;align-items:center;gap:7px;padding:0 0 8px;cursor:pointer;border-radius:8px;transition:background .15s" onclick="toggleWsDropdown()" title="Switch workspace">
-          <span style="font-size:14px;opacity:.7">&#128193;</span>
-          <div style="min-width:0;flex:1">
-            <div style="font-size:11px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" id="sidebarWsName">Workspace</div>
-            <div style="font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:1px" id="sidebarWsPath"></div>
+        <!-- Create job form (hidden by default) -->
+        <div id="cronCreateForm" class="form-card" style="display:none">
+          <div class="form-row">
+            <input class="form-input" id="cronFormName" placeholder="Job name (optional)">
           </div>
-          <span style="font-size:10px;color:var(--muted);flex-shrink:0">&#9662;</span>
+          <div class="form-row">
+            <input class="form-input" id="cronFormSchedule" placeholder="Schedule: '0 9 * * *' or 'every 1h'">
+          </div>
+          <div class="form-row">
+            <textarea class="form-textarea" id="cronFormPrompt" rows="3" placeholder="Prompt (must be self-contained)"></textarea>
+          </div>
+          <div class="form-row">
+            <select class="form-select" id="cronFormDeliver">
+              <option value="local">Local (save output only)</option>
+              <option value="discord">Discord</option>
+              <option value="telegram">Telegram</option>
+            </select>
+          </div>
+          <div class="form-row skill-picker-wrap">
+            <input class="form-input" id="cronFormSkillSearch" placeholder="Add skills (optional)..." autocomplete="off">
+            <div id="cronFormSkillDropdown" class="skill-picker-dropdown" style="display:none"></div>
+            <div id="cronFormSkillTags" class="skill-picker-tags"></div>
+          </div>
+          <div id="cronFormError" class="form-error" style="display:none"></div>
+          <div class="form-actions">
+            <button class="form-btn form-btn-ghost" onclick="toggleCronForm()" data-i18n="cancel">Cancel</button>
+            <button class="form-btn form-btn-primary" onclick="submitCronCreate()" data-i18n="create_job">Create job</button>
+          </div>
         </div>
-        <div class="ws-dropdown" id="wsDropdown"></div>
+        <div class="panel-body cron-list" id="cronList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
       </div>
-      <div class="sidebar-actions">
-        <button class="sm-btn" id="btnDownload" title="Download as Markdown" data-i18n-title="download_transcript">&#8595; <span data-i18n="transcript">Transcript</span></button>
-        <button class="sm-btn" id="btnExportJSON" title="Export full session as JSON">&#10092;/&#10093; JSON</button>
-        <button class="sm-btn" id="btnImportJSON" title="Import session from JSON">&#8593; <span data-i18n="import">Import</span></button>
-        <input type="file" id="importFileInput" accept=".json" style="display:none">
+
+      <!-- Skills panel -->
+      <div class="panel-view" id="panelSkills">
+        <div class="ph">
+          <span class="ph-t" data-i18n="tab_skills">Skills</span>
+          <button class="ph-add" onclick="toggleSkillForm()" title="New skill">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+        </div>
+        <div class="tab-search skills-search">
+          <input class="input-search" id="skillsSearch" placeholder="Search skills..." data-i18n-placeholder="search_skills" oninput="filterSkills()">
+        </div>
+        <!-- Skill create/edit form (hidden by default) -->
+        <div id="skillCreateForm" class="form-card" style="display:none">
+          <div class="form-row">
+            <input class="form-input" id="skillFormName" placeholder="Skill name (e.g. my-skill)">
+          </div>
+          <div class="form-row">
+            <input class="form-input" id="skillFormCategory" placeholder="Category (optional, e.g. devops)">
+          </div>
+          <div class="form-row">
+            <textarea class="form-textarea" id="skillFormContent" rows="6" placeholder="SKILL.md content (YAML frontmatter + markdown body)" style="font-family:'SF Mono',ui-monospace,monospace"></textarea>
+          </div>
+          <div id="skillFormError" class="form-error" style="display:none"></div>
+          <div class="form-actions">
+            <button class="form-btn form-btn-ghost" onclick="toggleSkillForm()" data-i18n="cancel">Cancel</button>
+            <button class="form-btn form-btn-primary" onclick="submitSkillSave()" data-i18n="save_skill">Save skill</button>
+          </div>
+        </div>
+        <div class="panel-body skills-list" id="skillsList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
+      </div>
+
+      <!-- Memory panel -->
+      <div class="panel-view" id="panelMemory">
+        <div class="ph">
+          <span class="ph-t" data-i18n="personal_memory">Personal memory</span>
+          <button class="ph-add" id="memEditBtn" onclick="toggleMemoryEdit()" title="Edit">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 3a2.83 2.83 0 114 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>
+          </button>
+        </div>
+        <div class="panel-body memory-panel" id="memoryPanel"><div style="color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
+        <!-- Memory edit form (hidden by default) -->
+        <div id="memoryEditForm" style="display:none;padding:8px;border-top:1px solid var(--border);flex-shrink:0">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:4px"><span data-i18n="editing">Editing</span>: <span id="memEditSection">memory</span></div>
+          <textarea class="form-textarea" id="memEditContent" rows="10" style="font-family:'SF Mono',ui-monospace,monospace;line-height:1.5"></textarea>
+          <div id="memEditError" class="form-error" style="display:none"></div>
+          <div class="form-actions">
+            <button class="form-btn form-btn-ghost" onclick="closeMemoryEdit()" data-i18n="cancel">Cancel</button>
+            <button class="form-btn form-btn-primary" onclick="submitMemorySave()" data-i18n="save">Save</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Todo panel -->
+      <div class="panel-view" id="panelTodos">
+        <div class="ph">
+          <span class="ph-t" data-i18n="current_task_list">Todos</span>
+        </div>
+        <div class="panel-body" id="todoPanel"></div>
+      </div>
+
+      <!-- Workspaces panel -->
+      <div class="panel-view" id="panelWorkspaces">
+        <div class="ph">
+          <span class="ph-t" data-i18n="tab_workspaces">Workspaces</span>
+        </div>
+        <div class="panel-body" id="workspacesPanel"><div style="color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
+      </div>
+
+      <!-- Profiles panel -->
+      <div class="panel-view" id="panelProfiles">
+        <div class="ph">
+          <span class="ph-t" data-i18n="tab_profiles">Agent profiles</span>
+          <button class="ph-add" onclick="toggleProfileForm()" title="New profile">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+        </div>
+        <!-- Profile create form (hidden by default) -->
+        <div id="profileCreateForm" class="form-card" style="display:none">
+          <div class="form-row">
+            <input class="form-input" id="profileFormName" placeholder="Profile name (lowercase, a-z 0-9 hyphens)">
+          </div>
+          <div class="form-row">
+            <label class="form-checkbox" style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);cursor:pointer">
+              <input type="checkbox" id="profileFormClone"> Clone config from active profile
+            </label>
+          </div>
+          <div id="profileFormError" class="form-error" style="display:none"></div>
+          <div class="form-actions">
+            <button class="form-btn form-btn-ghost" onclick="toggleProfileForm()">Cancel</button>
+            <button class="form-btn form-btn-primary" onclick="submitProfileCreate()">Create</button>
+          </div>
+        </div>
+        <div class="panel-body" id="profilesPanel"><div style="color:var(--muted);font-size:12px">Loading...</div></div>
+      </div>
+
+      <!-- Sidebar bottom area -->
+      <div class="sidebar-bottom">
+        <div class="field-label" style="font-size:10px;letter-spacing:.07em;margin-bottom:4px">MODEL</div>
+        <select id="modelSelect">
+          <optgroup label="OpenAI">
+            <option value="openai/gpt-5.4-mini">GPT-5.4 Mini</option>
+            <option value="openai/gpt-4o">GPT-4o</option>
+            <option value="openai/o3">o3</option>
+            <option value="openai/o4-mini">o4-mini</option>
+          </optgroup>
+          <optgroup label="Anthropic">
+            <option value="anthropic/claude-sonnet-4.6">Claude Sonnet 4.6</option>
+            <option value="anthropic/claude-sonnet-4-5">Claude Sonnet 4.5</option>
+            <option value="anthropic/claude-haiku-3-5">Claude Haiku 3.5</option>
+          </optgroup>
+          <optgroup label="Other">
+            <option value="google/gemini-2.5-pro">Gemini 2.5 Pro</option>
+            <option value="deepseek/deepseek-chat-v3-0324">DeepSeek V3</option>
+            <option value="meta-llama/llama-4-scout">Llama 4 Scout</option>
+          </optgroup>
+        </select>
+        <div style="position:relative">
+          <div id="sidebarWsDisplay" style="display:flex;align-items:center;gap:7px;padding:0 0 8px;cursor:pointer;border-radius:8px;transition:background .15s" onclick="toggleWsDropdown()" title="Switch workspace">
+            <span style="font-size:14px;opacity:.7">&#128193;</span>
+            <div style="min-width:0;flex:1">
+              <div style="font-size:11px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" id="sidebarWsName">Workspace</div>
+              <div style="font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:1px" id="sidebarWsPath"></div>
+            </div>
+            <span style="font-size:10px;color:var(--muted);flex-shrink:0">&#9662;</span>
+          </div>
+          <div class="ws-dropdown" id="wsDropdown"></div>
+        </div>
+        <div class="sidebar-actions">
+          <button class="sm-btn" id="btnDownload" title="Download as Markdown" data-i18n-title="download_transcript">&#8595; <span data-i18n="transcript">Transcript</span></button>
+          <button class="sm-btn" id="btnExportJSON" title="Export full session as JSON">&#10092;/&#10093; JSON</button>
+          <button class="sm-btn" id="btnImportJSON" title="Import session from JSON">&#8593; <span data-i18n="import">Import</span></button>
+          <input type="file" id="importFileInput" accept=".json" style="display:none">
+        </div>
       </div>
     </div>
-  <div class="resize-handle" id="sidebarResize"></div>
+
+    <div class="resize-handle" id="sidebarResize"></div>
   </aside>
+
   <main class="main">
     <div class="topbar">
       <button class="mobile-hamburger" id="btnHamburger" onclick="toggleMobileSidebar()" title="Menu">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+      </button>
+      <button class="tb" id="sidebarToggleBtn" onclick="toggleSidebarCollapse()" title="Toggle sidebar">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/></svg>
       </button>
       <div style="flex:1;min-width:0;overflow:hidden"><div class="topbar-title" id="topbarTitle">Hermes</div><div class="topbar-meta" id="topbarMeta" data-i18n="new_conversation">Start a new conversation</div></div>
       <div class="topbar-chips">
@@ -183,26 +275,27 @@
           <div class="profile-dropdown" id="profileDropdown"></div>
         </div>
         <div class="chip model" id="modelChip">GPT-5.4 Mini</div>
-
         <button class="chip clear-btn" id="btnClearConv" onclick="clearConversation()" title="Clear all messages in this conversation" style="display:none">&#128465; <span data-i18n="copy">Clear</span></button>
         <button class="chip gear-btn" id="btnSettings" onclick="toggleSettings()" title="Settings" data-i18n-title="settings_title">&#9881;</button>
         <button class="chip mobile-files-btn" id="btnMobileFiles" onclick="toggleMobileFiles()" title="Files">&#128193;</button>
       </div>
     </div>
+
     <div class="messages" id="messages">
       <div class="empty-state" id="emptyState">
-        <div class="empty-logo">🦉</div>
+        <div class="empty-logo">&#x1F989;</div>
         <h2 data-i18n="empty_title">What can I help with?</h2>
         <p data-i18n="empty_subtitle">Ask anything, run commands, explore files, or manage your scheduled tasks.</p>
         <div class="suggestion-grid">
-          <button class="suggestion" data-msg="What files are in this workspace?">📁 <span data-i18n="suggest_files">What files are in this workspace?</span></button>
-          <button class="suggestion" data-msg="What's on my schedule today?">📋 <span data-i18n="suggest_schedule">What's on my schedule today?</span></button>
-          <button class="suggestion" data-msg="Help me plan a small project.">🗺 <span data-i18n="suggest_plan">Help me plan a small project.</span></button>
+          <button class="suggestion" data-msg="What files are in this workspace?">&#128193; <span data-i18n="suggest_files">What files are in this workspace?</span></button>
+          <button class="suggestion" data-msg="What's on my schedule today?">&#128203; <span data-i18n="suggest_schedule">What's on my schedule today?</span></button>
+          <button class="suggestion" data-msg="Help me plan a small project.">&#128506; <span data-i18n="suggest_plan">Help me plan a small project.</span></button>
         </div>
       </div>
       <div class="messages-inner" id="msgInner"></div>
       <div id="liveToolCards" style="display:none;max-width:800px;margin:0 auto;width:100%;padding:0 24px;"></div>
     </div>
+
     <div class="update-banner" id="updateBanner">
       <span id="updateMsg"></span>
       <div style="display:flex;gap:8px;flex-shrink:0">
@@ -210,6 +303,7 @@
         <button class="update-btn update-primary" id="btnApplyUpdate" onclick="applyUpdates()">Update Now</button>
       </div>
     </div>
+
     <div class="reconnect-banner" id="reconnectBanner">
       <span id="reconnectMsg">&#9888; A response may have been in progress when you last left. Reload messages?</span>
       <div style="display:flex;gap:8px;flex-shrink:0">
@@ -217,6 +311,7 @@
         <button class="reconnect-btn" onclick="refreshSession()">&#8635; Reload</button>
       </div>
     </div>
+
     <div class="approval-card" id="approvalCard" role="alertdialog" aria-labelledby="approvalHeading" aria-describedby="approvalDesc">
       <div class="approval-inner">
         <div class="approval-header">
@@ -229,7 +324,7 @@
           <button class="approval-btn once" id="approvalBtnOnce" onclick="respondApproval('once')" title="Allow this one command (Enter)" data-i18n-title="approval_btn_once_title">
             <span class="approval-btn-icon">&#10003;</span>
             <span class="approval-btn-label" data-i18n="approval_btn_once">Allow once</span>
-            <kbd class="approval-kbd">↵</kbd>
+            <kbd class="approval-kbd">&#8629;</kbd>
           </button>
           <button class="approval-btn session" id="approvalBtnSession" onclick="respondApproval('session')" title="Allow for this session">
             <span class="approval-btn-icon">&#128274;</span>
@@ -239,13 +334,14 @@
             <span class="approval-btn-icon">&#9734;</span>
             <span class="approval-btn-label" data-i18n="approval_btn_always">Always allow</span>
           </button>
-          <button class="approval-btn deny" id="approvalBtnDeny" onclick="respondApproval('deny')" title="Deny — do not run this command">
+          <button class="approval-btn deny" id="approvalBtnDeny" onclick="respondApproval('deny')" title="Deny -- do not run this command">
             <span class="approval-btn-icon">&#10005;</span>
             <span class="approval-btn-label" data-i18n="approval_btn_deny">Deny</span>
           </button>
         </div>
       </div>
     </div>
+
     <!-- Activity bar: shows tool progress / status above composer (not inside input) -->
     <div id="activityBar" style="display:none;max-width:800px;margin:0 auto;width:100%;padding:0 24px;">
       <div id="activityBarInner" style="display:flex;align-items:center;gap:8px;padding:6px 12px;border-radius:8px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.07);font-size:12px;color:var(--muted);animation:fadeIn .15s ease;">
@@ -260,6 +356,7 @@
         </span>
       </div>
     </div>
+
     <div class="composer-wrap" id="composerWrap">
       <div class="cmd-dropdown" id="cmdDropdown"></div>
       <div class="composer-box" id="composerBox">
@@ -268,8 +365,8 @@
           Drop files to upload to workspace
         </div>
         <div class="attach-tray" id="attachTray"></div>
-        <div class="mic-status" id="micStatus" style="display:none"><span class="mic-dot"></span> Listening…</div>
-        <textarea id="msg" rows="1" placeholder="Message Hermes…"></textarea>
+        <div class="mic-status" id="micStatus" style="display:none"><span class="mic-dot"></span> Listening...</div>
+        <textarea id="msg" rows="1" placeholder="Message Hermes..."></textarea>
         <div class="composer-footer">
           <div class="composer-left">
             <input type="file" id="fileInput" multiple accept="image/*,text/*,application/pdf,application/json,.md,.py,.js,.ts,.yaml,.yml,.toml,.csv,.sh,.txt,.log,.env" style="display:none">
@@ -299,6 +396,7 @@
       </div>
     </div>
   </main>
+
   <aside class="rightpanel">
     <div class="resize-handle" id="rightpanelResize"></div>
     <div class="panel-header">
@@ -328,6 +426,7 @@
     </div>
   </aside>
 </div>
+
 <div class="settings-overlay" id="settingsOverlay" style="display:none">
   <div class="settings-panel">
     <div class="settings-header">
@@ -412,7 +511,7 @@
       <div class="settings-field" style="border-top:1px solid var(--border);padding-top:12px;margin-top:8px">
         <label for="settingsPassword" data-i18n="settings_label_password">Access Password</label>
         <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_password">Enter a new password to set or change it. Leave blank to keep current setting.</div>
-        <input type="password" id="settingsPassword" placeholder="Enter new password…" data-i18n-placeholder="password_placeholder" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+        <input type="password" id="settingsPassword" placeholder="Enter new password..." data-i18n-placeholder="password_placeholder" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
       </div>
       <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600" data-i18n="settings_save_btn">Save Settings</button>
       <button class="sm-btn" id="btnDisableAuth" onclick="disableAuth()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:#e8a030;border-color:rgba(232,160,48,.3);display:none" data-i18n="disable_auth">Disable Auth</button>
@@ -420,7 +519,9 @@
     </div>
   </div>
 </div>
+
 <div class="mobile-overlay" id="mobileOverlay" onclick="closeMobileSidebar()"></div>
+
 <nav class="mobile-bottom-nav" id="mobileBottomNav">
   <button class="mobile-nav-btn active" data-panel="chat" onclick="mobileSwitchPanel('chat')">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
@@ -443,7 +544,15 @@
     <span data-i18n="tab_workspaces">Spaces</span>
   </button>
 </nav>
+
 <div class="toast" id="toast"></div>
+<div id="bgErrorBanner" style="display:none"></div>
+<div id="thinkingRow" style="display:none"></div>
+<div id="toolRunningRow" style="display:none"></div>
+<div id="queueBadge" style="display:none"></div>
+<div id="settingsUnsavedBar" style="display:none"></div>
+<div id="wsAddInput" style="display:none"></div>
+
 <script src="/static/i18n.js"></script>
 <script src="/static/ui.js"></script>
 <script src="/static/workspace.js"></script>
