@@ -29,7 +29,14 @@ class TestAutoInstallAgentDeps:
 
     def test_skips_when_agent_dir_missing(self, tmp_path, capsys):
         missing = tmp_path / 'nonexistent-agent'
-        with patch.dict('os.environ', {'HERMES_WEBUI_AGENT_DIR': str(missing)}, clear=False):
+        # Patch both HERMES_WEBUI_AGENT_DIR and HERMES_HOME so the fallback
+        # path (HERMES_HOME/hermes-agent) also resolves to a nonexistent dir,
+        # preventing the real agent dir from being found in the test environment.
+        env_overrides = {
+            'HERMES_WEBUI_AGENT_DIR': str(missing),
+            'HERMES_HOME': str(tmp_path / 'no-hermes-home'),
+        }
+        with patch.dict('os.environ', env_overrides, clear=False):
             with patch('subprocess.run') as mock_run:
                 assert auto_install_agent_deps() is False
                 assert not mock_run.called
