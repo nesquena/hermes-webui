@@ -231,7 +231,13 @@ def test_default_provider_models_not_prefixed():
 # that case — the base_url belongs to the active provider.
 
 def _available_models_with_full_cfg(provider, default, base_url):
-    """Helper: set model.provider, model.default, model.base_url at once."""
+    """Helper: set model.provider, model.default, model.base_url at once.
+
+    Clears model-override env vars (HERMES_MODEL, OPENAI_MODEL, LLM_MODEL)
+    during the call so the real hermes profile environment doesn't leak into
+    the test and override the fixture's default model.
+    """
+    import os
     import api.config as _cfg
     old_cfg = dict(_cfg.cfg)
     _cfg.cfg['model'] = {
@@ -239,11 +245,17 @@ def _available_models_with_full_cfg(provider, default, base_url):
         'default': default,
         'base_url': base_url,
     }
+    # Clear model-override env vars to prevent the real profile from leaking in
+    _model_env_keys = ('HERMES_MODEL', 'OPENAI_MODEL', 'LLM_MODEL')
+    _saved_env = {k: os.environ.pop(k, None) for k in _model_env_keys}
     try:
         return _cfg.get_available_models()
     finally:
         _cfg.cfg.clear()
         _cfg.cfg.update(old_cfg)
+        for k, v in _saved_env.items():
+            if v is not None:
+                os.environ[k] = v
 
 
 def test_no_phantom_custom_group_when_active_provider_is_set(monkeypatch):
