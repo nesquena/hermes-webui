@@ -364,9 +364,18 @@ inherit `currentColor` for consistent theming.
 
 Three-panel layout (in static/index.html):
 
-    <aside class="sidebar">    Left panel: session list, nav tabs, model selector
+    <aside class="sidebar">    Left panel: session list, nav tabs, workspace switcher, export actions
     <main class="main">        Center: topbar, messages area, approval card, composer
     <aside class="rightpanel"> Right panel: workspace file tree and file preview
+
+Composer footer layout (current):
+
+    left cluster   attach button, mic button, per-conversation model selector
+    right cluster  compact circular context-usage badge, send button
+
+The model selector is still the authoritative control for new-session creation
+and session updates; it was moved out of the sidebar so model choice feels scoped
+to the active conversation rather than a global app setting.
 
 ### 5.2 Global State
 
@@ -476,7 +485,7 @@ Known gaps:
 - Nested lists: single regex pass, multi-level indentation not handled
 - Mixed bold+link in same line: may produce garbled output
 
-### 5.5 Model Chip Label (Fixed in Sprint 1)
+### 5.5 Model Label Resolution (Fixed in Sprint 1, reused by composer selector)
 
 B3 was resolved in Sprint 1. Current code uses a MODEL_LABELS dict:
 
@@ -487,10 +496,10 @@ B3 was resolved in Sprint 1. Current code uses a MODEL_LABELS dict:
       'anthropic/claude-haiku-3-5': 'Haiku 3.5', 'google/gemini-2.5-pro': 'Gemini 2.5 Pro',
       'deepseek/deepseek-chat-v3-0324': 'DeepSeek V3', 'meta-llama/llama-4-scout': 'Llama 4 Scout',
     };
-    $('modelChip').textContent = MODEL_LABELS[m] || (m.split('/').pop() || 'Unknown');
+    getModelLabel(m) => MODEL_LABELS[m] || (m.split('/').pop() || 'Unknown');
 
 Fallback: any unlisted model shows its short ID (after the last /) rather than a wrong label.
-To add a new model: add an entry to MODEL_LABELS and add an <option> to the <select>.
+To add a new model: add an entry to MODEL_LABELS and add an <option> to the composer footer <select>.
 
 ### 5.6 Session Delete Rules (from skill)
 
@@ -1108,7 +1117,7 @@ The model chip label bug is now fixed. The MODEL_LABELS object in syncTopbar():
       'deepseek/deepseek-chat-v3-0324':  'DeepSeek V3',
       'meta-llama/llama-4-scout':        'Llama 4 Scout',
     };
-    $('modelChip').textContent = MODEL_LABELS[m] || (m.split('/').pop() || 'Unknown');
+    getModelLabel(m) => MODEL_LABELS[m] || (m.split('/').pop() || 'Unknown');
 
 Fallback: splits on '/' and uses the last segment, so any unlisted model shows its
 short identifier rather than a wrong hardcoded label.

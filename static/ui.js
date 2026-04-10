@@ -114,30 +114,56 @@ function _fmtTokens(n){if(!n||n<0)return'0';if(n>=1e6)return(n/1e6).toFixed(1)+'
 
 // Context usage indicator in composer footer
 function _syncCtxIndicator(usage){
+  const wrap=$('ctxIndicatorWrap');
   const el=$('ctxIndicator');
   if(!el)return;
   const promptTok=usage.last_prompt_tokens||usage.input_tokens||0;
   const ctxWindow=usage.context_length||0;
-  if(!promptTok||!ctxWindow){el.style.display='none';return;}
-  el.style.display='';
+  if(!promptTok||!ctxWindow){
+    if(wrap) wrap.style.display='none';
+    return;
+  }
+  if(wrap) wrap.style.display='';
   const pct=Math.min(100,Math.round((promptTok/ctxWindow)*100));
-  const bar=$('ctxBar');
-  const label=$('ctxLabel');
-  if(bar){
-    bar.style.width=pct+'%';
-    bar.className='ctx-bar'+(pct>75?' ctx-high':pct>50?' ctx-mid':'');
+  const ring=$('ctxRingValue');
+  const center=$('ctxPercent');
+  const usageLine=$('ctxTooltipUsage');
+  const tokensLine=$('ctxTooltipTokens');
+  const thresholdLine=$('ctxTooltipThreshold');
+  const costLine=$('ctxTooltipCost');
+  const cost=usage.estimated_cost;
+  if(ring){
+    const circumference=61.261056745;
+    ring.style.strokeDasharray=String(circumference);
+    ring.style.strokeDashoffset=String(circumference*(1-pct/100));
   }
-  if(label){
-    const cost=usage.estimated_cost;
-    let text=`${_fmtTokens(promptTok)} / ${_fmtTokens(ctxWindow)}`;
-    if(pct>0) text+=` (${pct}%)`;
-    if(cost) text+=` \u00b7 $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
-    label.textContent=text;
-  }
-  // Update title with detailed info
+  if(center) center.textContent=String(pct);
+  el.classList.toggle('ctx-mid',pct>50&&pct<=75);
+  el.classList.toggle('ctx-high',pct>75);
+  let label=`Context window ${pct}% used`;
+  if(cost) label+=` \u00b7 $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
+  el.setAttribute('aria-label',label);
+  if(usageLine) usageLine.textContent=`${pct}% used (${Math.max(0,100-pct)}% left)`;
+  if(tokensLine) tokensLine.textContent=`${_fmtTokens(promptTok)} / ${_fmtTokens(ctxWindow)} tokens used`;
   const threshold=usage.threshold_tokens||0;
-  el.title=`Context: ${_fmtTokens(promptTok)} of ${_fmtTokens(ctxWindow)} tokens used`
-    +(threshold?`\nAuto-compress at ${_fmtTokens(threshold)} (${Math.round(threshold/ctxWindow*100)}%)`:'');
+  if(thresholdLine){
+    if(threshold){
+      thresholdLine.style.display='';
+      thresholdLine.textContent=`Auto-compress at ${_fmtTokens(threshold)} (${Math.round(threshold/ctxWindow*100)}%)`;
+    }else{
+      thresholdLine.style.display='none';
+      thresholdLine.textContent='';
+    }
+  }
+  if(costLine){
+    if(cost){
+      costLine.style.display='';
+      costLine.textContent=`Estimated cost: $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
+    }else{
+      costLine.style.display='none';
+      costLine.textContent='';
+    }
+  }
 }
 
 function scrollIfPinned(){
@@ -592,31 +618,30 @@ function syncTopbar(){
   // If a profile switch just happened, apply its model rather than the session's stale value.
   // S._pendingProfileModel is set by switchToProfile() and cleared here after one application.
   const modelOverride=S._pendingProfileModel;
+  let currentModel=S.session.model||'';
   if(modelOverride){
     S._pendingProfileModel=null;
     _applyModelToDropdown(modelOverride,$('modelSelect'));
+    currentModel=modelOverride;
   } else {
-    const m=S.session.model||'';
-    const applied=_applyModelToDropdown(m,$('modelSelect'));
+    const applied=_applyModelToDropdown(currentModel,$('modelSelect'));
     // If the model isn't in the current provider list, add it as a visually marked
     // "(unavailable)" entry so the session value is preserved without misleading the user.
     // Selecting it will still attempt to send (same as before), but the label makes
     // clear it's a stale model from a previous session.
-    if(!applied && m){
+    if(!applied && currentModel){
       const opt=document.createElement('option');
-      opt.value=m;
-      opt.textContent=getModelLabel(m)+t('model_unavailable');
+      opt.value=currentModel;
+      opt.textContent=getModelLabel(currentModel)+t('model_unavailable');
       opt.style.color='var(--muted, #888)';
       opt.title=t('model_unavailable_title');
       $('modelSelect').appendChild(opt);
-      $('modelSelect').value=m;
+      $('modelSelect').value=currentModel;
     }
   }
   // Show Clear button only when session has messages
   const clearBtn=$('btnClearConv');
   if(clearBtn) clearBtn.style.display=(S.messages&&S.messages.filter(msg=>msg.role!=='tool').length>0)?'':'none';
-  const displayModel=$('modelSelect').value||m;
-  $('modelChip').textContent=getModelLabel(displayModel);
   const ws=S.session.workspace||'';
   // Update sidebar workspace display
   const sidebarName=$('sidebarWsName');
