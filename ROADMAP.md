@@ -3,7 +3,7 @@
 > Goal: Full 1:1 parity with the Hermes CLI experience via a clean dark web UI.
 > Everything you can do from the CLI terminal, you can do from this UI.
 >
-> Last updated: v0.44.0 (April 10, 2026) — 595 tests, 579 passing
+> Last updated: v0.45.0 (April 10, 2026) — 604 tests, 604 passing
 > Tests: 499 total (499 passing, 0 failures)
 > Source: <repo>/
 
@@ -41,6 +41,7 @@
 | Sprint 22 | Multi-profile support | Profile picker, management panel, seamless switching, per-session tracking (#28) | 415 |
 | Sprint 23 | Agentic transparency | Token/cost display, subagent cards, skill picker in cron, skill linked files, workspace tree persistence, timestamp fixes | 424 |
 | v0.44.0 patch | Fix batch: approval card, login CSP, update diagnostics, Lucide icons | PRs #221 #225 #226 #227 #228 | 579 |
+| v0.45.0 | Custom endpoint in new profile form | Base URL + API key fields; server-side URL validation; config.yaml merge; 9 new tests (PR #233, fixes #170) | 604 |
 | v0.32 | Auto-compaction handling | Compression detection, /compact command, real context window indicator | 424 |
 | v0.33 | /insights sync | Opt-in state.db sync so `hermes /insights` includes WebUI sessions | 424 |
 | v0.34 | Sprint 26 — Pluggable themes | Dark, Light, Slate, Solarized, Monokai, Nord; settings unsaved-changes guard; /theme command | 433 |

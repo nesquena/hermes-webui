@@ -358,6 +358,7 @@ across 23 test files.
 - Gateway status dots (green = running), model info, skill count per profile
 - Profiles management panel -- create, switch, and delete profiles from the sidebar
 - Clone config from active profile on create
+- Optional custom endpoint fields on create -- Base URL and API key written into the profile's `config.yaml` at creation time, so Ollama, LMStudio, and other local endpoints can be configured without editing files manually
 - Seamless switching -- no server restart; reloads config, skills, memory, cron, models
 - Per-session profile tracking (records which profile was active at creation)
 
