@@ -532,48 +532,82 @@ function getWorkspaceFriendlyName(path){
   return path.split('/').filter(Boolean).pop()||path;
 }
 
+function syncWorkspaceDisplays(){
+  const hasSession=!!(S.session&&S.session.workspace);
+  const ws=hasSession?S.session.workspace:'';
+  const label=hasSession?getWorkspaceFriendlyName(ws):t('no_workspace');
+
+  const sidebarName=$('sidebarWsName');
+  const sidebarPath=$('sidebarWsPath');
+  if(sidebarName) sidebarName.textContent=label;
+  if(sidebarPath) sidebarPath.textContent=ws;
+
+  const composerChip=$('composerWorkspaceChip');
+  const composerLabel=$('composerWorkspaceLabel');
+  const composerDropdown=$('composerWsDropdown');
+  if(!hasSession && composerDropdown) composerDropdown.classList.remove('open');
+  if(composerLabel) composerLabel.textContent=label;
+  if(composerChip){
+    composerChip.disabled=!hasSession;
+    composerChip.title=hasSession?ws:'No active workspace';
+    composerChip.classList.toggle('active',!!(composerDropdown&&composerDropdown.classList.contains('open')));
+  }
+}
+
 async function loadWorkspaceList(){
   try{
     const data = await api('/api/workspaces');
     _workspaceList = data.workspaces || [];
-    // Refresh sidebar display if we have a current session
-    if(S.session && S.session.workspace) {
-      const sidebarName=$('sidebarWsName');
-      const sidebarPath=$('sidebarWsPath');
-      if(sidebarName) sidebarName.textContent=getWorkspaceFriendlyName(S.session.workspace);
-      if(sidebarPath) sidebarPath.textContent=S.session.workspace;
-    }
+    syncWorkspaceDisplays();
     return data;
   }catch(e){ return {workspaces:[], last:''}; }
 }
 
-function renderWorkspaceDropdown(workspaces, currentWs){
-  const dd = $('wsDropdown');
+function _renderWorkspaceAction(label, meta, iconSvg, onClick){
+  const opt=document.createElement('div');
+  opt.className='ws-opt ws-opt-action';
+  opt.innerHTML=`<span class="ws-opt-icon">${iconSvg}</span><span><span class="ws-opt-name">${esc(label)}</span>${meta?`<span class="ws-opt-meta">${esc(meta)}</span>`:''}</span>`;
+  opt.onclick=onClick;
+  return opt;
+}
+
+function _positionComposerWsDropdown(){
+  const dd=$('composerWsDropdown');
+  const chip=$('composerWorkspaceChip');
+  const footer=document.querySelector('.composer-footer');
+  if(!dd||!chip||!footer)return;
+  const chipRect=chip.getBoundingClientRect();
+  const footerRect=footer.getBoundingClientRect();
+  let left=chipRect.left-footerRect.left;
+  const maxLeft=Math.max(0, footer.clientWidth-dd.offsetWidth);
+  left=Math.max(0, Math.min(left, maxLeft));
+  dd.style.left=`${left}px`;
+}
+
+function renderWorkspaceDropdownInto(dd, workspaces, currentWs){
   if(!dd)return;
   dd.innerHTML='';
   for(const w of workspaces){
     const opt=document.createElement('div');
     opt.className='ws-opt'+(w.path===currentWs?' active':'');
     opt.innerHTML=`<span class="ws-opt-name">${esc(w.name)}</span><span class="ws-opt-path">${esc(w.path)}</span>`;
-    opt.onclick=async()=>{
-      closeWsDropdown();
-      if(!S.session||w.path===S.session.workspace)return;
-      await api('/api/session/update',{method:'POST',body:JSON.stringify({
-        session_id:S.session.session_id, workspace:w.path, model:S.session.model
-      })});
-      S.session.workspace=w.path;
-      syncTopbar();
-      await loadDir('.');
-      showToast(`Switched to ${w.name}`);
-    };
+    opt.onclick=()=>switchToWorkspace(w.path,w.name);
     dd.appendChild(opt);
   }
-  // Divider + Manage link
+  dd.appendChild(document.createElement('div')).className='ws-divider';
+  dd.appendChild(_renderWorkspaceAction(
+    'Choose workspace path',
+    'Add a validated path and switch this conversation',
+    li('folder',12),
+    ()=>promptWorkspacePath()
+  ));
   const div=document.createElement('div');div.className='ws-divider';dd.appendChild(div);
-  const mgmt=document.createElement('div');mgmt.className='ws-opt ws-manage';
-  mgmt.innerHTML=`${li('settings',12)} Manage workspaces`;
-  mgmt.onclick=()=>{closeWsDropdown();switchPanel('workspaces');};
-  dd.appendChild(mgmt);
+  dd.appendChild(_renderWorkspaceAction(
+    'Manage workspaces',
+    'Open the Spaces panel',
+    li('settings',12),
+    ()=>{closeWsDropdown();switchPanel('workspaces');}
+  ));
 }
 
 function toggleWsDropdown(){
@@ -584,18 +618,47 @@ function toggleWsDropdown(){
   else{
     closeProfileDropdown(); // close profile dropdown if open
     loadWorkspaceList().then(data=>{
-      renderWorkspaceDropdown(data.workspaces, S.session?S.session.workspace:'');
+      renderWorkspaceDropdownInto(dd, data.workspaces, S.session?S.session.workspace:'');
       dd.classList.add('open');
+    });
+  }
+}
+
+function toggleComposerWsDropdown(){
+  const dd=$('composerWsDropdown');
+  const chip=$('composerWorkspaceChip');
+  if(!dd||!chip||chip.disabled)return;
+  const open=dd.classList.contains('open');
+  if(open){closeWsDropdown();}
+  else{
+    closeProfileDropdown();
+    if(typeof closeModelDropdown==='function') closeModelDropdown();
+    loadWorkspaceList().then(data=>{
+      renderWorkspaceDropdownInto(dd, data.workspaces, S.session?S.session.workspace:'');
+      dd.classList.add('open');
+      _positionComposerWsDropdown();
+      chip.classList.add('active');
     });
   }
 }
 
 function closeWsDropdown(){
   const dd=$('wsDropdown');
+  const composerDd=$('composerWsDropdown');
+  const composerChip=$('composerWorkspaceChip');
   if(dd)dd.classList.remove('open');
+  if(composerDd)composerDd.classList.remove('open');
+  if(composerChip)composerChip.classList.remove('active');
 }
 document.addEventListener('click',e=>{
-  if(!e.target.closest('#sidebarWsDisplay') && !e.target.closest('#wsDropdown'))closeWsDropdown();
+  if(
+    !e.target.closest('#composerWorkspaceChip') &&
+    !e.target.closest('#composerWsDropdown')
+  ) closeWsDropdown();
+});
+window.addEventListener('resize',()=>{
+  const dd=$('composerWsDropdown');
+  if(dd&&dd.classList.contains('open')) _positionComposerWsDropdown();
 });
 
 async function loadWorkspacesPanel(){
@@ -656,16 +719,58 @@ async function removeWorkspace(path){
   }catch(e){setStatus('Remove failed: '+e.message);}
 }
 
+async function promptWorkspacePath(){
+  if(!S.session)return;
+  const value=await showPromptDialog({
+    title:'Switch workspace',
+    message:'Enter an absolute workspace path to add and switch this conversation to.',
+    confirmLabel:'Switch',
+    placeholder:'/Users/you/project',
+    value:S.session.workspace||''
+  });
+  const path=(value||'').trim();
+  if(!path)return;
+  try{
+    const data=await api('/api/workspaces/add',{method:'POST',body:JSON.stringify({path})});
+    _workspaceList=data.workspaces||[];
+    const target=_workspaceList[_workspaceList.length-1];
+    if(!target) throw new Error('Workspace was not added');
+    await switchToWorkspace(target.path,target.name);
+  }catch(e){
+    if(String(e.message||'').includes('Workspace already in list')){
+      showToast('Workspace already saved — choose it from the list');
+      return;
+    }
+    showToast('Workspace switch failed: '+e.message);
+  }
+}
+
 async function switchToWorkspace(path,name){
   if(!S.session)return;
+  if(S.busy){
+    showToast('Cannot switch workspace while agent is running');
+    return;
+  }
+  if(typeof _previewDirty!=='undefined'&&_previewDirty){
+    const discard=await showConfirmDialog({
+      title:'Discard file edits?',
+      message:'Switching workspaces will discard unsaved file edits in the preview.',
+      confirmLabel:t('discard'),
+      danger:true
+    });
+    if(!discard)return;
+    if(typeof cancelEditMode==='function')cancelEditMode();
+    if(typeof clearPreview==='function')clearPreview();
+  }
   try{
+    closeWsDropdown();
     await api('/api/session/update',{method:'POST',body:JSON.stringify({
       session_id:S.session.session_id, workspace:path, model:S.session.model
     })});
     S.session.workspace=path;
     syncTopbar();
     await loadDir('.');
-    showToast(`Switched to ${name}`);
+    showToast(`Switched to ${name||getWorkspaceFriendlyName(path)}`);
   }catch(e){setStatus('Switch failed: '+e.message);}
 }
 

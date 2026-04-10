@@ -298,9 +298,12 @@ $('btnClearPreview').onclick=handleWorkspaceClose;
 $('modelSelect').onchange=async()=>{
   if(!S.session)return;
   const selectedModel=$('modelSelect').value;
+  if(typeof closeModelDropdown==='function') closeModelDropdown();
   localStorage.setItem('hermes-webui-model', selectedModel);
   await api('/api/session/update',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,workspace:S.session.workspace,model:selectedModel})});
-  S.session.model=selectedModel;syncTopbar();
+  S.session.model=selectedModel;
+  if(typeof syncModelChip==='function') syncModelChip();
+  syncTopbar();
 };
 $('msg').addEventListener('input',()=>{
   autoResize();
