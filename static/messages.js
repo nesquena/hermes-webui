@@ -342,32 +342,47 @@ function autoResize(){const el=$('msg');el.style.height='auto';el.style.height=M
 
 // ── Approval polling ──
 let _approvalPollTimer = null;
-let _approvalVisibleSince = 0;
-let _approvalMinVisibleMs = 30000;
 let _approvalHideTimer = null;
+let _approvalVisibleSince = 0;
+let _approvalSignature = '';
+const APPROVAL_MIN_VISIBLE_MS = 30000;
 
 // showApprovalCard moved above respondApproval
+
+function _clearApprovalHideTimer() {
+  if (_approvalHideTimer) {
+    clearTimeout(_approvalHideTimer);
+    _approvalHideTimer = null;
+  }
+}
+
+function _resetApprovalCardState() {
+  _clearApprovalHideTimer();
+  _approvalVisibleSince = 0;
+  _approvalSignature = '';
+}
 
 function hideApprovalCard(force=false) {
   const card = $("approvalCard");
   if (!card) return;
-  const visible = card.classList.contains("visible");
-  if (visible && !force && _approvalVisibleSince) {
-    const elapsed = Date.now() - _approvalVisibleSince;
-    if (elapsed < _approvalMinVisibleMs) {
-      if (_approvalHideTimer) clearTimeout(_approvalHideTimer);
+  if (!force && _approvalVisibleSince) {
+    const remaining = APPROVAL_MIN_VISIBLE_MS - (Date.now() - _approvalVisibleSince);
+    if (remaining > 0) {
+      const scheduledSignature = _approvalSignature;
+      _clearApprovalHideTimer();
       _approvalHideTimer = setTimeout(() => {
         _approvalHideTimer = null;
+        if (_approvalSignature !== scheduledSignature) return;
         hideApprovalCard(true);
-      }, _approvalMinVisibleMs - elapsed);
+      }, remaining);
       return;
     }
   }
-  if (_approvalHideTimer) { clearTimeout(_approvalHideTimer); _approvalHideTimer = null; }
+  _approvalSessionId = null;
+  _resetApprovalCardState();
   card.classList.remove("visible");
   $("approvalCmd").textContent = "";
   $("approvalDesc").textContent = "";
-  _approvalVisibleSince = 0;
 }
 
 // Track session_id of the active approval so respond goes to the right session
@@ -377,19 +392,23 @@ function showApprovalCard(pending) {
   const keys = pending.pattern_keys || (pending.pattern_key ? [pending.pattern_key] : []);
   const desc = (pending.description || "") + (keys.length ? " [" + keys.join(", ") + "]" : "");
   const cmd = pending.command || "";
+  const sig = JSON.stringify({desc, cmd, sid: pending._session_id || (S.session && S.session.session_id) || null});
   const card = $("approvalCard");
-  const wasVisible = card.classList.contains("visible");
-  const sameApproval = wasVisible && $("approvalCmd").textContent === cmd && $("approvalDesc").textContent === desc;
+  const sameApproval = card.classList.contains("visible") && _approvalSignature === sig;
   $("approvalDesc").textContent = desc;
   $("approvalCmd").textContent = cmd;
   _approvalSessionId = pending._session_id || (S.session && S.session.session_id) || null;
-  if (!sameApproval) _approvalVisibleSince = Date.now();
+  _approvalSignature = sig;
+  if (!sameApproval) {
+    _approvalVisibleSince = Date.now();
+    _clearApprovalHideTimer();
+  }
   // Re-enable buttons in case a previous approval disabled them
   ["approvalBtnOnce","approvalBtnSession","approvalBtnAlways","approvalBtnDeny"].forEach(id => {
     const b = $(id); if (b) { b.disabled = false; b.classList.remove("loading"); }
   });
   card.classList.add("visible");
-  card.scrollIntoView({block:"end", behavior: sameApproval ? "auto" : "smooth"});
+  if (!sameApproval) card.scrollIntoView({block:"nearest", behavior:"smooth"});
   // Apply current locale to data-i18n elements inside the card
   if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
   // Focus Allow once button so Enter works immediately
