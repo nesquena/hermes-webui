@@ -664,12 +664,26 @@ function renderMessages(){
 }
 
 function toolIcon(name){
-  const icons={terminal:'⬛',read_file:'📄',write_file:'✏️',search_files:'🔍',
-    web_search:'🌐',web_extract:'🌐',execute_code:'⚙️',patch:'🔧',
-    memory:'🧠',skill_manage:'📚',todo:'✅',cronjob:'⏱️',delegate_task:'🤖',
-    send_message:'💬',browser_navigate:'🌐',vision_analyze:'👁️',
-    subagent_progress:'🔀'};
-  return icons[name]||'🔧';
+  const icons={
+    terminal:        li('terminal'),
+    read_file:       li('file-text'),
+    write_file:      li('file-pen'),
+    search_files:    li('search'),
+    web_search:      li('globe'),
+    web_extract:     li('globe'),
+    execute_code:    li('play'),
+    patch:           li('wrench'),
+    memory:          li('brain'),
+    skill_manage:    li('book-open'),
+    todo:            li('list-todo'),
+    cronjob:         li('clock'),
+    delegate_task:   li('bot'),
+    send_message:    li('message-square'),
+    browser_navigate:li('globe'),
+    vision_analyze:  li('eye'),
+    subagent_progress:li('shuffle'),
+  };
+  return icons[name]||li('wrench');
 }
 
 function buildToolCard(tc){
@@ -925,17 +939,17 @@ function appendThinking(){
 function removeThinking(){const el=$('thinkingRow');if(el)el.remove();}
 
 function fileIcon(name, type){
-  if(type==='dir') return '📁';
+  if(type==='dir') return li('folder',14);
   const e=fileExt(name);
-  if(IMAGE_EXTS.has(e)) return '📷';
-  if(MD_EXTS.has(e))    return '📝';
-  if(typeof DOWNLOAD_EXTS!=='undefined'&&DOWNLOAD_EXTS.has(e)) return '⬇️';
-  if(e==='.py')   return '🐍';
-  if(e==='.js'||e==='.ts'||e==='.jsx'||e==='.tsx') return '⚡';
-  if(e==='.json'||e==='.yaml'||e==='.yml'||e==='.toml') return '⚙';
-  if(e==='.sh'||e==='.bash') return '💻';
-  if(e==='.pdf') return '⬇️';
-  return '📄';
+  if(IMAGE_EXTS.has(e)) return li('image',14);
+  if(MD_EXTS.has(e))    return li('file-text',14);
+  if(typeof DOWNLOAD_EXTS!=='undefined'&&DOWNLOAD_EXTS.has(e)) return li('download',14);
+  if(e==='.py')   return li('file-code',14);
+  if(e==='.js'||e==='.ts'||e==='.jsx'||e==='.tsx') return li('zap',14);
+  if(e==='.json'||e==='.yaml'||e==='.yml'||e==='.toml') return li('settings',14);
+  if(e==='.sh'||e==='.bash') return li('terminal',14);
+  if(e==='.pdf') return li('download',14);
+  return li('file-text',14);
 }
 
 function renderBreadcrumb(){
@@ -1005,7 +1019,7 @@ function _renderTreeItems(container, entries, depth){
 
     // Icon
     const iconEl=document.createElement('span');
-    iconEl.className='file-icon';iconEl.textContent=fileIcon(item.name,item.type);
+    iconEl.className='file-icon';iconEl.innerHTML=fileIcon(item.name,item.type);
     el.appendChild(iconEl);
 
     // Name

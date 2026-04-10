@@ -24,7 +24,7 @@ async function send(){
   setStatus(S.pendingFiles&&S.pendingFiles.length?'Uploading…':'Sending…');
   let uploaded=[];
   try{uploaded=await uploadPendingFiles();}
-  catch(e){if(!text){setStatus(`❌ ${e.message}`);return;}}
+  catch(e){if(!text){setStatus(`Upload error: ${e.message}`);return;}}
 
   let msgText=text;
   if(uploaded.length&&!msgText)msgText=`I've uploaded ${uploaded.length} file(s): ${uploaded.join(', ')}`;
@@ -69,7 +69,7 @@ async function send(){
     markInflight(activeSid, streamId);
     // Show Cancel button
     const cancelBtn=$('btnCancel');
-    if(cancelBtn) cancelBtn.style.display='';
+    if(cancelBtn) cancelBtn.style.display='inline-flex';
   }catch(e){
     delete INFLIGHT[activeSid];
     stopApprovalPolling();
@@ -234,12 +234,11 @@ async function send(){
         try{
           const d=JSON.parse(e.data);
           const isRateLimit=d.type==='rate_limit';
-          const icon=isRateLimit?'⏱️':'⚠️';
           const label=isRateLimit?'Rate limit reached':'Error';
           const hint=d.hint?`\n\n*${d.hint}*`:'';
-          S.messages.push({role:'assistant',content:`**${icon} ${label}:** ${d.message}${hint}`});
+          S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`});
         }catch(_){
-          S.messages.push({role:'assistant',content:'**⚠️ Error:** An error occurred. Check server logs.'});
+          S.messages.push({role:'assistant',content:'**Error:** An error occurred. Check server logs.'});
         }
         renderMessages();
       }else if(typeof trackBackgroundError==='function'){
@@ -256,7 +255,7 @@ async function send(){
       try{
         const d=JSON.parse(e.data);
         // Show as a small inline notice, not a full error
-        setStatus(`⚠️ ${d.message||'Warning'}`);
+        setStatus(`${d.message||'Warning'}`);
         // If it's a fallback notice, show it briefly then clear
         if(d.type==='fallback') setTimeout(()=>setStatus(''),4000);
       }catch(_){}
@@ -484,4 +483,3 @@ function sendBrowserNotification(title,body){
 }
 
 // ── Panel navigation (Chat / Tasks / Skills / Memory) ──
-

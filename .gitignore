@@ -25,3 +25,6 @@ full-UI.png
 # OS files
 .DS_Store
 Thumbs.db
+
+# Local reference clones — never committed
+docs/
