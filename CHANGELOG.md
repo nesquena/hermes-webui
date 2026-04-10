@@ -6,6 +6,11 @@
 ---
 
 
+## [v0.42.2] — 2026-04-10
+
+### Bug Fixes
+- **CSP blocking inline event handlers** (PR #209): `script-src 'self'` blocked all 55+ inline `onclick=` handlers in `index.html`, making the settings panel, sidebar navigation, and most interactive controls non-functional. Added `'unsafe-inline'` to `script-src`. Also restores `https://cdn.jsdelivr.net` to `script-src` and `style-src` for Mermaid.js and Prism.js (dropped in v0.42.1).
+
 ## [v0.42.1] — 2026-04-11
 
 ### Bug Fixes
