@@ -148,6 +148,17 @@ def _apply_update_inner(target):
         branch = _detect_default_branch(path)
         compare_ref = f'origin/{branch}'
 
+    # Fetch before attempting pull, so the remote ref is current.
+    _, fetch_ok = _run_git(['fetch', 'origin', '--quiet'], path, timeout=15)
+    if not fetch_ok:
+        return {
+            'ok': False,
+            'message': (
+                'Could not reach the remote repository. '
+                'Check your internet connection and try again.'
+            ),
+        }
+
     # Check for dirty working tree
     status_out, _ = _run_git(['status', '--porcelain'], path)
     stashed = False
@@ -162,7 +173,31 @@ def _apply_update_inner(target):
     if not pull_ok:
         if stashed:
             _run_git(['stash', 'pop'], path)
-        return {'ok': False, 'message': f'Pull failed: {pull_out[:200]}'}
+
+        # Diagnose the most common failure modes and surface actionable messages.
+        pull_lower = pull_out.lower()
+        if 'not possible to fast-forward' in pull_lower or 'diverged' in pull_lower:
+            return {
+                'ok': False,
+                'message': (
+                    f'The local {target} repo has commits that are not on the remote '
+                    'branch, so a fast-forward update is not possible. '
+                    'Run: git -C ' + str(path) + ' fetch origin && '
+                    'git -C ' + str(path) + ' reset --hard ' + compare_ref
+                ),
+                'diverged': True,
+            }
+        if 'does not track' in pull_lower or 'no tracking information' in pull_lower:
+            return {
+                'ok': False,
+                'message': (
+                    f'The local {target} branch has no upstream tracking branch configured. '
+                    'Run: git -C ' + str(path) + ' branch --set-upstream-to=' + compare_ref
+                ),
+            }
+        # Generic fallback — include the raw git output for debugging.
+        detail = pull_out.strip()[:300] if pull_out.strip() else '(no output from git)'
+        return {'ok': False, 'message': f'Pull failed: {detail}'}
 
     # Pop stash if we stashed
     if stashed:
