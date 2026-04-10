@@ -294,8 +294,38 @@ def _create_profile_fallback(name: str, clone_from: str = None,
     return profile_dir
 
 
+def _write_endpoint_to_config(profile_dir: Path, base_url: str = None, api_key: str = None) -> None:
+    """Write custom endpoint fields into config.yaml for a profile."""
+    if not base_url and not api_key:
+        return
+    config_path = profile_dir / 'config.yaml'
+    try:
+        import yaml as _yaml
+    except ImportError:
+        return
+    cfg = {}
+    if config_path.exists():
+        try:
+            loaded = _yaml.safe_load(config_path.read_text())
+            if isinstance(loaded, dict):
+                cfg = loaded
+        except Exception:
+            pass
+    model_section = cfg.get('model', {})
+    if not isinstance(model_section, dict):
+        model_section = {}
+    if base_url:
+        model_section['base_url'] = base_url
+    if api_key:
+        model_section['api_key'] = api_key
+    cfg['model'] = model_section
+    config_path.write_text(_yaml.dump(cfg, default_flow_style=False, allow_unicode=True))
+
+
 def create_profile_api(name: str, clone_from: str = None,
-                       clone_config: bool = False) -> dict:
+                       clone_config: bool = False,
+                       base_url: str = None,
+                       api_key: str = None) -> dict:
     """Create a new profile. Returns the new profile info dict."""
     _validate_profile_name(name)
     # Defense-in-depth: validate clone_from here too, even though routes.py
@@ -315,11 +345,26 @@ def create_profile_api(name: str, clone_from: str = None,
     except ImportError:
         _create_profile_fallback(name, clone_from, clone_config)
 
+    # Resolve the profile directory from the profile list when possible.
+    # hermes_cli and the webui runtime do not always agree on the exact root,
+    # so we prefer the path returned by list_profiles_api() and fall back to the
+    # standard profile location only if the profile cannot be found there yet.
+    profile_path = _DEFAULT_HERMES_HOME / 'profiles' / name
+    for p in list_profiles_api():
+        if p['name'] == name:
+            try:
+                profile_path = Path(p.get('path') or profile_path)
+            except Exception:
+                pass
+            break
+
+    profile_path.mkdir(parents=True, exist_ok=True)
+    _write_endpoint_to_config(profile_path, base_url=base_url, api_key=api_key)
+
     # Find and return the newly created profile info.
     # When hermes_cli is not importable, list_profiles_api() also falls back
     # to the stub default-only list and won't find the new profile by name.
     # In that case, return a complete profile dict directly.
-    profile_path = _DEFAULT_HERMES_HOME / 'profiles' / name
     for p in list_profiles_api():
         if p['name'] == name:
             return p
