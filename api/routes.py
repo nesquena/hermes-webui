@@ -614,12 +614,16 @@ def handle_post(handler, parsed) -> bool:
             clone_from = str(clone_from).strip()
             if not _re.match(r'^[a-z0-9][a-z0-9_-]{0,63}$', clone_from):
                 return bad(handler, 'Invalid clone_from name')
+        base_url = body.get('base_url', '').strip() if body.get('base_url') else None
+        api_key = body.get('api_key', '').strip() if body.get('api_key') else None
         try:
             from api.profiles import create_profile_api
             result = create_profile_api(
                 name,
                 clone_from=clone_from,
                 clone_config=bool(body.get('clone_config', False)),
+                base_url=base_url,
+                api_key=api_key,
             )
             return j(handler, {'ok': True, 'profile': result})
         except (ValueError, FileExistsError, RuntimeError) as e:
