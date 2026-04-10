@@ -9,6 +9,19 @@
 
 ---
 
+## Recent Maintenance
+
+### April 10, 2026: Self-Update Pull Fix
+
+`api/updates.py` now preserves git `stderr` on command failure instead of only
+capturing `stdout`. This fixes the empty `Pull failed:` message in the update banner
+when `git pull` emits its explanation on stderr.
+
+The update path also now splits tracking refs like `origin/master` into
+`git pull --ff-only origin master` instead of passing `origin/master` as a single
+repository argument. This matches git's CLI contract and prevents false update
+failures during one-click agent or WebUI updates.
+
 ## 1. Overview and Purpose
 
 The Hermes Web UI is a lightweight web application that gives you a browser-based

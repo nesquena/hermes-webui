@@ -29,15 +29,26 @@ CACHE_TTL = 1800  # 30 minutes
 
 
 def _run_git(args, cwd, timeout=10):
-    """Run a git command and return (stdout, ok)."""
+    """Run a git command and return (useful output, ok)."""
     try:
         r = subprocess.run(
             ['git'] + args, cwd=str(cwd), capture_output=True,
             text=True, timeout=timeout,
         )
-        return r.stdout.strip(), r.returncode == 0
+        stdout = r.stdout.strip()
+        stderr = r.stderr.strip()
+        if r.returncode == 0:
+            return stdout, True
+        return stderr or stdout, False
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return '', False
+
+
+def _split_remote_ref(ref):
+    """Split origin/branch-name into ('origin', 'branch-name')."""
+    if '/' not in ref:
+        return None, ref
+    return ref.split('/', 1)
 
 
 def _detect_default_branch(path):
@@ -169,7 +180,13 @@ def _apply_update_inner(target):
         stashed = True
 
     # Pull with ff-only (no merge commits)
-    pull_out, pull_ok = _run_git(['pull', '--ff-only', compare_ref], path, timeout=30)
+    remote, branch = _split_remote_ref(compare_ref)
+    pull_args = ['pull', '--ff-only']
+    if remote:
+        pull_args.extend([remote, branch])
+    else:
+        pull_args.append(compare_ref)
+    pull_out, pull_ok = _run_git(pull_args, path, timeout=30)
     if not pull_ok:
         if stashed:
             _run_git(['stash', 'pop'], path)
