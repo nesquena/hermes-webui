@@ -6,6 +6,10 @@
 ---
 
 
+## [v0.43.1] — 2026-04-10
+
+- **CSRF fix for reverse proxies** (PR #219): The CSRF check now accepts `X-Forwarded-Host` and `X-Real-Host` headers in addition to `Host`, so deployments behind Caddy, nginx, and Traefik no longer reject POST requests with "Cross-origin request rejected". Security is preserved — requests with no matching proxy header are still rejected. Fixes #218.
+
 ## [v0.43.0] — 2026-04-10
 
 ### Features
