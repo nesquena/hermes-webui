@@ -9,11 +9,11 @@
   <meta property="og:description" content="Persistent memory, autonomous scheduling, and multi-surface access — all on hardware you control." />
   <meta property="og:type" content="website" />
   <meta property="og:url" content="https://nesquena.github.io/hermes-webui/" />
-  <meta property="og:image" content="https://github.com/user-attachments/assets/51adff98-53ee-4800-8508-78b6c34dd3dc" />
+  <meta property="og:image" content="https://nesquena.github.io/hermes-webui/images/ui-hero.png" />
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="Hermes — The self-improving AI agent" />
   <meta name="twitter:description" content="Persistent memory, autonomous scheduling, and multi-surface access — all on hardware you control." />
-  <meta name="twitter:image" content="https://github.com/user-attachments/assets/51adff98-53ee-4800-8508-78b6c34dd3dc" />
+  <meta name="twitter:image" content="https://nesquena.github.io/hermes-webui/images/ui-hero.png" />
   <meta name="theme-color" content="#0d1117" media="(prefers-color-scheme: dark)" />
   <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>" />
@@ -664,6 +664,8 @@
       margin-top: 48px;
     }
     .webui-layout > * { min-width: 0; }
+    .webui-layout > * { min-width: 0; }
+    .webui-layout > * { min-width: 0; }
     .webui-features {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -757,28 +759,30 @@
       border: 1px solid var(--border);
       margin: 8px 0;
     }
+    /* Code blocks always dark — switching to github.min.css light causes invisible text on dark bg */
     [data-theme="light"] .code-wrap {
-      background: #161b22;
+      background: #0d1117;
+      border-color: #30363d;
     }
     .code-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
       padding: 8px 16px;
-      background: rgba(255,255,255,0.04);
-      border-bottom: 1px solid var(--border);
+      background: rgba(255,255,255,0.05);
+      border-bottom: 1px solid #30363d;
     }
     .code-lang {
       font-size: 0.7rem;
       font-weight: 600;
       letter-spacing: 0.06em;
       text-transform: uppercase;
-      color: var(--text-muted);
+      color: #8b949e;
     }
     .copy-btn {
       background: none;
-      border: 1px solid var(--border);
-      color: var(--text-muted);
+      border: 1px solid #484f58;
+      color: #8b949e;
       font-size: 0.7rem;
       padding: 3px 8px;
       border-radius: 4px;
@@ -786,8 +790,8 @@
       transition: color 0.15s, border-color 0.15s;
       font-family: inherit;
     }
-    .copy-btn:hover { color: var(--text-primary); border-color: var(--border-hover); }
-    .copy-btn.copied { color: var(--green); border-color: var(--green); }
+    .copy-btn:hover { color: #e6edf3; border-color: #8b949e; }
+    .copy-btn.copied { color: #3fb950; border-color: #3fb950; }
     .code-wrap pre {
       margin: 0;
       padding: 16px;
@@ -800,6 +804,46 @@
     }
 
     /* ===== COMPARISON ===== */
+    .compare-more { margin-top: 40px; padding-top: 32px; border-top: 1px solid var(--border); }
+    .compare-more-label { font-size: 0.75rem; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 12px; }
+    .compare-more-links { display: flex; flex-wrap: wrap; gap: 8px; }
+    .compare-pill { display: inline-block; padding: 6px 14px; border: 1px solid var(--border); border-radius: 100px; font-size: 0.82rem; font-weight: 500; color: var(--text-secondary); transition: border-color 0.15s, color 0.15s, background 0.15s; }
+    .compare-pill:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-subtle); }
+    
+    .compare-more {
+      margin-top: 40px;
+      padding-top: 32px;
+      border-top: 1px solid var(--border);
+    }
+    .compare-more-label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+    }
+    .compare-more-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .compare-pill {
+      display: inline-block;
+      padding: 6px 14px;
+      border: 1px solid var(--border);
+      border-radius: 100px;
+      font-size: 0.82rem;
+      font-weight: 500;
+      color: var(--text-secondary);
+      transition: border-color 0.15s, color 0.15s, background 0.15s;
+    }
+    .compare-pill:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: var(--accent-subtle);
+    }
+    
     .comparison-intro {
       font-size: 1rem;
       color: var(--text-secondary);
@@ -870,7 +914,11 @@
       padding: 24px;
       transition: border-color 0.2s;
     }
-    .comparison-card:hover { border-color: var(--border-hover); }
+    .comparison-card:hover { border-color: var(--accent); background: var(--bg-card-hover); }
+    .comparison-card[role="link"] { position: relative; cursor: pointer; }
+    .comparison-card[role="link"]:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .card-arrow { position: absolute; top: 18px; right: 20px; color: var(--text-muted); font-size: 1.1rem; transition: transform 0.15s, color 0.15s; }
+    .comparison-card[role="link"]:hover .card-arrow { transform: translateX(4px); color: var(--accent); }
     .comparison-card h4 {
       font-size: 0.95rem;
       font-weight: 600;
@@ -890,6 +938,8 @@
       gap: 48px;
       margin-top: 48px;
     }
+    .install-layout > * { min-width: 0; }
+    .install-layout > * { min-width: 0; }
     .install-layout > * { min-width: 0; }
     .providers-table-wrap {
       border: 1px solid var(--border);
@@ -1140,7 +1190,7 @@
       <li><a href="#resources">Resources</a></li>
     </ul>
     <div class="nav-actions">
-      <button class="btn-theme" id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark mode">&#9790;</button>
+      <button class="btn-theme" id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark mode">🌙</button>
       <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" class="btn-nav-cta" target="_blank" rel="noopener">Get started &#8594;</a>
     </div>
     <button class="hamburger" id="hamburger" aria-label="Open menu">
@@ -1394,26 +1444,26 @@
 
       <!-- Hero screenshot -->
       <div class="showcase-hero" onclick="openLightbox(this.querySelector('img').src)">
-        <img src="https://github.com/user-attachments/assets/51adff98-53ee-4800-8508-78b6c34dd3dc" alt="Hermes Web UI - three-panel layout with sessions, chat, and workspace" loading="lazy" />
+        <img src="../images/ui-hero.png" alt="Hermes Web UI - three-panel layout with sessions, chat, and workspace" loading="lazy" />
         <div class="showcase-hero-label">Three-panel layout &mdash; dark mode</div>
       </div>
 
       <!-- Screenshot gallery -->
       <div class="showcase-gallery">
         <div class="showcase-thumb" onclick="openLightbox(this.querySelector('img').src)">
-          <img src="https://github.com/user-attachments/assets/9b68142f-d974-4493-a8d1-fd73e622c7fd" alt="Light mode with full profile support" loading="lazy" />
+          <img src="../images/ui-light-mode.png" alt="Light mode with full profile support" loading="lazy" />
           <div class="showcase-thumb-caption">Light mode with profile support</div>
         </div>
         <div class="showcase-thumb" onclick="openLightbox(this.querySelector('img').src)">
-          <img src="https://github.com/user-attachments/assets/941f3156-21e3-41fd-bcc8-f975d5000cb8" alt="Customize your settings and configure a password" loading="lazy" />
+          <img src="../images/ui-settings.png" alt="Settings panel with password protection" loading="lazy" />
           <div class="showcase-thumb-caption">Settings &amp; password protection</div>
         </div>
         <div class="showcase-thumb" onclick="openLightbox(this.querySelector('img').src)">
-          <img src="https://raw.githubusercontent.com/nesquena/hermes-webui/master/docs/images/ui-workspace.png" alt="Workspace file browser with inline preview" loading="lazy" />
+          <img src="../images/ui-workspace.png" alt="Workspace file browser with inline preview" loading="lazy" />
           <div class="showcase-thumb-caption">Workspace file browser</div>
         </div>
         <div class="showcase-thumb" onclick="openLightbox(this.querySelector('img').src)">
-          <img src="https://raw.githubusercontent.com/nesquena/hermes-webui/master/docs/images/ui-sessions.png" alt="Session projects, tags, and tool call cards" loading="lazy" />
+          <img src="../images/ui-sessions.png" alt="Session projects, tags, and tool call cards" loading="lazy" />
           <div class="showcase-thumb-caption">Sessions, projects &amp; tags</div>
         </div>
       </div>
@@ -1550,8 +1600,20 @@ docker run -d \
         </div>
 
       </div>
-    </div>
-  </section>
+
+      <div class="compare-more">
+        <p class="compare-more-label">More comparisons</p>
+        <div class="compare-more-links">
+          <a href="compare/openclaw.html" class="compare-pill">vs. OpenClaw</a>
+          <a href="compare/claude-code.html" class="compare-pill">vs. Claude Code</a>
+          <a href="compare/codex.html" class="compare-pill">vs. Codex CLI</a>
+          <a href="compare/opencode.html" class="compare-pill">vs. OpenCode</a>
+          <a href="compare/cursor.html" class="compare-pill">vs. Cursor</a>
+          <a href="compare/copilot.html" class="compare-pill">vs. GitHub Copilot</a>
+          <a href="compare/claude-ai.html" class="compare-pill">vs. Claude.ai</a>
+          <a href="compare/chatgpt.html" class="compare-pill">vs. ChatGPT</a>
+        </div>
+
 
   <!-- ===== SECTION 7: COMPARISON ===== -->
   <section id="compare" class="section">
@@ -1679,28 +1741,32 @@ docker run -d \
       <h3 class="subsection-title mt-32">Head-to-head</h3>
       <div class="comparison-cards">
 
-        <div class="comparison-card">
+        <div class="comparison-card" onclick="location.href='compare/openclaw.html'" role="link" tabindex="0" aria-label="Compare Hermes vs. OpenClaw" style="cursor:pointer">
+          <div class="card-arrow">→</div>
           <h4>Hermes vs. OpenClaw</h4>
           <p>
             OpenClaw (MIT, 350k+ stars) is the closest comparison: open-source, self-hosted, always-on. OpenClaw has the widest messaging surface (24+ platforms including iMessage, LINE, WeChat, Teams) and native Chrome CDP browser control. Hermes wins on stability (OpenClaw's Telegram integration broke across multiple 2026 releases) and security &mdash; three separate 2026 audits found malicious skills in ClawHub (Koi Security linked 335 to "ClawHavoc," Bitdefender flagged ~900 packages, ~20% of the ecosystem). Hermes writes skills automatically from experience; OpenClaw centers on a human-curated marketplace. Hermes runs in Python/ML ecosystem; OpenClaw is Node.js.
           </p>
         </div>
 
-        <div class="comparison-card">
+        <div class="comparison-card" onclick="location.href='compare/claude-code.html'" role="link" tabindex="0" aria-label="Compare Hermes vs. Claude Code" style="cursor:pointer">
+          <div class="card-arrow">→</div>
           <h4>Hermes vs. Claude Code</h4>
           <p>
             Claude Code is Anthropic's official agentic tool spanning terminal, IDE, desktop, and browser. It has a 26-event hooks system, a plugin/skills marketplace, CLAUDE.md/MEMORY.md project memory with auto-memory since v2.1.59+, and cloud-managed scheduling on Anthropic infrastructure. Messaging channels (Telegram/Discord/iMessage) remain a research preview; Slack has not shipped. Key differences: scheduling requires cloud or desktop app (not a headless server daemon), memory doesn't accumulate across projects, and it's locked to Claude models. Hermes can spawn Claude Code as a sub-agent for heavy implementation tasks.
           </p>
         </div>
 
-        <div class="comparison-card">
+        <div class="comparison-card" onclick="location.href='compare/cursor.html'" role="link" tabindex="0" aria-label="Compare Hermes vs. Cursor" style="cursor:pointer">
+          <div class="card-arrow">→</div>
           <h4>Hermes vs. Cursor</h4>
           <p>
             Cursor has changed substantially. Memories (per-project) shipped June 2025. Automations launched March 2026 with time-based, event-based, and Slack triggers on cloud VMs. Cursor v3.0 (April 2026) is explicitly agent-first with a $29.3B valuation. Cursor excels at editor-native agents with strong IDE integration. Hermes is self-hosted and server-resident: the same persistent identity follows you across every surface without cloud intermediation, works with any model family, and for workflows requiring data sovereignty or deep Python/ML tooling on your own hardware, Cursor's cloud architecture is a fundamental mismatch.
           </p>
         </div>
 
-        <div class="comparison-card">
+        <div class="comparison-card" onclick="location.href='compare/claude-ai.html'" role="link" tabindex="0" aria-label="Compare Hermes vs. Claude.ai / ChatGPT" style="cursor:pointer">
+          <div class="card-arrow">→</div>
           <h4>Hermes vs. Claude.ai / ChatGPT</h4>
           <p>
             Both are no longer simple chat tools. Claude Cowork added scheduling (Feb 2026) and 50+ connectors. ChatGPT has Agent Mode (July 2025), Scheduled Tasks, and 50+ connectors. Both have improved memory. The fundamental difference isn't features &mdash; it's where execution lives. Neither is self-hosted. Neither is provider-agnostic. Memory, sessions, and agent execution run on their servers, not yours. For workflows requiring data sovereignty, persistent server-resident execution, or provider flexibility, that's a disqualifying constraint.
@@ -1995,10 +2061,13 @@ hermes doctor         # diagnose any issues</code></pre>
   function setTheme(theme) {
     html.setAttribute('data-theme', theme);
     localStorage.setItem('theme', theme);
+    // Code blocks stay dark in both themes; no hljs switch needed
     if (theme === 'light') {
-      themeToggle.innerHTML = '&#9728;&#65039;';
-      hljsTheme.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css';
+      themeToggle.textContent = '🌙';
     } else {
+      themeToggle.textContent = '☀️';
+    }
+  } else {
       themeToggle.innerHTML = '&#9790;';
       hljsTheme.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css';
     }
@@ -2086,6 +2155,14 @@ hermes doctor         # diagnose any issues</code></pre>
 
   document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') closeLightbox();
+  });
+
+
+  // ===== KEYBOARD NAV FOR CLICKABLE CARDS =====
+  document.querySelectorAll('.comparison-card[role="link"]').forEach(function(card) {
+    card.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); card.click(); }
+    });
   });
 
   // ===== SMOOTH SCROLL =====
