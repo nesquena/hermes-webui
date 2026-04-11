@@ -90,7 +90,7 @@
 - [x] Custom endpoint model discovery: auto-detect models from Ollama, LM Studio, and other local LLM servers via base_url (PR #18)
 - [x] Upload files to workspace (drag-drop, click, clipboard paste)
 - [x] File tray with remove button
-- [x] Tool progress shown in activity bar above composer
+- [x] Tool progress shown inline in the conversation via live tool cards
 - [x] Approval card for dangerous commands (Allow once/session/always, Deny)
 - [x] Approval polling + SSE-pushed approval events
 - [x] INFLIGHT guard: switch sessions mid-request without losing response
@@ -102,7 +102,7 @@
 - [x] Token/cost estimate per message (Sprint 23)
 
 ### Tool Visibility
-- [x] Tool progress in activity bar (moved out of composer footer)
+- [x] Tool progress in live tool cards (kept out of the composer/footer chrome)
 - [x] Approval card with all 4 choices
 - [x] Tool call cards inline (collapsed, show name/args/result)
 
@@ -228,7 +228,7 @@
 - [ ] Gateway approval polling -- support blocking approvals from messaging gateway (PR #75)
 - [ ] Unified session storage -- SessionDB shared between webui and CLI (PR #75)
 - [ ] TTS playback of responses (deferred)
-- [x] Background task cancel (activity bar Cancel button)
+- [x] Background task cancel (composer footer stop button)
 - [ ] Code execution cell (deferred)
 - [ ] Desktop application (Sprint 25, PLANNED)
 - [x] Pluggable UI themes -- Dark, Light, Slate, Solarized, Monokai, Nord (Sprint 26, v0.34)

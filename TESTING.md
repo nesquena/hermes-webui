@@ -73,11 +73,11 @@ STEPS:
 EXPECT:
   - User message appears immediately in chat
   - Thinking dots (three animated dots) appear below
-  - Status bar shows "Hermes is thinking..."
   - Send button becomes disabled (grayed out)
+  - A red stop button appears in the composer footer while the turn is running
   - Within 10-30 seconds, Hermes responds with a three-word greeting
   - Thinking dots disappear
-  - Send button re-enables
+  - Send button re-enables and the stop button disappears
   - Session title in sidebar updates to reflect the first message
 FAIL: Message never appears, thinking dots never go away, Send button stays disabled forever.
 
@@ -491,6 +491,7 @@ FAIL: No log output, log shows Apache-style text instead of JSON, log file not c
 SETUP: Message is sending (thinking dots visible).
 EXPECT:
   - Send button is visually grayed out
+  - Stop button is visible in the composer footer
   - Pressing Enter does NOT send another message
   - Clicking Send button does nothing
 FAIL: Multiple messages sent while one is in flight.
