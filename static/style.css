@@ -476,6 +476,7 @@
   ::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.22)}
   /* ── Desktop: hide mobile-only elements ── */
   .mobile-hamburger{display:none;}
+  .mobile-files-btn{display:none!important;}
   .mobile-overlay{display:none;}
   .mobile-bottom-nav{display:none;}
 
@@ -483,7 +484,7 @@
     .layout.workspace-panel-collapsed .rightpanel{width:0 !important;opacity:0;transform:translateX(14px);border-left-color:transparent;pointer-events:none;}
   }
 
-  @media(max-width:900px){.rightpanel{display:none}.workspace-toggle-btn{display:inline-flex!important;}}
+  @media(max-width:900px){.rightpanel{display:none}.workspace-toggle-btn,.mobile-files-btn{display:inline-flex!important;}}
 
   @media(max-width:640px){
     /* ── Sidebar: slide-in overlay instead of hidden ── */
@@ -501,7 +502,7 @@
       z-index:199;-webkit-tap-highlight-color:transparent;}
     .mobile-overlay.visible{display:block;}
     /* Files button in topbar */
-    .workspace-toggle-btn{display:inline-flex!important;}
+    .workspace-toggle-btn,.mobile-files-btn{display:inline-flex!important;}
     /* Right panel: slide-over from right */
     .rightpanel{display:flex!important;position:fixed;right:-320px;top:0;bottom:0;
       width:300px;z-index:200;transition:right .25s ease;
@@ -612,7 +613,7 @@
 .ws-action-btn:hover{background:rgba(255,255,255,.1);color:var(--text);}
 /* ── Profile dropdown + management panel ── */
 .profile-chip{user-select:none;color:rgba(168,139,250,.9)!important;}
-.profile-dropdown{display:none;position:absolute;bottom:calc(100% + 4px);left:0;min-width:260px;background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -4px 24px rgba(0,0,0,.4);z-index:200;overflow:hidden;max-height:380px;overflow-y:auto;}
+.profile-dropdown{display:none;position:absolute;bottom:calc(100% + 4px);left:0;min-width:260px;max-width:min(260px,calc(100vw - 32px));background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -4px 24px rgba(0,0,0,.4);z-index:200;overflow:hidden;max-height:380px;overflow-y:auto;}
 .profile-dropdown.open{display:block;}
 .profile-opt{padding:10px 14px;cursor:pointer;transition:background .12s;}
 .profile-opt:hover{background:rgba(255,255,255,.07);}
