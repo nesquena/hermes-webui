@@ -33,8 +33,7 @@
   /* ── Light theme: sidebar, roles, chips, active states ── */
   :root[data-theme="light"] .session-item{color:#5a544a;}
   :root[data-theme="light"] .session-item:hover{background:rgba(0,0,0,.06);color:#2c2825;}
-  :root[data-theme="light"] .session-item.active{background:rgba(45,111,163,.1);color:#1a5a8a;border-left-color:#2d6fa3;}
-  :root[data-theme="light"] .session-item.active .session-actions{background:linear-gradient(to right,transparent,rgba(228,224,216,.95) 12px);}
+  :root[data-theme="light"] .session-item.active{background:rgba(45,111,163,.1);color:#1a5a8a;}
   :root[data-theme="light"] .session-pin-indicator{color:#996b15;}
   :root[data-theme="light"] .session-date-header.pinned{color:#996b15;}
   :root[data-theme="light"] .session-actions-trigger.active,
@@ -128,11 +127,11 @@
   .session-search input::placeholder{color:var(--muted);opacity:.7;}
   /* Inline session title edit */
   .session-title-input{flex:1;background:var(--surface);border:1px solid rgba(124,185,255,.6);border-radius:6px;color:var(--text);padding:3px 8px;font-size:13px;outline:none;min-width:0;box-shadow:0 0 0 2px rgba(124,185,255,.15);font-family:inherit;}
-  .session-item{padding:8px 40px 8px 8px;border-radius:0 8px 8px 0;cursor:pointer;font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:background .15s,color .15s,border-color .15s;display:flex;align-items:center;gap:6px;min-width:0;border-left:2px solid transparent;position:relative;}
+  .session-item{padding:8px 40px 8px 8px;margin-bottom:2px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:background .15s,color .15s;display:flex;align-items:center;gap:6px;min-width:0;position:relative;}
   .session-item:hover{background:var(--hover-bg);color:var(--text);}
-  .session-item.active{background:rgba(232,160,48,0.12);color:#e8a030;border-left:2px solid #e8a030;padding-left:8px;}
+  .session-item.active{background:rgba(232,160,48,0.12);color:#e8a030;}
   .session-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-  /* ── Session action trigger + dropdown (⋯ menu) ── */
+  /* ── Session action trigger + dropdown ── */
   .session-actions{position:absolute;right:6px;top:50%;transform:translateY(-50%);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .15s ease;}
   .session-item:hover .session-actions,.session-item:focus-within .session-actions,.session-item.menu-open .session-actions{opacity:1;pointer-events:auto;}
   .session-actions-trigger{width:26px;height:26px;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer;padding:0;line-height:1;display:inline-flex;align-items:center;justify-content:center;transition:background .12s,color .12s,border-color .12s;}
@@ -160,7 +159,6 @@
   .session-date-header.pinned{color:#f5c542;}
   .session-date-caret{font-size:9px;transition:transform .2s;flex-shrink:0;display:inline-block;}
   .session-date-caret.collapsed{transform:rotate(-90deg);}
-  /* ── Shared app dialogs (replace native confirm/prompt) ── */
   .app-dialog-overlay{position:fixed;inset:0;background:rgba(7,12,19,.62);backdrop-filter:blur(6px);z-index:1100;display:none;align-items:center;justify-content:center;padding:24px;}
   .app-dialog{width:min(460px,100%);background:linear-gradient(180deg,rgba(21,31,45,.98),rgba(13,20,31,.98));border:1px solid rgba(124,185,255,.2);border-radius:18px;box-shadow:0 18px 60px rgba(0,0,0,.45);padding:18px 18px 16px;color:var(--text);}
   .app-dialog-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px;}
@@ -461,7 +459,6 @@
   .panel-actions{display:flex;gap:4px;}
   .panel-icon-btn{width:24px;height:24px;background:none;border:none;color:var(--muted);cursor:pointer;border-radius:5px;font-size:13px;display:flex;align-items:center;justify-content:center;transition:all .15s;}
   .panel-icon-btn:hover{background:rgba(255,255,255,.08);color:var(--text);}
-  .mobile-close-btn{display:none;}
   .panel-icon-btn:disabled{opacity:.35;cursor:not-allowed;}
   .panel-icon-btn:disabled:hover{background:none;color:var(--muted);}
   /* File row actions (shown on hover) */
@@ -625,10 +622,6 @@
     .onboarding-actions .sm-btn{width:100%;min-height:44px;}
     /* Login page responsive */
     .card{width:90vw;max-width:320px;padding:28px 24px;}
-    /* Workspace panel mobile close button */
-    .mobile-close-btn{display:inline-flex;}
-    /* Profile dropdown — escape overflow-x:auto clipping context */
-    .profile-dropdown{position:fixed;top:56px;right:8px;left:auto;max-width:calc(100vw - 16px);}
   }
 
 /* ── Workspace dropdown (topbar) ── */
@@ -1008,7 +1001,6 @@ body.resizing{user-select:none;cursor:col-resize;}
 
 /* ── CLI / Agent session items in sidebar ── */
 .session-item.cli-session {
-  border-left-color: var(--gold);
   padding-right: 40px; /* make room for the session actions trigger */
 }
 .session-item.cli-session::after {
