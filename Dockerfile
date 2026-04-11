@@ -23,6 +23,7 @@ RUN apt-get update -y --fix-missing --no-install-recommends \
     ca-certificates \
     sudo \
     curl \
+    rsync \
     && apt-get upgrade -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
@@ -35,10 +36,9 @@ ENV LC_ALL=C
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app \
     PYTHONIOENCODING=utf-8
 
-WORKDIR /app
+WORKDIR /apptoo
 
 # Every sudo group user does not need a password
 RUN echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
@@ -55,38 +55,13 @@ RUN useradd -u 1024 -d /home/hermeswebui -g hermeswebui -s /bin/bash -m hermeswe
 RUN useradd -u 1025 -d /home/hermeswebuitoo -g hermeswebuitoo -s /bin/bash -m hermeswebuitoo \
     && usermod -G users hermeswebuitoo \
     && adduser hermeswebuitoo sudo
-RUN chown -R hermeswebuitoo:hermeswebuitoo /app
-
-USER hermeswebuitoo
-
-# Install uv
-# https://docs.astral.sh/uv/guides/integration/docker/#installing-uv
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/home/hermeswebuitoo/.local/bin/:$PATH"
-ENV UV_PROJECT_ENVIRONMENT=venv
-
-# Verify that python3 and uv are installed
-RUN which python3 && python3 --version
-RUN which uv && uv --version
-
-COPY . /app
-RUN --mount=type=cache,target=/uv_cache,uid=1025,gid=1025,mode=0755 \
-    export UV_CACHE_DIR=/uv_cache \
-    && cd /app \
-    && uv venv venv \
-    && VIRTUAL_ENV=/app/venv uv pip install -r requirements.txt --trusted-host pypi.org --trusted-host files.pythonhosted.org \
-    && VIRTUAL_ENV=/app/venv uv pip install -U pip setuptools --trusted-host pypi.org --trusted-host files.pythonhosted.org \
-    && test -d /app/venv \
-    && test -f /app/venv/bin/activate \
-    && test -x /app/venv/bin/python3 \
-    && test -x /app/venv/bin/pip \
-    && VIRTUAL_ENV=/app/venv uv pip install uv \
-    && test -x /app/venv/bin/uv \
-    && unset UV_CACHE_DIR
+RUN chown -R hermeswebuitoo:hermeswebuitoo /apptoo
 
 USER root
 
 COPY --chmod=555 docker_init.bash /hermeswebui_init.bash
+
+RUN touch /.within_container
 
 # Remove APT proxy configuration and clean up APT downloaded files
 RUN rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/01proxy \
@@ -94,12 +69,11 @@ RUN rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/01proxy \
 
 USER hermeswebuitoo
 
+COPY . /apptoo
+
 # Default to binding all interfaces (required for container networking)
 ENV HERMES_WEBUI_HOST=0.0.0.0
 ENV HERMES_WEBUI_PORT=8787
-
-# State directory (mount as volume for persistence)
-ENV HERMES_WEBUI_STATE_DIR=/data
 
 EXPOSE 8787
 
