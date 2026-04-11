@@ -342,6 +342,7 @@
   .panel-actions{display:flex;gap:4px;}
   .panel-icon-btn{width:24px;height:24px;background:none;border:none;color:var(--muted);cursor:pointer;border-radius:5px;font-size:13px;display:flex;align-items:center;justify-content:center;transition:all .15s;}
   .panel-icon-btn:hover{background:rgba(255,255,255,.08);color:var(--text);}
+  .mobile-close-btn{display:none;}
   /* File row actions (shown on hover) */
   /* file-item-actions removed: delete button is now a flex child */
   .file-action-btn{width:20px;height:20px;background:rgba(0,0,0,.4);border:none;border-radius:4px;color:var(--muted);cursor:pointer;font-size:11px;display:flex;align-items:center;justify-content:center;}
@@ -477,6 +478,10 @@
     .settings-panel{width:95vw;max-width:95vw;min-height:min(580px,88vh);max-height:92vh;}
     /* Login page responsive */
     .card{width:90vw;max-width:320px;padding:28px 24px;}
+    /* Workspace panel mobile close button */
+    .mobile-close-btn{display:inline-flex;}
+    /* Profile dropdown — escape overflow-x:auto clipping context */
+    .profile-dropdown{position:fixed;top:56px;right:8px;left:auto;max-width:calc(100vw - 16px);}
   }
 
 /* ── Workspace dropdown (topbar) ── */
