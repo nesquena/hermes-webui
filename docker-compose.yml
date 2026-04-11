@@ -4,19 +4,25 @@ services:
   hermes-webui:
     build: .
     ports:
-      - "127.0.0.1:8787:8787"
+#      - "127.0.0.1:8787:8787"
+      - "8787:8787"
     volumes:
-      # Persist session data, settings, and projects across restarts
-      - hermes-data:/data
+      - ./hermeswebui:/data
       # Mount hermes home for agent features and profile management
-      - ${HERMES_HOME:-${HOME}/.hermes}:/root/.hermes
+      - ${HERMES_HOME:-${HOME}/.hermes}:/home/hermeswebui/.hermes
+      # Default workspace directory shown on first launch
+      - ${HERMES_HOME:-${HOME}}/workspace:/workspace
     environment:
+      - WANTED_UID=1000
+      - WANTED_GID=1000
+      # Required: bind address and port
       - HERMES_WEBUI_HOST=0.0.0.0
       - HERMES_WEBUI_PORT=8787
-      - HERMES_WEBUI_STATE_DIR=/data
+      # Where to store sessions, workspaces, and other state (default: ~/.hermes/webui-mvp)
+      - HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui-mvp
+      # Default workspace directory shown on first launch
+      - HERMES_WEBUI_DEFAULT_WORKSPACE=/workspace
       # Optional: set a password for remote access
       # - HERMES_WEBUI_PASSWORD=your-secret-password
     restart: unless-stopped
 
-volumes:
-  hermes-data:
