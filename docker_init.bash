@@ -164,8 +164,13 @@ if [ -f $it ]; then
   load_env $it true
 fi
 
-echo ""; echo "-- Making sure /app is owned by the hermeswebui user to avoid permission issues when running the server and installing packages"
-sudo chown -R ${WANTED_UID}:${WANTED_GID} /app || error_exit "Failed to set owner of /app to hermeswebui user"
+##
+echo ""; echo "-- Making sure /app is owned by the hermeswebui user to avoid permission issues when running the server "
+sudo mkdir -p /app || error_exit "Failed to create /app directory"
+sudo chown hermeswebui:hermeswebui /app || error_exit "Failed to set owner of /app to hermeswebui user"
+sudo rsync -av --chown=hermeswebui:hermeswebui /apptoo/ /app/ || error_exit "Failed to sync /apptoo to /app with correct ownership"
+it=/app/.testfile; touch $it || error_exit "Failed to verify /app directory"
+rm -f $it || error_exit "Failed to delete test file in /app"
 
 ######## Environment variables (consume AFTER the load_env)
 
@@ -176,17 +181,48 @@ if [ -z "${HERMES_WEBUI_STATE_DIR+x}" ]; then error_exit "HERMES_WEBUI_STATE_DIR
 echo "-- HERMES_WEBUI_STATE_DIR: $HERMES_WEBUI_STATE_DIR"
 if [ ! -d "$HERMES_WEBUI_STATE_DIR" ]; then mkdir -p $HERMES_WEBUI_STATE_DIR || error_exit "Failed to create state directory at $HERMES_WEBUI_STATE_DIR"; fi
 if [ ! -d "$HERMES_WEBUI_STATE_DIR" ]; then error_exit "HERMES_WEBUI_STATE_DIR directory does not exist at $HERMES_WEBUI_STATE_DIR"; fi
-touch $HERMES_WEBUI_STATE_DIR/.testfile || error_exit "Failed to verify state directory at $HERMES_WEBUI_STATE_DIR"
-rm -f $HERMES_WEBUI_STATE_DIR/.testfile || error_exit "Failed to delete test file in $HERMES_WEBUI_STATE_DIR"
+it="$HERMES_WEBUI_STATE_DIR/.testfile"; touch $it || error_exit "Failed to verify state directory at $HERMES_WEBUI_STATE_DIR"
+rm -f $it || error_exit "Failed to delete test file in $HERMES_WEBUI_STATE_DIR"
 
 echo ""; echo "-- HERMES_WEBUI_DEFAULT_WORKSPACE: Default workspace directory shown on first launch"
-if [ -z "${HERMES_WEBUI_DEFAULT_WORKSPACE+x}" ]; then error_exit "HERMES_WEBUI_DEFAULT_WORKSPACE not set"; fi; 
+if [ -z "${HERMES_WEBUI_DEFAULT_WORKSPACE+x}" ]; then echo "HERMES_WEBUI_DEFAULT_WORKSPACE not set, setting to /workspace"; export HERMES_WEBUI_DEFAULT_WORKSPACE="/workspace"; fi;
 echo "-- HERMES_WEBUI_DEFAULT_WORKSPACE: $HERMES_WEBUI_DEFAULT_WORKSPACE"
-touch $HERMES_WEBUI_DEFAULT_WORKSPACE/.testfile || error_exit "Failed to verify default workspace at $HERMES_WEBUI_DEFAULT_WORKSPACE"
-rm -f $HERMES_WEBUI_DEFAULT_WORKSPACE/.testfile || error_exit "Failed to delete test file in $HERMES_WEBUI_DEFAULT_WORKSPACE"
+if [ ! -d "$HERMES_WEBUI_DEFAULT_WORKSPACE" ]; then mkdir -p $HERMES_WEBUI_DEFAULT_WORKSPACE || error_exit "Failed to create default workspace at $HERMES_WEBUI_DEFAULT_WORKSPACE"; fi
+if [ ! -d "$HERMES_WEBUI_DEFAULT_WORKSPACE" ]; then error_exit "HERMES_WEBUI_DEFAULT_WORKSPACE directory does not exist at $HERMES_WEBUI_DEFAULT_WORKSPACE"; fi
+it="$HERMES_WEBUI_DEFAULT_WORKSPACE/.testfile"; touch $it || error_exit "Failed to verify default workspace at $HERMES_WEBUI_DEFAULT_WORKSPACE"
+rm -f $it || error_exit "Failed to delete test file in $HERMES_WEBUI_DEFAULT_WORKSPACE"
 
 echo ""; echo "==================="
-echo "== Running hermes-webui"
-cd /app; source /app/venv/bin/activate; python server.py ${CLI_ARGS} || error_exit "hermes-webui failed or exited with an error"
+echo ""; echo "== Installing uv and creating a new virtual environment for hermes-webui"
 
+curl -LsSf https://astral.sh/uv/install.sh | sh
+export PATH="/home/hermeswebui/.local/bin/:$PATH"
+export UV_PROJECT_ENVIRONMENT=venv
+
+export UV_CACHE_DIR=/uv_cache
+sudo mkdir -p ${UV_CACHE_DIR} || error_exit "Failed to create /uv_cache directory"
+sudo chown hermeswebui:hermeswebui ${UV_CACHE_DIR} || error_exit "Failed to set owner of ${UV_CACHE_DIR} to hermeswebui user"
+
+cd /app
+uv venv venv
+export VIRTUAL_ENV=/app/venv
+test -d /app/venv
+test -f /app/venv/bin/activate
+
+echo "";echo "== Activating hermes webui's virtual environment"
+source /app/venv/bin/activate || error_exit "Failed to activate hermeswebui virtual environment"
+test -x /app/venv/bin/python3
+
+echo ""; echo "== Installing hermes-webui dependencies"
+uv pip install -r requirements.txt --trusted-host pypi.org --trusted-host files.pythonhosted.org
+uv pip install -U pip setuptools --trusted-host pypi.org --trusted-host files.pythonhosted.org
+test -x /app/venv/bin/pip
+
+echo ""; echo "== Adding hermes-agent's pyproject.toml base dependencies to the virtual environment"
+uv pip install /home/hermeswebui/.hermes/hermes-agent --trusted-host pypi.org --trusted-host files.pythonhosted.org || error_exit "Failed to install hermes-agent's requirements"
+
+echo ""; echo "== Running hermes-webui"
+cd /app; python server.py || error_exit "hermes-webui failed or exited with an error"
+
+# we should never be here because the server should be running indefinitely, but if we are, we exit safely
 ok_exit "Clean exit"
