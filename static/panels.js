@@ -1105,12 +1105,26 @@ function toggleSettings(){
   }
 }
 
+function _resetSettingsPanelState(){
+  _settingsSection = 'conversation';
+  switchSettingsSection('conversation');
+  const bar=$('settingsUnsavedBar');
+  if(bar) bar.style.display='none';
+}
+
+function _hideSettingsPanel(){
+  const overlay=$('settingsOverlay');
+  if(!overlay) return;
+  _resetSettingsPanelState();
+  overlay.style.display='none';
+}
+
 // Close with unsaved-changes check. If dirty, show a confirm dialog.
 function _closeSettingsPanel(){
   if(!_settingsDirty){
     // Nothing changed -- revert any live preview and close
     _revertSettingsPreview();
-    $('settingsOverlay').style.display='none';
+    _hideSettingsPanel();
     return;
   }
   // Dirty -- show inline confirm bar
@@ -1145,7 +1159,7 @@ function _showSettingsUnsavedBar(){
 function _discardSettings(){
   _revertSettingsPreview();
   _settingsDirty = false;
-  $('settingsOverlay').style.display = 'none';
+  _hideSettingsPanel();
 }
 
 // Mark settings as dirty whenever anything changes
@@ -1266,8 +1280,7 @@ async function saveSettings(andClose){
       if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
       showToast(t('settings_saved_pw'));
       _settingsDirty=false; _settingsThemeOnOpen=theme;
-      const bar=$('settingsUnsavedBar'); if(bar) bar.style.display='none';
-      $('settingsOverlay').style.display='none';
+      _hideSettingsPanel();
       return;
     }catch(e){showToast('Save failed: '+e.message);return;}
   }
@@ -1288,7 +1301,7 @@ async function saveSettings(andClose){
     if(typeof syncTopbar==='function') syncTopbar();
     if(typeof renderSessionList==='function') renderSessionList();
     showToast(t('settings_saved'));
-    $('settingsOverlay').style.display='none';
+    _hideSettingsPanel();
   }catch(e){
     showToast(t('settings_save_failed')+e.message);
   }
