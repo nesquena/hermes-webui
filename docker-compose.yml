@@ -4,8 +4,8 @@ services:
   hermes-webui:
     build: .
     ports:
-#      - "127.0.0.1:8787:8787"
-      - "8787:8787"
+      - "127.0.0.1:8787:8787"
+#      - "8787:8787"
     volumes:
       # Mount hermes home for agent features and profile management
       - ${HERMES_HOME:-${HOME}/.hermes}:/home/hermeswebui/.hermes
