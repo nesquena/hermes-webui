@@ -20,7 +20,7 @@ from api.config import (
     IMAGE_EXTS, MD_EXTS, MIME_MAP, MAX_FILE_BYTES, MAX_UPLOAD_BYTES,
     CHAT_LOCK, load_settings, save_settings,
 )
-from api.helpers import require, bad, safe_resolve, j, t, read_body, _security_headers, _sanitize_error
+from api.helpers import require, bad, safe_resolve, j, t, read_body, _security_headers, _sanitize_error, redact_session_data, _redact_text
 
 # ── CSRF: validate Origin/Referer on POST ────────────────────────────────────
 import re as _re
@@ -203,10 +203,11 @@ def handle_get(handler, parsed) -> bool:
             return j(handler, {'error': 'session_id is required'}, status=400)
         try:
             s = get_session(sid)
-            return j(handler, {'session': s.compact() | {
+            raw = s.compact() | {
                 'messages': s.messages,
                 'tool_calls': getattr(s, 'tool_calls', []),
-            }})
+            }
+            return j(handler, {'session': redact_session_data(raw)})
         except KeyError:
             # Not a WebUI session -- try CLI store
             msgs = get_cli_session_messages(sid)
@@ -232,7 +233,7 @@ def handle_get(handler, parsed) -> bool:
                     'messages': msgs,
                     'tool_calls': [],
                 }
-                return j(handler, {'session': sess})
+                return j(handler, {'session': redact_session_data(sess)})
             return bad(handler, 'Session not found', 404)
 
     if parsed.path == '/api/sessions':
@@ -817,7 +818,8 @@ def _handle_session_export(handler, parsed):
     if not sid: return bad(handler, 'session_id is required')
     try: s = get_session(sid)
     except KeyError: return bad(handler, 'Session not found', 404)
-    payload = json.dumps(s.__dict__, ensure_ascii=False, indent=2)
+    safe = redact_session_data(s.__dict__)
+    payload = json.dumps(safe, ensure_ascii=False, indent=2)
     handler.send_response(200)
     handler.send_header('Content-Type', 'application/json; charset=utf-8')
     handler.send_header('Content-Disposition', f'attachment; filename="hermes-{sid}.json"')
@@ -1043,7 +1045,7 @@ def _handle_memory_read(handler):
     memory = mem_file.read_text(encoding='utf-8', errors='replace') if mem_file.exists() else ''
     user = user_file.read_text(encoding='utf-8', errors='replace') if user_file.exists() else ''
     return j(handler, {
-        'memory': memory, 'user': user,
+        'memory': _redact_text(memory), 'user': _redact_text(user),
         'memory_path': str(mem_file), 'user_path': str(user_file),
         'memory_mtime': mem_file.stat().st_mtime if mem_file.exists() else None,
         'user_mtime': user_file.stat().st_mtime if user_file.exists() else None,
