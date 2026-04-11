@@ -54,7 +54,12 @@ async function loadDir(path){
     }
     if(typeof clearPreview==='function'){
       if(typeof _previewDirty!=='undefined'&&_previewDirty){
-        showConfirmDialog({title:t('unsaved_confirm'),message:'',confirmLabel:'Discard',danger:true,focusCancel:true}).then(ok=>{if(ok)clearPreview();});
+        const discard=await showConfirmDialog({
+          message:t('unsaved_confirm'),
+          confirmLabel:t('discard'),
+          danger:true
+        });
+        if(discard)clearPreview();
       }else{
         clearPreview();
       }
@@ -131,10 +136,11 @@ function updateEditBtn(){
   const editable = _previewCurrentMode==='code'||_previewCurrentMode==='md';
   btn.style.display = editable?'':'none';
   const editing = $('previewEditArea').style.display!=='none';
-  btn.innerHTML = editing ? `&#128190; ${t('save')}` : `&#9998; ${t('edit')}`;
+  btn.innerHTML = editing ? `${li('save',13)} ${t('save')}` : `${li('pencil',13)} ${t('edit')}`;
   btn.title = editing ? t('save_title') : t('edit_title');
   btn.style.color = editing ? 'var(--blue)' : '';
-  if(_previewDirty) btn.innerHTML = '&#128190; Save*';
+  if(_previewDirty) btn.innerHTML = `${li('save',13)} ${t('save')}*`;
+  if(typeof syncWorkspacePanelUI==='function')syncWorkspacePanelUI();
 }
 
 async function toggleEditMode(){
@@ -198,6 +204,8 @@ async function openFile(path){
   $('previewPathText').textContent=path;
   $('previewArea').classList.add('visible');
   $('fileTree').style.display='none';
+  if(typeof ensureWorkspacePreviewVisible==='function')ensureWorkspacePreviewVisible();
+  else if(typeof syncWorkspacePanelUI==='function')syncWorkspacePanelUI();
 
   _previewCurrentPath = path;
   if(IMAGE_EXTS.has(ext)){
@@ -244,4 +252,3 @@ function downloadFile(path){
   setTimeout(()=>document.body.removeChild(a),100);
   showToast(t('downloading',filename),2000);
 }
-

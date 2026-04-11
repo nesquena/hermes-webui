@@ -992,7 +992,7 @@ STEPS:
   1. Hover over an assistant message
   2. Click the clipboard icon
 EXPECT:
-  - Icon briefly shows a checkmark (✓) then reverts to clipboard
+  - Icon briefly shows a check icon, then reverts to the copy icon
   - Paste (Cmd+V) elsewhere shows the full text of that message
 FAIL: No visual feedback, clipboard empty or wrong content.
 
@@ -1005,23 +1005,23 @@ STEPS:
   1. Click any .py, .js, or .txt file in the workspace file tree
 EXPECT:
   - File content shows in read-only monospace view
-  - An "✎ Edit" button is visible in the preview path bar
+  - An Edit button with a pencil icon is visible in the preview path bar
   - Content is NOT editable (clicking in it does nothing)
 FAIL: Content immediately editable, no Edit button.
 
 ### T24.2: Edit Button Enters Edit Mode
 STEPS:
-  1. Click "✎ Edit" on a code file preview
+  1. Click the Edit button on a code file preview
 EXPECT:
   - Read-only view replaced by an editable textarea
   - Content of the file is pre-populated in the textarea
-  - Button changes to "💾 Save"
+  - Button changes to "Save" with a disk icon
 FAIL: Nothing changes, button doesn't change.
 
 ### T24.3: Save Writes Changes to Disk
 STEPS:
   1. In edit mode, change some text
-  2. Click "💾 Save"
+  2. Click the Save button
 EXPECT:
   - Read-only view returns, showing the updated content
   - Toast: "Saved"
@@ -1033,8 +1033,8 @@ STEPS:
   1. Enter edit mode on a file
   2. Make any change (type a character)
 EXPECT:
-  - Button shows "💾 Save*" (asterisk indicates unsaved changes)
-FAIL: No asterisk, button stays as "💾 Save".
+  - Button shows "Save*" with the disk icon still visible (asterisk indicates unsaved changes)
+FAIL: No asterisk, button stays as "Save".
 
 ### T24.5: Markdown File Edit-Save Roundtrip
 STEPS:
@@ -1081,7 +1081,7 @@ against each criterion below. A Claude browser agent can verify these with brows
 
 ### T25.1: Sidebar Nav Tabs are Icon-Only
 EXPECT:
-  - Five icon-only tabs in the sidebar nav row: 💬 ⏱️ 📚 🧠 📁
+  - Five icon-only tabs in the sidebar nav row: message, clock, book, brain, folder
   - No text labels visible by default (text removed to prevent overflow)
   - Hovering a tab shows a tooltip with the label (Chat/Tasks/Skills/Memory/Spaces)
   - Active tab has a blue underline, icon brighter blue
@@ -1205,7 +1205,7 @@ STEPS:
   3. Click Create job
 EXPECT:
   - Form closes
-  - Toast: "Job created ✓"
+  - Toast: "Job created"
   - New job appears in the cron list with status "active"
 FAIL: Error shown, job not created, form stays open.
 
@@ -1300,7 +1300,7 @@ STEPS (continued from T29.1):
   1. Change the name field to "Renamed Job"
   2. Click Save
 EXPECT:
-  - Form closes, toast "Job updated ✓"
+  - Form closes, toast "Job updated"
   - Job header shows new name
 FAIL: Save fails, name unchanged.
 
@@ -1337,7 +1337,7 @@ tags: [test]
 # Test"
   2. Click Save skill
 EXPECT:
-  - Toast "Skill created ✓", form closes
+  - Toast "Skill created", form closes
   - Skill appears in the skills list
 FAIL: Error, skill not in list.
 
@@ -1365,7 +1365,7 @@ STEPS:
   1. In edit mode, add a line to the textarea
   2. Click Save
 EXPECT:
-  - Toast "Memory saved ✓", form closes
+  - Toast "Memory saved", form closes
   - Memory panel reloads showing the updated content
 FAIL: Save fails, content unchanged.
 
@@ -1478,7 +1478,7 @@ FAIL: Both messages removed, wrong message sent, crash.
 ### T34.1: Clear Button Appears When Session Has Messages
 SETUP: Session with at least one message.
 EXPECT:
-  - A "🗑 Clear" chip appears in the topbar right side (next to the workspace chip)
+  - A "Clear" chip with a trash icon appears in the topbar right side (next to the workspace chip)
   - Button NOT visible when session has no messages / empty state
 FAIL: Button always visible, never visible.
 

@@ -42,15 +42,15 @@ async function loadCrons() {
           <span class="cron-status ${statusClass}">${statusLabel}</span>
         </div>
         <div class="cron-body" id="cron-body-${job.id}">
-          <div class="cron-schedule">&#128337; ${esc(job.schedule_display || job.schedule?.expression || '')} &nbsp;|&nbsp; Next: ${esc(nextRun)} &nbsp;|&nbsp; Last: ${esc(lastRun)}</div>
+          <div class="cron-schedule">${li('clock',12)} ${esc(job.schedule_display || job.schedule?.expression || '')} &nbsp;|&nbsp; Next: ${esc(nextRun)} &nbsp;|&nbsp; Last: ${esc(lastRun)}</div>
           <div class="cron-prompt">${esc((job.prompt||'').slice(0,300))}${(job.prompt||'').length>300?'…':''}</div>
           <div class="cron-actions">
-            <button class="cron-btn run" onclick="cronRun('${job.id}')">&#9654; Run now</button>
+            <button class="cron-btn run" onclick="cronRun('${job.id}')">${li('play',12)} Run now</button>
             ${statusLabel==='paused'
-              ? `<button class="cron-btn" onclick="cronResume('${job.id}')">&#9654;&#9474; Resume</button>`
-              : `<button class="cron-btn pause" onclick="cronPause('${job.id}')">&#9646;&#9646; Pause</button>`}
-            <button class="cron-btn" onclick="cronEditOpen('${job.id}',${JSON.stringify(job).replace(/"/g,'&quot;')})">&#9998; Edit</button>
-            <button class="cron-btn" style="border-color:rgba(201,168,76,.3);color:var(--accent)" onclick="cronDelete('${job.id}')">&#128465; Delete</button>
+              ? `<button class="cron-btn" onclick="cronResume('${job.id}')">${li('play',12)} Resume</button>`
+              : `<button class="cron-btn pause" onclick="cronPause('${job.id}')">${li('pause',12)} Pause</button>`}
+            <button class="cron-btn" onclick="cronEditOpen('${job.id}',${JSON.stringify(job).replace(/"/g,'&quot;')})">${li('pencil',12)} Edit</button>
+            <button class="cron-btn" style="border-color:rgba(201,168,76,.3);color:var(--accent)" onclick="cronDelete('${job.id}')">${li('trash-2',12)} Delete</button>
           </div>
           <!-- Inline edit form, hidden by default -->
           <div id="cron-edit-${job.id}" style="display:none;margin-top:8px;border-top:1px solid var(--border);padding-top:8px">
@@ -172,7 +172,7 @@ async function submitCronCreate(){
     if(_cronSelectedSkills.length)body.skills=_cronSelectedSkills;
     await api('/api/crons/create',{method:'POST',body:JSON.stringify(body)});
     toggleCronForm();
-    showToast('Job created ✓');
+    showToast('Job created');
     await loadCrons();
   }catch(e){
     errEl.textContent='Error: '+e.message;errEl.style.display='';
@@ -242,7 +242,7 @@ function toggleCron(id) {
 async function cronRun(id) {
   try {
     await api('/api/crons/run', {method:'POST', body: JSON.stringify({job_id: id})});
-    showToast('Job triggered ✓');
+    showToast('Job triggered');
     setTimeout(() => loadCronOutput(id), 5000);
   } catch(e) { showToast('Run failed: ' + e.message, 4000); }
 }
@@ -258,7 +258,7 @@ async function cronPause(id) {
 async function cronResume(id) {
   try {
     await api('/api/crons/resume', {method:'POST', body: JSON.stringify({job_id: id})});
-    showToast('Job resumed ✓');
+    showToast('Job resumed');
     await loadCrons();
   } catch(e) { showToast('Resume failed: ' + e.message, 4000); }
 }
@@ -290,7 +290,7 @@ async function cronEditSave(id) {
     const updates = {job_id: id, schedule, prompt};
     if (name) updates.name = name;
     await api('/api/crons/update', {method:'POST', body: JSON.stringify(updates)});
-    showToast('Job updated ✓');
+    showToast('Job updated');
     await loadCrons();
   } catch(e) { errEl.textContent = 'Error: ' + e.message; errEl.style.display = ''; }
 }
@@ -326,11 +326,11 @@ function loadTodos() {
     panel.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:4px 0">No active task list in this session.</div>';
     return;
   }
-  const statusIcon = {pending:'○', in_progress:'◉', completed:'✓', cancelled:'✗'};
+  const statusIcon = {pending:li('square',14), in_progress:li('loader',14), completed:li('check',14), cancelled:li('x',14)};
   const statusColor = {pending:'var(--muted)', in_progress:'var(--blue)', completed:'rgba(100,200,100,.8)', cancelled:'rgba(200,100,100,.5)'};
   panel.innerHTML = todos.map(t => `
     <div style="display:flex;align-items:flex-start;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);">
-      <span style="font-size:14px;flex-shrink:0;margin-top:1px;color:${statusColor[t.status]||'var(--muted)'}">${statusIcon[t.status]||'○'}</span>
+      <span style="font-size:14px;display:inline-flex;align-items:center;flex-shrink:0;margin-top:1px;color:${statusColor[t.status]||'var(--muted)'}">${statusIcon[t.status]||li('square',14)}</span>
       <div style="flex:1;min-width:0">
         <div style="font-size:13px;color:${t.status==='completed'?'var(--muted)':t.status==='in_progress'?'var(--text)':'var(--text)'};${t.status==='completed'?'text-decoration:line-through;opacity:.5':''};line-height:1.4">${esc(t.content)}</div>
         <div style="font-size:10px;color:var(--muted);margin-top:2px;opacity:.6">${esc(t.id)} · ${esc(t.status)}</div>
@@ -385,7 +385,7 @@ function renderSkills(skills) {
   for (const [cat, items] of Object.entries(cats).sort()) {
     const sec = document.createElement('div');
     sec.className = 'skills-category';
-    sec.innerHTML = `<div class="skills-cat-header">&#128193; ${esc(cat)} <span style="opacity:.5">(${items.length})</span></div>`;
+    sec.innerHTML = `<div class="skills-cat-header">${li('folder',12)} ${esc(cat)} <span style="opacity:.5">(${items.length})</span></div>`;
     for (const skill of items.sort((a,b) => a.name.localeCompare(b.name))) {
       const el = document.createElement('div');
       el.className = 'skill-item';
@@ -482,7 +482,7 @@ async function submitSkillSave() {
   if (!content.trim()) { errEl.textContent = 'Content is required'; errEl.style.display = ''; return; }
   try {
     await api('/api/skills/save', {method:'POST', body: JSON.stringify({name, category: category||undefined, content})});
-    showToast(_editingSkillName ? 'Skill updated ✓' : 'Skill created ✓');
+    showToast(_editingSkillName ? 'Skill updated' : 'Skill created');
     _skillsData = null;
     toggleSkillForm();
     await loadSkills();
@@ -514,7 +514,7 @@ async function submitMemorySave() {
   errEl.style.display = 'none';
   try {
     await api('/api/memory/write', {method:'POST', body: JSON.stringify({section: 'memory', content})});
-    showToast('Memory saved ✓');
+    showToast('Memory saved');
     closeMemoryEdit();
     await loadMemory(true);
   } catch(e) { errEl.textContent = 'Error: ' + e.message; errEl.style.display = ''; }
@@ -571,7 +571,7 @@ function renderWorkspaceDropdown(workspaces, currentWs){
   // Divider + Manage link
   const div=document.createElement('div');div.className='ws-divider';dd.appendChild(div);
   const mgmt=document.createElement('div');mgmt.className='ws-opt ws-manage';
-  mgmt.innerHTML='&#9881; Manage workspaces';
+  mgmt.innerHTML=`${li('settings',12)} Manage workspaces`;
   mgmt.onclick=()=>{closeWsDropdown();switchPanel('workspaces');};
   dd.appendChild(mgmt);
 }
@@ -616,15 +616,15 @@ function renderWorkspacesPanel(workspaces){
         <div class="ws-row-path">${esc(w.path)}</div>
       </div>
       <div class="ws-row-actions">
-        <button class="ws-action-btn" title="Use in current session" onclick="switchToWorkspace('${esc(w.path)}','${esc(w.name)}')">&#8594; Use</button>
-        <button class="ws-action-btn danger" title="Remove" onclick="removeWorkspace('${esc(w.path)}')">&#10005;</button>
+        <button class="ws-action-btn" title="Use in current session" onclick="switchToWorkspace('${esc(w.path)}','${esc(w.name)}')">${li('arrow-right',12)} Use</button>
+        <button class="ws-action-btn danger" title="Remove" onclick="removeWorkspace('${esc(w.path)}')">${li('x',12)}</button>
       </div>`;
     panel.appendChild(row);
   }
   const addRow=document.createElement('div');addRow.className='ws-add-row';
   addRow.innerHTML=`
     <input id="wsAddInput" placeholder="Add workspace path (e.g. /home/user/my-project)" style="flex:1;background:rgba(255,255,255,.06);border:1px solid var(--border2);border-radius:7px;color:var(--text);padding:7px 10px;font-size:12px;outline:none;">
-    <button class="ws-action-btn" onclick="addWorkspace()">&#43; Add</button>`;
+    <button class="ws-action-btn" onclick="addWorkspace()">${li('plus',12)} Add</button>`;
   panel.appendChild(addRow);
   const hint=document.createElement('div');
   hint.style.cssText='font-size:11px;color:var(--muted);padding:4px 0 8px';
@@ -704,7 +704,7 @@ async function loadProfilesPanel() {
           </div>
           <div class="profile-card-actions">
             ${!isActive ? `<button class="ws-action-btn" onclick="switchToProfile('${esc(p.name)}')" title="Switch to this profile">Use</button>` : ''}
-            ${!p.is_default ? `<button class="ws-action-btn danger" onclick="deleteProfile('${esc(p.name)}')" title="Delete this profile">&#10005;</button>` : ''}
+            ${!p.is_default ? `<button class="ws-action-btn danger" onclick="deleteProfile('${esc(p.name)}')" title="Delete this profile">${li('x',12)}</button>` : ''}
           </div>
         </div>`;
       panel.appendChild(card);
@@ -740,7 +740,7 @@ function renderProfileDropdown(data) {
   // Divider + Manage link
   const div = document.createElement('div'); div.className = 'ws-divider'; dd.appendChild(div);
   const mgmt = document.createElement('div'); mgmt.className = 'profile-opt ws-manage';
-  mgmt.innerHTML = '&#9881; Manage profiles';
+  mgmt.innerHTML = `${li('settings',12)} Manage profiles`;
   mgmt.onclick = () => { closeProfileDropdown(); switchPanel('profiles'); };
   dd.appendChild(mgmt);
 }
@@ -894,7 +894,7 @@ async function loadMemory(force) {
     panel.innerHTML = `
       <div class="memory-section">
         <div class="memory-section-title">
-          &#129504; My Notes
+          <span style="display:inline-flex;align-items:center;gap:6px">${li('brain',14)} My Notes</span>
           <span class="memory-mtime">${fmtTime(data.memory_mtime)}</span>
         </div>
         ${data.memory
@@ -903,7 +903,7 @@ async function loadMemory(force) {
       </div>
       <div class="memory-section">
         <div class="memory-section-title">
-          &#128100; User Profile
+          <span style="display:inline-flex;align-items:center;gap:6px">${li('user',14)} User Profile</span>
           <span class="memory-mtime">${fmtTime(data.user_mtime)}</span>
         </div>
         ${data.user
@@ -1170,8 +1170,7 @@ function startCronPolling(){
       const data=await api(`/api/crons/recent?since=${_cronPollSince}`);
       if(data.completions&&data.completions.length>0){
         for(const c of data.completions){
-          const icon=c.status==='error'?'\u274c':'\u2705';
-          showToast(`${icon} Cron "${c.name}" ${c.status==='error'?'failed':'completed'}`,4000);
+          showToast(`Cron "${c.name}" ${c.status==='error'?'failed':'completed'}`,4000);
           _cronPollSince=Math.max(_cronPollSince,c.completed_at);
         }
         _cronUnreadCount+=data.completions.length;
