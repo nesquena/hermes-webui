@@ -13,8 +13,10 @@
 
 The Hermes Web UI is a lightweight web application that gives you a browser-based
 interface to the Hermes agent that is functionally equivalent to the CLI. It is modeled on
-the Claude-style interface: a three-panel layout with a sidebar for session management,
-a central chat area, and a right panel for workspace file browsing.
+the Claude-style interface: a sidebar for session management, a central chat area,
+and a demand-driven right panel used for workspace browsing and preview surfaces.
+The right panel is closed by default on desktop and opens only when it is actively
+being used for browsing or previewing content.
 
 The design philosophy is deliberately minimal. There is no build step, no bundler, no
 frontend framework. The Python server is split into a routing shell (server.py) and
@@ -413,7 +415,14 @@ UI helpers:
     setStatus(t)          Updates #statusText in composer footer
     setBusy(v)            Sets S.busy, disables/enables Send button, clears status on false
     showToast(msg, ms)    Bottom-center fade toast (default 2800ms)
+    showConfirmDialog(o)  Shared in-app confirmation modal, resolves true/false
+    showPromptDialog(o)   Shared in-app input modal, resolves string/null
     autoResize()          Auto-resize #msg textarea up to 200px
+
+Dialog policy:
+    Native browser confirm()/prompt() are not used in the Web UI.
+    Destructive actions use showConfirmDialog(...), then a toast on success.
+    Lightweight naming flows (new file/folder/project) use showPromptDialog(...).
 
 Files:
     loadDir(path)         GET /api/list, rebuild #fileTree
