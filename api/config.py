@@ -808,6 +808,7 @@ CHAT_LOCK         = threading.Lock()
 STREAMS: dict     = {}
 STREAMS_LOCK      = threading.Lock()
 CANCEL_FLAGS: dict = {}
+AGENT_INSTANCES: dict = {}  # stream_id -> AIAgent instance for interrupt propagation
 SERVER_START_TIME = time.time()
 
 # ── Thread-local env context ─────────────────────────────────────────────────

@@ -11,7 +11,7 @@ import traceback
 from pathlib import Path
 
 from api.config import (
-    STREAMS, STREAMS_LOCK, CANCEL_FLAGS, CLI_TOOLSETS,
+    STREAMS, STREAMS_LOCK, CANCEL_FLAGS, AGENT_INSTANCES, CLI_TOOLSETS,
     LOCK, SESSIONS, SESSION_DIR,
     _get_session_agent_lock, _set_thread_env, _clear_thread_env,
     resolve_model_provider,
@@ -238,6 +238,20 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 stream_delta_callback=on_token,
                 tool_progress_callback=on_tool,
             )
+
+            # Store agent instance for cancel/interrupt propagation
+            with STREAMS_LOCK:
+                AGENT_INSTANCES[stream_id] = agent
+                # Check if cancel was requested during agent initialization
+                if stream_id in CANCEL_FLAGS and CANCEL_FLAGS[stream_id].is_set():
+                    # Cancel arrived during agent creation - interrupt immediately
+                    try:
+                        agent.interrupt("Cancelled before start")
+                    except Exception:
+                        pass
+                    put('cancel', {'message': 'Cancelled by user'})
+                    return
+
             # Prepend workspace context so the agent always knows which directory
             # to use for file operations, regardless of session age or AGENTS.md defaults.
             workspace_ctx = f"[Workspace: {s.workspace}]\n"
@@ -462,6 +476,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
             CANCEL_FLAGS.pop(stream_id, None)
+            AGENT_INSTANCES.pop(stream_id, None)  # Clean up agent instance reference
 
 # ============================================================
 # SECTION: HTTP Request Handler
@@ -476,9 +491,31 @@ def cancel_stream(stream_id: str) -> bool:
     with STREAMS_LOCK:
         if stream_id not in STREAMS:
             return False
+
+        # Set WebUI layer cancel flag
         flag = CANCEL_FLAGS.get(stream_id)
         if flag:
             flag.set()
+
+        # Interrupt the AIAgent instance to stop tool execution
+        agent = AGENT_INSTANCES.get(stream_id)
+        if agent:
+            try:
+                agent.interrupt("Cancelled by user")
+            except Exception as e:
+                # Log but don't block the cancel flow
+                import logging
+                logging.getLogger(__name__).debug(
+                    f"Failed to interrupt agent for stream {stream_id}: {e}"
+                )
+        else:
+            # Agent not yet stored - cancel_event flag will be checked by agent thread
+            import logging
+            logging.getLogger(__name__).debug(
+                f"Cancel requested for stream {stream_id} before agent ready - "
+                f"cancel_event flag set, will be checked on agent startup"
+            )
+
         # Put a cancel sentinel into the queue so the SSE handler wakes up
         q = STREAMS.get(stream_id)
         if q:

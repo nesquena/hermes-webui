@@ -4,7 +4,7 @@ async function cancelStream(){
   try{
     await fetch(new URL(`/api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,location.origin).href,{credentials:'include'});
     const btn=$('btnCancel');if(btn)btn.style.display='none';
-    setStatus(t('cancelling'));
+    // Don't set status here - let the SSE cancel event handle UI cleanup
   }catch(e){setStatus(t('cancel_failed')+e.message);}
 }
 

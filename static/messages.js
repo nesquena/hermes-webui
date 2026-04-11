@@ -295,7 +295,8 @@ async function send(){
         S.messages.push({role:'assistant',content:'*Task cancelled.*'});renderMessages();
       }
       renderSessionList();
-      if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setStatus('');}
+      // Always clear busy state and status when cancel event is received
+      setBusy(false);setStatus('');
     });
   }
 
