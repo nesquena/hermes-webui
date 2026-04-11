@@ -8,7 +8,7 @@
 > Prerequisites: SSH tunnel is active on port 8786. Open http://localhost:8786 in browser.
 > Server health check: curl http://127.0.0.1:8786/health should return {"status":"ok"}.
 >
-> Automated tests: 624 total (624 passing, 0 skipped, 0 known failures)
+> Automated tests: 645 total (645 passing, 0 skipped, 0 known failures)
 > Run: `pytest tests/ -v --timeout=60`
 
 ---
@@ -1708,8 +1708,8 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 
 ---
 
-*Last updated: v0.46.0, April 11, 2026*
-*Total automated tests: 624 (624 passing, 0 failures)*
+*Last updated: v0.47.0, April 11, 2026*
+*Total automated tests: 645 (645 passing, 0 failures)*
 *Regression gate: tests/test_regressions.py*
 *Run: pytest tests/ -v --timeout=60*
 *Source: <repo>/*
