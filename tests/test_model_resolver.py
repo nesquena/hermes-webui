@@ -326,3 +326,55 @@ def test_default_model_lands_under_active_provider_group(monkeypatch):
     assert 'gpt-5.4' not in groups.get('Anthropic', []), (
         f"gpt-5.4 leaked into Anthropic group via fallback: {groups.get('Anthropic')}"
     )
+
+
+def test_custom_endpoint_uses_model_config_api_key_for_model_discovery(monkeypatch):
+    """Custom endpoint model discovery must use model.api_key from config.yaml,
+    not only environment variables, otherwise the dropdown collapses to the
+    default model when /v1/models requires auth."""
+    import json as _json
+    import api.config as _cfg
+
+    old_cfg = dict(_cfg.cfg)
+    _cfg.cfg['model'] = {
+        'provider': 'custom',
+        'default': 'gpt-5.4',
+        'base_url': 'https://example.test/v1',
+        'api_key': 'sk-test-model-key',
+    }
+    _cfg.cfg.pop('providers', None)
+
+    captured = {}
+
+    class _Resp:
+        def read(self):
+            return _json.dumps({'data': [{'id': 'gpt-5.2', 'name': 'GPT-5.2'}]}).encode('utf-8')
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _fake_urlopen(req, timeout=10):
+        captured['auth'] = req.get_header('Authorization')
+        captured['ua'] = req.get_header('User-agent')
+        return _Resp()
+
+    monkeypatch.setattr('urllib.request.urlopen', _fake_urlopen)
+    monkeypatch.setattr('socket.getaddrinfo', lambda *a, **k: [])
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    monkeypatch.delenv('HERMES_API_KEY', raising=False)
+    monkeypatch.delenv('HERMES_OPENAI_API_KEY', raising=False)
+    monkeypatch.delenv('LOCAL_API_KEY', raising=False)
+    monkeypatch.delenv('OPENROUTER_API_KEY', raising=False)
+    monkeypatch.delenv('API_KEY', raising=False)
+    try:
+        result = _cfg.get_available_models()
+    finally:
+        _cfg.cfg.clear()
+        _cfg.cfg.update(old_cfg)
+
+    assert captured['auth'] == 'Bearer sk-test-model-key'
+    assert captured['ua'] == 'OpenAI/Python 1.0'
+    groups = {g['provider']: [m['id'] for m in g['models']] for g in result['groups']}
+    assert 'Custom' in groups
+    assert 'gpt-5.2' in groups['Custom']

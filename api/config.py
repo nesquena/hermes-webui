@@ -613,15 +613,33 @@ def get_available_models() -> dict:
                 except ValueError:
                     pass
 
-            # Resolve API key from environment (check profile .env keys too)
+            # Resolve API key for the custom / OpenAI-compatible endpoint.
+            # Priority:
+            #   1. model.api_key in config.yaml
+            #   2. provider-specific providers.<active>.api_key / providers.custom.api_key
+            #   3. env/.env fallbacks
             headers = {}
-            api_key_vars = ('HERMES_API_KEY', 'HERMES_OPENAI_API_KEY', 'OPENAI_API_KEY',
-                            'LOCAL_API_KEY', 'OPENROUTER_API_KEY', 'API_KEY')
-            for key in api_key_vars:
-                api_key = all_env.get(key) or os.getenv(key)
-                if api_key:
-                    headers['Authorization'] = f'Bearer {api_key}'
-                    break
+            api_key = ''
+            if isinstance(model_cfg, dict):
+                api_key = (model_cfg.get('api_key') or '').strip()
+            if not api_key:
+                providers_cfg = cfg.get('providers', {})
+                if isinstance(providers_cfg, dict):
+                    for provider_key in filter(None, [active_provider, 'custom']):
+                        provider_cfg = providers_cfg.get(provider_key, {})
+                        if isinstance(provider_cfg, dict):
+                            api_key = (provider_cfg.get('api_key') or '').strip()
+                            if api_key:
+                                break
+            if not api_key:
+                api_key_vars = ('HERMES_API_KEY', 'HERMES_OPENAI_API_KEY', 'OPENAI_API_KEY',
+                                'LOCAL_API_KEY', 'OPENROUTER_API_KEY', 'API_KEY')
+                for key in api_key_vars:
+                    api_key = (all_env.get(key) or os.getenv(key) or '').strip()
+                    if api_key:
+                        break
+            if api_key:
+                headers['Authorization'] = f'Bearer {api_key}'
 
             # Fetch model list from endpoint (with SSRF protection)
             import socket
@@ -641,6 +659,7 @@ def get_available_models() -> dict:
                 except socket.gaierror:
                     pass  # DNS resolution failed -- let urllib handle it
             req = urllib.request.Request(endpoint_url, method='GET')
+            req.add_header('User-Agent', 'OpenAI/Python 1.0')
             for k, v in headers.items():
                 req.add_header(k, v)
             with urllib.request.urlopen(req, timeout=10) as response:
