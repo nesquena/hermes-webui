@@ -23,6 +23,11 @@ frontend framework. The Python server is split into a routing shell (server.py) 
 business logic modules (api/). The frontend is seven vanilla JS modules loaded from static/.
 This makes the code easy to modify from a terminal or by an agent.
 
+Hermes-level chrome is intentionally consolidated: the sidebar has no dedicated brand header.
+Instead, the footer exposes a single "Hermes WebUI" launch button that opens one tabbed
+control-center modal for global preferences, conversation import/export, and clear-conversation
+actions. The topbar remains focused on conversation context and the workspace/files toggle.
+
 ---
 
 ## 2. File Inventory
@@ -364,7 +369,7 @@ inherit `currentColor` for consistent theming.
 
 Three-panel layout (in static/index.html):
 
-    <aside class="sidebar">    Left panel: session list, nav tabs, workspace switcher, export actions
+    <aside class="sidebar">    Left panel: session list, nav tabs, sidebar-footer Hermes WebUI trigger
     <main class="main">        Center: topbar, messages area, approval card, composer
     <aside class="rightpanel"> Right panel: workspace file tree and file preview
 

@@ -1052,6 +1052,44 @@ document.addEventListener('drop',e=>{e.preventDefault();dragCounter=0;wrap.class
 
 let _settingsDirty = false;
 let _settingsThemeOnOpen = null; // track theme at open time for discard revert
+let _settingsSection = 'conversation';
+
+function switchSettingsSection(name){
+  const section=(name==='preferences'||name==='system')?name:'conversation';
+  _settingsSection=section;
+  const map={conversation:'Conversation',preferences:'Preferences',system:'System'};
+  ['conversation','preferences','system'].forEach(key=>{
+    const tab=$('settingsTab'+map[key]);
+    const pane=$('settingsPane'+map[key]);
+    const active=key===section;
+    if(tab){
+      tab.classList.toggle('active',active);
+      tab.setAttribute('aria-selected',active?'true':'false');
+    }
+    if(pane) pane.classList.toggle('active',active);
+  });
+}
+
+function _syncHermesPanelSessionActions(){
+  const hasSession=!!S.session;
+  const visibleMessages=hasSession?(S.messages||[]).filter(m=>m&&m.role&&m.role!=='tool').length:0;
+  const title=hasSession?(S.session.title||'Untitled'):'No active conversation selected.';
+  const meta=$('hermesSessionMeta');
+  if(meta){
+    meta.textContent=hasSession
+      ? `${title} · ${visibleMessages} message${visibleMessages===1?'':'s'}`
+      : 'No active conversation selected.';
+  }
+  const setDisabled=(id,disabled)=>{
+    const el=$(id);
+    if(!el)return;
+    el.disabled=!!disabled;
+    el.classList.toggle('disabled',!!disabled);
+  };
+  setDisabled('btnDownload',!hasSession||visibleMessages===0);
+  setDisabled('btnExportJSON',!hasSession);
+  setDisabled('btnClearConvModal',!hasSession||visibleMessages===0);
+}
 
 function toggleSettings(){
   const overlay=$('settingsOverlay');
@@ -1059,6 +1097,7 @@ function toggleSettings(){
   if(overlay.style.display==='none'){
     _settingsDirty = false;
     _settingsThemeOnOpen = document.documentElement.dataset.theme || 'dark';
+    _settingsSection = S.session ? 'conversation' : 'preferences';
     overlay.style.display='';
     loadSettingsPanel();
   } else {
@@ -1099,7 +1138,7 @@ function _showSettingsUnsavedBar(){
     + '<button onclick="_discardSettings()" style="padding:5px 12px;border-radius:6px;border:1px solid var(--border2);background:rgba(255,255,255,.06);color:var(--muted);cursor:pointer;font-size:12px;font-weight:600">Discard</button>'
     + '<button onclick="saveSettings(true)" style="padding:5px 12px;border-radius:6px;border:none;background:var(--accent);color:#fff;cursor:pointer;font-size:12px;font-weight:600">Save</button>'
     + '</span>';
-  const body = document.querySelector('.settings-body') || document.querySelector('.settings-panel');
+  const body = document.querySelector('.settings-main') || document.querySelector('.settings-body') || document.querySelector('.settings-panel');
   if(body) body.prepend(bar);
 }
 
@@ -1186,6 +1225,8 @@ async function loadSettingsPanel(){
       const disableBtn=$('btnDisableAuth');
       if(disableBtn) disableBtn.style.display=active?'':'none';
     }catch(e){}
+    _syncHermesPanelSessionActions();
+    switchSettingsSection(_settingsSection);
   }catch(e){
     showToast(t('settings_load_failed')+e.message);
   }
