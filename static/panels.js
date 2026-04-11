@@ -1097,7 +1097,7 @@ function toggleSettings(){
   if(overlay.style.display==='none'){
     _settingsDirty = false;
     _settingsThemeOnOpen = document.documentElement.dataset.theme || 'dark';
-    _settingsSection = S.session ? 'conversation' : 'preferences';
+    _settingsSection = 'conversation';
     overlay.style.display='';
     loadSettingsPanel();
   } else {
