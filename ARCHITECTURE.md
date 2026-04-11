@@ -421,7 +421,8 @@ Approval:
     stopApprovalPolling   clearInterval
 
 UI helpers:
-    setStatus(t)          Updates #statusText in composer footer
+    setStatus(t)          Fallback helper: shows a toast for non-chat status/error messages
+    setComposerStatus(t)  Updates the inline composer status label for turn-scoped states
     setBusy(v)            Sets S.busy, disables/enables Send button, clears status on false
     showToast(msg, ms)    Bottom-center fade toast (default 2800ms)
     showConfirmDialog(o)  Shared in-app confirmation modal, resolves true/false
