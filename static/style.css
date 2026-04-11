@@ -446,7 +446,7 @@
     .topbar{padding:8px 12px;gap:8px;}
     .topbar-title{font-size:14px;}
     .topbar-meta{display:none;}
-    .topbar-chips{flex-wrap:nowrap;gap:4px;overflow-x:auto;-webkit-overflow-scrolling:touch;}
+    .topbar-chips{flex-wrap:nowrap;gap:4px;overflow-x:auto;overflow-y:visible;-webkit-overflow-scrolling:touch;}
     .topbar-chips .chip,.topbar-chips .ws-chip,.topbar-chips button{font-size:11px!important;padding:3px 8px!important;white-space:nowrap;}
     /* Messages area — account for bottom nav */
     .messages{padding-bottom:60px;}
