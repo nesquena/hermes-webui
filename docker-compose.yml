@@ -17,7 +17,6 @@ services:
       # Modify the UID and GID to match your user; docker compose starts as root by default, but the container will drop privileges to the specified UID/GID
       - WANTED_UID=${UID:-1000}
       - WANTED_GID=${GID:-1000}
-      - WANTED_GID=1000
       # Required: bind address and port
       - HERMES_WEBUI_HOST=0.0.0.0
       - HERMES_WEBUI_PORT=8787
