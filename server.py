@@ -63,6 +63,17 @@ def main() -> None:
 
     print_startup_config()
 
+    within_container = False
+    # Check for the "/.within_container" file to determine if we're running inside a container; this file is created in the Dockerfile
+    try:
+        with open('/.within_container', 'r') as f:
+            within_container = True
+    except FileNotFoundError:
+        pass
+
+    if within_container:
+        print('[ok] Running within container.', flush=True)
+
     # Security: warn if binding non-loopback without authentication
     from api.auth import is_auth_enabled
     if HOST not in ('127.0.0.1', '::1', 'localhost') and not is_auth_enabled():
@@ -70,6 +81,8 @@ def main() -> None:
         print(f'     Anyone on the network can access your filesystem and agent.', flush=True)
         print(f'     Set a password via Settings or HERMES_WEBUI_PASSWORD env var.', flush=True)
         print(f'     To suppress: bind to 127.0.0.1 or set a password.', flush=True)
+        if within_container:
+            print(f'     Note: You are running within a container, must bind to 0.0.0.0 to publish the port.', flush=True)
 
     ok, missing, errors = verify_hermes_imports()
     if not ok and _HERMES_FOUND:
@@ -108,7 +121,7 @@ def main() -> None:
             scheme = 'http'
 
     print(f'  Hermes Web UI listening on {scheme}://{HOST}:{PORT}', flush=True)
-    if HOST == '127.0.0.1':
+    if HOST == '127.0.0.1' or within_container:
         print(f'  Remote access: ssh -N -L {PORT}:127.0.0.1:{PORT} <user>@<your-server>', flush=True)
     print(f'  Then open:     {scheme}://localhost:{PORT}', flush=True)
     print('', flush=True)
