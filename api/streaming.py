@@ -16,6 +16,7 @@ from api.config import (
     _get_session_agent_lock, _set_thread_env, _clear_thread_env,
     resolve_model_provider,
 )
+from api.helpers import redact_session_data
 
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
 # concurrent runs of the SAME session, but two DIFFERENT sessions can still
@@ -404,7 +405,8 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 usage['context_length'] = getattr(_cc, 'context_length', 0) or 0
                 usage['threshold_tokens'] = getattr(_cc, 'threshold_tokens', 0) or 0
                 usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
-            put('done', {'session': s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}, 'usage': usage})
+            raw_session = s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}
+            put('done', {'session': redact_session_data(raw_session), 'usage': usage})
         finally:
             # Unregister the gateway approval callback and unblock any threads
             # still waiting on approval (e.g. stream cancelled mid-approval).

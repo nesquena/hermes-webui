@@ -12,7 +12,7 @@ from api.auth import check_auth
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import j
 from api.routes import handle_get, handle_post
-from api.startup import auto_install_agent_deps
+from api.startup import auto_install_agent_deps, fix_credential_permissions
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -63,6 +63,9 @@ def main() -> None:
 
     print_startup_config()
 
+    # Fix sensitive file permissions before doing anything else
+    fix_credential_permissions()
+
     # Security: warn if binding non-loopback without authentication
     from api.auth import is_auth_enabled
     if HOST not in ('127.0.0.1', '::1', 'localhost') and not is_auth_enabled():
@@ -70,6 +73,10 @@ def main() -> None:
         print(f'     Anyone on the network can access your filesystem and agent.', flush=True)
         print(f'     Set a password via Settings or HERMES_WEBUI_PASSWORD env var.', flush=True)
         print(f'     To suppress: bind to 127.0.0.1 or set a password.', flush=True)
+    elif not is_auth_enabled():
+        print(f'  [tip] No password set. Any process on this machine can read sessions', flush=True)
+        print(f'        and memory via the local API. Set HERMES_WEBUI_PASSWORD to', flush=True)
+        print(f'        enable authentication.', flush=True)
 
     ok, missing, errors = verify_hermes_imports()
     if not ok and _HERMES_FOUND:

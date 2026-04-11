@@ -1,7 +1,35 @@
 """Hermes Web UI -- startup helpers."""
 from __future__ import annotations
-import os, subprocess, sys
+import os, stat, subprocess, sys
 from pathlib import Path
+
+# Credential files that should never be world-readable
+_SENSITIVE_FILES = (
+    '.env',
+    'google_token.json',
+    'google_client_secret.json',
+    '.signing_key',
+    'auth.json',
+)
+
+
+def fix_credential_permissions() -> None:
+    """Ensure sensitive files in HERMES_HOME are chmod 600 (owner-only)."""
+    hermes_home = Path(os.environ.get('HERMES_HOME', str(Path.home() / '.hermes')))
+    if not hermes_home.is_dir():
+        return
+    for name in _SENSITIVE_FILES:
+        fpath = hermes_home / name
+        if not fpath.exists():
+            continue
+        try:
+            current = stat.S_IMODE(fpath.stat().st_mode)
+            if current & 0o077:  # group or other bits set
+                fpath.chmod(0o600)
+                print(f'  [security] fixed permissions on {fpath.name} ({oct(current)} -> 0600)', flush=True)
+        except OSError:
+            pass  # best-effort; don't abort startup
+
 
 def _agent_dir() -> Path | None:
     hermes_home = Path(os.environ.get('HERMES_HOME', str(Path.home() / '.hermes')))
