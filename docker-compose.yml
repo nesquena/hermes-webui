@@ -7,7 +7,6 @@ services:
 #      - "127.0.0.1:8787:8787"
       - "8787:8787"
     volumes:
-      - ./hermeswebui:/data
       # Mount hermes home for agent features and profile management
       - ${HERMES_HOME:-${HOME}/.hermes}:/home/hermeswebui/.hermes
       # Default workspace directory shown on first launch
