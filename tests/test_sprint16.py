@@ -700,10 +700,20 @@ def test_style_css_active_session_uses_gold(cleanup_test_sessions):
         "Active session gold color (#e8a030) not found in style.css"
 
 
-def test_sessions_js_active_skips_project_border(cleanup_test_sessions):
-    """sessions.js must not override active session border-left with project color."""
+def test_sessions_js_uses_action_menu_not_per_row_buttons(cleanup_test_sessions):
+    """sessions.js must use the single ⋯ action menu instead of per-row buttons.
+
+    The per-row button overlay was replaced with a single ⋯ trigger that opens a
+    positioned dropdown (session-action-menu). This removes the borderLeftColor
+    project colour override that the old code applied, which was the original
+    concern this test guarded. The new design uses a dot indicator for project
+    membership instead.
+    """
     src = REPO_ROOT / "static" / "sessions.js"
     code = src.read_text()
-    # The fix: only set borderLeftColor if NOT the active session
-    assert "isActive" in code, "isActive check not found in sessions.js"
-    assert "borderLeftColor" in code, "borderLeftColor not found in sessions.js"
+    assert "session-actions-trigger" in code, "session-actions-trigger not found in sessions.js"
+    assert "_openSessionActionMenu" in code, "_openSessionActionMenu not found in sessions.js"
+    assert "closeSessionActionMenu" in code, "closeSessionActionMenu not found in sessions.js"
+    # The old per-row buttons must not be present (they were replaced by the menu)
+    assert "act-pin" not in code, "old act-pin per-row button still in sessions.js"
+    assert "act-archive" not in code, "old act-archive per-row button still in sessions.js"
