@@ -122,14 +122,23 @@ That is it! The script will:
 
 **Pre-built images** (amd64 + arm64) are published to GHCR on every release:
 
+Make sure the `HERMES_WEBUI_STATE_DIR` (by default `~/.hermes/webui-mvp`, as detailed in the `.env.example` file) folder exist with the UID/GID of the owner of the `.hermes` folder. 
+The container will also mount your configured "workspace" (also from the example .env.example) as `/workspace`. adapt the location as needed.
+
+
 ```bash
 docker pull ghcr.io/nesquena/hermes-webui:latest
-docker run -d -p 8787:8787 -v ~/.hermes:/root/.hermes ghcr.io/nesquena/hermes-webui:latest
+docker run -d \
+-e WANTED_UID=`id -u` -e WANTED_GID=`id -g` \
+-v ~/.hermes:/home/hermeswebui/.hermes -e HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui-mvp \
+-v ~/workspace:/workspace \
+-p 8787:8787 ghcr.io/nesquena/hermes-webui:latest
 ```
 
 Or run with Docker Compose (recommended):
 
 ```bash
+# Check the docker-compose.yml and make sure to adapt as needed, at minimum WANTED_UID/WANTED_GID
 docker compose up -d
 ```
 
@@ -137,7 +146,11 @@ Or build locally:
 
 ```bash
 docker build -t hermes-webui .
-docker run -d -p 8787:8787 -v ~/.hermes:/root/.hermes hermes-webui
+docker run -d \
+-e WANTED_UID=`id -u` -e WANTED_GID=`id -g` \
+-v ~/.hermes:/home/hermeswebui/.hermes -e HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui-mvp \
+-v ~/workspace:/workspace \
+-p 8787:8787 hermes-webui
 ```
 
 Open http://localhost:8787 in your browser.
@@ -145,10 +158,12 @@ Open http://localhost:8787 in your browser.
 To enable password protection:
 
 ```bash
-docker run -d -p 8787:8787 -e HERMES_WEBUI_PASSWORD=your-secret -v ~/.hermes:/root/.hermes ghcr.io/nesquena/hermes-webui:latest
+docker run -d \
+-e WANTED_UID=`id -u` -e WANTED_GID=`id -g` \
+-v ~/.hermes:/home/hermeswebui/.hermes -e HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui-mvp \
+-v ~/workspace:/workspace \
+-p 8787:8787 -e HERMES_WEBUI_PASSWORD=your-secret ghcr.io/nesquena/hermes-webui:latest
 ```
-
-Session data persists in a named volume (`hermes-data`) across restarts.
 
 > **Note:** By default, Docker Compose binds to `127.0.0.1` (localhost only).
 > To expose on a network, change the port to `"8787:8787"` in `docker-compose.yml`
