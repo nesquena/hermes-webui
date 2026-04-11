@@ -193,7 +193,7 @@ it="$HERMES_WEBUI_DEFAULT_WORKSPACE/.testfile"; touch $it || error_exit "Failed 
 rm -f $it || error_exit "Failed to delete test file in $HERMES_WEBUI_DEFAULT_WORKSPACE"
 
 echo ""; echo "==================="
-echo ""; echo "== Installing uv and creating a new virtual environment for hermes-webui"
+echo ""; echo "== Installing uv asa as hermeswebui and creating a new virtual environment for hermes-webui"
 
 curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="/home/hermeswebui/.local/bin/:$PATH"

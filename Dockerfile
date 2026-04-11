@@ -69,6 +69,7 @@ RUN rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/01proxy \
 
 USER hermeswebuitoo
 
+# Staging dir for ownership transfer
 COPY . /apptoo
 
 # Default to binding all interfaces (required for container networking)
