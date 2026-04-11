@@ -21,22 +21,22 @@ async function send(){
 
   const activeSid=S.session.session_id;
 
-  setStatus(S.pendingFiles&&S.pendingFiles.length?'Uploading…':'Sending…');
+  setComposerStatus(S.pendingFiles&&S.pendingFiles.length?'Uploading…':'');
   let uploaded=[];
   try{uploaded=await uploadPendingFiles();}
-  catch(e){if(!text){setStatus(`Upload error: ${e.message}`);return;}}
+  catch(e){if(!text){setComposerStatus(`Upload error: ${e.message}`);return;}}
 
   let msgText=text;
   if(uploaded.length&&!msgText)msgText=`I've uploaded ${uploaded.length} file(s): ${uploaded.join(', ')}`;
   else if(uploaded.length)msgText=`${text}\n\n[Attached files: ${uploaded.join(', ')}]`;
-  if(!msgText){setStatus('Nothing to send');return;}
+  if(!msgText){setComposerStatus('Nothing to send');return;}
 
   $('msg').value='';autoResize();
   const displayText=text||(uploaded.length?`Uploaded: ${uploaded.join(', ')}`:'(file upload)');
   const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploaded:undefined,_ts:Date.now()/1000};
   S.toolCalls=[];  // clear tool calls from previous turn
   clearLiveToolCards();  // clear any leftover live cards from last turn
-  S.messages.push(userMsg);renderMessages();appendThinking();setBusy(true);  // activity bar shown via setBusy
+  S.messages.push(userMsg);renderMessages();appendThinking();setBusy(true);
   INFLIGHT[activeSid]={messages:[...S.messages],uploaded};
   startApprovalPolling(activeSid);
   S.activeStreamId = null;  // will be set after stream starts
@@ -76,7 +76,7 @@ async function send(){
     // Only hide approval card if it belongs to the session that just finished
     if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);removeThinking();
     S.messages.push({role:'assistant',content:`**Error:** ${e.message}`});
-    renderMessages();setBusy(false);setStatus('Error: '+e.message);
+    renderMessages();setBusy(false);setComposerStatus(`Error: ${e.message}`);
     return;
   }
 
@@ -156,9 +156,6 @@ async function send(){
 
     source.addEventListener('tool',e=>{
       const d=JSON.parse(e.data);
-      if(S.session&&S.session.session_id===activeSid){
-        setStatus(`${d.name}${d.preview?' · '+d.preview.slice(0,55):''}`);
-      }
       if(!S.session||S.session.session_id!==activeSid) return;
       removeThinking();
       const oldRow=$('toolRunningRow');if(oldRow)oldRow.remove();
@@ -207,6 +204,7 @@ async function send(){
         syncTopbar();renderMessages();loadDir('.');
       }
       renderSessionList();setBusy(false);setStatus('');
+      setComposerStatus('');
       playNotificationSound();
       sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished');
     });
@@ -246,7 +244,7 @@ async function send(){
         try{const d=JSON.parse(e.data);trackBackgroundError(activeSid,_errTitle,d.message||'Error');}
         catch(_){trackBackgroundError(activeSid,_errTitle,'Error');}
       }
-      if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setStatus('');}
+      if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setComposerStatus('');}
     });
 
     source.addEventListener('warning',e=>{
@@ -255,9 +253,9 @@ async function send(){
       try{
         const d=JSON.parse(e.data);
         // Show as a small inline notice, not a full error
-        setStatus(`${d.message||'Warning'}`);
+        setComposerStatus(`${d.message||'Warning'}`);
         // If it's a fallback notice, show it briefly then clear
-        if(d.type==='fallback') setTimeout(()=>setStatus(''),4000);
+        if(d.type==='fallback') setTimeout(()=>setComposerStatus(''),4000);
       }catch(_){}
     });
 
@@ -266,12 +264,12 @@ async function send(){
       // Attempt one reconnect if the stream is still active server-side
       if(!_reconnectAttempted && streamId){
         _reconnectAttempted=true;
-        setStatus('Connection lost \u2014 reconnecting\u2026');
+        setComposerStatus('Reconnecting…');
         setTimeout(async()=>{
           try{
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
             if(st.active){
-              setStatus('Reconnected');
+              setComposerStatus('Reconnected');
               _wireSSE(new EventSource(new URL(`/api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,location.origin).href,{withCredentials:true}));
               return;
             }
@@ -295,8 +293,7 @@ async function send(){
         S.messages.push({role:'assistant',content:'*Task cancelled.*'});renderMessages();
       }
       renderSessionList();
-      // Always clear busy state and status when cancel event is received
-      setBusy(false);setStatus('');
+      if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setComposerStatus('');}
     });
   }
 
@@ -315,7 +312,7 @@ async function send(){
         trackBackgroundError(activeSid,_errTitle,'Connection lost');
       }
     }
-    if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setStatus('Error: Connection lost');}
+    if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setComposerStatus('');}
   }
 
   _wireSSE(new EventSource(new URL(`/api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,location.origin).href,{withCredentials:true}));

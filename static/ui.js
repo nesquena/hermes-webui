@@ -255,22 +255,22 @@ function renderMd(raw){
 }
 
 function setStatus(t){
-  const bar=$('activityBar');
-  const txt=$('activityText');
-  const dismiss=$('btnDismissStatus');
-  if(!bar||!txt)return;
-  if(!t){
-    bar.style.display='none';
-    txt.textContent='';
-    if(dismiss)dismiss.style.display='none';
-  } else {
-    txt.textContent=t;
-    bar.style.display='';
-    // Show dismiss X only for static/error messages, not transient busy ones
-    const transient = t.endsWith('…') || t === (window._botName||'Hermes')+' is thinking\u2026';
-    if(dismiss)dismiss.style.display=(!transient && !S.busy)?'inline':'none';
-  }
+  if(!t)return;
+  showToast(t, 4000);
 }
+
+function setComposerStatus(t){
+  const el=$('composerStatus');
+  if(!el)return;
+  if(!t){
+    el.style.display='none';
+    el.textContent='';
+    return;
+  }
+  el.textContent=t;
+  el.style.display='';
+}
+
 function updateSendBtn(){
   const btn=$('btnSend');
   if(!btn) return;
@@ -290,10 +290,9 @@ function setBusy(v){
   S.busy=v;
   $('btnSend').disabled=v;
   updateSendBtn();
-  const dots=$('activityDots');
-  if(dots) dots.style.display=v?'flex':'none';
   if(!v){
     setStatus('');
+    setComposerStatus('');
     // Always hide Cancel button when not busy
     const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
     updateQueueBadge();
