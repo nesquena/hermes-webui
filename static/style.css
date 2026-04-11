@@ -157,7 +157,6 @@
   .session-date-header.pinned{color:#f5c542;}
   .session-date-caret{font-size:9px;transition:transform .2s;flex-shrink:0;display:inline-block;}
   .session-date-caret.collapsed{transform:rotate(-90deg);}
-
   /* ── Shared app dialogs (replace native confirm/prompt) ── */
   .app-dialog-overlay{position:fixed;inset:0;background:rgba(7,12,19,.62);backdrop-filter:blur(6px);z-index:1100;display:none;align-items:center;justify-content:center;padding:24px;}
   .app-dialog{width:min(460px,100%);background:linear-gradient(180deg,rgba(21,31,45,.98),rgba(13,20,31,.98));border:1px solid rgba(124,185,255,.2);border-radius:18px;box-shadow:0 18px 60px rgba(0,0,0,.45);padding:18px 18px 16px;color:var(--text);}
@@ -320,6 +319,9 @@
   .topbar-meta{font-size:11px;color:var(--muted);margin-top:3px;opacity:.75;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
   .topbar-chips{display:flex;gap:6px;align-items:center;flex-shrink:0;}
   .chip{font-size:11px;padding:4px 10px;border-radius:999px;background:rgba(255,255,255,0.05);border:1px solid var(--border2);color:var(--muted);font-weight:500;}
+  .workspace-toggle-btn{display:inline-flex!important;align-items:center;gap:6px;cursor:pointer;}
+  .workspace-toggle-btn.active{color:var(--blue);border-color:rgba(124,185,255,.35);background:rgba(124,185,255,.1);}
+  .workspace-toggle-btn:disabled{opacity:.38;cursor:not-allowed;}
   .chip.model{color:var(--blue);border-color:rgba(124,185,255,0.35);background:rgba(124,185,255,0.1);}
   .messages{flex:1;overflow-y:auto;display:flex;flex-direction:column;min-height:0;position:relative;z-index:0;}
   .messages-inner{margin:0 auto;width:100%;padding:20px 24px 32px;display:flex;flex-direction:column;}
@@ -403,7 +405,7 @@
   .upload-bar-wrap{display:none;height:3px;background:var(--hover-bg);border-radius:0 0 16px 16px;overflow:hidden;}
   .upload-bar-wrap.active{display:block;}
   .upload-bar{height:100%;background:linear-gradient(90deg,var(--blue),#a0d0ff);width:0%;transition:width .3s ease;}
-  .rightpanel{width:300px;background:var(--sidebar);border-left:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;flex-shrink:0;}
+  .rightpanel{width:300px;background:var(--sidebar);border-left:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;flex-shrink:0;min-width:0;opacity:1;transform:translateX(0);transform-origin:right center;transition:width .24s cubic-bezier(.22,1,.36,1),opacity .18s ease,transform .24s cubic-bezier(.22,1,.36,1),border-color .24s ease;}
   .panel-header{padding:12px 16px;border-bottom:1px solid var(--border);font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;display:flex;align-items:center;justify-content:space-between;}
   .git-badge{font-size:9px;font-weight:600;color:var(--muted);background:var(--hover-bg);padding:2px 7px;border-radius:4px;letter-spacing:.02em;margin-left:auto;margin-right:4px;white-space:nowrap;font-family:'SF Mono',ui-monospace,monospace;}
   .git-badge.dirty{color:var(--gold);background:rgba(201,168,76,.1);}
@@ -411,6 +413,8 @@
   .panel-icon-btn{width:24px;height:24px;background:none;border:none;color:var(--muted);cursor:pointer;border-radius:5px;font-size:13px;display:flex;align-items:center;justify-content:center;transition:all .15s;}
   .panel-icon-btn:hover{background:rgba(255,255,255,.08);color:var(--text);}
   .mobile-close-btn{display:none;}
+  .panel-icon-btn:disabled{opacity:.35;cursor:not-allowed;}
+  .panel-icon-btn:disabled:hover{background:none;color:var(--muted);}
   /* File row actions (shown on hover) */
   /* file-item-actions removed: delete button is now a flex child */
   .file-action-btn{width:20px;height:20px;background:rgba(0,0,0,.4);border:none;border-radius:4px;color:var(--muted);cursor:pointer;font-size:11px;display:flex;align-items:center;justify-content:center;}
@@ -466,11 +470,14 @@
   ::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.22)}
   /* ── Desktop: hide mobile-only elements ── */
   .mobile-hamburger{display:none;}
-  .mobile-files-btn{display:none!important;}
   .mobile-overlay{display:none;}
   .mobile-bottom-nav{display:none;}
 
-  @media(max-width:900px){.rightpanel{display:none}.mobile-files-btn{display:inline-flex!important;}}
+  @media(min-width:901px){
+    .layout.workspace-panel-collapsed .rightpanel{width:0 !important;opacity:0;transform:translateX(14px);border-left-color:transparent;pointer-events:none;}
+  }
+
+  @media(max-width:900px){.rightpanel{display:none}.workspace-toggle-btn{display:inline-flex!important;}}
 
   @media(max-width:640px){
     /* ── Sidebar: slide-in overlay instead of hidden ── */
@@ -488,7 +495,7 @@
       z-index:199;-webkit-tap-highlight-color:transparent;}
     .mobile-overlay.visible{display:block;}
     /* Files button in topbar */
-    .mobile-files-btn{display:inline-flex!important;}
+    .workspace-toggle-btn{display:inline-flex!important;}
     /* Right panel: slide-over from right */
     .rightpanel{display:flex!important;position:fixed;right:-320px;top:0;bottom:0;
       width:300px;z-index:200;transition:right .25s ease;
