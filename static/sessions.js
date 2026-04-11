@@ -7,7 +7,168 @@ const ICONS={
   unarchive:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="1.5" y="2" width="13" height="3" rx="1"/><path d="M2.5 5v8h11V5"/><polyline points="6.5,7 8,5.5 9.5,7"/></svg>',
   dup:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="4.5" y="4.5" width="8.5" height="8.5" rx="1.5"/><path d="M3 11.5V3h8.5"/></svg>',
   trash:'<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3.5 4.5h9M6.5 4.5V3h3v1.5M4.5 4.5v8.5h7v-8.5"/><line x1="7" y1="7" x2="7" y2="11"/><line x1="9" y1="7" x2="9" y2="11"/></svg>',
+  more:'<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" stroke="none"><circle cx="8" cy="3" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="8" cy="13" r="1.25"/></svg>',
 };
+
+
+let _sessionActionMenu = null;
+let _sessionActionAnchor = null;
+let _sessionActionSessionId = null;
+
+function closeSessionActionMenu(){
+  if(_sessionActionMenu){
+    _sessionActionMenu.remove();
+    _sessionActionMenu = null;
+  }
+  if(_sessionActionAnchor){
+    _sessionActionAnchor.classList.remove('active');
+    const row=_sessionActionAnchor.closest('.session-item');
+    if(row) row.classList.remove('menu-open');
+    _sessionActionAnchor = null;
+  }
+  _sessionActionSessionId = null;
+}
+
+function _positionSessionActionMenu(anchorEl){
+  if(!_sessionActionMenu || !anchorEl) return;
+  const rect=anchorEl.getBoundingClientRect();
+  const menuW=Math.min(280, Math.max(220, _sessionActionMenu.scrollWidth || 220));
+  let left=rect.right-menuW;
+  if(left<8) left=8;
+  if(left+menuW>window.innerWidth-8) left=window.innerWidth-menuW-8;
+  _sessionActionMenu.style.left=left+'px';
+  _sessionActionMenu.style.top='8px';
+  const menuH=_sessionActionMenu.offsetHeight || 0;
+  let top=rect.bottom+6;
+  if(top+menuH>window.innerHeight-8 && rect.top>menuH+12){
+    top=rect.top-menuH-6;
+  }
+  if(top<8) top=8;
+  _sessionActionMenu.style.top=top+'px';
+}
+
+function _buildSessionAction(label, meta, icon, onSelect, extraClass=''){
+  const opt=document.createElement('button');
+  opt.type='button';
+  opt.className='ws-opt session-action-opt'+(extraClass?` ${extraClass}`:'');
+  opt.innerHTML=
+    `<span class="ws-opt-action">`
+      + `<span class="ws-opt-icon">${icon}</span>`
+      + `<span class="session-action-copy">`
+        + `<span class="ws-opt-name">${esc(label)}</span>`
+        + (meta?`<span class="session-action-meta">${esc(meta)}</span>`:'')
+      + `</span>`
+    + `</span>`;
+  opt.onclick=async(e)=>{
+    e.preventDefault();
+    e.stopPropagation();
+    await onSelect();
+  };
+  return opt;
+}
+
+function _openSessionActionMenu(session, anchorEl){
+  if(_sessionActionMenu && _sessionActionSessionId===session.session_id && _sessionActionAnchor===anchorEl){
+    closeSessionActionMenu();
+    return;
+  }
+  closeSessionActionMenu();
+  const menu=document.createElement('div');
+  menu.className='session-action-menu open';
+  menu.appendChild(_buildSessionAction(
+    session.pinned?'Unpin conversation':'Pin conversation',
+    session.pinned?'Remove from the pinned section':'Keep this conversation at the top',
+    session.pinned?ICONS.pin:ICONS.unpin,
+    async()=>{
+      closeSessionActionMenu();
+      const newPinned=!session.pinned;
+      try{
+        await api('/api/session/pin',{method:'POST',body:JSON.stringify({session_id:session.session_id,pinned:newPinned})});
+        session.pinned=newPinned;
+        if(S.session&&S.session.session_id===session.session_id) S.session.pinned=newPinned;
+        renderSessionList();
+      }catch(err){showToast('Pin failed: '+err.message);}
+    },
+    session.pinned?'is-active':''
+  ));
+  menu.appendChild(_buildSessionAction(
+    'Move to project',
+    session.project_id?'Change which project this conversation belongs to':'Assign this conversation to a project',
+    ICONS.folder,
+    async()=>{
+      closeSessionActionMenu();
+      _showProjectPicker(session, anchorEl);
+    }
+  ));
+  menu.appendChild(_buildSessionAction(
+    session.archived?'Restore conversation':'Archive conversation',
+    session.archived?'Bring this conversation back into the main list':'Hide this conversation until archived is shown',
+    session.archived?ICONS.unarchive:ICONS.archive,
+    async()=>{
+      closeSessionActionMenu();
+      try{
+        await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:session.session_id,archived:!session.archived})});
+        session.archived=!session.archived;
+        if(S.session&&S.session.session_id===session.session_id) S.session.archived=session.archived;
+        await renderSessionList();
+        showToast(session.archived?'Session archived':'Session restored');
+      }catch(err){showToast('Archive failed: '+err.message);}
+    }
+  ));
+  menu.appendChild(_buildSessionAction(
+    'Duplicate conversation',
+    'Create a copy with the same workspace and model',
+    ICONS.dup,
+    async()=>{
+      closeSessionActionMenu();
+      try{
+        const res=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:session.workspace,model:session.model})});
+        if(res.session){
+          await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:res.session.session_id,title:(session.title||'Untitled')+' (copy)'})});
+          await loadSession(res.session.session_id);
+          await renderSessionList();
+          showToast('Session duplicated');
+        }
+      }catch(err){showToast('Duplicate failed: '+err.message);}
+    }
+  ));
+  menu.appendChild(_buildSessionAction(
+    'Delete conversation',
+    'Permanently remove this conversation',
+    ICONS.trash,
+    async()=>{
+      closeSessionActionMenu();
+      await deleteSession(session.session_id);
+    },
+    'danger'
+  ));
+  document.body.appendChild(menu);
+  _sessionActionMenu = menu;
+  _sessionActionAnchor = anchorEl;
+  _sessionActionSessionId = session.session_id;
+  anchorEl.classList.add('active');
+  const row=anchorEl.closest('.session-item');
+  if(row) row.classList.add('menu-open');
+  _positionSessionActionMenu(anchorEl);
+}
+
+document.addEventListener('click',e=>{
+  if(!_sessionActionMenu) return;
+  if(_sessionActionMenu.contains(e.target)) return;
+  if(_sessionActionAnchor && _sessionActionAnchor.contains(e.target)) return;
+  closeSessionActionMenu();
+});
+document.addEventListener('scroll',e=>{
+  if(!_sessionActionMenu) return;
+  if(_sessionActionMenu.contains(e.target)) return;
+  closeSessionActionMenu();
+}, true);
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape' && _sessionActionMenu) closeSessionActionMenu();
+});
+window.addEventListener('resize',()=>{
+  if(_sessionActionMenu && _sessionActionAnchor) _positionSessionActionMenu(_sessionActionAnchor);
+});
 
 async function newSession(flash){
   MSG_QUEUE.length=0;updateQueueBadge();
@@ -314,7 +475,7 @@ function renderSessionListFromCache(){
     if(s.project_id){
       const proj=_allProjects.find(p=>p.project_id===s.project_id);
       if(proj){
-        if(!isActive) el.style.borderLeftColor=proj.color||'var(--blue)';
+        // project color shown via dot indicator, not left border
         const dot=document.createElement('span');
         dot.className='session-project-dot';
         dot.style.background=proj.color||'var(--blue)';
@@ -323,65 +484,21 @@ function renderSessionListFromCache(){
       }
     }
     el.appendChild(title);
-    // Action buttons overlay (appears on hover with gradient fade)
     const actions=document.createElement('div');
     actions.className='session-actions';
-    // Pin toggle
-    const pinBtn=document.createElement('button');
-    pinBtn.className='act-pin'+(s.pinned?' pinned':'');
-    pinBtn.innerHTML=s.pinned?ICONS.pin:ICONS.unpin;
-    pinBtn.title=s.pinned?'Unpin':'Pin to top';
-    pinBtn.onclick=async(e)=>{
-      e.stopPropagation();e.preventDefault();
-      const newPinned=!s.pinned;
-      try{
-        await api('/api/session/pin',{method:'POST',body:JSON.stringify({session_id:s.session_id,pinned:newPinned})});
-        s.pinned=newPinned;
-        if(S.session&&S.session.session_id===s.session_id) S.session.pinned=newPinned;
-        renderSessionList();
-      }catch(err){showToast('Pin failed: '+err.message);}
+    const menuBtn=document.createElement('button');
+    menuBtn.type='button';
+    menuBtn.className='session-actions-trigger';
+    menuBtn.title='Conversation actions';
+    menuBtn.setAttribute('aria-haspopup','menu');
+    menuBtn.setAttribute('aria-label','Conversation actions');
+    menuBtn.innerHTML=ICONS.more;
+    menuBtn.onclick=(e)=>{
+      e.stopPropagation();
+      e.preventDefault();
+      _openSessionActionMenu(s, menuBtn);
     };
-    actions.appendChild(pinBtn);
-    // Move to project
-    const move=document.createElement('button');
-    move.className='act-move';move.innerHTML=ICONS.folder;move.title='Move to project';
-    move.onclick=async(e)=>{e.stopPropagation();e.preventDefault();_showProjectPicker(s,move);};
-    actions.appendChild(move);
-    // Archive
-    const archive=document.createElement('button');
-    archive.className='act-archive';archive.innerHTML=s.archived?ICONS.unarchive:ICONS.archive;
-    archive.title=s.archived?'Unarchive':'Archive';
-    archive.onclick=async(e)=>{
-      e.stopPropagation();e.preventDefault();
-      try{
-        await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:s.session_id,archived:!s.archived})});
-        s.archived=!s.archived;
-        if(S.session&&S.session.session_id===s.session_id) S.session.archived=s.archived;
-        await renderSessionList();
-        showToast(s.archived?'Session archived':'Session restored');
-      }catch(err){showToast('Archive failed: '+err.message);}
-    };
-    actions.appendChild(archive);
-    // Duplicate
-    const dup=document.createElement('button');
-    dup.className='act-dup';dup.innerHTML=ICONS.dup;dup.title='Duplicate';
-    dup.onclick=async(e)=>{
-      e.stopPropagation();e.preventDefault();
-      try{
-        const res=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:s.workspace,model:s.model})});
-        if(res.session){
-          await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:res.session.session_id,title:(s.title||'Untitled')+' (copy)'})});
-          await loadSession(res.session.session_id);await renderSessionList();
-          showToast('Session duplicated');
-        }
-      }catch(err){showToast('Duplicate failed: '+err.message);}
-    };
-    actions.appendChild(dup);
-    // Trash
-    const trash=document.createElement('button');
-    trash.className='act-trash';trash.innerHTML=ICONS.trash;trash.title='Delete';
-    trash.onclick=async(e)=>{e.stopPropagation();e.preventDefault();await deleteSession(s.session_id);};
-    actions.appendChild(trash);
+    actions.appendChild(menuBtn);
     el.appendChild(actions);
 
     // Use a click timer to distinguish single-click (navigate) from double-click (rename).
