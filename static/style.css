@@ -530,8 +530,10 @@
     .topbar-meta{display:none;}
     .topbar-chips{flex-wrap:nowrap;gap:4px;overflow-x:auto;-webkit-overflow-scrolling:touch;}
     .topbar-chips .chip,.topbar-chips .ws-chip,.topbar-chips button{font-size:11px!important;padding:3px 8px!important;white-space:nowrap;}
-    .settings-shell{grid-template-columns:1fr;gap:14px;}
-    .settings-tabs{padding-right:0;padding-bottom:14px;border-right:none;border-bottom:1px solid var(--border);}
+    .settings-shell{grid-template-columns:1fr;gap:0;}
+    .settings-tabs{flex-direction:row;overflow-x:auto;padding:10px 12px;border-right:none;border-bottom:1px solid var(--border);gap:6px;}
+    .settings-tab{flex-shrink:0;}
+    .settings-main{padding:18px 16px;}
     .hermes-action-grid{grid-template-columns:1fr;}
     /* Messages area — account for bottom nav */
     .messages{padding-bottom:60px;}
@@ -854,20 +856,20 @@ body.resizing{user-select:none;cursor:col-resize;}
 
 /* ── Settings overlay ── */
 .settings-overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:1000;display:flex;align-items:center;justify-content:center;}
-.settings-panel{background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:0;width:560px;max-width:92vw;max-height:92vh;min-height:min(700px,90vh);overflow:visible;box-shadow:0 12px 40px rgba(0,0,0,.5);display:flex;flex-direction:column;}
-.settings-header{display:flex;align-items:flex-start;justify-content:space-between;padding:18px 20px 14px;border-bottom:1px solid var(--border);gap:16px;}
+.settings-panel{background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:0;width:860px;max-width:92vw;height:min(700px,92vh);overflow:visible;box-shadow:0 12px 40px rgba(0,0,0,.5);display:flex;flex-direction:column;}
+.settings-header{display:flex;align-items:flex-start;justify-content:space-between;padding:18px 24px 14px;border-bottom:1px solid var(--border);gap:16px;}
 .settings-heading{display:flex;flex-direction:column;gap:3px;}
 .settings-kicker{font-size:10px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--blue);}
 .settings-subtitle{font-size:12px;color:var(--muted);line-height:1.5;}
-.settings-body{padding:20px;overflow:hidden;flex:1;}
-.settings-shell{display:grid;grid-template-columns:minmax(150px,1fr) minmax(0,2fr);gap:18px;height:100%;}
-.settings-tabs{display:flex;flex-direction:column;gap:8px;padding-right:18px;border-right:1px solid var(--border);}
-.settings-tab{display:flex;flex-direction:column;gap:3px;align-items:flex-start;padding:12px 13px;border-radius:10px;border:1px solid transparent;background:transparent;color:var(--muted);cursor:pointer;transition:background .15s,border-color .15s,color .15s;}
+.settings-body{padding:0;flex:1;display:flex;min-height:0;overflow:hidden;}
+.settings-shell{display:grid;grid-template-columns:220px minmax(0,1fr);gap:0;flex:1;min-height:0;min-width:0;}
+.settings-tabs{display:flex;flex-direction:column;gap:4px;padding:18px 12px;border-right:1px solid var(--border);align-self:stretch;min-height:0;}
+.settings-tab{display:flex;flex-direction:row;gap:12px;align-items:center;padding:9px 12px;border-radius:8px;border:1px solid transparent;background:transparent;color:var(--muted);cursor:pointer;transition:background .15s,border-color .15s,color .15s;text-align:left;width:100%;}
 .settings-tab:hover{background:rgba(255,255,255,.05);color:var(--text);}
 .settings-tab.active{background:rgba(124,185,255,.1);border-color:rgba(124,185,255,.22);color:var(--text);}
-.settings-tab-title{font-size:13px;font-weight:700;letter-spacing:.01em;}
-.settings-tab-meta{font-size:11px;line-height:1.45;opacity:.8;text-align:left;}
-.settings-main{overflow-y:auto;padding-right:4px;}
+.settings-tab-icon{flex-shrink:0;opacity:.9;}
+.settings-tab-title{font-size:13px;font-weight:600;letter-spacing:.01em;}
+.settings-main{overflow-y:auto;padding:22px 24px;min-width:0;}
 .settings-pane{display:none;}
 .settings-pane.active{display:block;}
 .settings-section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px;}
