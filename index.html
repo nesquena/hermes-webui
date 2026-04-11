@@ -4,10 +4,20 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Hermes — The self-improving AI agent</title>
-  <meta name="description" content="Persistent memory, autonomous scheduling, and 15+ messaging platforms — all on hardware you control. Open source, self-hosted AI agent." />
+  <meta name="description" content="Persistent memory, autonomous scheduling, and multi-surface access — all on hardware you control. Open source, self-hosted AI agent." />
   <meta property="og:title" content="Hermes — The self-improving AI agent" />
-  <meta property="og:description" content="Persistent memory, autonomous scheduling, and 15+ messaging platforms — all on hardware you control." />
+  <meta property="og:description" content="Persistent memory, autonomous scheduling, and multi-surface access — all on hardware you control." />
   <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://nesquena.github.io/hermes-webui/" />
+  <meta property="og:image" content="https://github.com/user-attachments/assets/51adff98-53ee-4800-8508-78b6c34dd3dc" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Hermes — The self-improving AI agent" />
+  <meta name="twitter:description" content="Persistent memory, autonomous scheduling, and multi-surface access — all on hardware you control." />
+  <meta name="twitter:image" content="https://github.com/user-attachments/assets/51adff98-53ee-4800-8508-78b6c34dd3dc" />
+  <meta name="theme-color" content="#0d1117" media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>" />
+  <link rel="canonical" href="https://nesquena.github.io/hermes-webui/" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
@@ -40,6 +50,7 @@
       --radius-lg: 12px;
       --shadow: 0 1px 3px rgba(0,0,0,0.4), 0 4px 16px rgba(0,0,0,0.3);
       --shadow-lg: 0 8px 32px rgba(0,0,0,0.5);
+      --shadow-screenshot: 0 8px 40px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.05);
     }
 
     [data-theme="light"] {
@@ -63,6 +74,7 @@
       --purple: #7c3aed;
       --shadow: 0 1px 3px rgba(0,0,0,0.1), 0 4px 16px rgba(0,0,0,0.06);
       --shadow-lg: 0 8px 32px rgba(0,0,0,0.12);
+      --shadow-screenshot: 0 8px 40px rgba(0,0,0,0.15), 0 0 0 1px rgba(0,0,0,0.06);
     }
 
     /* ===== RESET & BASE ===== */
@@ -287,6 +299,18 @@
       background: radial-gradient(ellipse at center, var(--accent-glow) 0%, transparent 70%);
       pointer-events: none;
     }
+    /* Subtle grid pattern */
+    #hero::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background-image: radial-gradient(circle at 1px 1px, rgba(240, 165, 0, 0.04) 1px, transparent 0);
+      background-size: 32px 32px;
+      pointer-events: none;
+    }
+    [data-theme="light"] #hero::after {
+      background-image: radial-gradient(circle at 1px 1px, rgba(192, 120, 0, 0.06) 1px, transparent 0);
+    }
     .hero-inner {
       max-width: 1100px;
       margin: 0 auto;
@@ -315,7 +339,12 @@
       color: var(--text-primary);
       margin-bottom: 24px;
     }
-    .hero-title .accent { color: var(--accent); }
+    .hero-title .accent {
+      background: linear-gradient(135deg, var(--accent) 0%, #ff8c00 50%, var(--accent-dim) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
     .hero-sub {
       font-size: clamp(1.05rem, 2.5vw, 1.25rem);
       color: var(--text-secondary);
@@ -447,6 +476,7 @@
       padding: 20px;
       background: var(--accent-subtle);
       border: 1px solid rgba(240, 165, 0, 0.2);
+      border-left: 3px solid var(--accent);
       border-radius: var(--radius);
       font-size: 0.9rem;
       color: var(--text-secondary);
@@ -470,6 +500,17 @@
       display: flex;
       flex-direction: column;
       gap: 0;
+      position: relative;
+      overflow: hidden;
+    }
+    .pillar-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 3px;
+      background: linear-gradient(90deg, var(--accent), var(--accent-dim));
+      opacity: 0;
+      transition: opacity 0.2s;
     }
     .pillar-card:hover {
       border-color: var(--accent);
@@ -477,6 +518,7 @@
       transform: translateY(-4px);
       box-shadow: 0 8px 32px rgba(240, 165, 0, 0.1);
     }
+    .pillar-card:hover::before { opacity: 1; }
     .pillar-icon {
       font-size: 2.5rem;
       margin-bottom: 16px;
@@ -549,7 +591,71 @@
       font-weight: 500;
     }
 
-    /* ===== WEB UI SECTION ===== */
+    /* ===== WEB UI SHOWCASE ===== */
+    .showcase-hero {
+      margin-top: 48px;
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+      box-shadow: var(--shadow-screenshot);
+      border: 1px solid var(--border);
+      position: relative;
+    }
+    .showcase-hero img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+    .showcase-hero-label {
+      position: absolute;
+      bottom: 16px;
+      left: 16px;
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      color: #fff;
+      font-size: 0.8rem;
+      font-weight: 500;
+      padding: 6px 14px;
+      border-radius: 6px;
+    }
+    [data-theme="light"] .showcase-hero-label {
+      background: rgba(255, 255, 255, 0.85);
+      color: var(--text-primary);
+    }
+    .showcase-gallery {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin-top: 24px;
+    }
+    .showcase-thumb {
+      border-radius: var(--radius);
+      overflow: hidden;
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow);
+      transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s;
+      cursor: pointer;
+      position: relative;
+    }
+    .showcase-thumb:hover {
+      transform: translateY(-4px);
+      border-color: var(--accent);
+      box-shadow: 0 8px 24px rgba(240, 165, 0, 0.12);
+    }
+    .showcase-thumb img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+    .showcase-thumb-caption {
+      padding: 10px 12px;
+      background: var(--bg-card);
+      font-size: 0.78rem;
+      font-weight: 500;
+      color: var(--text-secondary);
+      border-top: 1px solid var(--border);
+    }
+
     .webui-layout {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -575,7 +681,7 @@
       color: var(--text-secondary);
     }
     .webui-feature-item::before {
-      content: '✓';
+      content: '\2713';
       color: var(--green);
       font-weight: 700;
       flex-shrink: 0;
@@ -605,39 +711,74 @@
       color: var(--text-primary);
     }
 
+    /* ===== WHO IS IT FOR ===== */
+    .persona-grid {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 16px;
+      margin-top: 48px;
+    }
+    .persona-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 28px 24px;
+      transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
+      text-align: center;
+    }
+    .persona-card:hover {
+      border-color: var(--accent);
+      transform: translateY(-3px);
+      box-shadow: 0 8px 24px rgba(240, 165, 0, 0.08);
+    }
+    .persona-icon {
+      font-size: 2.2rem;
+      margin-bottom: 14px;
+      line-height: 1;
+    }
+    .persona-title {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      margin-bottom: 10px;
+    }
+    .persona-body {
+      font-size: 0.82rem;
+      color: var(--text-secondary);
+      line-height: 1.55;
+    }
+
     /* ===== CODE BLOCKS ===== */
     .code-wrap {
       position: relative;
       border-radius: var(--radius);
       overflow: hidden;
       background: #0d1117;
-      border: 1px solid #30363d;
+      border: 1px solid var(--border);
       margin: 8px 0;
     }
-    /* Code blocks stay dark in both themes — switching hljs to light-on-dark causes invisible text */
     [data-theme="light"] .code-wrap {
-      background: #0d1117;
-      border-color: #30363d;
+      background: #161b22;
     }
     .code-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
       padding: 8px 16px;
-      background: rgba(255,255,255,0.05);
-      border-bottom: 1px solid #30363d;
+      background: rgba(255,255,255,0.04);
+      border-bottom: 1px solid var(--border);
     }
     .code-lang {
       font-size: 0.7rem;
       font-weight: 600;
       letter-spacing: 0.06em;
       text-transform: uppercase;
-      color: #8b949e;
+      color: var(--text-muted);
     }
     .copy-btn {
       background: none;
-      border: 1px solid #484f58;
-      color: #8b949e;
+      border: 1px solid var(--border);
+      color: var(--text-muted);
       font-size: 0.7rem;
       padding: 3px 8px;
       border-radius: 4px;
@@ -645,8 +786,8 @@
       transition: color 0.15s, border-color 0.15s;
       font-family: inherit;
     }
-    .copy-btn:hover { color: #e6edf3; border-color: #8b949e; }
-    .copy-btn.copied { color: #3fb950; border-color: #3fb950; }
+    .copy-btn:hover { color: var(--text-primary); border-color: var(--border-hover); }
+    .copy-btn.copied { color: var(--green); border-color: var(--green); }
     .code-wrap pre {
       margin: 0;
       padding: 16px;
@@ -659,39 +800,6 @@
     }
 
     /* ===== COMPARISON ===== */
-    .compare-more {
-      margin-top: 40px;
-      padding-top: 32px;
-      border-top: 1px solid var(--border);
-    }
-    .compare-more-label {
-      font-size: 0.75rem;
-      font-weight: 600;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      color: var(--text-muted);
-      margin-bottom: 12px;
-    }
-    .compare-more-links {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-    }
-    .compare-pill {
-      display: inline-block;
-      padding: 6px 14px;
-      border: 1px solid var(--border);
-      border-radius: 100px;
-      font-size: 0.82rem;
-      font-weight: 500;
-      color: var(--text-secondary);
-      transition: border-color 0.15s, color 0.15s, background 0.15s;
-    }
-    .compare-pill:hover {
-      border-color: var(--accent);
-      color: var(--accent);
-      background: var(--accent-subtle);
-    }
     .comparison-intro {
       font-size: 1rem;
       color: var(--text-secondary);
@@ -762,18 +870,7 @@
       padding: 24px;
       transition: border-color 0.2s;
     }
-    .comparison-card:hover { border-color: var(--accent); background: var(--bg-card-hover); }
-    .comparison-card[role="link"]:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
-    .card-arrow {
-      position: absolute;
-      top: 18px;
-      right: 20px;
-      color: var(--text-muted);
-      font-size: 1.1rem;
-      transition: transform 0.15s, color 0.15s;
-    }
-    .comparison-card[role="link"] { position: relative; }
-    .comparison-card[role="link"]:hover .card-arrow { transform: translateX(4px); color: var(--accent); }
+    .comparison-card:hover { border-color: var(--border-hover); }
     .comparison-card h4 {
       font-size: 0.95rem;
       font-weight: 600;
@@ -963,10 +1060,34 @@
     /* ===== HIGHLIGHT.JS OVERRIDES ===== */
     .hljs { background: transparent !important; padding: 0 !important; }
 
+    /* ===== LIGHTBOX ===== */
+    .lightbox-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.85);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      z-index: 2000;
+      cursor: zoom-out;
+      align-items: center;
+      justify-content: center;
+      padding: 40px;
+    }
+    .lightbox-overlay.active { display: flex; }
+    .lightbox-overlay img {
+      max-width: 100%;
+      max-height: 90vh;
+      border-radius: var(--radius-lg);
+      box-shadow: 0 16px 64px rgba(0,0,0,0.5);
+    }
+
     /* ===== RESPONSIVE ===== */
     @media (max-width: 1024px) {
       .feature-grid { grid-template-columns: repeat(2, 1fr); }
       .resources-grid { grid-template-columns: repeat(3, 1fr); }
+      .persona-grid { grid-template-columns: repeat(3, 1fr); }
+      .showcase-gallery { grid-template-columns: repeat(2, 1fr); }
     }
     @media (max-width: 900px) {
       .why-grid { grid-template-columns: 1fr; }
@@ -975,6 +1096,7 @@
       .install-layout { grid-template-columns: 1fr; }
       .comparison-cards { grid-template-columns: 1fr; }
       .why-diagram { position: static; }
+      .persona-grid { grid-template-columns: repeat(2, 1fr); }
     }
     @media (max-width: 768px) {
       .nav-links { display: none; }
@@ -985,14 +1107,17 @@
       .feature-grid { grid-template-columns: 1fr 1fr; }
       .resources-grid { grid-template-columns: 1fr 1fr; }
       .webui-features { grid-template-columns: 1fr; }
+      .showcase-gallery { grid-template-columns: 1fr 1fr; }
     }
     @media (max-width: 540px) {
       .feature-grid { grid-template-columns: 1fr; }
       .resources-grid { grid-template-columns: 1fr; }
+      .persona-grid { grid-template-columns: 1fr; }
       .hero-stats { flex-direction: column; align-items: flex-start; }
       thead th, tbody td { padding: 10px 12px; font-size: 0.8rem; }
       .hero-ctas { flex-direction: column; }
       .btn-primary, .btn-secondary { width: 100%; justify-content: center; }
+      .showcase-gallery { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -1002,20 +1127,21 @@
 <nav id="nav">
   <div class="nav-inner">
     <a href="#hero" class="nav-logo">
-      <div class="nav-logo-icon">⚡</div>
+      <div class="nav-logo-icon">&#9889;</div>
       Hermes
     </a>
     <ul class="nav-links">
       <li><a href="#why">Why Hermes</a></li>
       <li><a href="#features">Features</a></li>
       <li><a href="#webui">Web UI</a></li>
+      <li><a href="#who">Who it's for</a></li>
       <li><a href="#compare">Compare</a></li>
       <li><a href="#install">Install</a></li>
       <li><a href="#resources">Resources</a></li>
     </ul>
     <div class="nav-actions">
-      <button class="btn-theme" id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark mode">🌙</button>
-      <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" class="btn-nav-cta" target="_blank" rel="noopener">Get started →</a>
+      <button class="btn-theme" id="theme-toggle" aria-label="Toggle theme" title="Toggle light/dark mode">&#9790;</button>
+      <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" class="btn-nav-cta" target="_blank" rel="noopener">Get started &#8594;</a>
     </div>
     <button class="hamburger" id="hamburger" aria-label="Open menu">
       <span></span><span></span><span></span>
@@ -1028,10 +1154,16 @@
   <a href="#why" onclick="closeMobileMenu()">Why Hermes</a>
   <a href="#features" onclick="closeMobileMenu()">Features</a>
   <a href="#webui" onclick="closeMobileMenu()">Web UI</a>
+  <a href="#who" onclick="closeMobileMenu()">Who it's for</a>
   <a href="#compare" onclick="closeMobileMenu()">Compare</a>
   <a href="#install" onclick="closeMobileMenu()">Install</a>
   <a href="#resources" onclick="closeMobileMenu()">Resources</a>
-  <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" target="_blank" rel="noopener" style="color: var(--accent); margin-top: 4px;">Get started →</a>
+  <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" target="_blank" rel="noopener" style="color: var(--accent); margin-top: 4px;">Get started &#8594;</a>
+</div>
+
+<!-- Lightbox -->
+<div class="lightbox-overlay" id="lightbox" onclick="closeLightbox()">
+  <img id="lightbox-img" src="" alt="Screenshot preview" />
 </div>
 
 <main>
@@ -1040,17 +1172,17 @@
   <section id="hero">
     <div class="hero-inner">
       <div class="hero-eyebrow">
-        ⚡ Open source · Self-hosted · MIT licensed
+        &#9889; Open source &middot; Self-hosted &middot; MIT licensed
       </div>
       <h1 class="hero-title">
         Hermes<br /><span class="accent">Agent</span>
       </h1>
       <p class="hero-sub">
-        The self-improving AI agent that lives on your server. Persistent memory, autonomous scheduling, and 15+ messaging platforms — all on hardware you control.
+        The self-improving AI agent that runs on your server. Layered memory that accumulates across sessions, a cron scheduler that fires while you're offline, and a skills system that saves reusable procedures automatically.
       </p>
       <div class="hero-ctas">
         <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" target="_blank" rel="noopener" class="btn-primary">
-          Get Started →
+          Get Started &#8594;
         </a>
         <a href="https://github.com/NousResearch/hermes-agent" target="_blank" rel="noopener" class="btn-secondary">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" style="flex-shrink:0"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
@@ -1059,7 +1191,7 @@
       </div>
       <div class="hero-stats">
         <span class="stat-badge"><span class="dot"></span>26k+ GitHub stars</span>
-        <span class="stat-badge"><span class="dot"></span>15+ messaging platforms</span>
+        <span class="stat-badge"><span class="dot"></span>Multi-surface access</span>
         <span class="stat-badge"><span class="dot"></span>47 built-in tools</span>
         <span class="stat-badge"><span class="dot"></span>MIT licensed</span>
       </div>
@@ -1071,35 +1203,35 @@
   <section id="why" class="section section-alt">
     <div class="container">
       <p class="section-label">The core idea</p>
-      <h2 class="section-title">Why Hermes?</h2>
+      <h2 class="section-title">Most tools are excellent in the moment and weak over time</h2>
       <div class="why-grid">
         <div class="why-text">
           <p>
-            Most AI tools are <strong>excellent in the moment and weak over time.</strong> They give you a great answer, then forget you exist. The next session starts from zero.
+            Memory is no longer a differentiator on its own. <strong>ChatGPT, Claude, Cursor, and GitHub Copilot all have some form of memory now.</strong> Anthropic, OpenAI, and Microsoft are all shipping scheduling and agent features. The category boundaries that existed twelve months ago are blurring fast.
           </p>
           <p>
-            The distinction isn't "has memory" vs "no memory" anymore. Every major tool has added some form of memory in the past year. The real question is whether that context is <strong>durable</strong> (survives reboots), <strong>self-hosted</strong> (your hardware), <strong>cross-surface</strong> (same agent on Telegram, Slack, terminal), and <strong>cumulative</strong> (compounds over months, not resets per project).
+            The distinction that matters is not "has memory" vs. "has no memory." It's whether context <strong>persists across sessions automatically</strong>, whether execution happens on <strong>hardware you control</strong>, whether you can reach the same agent identity from <strong>any device</strong>, and whether the system gets meaningfully <strong>better at your workflow over time</strong> without manual configuration.
           </p>
           <p>
             Hermes answers yes to all four. It runs as a persistent process on your server. Memory is markdown files in <code style="font-family: 'JetBrains Mono', monospace; font-size: 0.85em; background: var(--bg-tertiary); padding: 2px 6px; border-radius: 4px;">~/.hermes/</code>. The same agent that answered your Telegram message at 9am is available in your terminal at 2pm, with full context.
           </p>
-          <p>
-            The market is converging fast. Chat assistants have added scheduling. Editors are shipping cloud agents. CLIs are getting skills systems. Hermes wins through <strong>synthesis</strong> — all of these capabilities working together on hardware you own, with a model of your choice.
-          </p>
           <div class="convergence-note">
-            <strong>Why synthesis matters:</strong> A scheduler without messaging is just cron. Messaging without memory is just a chatbot. Memory without scheduling is a glorified notes app. Hermes ties them together into a single persistent process with an identity that accumulates across time.
+            <strong>Why synthesis matters:</strong> The market is converging. Chat assistants added scheduling. Editors shipped cloud agents. CLIs are getting skills. Any single feature is available somewhere else. The value is having all of them in one self-hosted system, running continuously, with a persistent identity that accumulates real knowledge of your stack over time.
           </div>
         </div>
         <div>
           <div class="why-diagram">
             <div class="label">Session-scoped tool</div>
             <div class="line">
-              <span class="kw">You</span> → <span class="bracket">[Tool]</span> → Answer → Done
+              <span class="kw">You</span> &#8594; <span class="bracket">[Tool]</span> &#8594; Answer &#8594; Done
+            </div>
+            <div class="line" style="font-size: 0.72rem; color: var(--text-muted); margin-top: 4px;">
+              (some tools carry memory, but execution is stateless)
             </div>
             <hr class="divider" />
             <div class="label">Persistent agent</div>
             <div class="line">
-              <span class="kw">You</span> ↔ <span class="bracket">[Hermes]</span> ↔ <span class="paren">(memory, skills,</span>
+              <span class="kw">You</span> &#8596; <span class="bracket">[Hermes]</span> &#8596; <span class="paren">(memory, skills,</span>
             </div>
             <div class="line">
               &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="paren">schedule, tools,</span>
@@ -1109,10 +1241,10 @@
             </div>
             <hr class="divider" />
             <div style="font-size: 0.75rem; color: var(--text-muted); line-height: 1.6;">
-              Memory: ~/.hermes/ (markdown files)<br />
+              Memory: ~/.hermes/ (markdown files, editable)<br />
               Skills: auto-written from experience<br />
               Schedule: cron, runs while you sleep<br />
-              Surfaces: Telegram · Discord · Slack · browser<br />
+              Surfaces: Telegram &middot; Discord &middot; Slack &middot; browser<br />
               Model: your choice, swap anytime
             </div>
           </div>
@@ -1129,27 +1261,27 @@
       <div class="pillars-grid">
 
         <div class="pillar-card">
-          <div class="pillar-icon">🧠</div>
+          <div class="pillar-icon">&#129504;</div>
           <h3 class="pillar-title">Memory that compounds</h3>
           <div class="pillar-body">
-            <p>Layered memory system: user profile, agent memory, skills, and session history. All stored locally as markdown files at <code style="font-family: 'JetBrains Mono', monospace; font-size: 0.85em;">~/.hermes/</code>.</p>
+            <p>Layered memory system: user profile, agent memory, skills, and session history. All stored locally as readable, editable markdown files at <code style="font-family: 'JetBrains Mono', monospace; font-size: 0.85em;">~/.hermes/</code>.</p>
             <ul>
               <li>Survives every reboot and model swap</li>
               <li>8 optional external memory providers</li>
-              <li>Grows more useful the longer you use it</li>
-              <li>Portable — it's just files</li>
+              <li>You never configure it manually</li>
+              <li>Portable, inspectable, deletable</li>
             </ul>
           </div>
           <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory" target="_blank" rel="noopener" class="pillar-link">
-            Memory docs →
+            Memory docs &#8594;
           </a>
         </div>
 
         <div class="pillar-card">
-          <div class="pillar-icon">⏰</div>
+          <div class="pillar-icon">&#9200;</div>
           <h3 class="pillar-title">Autonomous scheduling</h3>
           <div class="pillar-body">
-            <p>Built-in cron scheduler runs on your server and delivers results to any platform you've connected. Set it and forget it.</p>
+            <p>Built-in cron scheduler runs on your server with full access to your memory and skills, and delivers results wherever you want them.</p>
             <ul>
               <li>Morning news briefings to Telegram</li>
               <li>PR review automation</li>
@@ -1158,24 +1290,24 @@
             </ul>
           </div>
           <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/tools" target="_blank" rel="noopener" class="pillar-link">
-            Scheduling docs →
+            Scheduling docs &#8594;
           </a>
         </div>
 
         <div class="pillar-card">
-          <div class="pillar-icon">📡</div>
+          <div class="pillar-icon">&#128225;</div>
           <h3 class="pillar-title">Reach it from anywhere</h3>
           <div class="pillar-body">
-            <p>15+ messaging platforms, same agent, same memory. Switch surfaces mid-conversation without losing context.</p>
+            <p>Multi-surface access: same agent, same memory. Switch surfaces mid-conversation without losing context.</p>
             <ul>
-              <li>Telegram · Discord · Slack · WhatsApp</li>
-              <li>Signal · Matrix · Mattermost · Email · SMS</li>
-              <li>DingTalk · Feishu · WeCom · BlueBubbles</li>
-              <li>Home Assistant · browser</li>
+              <li>Telegram &middot; Discord &middot; Slack &middot; WhatsApp</li>
+              <li>Signal &middot; Matrix &middot; Mattermost &middot; Email &middot; SMS</li>
+              <li>DingTalk &middot; Feishu &middot; WeCom &middot; BlueBubbles</li>
+              <li>Home Assistant &middot; browser</li>
             </ul>
           </div>
           <a href="https://hermes-agent.nousresearch.com/docs/user-guide/messaging" target="_blank" rel="noopener" class="pillar-link">
-            Messaging docs →
+            Messaging docs &#8594;
           </a>
         </div>
 
@@ -1191,74 +1323,100 @@
       <div class="feature-grid">
 
         <div class="feature-tile">
-          <div class="feature-icon">🔧</div>
+          <div class="feature-icon">&#128295;</div>
           <div class="feature-title">47 built-in tools</div>
           <p class="feature-body">Web search and extraction, browser automation, code execution, vision analysis, image generation, TTS, subagent delegation, and more.</p>
-          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/tools" target="_blank" rel="noopener" class="feature-link">Tools reference →</a>
+          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/tools" target="_blank" rel="noopener" class="feature-link">Tools reference &#8594;</a>
         </div>
 
         <div class="feature-tile">
-          <div class="feature-icon">📚</div>
+          <div class="feature-icon">&#128218;</div>
           <div class="feature-title">Self-improving skills</div>
           <p class="feature-body">The agent writes its own skills from experience. Compatible with agentskills.io open standard and shareable via Skills Hub.</p>
-          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills" target="_blank" rel="noopener" class="feature-link">Skills docs →</a>
+          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills" target="_blank" rel="noopener" class="feature-link">Skills docs &#8594;</a>
         </div>
 
         <div class="feature-tile">
-          <div class="feature-icon">🔌</div>
+          <div class="feature-icon">&#128268;</div>
           <div class="feature-title">MCP integration</div>
-          <p class="feature-body">Connect to any MCP server — GitHub, databases, file systems, APIs. Hermes can also expose itself as an MCP server for Claude Code, Cursor, or Codex.</p>
-          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp" target="_blank" rel="noopener" class="feature-link">MCP docs →</a>
+          <p class="feature-body">Connect to any MCP server. Hermes can also expose itself as an MCP server for Claude Code, Cursor, or Codex.</p>
+          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp" target="_blank" rel="noopener" class="feature-link">MCP docs &#8594;</a>
         </div>
 
         <div class="feature-tile">
-          <div class="feature-icon">🎙️</div>
+          <div class="feature-icon">&#127908;</div>
           <div class="feature-title">Voice mode</div>
           <p class="feature-body">Real-time voice in CLI (Ctrl+B to record), Telegram voice bubbles, Discord voice channels. Supports faster-whisper locally or Groq/OpenAI Whisper.</p>
-          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/voice-mode" target="_blank" rel="noopener" class="feature-link">Voice docs →</a>
+          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/voice-mode" target="_blank" rel="noopener" class="feature-link">Voice docs &#8594;</a>
         </div>
 
         <div class="feature-tile">
-          <div class="feature-icon">🖥️</div>
+          <div class="feature-icon">&#128421;</div>
           <div class="feature-title">6 terminal backends</div>
           <p class="feature-body">Local, Docker, SSH, Daytona, Singularity, Modal. Run execution anywhere from a $5 VPS to serverless cloud, sandboxed as needed.</p>
-          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/tools" target="_blank" rel="noopener" class="feature-link">Backend docs →</a>
+          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/tools" target="_blank" rel="noopener" class="feature-link">Backend docs &#8594;</a>
         </div>
 
         <div class="feature-tile">
-          <div class="feature-icon">🎭</div>
-          <div class="feature-title">Personality & SOUL.md</div>
+          <div class="feature-icon">&#127917;</div>
+          <div class="feature-title">Personality &amp; SOUL.md</div>
           <p class="feature-body">Define the agent's default voice with a global SOUL.md file. 14 built-in personas plus custom personalities via config.</p>
-          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/personality" target="_blank" rel="noopener" class="feature-link">Personality docs →</a>
+          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/personality" target="_blank" rel="noopener" class="feature-link">Personality docs &#8594;</a>
         </div>
 
         <div class="feature-tile">
-          <div class="feature-icon">🤝</div>
+          <div class="feature-icon">&#129309;</div>
           <div class="feature-title">Agent orchestration</div>
           <p class="feature-body">Spawn Claude Code or Codex as sub-agents for heavy coding tasks. Results fold back into Hermes memory. Hermes also runs as an MCP server for other tools.</p>
-          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp" target="_blank" rel="noopener" class="feature-link">Orchestration docs →</a>
+          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp" target="_blank" rel="noopener" class="feature-link">Orchestration docs &#8594;</a>
         </div>
 
         <div class="feature-tile">
-          <div class="feature-icon">🔒</div>
+          <div class="feature-icon">&#128274;</div>
           <div class="feature-title">Security model</div>
           <p class="feature-body">7-layer defense in depth: user allowlists, dangerous command approval, Docker isolation, MCP credential filtering, prompt injection scanning, cross-session isolation, input sanitization.</p>
-          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/security" target="_blank" rel="noopener" class="feature-link">Security docs →</a>
+          <a href="https://hermes-agent.nousresearch.com/docs/user-guide/security" target="_blank" rel="noopener" class="feature-link">Security docs &#8594;</a>
         </div>
 
       </div>
     </div>
   </section>
 
-  <!-- ===== SECTION 5: WEB UI ===== -->
+  <!-- ===== SECTION 5: WEB UI SHOWCASE ===== -->
   <section id="webui" class="section">
     <div class="container">
       <p class="section-label">Hermes Web UI</p>
-      <h2 class="section-title">A browser interface for Hermes</h2>
+      <h2 class="section-title">A beautiful browser interface for Hermes</h2>
       <p class="section-body">
-        Full-featured, no build step, no framework. Three-panel Claude-style layout — sessions sidebar, chat, workspace file browser.
-        <a href="https://github.com/nesquena/hermes-webui" target="_blank" rel="noopener" style="margin-left: 6px;">GitHub →</a>
+        Full-featured, no build step, no framework. Three-panel Claude-style layout with sessions sidebar, chat, and workspace file browser. Everything you can do from a terminal, you can do from this UI.
+        <a href="https://github.com/nesquena/hermes-webui" target="_blank" rel="noopener" style="margin-left: 6px;">GitHub &#8594;</a>
       </p>
+
+      <!-- Hero screenshot -->
+      <div class="showcase-hero" onclick="openLightbox(this.querySelector('img').src)">
+        <img src="https://github.com/user-attachments/assets/51adff98-53ee-4800-8508-78b6c34dd3dc" alt="Hermes Web UI - three-panel layout with sessions, chat, and workspace" loading="lazy" />
+        <div class="showcase-hero-label">Three-panel layout &mdash; dark mode</div>
+      </div>
+
+      <!-- Screenshot gallery -->
+      <div class="showcase-gallery">
+        <div class="showcase-thumb" onclick="openLightbox(this.querySelector('img').src)">
+          <img src="https://github.com/user-attachments/assets/9b68142f-d974-4493-a8d1-fd73e622c7fd" alt="Light mode with full profile support" loading="lazy" />
+          <div class="showcase-thumb-caption">Light mode with profile support</div>
+        </div>
+        <div class="showcase-thumb" onclick="openLightbox(this.querySelector('img').src)">
+          <img src="https://github.com/user-attachments/assets/941f3156-21e3-41fd-bcc8-f975d5000cb8" alt="Customize your settings and configure a password" loading="lazy" />
+          <div class="showcase-thumb-caption">Settings &amp; password protection</div>
+        </div>
+        <div class="showcase-thumb" onclick="openLightbox(this.querySelector('img').src)">
+          <img src="https://raw.githubusercontent.com/nesquena/hermes-webui/master/docs/images/ui-workspace.png" alt="Workspace file browser with inline preview" loading="lazy" />
+          <div class="showcase-thumb-caption">Workspace file browser</div>
+        </div>
+        <div class="showcase-thumb" onclick="openLightbox(this.querySelector('img').src)">
+          <img src="https://raw.githubusercontent.com/nesquena/hermes-webui/master/docs/images/ui-sessions.png" alt="Session projects, tags, and tool call cards" loading="lazy" />
+          <div class="showcase-thumb-caption">Sessions, projects &amp; tags</div>
+        </div>
+      </div>
 
       <div class="webui-layout">
         <div>
@@ -1269,11 +1427,13 @@
             <div class="webui-feature-item">Session history with projects and tags</div>
             <div class="webui-feature-item">Tool call cards with expand/collapse</div>
             <div class="webui-feature-item">Workspace file browser</div>
-            <div class="webui-feature-item">Inline file preview</div>
+            <div class="webui-feature-item">Inline file preview (code, markdown, images)</div>
             <div class="webui-feature-item">Light + dark mode</div>
             <div class="webui-feature-item">Password protection</div>
             <div class="webui-feature-item">SSH tunnel ready</div>
             <div class="webui-feature-item">Docker image available</div>
+            <div class="webui-feature-item">Voice input (Web Speech API)</div>
+            <div class="webui-feature-item">Mobile responsive</div>
           </div>
         </div>
 
@@ -1330,7 +1490,7 @@ docker run -d \
 
           <div>
             <div class="step-header">
-              <div class="step-num" style="background: var(--bg-tertiary); color: var(--text-secondary); border: 1px solid var(--border);">→</div>
+              <div class="step-num" style="background: var(--bg-tertiary); color: var(--text-secondary); border: 1px solid var(--border);">&#8594;</div>
               <div class="step-title">SSH tunnel (for remote servers)</div>
             </div>
             <div class="code-wrap">
@@ -1349,13 +1509,57 @@ docker run -d \
     </div>
   </section>
 
-  <!-- ===== SECTION 6: COMPARISON ===== -->
-  <section id="compare" class="section section-alt">
+  <!-- ===== SECTION 6: WHO IS IT FOR ===== -->
+  <section id="who" class="section section-alt">
+    <div class="container">
+      <p class="section-label">Who it's for</p>
+      <h2 class="section-title">Built for these workflows</h2>
+      <p class="section-body">
+        Hermes earns its setup cost over time, not in the first session. These are the people and use cases where it shines.
+      </p>
+      <div class="persona-grid">
+
+        <div class="persona-card">
+          <div class="persona-icon">&#128187;</div>
+          <div class="persona-title">Solo developers</div>
+          <div class="persona-body">Don't want to re-explain your stack every session. Want an AI that actually knows your environment, your conventions, and what you fixed last week.</div>
+        </div>
+
+        <div class="persona-card">
+          <div class="persona-icon">&#128101;</div>
+          <div class="persona-title">Teams on a shared server</div>
+          <div class="persona-body">Multiple people sharing capable AI access without separate subscriptions. Each gets their own profile, memory, and history on the same instance.</div>
+        </div>
+
+        <div class="persona-card">
+          <div class="persona-icon">&#9889;</div>
+          <div class="persona-title">Automation-heavy</div>
+          <div class="persona-body">Want an AI running scheduled tasks, delivering results to your phone, without babysitting it. Morning briefings, PR reviews, monitoring.</div>
+        </div>
+
+        <div class="persona-card">
+          <div class="persona-icon">&#128272;</div>
+          <div class="persona-title">Privacy-conscious</div>
+          <div class="persona-body">Conversations, memory, and files stay on your hardware. No data leaving your server. Full control over what the agent can access.</div>
+        </div>
+
+        <div class="persona-card">
+          <div class="persona-icon">&#128260;</div>
+          <div class="persona-title">Multi-model users</div>
+          <div class="persona-body">Switch between OpenAI, Anthropic, Google, DeepSeek, and others based on cost, capability, or rate limits without rebuilding your workflow.</div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== SECTION 7: COMPARISON ===== -->
+  <section id="compare" class="section">
     <div class="container">
       <p class="section-label">Honest comparison</p>
       <h2 class="section-title">How Hermes compares</h2>
       <p class="comparison-intro">
-        The agent landscape is converging fast. <strong>Chat assistants added scheduling.</strong> Editors shipped cloud agents. CLIs are getting skills systems. Most comparisons a year ago are already outdated. This table reflects where things stand in mid-2026 — and will keep shifting. Hermes wins through <strong>synthesis</strong>: these capabilities working together on hardware you own, with a model of your choice.
+        The agent landscape is converging fast. <strong>Chat assistants added scheduling and connectors.</strong> Editors shipped cloud agents and automations. CLIs are getting skills systems and multi-surface reach. The lines between "assistant," "editor," and "agent" are dissolving. This table reflects where things stand in mid-2026. Hermes wins through <strong>synthesis</strong>: all of these capabilities working together on hardware you own, with a model of your choice.
       </p>
 
       <h3 class="subsection-title">vs. the agent landscape</h3>
@@ -1376,27 +1580,27 @@ docker run -d \
           <tbody>
             <tr class="highlight-row">
               <td>Hermes</td>
-              <td><span class="check">✓</span></td>
-              <td><span class="check">✓ self-hosted</span></td>
-              <td><span class="check">✓ 15+ platforms</span></td>
-              <td><span class="check">✓</span></td>
-              <td><span class="check">✓ MIT</span></td>
-              <td><span class="check">✓ automatic</span></td>
-              <td><span class="check">✓</span></td>
+              <td><span class="check">&#10003;</span></td>
+              <td><span class="check">&#10003; self-hosted</span></td>
+              <td><span class="check">&#10003; many platforms</span></td>
+              <td><span class="check">&#10003;</span></td>
+              <td><span class="check">&#10003; MIT</span></td>
+              <td><span class="check">&#10003; automatic</span></td>
+              <td><span class="check">&#10003;</span></td>
             </tr>
             <tr>
               <td>OpenClaw</td>
-              <td><span class="check">✓</span></td>
-              <td><span class="check">✓</span></td>
-              <td><span class="check">✓ 24+ platforms</span></td>
-              <td><span class="check">✓</span></td>
-              <td><span class="check">✓ MIT</span></td>
+              <td><span class="check">&#10003;</span></td>
+              <td><span class="check">&#10003;</span></td>
+              <td><span class="check">&#10003; 24+ platforms</span></td>
+              <td><span class="check">&#10003;</span></td>
+              <td><span class="check">&#10003; MIT</span></td>
               <td><span class="partial">Partial</span></td>
-              <td><span class="check">✓</span></td>
+              <td><span class="check">&#10003;</span></td>
             </tr>
             <tr>
               <td>Claude Code</td>
-              <td><span class="partial">Partial</span></td>
+              <td><span class="partial">Partial&#8224;</span></td>
               <td><span class="cloud">Cloud or desktop app</span></td>
               <td><span class="prev">Preview</span></td>
               <td><span class="no">No</span></td>
@@ -1409,8 +1613,8 @@ docker run -d \
               <td><span class="partial">Partial</span></td>
               <td><span class="partial">Desktop app</span></td>
               <td><span class="no">No</span></td>
-              <td><span class="check">✓ (CLI)</span></td>
-              <td><span class="check">✓ Apache 2.0</span></td>
+              <td><span class="check">&#10003; (CLI)</span></td>
+              <td><span class="check">&#10003; Apache 2.0</span></td>
               <td><span class="no">No</span></td>
               <td><span class="no">No</span></td>
             </tr>
@@ -1419,16 +1623,16 @@ docker run -d \
               <td><span class="partial">Partial</span></td>
               <td><span class="no">No</span></td>
               <td><span class="partial">Community</span></td>
-              <td><span class="check">✓</span></td>
-              <td><span class="check">✓</span></td>
+              <td><span class="check">&#10003;</span></td>
+              <td><span class="check">&#10003;</span></td>
               <td><span class="partial">Community</span></td>
               <td><span class="no">No</span></td>
             </tr>
             <tr>
               <td>Cursor</td>
-              <td><span class="partial">✓ per-project</span></td>
+              <td><span class="check">&#10003; per-project</span></td>
               <td><span class="cloud">Cloud VMs</span></td>
-              <td><span class="partial">✓ Slack/web</span></td>
+              <td><span class="check">&#10003; Slack/web/mobile</span></td>
               <td><span class="no">No</span></td>
               <td><span class="no">No</span></td>
               <td><span class="no">No</span></td>
@@ -1436,7 +1640,7 @@ docker run -d \
             </tr>
             <tr>
               <td>GitHub Copilot</td>
-              <td><span class="partial">Partial repo</span></td>
+              <td><span class="partial">Repo-scoped&#8225;</span></td>
               <td><span class="partial">Via agent</span></td>
               <td><span class="partial">Via CLI</span></td>
               <td><span class="no">No</span></td>
@@ -1446,9 +1650,9 @@ docker run -d \
             </tr>
             <tr>
               <td>Claude.ai</td>
-              <td><span class="check">✓</span></td>
-              <td><span class="check">✓ Cowork</span></td>
-              <td><span class="check">✓ 50+ connectors</span></td>
+              <td><span class="check">&#10003;</span></td>
+              <td><span class="check">&#10003; Cowork</span></td>
+              <td><span class="check">&#10003; 50+ connectors</span></td>
               <td><span class="no">No</span></td>
               <td><span class="no">No</span></td>
               <td><span class="no">No</span></td>
@@ -1456,9 +1660,9 @@ docker run -d \
             </tr>
             <tr>
               <td>ChatGPT</td>
-              <td><span class="check">✓</span></td>
-              <td><span class="check">✓</span></td>
-              <td><span class="check">✓ 50+ connectors</span></td>
+              <td><span class="check">&#10003;</span></td>
+              <td><span class="check">&#10003;</span></td>
+              <td><span class="check">&#10003; 50+ connectors</span></td>
               <td><span class="no">No</span></td>
               <td><span class="no">No</span></td>
               <td><span class="no">No</span></td>
@@ -1467,62 +1671,48 @@ docker run -d \
           </tbody>
         </table>
       </div>
+      <p style="font-size: 0.78rem; color: var(--text-muted); margin-top: -32px; margin-bottom: 48px; line-height: 1.6;">
+        &#8224; Claude Code: CLAUDE.md / MEMORY.md plus auto-memory since v2.1.59+; no automatic cross-project accumulation<br />
+        &#8225; Copilot Agentic Memory: public preview Jan 2026; repo-scoped, auto-expires after 28 days
+      </p>
 
       <h3 class="subsection-title mt-32">Head-to-head</h3>
       <div class="comparison-cards">
 
-        <div class="comparison-card" onclick="location.href='compare/openclaw.html'" role="link" tabindex="0" aria-label="Compare Hermes vs OpenClaw in detail" style="cursor:pointer">
-          <div class="card-arrow">→</div>
+        <div class="comparison-card">
           <h4>Hermes vs. OpenClaw</h4>
           <p>
-            OpenClaw (MIT, ~350k+ GitHub stars) is the closest comparison — open-source, self-hosted, always-on, with persistent memory, cron scheduling, and messaging. OpenClaw has the widest messaging surface (24+ platforms, including iMessage, LINE, WeChat, Teams) and native Chrome CDP browser control. Hermes wins on stability (OpenClaw has documented Telegram regressions through April 2026) and security — three separate 2026 audits found malicious skills in ClawHub, with Koi Security linking 335 packages to the "ClawHavoc" campaign and Bitdefender flagging ~900 malicious packages (~20% of the ecosystem). Hermes writes skills automatically; OpenClaw centers on a human-curated marketplace. Hermes also runs in the Python/ML ecosystem; OpenClaw is Node.js.
+            OpenClaw (MIT, 350k+ stars) is the closest comparison: open-source, self-hosted, always-on. OpenClaw has the widest messaging surface (24+ platforms including iMessage, LINE, WeChat, Teams) and native Chrome CDP browser control. Hermes wins on stability (OpenClaw's Telegram integration broke across multiple 2026 releases) and security &mdash; three separate 2026 audits found malicious skills in ClawHub (Koi Security linked 335 to "ClawHavoc," Bitdefender flagged ~900 packages, ~20% of the ecosystem). Hermes writes skills automatically from experience; OpenClaw centers on a human-curated marketplace. Hermes runs in Python/ML ecosystem; OpenClaw is Node.js.
           </p>
         </div>
 
-        <div class="comparison-card" onclick="location.href='compare/claude-code.html'" role="link" tabindex="0" aria-label="Compare Hermes vs Claude Code in detail" style="cursor:pointer">
-          <div class="card-arrow">→</div>
+        <div class="comparison-card">
           <h4>Hermes vs. Claude Code</h4>
           <p>
-            Claude Code is Anthropic's official agentic tool, strong for focused coding sessions. It has a 26-event hooks system, a plugin/skills marketplace, CLAUDE.md/MEMORY.md project memory, and cloud-managed scheduling on Anthropic infrastructure. Research-preview messaging covers Telegram, Discord, and iMessage; Slack is not yet shipped. The key differences: cloud scheduling runs on Anthropic's infrastructure (data leaves your hardware; desktop app tasks run locally but require the app open), it's locked to Claude models, and it's not open source. Hermes can spawn Claude Code as a sub-agent for heavy implementation tasks — they're complementary.
+            Claude Code is Anthropic's official agentic tool spanning terminal, IDE, desktop, and browser. It has a 26-event hooks system, a plugin/skills marketplace, CLAUDE.md/MEMORY.md project memory with auto-memory since v2.1.59+, and cloud-managed scheduling on Anthropic infrastructure. Messaging channels (Telegram/Discord/iMessage) remain a research preview; Slack has not shipped. Key differences: scheduling requires cloud or desktop app (not a headless server daemon), memory doesn't accumulate across projects, and it's locked to Claude models. Hermes can spawn Claude Code as a sub-agent for heavy implementation tasks.
           </p>
         </div>
 
-        <div class="comparison-card" onclick="location.href='compare/cursor.html'" role="link" tabindex="0" aria-label="Compare Hermes vs Cursor in detail" style="cursor:pointer">
-          <div class="card-arrow">→</div>
+        <div class="comparison-card">
           <h4>Hermes vs. Cursor</h4>
           <p>
-            Cursor has changed substantially. Per-project Memories shipped June 2025. Automations launched March 2026 — time-based, event-based, Slack-triggered background agents. v3.0 (April 2026) went agent-first. It's now valued at $29.3B. Cursor is excellent at what it does. But its agents run on cloud VMs with no data sovereignty. Hermes runs on your server, accumulates context across all your projects (not per-project), works with any model family, and is reachable from every surface you use — not just the editor.
+            Cursor has changed substantially. Memories (per-project) shipped June 2025. Automations launched March 2026 with time-based, event-based, and Slack triggers on cloud VMs. Cursor v3.0 (April 2026) is explicitly agent-first with a $29.3B valuation. Cursor excels at editor-native agents with strong IDE integration. Hermes is self-hosted and server-resident: the same persistent identity follows you across every surface without cloud intermediation, works with any model family, and for workflows requiring data sovereignty or deep Python/ML tooling on your own hardware, Cursor's cloud architecture is a fundamental mismatch.
           </p>
         </div>
 
-        <div class="comparison-card" onclick="location.href='compare/claude-ai.html'" role="link" tabindex="0" aria-label="Compare Hermes vs Claude.ai and ChatGPT in detail" style="cursor:pointer">
-          <div class="card-arrow">→</div>
+        <div class="comparison-card">
           <h4>Hermes vs. Claude.ai / ChatGPT</h4>
           <p>
-            Both are capable and no longer just chat tools. Claude Cowork added scheduling (Feb 2026) and 50+ connectors including Slack. ChatGPT has Agent Mode (July 2025), Scheduled Tasks, a computer-using agent, and 50+ connectors. The fundamental issue isn't features — it's where execution lives. Neither is self-hosted. Memory, sessions, and scheduled tasks run on their servers. For workflows requiring data sovereignty, server-resident execution, or provider flexibility, that's a hard constraint with no workaround.
+            Both are no longer simple chat tools. Claude Cowork added scheduling (Feb 2026) and 50+ connectors. ChatGPT has Agent Mode (July 2025), Scheduled Tasks, and 50+ connectors. Both have improved memory. The fundamental difference isn't features &mdash; it's where execution lives. Neither is self-hosted. Neither is provider-agnostic. Memory, sessions, and agent execution run on their servers, not yours. For workflows requiring data sovereignty, persistent server-resident execution, or provider flexibility, that's a disqualifying constraint.
           </p>
         </div>
 
-      </div>
-
-      <div class="compare-more">
-        <p class="compare-more-label">More comparisons</p>
-        <div class="compare-more-links">
-          <a href="compare/openclaw.html" class="compare-pill">vs. OpenClaw</a>
-          <a href="compare/claude-code.html" class="compare-pill">vs. Claude Code</a>
-          <a href="compare/codex.html" class="compare-pill">vs. Codex CLI</a>
-          <a href="compare/opencode.html" class="compare-pill">vs. OpenCode</a>
-          <a href="compare/cursor.html" class="compare-pill">vs. Cursor</a>
-          <a href="compare/copilot.html" class="compare-pill">vs. GitHub Copilot</a>
-          <a href="compare/claude-ai.html" class="compare-pill">vs. Claude.ai</a>
-          <a href="compare/chatgpt.html" class="compare-pill">vs. ChatGPT</a>
-        </div>
       </div>
     </div>
   </section>
 
-  <!-- ===== SECTION 7: INSTALLATION ===== -->
-  <section id="install" class="section">
+  <!-- ===== SECTION 8: INSTALLATION ===== -->
+  <section id="install" class="section section-alt">
     <div class="container">
       <p class="section-label">Quick start</p>
       <h2 class="section-title">Get started in 60 seconds</h2>
@@ -1535,7 +1725,7 @@ docker run -d \
 
           <div class="code-wrap">
             <div class="code-header">
-              <span class="code-lang">bash — one-liner install</span>
+              <span class="code-lang">bash &mdash; one-liner install</span>
               <button class="copy-btn" onclick="copyCode(this)">Copy</button>
             </div>
             <pre><code class="language-bash">curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash</code></pre>
@@ -1543,7 +1733,7 @@ docker run -d \
 
           <div class="code-wrap" style="margin-top: 16px;">
             <div class="code-header">
-              <span class="code-lang">bash — first run</span>
+              <span class="code-lang">bash &mdash; first run</span>
               <button class="copy-btn" onclick="copyCode(this)">Copy</button>
             </div>
             <pre><code class="language-bash">source ~/.bashrc      # reload shell
@@ -1553,7 +1743,7 @@ hermes                # start chatting</code></pre>
 
           <div class="code-wrap" style="margin-top: 16px;">
             <div class="code-header">
-              <span class="code-lang">bash — key commands</span>
+              <span class="code-lang">bash &mdash; key commands</span>
               <button class="copy-btn" onclick="copyCode(this)">Copy</button>
             </div>
             <pre><code class="language-bash">hermes model          # choose LLM provider and model
@@ -1563,7 +1753,7 @@ hermes doctor         # diagnose any issues</code></pre>
           </div>
 
           <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" target="_blank" rel="noopener" class="docs-link">
-            Full installation guide →
+            Full installation guide &#8594;
           </a>
         </div>
 
@@ -1592,6 +1782,10 @@ hermes doctor         # diagnose any issues</code></pre>
               <span class="provider-badge badge-oauth">OAuth or token</span>
             </div>
             <div class="provider-row">
+              <span class="provider-name">Google / Gemini</span>
+              <span class="provider-badge badge-key">API key</span>
+            </div>
+            <div class="provider-row">
               <span class="provider-name">DeepSeek</span>
               <span class="provider-badge badge-key">API key</span>
             </div>
@@ -1615,7 +1809,7 @@ hermes doctor         # diagnose any issues</code></pre>
             </div>
           </div>
           <div class="platforms-note">
-            <span>⚡</span>
+            <span>&#9889;</span>
             Run <code style="font-family: 'JetBrains Mono', monospace; font-size: 0.85em;">hermes model</code> to browse and authenticate interactively
           </div>
         </div>
@@ -1623,8 +1817,8 @@ hermes doctor         # diagnose any issues</code></pre>
     </div>
   </section>
 
-  <!-- ===== SECTION 8: WHAT HERMES IS NOT ===== -->
-  <section id="limits" class="section section-alt">
+  <!-- ===== SECTION 9: WHAT HERMES IS NOT ===== -->
+  <section id="limits" class="section">
     <div class="container">
       <p class="section-label">Honest limitations</p>
       <h2 class="section-title">What Hermes is not</h2>
@@ -1634,37 +1828,37 @@ hermes doctor         # diagnose any issues</code></pre>
       <div class="limitations-grid">
 
         <div class="limitation-item">
-          <div class="limitation-icon">✏️</div>
+          <div class="limitation-icon">&#9999;</div>
           <div class="limitation-text">
-            <strong>Not the best in-editor autocomplete.</strong> For tight editor integration and line-by-line completions, use Cursor or Windsurf. That's not what Hermes is optimizing for.
+            <strong>Not the best in-editor autocomplete.</strong> Cursor and Windsurf do that job better. Use one alongside Hermes &mdash; that's not what it's optimizing for.
           </div>
         </div>
 
         <div class="limitation-item">
-          <div class="limitation-icon">🔧</div>
+          <div class="limitation-icon">&#128295;</div>
           <div class="limitation-text">
-            <strong>Not zero-setup.</strong> You're running a server process. There's initial configuration for providers, messaging platforms, and tools. That's the trade-off for having something you own.
+            <strong>Not zero-setup.</strong> You're running a server. That means initial configuration, and you're responsible for uptime, upgrades, and backups. The tradeoff is data sovereignty and control.
           </div>
         </div>
 
         <div class="limitation-item">
-          <div class="limitation-icon">🤖</div>
+          <div class="limitation-icon">&#129302;</div>
           <div class="limitation-text">
-            <strong>Doesn't make weaker models magical.</strong> The infrastructure is only as good as the model you connect. A weak model with great memory is still a weak model.
+            <strong>Doesn't make weaker models magical.</strong> Memory and skills help, but the underlying model determines reasoning quality. Hermes with a weak model is a well-organized weak model.
           </div>
         </div>
 
         <div class="limitation-item">
-          <div class="limitation-icon">⚠️</div>
+          <div class="limitation-icon">&#9888;</div>
           <div class="limitation-text">
-            <strong>Needs guardrails for high-stakes automations.</strong> Autonomous scheduling with broad tool access is powerful. Review what you're scheduling. The security model helps, but judgment matters.
+            <strong>Needs guardrails for high-stakes automations.</strong> Autonomous execution on a schedule with shell access is powerful and requires judgment. Terminal commands can require confirmation &mdash; use that for anything consequential.
           </div>
         </div>
 
         <div class="limitation-item">
-          <div class="limitation-icon">⚡</div>
+          <div class="limitation-icon">&#9889;</div>
           <div class="limitation-text">
-            <strong>Not the lowest-friction one-shot tool.</strong> For a quick answer you'll never revisit, claude.ai or ChatGPT is faster to reach. Hermes earns its setup cost over time, not in the first session.
+            <strong>Not the lowest-friction one-shot tool.</strong> For a quick answer you'll never revisit, a chat interface is faster. Hermes earns its setup cost over time, not in the first session.
           </div>
         </div>
 
@@ -1672,93 +1866,93 @@ hermes doctor         # diagnose any issues</code></pre>
     </div>
   </section>
 
-  <!-- ===== SECTION 9: RESOURCES ===== -->
-  <section id="resources" class="section">
+  <!-- ===== SECTION 10: RESOURCES ===== -->
+  <section id="resources" class="section section-alt">
     <div class="container">
-      <p class="section-label">Docs & community</p>
+      <p class="section-label">Docs &amp; community</p>
       <h2 class="section-title">Resources</h2>
       <div class="resources-grid">
 
         <a href="https://hermes-agent.nousresearch.com/docs/" target="_blank" rel="noopener" class="resource-card">
-          <div class="resource-icon">📖</div>
+          <div class="resource-icon">&#128214;</div>
           <div class="resource-title">Official docs</div>
           <div class="resource-url">hermes-agent.nousresearch.com/docs</div>
         </a>
 
         <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" target="_blank" rel="noopener" class="resource-card">
-          <div class="resource-icon">🚀</div>
+          <div class="resource-icon">&#128640;</div>
           <div class="resource-title">Installation guide</div>
           <div class="resource-url">Getting started</div>
         </a>
 
         <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/memory" target="_blank" rel="noopener" class="resource-card">
-          <div class="resource-icon">🧠</div>
+          <div class="resource-icon">&#129504;</div>
           <div class="resource-title">Memory system</div>
           <div class="resource-url">Layered persistent memory</div>
         </a>
 
         <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/skills" target="_blank" rel="noopener" class="resource-card">
-          <div class="resource-icon">📚</div>
+          <div class="resource-icon">&#128218;</div>
           <div class="resource-title">Skills system</div>
           <div class="resource-url">agentskills.io compatible</div>
         </a>
 
         <a href="https://hermes-agent.nousresearch.com/docs/user-guide/messaging" target="_blank" rel="noopener" class="resource-card">
-          <div class="resource-icon">💬</div>
+          <div class="resource-icon">&#128172;</div>
           <div class="resource-title">Messaging setup</div>
-          <div class="resource-url">15+ platforms</div>
+          <div class="resource-url">Multi-surface access</div>
         </a>
 
         <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/tools" target="_blank" rel="noopener" class="resource-card">
-          <div class="resource-icon">🔧</div>
+          <div class="resource-icon">&#128295;</div>
           <div class="resource-title">Tools reference</div>
           <div class="resource-url">47 built-in tools</div>
         </a>
 
         <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp" target="_blank" rel="noopener" class="resource-card">
-          <div class="resource-icon">🔌</div>
+          <div class="resource-icon">&#128268;</div>
           <div class="resource-title">MCP integration</div>
           <div class="resource-url">Connect any MCP server</div>
         </a>
 
         <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/voice-mode" target="_blank" rel="noopener" class="resource-card">
-          <div class="resource-icon">🎙️</div>
+          <div class="resource-icon">&#127908;</div>
           <div class="resource-title">Voice mode</div>
           <div class="resource-url">CLI, Telegram, Discord</div>
         </a>
 
         <a href="https://hermes-agent.nousresearch.com/docs/user-guide/security" target="_blank" rel="noopener" class="resource-card">
-          <div class="resource-icon">🔒</div>
+          <div class="resource-icon">&#128274;</div>
           <div class="resource-title">Security model</div>
           <div class="resource-url">7-layer defense in depth</div>
         </a>
 
         <a href="https://github.com/NousResearch/hermes-agent" target="_blank" rel="noopener" class="resource-card">
-          <div class="resource-icon">⭐</div>
-          <div class="resource-title">GitHub — Hermes Agent</div>
+          <div class="resource-icon">&#11088;</div>
+          <div class="resource-title">GitHub &mdash; Hermes Agent</div>
           <div class="resource-url">NousResearch/hermes-agent</div>
         </a>
 
         <a href="https://github.com/nesquena/hermes-webui" target="_blank" rel="noopener" class="resource-card">
-          <div class="resource-icon">🖥️</div>
-          <div class="resource-title">GitHub — Hermes Web UI</div>
+          <div class="resource-icon">&#128421;</div>
+          <div class="resource-title">GitHub &mdash; Hermes Web UI</div>
           <div class="resource-url">nesquena/hermes-webui</div>
         </a>
 
         <a href="https://discord.gg/NousResearch" target="_blank" rel="noopener" class="resource-card">
-          <div class="resource-icon">💬</div>
+          <div class="resource-icon">&#128172;</div>
           <div class="resource-title">Discord</div>
           <div class="resource-url">discord.gg/NousResearch</div>
         </a>
 
         <a href="https://nousresearch.com" target="_blank" rel="noopener" class="resource-card">
-          <div class="resource-icon">🔬</div>
+          <div class="resource-icon">&#128300;</div>
           <div class="resource-title">Nous Research</div>
           <div class="resource-url">nousresearch.com</div>
         </a>
 
         <a href="https://agentskills.io" target="_blank" rel="noopener" class="resource-card">
-          <div class="resource-icon">🛠️</div>
+          <div class="resource-icon">&#128736;</div>
           <div class="resource-title">agentskills.io</div>
           <div class="resource-url">Open skills standard</div>
         </a>
@@ -1794,43 +1988,41 @@ hermes doctor         # diagnose any issues</code></pre>
   });
 
   // ===== THEME TOGGLE =====
-  const themeToggle = document.getElementById('theme-toggle');
-  const html = document.documentElement;
-  const hljsTheme = document.getElementById('hljs-theme');
+  var themeToggle = document.getElementById('theme-toggle');
+  var html = document.documentElement;
+  var hljsTheme = document.getElementById('hljs-theme');
 
   function setTheme(theme) {
     html.setAttribute('data-theme', theme);
     localStorage.setItem('theme', theme);
-    // Code blocks are always dark-styled; hljs stays on github-dark regardless of theme
     if (theme === 'light') {
-      themeToggle.textContent = '🌙';
+      themeToggle.innerHTML = '&#9728;&#65039;';
+      hljsTheme.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css';
     } else {
-      themeToggle.textContent = '☀️';
+      themeToggle.innerHTML = '&#9790;';
+      hljsTheme.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css';
     }
   }
 
-  // Init theme
-  const saved = localStorage.getItem('theme');
-  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  // Init theme: dark by default
+  var saved = localStorage.getItem('theme');
   if (saved) {
     setTheme(saved);
-  } else if (!prefersDark) {
-    setTheme('light');
   } else {
     setTheme('dark');
   }
 
   themeToggle.addEventListener('click', function() {
-    const current = html.getAttribute('data-theme');
+    var current = html.getAttribute('data-theme');
     setTheme(current === 'dark' ? 'light' : 'dark');
   });
 
   // ===== HAMBURGER MENU =====
-  const hamburger = document.getElementById('hamburger');
-  const mobileMenu = document.getElementById('mobile-menu');
+  var hamburger = document.getElementById('hamburger');
+  var mobileMenu = document.getElementById('mobile-menu');
 
   hamburger.addEventListener('click', function() {
-    const isOpen = mobileMenu.classList.toggle('open');
+    var isOpen = mobileMenu.classList.toggle('open');
     hamburger.classList.toggle('open', isOpen);
     hamburger.setAttribute('aria-expanded', isOpen);
   });
@@ -1850,8 +2042,8 @@ hermes doctor         # diagnose any issues</code></pre>
 
   // ===== COPY CODE =====
   function copyCode(btn) {
-    const pre = btn.closest('.code-wrap').querySelector('pre');
-    const text = pre.textContent;
+    var pre = btn.closest('.code-wrap').querySelector('pre');
+    var text = pre.textContent;
     navigator.clipboard.writeText(text).then(function() {
       btn.textContent = 'Copied!';
       btn.classList.add('copied');
@@ -1860,8 +2052,7 @@ hermes doctor         # diagnose any issues</code></pre>
         btn.classList.remove('copied');
       }, 2000);
     }).catch(function() {
-      // Fallback for older browsers
-      const ta = document.createElement('textarea');
+      var ta = document.createElement('textarea');
       ta.value = text;
       ta.style.position = 'fixed';
       ta.style.opacity = '0';
@@ -1878,36 +2069,45 @@ hermes doctor         # diagnose any issues</code></pre>
     });
   }
 
-  // ===== KEYBOARD NAV FOR CLICKABLE CARDS =====
-  document.querySelectorAll('.comparison-card[role="link"]').forEach(function(card) {
-    card.addEventListener('keydown', function(e) {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        card.click();
-      }
-    });
+  // ===== LIGHTBOX =====
+  function openLightbox(src) {
+    var lightbox = document.getElementById('lightbox');
+    var img = document.getElementById('lightbox-img');
+    img.src = src;
+    lightbox.classList.add('active');
+    document.body.style.overflow = 'hidden';
+  }
+
+  function closeLightbox() {
+    var lightbox = document.getElementById('lightbox');
+    lightbox.classList.remove('active');
+    document.body.style.overflow = '';
+  }
+
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') closeLightbox();
   });
 
-  // ===== SMOOTH SCROLL (for older browsers) =====
+  // ===== SMOOTH SCROLL =====
   document.querySelectorAll('a[href^="#"]').forEach(function(anchor) {
     anchor.addEventListener('click', function(e) {
-      const target = document.querySelector(this.getAttribute('href'));
+      var target = document.querySelector(this.getAttribute('href'));
       if (target) {
         e.preventDefault();
-        const top = target.getBoundingClientRect().top + window.scrollY - 72;
+        var top = target.getBoundingClientRect().top + window.scrollY - 72;
         window.scrollTo({ top: top, behavior: 'smooth' });
       }
     });
   });
 
   // ===== NAV ACTIVE STATE =====
-  const sections = document.querySelectorAll('section[id]');
-  const navLinks = document.querySelectorAll('.nav-links a');
+  var sections = document.querySelectorAll('section[id]');
+  var navLinks = document.querySelectorAll('.nav-links a');
 
   function updateActiveNav() {
-    let current = '';
+    var current = '';
     sections.forEach(function(section) {
-      const top = section.offsetTop - 100;
+      var top = section.offsetTop - 100;
       if (window.scrollY >= top) {
         current = section.getAttribute('id');
       }
