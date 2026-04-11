@@ -28,6 +28,23 @@ try:
     from run_agent import AIAgent
 except ImportError:
     AIAgent = None
+
+def _get_ai_agent():
+    """Return AIAgent class, retrying the import if the initial attempt failed.
+
+    auto_install_agent_deps() in server.py may install missing packages after
+    this module is first imported (common in Docker with a volume-mounted agent).
+    Re-attempting the import here picks up the newly installed packages without
+    requiring a server restart.
+    """
+    global AIAgent
+    if AIAgent is None:
+        try:
+            from run_agent import AIAgent as _cls  # noqa: PLC0415
+            AIAgent = _cls
+        except ImportError:
+            pass
+    return AIAgent
 from api.models import get_session, title_from
 from api.workspace import set_last_workspace
 
@@ -111,15 +128,15 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
         # The finally block re-acquires to restore — keeping critical sections short
         # and preventing a deadlock where the restore would re-enter the same lock.
         with _ENV_LOCK:
-          old_cwd = os.environ.get('TERMINAL_CWD')
-          old_exec_ask = os.environ.get('HERMES_EXEC_ASK')
-          old_session_key = os.environ.get('HERMES_SESSION_KEY')
-          old_hermes_home = os.environ.get('HERMES_HOME')
-          os.environ['TERMINAL_CWD'] = str(s.workspace)
-          os.environ['HERMES_EXEC_ASK'] = '1'
-          os.environ['HERMES_SESSION_KEY'] = session_id
-          if _profile_home:
-              os.environ['HERMES_HOME'] = _profile_home
+            old_cwd = os.environ.get('TERMINAL_CWD')
+            old_exec_ask = os.environ.get('HERMES_EXEC_ASK')
+            old_session_key = os.environ.get('HERMES_SESSION_KEY')
+            old_hermes_home = os.environ.get('HERMES_HOME')
+            os.environ['TERMINAL_CWD'] = str(s.workspace)
+            os.environ['HERMES_EXEC_ASK'] = '1'
+            os.environ['HERMES_SESSION_KEY'] = session_id
+            if _profile_home:
+                os.environ['HERMES_HOME'] = _profile_home
         # Lock released — agent runs without holding it
         # Register a gateway-style notify callback so the approval system can
         # push the `approval` SSE event the moment a dangerous command is
@@ -165,7 +182,8 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 except ImportError:
                     pass
 
-            if AIAgent is None:
+            _AIAgent = _get_ai_agent()
+            if _AIAgent is None:
                 raise ImportError("AIAgent not available -- check that hermes-agent is on sys.path")
             resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(model)
 
@@ -206,7 +224,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             else:
                 _fallback_resolved = None
 
-            agent = AIAgent(
+            agent = _AIAgent(
                 model=resolved_model,
                 provider=resolved_provider,
                 base_url=resolved_base_url,
