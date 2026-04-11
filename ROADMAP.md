@@ -330,3 +330,11 @@ Community-requested enhancements tracked from GitHub issues. All shipped.
 | Multi-profile support | #28 | Done | Sprint 22 |
 | Mobile responsive UI | #21 | Done | Sprint 21 |
 | Profile creation in Docker | #44 | Done | v0.27 |
+
+---
+
+## Maintenance Notes
+
+- April 11, 2026: self-update failures now surface concrete git timeout/process errors instead of empty `Pull failed:` responses.
+- April 11, 2026: update apply only stashes tracked changes; untracked-only files no longer trigger a broken stash/pop sequence.
+- April 11, 2026: update apply aborts early on repos with unresolved merge conflicts.
