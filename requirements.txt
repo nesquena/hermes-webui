@@ -2,4 +2,3 @@
 # The server uses only stdlib + pyyaml.
 # All heavy ML/agent deps live in the Hermes agent venv.
 pyyaml>=6.0
-openai
