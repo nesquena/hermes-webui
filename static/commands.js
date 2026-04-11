@@ -12,6 +12,7 @@ const COMMANDS=[
   {name:'usage',     desc:t('cmd_usage'),   fn:cmdUsage},
   {name:'theme',     desc:t('cmd_theme'), fn:cmdTheme, arg:'name'},
   {name:'personality', desc:t('cmd_personality'), fn:cmdPersonality, arg:'name'},
+  {name:'skills', desc:t('cmd_skills'), fn:cmdSkills, arg:'query'},
 ];
 
 function parseCommand(text){
@@ -138,6 +139,49 @@ async function cmdTheme(args){
   const sel=$('settingsTheme');
   if(sel)sel.value=themeName;
   showToast(t('theme_set')+themeName);
+}
+
+async function cmdSkills(args){
+  try{
+    const data = await api('/api/skills');
+    let skills = data.skills || [];
+    if(args){
+      const q = args.toLowerCase();
+      skills = skills.filter(s =>
+        (s.name||'').toLowerCase().includes(q) ||
+        (s.description||'').toLowerCase().includes(q) ||
+        (s.category||'').toLowerCase().includes(q)
+      );
+    }
+    if(!skills.length){
+      const msg = {role:'assistant', content: args ? `No skills matching "${args}".` : 'No skills found.'};
+      S.messages.push(msg); renderMessages(); return;
+    }
+    // Group by category
+    const byCategory = {};
+    skills.forEach(s => {
+      const cat = s.category || 'General';
+      if(!byCategory[cat]) byCategory[cat] = [];
+      byCategory[cat].push(s);
+    });
+    const lines = [];
+    for(const [cat, items] of Object.entries(byCategory).sort()){
+      lines.push(`**${cat}**`);
+      items.forEach(s => {
+        const desc = s.description ? ` — ${s.description.slice(0,80)}${s.description.length>80?'...':''}` : '';
+        lines.push(`  \`${s.name}\`${desc}`);
+      });
+      lines.push('');
+    }
+    const header = args
+      ? `Skills matching "${args}" (${skills.length}):\n\n`
+      : `Available skills (${skills.length}):\n\n`;
+    S.messages.push({role:'assistant', content: header + lines.join('\n')});
+    renderMessages();
+    showToast(t('type_slash'));
+  }catch(e){
+    showToast('Failed to load skills: '+e.message);
+  }
 }
 
 async function cmdPersonality(args){
