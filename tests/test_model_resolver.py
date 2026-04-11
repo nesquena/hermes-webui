@@ -378,3 +378,46 @@ def test_custom_endpoint_uses_model_config_api_key_for_model_discovery(monkeypat
     groups = {g['provider']: [m['id'] for m in g['models']] for g in result['groups']}
     assert 'Custom' in groups
     assert 'gpt-5.2' in groups['Custom']
+
+
+# -- Issue #230: custom provider with slash model name -----------------------
+
+def test_custom_endpoint_slash_model_routes_to_custom_not_openrouter():
+    """Regression test for #230.
+
+    When provider=custom (or any non-openrouter provider) and base_url is set,
+    a model name containing a slash (e.g. google/gemma-4-26b-a4b) must NOT be
+    rerouted to OpenRouter -- it should stay on the configured custom endpoint.
+    """
+    # --- custom provider with slash model name should NOT go to openrouter ---
+    model, provider, base_url = _resolve_with_config(
+        'google/gemma-4-26b-a4b',
+        provider='custom',
+        base_url='http://127.0.0.1:1234/v1',
+        default='google/gemma-4-26b-a4b',
+    )
+    assert provider.startswith('custom'), (
+        "Expected provider starting with 'custom', got '{}'. "
+        "Slash in model name should NOT trigger OpenRouter rerouting when base_url is set.".format(provider)
+    )
+    assert base_url == 'http://127.0.0.1:1234/v1', (
+        "Expected base_url 'http://127.0.0.1:1234/v1', got '{}'.".format(base_url)
+    )
+    assert model == 'google/gemma-4-26b-a4b', (
+        "Model name should be preserved as-is, got '{}'.".format(model)
+    )
+
+    # --- openrouter with slash model name MUST still route to openrouter -----
+    model_or, provider_or, _ = _resolve_with_config(
+        'google/gemma-4-26b-a4b',
+        provider='openrouter',
+        base_url='https://openrouter.ai/api/v1',
+        default='google/gemma-4-26b-a4b',
+    )
+    assert provider_or == 'openrouter', (
+        "Expected provider 'openrouter', got '{}'. "
+        "Slash model via openrouter provider must still resolve to openrouter.".format(provider_or)
+    )
+    assert model_or == 'google/gemma-4-26b-a4b', (
+        "Model name should be preserved for openrouter, got '{}'.".format(model_or)
+    )
