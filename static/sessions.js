@@ -417,7 +417,8 @@ function renderSessionListFromCache(){
 }
 
 async function deleteSession(sid){
-  if(!confirm('Delete this conversation?'))return;
+  const _delSess=await showConfirmDialog({title:'Delete conversation',message:'This cannot be undone.',confirmLabel:'Delete',danger:true,focusCancel:true});
+  if(!_delSess) return;
   try{
     await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
   }catch(e){setStatus(`Delete failed: ${e.message}`);return;}
@@ -493,7 +494,7 @@ function _showProjectPicker(session, anchorEl){
     picker.remove();
     document.removeEventListener('click',close);
     // Prompt for name inline
-    const name=prompt('Project name:');
+    const name=await showPromptDialog({title:'New project',message:'',placeholder:'Project name',confirmLabel:t('create')});
     if(!name||!name.trim()) return;
     const color=PROJECT_COLORS[_allProjects.length%PROJECT_COLORS.length];
     const res=await api('/api/projects/create',{method:'POST',body:JSON.stringify({name:name.trim(),color})});
@@ -532,7 +533,7 @@ function _showProjectPicker(session, anchorEl){
   setTimeout(()=>document.addEventListener('click',close),0);
 }
 
-function _startProjectCreate(bar, addBtn){
+async function _startProjectCreate(bar, addBtn){
   const inp=document.createElement('input');
   inp.className='project-create-input';
   inp.placeholder='Project name';
@@ -579,7 +580,8 @@ function _startProjectRename(proj, chip){
 }
 
 async function _confirmDeleteProject(proj){
-  if(!confirm('Delete project "'+proj.name+'"? Sessions will be unassigned but not deleted.')){return;}
+  const _delProj=await showConfirmDialog({title:`Delete project "${proj.name}"?`,message:'Sessions will be unassigned but not deleted.',confirmLabel:'Delete',danger:true,focusCancel:true});
+  if(!_delProj) return;
   await api('/api/projects/delete',{method:'POST',body:JSON.stringify({project_id:proj.project_id})});
   if(_activeProject===proj.project_id) _activeProject=null;
   await renderSessionList();
