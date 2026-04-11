@@ -32,7 +32,7 @@
 | Sprint 13 | Alerts + polish | Cron completion alerts (polling + badge), background error banner, session duplicate, browser tab title | 221 |
 | Sprint 14 | Visual polish + workspace ops | Mermaid diagrams, message timestamps, file rename, folder create, session tags, session archive | 233 |
 | Sprint 15 | Session projects + code copy | Session projects/folders, code block copy button, tool card expand/collapse toggle | 237 |
-| Sprint 16 | Session sidebar visual polish | SVG action icons, overlay hover actions, pin indicator, project border, safe HTML rendering | 289 |
+| Sprint 16 | Session sidebar visual polish | SVG action icons, session action dropdown, pin indicator, project border, safe HTML rendering | 289 |
 | Sprint 17 | Workspace polish + slash commands + settings | Breadcrumb navigation, slash command autocomplete, send key setting (#26) | 318 |
 | Sprint 18 | Thinking display + workspace tree | File preview auto-close, thinking/reasoning cards, expandable directory tree (#22) | 318 |
 | Sprint 19 | Auth + security hardening | Password auth (off by default), login page, security headers, 20MB body limit (#23) | 328 |

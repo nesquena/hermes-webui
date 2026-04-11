@@ -1667,11 +1667,12 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 
 ### Sprint 16: Sidebar Visual Polish
 - Session titles use full sidebar width (no truncated space for hidden icons).
-- Hover a session → action buttons appear from right with gradient fade.
+- Hover a session → a dotted actions trigger appears on the right.
+- Click the dotted trigger → a dropdown opens with pin, project, archive, duplicate, and delete actions.
 - All icons are monochrome SVGs (not emoji). Consistent across platforms.
 - Pinned sessions show small gold star inline. Unpinned = no star, full title width.
-- Active session has gold highlight (not blue). Overlay gradient matches.
-- Double-click to rename → overlay hides during rename.
+- Active session has gold highlight (not blue).
+- Double-click to rename → session actions hide during rename.
 
 ### Sprint 17: Workspace + Slash Commands + Send Key
 - Navigate into a subdirectory. Breadcrumb bar appears with clickable segments.
