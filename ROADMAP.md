@@ -99,18 +99,20 @@
 - [x] Tool call cards inline (collapsed, show name/args/result)
 
 ### Workspace / Files
+- [x] Workspace panel defaults closed and opens only for active browsing or preview
 - [x] Browse workspace directory tree with type icons
 - [x] Preview text/code files (read-only)
 - [x] Preview markdown files (rendered, tables supported)
 - [x] Preview image files (PNG, JPG, GIF, SVG, WEBP inline)
 - [x] Edit files inline (Edit button, Enter to save, Escape to cancel)
 - [x] Create new file (+ button in panel header)
-- [x] Delete file (hover trash, confirm dialog)
+- [x] Delete file (hover trash, confirmation modal)
 - [x] File name truncation with tooltip for long names
 - [x] Right panel resizable (drag inner edge)
 - [x] Syntax highlighted code preview (Prism.js)
 - [x] Rename file (Sprint 14)
 - [x] Create folder (Sprint 14)
+- [x] Shared app modal for confirm/input flows (Sprint 33)
 
 ### Sessions
 - [x] Create session (+ button or Cmd/Ctrl+K)

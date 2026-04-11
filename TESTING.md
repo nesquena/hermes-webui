@@ -228,8 +228,18 @@ FAIL: File not removed, error.
 
 ## Section 5: Workspace File Browser
 
-### T5.1: File Tree Loads on Session Start
+### T5.0: Panel Is Closed By Default
 SETUP: Active session with workspace set.
+EXPECT:
+  - Right workspace panel is hidden on initial load
+  - Center chat column uses the freed width
+  - "Files" toggle is visible in the topbar
+FAIL: Right panel starts open without any browsing or preview action.
+
+### T5.1: File Tree Loads When Files Panel Is Opened
+SETUP: Active session with workspace set.
+STEPS:
+  1. Click the "Files" toggle in the topbar
 EXPECT:
   - Right panel shows "WORKSPACE" header
   - File tree lists files and directories in the workspace
@@ -263,10 +273,11 @@ STEPS:
   1. Click the X button in the panel header
 EXPECT:
   - Preview closes
-  - File tree is visible again
+  - If the panel auto-opened for that preview, the entire right panel closes again
+  - If the panel was manually opened for browsing first, the file tree is visible again
   - Preview area is hidden
   - Reopening the same file shows fresh content (no stale cached text)
-FAIL: X button does nothing, tree does not reappear.
+FAIL: X button does nothing, panel stays stuck open, or the file tree does not reappear after manual browse mode.
 
 ### T5.5: Preview an Image File (Sprint 2)
 SETUP: Upload a PNG, JPG, or any image file to the workspace, OR the workspace already contains one.
@@ -831,7 +842,7 @@ FAIL: No icon ever appears, icon always visible (not hover-only).
 ### T21.2: Delete a File with Confirmation
 STEPS:
   1. Hover over a file and click its trash icon
-  2. A browser confirm dialog appears: "Delete [filename]?"
+  2. An in-app confirmation modal appears: "Delete [filename]?"
   3. Click OK
 EXPECT:
   - Toast: "Deleted [filename]"
@@ -842,7 +853,7 @@ FAIL: File not deleted, no confirmation dialog, error.
 ### T21.3: Cancel Delete Does Nothing
 STEPS:
   1. Hover over a file and click its trash icon
-  2. Click Cancel on the confirm dialog
+  2. Click Cancel on the confirmation modal
 EXPECT:
   - File remains in the tree
   - No toast, no error
@@ -851,7 +862,7 @@ FAIL: File deleted despite cancel.
 ### T21.4: Create a New File
 STEPS:
   1. Click the + button in the workspace panel header
-  2. A prompt dialog appears: "New file name (e.g. notes.md):"
+  2. An in-app input modal appears: "New file name (e.g. notes.md):"
   3. Type "test-sprint4.md" and click OK
 EXPECT:
   - Toast: "Created test-sprint4.md"
@@ -925,7 +936,7 @@ FAIL: Invalid path added, no error.
 ### T22.4: Remove a Workspace
 STEPS:
   1. Click the X button next to any non-default workspace
-  2. Confirm the dialog
+  2. Confirm the modal
 EXPECT:
   - Workspace disappears from the list
   - Toast: "Workspace removed"
@@ -1297,7 +1308,7 @@ FAIL: Save fails, name unchanged.
 SETUP: A cron job you can safely delete (or a test job created for this).
 STEPS:
   1. Expand the job, click "Delete"
-  2. Confirm the dialog
+  2. Confirm the modal
 EXPECT:
   - Toast: "Job deleted"
   - Job disappears from the list
@@ -1474,7 +1485,7 @@ FAIL: Button always visible, never visible.
 ### T34.2: Clear Wipes Messages and Resets Title
 STEPS:
   1. Click the Clear button in the topbar
-  2. Confirm the dialog
+  2. Confirm the modal
 EXPECT:
   - All messages disappear from the chat area
   - Empty state ("What can I help with?") reappears
@@ -1485,7 +1496,7 @@ FAIL: Session deleted, messages remain, title not reset.
 
 ### T34.3: Cancel Clear Does Nothing
 STEPS:
-  1. Click Clear, then click Cancel in the confirm dialog
+  1. Click Clear, then click Cancel in the confirmation modal
 EXPECT:
   - All messages still present
   - No toast, no change
@@ -1702,7 +1713,7 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 - "Use" button switches profile. Delete button removes non-default profiles.
 - "+ New profile" form: name validation (lowercase + hyphens), clone config checkbox.
 - Create profile → appears in list and dropdown.
-- Delete profile → confirm dialog. Auto-switches to default if deleting active.
+- Delete profile → confirmation modal. Auto-switches to default if deleting active.
 - Attempt switch while agent busy → blocked with toast message.
 - With hermes-agent not installed → only default profile shown, graceful fallback.
 
