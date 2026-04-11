@@ -448,6 +448,11 @@ def resolve_model_provider(model_id: str) -> tuple:
         # e.g. config=anthropic, model=anthropic/claude-... → bare name to anthropic API
         if config_provider and prefix == config_provider:
             return bare, config_provider, config_base_url
+        # If a custom endpoint base_url is configured, don't reroute through OpenRouter
+        # just because the model name contains a slash (e.g. google/gemma-4-26b-a4b).
+        # The user has explicitly pointed at a base_url, so trust their routing config.
+        if config_base_url:
+            return model_id, config_provider, config_base_url
         # If prefix does NOT match config provider, the user picked a cross-provider model
         # from the OpenRouter dropdown (e.g. config=anthropic but picked openai/gpt-5.4-mini).
         # In this case always route through openrouter with the full provider/model string.
