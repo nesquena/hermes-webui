@@ -746,20 +746,78 @@ function renderProfileDropdown(data) {
 }
 
 function toggleProfileDropdown() {
-  const dd = $('profileDropdown');
-  if (!dd) return;
-  if (dd.classList.contains('open')) { closeProfileDropdown(); return; }
-  closeWsDropdown(); // close workspace dropdown if open
+  // Portal-style menu to avoid Android Chrome click issues inside scrollable topbar
+  const wrap = $('profileChipWrap');
+  const chip = $('profileChip');
+  if (!wrap || !chip) return;
+  // if open -> close
+  const existing = document.getElementById('profileMenuPortal');
+  if (existing) { closeProfileDropdown(); return; }
+
+  closeWsDropdown();
   api('/api/profiles').then(data => {
     renderProfileDropdown(data);
-    dd.classList.add('open');
+    openProfileMenuPortal();
   }).catch(e => { showToast('Failed to load profiles'); });
+}
+
+function openProfileMenuPortal(){
+  const chip = $('profileChip');
+  const dd = $('profileDropdown');
+  if(!chip || !dd) return;
+  // create portal container
+  const portal = document.createElement('div');
+  portal.id = 'profileMenuPortal';
+  portal.style.position = 'fixed';
+  portal.style.inset = '0';
+  portal.style.zIndex = '1400';
+
+  // backdrop
+  const backdrop = document.createElement('div');
+  backdrop.style.position = 'absolute';
+  backdrop.style.inset = '0';
+  backdrop.style.background = 'transparent';
+  backdrop.addEventListener('pointerdown', (e)=>{ e.preventDefault(); closeProfileDropdown(); }, {passive:false});
+  portal.appendChild(backdrop);
+
+  // menu
+  const menu = dd;
+  menu.classList.add('open');
+  menu.style.display = 'block';
+  menu.style.position = 'fixed';
+  menu.style.left = 'auto';
+
+  const r = chip.getBoundingClientRect();
+  const top = Math.round(r.bottom + 6);
+  const right = Math.round(window.innerWidth - r.right);
+  menu.style.top = top + 'px';
+  menu.style.right = Math.max(8, right) + 'px';
+
+  // stop outside handlers
+  menu.addEventListener('pointerdown', (e)=>{ try{ e.stopPropagation(); }catch(_){} }, true);
+
+  portal.appendChild(menu);
+  document.body.appendChild(portal);
 }
 
 function closeProfileDropdown() {
   const dd = $('profileDropdown');
-  if (dd) dd.classList.remove('open');
+  if (dd) {
+    dd.classList.remove('open');
+    // reset inline styles we set for portal
+    dd.style.position = '';
+    dd.style.top = '';
+    dd.style.right = '';
+    dd.style.left = '';
+    dd.style.display = '';
+  }
+  const portal = document.getElementById('profileMenuPortal');
+  if (portal) portal.remove();
+  // re-attach dd back into the chip wrap (in case it was moved)
+  const wrap = $('profileChipWrap');
+  if (wrap && dd && dd.parentNode !== wrap) wrap.appendChild(dd);
 }
+
 document.addEventListener('click', e => {
   if (!e.target.closest('#profileChipWrap')) closeProfileDropdown();
 });
