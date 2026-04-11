@@ -310,7 +310,8 @@
   .sidebar-bottom{border-top:1px solid var(--border);padding:12px 14px;flex-shrink:0;position:relative;z-index:10;overflow:visible;}
   .hermes-launch-btn{width:100%;display:flex;align-items:center;gap:12px;padding:11px 12px;border-radius:12px;border:1px solid var(--border2);background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.03));color:var(--text);cursor:pointer;transition:background .15s,border-color .15s,transform .15s;text-align:left;}
   .hermes-launch-btn:hover{background:rgba(255,255,255,.08);border-color:rgba(124,185,255,.28);transform:translateY(-1px);}
-  .hermes-launch-icon{width:32px;height:32px;border-radius:10px;background:rgba(124,185,255,.12);color:var(--blue);display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+  .hermes-launch-icon{width:32px;height:32px;border-radius:10px;background:linear-gradient(145deg,rgba(124,185,255,.15),rgba(201,168,76,.1));border:1px solid rgba(124,185,255,.2);display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden;box-shadow:0 4px 16px rgba(124,185,255,.08);}
+  .hermes-launch-icon svg{display:block;width:22px;height:22px;flex-shrink:0;}
   .hermes-launch-copy{display:flex;flex-direction:column;min-width:0;flex:1;}
   .hermes-launch-title{font-size:13px;font-weight:700;letter-spacing:.01em;color:var(--text);}
   .hermes-launch-meta{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
