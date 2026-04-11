@@ -194,10 +194,14 @@ What Claude Code has that's worth knowing:
   4 handler types (shell command, HTTP endpoint, LLM prompt, sub-agent); gives deterministic
   non-LLM control over the agent lifecycle
 - Plugins / Skills — installable via `/plugin install`, hot-reloaded from `~/.claude/skills`,
-  with a marketplace; `/loop` behavior for session-scoped repetition comes from the
-  Anthropic-published ralph-wiggum plugin, not a built-in command
-- Scheduling — cloud-managed cron via `claude.ai/code/scheduled` (Anthropic infrastructure,
-  minimum interval applies) and desktop app automations; no self-hosted cron
+  with a marketplace; includes the official ralph-wiggum plugin (`/ralph-loop`) for
+  autonomous iteration toward a completion goal (distinct from `/loop`)
+- `/loop` — a native bundled skill, available in every session without any plugin, that runs
+  a prompt on a repeating schedule within an active CLI session (polling/monitoring use case);
+  session-scoped, dies when the terminal closes
+- Scheduling — cloud-managed cron (Anthropic infrastructure, minimum 1-hour interval) and
+  desktop app scheduled tasks (run locally while the app is open, minimum 1-minute interval,
+  full local file access); no self-hosted cron
 - Messaging channels — Telegram, Discord, and iMessage via the Channels feature (research
   preview, requires Bun runtime); Slack is the most-requested addition and has not yet shipped
 - Memory — CLAUDE.md and MEMORY.md for project-level context; auto-memory since v2.1.59+
@@ -209,8 +213,9 @@ down. The CLI ships as minified/bundled TypeScript compiled with Bun — it is n
 
 Key differences that remain:
 
-- Scheduling is cloud-side or desktop-app-only; your data leaves your hardware and there's a
-  minimum run interval
+- Scheduling requires cloud (Anthropic infrastructure, data off your hardware, 1-hour minimum)
+  or the desktop app (runs locally, but the app must stay open — not a headless server process);
+  neither runs as a server daemon the way Hermes cron does
 - Memory is project-file-based (CLAUDE.md / MEMORY.md plus rolling auto-memory); it doesn't
   automatically accumulate a cross-project knowledge graph the way Hermes does
 - Not provider-agnostic — routes through Anthropic, Bedrock, Vertex, or Foundry, but always
