@@ -33,11 +33,13 @@
   /* ── Light theme: sidebar, roles, chips, active states ── */
   :root[data-theme="light"] .session-item{color:#5a544a;}
   :root[data-theme="light"] .session-item:hover{background:rgba(0,0,0,.06);color:#2c2825;}
-  :root[data-theme="light"] .session-item.active{background:rgba(45,111,163,.1);color:#1a5a8a;}
+  :root[data-theme="light"] .session-item.active{background:rgba(45,111,163,.1);color:#1a5a8a;border-left-color:#2d6fa3;}
   :root[data-theme="light"] .session-item.active .session-actions{background:linear-gradient(to right,transparent,rgba(228,224,216,.95) 12px);}
   :root[data-theme="light"] .session-pin-indicator{color:#996b15;}
   :root[data-theme="light"] .session-date-header.pinned{color:#996b15;}
-  :root[data-theme="light"] .session-actions .act-pin.pinned{color:#996b15;}
+  :root[data-theme="light"] .session-actions-trigger.active,
+  :root[data-theme="light"] .session-item.menu-open .session-actions-trigger{background:rgba(45,111,163,.12);border-color:rgba(45,111,163,.22);color:#1a5a8a;}
+  :root[data-theme="light"] .session-action-opt.is-active{background:rgba(45,111,163,.1);}
   :root[data-theme="light"] .msg-role.user{color:#2d6fa3;}
   :root[data-theme="light"] .msg-role.assistant{color:#8a6520;}
   :root[data-theme="light"] .role-icon.user{background:rgba(45,111,163,.12);color:#2d6fa3;border-color:rgba(45,111,163,.25);}
@@ -126,7 +128,7 @@
   .session-search input::placeholder{color:var(--muted);opacity:.7;}
   /* Inline session title edit */
   .session-title-input{flex:1;background:var(--surface);border:1px solid rgba(124,185,255,.6);border-radius:6px;color:var(--text);padding:3px 8px;font-size:13px;outline:none;min-width:0;box-shadow:0 0 0 2px rgba(124,185,255,.15);font-family:inherit;}
-  .session-item{padding:8px 10px 8px 8px;border-radius:0 8px 8px 0;cursor:pointer;font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:background .15s,color .15s,border-color .15s;display:flex;align-items:center;gap:6px;min-width:0;border-left:2px solid transparent;position:relative;}
+  .session-item{padding:8px 40px 8px 8px;border-radius:0 8px 8px 0;cursor:pointer;font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:background .15s,color .15s,border-color .15s;display:flex;align-items:center;gap:6px;min-width:0;border-left:2px solid transparent;position:relative;}
   .session-item:hover{background:var(--hover-bg);color:var(--text);}
   .session-item.active{background:rgba(232,160,48,0.12);color:#e8a030;border-left:2px solid #e8a030;padding-left:8px;}
   .session-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
@@ -1021,7 +1023,10 @@ body.resizing{user-select:none;cursor:col-resize;}
   pointer-events: none; /* don't block clicks on session-actions beneath */
 }
 .session-item.cli-session:hover::after {
-  display: none; /* hide badge on hover so session-actions icons are fully reachable */
+  display: none; /* hide badge on hover so the session menu trigger stays clear */
+}
+.session-item.cli-session.menu-open::after {
+  display: none;
 }
 /* Source-specific colors for gateway sessions */
 .session-item.cli-session[data-source="telegram"] { border-left-color: #0088cc; }

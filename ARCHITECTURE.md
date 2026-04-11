@@ -58,7 +58,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       style.css            All CSS incl. mobile responsive (~670 lines)
       ui.js                DOM helpers, renderMd, tool cards, model dropdown, file tree (~977 lines)
       workspace.js         File preview, file ops, loadDir, clearPreview (~185 lines)
-      sessions.js          Session CRUD, list rendering, search, SVG icons, overlay actions (~533 lines)
+      sessions.js          Session CRUD, list rendering, search, SVG icons, dropdown actions (~533 lines)
       messages.js          send(), SSE event handlers, approval, transcript (~297 lines)
       panels.js            Cron, skills, memory, workspace, profiles, todo, settings (~974 lines)
       commands.js          Slash command registry, parser, autocomplete dropdown (~156 lines)
@@ -358,7 +358,7 @@ highlighting) and Mermaid.js (diagrams) from CDN, both loaded async/deferred wit
 Six JS modules loaded in order at end of <body>:
   1. ui.js       (~846 lines) DOM helpers, renderMd, tool card rendering, global state
   2. workspace.js (~169 lines) File tree, preview, file operations
-  3. sessions.js  (~532 lines) Session CRUD, list rendering, search, SVG icons, overlay actions, project picker
+  3. sessions.js  (~532 lines) Session CRUD, list rendering, search, SVG icons, dropdown actions, project picker
   4. messages.js  (~293 lines) send(), SSE event handlers, approval, transcript
   5. panels.js    (~771 lines) Cron, skills, memory, workspace, todo, switchPanel
   6. boot.js      (~175 lines) Event wiring + boot IIFE
