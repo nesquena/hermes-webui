@@ -257,7 +257,7 @@
   notification when the tab is in the background.
 - **Thinking / reasoning block display** (PR #181, #182): Inline `<think>…</think>`
   and Gemma 4 `<|channel>thought…<channel|>` tags are parsed out of assistant
-  messages and rendered as a collapsible 💡 "Thinking" card above the reply.
+  messages and rendered as a collapsible lightbulb "Thinking" card above the reply.
   During streaming, the bubble shows "Thinking…" until the tag closes. Hardened
   against partial-tag edge cases and empty thinking blocks.
 
@@ -665,7 +665,7 @@
   command. Persists server-side across refreshes.
 
 - **Subagent delegation cards.** `subagent_progress` events now render with
-  a 🔀 icon and a blue indented left border to visually distinguish child
+  a shuffle icon and a blue indented left border to visually distinguish child
   tool activity from parent tool calls. `delegate_task` cards display as
   "Delegate task" with cleaner formatting.
 
@@ -1461,9 +1461,9 @@ The sprint that closed the last gaps for heavy agentic use.
   restored from session history on reload. Shows tool name, preview, args, result snippet.
 - **Attachment metadata persists on reload.** File badges on user messages survive page
   refresh. Server stores filenames on the user message in session JSON.
-- **Todo list panel.** New checkmark tab in the sidebar. Shows current task list parsed
-  from the most recent todo tool result in message history. Status icons: pending (○),
-  in-progress (◉), completed (✓), cancelled (✗). Auto-refreshes when panel is active.
+- **Todo list panel.** New task-list tab in the sidebar. Shows current task list parsed
+  from the most recent todo tool result in message history. Status icons use Lucide
+  square, loader, check, and x states. Auto-refreshes when panel is active.
 - **Model preference persists.** Last-used model saved to localStorage. Restored on page
   load. New sessions inherit it automatically.
 
