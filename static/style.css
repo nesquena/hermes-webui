@@ -122,7 +122,7 @@
   .new-chat-btn:hover{background:rgba(124,185,255,0.13);border-color:rgba(124,185,255,.3);}
   .session-list{flex:1;overflow-y:auto;padding:0 8px 8px;min-height:0;}
   .session-search{padding:4px 10px 8px;flex-shrink:0;}
-  .session-search input{width:100%;background:var(--input-bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:7px 12px;font-size:12px;outline:none;transition:all .15s;}
+  .session-search input{width:100%;background:var(--input-bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:10px 12px;font-size:12px;outline:none;transition:all .15s;}
   .session-search input:focus{border-color:rgba(124,185,255,.35);background:var(--hover-bg);box-shadow:0 0 0 2px rgba(124,185,255,.07);}
   .session-search input::placeholder{color:var(--muted);opacity:.7;}
   /* Inline session title edit */
