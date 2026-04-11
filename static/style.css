@@ -138,9 +138,9 @@
   .session-actions-trigger svg{display:block;}
   .session-action-menu{display:block;position:fixed;left:0;top:0;right:auto;bottom:auto;min-width:220px;max-width:min(280px,calc(100vw - 16px));background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -4px 24px rgba(0,0,0,.4);z-index:999;overflow:hidden;max-height:320px;overflow-y:auto;}
   .session-action-menu.open{display:block;}
-  .session-action-opt{width:100%;background:none;border:none;text-align:left;font:inherit;color:var(--text);}
-  .session-action-opt .ws-opt-action{width:100%;align-items:flex-start;}
-  .session-action-opt .ws-opt-icon{color:var(--muted);transition:color .12s,opacity .12s;}
+  .session-action-opt{width:100%;background:none;border:none;text-align:left;font:inherit;color:var(--text);flex-direction:row!important;gap:0!important;padding:0!important;}
+  .session-action-opt .ws-opt-action{display:flex;flex-direction:row;align-items:center;gap:10px;width:100%;padding:10px 14px;}
+  .session-action-opt .ws-opt-icon{color:var(--muted);transition:color .12s,opacity .12s;flex-shrink:0;display:flex;align-items:center;width:16px;}
   .session-action-opt:hover .ws-opt-icon{color:var(--text);opacity:1;}
   .session-action-copy{display:flex;flex-direction:column;gap:2px;min-width:0;}
   .session-action-meta{font-size:11px;color:var(--muted);line-height:1.3;white-space:normal;opacity:.72;}
