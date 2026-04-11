@@ -13,13 +13,20 @@
 
 The Hermes Web UI is a lightweight web application that gives you a browser-based
 interface to the Hermes agent that is functionally equivalent to the CLI. It is modeled on
-the Claude-style interface: a three-panel layout with a sidebar for session management,
-a central chat area, and a right panel for workspace file browsing.
+the Claude-style interface: a sidebar for session management, a central chat area,
+and a demand-driven right panel used for workspace browsing and preview surfaces.
+The right panel is closed by default on desktop and opens only when it is actively
+being used for browsing or previewing content.
 
 The design philosophy is deliberately minimal. There is no build step, no bundler, no
 frontend framework. The Python server is split into a routing shell (server.py) and
 business logic modules (api/). The frontend is seven vanilla JS modules loaded from static/.
 This makes the code easy to modify from a terminal or by an agent.
+
+Hermes-level chrome is intentionally consolidated: the sidebar has no dedicated brand header.
+Instead, the footer exposes a single "Hermes WebUI" launch button that opens one tabbed
+control-center modal for global preferences, conversation import/export, and clear-conversation
+actions. The topbar remains focused on conversation context and the workspace/files toggle.
 
 ---
 
@@ -49,7 +56,7 @@ This makes the code easy to modify from a terminal or by an agent.
       style.css            All CSS incl. mobile responsive (~670 lines)
       ui.js                DOM helpers, renderMd, tool cards, model dropdown, file tree (~977 lines)
       workspace.js         File preview, file ops, loadDir, clearPreview (~185 lines)
-      sessions.js          Session CRUD, list rendering, search, SVG icons, overlay actions (~533 lines)
+      sessions.js          Session CRUD, list rendering, search, SVG icons, dropdown actions (~533 lines)
       messages.js          send(), SSE event handlers, approval, transcript (~297 lines)
       panels.js            Cron, skills, memory, workspace, profiles, todo, settings (~974 lines)
       commands.js          Slash command registry, parser, autocomplete dropdown (~156 lines)
@@ -348,7 +355,7 @@ highlighting) and Mermaid.js (diagrams) from CDN, both loaded async/deferred wit
 Six JS modules loaded in order at end of <body>:
   1. ui.js       (~846 lines) DOM helpers, renderMd, tool card rendering, global state
   2. workspace.js (~169 lines) File tree, preview, file operations
-  3. sessions.js  (~532 lines) Session CRUD, list rendering, search, SVG icons, overlay actions, project picker
+  3. sessions.js  (~532 lines) Session CRUD, list rendering, search, SVG icons, dropdown actions, project picker
   4. messages.js  (~293 lines) send(), SSE event handlers, approval, transcript
   5. panels.js    (~771 lines) Cron, skills, memory, workspace, todo, switchPanel
   6. boot.js      (~175 lines) Event wiring + boot IIFE
@@ -359,9 +366,18 @@ inherit `currentColor` for consistent theming.
 
 Three-panel layout (in static/index.html):
 
-    <aside class="sidebar">    Left panel: session list, nav tabs, model selector
+    <aside class="sidebar">    Left panel: session list, nav tabs, sidebar-footer Hermes WebUI trigger
     <main class="main">        Center: topbar, messages area, approval card, composer
     <aside class="rightpanel"> Right panel: workspace file tree and file preview
+
+Composer footer layout (current):
+
+    left cluster   attach button, mic button, per-conversation model selector
+    right cluster  compact circular context-usage badge, send button
+
+The model selector is still the authoritative control for new-session creation
+and session updates; it was moved out of the sidebar so model choice feels scoped
+to the active conversation rather than a global app setting.
 
 ### 5.2 Global State
 
@@ -407,10 +423,18 @@ Approval:
     stopApprovalPolling   clearInterval
 
 UI helpers:
-    setStatus(t)          Updates #statusText in composer footer
+    setStatus(t)          Fallback helper: shows a toast for non-chat status/error messages
+    setComposerStatus(t)  Updates the inline composer status label for turn-scoped states
     setBusy(v)            Sets S.busy, disables/enables Send button, clears status on false
     showToast(msg, ms)    Bottom-center fade toast (default 2800ms)
+    showConfirmDialog(o)  Shared in-app confirmation modal, resolves true/false
+    showPromptDialog(o)   Shared in-app input modal, resolves string/null
     autoResize()          Auto-resize #msg textarea up to 200px
+
+Dialog policy:
+    Native browser confirm()/prompt() are not used in the Web UI.
+    Destructive actions use showConfirmDialog(...), then a toast on success.
+    Lightweight naming flows (new file/folder/project) use showPromptDialog(...).
 
 Files:
     loadDir(path)         GET /api/list, rebuild #fileTree
@@ -464,7 +488,7 @@ Known gaps:
 - Nested lists: single regex pass, multi-level indentation not handled
 - Mixed bold+link in same line: may produce garbled output
 
-### 5.5 Model Chip Label (Fixed in Sprint 1)
+### 5.5 Model Label Resolution (Fixed in Sprint 1, reused by composer selector)
 
 B3 was resolved in Sprint 1. Current code uses a MODEL_LABELS dict:
 
@@ -475,10 +499,10 @@ B3 was resolved in Sprint 1. Current code uses a MODEL_LABELS dict:
       'anthropic/claude-haiku-3-5': 'Haiku 3.5', 'google/gemini-2.5-pro': 'Gemini 2.5 Pro',
       'deepseek/deepseek-chat-v3-0324': 'DeepSeek V3', 'meta-llama/llama-4-scout': 'Llama 4 Scout',
     };
-    $('modelChip').textContent = MODEL_LABELS[m] || (m.split('/').pop() || 'Unknown');
+    getModelLabel(m) => MODEL_LABELS[m] || (m.split('/').pop() || 'Unknown');
 
 Fallback: any unlisted model shows its short ID (after the last /) rather than a wrong label.
-To add a new model: add an entry to MODEL_LABELS and add an <option> to the <select>.
+To add a new model: add an entry to MODEL_LABELS and add an <option> to the composer footer <select>.
 
 ### 5.6 Session Delete Rules (from skill)
 
@@ -1096,7 +1120,7 @@ The model chip label bug is now fixed. The MODEL_LABELS object in syncTopbar():
       'deepseek/deepseek-chat-v3-0324':  'DeepSeek V3',
       'meta-llama/llama-4-scout':        'Llama 4 Scout',
     };
-    $('modelChip').textContent = MODEL_LABELS[m] || (m.split('/').pop() || 'Unknown');
+    getModelLabel(m) => MODEL_LABELS[m] || (m.split('/').pop() || 'Unknown');
 
 Fallback: splits on '/' and uses the last segment, so any unlisted model shows its
 short identifier rather than a wrong hardcoded label.

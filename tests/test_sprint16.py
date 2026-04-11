@@ -1,6 +1,6 @@
 """
 Sprint 16 Tests: safe HTML rendering in renderMd(), active session styling,
-session sidebar polish (SVG icons, overlay actions).
+session sidebar polish (SVG icons, dropdown actions).
 """
 import html as _html
 import pathlib
@@ -676,20 +676,22 @@ def test_sessions_js_has_svg_icons(cleanup_test_sessions):
     assert "<svg" in code, "SVG content not found in ICONS"
 
 
-def test_sessions_js_has_overlay_actions(cleanup_test_sessions):
-    """sessions.js must use .session-actions overlay div for action buttons."""
+def test_sessions_js_has_dropdown_actions(cleanup_test_sessions):
+    """sessions.js must use a single trigger button and dropdown for session actions."""
     src = REPO_ROOT / "static" / "sessions.js"
     code = src.read_text()
-    assert "session-actions" in code, ".session-actions overlay not found in sessions.js"
+    assert "session-actions-trigger" in code, "session action trigger button not found in sessions.js"
+    assert "session-action-menu" in code, "session action dropdown menu not found in sessions.js"
 
 
-def test_style_css_has_session_actions_overlay(cleanup_test_sessions):
-    """style.css must define .session-actions with position:absolute."""
+def test_style_css_has_session_actions_dropdown(cleanup_test_sessions):
+    """style.css must define trigger and dropdown styles for session actions."""
     src = REPO_ROOT / "static" / "style.css"
     code = src.read_text()
     assert ".session-actions" in code, ".session-actions not found in style.css"
-    assert "position:absolute" in code or "position: absolute" in code, \
-        ".session-actions must use position:absolute for overlay"
+    assert ".session-action-menu" in code, ".session-action-menu not found in style.css"
+    assert "position:fixed" in code or "position: fixed" in code, \
+        ".session-action-menu must use position:fixed to avoid sidebar clipping"
 
 
 def test_style_css_active_session_uses_gold(cleanup_test_sessions):

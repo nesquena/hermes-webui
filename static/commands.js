@@ -86,13 +86,8 @@ async function cmdWorkspace(args){
       (w.name||'').toLowerCase().includes(q)||w.path.toLowerCase().includes(q)
     );
     if(!ws){showToast(t('no_workspace_match')+`"${args}"`);return;}
-    if(!S.session)return;
-    await api('/api/session/update',{method:'POST',body:JSON.stringify({
-      session_id:S.session.session_id,workspace:ws.path,model:S.session.model
-    })});
-    S.session.workspace=ws.path;
-    syncTopbar();await loadDir('.');
-    showToast(t('switched_workspace')+(ws.name||ws.path));
+    if(typeof switchToWorkspace==='function') await switchToWorkspace(ws.path, ws.name||ws.path);
+    else showToast(t('switched_workspace')+(ws.name||ws.path));
   }catch(e){showToast(t('workspace_switch_failed')+e.message);}
 }
 

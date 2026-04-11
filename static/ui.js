@@ -34,6 +34,7 @@ function _applyModelToDropdown(modelId, sel){
   const resolved=_findModelInDropdown(modelId,sel);
   if(resolved){
     sel.value=resolved;
+    if(sel.id==='modelSelect' && typeof syncModelChip==='function') syncModelChip();
     return resolved;
   }
   return null;
@@ -64,11 +65,113 @@ async function populateModelDropdown(){
     if(data.default_model && !localStorage.getItem('hermes-webui-model')){
       _applyModelToDropdown(data.default_model, sel);
     }
+    if(typeof syncModelChip==='function') syncModelChip();
   }catch(e){
     // API unavailable -- keep the hardcoded HTML options as fallback
     console.warn('Failed to load models from server:',e.message);
+    if(typeof syncModelChip==='function') syncModelChip();
   }
 }
+
+function _selectedModelOption(){
+  const sel=$('modelSelect');
+  if(!sel) return null;
+  return sel.options[sel.selectedIndex]||null;
+}
+
+function syncModelChip(){
+  const sel=$('modelSelect');
+  const chip=$('composerModelChip');
+  const label=$('composerModelLabel');
+  const dd=$('composerModelDropdown');
+  if(!sel||!chip||!label) return;
+  const opt=_selectedModelOption();
+  label.textContent=opt?opt.textContent:getModelLabel(sel.value||'');
+  chip.title=sel.value||'Conversation model';
+  chip.classList.toggle('active',!!(dd&&dd.classList.contains('open')));
+}
+
+function _positionModelDropdown(){
+  const dd=$('composerModelDropdown');
+  const chip=$('composerModelChip');
+  const footer=document.querySelector('.composer-footer');
+  if(!dd||!chip||!footer) return;
+  const chipRect=chip.getBoundingClientRect();
+  const footerRect=footer.getBoundingClientRect();
+  let left=chipRect.left-footerRect.left;
+  const maxLeft=Math.max(0, footer.clientWidth-dd.offsetWidth);
+  left=Math.max(0, Math.min(left, maxLeft));
+  dd.style.left=`${left}px`;
+}
+
+function renderModelDropdown(){
+  const dd=$('composerModelDropdown');
+  const sel=$('modelSelect');
+  if(!dd||!sel) return;
+  dd.innerHTML='';
+  for(const child of Array.from(sel.children)){
+    if(child.tagName==='OPTGROUP'){
+      const heading=document.createElement('div');
+      heading.className='model-group';
+      heading.textContent=child.label||'Models';
+      dd.appendChild(heading);
+      for(const opt of Array.from(child.children)){
+        const row=document.createElement('div');
+        row.className='model-opt'+(opt.value===sel.value?' active':'');
+        row.innerHTML=`<span class="model-opt-name">${esc(opt.textContent||getModelLabel(opt.value))}</span><span class="model-opt-id">${esc(opt.value)}</span>`;
+        row.onclick=()=>selectModelFromDropdown(opt.value);
+        dd.appendChild(row);
+      }
+      continue;
+    }
+    if(child.tagName==='OPTION'){
+      const row=document.createElement('div');
+      row.className='model-opt'+(child.value===sel.value?' active':'');
+      row.innerHTML=`<span class="model-opt-name">${esc(child.textContent||getModelLabel(child.value))}</span><span class="model-opt-id">${esc(child.value)}</span>`;
+      row.onclick=()=>selectModelFromDropdown(child.value);
+      dd.appendChild(row);
+    }
+  }
+}
+
+async function selectModelFromDropdown(value){
+  const sel=$('modelSelect');
+  if(!sel||sel.value===value) { closeModelDropdown(); return; }
+  sel.value=value;
+  syncModelChip();
+  closeModelDropdown();
+  if(typeof sel.onchange==='function') await sel.onchange();
+}
+
+function toggleModelDropdown(){
+  const dd=$('composerModelDropdown');
+  const chip=$('composerModelChip');
+  const sel=$('modelSelect');
+  if(!dd||!chip||!sel) return;
+  const open=dd.classList.contains('open');
+  if(open){closeModelDropdown(); return;}
+  if(typeof closeProfileDropdown==='function') closeProfileDropdown();
+  if(typeof closeWsDropdown==='function') closeWsDropdown();
+  renderModelDropdown();
+  dd.classList.add('open');
+  _positionModelDropdown();
+  chip.classList.add('active');
+}
+
+function closeModelDropdown(){
+  const dd=$('composerModelDropdown');
+  const chip=$('composerModelChip');
+  if(dd) dd.classList.remove('open');
+  if(chip) chip.classList.remove('active');
+}
+
+document.addEventListener('click',e=>{
+  if(!e.target.closest('#composerModelChip') && !e.target.closest('#composerModelDropdown')) closeModelDropdown();
+});
+window.addEventListener('resize',()=>{
+  const dd=$('composerModelDropdown');
+  if(dd&&dd.classList.contains('open')) _positionModelDropdown();
+});
 
 // ── Scroll pinning ──────────────────────────────────────────────────────────
 // When streaming, auto-scroll only if the user hasn't manually scrolled up.
@@ -86,30 +189,56 @@ function _fmtTokens(n){if(!n||n<0)return'0';if(n>=1e6)return(n/1e6).toFixed(1)+'
 
 // Context usage indicator in composer footer
 function _syncCtxIndicator(usage){
+  const wrap=$('ctxIndicatorWrap');
   const el=$('ctxIndicator');
   if(!el)return;
   const promptTok=usage.last_prompt_tokens||usage.input_tokens||0;
   const ctxWindow=usage.context_length||0;
-  if(!promptTok||!ctxWindow){el.style.display='none';return;}
-  el.style.display='';
+  if(!promptTok||!ctxWindow){
+    if(wrap) wrap.style.display='none';
+    return;
+  }
+  if(wrap) wrap.style.display='';
   const pct=Math.min(100,Math.round((promptTok/ctxWindow)*100));
-  const bar=$('ctxBar');
-  const label=$('ctxLabel');
-  if(bar){
-    bar.style.width=pct+'%';
-    bar.className='ctx-bar'+(pct>75?' ctx-high':pct>50?' ctx-mid':'');
+  const ring=$('ctxRingValue');
+  const center=$('ctxPercent');
+  const usageLine=$('ctxTooltipUsage');
+  const tokensLine=$('ctxTooltipTokens');
+  const thresholdLine=$('ctxTooltipThreshold');
+  const costLine=$('ctxTooltipCost');
+  const cost=usage.estimated_cost;
+  if(ring){
+    const circumference=61.261056745;
+    ring.style.strokeDasharray=String(circumference);
+    ring.style.strokeDashoffset=String(circumference*(1-pct/100));
   }
-  if(label){
-    const cost=usage.estimated_cost;
-    let text=`${_fmtTokens(promptTok)} / ${_fmtTokens(ctxWindow)}`;
-    if(pct>0) text+=` (${pct}%)`;
-    if(cost) text+=` \u00b7 $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
-    label.textContent=text;
-  }
-  // Update title with detailed info
+  if(center) center.textContent=String(pct);
+  el.classList.toggle('ctx-mid',pct>50&&pct<=75);
+  el.classList.toggle('ctx-high',pct>75);
+  let label=`Context window ${pct}% used`;
+  if(cost) label+=` \u00b7 $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
+  el.setAttribute('aria-label',label);
+  if(usageLine) usageLine.textContent=`${pct}% used (${Math.max(0,100-pct)}% left)`;
+  if(tokensLine) tokensLine.textContent=`${_fmtTokens(promptTok)} / ${_fmtTokens(ctxWindow)} tokens used`;
   const threshold=usage.threshold_tokens||0;
-  el.title=`Context: ${_fmtTokens(promptTok)} of ${_fmtTokens(ctxWindow)} tokens used`
-    +(threshold?`\nAuto-compress at ${_fmtTokens(threshold)} (${Math.round(threshold/ctxWindow*100)}%)`:'');
+  if(thresholdLine){
+    if(threshold){
+      thresholdLine.style.display='';
+      thresholdLine.textContent=`Auto-compress at ${_fmtTokens(threshold)} (${Math.round(threshold/ctxWindow*100)}%)`;
+    }else{
+      thresholdLine.style.display='none';
+      thresholdLine.textContent='';
+    }
+  }
+  if(costLine){
+    if(cost){
+      costLine.style.display='';
+      costLine.textContent=`Estimated cost: $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
+    }else{
+      costLine.style.display='none';
+      costLine.textContent='';
+    }
+  }
 }
 
 function scrollIfPinned(){
@@ -229,22 +358,22 @@ function renderMd(raw){
 }
 
 function setStatus(t){
-  const bar=$('activityBar');
-  const txt=$('activityText');
-  const dismiss=$('btnDismissStatus');
-  if(!bar||!txt)return;
-  if(!t){
-    bar.style.display='none';
-    txt.textContent='';
-    if(dismiss)dismiss.style.display='none';
-  } else {
-    txt.textContent=t;
-    bar.style.display='';
-    // Show dismiss X only for static/error messages, not transient busy ones
-    const transient = t.endsWith('…') || t === (window._botName||'Hermes')+' is thinking\u2026';
-    if(dismiss)dismiss.style.display=(!transient && !S.busy)?'inline':'none';
-  }
+  if(!t)return;
+  showToast(t, 4000);
 }
+
+function setComposerStatus(t){
+  const el=$('composerStatus');
+  if(!el)return;
+  if(!t){
+    el.style.display='none';
+    el.textContent='';
+    return;
+  }
+  el.textContent=t;
+  el.style.display='';
+}
+
 function updateSendBtn(){
   const btn=$('btnSend');
   if(!btn) return;
@@ -264,10 +393,9 @@ function setBusy(v){
   S.busy=v;
   $('btnSend').disabled=v;
   updateSendBtn();
-  const dots=$('activityDots');
-  if(dots) dots.style.display=v?'flex':'none';
   if(!v){
     setStatus('');
+    setComposerStatus('');
     // Always hide Cancel button when not busy
     const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
     updateQueueBadge();
@@ -443,7 +571,7 @@ function copyMsg(btn){
   const text=row?row.dataset.rawText:'';
   if(!text)return;
   navigator.clipboard.writeText(text).then(()=>{
-    const orig=btn.innerHTML;btn.innerHTML='&#10003;';btn.style.color='var(--blue)';
+    const orig=btn.innerHTML;btn.innerHTML=li('check',13);btn.style.color='var(--blue)';
     setTimeout(()=>{btn.innerHTML=orig;btn.style.color='';},1500);
   }).catch(()=>showToast('Copy failed'));
 }
@@ -549,10 +677,14 @@ async function checkInflightOnBoot(sid) {
 function syncTopbar(){
   if(!S.session){
     document.title=window._botName||'Hermes';
-    // Show default workspace name even without a session
-    const sidebarName=$('sidebarWsName');
-    if(sidebarName && sidebarName.textContent==='Workspace'){
-      sidebarName.textContent=t('no_workspace');
+    if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
+    if(typeof syncModelChip==='function') syncModelChip();
+    if(typeof _syncHermesPanelSessionActions==='function') _syncHermesPanelSessionActions();
+    else {
+      const sidebarName=$('sidebarWsName');
+      if(sidebarName && sidebarName.textContent==='Workspace'){
+        sidebarName.textContent=t('no_workspace');
+      }
     }
     return;
   }
@@ -564,41 +696,33 @@ function syncTopbar(){
   // If a profile switch just happened, apply its model rather than the session's stale value.
   // S._pendingProfileModel is set by switchToProfile() and cleared here after one application.
   const modelOverride=S._pendingProfileModel;
+  let currentModel=S.session.model||'';
   if(modelOverride){
     S._pendingProfileModel=null;
     _applyModelToDropdown(modelOverride,$('modelSelect'));
+    currentModel=modelOverride;
   } else {
-    const m=S.session.model||'';
-    const applied=_applyModelToDropdown(m,$('modelSelect'));
+    const applied=_applyModelToDropdown(currentModel,$('modelSelect'));
     // If the model isn't in the current provider list, add it as a visually marked
     // "(unavailable)" entry so the session value is preserved without misleading the user.
     // Selecting it will still attempt to send (same as before), but the label makes
     // clear it's a stale model from a previous session.
-    if(!applied && m){
+    if(!applied && currentModel){
       const opt=document.createElement('option');
-      opt.value=m;
-      opt.textContent=getModelLabel(m)+t('model_unavailable');
+      opt.value=currentModel;
+      opt.textContent=getModelLabel(currentModel)+t('model_unavailable');
       opt.style.color='var(--muted, #888)';
       opt.title=t('model_unavailable_title');
       $('modelSelect').appendChild(opt);
-      $('modelSelect').value=m;
+      $('modelSelect').value=currentModel;
     }
   }
+  if(typeof syncModelChip==='function') syncModelChip();
   // Show Clear button only when session has messages
   const clearBtn=$('btnClearConv');
   if(clearBtn) clearBtn.style.display=(S.messages&&S.messages.filter(msg=>msg.role!=='tool').length>0)?'':'none';
-  const displayModel=$('modelSelect').value||m;
-  $('modelChip').textContent=getModelLabel(displayModel);
-  const ws=S.session.workspace||'';
-  // Update sidebar workspace display
-  const sidebarName=$('sidebarWsName');
-  const sidebarPath=$('sidebarWsPath');
-  if(sidebarName){
-    sidebarName.textContent=getWorkspaceFriendlyName(ws);
-  }
-  if(sidebarPath){
-    sidebarPath.textContent=ws;
-  }
+  if(typeof _syncHermesPanelSessionActions==='function') _syncHermesPanelSessionActions();
+  if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
   // modelSelect already set above
   // Update profile chip label
   const profileLabel=$('profileChipLabel');
@@ -670,22 +794,22 @@ function renderMessages(){
     // Render thinking card before the assistant message (collapsed by default)
     if(thinkingText&&!isUser){
       const thinkRow=document.createElement('div');thinkRow.className='msg-row thinking-card-row';
-      thinkRow.innerHTML=`<div class="thinking-card"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">&#128161;</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">&#9656;</span></div><div class="thinking-card-body"><pre>${esc(thinkingText)}</pre></div></div>`;
+      thinkRow.innerHTML=`<div class="thinking-card"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(thinkingText)}</pre></div></div>`;
       inner.appendChild(thinkRow);
     }
     const row=document.createElement('div');row.className='msg-row';
     row.dataset.msgIdx=rawIdx;row.dataset.role=m.role||'assistant';
     let filesHtml='';
     if(m.attachments&&m.attachments.length)
-      filesHtml=`<div class="msg-files">${m.attachments.map(f=>`<div class="msg-file-badge">&#128206; ${esc(f)}</div>`).join('')}</div>`;
+      filesHtml=`<div class="msg-files">${m.attachments.map(f=>`<div class="msg-file-badge">${li('paperclip',12)} ${esc(f)}</div>`).join('')}</div>`;
     const bodyHtml = isUser ? esc(String(content)).replace(/\n/g,'<br>') : renderMd(String(content));
     // Action buttons for this bubble
-    const editBtn  = isUser  ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">&#9998;</button>` : '';
-    const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">&#8635;</button>` : '';
+    const editBtn  = isUser  ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
+    const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
     const tsVal=m._ts||m.timestamp;
     const tsTitle=tsVal?new Date(tsVal*1000).toLocaleString():'';
     const _bn=window._botName||'Hermes';
-    row.innerHTML=`<div class="msg-role ${m.role}" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon ${m.role}">${isUser?'Y':esc(_bn.charAt(0).toUpperCase())}</div><span style="font-size:12px">${isUser?t('you'):esc(_bn)}</span>${tsTitle?`<span class="msg-time">${new Date(tsVal*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</span>`:''}<span class="msg-actions">${editBtn}<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">&#128203;</button>${retryBtn}</span></div>${filesHtml}<div class="msg-body">${bodyHtml}</div>`;
+    row.innerHTML=`<div class="msg-role ${m.role}" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon ${m.role}">${isUser?'Y':esc(_bn.charAt(0).toUpperCase())}</div><span style="font-size:12px">${isUser?t('you'):esc(_bn)}</span>${tsTitle?`<span class="msg-time">${new Date(tsVal*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</span>`:''}<span class="msg-actions">${editBtn}<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>${retryBtn}</span></div>${filesHtml}<div class="msg-body">${bodyHtml}</div>`;
     row.dataset.rawText = String(content).trim();
     inner.appendChild(row);
   }
@@ -852,12 +976,12 @@ function buildToolCard(tc){
   const isSubagent=tc.name==='subagent_progress';
   const isDelegation=tc.name==='delegate_task';
   const cardClass='tool-card'+(tc.done===false?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'');
-  // Clean up subagent preview: strip leading 🔀 emoji since the icon already shows it
+  // Clean up legacy subagent prefixes since the Lucide icon already shows it
   let displayName=tc.name;
   if(isSubagent) displayName='Subagent';
   if(isDelegation) displayName='Delegate task';
   let previewText=tc.preview||displaySnippet||'';
-  if(isSubagent) previewText=previewText.replace(/^🔀\s*/,'');
+  if(isSubagent) previewText=previewText.replace(/^(?:\u{1F500}|↳)\s*/u,'');
   row.innerHTML=`
     <div class="${cardClass}">
       <div class="tool-card-header" onclick="this.closest('.tool-card').classList.toggle('open')">
@@ -1310,7 +1434,7 @@ function renderTray(){
   updateSendBtn();
   S.pendingFiles.forEach((f,i)=>{
     const chip=document.createElement('div');chip.className='attach-chip';
-    chip.innerHTML=`&#128206; ${esc(f.name)} <button title="${t('remove_title')}">&#10005;</button>`;
+    chip.innerHTML=`${li('paperclip',12)} ${esc(f.name)} <button title="${t('remove_title')}">${li('x',12)}</button>`;
     chip.querySelector('button').onclick=()=>{S.pendingFiles.splice(i,1);renderTray();};
     tray.appendChild(chip);
   });

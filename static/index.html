@@ -14,7 +14,6 @@
 <body>
 <div class="layout">
   <aside class="sidebar">
-    <div class="sidebar-header"><div class="logo">H</div><div><h1 style="margin:0;font-size:15px;font-weight:700;letter-spacing:-.01em">Hermes</h1><div style="font-size:10px;color:var(--muted);opacity:.8;margin-top:1px">v0.47.0</div></div></div>
     <div class="sidebar-nav">
       <button class="nav-tab active" data-panel="chat" data-label="Chat" onclick="switchPanel('chat')" title="Chat" data-i18n-title="tab_chat"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>
       <button class="nav-tab" data-panel="tasks" data-label="Tasks" onclick="switchPanel('tasks')" title="Tasks" data-i18n-title="tab_tasks"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
@@ -29,7 +28,7 @@
       <div class="sidebar-section">
         <button class="new-chat-btn" id="btnNewChat">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-          <span data-i18n="new_conversation">New conversation</span> <span style="font-size:10px;opacity:.5;margin-left:4px">&#8984;K</span>
+          <span data-i18n="new_conversation">New conversation</span> <span style="font-size:10px;opacity:.5;margin-left:4px">Cmd+K</span>
         </button>
       </div>
       <div class="session-search"><input id="sessionSearch" placeholder="Filter conversations..." data-i18n-placeholder="filter_conversations" oninput="filterSessions()"></div>
@@ -134,42 +133,30 @@
       <div style="flex:1;overflow-y:auto;padding:0 12px 12px" id="profilesPanel"><div style="color:var(--muted);font-size:12px">Loading...</div></div>
     </div>
     <div class="sidebar-bottom">
-      <div class="field-label" style="font-size:10px;letter-spacing:.07em;margin-bottom:4px">MODEL</div>
-      <select id="modelSelect">
-        <optgroup label="OpenAI">
-          <option value="openai/gpt-5.4-mini">GPT-5.4 Mini</option>
-          <option value="openai/gpt-4o">GPT-4o</option>
-          <option value="openai/o3">o3</option>
-          <option value="openai/o4-mini">o4-mini</option>
-        </optgroup>
-        <optgroup label="Anthropic">
-          <option value="anthropic/claude-sonnet-4.6">Claude Sonnet 4.6</option>
-          <option value="anthropic/claude-sonnet-4-5">Claude Sonnet 4.5</option>
-          <option value="anthropic/claude-haiku-3-5">Claude Haiku 3.5</option>
-        </optgroup>
-        <optgroup label="Other">
-          <option value="google/gemini-2.5-pro">Gemini 2.5 Pro</option>
-          <option value="deepseek/deepseek-chat-v3-0324">DeepSeek V3</option>
-          <option value="meta-llama/llama-4-scout">Llama 4 Scout</option>
-        </optgroup>
-      </select>
-      <div style="position:relative">
-        <div id="sidebarWsDisplay" style="display:flex;align-items:center;gap:7px;padding:0 0 8px;cursor:pointer;border-radius:8px;transition:background .15s" onclick="toggleWsDropdown()" title="Switch workspace">
-          <span style="opacity:.7;line-height:1"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span>
-          <div style="min-width:0;flex:1">
-            <div style="font-size:11px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" id="sidebarWsName">Workspace</div>
-            <div style="font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:1px" id="sidebarWsPath"></div>
-          </div>
-          <span style="color:var(--muted);flex-shrink:0;line-height:1"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg></span>
-        </div>
-        <div class="ws-dropdown" id="wsDropdown"></div>
-      </div>
-      <div class="sidebar-actions">
-        <button class="sm-btn" id="btnDownload" title="Download as Markdown" data-i18n-title="download_transcript"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> <span data-i18n="transcript">Transcript</span></button>
-        <button class="sm-btn" id="btnExportJSON" title="Export full session as JSON"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1"/><path d="M16 3h1a2 2 0 0 1 2 2v5a2 2 0 0 0 2 2 2 2 0 0 0-2 2v5a2 2 0 0 1-2 2h-1"/></svg> JSON</button>
-        <button class="sm-btn" id="btnImportJSON" title="Import session from JSON"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg> <span data-i18n="import">Import</span></button>
-        <input type="file" id="importFileInput" accept=".json" style="display:none">
-      </div>
+      <button class="hermes-launch-btn" id="btnHermesPanel" onclick="toggleSettings()" title="Open Hermes control center">
+        <span class="hermes-launch-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+          <defs>
+            <linearGradient id="hermes-gold-sidebar" x1="0%" y1="0%" x2="0%" y2="100%">
+              <stop offset="0%" style="stop-color:#F5C542;stop-opacity:1"/>
+              <stop offset="100%" style="stop-color:#D4961C;stop-opacity:1"/>
+            </linearGradient>
+          </defs>
+          <rect x="30" y="10" width="4" height="46" rx="2" fill="url(#hermes-gold-sidebar)"/>
+          <path d="M30 18 C24 14, 14 14, 10 18 C14 16, 22 16, 28 20" fill="#F5C542" opacity="0.9"/>
+          <path d="M30 22 C26 19, 18 19, 14 22 C18 20, 24 20, 28 24" fill="#D4961C" opacity="0.8"/>
+          <path d="M34 18 C40 14, 50 14, 54 18 C50 16, 42 16, 36 20" fill="#F5C542" opacity="0.9"/>
+          <path d="M34 22 C38 19, 46 19, 50 22 C46 20, 40 20, 36 24" fill="#D4961C" opacity="0.8"/>
+          <path d="M32 48 C22 44, 20 38, 26 34 C20 36, 18 42, 24 46 C18 40, 22 30, 30 28 C24 32, 22 38, 28 42" fill="none" stroke="#F5C542" stroke-width="2.5" stroke-linecap="round"/>
+          <path d="M32 48 C42 44, 44 38, 38 34 C44 36, 46 42, 40 46 C46 40, 42 30, 34 28 C40 32, 42 38, 36 42" fill="none" stroke="#D4961C" stroke-width="2.5" stroke-linecap="round"/>
+          <circle cx="32" cy="10" r="4" fill="#F5C542"/>
+          <circle cx="32" cy="10" r="2" fill="#FFF8E1" opacity="0.7"/>
+        </svg></span>
+        <span class="hermes-launch-copy">
+          <span class="hermes-launch-title">Hermes WebUI</span>
+          <span class="hermes-launch-meta">Preferences, imports, exports</span>
+        </span>
+        <span class="hermes-launch-chevron" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></span>
+      </button>
     </div>
   <div class="resize-handle" id="sidebarResize"></div>
   </aside>
@@ -180,14 +167,7 @@
       </button>
       <div style="flex:1;min-width:0;overflow:hidden"><div class="topbar-title" id="topbarTitle">Hermes</div><div class="topbar-meta" id="topbarMeta" data-i18n="new_conversation">Start a new conversation</div></div>
       <div class="topbar-chips">
-        <div id="profileChipWrap" style="position:relative">
-          <div class="chip profile-chip" id="profileChip" onclick="toggleProfileDropdown()" title="Switch profile" style="cursor:pointer"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:3px"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg><span id="profileChipLabel">default</span> <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg></div>
-          <div class="profile-dropdown" id="profileDropdown"></div>
-        </div>
-        <div class="chip model" id="modelChip">GPT-5.4 Mini</div>
-
-        <button class="chip clear-btn" id="btnClearConv" onclick="clearConversation()" title="Clear all messages in this conversation" style="display:none"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg> <span data-i18n="copy">Clear</span></button>
-        <button class="chip gear-btn" id="btnSettings" onclick="toggleSettings()" title="Settings" data-i18n-title="settings_title"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
+        <button class="chip workspace-toggle-btn mobile-files-btn" id="btnWorkspacePanelToggle" onclick="toggleWorkspacePanel()" title="Show workspace panel" aria-pressed="false"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg><span class="workspace-toggle-label">Files</span></button>
         <button class="chip mobile-files-btn" id="btnMobileFiles" onclick="toggleMobileFiles()" title="Files"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button>
       </div>
     </div>
@@ -264,20 +244,6 @@
         </div>
       </div>
     </div>
-    <!-- Activity bar: shows tool progress / status above composer (not inside input) -->
-    <div id="activityBar" style="display:none;max-width:800px;margin:0 auto;width:100%;padding:0 24px;">
-      <div id="activityBarInner" style="display:flex;align-items:center;gap:8px;padding:6px 12px;border-radius:8px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.07);font-size:12px;color:var(--muted);animation:fadeIn .15s ease;">
-        <span id="activityIcon" style="opacity:.6;line-height:1"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"/><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/><line x1="4.93" y1="19.07" x2="7.76" y2="16.24"/><line x1="16.24" y1="7.76" x2="19.07" y2="4.93"/></svg></span>
-        <span id="activityText" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
-        <button id="btnCancel" onclick="cancelStream()" style="display:none;background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.35);color:#e94560;font-size:11px;font-weight:600;padding:3px 10px;border-radius:6px;cursor:pointer;flex-shrink:0;transition:background .15s;align-items:center;gap:4px" title="Cancel this task"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/></svg> Cancel</button>
-        <button id="btnDismissStatus" onclick="setStatus('')" style="display:none;background:none;border:none;color:var(--muted);line-height:1;cursor:pointer;padding:0 2px;opacity:.5;flex-shrink:0" title="Dismiss"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
-        <span id="activityDots" style="display:flex;gap:3px;align-items:center">
-          <span style="width:4px;height:4px;border-radius:50%;background:var(--blue);opacity:.3;animation:pulse 1.4s ease-in-out infinite"></span>
-          <span style="width:4px;height:4px;border-radius:50%;background:var(--blue);opacity:.3;animation:pulse 1.4s ease-in-out .22s infinite"></span>
-          <span style="width:4px;height:4px;border-radius:50%;background:var(--blue);opacity:.3;animation:pulse 1.4s ease-in-out .44s infinite"></span>
-        </span>
-      </div>
-    </div>
     <div class="composer-wrap" id="composerWrap">
       <div class="cmd-dropdown" id="cmdDropdown"></div>
       <div class="composer-box" id="composerBox">
@@ -302,16 +268,76 @@
                 <line x1="8" y1="23" x2="16" y2="23"/>
               </svg>
             </button>
-          </div>
-          <div class="ctx-indicator" id="ctxIndicator" style="display:none" title="Context window usage">
-            <span class="ctx-bar-wrap"><span class="ctx-bar" id="ctxBar"></span></span>
-            <span class="ctx-label" id="ctxLabel"></span>
+            <div class="composer-divider" aria-hidden="true"></div>
+            <div id="profileChipWrap" class="composer-profile-wrap">
+              <button class="composer-profile-chip profile-chip" id="profileChip" type="button" onclick="toggleProfileDropdown()" title="Switch profile">
+                <span class="composer-profile-icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></span>
+                <span class="composer-profile-label" id="profileChipLabel">default</span>
+                <span class="composer-profile-chevron" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
+              </button>
+            </div>
+            <div class="composer-ws-wrap">
+              <button class="composer-workspace-chip ws-chip" id="composerWorkspaceChip" type="button" onclick="toggleComposerWsDropdown()" title="Switch workspace" disabled>
+                <span class="composer-workspace-icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span>
+                <span class="composer-workspace-label" id="composerWorkspaceLabel">Workspace</span>
+                <span class="composer-workspace-chevron" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
+              </button>
+            </div>
+            <div class="composer-model-wrap">
+              <button class="composer-model-chip" id="composerModelChip" type="button" onclick="toggleModelDropdown()" title="Conversation model">
+                <span class="composer-model-label" id="composerModelLabel">Model</span>
+                <span class="composer-model-chevron" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></span>
+              </button>
+              <select id="modelSelect" class="composer-model-select" title="Conversation model" aria-hidden="true" tabindex="-1">
+              <optgroup label="OpenAI">
+                <option value="openai/gpt-5.4-mini">GPT-5.4 Mini</option>
+                <option value="openai/gpt-4o">GPT-4o</option>
+                <option value="openai/o3">o3</option>
+                <option value="openai/o4-mini">o4-mini</option>
+              </optgroup>
+              <optgroup label="Anthropic">
+                <option value="anthropic/claude-sonnet-4.6">Claude Sonnet 4.6</option>
+                <option value="anthropic/claude-sonnet-4-5">Claude Sonnet 4.5</option>
+                <option value="anthropic/claude-haiku-3-5">Claude Haiku 3.5</option>
+              </optgroup>
+              <optgroup label="Other">
+                <option value="google/gemini-2.5-pro">Gemini 2.5 Pro</option>
+                <option value="deepseek/deepseek-chat-v3-0324">DeepSeek V3</option>
+                <option value="meta-llama/llama-4-scout">Llama 4 Scout</option>
+              </optgroup>
+            </select>
+            </div>
           </div>
           <div class="composer-right">
+            <span class="composer-status" id="composerStatus" style="display:none"></span>
+            <div class="ctx-indicator-wrap" id="ctxIndicatorWrap" style="display:none">
+              <button class="ctx-indicator" id="ctxIndicator" type="button" aria-label="Context window usage" aria-describedby="ctxTooltip">
+                <span class="ctx-ring">
+                  <svg class="ctx-ring-svg" viewBox="0 0 24 24" aria-hidden="true">
+                    <circle class="ctx-ring-track" cx="12" cy="12" r="9.75"></circle>
+                    <circle class="ctx-ring-value" id="ctxRingValue" cx="12" cy="12" r="9.75"></circle>
+                  </svg>
+                  <span class="ctx-ring-center" id="ctxPercent">0</span>
+                </span>
+              </button>
+              <div class="ctx-tooltip" id="ctxTooltip" role="tooltip" aria-hidden="true">
+                <div class="ctx-tooltip-title">Context window</div>
+                <div class="ctx-tooltip-line" id="ctxTooltipUsage"></div>
+                <div class="ctx-tooltip-line" id="ctxTooltipTokens"></div>
+                <div class="ctx-tooltip-line" id="ctxTooltipThreshold"></div>
+                <div class="ctx-tooltip-line" id="ctxTooltipCost" style="display:none"></div>
+              </div>
+            </div>
+            <button class="cancel-btn" id="btnCancel" onclick="cancelStream()" style="display:none" title="Stop generation" aria-label="Stop generation">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"></rect></svg>
+            </button>
             <button class="send-btn" id="btnSend" title="Send message" style="display:none">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
             </button>
           </div>
+          <div class="profile-dropdown" id="profileDropdown"></div>
+          <div class="ws-dropdown ws-dropdown-footer" id="composerWsDropdown"></div>
+          <div class="model-dropdown" id="composerModelDropdown"></div>
         </div>
         <div class="upload-bar-wrap" id="uploadBarWrap"><div class="upload-bar" id="uploadBar"></div></div>
       </div>
@@ -323,12 +349,12 @@
       <span>Workspace</span>
       <span class="git-badge" id="gitBadge" style="display:none"></span>
       <div class="panel-actions">
+        <button class="panel-icon-btn" id="btnCollapseWorkspacePanel" title="Hide workspace panel" onclick="toggleWorkspacePanel(false)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></button>
         <button class="panel-icon-btn" id="btnUpDir" title="Parent directory" onclick="navigateUp()" style="display:none"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></button>
         <button class="panel-icon-btn" id="btnNewFile" title="New file" onclick="promptNewFile()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         <button class="panel-icon-btn" id="btnNewFolder" title="New folder" onclick="promptNewFolder()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button>
         <button class="panel-icon-btn" id="btnRefreshPanel" title="Refresh" onclick="if(S.session)loadDir(S.currentDir)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
         <button class="panel-icon-btn close-preview" id="btnClearPreview" title="Close preview"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
-        <button class="panel-icon-btn mobile-close-btn" onclick="closeMobileFiles()" title="Close">×</button>
       </div>
     </div>
     <div class="breadcrumb-bar" id="breadcrumbBar" style="display:none"></div>
@@ -350,96 +376,151 @@
 <div class="settings-overlay" id="settingsOverlay" style="display:none">
   <div class="settings-panel">
     <div class="settings-header">
-      <h3 style="margin:0;font-size:16px" data-i18n="settings_title">Settings</h3>
+      <div class="settings-heading">
+        <div class="settings-kicker">Hermes WebUI</div>
+        <h3 style="margin:0;font-size:18px">Control Center</h3>
+        <div class="settings-subtitle">Preferences, conversation tools, and system controls.</div>
+      </div>
       <button class="panel-icon-btn" onclick="_closeSettingsPanel()" title="Close"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
     <div class="settings-body">
-      <div class="settings-field">
-        <label for="settingsModel" data-i18n="settings_label_model">Default Model</label>
-        <select id="settingsModel" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
+      <div class="settings-shell">
+        <div class="settings-tabs" role="tablist" aria-label="Hermes control center sections">
+          <button class="settings-tab active" id="settingsTabConversation" type="button" role="tab" aria-selected="true" aria-controls="settingsPaneConversation" onclick="switchSettingsSection('conversation')">
+            <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            <span class="settings-tab-title">Conversation</span>
+          </button>
+          <button class="settings-tab" id="settingsTabPreferences" type="button" role="tab" aria-selected="false" aria-controls="settingsPanePreferences" onclick="switchSettingsSection('preferences')">
+            <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+            <span class="settings-tab-title">Preferences</span>
+          </button>
+          <button class="settings-tab" id="settingsTabSystem" type="button" role="tab" aria-selected="false" aria-controls="settingsPaneSystem" onclick="switchSettingsSection('system')">
+            <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><line x1="6" y1="7" x2="6.01" y2="7"/><line x1="6" y1="17" x2="6.01" y2="17"/></svg>
+            <span class="settings-tab-title">System</span>
+          </button>
+        </div>
+        <div class="settings-main">
+          <div class="settings-pane active" id="settingsPaneConversation" role="tabpanel" aria-labelledby="settingsTabConversation">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title">Conversation</div>
+                <div class="settings-section-meta" id="hermesSessionMeta">No active conversation selected.</div>
+              </div>
+            </div>
+            <div class="hermes-action-grid">
+              <button class="settings-action-btn" id="btnDownload" title="Download as Markdown" data-i18n-title="download_transcript"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> <span data-i18n="transcript">Transcript</span></button>
+              <button class="settings-action-btn" id="btnExportJSON" title="Export full session as JSON"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1"/><path d="M16 3h1a2 2 0 0 1 2 2v5a2 2 0 0 0 2 2 2 2 0 0 0-2 2v5a2 2 0 0 1-2 2h-1"/></svg> JSON</button>
+              <button class="settings-action-btn" id="btnImportJSON" title="Import session from JSON"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg> <span data-i18n="import">Import</span></button>
+              <button class="settings-action-btn danger" id="btnClearConvModal" onclick="clearConversation()" title="Clear all messages in this conversation"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 1 2 2 2v2"/></svg> Clear</button>
+            </div>
+            <input type="file" id="importFileInput" accept=".json" style="display:none">
+          </div>
+          <div class="settings-pane" id="settingsPanePreferences" role="tabpanel" aria-labelledby="settingsTabPreferences">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title">Preferences</div>
+                <div class="settings-section-meta">Defaults and UI behavior for Hermes Web UI.</div>
+              </div>
+            </div>
+            <div class="settings-field">
+              <label for="settingsModel" data-i18n="settings_label_model">Default Model</label>
+              <select id="settingsModel" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
+            </div>
+            <div class="settings-field">
+              <label for="settingsSendKey" data-i18n="settings_label_send_key">Send Key</label>
+              <select id="settingsSendKey" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                <option value="enter">Enter (Shift+Enter for newline)</option>
+                <option value="ctrl+enter">Ctrl+Enter (Enter for newline)</option>
+              </select>
+            </div>
+            <div class="settings-field">
+              <label for="settingsTheme" data-i18n="settings_label_theme">Theme</label>
+              <select id="settingsTheme" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px" onchange="document.documentElement.dataset.theme=this.value;localStorage.setItem('hermes-theme',this.value)">
+                <option value="dark">Dark (default)</option>
+                <option value="light">Light</option>
+                <option value="slate">Slate (charcoal)</option>
+                <option value="solarized">Solarized Dark</option>
+                <option value="monokai">Monokai</option>
+                <option value="nord">Nord</option>
+                <option value="oled">OLED</option>
+              </select>
+            </div>
+            <div class="settings-field">
+              <label for="settingsLanguage" data-i18n="settings_label_language">Language</label>
+              <select id="settingsLanguage" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsSoundEnabled" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_sound">Notification sound</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_sound">Play a sound when the assistant finishes a response.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsNotificationsEnabled" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_notifications">Browser notifications</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_notifications">Show a system notification when a response completes while the tab is in the background.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsShowTokenUsage" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_token_usage">Show token usage after responses</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_token_usage">Displays input/output token count below each assistant reply. Also toggled with <code>/usage</code>.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsShowCliSessions" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_cli_sessions">Show CLI sessions in sidebar</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_cli_sessions">Merges sessions from the Hermes CLI (state.db) into the session list. Click a CLI session to import it and continue the conversation.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsSyncInsights" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_sync_insights">Sync usage to /insights</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_sync_insights">Mirrors WebUI token usage to state.db so <code>hermes /insights</code> includes browser session data. Off by default.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsCheckUpdates" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_check_updates">Check for updates</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_check_updates">Show a banner when newer versions of the WebUI or Agent are available. Runs a background git fetch periodically.</div>
+            </div>
+            <div class="settings-field">
+              <label for="settingsBotName" data-i18n="settings_label_bot_name">Assistant Name</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_bot_name">Display name for the assistant throughout the UI. Defaults to Hermes.</div>
+              <input type="text" id="settingsBotName" placeholder="Hermes" maxlength="64" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+            </div>
+            <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600" data-i18n="settings_save_btn">Save Settings</button>
+          </div>
+          <div class="settings-pane" id="settingsPaneSystem" role="tabpanel" aria-labelledby="settingsTabSystem">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title">System</div>
+                <div class="settings-section-meta">Instance version and access controls.</div>
+              </div>
+              <span class="settings-version-badge">v0.45.1</span>
+            </div>
+            <div class="settings-field" style="border-top:1px solid var(--border);padding-top:12px;margin-top:8px">
+              <label for="settingsPassword" data-i18n="settings_label_password">Access Password</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_password">Enter a new password to set or change it. Leave blank to keep current setting.</div>
+              <input type="password" id="settingsPassword" placeholder="Enter new password…" data-i18n-placeholder="password_placeholder" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+            </div>
+            <button class="sm-btn" id="btnDisableAuth" onclick="disableAuth()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:#e8a030;border-color:rgba(232,160,48,.3);display:none" data-i18n="disable_auth">Disable Auth</button>
+            <button class="sm-btn" id="btnSignOut" onclick="signOut()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:var(--accent);border-color:rgba(233,69,96,.3);display:none" data-i18n="sign_out">Sign Out</button>
+          </div>
+        </div>
       </div>
-      <div class="settings-field">
-        <label for="settingsSendKey" data-i18n="settings_label_send_key">Send Key</label>
-        <select id="settingsSendKey" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
-          <option value="enter">Enter (Shift+Enter for newline)</option>
-          <option value="ctrl+enter">Ctrl+Enter (Enter for newline)</option>
-        </select>
       </div>
-      <div class="settings-field">
-        <label for="settingsTheme" data-i18n="settings_label_theme">Theme</label>
-        <select id="settingsTheme" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px" onchange="document.documentElement.dataset.theme=this.value;localStorage.setItem('hermes-theme',this.value)">
-          <option value="dark">Dark (default)</option>
-          <option value="light">Light</option>
-          <option value="slate">Slate (charcoal)</option>
-          <option value="solarized">Solarized Dark</option>
-          <option value="monokai">Monokai</option>
-          <option value="nord">Nord</option>
-          <option value="oled">OLED</option>
-        </select>
-      </div>
-      <div class="settings-field">
-        <label for="settingsLanguage" data-i18n="settings_label_language">Language</label>
-        <select id="settingsLanguage" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
-      </div>
-      <div class="settings-field">
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-          <input type="checkbox" id="settingsSoundEnabled" style="width:15px;height:15px;accent-color:var(--accent)">
-          <span data-i18n="settings_label_sound">Notification sound</span>
-        </label>
-        <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_sound">Play a sound when the assistant finishes a response.</div>
-      </div>
-      <div class="settings-field">
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-          <input type="checkbox" id="settingsNotificationsEnabled" style="width:15px;height:15px;accent-color:var(--accent)">
-          <span data-i18n="settings_label_notifications">Browser notifications</span>
-        </label>
-        <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_notifications">Show a system notification when a response completes while the tab is in the background.</div>
-      </div>
-      <div class="settings-field">
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-          <input type="checkbox" id="settingsShowTokenUsage" style="width:15px;height:15px;accent-color:var(--accent)">
-          <span data-i18n="settings_label_token_usage">Show token usage after responses</span>
-        </label>
-        <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_token_usage">Displays input/output token count below each assistant reply. Also toggled with <code>/usage</code>.</div>
-      </div>
-      <div class="settings-field">
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-          <input type="checkbox" id="settingsShowCliSessions" style="width:15px;height:15px;accent-color:var(--accent)">
-          <span data-i18n="settings_label_cli_sessions">Show CLI sessions in sidebar</span>
-        </label>
-        <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_cli_sessions">Merges sessions from the Hermes CLI (state.db) into the session list. Click a CLI session to import it and continue the conversation.</div>
-      </div>
-      <div class="settings-field">
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-          <input type="checkbox" id="settingsSyncInsights" style="width:15px;height:15px;accent-color:var(--accent)">
-          <span data-i18n="settings_label_sync_insights">Sync usage to /insights</span>
-        </label>
-        <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_sync_insights">Mirrors WebUI token usage to state.db so <code>hermes /insights</code> includes browser session data. Off by default.</div>
-      </div>
-      <div class="settings-field">
-        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-          <input type="checkbox" id="settingsCheckUpdates" style="width:15px;height:15px;accent-color:var(--accent)">
-          <span data-i18n="settings_label_check_updates">Check for updates</span>
-        </label>
-        <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_check_updates">Show a banner when newer versions of the WebUI or Agent are available. Runs a background git fetch periodically.</div>
-      </div>
-      <div class="settings-field">
-        <label for="settingsBotName" data-i18n="settings_label_bot_name">Assistant Name</label>
-        <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_bot_name">Display name for the assistant throughout the UI. Defaults to Hermes.</div>
-        <input type="text" id="settingsBotName" placeholder="Hermes" maxlength="64" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
-      </div>
-      <div class="settings-field" style="border-top:1px solid var(--border);padding-top:12px;margin-top:8px">
-        <label for="settingsPassword" data-i18n="settings_label_password">Access Password</label>
-        <div style="font-size:11px;color:var(--muted);margin-bottom:6px" data-i18n="settings_desc_password">Enter a new password to set or change it. Leave blank to keep current setting.</div>
-        <input type="password" id="settingsPassword" placeholder="Enter new password…" data-i18n-placeholder="password_placeholder" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
-      </div>
-      <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600" data-i18n="settings_save_btn">Save Settings</button>
-      <button class="sm-btn" id="btnDisableAuth" onclick="disableAuth()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:#e8a030;border-color:rgba(232,160,48,.3);display:none" data-i18n="disable_auth">Disable Auth</button>
-      <button class="sm-btn" id="btnSignOut" onclick="signOut()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:var(--accent);border-color:rgba(233,69,96,.3);display:none" data-i18n="sign_out">Sign Out</button>
     </div>
   </div>
 </div>
-<div class="mobile-overlay" id="mobileOverlay" onclick="closeMobileSidebar();closeMobileFiles()"></div>
+<div class="mobile-overlay" id="mobileOverlay" onclick="closeMobileSidebar()"></div>
 <nav class="mobile-bottom-nav" id="mobileBottomNav">
   <button class="mobile-nav-btn active" data-panel="chat" onclick="mobileSwitchPanel('chat')">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
@@ -462,16 +543,6 @@
     <span data-i18n="tab_workspaces">Spaces</span>
   </button>
 </nav>
-<div class="toast" id="toast"></div>
-<script src="/static/i18n.js"></script>
-<script src="/static/icons.js"></script>
-<script src="/static/ui.js"></script>
-<script src="/static/workspace.js"></script>
-<script src="/static/sessions.js"></script>
-<script src="/static/commands.js"></script>
-<script src="/static/messages.js"></script>
-<script src="/static/panels.js"></script>
-<script src="/static/boot.js"></script>
 <div class="app-dialog-overlay" id="appDialogOverlay" style="display:none" aria-hidden="true">
   <div class="app-dialog" id="appDialog" role="dialog" aria-modal="true" aria-labelledby="appDialogTitle" aria-describedby="appDialogDesc">
     <div class="app-dialog-header">
@@ -488,5 +559,15 @@
     </div>
   </div>
 </div>
+<div class="toast" id="toast"></div>
+<script src="/static/i18n.js"></script>
+<script src="/static/icons.js"></script>
+<script src="/static/ui.js"></script>
+<script src="/static/workspace.js"></script>
+<script src="/static/sessions.js"></script>
+<script src="/static/commands.js"></script>
+<script src="/static/messages.js"></script>
+<script src="/static/panels.js"></script>
+<script src="/static/boot.js"></script>
 </body>
 </html>

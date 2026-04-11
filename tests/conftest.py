@@ -170,7 +170,7 @@ def pytest_collection_modifyitems(config, items):
             skipped += 1
 
     if skipped:
-        print(f"\n⚠️  hermes-agent not found — {skipped} agent-dependent tests will be skipped\n")
+        print(f"\nWARNING: hermes-agent not found; {skipped} agent-dependent tests will be skipped\n")
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
