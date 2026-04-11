@@ -366,7 +366,7 @@ const LOCALES = {
 
   zh: {
     _lang: 'zh',
-    _label: '\u4e2d\u6587',
+    _label: '\u7b80\u4f53\u4e2d\u6587',
     _speech: 'zh-CN',
     // boot.js
     cancelling: '\u6b63\u5728\u53d6\u6d88...',
