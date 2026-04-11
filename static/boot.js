@@ -21,7 +21,11 @@ function closeMobileSidebar(){
   const sidebar=document.querySelector('.sidebar');
   const overlay=$('mobileOverlay');
   if(sidebar)sidebar.classList.remove('mobile-open');
-  if(overlay)overlay.classList.remove('visible');
+  // only hide overlay if right panel is also closed
+  const panel=document.querySelector('.rightpanel');
+  if(!panel||!panel.classList.contains('mobile-open')){
+    if(overlay)overlay.classList.remove('visible');
+  }
 }
 function toggleMobileFiles(){
   const panel=document.querySelector('.rightpanel');
