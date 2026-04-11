@@ -32,9 +32,11 @@ SETUP: Clear localStorage (DevTools > Application > Local Storage > delete herme
 STEPS:
   1. Navigate to http://localhost:8787
 EXPECT:
-  - Dark background, Hermes logo in sidebar header
+  - Dark background
+  - Sidebar begins directly with the icon tab row; there is no dedicated branding header
   - Center area shows "What can I help with?" heading with suggestion buttons
   - Session list in sidebar is empty or shows existing sessions
+  - Sidebar footer shows a single "Hermes WebUI" control-center button
   - No session is highlighted active
   - Send button is present but there is no input focus by default
 FAIL: Page shows error, blank white screen, or auto-creates a new session without user action.
@@ -400,7 +402,8 @@ FAIL: Command blocked after Allow once, card stays, error.
 ### T8.1: Download Conversation as Markdown
 SETUP: A session with at least 2 messages (1 user + 1 assistant).
 STEPS:
-  1. Click the "Transcript" download button in the sidebar bottom
+  1. Click the "Hermes" button in the sidebar footer
+  2. In the Control Center modal, click "Transcript"
 EXPECT:
   - Browser downloads a .md file named hermes-{session_id}.md
   - Opening the file shows the conversation in markdown format:
@@ -1249,7 +1252,8 @@ FAIL: Job created, form doesn't close.
 ### T28.1: JSON Export Button Downloads File
 SETUP: Active session with at least a few messages.
 STEPS:
-  1. Click the "JSON" button in the sidebar footer (next to Transcript)
+  1. Click the "Hermes" button in the sidebar footer
+  2. In the Control Center modal, click "JSON"
 EXPECT:
   - Browser downloads a file named hermes-{session_id}.json
   - Opening the file shows valid JSON with: session_id, title, messages array,
@@ -1491,14 +1495,16 @@ FAIL: Both messages removed, wrong message sent, crash.
 ### T34.1: Clear Button Appears When Session Has Messages
 SETUP: Session with at least one message.
 EXPECT:
-  - A "Clear" chip with a trash icon appears in the topbar right side (next to the workspace chip)
-  - Button NOT visible when session has no messages / empty state
+  - The "Hermes" button is visible in the sidebar footer
+  - Opening the Control Center shows a "Clear" action in the Conversation section
+  - The Clear action is disabled when there is no active session or no messages
 FAIL: Button always visible, never visible.
 
 ### T34.2: Clear Wipes Messages and Resets Title
 STEPS:
-  1. Click the Clear button in the topbar
-  2. Confirm the modal
+  1. Click the "Hermes" button in the sidebar footer
+  2. Click "Clear" in the Conversation section
+  3. Confirm the modal
 EXPECT:
   - All messages disappear from the chat area
   - Empty state ("What can I help with?") reappears
@@ -1633,7 +1639,7 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 - Switch model. Send a message. Verify response uses selected model.
 
 ### Sprint 12: Settings + Pin + Import
-- Click gear icon. Settings overlay opens.
+- Click the "Hermes WebUI" button in the sidebar footer. Control Center overlay opens with vertical section tabs on the left.
 - Change default model, save. Restart server. Verify setting persisted.
 - Pin a session (star icon in hover overlay). Verify it floats to top of list.
 - Export session as JSON. Import it back. Verify messages restored.

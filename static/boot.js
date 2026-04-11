@@ -274,6 +274,8 @@ $('importFileInput').onchange=async(e)=>{
     if(res.ok&&res.session){
       await loadSession(res.session.session_id);
       await renderSessionList();
+      const overlay=$('settingsOverlay');
+      if(overlay) overlay.style.display='none';
       showToast(t('session_imported'));
     }
   }catch(err){
