@@ -54,7 +54,7 @@ async function loadDir(path){
     }
     if(typeof clearPreview==='function'){
       if(typeof _previewDirty!=='undefined'&&_previewDirty){
-        if(confirm(t('unsaved_confirm')))clearPreview();
+        showConfirmDialog({title:t('unsaved_confirm'),message:'',confirmLabel:'Discard',danger:true,focusCancel:true}).then(ok=>{if(ok)clearPreview();});
       }else{
         clearPreview();
       }

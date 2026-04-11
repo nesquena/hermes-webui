@@ -296,7 +296,8 @@ async function cronEditSave(id) {
 }
 
 async function cronDelete(id) {
-  if (!confirm('Delete this cron job? This cannot be undone.')) return;
+  const _delCron=await showConfirmDialog({title:'Delete cron job',message:'This cannot be undone.',confirmLabel:'Delete',danger:true,focusCancel:true});
+  if(!_delCron) return;
   try {
     await api('/api/crons/delete', {method:'POST', body: JSON.stringify({job_id: id})});
     showToast('Job deleted');
@@ -339,7 +340,8 @@ function loadTodos() {
 
 async function clearConversation() {
   if(!S.session) return;
-  if(!confirm('Clear all messages in this conversation? This cannot be undone.')) return;
+  const _clrMsg=await showConfirmDialog({title:'Clear conversation',message:'Clear all messages? This cannot be undone.',confirmLabel:'Clear',danger:true,focusCancel:true});
+  if(!_clrMsg) return;
   try {
     const data = await api('/api/session/clear', {method:'POST',
       body: JSON.stringify({session_id: S.session.session_id})});
@@ -644,7 +646,8 @@ async function addWorkspace(){
 }
 
 async function removeWorkspace(path){
-  if(!confirm(`Remove workspace "${path}"?`))return;
+  const _rmWs=await showConfirmDialog({title:'Remove workspace',message:`Remove "${path}"?`,confirmLabel:'Remove',danger:true,focusCancel:true});
+  if(!_rmWs) return;
   try{
     const data=await api('/api/workspaces/remove',{method:'POST',body:JSON.stringify({path})});
     _workspaceList=data.workspaces;
@@ -872,7 +875,8 @@ async function submitProfileCreate() {
 }
 
 async function deleteProfile(name) {
-  if (!confirm(`Delete profile "${name}"? This removes all config, skills, memory, and sessions for this profile.`)) return;
+  const _delProf=await showConfirmDialog({title:`Delete profile "${name}"?`,message:'This removes all config, skills, memory, and sessions for this profile.',confirmLabel:'Delete',danger:true,focusCancel:true});
+  if(!_delProf) return;
   try {
     await api('/api/profile/delete', { method: 'POST', body: JSON.stringify({ name }) });
     await loadProfilesPanel();
@@ -1131,7 +1135,8 @@ async function signOut(){
 }
 
 async function disableAuth(){
-  if(!confirm('Disable password protection? Anyone will be able to access this instance.')) return;
+  const _disAuth=await showConfirmDialog({title:'Disable password protection',message:'Anyone will be able to access this instance.',confirmLabel:'Disable',danger:true,focusCancel:true});
+  if(!_disAuth) return;
   try{
     await api('/api/settings',{method:'POST',body:JSON.stringify({_clear_password:true})});
     showToast('Auth disabled — password protection removed');
