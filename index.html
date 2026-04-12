@@ -664,8 +664,6 @@
       margin-top: 48px;
     }
     .webui-layout > * { min-width: 0; }
-    .webui-layout > * { min-width: 0; }
-    .webui-layout > * { min-width: 0; }
     .webui-features {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -804,12 +802,6 @@
     }
 
     /* ===== COMPARISON ===== */
-    .compare-more { margin-top: 40px; padding-top: 32px; border-top: 1px solid var(--border); }
-    .compare-more-label { font-size: 0.75rem; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 12px; }
-    .compare-more-links { display: flex; flex-wrap: wrap; gap: 8px; }
-    .compare-pill { display: inline-block; padding: 6px 14px; border: 1px solid var(--border); border-radius: 100px; font-size: 0.82rem; font-weight: 500; color: var(--text-secondary); transition: border-color 0.15s, color 0.15s, background 0.15s; }
-    .compare-pill:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-subtle); }
-    
     .compare-more {
       margin-top: 40px;
       padding-top: 32px;
@@ -938,8 +930,6 @@
       gap: 48px;
       margin-top: 48px;
     }
-    .install-layout > * { min-width: 0; }
-    .install-layout > * { min-width: 0; }
     .install-layout > * { min-width: 0; }
     .providers-table-wrap {
       border: 1px solid var(--border);
@@ -1300,8 +1290,6 @@
           </div>
         </div>
       </div>
-
-        </div>
     </div>
   </section>
 
@@ -1601,16 +1589,8 @@ docker run -d \
           <div class="persona-body">Switch between OpenAI, Anthropic, Google, DeepSeek, and others based on cost, capability, or rate limits without rebuilding your workflow.</div>
         </div>
 
-        <div class="comparison-card" onclick="location.href='compare/perplexity-computer.html'" role="link" tabindex="0" style="cursor:pointer">
-          <div class="card-arrow">→</div>
-          <h4>Hermes vs. Perplexity Computer</h4>
-          <p>
-            Perplexity Computer (February 2026) is a cloud agentic workflow engine that routes across 19+ frontier models, runs tasks in isolated sandboxes, and connects to 400+ services via prebuilt OAuth. Zero setup, broad coverage. Key difference from Hermes: cloud-only, no data sovereignty, opaque credit costs, and no persistent environment state between runs.
-          </p>
-        </div>
 
       </div>
-
     </div>
   </section>
 
@@ -1779,6 +1759,14 @@ docker run -d \
           <h4>Hermes vs. Claude.ai / ChatGPT</h4>
           <p>
             Both are no longer simple chat tools. Claude Cowork added scheduling (Feb 2026) and 50+ connectors. ChatGPT has Agent Mode (July 2025), Scheduled Tasks, and 50+ connectors. Both have improved memory. The fundamental difference isn't features &mdash; it's where execution lives. Neither is self-hosted. Neither is provider-agnostic. Memory, sessions, and agent execution run on their servers, not yours. For workflows requiring data sovereignty, persistent server-resident execution, or provider flexibility, that's a disqualifying constraint.
+          </p>
+        </div>
+
+        <div class="comparison-card" onclick="location.href='compare/perplexity-computer.html'" role="link" tabindex="0" aria-label="Compare Hermes vs. Perplexity Computer" style="cursor:pointer">
+          <div class="card-arrow">&rarr;</div>
+          <h4>Hermes vs. Perplexity Computer</h4>
+          <p>
+            Perplexity Computer (February 2026) is a cloud agentic workflow engine that routes across 19+ frontier models, runs tasks in isolated sandboxes, and connects to 400+ services via prebuilt OAuth. Zero setup, broad coverage. Key difference from Hermes: cloud-only, no data sovereignty, opaque credit costs, and no persistent environment state between runs.
           </p>
         </div>
 
@@ -2086,10 +2074,11 @@ hermes doctor         # diagnose any issues</code></pre>
     html.setAttribute('data-theme', theme);
     localStorage.setItem('theme', theme);
     // Code blocks stay dark in both themes; no hljs switch needed
+    // Icon shows what you'll switch TO: sun in dark mode, moon in light mode
     if (theme === 'light') {
-      themeToggle.textContent = '🌙';
+      themeToggle.textContent = '\u263E';
     } else {
-      themeToggle.textContent = '☀️';
+      themeToggle.textContent = '\u2600\uFE0F';
     }
   }
 
