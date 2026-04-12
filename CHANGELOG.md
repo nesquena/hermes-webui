@@ -18,7 +18,7 @@
 - **Clickable breadcrumb navigation** (PR #302 / closes #292): Workspace file preview now shows a clickable breadcrumb path bar. Each segment navigates directly to that directory level. Paths with spaces and special characters handled correctly. `clearPreview()` restores the directory breadcrumb on close.
 - **Wider right panel** (PR #302): `PANEL_MAX` raised from 500 to 1200 — right panel can now be dragged wider on ultrawide screens.
 - **Responsive message width** (PR #302): `.messages-inner` now scales up gracefully at 1400px (1100px max) and 1800px (1200px max) viewport widths instead of capping at 800px on all screen sizes.
-  - 12 new tests in `tests/test_sprint35.py`; 743 tests total (up from 731)
+  - 12 new tests in `tests/test_sprint35.py`; 731 tests total (up from 719)
 
 ## [v0.49.2] OAuth provider support in onboarding (issues #303, #304)
 
@@ -26,7 +26,7 @@
   - New `_provider_oauth_authenticated()` helper in `api/onboarding.py` checks `hermes_cli.auth.get_auth_status()` first (authoritative), then falls back to parsing `~/.hermes/auth.json` directly for the known OAuth provider IDs (`openai-codex`, `copilot`, `copilot-acp`, `qwen-oauth`, `nous`).
   - `_status_from_runtime()` now has an `else` branch for providers not in `_SUPPORTED_PROVIDER_SETUPS`; OAuth-authenticated providers return `provider_ready=True` and `setup_state="ready"`.
   - The `provider_incomplete` status note no longer says "API key" for OAuth providers — it now says "Run 'hermes auth' or 'hermes model' in a terminal to complete setup."
-  - 19 new tests in `tests/test_sprint34.py`; 738 tests total (up from 719)
+  - 19 new tests in `tests/test_sprint34.py`; 719 tests total (up from 700)
 
 ## [v0.49.1] Docker docs + mobile Profiles button (PRs #291, #265)
 
