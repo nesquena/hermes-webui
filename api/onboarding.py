@@ -383,8 +383,16 @@ def get_onboarding_status() -> dict:
     last_workspace = get_last_workspace()
     available_models = get_available_models()
 
+    # HERMES_WEBUI_SKIP_ONBOARDING=1 lets hosting providers (e.g. Agent37) ship
+    # a pre-configured instance without the wizard blocking the first load.
+    # Only takes effect when the system is actually chat_ready — a misconfigured
+    # deployment still shows the wizard so the user can fix it.
+    skip_env = os.environ.get("HERMES_WEBUI_SKIP_ONBOARDING", "").strip()
+    skip_requested = skip_env in {"1", "true", "yes"}
+    auto_completed = skip_requested and bool(runtime.get("chat_ready"))
+
     return {
-        "completed": bool(settings.get("onboarding_completed")),
+        "completed": bool(settings.get("onboarding_completed")) or auto_completed,
         "settings": {
             "default_model": settings.get("default_model") or DEFAULT_MODEL,
             "default_workspace": settings.get("default_workspace")
@@ -461,11 +469,22 @@ def apply_onboarding_setup(body: dict) -> dict:
 
     if api_key:
         _write_env_file(env_path, {provider_meta["env_var"]: api_key})
+        # Belt-and-braces: set directly on os.environ so the value is visible to
+        # any code in the same process that reads it before the next request cycle.
+        os.environ[provider_meta["env_var"]] = api_key
 
+    # Reload the hermes_cli provider/config cache so the next streaming call
+    # picks up the new key without requiring a server restart.
     try:
         from api.profiles import _reload_dotenv
-
         _reload_dotenv(_get_active_hermes_home())
+    except Exception:
+        pass
+
+    try:
+        # hermes_cli may cache config at import time; ask it to reload if possible.
+        from hermes_cli.config import reload as _cli_reload
+        _cli_reload()
     except Exception:
         pass
 

@@ -21,6 +21,8 @@ INSTALLER_URL = "https://raw.githubusercontent.com/NousResearch/hermes-agent/mai
 REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_HOST = os.getenv("HERMES_WEBUI_HOST", "127.0.0.1")
 DEFAULT_PORT = int(os.getenv("HERMES_WEBUI_PORT", "8787"))
+# Set HERMES_WEBUI_SKIP_ONBOARDING=1 to bypass the first-run wizard when
+# the environment is already fully configured (e.g. managed hosting).
 
 
 def info(msg: str) -> None:
