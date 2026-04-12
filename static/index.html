@@ -169,7 +169,6 @@
       <div style="flex:1;min-width:0;overflow:hidden"><div class="topbar-title" id="topbarTitle">Hermes</div><div class="topbar-meta" id="topbarMeta" data-i18n="new_conversation">Start a new conversation</div></div>
       <div class="topbar-chips">
         <button class="chip workspace-toggle-btn mobile-files-btn" id="btnWorkspacePanelToggle" onclick="toggleWorkspacePanel()" title="Show workspace panel" aria-pressed="false"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg><span class="workspace-toggle-label">Files</span></button>
-        <button class="chip mobile-files-btn" id="btnMobileFiles" onclick="toggleMobileFiles()" title="Files"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button>
       </div>
     </div>
     <div class="messages" id="messages">
@@ -357,7 +356,7 @@
         <button class="panel-icon-btn" id="btnNewFolder" title="New folder" onclick="promptNewFolder()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button>
         <button class="panel-icon-btn" id="btnRefreshPanel" title="Refresh" onclick="if(S.session)loadDir(S.currentDir)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
         <button class="panel-icon-btn close-preview" id="btnClearPreview" title="Close preview"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
-        <button class="panel-icon-btn mobile-close-btn" onclick="closeMobileFiles()" title="Close" aria-label="Close workspace panel">×</button>
+        <button class="panel-icon-btn mobile-close-btn" onclick="closeWorkspacePanel()" title="Close" aria-label="Close workspace panel">×</button>
       </div>
     </div>
     <div class="breadcrumb-bar" id="breadcrumbBar" style="display:none"></div>
