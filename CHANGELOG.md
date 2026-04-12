@@ -6,6 +6,12 @@
 ---
 
 
+## [v0.50.2] Workspace panel state persists across refreshes
+
+- **Workspace panel open/closed persists** (localStorage key `hermes-webui-workspace-panel`): Once you open the workspace/files pane, it stays open after a page refresh. Closing it explicitly saves the closed state, which also survives a refresh. The restore happens in the boot sequence before the first render, so there is no flash of the wrong state. Works for both desktop and mobile.
+  - State is stored as `'open'` or `'closed'` — `'open'` restores as `'browse'` mode; any preview state is re-evaluated normally.
+  - 7 new tests in `tests/test_sprint37.py`; 753 tests total (up from 746)
+
 ## [v0.50.1] Mobile Enter key inserts newline (PR #315, fixes #269)
 
 - **Enter inserts newline on mobile** (closes #269): On touch-primary devices (detected via `matchMedia('(pointer:coarse)')`), the Enter key now inserts a newline instead of sending. Users send via the Send button, which is always visible on mobile. Desktop behavior is unchanged — Enter sends, Shift+Enter inserts a newline.

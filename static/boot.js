@@ -40,6 +40,8 @@ function _setWorkspacePanelMode(mode){
   if(!layout||!panel)return;
   _workspacePanelMode=(mode==='browse'||mode==='preview')?mode:'closed';
   const open=_workspacePanelMode!=='closed';
+  // Persist open/closed across refreshes (browse/preview → open; closed → closed)
+  localStorage.setItem('hermes-webui-workspace-panel', open ? 'open' : 'closed');
   layout.classList.toggle('workspace-panel-collapsed',!open);
   if(_isCompactWorkspaceViewport()){
     panel.classList.toggle('mobile-open',open);
@@ -503,6 +505,10 @@ function applyBotName(){
   await loadWorkspaceList();
   await loadOnboardingWizard();
   _initResizePanels();
+  // Restore workspace panel open/closed state from last visit
+  if(localStorage.getItem('hermes-webui-workspace-panel')==='open'){
+    _workspacePanelMode='browse';
+  }
   const saved=localStorage.getItem('hermes-webui-session');
   if(saved){
     try{await loadSession(saved);syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);return;}
