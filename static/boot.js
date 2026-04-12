@@ -5,7 +5,9 @@ async function cancelStream(){
     await fetch(new URL(`/api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,location.origin).href,{credentials:'include'});
     const btn=$('btnCancel');if(btn)btn.style.display='none';
     setComposerStatus(t('cancelling'));
-  }catch(e){setComposerStatus(t('cancel_failed')+e.message);}
+    // Fallback: if the SSE cancel event doesn't fire within 3s, clear status
+    setTimeout(()=>{if(S.activeStreamId===streamId||S.activeStreamId===null){setBusy(false);setComposerStatus('');}},3000);
+  }catch(e){setComposerStatus(t('cancel_failed')+e.message);setTimeout(()=>{setBusy(false);setComposerStatus('');},3000);}
 }
 
 // ── Mobile navigation ──────────────────────────────────────────────────────

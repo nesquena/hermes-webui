@@ -221,36 +221,39 @@ function _syncCtxIndicator(usage){
   const el=$('ctxIndicator');
   if(!el)return;
   const promptTok=usage.last_prompt_tokens||usage.input_tokens||0;
+  const totalTok=(usage.input_tokens||0)+(usage.output_tokens||0);
   const ctxWindow=usage.context_length||0;
-  if(!promptTok||!ctxWindow){
+  const cost=usage.estimated_cost;
+  // Show indicator whenever we have any usage data (tokens or cost)
+  if(!promptTok&&!totalTok&&!cost){
     if(wrap) wrap.style.display='none';
     return;
   }
   if(wrap) wrap.style.display='';
-  const pct=Math.min(100,Math.round((promptTok/ctxWindow)*100));
+  const hasCtxWindow=!!(promptTok&&ctxWindow);
+  const pct=hasCtxWindow?Math.min(100,Math.round((promptTok/ctxWindow)*100)):0;
   const ring=$('ctxRingValue');
   const center=$('ctxPercent');
   const usageLine=$('ctxTooltipUsage');
   const tokensLine=$('ctxTooltipTokens');
   const thresholdLine=$('ctxTooltipThreshold');
   const costLine=$('ctxTooltipCost');
-  const cost=usage.estimated_cost;
   if(ring){
     const circumference=61.261056745;
     ring.style.strokeDasharray=String(circumference);
     ring.style.strokeDashoffset=String(circumference*(1-pct/100));
   }
-  if(center) center.textContent=String(pct);
+  if(center) center.textContent=hasCtxWindow?String(pct):'\u00b7';
   el.classList.toggle('ctx-mid',pct>50&&pct<=75);
   el.classList.toggle('ctx-high',pct>75);
-  let label=`Context window ${pct}% used`;
+  let label=hasCtxWindow?`Context window ${pct}% used`:`${_fmtTokens(totalTok)} tokens used`;
   if(cost) label+=` \u00b7 $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
   el.setAttribute('aria-label',label);
-  if(usageLine) usageLine.textContent=`${pct}% used (${Math.max(0,100-pct)}% left)`;
-  if(tokensLine) tokensLine.textContent=`${_fmtTokens(promptTok)} / ${_fmtTokens(ctxWindow)} tokens used`;
+  if(usageLine) usageLine.textContent=hasCtxWindow?`${pct}% used (${Math.max(0,100-pct)}% left)`:`${_fmtTokens(totalTok)} tokens used`;
+  if(tokensLine) tokensLine.textContent=hasCtxWindow?`${_fmtTokens(promptTok)} / ${_fmtTokens(ctxWindow)} tokens used`:`In: ${_fmtTokens(usage.input_tokens||0)} \u00b7 Out: ${_fmtTokens(usage.output_tokens||0)}`;
   const threshold=usage.threshold_tokens||0;
   if(thresholdLine){
-    if(threshold){
+    if(threshold&&ctxWindow){
       thresholdLine.style.display='';
       thresholdLine.textContent=`Auto-compress at ${_fmtTokens(threshold)} (${Math.round(threshold/ctxWindow*100)}%)`;
     }else{
@@ -406,20 +409,17 @@ function updateSendBtn(){
   const btn=$('btnSend');
   if(!btn) return;
   const hasContent=$('msg').value.trim().length>0||S.pendingFiles.length>0;
-  const shouldShow=hasContent&&!S.busy;
-  if(shouldShow&&btn.style.display==='none'){
-    btn.style.display='';
-    // Remove then re-add class to retrigger animation each time
+  const canSend=hasContent&&!S.busy;
+  // Hide while busy (cancel button takes its place); show otherwise
+  btn.style.display=S.busy?'none':'';
+  btn.disabled=!canSend;
+  if(canSend&&!btn.classList.contains('visible')){
     btn.classList.remove('visible');
     requestAnimationFrame(()=>btn.classList.add('visible'));
-  } else if(!shouldShow&&btn.style.display!=='none'){
-    btn.style.display='none';
-    btn.classList.remove('visible');
   }
 }
 function setBusy(v){
   S.busy=v;
-  $('btnSend').disabled=v;
   updateSendBtn();
   if(!v){
     setStatus('');
