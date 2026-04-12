@@ -116,18 +116,21 @@ async function send(){
   function _streamDisplay(){
     const raw=assistantText;
     for(const {open,close} of _thinkPairs){
-      if(raw.startsWith(open)){
-        const ci=raw.indexOf(close,open.length);
+      // Trim leading whitespace before checking for the open tag — some models
+      // (e.g. MiniMax) emit newlines before <think>.
+      const trimmed=raw.trimStart();
+      if(trimmed.startsWith(open)){
+        const ci=trimmed.indexOf(close,open.length);
         if(ci!==-1){
           // Thinking block complete — strip it, show the rest
-          return raw.slice(ci+close.length).replace(/^\s+/,'');
+          return trimmed.slice(ci+close.length).replace(/^\s+/,'');
         }
         // Still inside thinking block — show placeholder
         return '';
       }
       // Hide partial tag prefixes while streaming so users don't see
       // `<thi`, `<think`, etc. before the model finishes the token.
-      if(open.startsWith(raw)) return '';
+      if(open.startsWith(trimmed)) return '';
     }
     return raw;
   }

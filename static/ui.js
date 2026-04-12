@@ -801,19 +801,20 @@ function renderMessages(){
     if(!thinkingText && m.reasoning){
       thinkingText=m.reasoning;
     }
-    // Parse inline thinking tags from plain text: <think>...</think> (DeepSeek, QwQ, etc.)
+    // Parse inline thinking tags from plain text: <think>...</think> (DeepSeek, QwQ, MiniMax, etc.)
     // and Gemma 4 channel tokens: <|channel>thought\n...<channel|>
+    // Note: no ^ anchor — some models emit leading whitespace/newlines before <think>.
     if(!thinkingText && typeof content==='string'){
-      const thinkMatch=content.match(/^<think>([\s\S]*?)<\/think>\s*/);
+      const thinkMatch=content.match(/<think>([\s\S]*?)<\/think>/);
       if(thinkMatch){
         thinkingText=thinkMatch[1].trim();
-        content=content.slice(thinkMatch[0].length);
+        content=content.replace(/<think>[\s\S]*?<\/think>\s*/,'').trimStart();
       }
       if(!thinkingText){
-        const gemmaMatch=content.match(/^<\|channel>thought\n([\s\S]*?)<channel\|>\s*/);
+        const gemmaMatch=content.match(/<\|channel>thought\n([\s\S]*?)<channel\|>/);
         if(gemmaMatch){
           thinkingText=gemmaMatch[1].trim();
-          content=content.slice(gemmaMatch[0].length);
+          content=content.replace(/<\|channel>thought\n[\s\S]*?<channel\|>\s*/,'').trimStart();
         }
       }
     }
