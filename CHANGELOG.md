@@ -6,6 +6,15 @@
 ---
 
 
+## [v0.48.0] Real-time gateway session sync (PR #274)
+
+- **Real-time gateway session sync** (PR #274, @bergeouss): Gateway sessions from Telegram, Discord, Slack, and other messaging platforms now appear in the WebUI sidebar and update in real time as new messages arrive. Enable via the "Show agent sessions" checkbox (renamed from "Show CLI sessions").
+  - `api/gateway_watcher.py`: background daemon thread polling `state.db` every 5s using MD5 hash-based change detection
+  - New SSE endpoint `/api/sessions/gateway/stream` for real-time push to browser
+  - Dynamic source badges: telegram (blue), discord (purple), slack (dark purple), cli (green)
+  - Zero changes to hermes-agent — WebUI reads the shared `state.db` that both components access
+  - 10 new tests in `test_gateway_sync.py` covering metadata, filtering, SSE, and watcher lifecycle
+  - 658 tests (up from 648)
 ## [v0.47.1] Spanish locale (PR #275)
 
 - **Spanish (es) locale** (PR #275, @gabogabucho): Full Spanish translation for all 175 UI strings. Exposed automatically in the language selector via existing `LOCALES` wiring. Includes regression tests verifying locale presence, representative translations, and key-parity with English. 648 tests (up from 645).
