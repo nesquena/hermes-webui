@@ -417,7 +417,11 @@ def apply_onboarding_setup(body: dict) -> dict:
     base_url = _normalize_base_url(str(body.get("base_url") or ""))
 
     if provider not in _SUPPORTED_PROVIDER_SETUPS:
-        raise ValueError("Unsupported provider for WebUI onboarding.")
+        # Unsupported providers (openai-codex, copilot, nous, etc.) are already
+        # configured via the CLI. Just mark onboarding as complete and let the
+        # user through — the agent is already set up, no further setup needed.
+        save_settings({"onboarding_completed": True})
+        return get_onboarding_status()
     if not model:
         raise ValueError("model is required")
 
