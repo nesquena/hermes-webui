@@ -168,7 +168,7 @@
     </a>
     <a href="../index.html#resources" class="nav-back"><span>&larr; Back to Hermes</span></a>
     <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
-      <button class="btn-theme" id="theme-toggle" aria-label="Toggle theme">&#9790;</button>
+      <button class="btn-theme" id="theme-toggle" aria-label="Toggle theme">🌙</button>
       <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" class="btn-cta" target="_blank" rel="noopener">Get started &rarr;</a>
     </div>
   </div>
@@ -188,8 +188,8 @@
       <p class="page-sub">The best third-party projects, tools, skills, and integrations created by the Hermes Agent community. Sorted by GitHub stars, filtered for quality.</p>
 
       <div class="stats-bar">
-        <span class="stat-pill"><span class="dot"></span>30+ community projects</span>
-        <span class="stat-pill"><span class="dot"></span>10+ categories</span>
+        <span class="stat-pill"><span class="dot"></span>27 community projects</span>
+        <span class="stat-pill"><span class="dot"></span>7 categories</span>
         <span class="stat-pill"><span class="dot"></span>50+ star minimum</span>
       </div>
     </div>
@@ -552,7 +552,7 @@
   function setTheme(t){
     html.setAttribute('data-theme',t);
     localStorage.setItem('theme',t);
-    themeToggle.textContent = t==='light' ? '\u263E' : '\u2600\uFE0F';
+    themeToggle.textContent = t==='light' ? '🌙' : '☀️';
   }
   var saved=localStorage.getItem('theme');
   if(saved){setTheme(saved)}else{setTheme('dark')}
