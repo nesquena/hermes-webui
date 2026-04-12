@@ -2,10 +2,10 @@ const ONBOARDING={status:null,step:0,steps:['system','workspace','password','fin
 
 function _onboardingStepMeta(key){
   return ({
-    system:{title:'System check',desc:'Verify Hermes Agent and config visibility.'},
-    workspace:{title:'Workspace + model',desc:'Pick defaults for new sessions.'},
-    password:{title:'Optional password',desc:'Protect the Web UI before sharing it.'},
-    finish:{title:'Finish',desc:'Review and enter the app.'}
+    system:{title:t('onboarding_step_system_title'),desc:t('onboarding_step_system_desc')},
+    workspace:{title:t('onboarding_step_workspace_title'),desc:t('onboarding_step_workspace_desc')},
+    password:{title:t('onboarding_step_password_title'),desc:t('onboarding_step_password_desc')},
+    finish:{title:t('onboarding_step_finish_title'),desc:t('onboarding_step_finish_desc')}
   })[key];
 }
 
@@ -52,21 +52,21 @@ function _renderOnboardingBody(){
   const nextBtn=$('onboardingNextBtn');
   const backBtn=$('onboardingBackBtn');
   if(backBtn) backBtn.style.display=ONBOARDING.step>0?'':'none';
-  if(nextBtn) nextBtn.textContent=key==='finish'?'Open Hermes':'Continue';
+  if(nextBtn) nextBtn.textContent=key==='finish'?t('onboarding_open'):t('onboarding_continue');
 
   if(key==='system'){
     const hermesOk=system.hermes_found&&system.imports_ok;
-    _setOnboardingNotice(hermesOk?'Hermes Agent looks reachable from the Web UI.':'Hermes Agent is not fully available yet. Bootstrap can install it, but provider setup may still require a terminal.',hermesOk?'success':'warn');
+    _setOnboardingNotice(hermesOk?t('onboarding_notice_system_ready'):t('onboarding_notice_system_unavailable'),hermesOk?'success':'warn');
     body.innerHTML=`
       <div class="onboarding-panel-grid">
-        <div class="onboarding-check ${hermesOk?'ok':'warn'}"><strong>Hermes Agent</strong><span>${hermesOk?'Detected and importable':'Missing or partially importable'}</span></div>
-        <div class="onboarding-check ${(settings.password_enabled?'ok':'muted')}"><strong>Password</strong><span>${settings.password_enabled?'Already enabled':'Not enabled yet'}</span></div>
-        <div class="onboarding-check ${(system.provider_configured?'ok':'muted')}"><strong>Provider config</strong><span>${system.provider_configured?'Config detected':'Needs verification'}</span></div>
+        <div class="onboarding-check ${hermesOk?'ok':'warn'}"><strong>${t('onboarding_check_agent')}</strong><span>${hermesOk?t('onboarding_check_agent_ready'):t('onboarding_check_agent_missing')}</span></div>
+        <div class="onboarding-check ${(settings.password_enabled?'ok':'muted')}"><strong>${t('onboarding_check_password')}</strong><span>${settings.password_enabled?t('onboarding_check_password_enabled'):t('onboarding_check_password_disabled')}</span></div>
+        <div class="onboarding-check ${(system.provider_configured?'ok':'muted')}"><strong>${t('onboarding_check_provider')}</strong><span>${system.provider_configured?t('onboarding_check_provider_ready'):t('onboarding_check_provider_pending')}</span></div>
       </div>
       <div class="onboarding-copy">
-        <p><strong>Config file:</strong> ${esc(system.config_path||'Unknown')}</p>
+        <p><strong>${t('onboarding_config_file')}</strong> ${esc(system.config_path||t('onboarding_unknown'))}</p>
         <p>${esc(system.provider_note||'')}</p>
-        ${system.missing_modules&&system.missing_modules.length?`<p><strong>Missing imports:</strong> ${esc(system.missing_modules.join(', '))}</p>`:''}
+        ${system.missing_modules&&system.missing_modules.length?`<p><strong>${t('onboarding_missing_imports')}</strong> ${esc(system.missing_modules.join(', '))}</p>`:''}
       </div>`;
     return;
   }
@@ -74,21 +74,21 @@ function _renderOnboardingBody(){
   if(key==='workspace'){
     const workspaceOptions=_getOnboardingWorkspaceChoices().map(ws=>`<option value="${esc(ws.path)}">${esc(ws.name||ws.path)} — ${esc(ws.path)}</option>`).join('');
     const modelOptions=((ONBOARDING.status.models||{}).groups||[]).map(g=>`<optgroup label="${esc(g.provider)}">${(g.models||[]).map(m=>`<option value="${esc(m.id)}">${esc(m.label)}</option>`).join('')}</optgroup>`).join('');
-    _setOnboardingNotice('These values reuse the same settings APIs as the normal app.', 'info');
+    _setOnboardingNotice(t('onboarding_notice_workspace'), 'info');
     body.innerHTML=`
       <label class="onboarding-field">
-        <span>Workspace</span>
+        <span>${t('onboarding_workspace_label')}</span>
         <select id="onboardingWorkspaceSelect" onchange="syncOnboardingWorkspaceSelect(this.value)">${workspaceOptions}</select>
       </label>
       <label class="onboarding-field">
-        <span>Or enter a workspace path</span>
-        <input id="onboardingWorkspaceInput" value="${esc(ONBOARDING.form.workspace||'')}" placeholder="/home/you/workspace" oninput="ONBOARDING.form.workspace=this.value">
+        <span>${t('onboarding_workspace_or_path')}</span>
+        <input id="onboardingWorkspaceInput" value="${esc(ONBOARDING.form.workspace||'')}" placeholder="${t('onboarding_workspace_placeholder')}" oninput="ONBOARDING.form.workspace=this.value">
       </label>
       <label class="onboarding-field">
-        <span>Default model</span>
+        <span>${t('onboarding_model_label')}</span>
         <select id="onboardingModelSelect" onchange="ONBOARDING.form.model=this.value">${modelOptions}</select>
       </label>
-      <p class="onboarding-copy">If provider readiness is uncertain, choose the model you expect to use and finish any remaining login/API-key setup later with <code>hermes model</code>.</p>`;
+      <p class="onboarding-copy">${t('onboarding_workspace_help')}</p>`;
     const wsSel=$('onboardingWorkspaceSelect');
     if(wsSel && ONBOARDING.form.workspace) wsSel.value=ONBOARDING.form.workspace;
     const modelSel=$('onboardingModelSelect');
@@ -97,24 +97,24 @@ function _renderOnboardingBody(){
   }
 
   if(key==='password'){
-    _setOnboardingNotice(settings.password_enabled?'A password is already configured. Enter a new one only if you want to replace it.':'Optional but recommended if you will expose the UI beyond localhost.', settings.password_enabled?'success':'info');
+    _setOnboardingNotice(settings.password_enabled?t('onboarding_notice_password_enabled'):t('onboarding_notice_password_recommended'), settings.password_enabled?'success':'info');
     body.innerHTML=`
       <label class="onboarding-field">
-        <span>Password (optional)</span>
-        <input id="onboardingPasswordInput" type="password" value="${esc(ONBOARDING.form.password||'')}" placeholder="Leave blank to skip" oninput="ONBOARDING.form.password=this.value">
+        <span>${t('onboarding_password_label')}</span>
+        <input id="onboardingPasswordInput" type="password" value="${esc(ONBOARDING.form.password||'')}" placeholder="${t('onboarding_password_placeholder')}" oninput="ONBOARDING.form.password=this.value">
       </label>
-      <p class="onboarding-copy">Passwords are stored through the existing settings API and hashed server-side.</p>`;
+      <p class="onboarding-copy">${t('onboarding_password_help')}</p>`;
     return;
   }
 
-  _setOnboardingNotice('You can reopen Settings later to change any of this.', 'success');
+  _setOnboardingNotice(t('onboarding_notice_finish'), 'success');
   body.innerHTML=`
     <div class="onboarding-summary">
-      <div><strong>Workspace</strong><span>${esc(ONBOARDING.form.workspace||'Not set')}</span></div>
-      <div><strong>Model</strong><span>${esc(getModelLabel(ONBOARDING.form.model)||ONBOARDING.form.model)}</span></div>
-      <div><strong>Password</strong><span>${ONBOARDING.form.password?'Will be enabled':'Skipped for now'}</span></div>
+      <div><strong>${t('onboarding_workspace_label')}</strong><span>${esc(ONBOARDING.form.workspace||t('onboarding_not_set'))}</span></div>
+      <div><strong>${t('onboarding_model_label')}</strong><span>${esc(getModelLabel(ONBOARDING.form.model)||ONBOARDING.form.model)}</span></div>
+      <div><strong>${t('onboarding_check_password')}</strong><span>${ONBOARDING.form.password?t('onboarding_password_will_enable'):t('onboarding_password_skipped')}</span></div>
     </div>
-    <p class="onboarding-copy">Finishing stores <code>onboarding_completed</code> in settings and drops you into the normal app.</p>`;
+    <p class="onboarding-copy">${t('onboarding_finish_help')}</p>`;
 }
 
 function syncOnboardingWorkspaceSelect(value){
@@ -153,8 +153,8 @@ async function _saveOnboardingDefaults(){
   const workspace=(ONBOARDING.form.workspace||'').trim();
   const model=(ONBOARDING.form.model||'').trim();
   const password=(ONBOARDING.form.password||'').trim();
-  if(!workspace) throw new Error('Choose a workspace before continuing.');
-  if(!model) throw new Error('Choose a model before continuing.');
+  if(!workspace) throw new Error(t('onboarding_error_choose_workspace'));
+  if(!model) throw new Error(t('onboarding_error_choose_model'));
   const known=_getOnboardingWorkspaceChoices().some(ws=>ws.path===workspace);
   if(!known){
     await api('/api/workspaces/add',{method:'POST',body:JSON.stringify({path:workspace})});
@@ -172,7 +172,7 @@ async function _finishOnboarding(){
   ONBOARDING.status=done;
   ONBOARDING.active=false;
   $('onboardingOverlay').style.display='none';
-  showToast('Onboarding complete');
+  showToast(t('onboarding_complete'));
   await loadWorkspaceList();
   if(typeof renderSessionList==='function') await renderSessionList();
   if(!S.session && typeof newSession==='function'){
@@ -186,8 +186,8 @@ async function nextOnboardingStep(){
     if(ONBOARDING.steps[ONBOARDING.step]==='workspace'){
       ONBOARDING.form.workspace=(($('onboardingWorkspaceInput')||{}).value||ONBOARDING.form.workspace||'').trim();
       ONBOARDING.form.model=(($('onboardingModelSelect')||{}).value||ONBOARDING.form.model||'').trim();
-      if(!ONBOARDING.form.workspace) throw new Error('Workspace is required.');
-      if(!ONBOARDING.form.model) throw new Error('Model is required.');
+      if(!ONBOARDING.form.workspace) throw new Error(t('onboarding_error_workspace_required'));
+      if(!ONBOARDING.form.model) throw new Error(t('onboarding_error_model_required'));
     }
     if(ONBOARDING.steps[ONBOARDING.step]==='password'){
       ONBOARDING.form.password=(($('onboardingPasswordInput')||{}).value||'').trim();
