@@ -6,6 +6,28 @@
 ---
 
 
+## [v0.48.2] Provider/model mismatch warning (PR #283, fixes #266)
+
+- **Provider mismatch warning** (PR #283): WebUI now warns when you select a model from a provider different from the one Hermes is configured for, instead of silently failing with a 401 error.
+  - `api/streaming.py`: 401/auth errors classified as `type='auth_mismatch'` with an actionable hint ("Run `hermes model` in your terminal to switch providers")
+  - `static/ui.js`: `populateModelDropdown()` stores `active_provider` from `/api/models` as `window._activeProvider`; new `_checkProviderMismatch()` helper compares selected model's provider prefix against the configured provider
+  - `static/boot.js`: `modelSelect.onchange` calls `_checkProviderMismatch()` and shows a toast warning immediately on selection
+  - `static/messages.js`: `apperror` handler shows "Provider mismatch" label (via i18n) instead of "Error" for auth errors
+  - `static/i18n.js`: `provider_mismatch_warning` and `provider_mismatch_label` keys added to all 5 locales (en, es, de, zh-Hans, zh-Hant)
+  - Check skipped for `openrouter` and `custom` providers to avoid false positives
+  - 21 new tests in `tests/test_provider_mismatch.py`; 679 tests total (up from 658)
+## [v0.48.1] Markdown table inline formatting (PR #278)
+
+- **Inline formatting in table cells** (PR #278, @nesquena): Table header and data cells now render `**bold**`, `*italic*`, `` `code` ``, and `[links](url)` correctly. Previously `esc()` was used, which displayed raw HTML tags as text. Changed to `inlineMd()` consistent with list items and blockquotes. XSS-safe: `inlineMd()` escapes all interpolated values. Two-line change in `static/ui.js`. Fixes #273.
+## [v0.48.0] Real-time gateway session sync (PR #274)
+
+- **Real-time gateway session sync** (PR #274, @bergeouss): Gateway sessions from Telegram, Discord, Slack, and other messaging platforms now appear in the WebUI sidebar and update in real time as new messages arrive. Enable via the "Show agent sessions" checkbox (renamed from "Show CLI sessions").
+  - `api/gateway_watcher.py`: background daemon thread polling `state.db` every 5s using MD5 hash-based change detection
+  - New SSE endpoint `/api/sessions/gateway/stream` for real-time push to browser
+  - Dynamic source badges: telegram (blue), discord (purple), slack (dark purple), cli (green)
+  - Zero changes to hermes-agent — WebUI reads the shared `state.db` that both components access
+  - 10 new tests in `test_gateway_sync.py` covering metadata, filtering, SSE, and watcher lifecycle
+  - 658 tests (up from 648)
 ## [v0.47.1] Spanish locale (PR #275)
 
 - **Spanish (es) locale** (PR #275, @gabogabucho): Full Spanish translation for all 175 UI strings. Exposed automatically in the language selector via existing `LOCALES` wiring. Includes regression tests verifying locale presence, representative translations, and key-parity with English. 648 tests (up from 645).

@@ -110,6 +110,14 @@ def main() -> None:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
     DEFAULT_WORKSPACE.mkdir(parents=True, exist_ok=True)
+
+    # Start the gateway session watcher for real-time SSE updates
+    try:
+        from api.gateway_watcher import start_watcher
+        start_watcher()
+    except Exception as e:
+        print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
+
     httpd = ThreadingHTTPServer((HOST, PORT), Handler)
 
     # ── TLS/HTTPS setup (optional) ─────────────────────────────────────────
@@ -132,7 +140,15 @@ def main() -> None:
         print(f'  Remote access: ssh -N -L {PORT}:127.0.0.1:{PORT} <user>@<your-server>', flush=True)
     print(f'  Then open:     {scheme}://localhost:{PORT}', flush=True)
     print('', flush=True)
-    httpd.serve_forever()
+    try:
+        httpd.serve_forever()
+    finally:
+        # Stop the gateway watcher on shutdown
+        try:
+            from api.gateway_watcher import stop_watcher
+            stop_watcher()
+        except Exception:
+            pass
 
 if __name__ == '__main__':
     main()

@@ -209,6 +209,11 @@ $('modelSelect').onchange=async()=>{
   localStorage.setItem('hermes-webui-model', selectedModel);
   await api('/api/session/update',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,workspace:S.session.workspace,model:selectedModel})});
   S.session.model=selectedModel;syncTopbar();
+  // Warn if selected model belongs to a different provider than what Hermes is configured for
+  if(typeof _checkProviderMismatch==='function'){
+    const warn=_checkProviderMismatch(selectedModel);
+    if(warn&&typeof showToast==='function') showToast(warn,4000);
+  }
 };
 $('msg').addEventListener('input',()=>{
   autoResize();
@@ -386,11 +391,13 @@ function applyBotName(){
   _initResizePanels();
   const saved=localStorage.getItem('hermes-webui-session');
   if(saved){
-    try{await loadSession(saved);await renderSessionList();await checkInflightOnBoot(saved);return;}
+    try{await loadSession(saved);await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);return;}
     catch(e){localStorage.removeItem('hermes-webui-session');}
   }
   // no saved session - show empty state, wait for user to hit +
   $('emptyState').style.display='';
   await renderSessionList();
+  // Start real-time gateway session sync if setting is enabled
+  if(typeof startGatewaySSE==='function') startGatewaySSE();
 })();
 

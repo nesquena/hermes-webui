@@ -248,6 +248,35 @@ async function renderSessionList(){
   }catch(e){console.warn('renderSessionList',e);}
 }
 
+// ── Gateway session SSE (real-time sync for agent sessions) ──
+let _gatewaySSE = null;
+
+function startGatewaySSE(){
+  stopGatewaySSE();
+  if(!window._showCliSessions) return;
+  try{
+    _gatewaySSE = new EventSource('/api/sessions/gateway/stream');
+    _gatewaySSE.addEventListener('sessions_changed', (ev) => {
+      try{
+        const data = JSON.parse(ev.data);
+        if(data.sessions){
+          renderSessionList(); // re-fetch and re-render
+        }
+      }catch(e){ /* ignore parse errors */ }
+    });
+    _gatewaySSE.onerror = () => {
+      // EventSource auto-reconnects; no action needed
+    };
+  }catch(e){ /* SSE not available */ }
+}
+
+function stopGatewaySSE(){
+  if(_gatewaySSE){
+    _gatewaySSE.close();
+    _gatewaySSE = null;
+  }
+}
+
 let _searchDebounceTimer = null;
 let _contentSearchResults = [];  // results from /api/sessions/search content scan
 
@@ -409,6 +438,7 @@ function renderSessionListFromCache(){
     const el=document.createElement('div');
     const isActive=S.session&&s.session_id===S.session.session_id;
     el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(s.is_cli_session?' cli-session':'');
+    if(s.source_tag) el.dataset.source=s.source_tag;
     if(isActive&&S.session&&S.session._flash)delete S.session._flash;
     const rawTitle=s.title||'Untitled';
     const tags=(rawTitle.match(/#[\w-]+/g)||[]);

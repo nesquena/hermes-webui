@@ -463,11 +463,28 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
         # Detect rate limit errors specifically so the client can show a helpful card
         # rather than the generic "Connection lost" message
         is_rate_limit = 'rate limit' in err_str.lower() or '429' in err_str or 'RateLimitError' in type(e).__name__
+        is_auth_error = (
+            '401' in err_str
+            or 'AuthenticationError' in type(e).__name__
+            or 'authentication' in err_str.lower()
+            or 'unauthorized' in err_str.lower()
+            or 'invalid api key' in err_str.lower()
+            or 'no cookie auth credentials' in err_str.lower()
+        )
         if is_rate_limit:
             put('apperror', {
                 'message': err_str,
                 'type': 'rate_limit',
                 'hint': 'Rate limit reached. The fallback model (if configured) was also exhausted. Try again in a moment.',
+            })
+        elif is_auth_error:
+            put('apperror', {
+                'message': err_str,
+                'type': 'auth_mismatch',
+                'hint': (
+                    'The selected model may not be supported by your configured provider. '
+                    'Run `hermes model` in your terminal to switch providers, then restart the WebUI.'
+                ),
             })
         else:
             put('apperror', {'message': err_str, 'type': 'error'})

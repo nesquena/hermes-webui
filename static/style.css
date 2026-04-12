@@ -906,13 +906,13 @@ body.resizing{user-select:none;cursor:col-resize;}
 
 .bg-error-banner{background:rgba(229,62,62,.15);border:1px solid rgba(229,62,62,.3);color:#fca5a5;padding:8px 16px;font-size:12px;display:flex;align-items:center;justify-content:space-between;gap:12px;border-radius:0;}
 
-/* ── CLI session items in sidebar ── */
+/* ── CLI / Agent session items in sidebar ── */
 .session-item.cli-session {
   border-left-color: var(--gold);
   padding-right: 40px; /* make room for the session actions trigger */
 }
 .session-item.cli-session::after {
-  content: 'cli';
+  content: attr(data-source);
   font-size: 9px;
   font-weight: 600;
   text-transform: uppercase;
@@ -926,3 +926,10 @@ body.resizing{user-select:none;cursor:col-resize;}
 .session-item.cli-session:hover::after {
   display: none; /* hide badge on hover so session-actions icons are fully reachable */
 }
+/* Source-specific colors for gateway sessions */
+.session-item.cli-session[data-source="telegram"] { border-left-color: #0088cc; }
+.session-item.cli-session[data-source="telegram"]::after { color: #0088cc; }
+.session-item.cli-session[data-source="discord"] { border-left-color: #5865F2; }
+.session-item.cli-session[data-source="discord"]::after { color: #5865F2; }
+.session-item.cli-session[data-source="slack"] { border-left-color: #4A154B; }
+.session-item.cli-session[data-source="slack"]::after { color: #4A154B; }
