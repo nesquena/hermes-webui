@@ -92,7 +92,7 @@ function _checkProviderMismatch(modelId){
   const aliases={'claude':'anthropic','gpt':'openai','gemini':'google'};
   const norm=p=>aliases[p]||p;
   if(norm(modelProvider)!==norm(ap)){
-    return (window.t?window.t('provider_mismatch_warning',[modelId,ap]):
+    return (window.t?window.t('provider_mismatch_warning',modelId,ap):
       `"${modelId}" may not work with your configured provider (${ap}). Send anyway or run \`hermes model\` to switch.`);
   }
   return null;
