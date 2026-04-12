@@ -43,23 +43,17 @@ def post(path, body=None):
 def _get_test_state_dir():
     """Return the test state directory (matches conftest.py TEST_STATE_DIR).
 
-    conftest.py sets HERMES_WEBUI_STATE_DIR and HERMES_HOME to the same
-    TEST_STATE_DIR (~/.hermes/webui-mvp-test).  The server resolves
-    state.db as HERMES_HOME/state.db, so we must write state.db to exactly
-    that directory.  Using HERMES_WEBUI_STATE_DIR is the most direct path;
-    the HERMES_WEBUI_TEST_STATE_DIR env var is kept as an explicit override.
+    conftest.py sets HERMES_WEBUI_TEST_STATE_DIR in the test-process environment
+    (via os.environ.setdefault) so that tests writing directly to state.db always
+    use the same path the test server was started with.  If the env var is not
+    set (e.g. when running this file standalone), fall back to the conftest
+    formula: HERMES_HOME/webui-mvp-test.
     """
     explicit = os.getenv('HERMES_WEBUI_TEST_STATE_DIR')
     if explicit:
         return pathlib.Path(explicit)
-    # HERMES_WEBUI_STATE_DIR is set by conftest to TEST_STATE_DIR — same place
-    # the server's HERMES_HOME points, so state.db lands in the right spot.
-    state_dir = os.getenv('HERMES_WEBUI_STATE_DIR')
-    if state_dir:
-        return pathlib.Path(state_dir)
-    # Bare fallback for running this file standalone (no conftest env vars)
     hermes_home = pathlib.Path(os.getenv('HERMES_HOME', str(pathlib.Path.home() / '.hermes')))
-    return hermes_home / 'webui-mvp-test'
+    return hermes_home / 'webui-mvp-test'  # matches conftest.py TEST_STATE_DIR formula
 
 
 def _get_state_db_path():

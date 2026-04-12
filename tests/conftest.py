@@ -238,6 +238,13 @@ def test_server():
     # Isolated cron state
     (TEST_STATE_DIR / 'cron').mkdir(parents=True, exist_ok=True)
 
+    # Expose TEST_STATE_DIR to the test process itself so that tests which write
+    # directly to state.db (e.g. test_gateway_sync.py) always use the same path
+    # as the server.  Other test files (test_auth_sessions.py) may override
+    # HERMES_WEBUI_STATE_DIR for their own purposes, but HERMES_WEBUI_TEST_STATE_DIR
+    # is reserved for this mapping and is never overridden by individual test files.
+    os.environ.setdefault('HERMES_WEBUI_TEST_STATE_DIR', str(TEST_STATE_DIR))
+
     env = os.environ.copy()
     env.update({
         "HERMES_WEBUI_PORT":              str(TEST_PORT),
