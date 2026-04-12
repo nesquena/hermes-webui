@@ -167,6 +167,12 @@ class GatewayWatcher:
                     self._subscribers.remove(q)
                 except ValueError:
                     pass
+                # Send a None sentinel so the SSE handler unblocks, closes,
+                # and lets the browser's EventSource auto-reconnect.
+                try:
+                    q.put_nowait(None)
+                except Exception:
+                    pass
 
     def _poll_loop(self):
         """Main polling loop. Runs in a daemon thread."""

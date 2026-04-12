@@ -41,12 +41,25 @@ def post(path, body=None):
 
 
 def _get_test_state_dir():
-    """Return the test state directory (matches conftest.py TEST_STATE_DIR)."""
+    """Return the test state directory (matches conftest.py TEST_STATE_DIR).
+
+    conftest.py sets HERMES_WEBUI_STATE_DIR and HERMES_HOME to the same
+    TEST_STATE_DIR (~/.hermes/webui-mvp-test).  The server resolves
+    state.db as HERMES_HOME/state.db, so we must write state.db to exactly
+    that directory.  Using HERMES_WEBUI_STATE_DIR is the most direct path;
+    the HERMES_WEBUI_TEST_STATE_DIR env var is kept as an explicit override.
+    """
+    explicit = os.getenv('HERMES_WEBUI_TEST_STATE_DIR')
+    if explicit:
+        return pathlib.Path(explicit)
+    # HERMES_WEBUI_STATE_DIR is set by conftest to TEST_STATE_DIR — same place
+    # the server's HERMES_HOME points, so state.db lands in the right spot.
+    state_dir = os.getenv('HERMES_WEBUI_STATE_DIR')
+    if state_dir:
+        return pathlib.Path(state_dir)
+    # Bare fallback for running this file standalone (no conftest env vars)
     hermes_home = pathlib.Path(os.getenv('HERMES_HOME', str(pathlib.Path.home() / '.hermes')))
-    return pathlib.Path(os.getenv(
-        'HERMES_WEBUI_TEST_STATE_DIR',
-        str(hermes_home / 'webui-mvp-test')
-    ))
+    return hermes_home / 'webui-mvp-test'
 
 
 def _get_state_db_path():
@@ -133,7 +146,6 @@ def test_gateway_sessions_appear_when_enabled():
     conn = _ensure_state_db()
     try:
         _insert_gateway_session(conn, session_id='gw_test_tg_001', source='telegram', title='TG Test Chat')
-        conn.close()
 
         # Enable the setting
         post('/api/settings', {'show_cli_sessions': True})
@@ -157,7 +169,6 @@ def test_gateway_sessions_excluded_when_disabled():
     conn = _ensure_state_db()
     try:
         _insert_gateway_session(conn, session_id='gw_test_dc_001', source='discord', title='DC Test Chat')
-        conn.close()
 
         # Ensure setting is off
         post('/api/settings', {'show_cli_sessions': False})
@@ -180,7 +191,6 @@ def test_gateway_session_has_correct_metadata():
     conn = _ensure_state_db()
     try:
         _insert_gateway_session(conn, session_id='gw_meta_001', source='telegram', title='Meta Test')
-        conn.close()
 
         post('/api/settings', {'show_cli_sessions': True})
 
@@ -206,7 +216,6 @@ def test_gateway_session_has_message_count():
     conn = _ensure_state_db()
     try:
         _insert_gateway_session(conn, session_id='gw_msg_001', source='discord', title='Msg Count Test', message_count=5)
-        conn.close()
 
         post('/api/settings', {'show_cli_sessions': True})
 
@@ -232,7 +241,6 @@ def test_gateway_sessions_multiple_sources():
         _insert_gateway_session(conn, session_id='gw_multi_tg', source='telegram', title='TG Chat')
         _insert_gateway_session(conn, session_id='gw_multi_dc', source='discord', title='DC Chat')
         _insert_gateway_session(conn, session_id='gw_multi_sl', source='slack', title='SL Chat')
-        conn.close()
 
         post('/api/settings', {'show_cli_sessions': True})
 
@@ -255,7 +263,6 @@ def test_gateway_session_messages_readable():
     conn = _ensure_state_db()
     try:
         _insert_gateway_session(conn, session_id='gw_read_001', source='telegram', title='Readable')
-        conn.close()
 
         post('/api/settings', {'show_cli_sessions': True})
 
@@ -346,7 +353,6 @@ def test_cli_sessions_still_work():
     try:
         _insert_gateway_session(conn, session_id='cli_legacy_001', source='cli', title='CLI Legacy')
         _insert_gateway_session(conn, session_id='gw_new_001', source='telegram', title='GW New')
-        conn.close()
 
         post('/api/settings', {'show_cli_sessions': True})
 
