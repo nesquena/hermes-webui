@@ -327,6 +327,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == '/api/chat/stream':
         return _handle_sse_stream(handler, parsed)
 
+    if parsed.path == '/api/sessions/gateway/stream':
+        return _handle_gateway_sse_stream(handler)
+
     if parsed.path == '/api/file/raw':
         return _handle_file_raw(handler, parsed)
 
@@ -911,6 +914,52 @@ def _handle_sse_stream(handler, parsed):
                 break
     except (BrokenPipeError, ConnectionResetError):
         pass
+    return True
+
+
+def _handle_gateway_sse_stream(handler):
+    """SSE endpoint for real-time gateway session updates.
+    Streams change events from the gateway watcher background thread.
+    Only active when show_cli_sessions (show_agent_sessions) setting is enabled.
+    """
+    # Check if the feature is enabled
+    settings = load_settings()
+    if not settings.get('show_cli_sessions'):
+        return j(handler, {'error': 'agent sessions not enabled'}, status=404)
+
+    from api.gateway_watcher import get_watcher
+    watcher = get_watcher()
+    if watcher is None:
+        return j(handler, {'error': 'watcher not started'}, status=503)
+
+    handler.send_response(200)
+    handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
+    handler.send_header('Cache-Control', 'no-cache')
+    handler.send_header('X-Accel-Buffering', 'no')
+    handler.send_header('Connection', 'keep-alive')
+    handler.end_headers()
+
+    q = watcher.subscribe()
+    try:
+        # Send initial snapshot immediately
+        from api.models import get_cli_sessions
+        initial = get_cli_sessions()
+        _sse(handler, 'sessions_changed', {'sessions': initial})
+
+        while True:
+            try:
+                event_data = q.get(timeout=30)
+            except queue.Empty:
+                handler.wfile.write(b': keepalive\n\n')
+                handler.wfile.flush()
+                continue
+            if event_data is None:
+                break  # watcher is stopping
+            _sse(handler, event_data.get('type', 'sessions_changed'), event_data)
+    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+        pass
+    finally:
+        watcher.unsubscribe(q)
     return True
 
 
