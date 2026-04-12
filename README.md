@@ -169,6 +169,32 @@ docker run -d \
 > To expose on a network, change the port to `"8787:8787"` in `docker-compose.yml`
 > and set `HERMES_WEBUI_PASSWORD` to enable authentication.
 
+### Two-container setup (Agent + WebUI)
+
+If you run the Hermes Agent in its own Docker container and want the WebUI
+in a separate container:
+
+```bash
+docker compose -f docker-compose.two-container.yml up -d
+```
+
+This starts both containers with shared volumes:
+
+- **`hermes-home`** — shared `~/.hermes` for config, sessions, skills, memory
+- **`hermes-agent-src`** — the agent's source code, mounted into the WebUI
+  container so it can install the agent's Python dependencies at startup
+
+The WebUI's init script automatically installs hermes-agent and all its
+dependencies (openai, anthropic, etc.) into its own Python environment on
+first boot. Subsequent restarts reuse the installed packages.
+
+> **How it works:** The WebUI imports hermes-agent's Python modules directly
+> (not via HTTP). The shared volume makes the agent source available, and
+> the init script runs `uv pip install` to set up the dependencies. Both
+> containers share the same `~/.hermes` directory for config and state.
+
+See `docker-compose.two-container.yml` for the full configuration.
+
 ---
 
 ## What start.sh discovers automatically
