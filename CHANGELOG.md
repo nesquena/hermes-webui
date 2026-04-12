@@ -6,6 +6,12 @@
 ---
 
 
+## [v0.49.1] Docker docs + mobile Profiles button (PRs #291, #265)
+
+- **Two-container Docker setup** (PR #291 / closes #288): New `docker-compose.two-container.yml` for running the Hermes Agent and WebUI as separate containers with shared volumes. Documents the architecture clearly; localhost-only port binding by default.
+- **Mobile Profiles button** (PR #265 @gabogabucho): Adds Profiles to the mobile bottom navigation bar (last position: Chat → Tasks → Skills → Memory → Spaces → Profiles). Uses `mobileSwitchPanel()` for correct active-highlight behaviour; `data-panel="profiles"` attribute set; SVG matches other nav icons; 3 new tests.
+  - 700 tests total (up from 697)
+
 ## [v0.49.0] First-run onboarding wizard + self-update hardening (PRs #285, #287, #289)
 
 - **One-shot bootstrap and first-run setup wizard** (PR #285): New users are greeted with a guided onboarding overlay on first load. The wizard checks system status, configures a provider (OpenRouter, Anthropic, OpenAI, or custom OpenAI-compatible endpoint), sets a workspace and optional password, and marks setup as complete — all without leaving the browser.
