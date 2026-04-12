@@ -827,10 +827,19 @@ def handle_post(handler, parsed) -> bool:
         return j(handler, saved)
 
     if parsed.path == "/api/onboarding/setup":
-        # Writing API keys to disk - restrict to loopback unless auth is active
+        # Writing API keys to disk - restrict to local/private networks unless auth is active.
+        # In Docker, requests arrive from the bridge network (172.x.x.x), not 127.0.0.1,
+        # even when the user accesses via localhost:8787 on the host.
         from api.auth import is_auth_enabled
-        if not is_auth_enabled() and handler.client_address[0] != "127.0.0.1":
-            return bad(handler, "Onboarding setup is only available from localhost when auth is not enabled.", 403)
+        if not is_auth_enabled():
+            import ipaddress
+            try:
+                addr = ipaddress.ip_address(handler.client_address[0])
+                is_local = addr.is_loopback or addr.is_private
+            except ValueError:
+                is_local = False
+            if not is_local:
+                return bad(handler, "Onboarding setup is only available from local networks when auth is not enabled.", 403)
         try:
             return j(handler, apply_onboarding_setup(body))
         except ValueError as e:
