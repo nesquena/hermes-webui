@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hermes Ecosystem — Community Projects &amp; Tools</title>
+  <meta name="description" content="The best third-party projects, tools, skills, and integrations built around Hermes Agent by the open-source community." />
+  <meta property="og:title" content="Hermes Ecosystem — Community Projects & Tools" />
+  <meta property="og:description" content="The best third-party projects, tools, skills, and integrations built around Hermes Agent." />
+  <meta property="og:type" content="website" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg-primary: #0d1117;
+      --bg-secondary: #161b22;
+      --bg-tertiary: #21262d;
+      --bg-card: #161b22;
+      --bg-card-hover: #1c2128;
+      --border: #30363d;
+      --border-hover: #484f58;
+      --text-primary: #e6edf3;
+      --text-secondary: #8b949e;
+      --text-muted: #6e7681;
+      --accent: #f0a500;
+      --accent-dim: #c88800;
+      --accent-glow: rgba(240,165,0,0.15);
+      --accent-subtle: rgba(240,165,0,0.08);
+      --green: #3fb950;
+      --red: #f85149;
+      --blue: #58a6ff;
+      --purple: #bc8cff;
+      --nav-height: 64px;
+      --radius: 8px;
+      --radius-lg: 12px;
+      --shadow: 0 1px 3px rgba(0,0,0,0.4),0 4px 16px rgba(0,0,0,0.3);
+    }
+    [data-theme="light"] {
+      --bg-primary: #ffffff;
+      --bg-secondary: #f6f8fa;
+      --bg-tertiary: #eaeef2;
+      --bg-card: #ffffff;
+      --bg-card-hover: #f6f8fa;
+      --border: #d0d7de;
+      --border-hover: #9198a1;
+      --text-primary: #1f2328;
+      --text-secondary: #656d76;
+      --text-muted: #9198a1;
+      --accent: #c07800;
+      --accent-dim: #a06000;
+      --accent-glow: rgba(192,120,0,0.12);
+      --accent-subtle: rgba(192,120,0,0.06);
+      --green: #1a7f37;
+      --red: #cf222e;
+      --blue: #0969da;
+      --purple: #7c3aed;
+      --shadow: 0 1px 3px rgba(0,0,0,0.1),0 4px 16px rgba(0,0,0,0.06);
+    }
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    html{scroll-behavior:smooth;font-size:16px;overflow-x:hidden}
+    body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg-primary);color:var(--text-primary);line-height:1.6;transition:background 0.2s,color 0.2s;-webkit-font-smoothing:antialiased}
+    a{color:var(--accent);text-decoration:none;transition:color 0.15s}
+    a:hover{color:var(--accent-dim)}
+    ::-webkit-scrollbar{width:6px;height:6px}
+    ::-webkit-scrollbar-track{background:var(--bg-secondary)}
+    ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+
+    /* Nav */
+    #nav{position:fixed;top:0;left:0;right:0;height:var(--nav-height);background:rgba(13,17,23,0.92);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid var(--border);z-index:1000}
+    [data-theme="light"] #nav{background:rgba(255,255,255,0.92)}
+    .nav-inner{max-width:1100px;margin:0 auto;padding:0 24px;height:100%;display:flex;align-items:center;justify-content:space-between;gap:16px}
+    .nav-logo{display:flex;align-items:center;gap:10px;font-weight:700;font-size:1.1rem;color:var(--text-primary);text-decoration:none;flex-shrink:0}
+    .nav-logo-icon{width:32px;height:32px;background:linear-gradient(135deg,var(--accent),var(--accent-dim));border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;line-height:1}
+    .nav-back{display:flex;align-items:center;gap:6px;color:var(--text-secondary);font-size:0.875rem;font-weight:500;padding:6px 12px;border-radius:6px;transition:color 0.15s,background 0.15s;text-decoration:none}
+    .nav-back:hover{color:var(--text-primary);background:var(--bg-tertiary)}
+    .btn-theme{background:none;border:1px solid var(--border);color:var(--text-secondary);cursor:pointer;padding:7px 10px;border-radius:6px;font-size:15px;line-height:1;transition:border-color 0.15s,color 0.15s,background 0.15s}
+    .btn-theme:hover{border-color:var(--border-hover);color:var(--text-primary);background:var(--bg-tertiary)}
+    .btn-cta{background:var(--accent);color:#000;font-size:0.8rem;font-weight:600;padding:7px 14px;border-radius:6px;border:none;cursor:pointer;text-decoration:none;display:inline-block;transition:background 0.15s,transform 0.1s;white-space:nowrap}
+    .btn-cta:hover{background:var(--accent-dim);color:#000;transform:translateY(-1px)}
+
+    /* Layout */
+    main{padding-top:var(--nav-height)}
+    .hero{padding:60px 24px 48px;background:var(--bg-primary);position:relative;overflow:hidden}
+    .hero::before{content:'';position:absolute;top:-200px;left:50%;transform:translateX(-50%);width:800px;height:400px;background:radial-gradient(ellipse at center,var(--accent-glow) 0%,transparent 70%);pointer-events:none}
+    .container{max-width:1100px;margin:0 auto;position:relative}
+    .section{padding:64px 24px}
+    .section-alt{background:var(--bg-secondary)}
+
+    /* Breadcrumb */
+    .breadcrumb{display:flex;align-items:center;gap:8px;font-size:0.8rem;color:var(--text-muted);margin-bottom:24px;flex-wrap:wrap}
+    .breadcrumb a{color:var(--text-muted)}
+    .breadcrumb a:hover{color:var(--accent)}
+    .breadcrumb-sep{opacity:0.4}
+
+    /* Hero content */
+    .page-label{font-size:0.75rem;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:var(--accent);margin-bottom:12px}
+    .page-title{font-size:clamp(2rem,5vw,3.2rem);font-weight:800;line-height:1.1;letter-spacing:-0.02em;margin-bottom:16px}
+    .page-sub{font-size:1.05rem;color:var(--text-secondary);max-width:680px;line-height:1.7;margin-bottom:32px}
+
+    /* Stats bar */
+    .stats-bar{display:flex;flex-wrap:wrap;gap:12px;margin-bottom:32px}
+    .stat-pill{display:inline-flex;align-items:center;gap:6px;background:var(--bg-secondary);border:1px solid var(--border);color:var(--text-secondary);font-size:0.825rem;font-weight:500;padding:6px 14px;border-radius:100px}
+    .stat-pill .dot{width:6px;height:6px;background:var(--accent);border-radius:50%;flex-shrink:0}
+
+    /* Category sections */
+    .cat-label{font-size:0.75rem;font-weight:600;letter-spacing:0.1em;text-transform:uppercase;color:var(--accent);margin-bottom:8px}
+    .cat-title{font-size:clamp(1.4rem,3vw,1.9rem);font-weight:700;margin-bottom:8px;color:var(--text-primary)}
+    .cat-desc{font-size:0.95rem;color:var(--text-secondary);max-width:680px;line-height:1.65;margin-bottom:28px}
+
+    /* Project cards */
+    .project-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:0}
+    .project-card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:24px;display:flex;flex-direction:column;gap:10px;transition:border-color 0.2s,transform 0.15s,background 0.2s;text-decoration:none;color:inherit}
+    .project-card:hover{border-color:var(--accent);transform:translateY(-3px);background:var(--bg-card-hover);color:inherit}
+    .project-header{display:flex;align-items:center;justify-content:space-between;gap:8px}
+    .project-name{font-size:0.95rem;font-weight:700;color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .project-stars{display:inline-flex;align-items:center;gap:4px;font-size:0.78rem;font-weight:600;color:var(--accent);white-space:nowrap;flex-shrink:0}
+    .project-stars svg{width:14px;height:14px;fill:var(--accent)}
+    .project-desc{font-size:0.84rem;color:var(--text-secondary);line-height:1.55;flex:1}
+    .project-meta{display:flex;align-items:center;gap:10px;font-size:0.75rem;color:var(--text-muted);margin-top:auto;padding-top:4px}
+    .lang-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+    .lang-python{background:#3572A5}
+    .lang-ts{background:#3178c6}
+    .lang-js{background:#f1e05a}
+    .lang-swift{background:#F05138}
+    .lang-shell{background:#89e051}
+    .lang-html{background:#e34c26}
+    .lang-go{background:#00ADD8}
+    .lang-rust{background:#dea584}
+    .lang-makefile{background:#427819}
+    .lang-docs{background:var(--text-muted)}
+
+    /* Featured card (wider) */
+    .project-card.featured{border-color:rgba(240,165,0,0.3);background:var(--accent-subtle)}
+    .project-card.featured:hover{border-color:var(--accent)}
+    .featured-badge{font-size:0.65rem;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;background:var(--accent);color:#000;padding:2px 8px;border-radius:100px;flex-shrink:0}
+
+    /* CTA footer */
+    .cta-strip{background:var(--bg-secondary);border-top:1px solid var(--border);padding:40px 24px;text-align:center}
+    .cta-strip h2{font-size:1.4rem;font-weight:700;margin-bottom:8px}
+    .cta-strip p{color:var(--text-secondary);margin-bottom:24px;font-size:0.975rem}
+    .cta-btns{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+    .btn-primary{display:inline-flex;align-items:center;gap:6px;background:var(--accent);color:#000;font-weight:600;font-size:0.95rem;padding:12px 22px;border-radius:8px;transition:background 0.15s,transform 0.1s}
+    .btn-primary:hover{background:var(--accent-dim);color:#000;transform:translateY(-1px)}
+    .btn-secondary{display:inline-flex;align-items:center;gap:6px;background:var(--bg-card);border:1px solid var(--border);color:var(--text-primary);font-weight:500;font-size:0.95rem;padding:12px 22px;border-radius:8px;transition:border-color 0.15s,background 0.15s}
+    .btn-secondary:hover{border-color:var(--border-hover);background:var(--bg-card-hover);color:var(--text-primary)}
+
+    /* Responsive */
+    @media(max-width:900px){.project-grid{grid-template-columns:repeat(2,1fr)}}
+    @media(max-width:640px){
+      .project-grid{grid-template-columns:1fr}
+      .nav-back span{display:none}
+      .btn-cta{display:none}
+      .nav-inner{gap:8px}
+      .hero{padding:48px 16px 36px}
+      .section{padding:48px 16px}
+    }
+  </style>
+</head>
+<body>
+
+<nav id="nav">
+  <div class="nav-inner">
+    <a href="../index.html" class="nav-logo">
+      <div class="nav-logo-icon">&#9889;</div>
+      Hermes
+    </a>
+    <a href="../index.html#resources" class="nav-back"><span>&larr; Back to Hermes</span></a>
+    <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+      <button class="btn-theme" id="theme-toggle" aria-label="Toggle theme">&#9790;</button>
+      <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" class="btn-cta" target="_blank" rel="noopener">Get started &rarr;</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+  <div class="hero">
+    <div class="container">
+      <nav class="breadcrumb" aria-label="Breadcrumb">
+        <a href="../index.html">Hermes</a>
+        <span class="breadcrumb-sep">/</span>
+        <span>Community &amp; Ecosystem</span>
+      </nav>
+
+      <div class="page-label">Community &amp; Ecosystem</div>
+      <h1 class="page-title">Built around Hermes</h1>
+      <p class="page-sub">The best third-party projects, tools, skills, and integrations created by the Hermes Agent community. Sorted by GitHub stars, filtered for quality.</p>
+
+      <div class="stats-bar">
+        <span class="stat-pill"><span class="dot"></span>30+ community projects</span>
+        <span class="stat-pill"><span class="dot"></span>10+ categories</span>
+        <span class="stat-pill"><span class="dot"></span>50+ star minimum</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== CURATED LISTS & GUIDES ===== -->
+  <div class="section section-alt">
+    <div class="container">
+      <p class="cat-label">Start here</p>
+      <h2 class="cat-title">Curated Lists &amp; Guides</h2>
+      <p class="cat-desc">Community-maintained directories and learning resources for the Hermes ecosystem.</p>
+      <div class="project-grid">
+
+        <a href="https://github.com/alchaincyf/hermes-agent-orange-book" target="_blank" rel="noopener" class="project-card featured">
+          <div class="project-header">
+            <div class="project-name">hermes-agent-orange-book</div>
+            <span class="featured-badge">Popular</span>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>1.9k</span>
+          </div>
+          <div class="project-desc">Hermes Agent &mdash; from beginner to expert. Comprehensive practical guide covering setup, skills, memory, scheduling, and advanced workflows. Chinese language.</div>
+          <div class="project-meta"><span class="lang-dot lang-docs"></span> Guide &middot; alchaincyf</div>
+        </a>
+
+        <a href="https://github.com/0xNyk/awesome-hermes-agent" target="_blank" rel="noopener" class="project-card featured">
+          <div class="project-header">
+            <div class="project-name">awesome-hermes-agent</div>
+            <span class="featured-badge">Popular</span>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>1.1k</span>
+          </div>
+          <div class="project-desc">A curated list of awesome skills, tools, integrations, and resources for Hermes Agent. The community-maintained starting point for ecosystem discovery.</div>
+          <div class="project-meta"><span class="lang-dot lang-docs"></span> Awesome list &middot; 0xNyk</div>
+        </a>
+
+        <a href="https://github.com/ksimback/hermes-ecosystem" target="_blank" rel="noopener" class="project-card">
+          <div class="project-header">
+            <div class="project-name">hermes-ecosystem</div>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>180</span>
+          </div>
+          <div class="project-desc">Hermes Atlas &mdash; the community map of every tool, skill, and integration for Hermes Agent. Visual ecosystem overview.</div>
+          <div class="project-meta"><span class="lang-dot lang-html"></span> HTML &middot; ksimback</div>
+        </a>
+
+        <a href="https://github.com/OnlyTerp/hermes-optimization-guide" target="_blank" rel="noopener" class="project-card">
+          <div class="project-header">
+            <div class="project-name">hermes-optimization-guide</div>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>97</span>
+          </div>
+          <div class="project-desc">Setup, migration, LightRAG integration, Telegram configuration, and skill creation guide. Practical optimization tips.</div>
+          <div class="project-meta"><span class="lang-dot lang-docs"></span> Guide &middot; OnlyTerp</div>
+        </a>
+
+        <a href="https://github.com/cclank/Hermes-Wiki" target="_blank" rel="noopener" class="project-card">
+          <div class="project-header">
+            <div class="project-name">Hermes-Wiki</div>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>78</span>
+          </div>
+          <div class="project-desc">Complete Hermes agent wiki with source code walkthroughs, architecture deep-dives, and LLM integration details.</div>
+          <div class="project-meta"><span class="lang-dot lang-docs"></span> Wiki &middot; cclank</div>
+        </a>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== AGENT ROLES & CONFIGS ===== -->
+  <div class="section">
+    <div class="container">
+      <p class="cat-label">Agent personas</p>
+      <h2 class="cat-title">Agent Roles &amp; Configurations</h2>
+      <p class="cat-desc">Pre-built agent personas, brain configurations, and expert role packs.</p>
+      <div class="project-grid">
+
+        <a href="https://github.com/jnMetaCode/agency-agents-zh" target="_blank" rel="noopener" class="project-card featured">
+          <div class="project-header">
+            <div class="project-name">agency-agents-zh</div>
+            <span class="featured-badge">Top project</span>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>5.8k</span>
+          </div>
+          <div class="project-desc">193 plug-and-play AI expert roles across 18 departments. Works with Hermes Agent, OpenClaw, Claude Code, Cursor. Includes 46 China-market specialized agents.</div>
+          <div class="project-meta"><span class="lang-dot lang-shell"></span> Shell &middot; jnMetaCode</div>
+        </a>
+
+        <a href="https://github.com/garrytan/gbrain" target="_blank" rel="noopener" class="project-card featured">
+          <div class="project-header">
+            <div class="project-name">gbrain</div>
+            <span class="featured-badge">Popular</span>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>4.8k</span>
+          </div>
+          <div class="project-desc">Garry's opinionated Hermes Agent brain configuration. Tuned for productivity, coding, and real-world task execution.</div>
+          <div class="project-meta"><span class="lang-dot lang-ts"></span> TypeScript &middot; garrytan</div>
+        </a>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== WEB INTERFACES & DESKTOP ===== -->
+  <div class="section section-alt">
+    <div class="container">
+      <p class="cat-label">Interfaces</p>
+      <h2 class="cat-title">Web Interfaces &amp; Desktop Clients</h2>
+      <p class="cat-desc">Alternative UIs for interacting with Hermes &mdash; from web dashboards to native desktop apps.</p>
+      <div class="project-grid">
+
+        <a href="https://github.com/nesquena/hermes-webui" target="_blank" rel="noopener" class="project-card featured">
+          <div class="project-header">
+            <div class="project-name">hermes-webui</div>
+            <span class="featured-badge">Official</span>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>1.3k</span>
+          </div>
+          <div class="project-desc">The official Web UI for Hermes Agent. Three-panel Claude-style layout with sessions, chat, workspace file browser, and full CLI parity.</div>
+          <div class="project-meta"><span class="lang-dot lang-python"></span> Python &middot; nesquena</div>
+        </a>
+
+        <a href="https://github.com/outsourc-e/hermes-workspace" target="_blank" rel="noopener" class="project-card featured">
+          <div class="project-header">
+            <div class="project-name">hermes-workspace</div>
+            <span class="featured-badge">Popular</span>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>1.1k</span>
+          </div>
+          <div class="project-desc">Native web workspace with chat, terminal, memory inspector, and skills manager. Full-featured IDE-like experience for Hermes.</div>
+          <div class="project-meta"><span class="lang-dot lang-ts"></span> TypeScript &middot; outsourc-e</div>
+        </a>
+
+        <a href="https://github.com/joeynyc/hermes-hudui" target="_blank" rel="noopener" class="project-card">
+          <div class="project-header">
+            <div class="project-name">hermes-hudui</div>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>571</span>
+          </div>
+          <div class="project-desc">Web UI consciousness monitor for Hermes. Visualizes agent state, memory access patterns, and tool usage in real time.</div>
+          <div class="project-meta"><span class="lang-dot lang-python"></span> Python &middot; joeynyc</div>
+        </a>
+
+        <a href="https://github.com/dodo-reach/hermes-desktop" target="_blank" rel="noopener" class="project-card">
+          <div class="project-header">
+            <div class="project-name">hermes-desktop</div>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>225</span>
+          </div>
+          <div class="project-desc">Native Mac workspace for Hermes with real SSH, real terminal, and real session data. Desktop-native experience.</div>
+          <div class="project-meta"><span class="lang-dot lang-swift"></span> Swift &middot; dodo-reach</div>
+        </a>
+
+        <a href="https://github.com/joeynyc/hermes-skins" target="_blank" rel="noopener" class="project-card">
+          <div class="project-header">
+            <div class="project-name">hermes-skins</div>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>152</span>
+          </div>
+          <div class="project-desc">Custom visual themes (skins) for the Hermes CLI agent. Drop-in theme files for personalized terminal aesthetics.</div>
+          <div class="project-meta"><span class="lang-dot lang-python"></span> Python &middot; joeynyc</div>
+        </a>
+
+        <a href="https://github.com/fathah/hermes-desktop" target="_blank" rel="noopener" class="project-card">
+          <div class="project-header">
+            <div class="project-name">hermes-desktop (companion)</div>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>144</span>
+          </div>
+          <div class="project-desc">Desktop companion app for Hermes Agent. Install, configure, and chat from a native GUI on macOS and Linux.</div>
+          <div class="project-meta"><span class="lang-dot lang-ts"></span> TypeScript &middot; fathah</div>
+        </a>
+
+        <a href="https://github.com/awizemann/scarf" target="_blank" rel="noopener" class="project-card">
+          <div class="project-header">
+            <div class="project-name">scarf</div>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>92</span>
+          </div>
+          <div class="project-desc">Native macOS GUI companion for Hermes. Dashboard, session browser, activity feed, and embedded terminal chat.</div>
+          <div class="project-meta"><span class="lang-dot lang-swift"></span> Swift &middot; awizemann</div>
+        </a>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== SKILLS & PLUGINS ===== -->
+  <div class="section">
+    <div class="container">
+      <p class="cat-label">Extend Hermes</p>
+      <h2 class="cat-title">Skills &amp; Plugins</h2>
+      <p class="cat-desc">Community-built skills and plugins that add new capabilities to Hermes Agent.</p>
+      <div class="project-grid">
+
+        <a href="https://github.com/conorbronsdon/avoid-ai-writing" target="_blank" rel="noopener" class="project-card">
+          <div class="project-header">
+            <div class="project-name">avoid-ai-writing</div>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>896</span>
+          </div>
+          <div class="project-desc">Audits and rewrites content to remove AI writing patterns. Compatible with Hermes, Claude Code, and OpenClaw.</div>
+          <div class="project-meta"><span class="lang-dot lang-docs"></span> Skill &middot; conorbronsdon</div>
+        </a>
+
+        <a href="https://github.com/Agents365-ai/drawio-skill" target="_blank" rel="noopener" class="project-card">
+          <div class="project-header">
+            <div class="project-name">drawio-skill</div>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>160</span>
+          </div>
+          <div class="project-desc">From text to professional diagrams. Agent skill that generates draw.io diagrams with full Hermes Agent support.</div>
+          <div class="project-meta"><span class="lang-dot lang-shell"></span> Shell &middot; Agents365-ai</div>
+        </a>
+
+        <a href="https://github.com/tlehman/litprog-skill" target="_blank" rel="noopener" class="project-card">
+          <div class="project-header">
+            <div class="project-name">litprog-skill</div>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>88</span>
+          </div>
+          <div class="project-desc">Literate programming skill for agent harnesses. Weave code and documentation together in Hermes, Claude Code, and OpenCode.</div>
+          <div class="project-meta"><span class="lang-dot lang-ts"></span> TypeScript &middot; tlehman</div>
+        </a>
+
+        <a href="https://github.com/Hmbown/Wizards-of-the-Ghosts" target="_blank" rel="noopener" class="project-card">
+          <div class="project-header">
+            <div class="project-name">Wizards-of-the-Ghosts</div>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>60</span>
+          </div>
+          <div class="project-desc">Unofficial Hermes Agent skill pack built from fantasy spell and skill names. Creative and experimental skill collection.</div>
+          <div class="project-meta"><span class="lang-dot lang-python"></span> Python &middot; Hmbown</div>
+        </a>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== TOOLS & EXTENSIONS ===== -->
+  <div class="section section-alt">
+    <div class="container">
+      <p class="cat-label">Power tools</p>
+      <h2 class="cat-title">Tools, Extensions &amp; Orchestration</h2>
+      <p class="cat-desc">Harnesses, orchestrators, and developer tools that extend what Hermes can do.</p>
+      <div class="project-grid">
+
+        <a href="https://github.com/greyhaven-ai/autocontext" target="_blank" rel="noopener" class="project-card">
+          <div class="project-header">
+            <div class="project-name">autocontext</div>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>726</span>
+          </div>
+          <div class="project-desc">A recursive self-improving harness for agents. Supports Hermes CLI as a runtime. Auto-generates and refines context for better agent performance.</div>
+          <div class="project-meta"><span class="lang-dot lang-python"></span> Python &middot; greyhaven-ai</div>
+        </a>
+
+        <a href="https://github.com/swarmclawai/swarmclaw" target="_blank" rel="noopener" class="project-card">
+          <div class="project-header">
+            <div class="project-name">swarmclaw</div>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>313</span>
+          </div>
+          <div class="project-desc">Build and run autonomous multi-agent swarms with OpenClaw and Hermes. Orchestration, delegation, memory sharing, skills, schedules, and chat connectors.</div>
+          <div class="project-meta"><span class="lang-dot lang-ts"></span> TypeScript &middot; swarmclawai</div>
+        </a>
+
+        <a href="https://github.com/0xNyk/lacp" target="_blank" rel="noopener" class="project-card">
+          <div class="project-header">
+            <div class="project-name">lacp</div>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>187</span>
+          </div>
+          <div class="project-desc">Control-plane-grade agent harness for Claude, Codex, and Hermes. Policy gates, verification loops, memory management, and audit trails.</div>
+          <div class="project-meta"><span class="lang-dot lang-shell"></span> Shell &middot; 0xNyk</div>
+        </a>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== MEMORY PROVIDERS ===== -->
+  <div class="section">
+    <div class="container">
+      <p class="cat-label">Memory layer</p>
+      <h2 class="cat-title">Memory Providers</h2>
+      <p class="cat-desc">External memory backends and context engines that integrate with Hermes's memory system.</p>
+      <div class="project-grid">
+
+        <a href="https://github.com/elkimek/honcho-self-hosted" target="_blank" rel="noopener" class="project-card">
+          <div class="project-header">
+            <div class="project-name">honcho-self-hosted</div>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>137</span>
+          </div>
+          <div class="project-desc">Self-host Honcho memory layer for Hermes Agent. Pre-configured with OpenRouter and Venice, no code changes required.</div>
+          <div class="project-meta"><span class="lang-dot lang-shell"></span> Shell &middot; elkimek</div>
+        </a>
+
+        <a href="https://github.com/yoloshii/ClawMem" target="_blank" rel="noopener" class="project-card">
+          <div class="project-header">
+            <div class="project-name">ClawMem</div>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>98</span>
+          </div>
+          <div class="project-desc">On-device context engine and memory for AI agents. Works with Claude Code, Hermes, and OpenClaw. Hooks, MCP server, and hybrid RAG.</div>
+          <div class="project-meta"><span class="lang-dot lang-ts"></span> TypeScript &middot; yoloshii</div>
+        </a>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== OFFICIAL NOUS RESEARCH ===== -->
+  <div class="section section-alt">
+    <div class="container">
+      <p class="cat-label">From Nous Research</p>
+      <h2 class="cat-title">Official Projects</h2>
+      <p class="cat-desc">First-party projects from the Hermes Agent team at Nous Research.</p>
+      <div class="project-grid">
+
+        <a href="https://github.com/NousResearch/hermes-agent" target="_blank" rel="noopener" class="project-card featured">
+          <div class="project-header">
+            <div class="project-name">hermes-agent</div>
+            <span class="featured-badge">Core</span>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>56k+</span>
+          </div>
+          <div class="project-desc">The self-improving AI agent. Persistent memory, autonomous scheduling, 47 built-in tools, 15+ messaging platforms.</div>
+          <div class="project-meta"><span class="lang-dot lang-python"></span> Python &middot; NousResearch</div>
+        </a>
+
+        <a href="https://github.com/NousResearch/hermes-agent-self-evolution" target="_blank" rel="noopener" class="project-card">
+          <div class="project-header">
+            <div class="project-name">hermes-agent-self-evolution</div>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>893</span>
+          </div>
+          <div class="project-desc">Evolutionary self-improvement for Hermes Agent. Optimize skills, prompts, and code using DSPy and GEPA algorithms.</div>
+          <div class="project-meta"><span class="lang-dot lang-python"></span> Python &middot; NousResearch</div>
+        </a>
+
+        <a href="https://github.com/NousResearch/hermes-paperclip-adapter" target="_blank" rel="noopener" class="project-card">
+          <div class="project-header">
+            <div class="project-name">hermes-paperclip-adapter</div>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>741</span>
+          </div>
+          <div class="project-desc">Paperclip adapter for Hermes Agent. Run Hermes as a managed employee in a Paperclip company environment.</div>
+          <div class="project-meta"><span class="lang-dot lang-ts"></span> TypeScript &middot; NousResearch</div>
+        </a>
+
+        <a href="https://github.com/NousResearch/autonovel" target="_blank" rel="noopener" class="project-card">
+          <div class="project-header">
+            <div class="project-name">autonovel</div>
+            <span class="project-stars"><svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25z"/></svg>467</span>
+          </div>
+          <div class="project-desc">An autonomous novel writing pipeline powered by Hermes Agent. End-to-end creative writing with structured narrative generation.</div>
+          <div class="project-meta"><span class="lang-dot lang-python"></span> Python &middot; NousResearch</div>
+        </a>
+
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<!-- CTA -->
+<div class="cta-strip">
+  <div class="container">
+    <h2>Build something with Hermes</h2>
+    <p>The ecosystem is growing fast. Skills, tools, and integrations are all welcome.</p>
+    <div class="cta-btns">
+      <a href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" target="_blank" rel="noopener" class="btn-primary">Get started &rarr;</a>
+      <a href="https://github.com/NousResearch/hermes-agent" target="_blank" rel="noopener" class="btn-secondary">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" style="flex-shrink:0"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        View on GitHub
+      </a>
+    </div>
+  </div>
+</div>
+
+<script>
+  var themeToggle = document.getElementById('theme-toggle');
+  var html = document.documentElement;
+  function setTheme(t){
+    html.setAttribute('data-theme',t);
+    localStorage.setItem('theme',t);
+    themeToggle.textContent = t==='light' ? '\u263E' : '\u2600\uFE0F';
+  }
+  var saved=localStorage.getItem('theme');
+  if(saved){setTheme(saved)}else{setTheme('dark')}
+  themeToggle.addEventListener('click',function(){
+    setTheme(html.getAttribute('data-theme')==='dark'?'light':'dark');
+  });
+</script>
+
+</body>
+</html>
