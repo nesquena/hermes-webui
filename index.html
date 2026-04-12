@@ -1170,6 +1170,158 @@
       .btn-primary, .btn-secondary { width: 100%; justify-content: center; }
       .showcase-gallery { grid-template-columns: 1fr; }
     }
+
+    /* ===== HOSTING SECTION ===== */
+    .hosting-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 24px;
+      margin-top: 40px;
+    }
+    .hosting-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 28px 24px;
+      display: flex;
+      flex-direction: column;
+      text-decoration: none;
+      color: inherit;
+      transition: border-color 0.2s, background 0.2s, transform 0.15s;
+    }
+    .hosting-card:hover {
+      border-color: var(--accent);
+      background: var(--bg-card-hover);
+      transform: translateY(-2px);
+    }
+    .hosting-card.featured {
+      border-color: var(--accent);
+      position: relative;
+      overflow: hidden;
+    }
+    .hosting-card.featured::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, var(--accent), var(--accent-dim));
+    }
+    .hosting-card.featured:hover {
+      background: var(--bg-card-hover);
+      transform: translateY(-2px);
+    }
+    .hosting-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: rgba(240, 165, 0, 0.12);
+      color: var(--accent);
+      border: 1px solid rgba(240, 165, 0, 0.25);
+      border-radius: 20px;
+      padding: 3px 10px;
+      font-size: 0.71rem;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      margin-bottom: 14px;
+      width: fit-content;
+    }
+    .hosting-card-icon {
+      font-size: 1.75rem;
+      margin-bottom: 10px;
+      line-height: 1;
+    }
+    .hosting-card-title {
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      margin: 0 0 4px 0;
+    }
+    .hosting-card-price {
+      font-size: 0.9rem;
+      color: var(--accent);
+      font-weight: 600;
+      margin-bottom: 12px;
+    }
+    .hosting-card-desc {
+      font-size: 0.87rem;
+      color: var(--text-secondary);
+      line-height: 1.6;
+      margin-bottom: 16px;
+    }
+    .hosting-card-features {
+      list-style: none;
+      padding: 0;
+      margin: 0 0 20px 0;
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      flex: 1;
+    }
+    .hosting-card-features li {
+      font-size: 0.82rem;
+      color: var(--text-secondary);
+      display: flex;
+      align-items: flex-start;
+      gap: 7px;
+      line-height: 1.45;
+    }
+    .hosting-card-features li::before {
+      content: '✓';
+      color: var(--green);
+      font-weight: 700;
+      flex-shrink: 0;
+      margin-top: 1px;
+    }
+    .hosting-card-cta {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 0.83rem;
+      font-weight: 600;
+      color: var(--accent);
+      text-decoration: none;
+      margin-top: auto;
+    }
+    .hosting-card-cta:hover { text-decoration: underline; }
+    .hosting-specs {
+      margin-top: 32px;
+      padding: 18px 24px;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+    }
+    .hosting-specs-icon {
+      font-size: 1.2rem;
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+    .hosting-specs-body { flex: 1; }
+    .hosting-specs-title {
+      font-size: 0.84rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      margin-bottom: 8px;
+    }
+    .hosting-specs-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px 28px;
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+    .hosting-specs-list li {
+      font-size: 0.81rem;
+      color: var(--text-secondary);
+    }
+    .hosting-specs-list li strong { color: var(--text-primary); }
+    @media (max-width: 900px) {
+      .hosting-grid { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
@@ -1188,6 +1340,7 @@
       <li><a href="#who">Who it's for</a></li>
       <li><a href="#compare">Compare</a></li>
       <li><a href="#install">Install</a></li>
+      <li><a href="#hosting">Hosting</a></li>
       <li><a href="#resources">Resources</a></li>
       <li><a href="eli5/">ELI5</a></li>
       <li><a href="models/">Models</a></li>
@@ -1211,6 +1364,7 @@
   <a href="#who" onclick="closeMobileMenu()">Who it's for</a>
   <a href="#compare" onclick="closeMobileMenu()">Compare</a>
   <a href="#install" onclick="closeMobileMenu()">Install</a>
+  <a href="#hosting" onclick="closeMobileMenu()">Hosting</a>
   <a href="#resources" onclick="closeMobileMenu()">Resources</a>
   <a href="eli5/" onclick="closeMobileMenu()">&#129300; ELI5</a>
   <a href="models/" onclick="closeMobileMenu()">&#129302; Models</a>
@@ -1909,6 +2063,85 @@ hermes doctor         # diagnose any issues</code></pre>
           </div>
         </div>
       </div>
+    </div>
+  </section>
+
+
+  <!-- ===== SECTION 9b: HOSTING ===== -->
+  <section id="hosting" class="section section-alt">
+    <div class="container">
+      <p class="section-label">Where to run it</p>
+      <h2 class="section-title">Hosting options</h2>
+      <p class="section-sub">Hermes is self-hosted by design &#8212; it runs on hardware you control. Here are the most practical ways to get it running, from zero-setup managed hosting to a bare VPS.</p>
+
+      <div class="hosting-grid">
+
+        <!-- Agent37: featured — genuinely cheapest + easiest purpose-built option -->
+        <a class="hosting-card featured" href="https://agent37.com" target="_blank" rel="noopener">
+          <div class="hosting-badge">&#9733; Easiest option</div>
+          <div class="hosting-card-icon">&#9889;</div>
+          <div class="hosting-card-title">Agent37</div>
+          <div class="hosting-card-price">From $3.99/mo</div>
+          <p class="hosting-card-desc">Managed Hermes hosting &#8212; live in 60 seconds with no VPS configuration. The only provider purpose-built for Hermes, with full terminal access, visual file browser, and live browser view on every plan.</p>
+          <ul class="hosting-card-features">
+            <li>Isolated Docker container per user</li>
+            <li>Full terminal + file browser on all plans</li>
+            <li>Brave search &amp; Composio integrations included</li>
+            <li>Bring your own API key (Claude, OpenAI, Gemini&#8230;)</li>
+            <li>Live browser view: watch your agent work in real time</li>
+          </ul>
+          <span class="hosting-card-cta">Visit agent37.com &#8594;</span>
+        </a>
+
+        <!-- VPS self-hosted -->
+        <div class="hosting-card">
+          <div class="hosting-card-icon">&#128421;</div>
+          <div class="hosting-card-title">VPS &#8212; self-hosted</div>
+          <div class="hosting-card-price">~$4&#8211;8/mo</div>
+          <p class="hosting-card-desc">Full control at roughly the same cost. Hetzner CX22 is the recommended pick: 4 GB RAM, 2 vCPU, 40 GB SSD, 20 TB bandwidth. Add Coolify for one-click deploys from GitHub with no manual Docker work.</p>
+          <ul class="hosting-card-features">
+            <li>Hetzner CX22 (~$4.50/mo) &#8212; best price-performance</li>
+            <li>Coolify for easy GitHub deploys (free, open-source)</li>
+            <li>Vultr, DigitalOcean, Linode all work from $5/mo</li>
+            <li>Full root access, no vendor lock-in</li>
+            <li>Docker or bare metal, any Linux distro</li>
+          </ul>
+          <a class="hosting-card-cta" href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" target="_blank" rel="noopener">Install docs &#8594;</a>
+        </div>
+
+        <!-- PaaS -->
+        <div class="hosting-card">
+          <div class="hosting-card-icon">&#9729;</div>
+          <div class="hosting-card-title">PaaS platforms</div>
+          <div class="hosting-card-price">$5&#8211;7/mo</div>
+          <p class="hosting-card-desc">Git-push deploys with no server management. Good if you want to skip infrastructure entirely. Railway, Render, and Fly.io all support Node.js and Python with automatic SSL and domains.</p>
+          <ul class="hosting-card-features">
+            <li>Railway Hobby &#8212; $5/mo, connect GitHub, auto-deploy</li>
+            <li>Render &#8212; free tier available (sleeps on inactivity)</li>
+            <li>Fly.io &#8212; Docker-native, 30+ global regions</li>
+            <li>No SSH or server management required</li>
+            <li>Built-in CI/CD on every git push</li>
+          </ul>
+          <a class="hosting-card-cta" href="https://hermes-agent.nousresearch.com/docs/getting-started/installation" target="_blank" rel="noopener">Install docs &#8594;</a>
+        </div>
+
+      </div>
+
+      <!-- Minimum specs bar -->
+      <div class="hosting-specs">
+        <div class="hosting-specs-icon">&#128202;</div>
+        <div class="hosting-specs-body">
+          <div class="hosting-specs-title">Minimum requirements &#8212; no GPU needed (Hermes calls external APIs)</div>
+          <ul class="hosting-specs-list">
+            <li><strong>RAM:</strong> 1 GB min, 2 GB recommended</li>
+            <li><strong>CPU:</strong> 1 vCPU minimum</li>
+            <li><strong>Storage:</strong> 10&#8211;20 GB SSD</li>
+            <li><strong>OS:</strong> Ubuntu 22.04 LTS or any modern Linux</li>
+            <li><strong>Model:</strong> Bring your own key &#8212; Claude, OpenAI, Gemini, or local</li>
+          </ul>
+        </div>
+      </div>
+
     </div>
   </section>
 
