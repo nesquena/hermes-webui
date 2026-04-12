@@ -507,6 +507,47 @@ State lives outside the repo at `~/.hermes/webui-mvp/` by default
 - `SPRINTS.md` -- forward sprint plan with CLI + Claude parity targets
 - `THEMES.md` -- theme system documentation, custom theme guide
 
+## Contributors
+
+Hermes WebUI is built with help from the open-source community. Every PR — whether merged directly or incorporated via rebase — shapes the project, and we're grateful to everyone who has taken the time to contribute.
+
+### Major contributions
+
+**[@aronprins](https://github.com/aronprins)** — v0.50.0 UI overhaul (PR #242)
+The biggest single contribution to the project: a complete UI redesign that moved model/profile/workspace controls into the composer footer, replaced the gear-icon settings panel with the Hermes Control Center (tabbed modal), removed the activity bar in favor of inline composer status, redesigned the session list with a `⋯` action dropdown, and added the workspace panel state machine. 26 commits, thoroughly designed and iterated through multiple review rounds.
+
+**[@iRonin](https://github.com/iRonin)** — Security hardening sprint (PRs #196–#204)
+Six consecutive security and reliability PRs: session memory leak fix (expired token pruning), Content-Security-Policy + Permissions-Policy headers, 30-second slow-client connection timeout, optional HTTPS/TLS support via environment variables, upstream branch tracking fix for self-update, and CLI session support in the file browser API. This is the kind of focused, high-quality security work that makes a self-hosted tool trustworthy.
+
+**[@DavidSchuchert](https://github.com/DavidSchuchert)** — German translation (PR #190)
+Complete German locale (`de`) covering all UI strings, settings labels, commands, and system messages — and in doing so, stress-tested the i18n system and exposed several elements that weren't yet translatable, which got fixed as part of the same PR.
+
+### Feature contributions
+
+**[@kevin-ho](https://github.com/kevin-ho)** — OLED theme (PR #168)
+Added the 7th built-in theme: pure black backgrounds with warm accents tuned to reduce burn-in risk. Small diff, big impact for anyone on an OLED display.
+
+**[@Bobby9228](https://github.com/Bobby9228)** — Mobile Profiles button (PR #265)
+Added the Profiles tab to the mobile bottom navigation bar, making profile switching reachable on phones without digging into the sidebar.
+
+**[@franksong2702](https://github.com/franksong2702)** — Session title guard + breadcrumb nav (PRs #301, #302)
+Two clean bug fixes / features: the session title guard that stops `title_from()` from overwriting user-renamed sessions after every turn, and clickable breadcrumb navigation in the workspace file preview panel.
+
+### Bug fix contributions
+
+**[@tgaalman](https://github.com/tgaalman)** — Thinking card fix (PR #169)
+Fixed top-level reasoning fields being missed in the thinking card display — an edge case in how Claude's extended thinking blocks surface in the API response.
+
+**[@smurmann](https://github.com/smurmann)** — Custom provider routing fix (PR #189)
+Fixed model routing for slash-prefixed custom provider models, which were being misrouted in the model selector. A precise fix for a real edge case in multi-provider setups.
+
+**[@jeffscottward](https://github.com/jeffscottward)** — Claude Haiku model ID fix (PR #145)
+Caught and corrected the Claude Haiku model ID (`3-5` → `4-5`) immediately after the Anthropic release — the kind of quick community catch that keeps the model dropdown accurate.
+
+---
+
+Want to contribute? See [ARCHITECTURE.md](ARCHITECTURE.md) for the codebase layout and [TESTING.md](TESTING.md) for how to run the test suite. The best contributions are focused, well-tested, and solve a real problem — exactly what every person on this list did.
+
 ## Repo
 
 ```
