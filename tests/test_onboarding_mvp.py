@@ -1,4 +1,10 @@
-"""Onboarding MVP tests — first-run wizard and provider config persistence."""
+"""Onboarding MVP tests — first-run wizard and provider config persistence.
+
+Tests that call /api/onboarding/setup require PyYAML in the test server's
+Python environment (the agent venv). They are skipped when hermes-agent is
+not installed, since the server falls back to system Python which typically
+lacks pyyaml.
+"""
 import json
 import pathlib
 import sys
@@ -8,6 +14,14 @@ import urllib.request
 import pytest
 
 BASE = "http://127.0.0.1:8788"
+
+# Check if pyyaml is available — onboarding setup tests need it on the server
+try:
+    import yaml as _yaml
+    _HAS_YAML = True
+except ImportError:
+    _HAS_YAML = False
+_needs_yaml = pytest.mark.skipif(not _HAS_YAML, reason="PyYAML not installed — onboarding setup tests require it")
 
 
 def get(path):
@@ -69,6 +83,7 @@ def test_onboarding_status_defaults_incomplete():
     assert data["setup"]["providers"]
 
 
+@_needs_yaml
 def test_onboarding_setup_openrouter_writes_real_config_and_env():
     data, status = post(
         "/api/onboarding/setup",
@@ -95,6 +110,7 @@ def test_onboarding_setup_openrouter_writes_real_config_and_env():
     assert "OPENROUTER_API_KEY=sk-or-test" in env_text
 
 
+@_needs_yaml
 def test_onboarding_setup_custom_endpoint_writes_runtime_files():
     data, status = post(
         "/api/onboarding/setup",
@@ -125,6 +141,7 @@ def test_onboarding_setup_custom_endpoint_writes_runtime_files():
     assert "OPENAI_API_KEY=sk-custom-test" in env_text
 
 
+@_needs_yaml
 def test_onboarding_setup_detects_incomplete_saved_provider():
     status, code = post(
         "/api/onboarding/setup",
@@ -145,6 +162,7 @@ def test_onboarding_setup_detects_incomplete_saved_provider():
     assert data["system"]["setup_state"] in {"provider_incomplete", "agent_unavailable"}
 
 
+@_needs_yaml
 def test_onboarding_setup_rejects_missing_custom_base_url():
     data, status = post(
         "/api/onboarding/setup",
@@ -210,6 +228,7 @@ def test_onboarding_already_completed_status():
     post("/api/settings", {"onboarding_completed": False})
 
 
+@_needs_yaml
 def test_onboarding_setup_rejects_api_key_with_newline():
     """API keys containing embedded newlines must be rejected to prevent .env injection."""
     injected_key = "sk-bad" + chr(10) + "OTHER_KEY=injected"
