@@ -1543,7 +1543,9 @@ def _handle_chat_sync(handler, body):
             else:
                 os.environ["HERMES_SESSION_KEY"] = old_session_key
     s.messages = result.get("messages") or s.messages
-    s.title = title_from(s.messages, s.title)
+    # Only auto-generate title when still default; preserves user renames
+    if s.title == "Untitled":
+        s.title = title_from(s.messages, s.title)
     s.save()
     # Sync to state.db for /insights (opt-in setting)
     try:
