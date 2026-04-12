@@ -231,13 +231,14 @@ class TestOnboardingStatusApiOAuth:
 # ── Control Center: section reset on close ─────────────────────────────────
 
 def test_control_center_resets_active_section_on_close():
-    """Closing the control center must reset _controlSection to 'conversation'."""
+    """Closing the control center must reset _settingsSection to 'conversation'."""
     src = open('static/panels.js').read()
-    assert '_controlSection' in src, '_controlSection state variable missing from panels.js'
-    assert "_controlSection='conversation'" in src or '_controlSection = 'conversation'' in src,         'Control center does not reset section to conversation on close'
+    assert '_settingsSection' in src, '_settingsSection state variable missing from panels.js'
+    assert "_settingsSection = 'conversation'" in src or "_settingsSection='conversation'" in src, \
+        'Control center does not reset section to conversation on close'
 
 
 def test_control_center_tab_highlight_on_open():
-    """Opening the control center must highlight the active tab."""
-    src = open('static/panels.js').read()
-    assert 'cc-tab' in src, 'cc-tab CSS class for control center tabs missing from panels.js'
+    """Opening the control center must use settings-tabs for section navigation."""
+    css = open('static/style.css').read()
+    assert 'settings-tabs' in css, 'settings-tabs CSS class for control center tabs missing from style.css'
