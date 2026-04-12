@@ -28,7 +28,8 @@ This makes the code easy to modify from a terminal or by an agent.
     <repo>/
     server.py              Thin routing shell + HTTP Handler + auth middleware. ~81 lines.
                            Delegates all route handling to api/routes.py.
-    start.sh               Discovery script: finds agent dir, Python, starts server.
+    bootstrap.py           One-shot launcher: optional agent install, deps, health wait, browser open.
+    start.sh               Thin wrapper around bootstrap.py for shell-based startup.
     Dockerfile             python:3.12-slim container image (~23 lines)
     docker-compose.yml     Compose config with named volume and optional auth (~22 lines)
     .dockerignore          Excludes .git, tests/, .env* from Docker builds
@@ -39,6 +40,7 @@ This makes the code easy to modify from a terminal or by an agent.
       helpers.py           HTTP helpers: j(), bad(), require(), safe_resolve(), security headers (~71 lines)
       models.py            Session model + CRUD, per-session profile tracking (~137 lines)
       profiles.py          Profile state management, hermes_cli wrapper (~246 lines)
+      onboarding.py        First-run onboarding status, real provider config writes, and readiness detection.
       routes.py            All GET + POST route handlers (~1180 lines)
       startup.py           Startup helpers: auto_install_agent_deps() (~50 lines)
       streaming.py         SSE engine, run_agent, cancel, HERMES_HOME save/restore (~236 lines)
@@ -53,6 +55,7 @@ This makes the code easy to modify from a terminal or by an agent.
       messages.js          send(), SSE event handlers, approval, transcript (~297 lines)
       panels.js            Cron, skills, memory, workspace, profiles, todo, settings (~974 lines)
       commands.js          Slash command registry, parser, autocomplete dropdown (~156 lines)
+      onboarding.js        First-run wizard overlay, provider setup flow, and settings/workspace orchestration.
       boot.js              Event wiring, mobile nav, voice input, boot IIFE (~338 lines)
     tests/
       conftest.py          Isolated test server (port 8788, separate HERMES_HOME) (~240 lines)

@@ -387,6 +387,7 @@ function applyBotName(){
   }
   // Pre-load workspace list so sidebar name is correct from first render
   await loadWorkspaceList();
+  await loadOnboardingWizard();
   _initResizePanels();
   const saved=localStorage.getItem('hermes-webui-session');
   if(saved){

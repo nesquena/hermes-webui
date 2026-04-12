@@ -286,7 +286,11 @@ def test_server_delete_invalidates_index(cleanup_test_sessions):
     routes_src = (REPO_ROOT / "api" / "routes.py").read_text() if (REPO_ROOT / "api" / "routes.py").exists() else ""
     # Find the delete handler in either file
     for label, text in [("server.py", src), ("api/routes.py", routes_src)]:
-        delete_idx = text.find("if parsed.path == '/api/session/delete':")
+        # Accept both single-quote and double-quote style (formatting varies by contributor)
+        delete_idx = max(
+            text.find("if parsed.path == '/api/session/delete':"),
+            text.find('if parsed.path == "/api/session/delete":'),
+        )
         if delete_idx >= 0:
             delete_block = text[delete_idx:delete_idx+600]
             assert "SESSION_INDEX_FILE" in delete_block, \
