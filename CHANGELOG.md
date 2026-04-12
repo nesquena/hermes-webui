@@ -6,6 +6,11 @@
 ---
 
 
+## [v0.50.3] Onboarding completes gracefully for pre-configured providers (PR #323, fixes #322)
+
+- **OAuth/CLI-configured providers no longer blocked by onboarding** (closes #322): Users with providers already set up via the CLI (`openai-codex`, `copilot`, `nous`, etc.) hit `Unsupported provider for WebUI onboarding` when clicking "Open Hermes" on the finish page. The wizard now marks onboarding complete and lets them through — the agent setup is already done, no wizard steps needed.
+  - 5 new tests in `tests/test_sprint34.py`; 758 tests total (up from 753)
+
 ## [v0.50.2] Workspace panel state persists across refreshes
 
 - **Workspace panel open/closed persists** (localStorage key `hermes-webui-workspace-panel`): Once you open the workspace/files pane, it stays open after a page refresh. Closing it explicitly saves the closed state, which also survives a refresh. The restore happens in the boot sequence before the first render, so there is no flash of the wrong state. Works for both desktop and mobile.

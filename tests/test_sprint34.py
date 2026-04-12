@@ -242,3 +242,59 @@ def test_control_center_tab_highlight_on_open():
     """Opening the control center must use settings-tabs for section navigation."""
     css = open('static/style.css').read()
     assert 'settings-tabs' in css, 'settings-tabs CSS class for control center tabs missing from style.css'
+
+
+# ── apply_onboarding_setup: unsupported/OAuth providers complete gracefully ──
+
+class TestApplyOnboardingSetupUnsupportedProvider:
+    """PR #323 / Issue #322: apply_onboarding_setup must not raise ValueError for
+    providers already configured via CLI (openai-codex, copilot, nous, etc.).
+    Instead it marks onboarding complete and returns current status.
+    """
+
+    def _call(self, provider: str) -> dict:
+        import sys, pathlib, unittest.mock, tempfile, os
+        repo = pathlib.Path(__file__).parent.parent
+        if str(repo) not in sys.path:
+            sys.path.insert(0, str(repo))
+
+        from api.onboarding import apply_onboarding_setup
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with unittest.mock.patch("api.onboarding._get_active_hermes_home",
+                                     return_value=pathlib.Path(tmp)), \
+                 unittest.mock.patch("api.onboarding._get_config_path",
+                                     return_value=pathlib.Path(tmp) / "config.yaml"), \
+                 unittest.mock.patch("api.onboarding.save_settings") as mock_save, \
+                 unittest.mock.patch("api.onboarding.get_onboarding_status",
+                                     return_value={"completed": True, "system": {}}):
+                result = apply_onboarding_setup({"provider": provider, "model": "", "api_key": ""})
+                return result, mock_save
+
+    def test_openai_codex_does_not_raise(self):
+        """apply_onboarding_setup with openai-codex must not raise ValueError."""
+        result, _ = self._call("openai-codex")
+        assert result is not None
+
+    def test_copilot_does_not_raise(self):
+        """apply_onboarding_setup with copilot must not raise ValueError."""
+        result, _ = self._call("copilot")
+        assert result is not None
+
+    def test_nous_does_not_raise(self):
+        """apply_onboarding_setup with nous must not raise ValueError."""
+        result, _ = self._call("nous")
+        assert result is not None
+
+    def test_unsupported_provider_marks_onboarding_complete(self):
+        """apply_onboarding_setup with an unsupported provider must save onboarding_completed=True."""
+        _, mock_save = self._call("openai-codex")
+        calls = [str(c) for c in mock_save.call_args_list]
+        assert any("onboarding_completed" in c for c in calls), \
+            "save_settings must be called with onboarding_completed=True for unsupported providers"
+
+    def test_unsupported_provider_returns_status_dict(self):
+        """apply_onboarding_setup with an unsupported provider must return a status dict (not raise)."""
+        result, _ = self._call("openai-codex")
+        assert isinstance(result, dict), \
+            "apply_onboarding_setup must return a dict for unsupported providers, not raise"
