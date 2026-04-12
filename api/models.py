@@ -269,6 +269,7 @@ def get_cli_sessions() -> list:
                        MAX(m.timestamp) AS last_activity
                 FROM sessions s
                 LEFT JOIN messages m ON m.session_id = s.id
+                WHERE s.source IS NOT NULL AND s.source != 'webui'
                 GROUP BY s.id
                 ORDER BY COALESCE(MAX(m.timestamp), s.started_at) DESC
                 LIMIT 200
@@ -280,9 +281,11 @@ def get_cli_sessions() -> list:
                 # the active CLI profile so sidebar filtering works either way.
                 profile = _cli_profile  # CLI DB has no profile column; use active profile
 
+                _source = row['source'] or 'cli'
+                _display_title = row['title'] or f'{_source.title()} Session'
                 cli_sessions.append({
                     'session_id': sid,
-                    'title': row['title'] or 'CLI Session',
+                    'title': _display_title,
                     'workspace': str(get_last_workspace()),
                     'model': row['model'] or 'unknown',
                     'message_count': row['message_count'] or 0,
@@ -292,7 +295,7 @@ def get_cli_sessions() -> list:
                     'archived': False,
                     'project_id': None,
                     'profile': profile,
-                    'source_tag': 'cli',
+                    'source_tag': _source,
                     'is_cli_session': True,
                 })
     except Exception:

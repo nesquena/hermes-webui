@@ -1113,6 +1113,8 @@ async function saveSettings(andClose){
     if(typeof applyBotName==='function') applyBotName();
     if(typeof setLocale==='function') setLocale(language);
     if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
+    // Restart gateway SSE when agent session setting changes
+    if(typeof startGatewaySSE==='function'){if(showCliSessions)startGatewaySSE();else if(typeof stopGatewaySSE==='function')stopGatewaySSE();}
     _settingsDirty=false; _settingsThemeOnOpen=theme;
     const bar=$('settingsUnsavedBar'); if(bar) bar.style.display='none';
     renderMessages();

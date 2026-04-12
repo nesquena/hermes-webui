@@ -385,11 +385,13 @@ function applyBotName(){
   _initResizePanels();
   const saved=localStorage.getItem('hermes-webui-session');
   if(saved){
-    try{await loadSession(saved);await renderSessionList();await checkInflightOnBoot(saved);return;}
+    try{await loadSession(saved);await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);return;}
     catch(e){localStorage.removeItem('hermes-webui-session');}
   }
   // no saved session - show empty state, wait for user to hit +
   $('emptyState').style.display='';
   await renderSessionList();
+  // Start real-time gateway session sync if setting is enabled
+  if(typeof startGatewaySSE==='function') startGatewaySSE();
 })();
 
