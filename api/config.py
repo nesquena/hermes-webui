@@ -913,10 +913,11 @@ def get_available_models() -> dict:
     # Ensure the user's configured default_model always appears in the dropdown.
     # It may be missing if the model isn't in any hardcoded list (e.g. openrouter/free,
     # a custom local model, or any model.default not in _FALLBACK_MODELS).
-    # Normalize before comparing: strip provider prefix so 'anthropic/claude-opus-4.6'
-    # matches 'claude-opus-4.6' already in the list and avoids a duplicate entry.
+    # Normalize before comparing: strip provider prefix and unify separators so
+    # 'anthropic/claude-opus-4.6' matches 'claude-opus-4.6' and 'claude-sonnet-4-6'
+    # matches 'claude-sonnet-4.6' (hermes-agent uses hyphens, webui uses dots).
     if default_model:
-        _norm = lambda mid: mid.split("/", 1)[-1] if "/" in mid else mid
+        _norm = lambda mid: (mid.split("/", 1)[-1] if "/" in mid else mid).replace("-", ".")
         all_ids_norm = {_norm(m["id"]) for g in groups for m in g.get("models", [])}
         if _norm(default_model) not in all_ids_norm:
             # Determine which group to inject into. Compare against the
