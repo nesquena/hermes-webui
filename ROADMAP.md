@@ -3,7 +3,7 @@
 > Goal: Full 1:1 parity with the Hermes CLI experience via a clean dark web UI.
 > Everything you can do from the CLI terminal, you can do from this UI.
 >
-> Last updated: v0.47.1 (April 12, 2026) — 648 tests, 648 passing
+> Last updated: v0.47.1 (April 12, 2026) — onboarding MVP now writes real Hermes provider config from the Web UI for OpenRouter, Anthropic, OpenAI, and custom OpenAI-compatible endpoints.
 > Tests: 604 total (604 passing, 0 failures)
 > Source: <repo>/
 

@@ -110,7 +110,11 @@ from api.workspace import (
 )
 from api.upload import handle_upload
 from api.streaming import _sse, _run_agent_streaming, cancel_stream
-from api.onboarding import get_onboarding_status, complete_onboarding
+from api.onboarding import (
+    apply_onboarding_setup,
+    get_onboarding_status,
+    complete_onboarding,
+)
 
 # Approval system (optional -- graceful fallback if agent not available)
 try:
@@ -818,6 +822,14 @@ def handle_post(handler, parsed) -> bool:
         saved = save_settings(body)
         saved.pop("password_hash", None)  # never expose hash to client
         return j(handler, saved)
+
+    if parsed.path == "/api/onboarding/setup":
+        try:
+            return j(handler, apply_onboarding_setup(body))
+        except ValueError as e:
+            return bad(handler, str(e))
+        except RuntimeError as e:
+            return bad(handler, str(e), 500)
 
     if parsed.path == "/api/onboarding/complete":
         return j(handler, complete_onboarding())
