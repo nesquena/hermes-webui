@@ -100,6 +100,9 @@ def _write_env_file(env_path: Path, updates: dict[str, str]) -> None:
         clean = str(value).strip()
         if not clean:
             continue
+        # Reject embedded newlines/carriage returns to prevent .env injection
+        if "\n" in clean or "\r" in clean:
+            raise ValueError("API key must not contain newline characters.")
         current[key] = clean
         os.environ[key] = clean
 

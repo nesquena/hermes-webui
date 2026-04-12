@@ -125,7 +125,7 @@ function _renderOnboardingBody(){
       ${showBaseUrl?`<label class="onboarding-field"><span>${t('onboarding_base_url_label')}</span><input id="onboardingBaseUrlInput" value="${esc(ONBOARDING.form.baseUrl||'')}" placeholder="${t('onboarding_base_url_placeholder')}" oninput="ONBOARDING.form.baseUrl=this.value"></label>`:''}
       <p class="onboarding-copy">${keyHelp}</p>
       ${showBaseUrl?`<p class="onboarding-copy">${t('onboarding_base_url_help')}</p>`:''}
-      <p class="onboarding-copy">${setup.unsupported_note||''}</p>`;
+      <p class="onboarding-copy">${esc(setup.unsupported_note||'')||''}</p>`;
     const providerSel=$('onboardingProviderSelect');
     if(providerSel) providerSel.value=ONBOARDING.form.provider;
     return;

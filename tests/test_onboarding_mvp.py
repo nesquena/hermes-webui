@@ -1,3 +1,4 @@
+"""Onboarding MVP tests — first-run wizard and provider config persistence."""
 import json
 import pathlib
 import sys
@@ -5,9 +6,6 @@ import urllib.error
 import urllib.request
 
 import pytest
-
-sys.path.insert(0, str(pathlib.Path(__file__).parent))
-from conftest import TEST_STATE_DIR
 
 BASE = "http://127.0.0.1:8788"
 
@@ -30,15 +28,32 @@ def post(path, body=None):
         return json.loads(e.read()), e.code
 
 
+def _server_hermes_home() -> pathlib.Path:
+    """Get the hermes home path the test server is actually using.
+
+    Using the server's own /api/onboarding/status response is more robust than
+    reading TEST_STATE_DIR from conftest, which can get the wrong path when
+    conftest is imported multiple times under different HERMES_HOME environments
+    (api.config resets HERMES_HOME at module import time via init_profile_state).
+    """
+    data, _ = get("/api/onboarding/status")
+    env_path = data.get("system", {}).get("env_path", "")
+    if env_path:
+        return pathlib.Path(env_path).parent
+    # Fallback
+    hermes_home = pathlib.Path.home() / ".hermes"
+    return hermes_home / "webui-mvp-test"
+
+
 @pytest.fixture(autouse=True)
 def clean_hermes_config_files():
+    hermes_home = _server_hermes_home()
     for rel in ("config.yaml", ".env"):
-        path = TEST_STATE_DIR / rel
-        path.unlink(missing_ok=True)
+        (hermes_home / rel).unlink(missing_ok=True)
     yield
     for rel in ("config.yaml", ".env"):
-        path = TEST_STATE_DIR / rel
-        path.unlink(missing_ok=True)
+        (hermes_home / rel).unlink(missing_ok=True)
+
 
 
 def test_onboarding_status_defaults_incomplete():
@@ -73,8 +88,8 @@ def test_onboarding_setup_openrouter_writes_real_config_and_env():
         assert data["system"]["chat_ready"] is False
         assert data["system"]["setup_state"] == "agent_unavailable"
 
-    cfg_text = (TEST_STATE_DIR / "config.yaml").read_text(encoding="utf-8")
-    env_text = (TEST_STATE_DIR / ".env").read_text(encoding="utf-8")
+    cfg_text = (_server_hermes_home() / "config.yaml").read_text(encoding="utf-8")
+    env_text = (_server_hermes_home() / ".env").read_text(encoding="utf-8")
     assert "provider: openrouter" in cfg_text
     assert "default: anthropic/claude-sonnet-4.6" in cfg_text
     assert "OPENROUTER_API_KEY=sk-or-test" in env_text
@@ -102,8 +117,8 @@ def test_onboarding_setup_custom_endpoint_writes_runtime_files():
     assert data["system"]["current_provider"] == "custom"
     assert data["system"]["current_base_url"] == "http://localhost:4000/v1"
 
-    cfg_text = (TEST_STATE_DIR / "config.yaml").read_text(encoding="utf-8")
-    env_text = (TEST_STATE_DIR / ".env").read_text(encoding="utf-8")
+    cfg_text = (_server_hermes_home() / "config.yaml").read_text(encoding="utf-8")
+    env_text = (_server_hermes_home() / ".env").read_text(encoding="utf-8")
     assert "provider: custom" in cfg_text
     assert "default: google/gemma-3-27b-it" in cfg_text
     assert "base_url: http://localhost:4000/v1" in cfg_text
@@ -121,7 +136,7 @@ def test_onboarding_setup_detects_incomplete_saved_provider():
     )
     assert code == 200
 
-    (TEST_STATE_DIR / ".env").unlink(missing_ok=True)
+    (_server_hermes_home() / ".env").unlink(missing_ok=True)
     data, status_code = get("/api/onboarding/status")
     assert status_code == 200
     assert data["system"]["provider_configured"] is True
@@ -149,7 +164,7 @@ def test_onboarding_complete_persists_flag():
     assert data["completed"] is True
 
     settings = json.loads(
-        (TEST_STATE_DIR / "settings.json").read_text(encoding="utf-8")
+        (_server_hermes_home() / "settings.json").read_text(encoding="utf-8")
     )
     assert settings["onboarding_completed"] is True
 
@@ -159,12 +174,52 @@ def test_onboarding_complete_persists_flag():
 
 
 def test_onboarding_complete_preserves_other_settings():
-    saved, status = post(
-        "/api/settings", {"default_model": "openai/gpt-4o", "bot_name": "Guide"}
-    )
-    assert status == 200
-    assert saved["default_model"] == "openai/gpt-4o"
+    """Completing onboarding must not overwrite other user settings."""
+    # Use send_key (a safe enum setting) to verify settings preservation
+    # without contaminating bot_name or theme checks in other test files.
+    # Use GET /api/settings (not onboarding status) to check preservation
+    # since the onboarding status only returns a subset of settings fields.
+    try:
+        saved, s1 = post("/api/settings", {"send_key": "ctrl+enter"})
+        assert s1 == 200
+        assert saved["send_key"] == "ctrl+enter"
 
-    done, status2 = post("/api/onboarding/complete", {})
+        _, s2 = post("/api/onboarding/complete", {})
+        assert s2 == 200
+
+        # Verify the non-onboarding setting survived the completion call
+        current_settings, s3 = get("/api/settings")
+        assert s3 == 200
+        assert current_settings["send_key"] == "ctrl+enter"
+    finally:
+        # Always restore default send_key to avoid contaminating other tests
+        post("/api/settings", {"send_key": "enter"})
+
+def test_onboarding_already_completed_status():
+    """After marking onboarding complete, status must reflect completed=True
+    so the wizard does not re-appear for returning users."""
+    done, status = post("/api/onboarding/complete", {})
+    assert status == 200
+    assert done["completed"] is True
+
+    data, status2 = get("/api/onboarding/status")
     assert status2 == 200
-    assert done["settings"]["default_model"] == "openai/gpt-4o"
+    assert data["completed"] is True
+
+    # Reset so test doesn't contaminate others
+    post("/api/settings", {"onboarding_completed": False})
+
+
+def test_onboarding_setup_rejects_api_key_with_newline():
+    """API keys containing embedded newlines must be rejected to prevent .env injection."""
+    injected_key = "sk-bad" + chr(10) + "OTHER_KEY=injected"
+    data, status = post(
+        "/api/onboarding/setup",
+        {
+            "provider": "openrouter",
+            "model": "anthropic/claude-sonnet-4.6",
+            "api_key": injected_key,
+        },
+    )
+    assert status == 400
+    assert "newline" in data["error"].lower()

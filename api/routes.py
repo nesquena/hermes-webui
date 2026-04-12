@@ -827,6 +827,10 @@ def handle_post(handler, parsed) -> bool:
         return j(handler, saved)
 
     if parsed.path == "/api/onboarding/setup":
+        # Writing API keys to disk - restrict to loopback unless auth is active
+        from api.auth import is_auth_enabled
+        if not is_auth_enabled() and handler.client_address[0] != "127.0.0.1":
+            return bad(handler, "Onboarding setup is only available from localhost when auth is not enabled.", 403)
         try:
             return j(handler, apply_onboarding_setup(body))
         except ValueError as e:
