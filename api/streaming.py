@@ -1430,19 +1430,36 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 print(f"[webui] WARNING: SessionDB init failed — session_search will be unavailable: {_db_err}", flush=True)
             resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(model)
 
+            # Gateway models carry their own API key and extra headers;
+            # skip the normal runtime provider resolution for them.
+            _gateway_extra_headers = {}
+            _is_gateway = False
+            try:
+                from api.gateway_provider import is_gateway_model, resolve_gateway_model
+                if is_gateway_model(model):
+                    _gw = resolve_gateway_model(model)
+                    if _gw:
+                        _is_gateway = True
+                        _gateway_extra_headers = _gw.get("extra_headers", {})
+            except Exception:
+                pass
+
             # Resolve API key via Hermes runtime provider (matches gateway behaviour).
             # Pass the resolved provider so non-default providers get their own credentials.
             resolved_api_key = None
-            try:
-                from hermes_cli.runtime_provider import resolve_runtime_provider
-                _rt = resolve_runtime_provider(requested=resolved_provider)
-                resolved_api_key = _rt.get("api_key")
-                if not resolved_provider:
-                    resolved_provider = _rt.get("provider")
-                if not resolved_base_url:
-                    resolved_base_url = _rt.get("base_url")
-            except Exception as _e:
-                print(f"[webui] WARNING: resolve_runtime_provider failed: {_e}", flush=True)
+            if _is_gateway:
+                resolved_api_key = "agent-gateway-no-key-required"
+            else:
+                try:
+                    from hermes_cli.runtime_provider import resolve_runtime_provider
+                    _rt = resolve_runtime_provider(requested=resolved_provider)
+                    resolved_api_key = _rt.get("api_key")
+                    if not resolved_provider:
+                        resolved_provider = _rt.get("provider")
+                    if not resolved_base_url:
+                        resolved_base_url = _rt.get("base_url")
+                except Exception as _e:
+                    print(f"[webui] WARNING: resolve_runtime_provider failed: {_e}", flush=True)
 
             # Read per-profile config at call time (not module-level snapshot)
             from api.config import get_config as _get_config
@@ -1487,6 +1504,13 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             except Exception:
                 _reasoning_config = None
 
+            # Gateway integration: when the resolved model came from the
+            # agent-api-gateway, we may need to pass extra HTTP headers
+            # (e.g. x-instance-keyword) through to the upstream call.
+            _request_overrides = {}
+            if _gateway_extra_headers:
+                _request_overrides["extra_headers"] = _gateway_extra_headers
+
             _agent_kwargs = dict(
                 model=resolved_model,
                 provider=resolved_provider,
@@ -1528,6 +1552,10 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             # re-instantiated fresh each turn (#855).
             if 'gateway_session_key' in _agent_params:
                 _agent_kwargs['gateway_session_key'] = session_id
+
+            # Forward gateway extra headers (x-instance-keyword) when supported.
+            if _request_overrides and 'request_overrides' in _agent_params:
+                _agent_kwargs['request_overrides'] = _request_overrides
 
             # ── Agent cache: reuse across messages in the same session ──
             # Mirrors gateway _agent_cache.  Keeps _user_turn_count alive so
