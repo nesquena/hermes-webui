@@ -619,7 +619,7 @@ function renderWorkspaceDropdownInto(dd, workspaces, currentWs){
     'Manage workspaces',
     'Open the Spaces panel',
     li('settings',12),
-    ()=>{closeWsDropdown();switchPanel('workspaces');}
+    ()=>{closeWsDropdown();mobileSwitchPanel('workspaces');}
   ));
 }
 
@@ -859,7 +859,7 @@ function renderProfileDropdown(data) {
   const div = document.createElement('div'); div.className = 'ws-divider'; dd.appendChild(div);
   const mgmt = document.createElement('div'); mgmt.className = 'profile-opt ws-manage';
   mgmt.innerHTML = `${li('settings',12)} Manage profiles`;
-  mgmt.onclick = () => { closeProfileDropdown(); switchPanel('profiles'); };
+  mgmt.onclick = () => { closeProfileDropdown(); mobileSwitchPanel('profiles'); };
   dd.appendChild(mgmt);
 }
 
