@@ -362,13 +362,23 @@ def _build_setup_catalog(cfg: dict) -> dict:
             }
         )
 
+    # Flag whether the currently-configured provider is OAuth-based (not in the
+    # API-key flow).  The frontend uses this to show a confirmation card instead
+    # of a key input when the user has already authenticated via 'hermes auth'.
+    current_is_oauth = current_provider not in _SUPPORTED_PROVIDER_SETUPS and bool(
+        current_provider
+    )
+
     return {
         "providers": providers,
         "unsupported_note": _UNSUPPORTED_PROVIDER_NOTE,
+        "current_is_oauth": current_is_oauth,
         "current": {
             "provider": current_provider,
             "model": current_model
-            or _SUPPORTED_PROVIDER_SETUPS[current_provider]["default_model"],
+            or _SUPPORTED_PROVIDER_SETUPS.get(current_provider, {}).get(
+                "default_model", ""
+            ),
             "base_url": current_base_url,
         },
     }

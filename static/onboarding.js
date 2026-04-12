@@ -112,6 +112,61 @@ function _renderOnboardingBody(){
     const provider=_getOnboardingSetupProvider(ONBOARDING.form.provider)||providers[0]||null;
     const showBaseUrl=provider&&provider.requires_base_url;
     const keyHelp=provider?`${t('onboarding_api_key_help_prefix')} ${esc(provider.env_var)}.`:'';
+
+    // OAuth provider path: configured via CLI, no API key input needed.
+    const currentIsOauth=!!(ONBOARDING.status.setup||{}).current_is_oauth;
+    const currentProviderName=((ONBOARDING.status.setup||{}).current||{}).provider||'';
+    if(currentIsOauth){
+      const isReady=!!(ONBOARDING.status.system||{}).chat_ready;
+      const providerLabel=esc(currentProviderName);
+      if(isReady){
+        _setOnboardingNotice(t('onboarding_notice_setup_already_ready'),'success');
+        body.innerHTML=`
+          <div class="onboarding-oauth-card onboarding-oauth-ready">
+            <div class="onboarding-oauth-icon">✓</div>
+            <div>
+              <strong>${t('onboarding_oauth_provider_ready_title')}</strong>
+              <p>${t('onboarding_oauth_provider_ready_body').replace('{provider}',providerLabel)}</p>
+            </div>
+          </div>
+          <p class="onboarding-copy" style="margin-top:20px">${t('onboarding_oauth_switch_hint')}</p>
+          <label class="onboarding-field">
+            <span>${t('onboarding_provider_label')}</span>
+            <select id="onboardingProviderSelect" onchange="syncOnboardingProvider(this.value)">${options}</select>
+          </label>
+          <label class="onboarding-field" id="onboardingApiKeyField">
+            <span>${t('onboarding_api_key_label')}</span>
+            <input id="onboardingApiKeyInput" type="password" value="${esc(ONBOARDING.form.apiKey||'')}" placeholder="${t('onboarding_api_key_placeholder')}" oninput="ONBOARDING.form.apiKey=this.value">
+          </label>
+          ${showBaseUrl?`<label class="onboarding-field"><span>${t('onboarding_base_url_label')}</span><input id="onboardingBaseUrlInput" value="${esc(ONBOARDING.form.baseUrl||'')}" placeholder="${t('onboarding_base_url_placeholder')}" oninput="ONBOARDING.form.baseUrl=this.value"></label>`:''}
+          <p class="onboarding-copy">${keyHelp}</p>`;
+      } else {
+        _setOnboardingNotice(t('onboarding_notice_setup_required'),'warn');
+        body.innerHTML=`
+          <div class="onboarding-oauth-card onboarding-oauth-pending">
+            <div class="onboarding-oauth-icon">⚠</div>
+            <div>
+              <strong>${t('onboarding_oauth_provider_not_ready_title')}</strong>
+              <p>${t('onboarding_oauth_provider_not_ready_body').replace('{provider}',providerLabel)}</p>
+            </div>
+          </div>
+          <p class="onboarding-copy" style="margin-top:20px">${t('onboarding_oauth_switch_hint')}</p>
+          <label class="onboarding-field">
+            <span>${t('onboarding_provider_label')}</span>
+            <select id="onboardingProviderSelect" onchange="syncOnboardingProvider(this.value)">${options}</select>
+          </label>
+          <label class="onboarding-field" id="onboardingApiKeyField">
+            <span>${t('onboarding_api_key_label')}</span>
+            <input id="onboardingApiKeyInput" type="password" value="${esc(ONBOARDING.form.apiKey||'')}" placeholder="${t('onboarding_api_key_placeholder')}" oninput="ONBOARDING.form.apiKey=this.value">
+          </label>
+          ${showBaseUrl?`<label class="onboarding-field"><span>${t('onboarding_base_url_label')}</span><input id="onboardingBaseUrlInput" value="${esc(ONBOARDING.form.baseUrl||'')}" placeholder="${t('onboarding_base_url_placeholder')}" oninput="ONBOARDING.form.baseUrl=this.value"></label>`:''}
+          <p class="onboarding-copy">${keyHelp}</p>`;
+      }
+      const providerSel=$('onboardingProviderSelect');
+      if(providerSel) providerSel.value=ONBOARDING.form.provider;
+      return;
+    }
+
     _setOnboardingNotice(system.chat_ready?t('onboarding_notice_setup_already_ready'):t('onboarding_notice_setup_required'),system.chat_ready?'success':'info');
     body.innerHTML=`
       <label class="onboarding-field">
