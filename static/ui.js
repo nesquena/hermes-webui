@@ -45,6 +45,8 @@ async function populateModelDropdown(){
   try{
     const data=await fetch(new URL('/api/models',location.origin).href,{credentials:'include'}).then(r=>r.json());
     if(!data.groups||!data.groups.length) return; // keep HTML defaults
+    // Store active provider globally so the send path can warn on mismatch
+    window._activeProvider=data.active_provider||null;
     // Clear existing options
     sel.innerHTML='';
     _dynamicModelLabels={};
@@ -68,6 +70,32 @@ async function populateModelDropdown(){
     // API unavailable -- keep the hardcoded HTML options as fallback
     console.warn('Failed to load models from server:',e.message);
   }
+}
+
+/**
+ * Check if the given model ID belongs to a different provider than the one
+ * currently configured in Hermes. Returns a warning string if mismatched,
+ * or null if the selection looks compatible.
+ *
+ * Provider detection is intentionally loose — we compare the model's slash
+ * prefix (e.g. "openai/" from "openai/gpt-4o") against the active provider
+ * name. Custom/local endpoints report active_provider='custom' or the
+ * base_url hostname and we skip the check to avoid false positives.
+ */
+function _checkProviderMismatch(modelId){
+  const ap=(window._activeProvider||'').toLowerCase();
+  if(!ap||ap==='custom'||ap==='openrouter') return null; // can't reliably check
+  const slash=modelId.indexOf('/');
+  if(slash<0) return null; // bare model name, no provider prefix
+  const modelProvider=modelId.substring(0,slash).toLowerCase();
+  // Normalise common aliases
+  const aliases={'claude':'anthropic','gpt':'openai','gemini':'google'};
+  const norm=p=>aliases[p]||p;
+  if(norm(modelProvider)!==norm(ap)){
+    return (window.t?window.t('provider_mismatch_warning',[modelId,ap]):
+      `"${modelId}" may not work with your configured provider (${ap}). Send anyway or run \`hermes model\` to switch.`);
+  }
+  return null;
 }
 
 // ── Scroll pinning ──────────────────────────────────────────────────────────

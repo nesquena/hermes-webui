@@ -234,7 +234,8 @@ async function send(){
         try{
           const d=JSON.parse(e.data);
           const isRateLimit=d.type==='rate_limit';
-          const label=isRateLimit?'Rate limit reached':'Error';
+          const isAuthMismatch=d.type==='auth_mismatch';
+          const label=isRateLimit?'Rate limit reached':isAuthMismatch?'Provider mismatch':'Error';
           const hint=d.hint?`\n\n*${d.hint}*`:'';
           S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`});
         }catch(_){

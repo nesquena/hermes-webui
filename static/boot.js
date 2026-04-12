@@ -209,6 +209,11 @@ $('modelSelect').onchange=async()=>{
   localStorage.setItem('hermes-webui-model', selectedModel);
   await api('/api/session/update',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,workspace:S.session.workspace,model:selectedModel})});
   S.session.model=selectedModel;syncTopbar();
+  // Warn if selected model belongs to a different provider than what Hermes is configured for
+  if(typeof _checkProviderMismatch==='function'){
+    const warn=_checkProviderMismatch(selectedModel);
+    if(warn&&typeof showToast==='function') showToast(warn,4000);
+  }
 };
 $('msg').addEventListener('input',()=>{
   autoResize();
