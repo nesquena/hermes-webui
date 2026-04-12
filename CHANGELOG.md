@@ -6,6 +6,11 @@
 ---
 
 
+## [v0.50.8] Model dropdown deduplication — hyphen vs dot separator fix (PR #332)
+
+- **Model dropdown no longer shows duplicates for hyphen-format configs** (e.g. `claude-sonnet-4-6` from hermes-agent config): The server-side normalization in `api/config.py` now unifies hyphens and dots when checking whether the default model is already in the dropdown. Previously, `claude-sonnet-4-6` (hermes-agent format) and `claude-sonnet-4.6` (WebUI list format) were treated as different models, causing the same model to appear twice — once as a raw unlabelled entry and once with the correct display name. The raw entry is now suppressed and the labelled one is selected as default.
+- **README updated**: test count corrected to 791 / 51 files; all module line counts updated to current values; `onboarding.py`, `state_sync.py`, `updates.py` added to the architecture listing.
+
 ## [v0.50.7] OAuth provider onboarding path — Codex/Copilot no longer blocks setup (PR #331, fixes #329 bug 2)
 
 - **OAuth providers now have a proper onboarding path** (closes bug 2): Users with `openai-codex`, `copilot`, `qwen-oauth`, or any other OAuth-authenticated provider now see a clear confirmation card instead of an unusable API key input form.

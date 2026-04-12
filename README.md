@@ -339,7 +339,7 @@ Or using the agent venv explicitly:
 ```
 
 Tests run against an isolated server on port 8788 with a separate state directory.
-Production data and real cron jobs are never touched. Current count: **782 tests**
+Production data and real cron jobs are never touched. Current count: **791 tests**
 across 51 test files.
 
 ---
@@ -462,33 +462,33 @@ across 51 test files.
 ## Architecture
 
 ```
-server.py               HTTP routing shell + auth middleware (~91 lines)
+server.py               HTTP routing shell + auth middleware (~154 lines)
 api/
-  auth.py               Optional password authentication, signed cookies (~193 lines)
-  config.py             Discovery, globals, model detection, reloadable config (~852 lines)
-  helpers.py            HTTP helpers, security headers (~80 lines)
-  models.py             Session model + CRUD + CLI bridge (~374 lines)
-  onboarding.py         OAuth provider onboarding flow (~35 lines)
-  profiles.py           Profile state management, hermes_cli wrapper (~366 lines)
-  routes.py             All GET + POST route handlers (~1463 lines)
+  auth.py               Optional password authentication, signed cookies (~201 lines)
+  config.py             Discovery, globals, model detection, reloadable config (~1110 lines)
+  helpers.py            HTTP helpers, security headers (~175 lines)
+  models.py             Session model + CRUD + CLI bridge (~377 lines)
+  onboarding.py         First-run onboarding wizard, OAuth provider support (~507 lines)
+  profiles.py           Profile state management, hermes_cli wrapper (~411 lines)
+  routes.py             All GET + POST route handlers (~1996 lines)
   state_sync.py         /insights sync — message_count to state.db (~113 lines)
-  streaming.py          SSE engine, run_agent, cancel support (~438 lines)
-  updates.py            Self-update check and release notes (~164 lines)
+  streaming.py          SSE engine, run_agent, cancel support (~545 lines)
+  updates.py            Self-update check and release notes (~257 lines)
   upload.py             Multipart parser, file upload handler (~82 lines)
   workspace.py          File ops, workspace helpers, git detection (~288 lines)
 static/
-  index.html            HTML template (~423 lines)
-  style.css             All CSS incl. mobile responsive, themes (~838 lines)
-  ui.js                 DOM helpers, renderMd, tool cards, context indicator (~1166 lines)
-  workspace.js          File preview, file ops, git badge (~247 lines)
-  sessions.js           Session CRUD, collapsible groups, search (~589 lines)
-  messages.js           send(), SSE handlers, rAF throttle (~364 lines)
-  panels.js             Cron, skills, memory, profiles, settings (~1207 lines)
-  commands.js           Slash command autocomplete (~228 lines)
-  boot.js               Mobile nav, voice input, boot IIFE (~359 lines)
+  index.html            HTML template (~600 lines)
+  style.css             All CSS incl. mobile responsive, themes (~1050 lines)
+  ui.js                 DOM helpers, renderMd, tool cards, context indicator (~1496 lines)
+  workspace.js          File preview, file ops, git badge (~286 lines)
+  sessions.js           Session CRUD, collapsible groups, search (~752 lines)
+  messages.js           send(), SSE handlers, rAF throttle (~487 lines)
+  panels.js             Cron, skills, memory, profiles, settings (~1438 lines)
+  commands.js           Slash command autocomplete (~267 lines)
+  boot.js               Mobile nav, voice input, boot IIFE (~524 lines)
 tests/
   conftest.py           Isolated test server (port 8788)
-  51 test files          782 test functions
+  51 test files          791 test functions
 Dockerfile              python:3.12-slim container image
 docker-compose.yml      Compose with named volume and optional auth
 .github/workflows/      CI: multi-arch Docker build + GitHub Release on tag
