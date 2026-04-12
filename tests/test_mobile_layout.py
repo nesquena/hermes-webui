@@ -70,11 +70,11 @@ def test_mobile_bottom_nav_present():
 
 
 def test_mobile_files_button_present():
-    """Mobile files toggle button (#btnWorkspacePanelToggle.mobile-files-btn) must be in HTML and CSS."""
+    """Mobile files toggle button (#btnWorkspacePanelToggle.workspace-toggle-btn) must be in HTML and CSS."""
     assert 'id="btnWorkspacePanelToggle"' in HTML, \
         "#btnWorkspacePanelToggle missing from index.html"
-    assert "mobile-files-btn" in CSS, \
-        ".mobile-files-btn CSS missing from style.css"
+    assert "workspace-toggle-btn" in CSS, \
+        ".workspace-toggle-btn CSS missing from style.css"
 
 
 # ── Profile dropdown overflow ─────────────────────────────────────────────────
