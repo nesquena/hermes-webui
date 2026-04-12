@@ -1736,6 +1736,16 @@ def get_available_models() -> dict:
                         }
                     )
 
+        # Append gateway provider groups (agent-api-gateway integration).
+        # Kept inside the cold-path builder so the result is cached normally;
+        # if discovery is slow, the next request hits the cache instead of
+        # repeating the HTTP probe.
+        try:
+            from api.gateway_provider import get_gateway_model_groups
+            groups.extend(get_gateway_model_groups())
+        except Exception:
+            pass  # gateway module missing or discovery failed — never crash
+
         return {
             "active_provider": active_provider,
             "default_model": default_model,
