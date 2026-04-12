@@ -6,6 +6,11 @@
 ---
 
 
+## [v0.49.4] Cancel stream cleanup guaranteed (PR #309, fixes #299)
+
+- **Reliable cancel cleanup** (closes #299): `cancelStream()` no longer depends on the SSE `cancel` event to clear busy state and status text. Previously, if the SSE connection was already closed when cancel fired, "Cancelling..." would linger indefinitely. Now `cancelStream()` clears `S.activeStreamId`, calls `setBusy(false)`, `setStatus('')`, and hides the cancel button directly after the cancel API request — regardless of SSE connection state. The SSE cancel handler still runs when the connection is alive (all operations are idempotent).
+  - 9 new tests in `tests/test_sprint36.py`; 740 tests total (up from 731)
+
 ## [v0.49.3] Session title guard + breadcrumb nav + wider panel (PRs #301, #302)
 
 - **Preserve user-renamed session titles** (PR #301 / closes #300): `title_from()` now only runs when the session title is still `'Untitled'`. Previously it overwrote user-assigned titles on every conversation turn.
