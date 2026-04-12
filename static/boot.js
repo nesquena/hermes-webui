@@ -246,9 +246,14 @@ $('msg').addEventListener('keydown',e=>{
     if(e.key==='Escape'){e.preventDefault();hideCmdDropdown();return;}
     if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();selectCmdDropdownItem();return;}
   }
-  // Send key: respect user preference
+  // Send key: respect user preference.
+  // On touch-primary devices (software keyboard), default to Enter = newline
+  // since there's no physical Shift key. Users send via the Send button.
+  // The 'ctrl+enter' setting also uses this behavior (Enter = newline).
+  // Users can override in Settings by explicitly choosing 'enter' mode.
   if(e.key==='Enter'){
-    if(window._sendKey==='ctrl+enter'){
+    const _mobileDefault=matchMedia('(pointer:coarse)').matches&&window._sendKey==='enter';
+    if(window._sendKey==='ctrl+enter'||_mobileDefault){
       if(e.ctrlKey||e.metaKey){e.preventDefault();send();}
     } else {
       if(!e.shiftKey){e.preventDefault();send();}
