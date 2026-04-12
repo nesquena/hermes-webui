@@ -6,6 +6,13 @@
 ---
 
 
+## [v0.50.1] Mobile Enter key inserts newline (PR #315, fixes #269)
+
+- **Enter inserts newline on mobile** (closes #269): On touch-primary devices (detected via `matchMedia('(pointer:coarse)')`), the Enter key now inserts a newline instead of sending. Users send via the Send button, which is always visible on mobile. Desktop behavior is unchanged — Enter sends, Shift+Enter inserts a newline.
+  - The `ctrl+enter` setting continues to work as before on all devices.
+  - Users who explicitly set send key to `enter` on mobile can override in Settings.
+  - 4 new tests in `tests/test_mobile_layout.py`; 746 tests total (up from 742)
+
 ## [v0.50.0] Composer-centric UI refresh + Hermes Control Center (PR #242)
 
 Major UI overhaul by **[@aronprins](https://github.com/aronprins)** — the biggest single contribution to the project. Rebased and reviewed on `pr-242-review`.

@@ -206,3 +206,35 @@ def test_mobile_profiles_button_is_last_in_nav():
     profiles_pos = HTML.rfind('data-panel="profiles"')
     assert spaces_pos > 0 and profiles_pos > spaces_pos, \
         "Profiles button must appear after Spaces button in the mobile nav"
+
+
+# ── Mobile Enter key inserts newline (PR #315, fixes #269) ───────────────────
+
+def test_mobile_enter_newline_condition_present():
+    """boot.js keydown handler must detect touch-primary devices via pointer:coarse."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    assert "pointer:coarse" in boot_js, \
+        "boot.js must use pointer:coarse media query for mobile Enter detection"
+
+
+def test_mobile_enter_newline_uses_match_media():
+    """boot.js must call matchMedia for pointer detection, not a hardcoded flag."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    assert "matchMedia('(pointer:coarse)')" in boot_js or 'matchMedia("(pointer:coarse)")' in boot_js, \
+        "boot.js must use matchMedia('(pointer:coarse)') for mobile detection"
+
+
+def test_mobile_enter_newline_only_overrides_enter_default():
+    """Mobile newline override must only apply when _sendKey is the default 'enter'."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    # The _mobileDefault check must gate on _sendKey==='enter' so ctrl+enter users aren't affected
+    assert "_sendKey===" in boot_js and "'enter'" in boot_js, \
+        "Mobile newline fallback must check window._sendKey==='enter' to avoid overriding user preference"
+
+
+def test_mobile_enter_does_not_affect_desktop_logic():
+    """The mobile Enter override must not alter the existing else branch for desktop users."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    # The else branch (desktop, sends on Enter without Shift) must still be present
+    assert "if(!e.shiftKey){e.preventDefault();send();" in boot_js, \
+        "Desktop Enter-to-send logic (else branch) must still be present in boot.js"
