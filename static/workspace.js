@@ -54,7 +54,7 @@ async function loadDir(path){
     }
     if(typeof clearPreview==='function'){
       if(typeof _previewDirty!=='undefined'&&_previewDirty){
-        showConfirmDialog({title:t('unsaved_confirm'),message:'',confirmLabel:'Discard',danger:true,focusCancel:true}).then(ok=>{if(ok)clearPreview();});
+        if(confirm(t('unsaved_confirm')))clearPreview();
       }else{
         clearPreview();
       }
@@ -200,6 +200,7 @@ async function openFile(path){
   $('fileTree').style.display='none';
 
   _previewCurrentPath = path;
+  renderFileBreadcrumb(path);
   if(IMAGE_EXTS.has(ext)){
     // Image: load via raw endpoint, show as <img>
     showPreview('image');
@@ -245,3 +246,41 @@ function downloadFile(path){
   showToast(t('downloading',filename),2000);
 }
 
+
+// ── Render breadcrumb for file preview mode ──────────────────────────────────
+function renderFileBreadcrumb(filePath) {
+  const bar = $('breadcrumbBar');
+  if (!bar) return;
+  bar.style.display = 'flex';
+  const upBtn = $('btnUpDir');
+  if (upBtn) upBtn.style.display = '';
+
+  bar.innerHTML = '';
+  // Root
+  const root = document.createElement('span');
+  root.className = 'breadcrumb-seg breadcrumb-link';
+  root.textContent = '~';
+  root.onclick = () => { clearPreview(); loadDir('.'); };
+  bar.appendChild(root);
+
+  const parts = filePath.split('/');
+  let accumulated = '';
+  for (let i = 0; i < parts.length; i++) {
+    const sep = document.createElement('span');
+    sep.className = 'breadcrumb-sep';
+    sep.textContent = '/';
+    bar.appendChild(sep);
+
+    accumulated += (accumulated ? '/' : '') + parts[i];
+    const seg = document.createElement('span');
+    seg.textContent = parts[i];
+    if (i < parts.length - 1) {
+      seg.className = 'breadcrumb-seg breadcrumb-link';
+      const target = accumulated;
+      seg.onclick = () => { clearPreview(); loadDir(target); };
+    } else {
+      seg.className = 'breadcrumb-seg breadcrumb-current';
+    }
+    bar.appendChild(seg);
+  }
+}

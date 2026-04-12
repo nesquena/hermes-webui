@@ -4,7 +4,7 @@ async function cancelStream(){
   try{
     await fetch(new URL(`/api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,location.origin).href,{credentials:'include'});
     const btn=$('btnCancel');if(btn)btn.style.display='none';
-    // Don't set status here - let the SSE cancel event handle UI cleanup
+    setStatus(t('cancelling'));
   }catch(e){setStatus(t('cancel_failed')+e.message);}
 }
 
@@ -21,37 +21,12 @@ function closeMobileSidebar(){
   const sidebar=document.querySelector('.sidebar');
   const overlay=$('mobileOverlay');
   if(sidebar)sidebar.classList.remove('mobile-open');
-  // only hide overlay if right panel is also closed
-  const panel=document.querySelector('.rightpanel');
-  if(!panel||!panel.classList.contains('mobile-open')){
-    if(overlay)overlay.classList.remove('visible');
-  }
+  if(overlay)overlay.classList.remove('visible');
 }
 function toggleMobileFiles(){
   const panel=document.querySelector('.rightpanel');
-  const overlay=$('mobileOverlay');
   if(!panel)return;
-  if(panel.classList.contains('mobile-open')){
-    panel.classList.remove('mobile-open');
-    // only hide overlay if left sidebar is also closed
-    const sidebar=document.querySelector('.sidebar');
-    if(!sidebar||!sidebar.classList.contains('mobile-open')){
-      if(overlay)overlay.classList.remove('visible');
-    }
-  } else {
-    panel.classList.add('mobile-open');
-    if(overlay)overlay.classList.add('visible');
-  }
-}
-function closeMobileFiles(){
-  const panel=document.querySelector('.rightpanel');
-  const overlay=$('mobileOverlay');
-  if(panel)panel.classList.remove('mobile-open');
-  // only hide overlay if left sidebar is also closed
-  const sidebar=document.querySelector('.sidebar');
-  if(!sidebar||!sidebar.classList.contains('mobile-open')){
-    if(overlay)overlay.classList.remove('visible');
-  }
+  panel.classList.toggle('mobile-open');
 }
 function mobileSwitchPanel(name){
   // Switch the panel content view
@@ -200,6 +175,8 @@ function clearPreview(){
   const pp=$('previewPathText');if(pp)pp.textContent='';
   const ft=$('fileTree');if(ft)ft.style.display='';
   _previewCurrentPath='';_previewCurrentMode='';_previewDirty=false;
+  // Restore directory breadcrumb after closing file preview
+  if(typeof renderBreadcrumb==='function') renderBreadcrumb();
 }
 $('btnClearPreview').onclick=clearPreview;
 // workspacePath click handler removed -- use topbar workspace chip dropdown instead
@@ -209,11 +186,6 @@ $('modelSelect').onchange=async()=>{
   localStorage.setItem('hermes-webui-model', selectedModel);
   await api('/api/session/update',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,workspace:S.session.workspace,model:selectedModel})});
   S.session.model=selectedModel;syncTopbar();
-  // Warn if selected model belongs to a different provider than what Hermes is configured for
-  if(typeof _checkProviderMismatch==='function'){
-    const warn=_checkProviderMismatch(selectedModel);
-    if(warn&&typeof showToast==='function') showToast(warn,4000);
-  }
 };
 $('msg').addEventListener('input',()=>{
   autoResize();
@@ -302,7 +274,7 @@ document.querySelectorAll('.suggestion').forEach(btn=>{
 // ── Resizable panels ──────────────────────────────────────────────────────
 (function(){
   const SIDEBAR_MIN=180, SIDEBAR_MAX=420;
-  const PANEL_MIN=180,   PANEL_MAX=500;
+  const PANEL_MIN=180,   PANEL_MAX=1200;
 
   function initResize(handleId, targetEl, edge, minW, maxW, storageKey){
     const handle = $(handleId);
@@ -387,17 +359,14 @@ function applyBotName(){
   }
   // Pre-load workspace list so sidebar name is correct from first render
   await loadWorkspaceList();
-  await loadOnboardingWizard();
   _initResizePanels();
   const saved=localStorage.getItem('hermes-webui-session');
   if(saved){
-    try{await loadSession(saved);await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);return;}
+    try{await loadSession(saved);await renderSessionList();await checkInflightOnBoot(saved);return;}
     catch(e){localStorage.removeItem('hermes-webui-session');}
   }
   // no saved session - show empty state, wait for user to hit +
   $('emptyState').style.display='';
   await renderSessionList();
-  // Start real-time gateway session sync if setting is enabled
-  if(typeof startGatewaySSE==='function') startGatewaySSE();
 })();
 
