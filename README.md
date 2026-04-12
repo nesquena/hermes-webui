@@ -92,29 +92,31 @@ ecosystem. See [HERMES.md](HERMES.md) for the full side-by-side.
 
 ## Quick start
 
-First, you need to install and configure [Hermes Agent](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart) on your computer or server. This includes the following steps to complete:
-
-* [ ] Running the `curl` command to download and setup Hermes
-* [ ] Configure your [LLM provider](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart#2-set-up-a-provider) with `hermes model`
-* [ ] Configure yout [messaging gateways](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/) with `hermes gateway setup`
-* [ ] Can start chatting with hermes on command-line with `hermes`
-* [ ] Optional: [Configure your extended memory provider](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory-providers)
-* [ ] Optional: [Configure your tools](https://hermes-agent.nousresearch.com/docs/user-guide/features/tools)
-
-Once installed, you can now setup the web UI with:
+Run the repo bootstrap:
 
 ```bash
 git clone https://github.com/nesquena/hermes-webui.git hermes-webui
 cd hermes-webui
+python3 bootstrap.py
+```
+
+Or keep using the shell launcher:
+
+```bash
 ./start.sh
 ```
 
-That is it! The script will:
+The bootstrap will:
 
-1. Locate your Hermes agent directory automatically.
-2. Find (or create) a Python environment with the required dependencies.
-3. Start the web server.
-4. Print the URL (and SSH tunnel command if you are on a remote machine).
+1. Detect Hermes Agent and, if missing, attempt the official installer (`curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash`).
+2. Find or create a Python environment with the WebUI dependencies.
+3. Start the web server and wait for `/health`.
+4. Open the browser unless you pass `--no-browser`.
+5. Drop you into a first-run onboarding wizard inside the WebUI.
+
+> Native Windows is not supported for this bootstrap yet. Use Linux, macOS, or WSL2.
+
+If provider setup is still incomplete after install, the onboarding wizard will point you to finish it with `hermes model` instead of trying to replicate the full CLI setup in-browser.
 
 ---
 
