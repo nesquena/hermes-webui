@@ -1,0 +1,55 @@
+# Two-container Docker Compose: Hermes Agent + Hermes WebUI
+#
+# This runs the agent and web UI in separate containers connected via
+# shared volumes. The WebUI installs the agent's Python dependencies
+# at startup from the shared agent source volume.
+#
+# Usage:
+#   docker compose -f docker-compose.two-container.yml up -d
+#
+# The agent container runs the gateway (CLI, Telegram, cron, etc.).
+# The WebUI container serves the browser interface on port 8787.
+# Both share ~/.hermes for config, sessions, and state.
+
+services:
+  hermes-agent:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes-agent
+    volumes:
+      # Persist config, state, sessions, skills, memory across restarts
+      - hermes-home:/root/.hermes
+      # Expose agent source so the WebUI can install dependencies from it
+      - hermes-agent-src:/opt/hermes
+    environment:
+      - HERMES_HOME=/root/.hermes
+    restart: unless-stopped
+
+  hermes-webui:
+    image: ghcr.io/nesquena/hermes-webui:latest
+    container_name: hermes-webui
+    depends_on:
+      - hermes-agent
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      # Same hermes home as the agent — shares config, sessions, state
+      - hermes-home:/home/hermeswebui/.hermes
+      # Agent source mounted where docker_init.bash expects it.
+      # At startup the init script runs:
+      #   uv pip install /home/hermeswebui/.hermes/hermes-agent
+      # which installs the agent and all its Python dependencies.
+      - hermes-agent-src:/home/hermeswebui/.hermes/hermes-agent
+    environment:
+      - HERMES_WEBUI_HOST=0.0.0.0
+      - HERMES_WEBUI_PORT=8787
+      - HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui-mvp
+      # Match your host user's UID/GID for correct file permissions
+      - WANTED_UID=${UID:-1000}
+      - WANTED_GID=${GID:-1000}
+      # Optional: set a password for remote access
+      # - HERMES_WEBUI_PASSWORD=your-secret-password
+    restart: unless-stopped
+
+volumes:
+  hermes-home:
+  hermes-agent-src:
