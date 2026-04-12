@@ -315,3 +315,147 @@ class TestApplyUpdateDiagnostics:
         assert 'could not reach' in result['message'].lower() or \
                'internet' in result['message'].lower() or \
                'remote' in result['message'].lower()
+
+
+# ---------------------------------------------------------------------------
+# Tests for _run_git() and compatibility regression cases
+# ---------------------------------------------------------------------------
+
+def test_run_git_returns_stderr_on_failure(tmp_path):
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+
+    from api import updates
+    with patch('subprocess.run') as mock_run:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=['git', 'pull', '--ff-only', 'origin/master'],
+            returncode=1,
+            stdout='',
+            stderr="fatal: 'origin/master' does not appear to be a git repository\n",
+        )
+        out, ok = updates._run_git(['pull', '--ff-only', 'origin/master'], repo)
+
+    assert ok is False
+    assert "does not appear to be a git repository" in out
+
+
+def test_run_git_returns_timeout_message(tmp_path):
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+
+    from api import updates
+    with patch('subprocess.run', side_effect=subprocess.TimeoutExpired(cmd='git pull', timeout=30)):
+        out, ok = updates._run_git(['pull', '--ff-only', 'origin', 'main'], repo, timeout=30)
+
+    assert ok is False
+    assert out == 'git pull --ff-only origin main timed out after 30s'
+
+
+def test_run_git_returns_exit_status_when_git_outputs_nothing(tmp_path):
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+
+    from api import updates
+    with patch('subprocess.run') as mock_run:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=['git', 'pull', '--ff-only', 'origin', 'main'],
+            returncode=1,
+            stdout='',
+            stderr='',
+        )
+        out, ok = updates._run_git(['pull', '--ff-only', 'origin', 'main'], repo)
+
+    assert ok is False
+    assert out == 'git exited with status 1'
+
+
+def test_apply_update_splits_remote_and_branch_for_pull(tmp_path, monkeypatch):
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    (repo / '.git').mkdir()
+
+    from api import updates
+    monkeypatch.setattr(updates, 'REPO_ROOT', repo)
+
+    calls = []
+
+    def fake_run_git(args, cwd, timeout=10):
+        calls.append(args)
+        if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
+            return 'origin/feature/update-fix', True
+        if args == ['fetch', 'origin', '--quiet']:
+            return '', True
+        if args == ['status', '--porcelain', '--untracked-files=no']:
+            return '', True
+        if args == ['pull', '--ff-only', 'origin', 'feature/update-fix']:
+            return 'Already up to date.', True
+        return '', True
+
+    monkeypatch.setattr(updates, '_run_git', fake_run_git)
+
+    fake_cache = {'webui': None, 'agent': None, 'checked_at': 1}
+    with patch(f'{_MODULE}._update_cache', fake_cache), \
+         patch(f'{_MODULE}._cache_lock'):
+        res = updates._apply_update_inner('webui')
+
+    assert res['ok'] is True
+    assert ['pull', '--ff-only', 'origin', 'feature/update-fix'] in calls
+    assert ['pull', '--ff-only', 'origin/feature/update-fix'] not in calls
+
+
+def test_apply_update_does_not_stash_for_untracked_only_changes(tmp_path, monkeypatch):
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    (repo / '.git').mkdir()
+
+    from api import updates
+    monkeypatch.setattr(updates, 'REPO_ROOT', repo)
+
+    calls = []
+
+    def fake_run_git(args, cwd, timeout=10):
+        calls.append(args)
+        if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
+            return 'origin/main', True
+        if args == ['fetch', 'origin', '--quiet']:
+            return '', True
+        if args == ['status', '--porcelain', '--untracked-files=no']:
+            return '', True
+        if args == ['pull', '--ff-only', 'origin', 'main']:
+            return 'Already up to date.', True
+        return '', True
+
+    monkeypatch.setattr(updates, '_run_git', fake_run_git)
+
+    fake_cache = {'webui': None, 'agent': None, 'checked_at': 1}
+    with patch(f'{_MODULE}._update_cache', fake_cache), \
+         patch(f'{_MODULE}._cache_lock'):
+        res = updates._apply_update_inner('webui')
+
+    assert res['ok'] is True
+    assert ['stash'] not in calls
+    assert ['stash', 'pop'] not in calls
+
+
+def test_apply_update_rejects_unmerged_conflicts(tmp_path, monkeypatch):
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    (repo / '.git').mkdir()
+
+    from api import updates
+    monkeypatch.setattr(updates, 'REPO_ROOT', repo)
+
+    def fake_run_git(args, cwd, timeout=10):
+        if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
+            return 'origin/main', True
+        if args == ['fetch', 'origin', '--quiet']:
+            return '', True
+        if args == ['status', '--porcelain', '--untracked-files=no']:
+            return 'UU static/style.css', True
+        raise AssertionError(f'unexpected git call: {args}')
+
+    monkeypatch.setattr(updates, '_run_git', fake_run_git)
+
+    res = updates._apply_update_inner('webui')
+
+    assert res == {'ok': False, 'message': 'Repository has unresolved merge conflicts'}

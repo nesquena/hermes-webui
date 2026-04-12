@@ -112,6 +112,11 @@ Tests NEVER talk to the production server (port 8787).
 The test state dir is wiped before each test session and deleted after.
 See: <repo>/tests/conftest.py
 
+Update flow note:
+- `api/updates.py` now preserves subprocess timeout/spawn errors instead of collapsing them into an empty `Pull failed:` message.
+- The updater ignores untracked-only files when deciding to stash, because plain `git stash` does not include `??` entries.
+- Repos already in an unmerged state are rejected before pull with a clear "Repository has unresolved merge conflicts" message.
+
 Per-request environment variables (set by chat handler, restored after):
 
     TERMINAL_CWD         Set to session.workspace before running agent.

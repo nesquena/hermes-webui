@@ -1706,6 +1706,11 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 - Attempt switch while agent busy → blocked with toast message.
 - With hermes-agent not installed → only default profile shown, graceful fallback.
 
+### Update Flow Regression Checks
+- Trigger an update failure by making `git pull` time out or fail to spawn: the toast should include the concrete timeout/process error, not `Pull failed: (no output from git)`.
+- Leave only untracked files in the repo and click "Update Now": the updater should not enter a stash/pop path just because `??` files exist.
+- Leave the repo in an unmerged state and click "Update Now": the updater should fail immediately with "Repository has unresolved merge conflicts".
+
 ---
 
 *Last updated: v0.47.0, April 11, 2026*
