@@ -1,0 +1,111 @@
+From a19514a891cff215a22db29713f4c4993e33d4e7 Mon Sep 17 00:00:00 2001
+From: milo <milo@gmail.com>
+Date: Sun, 12 Apr 2026 13:48:50 +0800
+Subject: [PATCH] fix: improve self-update git pull diagnostics
+
+---
+ api/updates.py        | 48 +++++++++++++++++++++++++++++++++++--------
+ tests/test_updates.py | 14 +++++++++++++
+ 2 files changed, 54 insertions(+), 8 deletions(-)
+ create mode 100644 tests/test_updates.py
+
+diff --git a/api/updates.py b/api/updates.py
+index 0f2aa2b..e7ac360 100644
+--- a/api/updates.py
++++ b/api/updates.py
+@@ -29,15 +29,33 @@ CACHE_TTL = 1800  # 30 minutes
+ 
+ 
+ def _run_git(args, cwd, timeout=10):
+-    """Run a git command and return (stdout, ok)."""
++    """Run a git command and return (useful output, ok)."""
++    cmd = ['git'] + args
+     try:
+         r = subprocess.run(
+-            ['git'] + args, cwd=str(cwd), capture_output=True,
++            cmd, cwd=str(cwd), capture_output=True,
+             text=True, timeout=timeout,
+         )
+-        return r.stdout.strip(), r.returncode == 0
+-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+-        return '', False
++        stdout = r.stdout.strip()
++        stderr = r.stderr.strip()
++        if r.returncode == 0:
++            return stdout, True
++        return stderr or stdout or f"git exited with status {r.returncode}", False
++    except subprocess.TimeoutExpired as exc:
++        detail = (exc.stderr or exc.stdout or '').strip()
++        return detail or f"git {' '.join(args)} timed out after {timeout}s", False
++    except FileNotFoundError:
++        return 'git executable not found', False
++    except OSError as exc:
++        return f'git failed to start: {exc}', False
++
++
++def _split_remote_ref(ref):
++    """Split origin/branch-name into ('origin', 'branch-name')."""
++    if '/' not in ref:
++        return None, ref
++    remote, branch = ref.split('/', 1)
++    return remote, branch
+ 
+ 
+ def _detect_default_branch(path):
+@@ -159,8 +177,16 @@ def _apply_update_inner(target):
+             ),
+         }
+ 
+-    # Check for dirty working tree
+-    status_out, _ = _run_git(['status', '--porcelain'], path)
++    # Ignore untracked files when deciding whether to stash. A plain
++    # `git stash` does not include them, so stashing on `??` alone leaves
++    # nothing to pop and can produce a misleading follow-up failure.
++    status_out, status_ok = _run_git(
++        ['status', '--porcelain', '--untracked-files=no'], path
++    )
++    if not status_ok:
++        return {'ok': False, 'message': f'Failed to inspect repo status: {status_out[:200]}'}
++    if any(line[:2] in {'DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU'} for line in status_out.splitlines()):
++        return {'ok': False, 'message': 'Repository has unresolved merge conflicts'}
+     stashed = False
+     if status_out:
+         _, ok = _run_git(['stash'], path)
+@@ -169,7 +195,13 @@ def _apply_update_inner(target):
+         stashed = True
+ 
+     # Pull with ff-only (no merge commits)
+-    pull_out, pull_ok = _run_git(['pull', '--ff-only', compare_ref], path, timeout=30)
++    remote, branch = _split_remote_ref(compare_ref)
++    pull_args = ['pull', '--ff-only']
++    if remote:
++        pull_args.extend([remote, branch])
++    else:
++        pull_args.append(compare_ref)
++    pull_out, pull_ok = _run_git(pull_args, path, timeout=30)
+     if not pull_ok:
+         if stashed:
+             _run_git(['stash', 'pop'], path)
+diff --git a/tests/test_updates.py b/tests/test_updates.py
+new file mode 100644
+index 0000000..c6f5f62
+--- /dev/null
++++ b/tests/test_updates.py
+@@ -0,0 +1,14 @@
++import api.updates as updates
++
++
++def test_run_git_returns_stderr_on_failure(tmp_path):
++    out, ok = updates._run_git(['pull', '--ff-only', 'origin/does-not-exist'], tmp_path)
++    assert ok is False
++    assert out
++    assert 'not a git repository' in out.lower() or 'fatal' in out.lower()
++
++
++def test_split_remote_ref_splits_tracking_ref():
++    assert updates._split_remote_ref('origin/master') == ('origin', 'master')
++    assert updates._split_remote_ref('origin/feature/foo') == ('origin', 'feature/foo')
++    assert updates._split_remote_ref('master') == (None, 'master')
+-- 
+2.43.0
+
