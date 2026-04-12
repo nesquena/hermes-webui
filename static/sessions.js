@@ -256,10 +256,10 @@ function startGatewaySSE(){
   if(!window._showCliSessions) return;
   try{
     _gatewaySSE = new EventSource('/api/sessions/gateway/stream');
-    _gatewaySSE.addEventListener('gateway_session_update', (ev) => {
+    _gatewaySSE.addEventListener('sessions_changed', (ev) => {
       try{
         const data = JSON.parse(ev.data);
-        if(data.changed){
+        if(data.sessions){
           renderSessionList(); // re-fetch and re-render
         }
       }catch(e){ /* ignore parse errors */ }

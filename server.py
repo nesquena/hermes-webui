@@ -127,7 +127,7 @@ def main() -> None:
         try:
             import ssl
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            ctx.minimum_version = ssl.TLSv1_2
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
             ctx.load_cert_chain(TLS_CERT, TLS_KEY)
             httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
             print(f'  TLS enabled: cert={TLS_CERT}, key={TLS_KEY}', flush=True)
