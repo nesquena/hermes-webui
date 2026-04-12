@@ -6,7 +6,7 @@
 ---
 
 
-## [v0.49.0] First-run onboarding wizard (PR #285)
+## [v0.49.0] First-run onboarding wizard + self-update hardening (PRs #285, #287, #289)
 
 - **One-shot bootstrap and first-run setup wizard** (PR #285): New users are greeted with a guided onboarding overlay on first load. The wizard checks system status, configures a provider (OpenRouter, Anthropic, OpenAI, or custom OpenAI-compatible endpoint), sets a workspace and optional password, and marks setup as complete — all without leaving the browser.
   - `bootstrap.py`: one-shot CLI bootstrap that writes `~/.hermes/config.yaml` and `~/.hermes/.env` from flags; idempotent and safe to re-run
@@ -17,6 +17,16 @@
   - `static/boot.js`: on load, fetches `/api/onboarding/status` and opens wizard when `completed=false`
   - Wizard does NOT show when `onboarding_completed=true` in settings
   - 14 new tests in `tests/test_onboarding.py`; 693 tests total (up from 679)
+
+- **Self-update git pull diagnostics** (PR #287): Fixes multiple failure modes in the WebUI self-update flow when the repo has a non-trivial git state.
+  - `_run_git()` now returns stderr on failure (stdout fallback, then exit-code message) — users see actionable git errors instead of empty strings
+  - New `_split_remote_ref()` helper splits `origin/master` into `('origin', 'master')` before `git pull --ff-only` — fixes silent failures where git misinterpreted the combined string as a repository name
+  - `--untracked-files=no` added to `git status --porcelain` — prevents spurious stash failures in repos with untracked files
+  - Early merge-conflict detection via porcelain status codes before attempting pull
+  - 4 new unit tests in `tests/test_updates.py`
+
+- **Skip flaky redaction test in agent-less environments** (PR #289): `test_api_sessions_list_redacts_titles` added to the CI skip list for environments without hermes-agent installed. Test still runs with the full agent; security coverage preserved by 6 pure-unit tests and 2 other API-level redaction tests.
+  - 697 tests total (up from 693)
 
 ## [v0.48.2] Provider/model mismatch warning (PR #283, fixes #266)
 

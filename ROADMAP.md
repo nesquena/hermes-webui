@@ -3,9 +3,9 @@
 > Goal: Full 1:1 parity with the Hermes CLI experience via a clean dark web UI.
 > Everything you can do from the CLI terminal, you can do from this UI.
 >
-> Last updated: v0.49.0 (April 12, 2026) — 693 tests, 693 passing
+> Last updated: v0.49.0 (April 12, 2026) — 697 tests, 697 passing
 > Onboarding MVP now writes real Hermes provider config from the Web UI for OpenRouter, Anthropic, OpenAI, and custom OpenAI-compatible endpoints.
-> Tests: 693 total (693 passing, 0 failures)
+> Tests: 697 total (697 passing, 0 failures)
 > Source: <repo>/
 
 ---
@@ -49,7 +49,7 @@
 | v0.48.0 | Gateway session sync | Real-time Telegram/Discord/Slack sessions in sidebar via SSE + DB polling (#274 @bergeouss); +10 tests | 658 |
 | v0.48.1 | Table inline formatting | `inlineMd()` in table cells — **bold**, *italic*, `code`, links render correctly (PR #278); 0 new tests | 658 |
 | v0.48.2 | Provider mismatch warning | Toast warning + auth_mismatch error type for provider/model mismatches (#283, fixes #266); +21 tests | 679 |
-| v0.49.0 | First-run onboarding wizard | One-shot bootstrap + guided setup wizard; provider config persisted to config.yaml + .env; OpenRouter/Anthropic/OpenAI/Custom; wizard hidden after completion (#285); +14 tests | 693 |
+| v0.49.0 | First-run onboarding wizard + self-update hardening | One-shot bootstrap + guided setup wizard; provider config persisted to config.yaml + .env; OpenRouter/Anthropic/OpenAI/Custom; wizard hidden after completion (#285); self-update stderr/split-ref/conflict fixes (#287); skip flaky redaction test (#289); +18 tests | 697 |
 | v0.32 | Auto-compaction handling | Compression detection, /compact command, real context window indicator | 424 |
 | v0.33 | /insights sync | Opt-in state.db sync so `hermes /insights` includes WebUI sessions | 424 |
 | v0.34 | Sprint 26 — Pluggable themes | Dark, Light, Slate, Solarized, Monokai, Nord; settings unsaved-changes guard; /theme command | 433 |
