@@ -210,6 +210,64 @@ def _provider_api_key_present(
     return False
 
 
+
+def _provider_oauth_authenticated(provider: str, hermes_home: "Path") -> bool:
+    """Return True if the provider has valid OAuth credentials.
+
+    Checks via hermes_cli.auth.get_auth_status() when available, then falls
+    back to reading auth.json directly for the known OAuth provider IDs
+    (openai-codex, copilot, copilot-acp, qwen-oauth, nous).
+
+    This covers users who authenticated via 'hermes auth' or 'hermes model'
+    but whose provider is not in _SUPPORTED_PROVIDER_SETUPS because it does
+    not use a plain API key.
+    """
+    provider = (provider or "").strip().lower()
+    if not provider:
+        return False
+
+    # Fast path: ask hermes_cli directly — the authoritative source
+    try:
+        from hermes_cli.auth import get_auth_status as _gas
+
+        status = _gas(provider)
+        if isinstance(status, dict) and status.get("logged_in"):
+            return True
+    except Exception:
+        pass
+
+    # Fallback: parse auth.json ourselves for known OAuth provider IDs.
+    # Covers deployments where hermes_cli is installed but the import above
+    # fails for an unexpected reason (version mismatch, import cycle, etc.).
+    _known_oauth_providers = {"openai-codex", "copilot", "copilot-acp", "qwen-oauth", "nous"}
+    if provider not in _known_oauth_providers:
+        return False
+
+    try:
+        import json as _j
+
+        auth_path = hermes_home / "auth.json"
+        if not auth_path.exists():
+            return False
+        store = _j.loads(auth_path.read_text(encoding="utf-8"))
+        providers_store = store.get("providers")
+        if not isinstance(providers_store, dict):
+            return False
+        state = providers_store.get(provider)
+        if not isinstance(state, dict):
+            return False
+        # Any non-empty token is enough to confirm the user has credentials.
+        # Token refresh happens at runtime inside the agent.
+        has_token = bool(
+            str(state.get("access_token") or "").strip()
+            or str(state.get("api_key") or "").strip()
+            or str(state.get("refresh_token") or "").strip()
+        )
+        return has_token
+    except Exception:
+        return False
+
+
 def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
     provider = _extract_current_provider(cfg)
     model = _extract_current_model(cfg)
@@ -226,6 +284,13 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
             )
         elif provider in _SUPPORTED_PROVIDER_SETUPS:
             provider_ready = _provider_api_key_present(provider, cfg, env_values)
+        else:
+            # Unknown / OAuth provider (e.g. openai-codex, copilot, qwen-oauth).
+            # These do not use a plain API key; auth lives in auth.json or a
+            # credential pool managed by hermes_cli.
+            provider_ready = _provider_oauth_authenticated(
+                provider, _get_active_hermes_home()
+            )
 
     chat_ready = bool(_HERMES_FOUND and imports_ok and provider_ready)
 
@@ -243,15 +308,23 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
         note = f"Hermes is minimally configured and ready to chat via {provider_name}."
     elif provider_configured:
         state = "provider_incomplete"
-        missing = (
-            "base URL and API key"
-            if provider == "custom" and not base_url
-            else "API key"
-        )
-        note = (
-            f"Hermes has a saved provider/model selection but still needs the {missing} "
-            "required to chat."
-        )
+        if provider == "custom" and not base_url:
+            note = (
+                "Hermes has a saved provider/model selection but still needs the "
+                "base URL and API key required to chat."
+            )
+        elif provider not in _SUPPORTED_PROVIDER_SETUPS:
+            # OAuth / unsupported provider: avoid misleading "API key" wording.
+            note = (
+                f"Provider '{provider}' is configured but not yet authenticated. "
+                "Run 'hermes auth' or 'hermes model' in a terminal to complete "
+                "setup, then reload the Web UI."
+            )
+        else:
+            note = (
+                "Hermes has a saved provider/model selection but still needs the "
+                "API key required to chat."
+            )
     else:
         state = "needs_provider"
         note = "Hermes is installed, but you still need to choose a provider and save working credentials."
