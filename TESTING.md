@@ -8,7 +8,7 @@
 > Prerequisites: SSH tunnel is active on port 8786. Open http://localhost:8786 in browser.
 > Server health check: curl http://127.0.0.1:8786/health should return {"status":"ok"}.
 >
-> Automated tests: 645 total (645 passing, 0 skipped, 0 known failures)
+> Automated tests: 648 total (648 passing, 0 skipped, 0 known failures)
 > Run: `pytest tests/ -v --timeout=60`
 
 ---

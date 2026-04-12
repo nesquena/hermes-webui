@@ -6,6 +6,9 @@
 ---
 
 
+## [v0.47.1] Spanish locale (PR #275)
+
+- **Spanish (es) locale** (PR #275, @gabogabucho): Full Spanish translation for all 175 UI strings. Exposed automatically in the language selector via existing `LOCALES` wiring. Includes regression tests verifying locale presence, representative translations, and key-parity with English. 648 tests (up from 645).
 ## [v0.47.0] — 2026-04-11
 
 ### Features
