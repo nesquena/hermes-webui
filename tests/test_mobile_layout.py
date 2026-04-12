@@ -175,3 +175,34 @@ def test_composer_textarea_font_size_mobile():
     # Check for 16px font-size on the textarea in a mobile breakpoint
     assert re.search(r'font-size:16px', CSS), \
         "Composer textarea must have font-size:16px at mobile widths to prevent iOS zoom-on-focus"
+
+
+
+# ── Profiles button in mobile bottom nav ─────────────────────────────────────
+
+def test_mobile_profiles_button_present():
+    """Mobile bottom nav must include a Profiles button (PR #265)."""
+    assert 'data-panel="profiles"' in HTML and 'mobileSwitchPanel' in HTML, \
+        "Mobile nav must have a Profiles button with data-panel='profiles' and mobileSwitchPanel"
+
+
+def test_mobile_profiles_button_uses_mobileSwitchPanel():
+    """Profiles mobile nav button must use mobileSwitchPanel, not raw switchPanel."""
+    import re
+    match = re.search(
+        r'<button[^>]*mobile-nav-btn[^>]*data-panel="profiles"[^>]*>|'
+        r'<button[^>]*data-panel="profiles"[^>]*mobile-nav-btn[^>]*>',
+        HTML
+    )
+    assert match, "Could not find mobile-nav-btn with data-panel='profiles'"
+    btn_html = HTML[match.start():match.start()+300]
+    assert "mobileSwitchPanel('profiles')" in btn_html, \
+        "Profiles mobile nav button must call mobileSwitchPanel('profiles')"
+
+
+def test_mobile_profiles_button_is_last_in_nav():
+    """Profiles button must appear after Spaces in the mobile bottom nav."""
+    spaces_pos = HTML.find('data-panel="workspaces"')
+    profiles_pos = HTML.rfind('data-panel="profiles"')
+    assert spaces_pos > 0 and profiles_pos > spaces_pos, \
+        "Profiles button must appear after Spaces button in the mobile nav"
