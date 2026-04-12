@@ -334,7 +334,9 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             for _m in s.messages:
                 if isinstance(_m, dict) and not _m.get('timestamp') and not _m.get('_ts'):
                     _m['timestamp'] = int(_now)
-            s.title = title_from(s.messages, s.title)
+            # Only auto-generate title when still default; preserves user renames
+            if s.title == 'Untitled':
+                s.title = title_from(s.messages, s.title)
             # Read token/cost usage from the agent object (if available)
             input_tokens = getattr(agent, 'session_prompt_tokens', 0) or 0
             output_tokens = getattr(agent, 'session_completion_tokens', 0) or 0

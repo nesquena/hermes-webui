@@ -6,6 +6,15 @@
 ---
 
 
+## [v0.49.3] Session title guard + breadcrumb nav + wider panel (PRs #301, #302)
+
+- **Preserve user-renamed session titles** (PR #301 / closes #300): `title_from()` now only runs when the session title is still `'Untitled'`. Previously it overwrote user-assigned titles on every conversation turn.
+  - Fixed in both `api/streaming.py` (streaming path) and `api/routes.py` (sync path).
+- **Clickable breadcrumb navigation** (PR #302 / closes #292): Workspace file preview now shows a clickable breadcrumb path bar. Each segment navigates directly to that directory level. Paths with spaces and special characters handled correctly. `clearPreview()` restores the directory breadcrumb on close.
+- **Wider right panel** (PR #302): `PANEL_MAX` raised from 500 to 1200 — right panel can now be dragged wider on ultrawide screens.
+- **Responsive message width** (PR #302): `.messages-inner` now scales up gracefully at 1400px (1100px max) and 1800px (1200px max) viewport widths instead of capping at 800px on all screen sizes.
+  - 12 new tests in `tests/test_sprint35.py`; 743 tests total (up from 731)
+
 ## [v0.49.2] OAuth provider support in onboarding (issues #303, #304)
 
 - **OAuth provider bypass** (closes #303, #304): The first-run onboarding wizard now correctly recognizes OAuth-authenticated providers (GitHub Copilot, OpenAI Codex, Nous Portal, Qwen OAuth) as ready, instead of always demanding an API key.

@@ -200,6 +200,8 @@ function clearPreview(){
   const pp=$('previewPathText');if(pp)pp.textContent='';
   const ft=$('fileTree');if(ft)ft.style.display='';
   _previewCurrentPath='';_previewCurrentMode='';_previewDirty=false;
+  // Restore directory breadcrumb after closing file preview
+  if(typeof renderBreadcrumb==='function') renderBreadcrumb();
 }
 $('btnClearPreview').onclick=clearPreview;
 // workspacePath click handler removed -- use topbar workspace chip dropdown instead
@@ -302,7 +304,7 @@ document.querySelectorAll('.suggestion').forEach(btn=>{
 // ── Resizable panels ──────────────────────────────────────────────────────
 (function(){
   const SIDEBAR_MIN=180, SIDEBAR_MAX=420;
-  const PANEL_MIN=180,   PANEL_MAX=500;
+  const PANEL_MIN=180,   PANEL_MAX=1200;
 
   function initResize(handleId, targetEl, edge, minW, maxW, storageKey){
     const handle = $(handleId);
