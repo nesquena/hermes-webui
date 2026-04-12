@@ -4,6 +4,7 @@
 > Everything you can do from the CLI terminal, you can do from this UI.
 >
 > Last updated: v0.48.2 (April 12, 2026) — 679 tests, 679 passing
+> Onboarding MVP now writes real Hermes provider config from the Web UI for OpenRouter, Anthropic, OpenAI, and custom OpenAI-compatible endpoints.
 > Tests: 604 total (604 passing, 0 failures)
 > Source: <repo>/
 

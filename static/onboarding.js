@@ -1,8 +1,21 @@
-const ONBOARDING={status:null,step:0,steps:['system','workspace','password','finish'],form:{workspace:'',model:'',password:''},active:false};
+const ONBOARDING={status:null,step:0,steps:['system','setup','workspace','password','finish'],form:{provider:'openrouter',workspace:'',model:'',password:'',apiKey:'',baseUrl:''},active:false};
+
+function _getOnboardingSetupProviders(){
+  return (((ONBOARDING.status||{}).setup||{}).providers)||[];
+}
+
+function _getOnboardingSetupProvider(id){
+  return _getOnboardingSetupProviders().find(p=>p.id===id)||null;
+}
+
+function _getOnboardingCurrentSetup(){
+  return (((ONBOARDING.status||{}).setup||{}).current)||{};
+}
 
 function _onboardingStepMeta(key){
   return ({
     system:{title:t('onboarding_step_system_title'),desc:t('onboarding_step_system_desc')},
+    setup:{title:t('onboarding_step_setup_title'),desc:t('onboarding_step_setup_desc')},
     workspace:{title:t('onboarding_step_workspace_title'),desc:t('onboarding_step_workspace_desc')},
     password:{title:t('onboarding_step_password_title'),desc:t('onboarding_step_password_desc')},
     finish:{title:t('onboarding_step_finish_title'),desc:t('onboarding_step_finish_desc')}
@@ -36,11 +49,28 @@ function _getOnboardingWorkspaceChoices(){
   return items.length?items:[{name:'Home',path:ONBOARDING.form.workspace||''}];
 }
 
-function _getOnboardingModelChoices(){
-  const groups=((ONBOARDING.status||{}).models||{}).groups||[];
-  const flat=[];
-  groups.forEach(g=>(g.models||[]).forEach(m=>flat.push({...m,provider:g.provider})));
-  return flat;
+function _getOnboardingProviderModelChoices(){
+  const provider=_getOnboardingSetupProvider(ONBOARDING.form.provider);
+  return provider?(provider.models||[]):[];
+}
+
+function _getOnboardingSelectedModel(){
+  return ONBOARDING.form.model||'';
+}
+
+function _renderOnboardingModelField(){
+  const choices=_getOnboardingProviderModelChoices();
+  if(ONBOARDING.form.provider==='custom'){
+    return `<label class="onboarding-field"><span>${t('onboarding_model_label')}</span><input id="onboardingModelInput" value="${esc(_getOnboardingSelectedModel())}" placeholder="${t('onboarding_custom_model_placeholder')}" oninput="ONBOARDING.form.model=this.value"></label><p class="onboarding-copy">${t('onboarding_custom_model_help')}</p>`;
+  }
+  const options=choices.map(m=>`<option value="${esc(m.id)}">${esc(m.label)}</option>`).join('');
+  return `<label class="onboarding-field"><span>${t('onboarding_model_label')}</span><select id="onboardingModelSelect" onchange="ONBOARDING.form.model=this.value">${options}</select></label><p class="onboarding-copy">${t('onboarding_workspace_help')}</p>`;
+}
+
+function _providerStatusLabel(system){
+  if(system.chat_ready) return t('onboarding_check_provider_ready');
+  if(system.provider_configured) return t('onboarding_check_provider_partial');
+  return t('onboarding_check_provider_pending');
 }
 
 function _renderOnboardingBody(){
@@ -49,6 +79,7 @@ function _renderOnboardingBody(){
   const key=ONBOARDING.steps[ONBOARDING.step];
   const system=ONBOARDING.status.system||{};
   const settings=ONBOARDING.status.settings||{};
+  const setup=ONBOARDING.status.setup||{};
   const nextBtn=$('onboardingNextBtn');
   const backBtn=$('onboardingBackBtn');
   if(backBtn) backBtn.style.display=ONBOARDING.step>0?'':'none';
@@ -56,24 +87,52 @@ function _renderOnboardingBody(){
 
   if(key==='system'){
     const hermesOk=system.hermes_found&&system.imports_ok;
-    _setOnboardingNotice(hermesOk?t('onboarding_notice_system_ready'):t('onboarding_notice_system_unavailable'),hermesOk?'success':'warn');
+    const setupOk=!!system.chat_ready;
+    _setOnboardingNotice(system.provider_note|| (setupOk?t('onboarding_notice_system_ready'):t('onboarding_notice_system_unavailable')),setupOk?'success':(hermesOk?'info':'warn'));
     body.innerHTML=`
       <div class="onboarding-panel-grid">
         <div class="onboarding-check ${hermesOk?'ok':'warn'}"><strong>${t('onboarding_check_agent')}</strong><span>${hermesOk?t('onboarding_check_agent_ready'):t('onboarding_check_agent_missing')}</span></div>
+        <div class="onboarding-check ${(setupOk?'ok':system.provider_configured?'warn':'muted')}"><strong>${t('onboarding_check_provider')}</strong><span>${_providerStatusLabel(system)}</span></div>
         <div class="onboarding-check ${(settings.password_enabled?'ok':'muted')}"><strong>${t('onboarding_check_password')}</strong><span>${settings.password_enabled?t('onboarding_check_password_enabled'):t('onboarding_check_password_disabled')}</span></div>
-        <div class="onboarding-check ${(system.provider_configured?'ok':'muted')}"><strong>${t('onboarding_check_provider')}</strong><span>${system.provider_configured?t('onboarding_check_provider_ready'):t('onboarding_check_provider_pending')}</span></div>
       </div>
       <div class="onboarding-copy">
         <p><strong>${t('onboarding_config_file')}</strong> ${esc(system.config_path||t('onboarding_unknown'))}</p>
+        <p><strong>${t('onboarding_env_file')}</strong> ${esc(system.env_path||t('onboarding_unknown'))}</p>
         <p>${esc(system.provider_note||'')}</p>
+        ${system.current_provider?`<p><strong>${t('onboarding_current_provider')}</strong> ${esc(system.current_provider)}${system.current_model?` — ${esc(system.current_model)}`:''}</p>`:''}
+        ${system.current_base_url?`<p><strong>${t('onboarding_base_url_label')}</strong> ${esc(system.current_base_url)}</p>`:''}
         ${system.missing_modules&&system.missing_modules.length?`<p><strong>${t('onboarding_missing_imports')}</strong> ${esc(system.missing_modules.join(', '))}</p>`:''}
       </div>`;
     return;
   }
 
+  if(key==='setup'){
+    const providers=_getOnboardingSetupProviders();
+    const options=providers.map(p=>`<option value="${esc(p.id)}">${esc(p.label)}${p.quick?' — '+esc(t('onboarding_quick_setup_badge')):''}</option>`).join('');
+    const provider=_getOnboardingSetupProvider(ONBOARDING.form.provider)||providers[0]||null;
+    const showBaseUrl=provider&&provider.requires_base_url;
+    const keyHelp=provider?`${t('onboarding_api_key_help_prefix')} ${esc(provider.env_var)}.`:'';
+    _setOnboardingNotice(system.chat_ready?t('onboarding_notice_setup_already_ready'):t('onboarding_notice_setup_required'),system.chat_ready?'success':'info');
+    body.innerHTML=`
+      <label class="onboarding-field">
+        <span>${t('onboarding_provider_label')}</span>
+        <select id="onboardingProviderSelect" onchange="syncOnboardingProvider(this.value)">${options}</select>
+      </label>
+      <label class="onboarding-field">
+        <span>${t('onboarding_api_key_label')}</span>
+        <input id="onboardingApiKeyInput" type="password" value="${esc(ONBOARDING.form.apiKey||'')}" placeholder="${t('onboarding_api_key_placeholder')}" oninput="ONBOARDING.form.apiKey=this.value">
+      </label>
+      ${showBaseUrl?`<label class="onboarding-field"><span>${t('onboarding_base_url_label')}</span><input id="onboardingBaseUrlInput" value="${esc(ONBOARDING.form.baseUrl||'')}" placeholder="${t('onboarding_base_url_placeholder')}" oninput="ONBOARDING.form.baseUrl=this.value"></label>`:''}
+      <p class="onboarding-copy">${keyHelp}</p>
+      ${showBaseUrl?`<p class="onboarding-copy">${t('onboarding_base_url_help')}</p>`:''}
+      <p class="onboarding-copy">${setup.unsupported_note||''}</p>`;
+    const providerSel=$('onboardingProviderSelect');
+    if(providerSel) providerSel.value=ONBOARDING.form.provider;
+    return;
+  }
+
   if(key==='workspace'){
     const workspaceOptions=_getOnboardingWorkspaceChoices().map(ws=>`<option value="${esc(ws.path)}">${esc(ws.name||ws.path)} — ${esc(ws.path)}</option>`).join('');
-    const modelOptions=((ONBOARDING.status.models||{}).groups||[]).map(g=>`<optgroup label="${esc(g.provider)}">${(g.models||[]).map(m=>`<option value="${esc(m.id)}">${esc(m.label)}</option>`).join('')}</optgroup>`).join('');
     _setOnboardingNotice(t('onboarding_notice_workspace'), 'info');
     body.innerHTML=`
       <label class="onboarding-field">
@@ -84,15 +143,11 @@ function _renderOnboardingBody(){
         <span>${t('onboarding_workspace_or_path')}</span>
         <input id="onboardingWorkspaceInput" value="${esc(ONBOARDING.form.workspace||'')}" placeholder="${t('onboarding_workspace_placeholder')}" oninput="ONBOARDING.form.workspace=this.value">
       </label>
-      <label class="onboarding-field">
-        <span>${t('onboarding_model_label')}</span>
-        <select id="onboardingModelSelect" onchange="ONBOARDING.form.model=this.value">${modelOptions}</select>
-      </label>
-      <p class="onboarding-copy">${t('onboarding_workspace_help')}</p>`;
+      ${_renderOnboardingModelField()}`;
     const wsSel=$('onboardingWorkspaceSelect');
     if(wsSel && ONBOARDING.form.workspace) wsSel.value=ONBOARDING.form.workspace;
     const modelSel=$('onboardingModelSelect');
-    if(modelSel && ONBOARDING.form.model) _applyModelToDropdown(ONBOARDING.form.model, modelSel);
+    if(modelSel && ONBOARDING.form.model) modelSel.value=ONBOARDING.form.model;
     return;
   }
 
@@ -107,13 +162,16 @@ function _renderOnboardingBody(){
     return;
   }
 
+  const provider=_getOnboardingSetupProvider(ONBOARDING.form.provider);
   _setOnboardingNotice(t('onboarding_notice_finish'), 'success');
   body.innerHTML=`
     <div class="onboarding-summary">
+      <div><strong>${t('onboarding_provider_label')}</strong><span>${esc((provider&&provider.label)||ONBOARDING.form.provider||t('onboarding_not_set'))}</span></div>
+      <div><strong>${t('onboarding_model_label')}</strong><span>${esc(_getOnboardingSelectedModel()||t('onboarding_not_set'))}</span></div>
       <div><strong>${t('onboarding_workspace_label')}</strong><span>${esc(ONBOARDING.form.workspace||t('onboarding_not_set'))}</span></div>
-      <div><strong>${t('onboarding_model_label')}</strong><span>${esc(getModelLabel(ONBOARDING.form.model)||ONBOARDING.form.model)}</span></div>
       <div><strong>${t('onboarding_check_password')}</strong><span>${ONBOARDING.form.password?t('onboarding_password_will_enable'):t('onboarding_password_skipped')}</span></div>
     </div>
+    ${ONBOARDING.form.baseUrl?`<p class="onboarding-copy"><strong>${t('onboarding_base_url_label')}</strong> ${esc(ONBOARDING.form.baseUrl)}</p>`:''}
     <p class="onboarding-copy">${t('onboarding_finish_help')}</p>`;
 }
 
@@ -123,13 +181,33 @@ function syncOnboardingWorkspaceSelect(value){
   if(input) input.value=value;
 }
 
+function syncOnboardingProvider(value){
+  const provider=_getOnboardingSetupProvider(value);
+  ONBOARDING.form.provider=value;
+  if(provider){
+    if(!ONBOARDING.form.model || !_getOnboardingProviderModelChoices().some(m=>m.id===ONBOARDING.form.model) || value==='custom'){
+      ONBOARDING.form.model=provider.default_model||'';
+    }
+    if(provider.requires_base_url){
+      ONBOARDING.form.baseUrl=ONBOARDING.form.baseUrl||provider.default_base_url||'';
+    }else{
+      ONBOARDING.form.baseUrl=provider.default_base_url||'';
+    }
+  }
+  _renderOnboardingBody();
+}
+
 async function loadOnboardingWizard(){
   try{
     const status=await api('/api/onboarding/status');
     ONBOARDING.status=status;
+    const current=((status.setup||{}).current)||{};
+    ONBOARDING.form.provider=current.provider||'openrouter';
     ONBOARDING.form.workspace=(status.workspaces&&status.workspaces.last)||status.settings.default_workspace||'';
-    ONBOARDING.form.model=status.settings.default_model||((status.models||{}).default_model)||'';
+    ONBOARDING.form.model=status.settings.default_model||current.model||'openai/gpt-5.4-mini';
     ONBOARDING.form.password='';
+    ONBOARDING.form.apiKey='';
+    ONBOARDING.form.baseUrl=current.base_url||'';
     ONBOARDING.active=!status.completed;
     if(!ONBOARDING.active) return false;
     $('onboardingOverlay').style.display='flex';
@@ -147,6 +225,21 @@ function prevOnboardingStep(){
   ONBOARDING.step--;
   _renderOnboardingSteps();
   _renderOnboardingBody();
+}
+
+async function _saveOnboardingProviderSetup(){
+  const provider=(ONBOARDING.form.provider||'').trim();
+  const model=(ONBOARDING.form.model||'').trim();
+  const apiKey=(ONBOARDING.form.apiKey||'').trim();
+  const baseUrl=(ONBOARDING.form.baseUrl||'').trim();
+  const current=_getOnboardingCurrentSetup();
+  const isUnchanged=current.provider===provider&&((current.model||'')===model)&&((current.base_url||'')===baseUrl);
+  if(isUnchanged && !apiKey && (ONBOARDING.status.system||{}).chat_ready) return;
+  const body={provider,model};
+  if(apiKey) body.api_key=apiKey;
+  if(baseUrl) body.base_url=baseUrl;
+  const status=await api('/api/onboarding/setup',{method:'POST',body:JSON.stringify(body)});
+  ONBOARDING.status=status;
 }
 
 async function _saveOnboardingDefaults(){
@@ -167,6 +260,7 @@ async function _saveOnboardingDefaults(){
 }
 
 async function _finishOnboarding(){
+  await _saveOnboardingProviderSetup();
   await _saveOnboardingDefaults();
   const done=await api('/api/onboarding/complete',{method:'POST',body:'{}'});
   ONBOARDING.status=done;
@@ -183,9 +277,16 @@ async function _finishOnboarding(){
 
 async function nextOnboardingStep(){
   try{
+    if(ONBOARDING.steps[ONBOARDING.step]==='setup'){
+      ONBOARDING.form.provider=(($('onboardingProviderSelect')||{}).value||ONBOARDING.form.provider||'').trim();
+      ONBOARDING.form.apiKey=(($('onboardingApiKeyInput')||{}).value||'').trim();
+      ONBOARDING.form.baseUrl=(($('onboardingBaseUrlInput')||{}).value||ONBOARDING.form.baseUrl||'').trim();
+      if(!ONBOARDING.form.provider) throw new Error(t('onboarding_error_provider_required'));
+      if(ONBOARDING.form.provider==='custom' && !ONBOARDING.form.baseUrl) throw new Error(t('onboarding_error_base_url_required'));
+    }
     if(ONBOARDING.steps[ONBOARDING.step]==='workspace'){
       ONBOARDING.form.workspace=(($('onboardingWorkspaceInput')||{}).value||ONBOARDING.form.workspace||'').trim();
-      ONBOARDING.form.model=(($('onboardingModelSelect')||{}).value||ONBOARDING.form.model||'').trim();
+      ONBOARDING.form.model=(($('onboardingModelInput')||{}).value||($('onboardingModelSelect')||{}).value||ONBOARDING.form.model||'').trim();
       if(!ONBOARDING.form.workspace) throw new Error(t('onboarding_error_workspace_required'));
       if(!ONBOARDING.form.model) throw new Error(t('onboarding_error_model_required'));
     }

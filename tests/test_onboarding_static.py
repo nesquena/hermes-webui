@@ -32,6 +32,7 @@ def test_onboarding_js_exposes_bootstrap_hooks():
     assert "async function loadOnboardingWizard()" in js
     assert "async function nextOnboardingStep()" in js
     assert "api('/api/onboarding/status')" in js
+    assert "api('/api/onboarding/setup'" in js
     assert "api('/api/onboarding/complete'" in js
 
 
@@ -42,6 +43,7 @@ def test_onboarding_uses_i18n_helpers():
     assert 'data-i18n="onboarding_title"' in html
     assert 'data-i18n="onboarding_continue"' in html
     assert "t('onboarding_step_system_title')" in js
+    assert "t('onboarding_step_setup_title')" in js
     assert "t('onboarding_complete')" in js
     assert "onboarding_title: 'Welcome to Hermes Web UI'" in i18n
     assert "onboarding_title: 'Bienvenido a Hermes Web UI'" in i18n
