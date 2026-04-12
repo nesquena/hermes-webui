@@ -6,6 +6,13 @@
 ---
 
 
+## [v0.50.5] Think-tag stripping with leading whitespace (PR #327)
+
+- **Fix think-tag rendering for models that emit leading whitespace** (e.g. MiniMax M2.7): Some models emit one or more newlines before the `<think>` opening tag. The previous regex used a `^` anchor, so it only matched when `<think>` was the very first character. When the anchor failed, the raw `</think>` tag appeared in the rendered message body.
+  - `static/ui.js` (stored messages): removed `^` anchor from `<think>` and Gemma channel-token regexes; switched from `.slice()` to `.replace()` + `.trimStart()` so stripping works regardless of position
+  - `static/messages.js` (live stream): `trimStart()` before `startsWith`/`indexOf` checks; partial-tag-prefix guard also uses trimmed buffer
+  - 10 new tests in `tests/test_sprint38.py`; 768 tests total (up from 758)
+
 ## [v0.50.3] Onboarding completes gracefully for pre-configured providers (PR #323, fixes #322)
 
 - **OAuth/CLI-configured providers no longer blocked by onboarding** (closes #322): Users with providers already set up via the CLI (`openai-codex`, `copilot`, `nous`, etc.) hit `Unsupported provider for WebUI onboarding` when clicking "Open Hermes" on the finish page. The wizard now marks onboarding complete and lets them through — the agent setup is already done, no wizard steps needed.
