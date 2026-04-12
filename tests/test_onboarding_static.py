@@ -35,6 +35,18 @@ def test_onboarding_js_exposes_bootstrap_hooks():
     assert "api('/api/onboarding/complete'" in js
 
 
+def test_onboarding_uses_i18n_helpers():
+    html = read("static/index.html")
+    js = read("static/onboarding.js")
+    i18n = read("static/i18n.js")
+    assert 'data-i18n="onboarding_title"' in html
+    assert 'data-i18n="onboarding_continue"' in html
+    assert "t('onboarding_step_system_title')" in js
+    assert "t('onboarding_complete')" in js
+    assert "onboarding_title: 'Welcome to Hermes Web UI'" in i18n
+    assert "onboarding_title: 'Bienvenido a Hermes Web UI'" in i18n
+
+
 def test_bootstrap_script_contains_official_installer_and_windows_guard():
     src = read("bootstrap.py")
     assert (
