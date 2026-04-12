@@ -6,6 +6,18 @@
 ---
 
 
+## [v0.49.0] First-run onboarding wizard (PR #285)
+
+- **One-shot bootstrap and first-run setup wizard** (PR #285): New users are greeted with a guided onboarding overlay on first load. The wizard checks system status, configures a provider (OpenRouter, Anthropic, OpenAI, or custom OpenAI-compatible endpoint), sets a workspace and optional password, and marks setup as complete — all without leaving the browser.
+  - `bootstrap.py`: one-shot CLI bootstrap that writes `~/.hermes/config.yaml` and `~/.hermes/.env` from flags; idempotent and safe to re-run
+  - `api/routes.py`: `/api/onboarding/status` (GET) and `/api/onboarding/complete` (POST) endpoints; real provider config persistence to `config.yaml` + `.env`
+  - `static/onboarding.js`: full wizard JS module — step navigation, provider dropdown, model selector, API key input, Back/Continue flow, i18n support
+  - `static/index.html`: onboarding overlay HTML shell + `<script src="/static/onboarding.js">` load
+  - `static/i18n.js`: 40+ onboarding keys added to all 5 locales (en, es, de, zh-Hans, zh-Hant)
+  - `static/boot.js`: on load, fetches `/api/onboarding/status` and opens wizard when `completed=false`
+  - Wizard does NOT show when `onboarding_completed=true` in settings
+  - 14 new tests in `tests/test_onboarding.py`; 693 tests total (up from 679)
+
 ## [v0.48.2] Provider/model mismatch warning (PR #283, fixes #266)
 
 - **Provider mismatch warning** (PR #283): WebUI now warns when you select a model from a provider different from the one Hermes is configured for, instead of silently failing with a 401 error.
