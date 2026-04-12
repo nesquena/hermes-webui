@@ -23,6 +23,8 @@ def test_spanish_locale_includes_representative_translations():
         "login_title: 'Iniciar sesión'",
         "approval_heading: 'Se requiere aprobación'",
         "tab_tasks: 'Tareas'",
+        "tab_skills: 'Habilidades'",
+        "tab_memory: 'Memoria'",
     ]
     for entry in expected:
         assert entry in src

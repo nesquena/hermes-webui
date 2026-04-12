@@ -337,7 +337,7 @@ const LOCALES = {
     // Sidebar & Tabs
     tab_chat: 'Chat',
     tab_tasks: 'Tareas',
-    tab_skills: 'Skills',
+    tab_skills: 'Habilidades',
     tab_memory: 'Memoria',
     tab_workspaces: 'Espacios',
     tab_profiles: 'Perfiles',
