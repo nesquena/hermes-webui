@@ -596,7 +596,8 @@
     .ctx-tooltip{right:-4px;min-width:190px;max-width:220px;}
     /* Touch targets — minimum 44px */
     .icon-btn,.mic-btn{min-width:44px;min-height:44px;}
-    .session-item{min-height:44px;padding:10px 12px;}
+    .session-item{min-height:44px;padding:10px 40px 10px 12px;}
+    .session-actions{opacity:1;pointer-events:auto;}
     /* Empty state */
     .empty-state h2{font-size:18px;}
     .empty-state p{font-size:13px;}
