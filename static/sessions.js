@@ -10,7 +10,75 @@ const ICONS={
   more:'<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" stroke="none"><circle cx="8" cy="3" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="8" cy="13" r="1.25"/></svg>',
 };
 
+async function newSession(flash){
+  MSG_QUEUE.length=0;updateQueueBadge();
+  S.toolCalls=[];
+  clearLiveToolCards();
+  // Use profile default workspace for new sessions after a profile switch (one-shot),
+  // otherwise inherit from the current session (or let server pick the default)
+  const inheritWs=S._profileDefaultWorkspace||(S.session?S.session.workspace:null);
+  S._profileDefaultWorkspace=null; // consume — only applies to the first new session after switch
+  const data=await api('/api/session/new',{method:'POST',body:JSON.stringify({model:$('modelSelect').value,workspace:inheritWs})});
+  S.session=data.session;S.messages=data.session.messages||[];
+  if(flash)S.session._flash=true;
+  localStorage.setItem('hermes-webui-session',S.session.session_id);
+  syncTopbar();await loadDir('.');renderMessages();
+  // don't call renderSessionList here - callers do it when needed
+}
 
+async function loadSession(sid){
+  stopApprovalPolling();hideApprovalCard();
+  const data=await api(`/api/session?session_id=${encodeURIComponent(sid)}`);
+  S.session=data.session;
+  localStorage.setItem('hermes-webui-session',S.session.session_id);
+  // B9: sanitize empty assistant messages that can appear when agent only ran tool calls
+  data.session.messages=(data.session.messages||[]).filter(m=>{
+    if(!m||!m.role)return false;
+    if(m.role==='tool')return false;
+    if(m.role==='assistant'){let c=m.content||'';if(Array.isArray(c))c=c.filter(p=>p&&p.type==='text').map(p=>p.text||'').join('');return String(c).trim().length>0;}
+    return true;
+  });
+  if(INFLIGHT[sid]){
+    S.messages=INFLIGHT[sid].messages;
+    // Restore live tool cards for this in-flight session
+    clearLiveToolCards();
+    for(const tc of (S.toolCalls||[])){
+      if(tc&&tc.name) appendLiveToolCard(tc);
+    }
+    syncTopbar();await loadDir('.');renderMessages();appendThinking();
+    setBusy(true);setComposerStatus('');
+    startApprovalPolling(sid);
+  }else{
+    MSG_QUEUE.length=0;updateQueueBadge();  // clear queue for the viewed session
+    S.messages=data.session.messages||[];
+    S.toolCalls=(data.session.tool_calls||[]).map(tc=>({...tc,done:true}));
+    // Reset per-session visual state: the viewed session is idle even if another
+    // session's stream is still running in the background.
+    // We directly update the DOM instead of calling setBusy(false), because
+    // setBusy(false) drains MSG_QUEUE which we don't want here.
+    S.busy=false;
+    S.activeStreamId=null;
+    updateSendBtn();
+    const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
+    setStatus('');
+    setComposerStatus('');
+    clearLiveToolCards();
+    syncTopbar();await loadDir('.');renderMessages();highlightCode();
+  }
+  // Sync context usage indicator from session data
+  const _s=S.session;
+  if(_s&&typeof _syncCtxIndicator==='function'){
+    const u=S.lastUsage||{};
+    _syncCtxIndicator({input_tokens:_s.input_tokens||u.input_tokens||0,output_tokens:_s.output_tokens||u.output_tokens||0,estimated_cost:_s.estimated_cost||u.estimated_cost,context_length:u.context_length||0,last_prompt_tokens:u.last_prompt_tokens||0,threshold_tokens:u.threshold_tokens||0});
+  }
+}
+
+let _allSessions = [];  // cached for search filter
+let _renamingSid = null;  // session_id currently being renamed (blocks list re-renders)
+let _showArchived = false;  // toggle to show archived sessions
+let _allProjects = [];  // cached project list
+let _activeProject = null;  // project_id filter (null = show all)
+let _showAllProfiles = false;  // false = filter to active profile only
 let _sessionActionMenu = null;
 let _sessionActionAnchor = null;
 let _sessionActionSessionId = null;
@@ -170,71 +238,6 @@ window.addEventListener('resize',()=>{
   if(_sessionActionMenu && _sessionActionAnchor) _positionSessionActionMenu(_sessionActionAnchor);
 });
 
-async function newSession(flash){
-  MSG_QUEUE.length=0;updateQueueBadge();
-  S.toolCalls=[];
-  clearLiveToolCards();
-  // Use profile default workspace for new sessions after a profile switch (one-shot),
-  // otherwise inherit from the current session (or let server pick the default)
-  const inheritWs=S._profileDefaultWorkspace||(S.session?S.session.workspace:null);
-  S._profileDefaultWorkspace=null; // consume — only applies to the first new session after switch
-  const data=await api('/api/session/new',{method:'POST',body:JSON.stringify({model:$('modelSelect').value,workspace:inheritWs})});
-  S.session=data.session;S.messages=data.session.messages||[];
-  if(flash)S.session._flash=true;
-  localStorage.setItem('hermes-webui-session',S.session.session_id);
-  syncTopbar();await loadDir('.');renderMessages();
-  // don't call renderSessionList here - callers do it when needed
-}
-
-async function loadSession(sid){
-  stopApprovalPolling();hideApprovalCard();
-  const data=await api(`/api/session?session_id=${encodeURIComponent(sid)}`);
-  S.session=data.session;
-  localStorage.setItem('hermes-webui-session',S.session.session_id);
-  // B9: sanitize empty assistant messages that can appear when agent only ran tool calls
-  data.session.messages=(data.session.messages||[]).filter(m=>{
-    if(!m||!m.role)return false;
-    if(m.role==='tool')return false;
-    if(m.role==='assistant'){let c=m.content||'';if(Array.isArray(c))c=c.filter(p=>p&&p.type==='text').map(p=>p.text||'').join('');return String(c).trim().length>0;}
-    return true;
-  });
-  if(INFLIGHT[sid]){
-    S.messages=INFLIGHT[sid].messages;
-    // Restore live tool cards for this in-flight session
-    clearLiveToolCards();
-    for(const tc of (S.toolCalls||[])){
-      if(tc&&tc.name) appendLiveToolCard(tc);
-    }
-    syncTopbar();await loadDir('.');renderMessages();appendThinking();
-    setBusy(true);setStatus((window._botName||'Hermes')+' is thinking\u2026');
-    startApprovalPolling(sid);
-  }else{
-    MSG_QUEUE.length=0;updateQueueBadge();  // clear queue for the viewed session
-    S.messages=data.session.messages||[];
-    S.toolCalls=(data.session.tool_calls||[]).map(tc=>({...tc,done:true}));
-    // Reset per-session visual state: the viewed session is idle even if another
-    // session's stream is still running in the background.
-    // We directly update the DOM instead of calling setBusy(false), because
-    // setBusy(false) drains MSG_QUEUE which we don't want here.
-    S.busy=false;
-    S.activeStreamId=null;
-    $('btnSend').disabled=false;
-    $('btnSend').style.opacity='1';
-    const _dots=$('activityDots');if(_dots)_dots.style.display='none';
-    const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
-    setStatus('');
-    clearLiveToolCards();
-    syncTopbar();await loadDir('.');renderMessages();highlightCode();
-  }
-}
-
-let _allSessions = [];  // cached for search filter
-let _renamingSid = null;  // session_id currently being renamed (blocks list re-renders)
-let _showArchived = false;  // toggle to show archived sessions
-let _allProjects = [];  // cached project list
-let _activeProject = null;  // project_id filter (null = show all)
-let _showAllProfiles = false;  // false = filter to active profile only
-
 async function renderSessionList(){
   try{
     if(!($('sessionSearch').value||'').trim()) _contentSearchResults = [];
@@ -300,6 +303,7 @@ function filterSessions(){
 function renderSessionListFromCache(){
   // Don't re-render while user is actively renaming a session (would destroy the input)
   if(_renamingSid) return;
+  closeSessionActionMenu();
   const q=($('sessionSearch').value||'').toLowerCase();
   const titleMatches=q?_allSessions.filter(s=>(s.title||'Untitled').toLowerCase().includes(q)):_allSessions;
   // Merge content matches (deduped): content matches appended after title matches
@@ -463,6 +467,7 @@ function renderSessionListFromCache(){
 
     // Rename: called directly when we confirm it's a double-click
     const startRename=()=>{
+      closeSessionActionMenu();
       _renamingSid = s.session_id;
       const inp=document.createElement('input');
       inp.className='session-title-input';
@@ -501,11 +506,10 @@ function renderSessionListFromCache(){
       pinInd.innerHTML=ICONS.pin;
       el.appendChild(pinInd);
     }
-    // Project indicator: colored left border (active item keeps its own gold color)
+    // Project indicator: colored dot appended after the title
     if(s.project_id){
       const proj=_allProjects.find(p=>p.project_id===s.project_id);
       if(proj){
-        // project color shown via dot indicator, not left border
         const dot=document.createElement('span');
         dot.className='session-project-dot';
         dot.style.background=proj.color||'var(--blue)';
@@ -514,6 +518,7 @@ function renderSessionListFromCache(){
       }
     }
     el.appendChild(title);
+    // Single trigger button that opens a shared dropdown menu
     const actions=document.createElement('div');
     actions.className='session-actions';
     const menuBtn=document.createElement('button');
@@ -564,8 +569,12 @@ function renderSessionListFromCache(){
 }
 
 async function deleteSession(sid){
-  const _delSess=await showConfirmDialog({title:'Delete conversation',message:'This cannot be undone.',confirmLabel:'Delete',danger:true,focusCancel:true});
-  if(!_delSess) return;
+  const ok=await showConfirmDialog({
+    message:'Delete this conversation?',
+    confirmLabel:t('delete_title'),
+    danger:true
+  });
+  if(!ok)return;
   try{
     await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
   }catch(e){setStatus(`Delete failed: ${e.message}`);return;}
@@ -640,8 +649,11 @@ function _showProjectPicker(session, anchorEl){
   createItem.onclick=async()=>{
     picker.remove();
     document.removeEventListener('click',close);
-    // Prompt for name inline
-    const name=await showPromptDialog({title:'New project',message:'',placeholder:'Project name',confirmLabel:t('create')});
+    const name=await showPromptDialog({
+      message:t('project_name_prompt'),
+      confirmLabel:t('create'),
+      placeholder:'Project name'
+    });
     if(!name||!name.trim()) return;
     const color=PROJECT_COLORS[_allProjects.length%PROJECT_COLORS.length];
     const res=await api('/api/projects/create',{method:'POST',body:JSON.stringify({name:name.trim(),color})});
@@ -680,7 +692,7 @@ function _showProjectPicker(session, anchorEl){
   setTimeout(()=>document.addEventListener('click',close),0);
 }
 
-async function _startProjectCreate(bar, addBtn){
+function _startProjectCreate(bar, addBtn){
   const inp=document.createElement('input');
   inp.className='project-create-input';
   inp.placeholder='Project name';
@@ -727,12 +739,14 @@ function _startProjectRename(proj, chip){
 }
 
 async function _confirmDeleteProject(proj){
-  const _delProj=await showConfirmDialog({title:`Delete project "${proj.name}"?`,message:'Sessions will be unassigned but not deleted.',confirmLabel:'Delete',danger:true,focusCancel:true});
-  if(!_delProj) return;
+  const ok=await showConfirmDialog({
+    message:'Delete project "'+proj.name+'"? Sessions will be unassigned but not deleted.',
+    confirmLabel:t('delete_title'),
+    danger:true
+  });
+  if(!ok){return;}
   await api('/api/projects/delete',{method:'POST',body:JSON.stringify({project_id:proj.project_id})});
   if(_activeProject===proj.project_id) _activeProject=null;
   await renderSessionList();
   showToast('Project deleted');
 }
-
-

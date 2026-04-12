@@ -32,9 +32,11 @@ SETUP: Clear localStorage (DevTools > Application > Local Storage > delete herme
 STEPS:
   1. Navigate to http://localhost:8787
 EXPECT:
-  - Dark background, Hermes logo in sidebar header
+  - Dark background
+  - Sidebar begins directly with the icon tab row; there is no dedicated branding header
   - Center area shows "What can I help with?" heading with suggestion buttons
   - Session list in sidebar is empty or shows existing sessions
+  - Sidebar footer shows a single "Hermes WebUI" control-center button
   - No session is highlighted active
   - Send button is present but there is no input focus by default
 FAIL: Page shows error, blank white screen, or auto-creates a new session without user action.
@@ -73,11 +75,11 @@ STEPS:
 EXPECT:
   - User message appears immediately in chat
   - Thinking dots (three animated dots) appear below
-  - Status bar shows "Hermes is thinking..."
   - Send button becomes disabled (grayed out)
+  - A red stop button appears in the composer footer while the turn is running
   - Within 10-30 seconds, Hermes responds with a three-word greeting
   - Thinking dots disappear
-  - Send button re-enables
+  - Send button re-enables and the stop button disappears
   - Session title in sidebar updates to reflect the first message
 FAIL: Message never appears, thinking dots never go away, Send button stays disabled forever.
 
@@ -144,7 +146,7 @@ FAIL: New session created, error thrown, or UI breaks.
 ### T3.1: Model Dropdown Shows All Options
 SETUP: Any active session.
 STEPS:
-  1. Look at the sidebar bottom: "Model" label and a dropdown
+  1. Look at the composer footer: to the right of the attach/mic controls there is a model dropdown
   2. Click the dropdown to expand it
 EXPECT:
   - Provider groups visible: OpenAI, Anthropic, Other
@@ -153,18 +155,30 @@ EXPECT:
   - Other group: Gemini 2.5 Pro, DeepSeek V3, Llama 4 Scout
 FAIL: Only 2 options visible, no groups, or missing models.
 
-### T3.2: Model Chip Reflects Selection
+### T3.2: Model Dropdown Reflects Active Conversation
 SETUP: Active session.
 STEPS:
   1. Change model dropdown to "Claude Sonnet 4.6"
 EXPECT:
-  - The blue chip in the topbar right updates to "Sonnet 4.6" immediately
-  - NOT "GPT-5.4 Mini" (this was Bug B3, now fixed)
+  - The composer footer dropdown stays on "Claude Sonnet 4.6"
+  - Sending the next message uses that session model rather than an older one from another conversation
 STEPS (continued):
   2. Change model to "Gemini 2.5 Pro"
 EXPECT:
-  - Chip updates to "Gemini 2.5 Pro" (not "GPT-5.4 Mini")
-FAIL: Chip shows wrong model name for any non-Sonnet selection.
+  - The dropdown updates to "Gemini 2.5 Pro"
+  - Switching away and back to the conversation restores the same model in the footer selector
+FAIL: Dropdown shows the wrong active model after a session switch, or sending uses a stale model.
+
+### T3.3: Context Badge Shares Footer Space Cleanly
+SETUP: Active session with at least one completed response.
+STEPS:
+  1. Look at the right side of the composer footer
+EXPECT:
+  - A compact circular context badge appears next to the send button when usage data is available
+  - The number in the center shows the used percentage
+  - Hovering or focusing the badge shows a tooltip with percent used, token count, auto-compress threshold, and estimated cost when available
+  - The model dropdown remains usable without overlapping the send button or pushing controls out of view
+FAIL: Linear meter still shown, tooltip missing/incomplete, controls overlap, or footer wraps in a broken way.
 
 ---
 
@@ -228,8 +242,18 @@ FAIL: File not removed, error.
 
 ## Section 5: Workspace File Browser
 
-### T5.1: File Tree Loads on Session Start
+### T5.0: Panel Is Closed By Default
 SETUP: Active session with workspace set.
+EXPECT:
+  - Right workspace panel is hidden on initial load
+  - Center chat column uses the freed width
+  - "Files" toggle is visible in the topbar
+FAIL: Right panel starts open without any browsing or preview action.
+
+### T5.1: File Tree Loads When Files Panel Is Opened
+SETUP: Active session with workspace set.
+STEPS:
+  1. Click the "Files" toggle in the topbar
 EXPECT:
   - Right panel shows "WORKSPACE" header
   - File tree lists files and directories in the workspace
@@ -263,10 +287,11 @@ STEPS:
   1. Click the X button in the panel header
 EXPECT:
   - Preview closes
-  - File tree is visible again
+  - If the panel auto-opened for that preview, the entire right panel closes again
+  - If the panel was manually opened for browsing first, the file tree is visible again
   - Preview area is hidden
   - Reopening the same file shows fresh content (no stale cached text)
-FAIL: X button does nothing, tree does not reappear.
+FAIL: X button does nothing, panel stays stuck open, or the file tree does not reappear after manual browse mode.
 
 ### T5.5: Preview an Image File (Sprint 2)
 SETUP: Upload a PNG, JPG, or any image file to the workspace, OR the workspace already contains one.
@@ -377,7 +402,8 @@ FAIL: Command blocked after Allow once, card stays, error.
 ### T8.1: Download Conversation as Markdown
 SETUP: A session with at least 2 messages (1 user + 1 assistant).
 STEPS:
-  1. Click the "Transcript" download button in the sidebar bottom
+  1. Click the "Hermes" button in the sidebar footer
+  2. In the Control Center modal, click "Transcript"
 EXPECT:
   - Browser downloads a .md file named hermes-{session_id}.md
   - Opening the file shows the conversation in markdown format:
@@ -468,6 +494,7 @@ FAIL: No log output, log shows Apache-style text instead of JSON, log file not c
 SETUP: Message is sending (thinking dots visible).
 EXPECT:
   - Send button is visually grayed out
+  - Stop button is visible in the composer footer
   - Pressing Enter does NOT send another message
   - Clicking Send button does nothing
 FAIL: Multiple messages sent while one is in flight.
@@ -831,7 +858,7 @@ FAIL: No icon ever appears, icon always visible (not hover-only).
 ### T21.2: Delete a File with Confirmation
 STEPS:
   1. Hover over a file and click its trash icon
-  2. A browser confirm dialog appears: "Delete [filename]?"
+  2. An in-app confirmation modal appears: "Delete [filename]?"
   3. Click OK
 EXPECT:
   - Toast: "Deleted [filename]"
@@ -842,7 +869,7 @@ FAIL: File not deleted, no confirmation dialog, error.
 ### T21.3: Cancel Delete Does Nothing
 STEPS:
   1. Hover over a file and click its trash icon
-  2. Click Cancel on the confirm dialog
+  2. Click Cancel on the confirmation modal
 EXPECT:
   - File remains in the tree
   - No toast, no error
@@ -851,7 +878,7 @@ FAIL: File deleted despite cancel.
 ### T21.4: Create a New File
 STEPS:
   1. Click the + button in the workspace panel header
-  2. A prompt dialog appears: "New file name (e.g. notes.md):"
+  2. An in-app input modal appears: "New file name (e.g. notes.md):"
   3. Type "test-sprint4.md" and click OK
 EXPECT:
   - Toast: "Created test-sprint4.md"
@@ -925,7 +952,7 @@ FAIL: Invalid path added, no error.
 ### T22.4: Remove a Workspace
 STEPS:
   1. Click the X button next to any non-default workspace
-  2. Confirm the dialog
+  2. Confirm the modal
 EXPECT:
   - Workspace disappears from the list
   - Toast: "Workspace removed"
@@ -981,7 +1008,7 @@ STEPS:
   1. Hover over an assistant message
   2. Click the clipboard icon
 EXPECT:
-  - Icon briefly shows a checkmark (✓) then reverts to clipboard
+  - Icon briefly shows a check icon, then reverts to the copy icon
   - Paste (Cmd+V) elsewhere shows the full text of that message
 FAIL: No visual feedback, clipboard empty or wrong content.
 
@@ -994,23 +1021,23 @@ STEPS:
   1. Click any .py, .js, or .txt file in the workspace file tree
 EXPECT:
   - File content shows in read-only monospace view
-  - An "✎ Edit" button is visible in the preview path bar
+  - An Edit button with a pencil icon is visible in the preview path bar
   - Content is NOT editable (clicking in it does nothing)
 FAIL: Content immediately editable, no Edit button.
 
 ### T24.2: Edit Button Enters Edit Mode
 STEPS:
-  1. Click "✎ Edit" on a code file preview
+  1. Click the Edit button on a code file preview
 EXPECT:
   - Read-only view replaced by an editable textarea
   - Content of the file is pre-populated in the textarea
-  - Button changes to "💾 Save"
+  - Button changes to "Save" with a disk icon
 FAIL: Nothing changes, button doesn't change.
 
 ### T24.3: Save Writes Changes to Disk
 STEPS:
   1. In edit mode, change some text
-  2. Click "💾 Save"
+  2. Click the Save button
 EXPECT:
   - Read-only view returns, showing the updated content
   - Toast: "Saved"
@@ -1022,8 +1049,8 @@ STEPS:
   1. Enter edit mode on a file
   2. Make any change (type a character)
 EXPECT:
-  - Button shows "💾 Save*" (asterisk indicates unsaved changes)
-FAIL: No asterisk, button stays as "💾 Save".
+  - Button shows "Save*" with the disk icon still visible (asterisk indicates unsaved changes)
+FAIL: No asterisk, button stays as "Save".
 
 ### T24.5: Markdown File Edit-Save Roundtrip
 STEPS:
@@ -1070,7 +1097,7 @@ against each criterion below. A Claude browser agent can verify these with brows
 
 ### T25.1: Sidebar Nav Tabs are Icon-Only
 EXPECT:
-  - Five icon-only tabs in the sidebar nav row: 💬 ⏱️ 📚 🧠 📁
+  - Five icon-only tabs in the sidebar nav row: message, clock, book, brain, folder
   - No text labels visible by default (text removed to prevent overflow)
   - Hovering a tab shows a tooltip with the label (Chat/Tasks/Skills/Memory/Spaces)
   - Active tab has a blue underline, icon brighter blue
@@ -1194,7 +1221,7 @@ STEPS:
   3. Click Create job
 EXPECT:
   - Form closes
-  - Toast: "Job created ✓"
+  - Toast: "Job created"
   - New job appears in the cron list with status "active"
 FAIL: Error shown, job not created, form stays open.
 
@@ -1225,7 +1252,8 @@ FAIL: Job created, form doesn't close.
 ### T28.1: JSON Export Button Downloads File
 SETUP: Active session with at least a few messages.
 STEPS:
-  1. Click the "JSON" button in the sidebar footer (next to Transcript)
+  1. Click the "Hermes" button in the sidebar footer
+  2. In the Control Center modal, click "JSON"
 EXPECT:
   - Browser downloads a file named hermes-{session_id}.json
   - Opening the file shows valid JSON with: session_id, title, messages array,
@@ -1289,7 +1317,7 @@ STEPS (continued from T29.1):
   1. Change the name field to "Renamed Job"
   2. Click Save
 EXPECT:
-  - Form closes, toast "Job updated ✓"
+  - Form closes, toast "Job updated"
   - Job header shows new name
 FAIL: Save fails, name unchanged.
 
@@ -1297,7 +1325,7 @@ FAIL: Save fails, name unchanged.
 SETUP: A cron job you can safely delete (or a test job created for this).
 STEPS:
   1. Expand the job, click "Delete"
-  2. Confirm the dialog
+  2. Confirm the modal
 EXPECT:
   - Toast: "Job deleted"
   - Job disappears from the list
@@ -1326,7 +1354,7 @@ tags: [test]
 # Test"
   2. Click Save skill
 EXPECT:
-  - Toast "Skill created ✓", form closes
+  - Toast "Skill created", form closes
   - Skill appears in the skills list
 FAIL: Error, skill not in list.
 
@@ -1354,7 +1382,7 @@ STEPS:
   1. In edit mode, add a line to the textarea
   2. Click Save
 EXPECT:
-  - Toast "Memory saved ✓", form closes
+  - Toast "Memory saved", form closes
   - Memory panel reloads showing the updated content
 FAIL: Save fails, content unchanged.
 
@@ -1467,14 +1495,16 @@ FAIL: Both messages removed, wrong message sent, crash.
 ### T34.1: Clear Button Appears When Session Has Messages
 SETUP: Session with at least one message.
 EXPECT:
-  - A "🗑 Clear" chip appears in the topbar right side (next to the workspace chip)
-  - Button NOT visible when session has no messages / empty state
+  - The "Hermes" button is visible in the sidebar footer
+  - Opening the Control Center shows a "Clear" action in the Conversation section
+  - The Clear action is disabled when there is no active session or no messages
 FAIL: Button always visible, never visible.
 
 ### T34.2: Clear Wipes Messages and Resets Title
 STEPS:
-  1. Click the Clear button in the topbar
-  2. Confirm the dialog
+  1. Click the "Hermes" button in the sidebar footer
+  2. Click "Clear" in the Conversation section
+  3. Confirm the modal
 EXPECT:
   - All messages disappear from the chat area
   - Empty state ("What can I help with?") reappears
@@ -1485,7 +1515,7 @@ FAIL: Session deleted, messages remain, title not reset.
 
 ### T34.3: Cancel Clear Does Nothing
 STEPS:
-  1. Click Clear, then click Cancel in the confirm dialog
+  1. Click Clear, then click Cancel in the confirmation modal
 EXPECT:
   - All messages still present
   - No toast, no change
@@ -1609,7 +1639,7 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 - Switch model. Send a message. Verify response uses selected model.
 
 ### Sprint 12: Settings + Pin + Import
-- Click gear icon. Settings overlay opens.
+- Click the "Hermes WebUI" button in the sidebar footer. Control Center overlay opens with vertical section tabs on the left.
 - Change default model, save. Restart server. Verify setting persisted.
 - Pin a session (star icon in hover overlay). Verify it floats to top of list.
 - Export session as JSON. Import it back. Verify messages restored.
@@ -1637,11 +1667,12 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 
 ### Sprint 16: Sidebar Visual Polish
 - Session titles use full sidebar width (no truncated space for hidden icons).
-- Hover a session → action buttons appear from right with gradient fade.
+- Hover a session → a dotted actions trigger appears on the right.
+- Click the dotted trigger → a dropdown opens with pin, project, archive, duplicate, and delete actions.
 - All icons are monochrome SVGs (not emoji). Consistent across platforms.
 - Pinned sessions show small gold star inline. Unpinned = no star, full title width.
-- Active session has gold highlight (not blue). Overlay gradient matches.
-- Double-click to rename → overlay hides during rename.
+- Active session has gold highlight (not blue).
+- Double-click to rename → session actions hide during rename.
 
 ### Sprint 17: Workspace + Slash Commands + Send Key
 - Navigate into a subdirectory. Breadcrumb bar appears with clickable segments.
@@ -1702,7 +1733,7 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 - "Use" button switches profile. Delete button removes non-default profiles.
 - "+ New profile" form: name validation (lowercase + hyphens), clone config checkbox.
 - Create profile → appears in list and dropdown.
-- Delete profile → confirm dialog. Auto-switches to default if deleting active.
+- Delete profile → confirmation modal. Auto-switches to default if deleting active.
 - Attempt switch while agent busy → blocked with toast message.
 - With hermes-agent not installed → only default profile shown, graceful fallback.
 

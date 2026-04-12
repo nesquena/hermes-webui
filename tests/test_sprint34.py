@@ -226,3 +226,19 @@ class TestOnboardingStatusApiOAuth:
         assert data["system"]["setup_state"] in valid, (
             f"Unexpected setup_state: {data['system']['setup_state']!r}"
         )
+
+
+# ── Control Center: section reset on close ─────────────────────────────────
+
+def test_control_center_resets_active_section_on_close():
+    """Closing the control center must reset _settingsSection to 'conversation'."""
+    src = open('static/panels.js').read()
+    assert '_settingsSection' in src, '_settingsSection state variable missing from panels.js'
+    assert "_settingsSection = 'conversation'" in src or "_settingsSection='conversation'" in src, \
+        'Control center does not reset section to conversation on close'
+
+
+def test_control_center_tab_highlight_on_open():
+    """Opening the control center must use settings-tabs for section navigation."""
+    css = open('static/style.css').read()
+    assert 'settings-tabs' in css, 'settings-tabs CSS class for control center tabs missing from style.css'

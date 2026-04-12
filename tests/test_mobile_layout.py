@@ -70,11 +70,11 @@ def test_mobile_bottom_nav_present():
 
 
 def test_mobile_files_button_present():
-    """Mobile files toggle button (#btnMobileFiles) must be in HTML and CSS."""
-    assert 'id="btnMobileFiles"' in HTML, \
-        "#btnMobileFiles missing from index.html"
-    assert "mobile-files-btn" in CSS, \
-        ".mobile-files-btn CSS missing from style.css"
+    """Mobile files toggle button (#btnWorkspacePanelToggle.workspace-toggle-btn) must be in HTML and CSS."""
+    assert 'id="btnWorkspacePanelToggle"' in HTML, \
+        "#btnWorkspacePanelToggle missing from index.html"
+    assert "workspace-toggle-btn" in CSS, \
+        ".workspace-toggle-btn CSS missing from style.css"
 
 
 # ── Profile dropdown overflow ─────────────────────────────────────────────────
@@ -115,13 +115,13 @@ def test_topbar_chips_mobile_overflow():
 
 def test_workspace_close_button_present():
     """Workspace panel must have a close/hide button accessible on mobile."""
-    # Either a dedicated mobile close button or the X button that closes the panel
+    # Either a dedicated mobile close button or the toggle button that closes the panel
     has_close = (
-        'onclick="toggleMobileFiles()"' in HTML or
-        'toggleMobileFiles' in HTML
+        'onclick="closeWorkspacePanel()"' in HTML or
+        'onclick="toggleWorkspacePanel()"' in HTML
     )
     assert has_close, \
-        "toggleMobileFiles() must be wired to a button to close the workspace panel on mobile"
+        "closeWorkspacePanel() or toggleWorkspacePanel() must be wired to a button to close the workspace panel on mobile"
 
 
 def test_toggle_mobile_files_js_defined():

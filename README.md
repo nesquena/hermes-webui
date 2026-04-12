@@ -7,8 +7,11 @@ Full parity with the CLI experience - everything you can do from a terminal,
 you can do from this UI. No build step, no framework, no bundler. Just Python
 and vanilla JS.
 
-Layout: three-panel Claude-style. Left sidebar for sessions and tools,
-center for chat, right for workspace file browsing.
+Layout: three-panel. Left sidebar for sessions and navigation, center for chat,
+right for workspace file browsing. Model, profile, and workspace controls live in
+the **composer footer** — always visible while composing. A circular context ring
+shows token usage at a glance. All settings and session tools are in the
+**Hermes Control Center** (launcher at the sidebar bottom).
 
 <img alt="Hermes Web UI — three-panel layout" width="1417" height="867" alt="image" src="https://github.com/user-attachments/assets/51adff98-53ee-4800-8508-78b6c34dd3dc" />
 
@@ -349,7 +352,7 @@ across 23 test files.
 - Send a message while one is processing -- it queues automatically
 - Edit any past user message inline and regenerate from that point
 - Retry the last assistant response with one click
-- Cancel a running task from the activity bar
+- Cancel a running task directly from the composer footer (Stop button next to Send)
 - Tool call cards inline -- each shows the tool name, args, and result snippet; expand/collapse all toggle for multi-tool turns
 - Subagent delegation cards -- child agent activity shown with distinct icon and indented border
 - Mermaid diagram rendering inline (flowcharts, sequence diagrams, gantt charts)
@@ -366,6 +369,7 @@ across 23 test files.
 
 ### Sessions
 - Create, rename, duplicate, delete, search by title and message content
+- Session actions via `⋯` dropdown per session — pin, move to project, archive, duplicate, delete
 - Pin/star sessions to the top of the sidebar (gold indicator)
 - Archive sessions (hide without deleting, toggle to show)
 - Session projects -- named groups with colors for organizing sessions
@@ -397,7 +401,7 @@ across 23 test files.
 - Hidden when browser doesn't support Web Speech API (Chrome, Edge, Safari)
 
 ### Profiles
-- Profile picker in the topbar -- purple chip with dropdown showing all profiles
+- Profile chip in the **composer footer** -- dropdown showing all profiles with gateway status and model info
 - Gateway status dots (green = running), model info, skill count per profile
 - Profiles management panel -- create, switch, and delete profiles from the sidebar
 - Clone config from active profile on create
@@ -415,16 +419,17 @@ across 23 test files.
 - CDN resources pinned with SRI integrity hashes
 
 ### Themes
-- 6 built-in themes: Dark (default), Light, Slate, Solarized Dark, Monokai, Nord
+- 7 built-in themes: Dark (default), Light, Slate, Solarized Dark, Monokai, Nord, OLED
 - Switch via Settings panel dropdown (instant live preview) or `/theme` command
 - Persists across reloads (server-side in settings.json + localStorage for flicker-free loading)
 - Custom themes: define a `:root[data-theme="name"]` CSS block and it works — see [THEMES.md](THEMES.md)
 
 ### Settings and configuration
-- Settings panel (gear icon) -- default model, default workspace, send key, theme
+- **Hermes Control Center** (sidebar launcher button) -- Conversation tab (export/import/clear), Preferences tab (model, send key, theme, language, all toggles), System tab (version, password)
 - Send key: Enter (default) or Ctrl/Cmd+Enter
 - Show/hide CLI sessions toggle (enabled by default)
 - Token usage display toggle (off by default, also via `/usage` command)
+- Control Center always opens on the Conversation tab; resets on close
 - Unsaved changes guard -- discard/save prompt when closing with unpersisted changes
 - Cron completion alerts -- toast notifications and unread badge on Tasks tab
 - Background agent error alerts -- banner when a non-active session encounters an error
@@ -469,19 +474,19 @@ api/
   upload.py             Multipart parser, file upload handler (~78 lines)
   workspace.py          File ops, workspace helpers, git detection (~288 lines)
 static/
-  index.html            HTML template (~388 lines)
-  style.css             All CSS incl. mobile responsive (~726 lines)
-  ui.js                 DOM helpers, renderMd, tool cards, context indicator (~1063 lines)
+  index.html            HTML template (~600 lines)
+  style.css             All CSS incl. mobile responsive, themes (~855 lines)
+  ui.js                 DOM helpers, renderMd, tool cards, context ring (~1090 lines)
   workspace.js          File preview, file ops, git badge (~247 lines)
-  sessions.js           Session CRUD, collapsible groups, search (~589 lines)
+  sessions.js           Session CRUD, ⋯ dropdown, collapsible groups, search (~600 lines)
   messages.js           send(), SSE handlers, rAF throttle (~352 lines)
-  panels.js             Cron, skills, memory, profiles, settings (~1146 lines)
+  panels.js             Cron, skills, memory, profiles, control center (~1200 lines)
   commands.js           Slash command autocomplete (~170 lines)
-  boot.js               Mobile nav, voice input, boot IIFE (~338 lines)
+  boot.js               Mobile nav, workspace state machine, composer chips, boot IIFE (~420 lines)
 tests/
   conftest.py           Isolated test server (port 8788)
-  test_sprint{1-23}.py  22 test files, 426 test functions
-  test_regressions.py   Permanent regression gate (23 tests)
+  test_sprint{1-36}.py  36 test files, 742 test functions
+  test_regressions.py   Permanent regression gate
 Dockerfile              python:3.12-slim container image
 docker-compose.yml      Compose with named volume and optional auth
 .github/workflows/      CI: multi-arch Docker build + GitHub Release on tag

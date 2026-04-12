@@ -5,16 +5,120 @@ async function cancelStream(){
     await fetch(new URL(`/api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,location.origin).href,{credentials:'include'});
   }catch(e){/* cancel request failed — cleanup below still runs */}
   // Clear status unconditionally after the cancel request completes.
-  // The SSE cancel event may also fire and call setBusy(false)/setStatus(''),
-  // but if the connection is already closed it won't arrive — so we handle
-  // cleanup here as the guaranteed path.
+  // The SSE cancel event may also fire, but if the connection is already
+  // closed it won't arrive — so we handle cleanup here as the guaranteed path.
   const btn=$('btnCancel');if(btn)btn.style.display='none';
   S.activeStreamId=null;
   setBusy(false);
-  setStatus('');
+  if(typeof setComposerStatus==='function') setComposerStatus('');
+  else setStatus('');
 }
 
 // ── Mobile navigation ──────────────────────────────────────────────────────
+let _workspacePanelMode='closed'; // 'closed' | 'browse' | 'preview'
+
+function _isCompactWorkspaceViewport(){
+  return window.matchMedia('(max-width: 900px)').matches;
+}
+
+function _workspacePanelEls(){
+  return {
+    layout: document.querySelector('.layout'),
+    panel: document.querySelector('.rightpanel'),
+    toggleBtn: $('btnWorkspacePanelToggle'),
+    collapseBtn: $('btnCollapseWorkspacePanel'),
+  };
+}
+
+function _hasWorkspacePreviewVisible(){
+  const preview=$('previewArea');
+  return !!(preview&&preview.classList.contains('visible'));
+}
+
+function _setWorkspacePanelMode(mode){
+  const {layout,panel}= _workspacePanelEls();
+  if(!layout||!panel)return;
+  _workspacePanelMode=(mode==='browse'||mode==='preview')?mode:'closed';
+  const open=_workspacePanelMode!=='closed';
+  layout.classList.toggle('workspace-panel-collapsed',!open);
+  if(_isCompactWorkspaceViewport()){
+    panel.classList.toggle('mobile-open',open);
+  }else{
+    panel.classList.remove('mobile-open');
+  }
+  syncWorkspacePanelUI();
+}
+
+function syncWorkspacePanelState(){
+  const hasPreview=_hasWorkspacePreviewVisible();
+  if(hasPreview){
+    if(_workspacePanelMode==='closed') _setWorkspacePanelMode('preview');
+    else syncWorkspacePanelUI();
+    return;
+  }
+  if(!S.session){
+    _setWorkspacePanelMode('closed');
+    return;
+  }
+  _setWorkspacePanelMode(_workspacePanelMode==='preview'?'closed':_workspacePanelMode);
+}
+
+function openWorkspacePanel(mode='browse'){
+  if(mode==='browse'&&!S.session&&!_hasWorkspacePreviewVisible())return;
+  if(mode==='preview'&&_workspacePanelMode==='browse'){
+    syncWorkspacePanelUI();
+    return;
+  }
+  _setWorkspacePanelMode(mode);
+}
+
+function closeWorkspacePanel(){
+  _setWorkspacePanelMode('closed');
+}
+
+function ensureWorkspacePreviewVisible(){
+  if(_workspacePanelMode==='closed') _setWorkspacePanelMode('preview');
+  else syncWorkspacePanelUI();
+}
+
+function handleWorkspaceClose(){
+  if(_hasWorkspacePreviewVisible()){
+    clearPreview();
+    return;
+  }
+  closeWorkspacePanel();
+}
+
+function syncWorkspacePanelUI(){
+  const {layout,panel,toggleBtn,collapseBtn}= _workspacePanelEls();
+  if(!layout||!panel)return;
+  const desktopOpen=_workspacePanelMode!=='closed';
+  const mobileOpen=panel.classList.contains('mobile-open');
+  const isCompact=_isCompactWorkspaceViewport();
+  const isOpen=isCompact?mobileOpen:desktopOpen;
+  const canBrowse=!!S.session||_hasWorkspacePreviewVisible();
+  const hasPreview=_hasWorkspacePreviewVisible();
+  if(toggleBtn){
+    toggleBtn.classList.toggle('active',isOpen);
+    toggleBtn.setAttribute('aria-pressed',isOpen?'true':'false');
+    toggleBtn.title=isOpen?'Hide workspace panel':'Show workspace panel';
+    toggleBtn.disabled=!canBrowse;
+  }
+  if(collapseBtn){
+    collapseBtn.title=isCompact?'Close workspace panel':'Hide workspace panel';
+  }
+  const hasSession=!!S.session;
+  ['btnUpDir','btnNewFile','btnNewFolder','btnRefreshPanel'].forEach(id=>{
+    const el=$(id);
+    if(el)el.disabled=!hasSession;
+  });
+  const clearBtn=$('btnClearPreview');
+  if(clearBtn){
+    clearBtn.disabled=!isOpen;
+    clearBtn.title=hasPreview?'Close preview':'Hide workspace panel';
+  }
+}
+
 function toggleMobileSidebar(){
   const sidebar=document.querySelector('.sidebar');
   const overlay=$('mobileOverlay');
@@ -27,37 +131,22 @@ function closeMobileSidebar(){
   const sidebar=document.querySelector('.sidebar');
   const overlay=$('mobileOverlay');
   if(sidebar)sidebar.classList.remove('mobile-open');
-  // only hide overlay if right panel is also closed
-  const panel=document.querySelector('.rightpanel');
-  if(!panel||!panel.classList.contains('mobile-open')){
-    if(overlay)overlay.classList.remove('visible');
-  }
+  if(overlay)overlay.classList.remove('visible');
 }
 function toggleMobileFiles(){
-  const panel=document.querySelector('.rightpanel');
-  const overlay=$('mobileOverlay');
-  if(!panel)return;
-  if(panel.classList.contains('mobile-open')){
-    panel.classList.remove('mobile-open');
-    // only hide overlay if left sidebar is also closed
-    const sidebar=document.querySelector('.sidebar');
-    if(!sidebar||!sidebar.classList.contains('mobile-open')){
-      if(overlay)overlay.classList.remove('visible');
-    }
-  } else {
-    panel.classList.add('mobile-open');
-    if(overlay)overlay.classList.add('visible');
-  }
+  toggleWorkspacePanel();
 }
-function closeMobileFiles(){
-  const panel=document.querySelector('.rightpanel');
-  const overlay=$('mobileOverlay');
-  if(panel)panel.classList.remove('mobile-open');
-  // only hide overlay if left sidebar is also closed
-  const sidebar=document.querySelector('.sidebar');
-  if(!sidebar||!sidebar.classList.contains('mobile-open')){
-    if(overlay)overlay.classList.remove('visible');
+function toggleWorkspacePanel(force){
+  const {panel}= _workspacePanelEls();
+  if(!panel)return;
+  const currentlyOpen=_workspacePanelMode!=='closed';
+  const nextOpen=typeof force==='boolean'?force:!currentlyOpen;
+  if(!nextOpen){
+    closeWorkspacePanel();
+    return;
   }
+  const nextMode=_hasWorkspacePreviewVisible()?'preview':'browse';
+  openWorkspacePanel(nextMode);
 }
 function mobileSwitchPanel(name){
   // Switch the panel content view
@@ -191,6 +280,8 @@ $('importFileInput').onchange=async(e)=>{
     if(res.ok&&res.session){
       await loadSession(res.session.session_id);
       await renderSessionList();
+      const overlay=$('settingsOverlay');
+      if(overlay) overlay.style.display='none';
       showToast(t('session_imported'));
     }
   }catch(err){
@@ -199,6 +290,7 @@ $('importFileInput').onchange=async(e)=>{
 };
 // btnRefreshFiles is now panel-icon-btn in header (see HTML)
 function clearPreview(){
+  const closePanelAfter=_workspacePanelMode==='preview';
   const pa=$('previewArea');if(pa)pa.classList.remove('visible');
   const pi=$('previewImg');if(pi){pi.onerror=null;pi.src='';}
   const pm=$('previewMd');if(pm)pm.innerHTML='';
@@ -208,15 +300,20 @@ function clearPreview(){
   _previewCurrentPath='';_previewCurrentMode='';_previewDirty=false;
   // Restore directory breadcrumb after closing file preview
   if(typeof renderBreadcrumb==='function') renderBreadcrumb();
+  if(closePanelAfter)closeWorkspacePanel();
+  else syncWorkspacePanelUI();
 }
-$('btnClearPreview').onclick=clearPreview;
+$('btnClearPreview').onclick=handleWorkspaceClose;
 // workspacePath click handler removed -- use topbar workspace chip dropdown instead
 $('modelSelect').onchange=async()=>{
   if(!S.session)return;
   const selectedModel=$('modelSelect').value;
+  if(typeof closeModelDropdown==='function') closeModelDropdown();
   localStorage.setItem('hermes-webui-model', selectedModel);
   await api('/api/session/update',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,workspace:S.session.workspace,model:selectedModel})});
-  S.session.model=selectedModel;syncTopbar();
+  S.session.model=selectedModel;
+  if(typeof syncModelChip==='function') syncModelChip();
+  syncTopbar();
   // Warn if selected model belongs to a different provider than what Hermes is configured for
   if(typeof _checkProviderMismatch==='function'){
     const warn=_checkProviderMismatch(selectedModel);
@@ -304,6 +401,10 @@ $('msg').addEventListener('paste',e=>{
 });
 document.querySelectorAll('.suggestion').forEach(btn=>{
   btn.onclick=()=>{$('msg').value=btn.dataset.msg;send();};
+});
+
+window.addEventListener('resize',()=>{
+  syncWorkspacePanelState();
 });
 
 // Boot: restore last session or start fresh
@@ -399,13 +500,14 @@ function applyBotName(){
   _initResizePanels();
   const saved=localStorage.getItem('hermes-webui-session');
   if(saved){
-    try{await loadSession(saved);await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);return;}
+    try{await loadSession(saved);syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);return;}
     catch(e){localStorage.removeItem('hermes-webui-session');}
   }
   // no saved session - show empty state, wait for user to hit +
+  syncTopbar();
+  syncWorkspacePanelState();
   $('emptyState').style.display='';
   await renderSessionList();
   // Start real-time gateway session sync if setting is enabled
   if(typeof startGatewaySSE==='function') startGatewaySSE();
 })();
-

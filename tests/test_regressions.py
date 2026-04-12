@@ -226,8 +226,8 @@ def test_loadSession_resets_busy_state_for_idle_session(cleanup_test_sessions):
     src = (REPO_ROOT / "static/sessions.js").read_text()
     # The fix adds explicit S.busy=false in the non-inflight else branch
     assert "S.busy=false;" in src,         "sessions.js loadSession must set S.busy=false when loading a non-inflight session"
-    # btnSend must be explicitly re-enabled
-    assert "$('btnSend').disabled=false;" in src,         "sessions.js loadSession must enable btnSend for non-inflight sessions"
+    # btnSend state must be refreshed via updateSendBtn
+    assert "updateSendBtn()" in src,         "sessions.js loadSession must call updateSendBtn for non-inflight sessions"
 
 
 def test_done_handler_guards_setbusy_with_inflight_check(cleanup_test_sessions):
@@ -352,12 +352,12 @@ def test_respond_approval_uses_approval_session_id(cleanup_test_sessions):
     assert "_approvalSessionId" in fn_body,         "respondApproval must read _approvalSessionId, not S.session.session_id"
 
 
-# ── R11: Activity bar shows cross-session tool status ─────────────────────
+# ── R11: Tool progress must not use shared status chrome ──────────────────
 
 def test_tool_status_only_shown_for_current_session(cleanup_test_sessions):
-    """R11: The activity bar setStatus() call in the tool SSE handler must only
-    fire when the user is viewing the session that triggered the tool.
-    When missing, session A's tool names would appear in session B's activity bar.
+    """R11: Tool progress should not drive the global status bar or composer
+    status. Live tool cards in the current conversation are the authoritative
+    progress UI, which avoids cross-session status leakage entirely.
     """
     src = (REPO_ROOT / "static/messages.js").read_text()
     # Sprint 12: handler moved into _wireSSE(source)
@@ -366,14 +366,10 @@ def test_tool_status_only_shown_for_current_session(cleanup_test_sessions):
         tool_idx = src.find("es.addEventListener('tool'")
     assert tool_idx >= 0
     tool_block = src[tool_idx:tool_idx+400]
-    # setStatus must be inside the activeSid guard, not before it
-    status_pos = tool_block.find("setStatus(")
-    guard_pos  = tool_block.find("S.session.session_id===activeSid")
-    assert guard_pos >= 0, "tool handler must guard with activeSid check"
-    # The guard must appear BEFORE or AROUND the setStatus call
-    # (status only fires for the current session)
-    assert status_pos > tool_block.find("activeSid"), \
-        "setStatus in tool handler must be inside the activeSid guard"
+    assert "setStatus(" not in tool_block, \
+        "tool handler should not use the global activity/status bar"
+    assert "setComposerStatus(" not in tool_block, \
+        "tool handler should not use composer status for tool progress"
 
 # ── R12: Live tool cards lost on switch-away and switch-back ──────────────
 

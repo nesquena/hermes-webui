@@ -6,6 +6,21 @@
 ---
 
 
+## [v0.50.0] Composer-centric UI refresh + Hermes Control Center (PR #242)
+
+Major UI overhaul by [@aronprins](https://github.com/aronprins), rebased and reviewed on `pr-242-review`.
+
+- **Composer as control hub** — model selector, profile chip, and workspace chip now live in the composer footer as pill buttons with dropdowns. The context window usage ring (token count, cost, fill) replaces the old linear pill.
+- **Hermes Control Center** — a single sidebar launcher button (bottom of sidebar) replaces the gear icon settings modal. Tabbed 860px modal: Conversation tab (transcript/JSON export, import, clear), Preferences tab (all settings), System tab (version, password). Always resets to Conversation on close.
+- **Activity bar removed** — turn-scoped status (thinking, cancelling) renders inline in the composer footer via `setComposerStatus`.
+- **Session `⋯` dropdown** — per-row pin/archive/duplicate/move/delete actions move from inline buttons into a shared dropdown menu; click-outside/scroll/Escape handling.
+- **Workspace panel state machine** — `_workspacePanelMode` (`closed`/`browse`/`preview`) in boot.js with proper transitions and discard-unsaved guard.
+- **Icon additions** — save, chevron-right, arrow-right, pause, paperclip, copy, rotate-ccw, user added to icons.js.
+- **i18n additions** — 6 new keys across en/de/zh/zh-Hant for control center sections.
+- **OLED theme** — 7th built-in theme (true black background for OLED displays).
+- **Mobile fixes** — icon-only composer chips below 640px, `overflow-y: hidden` on `.composer-left` to prevent scrollbar, profile dropdown `max-width: min(260px, calc(100vw - 32px))`.
+- 742 tests total; all existing tests pass; version badge in System tab updated to v0.50.0.
+
 ## [v0.49.4] Cancel stream cleanup guaranteed (PR #309, fixes #299)
 
 - **Reliable cancel cleanup** (closes #299): `cancelStream()` no longer depends on the SSE `cancel` event to clear busy state and status text. Previously, if the SSE connection was already closed when cancel fired, "Cancelling..." would linger indefinitely. Now `cancelStream()` clears `S.activeStreamId`, calls `setBusy(false)`, `setStatus('')`, and hides the cancel button directly after the cancel API request — regardless of SSE connection state. The SSE cancel handler still runs when the connection is alive (all operations are idempotent).
@@ -279,7 +294,7 @@
   notification when the tab is in the background.
 - **Thinking / reasoning block display** (PR #181, #182): Inline `<think>…</think>`
   and Gemma 4 `<|channel>thought…<channel|>` tags are parsed out of assistant
-  messages and rendered as a collapsible 💡 "Thinking" card above the reply.
+  messages and rendered as a collapsible lightbulb "Thinking" card above the reply.
   During streaming, the bubble shows "Thinking…" until the tag closes. Hardened
   against partial-tag edge cases and empty thinking blocks.
 
@@ -687,7 +702,7 @@
   command. Persists server-side across refreshes.
 
 - **Subagent delegation cards.** `subagent_progress` events now render with
-  a 🔀 icon and a blue indented left border to visually distinguish child
+  a shuffle icon and a blue indented left border to visually distinguish child
   tool activity from parent tool calls. `delegate_task` cards display as
   "Delegate task" with cleaner formatting.
 
@@ -1483,9 +1498,9 @@ The sprint that closed the last gaps for heavy agentic use.
   restored from session history on reload. Shows tool name, preview, args, result snippet.
 - **Attachment metadata persists on reload.** File badges on user messages survive page
   refresh. Server stores filenames on the user message in session JSON.
-- **Todo list panel.** New checkmark tab in the sidebar. Shows current task list parsed
-  from the most recent todo tool result in message history. Status icons: pending (○),
-  in-progress (◉), completed (✓), cancelled (✗). Auto-refreshes when panel is active.
+- **Todo list panel.** New task-list tab in the sidebar. Shows current task list parsed
+  from the most recent todo tool result in message history. Status icons use Lucide
+  square, loader, check, and x states. Auto-refreshes when panel is active.
 - **Model preference persists.** Last-used model saved to localStorage. Restored on page
   load. New sessions inherit it automatically.
 

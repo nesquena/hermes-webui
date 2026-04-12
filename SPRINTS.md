@@ -256,7 +256,7 @@ inconsistently across platforms. These were the most common visual complaints.
   button now only appears in the hover overlay like all other actions.
 
 ### Track B: Features
-- **SVG action icons.** Replaced all emoji HTML entities (★, 📂, 📦, ⊕, 🗑)
+- **SVG action icons.** Replaced old symbol and emoji HTML entities
   with monochrome SVG line icons that inherit `currentColor`. Consistent
   rendering across macOS, Linux, and Windows. Icons: pin (star), folder,
   archive (box), duplicate (overlapping squares), trash (bin with lines).
@@ -762,7 +762,7 @@ Both architectures in one .app. No separate downloads needed.
 - JS bridge fires when approval card appears/disappears
 
 **Menu bar mode (optional, v2):**
-- A small status bar item (⚗️ icon in menu bar) that opens a compact popover
+- A small status bar item (beaker icon in menu bar) that opens a compact popover
 - Popover shows current session status, last message, quick-compose field
 - Useful for running Hermes in the background without a full window
 

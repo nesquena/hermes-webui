@@ -33,7 +33,7 @@
 | Sprint 13 | Alerts + polish | Cron completion alerts (polling + badge), background error banner, session duplicate, browser tab title | 221 |
 | Sprint 14 | Visual polish + workspace ops | Mermaid diagrams, message timestamps, file rename, folder create, session tags, session archive | 233 |
 | Sprint 15 | Session projects + code copy | Session projects/folders, code block copy button, tool card expand/collapse toggle | 237 |
-| Sprint 16 | Session sidebar visual polish | SVG action icons, overlay hover actions, pin indicator, project border, safe HTML rendering | 289 |
+| Sprint 16 | Session sidebar visual polish | SVG action icons, session action dropdown, pin indicator, project border, safe HTML rendering | 289 |
 | Sprint 17 | Workspace polish + slash commands + settings | Breadcrumb navigation, slash command autocomplete, send key setting (#26) | 318 |
 | Sprint 18 | Thinking display + workspace tree | File preview auto-close, thinking/reasoning cards, expandable directory tree (#22) | 318 |
 | Sprint 19 | Auth + security hardening | Password auth (off by default), login page, security headers, 20MB body limit (#23) | 328 |
@@ -85,11 +85,12 @@
 ### Chat and Agent
 - [x] Send messages, get SSE-streaming responses
 - [x] Switch models per session (10 models, grouped by provider)
+- [x] Composer-scoped model picker in footer (moved from sidebar to align with per-conversation model selection)
 - [x] Multi-provider API support: use any Hermes agent API provider (OpenAI, Anthropic, Google, etc.) directly, not just OpenRouter (Sprint 11)
 - [x] Custom endpoint model discovery: auto-detect models from Ollama, LM Studio, and other local LLM servers via base_url (PR #18)
 - [x] Upload files to workspace (drag-drop, click, clipboard paste)
 - [x] File tray with remove button
-- [x] Tool progress shown in activity bar above composer
+- [x] Tool progress shown inline in the conversation via live tool cards
 - [x] Approval card for dangerous commands (Allow once/session/always, Deny)
 - [x] Approval polling + SSE-pushed approval events
 - [x] INFLIGHT guard: switch sessions mid-request without losing response
@@ -101,23 +102,25 @@
 - [x] Token/cost estimate per message (Sprint 23)
 
 ### Tool Visibility
-- [x] Tool progress in activity bar (moved out of composer footer)
+- [x] Tool progress in live tool cards (kept out of the composer/footer chrome)
 - [x] Approval card with all 4 choices
 - [x] Tool call cards inline (collapsed, show name/args/result)
 
 ### Workspace / Files
+- [x] Workspace panel defaults closed and opens only for active browsing or preview
 - [x] Browse workspace directory tree with type icons
 - [x] Preview text/code files (read-only)
 - [x] Preview markdown files (rendered, tables supported)
 - [x] Preview image files (PNG, JPG, GIF, SVG, WEBP inline)
 - [x] Edit files inline (Edit button, Enter to save, Escape to cancel)
 - [x] Create new file (+ button in panel header)
-- [x] Delete file (hover trash, confirm dialog)
+- [x] Delete file (hover trash, confirmation modal)
 - [x] File name truncation with tooltip for long names
 - [x] Right panel resizable (drag inner edge)
 - [x] Syntax highlighted code preview (Prism.js)
 - [x] Rename file (Sprint 14)
 - [x] Create folder (Sprint 14)
+- [x] Shared app modal for confirm/input flows (Sprint 33)
 
 ### Sessions
 - [x] Create session (+ button or Cmd/Ctrl+K)
@@ -218,14 +221,14 @@
 - [x] Streaming performance -- rAF-throttled token rendering (Sprint 24, PR #81)
 - [x] Workspace git detection -- branch name and dirty status badge (Sprint 24, PR #82)
 - [x] Collapsible date groups -- click group headers to collapse (Sprint 24, PR #80)
-- [x] Context usage indicator -- token count and cost in composer footer (Sprint 24, PR #83)
+- [x] Context usage indicator -- compact circular badge in composer footer (Sprint 24, PR #83; refreshed April 10, 2026)
 - [ ] LLM-generated session titles -- auto-title via small model instead of first-message substring (PR #75)
 - [ ] Workspace git detection -- show branch name, dirty status in workspace header (PR #75)
 - [ ] Clarify dialog -- agent can ask clarifying questions that block until user responds (PR #75)
 - [ ] Gateway approval polling -- support blocking approvals from messaging gateway (PR #75)
 - [ ] Unified session storage -- SessionDB shared between webui and CLI (PR #75)
 - [ ] TTS playback of responses (deferred)
-- [x] Background task cancel (activity bar Cancel button)
+- [x] Background task cancel (composer footer stop button)
 - [ ] Code execution cell (deferred)
 - [ ] Desktop application (Sprint 25, PLANNED)
 - [x] Pluggable UI themes -- Dark, Light, Slate, Solarized, Monokai, Nord (Sprint 26, v0.34)
