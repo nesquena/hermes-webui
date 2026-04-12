@@ -23,12 +23,12 @@ def test_send_button_present():
     assert 'id="btnSend"' in html
 
 
-def test_send_button_hidden_by_default():
-    """btnSend must start hidden (display:none) — only shown when there is content."""
+def test_send_button_disabled_by_default():
+    """btnSend must start disabled — enabled only when there is content."""
     html, _ = get_text("/")
     btn_match = re.search(r'id="btnSend"[^>]*>', html)
     assert btn_match, "btnSend element not found"
-    assert 'display:none' in btn_match.group(0)
+    assert 'disabled' in btn_match.group(0)
 
 
 def test_send_button_no_text_label():
@@ -264,14 +264,13 @@ def test_update_send_btn_uses_visible_class():
     assert 'visible' in fn_body
 
 
-def test_update_send_btn_uses_display_none():
-    """updateSendBtn must hide the button with display:none when no content."""
+def test_update_send_btn_uses_disabled():
+    """updateSendBtn must disable the button when no content or busy."""
     js, _ = get_text("/static/ui.js")
     fn_idx = js.find('function updateSendBtn')
     fn_end = js.find('\n}', fn_idx) + 2
     fn_body = js[fn_idx:fn_end]
-    assert 'display' in fn_body
-    assert 'none' in fn_body
+    assert 'disabled' in fn_body
 
 
 def test_set_busy_calls_update_send_btn():
@@ -321,14 +320,13 @@ def test_send_button_still_has_send_btn_class():
     assert 'class="send-btn"' in html
 
 
-def test_ui_js_set_busy_still_disables_btn():
-    """setBusy must still set btnSend.disabled (not just hide it)."""
+def test_ui_js_set_busy_calls_update_send_btn():
+    """setBusy must call updateSendBtn to manage button disabled state."""
     js, _ = get_text("/static/ui.js")
     busy_idx = js.find('function setBusy')
     busy_end = js.find('\n}', busy_idx) + 2
     busy_body = js[busy_idx:busy_end]
-    assert "btnSend" in busy_body
-    assert 'disabled' in busy_body
+    assert 'updateSendBtn' in busy_body
 
 
 def test_index_html_attach_button_unchanged():

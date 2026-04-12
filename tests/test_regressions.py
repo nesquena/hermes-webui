@@ -226,8 +226,8 @@ def test_loadSession_resets_busy_state_for_idle_session(cleanup_test_sessions):
     src = (REPO_ROOT / "static/sessions.js").read_text()
     # The fix adds explicit S.busy=false in the non-inflight else branch
     assert "S.busy=false;" in src,         "sessions.js loadSession must set S.busy=false when loading a non-inflight session"
-    # btnSend must be explicitly re-enabled
-    assert "$('btnSend').disabled=false;" in src,         "sessions.js loadSession must enable btnSend for non-inflight sessions"
+    # btnSend state must be refreshed via updateSendBtn
+    assert "updateSendBtn()" in src,         "sessions.js loadSession must call updateSendBtn for non-inflight sessions"
 
 
 def test_done_handler_guards_setbusy_with_inflight_check(cleanup_test_sessions):

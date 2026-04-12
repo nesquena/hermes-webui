@@ -625,6 +625,19 @@
     .card{width:90vw;max-width:320px;padding:28px 24px;}
   }
 
+  /* ── Narrow phones: icon-only composer chips ── */
+  @media(max-width:400px){
+    .composer-profile-label,
+    .composer-workspace-label,
+    .composer-model-label,
+    .composer-profile-chevron,
+    .composer-workspace-chevron,
+    .composer-model-chevron{display:none;}
+    .composer-profile-chip,
+    .composer-workspace-chip,
+    .composer-model-chip{max-width:44px;min-width:44px;min-height:44px;padding:6px;justify-content:center;gap:0;}
+  }
+
 /* ── Workspace dropdown (topbar) ── */
 .ws-chip{user-select:none;}
 .ws-dropdown{display:none;position:absolute;bottom:calc(100% + 4px);left:0;right:0;min-width:200px;background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -4px 24px rgba(0,0,0,.4);z-index:200;overflow:hidden;max-height:320px;overflow-y:auto;}

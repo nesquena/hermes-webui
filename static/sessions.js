@@ -58,13 +58,18 @@ async function loadSession(sid){
     // setBusy(false) drains MSG_QUEUE which we don't want here.
     S.busy=false;
     S.activeStreamId=null;
-    $('btnSend').disabled=false;
-    $('btnSend').style.opacity='1';
+    updateSendBtn();
     const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
     setStatus('');
     setComposerStatus('');
     clearLiveToolCards();
     syncTopbar();await loadDir('.');renderMessages();highlightCode();
+  }
+  // Sync context usage indicator from session data
+  const _s=S.session;
+  if(_s&&typeof _syncCtxIndicator==='function'){
+    const u=S.lastUsage||{};
+    _syncCtxIndicator({input_tokens:_s.input_tokens||u.input_tokens||0,output_tokens:_s.output_tokens||u.output_tokens||0,estimated_cost:_s.estimated_cost||u.estimated_cost,context_length:u.context_length||0,last_prompt_tokens:u.last_prompt_tokens||0,threshold_tokens:u.threshold_tokens||0});
   }
 }
 

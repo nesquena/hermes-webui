@@ -5,6 +5,8 @@ async function cancelStream(){
     await fetch(new URL(`/api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,location.origin).href,{credentials:'include'});
   }catch(e){/* cancel request failed — cleanup below still runs */}
   // Clear status unconditionally after the cancel request completes.
+  // The SSE cancel event may also fire, but if the connection is already
+  // closed it won't arrive — so we handle cleanup here as the guaranteed path.
   const btn=$('btnCancel');if(btn)btn.style.display='none';
   S.activeStreamId=null;
   setBusy(false);
