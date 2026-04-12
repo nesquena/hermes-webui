@@ -586,8 +586,16 @@
     .composer-box{border-radius:12px;}
     .composer-box textarea{font-size:16px;min-height:40px;}
     .composer-footer{padding:6px 8px 8px!important;gap:8px;}
-    .composer-profile-chip,.composer-workspace-chip{max-width:150px;font-size:11px;padding:6px 10px;}
-    .composer-model-chip{max-width:150px;font-size:11px;padding:6px 10px;}
+    /* icon-only composer chips below 768px */
+    .composer-profile-label,
+    .composer-workspace-label,
+    .composer-model-label,
+    .composer-profile-chevron,
+    .composer-workspace-chevron,
+    .composer-model-chevron{display:none;}
+    .composer-profile-chip,
+    .composer-workspace-chip,
+    .composer-model-chip{max-width:44px;min-width:44px;min-height:44px;padding:6px;justify-content:center;gap:0;font-size:11px;}
     .composer-divider{display:none;}
     .composer-status{max-width:96px;font-size:10px;}
     .send-btn{width:32px;height:32px;}
@@ -626,18 +634,6 @@
     .card{width:90vw;max-width:320px;padding:28px 24px;}
   }
 
-  /* ── Narrow phones: icon-only composer chips ── */
-  @media(max-width:400px){
-    .composer-profile-label,
-    .composer-workspace-label,
-    .composer-model-label,
-    .composer-profile-chevron,
-    .composer-workspace-chevron,
-    .composer-model-chevron{display:none;}
-    .composer-profile-chip,
-    .composer-workspace-chip,
-    .composer-model-chip{max-width:44px;min-width:44px;min-height:44px;padding:6px;justify-content:center;gap:0;}
-  }
 
 /* ── Workspace dropdown (topbar) ── */
 .ws-chip{user-select:none;}
