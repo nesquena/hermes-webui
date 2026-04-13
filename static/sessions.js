@@ -37,15 +37,16 @@ async function loadSession(sid){
   if(INFLIGHT[sid]){
     S.messages=INFLIGHT[sid].messages;
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
+    // Mark the viewed session busy before rendering so renderMessages() does not
+    // also inject the same in-flight tool calls as settled history cards.
+    S.busy=true;
     syncTopbar();await loadDir('.');renderMessages();appendThinking();
     // Restore live tool cards for this in-flight session after renderMessages()
     // rebuilds #msgInner, so the host is anchored into the active thread.
-
     clearLiveToolCards();
     for(const tc of (S.toolCalls||[])){
       if(tc&&tc.name) appendLiveToolCard(tc);
     }
-    syncTopbar();await loadDir('.');renderMessages();appendThinking();
     setBusy(true);setComposerStatus('');
     startApprovalPolling(sid);
   }else{

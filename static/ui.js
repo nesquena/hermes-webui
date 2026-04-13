@@ -1301,12 +1301,29 @@ function renderKatexBlocks(){
   });
 }
 
-function appendThinking(){
-  $('emptyState').style.display='none';
-  const row=document.createElement('div');row.className='msg-row';row.id='thinkingRow';
-  row.innerHTML=`<div class="msg-role assistant"><div class="role-icon assistant">H</div>Hermes</div><div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
-  $('msgInner').appendChild(row);scrollToBottom();
+function _thinkingMarkup(text=''){
+  const _bn=window._botName||'Hermes';
+  const icon=esc(_bn.charAt(0).toUpperCase());
+  const label=esc(_bn);
+  const body=(text&&String(text).trim())
+    ? `<div class="thinking-card open"><div class="thinking-card-header"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span></div><div class="thinking-card-body"><pre>${esc(String(text).trim())}</pre></div></div>`
+    : `<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
+  return `<div class="msg-role assistant"><div class="role-icon assistant">${icon}</div>${label}</div>${body}`;
 }
+function appendThinking(text=''){
+  $('emptyState').style.display='none';
+  let row=$('thinkingRow');
+  if(!row){
+    row=document.createElement('div');
+    row.className='msg-row';
+    row.id='thinkingRow';
+    $('msgInner').appendChild(row);
+  }
+  row.className=(text&&String(text).trim())?'msg-row thinking-card-row':'msg-row';
+  row.innerHTML=_thinkingMarkup(text);
+  scrollToBottom();
+}
+function updateThinking(text=''){appendThinking(text);}
 function removeThinking(){const el=$('thinkingRow');if(el)el.remove();}
 
 function fileIcon(name, type){
