@@ -11,6 +11,7 @@ Discovery order for all paths:
 
 import collections
 import json
+import logging
 import os
 import sys
 import threading
@@ -47,6 +48,8 @@ SESSION_INDEX_FILE = SESSION_DIR / "_index.json"
 SETTINGS_FILE = STATE_DIR / "settings.json"
 LAST_WORKSPACE_FILE = STATE_DIR / "last_workspace.txt"
 PROJECTS_FILE = STATE_DIR / "projects.json"
+
+logger = logging.getLogger(__name__)
 
 
 # ── Hermes agent directory discovery ─────────────────────────────────────────
@@ -760,6 +763,9 @@ def get_available_models() -> dict:
             parsed_url = urlparse(
                 endpoint_url if "://" in endpoint_url else f"http://{endpoint_url}"
             )
+            # Validate URL scheme to prevent file:// and other dangerous schemes
+            if parsed_url.scheme not in ("", "http", "https"):
+                raise ValueError(f"Invalid URL scheme: {parsed_url.scheme}")
             if parsed_url.hostname:
                 try:
                     resolved_ips = socket.getaddrinfo(parsed_url.hostname, None)
@@ -791,7 +797,7 @@ def get_available_models() -> dict:
             req.add_header("User-Agent", "OpenAI/Python 1.0")
             for k, v in headers.items():
                 req.add_header(k, v)
-            with urllib.request.urlopen(req, timeout=10) as response:
+            with urllib.request.urlopen(req, timeout=10) as response:  # nosec B310
                 data = json.loads(response.read().decode("utf-8"))
 
             # Handle both OpenAI-compatible and llama.cpp response formats
