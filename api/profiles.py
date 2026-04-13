@@ -26,6 +26,7 @@ _CLONE_CONFIG_FILES = ['config.yaml', '.env', 'SOUL.md']
 # ── Module state ────────────────────────────────────────────────────────────
 _active_profile = 'default'
 _profile_lock = threading.Lock()
+_loaded_profile_env_keys: set[str] = set()
 
 def _resolve_base_hermes_home() -> Path:
     """Return the BASE ~/.hermes directory — the root that contains profiles/.
@@ -120,11 +121,24 @@ def _set_hermes_home(home: Path):
 
 
 def _reload_dotenv(home: Path):
-    """Load .env from the profile dir into os.environ (additive)."""
+    """Load .env from the profile dir into os.environ with profile isolation.
+
+    Clears env vars that were loaded from the previously active profile before
+    applying the current profile's .env. This prevents API keys and other
+    profile-scoped secrets from leaking across profile switches.
+    """
+    global _loaded_profile_env_keys
+
+    # Remove keys loaded from the previous profile first.
+    for key in list(_loaded_profile_env_keys):
+        os.environ.pop(key, None)
+    _loaded_profile_env_keys = set()
+
     env_path = home / '.env'
     if not env_path.exists():
         return
     try:
+        loaded_keys: set[str] = set()
         for line in env_path.read_text().splitlines():
             line = line.strip()
             if line and not line.startswith('#') and '=' in line:
@@ -133,8 +147,10 @@ def _reload_dotenv(home: Path):
                 v = v.strip().strip('"').strip("'")
                 if k and v:
                     os.environ[k] = v
+                    loaded_keys.add(k)
+        _loaded_profile_env_keys = loaded_keys
     except Exception:
-        pass
+        _loaded_profile_env_keys = set()
 
 
 def init_profile_state() -> None:
