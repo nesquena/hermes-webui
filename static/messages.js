@@ -40,6 +40,9 @@ async function send(){
   clearLiveToolCards();  // clear any leftover live cards from last turn
   S.messages.push(userMsg);renderMessages();appendThinking();setBusy(true);
   INFLIGHT[activeSid]={messages:[...S.messages],uploaded,toolCalls:[]};
+  if(typeof saveInflightState==='function'){
+    saveInflightState(activeSid,{streamId:null,messages:INFLIGHT[activeSid].messages,uploaded,toolCalls:[]});
+  }
   startApprovalPolling(activeSid);
   S.activeStreamId = null;  // will be set after stream starts
 
@@ -69,6 +72,9 @@ async function send(){
     streamId=startData.stream_id;
     S.activeStreamId = streamId;
     markInflight(activeSid, streamId);
+    if(typeof saveInflightState==='function'){
+      saveInflightState(activeSid,{streamId,messages:INFLIGHT[activeSid].messages,uploaded,toolCalls:INFLIGHT[activeSid].toolCalls||[]});
+    }
     // Show Cancel button
     const cancelBtn=$('btnCancel');
     if(cancelBtn) cancelBtn.style.display='inline-flex';
@@ -120,6 +126,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _isActiveSession(){
     return !!(S.session&&S.session.session_id===activeSid);
   }
+  function persistInflightState(){
+    const inflight=INFLIGHT[activeSid];
+    if(!inflight||typeof saveInflightState!=='function') return;
+    saveInflightState(activeSid,{
+      streamId,
+      messages:inflight.messages||[],
+      uploaded:inflight.uploaded||[...uploaded],
+      toolCalls:inflight.toolCalls||[],
+    });
+  }
   function _closeSource(){
     closeLiveStream(activeSid, streamId);
   }
@@ -137,9 +153,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       inflight.messages[assistantIdx].content=assistantText;
       inflight.messages[assistantIdx].reasoning=reasoningText||undefined;
       inflight.messages[assistantIdx]._ts=inflight.messages[assistantIdx]._ts||ts;
+      persistInflightState();
       return;
     }
     inflight.messages.push({role:'assistant',content:assistantText,reasoning:reasoningText||undefined,_live:true,_ts:ts});
+    persistInflightState();
   }
   function ensureAssistantRow(){
     if(!_isActiveSession()) return;
@@ -276,6 +294,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!Array.isArray(INFLIGHT[activeSid].toolCalls)) INFLIGHT[activeSid].toolCalls=[];
       INFLIGHT[activeSid].toolCalls.push(tc);
       S.toolCalls=INFLIGHT[activeSid].toolCalls;
+      persistInflightState();
 
       if(!S.session||S.session.session_id!==activeSid) return;
       removeThinking();
@@ -307,6 +326,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       tc.is_error=!!d.is_error;
       if(d.duration!==undefined) tc.duration=d.duration;
       S.toolCalls=inflight.toolCalls;
+      persistInflightState();
       if(!S.session||S.session.session_id!==activeSid) return;
       appendLiveToolCard(tc);
       scrollIfPinned();
@@ -324,7 +344,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       source.close();
       const d=JSON.parse(e.data);
       delete INFLIGHT[activeSid];
-      clearInflight();
+      clearInflight();clearInflightState(activeSid);
       stopApprovalPolling();
       if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);
       if(S.session&&S.session.session_id===activeSid){
@@ -371,7 +391,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Application-level error sent explicitly by the server (rate limit, crash, etc.)
       // This is distinct from the SSE network 'error' event below.
       source.close();
-      delete INFLIGHT[activeSid];clearInflight();stopApprovalPolling();
+      delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPolling();
       if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;const _cbe=$('btnCancel');if(_cbe)_cbe.style.display='none';
@@ -431,7 +451,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('cancel',e=>{
       source.close();
-      delete INFLIGHT[activeSid];clearInflight();stopApprovalPolling();
+      delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPolling();
       if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;const _cbc=$('btnCancel');if(_cbc)_cbc.style.display='none';
@@ -446,16 +466,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _handleStreamError(){
-    delete INFLIGHT[activeSid];clearInflight();stopApprovalPolling();
+    delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPolling();
+    _closeSource();
     if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);
     if(S.session&&S.session.session_id===activeSid){
       S.activeStreamId=null;const _cbe=$('btnCancel');if(_cbe)_cbe.style.display='none';
       clearLiveToolCards();if(!assistantText)removeThinking();
       S.messages.push({role:'assistant',content:'**Error:** Connection lost'});renderMessages();
     }else{
-      // User switched away — show background error banner
       if(typeof trackBackgroundError==='function'){
-        // Look up session title from the session list cache so the banner names it correctly
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
         trackBackgroundError(activeSid,_errTitle,'Connection lost');
       }

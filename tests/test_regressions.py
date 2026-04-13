@@ -670,3 +670,24 @@ def test_skills_slash_command_defined():
     # 3. i18n key cmd_skills must be referenced (wired to COMMANDS entry)
     assert "cmd_skills" in src, \
         "cmd_skills i18n key must be referenced in commands.js"
+
+
+def test_reload_recovery_persists_durable_inflight_state(cleanup_test_sessions):
+    """Reload recovery must persist a durable per-session inflight snapshot.
+    Without these helpers, loadSession() references loadInflightState() but a full
+    browser reload has no saved state to hydrate, so recovery silently no-ops.
+    """
+    ui_src = (REPO_ROOT / "static/ui.js").read_text()
+    messages_src = (REPO_ROOT / "static/messages.js").read_text()
+    sessions_src = (REPO_ROOT / "static/sessions.js").read_text()
+
+    assert "const INFLIGHT_STATE_KEY = 'hermes-webui-inflight-state'" in ui_src
+    assert "function saveInflightState(sid, state)" in ui_src
+    assert "function loadInflightState(sid, streamId)" in ui_src
+    assert "function clearInflightState(sid)" in ui_src
+    assert "saveInflightState(activeSid" in messages_src, \
+        "messages.js must persist live stream snapshots while a turn is in flight"
+    assert "clearInflightState(activeSid)" in messages_src, \
+        "messages.js must clear durable inflight snapshots when the run ends/errors/cancels"
+    assert "const stored=loadInflightState(sid, activeStreamId);" in sessions_src, \
+        "loadSession() must hydrate in-flight state from durable browser storage on reload"
