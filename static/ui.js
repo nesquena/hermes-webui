@@ -723,6 +723,47 @@ function copyMsg(btn){
 
 // ── Reconnect banner (B4/B5: reload resilience) ──
 const INFLIGHT_KEY = 'hermes-webui-inflight'; // localStorage key for in-flight session tracking
+const INFLIGHT_STATE_KEY = 'hermes-webui-inflight-state'; // localStorage snapshots for mid-stream reload recovery
+
+function _readInflightStateMap(){
+  try{
+    const raw=localStorage.getItem(INFLIGHT_STATE_KEY);
+    const parsed=raw?JSON.parse(raw):{};
+    return parsed&&typeof parsed==='object'?parsed:{};
+  }catch(_){
+    return {};
+  }
+}
+function saveInflightState(sid, state){
+  if(!sid||!state) return;
+  try{
+    const all=_readInflightStateMap();
+    all[sid]={...state,updated_at:Date.now()};
+    localStorage.setItem(INFLIGHT_STATE_KEY, JSON.stringify(all));
+  }catch(_){ }
+}
+function loadInflightState(sid, streamId){
+  if(!sid) return null;
+  const all=_readInflightStateMap();
+  const entry=all[sid];
+  if(!entry) return null;
+  if(streamId&&entry.streamId&&entry.streamId!==streamId) return null;
+  if(entry.updated_at&&Date.now()-entry.updated_at>10*60*1000){
+    clearInflightState(sid);
+    return null;
+  }
+  return entry;
+}
+function clearInflightState(sid){
+  if(!sid) return;
+  try{
+    const all=_readInflightStateMap();
+    if(!(sid in all)) return;
+    delete all[sid];
+    if(Object.keys(all).length) localStorage.setItem(INFLIGHT_STATE_KEY, JSON.stringify(all));
+    else localStorage.removeItem(INFLIGHT_STATE_KEY);
+  }catch(_){ }
+}
 
 function markInflight(sid, streamId) {
   localStorage.setItem(INFLIGHT_KEY, JSON.stringify({sid, streamId, ts: Date.now()}));
