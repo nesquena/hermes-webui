@@ -304,6 +304,17 @@ function renderMd(raw){
   // Only runs OUTSIDE fenced code blocks and backtick spans (stash + restore).
   // Unsafe tags (anything not in the allowlist) are left as-is and will be
   // HTML-escaped by esc() when they reach an innerHTML assignment -- no XSS risk.
+  // Math stash: protect $$..$$ and $..$ from markdown processing
+  // Must run BEFORE fence_stash so code blocks don't capture math delimiters
+  const math_stash=[];
+  // Display math: $$...$$  (must come before inline to avoid mis-parsing)
+  s=s.replace(/\$\$([\s\S]+?)\$\$/g,(_,m)=>{math_stash.push({type:\'display\',src:m});return \'\\x00M\'+(math_stash.length-1)+\'\\x00\';});
+  // Inline math: $...$ — require non-space at boundaries to avoid false positives
+  // e.g. "costs $5 and $10" should not trigger (space after opening $)
+  s=s.replace(/\$([^\s$\n][^$\n]*?[^\s$\n]|\S)\$/g,(_,m)=>{math_stash.push({type:\'inline\',src:m});return \'\\x00M\'+(math_stash.length-1)+\'\\x00\';});
+  // Also stash \(...\) and \[...\] LaTeX delimiters
+  s=s.replace(/\\\\\((.+?)\\\\\)/g,(_,m)=>{math_stash.push({type:\'inline\',src:m});return \'\\x00M\'+(math_stash.length-1)+\'\\x00\';});
+  s=s.replace(/\\\\\[(.+?)\\\\\]/gs,(_,m)=>{math_stash.push({type:\'display\',src:m});return \'\\x00M\'+(math_stash.length-1)+\'\\x00\';});
   const fence_stash=[];
   s=s.replace(/(```[\s\S]*?```|`[^`\n]+`)/g,m=>{fence_stash.push(m);return '\x00F'+(fence_stash.length-1)+'\x00';});
   // Safe tag → markdown equivalent (these produce the same output as **text** etc.)
@@ -382,7 +393,7 @@ function renderMd(raw){
   // Our pipeline only emits: <strong>,<em>,<code>,<pre>,<h1-6>,<ul>,<ol>,<li>,
   // <table>,<thead>,<tbody>,<tr>,<th>,<td>,<hr>,<blockquote>,<p>,<br>,<a>,
   // <div class="..."> (mermaid/pre-header). Everything else is untrusted input.
-  const SAFE_TAGS=/^<\/?(strong|em|code|pre|h[1-6]|ul|ol|li|table|thead|tbody|tr|th|td|hr|blockquote|p|br|a|div)([\s>]|$)/i;
+  const SAFE_TAGS=/^<\/?(strong|em|code|pre|h[1-6]|ul|ol|li|table|thead|tbody|tr|th|td|hr|blockquote|p|br|a|div|span)([\s>]|$)/i;
   s=s.replace(/<\/?[a-z][^>]*>/gi,tag=>SAFE_TAGS.test(tag)?tag:esc(tag));
   // Autolink: convert plain URLs to clickable links (not inside existing <a> tags, not in code)
   s=s.replace(/(https?:\/\/[^\s<>"')\]]+)/g,(url)=>{
@@ -390,6 +401,15 @@ function renderMd(raw){
     const trail=url.match(/[.,;:!?)]$/)?url.slice(-1):'';
     const clean=trail?url.slice(0,-1):url;
     return `<a href="${esc(clean)}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;
+  });
+  // Restore math stash → katex placeholder spans/divs
+  // These will be rendered by renderKatexBlocks() after DOM insertion
+  s=s.replace(/\x00M(\d+)\x00/g,(_,i)=>{
+    const item=math_stash[+i];
+    if(item.type==='display'){
+      return `<div class="katex-block" data-katex="display">${esc(item.src)}</div>`;
+    }
+    return `<span class="katex-inline" data-katex="inline">${esc(item.src)}</span>`;
   });
   const parts=s.split(/\n{2,}/);
   s=parts.map(p=>{p=p.trim();if(!p)return '';if(/^<(h[1-6]|ul|ol|pre|hr|blockquote)/.test(p))return p;return `<p>${p.replace(/\n/g,'<br>')}</p>`;}).join('\n');
@@ -963,7 +983,7 @@ function renderMessages(){
   }
   scrollToBottom();
   // Apply syntax highlighting after DOM is built
-  requestAnimationFrame(()=>{highlightCode();addCopyButtons();renderMermaidBlocks();});
+  requestAnimationFrame(()=>{highlightCode();addCopyButtons();renderMermaidBlocks();renderKatexBlocks();});
   // Refresh todo panel if it's currently open
   if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){
     loadTodos();
@@ -1233,6 +1253,47 @@ function renderMermaidBlocks(){
     }catch(e){
       // Fall back to showing as a code block
       block.innerHTML=`<div class="pre-header">mermaid</div><pre><code>${esc(code)}</code></pre>`;
+    }
+  });
+}
+
+let _katexLoading=false;
+let _katexReady=false;
+
+function renderKatexBlocks(){
+  const blocks=document.querySelectorAll('.katex-block:not([data-rendered]),.katex-inline:not([data-rendered])');
+  if(!blocks.length) return;
+  if(!_katexReady){
+    if(!_katexLoading){
+      _katexLoading=true;
+      const script=document.createElement('script');
+      script.src='https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.js';
+      script.integrity='sha384-cMkvdD8LoxVzGF/RPUKAcvmm49FQ0oxwDF3BGKtDXcEc+T1b2N+teh/OJfpU0jr6';
+      script.crossOrigin='anonymous';
+      script.onload=()=>{
+        if(typeof katex!=='undefined'){
+          _katexReady=true;
+          renderKatexBlocks();
+        }
+      };
+      document.head.appendChild(script);
+    }
+    return;
+  }
+  blocks.forEach(el=>{
+    el.dataset.rendered='true';
+    const src=el.textContent||'';
+    const displayMode=el.dataset.katex==='display';
+    try{
+      katex.render(src,el,{
+        displayMode,
+        throwOnError:false,
+        trust:false,
+        strict:'ignore',
+      });
+    }catch(e){
+      // Leave as raw text in a code span on failure
+      el.outerHTML=`<code>${esc(src)}</code>`;
     }
   });
 }
