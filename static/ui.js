@@ -383,6 +383,8 @@ function renderMd(raw){
   // <div class="..."> (mermaid/pre-header). Everything else is untrusted input.
   const SAFE_TAGS=/^<\/?(strong|em|code|pre|h[1-6]|ul|ol|li|table|thead|tbody|tr|th|td|hr|blockquote|p|br|a|div)([\s>]|$)/i;
   s=s.replace(/<\/?[a-z][^>]*>/gi,tag=>SAFE_TAGS.test(tag)?tag:esc(tag));
+  // Autolink: convert plain URLs to clickable links (but not inside existing <a> or markdown [label](url))
+  s=s.replace(/(?!<a\s)[^>\n]*(https?:\/\/[^\s<>"')\]]+)(?![^<]*<\/a>)/g,(_, url)=>`<a href="${esc(url)}" target="_blank" rel="noopener">${esc(url)}</a>`);
   const parts=s.split(/\n{2,}/);
   s=parts.map(p=>{p=p.trim();if(!p)return '';if(/^<(h[1-6]|ul|ol|pre|hr|blockquote)/.test(p))return p;return `<p>${p.replace(/\n/g,'<br>')}</p>`;}).join('\n');
   return s;
