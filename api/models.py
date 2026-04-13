@@ -44,6 +44,10 @@ class Session:
                  project_id: str=None, profile=None,
                  input_tokens: int=0, output_tokens: int=0, estimated_cost=None,
                  personality=None,
+                 active_stream_id: str=None,
+                 pending_user_message: str=None,
+                 pending_attachments=None,
+                 pending_started_at=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
@@ -61,6 +65,10 @@ class Session:
         self.output_tokens = output_tokens or 0
         self.estimated_cost = estimated_cost
         self.personality = personality
+        self.active_stream_id = active_stream_id
+        self.pending_user_message = pending_user_message
+        self.pending_attachments = pending_attachments or []
+        self.pending_started_at = pending_started_at
 
     @property
     def path(self):

@@ -506,6 +506,10 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                         'assistant_msg_idx': asst_idx, 'args': args_snap,
                     })
             s.tool_calls = tool_calls
+            s.active_stream_id = None
+            s.pending_user_message = None
+            s.pending_attachments = []
+            s.pending_started_at = None
             # Tag the matching user message with attachment filenames for display on reload
             # Only tag a user message whose content relates to this turn's text
             # (msg_text is the full message including the [Attached files: ...] suffix)
@@ -564,6 +568,15 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
 
     except Exception as e:
         print('[webui] stream error:\n' + traceback.format_exc(), flush=True)
+        if s is not None:
+            s.active_stream_id = None
+            s.pending_user_message = None
+            s.pending_attachments = []
+            s.pending_started_at = None
+            try:
+                s.save()
+            except Exception:
+                pass
         err_str = str(e)
         # Detect rate limit errors specifically so the client can show a helpful card
         # rather than the generic "Connection lost" message

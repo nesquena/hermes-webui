@@ -11,7 +11,7 @@ const ICONS={
 };
 
 async function newSession(flash){
-  MSG_QUEUE.length=0;updateQueueBadge();
+  updateQueueBadge();
   S.toolCalls=[];
   clearLiveToolCards();
   // Use profile default workspace for new sessions after a profile switch (one-shot),
@@ -20,9 +20,19 @@ async function newSession(flash){
   S._profileDefaultWorkspace=null; // consume — only applies to the first new session after switch
   const data=await api('/api/session/new',{method:'POST',body:JSON.stringify({model:$('modelSelect').value,workspace:inheritWs})});
   S.session=data.session;S.messages=data.session.messages||[];
+  S.lastUsage={...(data.session.last_usage||{})};
   if(flash)S.session._flash=true;
   localStorage.setItem('hermes-webui-session',S.session.session_id);
-  syncTopbar();await loadDir('.');renderMessages();
+  // Reset per-session visual state: a fresh chat is idle even if another
+  // conversation is still streaming in the background.
+  S.busy=false;
+  S.activeStreamId=null;
+  updateSendBtn();
+  const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
+  setStatus('');
+  setComposerStatus('');
+  updateQueueBadge(S.session.session_id);
+  syncTopbar();renderMessages();loadDir('.');
   // don't call renderSessionList here - callers do it when needed
 }
 
@@ -30,41 +40,74 @@ async function loadSession(sid){
   stopApprovalPolling();hideApprovalCard();
   const data=await api(`/api/session?session_id=${encodeURIComponent(sid)}`);
   S.session=data.session;
+  S.lastUsage={...(data.session.last_usage||{})};
   localStorage.setItem('hermes-webui-session',S.session.session_id);
+  const activeStreamId=data.session.active_stream_id||null;
+  if(!INFLIGHT[sid]&&activeStreamId&&typeof loadInflightState==='function'){
+    const stored=loadInflightState(sid, activeStreamId);
+    if(stored){
+      INFLIGHT[sid]={
+        messages:Array.isArray(stored.messages)&&stored.messages.length?stored.messages:[...(data.session.messages||[])],
+        uploaded:Array.isArray(stored.uploaded)?stored.uploaded:[...(data.session.pending_attachments||[])],
+        toolCalls:Array.isArray(stored.toolCalls)?stored.toolCalls:[],
+        reattach:true,
+      };
+    }
+  }
   // Keep raw session.messages intact so side panels (e.g. Todos) can still
   // reconstruct state from tool outputs after reload. Visible transcript rows
   // are filtered later by renderMessages().
   if(INFLIGHT[sid]){
     S.messages=INFLIGHT[sid].messages;
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
-    // Mark the viewed session busy before rendering so renderMessages() does not
-    // also inject the same in-flight tool calls as settled history cards.
     S.busy=true;
-    syncTopbar();await loadDir('.');renderMessages();appendThinking();
-    // Restore live tool cards for this in-flight session after renderMessages()
-    // rebuilds #msgInner, so the host is anchored into the active thread.
+    syncTopbar();renderMessages();appendThinking();loadDir('.');
     clearLiveToolCards();
+    if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
     for(const tc of (S.toolCalls||[])){
       if(tc&&tc.name) appendLiveToolCard(tc);
     }
     setBusy(true);setComposerStatus('');
     startApprovalPolling(sid);
+    S.activeStreamId=activeStreamId;
+    const _cb=$('btnCancel');if(_cb&&activeStreamId)_cb.style.display='inline-flex';
+    if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function'){
+      INFLIGHT[sid].reattach=false;
+      attachLiveStream(sid, activeStreamId, data.session.pending_attachments||[], {reconnecting:true});
+    }
   }else{
-    MSG_QUEUE.length=0;updateQueueBadge();  // clear queue for the viewed session
+    updateQueueBadge(sid);
     S.messages=data.session.messages||[];
+    const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(data.session):null;
+    if(pendingMsg) S.messages.push(pendingMsg);
     S.toolCalls=(data.session.tool_calls||[]).map(tc=>({...tc,done:true}));
-    // Reset per-session visual state: the viewed session is idle even if another
-    // session's stream is still running in the background.
-    // We directly update the DOM instead of calling setBusy(false), because
-    // setBusy(false) drains MSG_QUEUE which we don't want here.
-    S.busy=false;
-    S.activeStreamId=null;
-    updateSendBtn();
-    const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
-    setStatus('');
-    setComposerStatus('');
     clearLiveToolCards();
-    syncTopbar();await loadDir('.');renderMessages();highlightCode();
+    if(activeStreamId){
+      S.busy=true;
+      S.activeStreamId=activeStreamId;
+      updateSendBtn();
+      const _cb=$('btnCancel');if(_cb)_cb.style.display='inline-flex';
+      setStatus('');
+      setComposerStatus('');
+      syncTopbar();renderMessages();appendThinking();loadDir('.');
+      updateQueueBadge(sid);
+      startApprovalPolling(sid);
+      if(typeof attachLiveStream==='function') attachLiveStream(sid, activeStreamId, data.session.pending_attachments||[], {reconnecting:true});
+      else if(typeof watchInflightSession==='function') watchInflightSession(sid, activeStreamId);
+    }else{
+      // Reset per-session visual state: the viewed session is idle even if another
+      // session's stream is still running in the background.
+      // We directly update the DOM instead of calling setBusy(false), because
+      // setBusy(false) drains the viewed session's queued follow-up turns.
+      S.busy=false;
+      S.activeStreamId=null;
+      updateSendBtn();
+      const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
+      setStatus('');
+      setComposerStatus('');
+      updateQueueBadge(sid);
+      syncTopbar();renderMessages();highlightCode();loadDir('.');
+    }
   }
   // Sync context usage indicator from session data
   const _s=S.session;
