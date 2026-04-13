@@ -5,6 +5,7 @@ Extracted from server.py (Sprint 11) so server.py is a thin shell.
 
 import html as _html
 import json
+import logging
 import os
 import queue
 import sys
@@ -13,6 +14,8 @@ import time
 import uuid
 from pathlib import Path
 from urllib.parse import parse_qs
+
+logger = logging.getLogger(__name__)
 
 from api.config import (
     STATE_DIR,

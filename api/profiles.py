@@ -9,11 +9,14 @@ cached paths in hermes-agent modules (skills_tool, cron/jobs) that snapshot
 HERMES_HOME at import time.
 """
 import json
+import logging
 import os
 import re
 import shutil
 import threading
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # ── Constants (match hermes_cli.profiles upstream) ─────────────────────────
 _PROFILE_ID_RE = re.compile(r'^[a-z0-9][a-z0-9_-]{0,63}$')
@@ -76,7 +79,7 @@ def _read_active_profile_file() -> str:
             if name:
                 return name
         except Exception:
-            pass
+            logger.debug("Failed to read active profile file")
     return 'default'
 
 
@@ -107,7 +110,7 @@ def _set_hermes_home(home: Path):
         _sk.HERMES_HOME = home
         _sk.SKILLS_DIR = home / 'skills'
     except (ImportError, AttributeError):
-        pass
+        logger.debug("Failed to patch skills_tool module")
 
     # Patch cron/jobs module-level cache
     try:
@@ -117,7 +120,7 @@ def _set_hermes_home(home: Path):
         _cj.JOBS_FILE = _cj.CRON_DIR / 'jobs.json'
         _cj.OUTPUT_DIR = _cj.CRON_DIR / 'output'
     except (ImportError, AttributeError):
-        pass
+        logger.debug("Failed to patch cron.jobs module")
 
 
 def _reload_dotenv(home: Path):
@@ -151,6 +154,7 @@ def _reload_dotenv(home: Path):
         _loaded_profile_env_keys = loaded_keys
     except Exception:
         _loaded_profile_env_keys = set()
+        logger.debug("Failed to reload dotenv from %s", env_path)
 
 
 def init_profile_state() -> None:
@@ -206,7 +210,7 @@ def switch_profile(name: str) -> dict:
         ap_file = _DEFAULT_HERMES_HOME / 'active_profile'
         ap_file.write_text(name if name != 'default' else '')
     except Exception:
-        pass
+        logger.debug("Failed to write active profile file")
 
     # Reload config.yaml from the new profile
     reload_config()
@@ -326,7 +330,7 @@ def _write_endpoint_to_config(profile_dir: Path, base_url: str = None, api_key: 
             if isinstance(loaded, dict):
                 cfg = loaded
         except Exception:
-            pass
+            logger.debug("Failed to load config from %s", config_path)
     model_section = cfg.get('model', {})
     if not isinstance(model_section, dict):
         model_section = {}
@@ -371,7 +375,7 @@ def create_profile_api(name: str, clone_from: str = None,
             try:
                 profile_path = Path(p.get('path') or profile_path)
             except Exception:
-                pass
+                logger.debug("Failed to parse profile path")
             break
 
     profile_path.mkdir(parents=True, exist_ok=True)
