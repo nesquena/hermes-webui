@@ -257,7 +257,7 @@ $('btnAttach').onclick=()=>$('fileInput').click();
 })();
 window._micActive=window._micActive||false;
 $('fileInput').onchange=e=>{addFiles(Array.from(e.target.files));e.target.value='';};
-$('btnNewChat').onclick=async()=>{await newSession();await renderSessionList();$('msg').focus();};
+$('btnNewChat').onclick=async()=>{await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();};
 $('btnDownload').onclick=()=>{
   if(!S.session)return;
   const blob=new Blob([transcript()],{type:'text/markdown'});
@@ -374,7 +374,7 @@ document.addEventListener('keydown',async e=>{
   }
   if((e.metaKey||e.ctrlKey)&&e.key==='k'){
     e.preventDefault();
-    if(!S.busy){await newSession();await renderSessionList();$('msg').focus();}
+    if(!S.busy){await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();}
   }
   if(e.key==='Escape'){
     // Close settings overlay if open
