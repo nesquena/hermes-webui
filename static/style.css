@@ -534,7 +534,12 @@
     .layout.workspace-panel-collapsed .rightpanel{width:0 !important;opacity:0;transform:translateX(14px);border-left-color:transparent;pointer-events:none;}
   }
 
-  @media(max-width:900px){.rightpanel{display:none}.workspace-toggle-btn,.mobile-files-btn{display:inline-flex!important;}.mobile-close-btn{display:flex;}}
+  @media(max-width:900px){
+    .rightpanel{display:none}
+    .workspace-toggle-btn,.mobile-files-btn{display:inline-flex!important;}
+    .mobile-close-btn{display:flex;}
+    #btnCollapseWorkspacePanel{display:none;}
+  }
 
   @media(max-width:640px){
     /* ── Sidebar: slide-in overlay instead of hidden ── */
