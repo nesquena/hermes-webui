@@ -186,6 +186,14 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             _AIAgent = _get_ai_agent()
             if _AIAgent is None:
                 raise ImportError("AIAgent not available -- check that hermes-agent is on sys.path")
+
+            # Initialize SessionDB so session_search works in WebUI sessions
+            _session_db = None
+            try:
+                from hermes_state import SessionDB
+                _session_db = SessionDB()
+            except Exception as _db_err:
+                print(f"[webui] WARNING: SessionDB init failed — session_search will be unavailable: {_db_err}", flush=True)
             resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(model)
 
             # Resolve API key via Hermes runtime provider (matches gateway behaviour).
@@ -235,6 +243,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 enabled_toolsets=_toolsets,
                 fallback_model=_fallback_resolved,
                 session_id=session_id,
+                session_db=_session_db,
                 stream_delta_callback=on_token,
                 tool_progress_callback=on_tool,
             )
