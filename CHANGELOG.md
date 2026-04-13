@@ -10,6 +10,24 @@
 - **Workspace file downloads no longer crash for Unicode filenames** (`api/routes.py`): Clicking a PDF or other file with Chinese, Japanese, Arabic, or other non-ASCII characters in its name caused a `UnicodeEncodeError` because Python's HTTP server requires header values to be latin-1 encodable. A new `_content_disposition_value(disposition, filename)` helper centralises `Content-Disposition` generation: it strips CR/LF (injection guard), builds an ASCII fallback for the legacy `filename=` parameter (non-ASCII chars replaced with `_`), and preserves the full UTF-8 name in `filename*=UTF-8''...` per RFC 5987. Both `attachment` and `inline` responses use it.
   - 2 new integration tests in `tests/test_sprint29.py` covering Chinese filenames for both download and inline responses, verifying the header is latin-1 encodable and `filename*=UTF-8''` is present; 924 tests total (up from 922)
 
+## [v0.50.20] Silent error fix, stale model cleanup, live model fetching (fixes #373, #374, #375)
+
+### Fix: Chat no longer silently swallows agent failures (fixes #373)
+
+- **`api/streaming.py`**: After `run_conversation()` completes, the server now checks whether the agent produced any assistant reply. If not (e.g., auth error swallowed internally, model unavailable, network timeout), it emits an `apperror` SSE event with a clear message and type (`auth_mismatch` or `no_response`) instead of silently emitting `done`. A `_token_sent` flag tracks whether any streaming tokens were sent.
+- **`static/messages.js`**: The `done` handler has a belt-and-suspenders guard — if `done` arrives but no assistant message exists in the session (the `apperror` path should usually catch this first), an inline "**No response received.**" message is shown. The `apperror` handler now also recognises the new `no_response` type with a distinct label.
+
+### Cleanup: Remove stale OpenAI models from default list (fixes #374)
+
+- **`api/config.py`**: `gpt-4o` and `o3` removed from `_FALLBACK_MODELS` and `_PROVIDER_MODELS["openai"]`. Both are superseded by newer models already in the list (`gpt-5.4-mini` for general use, `o4-mini` for reasoning). The Copilot provider list retains `gpt-4o` as it remains available via the Copilot API.
+
+### Feature: Live model fetching from provider API (closes #375)
+
+- **`api/routes.py`**: New `/api/models/live?provider=openai` endpoint. Fetches the actual model list from the provider's `/v1/models` API using the user's configured credentials. Includes URL scheme validation (B310), SSRF guard (private IP block), and graceful `not_supported` response for providers without a standard `/v1/models` endpoint (Anthropic, Google). Response normalised to `{id, label}` list, filtered to chat models.
+- **`static/ui.js`**: `populateModelDropdown()` now calls `_fetchLiveModels()` in the background after rendering the static list. Live models that aren't already in the dropdown are appended to the provider's optgroup. Results are cached per session so only one fetch per provider per page load. Skips Anthropic and Google (unsupported). Falls back to static list silently if the fetch fails.
+  - 25 new tests in `tests/test_issues_373_374_375.py`; 971 tests total (up from 924)
+
+
 ## [v0.50.18] Recover from invalid default workspace paths (PR #366)
 
 - **WebUI no longer breaks when the configured default workspace is unavailable** (`api/config.py`): The workspace resolution path was refactored into three composable functions — `_workspace_candidates()`, `_ensure_workspace_dir()`, and `resolve_default_workspace()`. When the configured workspace (from env var, settings file, or passed path) cannot be created or accessed, the server falls back through an ordered priority list: `HERMES_WEBUI_DEFAULT_WORKSPACE` env var → `~/workspace` (if exists) → `~/work` (if exists) → `~/workspace` (create it) → `STATE_DIR/workspace`.

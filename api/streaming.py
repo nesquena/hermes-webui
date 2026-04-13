@@ -163,9 +163,13 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             logger.debug("Approval module not available, falling back to polling")
 
         try:
+            _token_sent = False  # tracks whether any streamed tokens were sent
+
             def on_token(text):
+                nonlocal _token_sent
                 if text is None:
                     return  # end-of-stream sentinel
+                _token_sent = True
                 put('token', {'text': text})
 
             def on_tool(name, preview, args):
@@ -307,6 +311,45 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 persist_user_message=msg_text,
             )
             s.messages = result.get('messages') or s.messages
+
+            # ── Detect silent agent failure (no assistant reply produced) ──
+            # When the agent catches an auth/network error internally it may return
+            # an empty final_response without raising — the stream would end with
+            # a done event containing zero assistant messages, leaving the user with
+            # no feedback. Emit an apperror so the client shows an inline error.
+            _assistant_added = any(
+                m.get('role') == 'assistant' and str(m.get('content') or '').strip()
+                for m in (result.get('messages') or [])
+            )
+            # _token_sent tracks whether on_token() was called (any streamed text)
+            if not _assistant_added and not _token_sent:
+                _last_err = getattr(agent, '_last_error', None) or result.get('error') or ''
+                _err_str = str(_last_err) if _last_err else ''
+                _is_auth = (
+                    '401' in _err_str
+                    or 'AuthenticationError' in type(_last_err).__name__ if _last_err else False
+                    or 'authentication' in _err_str.lower()
+                    or 'unauthorized' in _err_str.lower()
+                    or 'invalid api key' in _err_str.lower()
+                    or 'invalid_api_key' in _err_str.lower()
+                )
+                if _is_auth:
+                    put('apperror', {
+                        'message': _err_str or 'Authentication failed — check your API key.',
+                        'type': 'auth_mismatch',
+                        'hint': (
+                            'The selected model may not be supported by your configured provider or '
+                            'your API key is invalid. Run `hermes model` in your terminal to '
+                            'update credentials, then restart the WebUI.'
+                        ),
+                    })
+                else:
+                    put('apperror', {
+                        'message': _err_str or 'The agent returned no response. Check your API key and model selection.',
+                        'type': 'no_response',
+                        'hint': 'Verify your API key is valid and the selected model is available for your account.',
+                    })
+                return  # Don't emit done — the apperror already closes the stream on the client
 
             # ── Handle context compression side effects ──
             # If compression fired inside run_conversation, the agent may have
