@@ -856,18 +856,6 @@ function getPendingSessionMessage(session){
     _pending:true,
   };
 }
-// loadInflightState — retrieve in-memory inflight state for a session.
-// Called by loadSession() when active_stream_id is set on the server session
-// but no INFLIGHT[sid] entry exists (e.g. after a session switch back).
-// Returns the stored state dict or null. The else-path in loadSession handles
-// page reloads directly via attachLiveStream when this returns null.
-function loadInflightState(sid, streamId) {
-  // In-memory store: only survives within the same page load.
-  // If INFLIGHT[sid] exists but the caller already checked !INFLIGHT[sid],
-  // this won't be reached. Return null — the else path handles page reloads.
-  return null;
-}
-
 async function checkInflightOnBoot(sid) {
   const raw = localStorage.getItem(INFLIGHT_KEY);
   if (!raw) return;
