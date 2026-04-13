@@ -209,21 +209,70 @@ cfg = _cfg_cache  # alias for backward compat with existing references
 
 
 # ── Default workspace discovery ───────────────────────────────────────────────
+def _workspace_candidates(raw: str | Path | None = None) -> list[Path]:
+    """Return ordered candidate workspace paths, de-duplicated."""
+    candidates: list[Path] = []
+
+    def add(candidate: str | Path | None) -> None:
+        if candidate in (None, ""):
+            return
+        try:
+            path = Path(candidate).expanduser().resolve()
+        except Exception:
+            return
+        if path not in candidates:
+            candidates.append(path)
+
+    add(raw)
+    if os.getenv("HERMES_WEBUI_DEFAULT_WORKSPACE"):
+        add(os.getenv("HERMES_WEBUI_DEFAULT_WORKSPACE"))
+
+    home_workspace = HOME / "workspace"
+    home_work = HOME / "work"
+    if home_workspace.exists():
+        add(home_workspace)
+    if home_work.exists():
+        add(home_work)
+
+    add(home_workspace)
+    add(STATE_DIR / "workspace")
+    return candidates
+
+
+
+def _ensure_workspace_dir(path: Path) -> bool:
+    """Best-effort check that a workspace directory exists and is writable."""
+    try:
+        path = path.expanduser().resolve()
+        path.mkdir(parents=True, exist_ok=True)
+        return path.is_dir() and os.access(path, os.R_OK | os.W_OK | os.X_OK)
+    except Exception:
+        return False
+
+
+
+def resolve_default_workspace(raw: str | Path | None = None) -> Path:
+    """Return the first usable workspace path, creating it when possible."""
+    for candidate in _workspace_candidates(raw):
+        if _ensure_workspace_dir(candidate):
+            return candidate
+    raise RuntimeError(
+        "Could not create or access any usable workspace directory. "
+        "Set HERMES_WEBUI_DEFAULT_WORKSPACE to a writable path."
+    )
+
+
+
 def _discover_default_workspace() -> Path:
     """
     Resolve the default workspace in order:
       1. HERMES_WEBUI_DEFAULT_WORKSPACE env var
-      2. ~/workspace (common Hermes convention)
-      3. STATE_DIR / workspace (isolated fallback)
+      2. ~/workspace if it already exists
+      3. ~/work if it already exists
+      4. ~/workspace (create if needed)
+      5. STATE_DIR / workspace
     """
-    if os.getenv("HERMES_WEBUI_DEFAULT_WORKSPACE"):
-        return Path(os.getenv("HERMES_WEBUI_DEFAULT_WORKSPACE")).expanduser().resolve()
-
-    common = HOME / "workspace"
-    if common.exists():
-        return common.resolve()
-
-    return (STATE_DIR / "workspace").resolve()
+    return resolve_default_workspace()
 
 
 DEFAULT_WORKSPACE = _discover_default_workspace()
@@ -1080,6 +1129,10 @@ def save_settings(settings: dict) -> dict:
             if k in _SETTINGS_BOOL_KEYS:
                 v = bool(v)
             current[k] = v
+
+    current["default_workspace"] = str(
+        resolve_default_workspace(current.get("default_workspace"))
+    )
     SETTINGS_FILE.write_text(
         json.dumps(current, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -1089,7 +1142,7 @@ def save_settings(settings: dict) -> dict:
     if "default_model" in current:
         DEFAULT_MODEL = current["default_model"]
     if "default_workspace" in current:
-        DEFAULT_WORKSPACE = Path(current["default_workspace"]).expanduser().resolve()
+        DEFAULT_WORKSPACE = resolve_default_workspace(current["default_workspace"])
     return current
 
 
@@ -1098,10 +1151,18 @@ _startup_settings = load_settings()
 if SETTINGS_FILE.exists():
     if _startup_settings.get("default_model"):
         DEFAULT_MODEL = _startup_settings["default_model"]
-    if _startup_settings.get("default_workspace"):
-        DEFAULT_WORKSPACE = (
-            Path(_startup_settings["default_workspace"]).expanduser().resolve()
-        )
+    DEFAULT_WORKSPACE = resolve_default_workspace(
+        _startup_settings.get("default_workspace")
+    )
+    if _startup_settings.get("default_workspace") != str(DEFAULT_WORKSPACE):
+        _startup_settings["default_workspace"] = str(DEFAULT_WORKSPACE)
+        try:
+            SETTINGS_FILE.write_text(
+                json.dumps(_startup_settings, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
 
 # ── SESSIONS in-memory cache (LRU OrderedDict) ───────────────────────────────
 SESSIONS: collections.OrderedDict = collections.OrderedDict()
