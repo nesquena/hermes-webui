@@ -339,8 +339,8 @@ Or using the agent venv explicitly:
 ```
 
 Tests run against an isolated server on port 8788 with a separate state directory.
-Production data and real cron jobs are never touched. Current count: **802 tests**
-across 51 test files.
+Production data and real cron jobs are never touched. Current count: **961 tests**
+across 53 test files.
 
 ---
 
@@ -470,19 +470,19 @@ api/
   models.py             Session model + CRUD + CLI bridge (~377 lines)
   onboarding.py         First-run onboarding wizard, OAuth provider support (~507 lines)
   profiles.py           Profile state management, hermes_cli wrapper (~411 lines)
-  routes.py             All GET + POST route handlers (~1996 lines)
+  routes.py             All GET + POST route handlers (~2200 lines)
   state_sync.py         /insights sync — message_count to state.db (~113 lines)
-  streaming.py          SSE engine, run_agent, cancel support (~545 lines)
+  streaming.py          SSE engine, run_agent, cancel support (~560 lines)
   updates.py            Self-update check and release notes (~257 lines)
   upload.py             Multipart parser, file upload handler (~82 lines)
   workspace.py          File ops, workspace helpers, git detection (~288 lines)
 static/
   index.html            HTML template (~600 lines)
   style.css             All CSS incl. mobile responsive, themes (~1050 lines)
-  ui.js                 DOM helpers, renderMd, tool cards, context indicator (~1496 lines)
+  ui.js                 DOM helpers, renderMd, tool cards, context indicator (~1900 lines)
   workspace.js          File preview, file ops, git badge (~286 lines)
-  sessions.js           Session CRUD, collapsible groups, search (~752 lines)
-  messages.js           send(), SSE handlers, rAF throttle (~487 lines)
+  sessions.js           Session CRUD, collapsible groups, search, reload recovery (~840 lines)
+  messages.js           send(), SSE handlers, rAF throttle, live streaming (~700 lines)
   panels.js             Cron, skills, memory, profiles, settings (~1438 lines)
   commands.js           Slash command autocomplete (~267 lines)
   boot.js               Mobile nav, voice input, boot IIFE (~524 lines)
@@ -524,18 +524,60 @@ Six consecutive security and reliability PRs: session memory leak fix (expired t
 **[@DavidSchuchert](https://github.com/DavidSchuchert)** — German translation (PR #190)
 Complete German locale (`de`) covering all UI strings, settings labels, commands, and system messages — and in doing so, stress-tested the i18n system and exposed several elements that weren't yet translatable, which got fixed as part of the same PR.
 
+**[@Jordan-SkyLF](https://github.com/Jordan-SkyLF)** — Live streaming, session recovery, workspace fallback (PRs #366, #367)
+Three interlocking improvements: workspace fallback resolution so the server recovers gracefully when the configured workspace is deleted or unavailable; live reasoning cards that upgrade the generic thinking spinner to a real-time reasoning display as the model thinks; and durable session state recovery via `localStorage` so in-flight tool cards, partial assistant output, and the live SSE stream all survive a full page reload or session switch.
+
 ### Feature contributions
+
+**[@gabogabucho](https://github.com/gabogabucho)** — Spanish locale + onboarding wizard (PRs #275, #285)
+Full Spanish (`es`) locale covering all 175 UI strings, plus the one-shot bootstrap onboarding wizard that guides new users through provider setup on first launch — the feature most responsible for new users actually getting started.
+
+**[@bergeouss](https://github.com/bergeouss)** — Real-time gateway session sync (PR #274)
+Bridged the gateway session database (Telegram, Discord, Slack, etc.) into the WebUI sidebar with live SSE polling. Gateway sessions now appear alongside WebUI sessions in real time, without any changes to hermes-agent.
+
+**[@ccqqlo](https://github.com/ccqqlo)** — Terminal approval UX + custom model discovery + mobile close button (PRs #224, #225, #238, #333)
+A run of focused quality-of-life improvements: terminal tool approval prompts that stay visible long enough to actually be read, restored custom model API key discovery, and the redundant mobile close button fix that had been confusing users on narrow screens.
 
 **[@kevin-ho](https://github.com/kevin-ho)** — OLED theme (PR #168)
 Added the 7th built-in theme: pure black backgrounds with warm accents tuned to reduce burn-in risk. Small diff, big impact for anyone on an OLED display.
 
-**[@Bobby9228](https://github.com/Bobby9228)** — Mobile Profiles button (PR #265)
-Added the Profiles tab to the mobile bottom navigation bar, making profile switching reachable on phones without digging into the sidebar.
+**[@Bobby9228](https://github.com/Bobby9228)** — Mobile Profiles button + Android Chrome fixes (PRs #253, #263, #265)
+Added the Profiles tab to the mobile bottom navigation bar, making profile switching reachable on phones, plus a set of Android Chrome-specific fixes for the profile dropdown.
 
 **[@franksong2702](https://github.com/franksong2702)** — Session title guard + breadcrumb nav (PRs #301, #302)
 Two clean bug fixes / features: the session title guard that stops `title_from()` from overwriting user-renamed sessions after every turn, and clickable breadcrumb navigation in the workspace file preview panel.
 
-### Bug fix contributions
+**[@betamod](https://github.com/betamod)** — Security hardening (PR #171)
+A comprehensive security audit PR covering CSRF protection, SSRF guards, XSS escaping improvements, and the env race condition between concurrent agent sessions — foundational security work that shipped in v0.39.0.
+
+**[@TaraTheStar](https://github.com/TaraTheStar)** — Bot name + thinking blocks + login refactor (PRs #132, #176, #181)
+Made the assistant display name configurable throughout the UI, added thinking/reasoning block display in chat, and refactored the login page to use template variables instead of inline string replacement.
+
+**[@thadreber-web](https://github.com/thadreber-web)** — CLI session bridge (PR #56)
+The original CLI session bridge: reads CLI sessions from the agent's SQLite state store and surfaces them in the WebUI sidebar. This was the first bridge between the CLI and WebUI session worlds.
+
+**[@deboste](https://github.com/deboste)** — Reverse proxy auth + mobile responsive layout + model routing (PRs #3, #4, #5)
+Three of the very first community PRs: fixed EventSource/fetch to use the URL origin for reverse proxy setups, corrected model provider routing from config, and added mobile responsive layout with dvh viewport fix. Early foundation work.
+
+### Bug fix and security contributions
+
+**[@Hinotoi-agent](https://github.com/Hinotoi-agent)** — Profile .env secret isolation (PR #351)
+Fixed API key leakage between profiles on switch — switching from a profile with `OPENAI_API_KEY` to one without it left the key in the process environment for the duration of the session, effectively leaking credentials. A subtle and important security fix.
+
+**[@lawrencel1ng](https://github.com/lawrencel1ng)** — Bandit security fixes B310/B324/B110 + QuietHTTPServer (PR #354)
+Systematic bandit security scan fixes: URL scheme validation before `urlopen`, MD5 `usedforsecurity=False`, and 40+ bare `except: pass` blocks replaced with proper logging — plus `QuietHTTPServer` to stop client-disconnect log spam from SSE streams.
+
+**[@lx3133584](https://github.com/lx3133584)** — CSRF fix for reverse proxy on non-standard ports (PR #360)
+Fixed CSRF rejection for deployments behind Nginx Proxy Manager or similar on non-standard ports — a real-world blocker for anyone hosting on a port other than 80/443.
+
+**[@DelightRun](https://github.com/DelightRun)** — session_search fix for WebUI sessions (PR #356)
+The `session_search` tool silently returned "Session database not available" in every WebUI session. Tracked down the missing `SessionDB` injection in the streaming path and fixed it.
+
+**[@shaoxianbilly](https://github.com/shaoxianbilly)** — Unicode filename downloads (PR #378)
+Fixed `UnicodeEncodeError` crashes when downloading workspace files with Chinese, Japanese, or other non-ASCII names. Implemented proper `Content-Disposition` header with RFC 5987 `filename*=UTF-8''...` encoding.
+
+**[@huangzt](https://github.com/huangzt)** — Cancel interrupts agent (PR #244)
+Made the Cancel button actually interrupt the running agent and clean up UI state, rather than just hiding the button while the agent kept running.
 
 **[@tgaalman](https://github.com/tgaalman)** — Thinking card fix (PR #169)
 Fixed top-level reasoning fields being missed in the thinking card display — an edge case in how Claude's extended thinking blocks surface in the API response.
@@ -545,6 +587,27 @@ Fixed model routing for slash-prefixed custom provider models, which were being 
 
 **[@jeffscottward](https://github.com/jeffscottward)** — Claude Haiku model ID fix (PR #145)
 Caught and corrected the Claude Haiku model ID (`3-5` → `4-5`) immediately after the Anthropic release — the kind of quick community catch that keeps the model dropdown accurate.
+
+**[@kcclaw001](https://github.com/kcclaw001)** — Credential redaction in API responses (PR #243)
+Added credential redaction to all API response paths so API keys, tokens, and other secrets in session data or error messages are masked before reaching the browser.
+
+**[@mbac](https://github.com/mbac)** — Phantom "Custom" provider group fix (PR #191)
+Removed the phantom "Custom" optgroup that appeared in the model dropdown even when no custom provider was configured — a small but consistently confusing UI noise issue.
+
+**[@andrewy-wizard](https://github.com/andrewy-wizard)** — Chinese localization (PR #177)
+Added Simplified Chinese (`zh`) locale to the WebUI. One of the first non-English locales and the most-used non-English locale in the codebase.
+
+**[@mmartial](https://github.com/mmartial)** — Docker UID/GID matching (PR #237)
+Added Docker support for running as an arbitrary UID/GID matching the host user, eliminating permission issues with bind-mounted volumes — essential for Docker deployments where the host user isn't UID 1000.
+
+**[@vCillusion](https://github.com/vCillusion)** — pip package resolution fix (PR #76)
+Fixed agent dependency resolution to prefer packages from the venv's site-packages over the agent directory itself, preventing shadowing bugs when developing locally.
+
+**[@carlytwozero](https://github.com/carlytwozero)** — API key pass-through for non-Anthropic providers (PR #78)
+Fixed `api_key` not being passed to `AIAgent` for non-Anthropic `/anthropic` providers — a quiet regression that silently broke any non-default provider.
+
+**[@mangodxd](https://github.com/mangodxd)** — Type hints cleanup (PR #115)
+Added missing type hints across 10 files and corrected 9 inaccurate existing ones — the kind of maintenance work that makes the codebase easier to reason about.
 
 ---
 
