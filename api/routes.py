@@ -1302,6 +1302,29 @@ def _handle_gateway_sse_stream(handler):
     return True
 
 
+def _content_disposition_value(disposition: str, filename: str) -> str:
+    """Build a latin-1-safe Content-Disposition value with RFC 5987 filename*."""
+    import urllib.parse as _up
+
+    safe_name = Path(filename).name.replace("\r", "").replace("\n", "")
+    ascii_fallback = "".join(
+        ch if 32 <= ord(ch) < 127 and ch not in {'"', '\\'} else "_"
+        for ch in safe_name
+    ).strip(" .")
+    if not ascii_fallback:
+        suffix = Path(safe_name).suffix
+        ascii_suffix = "".join(
+            ch if 32 <= ord(ch) < 127 and ch not in {'"', '\\'} else "_"
+            for ch in suffix
+        )
+        ascii_fallback = f"download{ascii_suffix}" if ascii_suffix else "download"
+    quoted_name = _up.quote(safe_name, safe="")
+    return (
+        f'{disposition}; filename="{ascii_fallback}"; '
+        f"filename*=UTF-8''{quoted_name}"
+    )
+
+
 def _handle_file_raw(handler, parsed):
     qs = parse_qs(parsed.query)
     sid = qs.get("session_id", [""])[0]
@@ -1319,9 +1342,6 @@ def _handle_file_raw(handler, parsed):
     ext = target.suffix.lower()
     mime = MIME_MAP.get(ext, "application/octet-stream")
     raw_bytes = target.read_bytes()
-    import urllib.parse as _up
-
-    safe_name = _up.quote(target.name, safe="")
     handler.send_response(200)
     handler.send_header("Content-Type", mime)
     handler.send_header("Content-Length", str(len(raw_bytes)))
@@ -1331,12 +1351,12 @@ def _handle_file_raw(handler, parsed):
     if force_download or mime in dangerous_types:
         handler.send_header(
             "Content-Disposition",
-            f"attachment; filename=\"{target.name}\"; filename*=UTF-8''{safe_name}",
+            _content_disposition_value("attachment", target.name),
         )
     else:
         handler.send_header(
             "Content-Disposition",
-            f"inline; filename=\"{target.name}\"; filename*=UTF-8''{safe_name}",
+            _content_disposition_value("inline", target.name),
         )
     handler.end_headers()
     handler.wfile.write(raw_bytes)

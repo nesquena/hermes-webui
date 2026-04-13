@@ -21,6 +21,7 @@ import pathlib
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
@@ -49,6 +50,12 @@ def post(path, body=None, headers=None):
             return json.loads(r.read()), r.status
     except urllib.error.HTTPError as e:
         return json.loads(e.read()), e.code
+
+
+def get_raw_with_headers(path):
+    req = urllib.request.Request(BASE + path)
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return r.read(), dict(r.headers.items()), r.status
 
 
 # ── 1. CSRF Protection ─────────────────────────────────────────────────────
@@ -549,6 +556,52 @@ class TestContentDisposition:
         assert "application/xhtml+xml" in src
         assert "image/svg+xml" in src
         assert "dangerous_types" in src
+
+    def test_unicode_filename_download_header_is_latin1_safe(self, cleanup_test_sessions):
+        """Unicode filenames must not crash download responses."""
+        body, status = post("/api/session/new", {})
+        assert status == 200, body
+        sid = body["session"]["session_id"]
+        cleanup_test_sessions.append(sid)
+        ws = pathlib.Path(body["session"]["workspace"])
+        filename = "中文对照表.pdf"
+        pdf_bytes = b"%PDF-1.3\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n"
+        (ws / filename).write_bytes(pdf_bytes)
+
+        encoded = urllib.parse.quote(filename)
+        raw, headers, raw_status = get_raw_with_headers(
+            f"/api/file/raw?session_id={sid}&path={encoded}&download=1"
+        )
+
+        assert raw_status == 200
+        assert raw == pdf_bytes
+        disp = headers["Content-Disposition"]
+        assert disp.startswith("attachment; ")
+        assert "filename*=UTF-8''" in disp
+        disp.encode("latin-1")
+
+    def test_unicode_filename_inline_header_is_latin1_safe(self, cleanup_test_sessions):
+        """Inline responses must also work for unicode filenames."""
+        body, status = post("/api/session/new", {})
+        assert status == 200, body
+        sid = body["session"]["session_id"]
+        cleanup_test_sessions.append(sid)
+        ws = pathlib.Path(body["session"]["workspace"])
+        filename = "预览.pdf"
+        pdf_bytes = b"%PDF-1.3\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF\n"
+        (ws / filename).write_bytes(pdf_bytes)
+
+        encoded = urllib.parse.quote(filename)
+        raw, headers, raw_status = get_raw_with_headers(
+            f"/api/file/raw?session_id={sid}&path={encoded}"
+        )
+
+        assert raw_status == 200
+        assert raw == pdf_bytes
+        disp = headers["Content-Disposition"]
+        assert disp.startswith("inline; ")
+        assert "filename*=UTF-8''" in disp
+        disp.encode("latin-1")
 
 
 # ── 9. PBKDF2 Password Hashing ───────────────────────────────────────────
