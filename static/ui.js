@@ -304,8 +304,12 @@ function renderMd(raw){
   // Only runs OUTSIDE fenced code blocks and backtick spans (stash + restore).
   // Unsafe tags (anything not in the allowlist) are left as-is and will be
   // HTML-escaped by esc() when they reach an innerHTML assignment -- no XSS risk.
+  // Fence stash: protect code blocks and backtick spans from all further processing
+  // Must run BEFORE math_stash so $..$ inside code spans is not extracted as math
+  const fence_stash=[];
+  s=s.replace(/(```[\s\S]*?```|`[^`\n]+`)/g,m=>{fence_stash.push(m);return '\x00F'+(fence_stash.length-1)+'\x00';});
   // Math stash: protect $$..$$ and $..$ from markdown processing
-  // Must run BEFORE fence_stash so code blocks don't capture math delimiters
+  // Runs AFTER fence_stash so backtick code spans protect their dollar-sign contents
   const math_stash=[];
   // Display math: $$...$$  (must come before inline to avoid mis-parsing)
   s=s.replace(/\$\$([\s\S]+?)\$\$/g,(_,m)=>{math_stash.push({type:'display',src:m});return '\\x00M'+(math_stash.length-1)+'\\x00';});
@@ -315,8 +319,6 @@ function renderMd(raw){
   // Also stash \(...\) and \[...\] LaTeX delimiters
   s=s.replace(/\\\\\((.+?)\\\\\)/g,(_,m)=>{math_stash.push({type:'inline',src:m});return '\\x00M'+(math_stash.length-1)+'\\x00';});
   s=s.replace(/\\\\\[(.+?)\\\\\]/gs,(_,m)=>{math_stash.push({type:'display',src:m});return '\\x00M'+(math_stash.length-1)+'\\x00';});
-  const fence_stash=[];
-  s=s.replace(/(```[\s\S]*?```|`[^`\n]+`)/g,m=>{fence_stash.push(m);return '\x00F'+(fence_stash.length-1)+'\x00';});
   // Safe tag → markdown equivalent (these produce the same output as **text** etc.)
   s=s.replace(/<strong>([\s\S]*?)<\/strong>/gi,(_,t)=>'**'+t+'**');
   s=s.replace(/<b>([\s\S]*?)<\/b>/gi,(_,t)=>'**'+t+'**');

@@ -150,7 +150,7 @@ async function toggleEditMode(){
       _previewDirty=false;
       // Update read-only views
       if(_previewCurrentMode==='code') $('previewCode').textContent=content;
-      else $('previewMd').innerHTML=renderMd(content);
+      else { $('previewMd').innerHTML=renderMd(content); requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();}); }
       $('previewEditArea').style.display='none';
       if(_previewCurrentMode==='code') $('previewCode').style.display='';
       else $('previewMd').style.display='';
@@ -215,6 +215,7 @@ async function openFile(path){
       showPreview('md');
       _previewRawContent = data.content;
       $('previewMd').innerHTML=renderMd(data.content);
+      requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();});
     }catch(e){setStatus(t('file_open_failed'));}
   } else {
     // Plain code / text -- but fall back to download if server signals binary
