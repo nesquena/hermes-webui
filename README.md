@@ -339,7 +339,7 @@ Or using the agent venv explicitly:
 ```
 
 Tests run against an isolated server on port 8788 with a separate state directory.
-Production data and real cron jobs are never touched. Current count: **791 tests**
+Production data and real cron jobs are never touched. Current count: **802 tests**
 across 51 test files.
 
 ---
@@ -488,7 +488,7 @@ static/
   boot.js               Mobile nav, voice input, boot IIFE (~524 lines)
 tests/
   conftest.py           Isolated test server (port 8788)
-  51 test files          791 test functions
+  51 test files          802 test functions
 Dockerfile              python:3.12-slim container image
 docker-compose.yml      Compose with named volume and optional auth
 .github/workflows/      CI: multi-arch Docker build + GitHub Release on tag
