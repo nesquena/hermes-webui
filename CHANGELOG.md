@@ -5,6 +5,10 @@
 
 ---
 
+## [v0.50.11] Chat table styles — .msg-body now renders bordered tables (fixes #341) — 2026-04-13
+
+- **Tables in chat messages now render with visible borders and alternating row shading** (`static/style.css`): The `.msg-body` area had no table CSS, so markdown tables sent by the assistant were displayed as unstyled, unreadable HTML. Four new rules mirror the existing `.preview-md` table styles: `border-collapse:collapse`, per-cell padding and borders via `var(--border2)`, and an alternating-row tint. Two additional `:root[data-theme="light"]` overrides ensure the borders and header background adapt correctly in light mode.
+  - 4 new tests in `tests/test_issue341.py`; 678 tests passing
 
 ## [v0.50.11] Auto-link plain URLs in chat messages (fixes #342)
 
