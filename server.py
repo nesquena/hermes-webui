@@ -5,6 +5,7 @@ All business logic lives in api/*.
 """
 import logging
 import socket
+import sys
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,7 +25,7 @@ class QuietHTTPServer(ThreadingHTTPServer):
     
     def handle_error(self, request, client_address):
         """Override to suppress logging for common client disconnect errors."""
-        exc_type, exc_value, _ = traceback.sys.exc_info()
+        exc_type, exc_value, _ = sys.exc_info()
         
         # Silently ignore common connection errors caused by client disconnects
         if exc_type in (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
