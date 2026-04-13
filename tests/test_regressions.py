@@ -241,6 +241,24 @@ def test_done_handler_guards_setbusy_with_inflight_check(cleanup_test_sessions):
     assert "INFLIGHT[S.session.session_id]" in src,         "messages.js must guard setBusy(false) with INFLIGHT check for current session"
 
 
+def test_refresh_handler_does_not_drop_tool_messages_needed_by_todos(cleanup_test_sessions):
+    """Todo panel state must survive session reload/refresh.
+    The UI can hide tool-role messages from the visible transcript, but it must not
+    destroy the raw session messages because loadTodos reconstructs state from the
+    latest todo tool output.
+    """
+    sessions_src = (REPO_ROOT / "static/sessions.js").read_text()
+    ui_src = (REPO_ROOT / "static/ui.js").read_text()
+    panels_src = (REPO_ROOT / "static/panels.js").read_text()
+
+    assert "data.session.messages=(data.session.messages||[]).filter(" not in sessions_src, \
+        "sessions.js must not overwrite raw session.messages when filtering transcript display"
+    assert "S.messages = (data.session.messages || []).filter(" not in ui_src, \
+        "ui.js refreshSession must not rebuild S.messages by discarding tool messages from the raw session payload"
+    assert "const sourceMessages = (S.session && Array.isArray(S.session.messages) && S.session.messages.length) ? S.session.messages : S.messages;" in panels_src, \
+        "loadTodos must prefer raw S.session.messages so todo state survives reloads"
+
+
 def test_cancel_button_not_cleared_across_sessions(cleanup_test_sessions):
     """R7c: The Cancel button and activeStreamId must only be cleared when the
     done/error event belongs to the currently viewed session.

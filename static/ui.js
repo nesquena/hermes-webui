@@ -657,11 +657,11 @@ async function refreshSession() {
   try {
     const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`);
     S.session = data.session;
-    S.messages = (data.session.messages || []).filter(m => {
-      if (!m || !m.role || m.role === 'tool') return false;
-      if (m.role === 'assistant') { let c = m.content || ''; if (Array.isArray(c)) c = c.map(p => p.text||'').join(''); return String(c).trim().length > 0; }
-      return true;
-    });
+    S.messages = data.session.messages || [];
+    const pendingMsg=getPendingSessionMessage(data.session);
+    if(pendingMsg) S.messages.push(pendingMsg);
+    S.activeStreamId=data.session.active_stream_id||null;
+
     syncTopbar(); renderMessages();
     showToast('Conversation refreshed');
   } catch(e) { setStatus('Refresh failed: ' + e.message); }

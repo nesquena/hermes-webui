@@ -31,13 +31,9 @@ async function loadSession(sid){
   const data=await api(`/api/session?session_id=${encodeURIComponent(sid)}`);
   S.session=data.session;
   localStorage.setItem('hermes-webui-session',S.session.session_id);
-  // B9: sanitize empty assistant messages that can appear when agent only ran tool calls
-  data.session.messages=(data.session.messages||[]).filter(m=>{
-    if(!m||!m.role)return false;
-    if(m.role==='tool')return false;
-    if(m.role==='assistant'){let c=m.content||'';if(Array.isArray(c))c=c.filter(p=>p&&p.type==='text').map(p=>p.text||'').join('');return String(c).trim().length>0;}
-    return true;
-  });
+  // Keep raw session.messages intact so side panels (e.g. Todos) can still
+  // reconstruct state from tool outputs after reload. Visible transcript rows
+  // are filtered later by renderMessages().
   if(INFLIGHT[sid]){
     S.messages=INFLIGHT[sid].messages;
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);

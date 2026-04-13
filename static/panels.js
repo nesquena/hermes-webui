@@ -308,10 +308,11 @@ async function cronDelete(id) {
 function loadTodos() {
   const panel = $('todoPanel');
   if (!panel) return;
+  const sourceMessages = (S.session && Array.isArray(S.session.messages) && S.session.messages.length) ? S.session.messages : S.messages;
   // Parse the most recent todo state from message history
   let todos = [];
-  for (let i = S.messages.length - 1; i >= 0; i--) {
-    const m = S.messages[i];
+  for (let i = sourceMessages.length - 1; i >= 0; i--) {
+    const m = sourceMessages[i];
     if (m && m.role === 'tool') {
       try {
         const d = JSON.parse(typeof m.content === 'string' ? m.content : JSON.stringify(m.content));
