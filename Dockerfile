@@ -69,6 +69,10 @@ RUN rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/01proxy \
 
 USER hermeswebuitoo
 
+# Pre-install uv so the container doesn't need internet access at runtime.
+# The init script will skip the download when uv is already on PATH.
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
 COPY . /apptoo
 
 # Default to binding all interfaces (required for container networking)
