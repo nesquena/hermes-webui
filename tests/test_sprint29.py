@@ -97,11 +97,19 @@ class TestCSRF:
         assert status != 403, f"Expected non-403 for same-referer request, got {status}"
 
     def test_proxy_host_default_https_port_matches_http_origin(self):
-        """Origin without port should match X-Forwarded-Host when only :443 differs."""
-        assert self._csrf_allowed({
+        """http:// origin without port must NOT match X-Forwarded-Host with :443.
+
+        After the scheme-aware _ports_match fix: http:// absent port = :80,
+        which is not equal to :443. These are different protocols/ports and
+        should be rejected. In real reverse proxy scenarios where the external
+        URL is HTTPS, the browser sends Origin: https://... not http://...
+        See test_proxy_host_default_https_port_matches_https_origin for the
+        real-world proxy case that should pass.
+        """
+        assert not self._csrf_allowed({
             "Origin": "http://example.com",
             "X-Forwarded-Host": "example.com:443",
-        })
+        }), 'http origin (port :80) must not match https host (:443)'
 
     def test_proxy_host_default_https_port_matches_https_origin(self):
         """HTTPS Origin without port should match X-Forwarded-Host with explicit :443."""
@@ -134,6 +142,164 @@ class TestCSRF:
             'Host': 'myapp.example.com',
             'X-Forwarded-Proto': 'https',
         })
+
+    # ── Port normalization: scheme-aware (M-1 fix) ────────────────────────────
+
+    def test_cross_protocol_port_not_confused_http_origin_https_host(self):
+        """http:// origin must NOT match a host with :443 (HTTPS default).
+
+        Before M-1 fix, _ports_match treated both 80 and 443 as equivalent to
+        absent port, allowing http://host to match https://host:443 servers.
+        """
+        assert not self._csrf_allowed({
+            'Origin': 'http://example.com',     # http, no port = :80
+            'X-Forwarded-Host': 'example.com:443',  # HTTPS port
+        }), 'http origin should NOT match host advertising port 443'
+
+    def test_cross_protocol_port_not_confused_https_origin_http_host(self):
+        """https:// origin must NOT match a host with :80 (HTTP default)."""
+        assert not self._csrf_allowed({
+            'Origin': 'https://example.com',    # https, no port = :443
+            'X-Forwarded-Host': 'example.com:80',   # HTTP port
+        }), 'https origin should NOT match host advertising port 80'
+
+    def test_http_explicit_port_80_matches_host_without_port(self):
+        """http://example.com:80 is the same origin as http://example.com."""
+        assert self._csrf_allowed({
+            'Origin': 'http://example.com:80',
+            'Host': 'example.com',
+        })
+
+    def test_https_explicit_port_443_matches_host_without_port(self):
+        """https://example.com:443 is the same origin as https://example.com."""
+        assert self._csrf_allowed({
+            'Origin': 'https://example.com:443',
+            'Host': 'example.com',
+        })
+
+    def test_non_default_port_not_waived(self):
+        """Non-default ports (e.g. :8000) must not be treated as equivalent to absent."""
+        assert not self._csrf_allowed({
+            'Origin': 'https://example.com:8000',
+            'Host': 'example.com',
+        })
+
+    # ── Bug scenario: proxy strips non-standard port ──────────────────────────
+
+    def test_bug_origin_8000_host_without_port_rejected_without_allowlist(self, monkeypatch):
+        """Without the allowlist, origin with :8000 must be rejected when proxy strips port.
+
+        This documents the original bug: Origin: https://app.com:8000 with
+        Host: app.com (proxy stripped the port). Before this PR that returned 403.
+        The fix (HERMES_WEBUI_ALLOWED_ORIGINS) handles it; without the env var
+        the request is still rejected, which is the safe default.
+        """
+        monkeypatch.delenv('HERMES_WEBUI_ALLOWED_ORIGINS', raising=False)
+        assert not self._csrf_allowed({
+            'Origin': 'https://myapp.example.com:8000',
+            'Host': 'myapp.example.com',
+        }), 'without allowlist, port mismatch must be rejected (safe default)'
+
+    def test_allowed_origins_comma_separated(self, monkeypatch):
+        """HERMES_WEBUI_ALLOWED_ORIGINS accepts multiple comma-separated origins."""
+        monkeypatch.setenv(
+            'HERMES_WEBUI_ALLOWED_ORIGINS',
+            'https://app1.example.com:8000, https://app2.example.com:9000',
+        )
+        assert self._csrf_allowed({'Origin': 'https://app1.example.com:8000', 'Host': 'proxy.internal'})
+        assert self._csrf_allowed({'Origin': 'https://app2.example.com:9000', 'Host': 'proxy.internal'})
+        assert not self._csrf_allowed({'Origin': 'https://evil.com:8000', 'Host': 'proxy.internal'})
+
+    def test_allowed_origins_without_scheme_ignored(self, monkeypatch, capsys):
+        """Allowlist entries missing the scheme are skipped and a warning is printed."""
+        monkeypatch.setenv('HERMES_WEBUI_ALLOWED_ORIGINS', 'myapp.example.com:8000')
+        from api.routes import _allowed_public_origins
+        result = _allowed_public_origins()
+        assert len(result) == 0, 'entry without scheme must be ignored'
+        captured = capsys.readouterr()
+        assert 'WARNING' in captured.err and 'scheme' in captured.err.lower()
+
+    def test_allowed_origins_trailing_slash_normalized(self, monkeypatch):
+        """Trailing slash in allowlist entry is stripped before comparison."""
+        monkeypatch.setenv('HERMES_WEBUI_ALLOWED_ORIGINS', 'https://myapp.example.com:8000/')
+        assert self._csrf_allowed({
+            'Origin': 'https://myapp.example.com:8000',
+            'Host': 'proxy.internal',
+        })
+
+
+# ── CSRF helpers: unit tests ─────────────────────────────────────────────────
+
+
+class TestCSRFHelpers:
+    """Direct unit tests for _normalize_host_port and _ports_match."""
+    def test_normalize_host_only(self):
+        from api.routes import _normalize_host_port
+        assert _normalize_host_port('example.com') == ('example.com', None)
+
+    def test_normalize_host_with_port(self):
+        from api.routes import _normalize_host_port
+        assert _normalize_host_port('example.com:8000') == ('example.com', '8000')
+
+    def test_normalize_ipv6_no_port(self):
+        from api.routes import _normalize_host_port
+        assert _normalize_host_port('[::1]') == ('::1', None)
+
+    def test_normalize_ipv6_with_port(self):
+        from api.routes import _normalize_host_port
+        assert _normalize_host_port('[::1]:8080') == ('::1', '8080')
+
+    def test_normalize_empty(self):
+        from api.routes import _normalize_host_port
+        assert _normalize_host_port('') == ('', None)
+
+    def test_normalize_whitespace_stripped(self):
+        from api.routes import _normalize_host_port
+        assert _normalize_host_port('  example.com  ') == ('example.com', None)
+
+    def test_normalize_lowercases(self):
+        from api.routes import _normalize_host_port
+        assert _normalize_host_port('EXAMPLE.COM:80') == ('example.com', '80')
+
+    def test_ports_match_identical(self):
+        from api.routes import _ports_match
+        assert _ports_match('https', '8000', '8000') is True
+
+    def test_ports_match_both_absent(self):
+        from api.routes import _ports_match
+        assert _ports_match('https', None, None) is True
+
+    def test_ports_match_https_absent_vs_443(self):
+        from api.routes import _ports_match
+        assert _ports_match('https', None, '443') is True
+        assert _ports_match('https', '443', None) is True
+
+    def test_ports_match_http_absent_vs_80(self):
+        from api.routes import _ports_match
+        assert _ports_match('http', None, '80') is True
+        assert _ports_match('http', '80', None) is True
+
+    def test_ports_match_http_absent_vs_443_rejected(self):
+        """http:// scheme: absent port is :80, not :443."""
+        from api.routes import _ports_match
+        assert _ports_match('http', None, '443') is False
+        assert _ports_match('http', '443', None) is False
+
+    def test_ports_match_https_absent_vs_80_rejected(self):
+        """https:// scheme: absent port is :443, not :80."""
+        from api.routes import _ports_match
+        assert _ports_match('https', None, '80') is False
+        assert _ports_match('https', '80', None) is False
+
+    def test_ports_match_non_default_never_waived(self):
+        from api.routes import _ports_match
+        assert _ports_match('https', None, '8000') is False
+        assert _ports_match('https', '8000', None) is False
+        assert _ports_match('http', None, '8080') is False
+
+    def test_ports_match_different_non_default(self):
+        from api.routes import _ports_match
+        assert _ports_match('https', '8000', '9000') is False
 
 
 # ── 2. Login Rate Limiting ─────────────────────────────────────────────────

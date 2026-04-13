@@ -79,29 +79,45 @@ def _normalize_host_port(value: str) -> tuple[str, str | None]:
     return value, None
 
 
-_DEFAULT_PORTS = {'80', '443'}
+def _ports_match(origin_scheme: str, origin_port: str | None, allowed_port: str | None) -> bool:
+    """Return True when two ports should be considered equivalent, scheme-aware.
 
-
-def _ports_match(origin_port: str | None, allowed_port: str | None) -> bool:
-    """Return True when two ports should be considered equivalent.
-    Treats None (absent) as matching the default HTTP/HTTPS ports."""
+    Treats an absent port as the scheme default: port 80 for http, port 443 for https.
+    Port 80 is NOT treated as equivalent to 443 (different protocols = different origins).
+    """
     if origin_port == allowed_port:
         return True
-    if not origin_port and allowed_port in _DEFAULT_PORTS:
+    # Determine the default port for the origin's scheme
+    default = '443' if origin_scheme == 'https' else '80'
+    if not origin_port and allowed_port == default:
         return True
-    if not allowed_port and origin_port in _DEFAULT_PORTS:
+    if not allowed_port and origin_port == default:
         return True
     return False
 
 
 def _allowed_public_origins() -> set[str]:
-    """Parse HERMES_WEBUI_ALLOWED_ORIGINS env var (comma-separated) into a set."""
+    """Parse HERMES_WEBUI_ALLOWED_ORIGINS env var (comma-separated) into a set.
+
+    Each entry must include the scheme, e.g. https://myapp.example.com:8000.
+    Entries without a scheme are silently skipped and a warning is printed.
+    """
     raw = os.getenv('HERMES_WEBUI_ALLOWED_ORIGINS', '')
-    return {
-        value.strip().rstrip('/').lower()
-        for value in raw.split(',')
-        if value.strip()
-    }
+    result = set()
+    for value in raw.split(','):
+        value = value.strip().rstrip('/').lower()
+        if not value:
+            continue
+        if not (value.startswith('http://') or value.startswith('https://')):
+            import sys
+            print(
+                f"[webui] WARNING: HERMES_WEBUI_ALLOWED_ORIGINS entry {value!r} is missing "
+                f"the scheme (expected https://hostname or http://hostname). Entry ignored.",
+                flush=True, file=sys.stderr,
+            )
+            continue
+        result.add(value)
+    return result
 
 
 def _check_csrf(handler) -> bool:
@@ -117,6 +133,7 @@ def _check_csrf(handler) -> bool:
     if not m:
         return False
     origin_host = m.group(1)
+    origin_scheme = m.group(0).split('://')[0].lower()  # 'http' or 'https'
     origin_name, origin_port = _normalize_host_port(origin_host)
     # Check against explicitly allowed public origins (env var)
     origin_value = m.group(0).rstrip('/').lower()
@@ -136,7 +153,7 @@ def _check_csrf(handler) -> bool:
     ]
     for allowed in allowed_hosts:
         allowed_name, allowed_port = _normalize_host_port(allowed)
-        if origin_name == allowed_name and _ports_match(origin_port, allowed_port):
+        if origin_name == allowed_name and _ports_match(origin_scheme, origin_port, allowed_port):
             return True
     return False
 
