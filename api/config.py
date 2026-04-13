@@ -448,6 +448,8 @@ _PROVIDER_DISPLAY = {
     "huggingface": "HuggingFace",
     "alibaba": "Alibaba",
     "ollama": "Ollama",
+    "opencode-zen": "OpenCode Zen",
+    "opencode-go": "OpenCode Go",
     "lmstudio": "LM Studio",
 }
 
@@ -508,6 +510,51 @@ _PROVIDER_MODELS = {
         {"id": "claude-opus-4.6", "label": "Claude Opus 4.6"},
         {"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6"},
         {"id": "gemini-2.5-pro", "label": "Gemini 2.5 Pro"},
+    ],
+    # OpenCode Zen — curated models via opencode.ai/zen (pay-as-you-go credits)
+    "opencode-zen": [
+        {"id": "gpt-5.4-pro", "label": "GPT-5.4 Pro"},
+        {"id": "gpt-5.4", "label": "GPT-5.4"},
+        {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
+        {"id": "gpt-5.4-nano", "label": "GPT-5.4 Nano"},
+        {"id": "gpt-5.3-codex", "label": "GPT-5.3 Codex"},
+        {"id": "gpt-5.3-codex-spark", "label": "GPT-5.3 Codex Spark"},
+        {"id": "gpt-5.2", "label": "GPT-5.2"},
+        {"id": "gpt-5.2-codex", "label": "GPT-5.2 Codex"},
+        {"id": "gpt-5.1", "label": "GPT-5.1"},
+        {"id": "gpt-5.1-codex", "label": "GPT-5.1 Codex"},
+        {"id": "gpt-5.1-codex-max", "label": "GPT-5.1 Codex Max"},
+        {"id": "gpt-5.1-codex-mini", "label": "GPT-5.1 Codex Mini"},
+        {"id": "gpt-5", "label": "GPT-5"},
+        {"id": "gpt-5-codex", "label": "GPT-5 Codex"},
+        {"id": "gpt-5-nano", "label": "GPT-5 Nano"},
+        {"id": "claude-opus-4-6", "label": "Claude Opus 4.6"},
+        {"id": "claude-opus-4-5", "label": "Claude Opus 4.5"},
+        {"id": "claude-opus-4-1", "label": "Claude Opus 4.1"},
+        {"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6"},
+        {"id": "claude-sonnet-4-5", "label": "Claude Sonnet 4.5"},
+        {"id": "claude-sonnet-4", "label": "Claude Sonnet 4"},
+        {"id": "claude-haiku-4-5", "label": "Claude Haiku 4.5"},
+        {"id": "claude-3-5-haiku", "label": "Claude 3.5 Haiku"},
+        {"id": "gemini-3.1-pro", "label": "Gemini 3.1 Pro"},
+        {"id": "gemini-3-flash", "label": "Gemini 3 Flash"},
+        {"id": "glm-5.1", "label": "GLM-5.1"},
+        {"id": "glm-5", "label": "GLM-5"},
+        {"id": "kimi-k2.5", "label": "Kimi K2.5"},
+        {"id": "minimax-m2.5", "label": "MiniMax M2.5"},
+        {"id": "minimax-m2.5-free", "label": "MiniMax M2.5 Free"},
+        {"id": "nemotron-3-super-free", "label": "Nemotron 3 Super Free"},
+        {"id": "big-pickle", "label": "Big Pickle"},
+    ],
+    # OpenCode Go — flat-rate models via opencode.ai/go ($10/month)
+    "opencode-go": [
+        {"id": "glm-5.1", "label": "GLM-5.1"},
+        {"id": "glm-5", "label": "GLM-5"},
+        {"id": "kimi-k2.5", "label": "Kimi K2.5"},
+        {"id": "mimo-v2-pro", "label": "MiMo V2 Pro"},
+        {"id": "mimo-v2-omni", "label": "MiMo V2 Omni"},
+        {"id": "minimax-m2.7", "label": "MiniMax M2.7"},
+        {"id": "minimax-m2.5", "label": "MiniMax M2.5"},
     ],
     # 'gemini' is the hermes_cli provider ID for Google AI Studio
     "gemini": [
@@ -710,6 +757,8 @@ def get_available_models() -> dict:
             "GLM_API_KEY",
             "KIMI_API_KEY",
             "DEEPSEEK_API_KEY",
+            "OPENCODE_ZEN_API_KEY",
+            "OPENCODE_GO_API_KEY",
         ):
             val = os.getenv(k)
             if val:
@@ -730,6 +779,10 @@ def get_available_models() -> dict:
             detected_providers.add("minimax")
         if all_env.get("DEEPSEEK_API_KEY"):
             detected_providers.add("deepseek")
+        if all_env.get("OPENCODE_ZEN_API_KEY"):
+            detected_providers.add("opencode-zen")
+        if all_env.get("OPENCODE_GO_API_KEY"):
+            detected_providers.add("opencode-go")
 
     # 3. Fetch models from custom endpoint if base_url is configured
     auto_detected_models = []
