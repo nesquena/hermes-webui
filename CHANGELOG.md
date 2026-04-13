@@ -5,19 +5,11 @@
 
 ---
 
-## [v0.50.11] Chat table styles — .msg-body now renders bordered tables (fixes #341) — 2026-04-13
+## [v0.50.11] Chat table styles + plain URL auto-linking (fixes #341, #342)
 
-- **Tables in chat messages now render with visible borders and alternating row shading** (`static/style.css`): The `.msg-body` area had no table CSS, so markdown tables sent by the assistant were displayed as unstyled, unreadable HTML. Four new rules mirror the existing `.preview-md` table styles: `border-collapse:collapse`, per-cell padding and borders via `var(--border2)`, and an alternating-row tint. Two additional `:root[data-theme="light"]` overrides ensure the borders and header background adapt correctly in light mode.
-  - 4 new tests in `tests/test_issue341.py`; 678 tests passing
-
-## [v0.50.11] Auto-link plain URLs in chat messages (fixes #342)
-
-- **Plain URLs in chat messages are now clickable** (`static/ui.js`): The `renderMd()` function previously only converted Markdown-style `[label](url)` links to `<a>` tags. Bare URLs like `https://example.com` were rendered as plain text. A new autolink pass converts `https?://...` URLs to `<a href="..." target="_blank" rel="noopener">` tags automatically.
-  - The pass runs after the `[label](url)` link pass and the `SAFE_TAGS` HTML-escape pass (protecting code blocks in `<pre>`), but before the paragraph-wrapping stage.
-  - The same autolink pass is applied inside `inlineMd()` so URLs in list items, blockquotes, and table cells are linked too.
-  - Trailing punctuation (`.`, `,`, `;`, `:`, `!`, `?`, `)`) is stripped from the end of URLs to avoid linking sentence-ending characters.
-  - URLs are passed through `esc()` before placement in `href` and link text — no XSS risk.
-  - 7 new structural tests in `tests/test_issue342.py`; 809 tests total (up from 802)
+- **Tables in chat messages now render with visible borders** (`static/style.css`): The `.msg-body` area had no table CSS, so markdown tables sent by the assistant were unstyled and unreadable. Four new rules mirror the existing `.preview-md` table styles: `border-collapse:collapse`, per-cell padding and borders via `var(--border2)`, and an alternating-row tint. Two `:root[data-theme="light"]` overrides ensure the borders and header background adapt correctly in light mode. (fixes #341)
+- **Plain URLs in chat messages are now clickable** (`static/ui.js`): Bare URLs like `https://example.com` were rendered as plain text. A new autolink pass in `renderMd()` converts `https?://...` URLs to `<a>` tags automatically. Runs after the SAFE_TAGS escape pass (protecting code blocks), before paragraph wrapping. Also applied inside `inlineMd()` so URLs in list items, blockquotes, and table cells are linked too. Trailing punctuation stripped; `esc()` applied to both href and link text. (fixes #342)
+  - 11 new tests (4 in `tests/test_issue341.py`, 7 in `tests/test_issue342.py`); 813 tests total (up from 802)
 
 ## [v0.50.10] Title auto-generation fix + mobile close button (PR #333)
 
