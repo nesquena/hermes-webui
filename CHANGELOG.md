@@ -25,7 +25,7 @@
 
 - **`api/routes.py`**: New `/api/models/live?provider=openai` endpoint. Fetches the actual model list from the provider's `/v1/models` API using the user's configured credentials. Includes URL scheme validation (B310), SSRF guard (private IP block), and graceful `not_supported` response for providers without a standard `/v1/models` endpoint (Anthropic, Google). Response normalised to `{id, label}` list, filtered to chat models.
 - **`static/ui.js`**: `populateModelDropdown()` now calls `_fetchLiveModels()` in the background after rendering the static list. Live models that aren't already in the dropdown are appended to the provider's optgroup. Results are cached per session so only one fetch per provider per page load. Skips Anthropic and Google (unsupported). Falls back to static list silently if the fetch fails.
-  - 25 new tests in `tests/test_issues_373_374_375.py`; 971 tests total (up from 924)
+  - 25 new tests in `tests/test_issues_373_374_375.py`; 949 tests total (up from 924)
 
 
 ## [v0.50.18] Recover from invalid default workspace paths (PR #366)
