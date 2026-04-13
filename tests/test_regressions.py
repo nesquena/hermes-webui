@@ -440,7 +440,107 @@ def test_newSession_clears_live_tool_cards(cleanup_test_sessions):
     assert "clearLiveToolCards" in new_sess_body,         "newSession() must call clearLiveToolCards() to clear stale live cards"
 
 
-# ── R16: Stack traces must not leak to clients in 500 responses ────────────
+def test_newSession_resets_busy_state_for_fresh_chat(cleanup_test_sessions):
+    """R15b: newSession() must reset the viewed chat to idle state.
+    Without this, starting a second chat while another session is streaming leaves
+    S.busy=true, so the first send in the new chat gets incorrectly queued.
+    """
+    src = (REPO_ROOT / "static/sessions.js").read_text()
+    new_sess_idx = src.find("async function newSession(")
+    assert new_sess_idx >= 0
+    next_fn = src.find("async function ", new_sess_idx + 10)
+    new_sess_body = src[new_sess_idx:next_fn]
+    assert "S.busy=false;" in new_sess_body, \
+        "newSession() must clear S.busy so a fresh chat is immediately sendable"
+    assert "S.activeStreamId=null;" in new_sess_body, \
+        "newSession() must clear the active stream id for the newly viewed chat"
+    assert "updateQueueBadge(S.session.session_id);" in new_sess_body, \
+        "newSession() must refresh the badge for the new session rather than leaving the old session's queue badge visible"
+
+
+def test_session_scoped_message_queue_frontend_wiring(cleanup_test_sessions):
+    """R15bb: queued follow-ups must stay attached to their originating session.
+    The frontend should use a session-keyed queue store and drain only the active
+    session's queued messages when that session becomes idle.
+    """
+    ui_src = (REPO_ROOT / "static/ui.js").read_text()
+    messages_src = (REPO_ROOT / "static/messages.js").read_text()
+    sessions_src = (REPO_ROOT / "static/sessions.js").read_text()
+    assert "const SESSION_QUEUES" in ui_src
+    assert "function queueSessionMessage" in ui_src
+    assert "function shiftQueuedSessionMessage" in ui_src
+    assert "const sid=S.session&&S.session.session_id;" in ui_src
+    assert "const next=sid?shiftQueuedSessionMessage(sid):null;" in ui_src
+    assert "queueSessionMessage(S.session.session_id" in messages_src
+    assert "updateQueueBadge(S.session.session_id);" in messages_src
+    assert "updateQueueBadge(sid);" in sessions_src
+
+
+def test_chat_start_persists_pending_turn_metadata_for_reload_recovery(cleanup_test_sessions):
+    """R15c: chat/start must expose enough pending-turn metadata for a reload to
+    rebuild the in-flight conversation instead of showing a blank session.
+    """
+    routes_src = (REPO_ROOT / "api/routes.py").read_text()
+    assert 's.active_stream_id = stream_id' in routes_src
+    assert 's.pending_user_message = msg' in routes_src
+    assert 's.pending_attachments = attachments' in routes_src
+    assert '"active_stream_id": getattr(s, "active_stream_id", None)' in routes_src
+    assert '"pending_user_message": getattr(s, "pending_user_message", None)' in routes_src
+
+
+def test_reload_path_restores_pending_message_and_reattaches_live_stream(cleanup_test_sessions):
+    """R15d: the frontend reload path must show the pending user turn and
+    reattach to the live SSE stream after loadSession().
+    """
+    sessions_src = (REPO_ROOT / "static/sessions.js").read_text()
+    ui_src = (REPO_ROOT / "static/ui.js").read_text()
+    messages_src = (REPO_ROOT / "static/messages.js").read_text()
+    assert 'getPendingSessionMessage' in ui_src
+    assert 'pending_user_message' in ui_src
+    assert 'function attachLiveStream' in messages_src
+    assert 'const pendingMsg=typeof getPendingSessionMessage' in sessions_src
+    assert 'const activeStreamId=data.session.active_stream_id||null;' in sessions_src
+    assert 'attachLiveStream(sid, activeStreamId' in sessions_src
+    assert 'if (S.activeStreamId && S.activeStreamId === streamId) return;' in ui_src
+
+
+# ── R16: Switching away/back must preserve live partial assistant output ─────
+
+
+def test_live_stream_tokens_persist_partial_assistant_for_session_switch(cleanup_test_sessions):
+    """R16: in-flight assistant text must be mirrored into INFLIGHT session state,
+    and the live stream must rebind to the rebuilt DOM after switching away and back.
+    Without this, partial assistant output disappears until the final done payload lands.
+    """
+    messages_src = (REPO_ROOT / "static/messages.js").read_text()
+    ui_src = (REPO_ROOT / "static/ui.js").read_text()
+
+    assert "content:assistantText" in messages_src, \
+        "messages.js must persist the partial assistant text into INFLIGHT state"
+    assert "_live:true" in messages_src, \
+        "messages.js must mark the persisted in-flight assistant row so renderMessages can re-anchor it"
+    assert "syncInflightAssistantMessage();" in messages_src, \
+        "token handler must update INFLIGHT state before checking the active session"
+    assert "assistantRow&&!assistantRow.isConnected" in messages_src, \
+        "live stream must drop stale detached assistant DOM references after session switches"
+    assert "data-live-assistant" in ui_src, \
+        "renderMessages must preserve a live-assistant DOM anchor when rebuilding the thread"
+
+
+def test_inflight_session_state_tracks_live_tool_cards_per_session(cleanup_test_sessions):
+    """R16b: live tool cards must be stored on the in-flight session, not only in the
+    global S.toolCalls array, so switching chats does not lose or misattach them.
+    """
+    messages_src = (REPO_ROOT / "static/messages.js").read_text()
+    sessions_src = (REPO_ROOT / "static/sessions.js").read_text()
+
+    assert "INFLIGHT[activeSid].toolCalls.push(tc);" in messages_src, \
+        "tool SSE handler must persist live tool calls onto the in-flight session"
+    assert "S.toolCalls=(INFLIGHT[sid].toolCalls||[]);" in sessions_src, \
+        "loadSession() must restore live tool calls from the in-flight session state"
+
+
+# ── R17: Stack traces must not leak to clients in 500 responses ────────────
 
 def test_500_response_has_no_trace_field():
     """R16: HTTP 500 responses must not include a 'trace' field.

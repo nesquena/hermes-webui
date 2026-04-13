@@ -40,7 +40,11 @@ async function loadSession(sid){
   });
   if(INFLIGHT[sid]){
     S.messages=INFLIGHT[sid].messages;
-    // Restore live tool cards for this in-flight session
+    S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
+    syncTopbar();await loadDir('.');renderMessages();appendThinking();
+    // Restore live tool cards for this in-flight session after renderMessages()
+    // rebuilds #msgInner, so the host is anchored into the active thread.
+
     clearLiveToolCards();
     for(const tc of (S.toolCalls||[])){
       if(tc&&tc.name) appendLiveToolCard(tc);

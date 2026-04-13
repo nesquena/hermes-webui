@@ -37,7 +37,7 @@ async function send(){
   S.toolCalls=[];  // clear tool calls from previous turn
   clearLiveToolCards();  // clear any leftover live cards from last turn
   S.messages.push(userMsg);renderMessages();appendThinking();setBusy(true);
-  INFLIGHT[activeSid]={messages:[...S.messages],uploaded};
+  INFLIGHT[activeSid]={messages:[...S.messages],uploaded,toolCalls:[]};
   startApprovalPolling(activeSid);
   S.activeStreamId = null;  // will be set after stream starts
 
@@ -81,6 +81,30 @@ async function send(){
   }
 
   // Open SSE stream and render tokens live
+  attachLiveStream(activeSid, streamId, uploaded);
+
+}
+
+const LIVE_STREAMS={};
+
+function closeLiveStream(sessionId, streamId){
+  const live=LIVE_STREAMS[sessionId];
+  if(!live) return;
+  if(streamId&&live.streamId!==streamId) return;
+  try{live.source.close();}catch(_){ }
+  delete LIVE_STREAMS[sessionId];
+}
+
+function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
+  if(!activeSid||!streamId) return;
+  const reconnecting=!!options.reconnecting;
+  closeLiveStream(activeSid);
+  if(!INFLIGHT[activeSid]) INFLIGHT[activeSid]={messages:[...S.messages],uploaded:[...uploaded],toolCalls:[]};
+  else {
+    if(uploaded.length) INFLIGHT[activeSid].uploaded=[...uploaded];
+    if(!Array.isArray(INFLIGHT[activeSid].toolCalls)) INFLIGHT[activeSid].toolCalls=[];
+  }
+
   let assistantText='';
   let assistantRow=null;
   let assistantBody=null;
@@ -90,8 +114,44 @@ async function send(){
     {open:'<|channel>thought\n',close:'<channel|>'}
   ];
 
+  function _isActiveSession(){
+    return !!(S.session&&S.session.session_id===activeSid);
+  }
+  function _closeSource(){
+    closeLiveStream(activeSid, streamId);
+  }
+  function syncInflightAssistantMessage(){
+    const inflight=INFLIGHT[activeSid];
+    if(!inflight) return;
+    if(!Array.isArray(inflight.messages)) inflight.messages=[];
+    let assistantIdx=-1;
+    for(let i=inflight.messages.length-1;i>=0;i--){
+      const msg=inflight.messages[i];
+      if(msg&&msg.role==='assistant'&&msg._live){assistantIdx=i;break;}
+    }
+    const ts=Date.now()/1000;
+    if(assistantIdx>=0){
+      inflight.messages[assistantIdx].content=assistantText;
+      inflight.messages[assistantIdx]._ts=inflight.messages[assistantIdx]._ts||ts;
+      return;
+    }
+    inflight.messages.push({role:'assistant',content:assistantText,_live:true,_ts:ts});
+  }
   function ensureAssistantRow(){
-    if(assistantRow)return;
+    if(!_isActiveSession()) return;
+    if(assistantRow&&!assistantRow.isConnected){assistantRow=null;assistantBody=null;}
+    if(!assistantRow){
+      const existing=$('msgInner').querySelector('.msg-row[data-live-assistant="1"]');
+      if(existing){
+        assistantRow=existing;
+        assistantBody=existing.querySelector('.msg-body');
+      }
+    }
+    if(assistantRow){
+      if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
+      return;
+    }
+
     removeThinking();
     const tr=$('toolRunningRow');if(tr)tr.remove();
     $('emptyState').style.display='none';
@@ -153,17 +213,23 @@ async function send(){
       if(!S.session||S.session.session_id!==activeSid) return;
       const d=JSON.parse(e.data);
       assistantText+=d.text;
+      syncInflightAssistantMessage();
+      if(!S.session||S.session.session_id!==activeSid) return;
+
       ensureAssistantRow();
       _scheduleRender();
     });
 
     source.addEventListener('tool',e=>{
       const d=JSON.parse(e.data);
+      const tc={name:d.name, preview:d.preview||'', args:d.args||{}, snippet:'', done:false};
+      if(!Array.isArray(INFLIGHT[activeSid].toolCalls)) INFLIGHT[activeSid].toolCalls=[];
+      INFLIGHT[activeSid].toolCalls.push(tc);
+      S.toolCalls=INFLIGHT[activeSid].toolCalls;
+
       if(!S.session||S.session.session_id!==activeSid) return;
       removeThinking();
       const oldRow=$('toolRunningRow');if(oldRow)oldRow.remove();
-      const tc={name:d.name, preview:d.preview||'', args:d.args||{}, snippet:'', done:false};
-      S.toolCalls.push(tc);
       appendLiveToolCard(tc);
       scrollIfPinned();
     });
