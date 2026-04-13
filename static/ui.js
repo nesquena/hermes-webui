@@ -308,13 +308,13 @@ function renderMd(raw){
   // Must run BEFORE fence_stash so code blocks don't capture math delimiters
   const math_stash=[];
   // Display math: $$...$$  (must come before inline to avoid mis-parsing)
-  s=s.replace(/\$\$([\s\S]+?)\$\$/g,(_,m)=>{math_stash.push({type:\'display\',src:m});return \'\\x00M\'+(math_stash.length-1)+\'\\x00\';});
+  s=s.replace(/\$\$([\s\S]+?)\$\$/g,(_,m)=>{math_stash.push({type:'display',src:m});return '\\x00M'+(math_stash.length-1)+'\\x00';});
   // Inline math: $...$ — require non-space at boundaries to avoid false positives
   // e.g. "costs $5 and $10" should not trigger (space after opening $)
-  s=s.replace(/\$([^\s$\n][^$\n]*?[^\s$\n]|\S)\$/g,(_,m)=>{math_stash.push({type:\'inline\',src:m});return \'\\x00M\'+(math_stash.length-1)+\'\\x00\';});
+  s=s.replace(/\$([^\s$\n][^$\n]*?[^\s$\n]|\S)\$/g,(_,m)=>{math_stash.push({type:'inline',src:m});return '\\x00M'+(math_stash.length-1)+'\\x00';});
   // Also stash \(...\) and \[...\] LaTeX delimiters
-  s=s.replace(/\\\\\((.+?)\\\\\)/g,(_,m)=>{math_stash.push({type:\'inline\',src:m});return \'\\x00M\'+(math_stash.length-1)+\'\\x00\';});
-  s=s.replace(/\\\\\[(.+?)\\\\\]/gs,(_,m)=>{math_stash.push({type:\'display\',src:m});return \'\\x00M\'+(math_stash.length-1)+\'\\x00\';});
+  s=s.replace(/\\\\\((.+?)\\\\\)/g,(_,m)=>{math_stash.push({type:'inline',src:m});return '\\x00M'+(math_stash.length-1)+'\\x00';});
+  s=s.replace(/\\\\\[(.+?)\\\\\]/gs,(_,m)=>{math_stash.push({type:'display',src:m});return '\\x00M'+(math_stash.length-1)+'\\x00';});
   const fence_stash=[];
   s=s.replace(/(```[\s\S]*?```|`[^`\n]+`)/g,m=>{fence_stash.push(m);return '\x00F'+(fence_stash.length-1)+'\x00';});
   // Safe tag → markdown equivalent (these produce the same output as **text** etc.)
