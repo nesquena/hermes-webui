@@ -106,6 +106,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   let assistantText='';
+  let reasoningText='';
   let assistantRow=null;
   let assistantBody=null;
   // Thinking tag patterns for streaming display
@@ -132,10 +133,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const ts=Date.now()/1000;
     if(assistantIdx>=0){
       inflight.messages[assistantIdx].content=assistantText;
+      inflight.messages[assistantIdx].reasoning=reasoningText||undefined;
       inflight.messages[assistantIdx]._ts=inflight.messages[assistantIdx]._ts||ts;
       return;
     }
-    inflight.messages.push({role:'assistant',content:assistantText,_live:true,_ts:ts});
+    inflight.messages.push({role:'assistant',content:assistantText,reasoning:reasoningText||undefined,_live:true,_ts:ts});
   }
   function ensureAssistantRow(){
     if(!_isActiveSession()) return;
@@ -175,6 +177,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // and hiding content still inside an open thinking block.
   function _streamDisplay(){
     const raw=assistantText;
+    if(reasoningText) return raw;
     for(const {open,close} of _thinkPairs){
       // Trim leading whitespace before checking for the open tag — some models
       // (e.g. MiniMax) emit newlines before <think>.
@@ -194,15 +197,52 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return raw;
   }
+  function _parseStreamState(){
+    const raw=assistantText;
+    if(reasoningText){
+      return {thinkingText:reasoningText, displayText:_streamDisplay(), inThinking:false};
+    }
+    for(const {open,close} of _thinkPairs){
+      const trimmed=raw.trimStart();
+      if(trimmed.startsWith(open)){
+        const ci=trimmed.indexOf(close,open.length);
+        if(ci!==-1){
+          return {
+            thinkingText: trimmed.slice(open.length, ci).trim(),
+            displayText: trimmed.slice(ci+close.length).replace(/^\s+/,''),
+            inThinking:false,
+          };
+        }
+        return {
+          thinkingText: trimmed.slice(open.length).trim(),
+          displayText:'',
+          inThinking:true,
+        };
+      }
+      if(open.startsWith(trimmed)){
+        return {thinkingText:'', displayText:'', inThinking:true};
+      }
+    }
+    return {thinkingText:'', displayText:raw, inThinking:false};
+  }
+  function _renderLiveThinking(parsed){
+    const text=(parsed&&parsed.thinkingText)||'';
+    if(text||(parsed&&parsed.inThinking)){
+      if(typeof updateThinking==='function') updateThinking(text||'Thinking…');
+      else appendThinking();
+      return;
+    }
+    removeThinking();
+  }
   function _scheduleRender(){
     if(_renderPending) return;
     _renderPending=true;
     requestAnimationFrame(()=>{
       _renderPending=false;
+      const parsed=_parseStreamState();
+      _renderLiveThinking(parsed);
       if(assistantBody){
-        const txt=_streamDisplay();
-        const isThinking=!txt&&assistantText.length>0;
-        assistantBody.innerHTML=txt?renderMd(txt):(isThinking?'<span style="color:var(--muted);font-size:13px">Thinking\u2026</span>':'');
+        assistantBody.innerHTML=parsed.displayText?renderMd(parsed.displayText):'';
       }
       scrollIfPinned();
     });
@@ -220,9 +260,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _scheduleRender();
     });
 
+    source.addEventListener('reasoning',e=>{
+      const d=JSON.parse(e.data);
+      reasoningText += d.text || '';
+      syncInflightAssistantMessage();
+      if(!S.session||S.session.session_id!==activeSid) return;
+      _scheduleRender();
+    });
+
     source.addEventListener('tool',e=>{
       const d=JSON.parse(e.data);
-      const tc={name:d.name, preview:d.preview||'', args:d.args||{}, snippet:'', done:false};
+      const tc={name:d.name, preview:d.preview||'', args:d.args||{}, snippet:'', done:false, tid:d.tid||`live-${Date.now()}-${Math.random().toString(36).slice(2,8)}`};
       if(!Array.isArray(INFLIGHT[activeSid].toolCalls)) INFLIGHT[activeSid].toolCalls=[];
       INFLIGHT[activeSid].toolCalls.push(tc);
       S.toolCalls=INFLIGHT[activeSid].toolCalls;
@@ -230,6 +278,34 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!S.session||S.session.session_id!==activeSid) return;
       removeThinking();
       const oldRow=$('toolRunningRow');if(oldRow)oldRow.remove();
+      appendLiveToolCard(tc);
+      scrollIfPinned();
+    });
+
+    source.addEventListener('tool_complete',e=>{
+      const d=JSON.parse(e.data);
+      const inflight=INFLIGHT[activeSid];
+      if(!inflight) return;
+      if(!Array.isArray(inflight.toolCalls)) inflight.toolCalls=[];
+      let tc=null;
+      for(let i=inflight.toolCalls.length-1;i>=0;i--){
+        const cur=inflight.toolCalls[i];
+        if(cur&&cur.done===false&&(!d.name||cur.name===d.name)){
+          tc=cur;
+          break;
+        }
+      }
+      if(!tc){
+        tc={name:d.name||'tool', preview:d.preview||'', args:d.args||{}, snippet:'', done:true};
+        inflight.toolCalls.push(tc);
+      }
+      tc.preview=d.preview||tc.preview||'';
+      tc.args=d.args||tc.args||{};
+      tc.done=true;
+      tc.is_error=!!d.is_error;
+      if(d.duration!==undefined) tc.duration=d.duration;
+      S.toolCalls=inflight.toolCalls;
+      if(!S.session||S.session.session_id!==activeSid) return;
       appendLiveToolCard(tc);
       scrollIfPinned();
     });
