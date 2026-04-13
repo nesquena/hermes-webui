@@ -1488,15 +1488,17 @@ def _handle_live_models(handler, parsed):
         if parsed_ep.scheme not in ("http", "https"):
             return j(handler, {"error": "invalid_scheme", "models": []}, status=400)
 
-        # SSRF guard: block private IPs (allow known local providers)
+        # SSRF guard: block private IPs (allow known local provider hostnames).
+        # Use exact hostname match — NOT substring — to prevent bypass via
+        # hostnames like evil-ollama.attacker.com containing "ollama".
+        _KNOWN_LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
         if parsed_ep.hostname:
+            hostname_lower = (parsed_ep.hostname or "").lower()
             try:
                 for _, _, _, _, addr in _sock.getaddrinfo(parsed_ep.hostname, None):
                     addr_obj = _ip.ip_address(addr[0])
                     if addr_obj.is_private or addr_obj.is_loopback:
-                        known_local = any(k in (parsed_ep.hostname or "").lower()
-                                          for k in ("ollama", "localhost", "127.0.0.1", "lmstudio", "lm-studio"))
-                        if not known_local:
+                        if hostname_lower not in _KNOWN_LOCAL_HOSTS:
                             return j(handler, {"error": "ssrf_blocked", "models": []}, status=400)
             except _sock.gaierror:
                 pass
