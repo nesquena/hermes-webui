@@ -292,6 +292,10 @@ def handle_get(handler, parsed) -> bool:
             raw = s.compact() | {
                 "messages": s.messages,
                 "tool_calls": getattr(s, "tool_calls", []),
+                "active_stream_id": getattr(s, "active_stream_id", None),
+                "pending_user_message": getattr(s, "pending_user_message", None),
+                "pending_attachments": getattr(s, "pending_attachments", []),
+                "pending_started_at": getattr(s, "pending_started_at", None),
             }
             return j(handler, {"session": redact_session_data(raw)})
         except KeyError:
@@ -1452,11 +1456,15 @@ def _handle_chat_start(handler, body):
     attachments = [str(a) for a in (body.get("attachments") or [])][:20]
     workspace = str(Path(body.get("workspace") or s.workspace).expanduser().resolve())
     model = body.get("model") or s.model
+    stream_id = uuid.uuid4().hex
     s.workspace = workspace
     s.model = model
+    s.active_stream_id = stream_id
+    s.pending_user_message = msg
+    s.pending_attachments = attachments
+    s.pending_started_at = time.time()
     s.save()
     set_last_workspace(workspace)
-    stream_id = uuid.uuid4().hex
     q = queue.Queue()
     with STREAMS_LOCK:
         STREAMS[stream_id] = q

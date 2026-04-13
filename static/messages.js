@@ -10,10 +10,12 @@ async function send(){
   // If busy, queue the message instead of dropping it
   if(S.busy){
     if(text){
-      MSG_QUEUE.push(text);
+      if(!S.session){await newSession();await renderSessionList();}
+      queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles]});
       $('msg').value='';autoResize();
-      updateQueueBadge();
-      showToast(`Queued: "${text.slice(0,40)}${text.length>40?'\u2026':''}"`,2000);
+      S.pendingFiles=[];renderTray();
+      updateQueueBadge(S.session.session_id);
+      showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
     }
     return;
   }
