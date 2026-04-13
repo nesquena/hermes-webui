@@ -3,6 +3,7 @@ Hermes Web UI -- Session model and in-memory session store.
 """
 import collections
 import json
+import logging
 import time
 import uuid
 from pathlib import Path
@@ -14,6 +15,8 @@ from api.config import (
 )
 from api.workspace import get_last_workspace
 
+logger = logging.getLogger(__name__)
+
 
 def _write_session_index():
     """Rebuild the session index file for O(1) future reads."""
@@ -24,7 +27,7 @@ def _write_session_index():
             s = Session.load(p.stem)
             if s: entries.append(s.compact())
         except Exception:
-            pass
+            logger.debug("Failed to load session from %s", p)
     with LOCK:
         for s in SESSIONS.values():
             if not any(e['session_id'] == s.session_id for e in entries):
@@ -151,7 +154,7 @@ def all_sessions():
                     s['profile'] = 'default'
             return result
         except Exception:
-            pass  # fall through to full scan
+            logger.debug("Failed to load session index, falling back to full scan")
     # Full scan fallback
     out = []
     for p in SESSION_DIR.glob('*.json'):
@@ -160,7 +163,7 @@ def all_sessions():
             s = Session.load(p.stem)
             if s: out.append(s)
         except Exception:
-            pass
+            logger.debug("Failed to load session from %s", p)
     for s in SESSIONS.values():
         if all(s.session_id != x.session_id for x in out): out.append(s)
     out.sort(key=lambda s: (getattr(s, 'pinned', False), s.updated_at), reverse=True)

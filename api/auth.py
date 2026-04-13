@@ -6,11 +6,14 @@ or configuring a password in the Settings panel.
 import hashlib
 import hmac
 import http.cookies
+import logging
 import os
 import secrets
 import time
 
 from api.config import STATE_DIR, load_settings
+
+logger = logging.getLogger(__name__)
 
 # ── Public paths (no auth required) ─────────────────────────────────────────
 PUBLIC_PATHS = frozenset({
@@ -54,7 +57,7 @@ def _signing_key():
             if len(raw) >= 32:
                 return raw[:32]
         except Exception:
-            pass
+            logger.debug("Failed to read signing key from file, generating new key")
     # Generate a new random key
     key = secrets.token_bytes(32)
     try:
@@ -62,7 +65,7 @@ def _signing_key():
         key_file.write_bytes(key)
         key_file.chmod(0o600)
     except Exception:
-        pass  # key works for this process even if persist fails
+        logger.debug("Failed to persist signing key, using in-memory key only")
     return key
 
 

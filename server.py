@@ -3,6 +3,7 @@ Hermes Web UI -- Main server entry point.
 Thin routing shell: imports Handler, delegates to api/routes.py, runs server.
 All business logic lives in api/*.
 """
+import socket
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -13,6 +14,28 @@ from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import j
 from api.routes import handle_get, handle_post
 from api.startup import auto_install_agent_deps, fix_credential_permissions
+
+
+class QuietHTTPServer(ThreadingHTTPServer):
+    """Custom HTTP server that silently handles common network errors."""
+    
+    def handle_error(self, request, client_address):
+        """Override to suppress logging for common client disconnect errors."""
+        exc_type, exc_value, _ = traceback.sys.exc_info()
+        
+        # Silently ignore common connection errors caused by client disconnects
+        if exc_type in (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
+            return
+        
+        # Also handle socket errors that indicate client disconnect
+        if exc_type is socket.error:
+            # errno 54 is Connection reset by peer on macOS/BSD
+            # errno 104 is Connection reset by peer on Linux
+            if exc_value.errno in (54, 104, 32):  # ECONNRESET, EPIPE
+                return
+        
+        # For other errors, use default logging
+        super().handle_error(request, client_address)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -118,7 +141,7 @@ def main() -> None:
     except Exception as e:
         print(f'[!!] WARNING: Gateway watcher failed to start: {e}', flush=True)
 
-    httpd = ThreadingHTTPServer((HOST, PORT), Handler)
+    httpd = QuietHTTPServer((HOST, PORT), Handler)
 
     # ── TLS/HTTPS setup (optional) ─────────────────────────────────────────
     from api.config import TLS_ENABLED, TLS_CERT, TLS_KEY

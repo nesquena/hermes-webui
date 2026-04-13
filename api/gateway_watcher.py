@@ -10,6 +10,7 @@ requiring any changes to hermes-agent.
 """
 import hashlib
 import json
+import logging
 import os
 import queue
 import sqlite3
@@ -18,6 +19,8 @@ import time
 from pathlib import Path
 
 from api.config import HOME
+
+logger = logging.getLogger(__name__)
 
 
 # ── State hash tracking ─────────────────────────────────────────────────────
@@ -124,7 +127,7 @@ class GatewayWatcher:
                 try:
                     q.put(None)  # sentinel
                 except Exception:
-                    pass
+                    logger.debug("Failed to send sentinel to subscriber")
         if self._thread:
             self._thread.join(timeout=3)
             self._thread = None
@@ -172,7 +175,7 @@ class GatewayWatcher:
                 try:
                     q.put_nowait(None)
                 except Exception:
-                    pass
+                    logger.debug("Failed to send sentinel to dead subscriber")
 
     def _poll_loop(self):
         """Main polling loop. Runs in a daemon thread."""
@@ -186,7 +189,7 @@ class GatewayWatcher:
                     self._last_sessions = sessions
                     self._notify_subscribers(sessions)
             except Exception:
-                pass  # never crash the watcher
+                logger.debug("Error in gateway watcher poll loop", exc_info=True)
 
             # Sleep in small increments so we can stop promptly
             for _ in range(self.POLL_INTERVAL * 10):

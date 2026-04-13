@@ -200,7 +200,7 @@ def reload_config() -> None:
                 if isinstance(loaded, dict):
                     _cfg_cache.update(loaded)
         except Exception:
-            pass
+            logger.debug("Failed to load yaml config from %s", config_path)
 
 
 # Initial load
@@ -604,7 +604,7 @@ def get_available_models() -> dict:
                 auth_store = _j.loads(auth_store_path.read_text())
                 active_provider = auth_store.get("active_provider")
             except Exception:
-                pass
+                logger.debug("Failed to load auth store from %s", auth_store_path)
 
     # 4. Detect available providers.
     # Primary: ask hermes-agent's auth layer — the authoritative source. It checks
@@ -632,11 +632,11 @@ def get_available_models() -> dict:
                 if _src == "gh auth token":
                     continue
             except Exception:
-                pass
+                logger.debug("Failed to get key source for provider %s", _p.get("id", "unknown"))
             detected_providers.add(_p["id"])
         _hermes_auth_used = True
     except Exception:
-        pass
+        logger.debug("Failed to detect auth providers from hermes")
 
     if not _hermes_auth_used:
         # Fallback: scan .env and os.environ for known API key variables
@@ -655,7 +655,7 @@ def get_available_models() -> dict:
                         k, v = line.split("=", 1)
                         env_keys[k.strip()] = v.strip().strip('"').strip("'")
             except Exception:
-                pass
+                logger.debug("Failed to parse hermes env file")
         all_env = {**env_keys}
         for k in (
             "ANTHROPIC_API_KEY",
@@ -820,7 +820,7 @@ def get_available_models() -> dict:
                     auto_detected_models.append({"id": model_id, "label": model_name})
                     detected_providers.add(provider.lower())
         except Exception:
-            pass  # custom endpoint unreachable or misconfigured -- fail silently
+            logger.debug("Custom endpoint unreachable or misconfigured for provider: %s", provider)
 
     # 3b. Include models from custom_providers config entries.
     # These are explicitly configured and should always appear even when the
@@ -1032,7 +1032,7 @@ def load_settings() -> dict:
             if isinstance(stored, dict):
                 settings.update(stored)
         except Exception:
-            pass
+            logger.debug("Failed to load settings from %s", SETTINGS_FILE)
     return settings
 
 
