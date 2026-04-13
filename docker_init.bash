@@ -187,7 +187,10 @@ rm -f $it || error_exit "Failed to delete test file in $HERMES_WEBUI_STATE_DIR"
 echo ""; echo "-- HERMES_WEBUI_DEFAULT_WORKSPACE: Default workspace directory shown on first launch"
 if [ -z "${HERMES_WEBUI_DEFAULT_WORKSPACE+x}" ]; then echo "HERMES_WEBUI_DEFAULT_WORKSPACE not set, setting to /workspace"; export HERMES_WEBUI_DEFAULT_WORKSPACE="/workspace"; fi;
 echo "-- HERMES_WEBUI_DEFAULT_WORKSPACE: $HERMES_WEBUI_DEFAULT_WORKSPACE"
-if [ ! -d "$HERMES_WEBUI_DEFAULT_WORKSPACE" ]; then mkdir -p $HERMES_WEBUI_DEFAULT_WORKSPACE || error_exit "Failed to create default workspace at $HERMES_WEBUI_DEFAULT_WORKSPACE"; fi
+# Use sudo for mkdir/chown — Docker may auto-create bind-mount directories as root,
+# leaving them unwritable by the hermeswebui user (#357).
+sudo mkdir -p "$HERMES_WEBUI_DEFAULT_WORKSPACE" || error_exit "Failed to create default workspace at $HERMES_WEBUI_DEFAULT_WORKSPACE"
+sudo chown hermeswebui:hermeswebui "$HERMES_WEBUI_DEFAULT_WORKSPACE" || error_exit "Failed to set owner of $HERMES_WEBUI_DEFAULT_WORKSPACE"
 if [ ! -d "$HERMES_WEBUI_DEFAULT_WORKSPACE" ]; then error_exit "HERMES_WEBUI_DEFAULT_WORKSPACE directory does not exist at $HERMES_WEBUI_DEFAULT_WORKSPACE"; fi
 it="$HERMES_WEBUI_DEFAULT_WORKSPACE/.testfile"; touch $it || error_exit "Failed to verify default workspace at $HERMES_WEBUI_DEFAULT_WORKSPACE"
 rm -f $it || error_exit "Failed to delete test file in $HERMES_WEBUI_DEFAULT_WORKSPACE"
@@ -195,8 +198,13 @@ rm -f $it || error_exit "Failed to delete test file in $HERMES_WEBUI_DEFAULT_WOR
 echo ""; echo "==================="
 echo ""; echo "== Installing uv and creating a new virtual environment for hermes-webui"
 
-curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="/home/hermeswebui/.local/bin/:$PATH"
+if command -v uv &>/dev/null; then
+  echo "-- uv already installed ($(uv --version)), skipping download"
+else
+  echo "-- uv not found, downloading..."
+  curl -LsSf https://astral.sh/uv/install.sh | sh || error_exit "Failed to install uv — check network connectivity"
+fi
 export UV_PROJECT_ENVIRONMENT=venv
 
 export UV_CACHE_DIR=/uv_cache
