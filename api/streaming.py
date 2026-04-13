@@ -327,7 +327,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 _err_str = str(_last_err) if _last_err else ''
                 _is_auth = (
                     '401' in _err_str
-                    or 'AuthenticationError' in type(_last_err).__name__ if _last_err else False
+                    or (_last_err and 'AuthenticationError' in type(_last_err).__name__)
                     or 'authentication' in _err_str.lower()
                     or 'unauthorized' in _err_str.lower()
                     or 'invalid api key' in _err_str.lower()
