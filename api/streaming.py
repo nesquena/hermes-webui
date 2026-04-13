@@ -3,12 +3,15 @@ Hermes Web UI -- SSE streaming engine and agent thread runner.
 Includes Sprint 10 cancel support via CANCEL_FLAGS.
 """
 import json
+import logging
 import os
 import queue
 import threading
 import time
 import traceback
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from api.config import (
     STREAMS, STREAMS_LOCK, CANCEL_FLAGS, AGENT_INSTANCES, CLI_TOOLSETS,
@@ -97,7 +100,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
         try:
             q.put_nowait((event, data))
         except Exception:
-            pass
+            logger.debug("Failed to put event to queue")
 
     try:
         s = get_session(session_id)
@@ -157,7 +160,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             _reg_notify(session_id, _approval_notify_cb)
             _approval_registered = True
         except ImportError:
-            pass  # approval module not available — fall back to polling
+            logger.debug("Approval module not available, falling back to polling")
 
         try:
             def on_token(text):
@@ -257,7 +260,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                     try:
                         agent.interrupt("Cancelled before start")
                     except Exception:
-                        pass
+                        logger.debug("Failed to interrupt agent before start")
                     put('cancel', {'message': 'Cancelled by user'})
                     return
 
@@ -325,7 +328,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                     try:
                         old_path.rename(new_path)
                     except OSError:
-                        pass
+                        logger.debug("Failed to rename session file during compression")
                 _compressed = True
             # Also detect compression via the result dict or compressor state
             if not _compressed:
@@ -440,7 +443,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                         message_count=len(s.messages),
                     )
             except Exception:
-                pass  # never crash the stream for sync failures
+                logger.debug("Failed to sync session to insights")
             usage = {'input_tokens': input_tokens, 'output_tokens': output_tokens, 'estimated_cost': estimated_cost}
             # Include context window data from the agent's compressor for the UI indicator
             _cc = getattr(agent, 'context_compressor', None)
@@ -457,7 +460,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 try:
                     _unreg_notify(session_id)
                 except Exception:
-                    pass
+                    logger.debug("Failed to unregister approval callback")
             with _ENV_LOCK:
                 if old_cwd is None: os.environ.pop('TERMINAL_CWD', None)
                 else: os.environ['TERMINAL_CWD'] = old_cwd
@@ -550,5 +553,5 @@ def cancel_stream(stream_id: str) -> bool:
             try:
                 q.put_nowait(('cancel', {'message': 'Cancelled by user'}))
             except Exception:
-                pass
+                logger.debug("Failed to put cancel event to queue")
     return True
