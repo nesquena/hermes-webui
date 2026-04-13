@@ -321,3 +321,28 @@ def test_display_math_stashed_before_inline():
         "Display math ($$...$$) must be stashed before inline math ($...$) "
         "to prevent $$ from being parsed as two adjacent inline delimiters"
     )
+
+
+def test_math_stash_token_uses_single_backslash_null_byte():
+    """Math stash tokens must use the null-byte form (single backslash x00M).
+
+    The restore regex expects a null byte character. If the stash emits
+    a literal backslash+x00M (double backslash = 5-char string), the restore
+    regex never matches and the tokens appear verbatim in the rendered output.
+
+    The fence_stash correctly uses the null byte convention. Math stash must be consistent.
+    """
+    # In the source file, the correct form is: return '\x00M'
+    # The wrong form (double backslash) would be: return '\\x00M'
+    # Check that no double-backslash form exists in the math stash return statements
+    import re
+    bad_returns = re.findall(r"return\s+'\\\\x00M'", UI_JS)
+    assert not bad_returns, (
+        f"Found {len(bad_returns)} math stash return(s) using double-backslash \\\\x00M. "
+        "Must use single backslash '\x00M' (null byte) to match the restore regex."
+    )
+    # Positive check: single-backslash form must exist
+    good_returns = re.findall(r"math_stash\.push.*?return '\\x00M'", UI_JS, re.DOTALL)
+    assert good_returns, (
+        "Math stash return must use single-backslash '\x00M' (null byte convention)"
+    )
