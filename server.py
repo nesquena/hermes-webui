@@ -3,11 +3,14 @@ Hermes Web UI -- Main server entry point.
 Thin routing shell: imports Handler, delegates to api/routes.py, runs server.
 All business logic lives in api/*.
 """
+import logging
 import socket
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
+
+logger = logging.getLogger(__name__)
 
 from api.auth import check_auth
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
@@ -171,7 +174,7 @@ def main() -> None:
             from api.gateway_watcher import stop_watcher
             stop_watcher()
         except Exception:
-            pass
+            logger.debug("Failed to stop gateway watcher during shutdown")
 
 if __name__ == '__main__':
     main()

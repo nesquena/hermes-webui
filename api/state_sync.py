@@ -13,8 +13,11 @@ The bridge uses absolute token counts (not deltas) because the WebUI
 Session object already accumulates totals across turns. This avoids
 any double-counting risk.
 """
+import logging
 import os
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def _get_state_db():
@@ -31,6 +34,7 @@ def _get_state_db():
         from api.profiles import get_active_hermes_home
         hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
     except Exception:
+        logger.debug("Failed to resolve hermes home, using default")
         hermes_home = Path(os.getenv('HERMES_HOME', str(Path.home() / '.hermes')))
 
     db_path = hermes_home / 'state.db'
@@ -40,6 +44,7 @@ def _get_state_db():
     try:
         return SessionDB(db_path)
     except Exception:
+        logger.debug("Failed to open state.db")
         return None
 
 
@@ -57,12 +62,12 @@ def sync_session_start(session_id: str, model=None) -> None:
             model=model,
         )
     except Exception:
-        pass  # never crash the WebUI for sync failures
+        logger.debug("Failed to sync session start to state.db")
     finally:
         try:
             db.close()
         except Exception:
-            pass
+            logger.debug("Failed to close state.db")
 
 
 def sync_session_usage(session_id: str, input_tokens: int=0, output_tokens: int=0,
@@ -92,7 +97,7 @@ def sync_session_usage(session_id: str, input_tokens: int=0, output_tokens: int=
             try:
                 db.set_session_title(session_id, title)
             except Exception:
-                pass
+                logger.debug("Failed to sync session title to state.db")
         # Update message count
         if message_count is not None:
             try:
@@ -103,11 +108,11 @@ def sync_session_usage(session_id: str, input_tokens: int=0, output_tokens: int=
                     )
                 db._execute_write(_set_msg_count)
             except Exception:
-                pass
+                logger.debug("Failed to sync message count to state.db")
     except Exception:
-        pass  # never crash the WebUI for sync failures
+        logger.debug("Failed to sync session usage to state.db")
     finally:
         try:
             db.close()
         except Exception:
-            pass
+            logger.debug("Failed to close state.db")

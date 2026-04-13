@@ -8,9 +8,12 @@ profile has its own workspace configuration.  State files live at
 paths are used as fallback when no profile module is available.
 """
 import json
+import logging
 import os
 import subprocess
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from api.config import (
     WORKSPACES_FILE as _GLOBAL_WS_FILE,
@@ -37,7 +40,7 @@ def _profile_state_dir() -> Path:
             d.mkdir(parents=True, exist_ok=True)
             return d
     except ImportError:
-        pass
+        logger.debug("Failed to import profiles module, using global state dir")
     return _GLOBAL_WS_FILE.parent
 
 
@@ -80,7 +83,7 @@ def _profile_default_workspace() -> str:
                 if p.is_dir():
                     return str(p)
     except (ImportError, Exception):
-        pass
+        logger.debug("Failed to load profile default workspace config")
     return str(_BOOT_DEFAULT_WORKSPACE)
 
 
@@ -156,10 +159,10 @@ def load_workspaces() -> list:
                         json.dumps(cleaned, ensure_ascii=False, indent=2), encoding='utf-8'
                     )
                 except Exception:
-                    pass
+                    logger.debug("Failed to persist cleaned workspace list")
             return cleaned or [{'path': _profile_default_workspace(), 'name': 'Home'}]
         except Exception:
-            pass
+            logger.debug("Failed to load workspaces from %s", ws_file)
     # No profile-local file yet.
     # For the DEFAULT profile: migrate from the legacy global file (one-time cleanup).
     # For NAMED profiles: always start clean with just their own workspace.
@@ -190,7 +193,7 @@ def get_last_workspace() -> str:
             if p and Path(p).is_dir():
                 return p
         except Exception:
-            pass
+            logger.debug("Failed to read last workspace from %s", lw_file)
     # Fallback: try global file
     if _GLOBAL_LW_FILE.exists():
         try:
@@ -198,7 +201,7 @@ def get_last_workspace() -> str:
             if p and Path(p).is_dir():
                 return p
         except Exception:
-            pass
+            logger.debug("Failed to read global last workspace")
     return _profile_default_workspace()
 
 
@@ -208,7 +211,7 @@ def set_last_workspace(path: str) -> None:
         lw_file.parent.mkdir(parents=True, exist_ok=True)
         lw_file.write_text(str(path), encoding='utf-8')
     except Exception:
-        pass
+        logger.debug("Failed to set last workspace")
 
 
 def safe_resolve_ws(root: Path, requested: str) -> Path:

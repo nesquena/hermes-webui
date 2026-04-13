@@ -333,6 +333,10 @@ def handle_get(handler, parsed) -> bool:
             deduped_cli = []
         merged = webui_sessions + deduped_cli
         merged.sort(key=lambda s: s.get("updated_at", 0) or 0, reverse=True)
+        # Redact credentials from session titles before returning
+        for s in merged:
+            if isinstance(s.get("title"), str):
+                s["title"] = _redact_text(s["title"])
         return j(handler, {"sessions": merged, "cli_count": len(deduped_cli)})
 
     if parsed.path == "/api/projects":
@@ -645,18 +649,18 @@ def handle_post(handler, parsed) -> bool:
         try:
             p.unlink(missing_ok=True)
         except Exception:
-            pass
+            logger.debug("Failed to unlink session file %s", p)
         try:
             SESSION_INDEX_FILE.unlink(missing_ok=True)
         except Exception:
-            pass
+            logger.debug("Failed to unlink session index")
         # Also delete from CLI state.db (for CLI sessions shown in sidebar)
         try:
             from api.models import delete_cli_session
 
             delete_cli_session(sid)
         except Exception:
-            pass
+            logger.debug("Failed to delete CLI session %s", sid)
         return j(handler, {"ok": True})
 
     if parsed.path == "/api/session/clear":
@@ -966,9 +970,9 @@ def handle_post(handler, parsed) -> bool:
                             s.project_id = None
                             s.save()
                         except Exception:
-                            pass
+                            logger.debug("Failed to update session %s", entry.get("session_id"))
             except Exception:
-                pass
+                logger.debug("Failed to load session index for project unlink")
         return j(handler, {"ok": True})
 
     # ── Session import from JSON (POST) ──
@@ -1333,7 +1337,7 @@ def _handle_cron_output(handler, parsed):
                 txt = f.read_text(encoding="utf-8", errors="replace")
                 outputs.append({"filename": f.name, "content": txt[:8000]})
             except Exception:
-                pass
+                logger.debug("Failed to read cron output file %s", f)
     return j(handler, {"job_id": job_id, "outputs": outputs})
 
 
@@ -1427,7 +1431,7 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
                 p.unlink(missing_ok=True)
                 cleaned += 1
         except Exception:
-            pass
+            logger.debug("Failed to clean up session file %s", p)
     if SESSION_INDEX_FILE.exists():
         SESSION_INDEX_FILE.unlink(missing_ok=True)
     return j(handler, {"ok": True, "cleaned": cleaned})
@@ -1574,7 +1578,7 @@ def _handle_chat_sync(handler, body):
                 message_count=len(s.messages),
             )
     except Exception:
-        pass
+        logger.debug("Failed to update session cost tracking")
     return j(
         handler,
         {
