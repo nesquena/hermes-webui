@@ -479,9 +479,6 @@ def apply_onboarding_setup(body: dict) -> dict:
 
     if api_key:
         _write_env_file(env_path, {provider_meta["env_var"]: api_key})
-        # Belt-and-braces: set directly on os.environ so the value is visible to
-        # any code in the same process that reads it before the next request cycle.
-        os.environ[provider_meta["env_var"]] = api_key
 
     # Reload the hermes_cli provider/config cache so the next streaming call
     # picks up the new key without requiring a server restart.
@@ -490,6 +487,12 @@ def apply_onboarding_setup(body: dict) -> dict:
         _reload_dotenv(_get_active_hermes_home())
     except Exception:
         pass
+
+    # Belt-and-braces: set directly on os.environ AFTER _reload_dotenv so the
+    # value survives even if _reload_dotenv cleared it (e.g. when _write_env_file
+    # wrote to disk but the profile isolation tracking hasn't seen it yet).
+    if api_key:
+        os.environ[provider_meta["env_var"]] = api_key
 
     try:
         # hermes_cli may cache config at import time; ask it to reload if possible.
