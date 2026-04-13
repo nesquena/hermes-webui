@@ -6,6 +6,15 @@
 ---
 
 
+## [v0.50.11] Auto-link plain URLs in chat messages (fixes #342)
+
+- **Plain URLs in chat messages are now clickable** (`static/ui.js`): The `renderMd()` function previously only converted Markdown-style `[label](url)` links to `<a>` tags. Bare URLs like `https://example.com` were rendered as plain text. A new autolink pass converts `https?://...` URLs to `<a href="..." target="_blank" rel="noopener">` tags automatically.
+  - The pass runs after the `[label](url)` link pass and the `SAFE_TAGS` HTML-escape pass (protecting code blocks in `<pre>`), but before the paragraph-wrapping stage.
+  - The same autolink pass is applied inside `inlineMd()` so URLs in list items, blockquotes, and table cells are linked too.
+  - Trailing punctuation (`.`, `,`, `;`, `:`, `!`, `?`, `)`) is stripped from the end of URLs to avoid linking sentence-ending characters.
+  - URLs are passed through `esc()` before placement in `href` and link text — no XSS risk.
+  - 7 new structural tests in `tests/test_issue342.py`; 809 tests total (up from 802)
+
 ## [v0.50.10] Title auto-generation fix + mobile close button (PR #333)
 
 - **Session title now auto-generates for all default title values** (`'Untitled'`, `'New Chat'`, empty string): The condition in `api/streaming.py` that triggers `title_from()` previously only matched `'Untitled'`. It now also covers `'New Chat'` (used by some external clients/forks) and any empty/falsy title, so sessions started from those states get a proper auto-generated title after the first message.

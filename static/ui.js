@@ -331,6 +331,7 @@ function renderMd(raw){
     t=t.replace(/\*([^*\n]+)\*/g,(_,x)=>`<em>${esc(x)}</em>`);
     t=t.replace(/`([^`\n]+)`/g,(_,x)=>`<code>${esc(x)}</code>`);
     t=t.replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g,(_,lb,u)=>`<a href="${esc(u)}" target="_blank" rel="noopener">${esc(lb)}</a>`);
+    t=t.replace(/(https?:\/\/[^\s<>"')\]]+)/g,(url)=>{const trail=url.match(/[.,;:!?)]$/)?url.slice(-1):'';const clean=trail?url.slice(0,-1):url;return `<a href="${esc(clean)}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;});
     // Escape any plain text that isn't already wrapped in a tag we produced
     // by escaping bare < > that aren't part of our own tags
     const SAFE_INLINE=/^<\/?(strong|em|code|a)([\s>]|$)/i;
@@ -383,6 +384,13 @@ function renderMd(raw){
   // <div class="..."> (mermaid/pre-header). Everything else is untrusted input.
   const SAFE_TAGS=/^<\/?(strong|em|code|pre|h[1-6]|ul|ol|li|table|thead|tbody|tr|th|td|hr|blockquote|p|br|a|div)([\s>]|$)/i;
   s=s.replace(/<\/?[a-z][^>]*>/gi,tag=>SAFE_TAGS.test(tag)?tag:esc(tag));
+  // Autolink: convert plain URLs to clickable links (not inside existing <a> tags, not in code)
+  s=s.replace(/(https?:\/\/[^\s<>"')\]]+)/g,(url)=>{
+    // Strip trailing punctuation that was likely not part of the URL
+    const trail=url.match(/[.,;:!?)]$/)?url.slice(-1):'';
+    const clean=trail?url.slice(0,-1):url;
+    return `<a href="${esc(clean)}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;
+  });
   const parts=s.split(/\n{2,}/);
   s=parts.map(p=>{p=p.trim();if(!p)return '';if(/^<(h[1-6]|ul|ol|pre|hr|blockquote)/.test(p))return p;return `<p>${p.replace(/\n/g,'<br>')}</p>`;}).join('\n');
   return s;
