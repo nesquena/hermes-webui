@@ -130,9 +130,12 @@ def install_hermes_agent() -> None:
 
 def wait_for_health(url: str, timeout: float = 25.0) -> bool:
     deadline = time.time() + timeout
+    # Validate URL scheme to prevent file:// and other dangerous schemes
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(f"Invalid health check URL: {url}")
     while time.time() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=2) as response:
+            with urllib.request.urlopen(url, timeout=2) as response:  # nosec B310
                 if b'"status": "ok"' in response.read():
                     return True
         except Exception:
