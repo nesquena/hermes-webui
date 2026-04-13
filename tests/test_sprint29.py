@@ -55,6 +55,13 @@ def post(path, body=None, headers=None):
 
 
 class TestCSRF:
+    @staticmethod
+    def _csrf_allowed(headers):
+        from types import SimpleNamespace
+        from api.routes import _check_csrf
+
+        return _check_csrf(SimpleNamespace(headers=headers))
+
     def test_no_origin_no_referer_allowed(self):
         """Curl-style request with no Origin/Referer must pass CSRF check."""
         body, status = post("/api/sessions/new", {})
@@ -87,7 +94,46 @@ class TestCSRF:
             {},
             headers={"Referer": "http://127.0.0.1:8788/", "Host": "127.0.0.1:8788"},
         )
-        assert status != 403, f"Expected non-403 for same-referer request, got {status}: {body}"
+        assert status != 403, f"Expected non-403 for same-referer request, got {status}"
+
+    def test_proxy_host_default_https_port_matches_http_origin(self):
+        """Origin without port should match X-Forwarded-Host when only :443 differs."""
+        assert self._csrf_allowed({
+            "Origin": "http://example.com",
+            "X-Forwarded-Host": "example.com:443",
+        })
+
+    def test_proxy_host_default_https_port_matches_https_origin(self):
+        """HTTPS Origin without port should match X-Forwarded-Host with explicit :443."""
+        assert self._csrf_allowed({
+            "Origin": "https://example.com",
+            "X-Forwarded-Host": "example.com:443",
+        })
+
+    def test_proxy_host_port_normalization_still_rejects_other_host(self):
+        """Port normalization must not allow different hosts through."""
+        assert not self._csrf_allowed({
+            "Origin": "https://evil.com",
+            "X-Forwarded-Host": "example.com:443",
+        })
+
+    def test_allowed_public_origin_bypasses_missing_proxy_port(self, monkeypatch):
+        """Explicitly configured public origins should pass even if proxy strips :port from Host."""
+        monkeypatch.setenv('HERMES_WEBUI_ALLOWED_ORIGINS', 'https://myapp.example.com:8000')
+        assert self._csrf_allowed({
+            'Origin': 'https://myapp.example.com:8000',
+            'Host': 'myapp.example.com',
+            'X-Forwarded-Proto': 'https',
+        })
+
+    def test_other_origin_not_allowed_by_public_origin_allowlist(self, monkeypatch):
+        """Allowlist must stay exact; unrelated origins must still be rejected."""
+        monkeypatch.setenv('HERMES_WEBUI_ALLOWED_ORIGINS', 'https://myapp.example.com:8000')
+        assert not self._csrf_allowed({
+            'Origin': 'https://evil.com:8000',
+            'Host': 'myapp.example.com',
+            'X-Forwarded-Proto': 'https',
+        })
 
 
 # ── 2. Login Rate Limiting ─────────────────────────────────────────────────

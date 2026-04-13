@@ -55,6 +55,52 @@ from api.helpers import (
 import re as _re
 
 
+def _normalize_host_port(value: str) -> tuple[str, str | None]:
+    """Split a host or host:port string into (hostname, port|None).
+    Handles IPv6 bracket notation, e.g. [::1]:8080."""
+    value = value.strip().lower()
+    if not value:
+        return '', None
+    if value.startswith('['):
+        end = value.find(']')
+        if end != -1:
+            host = value[1:end]
+            rest = value[end + 1 :]
+            if rest.startswith(':') and rest[1:].isdigit():
+                return host, rest[1:]
+            return host, None
+    if value.count(':') == 1:
+        host, port = value.rsplit(':', 1)
+        if port.isdigit():
+            return host, port
+    return value, None
+
+
+_DEFAULT_PORTS = {'80', '443'}
+
+
+def _ports_match(origin_port: str | None, allowed_port: str | None) -> bool:
+    """Return True when two ports should be considered equivalent.
+    Treats None (absent) as matching the default HTTP/HTTPS ports."""
+    if origin_port == allowed_port:
+        return True
+    if not origin_port and allowed_port in _DEFAULT_PORTS:
+        return True
+    if not allowed_port and origin_port in _DEFAULT_PORTS:
+        return True
+    return False
+
+
+def _allowed_public_origins() -> set[str]:
+    """Parse HERMES_WEBUI_ALLOWED_ORIGINS env var (comma-separated) into a set."""
+    raw = os.getenv('HERMES_WEBUI_ALLOWED_ORIGINS', '')
+    return {
+        value.strip().rstrip('/').lower()
+        for value in raw.split(',')
+        if value.strip()
+    }
+
+
 def _check_csrf(handler) -> bool:
     """Reject cross-origin POST requests. Returns True if OK."""
     origin = handler.headers.get("Origin", "")
@@ -68,10 +114,15 @@ def _check_csrf(handler) -> bool:
     if not m:
         return False
     origin_host = m.group(1)
+    origin_name, origin_port = _normalize_host_port(origin_host)
+    # Check against explicitly allowed public origins (env var)
+    origin_value = m.group(0).rstrip('/').lower()
+    if origin_value in _allowed_public_origins():
+        return True
     # Allow same-origin: check Host, X-Forwarded-Host (reverse proxy), and
     # X-Real-Host against the origin. Reverse proxies (Caddy, nginx) set
     # X-Forwarded-Host to the client's original Host header.
-    allowed_hosts = {
+    allowed_hosts = [
         h.strip()
         for h in [
             host,
@@ -79,9 +130,11 @@ def _check_csrf(handler) -> bool:
             handler.headers.get("X-Real-Host", ""),
         ]
         if h.strip()
-    }
-    if origin_host in allowed_hosts:
-        return True
+    ]
+    for allowed in allowed_hosts:
+        allowed_name, allowed_port = _normalize_host_port(allowed)
+        if origin_name == allowed_name and _ports_match(origin_port, allowed_port):
+            return True
     return False
 
 
