@@ -68,10 +68,67 @@ async function populateModelDropdown(){
       _applyModelToDropdown(data.default_model, sel);
     }
     if(typeof syncModelChip==='function') syncModelChip();
+    // Kick off a background live-model fetch for the active provider.
+    // This runs after the static list is already shown (no blocking flicker).
+    if(data.active_provider) _fetchLiveModels(data.active_provider, sel);
   }catch(e){
     // API unavailable -- keep the hardcoded HTML options as fallback
     console.warn('Failed to load models from server:',e.message);
     if(typeof syncModelChip==='function') syncModelChip();
+  }
+}
+
+// Cache so we don't re-fetch on every page load
+const _liveModelCache={};
+
+async function _fetchLiveModels(provider, sel){
+  if(!provider||!sel) return;
+  // Don't fetch for providers where we know it's unsupported or unnecessary
+  if(['anthropic','google','gemini'].includes(provider)) return;
+  if(_liveModelCache[provider]) return; // already fetched this session
+  try{
+    const url=new URL('/api/models/live',location.origin);
+    url.searchParams.set('provider',provider);
+    const data=await fetch(url.href,{credentials:'include'}).then(r=>r.json());
+    if(!data.models||!data.models.length) return;
+    _liveModelCache[provider]=data.models;
+    // Remember current selection before rebuilding options
+    const currentVal=sel.value;
+    // Rebuild the optgroup for this provider with live models
+    // Keep other providers' optgroups intact
+    let providerGroup=null;
+    for(const og of sel.querySelectorAll('optgroup')){
+      if(og.label&&og.label.toLowerCase().includes(provider.toLowerCase())){
+        providerGroup=og; break;
+      }
+    }
+    if(!providerGroup){
+      // No existing group — add a new one
+      providerGroup=document.createElement('optgroup');
+      providerGroup.label=provider.charAt(0).toUpperCase()+provider.slice(1)+' (live)';
+      sel.appendChild(providerGroup);
+    }
+    // Rebuild options from live data
+    const existingIds=new Set([...sel.options].map(o=>o.value));
+    let added=0;
+    for(const m of data.models){
+      if(existingIds.has(m.id)) continue; // already shown from static list
+      const opt=document.createElement('option');
+      opt.value=m.id;
+      opt.textContent=m.label||m.id;
+      opt.title='Live model — fetched from provider';
+      providerGroup.appendChild(opt);
+      _dynamicModelLabels[m.id]=m.label||m.id;
+      added++;
+    }
+    if(added>0){
+      // Restore selection
+      if(currentVal) _applyModelToDropdown(currentVal, sel);
+      if(typeof syncModelChip==='function') syncModelChip();
+      console.log('[hermes] Live models loaded for',provider+':',added,'new models added');
+    }
+  }catch(e){
+    console.debug('[hermes] Live model fetch failed for',provider,e.message);
   }
 }
 

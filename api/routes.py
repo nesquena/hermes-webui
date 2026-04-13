@@ -341,6 +341,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/models":
         return j(handler, get_available_models())
 
+    if parsed.path == "/api/models/live":
+        return _handle_live_models(handler, parsed)
+
     if parsed.path == "/api/settings":
         settings = load_settings()
         # Never expose the stored password hash to clients
@@ -1388,6 +1391,142 @@ def _handle_approval_inject(handler, parsed):
         )
         return j(handler, {"ok": True, "session_id": sid})
     return j(handler, {"error": "session_id required"}, status=400)
+
+
+def _handle_live_models(handler, parsed):
+    """Fetch the live model list from a provider's /v1/models endpoint.
+
+    Returns the provider's actual model catalog so the UI can show all
+    available models, not just the hardcoded fallback list.
+
+    Query params:
+        provider  (optional) — provider ID to fetch for; defaults to active
+        base_url  (optional) — override the base URL for the provider
+
+    Providers that don't expose a /v1/models endpoint (Anthropic) are not
+    supported here — the caller should fall back to the static list.
+
+    Supported: openai, openrouter, custom (any OpenAI-compatible endpoint).
+    """
+    import urllib.request as _ur
+    import ipaddress as _ip
+    import socket as _sock
+    from urllib.parse import urlparse as _up
+
+    qs = parse_qs(parsed.query)
+    provider = (qs.get("provider", [""])[0] or "").lower().strip()
+    base_url_override = (qs.get("base_url", [""])[0] or "").strip()
+
+    try:
+        from api.config import get_config as _gc, resolve_model_provider as _rmp
+        cfg = _gc()
+        active_provider = cfg.get("model", {}).get("provider") or ""
+        if not provider:
+            provider = active_provider
+
+        # Resolve API key and base URL for this provider
+        api_key = None
+        base_url = base_url_override or ""
+        try:
+            from hermes_cli.runtime_provider import resolve_runtime_provider
+            rt = resolve_runtime_provider(requested=provider)
+            api_key = rt.get("api_key")
+            if not base_url:
+                base_url = rt.get("base_url") or ""
+        except Exception:
+            pass
+
+        # Determine the /v1/models endpoint URL
+        if not base_url:
+            if provider in ("openai", "openai-codex", "copilot"):
+                base_url = "https://api.openai.com/v1"
+            elif provider == "openrouter":
+                base_url = "https://openrouter.ai/api/v1"
+            elif provider in ("anthropic",):
+                # Anthropic doesn't support /v1/models in a standard way
+                return j(handler, {"error": "not_supported", "models": []})
+            elif provider in ("google", "gemini"):
+                return j(handler, {"error": "not_supported", "models": []})
+            else:
+                # Generic OpenAI-compatible — try common paths
+                base_url = ""
+
+        if not base_url:
+            return j(handler, {"error": "no_base_url", "models": []})
+
+        # Build URL safely
+        base_url = base_url.rstrip("/")
+        if base_url.endswith("/v1"):
+            endpoint_url = base_url + "/models"
+        elif "/v1" in base_url:
+            endpoint_url = base_url.rstrip("/") + "/models"
+        else:
+            endpoint_url = base_url + "/v1/models"
+
+        # Validate scheme (B310 guard)
+        parsed_ep = _up(endpoint_url)
+        if parsed_ep.scheme not in ("http", "https"):
+            return j(handler, {"error": "invalid_scheme", "models": []}, status=400)
+
+        # SSRF guard: block private IPs (allow known local providers)
+        if parsed_ep.hostname:
+            try:
+                for _, _, _, _, addr in _sock.getaddrinfo(parsed_ep.hostname, None):
+                    addr_obj = _ip.ip_address(addr[0])
+                    if addr_obj.is_private or addr_obj.is_loopback:
+                        known_local = any(k in (parsed_ep.hostname or "").lower()
+                                          for k in ("ollama", "localhost", "127.0.0.1", "lmstudio", "lm-studio"))
+                        if not known_local:
+                            return j(handler, {"error": "ssrf_blocked", "models": []}, status=400)
+            except _sock.gaierror:
+                pass
+
+        # Fetch models
+        req = _ur.Request(endpoint_url, method="GET")
+        req.add_header("User-Agent", "HermesWebUI/1.0")
+        if api_key:
+            req.add_header("Authorization", f"Bearer {api_key}")
+        with _ur.urlopen(req, timeout=8) as resp:  # nosec B310
+            raw = resp.read().decode("utf-8")
+
+        import json as _json
+        data = _json.loads(raw)
+        raw_models = data.get("data") or data.get("models") or []
+
+        # Normalise to {id, label} list; filter to text-generation models
+        models = []
+        seen = set()
+        for m in raw_models:
+            if not isinstance(m, dict):
+                continue
+            mid = m.get("id") or m.get("name") or ""
+            if not mid or mid in seen:
+                continue
+            # Skip embedding/image/audio models for direct providers
+            obj_type = (m.get("object") or "").lower()
+            if obj_type and obj_type not in ("model",):
+                continue
+            # Heuristic: skip obvious non-chat models
+            if any(skip in mid.lower() for skip in ("embed", "tts", "whisper", "dall-e", "davinci-edit", "babbage", "ada", "curie")):
+                continue
+            seen.add(mid)
+            label = m.get("name") or m.get("display_name") or mid
+            # For OpenAI, the id IS the label — clean it up
+            if label == mid:
+                label = mid.replace("-", " ").replace(".", ".").title()
+                # Restore original casing for well-known names
+                for known in ("GPT", "o1", "o3", "o4", "gpt"):
+                    label = label.replace(known.title(), known)
+            models.append({"id": mid, "label": label})
+
+        # Sort: newest (higher version numbers) first via lexicographic sort on reversed id
+        models.sort(key=lambda m: m["id"], reverse=True)
+
+        return j(handler, {"provider": provider, "models": models, "count": len(models)})
+
+    except Exception as _e:
+        logger.debug("Failed to fetch live models for %s: %s", provider, _e)
+        return j(handler, {"error": str(_e), "models": []})
 
 
 def _handle_cron_output(handler, parsed):

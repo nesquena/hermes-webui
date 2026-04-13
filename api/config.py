@@ -406,8 +406,6 @@ CLI_TOOLSETS = get_config().get("platform_toolsets", {}).get("cli", _DEFAULT_TOO
 # Hardcoded fallback models (used when no config.yaml or agent is available)
 _FALLBACK_MODELS = [
     {"provider": "OpenAI", "id": "openai/gpt-5.4-mini", "label": "GPT-5.4 Mini"},
-    {"provider": "OpenAI", "id": "openai/gpt-4o", "label": "GPT-4o"},
-    {"provider": "OpenAI", "id": "openai/o3", "label": "o3"},
     {"provider": "OpenAI", "id": "openai/o4-mini", "label": "o4-mini"},
     {
         "provider": "Anthropic",
@@ -463,8 +461,6 @@ _PROVIDER_MODELS = {
     ],
     "openai": [
         {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
-        {"id": "gpt-4o", "label": "GPT-4o"},
-        {"id": "o3", "label": "o3"},
         {"id": "o4-mini", "label": "o4-mini"},
     ],
     "openai-codex": [
