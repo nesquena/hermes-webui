@@ -915,7 +915,7 @@ function renderMessages(){
     }
     const row=document.createElement('div');row.className='msg-row';
     row.dataset.msgIdx=rawIdx;row.dataset.role=m.role||'assistant';
-    if(m._live) row.dataset.liveAssistant='1';
+    if(m._live) row.setAttribute('data-live-assistant','1');
     let filesHtml='';
     if(m.attachments&&m.attachments.length)
       filesHtml=`<div class="msg-files">${m.attachments.map(f=>`<div class="msg-file-badge">${li('paperclip',12)} ${esc(f)}</div>`).join('')}</div>`;
