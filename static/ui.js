@@ -433,10 +433,13 @@ function renderMd(raw){
   // Used inside list items and blockquotes where the text may already contain
   // HTML from the pre-pass → bold pipeline, so we cannot call esc() directly.
   function inlineMd(t){
+    // Stash backtick code spans first so bold/italic never esc() their content
+    const _code_stash=[];
+    t=t.replace(/`([^`\n]+)`/g,(_,x)=>{_code_stash.push(`<code>${esc(x)}</code>`);return `\x00C${_code_stash.length-1}\x00`;});
     t=t.replace(/\*\*\*(.+?)\*\*\*/g,(_,x)=>`<strong><em>${esc(x)}</em></strong>`);
     t=t.replace(/\*\*(.+?)\*\*/g,(_,x)=>`<strong>${esc(x)}</strong>`);
     t=t.replace(/\*([^*\n]+)\*/g,(_,x)=>`<em>${esc(x)}</em>`);
-    t=t.replace(/`([^`\n]+)`/g,(_,x)=>`<code>${esc(x)}</code>`);
+    t=t.replace(/\x00C(\d+)\x00/g,(_,i)=>_code_stash[+i]);
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
     t=t.replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g,(_,lb,u)=>{_link_stash.push(`<a href="${u.replace(/"/g,'%22')}" target="_blank" rel="noopener">${esc(lb)}</a>`);return `\x00L${_link_stash.length-1}\x00`;});

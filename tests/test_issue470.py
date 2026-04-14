@@ -260,3 +260,54 @@ def test_js_source_sanitizes_quotes_in_href():
     assert "%22" in UI_JS, (
         "URL placed in href should have double-quotes percent-encoded via .replace to %22"
     )
+
+# ── Code-inside-bold tests (pre-existing bug, fixed in same PR) ───────────────
+
+def test_js_inlinemd_stashes_code_before_bold():
+    """Fixed inlineMd() must stash backtick code spans before bold/italic processing."""
+    assert '_code_stash' in UI_JS, (
+        "inlineMd() should use _code_stash to protect backtick spans from bold/italic esc()"
+    )
+
+
+def test_code_inside_bold_renders_correctly():
+    """Inline code inside bold text must render as <strong><code>...</code></strong>,
+    not with escaped &lt;code&gt; tags visible on screen."""
+    # This was the pre-existing bug: **`esc()`** → <strong>&lt;code&gt;esc()&lt;/code&gt;</strong>
+    text = '**`esc()` on `href`**: breaks URLs'
+    # Simulate the fixed inlineMd()
+    code_stash = []
+    t = text
+    t = re.sub(r'`([^`\n]+)`',
+        lambda m: (code_stash.append(f'<code>{esc(m.group(1))}</code>') or f'\x00C{len(code_stash)-1}\x00'), t)
+    t = re.sub(r'\*\*(.+?)\*\*', lambda m: f'<strong>{esc(m.group(1))}</strong>', t)
+    t = re.sub(r'\x00C(\d+)\x00', lambda m: code_stash[int(m.group(1))], t)
+    assert '&lt;code&gt;' not in t, (
+        f"Code tags should not be HTML-escaped inside bold. Got: {t}"
+    )
+    assert '<code>esc()</code>' in t, (
+        f"Code tags should render as <code> elements inside bold. Got: {t}"
+    )
+    assert '<strong>' in t, "Bold should still render"
+
+
+def test_code_and_bold_mixed_no_escaping():
+    """Bold text containing multiple backtick spans must render all code tags correctly."""
+    cases = [
+        ('**`esc()` on `href`**', '<strong>', '<code>esc()</code>', '<code>href</code>'),
+        ('***`code` in bold-italic***', '<strong>', '<code>code</code>'),
+        ('`code` then **bold**', '<code>code</code>', '<strong>bold</strong>'),
+    ]
+    for args in cases:
+        text = args[0]
+        expected_fragments = args[1:]
+        code_stash = []
+        t = text
+        t = re.sub(r'`([^`\n]+)`',
+            lambda m: (code_stash.append(f'<code>{esc(m.group(1))}</code>') or f'\x00C{len(code_stash)-1}\x00'), t)
+        t = re.sub(r'\*\*\*(.+?)\*\*\*', lambda m: f'<strong><em>{esc(m.group(1))}</em></strong>', t)
+        t = re.sub(r'\*\*(.+?)\*\*', lambda m: f'<strong>{esc(m.group(1))}</strong>', t)
+        t = re.sub(r'\x00C(\d+)\x00', lambda m: code_stash[int(m.group(1))], t)
+        assert '&lt;code&gt;' not in t, f"Escaped code tag in: {text!r} → {t}"
+        for frag in expected_fragments:
+            assert frag in t, f"Expected {frag!r} in output of {text!r}, got: {t}"
