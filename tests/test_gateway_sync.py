@@ -275,6 +275,64 @@ def test_gateway_session_messages_readable():
         post('/api/settings', {'show_cli_sessions': False})
 
 
+def test_importing_older_gateway_session_preserves_original_timestamps_and_order():
+    """Importing an older gateway session should not bump it above newer WebUI sessions."""
+    conn = _ensure_state_db()
+    older_started_at = time.time() - 1800
+    imported_sid = 'gw_import_old_001'
+    newer_webui_sid = None
+    try:
+        newer_webui, status = post('/api/session/new', {'model': 'openai/gpt-5'})
+        assert status == 200, newer_webui
+        newer_webui_sid = newer_webui['session']['session_id']
+
+        rename, rename_status = post(
+            '/api/session/rename',
+            {'session_id': newer_webui_sid, 'title': 'Newer WebUI Session'},
+        )
+        assert rename_status == 200, rename
+
+        _insert_gateway_session(
+            conn,
+            session_id=imported_sid,
+            source='discord',
+            title='Older imported gateway session',
+            started_at=older_started_at,
+        )
+        post('/api/settings', {'show_cli_sessions': True})
+
+        imported, imported_status = post('/api/session/import_cli', {'session_id': imported_sid})
+        assert imported_status == 200, imported
+        imported_session = imported['session']
+        assert abs(imported_session['created_at'] - older_started_at) < 2, imported_session
+        assert abs(imported_session['updated_at'] - older_started_at) < 5, imported_session
+
+        sessions_payload, sessions_status = get('/api/sessions')
+        assert sessions_status == 200, sessions_payload
+        ordered_ids = [item['session_id'] for item in sessions_payload.get('sessions', [])]
+        assert newer_webui_sid in ordered_ids, ordered_ids
+        assert imported_sid in ordered_ids, ordered_ids
+        assert ordered_ids.index(newer_webui_sid) < ordered_ids.index(imported_sid), ordered_ids
+    finally:
+        try:
+            _remove_test_sessions(conn, imported_sid)
+            conn.close()
+        except Exception:
+            pass
+        if imported_sid:
+            try:
+                post('/api/session/delete', {'session_id': imported_sid})
+            except Exception:
+                pass
+        if newer_webui_sid:
+            try:
+                post('/api/session/delete', {'session_id': newer_webui_sid})
+            except Exception:
+                pass
+        post('/api/settings', {'show_cli_sessions': False})
+
+
+
 def test_gateway_sse_stream_endpoint_exists():
     """GET /api/sessions/gateway/stream returns a response (200 or 200-range)."""
     # The SSE endpoint requires show_cli_sessions to be enabled

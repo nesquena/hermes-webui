@@ -2209,18 +2209,30 @@ def _handle_session_import_cli(handler, body):
     title = title_from(msgs, "CLI Session")
     model = "unknown"
 
-    # Get profile and model from CLI session metadata
+    # Get profile, model, and timestamps from CLI session metadata
     profile = None
+    created_at = None
+    updated_at = None
     for cs in get_cli_sessions():
         if cs["session_id"] == sid:
             profile = cs.get("profile")
             model = cs.get("model", "unknown")
+            created_at = cs.get("created_at")
+            updated_at = cs.get("updated_at")
             break
 
-    s = import_cli_session(sid, title, msgs, model, profile=profile)
+    s = import_cli_session(
+        sid,
+        title,
+        msgs,
+        model,
+        profile=profile,
+        created_at=created_at,
+        updated_at=updated_at,
+    )
     s.is_cli_session = True
     s._cli_origin = sid
-    s.save()
+    s.save(touch_updated_at=False)
     return j(
         handler,
         {

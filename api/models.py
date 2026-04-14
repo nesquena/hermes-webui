@@ -74,8 +74,9 @@ class Session:
     def path(self):
         return SESSION_DIR / f'{self.session_id}.json'
 
-    def save(self) -> None:
-        self.updated_at = time.time()
+    def save(self, touch_updated_at: bool = True) -> None:
+        if touch_updated_at:
+            self.updated_at = time.time()
         self.path.write_text(
             json.dumps(self.__dict__, ensure_ascii=False, indent=2),
             encoding='utf-8',
@@ -211,7 +212,15 @@ def save_projects(projects) -> None:
     PROJECTS_FILE.write_text(json.dumps(projects, ensure_ascii=False, indent=2), encoding='utf-8')
 
 
-def import_cli_session(session_id: str, title: str, messages, model: str='unknown', profile=None):
+def import_cli_session(
+    session_id: str,
+    title: str,
+    messages,
+    model: str='unknown',
+    profile=None,
+    created_at=None,
+    updated_at=None,
+):
     """Create a new WebUI session populated with CLI messages.
     Returns the Session object.
     """
@@ -222,8 +231,10 @@ def import_cli_session(session_id: str, title: str, messages, model: str='unknow
         model=model,
         messages=messages,
         profile=profile,
+        created_at=created_at,
+        updated_at=updated_at,
     )
-    s.save()
+    s.save(touch_updated_at=False)
     return s
 
 
