@@ -596,23 +596,12 @@ function renderSessionListFromCache(){
     title.textContent=cleanTitle||'Untitled';
     title.title='Double-click to rename';
     const tsMs=_sessionTimestampMs(s);
-    const timeLabel=document.createElement('span');
-    timeLabel.className='session-time';
-    timeLabel.textContent=_formatRelativeSessionTime(tsMs, now);
-    if(tsMs) timeLabel.title=new Date(tsMs).toLocaleString();
     titleRow.appendChild(title);
     const metaBits=[];
     if(s.is_cli_session && s.source_tag) metaBits.push(s.source_tag);
     if(s.message_count) metaBits.push(t('n_messages', s.message_count));
     if(s.model) metaBits.push(String(s.model).split('/').pop());
     sessionText.appendChild(titleRow);
-    if(tsMs){
-      const timeLine=document.createElement('div');
-      timeLine.className='session-time';
-      timeLine.textContent=_formatRelativeSessionTime(tsMs, now);
-      timeLine.title=new Date(tsMs).toLocaleString();
-      sessionText.appendChild(timeLine);
-    }
     if(metaBits.length){
       const meta=document.createElement('div');
       meta.className='session-meta';

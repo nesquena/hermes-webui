@@ -173,7 +173,7 @@
   .session-title-row{display:flex;align-items:flex-start;gap:8px;min-width:0;}
   .session-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);}
   .session-item.active .session-title{color:#e8a030;}
-  .session-time{display:block;font-size:11px;line-height:1.4;color:var(--muted);text-transform:lowercase;margin-top:1px;}
+  .session-time{display:none;}
   .session-meta{font-size:11px;line-height:1.35;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
   /* ── Session action trigger + dropdown ── */
   .session-actions{position:absolute;right:6px;top:50%;transform:translateY(-50%);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .15s ease;}
