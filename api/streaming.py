@@ -164,6 +164,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
 
         try:
             _token_sent = False  # tracks whether any streamed tokens were sent
+            _reasoning_text = ''  # accumulates reasoning/thinking trace for persistence
 
             def on_token(text):
                 nonlocal _token_sent
@@ -173,8 +174,10 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 put('token', {'text': text})
 
             def on_reasoning(text):
+                nonlocal _reasoning_text
                 if text is None:
                     return
+                _reasoning_text += str(text)
                 put('reasoning', {'text': str(text)})
 
             def on_tool(*cb_args, **cb_kwargs):
@@ -546,6 +549,12 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 usage['context_length'] = getattr(_cc, 'context_length', 0) or 0
                 usage['threshold_tokens'] = getattr(_cc, 'threshold_tokens', 0) or 0
                 usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
+            # Persist reasoning trace in the session so it survives reload
+            if _reasoning_text and s.messages:
+                for _rm in reversed(s.messages):
+                    if isinstance(_rm, dict) and _rm.get('role') == 'assistant':
+                        _rm['reasoning'] = _reasoning_text
+                        break
             raw_session = s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}
             put('done', {'session': redact_session_data(raw_session), 'usage': usage})
         finally:
