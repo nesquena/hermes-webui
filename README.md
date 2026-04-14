@@ -470,25 +470,25 @@ api/
   models.py             Session model + CRUD + CLI bridge (~377 lines)
   onboarding.py         First-run onboarding wizard, OAuth provider support (~507 lines)
   profiles.py           Profile state management, hermes_cli wrapper (~411 lines)
-  routes.py             All GET + POST route handlers (~2200 lines)
+  routes.py             All GET + POST route handlers (~2250 lines)
   state_sync.py         /insights sync — message_count to state.db (~113 lines)
-  streaming.py          SSE engine, run_agent, cancel support (~560 lines)
+  streaming.py          SSE engine, run_agent, cancel support (~660 lines)
   updates.py            Self-update check and release notes (~257 lines)
   upload.py             Multipart parser, file upload handler (~82 lines)
   workspace.py          File ops, workspace helpers, git detection (~288 lines)
 static/
   index.html            HTML template (~600 lines)
   style.css             All CSS incl. mobile responsive, themes (~1050 lines)
-  ui.js                 DOM helpers, renderMd, tool cards, context indicator (~1900 lines)
+  ui.js                 DOM helpers, renderMd, tool cards, context indicator (~1740 lines)
   workspace.js          File preview, file ops, git badge (~286 lines)
-  sessions.js           Session CRUD, collapsible groups, search, reload recovery (~840 lines)
-  messages.js           send(), SSE handlers, rAF throttle, live streaming (~700 lines)
+  sessions.js           Session CRUD, collapsible groups, search, reload recovery (~800 lines)
+  messages.js           send(), SSE handlers, live streaming, session recovery (~655 lines)
   panels.js             Cron, skills, memory, profiles, settings (~1438 lines)
   commands.js           Slash command autocomplete (~267 lines)
   boot.js               Mobile nav, voice input, boot IIFE (~524 lines)
 tests/
   conftest.py           Isolated test server (port 8788)
-  51 test files          802 test functions
+  61 test files          961 test functions
 Dockerfile              python:3.12-slim container image
 docker-compose.yml      Compose with named volume and optional auth
 .github/workflows/      CI: multi-arch Docker build + GitHub Release on tag
