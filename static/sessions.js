@@ -344,6 +344,52 @@ function filterSessions(){
   }, 350);
 }
 
+function _sessionTimestampMs(session) {
+  const raw = Number(session && (session.updated_at || session.created_at || 0));
+  return Number.isFinite(raw) ? raw * 1000 : 0;
+}
+
+function _formatRelativeSessionTime(timestampMs, nowMs = Date.now()) {
+  if (!timestampMs) return 'Unknown';
+  const diffMs = Math.max(0, nowMs - timestampMs);
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  const week = 7 * day;
+  if (diffMs < minute) return 'just now';
+  if (diffMs < hour) {
+    const minutes = Math.floor(diffMs / minute);
+    return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+  }
+  if (diffMs < day) {
+    const hours = Math.floor(diffMs / hour);
+    return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  }
+  if (diffMs < 2 * day) return 'yesterday';
+  if (diffMs < week) {
+    const days = Math.floor(diffMs / day);
+    return `${days} day${days === 1 ? '' : 's'} ago`;
+  }
+  if (diffMs < 2 * week) return 'last week';
+  const date = new Date(timestampMs);
+  return date.toLocaleDateString(undefined, {month:'short', day:'numeric'});
+}
+
+function _sessionTimeBucketLabel(timestampMs, nowMs = Date.now()) {
+  if (!timestampMs) return 'Older';
+  const now = new Date(nowMs);
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const startOfYesterday = startOfToday - 86400000;
+  const dayOfWeek = now.getDay();
+  const startOfWeek = startOfToday - ((dayOfWeek + 6) % 7) * 86400000;
+  const startOfLastWeek = startOfWeek - 7 * 86400000;
+  if (timestampMs >= startOfToday) return 'Today';
+  if (timestampMs >= startOfYesterday) return 'Yesterday';
+  if (timestampMs >= startOfWeek) return 'This week';
+  if (timestampMs >= startOfLastWeek) return 'Last week';
+  return 'Older';
+}
+
 function renderSessionListFromCache(){
   // Don't re-render while user is actively renaming a session (would destroy the input)
   if(_renamingSid) return;
@@ -430,10 +476,11 @@ function renderSessionListFromCache(){
     empty.textContent='No sessions in this project yet.';
     list.appendChild(empty);
   }
+  const orderedSessions=[...sessions].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a));
   // Separate pinned from unpinned
-  const pinned=sessions.filter(s=>s.pinned);
-  const unpinned=sessions.filter(s=>!s.pinned);
-  // Date grouping: Pinned / Today / Yesterday / Earlier
+  const pinned=orderedSessions.filter(s=>s.pinned);
+  const unpinned=orderedSessions.filter(s=>!s.pinned);
+  // Date grouping: Pinned / Today / Yesterday / This week / Last week / Older
   const now=Date.now();
   const ONE_DAY=86400000;
   // Collapse state persisted in localStorage
@@ -445,8 +492,8 @@ function renderSessionListFromCache(){
   let curLabel=null,curItems=[];
   if(pinned.length) groups.push({label:'\u2605 Pinned',items:pinned,isPinned:true});
   for(const s of unpinned){
-    const ts=(s.updated_at||s.created_at||0)*1000;
-    const label=ts>now-ONE_DAY?'Today':ts>now-2*ONE_DAY?'Yesterday':'Earlier';
+    const ts=_sessionTimestampMs(s);
+    const label=_sessionTimeBucketLabel(ts, now);
     if(label!==curLabel){
       if(curItems.length) groups.push({label:curLabel,items:curItems});
       curLabel=label;curItems=[s];
@@ -491,10 +538,30 @@ function renderSessionListFromCache(){
     const rawTitle=s.title||'Untitled';
     const tags=(rawTitle.match(/#[\w-]+/g)||[]);
     const cleanTitle=tags.length?rawTitle.replace(/#[\w-]+/g,'').trim():rawTitle;
+    const sessionText=document.createElement('div');
+    sessionText.className='session-text';
+    const titleRow=document.createElement('div');
+    titleRow.className='session-title-row';
     const title=document.createElement('span');
     title.className='session-title';
     title.textContent=cleanTitle||'Untitled';
     title.title='Double-click to rename';
+    const tsMs=_sessionTimestampMs(s);
+    const timeLabel=document.createElement('span');
+    timeLabel.className='session-time';
+    timeLabel.textContent=_formatRelativeSessionTime(tsMs, now);
+    if(tsMs) timeLabel.title=new Date(tsMs).toLocaleString();
+    titleRow.appendChild(title);
+    titleRow.appendChild(timeLabel);
+    const meta=document.createElement('div');
+    meta.className='session-meta';
+    const metaBits=[];
+    if(s.is_cli_session && s.source_tag) metaBits.push(s.source_tag);
+    if(s.message_count) metaBits.push(`${s.message_count} msg${s.message_count===1?'':'s'}`);
+    if(s.model) metaBits.push(String(s.model).split('/').pop());
+    meta.textContent=metaBits.join(' · ') || _sessionTimeBucketLabel(tsMs, now);
+    sessionText.appendChild(titleRow);
+    sessionText.appendChild(meta);
     // Append tag chips after the title text
     for(const tag of tags){
       const chip=document.createElement('span');
@@ -561,7 +628,7 @@ function renderSessionListFromCache(){
         title.appendChild(dot);
       }
     }
-    el.appendChild(title);
+    el.appendChild(sessionText);
     // Single trigger button that opens a shared dropdown menu
     const actions=document.createElement('div');
     actions.className='session-actions';

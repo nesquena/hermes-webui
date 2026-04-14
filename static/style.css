@@ -129,10 +129,15 @@
   .session-search input::placeholder{color:var(--muted);opacity:.7;}
   /* Inline session title edit */
   .session-title-input{flex:1;background:var(--surface);border:1px solid rgba(124,185,255,.6);border-radius:6px;color:var(--text);padding:3px 8px;font-size:13px;outline:none;min-width:0;box-shadow:0 0 0 2px rgba(124,185,255,.15);font-family:inherit;}
-  .session-item{padding:8px 40px 8px 8px;margin-bottom:2px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:background .15s,color .15s;display:flex;align-items:center;gap:6px;min-width:0;position:relative;}
+  .session-item{padding:8px 40px 8px 8px;margin-bottom:2px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--muted);transition:background .15s,color .15s;display:flex;align-items:flex-start;gap:8px;min-width:0;position:relative;}
   .session-item:hover{background:var(--hover-bg);color:var(--text);}
   .session-item.active{background:rgba(232,160,48,0.12);color:#e8a030;}
-  .session-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .session-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;overflow:hidden;}
+  .session-title-row{display:flex;align-items:flex-start;gap:8px;min-width:0;}
+  .session-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);}
+  .session-item.active .session-title{color:#e8a030;}
+  .session-time{flex-shrink:0;font-size:11px;line-height:1.4;color:var(--muted);text-transform:lowercase;}
+  .session-meta{font-size:11px;line-height:1.35;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
   /* ── Session action trigger + dropdown ── */
   .session-actions{position:absolute;right:6px;top:50%;transform:translateY(-50%);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .15s ease;}
   .session-item:hover .session-actions,.session-item:focus-within .session-actions,.session-item.menu-open .session-actions{opacity:1;pointer-events:auto;}
