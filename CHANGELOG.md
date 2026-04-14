@@ -24,7 +24,7 @@ locale routing updated in `api/routes.py` (`_resolve_login_locale_key()` helper)
 strings in `panels.js` cron UI extracted to i18n keys. 3 new test files:
 `test_chinese_locale.py`, `test_language_precedence.py`, `test_login_locale.py`.
 
-- Total tests: 1073 (was 1063)
+- Total tests: 1075 (was 1063)
 
 ## [v0.50.37] fix(onboarding): skip wizard when Hermes is already configured
 
