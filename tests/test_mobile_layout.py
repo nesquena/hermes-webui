@@ -133,6 +133,21 @@ def test_toggle_mobile_files_js_defined():
         "toggleMobileFiles() must toggle mobile-open class on the right panel"
 
 
+def test_new_conversation_closes_mobile_sidebar():
+    """New conversation must close the mobile drawer so the chat pane is visible immediately."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    click_line = next((ln for ln in boot_js.splitlines() if "$('btnNewChat').onclick" in ln), "")
+    assert click_line, "btnNewChat onclick handler missing from static/boot.js"
+    assert "closeMobileSidebar" in click_line, \
+        "btnNewChat handler must closeMobileSidebar() after creating the new session"
+
+    shortcut_line = next((ln for ln in boot_js.splitlines() if "e.key==='k'" in ln or "e.key === 'k'" in ln), "")
+    assert shortcut_line, "Cmd/Ctrl+K new chat shortcut missing from static/boot.js"
+    shortcut_block = "\n".join(boot_js.splitlines()[boot_js.splitlines().index(shortcut_line):boot_js.splitlines().index(shortcut_line)+4])
+    assert "closeMobileSidebar" in shortcut_block, \
+        "Cmd/Ctrl+K new chat shortcut must closeMobileSidebar() after creating the new session"
+
+
 # ── Viewport and scroll safety ────────────────────────────────────────────────
 
 def test_body_overflow_hidden():
@@ -141,6 +156,32 @@ def test_body_overflow_hidden():
         "body rule missing from style.css"
     assert re.search(r'body\{[^}]*overflow:hidden', CSS), \
         "body must have overflow:hidden to prevent double scrollbars"
+
+
+def test_flex_parents_allow_message_scroller_to_shrink():
+    """The top-level flex containers must opt into min-height:0 so .messages can scroll on mobile.
+
+    Mobile Safari/Chrome can trap scroll when a flex child with overflow:auto sits inside
+    parents whose min-height remains auto. Both .layout and .main need min-height:0.
+    """
+    assert re.search(r'\.layout\{[^}]*min-height:0', CSS), \
+        ".layout must set min-height:0 so the chat column can shrink and scroll"
+    assert re.search(r'\.main\{[^}]*min-height:0', CSS), \
+        ".main must set min-height:0 so .messages remains scrollable while busy"
+
+
+def test_messages_touch_scrolling_hints_present():
+    """The messages scroller must advertise touch-friendly scrolling behavior.
+
+    On mobile browsers, momentum scrolling and explicit pan-y/overscroll behavior help
+    prevent the chat area from feeling locked while the app body itself stays overflow:hidden.
+    """
+    assert re.search(r'\.messages\{[^}]*-webkit-overflow-scrolling:\s*touch', CSS), \
+        ".messages must enable -webkit-overflow-scrolling:touch for mobile momentum scroll"
+    assert re.search(r'\.messages\{[^}]*touch-action:\s*pan-y', CSS), \
+        ".messages must set touch-action:pan-y so vertical swipe gestures scroll the transcript"
+    assert re.search(r'\.messages\{[^}]*overscroll-behavior-y:\s*contain', CSS), \
+        ".messages must contain vertical overscroll so the transcript keeps the gesture"
 
 
 def test_100dvh_viewport_height():
