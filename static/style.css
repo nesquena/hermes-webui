@@ -1099,8 +1099,8 @@ body.resizing{user-select:none;cursor:col-resize;}
   display: none;
 }
 /* Source-specific colors for gateway sessions */
-.session-item.cli-session[data-source="telegram"] { border-left-color: #0088cc; }
-.session-item.cli-session[data-source="telegram"]::after { color: #0088cc; }
+.session-item.cli-session[data-source="telegram"] { border-left-color: rgba(0, 136, 204, 0.55); }
+.session-item.cli-session[data-source="telegram"]::after { color: rgba(0, 136, 204, 0.55); }
 .session-item.cli-session[data-source="discord"] { border-left-color: #5865F2; }
 .session-item.cli-session[data-source="discord"]::after { color: #5865F2; }
 .session-item.cli-session[data-source="slack"] { border-left-color: #4A154B; }

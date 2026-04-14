@@ -578,6 +578,10 @@ function renderSessionListFromCache(){
   }
   // ── Render session items (extracted for group body use) ──
   // Note: declared after the groups loop but available via function hoisting.
+  function _formatSourceTag(tag){
+    const names={telegram:'via Telegram',discord:'via Discord',slack:'via Slack',cli:'CLI',feishu:'via Feishu',weixin:'via WeChat'};
+    return names[tag]||tag;
+  }
   function _renderOneSession(s){
     const el=document.createElement('div');
     const isActive=S.session&&s.session_id===S.session.session_id;
@@ -603,7 +607,7 @@ function renderSessionListFromCache(){
     titleRow.appendChild(title);
     titleRow.appendChild(timeLabel);
     const metaBits=[];
-    if(s.is_cli_session && s.source_tag) metaBits.push(s.source_tag);
+    if(s.is_cli_session && s.source_tag) metaBits.push(_formatSourceTag(s.source_tag));
     if(s.message_count) metaBits.push(t('n_messages', s.message_count));
     if(s.model) metaBits.push(String(s.model).split('/').pop());
     sessionText.appendChild(titleRow);
