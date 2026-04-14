@@ -724,10 +724,21 @@ def handle_post(handler, parsed) -> bool:
         sid = body.get("session_id", "")
         if not sid:
             return bad(handler, "session_id is required")
+        if not all(c in '0123456789abcdefghijklmnopqrstuvwxyz_' for c in sid):
+            return bad(handler, "Invalid session_id", 400)
         # Delete from WebUI session store
         with LOCK:
             SESSIONS.pop(sid, None)
-        p = SESSION_DIR / f"{sid}.json"
+        # Invalidate session index before file deletion so deleted sessions do not reappear
+        try:
+            SESSION_INDEX_FILE.unlink(missing_ok=True)
+        except Exception:
+            logger.debug("Failed to unlink session index")
+        try:
+            p = (SESSION_DIR / f"{sid}.json").resolve()
+            p.relative_to(SESSION_DIR.resolve())
+        except Exception:
+            return bad(handler, "Invalid session_id", 400)
         try:
             p.unlink(missing_ok=True)
         except Exception:
