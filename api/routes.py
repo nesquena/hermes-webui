@@ -227,6 +227,24 @@ _LOGIN_LOCALE = {
         "invalid_pw": "Invalid password",
         "conn_failed": "Connection failed",
     },
+    "es": {
+        "lang": "es-ES",
+        "title": "Iniciar sesi\u00f3n",
+        "subtitle": "Introduce tu contrase\u00f1a para continuar",
+        "placeholder": "Contrase\u00f1a",
+        "btn": "Iniciar sesi\u00f3n",
+        "invalid_pw": "Contrase\u00f1a inv\u00e1lida",
+        "conn_failed": "Error de conexi\u00f3n",
+    },
+    "de": {
+        "lang": "de-DE",
+        "title": "Anmelden",
+        "subtitle": "Geben Sie Ihr Passwort ein, um fortzufahren",
+        "placeholder": "Passwort",
+        "btn": "Anmelden",
+        "invalid_pw": "Ung\u00fcltiges Passwort",
+        "conn_failed": "Verbindung fehlgeschlagen",
+    },
     "zh": {
         "lang": "zh-CN",
         "title": "\u767b\u5f55",
@@ -236,7 +254,48 @@ _LOGIN_LOCALE = {
         "invalid_pw": "\u5bc6\u7801\u9519\u8bef",
         "conn_failed": "\u8fde\u63a5\u5931\u8d25",
     },
+    "zh-Hant": {
+        "lang": "zh-TW",
+        "title": "\u767b\u5f55",
+        "subtitle": "\u8f38\u5165\u5bc6\u78bc\u7e7c\u7e8c\u4f7f\u7528",
+        "placeholder": "\u5bc6\u78bc",
+        "btn": "\u767b\u5f55",
+        "invalid_pw": "\u5bc6\u78bc\u932f\u8aa4",
+        "conn_failed": "\u9023\u63a5\u5931\u6557",
+    },
 }
+
+
+def _resolve_login_locale_key(raw_lang: str | None) -> str:
+    """Resolve settings.language to a known _LOGIN_LOCALE key."""
+    if not raw_lang:
+        return "en"
+    lang = str(raw_lang).strip()
+    if not lang:
+        return "en"
+    if lang in _LOGIN_LOCALE:
+        return lang
+
+    normalized = lang.replace("_", "-")
+    lower = normalized.lower()
+
+    # Case-insensitive direct key match first.
+    for key in _LOGIN_LOCALE:
+        if key.lower() == lower:
+            return key
+
+    # Common Chinese aliases.
+    if lower == "zh" or lower.startswith("zh-cn") or lower.startswith("zh-sg") or lower.startswith("zh-hans"):
+        return "zh"
+    if lower.startswith("zh-tw") or lower.startswith("zh-hk") or lower.startswith("zh-mo") or lower.startswith("zh-hant"):
+        return "zh-Hant" if "zh-Hant" in _LOGIN_LOCALE else "zh"
+
+    # Fallback to base language subtag (e.g. en-US -> en).
+    base = lower.split("-", 1)[0]
+    for key in _LOGIN_LOCALE:
+        if key.lower() == base:
+            return key
+    return "en"
 
 # ── Login page (self-contained, no external deps) ────────────────────────────
 _LOGIN_PAGE_HTML = """<!doctype html>
@@ -293,7 +352,9 @@ def handle_get(handler, parsed) -> bool:
         _settings = load_settings()
         _bn = _html.escape(_settings.get("bot_name") or "Hermes")
         _lang = _settings.get("language", "en")
-        _login_strings = _LOGIN_LOCALE.get(_lang, _LOGIN_LOCALE["en"])
+        _login_strings = _LOGIN_LOCALE[
+            _resolve_login_locale_key(_lang)
+        ]
         _page = (
             _LOGIN_PAGE_HTML.replace("{{BOT_NAME}}", _bn)
             .replace("{{BOT_NAME_INITIAL}}", _bn[0].upper())
