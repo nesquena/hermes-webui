@@ -1,5 +1,16 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.36] fix: workspace list cleaner — allow own-profile paths, remove brittle string filter
+
+Two bugs in `_clean_workspace_list()` caused workspace additions to silently disappear on the next `load_workspaces()` call, breaking `test_workspace_add_no_duplicate` and `test_workspace_rename` (and potentially causing real-world workspace list corruption):
+
+**Bug 1 — Brittle string filter removed:** `if 'test-workspace' in path or 'webui-mvp-test' in path: continue` dropped any workspace path containing those substrings. In the test server, `TEST_WORKSPACE` is `~/.hermes/profiles/webui/webui-mvp-test/test-workspace`, so every workspace added during tests was silently discarded on the next `load_workspaces()` call. The `p.is_dir()` check already handles genuinely non-existent paths — the string filter was redundant and harmful.
+
+**Bug 2 — Cross-profile filter was too broad:** `if p is under ~/.hermes/profiles/: skip` was designed to block cross-profile workspace leakage, but it also removed paths under the *current* profile's own directory (e.g. `~/.hermes/profiles/webui/...`). Fixed: now only skips paths under `profiles/` that are NOT under the current profile's own `hermes_home`.
+
+- `api/workspace.py`: remove string-match filter; fix cross-profile check to allow own-profile paths
+- All 1055 tests now pass (was 1053 pass + 2 fail)
+
 ## [v0.50.35] fix: workspace trust boundary — cross-platform, multi-workspace support
 
 v0.50.34's workspace trust check was too restrictive: it required all workspaces to be under `DEFAULT_WORKSPACE` (/home/hermes/workspace), which blocked every profile-specific workspace (~/CodePath, ~/hermes-webui-public, ~/WebUI, ~/Camanji, etc.) and prevented switching between workspaces at all.
