@@ -215,13 +215,18 @@ def set_last_workspace(path: str) -> None:
 
 
 def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
-    """Resolve and validate a workspace path under the profile's trusted root.
+    """Resolve and validate a workspace path under the WebUI's trusted workspace root.
 
-    The trusted root is the profile default workspace. Session creation/update and
+    The trusted root is the WebUI boot-time DEFAULT_WORKSPACE (respects
+    HERMES_WEBUI_STATE_DIR for test isolation). Session creation/update and
     workspace-list mutations must stay within that root so callers cannot repoint
-    a session to arbitrary filesystem locations.
+    a session to arbitrary filesystem locations outside the intended sandbox.
+
+    Note: _profile_default_workspace() reads the agent's terminal.cwd which may
+    differ from the WebUI's configured workspace root — always use DEFAULT_WORKSPACE
+    here to stay consistent with how new_session() seeds the initial workspace.
     """
-    root = Path(_profile_default_workspace()).expanduser().resolve()
+    root = Path(_BOOT_DEFAULT_WORKSPACE).expanduser().resolve()
     candidate = root if path in (None, "") else Path(path).expanduser().resolve()
     if not candidate.exists():
         raise ValueError(f"Path does not exist: {candidate}")
