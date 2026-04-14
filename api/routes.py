@@ -914,16 +914,26 @@ def handle_post(handler, parsed) -> bool:
         # Writing API keys to disk - restrict to local/private networks unless auth is active.
         # In Docker, requests arrive from the bridge network (172.x.x.x), not 127.0.0.1,
         # even when the user accesses via localhost:8787 on the host.
+        # Behind a reverse proxy (nginx/Caddy/Traefik) or SSH tunnel, X-Forwarded-For
+        # carries the real origin IP — read it first before falling back to the raw socket addr.
+        # HERMES_WEBUI_ONBOARDING_OPEN=1 lets operators on remote servers explicitly bypass
+        # the check when they control network access themselves (e.g. firewall + VPN).
         from api.auth import is_auth_enabled
-        if not is_auth_enabled():
+        import os as _os
+        if not is_auth_enabled() and not _os.getenv("HERMES_WEBUI_ONBOARDING_OPEN"):
             import ipaddress
             try:
-                addr = ipaddress.ip_address(handler.client_address[0])
+                # Prefer forwarded headers set by reverse proxies
+                _xff = handler.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+                _xri = handler.headers.get("X-Real-IP", "").strip()
+                _raw = handler.client_address[0]
+                _ip_str = _xff or _xri or _raw
+                addr = ipaddress.ip_address(_ip_str)
                 is_local = addr.is_loopback or addr.is_private
             except ValueError:
                 is_local = False
             if not is_local:
-                return bad(handler, "Onboarding setup is only available from local networks when auth is not enabled.", 403)
+                return bad(handler, "Onboarding setup is only available from local networks when auth is not enabled. To bypass this on a remote server, set HERMES_WEBUI_ONBOARDING_OPEN=1.", 403)
         try:
             return j(handler, apply_onboarding_setup(body))
         except ValueError as e:

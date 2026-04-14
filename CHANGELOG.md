@@ -1,5 +1,12 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.22] Onboarding unblocked for reverse proxy / SSH tunnel deployments (fixes #390)
+
+- `api/routes.py`: Onboarding setup endpoint now reads `X-Forwarded-For` and `X-Real-IP` headers before falling back to raw socket IP — reverse proxy (nginx/Caddy/Traefik) and SSH tunnel users are no longer incorrectly blocked
+- Added `HERMES_WEBUI_ONBOARDING_OPEN=1` env var escape hatch for operators on remote servers who control network access themselves
+- Error message now includes the env var hint so users know how to unblock themselves
+- 18 new tests covering all IP resolution paths (`TestOnboardingIPLogic`, `TestOnboardingSetupEndpoint`)
+
 > Living document. Updated at the end of every sprint.
 > Repository: https://github.com/nesquena/hermes-webui
 
