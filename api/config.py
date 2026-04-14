@@ -466,7 +466,13 @@ _PROVIDER_MODELS = {
         {"id": "o4-mini", "label": "o4-mini"},
     ],
     "openai-codex": [
-        {"id": "codex-mini-latest", "label": "Codex Mini"},
+        {"id": "gpt-5.4", "label": "GPT-5.4"},
+        {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
+        {"id": "gpt-5.3-codex", "label": "GPT-5.3 Codex"},
+        {"id": "gpt-5.2-codex", "label": "GPT-5.2 Codex"},
+        {"id": "gpt-5.1-codex-max", "label": "GPT-5.1 Codex Max"},
+        {"id": "gpt-5.1-codex-mini", "label": "GPT-5.1 Codex Mini"},
+        {"id": "codex-mini-latest", "label": "Codex Mini (latest)"},
     ],
     "google": [
         {"id": "gemini-2.5-pro", "label": "Gemini 2.5 Pro"},

@@ -68,3 +68,19 @@ def test_opencode_zen_detected_via_env_key(monkeypatch):
 
 def test_opencode_go_detected_via_env_key(monkeypatch):
     _models_with_env_key(monkeypatch, "OPENCODE_GO_API_KEY", "OpenCode Go")
+
+
+def test_openai_codex_model_catalog_includes_gpt54():
+    """openai-codex catalog must include gpt-5.4 and the standard Codex lineup."""
+    assert "openai-codex" in config._PROVIDER_MODELS
+    ids = [m["id"] for m in config._PROVIDER_MODELS["openai-codex"]]
+    assert "gpt-5.4" in ids, f"gpt-5.4 missing from openai-codex catalog: {ids}"
+    assert "gpt-5.4-mini" in ids, f"gpt-5.4-mini missing from openai-codex catalog: {ids}"
+    assert "gpt-5.3-codex" in ids, f"gpt-5.3-codex missing from openai-codex catalog: {ids}"
+    assert "gpt-5.2-codex" in ids, f"gpt-5.2-codex missing from openai-codex catalog: {ids}"
+
+
+def test_openai_codex_display_name():
+    """openai-codex must have a human-readable display name."""
+    assert "openai-codex" in config._PROVIDER_DISPLAY
+    assert config._PROVIDER_DISPLAY["openai-codex"] == "OpenAI Codex"
