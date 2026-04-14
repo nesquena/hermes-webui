@@ -1,5 +1,31 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.37] fix(onboarding): skip wizard when Hermes is already configured
+
+Fixes #420 — existing Hermes users with a valid `config.yaml` were shown the first-run
+onboarding wizard on every WebUI load because the only completion gate was
+`settings.onboarding_completed` in the WebUI's own settings file. Users who configured
+Hermes via the CLI before the WebUI existed had no such flag, so the wizard always fired
+and could silently overwrite their working config.
+
+**Changes:**
+1. `api/onboarding.py` `get_onboarding_status()`: auto-complete when `config.yaml` exists
+   AND `chat_ready=True`. Existing configured users are never shown the wizard.
+2. `api/onboarding.py` `apply_onboarding_setup()`: refuse to overwrite an existing
+   `config.yaml` without `confirm_overwrite=True` in the request body. Returns
+   `{error: "config_exists", requires_confirm: true}` for the frontend to handle.
+3. `static/index.html`: "Skip setup" button added to wizard footer — users are never
+   trapped in the wizard.
+4. `static/onboarding.js`: `skipOnboarding()` calls `/api/onboarding/complete` without
+   modifying config, then closes the overlay.
+5. `static/boot.js`: Escape key now dismisses the onboarding overlay.
+6. `static/i18n.js`: `onboarding_skip` / `onboarding_skipped` keys added to en + es locales.
+7. `tests/test_onboarding_existing_config.py`: 8 new unit tests covering gate logic and
+   overwrite guard.
+
+- Total tests: 1063 (was 1055)
+
+
 ## [v0.50.36] fix: workspace list cleaner — allow own-profile paths, remove brittle string filter
 
 Two bugs in `_clean_workspace_list()` caused workspace additions to silently disappear on the next `load_workspaces()` call, breaking `test_workspace_add_no_duplicate` and `test_workspace_rename` (and potentially causing real-world workspace list corruption):

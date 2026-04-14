@@ -8,7 +8,7 @@
 > Prerequisites: SSH tunnel is active on port 8787. Open http://localhost:8787 in browser.
 > Server health check: curl http://127.0.0.1:8787/health should return {"status":"ok"}.
 >
-> Automated tests: 961 total (961 passing, 0 known failures). Includes onboarding coverage for bootstrap/static wizard presence, real provider config persistence (`config.yaml` + `.env`), and the `/api/onboarding/*` backend.
+> Automated tests: 1063 total (1063 passing, 0 known failures). Includes onboarding coverage for bootstrap/static wizard presence, real provider config persistence (`config.yaml` + `.env`), the `/api/onboarding/*` backend, and the onboarding skip/existing-config guard.
 > Run: `pytest tests/ -v --timeout=60`
 
 ---
