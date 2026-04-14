@@ -143,7 +143,15 @@ async function loadSession(sid){
   const _s=S.session;
   if(_s&&typeof _syncCtxIndicator==='function'){
     const u=S.lastUsage||{};
-    _syncCtxIndicator({input_tokens:_s.input_tokens||u.input_tokens||0,output_tokens:_s.output_tokens||u.output_tokens||0,estimated_cost:_s.estimated_cost||u.estimated_cost,context_length:u.context_length||0,last_prompt_tokens:u.last_prompt_tokens||0,threshold_tokens:u.threshold_tokens||0});
+    const _pick=(latest,stored,dflt=0)=>latest!=null?latest:(stored!=null?stored:dflt);
+    _syncCtxIndicator({
+      input_tokens:      _pick(u.input_tokens,      _s.input_tokens),
+      output_tokens:     _pick(u.output_tokens,     _s.output_tokens),
+      estimated_cost:    _pick(u.estimated_cost,    _s.estimated_cost),
+      context_length:    _pick(u.context_length,    _s.context_length),
+      last_prompt_tokens:_pick(u.last_prompt_tokens,_s.last_prompt_tokens),
+      threshold_tokens:  _pick(u.threshold_tokens,  _s.threshold_tokens),
+    });
   }
 }
 
