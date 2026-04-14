@@ -729,11 +729,6 @@ def handle_post(handler, parsed) -> bool:
         # Delete from WebUI session store
         with LOCK:
             SESSIONS.pop(sid, None)
-        # Invalidate session index before file deletion so deleted sessions do not reappear
-        try:
-            SESSION_INDEX_FILE.unlink(missing_ok=True)
-        except Exception:
-            logger.debug("Failed to unlink session index")
         try:
             p = (SESSION_DIR / f"{sid}.json").resolve()
             p.relative_to(SESSION_DIR.resolve())
