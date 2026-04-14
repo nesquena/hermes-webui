@@ -31,13 +31,46 @@ async function loadSession(sid){
   const data=await api(`/api/session?session_id=${encodeURIComponent(sid)}`);
   S.session=data.session;
   localStorage.setItem('hermes-webui-session',S.session.session_id);
-  // B9: sanitize empty assistant messages that can appear when agent only ran tool calls
-  data.session.messages=(data.session.messages||[]).filter(m=>{
-    if(!m||!m.role)return false;
-    if(m.role==='tool')return false;
-    if(m.role==='assistant'){let c=m.content||'';if(Array.isArray(c))c=c.filter(p=>p&&p.type==='text').map(p=>p.text||'').join('');return String(c).trim().length>0;}
-    return true;
-  });
+  // B9: sanitize empty assistant messages that can appear when agent only ran tool calls.
+  // We MUST update tool_calls assistant_msg_idx to match the new (filtered) message array.
+  // For filtered-out assistant messages, we map to the nearest previous KEEP assistant.
+  const allMsgs = data.session.messages || [];
+  const sanitized = [];
+  const origIdxToSanitizedIdx = {};  // original -> new index
+  let lastKeptAsstIdx = -1;  // track last kept assistant index
+  for (let i = 0; i < allMsgs.length; i++) {
+    const m = allMsgs[i];
+    if (!m || !m.role) continue;
+    if (m.role === 'tool') continue;
+    if (m.role === 'assistant') {
+      let c = m.content || '';
+      if (Array.isArray(c)) c = c.filter(p => p && p.type === 'text').map(p => p.text || '').join('');
+      if (!String(c).trim().length) {
+        // Empty assistant -- skip it but remember it for tool_call index remapping
+        continue;
+      }
+      lastKeptAsstIdx = sanitized.length;  // this assistant will be at this index
+    }
+    origIdxToSanitizedIdx[i] = sanitized.length;
+    sanitized.push(m);
+  }
+  // Update tool_calls assistant_msg_idx to match the sanitized message indices.
+  // For tool_calls whose assistant was filtered out, map to lastKeptAsstIdx (nearest
+  // previous assistant) so they still attach to the correct conversation turn.
+  if (data.session.tool_calls && data.session.tool_calls.length) {
+    for (const tc of data.session.tool_calls) {
+      if (!tc || tc.assistant_msg_idx === undefined) continue;
+      const origIdx = tc.assistant_msg_idx;
+      if (origIdx in origIdxToSanitizedIdx) {
+        // Assistant message was kept -- use its new index
+        tc.assistant_msg_idx = origIdxToSanitizedIdx[origIdx];
+      } else {
+        // Assistant message was filtered out -- attach to nearest previous assistant
+        tc.assistant_msg_idx = lastKeptAsstIdx >= 0 ? lastKeptAsstIdx : -1;
+      }
+    }
+  }
+  data.session.messages = sanitized;
   if(INFLIGHT[sid]){
     S.messages=INFLIGHT[sid].messages;
     // Restore live tool cards for this in-flight session
@@ -51,7 +84,11 @@ async function loadSession(sid){
   }else{
     MSG_QUEUE.length=0;updateQueueBadge();  // clear queue for the viewed session
     S.messages=data.session.messages||[];
-    S.toolCalls=(data.session.tool_calls||[]).map(tc=>({...tc,done:true}));
+    // IMPORTANT: Do NOT use session-level tool_calls from API — they have wrong
+    // assistant_msg_idx values (compact() stripped original indices). Instead,
+    // leave S.toolCalls empty and let renderMessages() derive them from the
+    // per-message tool_calls using the correct sanitized-array indices.
+    S.toolCalls=[];
     // Reset per-session visual state: the viewed session is idle even if another
     // session's stream is still running in the background.
     // We directly update the DOM instead of calling setBusy(false), because
