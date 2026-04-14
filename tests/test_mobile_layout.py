@@ -115,13 +115,16 @@ def test_topbar_chips_mobile_overflow():
 
 def test_workspace_close_button_present():
     """Workspace panel must have a close/hide button accessible on mobile."""
-    # Either a dedicated mobile close button or the toggle button that closes the panel
+    # Accept handleWorkspaceClose() (two-step close: file→browse→closed), or the
+    # lower-level functions directly.  handleWorkspaceClose is preferred because
+    # it dismisses a file preview first before closing the panel.
     has_close = (
+        'onclick="handleWorkspaceClose()"' in HTML or
         'onclick="closeWorkspacePanel()"' in HTML or
         'onclick="toggleWorkspacePanel()"' in HTML
     )
     assert has_close, \
-        "closeWorkspacePanel() or toggleWorkspacePanel() must be wired to a button to close the workspace panel on mobile"
+        "handleWorkspaceClose() or closeWorkspacePanel() must be wired to a button to close the workspace panel on mobile"
 
 
 def test_toggle_mobile_files_js_defined():
