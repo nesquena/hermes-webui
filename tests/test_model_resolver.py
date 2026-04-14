@@ -403,8 +403,10 @@ def test_custom_endpoint_slash_model_routes_to_custom_not_openrouter():
     assert base_url == 'http://127.0.0.1:1234/v1', (
         "Expected base_url 'http://127.0.0.1:1234/v1', got '{}'.".format(base_url)
     )
-    assert model == 'google/gemma-4-26b-a4b', (
-        "Model name should be preserved as-is, got '{}'.".format(model)
+    # Fix #433: provider prefix is now stripped for custom endpoints so stale
+    # prefixed model IDs from previous sessions do not break custom endpoint routing.
+    assert model == 'gemma-4-26b-a4b', (
+        "Model name prefix should be stripped for custom base_url endpoint, got '{}'.".format(model)
     )
 
     # --- openrouter with slash model name MUST still route to openrouter -----

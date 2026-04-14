@@ -637,7 +637,10 @@ def resolve_model_provider(model_id: str) -> tuple:
         # just because the model name contains a slash (e.g. google/gemma-4-26b-a4b).
         # The user has explicitly pointed at a base_url, so trust their routing config.
         if config_base_url:
-            return model_id, config_provider, config_base_url
+            # Strip provider prefix (e.g. 'openai/gpt-5.4' -> 'gpt-5.4') so prefixed
+            # model IDs from previous sessions don't break custom endpoint routing.
+            bare_model = model_id.split('/', 1)[-1]
+            return bare_model, config_provider, config_base_url
         # If prefix does NOT match config provider, the user picked a cross-provider model
         # from the OpenRouter dropdown (e.g. config=anthropic but picked openai/gpt-5.4-mini).
         # In this case always route through openrouter with the full provider/model string.
