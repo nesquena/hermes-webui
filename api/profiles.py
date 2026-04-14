@@ -176,7 +176,7 @@ def switch_profile(name: str) -> dict:
     if name == 'default':
         home = _DEFAULT_HERMES_HOME
     else:
-        home = _DEFAULT_HERMES_HOME / 'profiles' / name
+        home = _resolve_named_profile_home(name)
         if not home.is_dir():
             raise ValueError(f"Profile '{name}' does not exist.")
 
@@ -265,6 +265,24 @@ def _validate_profile_name(name: str):
             f"Invalid profile name {name!r}. "
             "Must match [a-z0-9][a-z0-9_-]{0,63}"
         )
+
+
+def _profiles_root() -> Path:
+    """Return the canonical root that contains named profiles."""
+    return (_DEFAULT_HERMES_HOME / 'profiles').resolve()
+
+
+def _resolve_named_profile_home(name: str) -> Path:
+    """Resolve a named profile to a directory under the profiles root.
+
+    Validates *name* as a logical profile identifier first, then resolves the
+    final filesystem path and enforces containment under ~/.hermes/profiles.
+    """
+    _validate_profile_name(name)
+    profiles_root = _profiles_root()
+    candidate = (profiles_root / name).resolve()
+    candidate.relative_to(profiles_root)
+    return candidate
 
 
 def _create_profile_fallback(name: str, clone_from: str = None,
@@ -385,6 +403,7 @@ def delete_profile_api(name: str) -> dict:
     """Delete a profile. Switches to default first if it's the active one."""
     if name == 'default':
         raise ValueError("Cannot delete the default profile.")
+    _validate_profile_name(name)
 
     # If deleting the active profile, switch to default first
     if _active_profile == name:
@@ -402,7 +421,7 @@ def delete_profile_api(name: str) -> dict:
     except ImportError:
         # Manual fallback: just remove the directory
         import shutil
-        profile_dir = _DEFAULT_HERMES_HOME / 'profiles' / name
+        profile_dir = _resolve_named_profile_home(name)
         if profile_dir.is_dir():
             shutil.rmtree(str(profile_dir))
         else:

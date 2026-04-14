@@ -761,8 +761,10 @@ def handle_post(handler, parsed) -> bool:
         if not name:
             return bad(handler, "name is required")
         try:
-            from api.profiles import switch_profile
+            from api.profiles import switch_profile, _validate_profile_name
 
+            if name != 'default':
+                _validate_profile_name(name)
             result = switch_profile(name)
             return j(handler, result)
         except (ValueError, FileNotFoundError) as e:
@@ -809,8 +811,9 @@ def handle_post(handler, parsed) -> bool:
         if not name:
             return bad(handler, "name is required")
         try:
-            from api.profiles import delete_profile_api
+            from api.profiles import delete_profile_api, _validate_profile_name
 
+            _validate_profile_name(name)
             result = delete_profile_api(name)
             return j(handler, result)
         except (ValueError, FileNotFoundError) as e:
