@@ -4,7 +4,7 @@ Run: python -m pytest tests/test_sprint9.py -v
 """
 import json, pathlib, urllib.error, urllib.request
 
-BASE = "http://127.0.0.1:8788"
+from tests._pytest_port import BASE
 
 def get_text(path):
     with urllib.request.urlopen(BASE + path, timeout=10) as r:

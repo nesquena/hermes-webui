@@ -13,7 +13,7 @@ import urllib.request
 
 import pytest
 
-BASE = "http://127.0.0.1:8788"
+from tests._pytest_port import BASE
 
 # Check if pyyaml is available — onboarding setup tests need it on the server
 try:

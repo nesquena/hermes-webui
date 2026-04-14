@@ -12,6 +12,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import urllib.error
 import urllib.request
@@ -187,7 +188,7 @@ class TestApplyOnboardingSetupGuard:
 # Integration tests — require the live test server on port 8788
 # ---------------------------------------------------------------------------
 
-BASE = "http://127.0.0.1:8788"
+from tests._pytest_port import BASE
 
 
 def _http_get(path):
@@ -213,7 +214,7 @@ def _server_hermes_home() -> pathlib.Path:
     env_path = data.get("system", {}).get("env_path", "")
     if env_path:
         return pathlib.Path(env_path).parent
-    return pathlib.Path.home() / ".hermes" / "webui-mvp-test"
+    return pathlib.Path(os.environ.get("HERMES_WEBUI_TEST_STATE_DIR", str(pathlib.Path.home() / ".hermes" / "webui-mvp-test")))
 
 
 def _server_reachable() -> bool:

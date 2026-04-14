@@ -1,7 +1,7 @@
 """Sprint 3 tests: cron API, skills API, memory API, input validation."""
 import json, uuid, urllib.request, urllib.error
 
-BASE = "http://127.0.0.1:8788"  # test server (isolated from production)
+from tests._pytest_port import BASE
 
 def get(path):
     with urllib.request.urlopen(BASE + path, timeout=10) as r:

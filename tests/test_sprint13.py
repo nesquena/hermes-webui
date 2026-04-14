@@ -3,7 +3,7 @@ Sprint 13 Tests: cron recent endpoint, session duplicate, background alerts.
 """
 import json, pathlib, urllib.error, urllib.request
 
-BASE = "http://127.0.0.1:8788"
+from tests._pytest_port import BASE
 
 
 def get(path):

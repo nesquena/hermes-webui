@@ -1,7 +1,7 @@
 """Sprint 2 tests: image preview, file types, markdown. Uses cleanup_test_sessions fixture."""
 import io, json, uuid, urllib.request, urllib.error, pathlib
 
-BASE = "http://127.0.0.1:8788"  # test server (isolated from production)
+from tests._pytest_port import BASE
 
 def get(path):
     with urllib.request.urlopen(BASE + path, timeout=10) as r:

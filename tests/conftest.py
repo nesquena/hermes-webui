@@ -31,13 +31,36 @@ HOME       = pathlib.Path.home()
 HERMES_HOME = pathlib.Path(os.getenv('HERMES_HOME', str(HOME / '.hermes')))
 
 # ── Test server config ────────────────────────────────────────────────────
-TEST_PORT      = int(os.getenv('HERMES_WEBUI_TEST_PORT', '8788'))
+# Port and state dir auto-derive from the repo path when no env var is set,
+# giving every worktree its own isolated port (8800-8899) and state directory.
+# Override with HERMES_WEBUI_TEST_PORT / HERMES_WEBUI_TEST_STATE_DIR to pin.
+
+def _auto_test_port(repo_root) -> int:
+    """Map repo path to a unique port in 20000-29999 (10k range = near-zero collisions).
+    Far from system port ranges and Linux ephemeral ports (32768+).
+    Override with HERMES_WEBUI_TEST_PORT to use a specific port."""
+    import hashlib
+    h = int(hashlib.md5(str(repo_root).encode()).hexdigest(), 16)
+    return 20000 + (h % 10000)
+
+def _auto_state_dir_name(repo_root) -> str:
+    import hashlib
+    h = hashlib.md5(str(repo_root).encode()).hexdigest()[:8]
+    return f"webui-test-{h}"
+
+TEST_PORT      = int(os.getenv('HERMES_WEBUI_TEST_PORT',
+                               str(_auto_test_port(REPO_ROOT))))
 TEST_BASE      = f"http://127.0.0.1:{TEST_PORT}"
 TEST_STATE_DIR = pathlib.Path(os.getenv(
     'HERMES_WEBUI_TEST_STATE_DIR',
-    str(HERMES_HOME / 'webui-mvp-test')
+    str(HERMES_HOME / _auto_state_dir_name(REPO_ROOT))
 ))
 TEST_WORKSPACE = TEST_STATE_DIR / 'test-workspace'
+
+# Publish at module level so _pytest_port.py (imported at collection time)
+# and any test file using os.environ sees the right values immediately.
+os.environ.setdefault('HERMES_WEBUI_TEST_PORT', str(TEST_PORT))
+os.environ.setdefault('HERMES_WEBUI_TEST_STATE_DIR', str(TEST_STATE_DIR))
 
 # ── Server script: always relative to repo root ───────────────────────────
 SERVER_SCRIPT = REPO_ROOT / 'server.py'
@@ -245,7 +268,10 @@ def test_server():
     # as the server.  Other test files (test_auth_sessions.py) may override
     # HERMES_WEBUI_STATE_DIR for their own purposes, but HERMES_WEBUI_TEST_STATE_DIR
     # is reserved for this mapping and is never overridden by individual test files.
-    os.environ.setdefault('HERMES_WEBUI_TEST_STATE_DIR', str(TEST_STATE_DIR))
+    # Export both port and state-dir as env vars so individual test files
+    # can read them without importing conftest (avoids circular imports).
+    os.environ.setdefault('HERMES_WEBUI_TEST_PORT', str(TEST_PORT))
+    # os.environ already set at module level above; no-op here.
 
     env = os.environ.copy()
     env.update({

@@ -3,7 +3,7 @@ Sprint 14 Tests: file rename, folder create, session archive, session tags, merm
 """
 import json, os, pathlib, shutil, tempfile, urllib.error, urllib.request
 
-BASE = "http://127.0.0.1:8788"
+from tests._pytest_port import BASE
 
 
 def get(path):

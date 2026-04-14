@@ -1,7 +1,8 @@
 """Sprint 5 tests: workspace CRUD, file save, session index, JS serving."""
 import json, pathlib, uuid, urllib.request, urllib.error
+import os
 
-BASE = "http://127.0.0.1:8788"  # test server (isolated from production)
+from tests._pytest_port import BASE
 
 def get(path):
     with urllib.request.urlopen(BASE + path, timeout=10) as r:
@@ -132,7 +133,7 @@ def test_file_save_path_traversal_blocked(cleanup_test_sessions):
 
 def test_session_index_created_after_save(cleanup_test_sessions):
     # Index is created in the TEST state dir, not the production dir
-    test_state_dir = pathlib.Path.home() / ".hermes" / "webui-mvp-test"
+    test_state_dir = pathlib.Path(os.environ.get("HERMES_WEBUI_TEST_STATE_DIR", str(pathlib.Path.home() / ".hermes" / "webui-mvp-test")))
     index_path = test_state_dir / "sessions" / "_index.json"
     make_session_tracked(cleanup_test_sessions)
     # Index may not exist yet if cleanup already wiped it -- just check the endpoint works

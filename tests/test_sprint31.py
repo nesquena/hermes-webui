@@ -68,7 +68,7 @@ class TestWriteEndpointToConfig:
 
 # ── 6-7: API integration tests ────────────────────────────────────────────────
 
-_TEST_BASE = "http://127.0.0.1:8788"
+from tests._pytest_port import BASE as _TEST_BASE
 
 
 def _post(path, body=None):

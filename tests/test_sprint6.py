@@ -2,7 +2,7 @@
 import json, uuid, pathlib, urllib.request, urllib.error
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 
-BASE = "http://127.0.0.1:8788"  # isolated test server
+from tests._pytest_port import BASE
 
 def get(path):
     with urllib.request.urlopen(BASE + path, timeout=10) as r:

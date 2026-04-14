@@ -34,7 +34,7 @@ STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text()
 INDEX_HTML = (REPO_ROOT / "static" / "index.html").read_text()
 I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text()
 
-BASE = "http://127.0.0.1:8788"
+from tests._pytest_port import BASE
 
 
 def _get(path):
@@ -261,7 +261,7 @@ class TestBubbleLayoutI18N(unittest.TestCase):
         )
 
 
-# ── Integration tests (require live server on port 8788) ─────────────────
+# ── Integration tests (require live server on test server port) ─────────────────
 
 
 class TestBubbleLayoutSettingsAPI(unittest.TestCase):
@@ -272,7 +272,7 @@ class TestBubbleLayoutSettingsAPI(unittest.TestCase):
         try:
             d, status = _get("/api/settings")
         except OSError:
-            self.skipTest("Server not running on port 8788")
+            self.skipTest("Server not running on test server port")
         self.assertEqual(status, 200)
         self.assertIn(
             "bubble_layout",
@@ -289,7 +289,7 @@ class TestBubbleLayoutSettingsAPI(unittest.TestCase):
         try:
             _, status = _post("/api/settings", {"bubble_layout": True})
         except OSError:
-            self.skipTest("Server not running on port 8788")
+            self.skipTest("Server not running on test server port")
         self.assertEqual(status, 200)
         d, _ = _get("/api/settings")
         self.assertTrue(d["bubble_layout"], "bubble_layout=True must persist after POST")
@@ -302,7 +302,7 @@ class TestBubbleLayoutSettingsAPI(unittest.TestCase):
             _post("/api/settings", {"bubble_layout": True})
             _post("/api/settings", {"bubble_layout": False})
         except OSError:
-            self.skipTest("Server not running on port 8788")
+            self.skipTest("Server not running on test server port")
         d, _ = _get("/api/settings")
         self.assertFalse(d["bubble_layout"], "bubble_layout=False must persist after POST")
 
@@ -311,7 +311,7 @@ class TestBubbleLayoutSettingsAPI(unittest.TestCase):
         try:
             _post("/api/settings", {"bubble_layout": "1"})
         except OSError:
-            self.skipTest("Server not running on port 8788")
+            self.skipTest("Server not running on test server port")
         d, _ = _get("/api/settings")
         self.assertIsInstance(
             d["bubble_layout"],

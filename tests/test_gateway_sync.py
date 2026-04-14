@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
-BASE = "http://127.0.0.1:8788"
+from tests._pytest_port import BASE
 
 
 def get(path):
@@ -49,11 +49,9 @@ def _get_test_state_dir():
     set (e.g. when running this file standalone), fall back to the conftest
     formula: HERMES_HOME/webui-mvp-test.
     """
-    explicit = os.getenv('HERMES_WEBUI_TEST_STATE_DIR')
-    if explicit:
-        return pathlib.Path(explicit)
-    hermes_home = pathlib.Path(os.getenv('HERMES_HOME', str(pathlib.Path.home() / '.hermes')))
-    return hermes_home / 'webui-mvp-test'  # matches conftest.py TEST_STATE_DIR formula
+    # Use _pytest_port which applies the same auto-derivation as conftest.py
+    from tests._pytest_port import TEST_STATE_DIR as _ptsd
+    return _ptsd
 
 
 def _get_state_db_path():

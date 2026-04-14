@@ -24,7 +24,7 @@ import urllib.request
 import pytest
 
 REPO = pathlib.Path(__file__).parent.parent
-BASE = "http://127.0.0.1:8788"
+from tests._pytest_port import BASE
 
 # ---------------------------------------------------------------------------
 # Unit tests — directly test the IP-resolution + guard logic in routes.py
@@ -128,14 +128,14 @@ class TestOnboardingIPLogic:
 
 
 # ---------------------------------------------------------------------------
-# Integration tests — hit the live test server at port 8788
+# Integration tests — hit the live test server at test server port
 # ---------------------------------------------------------------------------
 
 @pytest.mark.integration
 class TestOnboardingSetupEndpoint:
     """
     Integration tests for /api/onboarding/setup.
-    These require the test server running on port 8788.
+    These require the test server running on test server port.
     """
 
     def _post(self, path: str, data: dict, headers: dict | None = None) -> tuple[int, dict]:
@@ -157,7 +157,7 @@ class TestOnboardingSetupEndpoint:
         Requests from 127.0.0.1 (which is what the test server sees) should
         pass the IP check. We confirm no 403 is returned.
         """
-        # The test server runs on 127.0.0.1:8788 so client_address[0] is 127.0.0.1.
+        # The test server runs on 127.0.0.1:{TEST_PORT} so client_address[0] is 127.0.0.1.
         # A valid setup payload with a mock provider should not be rejected for IP reasons.
         # We patch apply_onboarding_setup to avoid actually writing any config.
         import unittest.mock

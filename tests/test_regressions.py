@@ -5,6 +5,7 @@ These tests exist specifically to prevent those bugs from silently returning.
 Each test is tagged with the sprint/commit where the bug was found and fixed.
 """
 import json
+import os
 import pathlib
 import time
 import urllib.error
@@ -12,7 +13,7 @@ import urllib.request
 import urllib.parse
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 
-BASE = "http://127.0.0.1:8788"
+from tests._pytest_port import BASE
 
 def get(path):
     with urllib.request.urlopen(BASE + path, timeout=10) as r:
@@ -104,7 +105,7 @@ def test_session_with_tool_calls_in_json_loads_ok(cleanup_test_sessions):
     sid = make_session(cleanup_test_sessions)
 
     # Manually inject tool_calls into the session's JSON file
-    sessions_dir = pathlib.Path.home() / ".hermes" / "webui-mvp-test" / "sessions"
+    sessions_dir = pathlib.Path(os.environ.get("HERMES_WEBUI_TEST_STATE_DIR", str(pathlib.Path.home() / ".hermes" / "webui-mvp-test"))) / "sessions"
     session_file = sessions_dir / f"{sid}.json"
     if session_file.exists():
         d = json.loads(session_file.read_text())

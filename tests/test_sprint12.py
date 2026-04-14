@@ -3,7 +3,7 @@ Sprint 12 Tests: settings panel, session pinning, session import, SSE reconnect.
 """
 import json, pathlib, urllib.error, urllib.request, urllib.parse
 
-BASE = "http://127.0.0.1:8788"
+from tests._pytest_port import BASE
 
 
 def get(path):

@@ -3,7 +3,7 @@ Sprint 15 Tests: session projects (CRUD, move, backward compat).
 """
 import json, urllib.error, urllib.request
 
-BASE = "http://127.0.0.1:8788"
+from tests._pytest_port import BASE
 
 
 def get(path):

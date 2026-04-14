@@ -1,6 +1,7 @@
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import subprocess
+import os
 from api.startup import auto_install_agent_deps
 
 class TestAutoInstallAgentDeps:

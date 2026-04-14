@@ -41,7 +41,7 @@ pytestmark = pytest.mark.skipif(
     reason="tools.approval not available in this environment"
 )
 
-BASE = "http://127.0.0.1:8788"
+from tests._pytest_port import BASE
 
 
 def get(path):

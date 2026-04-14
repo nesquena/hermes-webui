@@ -3,7 +3,7 @@ Sprint 17 Tests: send_key setting, commands.js static file, workspace subdir lis
 """
 import json, urllib.error, urllib.request
 
-BASE = "http://127.0.0.1:8788"
+from tests._pytest_port import BASE
 
 
 def get(path):

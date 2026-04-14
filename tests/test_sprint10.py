@@ -4,7 +4,7 @@ Sprint 10 Tests: server.py split, cancel endpoint, cron history, tool card polis
 import json, pathlib, urllib.error, urllib.request, urllib.parse
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 
-BASE = "http://127.0.0.1:8788"
+from tests._pytest_port import BASE
 
 def get(path):
     with urllib.request.urlopen(BASE + path, timeout=10) as r:

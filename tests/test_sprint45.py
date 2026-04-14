@@ -14,7 +14,7 @@ import urllib.request
 
 import os
 
-BASE = "http://127.0.0.1:8788"
+from tests._pytest_port import BASE
 REPO = pathlib.Path(__file__).parent.parent
 # Use HERMES_WEBUI_TEST_STATE_DIR if available (set by conftest for the test process),
 # falling back to the conventional webui-mvp-test path.

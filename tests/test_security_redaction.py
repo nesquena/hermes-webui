@@ -33,7 +33,7 @@ def _server_is_up(port: int = 8788) -> bool:
 # The skipif is evaluated lazily via the fixture, not at collection time.
 _needs_server = pytest.mark.usefixtures("test_server")
 
-BASE = "http://127.0.0.1:8788"
+from tests._pytest_port import BASE
 
 # Sample credentials that should be masked in every API response
 _FAKE_GITHUB_PAT = "ghp_TestFakeCredential1234567890ab"

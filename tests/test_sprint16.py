@@ -7,7 +7,7 @@ import pathlib
 import re
 import urllib.request
 
-BASE = "http://127.0.0.1:8788"
+from tests._pytest_port import BASE
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 
 

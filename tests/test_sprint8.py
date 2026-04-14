@@ -3,7 +3,7 @@ Sprint 8 Tests: Edit/regenerate, clear conversation, truncate, reconnect banner 
 """
 import json, pathlib, urllib.error, urllib.parse, urllib.request
 
-BASE = "http://127.0.0.1:8788"
+from tests._pytest_port import BASE
 
 def get(path):
     with urllib.request.urlopen(BASE + path, timeout=10) as r:
