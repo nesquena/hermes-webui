@@ -1,5 +1,16 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.24] feat: opt-in chat bubble layout (closes #336)
+
+- `api/config.py`: Add `bubble_layout` bool to `_SETTINGS_DEFAULTS` (default `False`) and `_SETTINGS_BOOL_KEYS` — new setting is opt-in, server-persisted, and coerced to bool on save
+- `static/style.css`: 11 lines of CSS-only bubble layout — user rows `align-self:flex-end` / max-width 75%, assistant rows `flex-start`, all gated on `body.bubble-layout` class so the default full-width canvas is untouched; 700px responsive rule widens to 92%
+- `static/boot.js`: Apply `body.bubble-layout` class from settings on page load; explicitly remove the class in the catch path so the feature stays off on API failure
+- `static/panels.js`: Load checkbox state in `loadSettingsPanel`; write `body.bubble_layout` in `saveSettings` and immediately toggle `body.bubble-layout` class for live preview without a page reload
+- `static/index.html`: Checkbox in the Appearance settings group, positioned between Show token usage and Show agent sessions
+- `static/i18n.js`: English label + description keys; Spanish translations included in the same PR
+- `tests/test_issue336.py`: 22 new tests covering config registration, JS class management in boot and panels, CSS selectors, HTML structure, i18n coverage for en+es, and API round-trip (default false, persist true/false, bool coercion)
+- 1003 tests total (up from 981)
+
 ## [v0.50.23] Add OpenCode Zen and Go provider support (fixes #362)
 
 - `api/config.py`: Add `opencode-zen` and `opencode-go` to `_PROVIDER_DISPLAY` — providers now show human-readable names in the UI instead of raw IDs
