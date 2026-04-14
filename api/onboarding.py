@@ -404,8 +404,15 @@ def get_onboarding_status() -> dict:
     skip_requested = skip_env in {"1", "true", "yes"}
     auto_completed = skip_requested and bool(runtime.get("chat_ready"))
 
+    # Auto-complete for existing Hermes users: if config.yaml already exists
+    # AND the system is chat_ready, treat onboarding as done.  These users
+    # configured Hermes via the CLI before the Web UI existed; they must never
+    # be shown the first-run wizard — it would silently overwrite their config.
+    config_exists = Path(_get_config_path()).exists()
+    config_auto_completed = config_exists and bool(runtime.get("chat_ready"))
+
     return {
-        "completed": bool(settings.get("onboarding_completed")) or auto_completed,
+        "completed": bool(settings.get("onboarding_completed")) or auto_completed or config_auto_completed,
         "settings": {
             "default_model": settings.get("default_model") or DEFAULT_MODEL,
             "default_workspace": settings.get("default_workspace")
@@ -454,7 +461,21 @@ def apply_onboarding_setup(body: dict) -> dict:
         if parsed.scheme not in {"http", "https"}:
             raise ValueError("base_url must start with http:// or https://")
 
-    cfg = _load_yaml_config(_get_config_path())
+    config_path = _get_config_path()
+    # Guard: if config.yaml already exists and the caller did not explicitly
+    # acknowledge the overwrite, refuse to proceed.  The frontend must pass
+    # confirm_overwrite=True after showing the user a confirmation step.
+    if Path(config_path).exists() and not body.get("confirm_overwrite"):
+        return {
+            "error": "config_exists",
+            "message": (
+                "Hermes is already configured (config.yaml exists). "
+                "Pass confirm_overwrite=true to overwrite it."
+            ),
+            "requires_confirm": True,
+        }
+
+    cfg = _load_yaml_config(config_path)
     env_path = _get_active_hermes_home() / ".env"
     env_values = _load_env_file(env_path)
 
@@ -478,7 +499,7 @@ def apply_onboarding_setup(body: dict) -> dict:
         model_cfg.pop("base_url", None)
 
     cfg["model"] = model_cfg
-    _save_yaml_config(_get_config_path(), cfg)
+    _save_yaml_config(config_path, cfg)
 
     if api_key:
         _write_env_file(env_path, {provider_meta["env_var"]: api_key})

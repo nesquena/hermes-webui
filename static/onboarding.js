@@ -330,6 +330,18 @@ async function _finishOnboarding(){
   }
 }
 
+async function skipOnboarding(){
+  try{
+    // Mark onboarding completed server-side without changing any config
+    await api('/api/onboarding/complete',{method:'POST',body:'{}'});
+    ONBOARDING.active=false;
+    $('onboardingOverlay').style.display='none';
+    showToast(t('onboarding_skipped')||'Setup skipped');
+  }catch(e){
+    _setOnboardingNotice((e.message||String(e)),'warn');
+  }
+}
+
 async function nextOnboardingStep(){
   try{
     if(ONBOARDING.steps[ONBOARDING.step]==='setup'){

@@ -484,6 +484,12 @@ document.addEventListener('keydown',async e=>{
     if(!S.busy){await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();}
   }
   if(e.key==='Escape'){
+    // Close onboarding overlay if open (skip/dismiss the wizard)
+    const onboardingOverlay=$('onboardingOverlay');
+    if(onboardingOverlay&&onboardingOverlay.style.display!=='none'){
+      if(typeof skipOnboarding==='function') skipOnboarding();
+      return;
+    }
     // Close settings overlay if open
     const settingsOverlay=$('settingsOverlay');
     if(settingsOverlay&&settingsOverlay.style.display!=='none'){_closeSettingsPanel();return;}
