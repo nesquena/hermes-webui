@@ -1,5 +1,13 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.29] fix: correct tool call card rendering on session load after context compaction (closes #401) (#402)
+
+- `static/sessions.js`: replace the flat B9 filter in `loadSession()` with a full sanitization pass that builds `origIdxToSanitizedIdx` — each `session.tool_calls[].assistant_msg_idx` is remapped to the new sanitized-array position as messages are filtered; for tool calls whose empty-assistant host was filtered out, they attach to the nearest prior kept assistant
+- `static/sessions.js`: set `S.toolCalls=[]` instead of pre-filling from session-level `tool_calls` — this lets `renderMessages()` use its fallback derivation from per-message `tool_calls` (which already carry correct indices into the sanitized message array); the fix eliminates the "200+ tool cards all on the wrong message" symptom on context-compacted session load
+- `tests/test_issue401.py`: 8 regression tests — 4 static structural checks and 4 behavioural Node.js tests covering index remapping, multiple consecutive empty assistants, no-filtering pass-through, and `tool`-role message exclusion
+- Original PR by @franksong2702 (cherry-picked onto master; branch was 31 commits behind)
+- 1037 tests total (up from 1029)
+
 ## [v0.50.28] fix: expand openai-codex model catalog to match DEFAULT_CODEX_MODELS
 
 `_PROVIDER_MODELS["openai-codex"]` only listed `codex-mini-latest`, so profiles using the `openai-codex` provider (e.g. a CodePath profile with `default: gpt-5.4`) showed only one entry in the model dropdown. Updated to mirror the agent's authoritative `DEFAULT_CODEX_MODELS` list: `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.2-codex`, `gpt-5.1-codex-max`, `gpt-5.1-codex-mini`, `codex-mini-latest`. Added 2 regression tests.
