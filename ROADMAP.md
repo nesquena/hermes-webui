@@ -3,9 +3,10 @@
 > Goal: Full 1:1 parity with the Hermes CLI experience via a clean dark web UI.
 > Everything you can do from the CLI terminal, you can do from this UI.
 >
-> Last updated: v0.49.1 (April 12, 2026) — 700 tests, 700 passing
-> Onboarding MVP now writes real Hermes provider config from the Web UI for OpenRouter, Anthropic, OpenAI, and custom OpenAI-compatible endpoints.
-> Tests: 700 total (700 passing, 0 failures)
+> Last updated: v0.50.21 (April 13, 2026) — 961 tests, 961 passing
+> Full production-ready: onboarding wizard, multi-profile support, KaTeX math rendering,
+> live reasoning cards with localStorage reload recovery, CSRF reverse proxy fixes, Docker improvements.
+> Tests: 961 total (961 passing, 0 failures)
 > Source: <repo>/
 
 ---
@@ -61,6 +62,18 @@
 | v0.36–v0.37 | Model routing, personality config, tool card reload, duplicate model fixes | Model routing by provider prefix, personality via config.yaml, tool cards reload on page refresh | 466 |
 | v0.38.0–v0.38.6 | Model selector, custom endpoints, OLED theme, reasoning display, insights sync | Custom endpoint URL fix, OLED theme, top-level reasoning field fix, message_count sync to state.db | 466 |
 | v0.39.0 | Security hardening (Sprint 29) | CSRF, PBKDF2, rate limiting, session ID validation, SSRF, ENV_LOCK, XSS, HMAC, skills traversal, secure cookie, error sanitization, startup warning | 499 |
+| v0.40–v0.44.2 | Approval card + Lucide icons + sprint auth | Approval prompt surfaced in UI, emoji icons → Lucide SVG, login CSP inline fix, update diagnostics | 579 |
+| v0.45–v0.46 | Custom endpoints + security + i18n + cancel | Custom endpoint Base URL + API key on profile create, credential redaction (PR #243), Docker UID/GID (PR #237), HTML entity decode + zh/zh-Hant i18n, cancel interrupts agent | 624 |
+| v0.47–v0.47.1 | Dialogs + session menu + skills + mobile QA + Spanish | Shared app dialogs, session ⋯ menu, /skills command, mobile QA suite, Android Chrome fixes, Spanish locale (@gabogabucho) | 648 |
+| v0.48–v0.48.2 | Gateway session sync + table formatting + provider warnings | Real-time Telegram/Discord/Slack sessions in sidebar (@bergeouss), inlineMd() in table cells, provider/model mismatch toast | 679 |
+| v0.49–v0.49.1 | Onboarding wizard + Docker two-container | One-shot bootstrap + guided setup wizard, OpenRouter/Anthropic/OpenAI/Custom provider config, two-container Docker compose, mobile Profiles button | 700 |
+| v0.50.0 | v0.50.0 UI overhaul (Sprint 34) | Composer-centric controls, Hermes Control Center modal, workspace panel state machine, collapsible date groups, rAF streaming throttle, context ring indicator (@aronprins) | 742 |
+| v0.50.5–v0.50.10 | Think-tag edge cases + onboarding hardening + mobile fixes | MiniMax M2.5 leading-whitespace think-tag fix, skip-onboarding env var, OAuth provider path, Docker bridge networks fix, model dropdown dedup, title auto-generation fix, mobile close button | 802 |
+| v0.50.11–v0.50.12 | Chat table styles + URL autolink + profile env isolation | .msg-body table borders, plain URL auto-linking, profile .env secret isolation on switch (prevents API key leakage across profiles, @Hinotoi-agent) | 815 |
+| v0.50.13–v0.50.15 | session_search + security sweep + KaTeX math | SessionDB injection for session_search in WebUI (@DelightRun), bandit B310/B324/B110 + QuietHTTPServer (@lawrencel1ng), KaTeX math rendering with fence-before-math fix | 871 |
+| v0.50.16–v0.50.17 | CSRF reverse proxy + Docker uv pre-install | Scheme-aware CSRF port normalization for non-standard ports (@lx3133584), Docker uv pre-installed at build time as root (fixes air-gapped startup, @mmartial-pattern) | 900 |
+| v0.50.18–v0.50.19 | Workspace fallback + Unicode filenames | Cascading workspace path recovery (@Jordan-SkyLF), Unicode Content-Disposition headers with RFC 5987 filename* (@shaoxianbilly), silent auth error surfacing, stale model cleanup | 924 |
+| v0.50.20–v0.50.21 | Silent errors + live model fetching + durable streaming recovery | apperror on empty agent response, /api/models/live endpoint with SSRF guard, live reasoning cards, tool_complete SSE events, SESSION_QUEUES, localStorage reload recovery (@Jordan-SkyLF) | 961 |
 
 ---
 
@@ -68,14 +81,14 @@
 
 | Layer | Location | Status |
 |-------|----------|--------|
-| Python server | <repo>/server.py (~81 lines) + api/ modules (~3210 lines) | Thin shell + auth middleware + business logic in api/ |
-| HTML template | <repo>/static/index.html (~364 lines) | Served from disk |
-| CSS | <repo>/static/style.css (~670 lines) | Served from disk, incl. mobile responsive |
-| JavaScript | <repo>/static/{ui,workspace,sessions,messages,panels,boot,commands}.js | 7 modules, ~3610 lines total |
+| Python server | <repo>/server.py (~165 lines) + api/ modules (~5000 lines) | Thin shell + QuietHTTPServer + auth middleware + business logic in api/ |
+| HTML template | <repo>/static/index.html (~600 lines) | Served from disk |
+| CSS | <repo>/static/style.css (~1050 lines) | Served from disk, incl. mobile responsive, KaTeX, table styles |
+| JavaScript | <repo>/static/{ui,workspace,sessions,messages,panels,boot,commands,icons,i18n,login}.js | 10 modules, ~7100 lines total |
 | Docker | Dockerfile, docker-compose.yml, .dockerignore | python:3.12-slim, multi-arch (amd64+arm64) |
 | CI/CD | .github/workflows/release.yml | Auto-release + GHCR publish on tag push |
 | Runtime state | ~/.hermes/webui-mvp/sessions/ | Session JSON files |
-| Test server | Port 8788, state dir ~/.hermes/webui-mvp-test/ | Isolated, wiped per run |
+| Test server | Port 8788 (conftest.py), port 8789 (browser sanity) | Isolated, wiped per run |
 | Production server | Port 8787 | SSH tunnel from Mac |
 
 ---

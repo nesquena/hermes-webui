@@ -1,22 +1,28 @@
 # Hermes Web UI -- Forward Sprint Plan
 
-> Current state: v0.36 | 433 tests | Daily driver ready
-> This document plans the path from here to two targets:
+> Current state: v0.50.21 | 961 tests | Full daily driver — CLI parity achieved
 >
-> Target A: 1:1 feature parity with the Hermes CLI (everything you can do from the
->           terminal, you can do from the browser)
+> NOTE: Most planned work in this document has now shipped. This file is preserved
+> as a historical planning record. Current sprint state and version history live
+> in CHANGELOG.md and ROADMAP.md.
 >
-> Target B: 1:1 parity with Claude's reproducible features (the full Claude
->           browser UI experience, minus things only Anthropic can build)
+> Target A (CLI parity): ✅ Complete — all core tools, workspace, cron, skills,
+>           memory, sessions, profiles, model routing, streaming, voice, mobile.
 >
-> Sprints are ordered by impact. Each builds on the one before.
-> Past sprint history lives in CHANGELOG.md.
+> Target B (Claude parity): ~90% — thinking display, math rendering (KaTeX),
+>           tool cards, workspace preview, onboarding, settings panel all done.
+>           Remaining: full subagent transparency UI, file diff viewer.
+>
+> Last meaningful update: v0.50.21 (April 13, 2026). See CHANGELOG.md for full history.
 
 ---
 
-## Where we are now (v0.36)
+## Where we are now (v0.50.21 — updated April 2026)
 
-**CLI parity: ~95% complete.** Core agent loop, all tools visible, workspace
+> The sections below describe the state as of v0.36 for historical reference.
+> See ROADMAP.md for the current sprint history table (v0.36 → v0.50.21).
+
+**CLI parity: ✅ Complete** as of v0.50.x. Core agent loop, all tools visible, workspace
 file ops with tree view and git detection, cron/skills/memory CRUD, session
 management, streaming with rAF throttle, cancel, multi-provider models, custom
 endpoint discovery, slash commands (help/clear/model/workspace/new/usage/theme/compact),
