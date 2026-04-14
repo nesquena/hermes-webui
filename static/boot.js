@@ -118,6 +118,10 @@ function syncWorkspacePanelUI(){
   if(clearBtn){
     clearBtn.disabled=!isOpen;
     clearBtn.title=hasPreview?'Close preview':'Hide workspace panel';
+    // On desktop, only show the X button when a file preview is open.
+    // In browse mode the chevron (btnCollapseWorkspacePanel) already serves
+    // as the close control, so showing both produces a duplicate X.
+    if(!isCompact) clearBtn.style.display=hasPreview?'':'none';
   }
 }
 

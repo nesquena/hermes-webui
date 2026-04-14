@@ -149,8 +149,10 @@ def test_file_requires_path(cleanup_test_sessions):
         assert e.code == 400
 
 def test_new_session_inherits_workspace(cleanup_test_sessions):
-    sid, _ = make_session_tracked(cleanup_test_sessions)
-    post("/api/session/update", {"session_id": sid, "workspace": "/tmp", "model": "openai/gpt-5.4-mini"})
+    sid, ws = make_session_tracked(cleanup_test_sessions)
+    child = ws / f"workspace-inherit-{uuid.uuid4().hex[:6]}"
+    child.mkdir(parents=True, exist_ok=True)
+    post("/api/session/update", {"session_id": sid, "workspace": str(child), "model": "openai/gpt-5.4-mini"})
     sid2, _ = make_session_tracked(cleanup_test_sessions)
     data, _ = get(f"/api/session?session_id={sid2}")
-    assert data["session"]["workspace"] == "/tmp"
+    assert data["session"]["workspace"] == str(child)

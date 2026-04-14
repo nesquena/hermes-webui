@@ -1,5 +1,57 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.36] fix: workspace list cleaner — allow own-profile paths, remove brittle string filter
+
+Two bugs in `_clean_workspace_list()` caused workspace additions to silently disappear on the next `load_workspaces()` call, breaking `test_workspace_add_no_duplicate` and `test_workspace_rename` (and potentially causing real-world workspace list corruption):
+
+**Bug 1 — Brittle string filter removed:** `if 'test-workspace' in path or 'webui-mvp-test' in path: continue` dropped any workspace path containing those substrings. In the test server, `TEST_WORKSPACE` is `~/.hermes/profiles/webui/webui-mvp-test/test-workspace`, so every workspace added during tests was silently discarded on the next `load_workspaces()` call. The `p.is_dir()` check already handles genuinely non-existent paths — the string filter was redundant and harmful.
+
+**Bug 2 — Cross-profile filter was too broad:** `if p is under ~/.hermes/profiles/: skip` was designed to block cross-profile workspace leakage, but it also removed paths under the *current* profile's own directory (e.g. `~/.hermes/profiles/webui/...`). Fixed: now only skips paths under `profiles/` that are NOT under the current profile's own `hermes_home`.
+
+- `api/workspace.py`: remove string-match filter; fix cross-profile check to allow own-profile paths
+- All 1055 tests now pass (was 1053 pass + 2 fail)
+
+## [v0.50.35] fix: workspace trust boundary — cross-platform, multi-workspace support
+
+v0.50.34's workspace trust check was too restrictive: it required all workspaces to be under `DEFAULT_WORKSPACE` (/home/hermes/workspace), which blocked every profile-specific workspace (~/CodePath, ~/hermes-webui-public, ~/WebUI, ~/Camanji, etc.) and prevented switching between workspaces at all.
+
+Replaced with a three-layer model that works cross-platform and supports multiple workspaces per profile:
+
+1. **Blocklist** — `/etc`, `/usr`, `/var`, `/bin`, `/sbin`, `/boot`, `/proc`, `/sys`, `/dev`, `/root`, `/lib`, `/lib64`, `/opt/homebrew` always rejected, closing the original CVSS 8.8 vulnerability
+2. **Home-directory check** — any path under `Path.home()` is trusted; `Path.home()` is cross-platform (`~/...` on Linux/macOS, `C:\\Users\\...` on Windows); allows all profile workspaces simultaneously since they don't need to share a single ancestor
+3. **Saved-workspace escape hatch** — paths already in the profile's saved workspace list are trusted regardless of location, covering self-hosted deployments with workspaces outside home (`/data/projects`, `/opt/workspace`, etc.)
+
+- `api/workspace.py`: rewritten `resolve_trusted_workspace()` with the three-layer model
+- `tests/test_sprint3.py`: updated error-message assertions from `"trusted workspace root"` → `"outside"` (covers both old and new error strings)
+- 1053 tests total (unchanged)
+
+## [v0.50.34] fix(workspace): restrict session workspaces to trusted roots [SECURITY] (#415)
+
+Session creation, update, chat-start, and workspace-add endpoints accepted arbitrary caller-supplied workspace paths. An authenticated caller could repoint a session to any directory the process could access, then use normal file read/write APIs to operate on attacker-chosen locations. CVSS 8.8 High (AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H).
+
+- `api/workspace.py`: new `resolve_trusted_workspace(path)` helper — resolves path, checks existence + is_dir, enforces `path.relative_to(_BOOT_DEFAULT_WORKSPACE)` containment; requests outside the WebUI workspace root fail with 400
+- `api/routes.py`: apply `resolve_trusted_workspace()` to all four entry points — `POST /api/session/new`, `POST /api/session/update`, `POST /api/chat/start` (workspace override), `POST /api/workspaces/add`
+- `tests/test_sprint3.py`, `tests/test_sprint5.py`: regression tests for rejected outside-root paths on all four entry points; existing workspace tests updated to use trusted child directories
+- `tests/test_sprint1.py`, `tests/test_sprint4.py`, `tests/test_sprint13.py`: aligned to new trusted-root contract
+- Fix: use `_BOOT_DEFAULT_WORKSPACE` (respects `HERMES_WEBUI_DEFAULT_WORKSPACE` env for test isolation) rather than `_profile_default_workspace()` (reads agent terminal.cwd which may differ)
+- Original PR by @Hinotoi-agent (cherry-picked; branch was 6 commits behind master)
+- 1053 tests total (up from 1051; 2 pre-existing test_sprint5 isolation failures on master, not introduced by this PR)
+
+## [v0.50.33] fix: workspace panel close button — no duplicate X on desktop, mobile X respects file preview (#413)
+
+**Bug 1 — Duplicate X on desktop:** `#btnClearPreview` (the X icon) was always visible regardless of panel state, so desktop browse mode showed both the chevron collapse button and the X simultaneously. Fixed in `syncWorkspacePanelUI()`: on non-compact (desktop) viewports, `clearBtn.style.display` is set to `none` when no file preview is open, and cleared (shown) when a preview is active.
+
+**Bug 2 — Mobile X collapsed the whole panel instead of dismissing the file:** `.mobile-close-btn` was wired to `closeWorkspacePanel()` directly, bypassing the two-step close logic. Fixed by changing `onclick` to `handleWorkspaceClose()`, which calls `clearPreview()` first if a file is open, and falls through to `closeWorkspacePanel()` otherwise.
+
+**Also:** widened the `test_server_delete_invalidates_index` window from 600 → 1200 chars to accommodate the session_id validation guards added in v0.50.32 (#412).
+
+- `static/boot.js`: `syncWorkspacePanelUI()` sets `clearBtn.style.display` based on `hasPreview` when `!isCompact`
+- `static/index.html`: `.mobile-close-btn` onclick changed from `closeWorkspacePanel()` to `handleWorkspaceClose()`
+- `tests/test_sprint44.py`: 10 new regression tests covering both fixes
+- `tests/test_mobile_layout.py`: updated to accept `handleWorkspaceClose()` as valid onclick
+- `tests/test_regressions.py`: widened delete handler window to 1200 chars
+- 1051 tests total (up from 1041)
+
 ## [v0.50.32] fix(sessions): validate session_id before deleting session files [SECURITY] (#409)
 
 `/api/session/delete` accepted arbitrary `session_id` values from the request body and built the delete path directly as `SESSION_DIR / f"{sid}.json"`. Because pathlib discards the prefix when `sid` is an absolute path, an attacker could supply `/tmp/victim` and cause the server to unlink `victim.json` outside the session store. Traversal-style values (`../../etc/target`) were also accepted. CVSS 8.1 High (AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H).
