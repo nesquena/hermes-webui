@@ -1,5 +1,37 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.25] Multi-PR batch: mobile scroll, import timestamps, profile security, mic fallback
+
+### fix: restore mobile chat scrolling and drawer close (#397)
+- `static/style.css`: `min-height:0` on `.layout` and `.main` (flex shrink chain fix); `-webkit-overflow-scrolling:touch`, `touch-action:pan-y`, `overscroll-behavior-y:contain` on `.messages`
+- `static/boot.js`: call `closeMobileSidebar()` on new-conversation button and Ctrl+K shortcut so the transcript is visible immediately after starting a chat
+- `tests/test_mobile_layout.py`: 41 new lines covering CSS fixes and both JS call sites
+- Original PR by @Jordan-SkyLF
+
+### fix: preserve imported session timestamps (#395)
+- `api/models.py`: `Session.save(touch_updated_at=True)` — new flag; `import_cli_session()` accepts `created_at`/`updated_at` kwargs and saves with `touch_updated_at=False`
+- `api/routes.py`: extract `created_at`/`updated_at` from `get_cli_sessions()` metadata and forward to import; post-import save also uses `touch_updated_at=False`
+- `tests/test_gateway_sync.py`: +53 lines — integration test verifying imported session keeps original timestamp and sorts correctly; also fix session file cleanup in test finally block
+- Original PR by @Jordan-SkyLF
+
+### fix(profiles): block path traversal in profile switch and delete flows (#399) [SECURITY]
+- `api/profiles.py`: new `_resolve_named_profile_home(name)` — validates name via `^[a-z0-9][a-z0-9_-]{0,63}$` regex then enforces path containment via `candidate.resolve().relative_to(profiles_root)`; use in `switch_profile()`
+- `api/profiles.py`: add `_validate_profile_name()` call to `delete_profile_api()` entry
+- `api/routes.py`: add `_validate_profile_name()` at HTTP handler level for both `/api/profile/switch` and `/api/profile/delete`
+- `tests/test_profile_path_security.py`: 3 new tests — traversal rejected, valid name passes (cherry-picked from @Hinotoi-agent's PR, which was 62 commits behind master)
+
+### feat: add desktop microphone transcription fallback (#396)
+- `static/boot.js`: detect `_canRecordAudio`; keep mic button enabled when MediaRecorder available even without SpeechRecognition; full MediaRecorder recording → `/api/transcribe` fallback path with proper cleanup and error handling
+- `api/upload.py`: add `transcribe_audio()` helper — temp file, calls transcription_tools, always cleans up
+- `api/routes.py`: add `/api/transcribe` POST handler — CSRF-protected, auth-gated, 20MB limit
+- `api/helpers.py`: change `Permissions-Policy` `microphone=()` → `microphone=(self)` (required for getUserMedia)
+- `tests/test_voice_transcribe_endpoint.py`: 87 new lines (3 tests with mocked transcription)
+- `tests/test_sprint19.py`: regression guard for microphone Permissions-Policy
+- `tests/test_sprint20.py`: 3 updated tests for new fallback capability checks
+- Original PR by @Jordan-SkyLF
+
+- 1020 tests total (up from 1003)
+
 ## [v0.50.24] feat: opt-in chat bubble layout (closes #336)
 
 - `api/config.py`: Add `bubble_layout` bool to `_SETTINGS_DEFAULTS` (default `False`) and `_SETTINGS_BOOL_KEYS` — new setting is opt-in, server-persisted, and coerced to bool on save
