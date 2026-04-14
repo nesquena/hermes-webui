@@ -236,3 +236,27 @@ def test_link_not_broken_by_prior_autolink():
     assert f'href="{url1}"' in result
     assert f'href="{url2}"' in result
     assert '#461' in result
+
+def test_href_quote_sanitized():
+    """A URL containing a double-quote must have it percent-encoded in href to prevent attribute breakout."""
+    # This would break out of href="..." and inject an event handler without the fix
+    url = 'https://evil.com" onmouseover="alert(1)'
+    # The [label](url) regex captures up to the closing ), so we test via the render helper
+    # by constructing a URL that contains a literal quote character
+    safe_url = 'https://example.com/path"with"quotes'
+    result = render_links_only(f'[click]({safe_url})')
+    # The href must not contain a raw unencoded double-quote
+    href_start = result.find('href="') + 6
+    href_end = result.find('"', href_start)
+    href_val = result[href_start:href_end]
+    assert '"' not in href_val, (
+        f"href value must not contain unencoded double-quote. Got href: {href_val}"
+    )
+
+
+def test_js_source_sanitizes_quotes_in_href():
+    """JS source must apply quote percent-encoding to URLs before placing in href."""
+    # Both the inlineMd stash and outer link pass must sanitize quotes
+    assert "%22" in UI_JS, (
+        "URL placed in href should have double-quotes percent-encoded via .replace to %22"
+    )

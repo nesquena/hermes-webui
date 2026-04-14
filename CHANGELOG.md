@@ -1,5 +1,31 @@
 # Hermes Web UI -- Changelog
 
+## [Unreleased] fix(renderer): prevent double-linking and esc() corruption in renderMd() (fixes #470)
+
+Markdown links rendered incorrectly in several contexts — most visibly inside table cells —
+due to three related bugs in the `renderMd()` pipeline in `static/ui.js`:
+
+**Bugs fixed:**
+- **Double-linking**: `[label](url)` was converted to `<a href="...">` then the bare-URL
+  autolink pass re-matched the URL inside `href="..."` and wrapped it in a second `<a>` tag.
+  Affected `inlineMd()` (table cells, list items, blockquotes) and the outer link pass.
+- **`esc()` on `href` values**: `esc()` was applied to URLs placed in `href` attributes,
+  converting `&` → `&amp;` in query strings and corrupting links like `?a=1&b=2`.
+  `esc()` is for display text — URL attribute values do not need HTML-entity encoding.
+- **Quote injection in `href`**: without `esc()`, a URL containing a literal `"` could
+  break out of the `href="..."` attribute. Fixed by applying `.replace(/"/g,'%22')` to
+  URL values before placing them in `href` (preserves `&`, closes the injection vector).
+
+**Fix:** stash-based protection — `[label](url)` links are stashed as placeholders before
+the autolink pass runs, preventing re-matching. Existing `<a>` tags are stashed before
+both the outer link pass and autolink pass. `esc()` removed from `href` values; display
+text still uses `esc()` for XSS safety. `"` in URLs is percent-encoded (`%22`).
+
+**Changes:**
+- `static/ui.js`: stash/restore pattern in `inlineMd()`, outer link pass, autolink pass
+- `tests/test_issue470.py`: 14 new tests covering all three bugs + security regression
+- `tests/test_issue342.py`: updated 2 tests to reflect intentional removal of `esc()` from `href`
+
 ## [v0.50.41] feat(ui): render MEDIA: images inline in web UI chat (fixes #450)
 
 When the agent outputs `MEDIA:<path>` tokens — screenshots from the browser tool,
