@@ -310,7 +310,10 @@ def test_server_delete_invalidates_index(cleanup_test_sessions):
             text.find('if parsed.path == "/api/session/delete":'),
         )
         if delete_idx >= 0:
-            delete_block = text[delete_idx:delete_idx+600]
+            # Use 1200 chars to accommodate any validation/guard code added
+            # before the SESSION_INDEX_FILE.unlink() call (e.g. session_id
+            # character checks, path traversal guards).
+            delete_block = text[delete_idx:delete_idx+1200]
             assert "SESSION_INDEX_FILE" in delete_block, \
                 f"{label} session/delete must invalidate SESSION_INDEX_FILE"
             return
