@@ -105,7 +105,7 @@ const _liveModelCache={};
 async function _fetchLiveModels(provider, sel){
   if(!provider||!sel) return;
   // Don't fetch for providers where we know it's unsupported or unnecessary
-  if(['anthropic','google','gemini'].includes(provider)) return;
+  // All providers now supported via agent's provider_model_ids() — no exclusions needed
   if(_liveModelCache[provider]) return; // already fetched this session
   try{
     const url=new URL('/api/models/live',location.origin);

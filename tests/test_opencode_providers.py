@@ -86,29 +86,36 @@ def test_openai_codex_display_name():
     assert config._PROVIDER_DISPLAY["openai-codex"] == "OpenAI Codex"
 
 
-def test_live_models_handler_uses_codex_agent_path():
-    """_handle_live_models for openai-codex must use get_codex_model_ids(), not the
-    standard /v1/models endpoint (which returns 403 for OAuth-based Codex auth).
-    Verify structurally that the routes.py handler has a dedicated codex branch.
+def test_live_models_handler_delegates_to_provider_model_ids():
+    """_handle_live_models must delegate to the agent's provider_model_ids()
+    rather than maintain its own per-provider fetch logic.
     """
     import pathlib
     routes_src = (pathlib.Path(__file__).parent.parent / "api" / "routes.py").read_text()
-    # Must have a dedicated openai-codex branch before any base_url assignment
-    assert 'provider == "openai-codex"' in routes_src, (
-        "_handle_live_models must have a dedicated openai-codex branch "
-        "that uses get_codex_model_ids() instead of /v1/models"
+    assert "provider_model_ids" in routes_src, (
+        "_handle_live_models must call hermes_cli.models.provider_model_ids() "
+        "to delegate all provider-specific live-fetch logic to the agent"
     )
-    # Must delegate to the agent's get_codex_model_ids
-    assert "get_codex_model_ids" in routes_src, (
-        "_handle_live_models must call hermes_cli.codex_models.get_codex_model_ids() "
-        "for openai-codex provider"
+    # The old per-provider base_url hardcoding should be gone
+    assert "https://api.openai.com/v1" not in routes_src, (
+        "_handle_live_models must not hardcode api.openai.com — "
+        "provider resolution is handled by the agent"
     )
-    # Must NOT route openai-codex through the standard OpenAI base URL
-    # (the old bug: openai-codex was grouped with openai and sent to api.openai.com)
-    codex_block_start = routes_src.find('provider == "openai-codex"')
-    openai_base_url_line = routes_src.find('"https://api.openai.com/v1"', codex_block_start)
-    openai_base_url_before = routes_src.find('"https://api.openai.com/v1"')
-    assert openai_base_url_before > codex_block_start or openai_base_url_line == -1, (
-        "openai-codex must be handled before the api.openai.com/v1 fallback, "
-        "not grouped with it"
+    assert "not_supported" not in routes_src, (
+        "_handle_live_models must not return not_supported for any provider — "
+        "provider_model_ids() falls back to static list automatically"
+    )
+
+
+def test_live_models_ui_no_longer_skips_any_provider():
+    """_fetchLiveModels in ui.js must not exclude any provider from live fetching.
+    Previously anthropic, google, and gemini were skipped — now provider_model_ids()
+    handles them all (with graceful fallback to static lists).
+    """
+    import pathlib
+    ui_src = (pathlib.Path(__file__).parent.parent / "static" / "ui.js").read_text()
+    # The old exclusion list must be gone
+    assert "includes(provider)" not in ui_src or "anthropic" not in ui_src[:ui_src.find("includes(provider)")+100], (
+        "_fetchLiveModels must not skip anthropic, google, or gemini — "
+        "the backend now returns live models for all providers"
     )

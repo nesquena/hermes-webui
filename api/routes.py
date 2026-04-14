@@ -1448,175 +1448,87 @@ def _handle_approval_inject(handler, parsed):
 
 
 def _handle_live_models(handler, parsed):
-    """Fetch the live model list from a provider's /v1/models endpoint.
+    """Return the live model list for a provider.
 
-    Returns the provider's actual model catalog so the UI can show all
-    available models, not just the hardcoded fallback list.
+    Delegates to the agent's provider_model_ids() which handles:
+    - OpenRouter: live fetch from /api/v1/models
+    - Anthropic: live fetch from /v1/models (API key or OAuth token)
+    - Copilot: live fetch from api.githubcopilot.com/models with correct headers
+    - openai-codex: Codex OAuth endpoint + local ~/.codex/ cache fallback
+    - Nous: live fetch from inference-api.nousresearch.com/v1/models
+    - DeepSeek, kimi-coding, opencode-zen/go, custom: generic OpenAI-compat /v1/models
+    - ZAI, MiniMax, Google/Gemini: fall back to static list (non-standard endpoints)
+    - All others: static _PROVIDER_MODELS fallback
+
+    The agent already maintains all provider-specific auth and endpoint logic
+    in one place; the WebUI inherits it rather than duplicating it.
 
     Query params:
-        provider  (optional) — provider ID to fetch for; defaults to active
-        base_url  (optional) — override the base URL for the provider
-
-    Providers that don't expose a /v1/models endpoint (Anthropic) are not
-    supported here — the caller should fall back to the static list.
-
-    Supported: openai, openrouter, custom (any OpenAI-compatible endpoint).
+        provider  (optional) — provider ID; defaults to active profile provider
     """
-    import urllib.request as _ur
-    import ipaddress as _ip
-    import socket as _sock
-    from urllib.parse import urlparse as _up
-
     qs = parse_qs(parsed.query)
     provider = (qs.get("provider", [""])[0] or "").lower().strip()
-    base_url_override = (qs.get("base_url", [""])[0] or "").strip()
 
     try:
-        from api.config import get_config as _gc, resolve_model_provider as _rmp
+        from api.config import get_config as _gc
         cfg = _gc()
-        active_provider = cfg.get("model", {}).get("provider") or ""
         if not provider:
-            provider = active_provider
+            provider = cfg.get("model", {}).get("provider") or ""
+        if not provider:
+            return j(handler, {"error": "no_provider", "models": []})
 
-        # Resolve API key and base URL for this provider
-        api_key = None
-        base_url = base_url_override or ""
+        # Delegate to the agent's live-fetch + fallback resolver.
+        # provider_model_ids() tries live endpoints first and falls back to
+        # the static _PROVIDER_MODELS list — it never raises.
         try:
-            from hermes_cli.runtime_provider import resolve_runtime_provider
-            rt = resolve_runtime_provider(requested=provider)
-            api_key = rt.get("api_key")
-            if not base_url:
-                base_url = rt.get("base_url") or ""
-        except Exception:
-            pass
+            import sys as _sys
+            import os as _os
+            _agent_dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                                       "..", "..", ".hermes", "hermes-agent")
+            _agent_dir = _os.path.normpath(_agent_dir)
+            if _agent_dir not in _sys.path:
+                _sys.path.insert(0, _agent_dir)
+            from hermes_cli.models import provider_model_ids as _pmi
+            ids = _pmi(provider)
+        except Exception as _import_err:
+            logger.debug("provider_model_ids import failed for %s: %s", provider, _import_err)
+            # Last resort: return the WebUI's own static catalog
+            from api.config import _PROVIDER_MODELS as _pm
+            ids = [m["id"] for m in _pm.get(provider, [])]
 
-        # openai-codex: use the agent's get_codex_model_ids() which calls the
-        # correct chatgpt.com/backend-api/codex/models endpoint with the OAuth
-        # token and also falls back to ~/.codex/ local cache and DEFAULT_CODEX_MODELS.
-        # This is the only path that can actually return the user's real Codex model list.
-        if provider == "openai-codex":
-            try:
-                from hermes_cli.codex_models import get_codex_model_ids as _get_codex_ids
-                access_token = None
-                try:
-                    from hermes_cli.runtime_provider import resolve_runtime_provider as _rrt
-                    rt2 = _rrt(requested="openai-codex")
-                    access_token = rt2.get("api_key") or rt2.get("access_token")
-                except Exception:
-                    pass
-                ids = _get_codex_ids(access_token=access_token)
-                def _codex_label(mid):
-                    # e.g. "gpt-5.4-mini" -> "GPT-5.4 Mini"
-                    parts = mid.split("-")
-                    result = []
-                    for p in parts:
-                        if p.lower() == "gpt":
-                            result.append("GPT")
-                        elif p[:1].isdigit():
-                            result.append(p)   # version numbers unchanged: 5.4, 5.1
-                        else:
-                            result.append(p.capitalize())
-                    return " ".join(result)
-                models_out = [{"id": mid, "label": _codex_label(mid)} for mid in ids if mid]
-                return j(handler, {"provider": provider, "models": models_out,
-                                   "count": len(models_out)})
-            except Exception as _ce:
-                logger.debug("Codex live model fetch failed: %s", _ce)
-                # Fall through to static list (handled by get_available_models())
-                return j(handler, {"error": str(_ce), "models": []})
+        if not ids:
+            return j(handler, {"provider": provider, "models": [], "count": 0})
 
-        # Determine the /v1/models endpoint URL
-        if not base_url:
-            if provider in ("openai", "copilot"):
-                base_url = "https://api.openai.com/v1"
-            elif provider == "openrouter":
-                base_url = "https://openrouter.ai/api/v1"
-            elif provider in ("anthropic",):
-                # Anthropic doesn't support /v1/models in a standard way
-                return j(handler, {"error": "not_supported", "models": []})
-            elif provider in ("google", "gemini"):
-                return j(handler, {"error": "not_supported", "models": []})
-            else:
-                # Generic OpenAI-compatible — try common paths
-                base_url = ""
+        # Normalise to {id, label} — provider_model_ids() returns plain string IDs
+        def _make_label(mid):
+            """Best-effort human label from a model ID string."""
+            # Preserve slashes for router IDs like "anthropic/claude-sonnet-4.6"
+            display = mid.split("/")[-1] if "/" in mid else mid
+            parts = display.split("-")
+            result = []
+            for p in parts:
+                pl = p.lower()
+                if pl == "gpt":
+                    result.append("GPT")
+                elif pl in ("claude", "gemini", "gemma", "llama", "mistral",
+                            "qwen", "deepseek", "grok", "kimi", "glm"):
+                    result.append(p.capitalize())
+                elif p[:1].isdigit():
+                    result.append(p)  # version numbers: 5.4, 3.5, 4.6 — unchanged
+                else:
+                    result.append(p.capitalize())
+            label = " ".join(result)
+            # Restore well-known uppercase tokens that title-casing breaks
+            for orig in ("GPT", "GLM", "API", "AI", "XL", "MoE"):
+                label = label.replace(orig.title(), orig)
+            return label
 
-        if not base_url:
-            return j(handler, {"error": "no_base_url", "models": []})
-
-        # Build URL safely
-        base_url = base_url.rstrip("/")
-        if base_url.endswith("/v1"):
-            endpoint_url = base_url + "/models"
-        elif "/v1" in base_url:
-            endpoint_url = base_url.rstrip("/") + "/models"
-        else:
-            endpoint_url = base_url + "/v1/models"
-
-        # Validate scheme (B310 guard)
-        parsed_ep = _up(endpoint_url)
-        if parsed_ep.scheme not in ("http", "https"):
-            return j(handler, {"error": "invalid_scheme", "models": []}, status=400)
-
-        # SSRF guard: block private IPs (allow known local provider hostnames).
-        # Use exact hostname match — NOT substring — to prevent bypass via
-        # hostnames like evil-ollama.attacker.com containing "ollama".
-        _KNOWN_LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
-        if parsed_ep.hostname:
-            hostname_lower = (parsed_ep.hostname or "").lower()
-            try:
-                for _, _, _, _, addr in _sock.getaddrinfo(parsed_ep.hostname, None):
-                    addr_obj = _ip.ip_address(addr[0])
-                    if addr_obj.is_private or addr_obj.is_loopback:
-                        if hostname_lower not in _KNOWN_LOCAL_HOSTS:
-                            return j(handler, {"error": "ssrf_blocked", "models": []}, status=400)
-            except _sock.gaierror:
-                pass
-
-        # Fetch models
-        req = _ur.Request(endpoint_url, method="GET")
-        req.add_header("User-Agent", "HermesWebUI/1.0")
-        if api_key:
-            req.add_header("Authorization", f"Bearer {api_key}")
-        with _ur.urlopen(req, timeout=8) as resp:  # nosec B310
-            raw = resp.read().decode("utf-8")
-
-        import json as _json
-        data = _json.loads(raw)
-        raw_models = data.get("data") or data.get("models") or []
-
-        # Normalise to {id, label} list; filter to text-generation models
-        models = []
-        seen = set()
-        for m in raw_models:
-            if not isinstance(m, dict):
-                continue
-            mid = m.get("id") or m.get("name") or ""
-            if not mid or mid in seen:
-                continue
-            # Skip embedding/image/audio models for direct providers
-            obj_type = (m.get("object") or "").lower()
-            if obj_type and obj_type not in ("model",):
-                continue
-            # Heuristic: skip obvious non-chat models
-            if any(skip in mid.lower() for skip in ("embed", "tts", "whisper", "dall-e", "davinci-edit", "babbage", "ada", "curie")):
-                continue
-            seen.add(mid)
-            label = m.get("name") or m.get("display_name") or mid
-            # For OpenAI, the id IS the label — clean it up
-            if label == mid:
-                label = mid.replace("-", " ").replace(".", ".").title()
-                # Restore original casing for well-known names
-                for known in ("GPT", "o1", "o3", "o4", "gpt"):
-                    label = label.replace(known.title(), known)
-            models.append({"id": mid, "label": label})
-
-        # Sort: newest (higher version numbers) first via lexicographic sort on reversed id
-        models.sort(key=lambda m: m["id"], reverse=True)
-
-        return j(handler, {"provider": provider, "models": models, "count": len(models)})
+        models_out = [{"id": mid, "label": _make_label(mid)} for mid in ids if mid]
+        return j(handler, {"provider": provider, "models": models_out,
+                           "count": len(models_out)})
 
     except Exception as _e:
-        logger.debug("Failed to fetch live models for %s: %s", provider, _e)
+        logger.debug("_handle_live_models failed for %s: %s", provider, _e)
         return j(handler, {"error": str(_e), "models": []})
 
 

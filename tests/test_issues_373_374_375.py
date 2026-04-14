@@ -174,10 +174,14 @@ class TestLiveModelFetching:
             "_handle_live_models must have SSRF protection for private IP ranges (#375)"
         )
 
-    def test_live_models_unsupported_providers_gracefully_handled(self):
-        """Providers without /v1/models support must return not_supported gracefully."""
-        assert "not_supported" in ROUTES_PY, (
-            "_handle_live_models must return not_supported for Anthropic/Google (#375)"
+    def test_live_models_all_providers_handled_via_agent(self):
+        """_handle_live_models must delegate to provider_model_ids() which handles all
+        providers gracefully — live fetch where possible, static fallback otherwise.
+        The old 'not_supported' return for Anthropic/Google is superseded: those
+        providers now return live or static model lists via the agent delegate."""
+        assert "provider_model_ids" in ROUTES_PY, (
+            "_handle_live_models must delegate to hermes_cli.models.provider_model_ids() "
+            "so all providers are handled uniformly (#375 upgrade)"
         )
 
     def test_frontend_has_fetch_live_models_function(self):
@@ -204,11 +208,16 @@ class TestLiveModelFetching:
             "_fetchLiveModels must track existing model IDs to avoid duplicates (#375)"
         )
 
-    def test_frontend_live_fetch_skips_unsupported_providers(self):
-        """_fetchLiveModels must skip providers that don't support live fetching (#375)."""
-        assert "anthropic" in UI_JS and "google" in UI_JS, (
-            "_fetchLiveModels must skip Anthropic and Google (no /v1/models support) (#375)"
-        )
+    def test_frontend_live_fetch_covers_all_providers(self):
+        """_fetchLiveModels no longer skips any provider — all providers return
+        live or fallback models via provider_model_ids() on the backend (#375 upgrade)."""
+        # The old skip list (anthropic, google, gemini) must be gone from the guard
+        skip_guard_pos = UI_JS.find("includes(provider)")
+        if skip_guard_pos != -1:
+            guard_line = UI_JS[max(0,skip_guard_pos-100):skip_guard_pos+50]
+            assert "anthropic" not in guard_line, (
+                "_fetchLiveModels must not skip anthropic — backend now handles it (#375 upgrade)"
+            )
 
     def test_live_models_endpoint_wired_in_routes(self):
         """The /api/models/live path must be handled in handle_get()."""
