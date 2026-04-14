@@ -441,7 +441,7 @@ function renderMd(raw){
     const _link_stash=[];
     t=t.replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g,(_,lb,u)=>{_link_stash.push(`<a href="${u}" target="_blank" rel="noopener">${esc(lb)}</a>`);return `\x00L${_link_stash.length-1}\x00`;});
     t=t.replace(/(https?:\/\/[^\s<>"')\]]+)/g,(url)=>{const trail=url.match(/[.,;:!?)]$/)?url.slice(-1):'';const clean=trail?url.slice(0,-1):url;return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;});
-    t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);;
+    t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);
     // Escape any plain text that isn't already wrapped in a tag we produced
     // by escaping bare < > that aren't part of our own tags
     const SAFE_INLINE=/^<\/?(strong|em|code|a)([\s>]|$)/i;
