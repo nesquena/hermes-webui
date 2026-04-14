@@ -12,7 +12,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent.parent.parent))
 
 _needs_server = pytest.mark.usefixtures("test_server")
 BASE = "http://127.0.0.1:8788"
-_FULL_SECRET = "sk-" + ("B" * 24)
+_FULL_SECRET = "hf_" + ("B" * 24)
 
 
 def _get(path):
