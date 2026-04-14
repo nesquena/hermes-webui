@@ -215,27 +215,31 @@ def set_last_workspace(path: str) -> None:
 
 
 def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
-    """Resolve and validate a workspace path under the WebUI's trusted workspace root.
+    """Resolve and validate a workspace path against the trusted workspace roots.
 
-    The trusted root is the WebUI boot-time DEFAULT_WORKSPACE (respects
-    HERMES_WEBUI_STATE_DIR for test isolation). Session creation/update and
-    workspace-list mutations must stay within that root so callers cannot repoint
-    a session to arbitrary filesystem locations outside the intended sandbox.
+    A path is trusted if it passes these checks:
+      1. It exists and is a directory.
+      2. It is under the user's home directory.
+         This blocks paths like /etc, /tmp, /var, /root, /usr while allowing
+         any legitimate workspace under ~/  (~/CodePath, ~/General, ~/WebUI, etc.)
 
-    Note: _profile_default_workspace() reads the agent's terminal.cwd which may
-    differ from the WebUI's configured workspace root — always use DEFAULT_WORKSPACE
-    here to stay consistent with how new_session() seeds the initial workspace.
+    Intentionally permissive enough for multi-profile setups where each profile
+    has its own workspace directory at different locations under ~/, without
+    requiring those directories to share a single common ancestor.
     """
-    root = Path(_BOOT_DEFAULT_WORKSPACE).expanduser().resolve()
-    candidate = root if path in (None, "") else Path(path).expanduser().resolve()
+    home = Path.home().resolve()
+    candidate = Path(_BOOT_DEFAULT_WORKSPACE).expanduser().resolve() if path in (None, "") else Path(path).expanduser().resolve()
     if not candidate.exists():
         raise ValueError(f"Path does not exist: {candidate}")
     if not candidate.is_dir():
         raise ValueError(f"Path is not a directory: {candidate}")
+    # Must be under the user's home directory
     try:
-        candidate.relative_to(root)
+        candidate.relative_to(home)
     except ValueError:
-        raise ValueError(f"Path is outside the trusted workspace root: {candidate}")
+        raise ValueError(f"Path is outside the user home directory: {candidate}")
+    # Home-directory check is sufficient — blocks /etc, /tmp, /var, /root, etc.
+    # while allowing any directory under ~/  (~/CodePath, ~/General, ~/WebUI, etc.)
     return candidate
 
 

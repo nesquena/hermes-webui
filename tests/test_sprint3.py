@@ -153,7 +153,7 @@ def test_session_update_rejects_workspace_outside_trusted_root(tmp_path):
     outside.mkdir(parents=True, exist_ok=True)
     result, status = post("/api/session/update", {"session_id": sid, "workspace": str(outside)})
     assert status == 400
-    assert "trusted workspace root" in result.get("error", "").lower()
+    assert "outside" in result.get("error", "").lower()
 
 
 def test_chat_start_rejects_workspace_outside_trusted_root(tmp_path):
@@ -163,7 +163,7 @@ def test_chat_start_rejects_workspace_outside_trusted_root(tmp_path):
     outside.mkdir(parents=True, exist_ok=True)
     result, status = post("/api/chat/start", {"session_id": sid, "message": "hello", "workspace": str(outside)})
     assert status == 400
-    assert "trusted workspace root" in result.get("error", "").lower()
+    assert "outside" in result.get("error", "").lower()
 
 
 def test_workspace_add_rejects_path_outside_trusted_root(tmp_path):
@@ -171,7 +171,7 @@ def test_workspace_add_rejects_path_outside_trusted_root(tmp_path):
     outside.mkdir(parents=True, exist_ok=True)
     result, status = post("/api/workspaces/add", {"path": str(outside), "name": "Outside"})
     assert status == 400
-    assert "trusted workspace root" in result.get("error", "").lower()
+    assert "outside" in result.get("error", "").lower()
 
 
 def test_session_new_rejects_workspace_outside_trusted_root(tmp_path):
@@ -179,7 +179,7 @@ def test_session_new_rejects_workspace_outside_trusted_root(tmp_path):
     outside.mkdir(parents=True, exist_ok=True)
     result, status = post("/api/session/new", {"workspace": str(outside)})
     assert status == 400
-    assert "trusted workspace root" in result.get("error", "").lower()
+    assert "outside" in result.get("error", "").lower()
 
 
 def test_session_search_returns_matches(cleanup_test_sessions):
