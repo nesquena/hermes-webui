@@ -350,6 +350,17 @@
   @media(min-width:1800px){.messages-inner{max-width:1200px;}}
   .msg-row{padding:10px 0;}
   .msg-row+.msg-row{border-top:none;}
+  /* Bubble layout (issue #336): opt-in chat-bubble look with user messages right-aligned
+     and assistant messages left-aligned. Uses :has() to tag rows by role without JS
+     changes. Full-width by default -- enabled via body.bubble-layout from settings. */
+  body.bubble-layout .msg-row:has(.msg-role.user){align-self:flex-end;max-width:75%;}
+  body.bubble-layout .msg-row:has(.msg-role.user) .msg-body{padding-left:0;padding-right:30px;max-width:none;}
+  body.bubble-layout .msg-row:has(.msg-role.user) .msg-role{flex-direction:row-reverse;}
+  body.bubble-layout .msg-row:has(.msg-role.assistant){align-self:flex-start;max-width:75%;}
+  @media(max-width:700px){
+    body.bubble-layout .msg-row:has(.msg-role.user),
+    body.bubble-layout .msg-row:has(.msg-role.assistant){max-width:92%;}
+  }
   .msg-role{font-size:12px;font-weight:500;letter-spacing:.01em;margin-bottom:8px;display:flex;align-items:center;gap:8px;}
   .msg-role.user{color:rgba(124,185,255,0.65);}
   .msg-role.assistant{color:rgba(201,168,76,0.6);}

@@ -1117,6 +1117,7 @@ _SETTINGS_DEFAULTS = {
     ),  # display name for the assistant
     "sound_enabled": False,  # play notification sound when assistant finishes
     "notifications_enabled": False,  # browser notification when tab is in background
+    "bubble_layout": False,  # right-aligned user / left-aligned assistant chat bubbles
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
 }
 
@@ -1146,6 +1147,7 @@ _SETTINGS_BOOL_KEYS = {
     "check_for_updates",
     "sound_enabled",
     "notifications_enabled",
+    "bubble_layout",
 }
 # Language codes are validated as short alphanumeric BCP-47-like tags (e.g. 'en', 'zh', 'fr')
 _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8})?$")
