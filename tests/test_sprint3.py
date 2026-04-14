@@ -127,6 +127,43 @@ def test_session_update_unknown_id_returns_404():
     result, status = post("/api/session/update", {"session_id": "nosuchsession", "model": "openai/gpt-5.4-mini"})
     assert status == 404
 
+
+def test_session_update_rejects_workspace_outside_trusted_root(tmp_path):
+    d, _ = post("/api/session/new", {})
+    sid = d["session"]["session_id"]
+    outside = tmp_path / "outside"
+    outside.mkdir(parents=True, exist_ok=True)
+    result, status = post("/api/session/update", {"session_id": sid, "workspace": str(outside)})
+    assert status == 400
+    assert "trusted workspace root" in result.get("error", "").lower()
+
+
+def test_chat_start_rejects_workspace_outside_trusted_root(tmp_path):
+    d, _ = post("/api/session/new", {})
+    sid = d["session"]["session_id"]
+    outside = tmp_path / "outside-chat"
+    outside.mkdir(parents=True, exist_ok=True)
+    result, status = post("/api/chat/start", {"session_id": sid, "message": "hello", "workspace": str(outside)})
+    assert status == 400
+    assert "trusted workspace root" in result.get("error", "").lower()
+
+
+def test_workspace_add_rejects_path_outside_trusted_root(tmp_path):
+    outside = tmp_path / "outside-add"
+    outside.mkdir(parents=True, exist_ok=True)
+    result, status = post("/api/workspaces/add", {"path": str(outside), "name": "Outside"})
+    assert status == 400
+    assert "trusted workspace root" in result.get("error", "").lower()
+
+
+def test_session_new_rejects_workspace_outside_trusted_root(tmp_path):
+    outside = tmp_path / "outside-new"
+    outside.mkdir(parents=True, exist_ok=True)
+    result, status = post("/api/session/new", {"workspace": str(outside)})
+    assert status == 400
+    assert "trusted workspace root" in result.get("error", "").lower()
+
+
 def test_session_search_returns_matches(cleanup_test_sessions):
     sid, _ = make_session_tracked(cleanup_test_sessions)
     post("/api/session/rename", {"session_id": sid, "title": f"unique-s3-{sid}"})

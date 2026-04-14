@@ -180,6 +180,7 @@ from api.workspace import (
     list_dir,
     read_file_content,
     safe_resolve_ws,
+    resolve_trusted_workspace,
 )
 from api.upload import handle_upload, handle_transcribe
 from api.streaming import _sse, _run_agent_streaming, cancel_stream
@@ -638,7 +639,11 @@ def handle_post(handler, parsed) -> bool:
     body = read_body(handler)
 
     if parsed.path == "/api/session/new":
-        s = new_session(workspace=body.get("workspace"), model=body.get("model"))
+        try:
+            workspace = str(resolve_trusted_workspace(body.get("workspace"))) if body.get("workspace") else None
+        except ValueError as e:
+            return bad(handler, str(e))
+        s = new_session(workspace=workspace, model=body.get("model"))
         return j(handler, {"session": s.compact() | {"messages": s.messages}})
 
     if parsed.path == "/api/sessions/cleanup":
@@ -713,7 +718,10 @@ def handle_post(handler, parsed) -> bool:
             s = get_session(body["session_id"])
         except KeyError:
             return bad(handler, "Session not found", 404)
-        new_ws = str(Path(body.get("workspace", s.workspace)).expanduser().resolve())
+        try:
+            new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace)))
+        except ValueError as e:
+            return bad(handler, str(e))
         s.workspace = new_ws
         s.model = body.get("model", s.model)
         s.save()
@@ -1715,7 +1723,10 @@ def _handle_chat_start(handler, body):
     if not msg:
         return bad(handler, "message is required")
     attachments = [str(a) for a in (body.get("attachments") or [])][:20]
-    workspace = str(Path(body.get("workspace") or s.workspace).expanduser().resolve())
+    try:
+        workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+    except ValueError as e:
+        return bad(handler, str(e))
     model = body.get("model") or s.model
     stream_id = uuid.uuid4().hex
     s.workspace = workspace
@@ -2063,11 +2074,10 @@ def _handle_workspace_add(handler, body):
     name = body.get("name", "").strip()
     if not path_str:
         return bad(handler, "path is required")
-    p = Path(path_str).expanduser().resolve()
-    if not p.exists():
-        return bad(handler, f"Path does not exist: {p}")
-    if not p.is_dir():
-        return bad(handler, f"Path is not a directory: {p}")
+    try:
+        p = resolve_trusted_workspace(path_str)
+    except ValueError as e:
+        return bad(handler, str(e))
     wss = load_workspaces()
     if any(w["path"] == str(p) for w in wss):
         return bad(handler, "Workspace already in list")
