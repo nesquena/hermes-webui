@@ -105,3 +105,48 @@ class TestSessionDBAST(unittest.TestCase):
                         src,
                         "SessionDB try/except must NOT be inside _ENV_LOCK body (deadlock risk)",
                     )
+
+
+class TestModelCustomInput(unittest.TestCase):
+    """Tests for issue #444 — custom model ID input in model dropdown."""
+
+    STATIC = pathlib.Path(__file__).parent.parent / 'static'
+
+    def _read(self, filename):
+        path = self.STATIC / filename
+        with open(path, 'r', encoding='utf-8') as f:
+            return f.read()
+
+    def _renderModelDropdown_body(self):
+        src = self._read('ui.js')
+        start = src.find('function renderModelDropdown()')
+        end = src.find('\nasync function selectModelFromDropdown', start)
+        return src[start:end]
+
+    def test_model_custom_input_in_dropdown(self):
+        body = self._renderModelDropdown_body()
+        self.assertIn('model-custom-input', body,
+                      'model-custom-input class must be in renderModelDropdown')
+
+    def test_model_custom_enter_handler(self):
+        body = self._renderModelDropdown_body()
+        self.assertIn('_applyCustom', body,
+                      '_applyCustom function must be defined in renderModelDropdown')
+
+    def test_model_custom_css_defined(self):
+        css = self._read('style.css')
+        self.assertIn('.model-custom-row', css,
+                      '.model-custom-row must be defined in style.css')
+        self.assertIn('.model-custom-input', css,
+                      '.model-custom-input must be defined in style.css')
+
+    def test_model_custom_i18n_keys(self):
+        i18n = self._read('i18n.js')
+        # Find en locale block (appears first before es)
+        en_block_start = i18n.find("'en'")
+        es_block_start = i18n.find("'es'")
+        en_block = i18n[en_block_start:es_block_start]
+        self.assertIn('model_custom_label', en_block,
+                      'model_custom_label must be in en locale')
+        self.assertIn('model_custom_placeholder', en_block,
+                      'model_custom_placeholder must be in en locale')

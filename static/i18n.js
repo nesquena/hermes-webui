@@ -50,6 +50,8 @@ const LOCALES = {
     model_unavailable_title: 'This model is no longer in your current provider list',
     provider_mismatch_warning: (m,p)=>`"${m}" may not work with your configured provider (${p}). Send anyway, or run \`hermes model\` in your terminal to switch.`,
     provider_mismatch_label: 'Provider mismatch',
+    model_custom_label: 'Custom model ID',
+    model_custom_placeholder: 'e.g. openai/gpt-5.4',
     // commands.js
     cmd_help: 'List available commands',
     cmd_clear: 'Clear conversation messages',
@@ -456,6 +458,8 @@ const LOCALES = {
     model_unavailable_title: 'Este modelo ya no está en tu lista actual de proveedores',
     provider_mismatch_warning: (m,p)=>`"${m}" puede no funcionar con tu proveedor configurado (${p}). Envía de todas formas, o ejecuta \`hermes model\` en la terminal para cambiar.`,
     provider_mismatch_label: 'Proveedor incompatible',
+    model_custom_label: 'ID de modelo personalizado',
+    model_custom_placeholder: 'p. ej. openai/gpt-5.4',
     // commands.js
     cmd_help: 'Listar los comandos disponibles',
     cmd_clear: 'Borrar los mensajes de la conversación',
@@ -1058,6 +1062,8 @@ const LOCALES = {
     model_unavailable_title: '\u8fd9\u4e2a\u6a21\u578b\u5df2\u7ecf\u4e0d\u5728\u5f53\u524d provider \u5217\u8868\u4e2d',
     provider_mismatch_warning: (m,p)=>`\"${m}\" \u53ef\u80fd\u65e0\u6cd5\u5728\u5f53\u524d\u914d\u7f6e\u7684\u63d0\u4f9b\u5546 (${p}) \u4e0b\u5de5\u4f5c\u3002\u76f4\u63a5\u53d1\u9001\uff0c\u6216\u5728\u7ec8\u7aef\u8fd0\u884c \`hermes model\` \u5207\u6362\u3002`,
     provider_mismatch_label: '\u63d0\u4f9b\u5546\u4e0d\u5339\u914d',
+    model_custom_label: '\u81ea\u5b9a\u4e49\u6a21\u578b ID',
+    model_custom_placeholder: '\u4f8b\u5982 openai/gpt-5.4',
     // commands.js
     cmd_help: '\u67e5\u770b\u53ef\u7528\u547d\u4ee4',
     cmd_clear: '\u6e05\u7a7a\u5f53\u524d\u5bf9\u8bdd\u6d88\u606f',

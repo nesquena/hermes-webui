@@ -238,6 +238,21 @@ function renderModelDropdown(){
       dd.appendChild(row);
     }
   }
+  // Custom model ID input — lets users type any model not in the curated list
+  const _custSep=document.createElement('div');
+  _custSep.className='model-group model-custom-sep';
+  _custSep.textContent=t('model_custom_label')||'Custom model ID';
+  dd.appendChild(_custSep);
+  const _custRow=document.createElement('div');
+  _custRow.className='model-custom-row';
+  _custRow.innerHTML=`<input class="model-custom-input" type="text" placeholder="${esc(t('model_custom_placeholder')||'e.g. openai/gpt-5.4')}" spellcheck="false" autocomplete="off"><button class="model-custom-btn" title="Use this model">${li('plus',12)}</button>`;
+  const _ci=_custRow.querySelector('.model-custom-input');
+  const _cb=_custRow.querySelector('.model-custom-btn');
+  const _applyCustom=()=>{const v=_ci.value.trim();if(!v)return;selectModelFromDropdown(v);_ci.value='';};
+  _cb.onclick=_applyCustom;
+  _ci.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();_applyCustom();}if(e.key==='Escape'){closeModelDropdown();}});
+  _ci.addEventListener('click',e=>e.stopPropagation());
+  dd.appendChild(_custRow);
 }
 
 async function selectModelFromDropdown(value){
