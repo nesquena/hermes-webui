@@ -30,6 +30,14 @@ def read(path):
     return (REPO / path).read_text(encoding="utf-8")
 
 
+def _locale_count(src: str) -> int:
+    pattern = re.compile(
+        r"^\s{2}(?:'(?P<quoted>[A-Za-z0-9-]+)'|(?P<plain>[A-Za-z0-9-]+))\s*:\s*\{",
+        re.MULTILINE,
+    )
+    return sum(1 for _ in pattern.finditer(src))
+
+
 # ── 1–4. cancelStream() cleanup is unconditional ─────────────────────────────
 
 class TestCancelStreamCleanup:
@@ -165,9 +173,10 @@ def test_sse_cancel_handler_calls_set_busy():
 def test_cancel_failed_i18n_key_exists_in_all_locales():
     """cancel_failed key must still exist in i18n.js for all locales."""
     src = read("static/i18n.js")
-    # Should appear once per locale (en, es, de, zh-Hans, zh-Hant)
+    # Should appear once per locale (en, es, de, ru, zh, zh-Hant)
+    locale_count = _locale_count(src)
     count = src.count("cancel_failed:")
-    assert count >= 5, (
+    assert count >= locale_count, (
         f"cancel_failed key only found {count} times in i18n.js — "
-        "expected at least 5 (one per locale)"
+        f"expected at least {locale_count} (one per locale)"
     )

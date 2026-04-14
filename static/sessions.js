@@ -211,8 +211,8 @@ function _openSessionActionMenu(session, anchorEl){
   const menu=document.createElement('div');
   menu.className='session-action-menu open';
   menu.appendChild(_buildSessionAction(
-    session.pinned?'Unpin conversation':'Pin conversation',
-    session.pinned?'Remove from the pinned section':'Keep this conversation at the top',
+    session.pinned?'Открепить беседу':'Закрепить беседу',
+    session.pinned?'Убрать из закреплённых':'Оставить эту беседу сверху',
     session.pinned?ICONS.pin:ICONS.unpin,
     async()=>{
       closeSessionActionMenu();
@@ -222,13 +222,13 @@ function _openSessionActionMenu(session, anchorEl){
         session.pinned=newPinned;
         if(S.session&&S.session.session_id===session.session_id) S.session.pinned=newPinned;
         renderSessionList();
-      }catch(err){showToast('Pin failed: '+err.message);}
+      }catch(err){showToast('Не удалось закрепить: '+err.message);}
     },
     session.pinned?'is-active':''
   ));
   menu.appendChild(_buildSessionAction(
-    'Move to project',
-    session.project_id?'Change which project this conversation belongs to':'Assign this conversation to a project',
+    'Переместить в проект',
+    session.project_id?'Изменить проект этой беседы':'Назначить этой беседе проект',
     ICONS.folder,
     async()=>{
       closeSessionActionMenu();
@@ -236,8 +236,8 @@ function _openSessionActionMenu(session, anchorEl){
     }
   ));
   menu.appendChild(_buildSessionAction(
-    session.archived?'Restore conversation':'Archive conversation',
-    session.archived?'Bring this conversation back into the main list':'Hide this conversation until archived is shown',
+    session.archived?'Восстановить беседу':'Архивировать беседу',
+    session.archived?'Вернуть эту беседу в основной список':'Скрыть эту беседу, пока не будут показаны архивные',
     session.archived?ICONS.unarchive:ICONS.archive,
     async()=>{
       closeSessionActionMenu();
@@ -246,13 +246,13 @@ function _openSessionActionMenu(session, anchorEl){
         session.archived=!session.archived;
         if(S.session&&S.session.session_id===session.session_id) S.session.archived=session.archived;
         await renderSessionList();
-        showToast(session.archived?'Session archived':'Session restored');
-      }catch(err){showToast('Archive failed: '+err.message);}
+        showToast(session.archived?'Беседа архивирована':'Беседа восстановлена');
+      }catch(err){showToast('Не удалось архивировать: '+err.message);}
     }
   ));
   menu.appendChild(_buildSessionAction(
-    'Duplicate conversation',
-    'Create a copy with the same workspace and model',
+    'Дублировать беседу',
+    'Создать копию с тем же рабочим пространством и моделью',
     ICONS.dup,
     async()=>{
       closeSessionActionMenu();
@@ -262,14 +262,14 @@ function _openSessionActionMenu(session, anchorEl){
           await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:res.session.session_id,title:(session.title||'Untitled')+' (copy)'})});
           await loadSession(res.session.session_id);
           await renderSessionList();
-          showToast('Session duplicated');
+          showToast('Беседа дублирована');
         }
-      }catch(err){showToast('Duplicate failed: '+err.message);}
+      }catch(err){showToast('Не удалось дублировать: '+err.message);}
     }
   ));
   menu.appendChild(_buildSessionAction(
-    'Delete conversation',
-    'Permanently remove this conversation',
+    'Удалить беседу',
+    'Безвозвратно удалить эту беседу',
     ICONS.trash,
     async()=>{
       closeSessionActionMenu();
@@ -379,15 +379,15 @@ function _localDayOrdinal(timestampMs) {
 
 function _sessionCalendarBoundaries(nowMs = Date.now()) {
   const now = new Date(nowMs);
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const startOfYesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
-  const startOfWeek = new Date(startOfToday);
+  const startOfСегодня = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const startOfВчера = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  const startOfWeek = new Date(startOfСегодня);
   startOfWeek.setDate(startOfWeek.getDate() - ((startOfWeek.getDay() + 6) % 7));
   const startOfLastWeek = new Date(startOfWeek);
   startOfLastWeek.setDate(startOfLastWeek.getDate() - 7);
   return {
-    startOfToday: startOfToday.getTime(),
-    startOfYesterday: startOfYesterday.getTime(),
+    startOfСегодня: startOfСегодня.getTime(),
+    startOfВчера: startOfВчера.getTime(),
     startOfWeek: startOfWeek.getTime(),
     startOfLastWeek: startOfLastWeek.getTime(),
   };
@@ -406,9 +406,9 @@ function _formatRelativeSessionTime(timestampMs, nowMs = Date.now()) {
   const diffMs = Math.max(0, nowMs - timestampMs);
   const minute = 60 * 1000;
   const hour = 60 * minute;
-  const {startOfToday, startOfYesterday, startOfWeek, startOfLastWeek} = _sessionCalendarBoundaries(nowMs);
+  const {startOfСегодня, startOfВчера, startOfWeek, startOfLastWeek} = _sessionCalendarBoundaries(nowMs);
   const dayDiff = Math.max(0, _localDayOrdinal(nowMs) - _localDayOrdinal(timestampMs));
-  if (timestampMs >= startOfToday) {
+  if (timestampMs >= startOfСегодня) {
     if (diffMs < minute) return t('session_time_just_now');
     if (diffMs < hour) {
       const minutes = Math.floor(diffMs / minute);
@@ -417,7 +417,7 @@ function _formatRelativeSessionTime(timestampMs, nowMs = Date.now()) {
     const hours = Math.floor(diffMs / hour);
     return t('session_time_hours_ago', hours);
   }
-  if (timestampMs >= startOfYesterday) return t('session_time_bucket_yesterday');
+  if (timestampMs >= startOfВчера) return t('session_time_bucket_yesterday');
   if (timestampMs >= startOfWeek) return t('session_time_days_ago', dayDiff);
   if (timestampMs >= startOfLastWeek) return t('session_time_last_week');
   return _formatSessionDate(timestampMs, nowMs);
@@ -425,9 +425,9 @@ function _formatRelativeSessionTime(timestampMs, nowMs = Date.now()) {
 
 function _sessionTimeBucketLabel(timestampMs, nowMs = Date.now()) {
   if (!timestampMs) return t('session_time_bucket_older');
-  const {startOfToday, startOfYesterday, startOfWeek, startOfLastWeek} = _sessionCalendarBoundaries(nowMs);
-  if (timestampMs >= startOfToday) return t('session_time_bucket_today');
-  if (timestampMs >= startOfYesterday) return t('session_time_bucket_yesterday');
+  const {startOfСегодня, startOfВчера, startOfWeek, startOfLastWeek} = _sessionCalendarBoundaries(nowMs);
+  if (timestampMs >= startOfСегодня) return t('session_time_bucket_today');
+  if (timestampMs >= startOfВчера) return t('session_time_bucket_yesterday');
   if (timestampMs >= startOfWeek) return t('session_time_bucket_this_week');
   if (timestampMs >= startOfLastWeek) return t('session_time_bucket_last_week');
   return t('session_time_bucket_older');
@@ -516,14 +516,14 @@ function renderSessionListFromCache(){
   if(_activeProject&&sessions.length===0){
     const empty=document.createElement('div');
     empty.style.cssText='padding:20px 14px;color:var(--muted);font-size:12px;text-align:center;opacity:.7;';
-    empty.textContent='No sessions in this project yet.';
+    empty.textContent='В этом проекте пока нет бесед.';
     list.appendChild(empty);
   }
   const orderedSessions=[...sessions].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a));
   // Separate pinned from unpinned
   const pinned=orderedSessions.filter(s=>s.pinned);
   const unpinned=orderedSessions.filter(s=>!s.pinned);
-  // Date grouping: Pinned / Today / Yesterday / This week / Last week / Older
+  // Date grouping: Pinned / Сегодня / Вчера / This week / Last week / Older
   const now=Date.now();
   // Collapse state persisted in localStorage
   let _groupCollapsed={};
@@ -532,7 +532,7 @@ function renderSessionListFromCache(){
   // Group sessions by date
   const groups=[];
   let curLabel=null,curItems=[];
-  if(pinned.length) groups.push({label:'\u2605 Pinned',items:pinned,isPinned:true});
+  if(pinned.length) groups.push({label:'\u2605 Закреплённые',items:pinned,isPinned:true});
   for(const s of unpinned){
     const ts=_sessionTimestampMs(s);
     const label=_sessionTimeBucketLabel(ts, now);
@@ -590,7 +590,7 @@ function renderSessionListFromCache(){
     const title=document.createElement('span');
     title.className='session-title';
     title.textContent=cleanTitle||'Untitled';
-    title.title='Double-click to rename';
+    title.title='Дважды щёлкните, чтобы переименовать';
     const tsMs=_sessionTimestampMs(s);
     titleRow.appendChild(title);
     sessionText.appendChild(titleRow);
@@ -599,7 +599,7 @@ function renderSessionListFromCache(){
       const chip=document.createElement('span');
       chip.className='session-tag';
       chip.textContent=tag;
-      chip.title='Click to filter by '+tag;
+      chip.title='Нажмите, чтобы отфильтровать по '+tag;
       chip.onclick=(e)=>{
         e.stopPropagation();
         const searchBox=$('sessionSearch');
@@ -672,9 +672,9 @@ function renderSessionListFromCache(){
     const menuBtn=document.createElement('button');
     menuBtn.type='button';
     menuBtn.className='session-actions-trigger';
-    menuBtn.title='Conversation actions';
+    menuBtn.title='Действия беседы';
     menuBtn.setAttribute('aria-haspopup','menu');
-    menuBtn.setAttribute('aria-label','Conversation actions');
+    menuBtn.setAttribute('aria-label','Действия беседы');
     menuBtn.innerHTML=ICONS.more;
     menuBtn.onclick=(e)=>{
       e.stopPropagation();
@@ -718,14 +718,14 @@ function renderSessionListFromCache(){
 
 async function deleteSession(sid){
   const ok=await showConfirmDialog({
-    message:'Delete this conversation?',
+    message:'Удалить эту беседу?',
     confirmLabel:t('delete_title'),
     danger:true
   });
   if(!ok)return;
   try{
     await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
-  }catch(e){setStatus(`Delete failed: ${e.message}`);return;}
+  }catch(e){setStatus(`Не удалось удалить: ${e.message}`);return;}
   if(S.session&&S.session.session_id===sid){
     S.session=null;S.messages=[];S.entries=[];
     localStorage.removeItem('hermes-webui-session');
@@ -741,7 +741,7 @@ async function deleteSession(sid){
       $('fileTree').innerHTML='';
     }
   }
-  showToast('Conversation deleted');
+  showToast('Беседа удалена');
   await renderSessionList();
 }
 
@@ -754,17 +754,17 @@ function _showProjectPicker(session, anchorEl){
   document.querySelectorAll('.project-picker').forEach(p=>p.remove());
   const picker=document.createElement('div');
   picker.className='project-picker';
-  // "No project" option
+  // "Без проекта" option
   const none=document.createElement('div');
   none.className='project-picker-item'+(!session.project_id?' active':'');
-  none.textContent='No project';
+  none.textContent='Без проекта';
   none.onclick=async()=>{
     picker.remove();
     document.removeEventListener('click',close);
     await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:null})});
     session.project_id=null;
     renderSessionListFromCache();
-    showToast('Removed from project');
+    showToast('Убрано из проекта');
   };
   picker.appendChild(none);
   // Project options
@@ -786,14 +786,14 @@ function _showProjectPicker(session, anchorEl){
       await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:p.project_id})});
       session.project_id=p.project_id;
       renderSessionListFromCache();
-      showToast('Moved to '+p.name);
+      showToast('Перемещено в '+p.name);
     };
     picker.appendChild(item);
   }
-  // "+ New project" shortcut at the bottom
+  // "+ Новый проект" shortcut at the bottom
   const createItem=document.createElement('div');
   createItem.className='project-picker-item project-picker-create';
-  createItem.textContent='+ New project';
+  createItem.textContent='+ Новый проект';
   createItem.onclick=async()=>{
     picker.remove();
     document.removeEventListener('click',close);
@@ -896,7 +896,7 @@ function _startProjectRename(proj, chip){
 
 async function _confirmDeleteProject(proj){
   const ok=await showConfirmDialog({
-    message:'Delete project "'+proj.name+'"? Sessions will be unassigned but not deleted.',
+    message:'Удалить проект "'+proj.name+'"? Беседы будут отвязаны, но не удалены.',
     confirmLabel:t('delete_title'),
     danger:true
   });

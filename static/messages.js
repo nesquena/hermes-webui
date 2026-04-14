@@ -676,14 +676,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
 function transcript(){
   const lines=[`# Hermes session ${S.session?.session_id||''}`,``,
-    `Workspace: ${S.session?.workspace||''}`,`Model: ${S.session?.model||''}`,``];
+    `Рабочее пространство: ${S.session?.workspace||''}`,`Модель: ${S.session?.model||''}`,``];
   for(const m of S.messages){
     if(!m||m.role==='tool')continue;
     let c=m.content||'';
     if(Array.isArray(c))c=c.filter(p=>p&&p.type==='text').map(p=>p.text||'').join('\n');
     const ct=String(c).trim();
     if(!ct&&!m.attachments?.length)continue;
-    const attach=m.attachments?.length?`\n\n_Files: ${m.attachments.join(', ')}_`:'';
+    const attach=m.attachments?.length?`\n\n_Файлы: ${m.attachments.join(', ')}_`:'';
     lines.push(`## ${m.role}`,'',ct+attach,'');
   }
   return lines.join('\n');

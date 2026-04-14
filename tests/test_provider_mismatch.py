@@ -6,7 +6,7 @@ Covers:
   2. static/ui.js: _checkProviderMismatch() helper exists and logic is correct
   3. static/messages.js: apperror handler has auth_mismatch branch
   4. static/i18n.js: provider_mismatch_warning and provider_mismatch_label keys
-     present in all 5 locales (en, es, de, zh, zh-Hant)
+     present in all locales (en, es, de, ru, zh, zh-Hant)
   5. static/boot.js: modelSelect.onchange calls _checkProviderMismatch
   6. /api/models: response includes active_provider field
 """
@@ -165,31 +165,43 @@ class TestApperrorHandler:
         )
 
 
-# ── 4. static/i18n.js: all 5 locales ────────────────────────────────────────
+# ── 4. static/i18n.js: all locales ───────────────────────────────────────────
 
 class TestI18nProviderMismatch:
-    """All 5 locales must have provider_mismatch_warning and provider_mismatch_label."""
+    """All locales must have provider_mismatch_warning and provider_mismatch_label."""
 
     REQUIRED_KEYS = ["provider_mismatch_warning", "provider_mismatch_label"]
+
+    def _locale_names(self, src: str) -> list[str]:
+        pattern = re.compile(
+            r"^\s{2}(?:'(?P<quoted>[A-Za-z0-9-]+)'|(?P<plain>[A-Za-z0-9-]+))\s*:\s*\{",
+            re.MULTILINE,
+        )
+        names = []
+        for match in pattern.finditer(src):
+            names.append(match.group("quoted") or match.group("plain"))
+        return names
 
     def _count_key(self, src: str, key: str) -> int:
         return len(re.findall(r'\b' + re.escape(key) + r'\b', src))
 
     def test_all_locales_have_warning_key(self):
-        """provider_mismatch_warning must appear in all 5 locales."""
+        """provider_mismatch_warning must appear in all locales."""
         src = _read("static/i18n.js")
+        locale_count = len(self._locale_names(src))
         count = self._count_key(src, "provider_mismatch_warning")
-        assert count >= 5, (
-            f"provider_mismatch_warning found {count} times, expected >= 5 "
-            f"(one per locale: en, es, de, zh, zh-Hant)"
+        assert count >= locale_count, (
+            f"provider_mismatch_warning found {count} times, expected >= {locale_count} "
+            f"(one per locale)"
         )
 
     def test_all_locales_have_label_key(self):
-        """provider_mismatch_label must appear in all 5 locales."""
+        """provider_mismatch_label must appear in all locales."""
         src = _read("static/i18n.js")
+        locale_count = len(self._locale_names(src))
         count = self._count_key(src, "provider_mismatch_label")
-        assert count >= 5, (
-            f"provider_mismatch_label found {count} times, expected >= 5"
+        assert count >= locale_count, (
+            f"provider_mismatch_label found {count} times, expected >= {locale_count}"
         )
 
     def test_warning_is_function_in_en(self):

@@ -66,3 +66,21 @@ def test_login_page_uses_traditional_chinese_for_zh_hant():
         restored, restore_status = post("/api/settings", {"language": prev_lang})
         assert restore_status == 200
         assert restored.get("language") == prev_lang
+
+
+def test_login_page_uses_russian_for_ru():
+    prev_lang = _current_language()
+    try:
+        saved, status = post("/api/settings", {"language": "ru"})
+        assert status == 200
+        assert saved.get("language") == "ru"
+        html, status2 = get_raw("/login")
+        assert status2 == 200
+        assert 'lang="ru-RU"' in html
+        assert "\u0412\u043e\u0439\u0442\u0438" in html
+        assert "\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043f\u0430\u0440\u043e\u043b\u044c, \u0447\u0442\u043e\u0431\u044b \u043f\u0440\u043e\u0434\u043e\u043b\u0436\u0438\u0442\u044c" in html
+        assert "\u041d\u0435\u0432\u0435\u0440\u043d\u044b\u0439 \u043f\u0430\u0440\u043e\u043b\u044c" in html
+    finally:
+        restored, restore_status = post("/api/settings", {"language": prev_lang})
+        assert restore_status == 200
+        assert restored.get("language") == prev_lang

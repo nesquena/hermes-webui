@@ -201,7 +201,7 @@ function syncModelChip(){
   if(!S._bootReady){ label.textContent=''; chip.title='Conversation model'; return; }
   const opt=_selectedModelOption();
   label.textContent=opt?opt.textContent:getModelLabel(sel.value||'');
-  chip.title=sel.value||'Conversation model';
+  chip.title=sel.value||'Модель беседы';
   chip.classList.toggle('active',!!(dd&&dd.classList.contains('open')));
 }
 
@@ -244,7 +244,7 @@ function renderModelDropdown(){
   const _custSep=document.createElement('div');
   _custSep.className='model-group model-custom-sep';
   _custSep.textContent=t('model_custom_label')||'Custom model ID';
-  const _custRow=document.createElement('div');
+  dd.appendChild(_custSep);  const _custRow=document.createElement('div');
   _custRow.className='model-custom-row';
   _custRow.innerHTML=`<input class="model-custom-input" type="text" placeholder="${esc(t('model_custom_placeholder')||'e.g. openai/gpt-5.4')}" spellcheck="false" autocomplete="off"><button class="model-custom-btn" title="Use this model">${li('plus',12)}</button>`;
   const _ci=_custRow.querySelector('.model-custom-input');
@@ -414,16 +414,16 @@ function _syncCtxIndicator(usage){
   if(center) center.textContent=hasCtxWindow?String(pct):'\u00b7';
   el.classList.toggle('ctx-mid',pct>50&&pct<=75);
   el.classList.toggle('ctx-high',pct>75);
-  let label=hasCtxWindow?`Context window ${pct}% used`:`${_fmtTokens(totalTok)} tokens used`;
+  let label=hasCtxWindow?`Окно контекста: ${pct}% использовано`:`Использовано ${_fmtTokens(totalTok)} токенов`;
   if(cost) label+=` \u00b7 $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
   el.setAttribute('aria-label',label);
-  if(usageLine) usageLine.textContent=hasCtxWindow?`${pct}% used (${Math.max(0,100-pct)}% left)`:`${_fmtTokens(totalTok)} tokens used`;
-  if(tokensLine) tokensLine.textContent=hasCtxWindow?`${_fmtTokens(promptTok)} / ${_fmtTokens(ctxWindow)} tokens used`:`In: ${_fmtTokens(usage.input_tokens||0)} \u00b7 Out: ${_fmtTokens(usage.output_tokens||0)}`;
+  if(usageLine) usageLine.textContent=hasCtxWindow?`${pct}% использовано (${Math.max(0,100-pct)}% осталось)`:`Использовано ${_fmtTokens(totalTok)} токенов`;
+  if(tokensLine) tokensLine.textContent=hasCtxWindow?`${_fmtTokens(promptTok)} / ${_fmtTokens(ctxWindow)} токенов использовано`:`Вх.: ${_fmtTokens(usage.input_tokens||0)} \u00b7 Вых.: ${_fmtTokens(usage.output_tokens||0)}`;
   const threshold=usage.threshold_tokens||0;
   if(thresholdLine){
     if(threshold&&ctxWindow){
       thresholdLine.style.display='';
-      thresholdLine.textContent=`Auto-compress at ${_fmtTokens(threshold)} (${Math.round(threshold/ctxWindow*100)}%)`;
+      thresholdLine.textContent=`Автосжатие при ${_fmtTokens(threshold)} (${Math.round(threshold/ctxWindow*100)}%)`;
     }else{
       thresholdLine.style.display='none';
       thresholdLine.textContent='';
@@ -1001,17 +1001,17 @@ async function refreshSession() {
     S.activeStreamId=data.session.active_stream_id||null;
 
     syncTopbar(); renderMessages();
-    showToast('Conversation refreshed');
-  } catch(e) { setStatus('Refresh failed: ' + e.message); }
+    showToast('Беседа обновлена');
+  } catch(e) { setStatus('Не удалось обновить: ' + e.message); }
 }
 // ── Update banner ──
 function _showUpdateBanner(data){
   const parts=[];
-  if(data.webui&&data.webui.behind>0) parts.push(`WebUI: ${data.webui.behind} update${data.webui.behind>1?'s':''}`);
-  if(data.agent&&data.agent.behind>0) parts.push(`Agent: ${data.agent.behind} update${data.agent.behind>1?'s':''}`);
+  if(data.webui&&data.webui.behind>0) parts.push(`WebUI — ${data.webui.behind}`);
+  if(data.agent&&data.agent.behind>0) parts.push(`Agent — ${data.agent.behind}`);
   if(!parts.length)return;
   const msg=$('updateMsg');
-  if(msg) msg.textContent='\u2B06 '+parts.join(', ')+' available';
+  if(msg) msg.textContent='\u2B06 Доступны обновления: '+parts.join(', ');
   const banner=$('updateBanner');
   if(banner) banner.classList.add('visible');
   window._updateData=data;
@@ -1022,7 +1022,7 @@ function dismissUpdate(){
 }
 async function applyUpdates(){
   const btn=$('btnApplyUpdate');
-  if(btn){btn.disabled=true;btn.textContent='Updating\u2026';}
+  if(btn){btn.disabled=true;btn.textContent='Обновляю\u2026';}
   const targets=[];
   if(window._updateData?.webui?.behind>0) targets.push('webui');
   if(window._updateData?.agent?.behind>0) targets.push('agent');
@@ -1030,18 +1030,18 @@ async function applyUpdates(){
     for(const target of targets){
       const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify({target})});
       if(!res.ok){
-        showToast('Update failed ('+target+'): '+(res.message||'unknown error'));
-        if(btn){btn.disabled=false;btn.textContent='Update Now';}
+        showToast('Не удалось обновить ('+target+'): '+(res.message||'неизвестная ошибка'));
+        if(btn){btn.disabled=false;btn.textContent='Обновить сейчас';}
         return;
       }
     }
-    showToast('Updated! Reloading\u2026');
+    showToast('Обновлено! Перезагружаю\u2026');
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
     setTimeout(()=>location.reload(),1500);
   }catch(e){
-    showToast('Update failed: '+e.message);
-    if(btn){btn.disabled=false;btn.textContent='Update Now';}
+    showToast('Не удалось обновить: '+e.message);
+    if(btn){btn.disabled=false;btn.textContent='Обновить сейчас';}
   }
 }
 
@@ -1100,7 +1100,7 @@ function syncTopbar(){
     if(typeof _syncHermesPanelSessionActions==='function') _syncHermesPanelSessionActions();
     else {
       const sidebarName=$('sidebarWsName');
-      if(sidebarName && sidebarName.textContent==='Workspace'){
+      if(sidebarName && sidebarName.textContent==='Рабочее пространство'){
         sidebarName.textContent=t('no_workspace');
       }
     }
