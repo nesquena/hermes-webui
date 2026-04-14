@@ -3,10 +3,10 @@
 > Goal: Full 1:1 parity with the Hermes CLI experience via a clean dark web UI.
 > Everything you can do from the CLI terminal, you can do from this UI.
 >
-> Last updated: v0.50.21 (April 13, 2026) — 961 tests, 961 passing
+> Last updated: v0.50.22 (April 14, 2026) — 962 tests, 962 passing
 > Full production-ready: onboarding wizard, multi-profile support, KaTeX math rendering,
 > live reasoning cards with localStorage reload recovery, CSRF reverse proxy fixes, Docker improvements.
-> Tests: 961 total (961 passing, 0 failures)
+> Tests: 962 total (962 passing, 0 failures)
 > Source: <repo>/
 
 ---
@@ -74,6 +74,7 @@
 | v0.50.16–v0.50.17 | CSRF reverse proxy + Docker uv pre-install | Scheme-aware CSRF port normalization for non-standard ports (@lx3133584), Docker uv pre-installed at build time as root (fixes air-gapped startup, @mmartial-pattern) | 900 |
 | v0.50.18–v0.50.19 | Workspace fallback + Unicode filenames | Cascading workspace path recovery (@Jordan-SkyLF), Unicode Content-Disposition headers with RFC 5987 filename* (@shaoxianbilly), silent auth error surfacing, stale model cleanup | 924 |
 | v0.50.20–v0.50.21 | Silent errors + live model fetching + durable streaming recovery | apperror on empty agent response, /api/models/live endpoint with SSRF guard, live reasoning cards, tool_complete SSE events, SESSION_QUEUES, localStorage reload recovery (@Jordan-SkyLF) | 961 |
+| v0.50.22 | Gateway orphan-session hotfix | Hide agent sidebar rows with no backing `messages` in `state.db`; stale click path now refreshes the sidebar and shows a toast instead of throwing | 962 |
 
 ---
 

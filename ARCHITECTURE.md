@@ -45,7 +45,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       auth.py              Optional password authentication, signed cookies (~149 lines)
       config.py            Discovery, globals, model detection, reloadable config (~701 lines)
       helpers.py           HTTP helpers: j(), bad(), require(), safe_resolve(), security headers (~71 lines)
-      models.py            Session model + CRUD, per-session profile tracking (~137 lines)
+      models.py            Session model + CRUD, per-session profile tracking, CLI/gateway bridge (~138 lines)
       profiles.py          Profile state management, hermes_cli wrapper (~246 lines)
       onboarding.py        First-run onboarding status, real provider config writes, and readiness detection.
       routes.py            All GET + POST route handlers (~1180 lines)
@@ -1278,7 +1278,9 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
     /index.html                Same as /
     /health                    {"status":"ok","sessions":N}
     /api/session               ?session_id=X -> full session + messages. 400 if no ID.
-    /api/sessions              List of all session compact() dicts, sorted by updated_at
+    /api/sessions              List of all session compact() dicts, sorted by updated_at.
+                               Agent/CLI rows from state.db are only included when they
+                               have at least one backing message row.
     /api/list                  ?session_id=X&path=. -> directory listing for session workspace
     /api/file                  ?session_id=X&path=rel -> file content (text, 200KB limit)
     /api/chat/stream           ?stream_id=X -> SSE stream. Long-lived. Emits token/tool/

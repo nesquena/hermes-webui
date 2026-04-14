@@ -709,14 +709,32 @@ function renderSessionListFromCache(){
       _clickTimer=setTimeout(async()=>{
         _clickTimer=null;
         if(_renamingSid) return;
-        // For CLI sessions, import into WebUI store first (idempotent)
-        if(s.is_cli_session){
-          try{
-            await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:s.session_id})});
-          }catch(e){ /* import failed -- fall through to read-only view */ }
+        try{
+          // For CLI sessions, import into WebUI store first (idempotent).
+          // If the gateway row is stale and has no backing messages anymore,
+          // refresh the sidebar instead of throwing an uncaught promise.
+          if(s.is_cli_session){
+            try{
+              await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:s.session_id})});
+            }catch(err){
+              if(String(err&&err.message||'').includes('Session not found')){
+                await renderSessionList();
+                showToast('Agent session is no longer available');
+                return;
+              }
+              throw err;
+            }
+          }
+          await loadSession(s.session_id);renderSessionListFromCache();
+          if(typeof closeMobileSidebar==='function')closeMobileSidebar();
+        }catch(err){
+          if(s.is_cli_session&&String(err&&err.message||'').includes('Session not found')){
+            await renderSessionList();
+            showToast('Agent session is no longer available');
+            return;
+          }
+          setStatus('Open failed: '+err.message);
         }
-        await loadSession(s.session_id);renderSessionListFromCache();
-        if(typeof closeMobileSidebar==='function')closeMobileSidebar();
       }, 220);
     };
     el.ondblclick=async(e)=>{

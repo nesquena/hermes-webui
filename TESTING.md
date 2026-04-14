@@ -8,7 +8,7 @@
 > Prerequisites: SSH tunnel is active on port 8787. Open http://localhost:8787 in browser.
 > Server health check: curl http://127.0.0.1:8787/health should return {"status":"ok"}.
 >
-> Automated tests: 961 total (961 passing, 0 known failures). Includes onboarding coverage for bootstrap/static wizard presence, real provider config persistence (`config.yaml` + `.env`), and the `/api/onboarding/*` backend.
+> Automated tests: 962 total (962 passing, 0 known failures). Includes onboarding coverage for bootstrap/static wizard presence, real provider config persistence (`config.yaml` + `.env`), and the `/api/onboarding/*` backend.
 > Run: `pytest tests/ -v --timeout=60`
 
 ---
@@ -117,6 +117,16 @@ EXPECT:
   - The next most recent session automatically loads (or empty state if none remain)
   - NO new session is auto-created
 FAIL: Session not removed, new session auto-created, error shown, or wrong session loaded.
+
+### T2.5a: Orphan Agent Session Self-Heals
+SETUP: "Show agent sessions" is enabled and the sidebar contains an agent session whose row exists in `state.db` but whose `messages` rows are gone.
+STEPS:
+  1. Click the orphan agent session in the sidebar
+EXPECT:
+  - No uncaught promise appears in the console
+  - A toast says the agent session is no longer available
+  - The sidebar refreshes and the orphan row disappears
+FAIL: Click throws `Session not found`, import/load 404s remain visible, or the stale row stays in the list.
 
 ### T2.6: Delete Non-Active Session
 SETUP: At least two sessions exist. Session B is not active.

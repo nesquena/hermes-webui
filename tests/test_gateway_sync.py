@@ -228,6 +228,34 @@ def test_gateway_session_has_message_count():
         post('/api/settings', {'show_cli_sessions': False})
 
 
+def test_gateway_sessions_with_no_message_rows_are_hidden():
+    """Orphan gateway metadata rows must not appear in /api/sessions."""
+    conn = _ensure_state_db()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO sessions (id, source, title, model, started_at, message_count) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ('gw_orphan_001', 'telegram', 'Orphan Telegram', 'anthropic/claude-sonnet-4-5', time.time(), 0)
+        )
+        conn.execute("DELETE FROM messages WHERE session_id = ?", ('gw_orphan_001',))
+        conn.commit()
+
+        post('/api/settings', {'show_cli_sessions': True})
+
+        data, status = get('/api/sessions')
+        assert status == 200
+        sessions = data.get('sessions', [])
+        orphan = next((s for s in sessions if s.get('session_id') == 'gw_orphan_001'), None)
+        assert orphan is None, f"Orphan gateway row should be hidden, got {orphan}"
+    finally:
+        try:
+            _remove_test_sessions(conn, 'gw_orphan_001')
+            conn.close()
+        except Exception:
+            pass
+        post('/api/settings', {'show_cli_sessions': False})
+
+
 def test_gateway_sessions_multiple_sources():
     """Sessions from multiple gateway sources (telegram, discord, slack) all appear."""
     conn = _ensure_state_db()
