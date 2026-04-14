@@ -97,10 +97,9 @@ function toggleCronForm(){
     _renderCronSkillTags();
     const search=$('cronFormSkillSearch');
     if(search)search.value='';
-    // Pre-fetch skills for the picker
-    if(!_cronSkillsCache){
-      api('/api/skills').then(d=>{_cronSkillsCache=d.skills||[];}).catch(()=>{});
-    }
+    // Always re-fetch skills to avoid stale cache
+    _cronSkillsCache=null;
+    api('/api/skills').then(d=>{_cronSkillsCache=d.skills||[];}).catch(()=>{});
     $('cronFormName').focus();
   }
 }
