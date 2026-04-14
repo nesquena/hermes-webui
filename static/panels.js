@@ -1225,6 +1225,8 @@ async function loadSettingsPanel(){
     if(soundCb){soundCb.checked=!!settings.sound_enabled;soundCb.addEventListener('change',_markSettingsDirty,{once:false});}
     const notifCb=$('settingsNotificationsEnabled');
     if(notifCb){notifCb.checked=!!settings.notifications_enabled;notifCb.addEventListener('change',_markSettingsDirty,{once:false});}
+    const bubbleCb=$('settingsBubbleLayout');
+    if(bubbleCb){bubbleCb.checked=!!settings.bubble_layout;bubbleCb.addEventListener('change',_markSettingsDirty,{once:false});}
     // Bot name
     const botNameField=$('settingsBotName');
     if(botNameField){botNameField.value=settings.bot_name||'Hermes';botNameField.addEventListener('input',_markSettingsDirty,{once:false});}
@@ -1267,6 +1269,8 @@ async function saveSettings(andClose){
   body.check_for_updates=!!($('settingsCheckUpdates')||{}).checked;
   body.sound_enabled=!!($('settingsSoundEnabled')||{}).checked;
   body.notifications_enabled=!!($('settingsNotificationsEnabled')||{}).checked;
+  body.bubble_layout=!!($('settingsBubbleLayout')||{}).checked;
+  document.body.classList.toggle('bubble-layout', body.bubble_layout);
   const botName=(($('settingsBotName')||{}).value||'').trim();
   body.bot_name=botName||'Hermes';
   // Password: only act if the field has content; blank = leave auth unchanged
