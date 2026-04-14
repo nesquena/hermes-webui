@@ -947,6 +947,18 @@ async function switchToProfile(name) {
       // The current session has messages and belongs to the previous profile.
       // Start a new session for the new profile so nothing gets cross-tagged.
       await newSession(false);
+      // Apply profile default workspace to the newly created session (fixes #424)
+      if (S._profileDefaultWorkspace && S.session) {
+        try {
+          await api('/api/session/update', { method: 'POST', body: JSON.stringify({
+            session_id: S.session.session_id,
+            workspace: S._profileDefaultWorkspace,
+            model: S.session.model,
+          })});
+          S.session.workspace = S._profileDefaultWorkspace;
+        } catch (_) {}
+      }
+      updateWorkspaceChip();
       await renderSessionList();
       showToast(t('profile_switched_new_conversation', name));
     } else {
