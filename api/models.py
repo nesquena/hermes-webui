@@ -309,7 +309,7 @@ def get_cli_sessions() -> list:
                     'session_id': sid,
                     'title': _display_title,
                     'workspace': str(get_last_workspace()),
-                    'model': row['model'] or 'unknown',
+                    'model': row['model'] or None,
                     'message_count': row['message_count'] or 0,
                     'created_at': row['started_at'],
                     'updated_at': raw_ts,

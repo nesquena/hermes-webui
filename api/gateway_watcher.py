@@ -75,7 +75,7 @@ def _get_agent_sessions_from_db() -> list:
                 sessions.append({
                     'session_id': row['id'],
                     'title': row['title'] or 'Agent Session',
-                    'model': row['model'] or 'unknown',
+                    'model': row['model'] or None,
                     'message_count': row['message_count'] or 0,
                     'created_at': row['started_at'],
                     'updated_at': row['last_activity'] or row['started_at'],
