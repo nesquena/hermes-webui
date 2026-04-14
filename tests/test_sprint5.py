@@ -31,6 +31,12 @@ def make_session_tracked(created_list, ws=None):
     return sid, _pathlib.Path(d["session"]["workspace"])
 
 
+def make_workspace_child(base: pathlib.Path, name: str) -> pathlib.Path:
+    target = base / name
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
 def test_server_running_from_new_location():
     data, status = get("/health")
     assert status == 200 and data["status"] == "ok"
@@ -44,11 +50,13 @@ def test_workspaces_list():
     data, status = get("/api/workspaces")
     assert status == 200 and "workspaces" in data and "last" in data
 
-def test_workspace_add_valid():
-    post("/api/workspaces/remove", {"path": "/tmp"})
-    result, status = post("/api/workspaces/add", {"path": "/tmp", "name": "Temp"})
-    assert status == 200 and any(w["path"]=="/tmp" for w in result["workspaces"])
-    post("/api/workspaces/remove", {"path": "/tmp"})
+def test_workspace_add_valid(cleanup_test_sessions):
+    _, ws = make_session_tracked(cleanup_test_sessions)
+    child = make_workspace_child(ws, f"workspace-add-{uuid.uuid4().hex[:6]}")
+    post("/api/workspaces/remove", {"path": str(child)})
+    result, status = post("/api/workspaces/add", {"path": str(child), "name": "Temp"})
+    assert status == 200 and any(w["path"] == str(child) for w in result["workspaces"])
+    post("/api/workspaces/remove", {"path": str(child)})
 
 def test_workspace_add_validates_existence():
     result, status = post("/api/workspaces/add", {"path": "/tmp/does_not_exist_xyz_999"})
@@ -58,40 +66,47 @@ def test_workspace_add_validates_is_dir():
     result, status = post("/api/workspaces/add", {"path": "/etc/hostname"})
     assert status == 400
 
-def test_workspace_add_no_duplicate():
-    post("/api/workspaces/remove", {"path": "/tmp"})
-    post("/api/workspaces/add", {"path": "/tmp"})
-    result, status = post("/api/workspaces/add", {"path": "/tmp"})
+def test_workspace_add_no_duplicate(cleanup_test_sessions):
+    _, ws = make_session_tracked(cleanup_test_sessions)
+    child = make_workspace_child(ws, f"workspace-dup-{uuid.uuid4().hex[:6]}")
+    post("/api/workspaces/remove", {"path": str(child)})
+    post("/api/workspaces/add", {"path": str(child)})
+    result, status = post("/api/workspaces/add", {"path": str(child)})
     assert status == 400 and "already" in result.get("error","").lower()
-    post("/api/workspaces/remove", {"path": "/tmp"})
+    post("/api/workspaces/remove", {"path": str(child)})
 
 def test_workspace_add_requires_path():
     result, status = post("/api/workspaces/add", {})
     assert status == 400
 
-def test_workspace_remove():
-    post("/api/workspaces/remove", {"path": "/tmp"})
-    post("/api/workspaces/add", {"path": "/tmp", "name": "Temp"})
-    result, status = post("/api/workspaces/remove", {"path": "/tmp"})
-    assert status == 200 and "/tmp" not in [w["path"] for w in result["workspaces"]]
+def test_workspace_remove(cleanup_test_sessions):
+    _, ws = make_session_tracked(cleanup_test_sessions)
+    child = make_workspace_child(ws, f"workspace-remove-{uuid.uuid4().hex[:6]}")
+    post("/api/workspaces/remove", {"path": str(child)})
+    post("/api/workspaces/add", {"path": str(child), "name": "Temp"})
+    result, status = post("/api/workspaces/remove", {"path": str(child)})
+    assert status == 200 and str(child) not in [w["path"] for w in result["workspaces"]]
 
-def test_workspace_rename():
-    post("/api/workspaces/remove", {"path": "/tmp"})
-    post("/api/workspaces/add", {"path": "/tmp", "name": "Temp"})
-    result, status = post("/api/workspaces/rename", {"path": "/tmp", "name": "My Temp"})
+def test_workspace_rename(cleanup_test_sessions):
+    _, ws = make_session_tracked(cleanup_test_sessions)
+    child = make_workspace_child(ws, f"workspace-rename-{uuid.uuid4().hex[:6]}")
+    post("/api/workspaces/remove", {"path": str(child)})
+    post("/api/workspaces/add", {"path": str(child), "name": "Temp"})
+    result, status = post("/api/workspaces/rename", {"path": str(child), "name": "My Temp"})
     assert status == 200
-    assert {w["path"]: w["name"] for w in result["workspaces"]}.get("/tmp") == "My Temp"
-    post("/api/workspaces/remove", {"path": "/tmp"})
+    assert {w["path"]: w["name"] for w in result["workspaces"]}.get(str(child)) == "My Temp"
+    post("/api/workspaces/remove", {"path": str(child)})
 
 def test_workspace_rename_unknown():
     result, status = post("/api/workspaces/rename", {"path": "/no/such/path", "name": "X"})
     assert status == 404
 
 def test_last_workspace_updates_on_session_update(cleanup_test_sessions):
-    sid, _ = make_session_tracked(cleanup_test_sessions)
-    post("/api/session/update", {"session_id": sid, "workspace": "/tmp", "model": "openai/gpt-5.4-mini"})
+    sid, ws = make_session_tracked(cleanup_test_sessions)
+    child = make_workspace_child(ws, f"workspace-last-{uuid.uuid4().hex[:6]}")
+    post("/api/session/update", {"session_id": sid, "workspace": str(child), "model": "openai/gpt-5.4-mini"})
     data, _ = get("/api/workspaces")
-    assert data["last"] == "/tmp"
+    assert data["last"] == str(child)
 
 def test_file_save(cleanup_test_sessions):
     sid, ws = make_session_tracked(cleanup_test_sessions)
@@ -133,8 +148,9 @@ def test_sessions_endpoint_returns_sorted():
         assert sessions[0]["updated_at"] >= sessions[1]["updated_at"]
 
 def test_new_session_inherits_last_workspace(cleanup_test_sessions):
-    sid, _ = make_session_tracked(cleanup_test_sessions)
-    post("/api/session/update", {"session_id": sid, "workspace": "/tmp", "model": "openai/gpt-5.4-mini"})
+    sid, ws = make_session_tracked(cleanup_test_sessions)
+    child = make_workspace_child(ws, f"workspace-inherit-{uuid.uuid4().hex[:6]}")
+    post("/api/session/update", {"session_id": sid, "workspace": str(child), "model": "openai/gpt-5.4-mini"})
     sid2, _ = make_session_tracked(cleanup_test_sessions)
     d, _ = get(f"/api/session?session_id={sid2}")
-    assert d["session"]["workspace"] == "/tmp"
+    assert d["session"]["workspace"] == str(child)

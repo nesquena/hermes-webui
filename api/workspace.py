@@ -214,6 +214,26 @@ def set_last_workspace(path: str) -> None:
         logger.debug("Failed to set last workspace")
 
 
+def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
+    """Resolve and validate a workspace path under the profile's trusted root.
+
+    The trusted root is the profile default workspace. Session creation/update and
+    workspace-list mutations must stay within that root so callers cannot repoint
+    a session to arbitrary filesystem locations.
+    """
+    root = Path(_profile_default_workspace()).expanduser().resolve()
+    candidate = root if path in (None, "") else Path(path).expanduser().resolve()
+    if not candidate.exists():
+        raise ValueError(f"Path does not exist: {candidate}")
+    if not candidate.is_dir():
+        raise ValueError(f"Path is not a directory: {candidate}")
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        raise ValueError(f"Path is outside the trusted workspace root: {candidate}")
+    return candidate
+
+
 def safe_resolve_ws(root: Path, requested: str) -> Path:
     """Resolve a relative path inside a workspace root, raising ValueError on traversal."""
     resolved = (root / requested).resolve()

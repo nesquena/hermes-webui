@@ -145,10 +145,13 @@ def test_session_update():
     """Create session, update workspace and model, verify persisted."""
     data, _ = post("/api/session/new", {})
     sid = data["session"]["session_id"]
+    current_ws = pathlib.Path(data["session"]["workspace"])
+    child_ws = current_ws / f"session-update-{uuid.uuid4().hex[:6]}"
+    child_ws.mkdir(parents=True, exist_ok=True)
 
     updated, status = post("/api/session/update", {
         "session_id": sid,
-        "workspace": "/tmp",
+        "workspace": str(child_ws),
         "model": "anthropic/claude-sonnet-4.6"
     })
     assert status == 200
