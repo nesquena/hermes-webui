@@ -92,7 +92,6 @@ def _profile_default_workspace() -> str:
 def _clean_workspace_list(workspaces: list) -> list:
     """Sanitize a workspace list:
     - Remove entries whose paths no longer exist on disk.
-    - Remove entries that look like test artifacts (webui-mvp-test, test-workspace).
     - Remove entries whose paths live inside another profile's directory
       (e.g. ~/.hermes/profiles/X/... should not appear on a different profile).
     - Rename any entry whose name is literally 'default' to 'Home' (avoids
@@ -105,18 +104,24 @@ def _clean_workspace_list(workspaces: list) -> list:
         path = w.get('path', '')
         name = w.get('name', '')
         p = Path(path).resolve() if path else Path('/')
-        # Skip test artifacts
-        if 'test-workspace' in path or 'webui-mvp-test' in path:
-            continue
         # Skip paths that no longer exist
         if not p.is_dir():
             continue
-        # Skip paths inside a named profile's directory (cross-profile leak)
+        # Skip paths inside a DIFFERENT profile's directory (cross-profile leak).
+        # Allow paths inside the CURRENT profile's own directory (e.g. test workspaces
+        # created under ~/.hermes/profiles/webui/webui-mvp-test/).
         try:
             p.relative_to(hermes_profiles)
-            continue  # it IS under profiles/ — remove it
+            # p is under ~/.hermes/profiles/ — only skip if it's under a DIFFERENT profile
+            try:
+                from api.profiles import get_active_hermes_home
+                own_profile_dir = get_active_hermes_home().resolve()
+                p.relative_to(own_profile_dir)
+                # p is under our own profile dir — keep it
+            except (ValueError, Exception):
+                continue  # under profiles/ but not our own — cross-profile leak, skip
         except ValueError:
-            pass
+            pass  # not under profiles/ at all — keep it
         # Rename confusing 'default' label to 'Home'
         if name.lower() == 'default':
             name = 'Home'
