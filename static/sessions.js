@@ -349,45 +349,65 @@ function _sessionTimestampMs(session) {
   return Number.isFinite(raw) ? raw * 1000 : 0;
 }
 
+function _localDayOrdinal(timestampMs) {
+  const date = new Date(timestampMs);
+  return Math.floor(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / 86400000);
+}
+
+function _sessionCalendarBoundaries(nowMs = Date.now()) {
+  const now = new Date(nowMs);
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const startOfYesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  const startOfWeek = new Date(startOfToday);
+  startOfWeek.setDate(startOfWeek.getDate() - ((startOfWeek.getDay() + 6) % 7));
+  const startOfLastWeek = new Date(startOfWeek);
+  startOfLastWeek.setDate(startOfLastWeek.getDate() - 7);
+  return {
+    startOfToday: startOfToday.getTime(),
+    startOfYesterday: startOfYesterday.getTime(),
+    startOfWeek: startOfWeek.getTime(),
+    startOfLastWeek: startOfLastWeek.getTime(),
+  };
+}
+
+function _formatSessionDate(timestampMs, nowMs = Date.now()) {
+  const date = new Date(timestampMs);
+  const now = new Date(nowMs);
+  const options = {month:'short', day:'numeric'};
+  if (date.getFullYear() !== now.getFullYear()) options.year = 'numeric';
+  return date.toLocaleDateString(undefined, options);
+}
+
 function _formatRelativeSessionTime(timestampMs, nowMs = Date.now()) {
-  if (!timestampMs) return 'Unknown';
+  if (!timestampMs) return t('session_time_unknown');
   const diffMs = Math.max(0, nowMs - timestampMs);
   const minute = 60 * 1000;
   const hour = 60 * minute;
-  const day = 24 * hour;
-  const week = 7 * day;
-  if (diffMs < minute) return 'just now';
-  if (diffMs < hour) {
-    const minutes = Math.floor(diffMs / minute);
-    return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
-  }
-  if (diffMs < day) {
+  const {startOfToday, startOfYesterday, startOfWeek, startOfLastWeek} = _sessionCalendarBoundaries(nowMs);
+  const dayDiff = Math.max(0, _localDayOrdinal(nowMs) - _localDayOrdinal(timestampMs));
+  if (timestampMs >= startOfToday) {
+    if (diffMs < minute) return t('session_time_just_now');
+    if (diffMs < hour) {
+      const minutes = Math.floor(diffMs / minute);
+      return t('session_time_minutes_ago', minutes);
+    }
     const hours = Math.floor(diffMs / hour);
-    return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+    return t('session_time_hours_ago', hours);
   }
-  if (diffMs < 2 * day) return 'yesterday';
-  if (diffMs < week) {
-    const days = Math.floor(diffMs / day);
-    return `${days} day${days === 1 ? '' : 's'} ago`;
-  }
-  if (diffMs < 2 * week) return 'last week';
-  const date = new Date(timestampMs);
-  return date.toLocaleDateString(undefined, {month:'short', day:'numeric'});
+  if (timestampMs >= startOfYesterday) return t('session_time_bucket_yesterday');
+  if (timestampMs >= startOfWeek) return t('session_time_days_ago', dayDiff);
+  if (timestampMs >= startOfLastWeek) return t('session_time_last_week');
+  return _formatSessionDate(timestampMs, nowMs);
 }
 
 function _sessionTimeBucketLabel(timestampMs, nowMs = Date.now()) {
-  if (!timestampMs) return 'Older';
-  const now = new Date(nowMs);
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const startOfYesterday = startOfToday - 86400000;
-  const dayOfWeek = now.getDay();
-  const startOfWeek = startOfToday - ((dayOfWeek + 6) % 7) * 86400000;
-  const startOfLastWeek = startOfWeek - 7 * 86400000;
-  if (timestampMs >= startOfToday) return 'Today';
-  if (timestampMs >= startOfYesterday) return 'Yesterday';
-  if (timestampMs >= startOfWeek) return 'This week';
-  if (timestampMs >= startOfLastWeek) return 'Last week';
-  return 'Older';
+  if (!timestampMs) return t('session_time_bucket_older');
+  const {startOfToday, startOfYesterday, startOfWeek, startOfLastWeek} = _sessionCalendarBoundaries(nowMs);
+  if (timestampMs >= startOfToday) return t('session_time_bucket_today');
+  if (timestampMs >= startOfYesterday) return t('session_time_bucket_yesterday');
+  if (timestampMs >= startOfWeek) return t('session_time_bucket_this_week');
+  if (timestampMs >= startOfLastWeek) return t('session_time_bucket_last_week');
+  return t('session_time_bucket_older');
 }
 
 function renderSessionListFromCache(){
@@ -482,7 +502,6 @@ function renderSessionListFromCache(){
   const unpinned=orderedSessions.filter(s=>!s.pinned);
   // Date grouping: Pinned / Today / Yesterday / This week / Last week / Older
   const now=Date.now();
-  const ONE_DAY=86400000;
   // Collapse state persisted in localStorage
   let _groupCollapsed={};
   try{_groupCollapsed=JSON.parse(localStorage.getItem('hermes-date-groups-collapsed')||'{}');}catch(e){}
@@ -553,15 +572,17 @@ function renderSessionListFromCache(){
     if(tsMs) timeLabel.title=new Date(tsMs).toLocaleString();
     titleRow.appendChild(title);
     titleRow.appendChild(timeLabel);
-    const meta=document.createElement('div');
-    meta.className='session-meta';
     const metaBits=[];
     if(s.is_cli_session && s.source_tag) metaBits.push(s.source_tag);
-    if(s.message_count) metaBits.push(`${s.message_count} msg${s.message_count===1?'':'s'}`);
+    if(s.message_count) metaBits.push(t('n_messages', s.message_count));
     if(s.model) metaBits.push(String(s.model).split('/').pop());
-    meta.textContent=metaBits.join(' · ') || _sessionTimeBucketLabel(tsMs, now);
     sessionText.appendChild(titleRow);
-    sessionText.appendChild(meta);
+    if(metaBits.length){
+      const meta=document.createElement('div');
+      meta.className='session-meta';
+      meta.textContent=metaBits.join(' · ');
+      sessionText.appendChild(meta);
+    }
     // Append tag chips after the title text
     for(const tag of tags){
       const chip=document.createElement('span');

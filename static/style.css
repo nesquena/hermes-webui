@@ -34,6 +34,7 @@
   :root[data-theme="light"] .session-item{color:#5a544a;}
   :root[data-theme="light"] .session-item:hover{background:rgba(0,0,0,.06);color:#2c2825;}
   :root[data-theme="light"] .session-item.active{background:rgba(45,111,163,.1);color:#1a5a8a;}
+  :root[data-theme="light"] .session-item.active .session-title{color:#1a5a8a;}
   :root[data-theme="light"] .session-pin-indicator{color:#996b15;}
   :root[data-theme="light"] .session-date-header.pinned{color:#996b15;}
   :root[data-theme="light"] .session-actions-trigger.active,
