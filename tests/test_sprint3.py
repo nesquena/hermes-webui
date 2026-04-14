@@ -114,6 +114,24 @@ def test_session_delete_requires_session_id():
     result, status = post("/api/session/delete", {})
     assert status == 400
 
+
+def test_session_delete_rejects_absolute_path_payload(tmp_path):
+    victim = tmp_path / "victim.json"
+    victim.write_text("TOPSECRET", encoding="utf-8")
+    result, status = post("/api/session/delete", {"session_id": str(victim.with_suffix(""))})
+    assert status == 400
+    assert victim.exists(), "absolute-path payload must not delete arbitrary files"
+
+
+def test_session_delete_rejects_traversal_payload(tmp_path):
+    victim = tmp_path / "outside.json"
+    victim.write_text("TOPSECRET", encoding="utf-8")
+    traversal = f"../../../../{victim.with_suffix('').as_posix().lstrip('/')}"
+    result, status = post("/api/session/delete", {"session_id": traversal})
+    assert status == 400
+    assert victim.exists(), "traversal payload must not delete arbitrary files"
+
+
 def test_chat_start_requires_session_id():
     result, status = post("/api/chat/start", {"message": "hello"})
     assert status == 400
