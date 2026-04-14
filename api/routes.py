@@ -1575,12 +1575,12 @@ def _handle_media(handler, parsed):
     if mime in _DOWNLOAD_TYPES or mime not in _INLINE_IMAGE_TYPES:
         handler.send_header(
             "Content-Disposition",
-            f'attachment; filename="{target.name}"',
+            _content_disposition_value("attachment", target.name),
         )
     else:
         handler.send_header(
             "Content-Disposition",
-            f'inline; filename="{target.name}"',
+            _content_disposition_value("inline", target.name),
         )
 
     handler.end_headers()
