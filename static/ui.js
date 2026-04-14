@@ -437,8 +437,11 @@ function renderMd(raw){
     t=t.replace(/\*\*(.+?)\*\*/g,(_,x)=>`<strong>${esc(x)}</strong>`);
     t=t.replace(/\*([^*\n]+)\*/g,(_,x)=>`<em>${esc(x)}</em>`);
     t=t.replace(/`([^`\n]+)`/g,(_,x)=>`<code>${esc(x)}</code>`);
-    t=t.replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g,(_,lb,u)=>`<a href="${esc(u)}" target="_blank" rel="noopener">${esc(lb)}</a>`);
-    t=t.replace(/(https?:\/\/[^\s<>"')\]]+)/g,(url)=>{const trail=url.match(/[.,;:!?)]$/)?url.slice(-1):'';const clean=trail?url.slice(0,-1):url;return `<a href="${esc(clean)}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;});
+    // Stash [label](url) links before autolink so the URL in href= is not re-linked
+    const _link_stash=[];
+    t=t.replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g,(_,lb,u)=>{_link_stash.push(`<a href="${u}" target="_blank" rel="noopener">${esc(lb)}</a>`);return `\x00L${_link_stash.length-1}\x00`;});
+    t=t.replace(/(https?:\/\/[^\s<>"')\]]+)/g,(url)=>{const trail=url.match(/[.,;:!?)]$/)?url.slice(-1):'';const clean=trail?url.slice(0,-1):url;return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;});
+    t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);;
     // Escape any plain text that isn't already wrapped in a tag we produced
     // by escaping bare < > that aren't part of our own tags
     const SAFE_INLINE=/^<\/?(strong|em|code|a)([\s>]|$)/i;
@@ -472,7 +475,11 @@ function renderMd(raw){
     }
     return html+'</ol>';
   });
-  s=s.replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g,(_,label,url)=>`<a href="${esc(url)}" target="_blank" rel="noopener">${esc(label)}</a>`);
+  // Stash existing <a> tags before link pass so autolink never re-links already-linked URLs
+  const _a_stash=[];
+  s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>)/g,m=>{_a_stash.push(m);return `\x00A${_a_stash.length-1}\x00`;});
+  s=s.replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g,(_,label,url)=>`<a href="${url}" target="_blank" rel="noopener">${esc(label)}</a>`);
+  s=s.replace(/\x00A(\d+)\x00/g,(_,i)=>_a_stash[+i]);
   // Tables: | col | col | header row followed by | --- | --- | separator then data rows
   s=s.replace(/((?:^\|.+\|\n?)+)/gm,block=>{
     const rows=block.trim().split('\n').filter(r=>r.trim());
@@ -491,13 +498,17 @@ function renderMd(raw){
   // <div class="..."> (mermaid/pre-header). Everything else is untrusted input.
   const SAFE_TAGS=/^<\/?(strong|em|code|pre|h[1-6]|ul|ol|li|table|thead|tbody|tr|th|td|hr|blockquote|p|br|a|div|span)([\s>]|$)/i;
   s=s.replace(/<\/?[a-z][^>]*>/gi,tag=>SAFE_TAGS.test(tag)?tag:esc(tag));
-  // Autolink: convert plain URLs to clickable links (not inside existing <a> tags, not in code)
-  s=s.replace(/(https?:\/\/[^\s<>"')\]]+)/g,(url)=>{
+  // Autolink: convert plain URLs to clickable links.
+  // Stash existing <a> tags first so we never re-link a URL already inside href="...".
+  const _al_stash=[];
+  s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>)/g,m=>{_al_stash.push(m);return `\x00B${_al_stash.length-1}\x00`;});
+  s=s.replace(/(https?:\/\/[^\s<>"'\)\]]+)/g,(url)=>{
     // Strip trailing punctuation that was likely not part of the URL
     const trail=url.match(/[.,;:!?)]$/)?url.slice(-1):'';
     const clean=trail?url.slice(0,-1):url;
-    return `<a href="${esc(clean)}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;
+    return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;
   });
+  s=s.replace(/\x00B(\d+)\x00/g,(_,i)=>_al_stash[+i]);
   // Restore math stash → katex placeholder spans/divs
   // These will be rendered by renderKatexBlocks() after DOM insertion
   s=s.replace(/\x00M(\d+)\x00/g,(_,i)=>{

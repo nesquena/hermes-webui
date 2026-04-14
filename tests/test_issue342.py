@@ -38,15 +38,23 @@ def test_autolink_regex_in_rendermd():
 
 
 def test_autolink_uses_esc_for_xss_safety():
-    """The autolink code must use esc() to escape URLs, preventing XSS."""
+    """The autolink code must use esc() to escape the display text of URLs, preventing XSS.
+    Note: esc() is intentionally NOT applied to the href value (that would corrupt & in
+    query strings). It IS applied to the visible link text (esc(clean)) to prevent XSS."""
     content = read_ui_js()
     # Find the autolink section (between the SAFE_TAGS pass and paragraph wrap)
     autolink_idx = content.find('// Autolink: convert plain URLs')
     assert autolink_idx != -1, "Autolink comment not found in ui.js"
-    # Extract the autolink block (next ~300 chars after the comment)
-    autolink_block = content[autolink_idx:autolink_idx + 400]
+    # Extract the autolink block (next ~600 chars after the comment)
+    autolink_block = content[autolink_idx:autolink_idx + 600]
+    # esc() must be used on the visible link text to prevent XSS
     assert 'esc(clean)' in autolink_block, (
-        "Autolink block should use esc(clean) for XSS-safe URL escaping, but it was not found."
+        "Autolink block should use esc(clean) for the link display text (XSS safety), "
+        "but it was not found."
+    )
+    # esc() must NOT be used on the href value — that breaks URLs containing &
+    assert 'href="${esc(clean)}"' not in autolink_block, (
+        "Autolink block should use href=\"${clean}\" (not esc'd) to preserve & in query strings."
     )
 
 
@@ -87,12 +95,13 @@ def test_autolink_target_blank_and_rel():
     content = read_ui_js()
     autolink_idx = content.find('// Autolink: convert plain URLs')
     assert autolink_idx != -1, "Autolink comment not found"
-    autolink_block = content[autolink_idx:autolink_idx + 400]
+    # Use a larger window to account for the stash preamble added by the fix
+    autolink_block = content[autolink_idx:autolink_idx + 700]
     assert 'target="_blank"' in autolink_block, (
-        "Autolinked URLs should have target=\"_blank\""
+        'Autolinked URLs should have target="_blank"'
     )
     assert 'rel="noopener"' in autolink_block, (
-        "Autolinked URLs should have rel=\"noopener\" for security"
+        'Autolinked URLs should have rel="noopener" for security'
     )
 
 
