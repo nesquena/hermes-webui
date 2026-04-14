@@ -1,5 +1,11 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.28] fix: expand openai-codex model catalog to match DEFAULT_CODEX_MODELS
+
+`_PROVIDER_MODELS["openai-codex"]` only listed `codex-mini-latest`, so profiles using the `openai-codex` provider (e.g. a CodePath profile with `default: gpt-5.4`) showed only one entry in the model dropdown. Updated to mirror the agent's authoritative `DEFAULT_CODEX_MODELS` list: `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex`, `gpt-5.2-codex`, `gpt-5.1-codex-max`, `gpt-5.1-codex-mini`, `codex-mini-latest`. Added 2 regression tests.
+
+- 1029 tests total (up from 1027)
+
 ## [v0.50.27] feat: relative time labels in session sidebar (#394)
 
 - `static/sessions.js`: new `_sessionCalendarBoundaries()` (DST-safe via `new Date(y,m,d)` construction), `_localDayOrdinal()`, `_formatSessionDate()` (includes year for dates from prior years); `_formatRelativeSessionTime()` now uses calendar midnight boundaries consistent with `_sessionTimeBucketLabel()` — no more label/bucket mismatch; all relative time strings call `t()` for localization; meta row only appended when non-empty (removes redundant group-header fallback); dead `ONE_DAY` constant removed
