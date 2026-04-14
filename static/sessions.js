@@ -590,7 +590,12 @@ function renderSessionListFromCache(){
     if(isActive&&S.session&&S.session._flash)delete S.session._flash;
     const rawTitle=s.title||'Untitled';
     const tags=(rawTitle.match(/#[\w-]+/g)||[]);
-    const cleanTitle=tags.length?rawTitle.replace(/#[\w-]+/g,'').trim():rawTitle;
+    let cleanTitle=tags.length?rawTitle.replace(/#[\w-]+/g,'').trim():rawTitle;
+    // Guard: system prompt content must never surface as a visible session title
+    const _SOURCE_DISPLAY={telegram:'Telegram',discord:'Discord',slack:'Slack',cli:'CLI',feishu:'Feishu',weixin:'WeChat'};
+    if(cleanTitle.startsWith('[SYSTEM:')){
+      cleanTitle=(_SOURCE_DISPLAY[s.source_tag]||s.source_tag||'Gateway')+' session';
+    }
     const sessionText=document.createElement('div');
     sessionText.className='session-text';
     const titleRow=document.createElement('div');
