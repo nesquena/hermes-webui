@@ -585,6 +585,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == '/api/sessions/gateway/stream':
         return _handle_gateway_sse_stream(handler)
 
+    if parsed.path == "/api/media":
+        return _handle_media(handler, parsed)
+
     if parsed.path == "/api/file/raw":
         return _handle_file_raw(handler, parsed)
 
@@ -1480,6 +1483,99 @@ def _content_disposition_value(disposition: str, filename: str) -> str:
         f'{disposition}; filename="{ascii_fallback}"; '
         f"filename*=UTF-8''{quoted_name}"
     )
+
+
+def _handle_media(handler, parsed):
+    """Serve a local file by absolute path for inline display in the chat.
+
+    Security:
+    - Path must resolve to an allowed root (hermes home, /tmp, common dirs)
+    - Auth-gated when auth is enabled
+    - Only image MIME types are served inline; all others force download
+    - SVG always served as attachment (XSS risk)
+    - No path traversal: resolved path must stay within an allowed root
+    """
+    import os as _os
+    from api.auth import is_auth_enabled, parse_cookie, verify_session
+    _HOME = Path(_os.path.expanduser("~"))
+    _HERMES_HOME = Path(_os.getenv("HERMES_HOME", str(_HOME / ".hermes"))).expanduser()
+
+    # Auth check
+    if is_auth_enabled():
+        cv = parse_cookie(handler)
+        if not (cv and verify_session(cv)):
+            handler.send_response(401)
+            handler.send_header("Content-Type", "application/json")
+            handler.end_headers()
+            handler.wfile.write(b'{"error":"Authentication required"}')
+            return
+
+    qs = parse_qs(parsed.query)
+    raw_path = qs.get("path", [""])[0].strip()
+    if not raw_path:
+        return bad(handler, "path parameter required", 400)
+
+    # Resolve the path and check it is within an allowed root
+    try:
+        target = Path(raw_path).resolve()
+    except Exception:
+        return bad(handler, "Invalid path", 400)
+
+    # Allowed roots: hermes home, /tmp, common screenshot cache dirs
+    allowed_roots = [
+        _HERMES_HOME.resolve(),
+        Path("/tmp").resolve(),
+        (_HOME / ".hermes").resolve(),
+        _HOME.resolve(),  # allow any file under the user's home
+    ]
+    within_allowed = any(
+        _os.path.commonpath([str(target), str(root)]) == str(root)
+        for root in allowed_roots
+        if root.exists()
+    )
+    if not within_allowed:
+        return bad(handler, "Path not in allowed location", 403)
+
+    if not target.exists() or not target.is_file():
+        return j(handler, {"error": "not found"}, status=404)
+
+    # Determine MIME type
+    ext = target.suffix.lower()
+    mime = MIME_MAP.get(ext, "application/octet-stream")
+
+    # Only serve image types inline; everything else is a download
+    _INLINE_IMAGE_TYPES = {
+        "image/png", "image/jpeg", "image/gif", "image/webp",
+        "image/x-icon", "image/bmp",
+    }
+    _DOWNLOAD_TYPES = {"image/svg+xml"}  # SVG: XSS risk, force download
+
+    try:
+        raw_bytes = target.read_bytes()
+    except PermissionError:
+        return bad(handler, "Permission denied", 403)
+    except Exception:
+        return bad(handler, "Could not read file", 500)
+
+    handler.send_response(200)
+    handler.send_header("Content-Type", mime)
+    handler.send_header("Content-Length", str(len(raw_bytes)))
+    handler.send_header("Cache-Control", "private, max-age=3600")
+    _security_headers(handler)
+
+    if mime in _DOWNLOAD_TYPES or mime not in _INLINE_IMAGE_TYPES:
+        handler.send_header(
+            "Content-Disposition",
+            f'attachment; filename="{target.name}"',
+        )
+    else:
+        handler.send_header(
+            "Content-Disposition",
+            f'inline; filename="{target.name}"',
+        )
+
+    handler.end_headers()
+    handler.wfile.write(raw_bytes)
 
 
 def _handle_file_raw(handler, parsed):

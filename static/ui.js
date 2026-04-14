@@ -373,6 +373,17 @@ function getModelLabel(modelId){
 
 function renderMd(raw){
   let s=raw||'';
+  // ── MEDIA: token stash (must run first, before any other processing) ───────
+  // Detect MEDIA:<path-or-url> tokens emitted by the agent (e.g. screenshots,
+  // generated images) and replace them with inline <img> or download links.
+  // Stashed so the path/URL is never processed as markdown.
+  const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico)$/i;
+  const media_stash=[];
+  s=s.replace(/MEDIA:([^\s\)\]]+)/g,(_,raw_ref)=>{
+    media_stash.push(raw_ref);
+    return '\x00D'+(media_stash.length-1)+'\x00';
+  });
+  // ── End MEDIA stash ─────────────────────────────────────────────────────────
   // Pre-pass: decode HTML entities first so markdown processing works correctly.
   // This prevents double-escaping when LLM outputs entities like &lt; &gt; &amp;
   const decode=s=>s.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;/g,"'");
@@ -498,6 +509,26 @@ function renderMd(raw){
   });
   const parts=s.split(/\n{2,}/);
   s=parts.map(p=>{p=p.trim();if(!p)return '';if(/^<(h[1-6]|ul|ol|pre|hr|blockquote)/.test(p))return p;return `<p>${p.replace(/\n/g,'<br>')}</p>`;}).join('\n');
+  // ── Restore MEDIA stash → inline images or download links ─────────────────
+  s=s.replace(/\x00D(\d+)\x00/g,(_,i)=>{
+    const ref=media_stash[+i];
+    // HTTP(S) URL
+    if(/^https?:\/\//i.test(ref)){
+      if(_IMAGE_EXTS.test(ref.split('?')[0])){
+        return `<img class="msg-media-img" src="${esc(ref)}" alt="image" loading="lazy" onclick="this.classList.toggle('msg-media-img--full')">`;
+      }
+      return `<a href="${esc(ref)}" target="_blank" rel="noopener">${esc(ref)}</a>`;
+    }
+    // Local file path
+    const apiUrl='/api/media?path='+encodeURIComponent(ref);
+    if(_IMAGE_EXTS.test(ref)){
+      return `<img class="msg-media-img" src="${esc(apiUrl)}" alt="${esc(ref.split('/').pop())}" loading="lazy" onclick="this.classList.toggle('msg-media-img--full')">`;
+    }
+    // Non-image local file — show download link with filename
+    const fname=esc(ref.split('/').pop()||ref);
+    return `<a class="msg-media-link" href="${esc(apiUrl+'&download=1')}" download="${fname}">📎 ${fname}</a>`;
+  });
+  // ── End MEDIA restore ──────────────────────────────────────────────────────
   return s;
 }
 
