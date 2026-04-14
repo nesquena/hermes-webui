@@ -1,5 +1,12 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.26] fix(sessions): redact sensitive titles in session list and search responses [SECURITY] (#400)
+
+- `api/routes.py`: apply `_redact_text()` to session titles in all four response paths — `/api/sessions` merged list, `/api/sessions/search` empty-q, title-match, and content-match; use `dict(s)` copy before mutating to avoid corrupting the in-memory session cache
+- `tests/test_session_summary_redaction.py`: 2 integration tests verifying `sk-` prefixed secrets in session titles are redacted from both list and search endpoint responses
+- Original PR by @Hinotoi-agent (note: fix commit had a display artifact — `sk-` prefix was visually rendered as `***` in terminal output but the actual bytes were correct and the token was recognized by the redaction engine)
+- 1022 tests total (up from 1020)
+
 ## [v0.50.25] Multi-PR batch: mobile scroll, import timestamps, profile security, mic fallback
 
 ### fix: restore mobile chat scrolling and drawer close (#397)
