@@ -1,5 +1,14 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.30] fix: openai-codex live model fetch routes through agent's get_codex_model_ids()
+
+`_handle_live_models()` was grouping `openai-codex` with `openai` and sending `GET https://api.openai.com/v1/models` — which returns 403 because Codex auth is OAuth-based via `chatgpt.com`, not a standard API key. The live fetch silently failed, so users only ever saw the hardcoded static list.
+
+- `api/routes.py`: dedicated early-return branch for `openai-codex` that calls `hermes_cli.codex_models.get_codex_model_ids()` — the same resolver the agent CLI uses. Resolution order: live Codex API (if OAuth token available, hits `chatgpt.com/backend-api/codex/models`) → `~/.codex/` local cache (written by the Codex CLI) → `DEFAULT_CODEX_MODELS` hardcoded fallback. Users with a valid Codex session now get their exact subscription model list including any models not in the hardcoded list.
+- `api/routes.py`: improved label generation for Codex model IDs (e.g. `gpt-5.4-mini` → `GPT 5.4 Mini`)
+- `tests/test_opencode_providers.py`: structural regression test verifying the dedicated `openai-codex` branch exists and calls `get_codex_model_ids()`
+- 1038 tests total (up from 1037)
+
 ## [v0.50.29] fix: correct tool call card rendering on session load after context compaction (closes #401) (#402)
 
 - `static/sessions.js`: replace the flat B9 filter in `loadSession()` with a full sanitization pass that builds `origIdxToSanitizedIdx` — each `session.tool_calls[].assistant_msg_idx` is remapped to the new sanitized-array position as messages are filtered; for tool calls whose empty-assistant host was filtered out, they attach to the nearest prior kept assistant
