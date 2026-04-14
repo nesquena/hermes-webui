@@ -353,13 +353,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       if(S.session&&S.session.session_id===activeSid){
         S.session=d.session;S.messages=d.session.messages||[];
-        // Persist reasoning trace so thinking card survives page reload
-        if(reasoningText){
-          const lastAsst=[...S.messages].reverse().find(m=>m.role==='assistant');
-          if(lastAsst&&!lastAsst.reasoning) lastAsst.reasoning=reasoningText;
-        }
-        // Stamp _ts on the last assistant message if it has no timestamp
+        // Find the last assistant message once for both reasoning persistence and timestamp
         const lastAsst=[...S.messages].reverse().find(m=>m.role==='assistant');
+        // Persist reasoning trace so thinking card survives page reload
+        if(reasoningText&&lastAsst&&!lastAsst.reasoning) lastAsst.reasoning=reasoningText;
+        // Stamp _ts on the last assistant message if it has no timestamp
         if(lastAsst&&!lastAsst._ts&&!lastAsst.timestamp) lastAsst._ts=Date.now()/1000;
         if(d.usage){S.lastUsage=d.usage;_syncCtxIndicator(d.usage);}
         if(d.session.tool_calls&&d.session.tool_calls.length){
