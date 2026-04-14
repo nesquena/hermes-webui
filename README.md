@@ -277,8 +277,8 @@ WireGuard. Install it on your server and your phone, and they join the same
 private network -- no port forwarding, no SSH tunnels, no public exposure.
 
 The Hermes Web UI is fully responsive with a mobile-optimized layout
-(hamburger sidebar, bottom navigation bar, touch-friendly controls), so it
-works well as a daily-driver agent interface from your phone.
+(hamburger sidebar, sidebar top tabs in the drawer, touch-friendly controls),
+so it works well as a daily-driver agent interface from your phone.
 
 **Setup:**
 
@@ -451,10 +451,10 @@ across 53 test files.
 
 ### Mobile responsive
 - Hamburger sidebar -- slide-in overlay on mobile (<640px)
-- Bottom navigation bar -- 5-tab iOS-style fixed bar
+- Sidebar top tabs stay available on mobile; no fixed bottom nav stealing chat height
 - Files slide-over panel from right edge
 - Touch targets minimum 44px on all interactive elements
-- Composer positioned above bottom nav
+- Full-height chat/composer on phones without bottom-nav spacing
 - Desktop layout completely unchanged
 
 ---
@@ -542,7 +542,7 @@ A run of focused quality-of-life improvements: terminal tool approval prompts th
 Added the 7th built-in theme: pure black backgrounds with warm accents tuned to reduce burn-in risk. Small diff, big impact for anyone on an OLED display.
 
 **[@Bobby9228](https://github.com/Bobby9228)** — Mobile Profiles button + Android Chrome fixes (PRs #253, #263, #265)
-Added the Profiles tab to the mobile bottom navigation bar, making profile switching reachable on phones, plus a set of Android Chrome-specific fixes for the profile dropdown.
+Added the Profiles entry to the mobile navigation flow, making profile switching reachable on phones, plus a set of Android Chrome-specific fixes for the profile dropdown.
 
 **[@franksong2702](https://github.com/franksong2702)** — Session title guard + breadcrumb nav (PRs #301, #302)
 Two clean bug fixes / features: the session title guard that stops `title_from()` from overwriting user-renamed sessions after every turn, and clickable breadcrumb navigation in the workspace file preview panel.

@@ -39,7 +39,7 @@
 | Sprint 18 | Thinking display + workspace tree | File preview auto-close, thinking/reasoning cards, expandable directory tree (#22) | 318 |
 | Sprint 19 | Auth + security hardening | Password auth (off by default), login page, security headers, 20MB body limit (#23) | 328 |
 | Sprint 20 | Voice input + send button | Voice input (Web Speech API), send button icon-circle with pop-in animation | 415 |
-| Sprint 21 | Mobile responsive + Docker | Hamburger sidebar, bottom nav, files slide-over, Docker support (#21, #7) | 415 |
+| Sprint 21 | Mobile responsive + Docker | Hamburger sidebar, mobile nav, files slide-over, Docker support (#21, #7) | 415 |
 | Sprint 22 | Multi-profile support | Profile picker, management panel, seamless switching, per-session tracking (#28) | 415 |
 | Sprint 23 | Agentic transparency | Token/cost display, subagent cards, skill picker in cron, skill linked files, workspace tree persistence, timestamp fixes | 424 |
 | v0.44.0 patch | Fix batch: approval card, login CSP, update diagnostics, Lucide icons | PRs #221 #225 #226 #227 #228 | 579 |
@@ -50,7 +50,7 @@
 | v0.48.0 | Gateway session sync | Real-time Telegram/Discord/Slack sessions in sidebar via SSE + DB polling (#274 @bergeouss); +10 tests | 658 |
 | v0.48.1 | Table inline formatting | `inlineMd()` in table cells — **bold**, *italic*, `code`, links render correctly (PR #278); 0 new tests | 658 |
 | v0.48.2 | Provider mismatch warning | Toast warning + auth_mismatch error type for provider/model mismatches (#283, fixes #266); +21 tests | 679 |
-| v0.49.1 | Docker docs + mobile Profiles button | Two-container Docker compose (#291/#288); Profiles button in mobile bottom nav with mobileSwitchPanel, data-panel, correct SVG size and position (#297/#265 @gabogabucho); +3 tests | 700 |
+| v0.49.1 | Docker docs + mobile Profiles button | Two-container Docker compose (#291/#288); Profiles added to the mobile navigation flow with correct panel wiring and SVG sizing (#297/#265 @gabogabucho); +3 tests | 700 |
 | v0.49.0 | First-run onboarding wizard + self-update hardening | One-shot bootstrap + guided setup wizard; provider config persisted to config.yaml + .env; OpenRouter/Anthropic/OpenAI/Custom; wizard hidden after completion (#285); self-update stderr/split-ref/conflict fixes (#287); skip flaky redaction test (#289); +18 tests | 697 |
 | v0.32 | Auto-compaction handling | Compression detection, /compact command, real context window indicator | 424 |
 | v0.33 | /insights sync | Opt-in state.db sync so `hermes /insights` includes WebUI sessions | 424 |
@@ -223,7 +223,7 @@
 - [x] Voice input via Web Speech API (Sprint 20)
 
 ### Mobile
-- [x] Mobile responsive layout — hamburger sidebar, bottom nav, files slide-over (Sprint 21)
+- [x] Mobile responsive layout — hamburger sidebar, sidebar tabs on phones, files slide-over (Sprint 21 + later mobile nav simplification)
 
 ### Profiles
 - [x] Multi-profile support — create, switch, delete profiles (Sprint 22, Issue #28)

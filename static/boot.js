@@ -155,11 +155,7 @@ function toggleWorkspacePanel(force){
   openWorkspacePanel(nextMode);
 }
 function mobileSwitchPanel(name){
-  // Switch the panel content view
   switchPanel(name);
-  // For non-chat panels (tasks, skills, memory, spaces), open the sidebar
-  // so the panel is visible. For 'chat', the content is in the main area —
-  // just close the sidebar so the chat view is unobstructed.
   if(name==='chat'){
     closeMobileSidebar();
   } else {
@@ -170,10 +166,6 @@ function mobileSwitchPanel(name){
       if(overlay)overlay.classList.add('visible');
     }
   }
-  // Update bottom nav active state
-  document.querySelectorAll('.mobile-nav-btn').forEach(btn=>{
-    btn.classList.toggle('active',btn.dataset.panel===name);
-  });
 }
 
 $('btnSend').onclick=()=>{

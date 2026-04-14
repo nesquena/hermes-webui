@@ -63,7 +63,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       panels.js            Cron, skills, memory, workspace, profiles, todo, settings (~974 lines)
       commands.js          Slash command registry, parser, autocomplete dropdown (~156 lines)
       onboarding.js        First-run wizard overlay, provider setup flow, and settings/workspace orchestration.
-      boot.js              Event wiring, mobile nav, voice input, boot IIFE (~338 lines)
+      boot.js              Event wiring, mobile sidebar/workspace nav, voice input, boot IIFE (~338 lines)
     tests/
       conftest.py          Isolated test server (port 8788, separate HERMES_HOME) (~240 lines)
       test_sprint{1-20b}.py Feature tests per sprint (21 files, 415 test functions)

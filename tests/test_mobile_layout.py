@@ -9,7 +9,7 @@ They are static checks (no server needed) that catch common regressions:
   - Right panel slide-over markup and CSS intact
   - Profile dropdown not clipped by overflow on mobile
   - Composer footer chips scroll correctly on narrow viewports
-  - Mobile bottom nav and overlay markup present
+  - Mobile sidebar navigation stays available on phones
   - No full-viewport overflow that would break scroll
 
 Run as part of the standard test suite:
@@ -61,12 +61,20 @@ def test_mobile_overlay_present():
         ".mobile-overlay CSS rule missing from style.css"
 
 
-def test_mobile_bottom_nav_present():
-    """Mobile bottom navigation bar must be present."""
-    assert "mobile-bottom-nav" in HTML or "mobile-nav-btn" in HTML, \
-        "Mobile bottom nav (.mobile-bottom-nav or .mobile-nav-btn) missing from index.html"
-    assert "mobile-bottom-nav" in CSS, \
-        ".mobile-bottom-nav CSS rule missing from style.css"
+def test_sidebar_nav_present():
+    """Sidebar top navigation tabs must be present."""
+    assert 'class="sidebar-nav"' in HTML, \
+        ".sidebar-nav missing from index.html"
+    assert ".sidebar-nav{" in CSS or ".sidebar-nav {" in CSS, \
+        ".sidebar-nav CSS rule missing from style.css"
+
+
+def test_mobile_does_not_hide_sidebar_nav():
+    """Phone breakpoint must keep the sidebar top navigation visible."""
+    mobile_block = re.search(r'@media\(max-width:640px\)\{(.*)\n\s*\}', CSS, re.DOTALL)
+    assert mobile_block, "Missing @media(max-width:640px) block in style.css"
+    assert ".sidebar-nav{display:none" not in mobile_block.group(1).replace(" ", ""), \
+        ".sidebar-nav must stay visible on mobile"
 
 
 def test_mobile_files_button_present():
@@ -222,34 +230,20 @@ def test_composer_textarea_font_size_mobile():
 
 
 
-# ── Profiles button in mobile bottom nav ─────────────────────────────────────
+# ── Sidebar tabs on mobile ───────────────────────────────────────────────────
 
-def test_mobile_profiles_button_present():
-    """Mobile bottom nav must include a Profiles button (PR #265)."""
-    assert 'data-panel="profiles"' in HTML and 'mobileSwitchPanel' in HTML, \
-        "Mobile nav must have a Profiles button with data-panel='profiles' and mobileSwitchPanel"
-
-
-def test_mobile_profiles_button_uses_mobileSwitchPanel():
-    """Profiles mobile nav button must use mobileSwitchPanel, not raw switchPanel."""
-    import re
-    match = re.search(
-        r'<button[^>]*mobile-nav-btn[^>]*data-panel="profiles"[^>]*>|'
-        r'<button[^>]*data-panel="profiles"[^>]*mobile-nav-btn[^>]*>',
-        HTML
-    )
-    assert match, "Could not find mobile-nav-btn with data-panel='profiles'"
-    btn_html = HTML[match.start():match.start()+300]
-    assert "mobileSwitchPanel('profiles')" in btn_html, \
-        "Profiles mobile nav button must call mobileSwitchPanel('profiles')"
+def test_profiles_sidebar_tab_present():
+    """Sidebar tab strip must include Profiles."""
+    assert 'class="nav-tab" data-panel="profiles"' in HTML, \
+        "Sidebar nav must have a Profiles tab"
 
 
-def test_mobile_profiles_button_is_last_in_nav():
-    """Profiles button must appear after Spaces in the mobile bottom nav."""
-    spaces_pos = HTML.find('data-panel="workspaces"')
-    profiles_pos = HTML.rfind('data-panel="profiles"')
-    assert spaces_pos > 0 and profiles_pos > spaces_pos, \
-        "Profiles button must appear after Spaces button in the mobile nav"
+def test_mobile_bottom_nav_removed():
+    """The old fixed mobile bottom nav should not be present anymore."""
+    assert "mobile-bottom-nav" not in HTML, \
+        "mobile-bottom-nav markup should be removed from index.html"
+    assert "mobile-bottom-nav" not in CSS, \
+        "mobile-bottom-nav CSS should be removed from style.css"
 
 
 # ── Mobile Enter key inserts newline (PR #315, fixes #269) ───────────────────

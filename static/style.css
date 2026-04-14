@@ -557,7 +557,6 @@
   .mobile-hamburger{display:none;}
   .mobile-files-btn{display:none!important;}
   .mobile-overlay{display:none;}
-  .mobile-bottom-nav{display:none;}
 
   @media(min-width:901px){
     .layout.workspace-panel-collapsed .rightpanel{width:0 !important;opacity:0;transform:translateX(14px);border-left-color:transparent;pointer-events:none;}
@@ -593,20 +592,6 @@
       box-shadow:-4px 0 24px rgba(0,0,0,.4);}
     .rightpanel.mobile-open{right:0;}
     .rightpanel .resize-handle{display:none;}
-    /* Bottom navigation bar */
-    .mobile-bottom-nav{display:flex;position:fixed;bottom:0;left:0;right:0;
-      background:var(--sidebar);border-top:1px solid var(--border);
-      z-index:150;padding:4px 0 env(safe-area-inset-bottom,0);
-      justify-content:space-around;align-items:center;}
-    .mobile-nav-btn{display:flex;flex-direction:column;align-items:center;gap:2px;
-      background:none;border:none;color:var(--muted);font-size:9px;padding:6px 4px;
-      cursor:pointer;min-width:44px;min-height:44px;justify-content:center;
-      -webkit-tap-highlight-color:transparent;transition:color .15s;}
-    .mobile-nav-btn.active{color:var(--blue);}
-    .mobile-nav-btn:hover{color:var(--text);}
-    .mobile-nav-btn svg{flex-shrink:0;}
-    /* Hide sidebar nav tabs (replaced by bottom nav) */
-    .sidebar-nav{display:none;}
     /* Keep the Hermes control available at the bottom of the mobile sidebar */
     .sidebar-bottom{display:block;padding:10px;}
     /* Topbar adjustments */
@@ -620,13 +605,10 @@
     .settings-tab{flex-shrink:0;}
     .settings-main{padding:18px 16px;}
     .hermes-action-grid{grid-template-columns:1fr;}
-    /* Messages area — account for bottom nav */
-    .messages{padding-bottom:60px;}
     .messages-inner{padding:12px 10px 20px;}
     .msg-body{padding-left:0;max-width:100%;}
     .msg-role{font-size:12px;}
-    /* Composer — above bottom nav */
-    .composer-wrap{padding:8px 10px 12px!important;margin-bottom:56px;}
+    .composer-wrap{padding:8px 10px 12px!important;}
     .composer-box{border-radius:12px;}
     .composer-box textarea{font-size:16px;min-height:40px;}
     .composer-footer{padding:6px 8px 8px!important;gap:8px;}
