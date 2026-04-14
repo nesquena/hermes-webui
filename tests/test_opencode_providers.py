@@ -84,3 +84,31 @@ def test_openai_codex_display_name():
     """openai-codex must have a human-readable display name."""
     assert "openai-codex" in config._PROVIDER_DISPLAY
     assert config._PROVIDER_DISPLAY["openai-codex"] == "OpenAI Codex"
+
+
+def test_live_models_handler_uses_codex_agent_path():
+    """_handle_live_models for openai-codex must use get_codex_model_ids(), not the
+    standard /v1/models endpoint (which returns 403 for OAuth-based Codex auth).
+    Verify structurally that the routes.py handler has a dedicated codex branch.
+    """
+    import pathlib
+    routes_src = (pathlib.Path(__file__).parent.parent / "api" / "routes.py").read_text()
+    # Must have a dedicated openai-codex branch before any base_url assignment
+    assert 'provider == "openai-codex"' in routes_src, (
+        "_handle_live_models must have a dedicated openai-codex branch "
+        "that uses get_codex_model_ids() instead of /v1/models"
+    )
+    # Must delegate to the agent's get_codex_model_ids
+    assert "get_codex_model_ids" in routes_src, (
+        "_handle_live_models must call hermes_cli.codex_models.get_codex_model_ids() "
+        "for openai-codex provider"
+    )
+    # Must NOT route openai-codex through the standard OpenAI base URL
+    # (the old bug: openai-codex was grouped with openai and sent to api.openai.com)
+    codex_block_start = routes_src.find('provider == "openai-codex"')
+    openai_base_url_line = routes_src.find('"https://api.openai.com/v1"', codex_block_start)
+    openai_base_url_before = routes_src.find('"https://api.openai.com/v1"')
+    assert openai_base_url_before > codex_block_start or openai_base_url_line == -1, (
+        "openai-codex must be handled before the api.openai.com/v1 fallback, "
+        "not grouped with it"
+    )

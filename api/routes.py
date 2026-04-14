@@ -1490,9 +1490,44 @@ def _handle_live_models(handler, parsed):
         except Exception:
             pass
 
+        # openai-codex: use the agent's get_codex_model_ids() which calls the
+        # correct chatgpt.com/backend-api/codex/models endpoint with the OAuth
+        # token and also falls back to ~/.codex/ local cache and DEFAULT_CODEX_MODELS.
+        # This is the only path that can actually return the user's real Codex model list.
+        if provider == "openai-codex":
+            try:
+                from hermes_cli.codex_models import get_codex_model_ids as _get_codex_ids
+                access_token = None
+                try:
+                    from hermes_cli.runtime_provider import resolve_runtime_provider as _rrt
+                    rt2 = _rrt(requested="openai-codex")
+                    access_token = rt2.get("api_key") or rt2.get("access_token")
+                except Exception:
+                    pass
+                ids = _get_codex_ids(access_token=access_token)
+                def _codex_label(mid):
+                    # e.g. "gpt-5.4-mini" -> "GPT-5.4 Mini"
+                    parts = mid.split("-")
+                    result = []
+                    for p in parts:
+                        if p.lower() == "gpt":
+                            result.append("GPT")
+                        elif p[:1].isdigit():
+                            result.append(p)   # version numbers unchanged: 5.4, 5.1
+                        else:
+                            result.append(p.capitalize())
+                    return " ".join(result)
+                models_out = [{"id": mid, "label": _codex_label(mid)} for mid in ids if mid]
+                return j(handler, {"provider": provider, "models": models_out,
+                                   "count": len(models_out)})
+            except Exception as _ce:
+                logger.debug("Codex live model fetch failed: %s", _ce)
+                # Fall through to static list (handled by get_available_models())
+                return j(handler, {"error": str(_ce), "models": []})
+
         # Determine the /v1/models endpoint URL
         if not base_url:
-            if provider in ("openai", "openai-codex", "copilot"):
+            if provider in ("openai", "copilot"):
                 base_url = "https://api.openai.com/v1"
             elif provider == "openrouter":
                 base_url = "https://openrouter.ai/api/v1"
