@@ -77,6 +77,42 @@
   :root[data-theme="light"] .profile-opt:hover{background:rgba(0,0,0,.05);}
   :root[data-theme="light"] .profile-opt.active{background:rgba(45,111,163,.06);}
   :root[data-theme="light"] .profile-chip{color:#7a5a90!important;}
+  /* ── Light theme: Prism syntax token overrides (prism-tomorrow is dark-only) ── */
+  :root[data-theme="light"] .token.comment,
+  :root[data-theme="light"] .token.prolog,
+  :root[data-theme="light"] .token.doctype,
+  :root[data-theme="light"] .token.cdata{color:#7a7060;font-style:italic;}
+  :root[data-theme="light"] .token.punctuation{color:#5a4e44;}
+  :root[data-theme="light"] .token.namespace{opacity:.8;}
+  :root[data-theme="light"] .token.property,
+  :root[data-theme="light"] .token.tag,
+  :root[data-theme="light"] .token.boolean,
+  :root[data-theme="light"] .token.number,
+  :root[data-theme="light"] .token.constant,
+  :root[data-theme="light"] .token.symbol,
+  :root[data-theme="light"] .token.deleted{color:#a0290a;}
+  :root[data-theme="light"] .token.selector,
+  :root[data-theme="light"] .token.attr-name,
+  :root[data-theme="light"] .token.string,
+  :root[data-theme="light"] .token.char,
+  :root[data-theme="light"] .token.builtin,
+  :root[data-theme="light"] .token.inserted{color:#276b30;}
+  :root[data-theme="light"] .token.operator,
+  :root[data-theme="light"] .token.entity,
+  :root[data-theme="light"] .token.url,
+  :root[data-theme="light"] .language-css .token.string,
+  :root[data-theme="light"] .style .token.string{color:#5a3e8a;}
+  :root[data-theme="light"] .token.atrule,
+  :root[data-theme="light"] .token.attr-value,
+  :root[data-theme="light"] .token.keyword{color:#2d6fa3;}
+  :root[data-theme="light"] .token.function,
+  :root[data-theme="light"] .token.class-name{color:#7a3a00;}
+  :root[data-theme="light"] .token.regex,
+  :root[data-theme="light"] .token.important,
+  :root[data-theme="light"] .token.variable{color:#8a4a00;}
+  :root[data-theme="light"] .token.important,
+  :root[data-theme="light"] .token.bold{font-weight:bold;}
+  :root[data-theme="light"] .token.italic{font-style:italic;}
   :root[data-theme="light"] .nav-tab:hover::after{background:var(--surface);border-color:rgba(45,111,163,.25);color:#2d6fa3;}
   :root[data-theme="light"] .cron-status.disabled{background:rgba(0,0,0,.05);}
   :root[data-theme="light"] .cron-btn{background:rgba(0,0,0,.04);}
@@ -382,6 +418,8 @@
   .msg-body code{font-family:"SF Mono","Fira Code",ui-monospace,monospace;font-size:12.5px;background:var(--code-inline-bg);padding:1px 5px;border-radius:4px;color:var(--code-text);}
   .msg-body pre{background:var(--code-bg);border:1px solid var(--border);border-radius:10px;padding:14px 16px;overflow-x:auto;margin:10px 0;}
   .msg-body pre code{background:none;padding:0;border-radius:0;color:var(--pre-text);font-size:13px;line-height:1.6;}
+  /* Keep original theme background — prevent prism-tomorrow from overriding --code-bg */
+  .msg-body pre[class*="language-"],.msg-body pre code[class*="language-"]{background:var(--code-bg) !important;}
   .pre-header{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:8px 16px 8px;background:var(--input-bg);border-radius:10px 10px 0 0;border:1px solid var(--border);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px;}
   .pre-header::before{content:'';width:8px;height:8px;border-radius:50%;background:var(--muted);opacity:.4;}
   .pre-header+pre{border-radius:0 0 10px 10px;border-top:none;margin-top:0;}
@@ -536,6 +574,8 @@
   .preview-md code{font-family:"SF Mono",ui-monospace,monospace;font-size:11.5px;background:var(--code-inline-bg);padding:1px 5px;border-radius:4px;color:var(--code-text);}
   .preview-md pre{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px;overflow-x:auto;margin:8px 0;}
   .preview-md pre code{background:none;padding:0;color:var(--pre-text);font-size:11.5px;line-height:1.55;}
+  /* Keep original theme background — prevent prism-tomorrow from overriding --code-bg */
+  .preview-md pre[class*="language-"],.preview-md pre code[class*="language-"]{background:var(--code-bg) !important;}
   .preview-md blockquote{border-left:3px solid var(--blue);padding-left:12px;color:var(--muted);font-style:italic;margin:8px 0;}
   .preview-md strong{color:var(--strong);font-weight:600;}.preview-md em{color:var(--em);}
   .preview-md a{color:var(--blue);text-decoration:underline;}

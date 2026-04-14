@@ -411,7 +411,12 @@ function renderMd(raw){
     const id='mermaid-'+Math.random().toString(36).slice(2,10);
     return `<div class="mermaid-block" data-mermaid-id="${id}">${esc(code.trim())}</div>`;
   });
-  s=s.replace(/```([\w+-]*)\n?([\s\S]*?)```/g,(_,lang,code)=>{const h=lang?`<div class="pre-header">${esc(lang)}</div>`:'';return `${h}<pre><code>${esc(code.replace(/\n$/,''))}</code></pre>`;});
+  s=s.replace(/```([\w+-]*)\n?([\s\S]*?)```/g,(_,lang,code)=>{
+    const normalizedLang=(lang||'').trim().toLowerCase();
+    const h=normalizedLang?`<div class="pre-header">${esc(normalizedLang)}</div>`:'';
+    const langAttr=normalizedLang?` class="language-${esc(normalizedLang)}"`:'';
+    return `${h}<pre><code${langAttr}>${esc(code.replace(/\n$/,''))}</code></pre>`;
+  });
   s=s.replace(/`([^`\n]+)`/g,(_,c)=>`<code>${esc(c)}</code>`);
   // inlineMd: process bold/italic/code/links within a single line of text.
   // Used inside list items and blockquotes where the text may already contain
