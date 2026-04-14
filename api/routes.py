@@ -1521,13 +1521,22 @@ def _handle_media(handler, parsed):
     except Exception:
         return bad(handler, "Invalid path", 400)
 
-    # Allowed roots: hermes home, /tmp, common screenshot cache dirs
+    # Allowed roots: hermes home, /tmp, and active workspace.
+    # Intentionally NOT the entire home dir — that would expose ~/.ssh,
+    # ~/.aws, browser profiles, etc. to any authenticated user.
     allowed_roots = [
         _HERMES_HOME.resolve(),
         Path("/tmp").resolve(),
         (_HOME / ".hermes").resolve(),
-        _HOME.resolve(),  # allow any file under the user's home
     ]
+    # Also allow the active workspace directory (where screenshots land)
+    try:
+        from api.workspace import get_last_workspace
+        ws = Path(get_last_workspace()).resolve()
+        if ws.is_dir():
+            allowed_roots.append(ws)
+    except Exception:
+        pass
     within_allowed = any(
         _os.path.commonpath([str(target), str(root)]) == str(root)
         for root in allowed_roots
