@@ -1,3 +1,26 @@
+// ── Theme system with system preference support ──
+var _systemThemeMQL = window.matchMedia('(prefers-color-scheme: dark)');
+function _resolveSystemTheme(val) {
+  if (val === 'system') return _systemThemeMQL.matches ? 'dark' : 'light';
+  return val || 'dark';
+}
+function applyTheme(val) {
+  localStorage.setItem('hermes-theme', val);
+  var resolved = _resolveSystemTheme(val);
+  document.documentElement.dataset.theme = resolved;
+  var sel = $('settingsTheme');
+  if (sel) sel.value = val;
+}
+_systemThemeMQL.addEventListener('change', function() {
+  var stored = localStorage.getItem('hermes-theme');
+  if (stored === 'system') applyTheme('system');
+});
+// Restore theme on load (before DOM ready, prevents flash)
+(function() {
+  var t = localStorage.getItem('hermes-theme');
+  if (t) applyTheme(t);
+})();
+
 async function cancelStream(){
   const streamId = S.activeStreamId;
   if(!streamId) return;
@@ -594,8 +617,7 @@ function applyBotName(){
     window._notificationsEnabled=!!s.notifications_enabled;
     window._botName=s.bot_name||'Hermes';
     const _theme=s.theme||'dark';
-    document.documentElement.dataset.theme=_theme;
-    localStorage.setItem('hermes-theme',_theme);
+    applyTheme(_theme);
     document.body.classList.toggle('bubble-layout',!!s.bubble_layout);
     if(typeof setLocale==='function'){
       const _lang=typeof resolvePreferredLocale==='function'
