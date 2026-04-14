@@ -46,7 +46,9 @@ def test_login_page_uses_simplified_chinese_for_zh_cn_alias():
         assert "\u767b\u5f55" in html
         assert "\u8f93\u5165\u5bc6\u7801\u7ee7\u7eed\u4f7f\u7528" in html
     finally:
-        post("/api/settings", {"language": prev_lang})
+        restored, restore_status = post("/api/settings", {"language": prev_lang})
+        assert restore_status == 200
+        assert restored.get("language") == prev_lang
 
 
 def test_login_page_uses_traditional_chinese_for_zh_hant():
@@ -61,4 +63,6 @@ def test_login_page_uses_traditional_chinese_for_zh_hant():
         assert "\u8f38\u5165\u5bc6\u78bc\u7e7c\u7e8c\u4f7f\u7528" in html
         assert "\u5bc6\u78bc\u932f\u8aa4" in html
     finally:
-        post("/api/settings", {"language": prev_lang})
+        restored, restore_status = post("/api/settings", {"language": prev_lang})
+        assert restore_status == 200
+        assert restored.get("language") == prev_lang

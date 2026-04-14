@@ -808,7 +808,7 @@ async function loadProfilesPanel() {
       const meta = [];
       if (p.model) meta.push(p.model.split('/').pop());
       if (p.provider) meta.push(p.provider);
-      if (p.skill_count) meta.push(p.skill_count + ' skill' + (p.skill_count !== 1 ? 's' : ''));
+      if (p.skill_count) meta.push(t('profile_skill_count', p.skill_count));
       if (p.has_env) meta.push(t('profile_api_keys_configured'));
       const gwDot = p.gateway_running
         ? `<span class="profile-opt-badge running" title="${esc(t('profile_gateway_running'))}"></span>`
@@ -823,7 +823,7 @@ async function loadProfilesPanel() {
           </div>
           <div class="profile-card-actions">
             ${!isActive ? `<button class="ws-action-btn" onclick="switchToProfile('${esc(p.name)}')" title="${esc(t('profile_switch_title'))}">${esc(t('profile_use'))}</button>` : ''}
-            ${!p.is_default ? `<button class="ws-action-btn danger" onclick="deleteProfile('${esc(p.name)}')" title="Delete this profile">${li('x',12)}</button>` : ''}
+            ${!p.is_default ? `<button class="ws-action-btn danger" onclick="deleteProfile('${esc(p.name)}')" title="${esc(t('profile_delete_title'))}">${li('x',12)}</button>` : ''}
           </div>
         </div>`;
       panel.appendChild(card);
@@ -844,7 +844,7 @@ function renderProfileDropdown(data) {
     opt.className = 'profile-opt' + (p.name === active ? ' active' : '');
     const meta = [];
     if (p.model) meta.push(p.model.split('/').pop());
-    if (p.skill_count) meta.push(p.skill_count + ' skills');
+    if (p.skill_count) meta.push(t('profile_skill_count', p.skill_count));
     const gwDot = `<span class="profile-opt-badge ${p.gateway_running ? 'running' : 'stopped'}"></span>`;
     const checkmark = p.name === active ? ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--link)" stroke-width="3" style="vertical-align:-1px"><polyline points="20 6 9 17 4 12"/></svg>' : '';
     opt.innerHTML = `<div class="profile-opt-name">${gwDot}${esc(p.name)}${p.is_default ? ' <span style="opacity:.5;font-weight:400">(default)</span>' : ''}${checkmark}</div>` +
@@ -1000,7 +1000,10 @@ async function submitProfileCreate() {
     toggleProfileForm();
     await loadProfilesPanel();
     showToast(t('profile_created', name));
-    } catch (e) { errEl.textContent = e.message || 'Create failed'; errEl.style.display = ''; }
+  } catch (e) {
+    errEl.textContent = e.message || t('create_failed');
+    errEl.style.display = '';
+  }
 }
 
 async function deleteProfile(name) {

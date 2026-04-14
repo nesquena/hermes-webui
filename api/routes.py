@@ -232,7 +232,7 @@ _LOGIN_LOCALE = {
         "title": "Iniciar sesi\u00f3n",
         "subtitle": "Introduce tu contrase\u00f1a para continuar",
         "placeholder": "Contrase\u00f1a",
-        "btn": "Iniciar sesi\u00f3n",
+        "btn": "Entrar",
         "invalid_pw": "Contrase\u00f1a inv\u00e1lida",
         "conn_failed": "Error de conexi\u00f3n",
     },

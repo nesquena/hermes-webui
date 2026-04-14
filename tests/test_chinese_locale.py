@@ -10,6 +10,66 @@ def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def extract_locale_block(src: str, locale_key: str) -> str:
+    start_match = re.search(rf"\b{re.escape(locale_key)}\s*:\s*\{{", src)
+    assert start_match, f"{locale_key} locale block not found"
+
+    start = start_match.end() - 1  # "{"
+    depth = 0
+    in_single = False
+    in_double = False
+    in_backtick = False
+    escape = False
+
+    for i in range(start, len(src)):
+        ch = src[i]
+
+        if escape:
+            escape = False
+            continue
+
+        if in_single:
+            if ch == "\\":
+                escape = True
+            elif ch == "'":
+                in_single = False
+            continue
+
+        if in_double:
+            if ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_double = False
+            continue
+
+        if in_backtick:
+            if ch == "\\":
+                escape = True
+            elif ch == "`":
+                in_backtick = False
+            continue
+
+        if ch == "'":
+            in_single = True
+            continue
+        if ch == '"':
+            in_double = True
+            continue
+        if ch == "`":
+            in_backtick = True
+            continue
+
+        if ch == "{":
+            depth += 1
+            continue
+        if ch == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start + 1 : i]
+
+    raise AssertionError(f"{locale_key} locale block braces are not balanced")
+
+
 def test_chinese_locale_block_exists():
     src = read(REPO / "static" / "i18n.js")
     assert "\n  zh: {" in src
@@ -35,17 +95,9 @@ def test_chinese_locale_includes_representative_translations():
 
 def test_chinese_locale_covers_english_keys():
     src = read(REPO / "static" / "i18n.js")
-    en_match = re.search(r"\n  en: \{([\s\S]*?)\n  \},\n\n  es: \{", src)
-    zh_match = re.search(
-        r"\n  zh: \{([\s\S]*?)\n  \},\n\n  // Traditional Chinese \(zh-Hant\)",
-        src,
-    )
-    assert en_match, "English locale block not found"
-    assert zh_match, "Chinese locale block not found"
-
     key_pattern = re.compile(r"^\s{4}([a-zA-Z0-9_]+):", re.MULTILINE)
-    en_keys = set(key_pattern.findall(en_match.group(1)))
-    zh_keys = set(key_pattern.findall(zh_match.group(1)))
+    en_keys = set(key_pattern.findall(extract_locale_block(src, "en")))
+    zh_keys = set(key_pattern.findall(extract_locale_block(src, "zh")))
 
     missing = sorted(en_keys - zh_keys)
     assert not missing, f"Chinese locale missing keys: {missing}"
@@ -53,13 +105,7 @@ def test_chinese_locale_covers_english_keys():
 
 def test_chinese_locale_has_no_duplicate_keys():
     src = read(REPO / "static" / "i18n.js")
-    zh_match = re.search(
-        r"\n  zh: \{([\s\S]*?)\n  \},\n\n  // Traditional Chinese \(zh-Hant\)",
-        src,
-    )
-    assert zh_match, "Chinese locale block not found"
-
     key_pattern = re.compile(r"^\s{4}([a-zA-Z0-9_]+):", re.MULTILINE)
-    keys = key_pattern.findall(zh_match.group(1))
+    keys = key_pattern.findall(extract_locale_block(src, "zh"))
     duplicates = sorted(k for k, count in Counter(keys).items() if count > 1)
     assert not duplicates, f"Chinese locale has duplicate keys: {duplicates}"
