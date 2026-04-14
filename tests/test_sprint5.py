@@ -1,6 +1,8 @@
 """Sprint 5 tests: workspace CRUD, file save, session index, JS serving."""
 import json, pathlib, uuid, urllib.request, urllib.error
 
+from api.workspace import _clean_workspace_list
+
 BASE = "http://127.0.0.1:8788"  # test server (isolated from production)
 
 def get(path):
@@ -74,6 +76,21 @@ def test_workspace_add_no_duplicate(cleanup_test_sessions):
     result, status = post("/api/workspaces/add", {"path": str(child)})
     assert status == 400 and "already" in result.get("error","").lower()
     post("/api/workspaces/remove", {"path": str(child)})
+
+
+def test_clean_workspace_list_keeps_child_under_test_workspace(tmp_path):
+    root = tmp_path / "test-workspace"
+    child = root / "project-a"
+    child.mkdir(parents=True)
+    cleaned = _clean_workspace_list([{"path": str(child), "name": "Project A"}])
+    assert cleaned == [{"path": str(child.resolve()), "name": "Project A"}]
+
+
+def test_clean_workspace_list_still_drops_exact_legacy_artifact_dirs(tmp_path):
+    legacy_root = tmp_path / "test-workspace"
+    legacy_root.mkdir(parents=True)
+    cleaned = _clean_workspace_list([{"path": str(legacy_root), "name": "Legacy"}])
+    assert cleaned == []
 
 def test_workspace_add_requires_path():
     result, status = post("/api/workspaces/add", {})

@@ -105,8 +105,11 @@ def _clean_workspace_list(workspaces: list) -> list:
         path = w.get('path', '')
         name = w.get('name', '')
         p = Path(path).resolve() if path else Path('/')
-        # Skip test artifacts
-        if 'test-workspace' in path or 'webui-mvp-test' in path:
+        # Skip only exact legacy test artifact directories, not legitimate child
+        # workspaces underneath them. Broad substring matching here breaks
+        # saved workspace entries such as <trusted-root>/workspace-dup-xxxx when
+        # the trusted root itself happens to be named test-workspace.
+        if p.name in {'test-workspace', 'webui-mvp-test'}:
             continue
         # Skip paths that no longer exist
         if not p.is_dir():
