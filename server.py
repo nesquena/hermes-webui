@@ -44,7 +44,7 @@ class QuietHTTPServer(ThreadingHTTPServer):
 
 class Handler(BaseHTTPRequestHandler):
     timeout = 30  # seconds — kills idle/incomplete connections to prevent thread exhaustion
-    server_version = 'HermesWebUI/0.2'
+    server_version = 'HermesWebUI/0.50.36-local.1'
     def log_message(self, fmt, *args): pass  # suppress default Apache-style log
 
     def log_request(self, code: str='-', size: str='-') -> None:

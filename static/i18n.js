@@ -140,7 +140,8 @@ const LOCALES = {
     settings_saved: 'Settings saved',
     settings_save_failed: 'Save failed: ',
     settings_load_failed: 'Failed to load settings: ',
-    settings_saved_pw: 'Settings saved (password set \u2014 login now required)',
+    settings_saved_pw: 'Settings saved — password protection enabled and this browser stays signed in',
+    settings_saved_pw_updated: 'Settings saved — password updated',
     // login page (used server-side via /api/i18n/login endpoint)
     login_title: 'Sign in',
     login_subtitle: 'Enter your password to continue',
@@ -279,6 +280,9 @@ const LOCALES = {
     onboarding_notice_finish: 'You can reopen Settings later to change any of this.',
     onboarding_not_set: 'Not set',
     onboarding_password_will_enable: 'Will be enabled',
+    onboarding_password_will_replace: 'Will be replaced',
+    onboarding_password_keep_existing: 'Keep current password',
+    onboarding_password_remains_disabled: 'Will remain disabled',
     onboarding_password_skipped: 'Skipped for now',
     onboarding_finish_help: 'Finishing stores <code>onboarding_completed</code> in settings and drops you into the normal app.',
     onboarding_error_choose_workspace: 'Choose a workspace before continuing.',
@@ -418,7 +422,8 @@ const LOCALES = {
     settings_saved: 'Configuración guardada',
     settings_save_failed: 'Error al guardar: ',
     settings_load_failed: 'Error al cargar la configuración: ',
-    settings_saved_pw: 'Configuración guardada (contraseña establecida — ahora se requiere iniciar sesión)',
+    settings_saved_pw: 'Configuración guardada — la contraseña queda activada y este navegador sigue autenticado',
+    settings_saved_pw_updated: 'Configuración guardada — contraseña actualizada',
     // login page (used server-side via /api/i18n/login endpoint)
     login_title: 'Iniciar sesión',
     login_subtitle: 'Introduce tu contraseña para continuar',
@@ -557,6 +562,9 @@ const LOCALES = {
     onboarding_notice_finish: 'Puedes volver a abrir Configuración más tarde para cambiar cualquiera de estos valores.',
     onboarding_not_set: 'Sin definir',
     onboarding_password_will_enable: 'Se activará',
+    onboarding_password_will_replace: 'Se reemplazará',
+    onboarding_password_keep_existing: 'Mantener la contraseña actual',
+    onboarding_password_remains_disabled: 'Seguirá desactivada',
     onboarding_password_skipped: 'Se omitirá por ahora',
     onboarding_finish_help: 'Al finalizar se guarda <code>onboarding_completed</code> en la configuración y entras en la app normal.',
     onboarding_error_choose_workspace: 'Elige un espacio de trabajo antes de continuar.',
@@ -703,7 +711,8 @@ const LOCALES = {
     settings_saved: 'Einstellungen gespeichert',
     settings_save_failed: 'Speichern fehlgeschlagen: ',
     settings_load_failed: 'Laden der Einstellungen fehlgeschlagen: ',
-    settings_saved_pw: 'Einstellungen gespeichert (Passwort gesetzt \u2014 Login jetzt erforderlich)',
+    settings_saved_pw: 'Einstellungen gespeichert — Passwortschutz aktiviert und dieser Browser bleibt angemeldet',
+    settings_saved_pw_updated: 'Einstellungen gespeichert — Passwort aktualisiert',
     // login page
     login_title: 'Anmelden',
     login_subtitle: 'Geben Sie Ihr Passwort ein, um fortzufahren',
@@ -765,6 +774,10 @@ const LOCALES = {
     suggest_files: 'Welche Dateien sind in diesem Workspace?',
     suggest_schedule: 'Was steht heute auf meinem Plan?',
     suggest_plan: 'Hilf mir, ein kleines Projekt zu planen.',
+    onboarding_password_will_enable: 'Wird aktiviert',
+    onboarding_password_will_replace: 'Wird ersetzt',
+    onboarding_password_keep_existing: 'Aktuelles Passwort beibehalten',
+    onboarding_password_remains_disabled: 'Bleibt deaktiviert',
   },
 
   zh: {
@@ -902,7 +915,8 @@ const LOCALES = {
     settings_saved: '\u8bbe\u7f6e\u5df2\u4fdd\u5b58',
     settings_save_failed: '\u4fdd\u5b58\u5931\u8d25\uff1a',
     settings_load_failed: '\u8bbe\u7f6e\u52a0\u8f7d\u5931\u8d25\uff1a',
-    settings_saved_pw: '\u8bbe\u7f6e\u5df2\u4fdd\u5b58\uff08\u5bc6\u7801\u5df2\u8bbe\u7f6e\u2014\u73b0\u5728\u9700\u8981\u767b\u5f55\uff09',
+    settings_saved_pw: '\u8bbe\u7f6e\u5df2\u4fdd\u5b58\uff0c\u5df2\u542f\u7528\u5bc6\u7801\u4fdd\u62a4\uff0c\u5f53\u524d\u6d4f\u89c8\u5668\u4f1a\u4fdd\u6301\u767b\u5f55',
+    settings_saved_pw_updated: '\u8bbe\u7f6e\u5df2\u4fdd\u5b58\uff0c\u5bc6\u7801\u5df2\u66f4\u65b0',
     // login page
     login_title: '\u767b\u5f55',
     login_subtitle: '\u8f93\u5165\u5bc6\u7801\u7ee7\u7eed\u4f7f\u7528',
@@ -952,6 +966,10 @@ const LOCALES = {
     settings_desc_check_updates: '当有更新的 WebUI 或助手版本时显示横幅。会在后台定期执行 git fetch。',
     settings_desc_bot_name: '助手在 UI 中的显示名称。默认为 Hermes。',
     settings_desc_password: '输入新密码以设置或更改。留空保持当前设置。',
+    onboarding_password_will_enable: '将启用',
+    onboarding_password_will_replace: '将替换',
+    onboarding_password_keep_existing: '保持当前密码',
+    onboarding_password_remains_disabled: '仍会保持关闭',
   },
 
   // Traditional Chinese (zh-Hant)
@@ -1082,7 +1100,8 @@ const LOCALES = {
     settings_saved: '\u8a2d\u5b9a\u5df2\u5132\u5b58',
     settings_save_failed: '\u5132\u5b58\u5931\u6557\uff1a',
     settings_load_failed: '\u8a2d\u5b9a\u52a0\u8f09\u5931\u6557\uff1a',
-    settings_saved_pw: '\u8a2d\u5b9a\u5df2\u5132\u5b58\uff08\u5bc6\u78bc\u5df2\u8a2d\u5b9a\u2014\u73fe\u5728\u9700\u8981\u767b\u5f55\uff09',
+    settings_saved_pw: '\u8a2d\u5b9a\u5df2\u5132\u5b58\uff0c\u5bc6\u78bc\u4fdd\u8b77\u5df2\u555f\u7528\uff0c\u7576\u524d\u700f\u89bd\u5668\u6703\u4fdd\u6301\u767b\u5165',
+    settings_saved_pw_updated: '\u8a2d\u5b9a\u5df2\u5132\u5b58\uff0c\u5bc6\u78bc\u5df2\u66f4\u65b0',
     // login page
     login_title: '\u767b\u5f55',
     login_subtitle: '\u8f38\u5165\u5bc6\u78bc\u7e7c\u7e8c\u4f7f\u7528',
@@ -1140,6 +1159,10 @@ const LOCALES = {
     settings_desc_check_updates: '\u7576\u6709\u66f4\u65b0\u7684 WebUI \u6216\u52a9\u624b\u7248\u672c\u6642\u986f\u793a\u6a19\u8a18\u3002\u5c07\u5728\u5f8c\u81ea\u6b63\u5e38\u57f7\u884c Git-Fetch\u3002',
     settings_desc_bot_name: '\u52a9\u624b\u5728 UI \u4e2d\u7684\u986f\u793a\u540d\u7a31\u3002\u9810\u8a2d\u70b8\u7528\u6539\u3002',
     settings_desc_password: '\u8a2d\u5b9a WebUI \u767b\u5165\u5bc6\u78bc\u3002\u5047\u5982\u5df2\u8a2d\u7f6e\uff0c\u6bcf\u6b21\u52a0\u8f09\u90fd\u9700\u8981\u767b\u5165\u3002',
+    onboarding_password_will_enable: '\u5c07\u6703\u555f\u7528',
+    onboarding_password_will_replace: '\u5c07\u6703\u53d6\u4ee3',
+    onboarding_password_keep_existing: '\u4fdd\u7559\u76ee\u524d\u5bc6\u78bc',
+    onboarding_password_remains_disabled: '\u6703\u7e7c\u7e8c\u4fdd\u6301\u95dc\u9589',
     settings_label_sound: '\u901a\u77e5\u8072\u97f3',
     // boot.js
     cancelling: '\u6b63\u5728\u53d6\u6d88...',

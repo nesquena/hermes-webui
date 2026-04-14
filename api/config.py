@@ -1126,6 +1126,7 @@ _SETTINGS_DEFAULTS = {
     "bubble_layout": False,  # right-aligned user / left-aligned assistant chat bubbles
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
 }
+_SETTINGS_LEGACY_DROP_KEYS = {"assistant_language"}
 
 
 def load_settings() -> dict:
@@ -1135,7 +1136,13 @@ def load_settings() -> dict:
         try:
             stored = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
             if isinstance(stored, dict):
-                settings.update(stored)
+                settings.update(
+                    {
+                        k: v
+                        for k, v in stored.items()
+                        if k not in _SETTINGS_LEGACY_DROP_KEYS
+                    }
+                )
         except Exception:
             logger.debug("Failed to load settings from %s", SETTINGS_FILE)
     return settings

@@ -224,10 +224,17 @@ function _renderOnboardingBody(){
       <div><strong>${t('onboarding_provider_label')}</strong><span>${esc((provider&&provider.label)||ONBOARDING.form.provider||t('onboarding_not_set'))}</span></div>
       <div><strong>${t('onboarding_model_label')}</strong><span>${esc(_getOnboardingSelectedModel()||t('onboarding_not_set'))}</span></div>
       <div><strong>${t('onboarding_workspace_label')}</strong><span>${esc(ONBOARDING.form.workspace||t('onboarding_not_set'))}</span></div>
-      <div><strong>${t('onboarding_check_password')}</strong><span>${ONBOARDING.form.password?t('onboarding_password_will_enable'):t('onboarding_password_skipped')}</span></div>
+      <div><strong>${t('onboarding_check_password')}</strong><span>${t(_getOnboardingPasswordSummaryKey(settings))}</span></div>
     </div>
     ${ONBOARDING.form.baseUrl?`<p class="onboarding-copy"><strong>${t('onboarding_base_url_label')}</strong> ${esc(ONBOARDING.form.baseUrl)}</p>`:''}
     <p class="onboarding-copy">${t('onboarding_finish_help')}</p>`;
+}
+
+function _getOnboardingPasswordSummaryKey(settings){
+  const hasExistingPassword=!!(settings&&settings.password_enabled);
+  const hasNewPassword=!!((ONBOARDING.form.password||'').trim());
+  if(hasNewPassword) return hasExistingPassword?'onboarding_password_will_replace':'onboarding_password_will_enable';
+  return hasExistingPassword?'onboarding_password_keep_existing':'onboarding_password_remains_disabled';
 }
 
 function syncOnboardingWorkspaceSelect(value){
@@ -309,7 +316,10 @@ async function _saveOnboardingDefaults(){
   }
   const body={default_workspace:workspace,default_model:model};
   if(password) body._set_password=password;
-  await api('/api/settings',{method:'POST',body:JSON.stringify(body)});
+  const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(body)});
+  if(ONBOARDING.status){
+    ONBOARDING.status.settings={...(ONBOARDING.status.settings||{}),password_enabled:!!saved.auth_enabled};
+  }
   localStorage.setItem('hermes-webui-model',model);
   if($('modelSelect')) _applyModelToDropdown(model,$('modelSelect'));
 }

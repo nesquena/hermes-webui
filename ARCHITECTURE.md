@@ -7,6 +7,11 @@
 >
 > Keep this document updated as architecture changes are made.
 
+> Current shipped build: `v0.50.36-local.1` (April 14, 2026).
+> Baseline: upstream `nesquena/hermes-webui` `v0.50.36`.
+> Intentional local delta: first-time password enablement from Settings immediately issues a `hermes_session` cookie so the current browser remains signed in. The previous `Assistant Reply Language` customization has been removed, and legacy `assistant_language` settings are filtered out on load/save.
+> Automated coverage: 1059 passing tests.
+
 ---
 
 ## 1. Overview and Purpose
@@ -22,6 +27,11 @@ The design philosophy is deliberately minimal. There is no build step, no bundle
 frontend framework. The Python server is split into a routing shell (server.py) and
 business logic modules (api/). The frontend is seven vanilla JS modules loaded from static/.
 This makes the code easy to modify from a terminal or by an agent.
+
+For the current local build, the codebase is intentionally as close to upstream as possible:
+the app now tracks upstream `v0.50.36`, keeps the password-session continuity patch in the
+settings/onboarding flow, and does not carry forward the prior reply-language preference
+feature.
 
 Hermes-level chrome is intentionally consolidated: the sidebar has no dedicated brand header.
 Instead, the footer exposes a single "Hermes WebUI" launch button that opens one tabbed

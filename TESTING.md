@@ -1,14 +1,16 @@
 # Hermes Web UI: Browser Testing Plan
 
 > This document is for manual browser testing by you or by a Claude browser agent.
-> It covers user-facing features of the UI through v0.50.21 and later releases.
+> It covers user-facing features of the UI through `v0.50.36-local.1` and later releases.
 > Each section is written as a step-by-step test procedure with expected outcomes.
 > A browser agent (e.g. Claude with Chrome access) can execute this plan directly.
 >
 > Prerequisites: SSH tunnel is active on port 8787. Open http://localhost:8787 in browser.
 > Server health check: curl http://127.0.0.1:8787/health should return {"status":"ok"}.
 >
-> Automated tests: 961 total (961 passing, 0 known failures). Includes onboarding coverage for bootstrap/static wizard presence, real provider config persistence (`config.yaml` + `.env`), and the `/api/onboarding/*` backend.
+> Current local delta vs upstream `v0.50.36`: first-time password enablement keeps the current browser signed in; the former reply-language preference customization has been removed.
+>
+> Automated tests: 1059 total (1059 passing, 0 known failures). Includes onboarding coverage for bootstrap/static wizard presence, real provider config persistence (`config.yaml` + `.env`), the `/api/onboarding/*` backend, and the local password-session continuity regression tests.
 > Run: `pytest tests/ -v --timeout=60`
 
 ---

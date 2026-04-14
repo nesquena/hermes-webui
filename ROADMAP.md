@@ -3,10 +3,10 @@
 > Goal: Full 1:1 parity with the Hermes CLI experience via a clean dark web UI.
 > Everything you can do from the CLI terminal, you can do from this UI.
 >
-> Last updated: v0.50.21 (April 13, 2026) — 961 tests, 961 passing
-> Full production-ready: onboarding wizard, multi-profile support, KaTeX math rendering,
-> live reasoning cards with localStorage reload recovery, CSRF reverse proxy fixes, Docker improvements.
-> Tests: 961 total (961 passing, 0 failures)
+> Last updated: v0.50.36-local.1 (April 14, 2026) — 1059 tests, 1059 passing
+> Full production-ready: upstream v0.50.36 synced locally, with only the first-password session continuity patch retained.
+> Local delta: enabling password from Settings keeps the current browser signed in; the former Assistant Reply Language enhancement has been removed.
+> Tests: 1059 total (1059 passing, 0 failures)
 > Source: <repo>/
 
 ---
@@ -74,6 +74,7 @@
 | v0.50.16–v0.50.17 | CSRF reverse proxy + Docker uv pre-install | Scheme-aware CSRF port normalization for non-standard ports (@lx3133584), Docker uv pre-installed at build time as root (fixes air-gapped startup, @mmartial-pattern) | 900 |
 | v0.50.18–v0.50.19 | Workspace fallback + Unicode filenames | Cascading workspace path recovery (@Jordan-SkyLF), Unicode Content-Disposition headers with RFC 5987 filename* (@shaoxianbilly), silent auth error surfacing, stale model cleanup | 924 |
 | v0.50.20–v0.50.21 | Silent errors + live model fetching + durable streaming recovery | apperror on empty agent response, /api/models/live endpoint with SSRF guard, live reasoning cards, tool_complete SSE events, SESSION_QUEUES, localStorage reload recovery (@Jordan-SkyLF) | 961 |
+| v0.50.22–v0.50.36-local.1 | Upstream sync + minimal local patch retention | Synced to upstream `v0.50.36`; retained first-password session continuity in Settings/onboarding; removed local Assistant Reply Language enhancement; added legacy settings cleanup regression coverage | 1059 |
 
 ---
 

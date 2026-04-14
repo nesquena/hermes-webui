@@ -1236,17 +1236,46 @@ async function loadSettingsPanel(){
     // Show auth buttons only when auth is active
     try{
       const authStatus=await api('/api/auth/status');
-      const active=authStatus.auth_enabled;
-      const signOutBtn=$('btnSignOut');
-      if(signOutBtn) signOutBtn.style.display=active?'':'none';
-      const disableBtn=$('btnDisableAuth');
-      if(disableBtn) disableBtn.style.display=active?'':'none';
+      _setSettingsAuthButtonsVisible(!!authStatus.auth_enabled);
     }catch(e){}
     _syncHermesPanelSessionActions();
     switchSettingsSection(_settingsSection);
   }catch(e){
     showToast(t('settings_load_failed')+e.message);
   }
+}
+
+function _setSettingsAuthButtonsVisible(active){
+  const signOutBtn=$('btnSignOut');
+  if(signOutBtn) signOutBtn.style.display=active?'':'none';
+  const disableBtn=$('btnDisableAuth');
+  if(disableBtn) disableBtn.style.display=active?'':'none';
+}
+
+function _applySavedSettingsUi(saved, body, opts){
+  const {sendKey,showTokenUsage,showCliSessions,theme,language}=opts;
+  window._sendKey=sendKey||'enter';
+  window._showTokenUsage=showTokenUsage;
+  window._showCliSessions=showCliSessions;
+  window._soundEnabled=body.sound_enabled;
+  window._notificationsEnabled=body.notifications_enabled;
+  window._botName=body.bot_name||'Hermes';
+  document.body.classList.toggle('bubble-layout', !!body.bubble_layout);
+  if(typeof applyBotName==='function') applyBotName();
+  if(typeof setLocale==='function') setLocale(language);
+  if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
+  if(typeof startGatewaySSE==='function'){
+    if(showCliSessions) startGatewaySSE();
+    else if(typeof stopGatewaySSE==='function') stopGatewaySSE();
+  }
+  _setSettingsAuthButtonsVisible(!!saved.auth_enabled);
+  _settingsDirty=false;
+  _settingsThemeOnOpen=theme;
+  const bar=$('settingsUnsavedBar');
+  if(bar) bar.style.display='none';
+  renderMessages();
+  if(typeof syncTopbar==='function') syncTopbar();
+  if(typeof renderSessionList==='function') renderSessionList();
 }
 
 async function saveSettings(andClose){
@@ -1276,37 +1305,16 @@ async function saveSettings(andClose){
   // Password: only act if the field has content; blank = leave auth unchanged
   if(pw && pw.trim()){
     try{
-      await api('/api/settings',{method:'POST',body:JSON.stringify({...body,_set_password:pw.trim()})});
-      window._sendKey=sendKey||'enter';
-      window._showTokenUsage=showTokenUsage;
-      window._soundEnabled=body.sound_enabled;
-      window._notificationsEnabled=body.notifications_enabled;
-      if(typeof setLocale==='function') setLocale(language);
-      if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
-      showToast(t('settings_saved_pw'));
-      _settingsDirty=false; _settingsThemeOnOpen=theme;
+      const saved=await api('/api/settings',{method:'POST',body:JSON.stringify({...body,_set_password:pw.trim()})});
+      _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,language});
+      showToast(t(saved.auth_just_enabled?'settings_saved_pw':'settings_saved_pw_updated'));
       _hideSettingsPanel();
       return;
     }catch(e){showToast('Save failed: '+e.message);return;}
   }
   try{
-    await api('/api/settings',{method:'POST',body:JSON.stringify(body)});
-    window._sendKey=sendKey||'enter';
-    window._showTokenUsage=showTokenUsage;
-    window._showCliSessions=showCliSessions;
-    window._soundEnabled=body.sound_enabled;
-    window._notificationsEnabled=body.notifications_enabled;
-    window._botName=body.bot_name;
-    if(typeof applyBotName==='function') applyBotName();
-    if(typeof setLocale==='function') setLocale(language);
-    if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
-    // Restart gateway SSE when agent session setting changes
-    if(typeof startGatewaySSE==='function'){if(showCliSessions)startGatewaySSE();else if(typeof stopGatewaySSE==='function')stopGatewaySSE();}
-    _settingsDirty=false; _settingsThemeOnOpen=theme;
-    const bar=$('settingsUnsavedBar'); if(bar) bar.style.display='none';
-    renderMessages();
-    if(typeof syncTopbar==='function') syncTopbar();
-    if(typeof renderSessionList==='function') renderSessionList();
+    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(body)});
+    _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,language});
     showToast(t('settings_saved'));
     _hideSettingsPanel();
   }catch(e){

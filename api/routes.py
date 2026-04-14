@@ -926,11 +926,56 @@ def handle_post(handler, parsed) -> bool:
 
     # ── Settings (POST) ──
     if parsed.path == "/api/settings":
+        from api.auth import (
+            create_session,
+            is_auth_enabled,
+            parse_cookie,
+            set_auth_cookie,
+            verify_session,
+        )
+
         if "bot_name" in body:
             body["bot_name"] = (str(body["bot_name"]) or "").strip() or "Hermes"
+
+        auth_enabled_before = is_auth_enabled()
+        current_cookie = parse_cookie(handler)
+        logged_in_before = bool(current_cookie and verify_session(current_cookie))
+        requested_password = bool(
+            isinstance(body.get("_set_password"), str)
+            and body.get("_set_password", "").strip()
+        )
+
         saved = save_settings(body)
         saved.pop("password_hash", None)  # never expose hash to client
-        return j(handler, saved)
+
+        auth_enabled_after = is_auth_enabled()
+        auth_just_enabled = bool(
+            requested_password and auth_enabled_after and not auth_enabled_before
+        )
+        logged_in_after = logged_in_before
+        new_cookie = None
+
+        if auth_just_enabled and not logged_in_before:
+            new_cookie = create_session()
+            logged_in_after = True
+
+        saved["auth_enabled"] = auth_enabled_after
+        saved["logged_in"] = logged_in_after
+        saved["auth_just_enabled"] = auth_just_enabled
+
+        if not new_cookie:
+            return j(handler, saved)
+
+        response_body = json.dumps(saved, ensure_ascii=False, indent=2).encode("utf-8")
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/json; charset=utf-8")
+        handler.send_header("Content-Length", str(len(response_body)))
+        handler.send_header("Cache-Control", "no-store")
+        set_auth_cookie(handler, new_cookie)
+        _security_headers(handler)
+        handler.end_headers()
+        handler.wfile.write(response_body)
+        return True
 
     if parsed.path == "/api/onboarding/setup":
         # Writing API keys to disk - restrict to local/private networks unless auth is active.

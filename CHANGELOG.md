@@ -1,5 +1,17 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.36-local.1] sync: rebase local tree onto upstream v0.50.36, retain only the password-session continuity patch
+
+This local build now uses upstream `v0.50.36` as the code baseline, keeping the workspace, onboarding, live-model, and security fixes that landed between `v0.50.22` and `v0.50.36`.
+
+Only one local behavior difference is intentionally retained: when password auth is enabled for the first time from Settings, the same browser immediately receives a valid `hermes_session` cookie and stays signed in for the remainder of onboarding or settings flow. The local `Assistant Reply Language` enhancement has been removed; legacy `assistant_language` values are now filtered from `GET /api/settings` and dropped on the next save.
+
+- `api/routes.py`, `static/panels.js`, `static/onboarding.js`, `static/i18n.js`: keep the first-password-enable continuity fix and matching UX copy
+- `api/config.py`: treat `assistant_language` as a legacy key so it is hidden from responses and cleaned from persisted settings
+- `static/index.html`, `server.py`: expose the build as `v0.50.36-local.1`
+- `tests/test_sprint45.py`: regression coverage for cookie issuance on first password enablement, onboarding continuity, and reply-language removal
+- All 1059 tests now pass
+
 ## [v0.50.36] fix: workspace list cleaner — allow own-profile paths, remove brittle string filter
 
 Two bugs in `_clean_workspace_list()` caused workspace additions to silently disappear on the next `load_workspaces()` call, breaking `test_workspace_add_no_duplicate` and `test_workspace_rename` (and potentially causing real-world workspace list corruption):
