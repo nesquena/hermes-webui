@@ -1,5 +1,24 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.31] fix: delegate all live model fetching to agent's provider_model_ids()
+
+`_handle_live_models()` in `api/routes.py` previously maintained its own per-provider fetch logic and returned `not_supported` for Anthropic, Google, and Gemini. Now it delegates entirely to the agent's `hermes_cli.models.provider_model_ids()` — the single authoritative resolver — and `_fetchLiveModels()` in `ui.js` no longer skips any provider.
+
+**What each provider now returns (live data where credentials are present, static fallback otherwise):**
+- `anthropic` — live from `api.anthropic.com/v1/models` (API key or OAuth token with correct beta headers)
+- `copilot` — live from `api.githubcopilot.com/models` with required Copilot headers
+- `openai-codex` — Codex OAuth endpoint → `~/.codex/` cache → `DEFAULT_CODEX_MODELS`
+- `nous` — live from Nous inference portal
+- `deepseek`, `kimi-coding` — generic OpenAI-compat `/v1/models`
+- `opencode-zen`, `opencode-go` — OpenCode live catalog
+- `openrouter` — curated static list (live returns 300+ which floods the picker)
+- `google`, `gemini`, `zai`, `minimax` — static list (non-standard or Anthropic-compat endpoints)
+- All others — graceful static fallback from `_PROVIDER_MODELS`
+
+The hardcoded lists in `_PROVIDER_MODELS` remain as credential-missing / network-unavailable fallbacks. `api/routes.py` shrank by ~100 lines. Updated 2 tests to reflect the improved behavior.
+
+- 1039 tests total (up from 1038)
+
 ## [v0.50.30] fix: openai-codex live model fetch routes through agent's get_codex_model_ids()
 
 `_handle_live_models()` was grouping `openai-codex` with `openai` and sending `GET https://api.openai.com/v1/models` — which returns 403 because Codex auth is OAuth-based via `chatgpt.com`, not a standard API key. The live fetch silently failed, so users only ever saw the hardcoded static list.
