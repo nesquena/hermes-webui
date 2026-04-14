@@ -172,24 +172,32 @@ function mobileSwitchPanel(name){
   });
 }
 
-$('btnSend').onclick=()=>{if(window._micActive)_stopMic();send();};
+$('btnSend').onclick=()=>{
+  if(window._micActive){
+    window._micPendingSend=true;
+    _stopMic();
+    return;
+  }
+  send();
+};
 $('btnAttach').onclick=()=>$('fileInput').click();
 
-// ── Voice input (Web Speech API) ─────────────────────────────────────────
+// ── Voice input (Web Speech API + MediaRecorder fallback) ───────────────────
 (function(){
   const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
-  if(!SpeechRecognition) return; // Browser unsupported — mic button stays hidden
+  const _canRecordAudio=!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia&&window.MediaRecorder);
+  if(!SpeechRecognition&&!_canRecordAudio) return; // Browser unsupported — mic button stays hidden
 
   const btn=$('btnMic');
   const status=$('micStatus');
   const ta=$('msg');
-  btn.style.display=''; // Show button — browser supports speech
+  const statusText=status?status.querySelector('.status-text'):null;
+  btn.style.display=''; // Show button — browser supports speech recognition or recording fallback
 
-  const recognition=new SpeechRecognition();
-  recognition.continuous=false;
-  recognition.interimResults=true;
-  recognition.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
-
+  let recognition=SpeechRecognition?new SpeechRecognition():null;
+  let mediaRecorder=null;
+  let mediaStream=null;
+  let audioChunks=[];
   let _finalText='';
   let _prefix='';
 
@@ -197,65 +205,160 @@ $('btnAttach').onclick=()=>$('fileInput').click();
     window._micActive=on;
     btn.classList.toggle('recording',on);
     status.style.display=on?'':'none';
+    if(statusText) statusText.textContent=on?'Listening':'Listening';
     if(!on){ _finalText=''; _prefix=''; }
   }
 
-  recognition.onstart=()=>{ _finalText=''; };
-
-  recognition.onresult=(event)=>{
-    let interim='';
-    let final=_finalText;
-    for(let i=event.resultIndex;i<event.results.length;i++){
-      const t=event.results[i][0].transcript;
-      if(event.results[i].isFinal){ final+=t; _finalText=final; }
-      else{ interim+=t; }
-    }
-    // Append to whatever was already in the textarea before mic started
-    ta.value=_prefix+(final||interim);
-    autoResize();
-  };
-
-  recognition.onend=()=>{
-    // Commit: prefix + final transcription; trim trailing space if prefix was non-empty
-    const committed=_finalText
+  function _commitTranscript(text){
+    const clean=(text||'').trim();
+    const committed=clean
       ? (_prefix&&!_prefix.endsWith(' ')&&!_prefix.endsWith('\n')
-          ? _prefix+' '+_finalText.trimStart()
-          : _prefix+_finalText)
-      : ta.value; // no speech detected — leave whatever is there
-    _setRecording(false);
+          ? _prefix+' '+clean.trimStart()
+          : _prefix+clean)
+      : ta.value;
     ta.value=committed;
     autoResize();
-  };
+    if(window._micPendingSend){
+      window._micPendingSend=false;
+      send();
+    }
+  }
 
-  recognition.onerror=(event)=>{
-    _setRecording(false);
-    const msgs={
-      'not-allowed':t('mic_denied'),
-      'no-speech':t('mic_no_speech'),
-      'network':t('mic_network'),
-    };
-    showToast(msgs[event.error]||t('mic_error')+event.error);
-  };
+  async function _transcribeBlob(blob){
+    const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
+    const form=new FormData();
+    form.append('file',new File([blob],`voice-input.${ext}`,{type:blob.type||`audio/${ext}`}));
+    setComposerStatus('Transcribing…');
+    try{
+      const res=await fetch('/api/transcribe',{method:'POST',body:form});
+      const data=await res.json().catch(()=>({}));
+      if(!res.ok) throw new Error(data.error||'Transcription failed');
+      _commitTranscript(data.transcript||'');
+    }catch(err){
+      window._micPendingSend=false;
+      showToast(err.message||t('mic_network'));
+    }finally{
+      setComposerStatus('');
+    }
+  }
+
+  function _stopTracks(){
+    if(mediaStream){
+      mediaStream.getTracks().forEach(track=>track.stop());
+      mediaStream=null;
+    }
+  }
 
   function _stopMic(){
-    if(window._micActive){ recognition.stop(); }
+    if(!window._micActive) return;
+    if(recognition){
+      recognition.stop();
+      return;
+    }
+    if(mediaRecorder&&mediaRecorder.state!=='inactive'){
+      mediaRecorder.stop();
+      return;
+    }
+    _setRecording(false);
+    _stopTracks();
   }
   window._stopMic=_stopMic; // expose for send-guard above
 
-  btn.onclick=()=>{
+  if(recognition){
+    recognition.continuous=false;
+    recognition.interimResults=true;
+    recognition.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
+
+    recognition.onstart=()=>{ _finalText=''; };
+
+    recognition.onresult=(event)=>{
+      let interim='';
+      let final=_finalText;
+      for(let i=event.resultIndex;i<event.results.length;i++){
+        const t=event.results[i][0].transcript;
+        if(event.results[i].isFinal){ final+=t; _finalText=final; }
+        else{ interim+=t; }
+      }
+      ta.value=_prefix+(final||interim);
+      autoResize();
+    };
+
+    recognition.onend=()=>{
+      const committed=_finalText
+        ? (_prefix&&!_prefix.endsWith(' ')&&!_prefix.endsWith('\n')
+            ? _prefix+' '+_finalText.trimStart()
+            : _prefix+_finalText)
+        : ta.value;
+      _setRecording(false);
+      ta.value=committed;
+      autoResize();
+      if(window._micPendingSend){
+        window._micPendingSend=false;
+        send();
+      }
+    };
+
+    recognition.onerror=(event)=>{
+      _setRecording(false);
+      window._micPendingSend=false;
+      const msgs={
+        'not-allowed':t('mic_denied'),
+        'no-speech':t('mic_no_speech'),
+        'network':t('mic_network'),
+      };
+      showToast(msgs[event.error]||t('mic_error')+event.error);
+    };
+  }
+
+  btn.onclick=async()=>{
     if(window._micActive){
-      recognition.stop();
-      // _setRecording(false) will be called by onend
-    } else {
-      _finalText='';
-      // Snapshot existing textarea content so we append rather than replace
-      _prefix=ta.value;
+      _stopMic();
+      return;
+    }
+    _finalText='';
+    _prefix=ta.value;
+    if(recognition){
       recognition.start();
       _setRecording(true);
+      return;
+    }
+    if(!_canRecordAudio){
+      showToast(t('mic_network'));
+      return;
+    }
+    try{
+      mediaStream=await navigator.mediaDevices.getUserMedia({audio:true});
+      const preferredTypes=['audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus','audio/ogg'];
+      const mimeType=preferredTypes.find(type=>window.MediaRecorder.isTypeSupported?.(type))||'';
+      mediaRecorder=new MediaRecorder(mediaStream,mimeType?{mimeType}:undefined);
+      audioChunks=[];
+      mediaRecorder.ondataavailable=e=>{if(e.data&&e.data.size)audioChunks.push(e.data);};
+      mediaRecorder.onerror=()=>{
+        _setRecording(false);
+        window._micPendingSend=false;
+        _stopTracks();
+        showToast(t('mic_network'));
+      };
+      mediaRecorder.onstop=async()=>{
+        const blob=new Blob(audioChunks,{type:mediaRecorder.mimeType||mimeType||'audio/webm'});
+        _setRecording(false);
+        _stopTracks();
+        if(blob.size){ await _transcribeBlob(blob); }
+        else if(window._micPendingSend){
+          window._micPendingSend=false;
+        }
+      };
+      mediaRecorder.start();
+      _setRecording(true);
+    }catch(err){
+      window._micPendingSend=false;
+      _stopTracks();
+      showToast(t('mic_denied'));
     }
   };
 })();
 window._micActive=window._micActive||false;
+window._micPendingSend=window._micPendingSend||false;
 $('fileInput').onchange=e=>{addFiles(Array.from(e.target.files));e.target.value='';};
 $('btnNewChat').onclick=async()=>{await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();};
 $('btnDownload').onclick=()=>{

@@ -80,6 +80,16 @@ def test_security_headers_on_health():
     assert headers.get("X-Content-Type-Options") == "nosniff"
 
 
+def test_permissions_policy_does_not_disable_microphone():
+    """Permissions-Policy must not hard-disable microphone access for same-origin voice input."""
+    _, status, headers = get("/health")
+    assert status == 200
+    policy = headers.get("Permissions-Policy", "")
+    assert policy, "Permissions-Policy header missing"
+    assert "microphone=()" not in policy, \
+        "Permissions-Policy must not block microphone access or desktop/mobile voice input cannot work"
+
+
 def test_cache_control_no_store():
     """API responses should have Cache-Control: no-store."""
     d, status, headers = get("/api/sessions")

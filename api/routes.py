@@ -181,7 +181,7 @@ from api.workspace import (
     read_file_content,
     safe_resolve_ws,
 )
-from api.upload import handle_upload
+from api.upload import handle_upload, handle_transcribe
 from api.streaming import _sse, _run_agent_streaming, cancel_stream
 from api.onboarding import (
     apply_onboarding_setup,
@@ -629,6 +629,9 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/upload":
         return handle_upload(handler)
+
+    if parsed.path == "/api/transcribe":
+        return handle_transcribe(handler)
 
     body = read_body(handler)
 
