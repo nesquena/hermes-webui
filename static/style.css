@@ -172,7 +172,7 @@
   .session-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;overflow:hidden;}
   .session-title-row{display:flex;align-items:flex-start;gap:8px;min-width:0;}
   .session-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);}
-  .session-item.active .session-title{color:#e8a030;}
+  .session-item.active .session-title{color:var(--gold);}
   .session-time{flex-shrink:0;font-size:11px;line-height:1.4;color:var(--muted);text-transform:lowercase;}
   .session-meta{font-size:11px;line-height:1.35;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
   /* ── Session action trigger + dropdown ── */
