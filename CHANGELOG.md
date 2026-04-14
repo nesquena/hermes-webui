@@ -1,5 +1,14 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.27] feat: relative time labels in session sidebar (#394)
+
+- `static/sessions.js`: new `_sessionCalendarBoundaries()` (DST-safe via `new Date(y,m,d)` construction), `_localDayOrdinal()`, `_formatSessionDate()` (includes year for dates from prior years); `_formatRelativeSessionTime()` now uses calendar midnight boundaries consistent with `_sessionTimeBucketLabel()` — no more label/bucket mismatch; all relative time strings call `t()` for localization; meta row only appended when non-empty (removes redundant group-header fallback); dead `ONE_DAY` constant removed
+- `static/style.css`: add `session-item.active .session-title{color:#1a5a8a}` to light-theme block (fixes active title color in light mode)
+- `static/i18n.js`: 11 new i18n keys (`session_time_*`) in both English and Spanish locale blocks; callable keys use arrow-function pattern consistent with existing `n_messages`
+- `tests/test_session_sidebar_relative_time.py`: 5 tests — structural presence checks, behavioral Node.js tests via subprocess (yesterday/week boundary correctness, `just now` threshold, year-in-date for old sessions, full i18n key coverage for en+es)
+- Original PR by @Jordan-SkyLF (two-pass review: blocking issues fixed in second commit)
+- 1027 tests total (up from 1022)
+
 ## [v0.50.26] fix(sessions): redact sensitive titles in session list and search responses [SECURITY] (#400)
 
 - `api/routes.py`: apply `_redact_text()` to session titles in all four response paths — `/api/sessions` merged list, `/api/sessions/search` empty-q, title-match, and content-match; use `dict(s)` copy before mutating to avoid corrupting the in-memory session cache
