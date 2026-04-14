@@ -1112,7 +1112,7 @@ function toggleSettings(){
   if(!overlay) return;
   if(overlay.style.display==='none'){
     _settingsDirty = false;
-    _settingsThemeOnOpen = document.documentElement.dataset.theme || 'dark';
+    _settingsThemeOnOpen = localStorage.getItem('hermes-theme') || 'dark';
     _settingsSection = 'conversation';
     overlay.style.display='';
     loadSettingsPanel();
@@ -1150,8 +1150,12 @@ function _closeSettingsPanel(){
 // Revert live DOM/localStorage to what they were when the panel opened
 function _revertSettingsPreview(){
   if(_settingsThemeOnOpen){
-    document.documentElement.dataset.theme = _settingsThemeOnOpen;
-    localStorage.setItem('hermes-theme', _settingsThemeOnOpen);
+    if(typeof applyTheme==='function'){
+      applyTheme(_settingsThemeOnOpen);
+    }else{
+      document.documentElement.dataset.theme = _settingsThemeOnOpen;
+      localStorage.setItem('hermes-theme', _settingsThemeOnOpen);
+    }
   }
 }
 

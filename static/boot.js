@@ -594,7 +594,8 @@ function applyBotName(){
     window._notificationsEnabled=!!s.notifications_enabled;
     window._botName=s.bot_name||'Hermes';
     const _theme=s.theme||'dark';
-    document.documentElement.dataset.theme=_theme;
+    const _resolved=_theme==='system'?(window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light'):_theme;
+    document.documentElement.dataset.theme=_resolved;
     localStorage.setItem('hermes-theme',_theme);
     document.body.classList.toggle('bubble-layout',!!s.bubble_layout);
     if(typeof setLocale==='function'){
