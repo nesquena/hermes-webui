@@ -215,32 +215,73 @@ def set_last_workspace(path: str) -> None:
 
 
 def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
-    """Resolve and validate a workspace path against the trusted workspace roots.
+    """Resolve and validate a workspace path.
 
-    A path is trusted if it passes these checks:
-      1. It exists and is a directory.
-      2. It is under the user's home directory.
-         This blocks paths like /etc, /tmp, /var, /root, /usr while allowing
-         any legitimate workspace under ~/  (~/CodePath, ~/General, ~/WebUI, etc.)
+    A path is trusted if it satisfies at least one of:
+      (A) It is under the user's home directory (Path.home()).
+          Works cross-platform: ~/... on Linux/macOS, C:\\Users\\... on Windows.
+      (B) It is already in the profile's saved workspace list.
+          This covers self-hosted deployments where workspaces live outside home
+          (e.g. /data/projects, /opt/workspace) — once a workspace is saved by
+          an admin, it can be reused without re-validation.
 
-    Intentionally permissive enough for multi-profile setups where each profile
-    has its own workspace directory at different locations under ~/, without
-    requiring those directories to share a single common ancestor.
+    Additionally enforced regardless of (A)/(B):
+      1. The path must exist.
+      2. The path must be a directory.
+      3. The path must not be a known system root (/etc, /usr, /var, /bin, /sbin,
+         /boot, /proc, /sys, /dev, /root on Linux/macOS; Windows system dirs).
+         This prevents even admin-saved workspaces from pointing at OS internals.
+
+    None/empty path falls back to the boot-time DEFAULT_WORKSPACE, which is always
+    trusted (it was validated at server startup).
     """
-    home = Path.home().resolve()
-    candidate = Path(_BOOT_DEFAULT_WORKSPACE).expanduser().resolve() if path in (None, "") else Path(path).expanduser().resolve()
+    _BLOCKED_SYSTEM_ROOTS = {
+        # Linux / macOS
+        Path('/etc'), Path('/usr'), Path('/var'), Path('/bin'), Path('/sbin'),
+        Path('/boot'), Path('/proc'), Path('/sys'), Path('/dev'), Path('/root'),
+        Path('/lib'), Path('/lib64'), Path('/opt/homebrew'),
+    }
+
+    if path in (None, ""):
+        return Path(_BOOT_DEFAULT_WORKSPACE).expanduser().resolve()
+
+    candidate = Path(path).expanduser().resolve()
+
     if not candidate.exists():
         raise ValueError(f"Path does not exist: {candidate}")
     if not candidate.is_dir():
         raise ValueError(f"Path is not a directory: {candidate}")
-    # Must be under the user's home directory
+
+    # Block known system roots and their children
+    for blocked in _BLOCKED_SYSTEM_ROOTS:
+        try:
+            candidate.relative_to(blocked)
+            raise ValueError(f"Path points to a system directory: {candidate}")
+        except ValueError as e:
+            if "system directory" in str(e):
+                raise
+            # relative_to raised ValueError = candidate is NOT under blocked = safe
+
+    # (A) Trusted if under the user's home directory — cross-platform via Path.home()
     try:
-        candidate.relative_to(home)
+        candidate.relative_to(Path.home().resolve())
+        return candidate
     except ValueError:
-        raise ValueError(f"Path is outside the user home directory: {candidate}")
-    # Home-directory check is sufficient — blocks /etc, /tmp, /var, /root, etc.
-    # while allowing any directory under ~/  (~/CodePath, ~/General, ~/WebUI, etc.)
-    return candidate
+        pass
+
+    # (B) Trusted if already in the saved workspace list — covers non-home installs
+    try:
+        saved = load_workspaces()
+        saved_paths = {Path(w["path"]).resolve() for w in saved if w.get("path")}
+        if candidate in saved_paths:
+            return candidate
+    except Exception:
+        pass
+
+    raise ValueError(
+        f"Path is outside the user home directory and not in the saved workspace "
+        f"list: {candidate}. Add it via Settings → Workspaces first."
+    )
 
 
 def safe_resolve_ws(root: Path, requested: str) -> Path:
