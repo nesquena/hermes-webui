@@ -410,11 +410,13 @@ def handle_get(handler, parsed) -> bool:
             deduped_cli = []
         merged = webui_sessions + deduped_cli
         merged.sort(key=lambda s: s.get("updated_at", 0) or 0, reverse=True)
-        # Redact credentials from session titles before returning
+        safe_merged = []
         for s in merged:
-            if isinstance(s.get("title"), str):
-                s["title"] = _redact_text(s["title"])
-        return j(handler, {"sessions": merged, "cli_count": len(deduped_cli)})
+            item = dict(s)
+            if isinstance(item.get("title"), str):
+                item["title"] = _redact_text(item["title"])
+            safe_merged.append(item)
+        return j(handler, {"sessions": safe_merged, "cli_count": len(deduped_cli)})
 
     if parsed.path == "/api/projects":
         return j(handler, {"projects": load_projects()})
@@ -1192,12 +1194,21 @@ def _handle_sessions_search(handler, parsed):
     content_search = qs.get("content", ["1"])[0] == "1"
     depth = int(qs.get("depth", ["5"])[0])
     if not q:
-        return j(handler, {"sessions": all_sessions()})
+        safe_sessions = []
+        for s in all_sessions():
+            item = dict(s)
+            if isinstance(item.get("title"), str):
+                item["title"] = _redact_text(item["title"])
+            safe_sessions.append(item)
+        return j(handler, {"sessions": safe_sessions})
     results = []
     for s in all_sessions():
         title_match = q in (s.get("title") or "").lower()
         if title_match:
-            results.append(dict(s, match_type="title"))
+            item = dict(s, match_type="title")
+            if isinstance(item.get("title"), str):
+                item["title"] = _redact_text(item["title"])
+            results.append(item)
             continue
         if content_search:
             try:
@@ -1212,7 +1223,10 @@ def _handle_sessions_search(handler, parsed):
                             if isinstance(p, dict) and p.get("type") == "text"
                         )
                     if q in str(c).lower():
-                        results.append(dict(s, match_type="content"))
+                        item = dict(s, match_type="content")
+                        if isinstance(item.get("title"), str):
+                            item["title"] = _redact_text(item["title"])
+                        results.append(item)
                         break
             except (KeyError, Exception):
                 pass
