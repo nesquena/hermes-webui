@@ -354,6 +354,13 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             # Pass personality via ephemeral_system_prompt (agent's own mechanism)
             if _personality_prompt:
                 agent.ephemeral_system_prompt = _personality_prompt
+            
+            # We no longer rewrite [Attached files: ...] to use absolute paths.
+            # The agent is instructed to combine [Workspace: ...] with [Attached files: ...]
+            # automatically. See AGENTS.md.
+            if '\n\n[Attached files:' in msg_text:
+                pass
+
             result = agent.run_conversation(
                 user_message=workspace_ctx + msg_text,
                 system_message=workspace_system_msg,
@@ -521,7 +528,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                     if m.get('role') == 'user':
                         content = str(m.get('content', ''))
                         # Match if content is part of the sent message or vice-versa
-                        base_text = msg_text.split('\n\n[Attached files:')[0].strip()
+                        base_text = msg_text.split('\n\n[Attached files:')[0].strip() if '\n\n[Attached files:' in msg_text else msg_text
                         if base_text[:60] in content or content[:60] in msg_text:
                             m['attachments'] = attachments
                             break
