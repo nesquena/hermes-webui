@@ -1289,6 +1289,15 @@ function _applySavedSettingsUi(saved, body, opts){
     if(showCliSessions) startGatewaySSE();
     else if(typeof stopGatewaySSE==='function') stopGatewaySSE();
   }
+  // Resolve 'system' to actual dark/light before applying
+  _applyTheme(theme);
+  // Re-apply system change listener if system is selected
+  if(theme==='system'){
+    const mq=window.matchMedia('(prefers-color-scheme: dark)');
+    const handler=(e)=>{ document.documentElement.dataset.theme=e.matches?'dark':'light'; };
+    mq.removeEventListener('change', handler);
+    mq.addEventListener('change', handler);
+  }
   _setSettingsAuthButtonsVisible(!!saved.auth_enabled);
   _settingsDirty=false;
   _settingsThemeOnOpen=theme;
