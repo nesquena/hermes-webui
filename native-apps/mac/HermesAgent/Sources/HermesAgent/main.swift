@@ -1,19 +1,26 @@
 import Cocoa
+import Darwin
 import Foundation
 
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
 
-signal(SIGTERM) { _ in
+// Safe signal handling via GCD (signal handlers must be async-signal-safe)
+let sigTermSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+sigTermSource.setEventHandler {
     (NSApp.delegate as? AppDelegate)?.tunnelManager?.stop()
-    Thread.sleep(forTimeInterval: 1.5)
-    exit(0)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { NSApp.terminate(nil) }
 }
-signal(SIGINT) { _ in
+sigTermSource.resume()
+signal(SIGTERM, SIG_IGN)
+
+let sigIntSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+sigIntSource.setEventHandler {
     (NSApp.delegate as? AppDelegate)?.tunnelManager?.stop()
-    Thread.sleep(forTimeInterval: 1.5)
-    exit(0)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { NSApp.terminate(nil) }
 }
+sigIntSource.resume()
+signal(SIGINT, SIG_IGN)
 
 app.run()

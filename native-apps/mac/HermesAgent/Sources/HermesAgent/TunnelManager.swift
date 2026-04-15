@@ -35,7 +35,7 @@ class TunnelManager {
             "-o", "StrictHostKeyChecking=accept-new",
             "-o", "ExitOnForwardFailure=yes",
             "-L", "\(localPort):\(remoteHost):\(remotePort)",
-            "\(user)@\(host)"
+            "\(user)@\(host)",
         ]
 
         let pipe = Pipe()
@@ -91,7 +91,8 @@ class TunnelManager {
 
     private func startMonitoring() {
         monitorTimer?.invalidate()
-        monitorTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
+        monitorTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) {
+            [weak self] _ in
             guard let self = self, let p = self.process else { return }
             if !p.isRunning {
                 self.setStatus(.disconnected)
@@ -100,7 +101,9 @@ class TunnelManager {
         }
     }
 
-    private func waitForPortForward(timeout: TimeInterval = 5.0, interval: TimeInterval = 0.5) -> Bool {
+    private func waitForPortForward(timeout: TimeInterval = 5.0, interval: TimeInterval = 0.5)
+        -> Bool
+    {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if process?.isRunning != true {

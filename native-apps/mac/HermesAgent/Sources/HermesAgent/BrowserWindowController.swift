@@ -5,8 +5,7 @@ class BrowserWindow: NSWindow {
     var onPaste: (() -> Void)?
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if event.modifierFlags.contains(.command) &&
-           event.charactersIgnoringModifiers == "v" {
+        if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "v" {
             onPaste?()
             return true
         }
@@ -17,16 +16,20 @@ class BrowserWindow: NSWindow {
 class BrowserWindowController: NSWindowController, WKUIDelegate, WKNavigationDelegate {
 
     private var webView: WKWebView!
+    private var statusBar: NSView!
+    private var separator: NSView!
     private var statusDot: NSView!
     private var statusLabel: NSTextField!
     private var reconnectButton: NSButton!
     private let urlString: String
     private let appTitle: String
+    private let connectionMode: String
     var onReconnect: (() -> Void)?
 
-    init(urlString: String, title: String) {
+    init(urlString: String, title: String, connectionMode: String = "direct") {
         self.urlString = urlString
         self.appTitle = title
+        self.connectionMode = connectionMode
 
         let window = BrowserWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 830),
@@ -50,7 +53,7 @@ class BrowserWindowController: NSWindowController, WKUIDelegate, WKNavigationDel
     private func buildUI() {
         guard let contentView = window?.contentView else { return }
         let bounds = contentView.bounds
-        let statusBarHeight: CGFloat = 28
+        let statusBarHeight: CGFloat = connectionMode == "ssh" ? 28 : 0
 
         let config = WKWebViewConfiguration()
         let prefs = WKPreferences()
@@ -58,13 +61,15 @@ class BrowserWindowController: NSWindowController, WKUIDelegate, WKNavigationDel
         prefs.setValue(true, forKey: "DOMPasteAllowed")
         config.preferences = prefs
         let script = WKUserScript(
-            source: "document.addEventListener('paste', function(e) { e.stopImmediatePropagation(); }, true);",
+            source:
+                "document.addEventListener('paste', function(e) { e.stopImmediatePropagation(); }, true);",
             injectionTime: .atDocumentStart,
             forMainFrameOnly: false
         )
         config.userContentController.addUserScript(script)
 
-        let webFrame = NSRect(x: 0, y: statusBarHeight, width: bounds.width, height: bounds.height - statusBarHeight)
+        let webFrame = NSRect(
+            x: 0, y: statusBarHeight, width: bounds.width, height: bounds.height - statusBarHeight)
         webView = WKWebView(frame: webFrame, configuration: config)
         webView.autoresizingMask = [.width, .height]
         webView.uiDelegate = self
@@ -72,37 +77,43 @@ class BrowserWindowController: NSWindowController, WKUIDelegate, WKNavigationDel
         webView.allowsMagnification = true
         contentView.addSubview(webView)
 
-        let statusBar = NSView(frame: NSRect(x: 0, y: 0, width: bounds.width, height: statusBarHeight))
-        statusBar.autoresizingMask = [.width]
-        statusBar.wantsLayer = true
-        statusBar.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-        contentView.addSubview(statusBar)
+        // Only add status bar in SSH mode
+        if connectionMode == "ssh" {
+            statusBar = NSView(
+                frame: NSRect(x: 0, y: 0, width: bounds.width, height: statusBarHeight))
+            statusBar.autoresizingMask = [.width]
+            statusBar.wantsLayer = true
+            statusBar.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+            contentView.addSubview(statusBar)
 
-        let separator = NSView(frame: NSRect(x: 0, y: statusBarHeight - 1, width: bounds.width, height: 1))
-        separator.autoresizingMask = [.width]
-        separator.wantsLayer = true
-        separator.layer?.backgroundColor = NSColor.separatorColor.cgColor
-        contentView.addSubview(separator)
+            separator = NSView(
+                frame: NSRect(x: 0, y: statusBarHeight - 1, width: bounds.width, height: 1))
+            separator.autoresizingMask = [.width]
+            separator.wantsLayer = true
+            separator.layer?.backgroundColor = NSColor.separatorColor.cgColor
+            contentView.addSubview(separator)
 
-        statusDot = NSView(frame: NSRect(x: 12, y: 9, width: 10, height: 10))
-        statusDot.wantsLayer = true
-        statusDot.layer?.cornerRadius = 5
-        statusDot.layer?.backgroundColor = NSColor.systemGray.cgColor
-        statusBar.addSubview(statusDot)
+            statusDot = NSView(frame: NSRect(x: 12, y: 9, width: 10, height: 10))
+            statusDot.wantsLayer = true
+            statusDot.layer?.cornerRadius = 5
+            statusDot.layer?.backgroundColor = NSColor.systemGray.cgColor
+            statusBar.addSubview(statusDot)
 
-        statusLabel = NSTextField(labelWithString: "Connecting…")
-        statusLabel.font = NSFont.systemFont(ofSize: 11)
-        statusLabel.textColor = .secondaryLabelColor
-        statusLabel.frame = NSRect(x: 30, y: 6, width: 500, height: 16)
-        statusBar.addSubview(statusLabel)
+            statusLabel = NSTextField(labelWithString: "Connecting…")
+            statusLabel.font = NSFont.systemFont(ofSize: 11)
+            statusLabel.textColor = .secondaryLabelColor
+            statusLabel.frame = NSRect(x: 30, y: 6, width: 500, height: 16)
+            statusBar.addSubview(statusLabel)
 
-        reconnectButton = NSButton(title: "Reconnect", target: self, action: #selector(reconnectTapped))
-        reconnectButton.bezelStyle = .rounded
-        reconnectButton.font = NSFont.systemFont(ofSize: 11)
-        reconnectButton.frame = NSRect(x: bounds.width - 110, y: 2, width: 100, height: 24)
-        reconnectButton.autoresizingMask = [.minXMargin]
-        reconnectButton.isHidden = true
-        statusBar.addSubview(reconnectButton)
+            reconnectButton = NSButton(
+                title: "Reconnect", target: self, action: #selector(reconnectTapped))
+            reconnectButton.bezelStyle = .rounded
+            reconnectButton.font = NSFont.systemFont(ofSize: 11)
+            reconnectButton.frame = NSRect(x: bounds.width - 110, y: 2, width: 100, height: 24)
+            reconnectButton.autoresizingMask = [.minXMargin]
+            reconnectButton.isHidden = true
+            statusBar.addSubview(reconnectButton)
+        }
 
         if let url = URL(string: urlString) {
             webView.load(URLRequest(url: url))
@@ -116,58 +127,60 @@ class BrowserWindowController: NSWindowController, WKUIDelegate, WKNavigationDel
 
         // Image paste — write to temp file and inject via fetch
         if let image = NSImage(pasteboard: pb),
-           let tiff = image.tiffRepresentation,
-           let bitmap = NSBitmapImageRep(data: tiff),
-           let png = bitmap.representation(using: .png, properties: [:]) {
+            let tiff = image.tiffRepresentation,
+            let bitmap = NSBitmapImageRep(data: tiff),
+            let png = bitmap.representation(using: .png, properties: [:])
+        {
 
             let base64 = png.base64EncodedString()
 
+            // Safe: base64 encoding only produces [A-Za-z0-9+/=], no JS-special chars
             // Try multiple strategies to get the image into the web app
             let js = """
-            (function() {
-                const base64 = '\(base64)';
-                const binary = atob(base64);
-                const bytes = new Uint8Array(binary.length);
-                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-                const blob = new Blob([bytes], { type: 'image/png' });
-                const file = new File([blob], 'screenshot.png', { type: 'image/png', lastModified: Date.now() });
+                (function() {
+                    const base64 = '\(base64)';
+                    const binary = atob(base64);
+                    const bytes = new Uint8Array(binary.length);
+                    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                    const blob = new Blob([bytes], { type: 'image/png' });
+                    const file = new File([blob], 'screenshot.png', { type: 'image/png', lastModified: Date.now() });
 
-                // Strategy 1: fire paste event on active element with clipboardData
-                const active = document.activeElement || document.body;
-                const dt = new DataTransfer();
-                dt.items.add(file);
+                    // Strategy 1: fire paste event on active element with clipboardData
+                    const active = document.activeElement || document.body;
+                    const dt = new DataTransfer();
+                    dt.items.add(file);
 
-                // Override clipboardData getter so web app can read items
-                const pasteEvent = new Event('paste', { bubbles: true, cancelable: true });
-                Object.defineProperty(pasteEvent, 'clipboardData', {
-                    value: dt,
-                    writable: false
-                });
-                active.dispatchEvent(pasteEvent);
-
-                // Strategy 2: also try on document and body
-                document.dispatchEvent(new Event('paste', { bubbles: true }));
-
-                // Strategy 3: simulate drop on active element
-                const dropDt = new DataTransfer();
-                dropDt.items.add(file);
-                const rect = active.getBoundingClientRect();
-                const cx = rect.left + rect.width / 2;
-                const cy = rect.top + rect.height / 2;
-                ['dragenter','dragover','drop'].forEach(type => {
-                    const ev = new DragEvent(type, {
-                        bubbles: true,
-                        cancelable: true,
-                        clientX: cx,
-                        clientY: cy,
-                        dataTransfer: dropDt
+                    // Override clipboardData getter so web app can read items
+                    const pasteEvent = new Event('paste', { bubbles: true, cancelable: true });
+                    Object.defineProperty(pasteEvent, 'clipboardData', {
+                        value: dt,
+                        writable: false
                     });
-                    active.dispatchEvent(ev);
-                });
+                    active.dispatchEvent(pasteEvent);
 
-                return 'ok';
-            })();
-            """
+                    // Strategy 2: also try on document and body
+                    document.dispatchEvent(new Event('paste', { bubbles: true }));
+
+                    // Strategy 3: simulate drop on active element
+                    const dropDt = new DataTransfer();
+                    dropDt.items.add(file);
+                    const rect = active.getBoundingClientRect();
+                    const cx = rect.left + rect.width / 2;
+                    const cy = rect.top + rect.height / 2;
+                    ['dragenter','dragover','drop'].forEach(type => {
+                        const ev = new DragEvent(type, {
+                            bubbles: true,
+                            cancelable: true,
+                            clientX: cx,
+                            clientY: cy,
+                            dataTransfer: dropDt
+                        });
+                        active.dispatchEvent(ev);
+                    });
+
+                    return 'ok';
+                })();
+                """
             webView.evaluateJavaScript(js) { result, error in
                 if let error = error {
                     print("Paste JS error: \(error)")
@@ -179,7 +192,8 @@ class BrowserWindowController: NSWindowController, WKUIDelegate, WKNavigationDel
         } else if let text = pb.string(forType: .string) {
             let jsonText: String
             if let data = try? JSONEncoder().encode(text),
-               let encoded = String(data: data, encoding: .utf8) {
+                let encoded = String(data: data, encoding: .utf8)
+            {
                 jsonText = encoded
             } else {
                 jsonText = "\"\""
@@ -196,6 +210,8 @@ class BrowserWindowController: NSWindowController, WKUIDelegate, WKNavigationDel
     // MARK: - Status
 
     func updateStatus(_ status: TunnelStatus, host: String, port: Int) {
+        guard connectionMode == "ssh" else { return }
+
         DispatchQueue.main.async {
             switch status {
             case .connecting:
@@ -220,10 +236,12 @@ class BrowserWindowController: NSWindowController, WKUIDelegate, WKNavigationDel
 
     // MARK: - File upload
 
-    func webView(_ webView: WKWebView,
-                 runOpenPanelWith parameters: WKOpenPanelParameters,
-                 initiatedByFrame frame: WKFrameInfo,
-                 completionHandler: @escaping ([URL]?) -> Void) {
+    func webView(
+        _ webView: WKWebView,
+        runOpenPanelWith parameters: WKOpenPanelParameters,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping ([URL]?) -> Void
+    ) {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
