@@ -415,6 +415,10 @@ $('modelSelect').onchange=async()=>{
   S.session.model=selectedModel;
   if(typeof syncModelChip==='function') syncModelChip();
   syncTopbar();
+  // Show toast if switching model during active session (issue #517)
+  if(S.session && S.session.messages && S.session.messages.length > 0){
+    if(typeof showToast==='function') showToast('Model change takes effect in your next conversation', 3000);
+  }
   // Warn if selected model belongs to a different provider than what Hermes is configured for
   if(typeof _checkProviderMismatch==='function'){
     const warn=_checkProviderMismatch(selectedModel);
