@@ -32,7 +32,7 @@ class TunnelManager {
         p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
         p.arguments = [
             "-N",
-            "-o", "StrictHostKeyChecking=no",
+            "-o", "StrictHostKeyChecking=accept-new",
             "-o", "ExitOnForwardFailure=yes",
             "-L", "\(localPort):\(remoteHost):\(remotePort)",
             "\(user)@\(host)"
@@ -62,9 +62,11 @@ class TunnelManager {
             return
         }
 
-        DispatchQueue.global().asyncAfter(deadline: .now() + 2.0) {
+        DispatchQueue.global().async { [weak self] in
+            guard let self = self else { return }
+            let connected = self.waitForPortForward(timeout: 5.0, interval: 0.5)
             DispatchQueue.main.async {
-                if p.isRunning {
+                if connected {
                     self.setStatus(.connected)
                     self.startMonitoring()
                 } else {
@@ -94,6 +96,38 @@ class TunnelManager {
             if !p.isRunning {
                 self.setStatus(.disconnected)
                 self.monitorTimer?.invalidate()
+            }
+        }
+    }
+
+    private func waitForPortForward(timeout: TimeInterval = 5.0, interval: TimeInterval = 0.5) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if process?.isRunning != true {
+                return false
+            }
+            if portIsListening(localPort) {
+                return true
+            }
+            Thread.sleep(forTimeInterval: interval)
+        }
+        return false
+    }
+
+    private func portIsListening(_ port: Int) -> Bool {
+        let sock = socket(AF_INET, SOCK_STREAM, 0)
+        guard sock >= 0 else { return false }
+        defer { close(sock) }
+
+        var addr = sockaddr_in()
+        addr.sin_len = __uint8_t(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = in_port_t(port).bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+
+        return withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                connect(sock, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
             }
         }
     }

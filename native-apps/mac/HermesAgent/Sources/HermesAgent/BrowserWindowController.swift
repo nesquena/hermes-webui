@@ -120,11 +120,6 @@ class BrowserWindowController: NSWindowController, WKUIDelegate, WKNavigationDel
            let bitmap = NSBitmapImageRep(data: tiff),
            let png = bitmap.representation(using: .png, properties: [:]) {
 
-            // Write to temp file that the webview can fetch
-            let tmpURL = URL(fileURLWithPath: NSTemporaryDirectory())
-                .appendingPathComponent("clipboard_\(Int(Date().timeIntervalSince1970)).png")
-            try? png.write(to: tmpURL)
-
             let base64 = png.base64EncodedString()
 
             // Try multiple strategies to get the image into the web app
@@ -182,13 +177,15 @@ class BrowserWindowController: NSWindowController, WKUIDelegate, WKNavigationDel
             }
 
         } else if let text = pb.string(forType: .string) {
-            let escaped = text
-                .replacingOccurrences(of: "\\", with: "\\\\")
-                .replacingOccurrences(of: "`", with: "\\`")
-                .replacingOccurrences(of: "\r\n", with: "\\n")
-                .replacingOccurrences(of: "\n", with: "\\n")
+            let jsonText: String
+            if let data = try? JSONEncoder().encode(text),
+               let encoded = String(data: data, encoding: .utf8) {
+                jsonText = encoded
+            } else {
+                jsonText = "\"\""
+            }
             webView.evaluateJavaScript(
-                "document.execCommand('insertText', false, `\(escaped)`);",
+                "document.execCommand('insertText', false, \(jsonText));",
                 completionHandler: nil
             )
         } else {

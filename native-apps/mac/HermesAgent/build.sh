@@ -40,7 +40,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << PLIST
     <key>CFBundleName</key>
     <string>$DISPLAY_NAME</string>
     <key>CFBundleIdentifier</key>
-    <string>com.local.$APP_NAME</string>
+    <string>ai.get-hermes.HermesAgent</string>
     <key>CFBundleVersion</key>
     <string>1.0</string>
     <key>CFBundleExecutable</key>
@@ -63,11 +63,12 @@ echo "→ Installing to Applications..."
 rm -rf "/Applications/$APP_BUNDLE"
 cp -r "$APP_BUNDLE" "/Applications/$APP_BUNDLE"
 
-echo "→ Busting icon cache..."
-touch "/Applications/$APP_BUNDLE"
-sudo find /private/var/folders -name "com.apple.dock.iconcache" -exec rm {} \; 2>/dev/null || true
-sudo rm -rf /Library/Caches/com.apple.iconservices.store 2>/dev/null || true
-killall Dock
-killall Finder
+echo "→ Installed to /Applications/$APP_BUNDLE"
+echo "Note: icon cache refresh is optional and may require sudo if the old icon persists."
+echo "If needed, run these commands manually:"
+echo "  sudo find /private/var/folders -name \"com.apple.dock.iconcache\" -exec rm {} \; 2>/dev/null || true"
+echo "  sudo rm -rf /Library/Caches/com.apple.iconservices.store 2>/dev/null || true"
+echo "  killall Dock"
+echo "  killall Finder"
 
 echo "✓ Done! Run with: open \"$APP_BUNDLE\""

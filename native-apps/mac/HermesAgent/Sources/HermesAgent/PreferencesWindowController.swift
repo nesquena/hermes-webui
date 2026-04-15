@@ -100,6 +100,8 @@ class PreferencesWindowController: NSWindowController {
         // Validate fields aren't empty
         guard !usernameField.stringValue.isEmpty,
               !hostField.stringValue.isEmpty,
+              !localPortField.stringValue.isEmpty,
+              !remotePortField.stringValue.isEmpty,
               !targetURLField.stringValue.isEmpty else {
             let alert = NSAlert()
             alert.messageText = "Missing fields"
@@ -108,15 +110,39 @@ class PreferencesWindowController: NSWindowController {
             return
         }
 
+        guard let localPort = Int(localPortField.stringValue), (1...65535).contains(localPort) else {
+            showValidationError("Local port must be a number between 1 and 65535.")
+            return
+        }
+
+        guard let remotePort = Int(remotePortField.stringValue), (1...65535).contains(remotePort) else {
+            showValidationError("Remote port must be a number between 1 and 65535.")
+            return
+        }
+
+        guard let targetURL = URL(string: targetURLField.stringValue),
+              let scheme = targetURL.scheme?.lowercased(),
+              ["http", "https"].contains(scheme) else {
+            showValidationError("Target URL must be a valid http:// or https:// URL.")
+            return
+        }
+
         let defaults = UserDefaults.standard
         defaults.set(usernameField.stringValue,  forKey: "sshUser")
         defaults.set(hostField.stringValue,      forKey: "sshHost")
-        defaults.set(localPortField.stringValue,  forKey: "localPort")
-        defaults.set(remotePortField.stringValue, forKey: "remotePort")
-        defaults.set(targetURLField.stringValue,  forKey: "targetURL")
+        defaults.set(String(localPort),          forKey: "localPort")
+        defaults.set(String(remotePort),         forKey: "remotePort")
+        defaults.set(targetURL.absoluteString,   forKey: "targetURL")
 
         close()
         onSave?()
+    }
+
+    private func showValidationError(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "Invalid value"
+        alert.informativeText = message
+        alert.runModal()
     }
 
     @objc func cancel() {
