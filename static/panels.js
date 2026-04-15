@@ -483,6 +483,7 @@ async function submitSkillSave() {
   if (!content.trim()) { errEl.textContent = t('content_required'); errEl.style.display = ''; return; }
   try {
     await api('/api/skills/save', {method:'POST', body: JSON.stringify({name, category: category||undefined, content})});
+    _cronSkillsCache = null;
     showToast(_editingSkillName ? t('skill_updated') : t('skill_created'));
     _skillsData = null;
     toggleSkillForm();
