@@ -271,6 +271,10 @@ async function selectModelFromDropdown(value){
   }
   sel.value=value;
   syncModelChip();
+  // Warn user if model is changed mid-session (model takes effect next turn)
+  if(S.session && S.messages && S.messages.length > 0){
+    showToast('Model change takes effect in your next conversation', 3500);
+  }
   closeModelDropdown();
   if(typeof sel.onchange==='function') await sel.onchange();
 }
