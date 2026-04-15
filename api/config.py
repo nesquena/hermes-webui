@@ -949,8 +949,11 @@ def get_available_models() -> dict:
     # THAT provider, not to a separate "Custom" group. hermes_cli reports
     # 'custom' as authenticated whenever base_url is set, which would otherwise
     # build a phantom "Custom" bucket next to the real provider's group. Drop
-    # it unless the user explicitly chose 'custom' as their active provider.
-    if active_provider and active_provider != "custom":
+    # it unless (a) the user explicitly chose 'custom' as their active provider,
+    # or (b) the user has custom_providers entries in config.yaml (those models
+    # were already added above and should still be shown).
+    _has_custom_providers = isinstance(_custom_providers_cfg, list) and len(_custom_providers_cfg) > 0
+    if active_provider and active_provider != "custom" and not _has_custom_providers:
         detected_providers.discard("custom")
 
     # 5. Build model groups
