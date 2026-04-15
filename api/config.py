@@ -604,23 +604,42 @@ def resolve_model_provider(model_id: str) -> tuple:
 
     # Custom providers declared in config.yaml should win over slash-based
     # OpenRouter heuristics. Their model IDs commonly contain '/' too.
+    # Supports both single 'model' field and 'models' dict format.
     custom_providers = cfg.get("custom_providers", [])
     if isinstance(custom_providers, list):
         for entry in custom_providers:
             if not isinstance(entry, dict):
                 continue
-            entry_model = (entry.get("model") or "").strip()
             entry_name = (entry.get("name") or "").strip()
             entry_base_url = (entry.get("base_url") or "").strip()
+            
+            # Check single model field (legacy format)
+            entry_model = (entry.get("model") or "").strip()
             if entry_model and entry_name and model_id == entry_model:
+                provider_hint = "custom:" + entry_name.lower().replace(" ", "-")
+                return model_id, provider_hint, entry_base_url or None
+            
+            # Check models dict format (new format)
+            entry_models = entry.get("models", {})
+            if isinstance(entry_models, dict) and entry_name and model_id in entry_models:
                 provider_hint = "custom:" + entry_name.lower().replace(" ", "-")
                 return model_id, provider_hint, entry_base_url or None
 
     # @provider:model format — explicit provider hint from the dropdown.
     # Route through that provider directly (resolve_runtime_provider will
     # resolve credentials in streaming.py).
+    # For custom_providers, add 'custom:' prefix and lookup base_url.
     if model_id.startswith("@") and ":" in model_id:
         provider_hint, bare_model = model_id[1:].split(":", 1)
+        # Check if this is a custom provider
+        if isinstance(custom_providers, list):
+            for entry in custom_providers:
+                if not isinstance(entry, dict):
+                    continue
+                entry_name = (entry.get("name") or "").strip().lower().replace(" ", "-")
+                entry_base_url = (entry.get("base_url") or "").strip()
+                if entry_name == provider_hint:
+                    return bare_model, "custom:" + provider_hint, entry_base_url or None
         return bare_model, provider_hint, None
 
     if "/" in model_id:
@@ -932,18 +951,57 @@ def get_available_models() -> dict:
     # 3b. Include models from custom_providers config entries.
     # These are explicitly configured and should always appear even when the
     # /v1/models endpoint is unreachable or returns a subset.
+    # Supports both:
+    #   - Single model: model: "model-name"
+    #   - Multiple models: models: {model-name: {context_length: ...}, ...}
     _custom_providers_cfg = cfg.get("custom_providers", [])
+    _custom_provider_models = {}  # {provider_name: [model_ids]}
     if isinstance(_custom_providers_cfg, list):
-        _seen_custom_ids = {m["id"] for m in auto_detected_models}
         for _cp in _custom_providers_cfg:
             if not isinstance(_cp, dict):
                 continue
+            _cp_name = _cp.get("name", "")
+            if not _cp_name:
+                continue
+            
+            _provider_models = []
+            _seen_in_this_provider = set()  # Track duplicates within this provider only
+            
+            # Check for models field - supports dict, list, and string formats
+            _models_field = _cp.get("models")
+            
+            # Format 1: models dict {model_name: {config...}}
+            if isinstance(_models_field, dict) and _models_field:
+                for _model_id in _models_field.keys():
+                    if _model_id and _model_id not in _seen_in_this_provider:
+                        _provider_models.append(_model_id)
+                        _seen_in_this_provider.add(_model_id)
+            
+            # Format 2: models list [model_name1, model_name2, ...]
+            elif isinstance(_models_field, list) and _models_field:
+                for _model_id in _models_field:
+                    # Handle both string items and dict items with 'id' key
+                    if isinstance(_model_id, dict):
+                        _model_id = _model_id.get("id", _model_id.get("name", ""))
+                    if _model_id and _model_id not in _seen_in_this_provider:
+                        _provider_models.append(str(_model_id))
+                        _seen_in_this_provider.add(str(_model_id))
+            
+            # Format 3: single model field (legacy format)
             _cp_model = _cp.get("model", "")
-            if _cp_model and _cp_model not in _seen_custom_ids:
-                _cp_label = _cp_model.split("/")[-1] if "/" in _cp_model else _cp_model
-                auto_detected_models.append({"id": _cp_model, "label": _cp_label})
-                _seen_custom_ids.add(_cp_model)
-                detected_providers.add("custom")
+            if _cp_model and _cp_model not in _seen_in_this_provider:
+                _provider_models.append(_cp_model)
+                _seen_in_this_provider.add(_cp_model)
+            
+            if _provider_models:
+                _custom_provider_models[_cp_name] = _provider_models
+    
+    # Remove models from auto_detected_models that are already in custom_providers
+    # custom_providers config takes precedence over /v1/models API results
+    _all_custom_model_ids = set()
+    for _models in _custom_provider_models.values():
+        _all_custom_model_ids.update(_models)
+    auto_detected_models = [m for m in auto_detected_models if m["id"] not in _all_custom_model_ids]
 
     # If the user configured a real model.provider, the base_url belongs to
     # THAT provider, not to a separate "Custom" group. hermes_cli reports
@@ -953,12 +1011,20 @@ def get_available_models() -> dict:
     # or (b) the user has custom_providers entries in config.yaml (those models
     # were already added above and should still be shown).
     _has_custom_providers = isinstance(_custom_providers_cfg, list) and len(_custom_providers_cfg) > 0
-    if active_provider and active_provider != "custom" and not _has_custom_providers:
+    # Also discard "custom" when active_provider is "custom:xxx" format to avoid duplicate groups
+    _is_custom_subprovider = active_provider and (active_provider.startswith("custom:") or active_provider == "custom")
+    if active_provider and active_provider != "custom" and (not _has_custom_providers or _is_custom_subprovider):
         detected_providers.discard("custom")
 
     # 5. Build model groups
     if detected_providers:
         for pid in sorted(detected_providers):
+            # Skip custom:xxx providers that will be handled by _custom_provider_models
+            if pid.startswith("custom:"):
+                _cp_short_name = pid[7:]  # strip "custom:" prefix
+                if _cp_short_name in _custom_provider_models:
+                    continue
+            
             provider_name = _PROVIDER_DISPLAY.get(pid, pid.title())
             if pid == "openrouter":
                 # OpenRouter uses provider/model format -- show the fallback list
@@ -1017,7 +1083,28 @@ def get_available_models() -> dict:
                             ],
                         }
                     )
-    else:
+    
+    # Add custom_providers models as separate groups
+    # Each custom provider gets its own group with its models
+    # Use @provider:model format for unique routing
+    for _cp_name, _cp_models in sorted(_custom_provider_models.items()):
+        _cp_display_name = f"Custom:{_cp_name.title()}"
+        _cp_id = _cp_name.lower().replace(" ", "-")
+        _models_list = []
+        for _mid in _cp_models:
+            # Add @provider: prefix for unique model identification
+            _model_id = f"@{_cp_id}:{_mid}"
+            _models_list.append({
+                "id": _model_id,
+                "label": _mid.split("/")[-1] if "/" in _mid else _mid
+            })
+        if _models_list:
+            groups.append({
+                "provider": _cp_display_name,
+                "models": _models_list
+            })
+
+    if not groups:
         # No providers detected. Show only the configured default model so the user
         # can at least send messages with their current setting. Avoid showing a
         # generic multi-provider list — those models wouldn't be routable anyway.
@@ -1029,11 +1116,19 @@ def get_available_models() -> dict:
     # Ensure the user's configured default_model always appears in the dropdown.
     # It may be missing if the model isn't in any hardcoded list (e.g. openrouter/free,
     # a custom local model, or any model.default not in _FALLBACK_MODELS).
-    # Normalize before comparing: strip provider prefix and unify separators so
+    # Normalize before comparing: strip provider prefix (@provider:) and unify separators so
     # 'anthropic/claude-opus-4.6' matches 'claude-opus-4.6' and 'claude-sonnet-4-6'
     # matches 'claude-sonnet-4.6' (hermes-agent uses hyphens, webui uses dots).
+    # Also handle @provider:model format by stripping the prefix.
     if default_model:
-        _norm = lambda mid: (mid.split("/", 1)[-1] if "/" in mid else mid).replace("-", ".")
+        def _norm(mid):
+            # Strip @provider: prefix if present
+            if mid.startswith("@") and ":" in mid:
+                mid = mid.split(":", 1)[-1]
+            # Strip provider/ prefix if present (e.g. anthropic/claude-opus-4.6)
+            mid = mid.split("/", 1)[-1] if "/" in mid else mid
+            # Unify hyphens and dots
+            return mid.replace("-", ".")
         all_ids_norm = {_norm(m["id"]) for g in groups for m in g.get("models", [])}
         if _norm(default_model) not in all_ids_norm:
             # Determine which group to inject into. Compare against the
