@@ -581,6 +581,20 @@ function applyBotName(){
   if(msg) msg.placeholder='Message '+name+'\u2026';
 }
 
+function _applyTheme(theme){
+  if(theme==='system'){
+    theme=window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';
+  }
+  document.documentElement.dataset.theme=theme;
+  return theme;
+}
+// Listen for OS theme changes when system is selected
+const _savedTheme=localStorage.getItem('hermes-theme');
+if(_savedTheme==='system'){
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',(e)=>{
+    document.documentElement.dataset.theme=e.matches?'dark':'light';
+  });
+}
 (async()=>{
   // Load send key preference
   let _bootSettings={};
@@ -594,7 +608,7 @@ function applyBotName(){
     window._notificationsEnabled=!!s.notifications_enabled;
     window._botName=s.bot_name||'Hermes';
     const _theme=s.theme||'dark';
-    document.documentElement.dataset.theme=_theme;
+    _applyTheme(_theme);
     localStorage.setItem('hermes-theme',_theme);
     document.body.classList.toggle('bubble-layout',!!s.bubble_layout);
     if(typeof setLocale==='function'){
