@@ -4,11 +4,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     let appTitle = "Hermes Agent"
 
-    let defaultSSHUser    = "root"
+    let defaultSSHUser    = "hermes"
     let defaultSSHHost    = "your-server.com"
-    let defaultLocalPort  = "8080"
-    let defaultRemotePort = "8080"
-    let defaultTargetURL  = "http://localhost:8080"
+    let defaultLocalPort  = "8787"
+    let defaultRemotePort = "8787"
+    let defaultTargetURL  = "http://localhost:8787"
 
     var tunnelManager: TunnelManager!
     var splashWindow: SplashWindowController!
@@ -38,8 +38,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let defaults = UserDefaults.standard
         let user       = defaults.string(forKey: "sshUser")    ?? defaultSSHUser
         let host       = defaults.string(forKey: "sshHost")    ?? defaultSSHHost
-        let localPort  = Int(defaults.string(forKey: "localPort")  ?? defaultLocalPort)  ?? 8080
-        let remotePort = Int(defaults.string(forKey: "remotePort") ?? defaultRemotePort) ?? 8080
+        let localPort  = Int(defaults.string(forKey: "localPort")  ?? defaultLocalPort)  ?? 8787
+        let remotePort = Int(defaults.string(forKey: "remotePort") ?? defaultRemotePort) ?? 8787
         let targetURL  = defaults.string(forKey: "targetURL")  ?? defaultTargetURL
 
         tunnelManager?.stop()
