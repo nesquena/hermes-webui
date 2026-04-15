@@ -315,9 +315,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const d=JSON.parse(e.data);
       if(d.name==='clarify') return;
       const tc={name:d.name, preview:d.preview||'', args:d.args||{}, snippet:'', done:false, tid:d.tid||`live-${Date.now()}-${Math.random().toString(36).slice(2,8)}`};
-      if(!Array.isArray(INFLIGHT[activeSid].toolCalls)) INFLIGHT[activeSid].toolCalls=[];
-      INFLIGHT[activeSid].toolCalls.push(tc);
-      S.toolCalls=INFLIGHT[activeSid].toolCalls;
+      const inflight = INFLIGHT[activeSid] || (INFLIGHT[activeSid] = {
+        messages:[...S.messages],
+        uploaded:[],
+        toolCalls:[]
+      });
+      if(!Array.isArray(inflight.toolCalls)) inflight.toolCalls=[];
+      inflight.toolCalls.push(tc);
+      S.toolCalls=inflight.toolCalls;
       persistInflightState();
 
       if(!S.session||S.session.session_id!==activeSid) return;
@@ -373,8 +378,40 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       sendBrowserNotification('Clarification needed',d.question||'Tool clarification needed');
     });
 
+    source.addEventListener('title',e=>{
+      let d={};
+      try{ d=JSON.parse(e.data||'{}'); }catch(_){}
+      if((d.session_id||activeSid)!==activeSid) return;
+      const newTitle=String(d.title||'').trim();
+      if(!newTitle) return;
+      if(S.session&&S.session.session_id===activeSid){
+        S.session.title=newTitle;
+        syncTopbar();
+      }
+      if(typeof _allSessions!=='undefined'&&Array.isArray(_allSessions)){
+        const row=_allSessions.find(s=>s&&s.session_id===activeSid);
+        if(row) row.title=newTitle;
+      }
+      if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+      else if(typeof renderSessionList==='function') renderSessionList();
+    });
+
+    source.addEventListener('title_status',e=>{
+      let d={};
+      try{ d=JSON.parse(e.data||'{}'); }catch(_){}
+      if((d.session_id||activeSid)!==activeSid) return;
+      try{
+        console.info('[title]', {
+          status:String(d.status||''),
+          reason:String(d.reason||''),
+          title:String(d.title||''),
+          raw_preview:String(d.raw_preview||''),
+          session_id:String(d.session_id||activeSid)
+        });
+      }catch(_){}
+    });
+
     source.addEventListener('done',e=>{
-      source.close();
       const d=JSON.parse(e.data);
       delete INFLIGHT[activeSid];
       clearInflight();clearInflightState(activeSid);
@@ -414,6 +451,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       setComposerStatus('');
       playNotificationSound();
       sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished');
+    });
+
+    source.addEventListener('stream_end',e=>{
+      try{
+        const d=JSON.parse(e.data||'{}');
+        if((d.session_id||activeSid)!==activeSid) return;
+      }catch(_){}
+      source.close();
     });
 
     source.addEventListener('compressed',e=>{
@@ -526,7 +571,36 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setComposerStatus('');}
   }
 
-  _wireSSE(new EventSource(new URL(`/api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,location.origin).href,{withCredentials:true}));
+  (async()=>{
+    // Reattach path can carry stale stream ids after server restart; preflight
+    // status avoids opening a dead SSE URL that will 404 in the console.
+    if(reconnecting){
+      try{
+        const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
+        if(!st.active){
+          delete INFLIGHT[activeSid];
+          clearInflight();
+          clearInflightState(activeSid);
+          stopApprovalPolling();
+          stopClarifyPolling();
+          if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);
+          if(!_clarifySessionId||_clarifySessionId===activeSid) hideClarifyCard(true);
+          if(S.session&&S.session.session_id===activeSid){
+            S.activeStreamId=null;
+            const _cbe=$('btnCancel');if(_cbe)_cbe.style.display='none';
+            clearLiveToolCards();
+            removeThinking();
+            setBusy(false);
+            setComposerStatus('');
+            renderMessages();
+            renderSessionList();
+          }
+          return;
+        }
+      }catch(_){}
+    }
+    _wireSSE(new EventSource(new URL(`/api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,location.origin).href,{withCredentials:true}));
+  })();
 
 }
 

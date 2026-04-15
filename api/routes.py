@@ -1434,7 +1434,7 @@ def _handle_sse_stream(handler, parsed):
                 handler.wfile.flush()
                 continue
             _sse(handler, event, data)
-            if event in ("done", "error", "cancel"):
+            if event in ("stream_end", "error", "cancel"):
                 break
     except (BrokenPipeError, ConnectionResetError):
         pass

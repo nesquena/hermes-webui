@@ -6,10 +6,12 @@ import json
 import logging
 import os
 import queue
+import re
 import threading
 import time
 import traceback
 from pathlib import Path
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +58,442 @@ from api.workspace import set_last_workspace
 # Everything else (attachments, timestamp, _ts, etc.) is display-only
 # metadata added by the webui and must be stripped before the API call.
 _API_SAFE_MSG_KEYS = {'role', 'content', 'tool_calls', 'tool_call_id', 'name', 'refusal'}
+
+
+def _strip_thinking_markup(text: str) -> str:
+    """Remove common reasoning/thinking wrappers from model text."""
+    if not text:
+        return ''
+    s = str(text)
+    s = re.sub(r'<think>.*?</think>', ' ', s, flags=re.IGNORECASE | re.DOTALL)
+    s = re.sub(r'<\|channel\>thought.*?<channel\|>', ' ', s, flags=re.IGNORECASE | re.DOTALL)
+    s = re.sub(r'^\s*(the|ther)\s+user\s+is\s+asking.*$', ' ', s, flags=re.IGNORECASE | re.MULTILINE)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+
+def _sanitize_generated_title(text: str) -> str:
+    """Sanitize LLM-generated title text before persisting to session."""
+    s = _strip_thinking_markup(text or '')
+    s = re.sub(r'^\s*title\s*:\s*', '', s, flags=re.IGNORECASE)
+    s = s.strip(" \t\r\n\"'`")
+    s = re.sub(r'\s+', ' ', s).strip()
+    # Guard against chain-of-thought leakage and meta-reasoning patterns.
+    if _looks_invalid_generated_title(s):
+        return ''
+    return s[:80]
+
+
+def _looks_invalid_generated_title(text: str) -> bool:
+    s = str(text or '')
+    if not s.strip():
+        return True
+    return bool(
+        re.search(r'<think>|<\|channel\>thought', s, flags=re.IGNORECASE)
+        or re.search(r'^\s*(the|ther)\s+user\s+', s, flags=re.IGNORECASE)
+        or re.search(r'^\s*user\s+\w+\s+', s, flags=re.IGNORECASE)
+        or re.search(r'\b(they|user)\s+want(s)?\s+me\s+to\b', s, flags=re.IGNORECASE)
+        or re.search(r'^\s*(i|we)\s+(should|need to|will|can)\b', s, flags=re.IGNORECASE)
+        or re.search(r'^\s*let me\b', s, flags=re.IGNORECASE)
+        or re.search(r'用户(要求|希望|想让|让我)', s)
+        or re.search(r'请只?回复', s)
+        or re.search(r'^\s*(ok|okay|done|all set|complete|completed|finished)\b[\s.!?]*$', s, flags=re.IGNORECASE)
+        or re.search(r'^\s*(好的|好啦|完成了|已完成|测试完成|测试已完成|可以了|没问题)\s*[！!。\.\s]*$', s)
+    )
+
+
+def _message_text(value) -> str:
+    """Extract plain text from mixed message content payloads."""
+    if isinstance(value, list):
+        parts = []
+        for p in value:
+            if not isinstance(p, dict):
+                continue
+            ptype = str(p.get('type') or '').lower()
+            if ptype in ('', 'text', 'input_text', 'output_text'):
+                parts.append(str(p.get('text') or p.get('content') or ''))
+        return _strip_thinking_markup('\n'.join(parts).strip())
+    return _strip_thinking_markup(str(value or '').strip())
+
+
+def _first_exchange_snippets(messages):
+    """Return (first_user_text, first_assistant_text) snippets for title generation."""
+    user_text = ''
+    asst_text = ''
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        role = m.get('role')
+        if role == 'user' and not user_text:
+            user_text = _message_text(m.get('content'))
+        elif role == 'assistant' and not asst_text:
+            asst_text = _message_text(m.get('content'))
+        if user_text and asst_text:
+            break
+    return user_text[:500], asst_text[:500]
+
+
+def _is_provisional_title(current_title: str, messages) -> bool:
+    """Heuristic: title equals first-message substring placeholder."""
+    derived = title_from(messages, '') or ''
+    if not derived:
+        return False
+    return (str(current_title or '').strip() == derived[:64])
+
+
+def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]:
+    qa = f"User question:\n{user_text[:500]}\n\nAssistant answer:\n{assistant_text[:500]}"
+    prompts = [
+        (
+            "Generate a short session title from this conversation start.\n"
+            "Use BOTH the user's question and the assistant's visible answer.\n"
+            "Return only the title text, 3-8 words, as a topic label.\n"
+            "Do not output a full sentence.\n"
+            "Do not output acknowledgements or completion phrases like OK, done, all set, 测试完成.\n"
+            "Do not describe internal reasoning.\n"
+            "Bad: The user is asking..., OK, 好的，测试完成！\n"
+            "Good: 自动标题生成测试, Clarify Dialog Layout, GitHub Issue Triage"
+        ),
+        (
+            "Rewrite this conversation start as a concise noun-phrase title.\n"
+            "Use the actual topic, not the task outcome.\n"
+            "Return title text only.\n"
+            "Never output acknowledgements, completion status, or meta commentary."
+        ),
+    ]
+    return qa, prompts
+
+
+def _is_minimax_route(provider: str = '', model: str = '', base_url: str = '') -> bool:
+    text = ' '.join([
+        str(provider or '').lower(),
+        str(model or '').lower(),
+        str(base_url or '').lower(),
+    ])
+    return 'minimax' in text or 'minimaxi.com' in text
+
+
+def _title_completion_budget(provider: str = '', model: str = '', base_url: str = '') -> int:
+    if _is_minimax_route(provider, model, base_url):
+        return 384
+    return 160
+
+
+def generate_title_raw_via_aux(
+    user_text: str,
+    assistant_text: str,
+    provider: str = '',
+    model: str = '',
+    base_url: str = '',
+) -> tuple[Optional[str], str]:
+    """Return (raw_text, status) via auxiliary LLM route."""
+    if not user_text or not assistant_text:
+        return None, 'missing_exchange'
+    qa, prompts = _title_prompts(user_text, assistant_text)
+    max_tokens = _title_completion_budget(provider, model, base_url)
+    reasoning_extra = {"reasoning": {"enabled": False}}
+    if _is_minimax_route(provider, model, base_url):
+        reasoning_extra["reasoning_split"] = True
+    try:
+        from agent.auxiliary_client import call_llm
+        for idx, prompt in enumerate(prompts):
+            messages = [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": qa},
+            ]
+            try:
+                resp = call_llm(
+                    task='title_generation',
+                    provider=provider or None,
+                    model=model or None,
+                    base_url=base_url or None,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=0.2,
+                    timeout=15.0,
+                    extra_body=reasoning_extra,
+                )
+                raw = ''
+                try:
+                    raw = resp.choices[0].message.content or ''
+                except Exception:
+                    raw = ''
+                raw = str(raw or '').strip()
+                if raw:
+                    return raw, ('llm_aux' if idx == 0 else 'llm_aux_retry')
+            except Exception as e:
+                logger.debug("Aux title generation attempt %s failed: %s", idx + 1, e)
+        return None, 'llm_error_aux'
+    except Exception as e:
+        logger.debug("Aux title generation failed: %s", e)
+        return None, 'llm_error_aux'
+
+
+def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> tuple[Optional[str], str]:
+    """Return (raw_text, status) via active-agent route."""
+    if not user_text or not assistant_text:
+        return None, 'missing_exchange'
+    if agent is None:
+        return None, 'missing_agent'
+
+    qa, prompts = _title_prompts(user_text, assistant_text)
+    max_tokens = _title_completion_budget(
+        getattr(agent, 'provider', ''),
+        getattr(agent, 'model', ''),
+        getattr(agent, 'base_url', ''),
+    )
+    disabled_reasoning = {"enabled": False}
+    prev_reasoning = getattr(agent, 'reasoning_config', None)
+    try:
+        agent.reasoning_config = disabled_reasoning
+        for idx, prompt in enumerate(prompts):
+            api_messages = [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": qa},
+            ]
+            try:
+                raw = ""
+                if getattr(agent, 'api_mode', '') == 'codex_responses':
+                    codex_kwargs = agent._build_api_kwargs(api_messages)
+                    codex_kwargs.pop('tools', None)
+                    if 'max_output_tokens' in codex_kwargs:
+                        codex_kwargs['max_output_tokens'] = max_tokens
+                    resp = agent._run_codex_stream(codex_kwargs)
+                    assistant_message, _ = agent._normalize_codex_response(resp)
+                    raw = (assistant_message.content or '') if assistant_message else ''
+                elif getattr(agent, 'api_mode', '') == 'anthropic_messages':
+                    from agent.anthropic_adapter import build_anthropic_kwargs, normalize_anthropic_response
+                    ant_kwargs = build_anthropic_kwargs(
+                        model=agent.model,
+                        messages=api_messages,
+                        tools=None,
+                        max_tokens=max_tokens,
+                        reasoning_config=disabled_reasoning,
+                        is_oauth=getattr(agent, '_is_anthropic_oauth', False),
+                        preserve_dots=agent._anthropic_preserve_dots(),
+                        base_url=getattr(agent, '_anthropic_base_url', None),
+                    )
+                    resp = agent._anthropic_messages_create(ant_kwargs)
+                    assistant_message, _ = normalize_anthropic_response(
+                        resp, strip_tool_prefix=getattr(agent, '_is_anthropic_oauth', False)
+                    )
+                    raw = (assistant_message.content or '') if assistant_message else ''
+                else:
+                    api_kwargs = agent._build_api_kwargs(api_messages)
+                    api_kwargs.pop('tools', None)
+                    api_kwargs['temperature'] = 0.1
+                    api_kwargs['timeout'] = 15.0
+                    if _is_minimax_route(getattr(agent, 'provider', ''), getattr(agent, 'model', ''), getattr(agent, 'base_url', '')):
+                        extra_body = dict(api_kwargs.get('extra_body') or {})
+                        extra_body['reasoning_split'] = True
+                        api_kwargs['extra_body'] = extra_body
+                    if 'max_completion_tokens' in api_kwargs:
+                        api_kwargs['max_completion_tokens'] = max_tokens
+                    else:
+                        api_kwargs['max_tokens'] = max_tokens
+                    resp = agent._ensure_primary_openai_client(reason='title_generation').chat.completions.create(
+                        **api_kwargs,
+                    )
+                    try:
+                        raw = resp.choices[0].message.content or ""
+                    except Exception:
+                        raw = ""
+                raw = str(raw or '').strip()
+                if raw:
+                    return raw, ('llm' if idx == 0 else 'llm_retry')
+            except Exception as e:
+                logger.debug(
+                    "Agent title generation attempt %s failed: provider=%s model=%s error=%s",
+                    idx + 1,
+                    getattr(agent, 'provider', None),
+                    getattr(agent, 'model', None),
+                    e,
+                )
+        return None, 'llm_error'
+    except Exception as e:
+        logger.debug("Agent title generation failed: %s", e)
+        return None, 'llm_error'
+    finally:
+        agent.reasoning_config = prev_reasoning
+
+
+def _generate_llm_session_title_for_agent(agent, user_text: str, assistant_text: str) -> tuple[Optional[str], str, str]:
+    """Generate a title via active-agent route, then sanitize/validate result."""
+    raw, status = generate_title_raw_via_agent(agent, user_text, assistant_text)
+    if not raw:
+        return None, status, ''
+    title = _sanitize_generated_title(raw)
+    if title:
+        return title, status, ''
+    return None, 'llm_invalid', str(raw)[:120]
+
+
+def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, agent=None) -> tuple[Optional[str], str, str]:
+    """Generate a title via dedicated auxiliary LLM route, then sanitize/validate result."""
+    raw, status = generate_title_raw_via_aux(
+        user_text,
+        assistant_text,
+        provider=getattr(agent, 'provider', '') if agent else '',
+        model=getattr(agent, 'model', '') if agent else '',
+        base_url=getattr(agent, 'base_url', '') if agent else '',
+    )
+    if not raw:
+        return None, status, ''
+    title = _sanitize_generated_title(raw)
+    if title:
+        return title, status, ''
+    return None, 'llm_invalid_aux', str(raw)[:120]
+
+
+def _put_title_status(put_event, session_id: str, status: str, reason: str = '', title: str = '', raw_preview: str = '') -> None:
+    payload = {'session_id': session_id, 'status': status}
+    if reason:
+        payload['reason'] = reason
+    if title:
+        payload['title'] = title
+    if raw_preview:
+        payload['raw_preview'] = raw_preview
+    put_event('title_status', payload)
+    logger.info(
+        "title_status session=%s status=%s reason=%s title=%r raw_preview=%r",
+        session_id,
+        status,
+        reason or '-',
+        title or '',
+        (raw_preview or '')[:120],
+    )
+
+
+def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Optional[str]:
+    """Generate a readable local fallback title when LLM title generation fails."""
+    user_text = (user_text or '').strip()
+    assistant_text = _strip_thinking_markup(assistant_text or '').strip()
+    if not user_text:
+        return None
+    user_text = re.sub(r'^\[Workspace:[^\]]+\]\s*', '', user_text)
+    user_text = re.sub(r'\s+', ' ', user_text).strip()
+    assistant_text = re.sub(r'\s+', ' ', assistant_text).strip()
+    combined = f"{user_text} {assistant_text}".strip().lower()
+    combined_raw = f"{user_text} {assistant_text}".strip()
+
+    def _extract_named_topic(text: str) -> str:
+        m = re.search(r'《([^》]{2,24})》', text)
+        if m:
+            return (m.group(1) or '').strip()
+        m = re.search(r'"([^"\n]{2,24})"', text)
+        if m:
+            return (m.group(1) or '').strip()
+        m = re.search(r'“([^”\n]{2,24})”', text)
+        if m:
+            return (m.group(1) or '').strip()
+        return ''
+
+    topic_name = _extract_named_topic(combined_raw)
+    if topic_name:
+        if any(k in combined for k in ('时间', 'time', '安排', '效率', '怎么办', '健身', '唱歌', '写毛笔', '不够用了')):
+            return f'{topic_name}与时间管理'
+        if any(k in combined for k in ('hermes', 'codex', 'ai')):
+            return f'{topic_name}与AI效率'
+        return f'{topic_name}讨论'
+
+    if any(k in combined for k in ('title', '标题')) and any(k in combined for k in ('summary', 'summar', '摘要', '短标题')):
+        if any(k in combined for k in ('test', '测试', 'ok', '回复ok')):
+            return '会话标题自动摘要测试'
+        return '会话标题自动摘要'
+    if any(k in combined for k in ('clarify', '澄清')) and any(k in combined for k in ('dialog', 'card', '对话', '卡片')):
+        return 'Clarify 对话卡片'
+    if any(k in combined for k in ('issue', 'github', 'pr')) and any(k in combined for k in ('triage', 'bug', 'review', '问题')):
+        return 'GitHub Issue Triage'
+
+    head = re.split(r'[。！？.!?\n]', user_text)[0].strip()
+    if not head:
+        return None
+
+    stop_cjk = {
+        '我们', '看看', '一下', '这个', '标题', '是否', '可以', '用户', '理解', '这里', '测试', '一下',
+        '你只', '需要', '回复', '就可', '可以', '不需', '需要做', '什么', '自动', '成用户', '短标题',
+    }
+    stop_en = {
+        'the', 'this', 'that', 'with', 'from', 'into', 'just', 'reply', 'please',
+        'need', 'needs', 'want', 'wants', 'user', 'assistant', 'could', 'would',
+        'should', 'about', 'there', 'here', 'test', 'testing', 'title', 'summary',
+    }
+    tokens = re.findall(r'[\u4e00-\u9fff]{2,6}|[A-Za-z0-9][A-Za-z0-9_./+-]*', head)
+    if not tokens:
+        return head[:64]
+
+    picked = []
+    for tok in tokens:
+        lower_tok = tok.lower()
+        if re.search(r'[\u4e00-\u9fff]', tok):
+            if tok in stop_cjk:
+                continue
+        else:
+            if lower_tok in stop_en or len(lower_tok) < 3:
+                continue
+        if tok not in picked:
+            picked.append(tok)
+        if len(picked) >= 4:
+            break
+
+    if picked:
+        if any(re.search(r'[\u4e00-\u9fff]', t) for t in picked):
+            return ''.join(picked)[:20]
+        return ' '.join(picked)[:60]
+    return head[:24]
+
+
+def _run_background_title_update(session_id: str, user_text: str, assistant_text: str, placeholder_title: str, put_event, agent=None):
+    """Generate and publish a better title after `done`, then end the stream."""
+    try:
+        try:
+            s = get_session(session_id)
+        except KeyError:
+            _put_title_status(put_event, session_id, 'skipped', 'missing_session')
+            return
+        # Allow self-heal when a previously generated title leaked thinking text.
+        _invalid_existing = _looks_invalid_generated_title(s.title)
+        if getattr(s, 'llm_title_generated', False) and not _invalid_existing:
+            _put_title_status(put_event, session_id, 'skipped', 'already_generated', str(s.title or ''))
+            return
+        current = str(s.title or '').strip()
+        still_auto = (
+            current == placeholder_title
+            or current in ('Untitled', 'New Chat', '')
+            or _is_provisional_title(current, s.messages)
+            or _invalid_existing
+        )
+        if not still_auto:
+            _put_title_status(put_event, session_id, 'skipped', 'manual_title', current)
+            return
+        # Prefer the active session model when available so title generation
+        # matches the user's chosen runtime and can use provider-specific fixes.
+        if agent:
+            next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
+            if not next_title and llm_status in ('llm_error', 'llm_invalid'):
+                next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent)
+        else:
+            next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent)
+        source = llm_status
+        if not next_title:
+            next_title = _fallback_title_from_exchange(user_text, assistant_text)
+            if next_title:
+                logger.debug("Using local fallback for session title generation")
+                source = 'fallback'
+        if next_title and next_title != current:
+            s.title = next_title
+            s.llm_title_generated = True
+            # Keep chronological ordering stable in the sidebar.
+            s.save(touch_updated_at=False)
+            if source == 'fallback':
+                _put_title_status(put_event, session_id, source, 'local_summary', s.title, raw_preview)
+            else:
+                _put_title_status(put_event, session_id, source, llm_status, s.title, raw_preview)
+            put_event('title', {'session_id': s.session_id, 'title': s.title})
+        else:
+            _put_title_status(put_event, session_id, 'skipped', source or 'unchanged', current, raw_preview)
+    finally:
+        put_event('stream_end', {'session_id': session_id})
 
 
 def _sanitize_messages_for_api(messages):
@@ -517,6 +955,17 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             # Only auto-generate title when still default; preserves user renames
             if s.title == 'Untitled' or s.title == 'New Chat' or not s.title:
                 s.title = title_from(s.messages, s.title)
+            _looks_default = (s.title == 'Untitled' or s.title == 'New Chat' or not s.title)
+            _looks_provisional = _is_provisional_title(s.title, s.messages)
+            _invalid_existing_title = _looks_invalid_generated_title(s.title)
+            _should_bg_title = (
+                (_looks_default or _looks_provisional or _invalid_existing_title)
+                and (not getattr(s, 'llm_title_generated', False) or _invalid_existing_title)
+            )
+            _u0 = ''
+            _a0 = ''
+            if _should_bg_title:
+                _u0, _a0 = _first_exchange_snippets(s.messages)
             # Read token/cost usage from the agent object (if available)
             input_tokens = getattr(agent, 'session_prompt_tokens', 0) or 0
             output_tokens = getattr(agent, 'session_completion_tokens', 0) or 0
@@ -631,6 +1080,14 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                         break
             raw_session = s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}
             put('done', {'session': redact_session_data(raw_session), 'usage': usage})
+            if _should_bg_title and _u0 and _a0:
+                threading.Thread(
+                    target=_run_background_title_update,
+                    args=(s.session_id, _u0, _a0, str(s.title or '').strip(), put, agent),
+                    daemon=True,
+                ).start()
+            else:
+                put('stream_end', {'session_id': s.session_id})
         finally:
             # Unregister the gateway approval callback and unblock any threads
             # still waiting on approval (e.g. stream cancelled mid-approval).
