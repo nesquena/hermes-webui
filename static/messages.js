@@ -321,8 +321,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         toolCalls:[]
       });
       if(!Array.isArray(inflight.toolCalls)) inflight.toolCalls=[];
-      inflight.toolCalls.push(tc);
-      S.toolCalls=inflight.toolCalls;
+      INFLIGHT[activeSid].toolCalls.push(tc);
+      S.toolCalls=INFLIGHT[activeSid].toolCalls;
       persistInflightState();
 
       if(!S.session||S.session.session_id!==activeSid) return;
@@ -488,7 +488,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const isAuthMismatch=d.type==='auth_mismatch';
           const isNoResponse=d.type==='no_response';
           const label=isRateLimit?'Rate limit reached':isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isNoResponse?'No response received':'Error';
-          const hint=d.hint?`\n\n*${d.hint}*`:'';
+          const hint=d.hint?`\\n\\n*{d.hint}*`:'';
           S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`});
         }catch(_){
           S.messages.push({role:'assistant',content:'**Error:** An error occurred. Check server logs.'});
@@ -519,7 +519,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Attempt one reconnect if the stream is still active server-side
       if(!_reconnectAttempted && streamId){
         _reconnectAttempted=true;
-        setComposerStatus('Reconnecting…');
+        setComposerStatus('Reconnecting…");
         setTimeout(async()=>{
           try{
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
