@@ -578,6 +578,16 @@ function _applyTheme(name){
     ?(window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light')
     :name;
   document.documentElement.dataset.theme=resolved||'dark';
+  // Swap Prism syntax-highlighting theme to match UI theme
+  (function(){
+    const link=document.getElementById('prism-theme');
+    if(!link) return;
+    const isDark=(resolved!=='light');
+    const want=isDark
+      ?'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css'
+      :'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css';
+    if(link.href!==want){ link.href=want; }
+  })();
   // Re-register OS change listener whenever system theme is active
   if(name==='system'){
     const mq=window.matchMedia('(prefers-color-scheme:dark)');
