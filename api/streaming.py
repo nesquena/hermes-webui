@@ -66,7 +66,7 @@ def _strip_thinking_markup(text: str) -> str:
         return ''
     s = str(text)
     s = re.sub(r'<think>.*?</think>', ' ', s, flags=re.IGNORECASE | re.DOTALL)
-    s = re.sub(r'<\|channel\>thought.*?<channel\|>', ' ', s, flags=re.IGNORECASE | re.DOTALL)
+    s = re.sub(r'<\|channel\|>thought.*?<channel\|>', ' ', s, flags=re.IGNORECASE | re.DOTALL)
     s = re.sub(r'^\s*(the|ther)\s+user\s+is\s+asking.*$', ' ', s, flags=re.IGNORECASE | re.MULTILINE)
     s = re.sub(r'\s+', ' ', s).strip()
     return s
@@ -89,7 +89,7 @@ def _looks_invalid_generated_title(text: str) -> bool:
     if not s.strip():
         return True
     return bool(
-        re.search(r'<think>|<\|channel\>thought', s, flags=re.IGNORECASE)
+        re.search(r'<think>|<\|channel\|>thought', s, flags=re.IGNORECASE)
         or re.search(r'^\s*(the|ther)\s+user\s+', s, flags=re.IGNORECASE)
         or re.search(r'^\s*user\s+\w+\s+', s, flags=re.IGNORECASE)
         or re.search(r'\b(they|user)\s+want(s)?\s+me\s+to\b', s, flags=re.IGNORECASE)
