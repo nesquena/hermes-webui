@@ -454,6 +454,7 @@ $('msg').addEventListener('keydown',e=>{
   // The 'ctrl+enter' setting also uses this behavior (Enter = newline).
   // Users can override in Settings by explicitly choosing 'enter' mode.
   if(e.key==='Enter'){
+    if(e.isComposing){return;}
     const _mobileDefault=matchMedia('(pointer:coarse)').matches&&window._sendKey==='enter';
     if(window._sendKey==='ctrl+enter'||_mobileDefault){
       if(e.ctrlKey||e.metaKey){e.preventDefault();send();}
