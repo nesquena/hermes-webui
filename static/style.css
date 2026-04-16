@@ -1186,7 +1186,7 @@ body.resizing{user-select:none;cursor:col-resize;}
 
 /* ── Unified indent rail — every child of a turn lines up on --msg-rail ── */
 .msg-row { padding: 12px 0; }
-.msg-body { padding-left: var(--msg-rail); max-width: var(--msg-max); }
+.msg-body { padding-left: var(--msg-rail); padding-top: 8px; max-width: var(--msg-max); }
 .msg-body:empty { display: none; }
 .assistant-turn { width: 100%; }
 .assistant-turn-blocks { display: flex; flex-direction: column; }
