@@ -539,6 +539,110 @@ def _sanitize_messages_for_api(messages):
     return clean
 
 
+def _tool_result_snippet(raw) -> str:
+    """Extract a compact result preview from a stored tool message payload."""
+    text = str(raw or '')
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return str(data.get('output') or data.get('result') or data.get('error') or text)[:200]
+    except Exception:
+        pass
+    return text[:200]
+
+
+def _truncate_tool_args(args, limit: int = 6) -> dict:
+    """Truncate tool args for compact session persistence."""
+    out = {}
+    if not isinstance(args, dict):
+        return out
+    for k, v in list(args.items())[:limit]:
+        s = str(v)
+        out[k] = s[:120] + ('...' if len(s) > 120 else '')
+    return out
+
+
+def _nearest_assistant_msg_idx(messages, msg_idx: int) -> int:
+    """Find the closest preceding assistant message index for a tool result."""
+    for idx in range(msg_idx - 1, -1, -1):
+        msg = messages[idx]
+        if isinstance(msg, dict) and msg.get('role') == 'assistant':
+            return idx
+    return -1
+
+
+def _extract_tool_calls_from_messages(messages, live_tool_calls=None):
+    """Build persisted tool-call summaries from final messages plus live progress fallback."""
+    tool_calls = []
+    pending_names = {}
+    pending_args = {}
+    pending_asst_idx = {}
+    tool_msg_sequence = []
+
+    for msg_idx, m in enumerate(messages or []):
+        if not isinstance(m, dict):
+            continue
+        role = m.get('role')
+        if role == 'assistant':
+            content = m.get('content', '')
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get('type') == 'tool_use':
+                        tid = part.get('id', '')
+                        if tid:
+                            pending_names[tid] = part.get('name', '')
+                            pending_args[tid] = part.get('input', {})
+                            pending_asst_idx[tid] = msg_idx
+            for tc in m.get('tool_calls', []):
+                if not isinstance(tc, dict):
+                    continue
+                tid = tc.get('id', '') or tc.get('call_id', '')
+                fn = tc.get('function', {})
+                name = fn.get('name', '')
+                try:
+                    args = json.loads(fn.get('arguments', '{}') or '{}')
+                except Exception:
+                    args = {}
+                if tid and name:
+                    pending_names[tid] = name
+                    pending_args[tid] = args
+                    pending_asst_idx[tid] = msg_idx
+        elif role == 'tool':
+            tid = m.get('tool_call_id') or m.get('tool_use_id', '')
+            raw = m.get('content', '')
+            seq = {'msg_idx': msg_idx, 'raw': raw, 'resolved': False}
+            if tid:
+                name = pending_names.get(tid, '')
+                if name and name != 'tool':
+                    tool_calls.append({
+                        'name': name,
+                        'snippet': _tool_result_snippet(raw),
+                        'tid': tid,
+                        'assistant_msg_idx': pending_asst_idx.get(tid, -1),
+                        'args': _truncate_tool_args(pending_args.get(tid, {})),
+                    })
+                    seq['resolved'] = True
+            tool_msg_sequence.append(seq)
+
+    live = [tc for tc in (live_tool_calls or []) if isinstance(tc, dict) and tc.get('name') and tc.get('name') != 'clarify']
+    if live:
+        for seq_idx, seq in enumerate(tool_msg_sequence):
+            if seq.get('resolved'):
+                continue
+            if seq_idx >= len(live):
+                break
+            live_tc = live[seq_idx]
+            tool_calls.append({
+                'name': live_tc.get('name', 'tool'),
+                'snippet': _tool_result_snippet(seq.get('raw', '')),
+                'tid': live_tc.get('tid', '') or '',
+                'assistant_msg_idx': _nearest_assistant_msg_idx(messages, seq.get('msg_idx', -1)),
+                'args': _truncate_tool_args(live_tc.get('args', {}), limit=4),
+            })
+
+    return tool_calls
+
+
 def _sse(handler, event, data):
     """Write one SSE event to the response stream."""
     payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
@@ -698,6 +802,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
         try:
             _token_sent = False  # tracks whether any streamed tokens were sent
             _reasoning_text = ''  # accumulates reasoning/thinking trace for persistence
+            _live_tool_calls = []  # tool progress fallback when final messages omit tool IDs
 
             def on_token(text):
                 nonlocal _token_sent
@@ -743,6 +848,10 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                         args_snap[k] = s2[:120] + ('...' if len(s2) > 120 else '')
 
                 if event_type in (None, 'tool.started'):
+                    _live_tool_calls.append({
+                        'name': name,
+                        'args': args if isinstance(args, dict) else {},
+                    })
                     put('tool', {
                         'event_type': event_type or 'tool.started',
                         'name': name,
@@ -763,6 +872,14 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                     return
 
                 if event_type == 'tool.completed':
+                    for live_tc in reversed(_live_tool_calls):
+                        if live_tc.get('done'):
+                            continue
+                        if not name or live_tc.get('name') == name:
+                            live_tc['done'] = True
+                            live_tc['duration'] = cb_kwargs.get('duration')
+                            live_tc['is_error'] = bool(cb_kwargs.get('is_error', False))
+                            break
                     put('tool_complete', {
                         'event_type': event_type,
                         'name': name,
@@ -1001,63 +1118,12 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             s.output_tokens = (s.output_tokens or 0) + output_tokens
             if estimated_cost:
                 s.estimated_cost = (s.estimated_cost or 0) + estimated_cost
-            # Extract tool call metadata grouped by assistant message index
-            # Each tool call gets assistant_msg_idx so the client can render
-            # cards inline with the assistant bubble that triggered them.
-            tool_calls = []
-            pending_names = {}   # tool_call_id -> name
-            pending_args = {}    # tool_call_id -> args dict
-            pending_asst_idx = {} # tool_call_id -> index in s.messages
-            for msg_idx, m in enumerate(s.messages):
-                if m.get('role') == 'assistant':
-                    c = m.get('content', '')
-                    # Anthropic format: content is a list with type=tool_use blocks
-                    if isinstance(c, list):
-                        for p in c:
-                            if isinstance(p, dict) and p.get('type') == 'tool_use':
-                                tid = p.get('id', '')
-                                pending_names[tid] = p.get('name', '')
-                                pending_args[tid] = p.get('input', {})
-                                pending_asst_idx[tid] = msg_idx
-                    # OpenAI format: tool_calls as top-level field on the message
-                    for tc in m.get('tool_calls', []):
-                        if not isinstance(tc, dict):
-                            continue
-                        tid = tc.get('id', '') or tc.get('call_id', '')
-                        fn = tc.get('function', {})
-                        name = fn.get('name', '')
-                        try:
-                            import json as _j
-                            args = _j.loads(fn.get('arguments', '{}') or '{}')
-                        except Exception:
-                            args = {}
-                        if tid and name:
-                            pending_names[tid] = name
-                            pending_args[tid] = args
-                            pending_asst_idx[tid] = msg_idx
-                elif m.get('role') == 'tool':
-                    tid = m.get('tool_call_id') or m.get('tool_use_id', '')
-                    name = pending_names.get(tid, '')
-                    if not name or name == 'tool':
-                        continue  # skip unresolvable tool entries
-                    asst_idx = pending_asst_idx.get(tid, -1)
-                    args = pending_args.get(tid, {})
-                    raw = str(m.get('content', ''))
-                    try:
-                        rd = json.loads(raw)
-                        snippet = str(rd.get('output') or rd.get('result') or rd.get('error') or raw)[:200]
-                    except Exception:
-                        snippet = raw[:200]
-                    # Truncate args values for storage
-                    args_snap = {}
-                    if isinstance(args, dict):
-                        for k, v in list(args.items())[:6]:
-                            s2 = str(v)
-                            args_snap[k] = s2[:120] + ('...' if len(s2) > 120 else '')
-                    tool_calls.append({
-                        'name': name, 'snippet': snippet, 'tid': tid,
-                        'assistant_msg_idx': asst_idx, 'args': args_snap,
-                    })
+            # Persist tool-call summaries even when the final message history only
+            # kept bare tool rows and omitted explicit assistant tool_call IDs.
+            tool_calls = _extract_tool_calls_from_messages(
+                s.messages,
+                live_tool_calls=_live_tool_calls,
+            )
             s.tool_calls = tool_calls
             s.active_stream_id = None
             s.pending_user_message = None

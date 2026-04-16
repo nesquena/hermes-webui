@@ -44,35 +44,13 @@ async function loadSession(sid){
   S.session=data.session;
   S.lastUsage={...(data.session.last_usage||{})};
   localStorage.setItem('hermes-webui-session',S.session.session_id);
-  // B9: sanitize empty assistant messages (PR #402) — build index map to remap
-  // session-level tool_calls.assistant_msg_idx to the new sanitized positions.
-  const allMsgs = data.session.messages || [];
-  const sanitized = [];
-  const origIdxToSanitizedIdx = {};
-  let lastKeptAsstIdx = -1;
-  for (let i = 0; i < allMsgs.length; i++) {
-    const m = allMsgs[i];
-    if (!m || !m.role) continue;
-    if (m.role === 'tool') continue;
-    if (m.role === 'assistant') {
-      let c = m.content || '';
-      if (Array.isArray(c)) c = c.filter(p => p && p.type === 'text').map(p => p.text || '').join('');
-      if (!String(c).trim().length) { continue; }  // empty assistant — skip
-      lastKeptAsstIdx = sanitized.length;
-    }
-    origIdxToSanitizedIdx[i] = sanitized.length;
-    sanitized.push(m);
-  }
-  if (data.session.tool_calls && data.session.tool_calls.length) {
-    for (const tc of data.session.tool_calls) {
-      if (!tc || tc.assistant_msg_idx === undefined) continue;
-      const origIdx = tc.assistant_msg_idx;
-      tc.assistant_msg_idx = (origIdx in origIdxToSanitizedIdx)
-        ? origIdxToSanitizedIdx[origIdx]
-        : (lastKeptAsstIdx >= 0 ? lastKeptAsstIdx : -1);
-    }
-  }
-  data.session.messages = sanitized;
+  data.session.messages = (data.session.messages || []).filter(m => m && m.role);
+  const hasMessageToolMetadata = (data.session.messages || []).some(m => {
+    if (!m || m.role !== 'assistant') return false;
+    const hasTc = Array.isArray(m.tool_calls) && m.tool_calls.length > 0;
+    const hasTu = Array.isArray(m.content) && m.content.some(p => p && p.type === 'tool_use');
+    return hasTc || hasTu;
+  });
   const activeStreamId=data.session.active_stream_id||null;
   if(!INFLIGHT[sid]&&activeStreamId&&typeof loadInflightState==='function'){
     const stored=loadInflightState(sid, activeStreamId);
@@ -109,11 +87,14 @@ async function loadSession(sid){
     S.messages=data.session.messages||[];
     const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(data.session):null;
     if(pendingMsg) S.messages.push(pendingMsg);
-    // Fix (PR #402): do NOT pre-fill S.toolCalls from session-level tool_calls —
-    // those have stale assistant_msg_idx values after B9 sanitization. Instead,
-    // set S.toolCalls=[] and let renderMessages() derive them from per-message
-    // tool_calls (which already have correct sanitized-array indices).
-    S.toolCalls=[];
+    // Prefer reconstructing cards from per-message tool metadata when available.
+    // Fall back to persisted session summaries for older sessions that only
+    // saved session.tool_calls and bare role=tool results.
+    if(!hasMessageToolMetadata&&data.session.tool_calls&&data.session.tool_calls.length){
+      S.toolCalls=(data.session.tool_calls||[]).map(tc=>({...tc,done:true}));
+    }else{
+      S.toolCalls=[];
+    }
     clearLiveToolCards();
     if(activeStreamId){
       S.busy=true;

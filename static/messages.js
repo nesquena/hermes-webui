@@ -594,7 +594,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;const _cbe=$('btnCancel');if(_cbe)_cbe.style.display='none';
         clearLiveToolCards();if(!assistantText)removeThinking();
-        S.session=session;S.messages=session.messages||[];
+        S.session=session;S.messages=(session.messages||[]).filter(m=>m&&m.role);
+        const hasMessageToolMetadata=S.messages.some(m=>{
+          if(!m||m.role!=='assistant') return false;
+          const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
+          const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
+          return hasTc||hasTu;
+        });
+        if(!hasMessageToolMetadata&&session.tool_calls&&session.tool_calls.length){
+          S.toolCalls=(session.tool_calls||[]).map(tc=>({...tc,done:true}));
+        }else{
+          S.toolCalls=[];
+        }
         syncTopbar();renderMessages();
       }
       renderSessionList();setBusy(false);setComposerStatus('');

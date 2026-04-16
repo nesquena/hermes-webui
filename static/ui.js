@@ -1093,7 +1093,11 @@ function renderMessages(){
     if(!m||!m.role||m.role==='tool')return false;
     // Keep assistant messages with tool_use content even if they have no text,
     // so tool cards can be anchored to their DOM rows on page reload (#140).
-    if(m.role==='assistant'&&Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use'))return true;
+    if(m.role==='assistant'){
+      const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
+      const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
+      if(hasTc||hasTu)return true;
+    }
     return msgContent(m)||m.attachments?.length;
   });
   $('emptyState').style.display=vis.length?'none':'';
