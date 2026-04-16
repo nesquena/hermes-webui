@@ -26,5 +26,7 @@ full-UI.png
 .DS_Store
 Thumbs.db
 
-# Local reference clones — never committed
-docs/
+# Local reference clones — never committed (except tracked design/UI-UX reference pages)
+docs/*
+!docs/ui-ux/
+!docs/ui-ux/**
