@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.62] — 2026-04-16
+
+### Fixed
+- **Docker startup no longer hard-exits when hermes-agent source is not mounted** — previously `docker_init.bash` would call `error_exit` if the agent source directory was missing, preventing the container from starting at all. Users running a minimal `docker run` without the two-container compose setup hit this immediately. Now the script checks for the directory and `pyproject.toml` first, prints a clear warning explaining reduced functionality, and continues startup. The WebUI already has `try/except` fallbacks throughout for when hermes-agent is unavailable. (Fixes #570, PR #573)
+
 ## [v0.50.61] — 2026-04-16
 
 ### Added
