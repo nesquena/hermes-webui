@@ -1,5 +1,7 @@
 async function api(path,opts={}){
-  const url=new URL(path,location.origin);
+  // Strip leading slash so URL resolves relative to location.href (supports subpath mounts)
+  const rel = path.startsWith('/') ? path.slice(1) : path;
+  const url=new URL(rel,location.href);
   const res=await fetch(url.href,{credentials:'include',headers:{'Content-Type':'application/json'},...opts});
   if(!res.ok){
     const text=await res.text();
@@ -204,7 +206,7 @@ async function openFile(path){
   if(IMAGE_EXTS.has(ext)){
     // Image: load via raw endpoint, show as <img>
     showPreview('image');
-    const url=`/api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}`;
+    const url=`api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}`;
     $('previewImg').alt=path;
     $('previewImg').src=url;
     $('previewImg').onerror=()=>setStatus(t('image_load_failed'));
@@ -238,7 +240,7 @@ async function openFile(path){
 function downloadFile(path){
   if(!S.session)return;
   // Trigger browser download via the raw file endpoint with content-disposition attachment
-  const url=`/api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}&download=1`;
+  const url=`api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}&download=1`;
   const filename=path.split('/').pop();
   const a=document.createElement('a');
   a.href=url;a.download=filename;

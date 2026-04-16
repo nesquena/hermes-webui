@@ -2,7 +2,7 @@ async function cancelStream(){
   const streamId = S.activeStreamId;
   if(!streamId) return;
   try{
-    await fetch(new URL(`/api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,location.origin).href,{credentials:'include'});
+    await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,location.href).href,{credentials:'include'});
   }catch(e){/* cancel request failed — cleanup below still runs */}
   // Clear status unconditionally after the cancel request completes.
   // The SSE cancel event may also fire, but if the connection is already
@@ -226,7 +226,7 @@ $('btnAttach').onclick=()=>$('fileInput').click();
     form.append('file',new File([blob],`voice-input.${ext}`,{type:blob.type||`audio/${ext}`}));
     setComposerStatus('Transcribing…');
     try{
-      const res=await fetch('/api/transcribe',{method:'POST',body:form});
+      const res=await fetch('api/transcribe',{method:'POST',body:form});
       const data=await res.json().catch(()=>({}));
       if(!res.ok) throw new Error(data.error||'Transcription failed');
       _commitTranscript(data.transcript||'');

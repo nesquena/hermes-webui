@@ -4,8 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hermes</title>
+<!-- base href enables subpath mount support; all static paths must stay relative (no leading slash) -->
+<script>(function(){var p=location.pathname.endsWith('/')?location.pathname:(location.pathname.replace(/\/[^\/]*$/,'/')||'/');document.write('<base href="'+location.origin+p+'">');})()</script>
 <script>(function(){var t=localStorage.getItem('hermes-theme');if(t==='system'){t=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';}if(t&&t!=='dark')document.documentElement.dataset.theme=t;})()</script>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="static/style.css">
   <!-- KaTeX math rendering CSS (loaded eagerly to prevent layout shift) -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css" integrity="sha384-5TcZemv2l/9On385z///+d7MSYlvIEw9FuZTIdZ14vJLqWphw7e7ZPuOiCHJcFCP" crossorigin="anonymous">
   <!-- Prism.js syntax highlighting (loaded async, non-blocking) -->
@@ -553,7 +555,7 @@
                 <div class="settings-section-title">System</div>
                 <div class="settings-section-meta">Instance version and access controls.</div>
               </div>
-              <span class="settings-version-badge">v0.50.66</span>
+              <span class="settings-version-badge">v0.50.67</span>
             </div>
             <div class="settings-field" style="border-top:1px solid var(--border);padding-top:12px;margin-top:8px">
               <label for="settingsPassword" data-i18n="settings_label_password">Access Password</label>
@@ -587,15 +589,15 @@
   </div>
 </div>
 <div class="toast" id="toast"></div>
-<script src="/static/i18n.js"></script>
-<script src="/static/icons.js"></script>
-<script src="/static/ui.js"></script>
-<script src="/static/workspace.js"></script>
-<script src="/static/sessions.js"></script>
-<script src="/static/commands.js"></script>
-<script src="/static/messages.js"></script>
-<script src="/static/panels.js"></script>
-<script src="/static/onboarding.js"></script>
-<script src="/static/boot.js"></script>
+<script src="static/i18n.js"></script>
+<script src="static/icons.js"></script>
+<script src="static/ui.js"></script>
+<script src="static/workspace.js"></script>
+<script src="static/sessions.js"></script>
+<script src="static/commands.js"></script>
+<script src="static/messages.js"></script>
+<script src="static/panels.js"></script>
+<script src="static/onboarding.js"></script>
+<script src="static/boot.js"></script>
 </body>
 </html>

@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.67] — 2026-04-16
+
+### Added
+- **Subpath mount support** — Hermes WebUI can now be served behind a reverse proxy at any subpath (e.g. `/hermes-webui/` via Tailscale Serve, nginx, or Caddy). A dynamic `<base href>` is injected as the first script in `<head>`, and all client-side URL references are converted from absolute to relative. The server-side route handlers are unchanged. No configuration needed — works transparently for both root (`/`) and subpath deployments. (PR #588 by @vcavichini)
+
 ## [v0.50.66] — 2026-04-16
 
 ### Fixed

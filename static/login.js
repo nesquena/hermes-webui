@@ -26,7 +26,7 @@ document.addEventListener('DOMContentLoaded', function () {
     var pw = input.value;
     hideErr();
     try {
-      var res = await fetch('/api/auth/login', {
+      var res = await fetch('api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password: pw }),
@@ -35,7 +35,7 @@ document.addEventListener('DOMContentLoaded', function () {
       var data = {};
       try { data = await res.json(); } catch (_) {}
       if (res.ok && data.ok) {
-        window.location.href = '/';
+        window.location.href = './';
       } else {
         showErr(data.error || invalidPw);
       }
