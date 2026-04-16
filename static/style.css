@@ -1209,6 +1209,7 @@ body.resizing{user-select:none;cursor:col-resize;}
 .thinking-card { margin-left: var(--msg-rail); max-width: var(--msg-max); }
 .tool-cards-toggle { margin-left: var(--msg-rail); }
 .clarify-card { margin-left: var(--msg-rail); max-width: var(--msg-max); }
+.msg-row[data-editing="1"] { width: 100%; }
 .msg-row[data-editing="1"] .msg-edit-area,
 .msg-row[data-editing="1"] .msg-edit-bar { margin-left: var(--msg-rail); }
 
