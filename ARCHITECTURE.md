@@ -9,7 +9,7 @@
 
 > Current shipped build: `v0.50.36-local.1` (April 16, 2026).
 > Baseline: upstream `nesquena/hermes-webui` `v0.50.36`.
-> Intentional local delta: first-time password enablement from Settings immediately issues a `hermes_session` cookie so the current browser remains signed in. The previous `Assistant Reply Language` customization has been removed, legacy `assistant_language` settings are filtered out on load/save, the workspace panel closed/open state is preloaded via a `documentElement` dataset marker before `style.css` paints to avoid a first-load desktop flash, and transcript disclosure cards now animate caret rotation and body expansion with transitionable `max-height`/`opacity` states instead of `display:none/block`.
+> Intentional local delta: first-time password enablement from Settings immediately issues a `hermes_session` cookie so the current browser remains signed in. The previous `Assistant Reply Language` customization has been removed, legacy `assistant_language` settings are filtered out on load/save, the workspace panel closed/open state is preloaded via a `documentElement` dataset marker before `style.css` paints to avoid a first-load desktop flash, transcript disclosure cards now animate caret rotation and body expansion with transitionable `max-height`/`opacity` states instead of `display:none/block`, and thinking cards now share the same rounded bordered card chrome as tool cards while keeping their gold palette.
 > Automated coverage: 1353 tests collected (`pytest tests/ --collect-only -q`).
 
 ---

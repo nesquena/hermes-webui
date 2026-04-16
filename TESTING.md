@@ -1688,6 +1688,7 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 - Click a directory toggle arrow (▸) → expands in-place showing children.
 - Click again (▾) → collapses. Double-click navigates into it (breadcrumb view).
 - If model returns thinking blocks (Claude extended thinking), verify collapsible gold card appears above response.
+- Verify the thinking card has a tinted background, visible border, and rounded corners like a tool card, but in the gold thinking palette.
 - Open and close a thinking card. Verify the caret rotation and the content reveal both animate smoothly instead of snapping open.
 
 ### UI Polish: Tool Card Disclosure Animation

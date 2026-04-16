@@ -1294,26 +1294,29 @@ body.bubble-layout .msg-row + .msg-row[data-role="user"] { border-top: none; pad
 /* ── Thinking card: quieter than before (no background panel) but still
    clearly a gold-accented affordance so users know it's collapsible. ── */
 .thinking-card {
-  background: transparent;
-  border: none;
-  border-left: 2px solid rgba(201,168,76,.4);
-  border-radius: 0;
-  padding: 0 0 0 12px;
-  margin: 4px 0 4px var(--msg-rail);
-  transition: border-left-color .15s;
+  background: rgba(201,168,76,.05);
+  border: 1px solid rgba(201,168,76,.18);
+  border-radius: 8px;
+  padding: 0;
+  margin: 3px 0 3px var(--msg-rail);
+  transition: border-color .15s, background .15s;
 }
-.thinking-card:hover { border-left-color: rgba(201,168,76,.7); }
-.thinking-card-header { padding: 5px 0; color: var(--gold); font-size: 12px; font-weight: 600; opacity: .85; }
+.thinking-card:hover {
+  border-color: rgba(201,168,76,.3);
+  background: rgba(201,168,76,.07);
+}
+.thinking-card-header { padding: 5px 10px; color: var(--gold); font-size: 12px; font-weight: 600; opacity: .85; }
 .thinking-card-header:hover { opacity: 1; }
 .thinking-card-icon { opacity: .7; }
 .thinking-card-body {
   max-height: 0;
   opacity: 0;
   overflow: hidden;
-  padding: 0;
-  transition: max-height .22s ease, opacity .18s ease, padding .22s ease;
+  padding: 0 12px;
+  border-top: 1px solid transparent;
+  transition: max-height .22s ease, opacity .18s ease, padding .22s ease, border-top-color .22s ease;
 }
-.thinking-card.open .thinking-card-body { max-height: 260px; opacity: 1; padding: 2px 0 8px; }
+.thinking-card.open .thinking-card-body { max-height: 260px; opacity: 1; padding: 8px 12px; border-top-color: rgba(201,168,76,.12); }
 .thinking-card-body pre { font-size: 11px; line-height: 1.6; color: var(--muted); }
 
 /* ── Tool cards: tighter chrome to match quieter thinking card ── */

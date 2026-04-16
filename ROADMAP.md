@@ -4,7 +4,7 @@
 > Everything you can do from the CLI terminal, you can do from this UI.
 >
 > Last updated: v0.50.44 (April 16, 2026) — 1353 tests collected
-> Local delta: enabling password from Settings keeps the current browser signed in; the former Assistant Reply Language enhancement has been removed; workspace panel closed-state now preloads in `<head>` so desktop first paint no longer flashes open before boot sync; thinking cards and tool call cards now animate both their carets and disclosure bodies smoothly on expand/collapse.
+> Local delta: enabling password from Settings keeps the current browser signed in; the former Assistant Reply Language enhancement has been removed; workspace panel closed-state now preloads in `<head>` so desktop first paint no longer flashes open before boot sync; thinking cards and tool call cards now animate both their carets and disclosure bodies smoothly on expand/collapse, and thinking cards now use the same bordered rounded panel chrome as tool cards with a gold palette.
 > Tests: 1353 collected (`pytest tests/ --collect-only -q`)
 > Source: <repo>/
 
