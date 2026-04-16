@@ -344,7 +344,7 @@ function startGatewaySSE(){
   stopGatewaySSE();
   if(!window._showCliSessions) return;
   try{
-    _gatewaySSE = new EventSource('/api/sessions/gateway/stream');
+    _gatewaySSE = new EventSource('api/sessions/gateway/stream');
     _gatewaySSE.addEventListener('sessions_changed', (ev) => {
       try{
         const data = JSON.parse(ev.data);
