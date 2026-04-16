@@ -342,7 +342,6 @@ MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 # ── File type maps ───────────────────────────────────────────────────────────
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".bmp"}
 MD_EXTS = {".md", ".markdown", ".mdown"}
-OFFICE_EXTS = {".xls", ".xlsx", ".doc", ".docx"}
 CODE_EXTS = {
     ".py",
     ".js",
