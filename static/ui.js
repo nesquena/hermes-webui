@@ -843,7 +843,7 @@ function showPromptDialog(opts={}){
 
 
 function copyMsg(btn){
-  const row=btn.closest('.msg-row');
+  const row=btn.closest('[data-raw-text]');
   const text=row?row.dataset.rawText:'';
   if(!text)return;
   navigator.clipboard.writeText(text).then(()=>{
@@ -1087,38 +1087,56 @@ function _fmtDateSep(d){
   return dStart.toLocaleDateString([], opts);
 }
 const _ERR_MSG_RE=/^(?:\*\*error\b|error:|connection lost|no response received)/i;
+function _messageHasReasoningPayload(m){
+  if(!m||m.role!=='assistant') return false;
+  if(m.reasoning) return true;
+  if(Array.isArray(m.content)) return m.content.some(p=>p&&(p.type==='thinking'||p.type==='reasoning'));
+  return /<think>[\s\S]*?<\/think>|<\|channel>thought\n[\s\S]*?<channel\|>/.test(String(m.content||''));
+}
+function _assistantRoleHtml(tsTitle=''){
+  const _bn=window._botName||'Hermes';
+  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant">${esc(_bn.charAt(0).toUpperCase())}</div><span style="font-size:12px">${esc(_bn)}</span></div>`;
+}
+function _createAssistantTurn(tsTitle=''){
+  const row=document.createElement('div');
+  row.className='msg-row assistant-turn';
+  row.dataset.role='assistant';
+  row.innerHTML=`${_assistantRoleHtml(tsTitle)}<div class="assistant-turn-blocks"></div>`;
+  return row;
+}
+function _assistantTurnBlocks(turn){
+  return turn?turn.querySelector('.assistant-turn-blocks'):null;
+}
+function _thinkingCardHtml(text){
+  return `<div class="thinking-card"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(text)}</pre></div></div>`;
+}
 function renderMessages(){
   const inner=$('msgInner');
   const vis=S.messages.filter(m=>{
     if(!m||!m.role||m.role==='tool')return false;
-    // Keep assistant messages with tool_use content even if they have no text,
-    // so tool cards can be anchored to their DOM rows on page reload (#140).
     if(m.role==='assistant'){
       const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
       const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-      if(hasTc||hasTu)return true;
+      if(hasTc||hasTu||_messageHasReasoningPayload(m)) return true;
     }
     return msgContent(m)||m.attachments?.length;
   });
   $('emptyState').style.display=vis.length?'none':'';
   inner.innerHTML='';
-  // Track original indices (in S.messages) so truncate knows the cut point.
-  // Also include assistant messages that have tool_calls (OpenAI format) or
-  // tool_use content (Anthropic format) even when their text is empty — these
-  // rows serve as DOM anchors for tool card insertion on page reload.
   const visWithIdx=[];
   let rawIdx=0;
   for(const m of S.messages){
     if(!m||!m.role||m.role==='tool'){rawIdx++;continue;}
     const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
     const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-    if(msgContent(m)||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu))) visWithIdx.push({m,rawIdx});
+    if(msgContent(m)||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)))) visWithIdx.push({m,rawIdx});
     rawIdx++;
   }
   let _prevSepKey=null;
+  let currentAssistantTurn=null;
+  const assistantSegments=new Map();
   for(let vi=0;vi<visWithIdx.length;vi++){
     const {m,rawIdx}=visWithIdx[vi];
-    // Day-change separator (only when timestamps exist on both sides of the change)
     const _tsSep=m._ts||m.timestamp;
     if(_tsSep){
       const _d=new Date(_tsSep*1000);
@@ -1132,19 +1150,12 @@ function renderMessages(){
       _prevSepKey=_key;
     }
     let content=m.content||'';
-    // Extract thinking/reasoning blocks from structured content (Claude extended thinking, o3)
     let thinkingText='';
     if(Array.isArray(content)){
       thinkingText=content.filter(p=>p&&(p.type==='thinking'||p.type==='reasoning')).map(p=>p.thinking||p.reasoning||p.text||'').join('\n');
       content=content.filter(p=>p&&p.type==='text').map(p=>p.text||p.content||'').join('\n');
     }
-    // Also check top-level reasoning field (Hermes format)
-    if(!thinkingText && m.reasoning){
-      thinkingText=m.reasoning;
-    }
-    // Parse inline thinking tags from plain text: <think>...</think> (DeepSeek, QwQ, MiniMax, etc.)
-    // and Gemma 4 channel tokens: <|channel>thought\n...<channel|>
-    // Note: no ^ anchor — some models emit leading whitespace/newlines before <think>.
+    if(!thinkingText && m.reasoning) thinkingText=m.reasoning;
     if(!thinkingText && typeof content==='string'){
       const thinkMatch=content.match(/<think>([\s\S]*?)<\/think>/);
       if(thinkMatch){
@@ -1161,29 +1172,54 @@ function renderMessages(){
     }
     const isUser=m.role==='user';
     const isLastAssistant=!isUser&&vi===visWithIdx.length-1;
-    // Render thinking card before the assistant message (collapsed by default)
-    if(thinkingText&&!isUser){
-      const thinkRow=document.createElement('div');thinkRow.className='msg-row thinking-card-row';
-      thinkRow.innerHTML=`<div class="thinking-card"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(thinkingText)}</pre></div></div>`;
-      inner.appendChild(thinkRow);
-    }
-    const row=document.createElement('div');row.className='msg-row';
-    row.dataset.msgIdx=rawIdx;row.dataset.role=m.role||'assistant';
-    if(m._live) row.setAttribute('data-live-assistant','1');
-    if(!isUser && _ERR_MSG_RE.test(String(content||'').trim())) row.dataset.error='1';
     let filesHtml='';
-    if(m.attachments&&m.attachments.length)
+    if(m.attachments&&m.attachments.length){
       filesHtml=`<div class="msg-files">${m.attachments.map(f=>`<div class="msg-file-badge">${li('paperclip',12)} ${esc(f)}</div>`).join('')}</div>`;
+    }
     const bodyHtml = isUser ? esc(String(content)).replace(/\n/g,'<br>') : renderMd(String(content));
-    // Action buttons for this bubble
     const editBtn  = isUser  ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
+    const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
     const tsVal=m._ts||m.timestamp;
     const tsTitle=tsVal?new Date(tsVal*1000).toLocaleString():'';
-    const _bn=window._botName||'Hermes';
-    row.innerHTML=`<div class="msg-role ${m.role}" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon ${m.role}">${isUser?'Y':esc(_bn.charAt(0).toUpperCase())}</div><span style="font-size:12px">${isUser?t('you'):esc(_bn)}</span>${tsTitle?`<span class="msg-time">${new Date(tsVal*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</span>`:''}<span class="msg-actions">${editBtn}<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>${retryBtn}</span></div>${filesHtml}<div class="msg-body">${bodyHtml}</div>`;
-    row.dataset.rawText = String(content).trim();
-    inner.appendChild(row);
+    const tsTime=tsVal?new Date(tsVal*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'';
+    const userTimeHtml = (isUser && tsTime) ? `<span class="msg-time" title="${esc(tsTitle)}">${tsTime}</span>` : '';
+    const footHtml = `<div class="msg-foot">${userTimeHtml}<span class="msg-actions">${editBtn}${copyBtn}${retryBtn}</span></div>`;
+
+    if(isUser){
+      currentAssistantTurn=null;
+      const row=document.createElement('div');
+      row.className='msg-row';
+      row.dataset.msgIdx=rawIdx;
+      row.dataset.role='user';
+      row.dataset.rawText=String(content).trim();
+      row.innerHTML=`${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`;
+      inner.appendChild(row);
+      continue;
+    }
+
+    if(!currentAssistantTurn){
+      currentAssistantTurn=_createAssistantTurn(tsTitle);
+      inner.appendChild(currentAssistantTurn);
+    }
+    const seg=document.createElement('div');
+    seg.className='assistant-segment';
+    seg.dataset.msgIdx=rawIdx;
+    seg.dataset.rawText=String(content).trim();
+    if(m._live){
+      currentAssistantTurn.id='liveAssistantTurn';
+      seg.setAttribute('data-live-assistant','1');
+    }
+    if(_ERR_MSG_RE.test(String(content||'').trim())) seg.dataset.error='1';
+    if(thinkingText) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
+    const hasVisibleBody=!!(String(content||'').trim()||filesHtml);
+    if(hasVisibleBody){
+      seg.insertAdjacentHTML('beforeend', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
+    }else{
+      seg.classList.add('assistant-segment-anchor');
+    }
+    _assistantTurnBlocks(currentAssistantTurn).appendChild(seg);
+    assistantSegments.set(rawIdx, seg);
   }
   // Insert settled tool call cards (history view only).
   // During live streaming, tool cards are rendered in #liveToolCards by the
@@ -1267,40 +1303,24 @@ function renderMessages(){
       if(!byAssistant[key]) byAssistant[key] = [];
       byAssistant[key].push(tc);
     }
-    const allRows = Array.from(inner.querySelectorAll('.msg-row[data-msg-idx]'));
-    // Track the last inserted node per anchor so back-to-back groups for the
-    // same (filtered) anchor row are inserted in chronological order.
+    const assistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);
     const anchorInsertAfter = new Map();
     for(const [key, cards] of Object.entries(byAssistant)){
       const aIdx = parseInt(key);
-      // Find the right insertion point: cards go AFTER the assistant message
-      // that triggered them. We look for the row at aIdx, or the nearest
-      // visible ASSISTANT row at or before aIdx (the assistant message may be
-      // filtered out if it contained only tool_use blocks with no text response).
-      let anchorRow = null;
-      if(aIdx >= 0){
-        // First: exact match for the assistant row
-        for(const r of allRows){
-          const ri=parseInt(r.dataset.msgIdx||'-1');
-          if(ri===aIdx){anchorRow=r;break;}
-        }
-        // Fallback: nearest visible ASSISTANT row at or before aIdx
-        if(!anchorRow){
-          for(let i=allRows.length-1;i>=0;i--){
-            const ri=parseInt(allRows[i].dataset.msgIdx||'-1');
-            if(ri<=aIdx&&S.messages[ri]&&S.messages[ri].role==='assistant'){anchorRow=allRows[i];break;}
-          }
-        }
+      let anchorRow=assistantSegments.get(aIdx)||null;
+      if(!anchorRow&&assistantIdxs.length){
+        const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
+        anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
       }
-      // aIdx === -1 or no assistant anchor found: attach after the last assistant row
-      if(!anchorRow){
-        for(let i=allRows.length-1;i>=0;i--){
-          const ri=parseInt(allRows[i].dataset.msgIdx||'-1',10);
-          if(ri>=0&&S.messages[ri]&&S.messages[ri].role==='assistant'){anchorRow=allRows[i];break;}
-        }
-      }
+      if(!anchorRow) continue;
+      const anchorParent=anchorRow.parentElement;
       const frag=document.createDocumentFragment();
-      for(const tc of cards){frag.appendChild(buildToolCard(tc));}
+      let lastInsertedNode=null;
+      for(const tc of cards){
+        const card=buildToolCard(tc);
+        frag.appendChild(card);
+        lastInsertedNode=card;
+      }
       // Add expand/collapse toggle for groups with 2+ cards
       if(cards.length>=2){
         const toggle=document.createElement('div');
@@ -1317,22 +1337,18 @@ function renderMessages(){
         toggle.appendChild(collapseBtn);
         frag.insertBefore(toggle,frag.firstChild);
       }
-      // Insert after the anchor row (or after any previously inserted group for
-      // the same anchor), preserving chronological order for multi-step chains.
       const insertAfterNode = anchorInsertAfter.get(anchorRow) || anchorRow;
       const refNode = insertAfterNode ? insertAfterNode.nextSibling : null;
-      if(refNode) inner.insertBefore(frag,refNode);
-      else inner.appendChild(frag);
-      // Record the last child we inserted so the next group for this anchor
-      // goes after it rather than back at anchorRow.nextSibling.
-      anchorInsertAfter.set(anchorRow, inner.lastChild);
+      if(refNode) anchorParent.insertBefore(frag,refNode);
+      else anchorParent.appendChild(frag);
+      if(anchorRow&&lastInsertedNode) anchorInsertAfter.set(anchorRow, lastInsertedNode);
     }
   }
-  // Render usage badge on the last assistant message row (if enabled and usage data exists)
+  // Render usage badge on the last assistant turn (if enabled and usage data exists)
   if(window._showTokenUsage&&S.session&&(S.session.input_tokens||S.session.output_tokens)){
-    const rows=inner.querySelectorAll('.msg-row');
+    const rows=inner.querySelectorAll('.assistant-turn');
     let lastAssist=null;
-    for(let i=rows.length-1;i>=0;i--){if(rows[i].dataset.role==='assistant'){lastAssist=rows[i];break;}}
+    for(let i=rows.length-1;i>=0;i--){lastAssist=rows[i];break;}
     if(lastAssist&&!lastAssist.querySelector('.msg-usage')){
       const usage=document.createElement('div');
       usage.className='msg-usage';
@@ -1342,7 +1358,7 @@ function renderMessages(){
       let text=`${_fmtTokens(inTok)} in · ${_fmtTokens(outTok)} out`;
       if(cost) text+=` · ~$${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
       usage.textContent=text;
-      lastAssist.appendChild(usage);
+      _assistantTurnBlocks(lastAssist).appendChild(usage);
     }
   }
   scrollToBottom();
@@ -1379,7 +1395,7 @@ function toolIcon(name){
 
 function buildToolCard(tc){
   const row=document.createElement('div');
-  row.className='msg-row tool-card-row';
+  row.className='tool-card-row';
   const icon=toolIcon(tc.name);
   const hasDetail=tc.snippet||(tc.args&&Object.keys(tc.args).length>0);
   let displaySnippet='';
@@ -1433,7 +1449,12 @@ function buildToolCard(tc){
 // message column eliminates the visible "jump" users saw when renderMessages
 // fired on the done event.
 function appendLiveToolCard(tc){
-  const inner=$('msgInner');
+  let turn=$('liveAssistantTurn');
+  if(!turn){
+    appendThinking();
+    turn=$('liveAssistantTurn');
+  }
+  const inner=_assistantTurnBlocks(turn);
   if(!inner) return;
   const tid=tc.tid||'';
   // Update existing card in place (tool_complete after tool_start)
@@ -1448,17 +1469,16 @@ function appendLiveToolCard(tc){
   }
   const row=buildToolCard(tc);
   if(tid) row.dataset.liveTid=tid;
-  // Insert BEFORE the live assistant row if it exists, so tool cards sit
-  // between the thinking card and the streaming response (matching the
-  // settled render order). Otherwise append at the end.
-  const liveAssistant=inner.querySelector('.msg-row[data-live-assistant="1"]');
+  // Insert BEFORE the live assistant segment if it exists, so tool cards stay
+  // between the current thinking block(s) and the streaming response.
+  const liveAssistant=inner.querySelector('[data-live-assistant="1"]');
   if(liveAssistant) inner.insertBefore(row, liveAssistant);
   else inner.appendChild(row);
   if(typeof scrollIfPinned==='function') scrollIfPinned();
 }
 
 function clearLiveToolCards(){
-  const inner=$('msgInner');
+  const inner=_assistantTurnBlocks($('liveAssistantTurn'));
   if(inner) inner.querySelectorAll('.tool-card-row[data-live-tid]').forEach(el=>el.remove());
   // Legacy #liveToolCards container cleanup — kept for safety in case any
   // leftover cards were inserted there before this refactor took effect.
@@ -1470,7 +1490,7 @@ function clearLiveToolCards(){
 
 function editMessage(btn) {
   if(S.busy) return;
-  const row = btn.closest('.msg-row');
+  const row = btn.closest('[data-msg-idx]');
   if(!row) return;
   const msgIdx = parseInt(row.dataset.msgIdx, 10);
   const originalText = row.dataset.rawText || '';
@@ -1540,7 +1560,7 @@ async function regenerateResponse(btn) {
   if(!S.session || S.busy) return;
   // Find the last user message and re-run it
   // Remove the last assistant message first (truncate to before it)
-  const row = btn.closest('.msg-row');
+  const row = btn.closest('[data-msg-idx]');
   if(!row) return;
   const assistantIdx = parseInt(row.dataset.msgIdx, 10);
   // Find the last user message text (one before this assistant message)
@@ -1684,29 +1704,38 @@ function renderKatexBlocks(){
 }
 
 function _thinkingMarkup(text=''){
-  const _bn=window._botName||'Hermes';
-  const icon=esc(_bn.charAt(0).toUpperCase());
-  const label=esc(_bn);
-  const body=(text&&String(text).trim())
+  return (text&&String(text).trim())
     ? `<div class="thinking-card open"><div class="thinking-card-header"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span></div><div class="thinking-card-body"><pre>${esc(String(text).trim())}</pre></div></div>`
     : `<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
-  return `<div class="msg-role assistant"><div class="role-icon assistant">${icon}</div>${label}</div>${body}`;
 }
 function appendThinking(text=''){
   $('emptyState').style.display='none';
+  let turn=$('liveAssistantTurn');
+  if(!turn){
+    turn=_createAssistantTurn();
+    turn.id='liveAssistantTurn';
+    $('msgInner').appendChild(turn);
+  }
+  const blocks=_assistantTurnBlocks(turn);
   let row=$('thinkingRow');
   if(!row){
     row=document.createElement('div');
-    row.className='msg-row';
+    row.className='assistant-segment';
     row.id='thinkingRow';
-    $('msgInner').appendChild(row);
+    blocks.appendChild(row);
   }
-  row.className=(text&&String(text).trim())?'msg-row thinking-card-row':'msg-row';
+  row.className=(text&&String(text).trim())?'assistant-segment thinking-card-row':'assistant-segment';
   row.innerHTML=_thinkingMarkup(text);
   scrollToBottom();
 }
 function updateThinking(text=''){appendThinking(text);}
-function removeThinking(){const el=$('thinkingRow');if(el)el.remove();}
+function removeThinking(){
+  const el=$('thinkingRow');
+  if(el) el.remove();
+  const turn=$('liveAssistantTurn');
+  const blocks=_assistantTurnBlocks(turn);
+  if(turn&&blocks&&!blocks.children.length) turn.remove();
+}
 
 function fileIcon(name, type){
   if(type==='dir') return li('folder',14);

@@ -296,3 +296,29 @@ def test_rendermessages_reads_reasoning_from_messages():
     # Specifically, the fallback that reads from top-level m.reasoning field
     assert 'thinkingText=m.reasoning' in src.replace(' ', ''), \
         "thinkingText=m.reasoning assignment not found in ui.js renderMessages"
+
+
+def test_streaming_restores_prior_reasoning_metadata_after_followup():
+    """Previous-turn thinking must survive later turns.
+
+    The provider-facing history strips WebUI-only `reasoning` fields, so the
+    streaming path must merge that metadata back onto the returned message
+    history before saving the session, including reinserting dropped
+    reasoning-only assistant segments.
+    """
+    src = (REPO / 'api' / 'streaming.py').read_text()
+    assert "def _restore_reasoning_metadata(" in src, \
+        "streaming.py must define a helper to restore prior reasoning metadata"
+    assert "s.messages = _restore_reasoning_metadata(" in src, \
+        "streaming.py must merge prior reasoning metadata back after run_conversation()"
+    assert "updated_messages.insert(safe_pos, copy.deepcopy(prev_msg))" in src, \
+        "streaming.py must reinsert dropped reasoning-only assistant messages"
+
+
+def test_routes_restores_prior_reasoning_metadata_after_followup():
+    """The non-streaming route path must preserve prior reasoning metadata too."""
+    src = (REPO / 'api' / 'routes.py').read_text()
+    assert "_restore_reasoning_metadata" in src, \
+        "routes.py must import reasoning metadata restoration helper"
+    assert 's.messages = _restore_reasoning_metadata(' in src, \
+        "routes.py must merge prior reasoning metadata back after run_conversation()"

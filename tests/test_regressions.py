@@ -621,6 +621,50 @@ def test_ui_js_can_upgrade_thinking_spinner_into_live_reasoning_card(cleanup_tes
         "ui.js must expose an updateThinking helper for live reasoning rendering"
 
 
+def test_ui_js_keeps_split_thinking_cards_and_assistant_header(cleanup_test_sessions):
+    """R19b: settled render should keep distinct thinking cards for split assistant
+    turns inside a single assistant turn container, preserving one assistant header
+    for the whole response while keeping multiple thinking cards distinct.
+    """
+    src = (REPO_ROOT / "static" / "ui.js").read_text()
+    assert "pendingTurnThinking" not in src, \
+        "renderMessages must not merge distinct thinking blocks into one settled card"
+    assert "_createAssistantTurn(" in src, \
+        "renderMessages must build a shared assistant turn wrapper instead of separate top-level rows"
+    assert "assistant-segment" in src, \
+        "settled assistant turns must preserve per-message segments for multiple thinking/tool/result blocks"
+
+
+def test_ui_js_keeps_reasoning_only_assistant_messages_visible(cleanup_test_sessions):
+    """R19c: assistant messages that only contain reasoning must still survive
+    rerenders, otherwise prior thinking cards disappear on the next turn.
+    """
+    src = (REPO_ROOT / "static" / "ui.js").read_text()
+    assert "function _messageHasReasoningPayload(m)" in src, \
+        "ui.js must detect reasoning-only assistant messages"
+    assert "hasTc||hasTu||_messageHasReasoningPayload(m)" in src.replace(' ', ''), \
+        "renderMessages visibility filter must preserve reasoning-only assistant messages"
+
+
+def test_messages_js_live_assistant_segment_reuses_live_turn_wrapper(cleanup_test_sessions):
+    """R19d: live streaming must reuse the existing live assistant turn wrapper created
+    by appendThinking(), otherwise the header gets recreated when answer tokens start.
+    """
+    src = (REPO_ROOT / "static" / "messages.js").read_text()
+    assert "function ensureAssistantRow(force=false)" in src or 'function ensureAssistantRow(force = false)' in src, \
+        "ensureAssistantRow should manage the live assistant content segment"
+    assert "let turn=$('liveAssistantTurn');" in src, \
+        "ensureAssistantRow must bind to the existing live assistant turn wrapper"
+    assert "appendThinking();" in src, \
+        "ensureAssistantRow should create the live turn via appendThinking() when needed"
+    assert "assistantRow.className='assistant-segment';" in src or 'assistantRow.className = \'assistant-segment\';' in src, \
+        "live answer content should be appended as a segment inside the live turn wrapper"
+    assert "if(!force&&!assistantRow){" in src.replace(' ', ''), \
+        "ensureAssistantRow must still avoid creating the live answer segment when no display text exists yet"
+    assert "if(String((parsed&&parsed.displayText)||'').trim()||assistantRow) ensureAssistantRow();" in src, \
+        "token handler must only create the live answer segment once visible answer text starts"
+
+
 # ── R17: Stack traces must not leak to clients in 500 responses ────────────
 
 def test_500_response_has_no_trace_field():

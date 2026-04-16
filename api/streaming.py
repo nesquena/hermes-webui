@@ -10,6 +10,7 @@ import re
 import threading
 import time
 import traceback
+import copy
 from pathlib import Path
 from typing import Optional
 
@@ -539,6 +540,79 @@ def _sanitize_messages_for_api(messages):
     return clean
 
 
+def _api_safe_message_positions(messages):
+    """Return [(original_index, sanitized_message)] for API-safe messages."""
+    valid_tool_call_ids: set = set()
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get('role') == 'assistant':
+            for tc in msg.get('tool_calls') or []:
+                if isinstance(tc, dict):
+                    tid = tc.get('id') or tc.get('call_id') or ''
+                    if tid:
+                        valid_tool_call_ids.add(tid)
+
+    out = []
+    for idx, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get('role')
+        if role == 'tool':
+            tid = msg.get('tool_call_id') or ''
+            if not tid or tid not in valid_tool_call_ids:
+                continue
+        sanitized = {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS}
+        if sanitized.get('role'):
+            out.append((idx, sanitized))
+    return out
+
+
+def _restore_reasoning_metadata(previous_messages, updated_messages):
+    """Carry forward assistant reasoning metadata lost during API-safe history sanitization.
+
+    The provider-facing history strips WebUI-only fields like `reasoning`. When the
+    agent returns its new full message history, prior assistant messages come back
+    without that metadata unless we merge it back in by API-history position.
+    """
+    if not previous_messages or not updated_messages:
+        return updated_messages
+    updated_messages = list(updated_messages)
+    prev_safe = _api_safe_message_positions(previous_messages)
+
+    def _safe_projection(msg):
+        if not isinstance(msg, dict):
+            return None
+        return {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS and msg.get('role')}
+
+    def _reasoning_only_assistant(msg):
+        if not isinstance(msg, dict) or msg.get('role') != 'assistant' or not msg.get('reasoning'):
+            return False
+        if msg.get('tool_calls'):
+            return False
+        return not _message_text(msg.get('content'))
+
+    safe_pos = 0
+    while safe_pos < len(prev_safe):
+        prev_idx, _ = prev_safe[safe_pos]
+        prev_msg = previous_messages[prev_idx]
+        cur_msg = updated_messages[safe_pos] if safe_pos < len(updated_messages) else None
+
+        if isinstance(prev_msg, dict) and isinstance(cur_msg, dict) and _safe_projection(prev_msg) == _safe_projection(cur_msg):
+            if prev_msg.get('role') == 'assistant' and prev_msg.get('reasoning') and not cur_msg.get('reasoning'):
+                cur_msg['reasoning'] = prev_msg['reasoning']
+            safe_pos += 1
+            continue
+
+        if _reasoning_only_assistant(prev_msg):
+            updated_messages.insert(safe_pos, copy.deepcopy(prev_msg))
+            safe_pos += 1
+            continue
+
+        safe_pos += 1
+    return updated_messages
+
+
 def _tool_result_snippet(raw) -> str:
     """Extract a compact result preview from a stored tool message payload."""
     text = str(raw or '')
@@ -1010,6 +1084,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             # Pass personality via ephemeral_system_prompt (agent's own mechanism)
             if _personality_prompt:
                 agent.ephemeral_system_prompt = _personality_prompt
+            _previous_messages = list(s.messages or [])
             result = agent.run_conversation(
                 user_message=workspace_ctx + msg_text,
                 system_message=workspace_system_msg,
@@ -1017,7 +1092,10 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 task_id=session_id,
                 persist_user_message=msg_text,
             )
-            s.messages = result.get('messages') or s.messages
+            s.messages = _restore_reasoning_metadata(
+                _previous_messages,
+                result.get('messages') or s.messages,
+            )
 
             # ── Detect silent agent failure (no assistant reply produced) ──
             # When the agent catches an auth/network error internally it may return

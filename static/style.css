@@ -1186,6 +1186,14 @@ body.resizing{user-select:none;cursor:col-resize;}
 .msg-row { padding: 12px 0; }
 .msg-body { padding-left: var(--msg-rail); max-width: var(--msg-max); }
 .msg-body:empty { display: none; }
+.assistant-turn { width: 100%; }
+.assistant-turn-blocks { display: flex; flex-direction: column; }
+.assistant-segment-anchor { display: none; }
+
+/* ── Classic conversation layout: user right, half-width; assistant left ── */
+.msg-row[data-role="user"] { align-self: flex-end; max-width: 60%; }
+@media (max-width: 900px) { .msg-row[data-role="user"] { max-width: 78%; } }
+@media (max-width: 600px) { .msg-row[data-role="user"] { max-width: 90%; } }
 /* Hide the entire "empty tool-anchor" assistant row (content='' with
    tool_calls). renderMessages keeps it in the DOM so tool cards can anchor
    to it, but visually it adds a ghost "Hermes" header above the tool cards.
@@ -1213,17 +1221,19 @@ body.resizing{user-select:none;cursor:col-resize;}
 /* Persistent action toolbar: subtle at rest, full on hover */
 .msg-actions { opacity: .25; }
 .msg-row:hover .msg-actions { opacity: 1; }
+.assistant-turn:hover .msg-actions { opacity: 1; }
 
-/* ── User message: becomes a subtle card so it visually reads as "my input" ── */
+/* ── User message: right-aligned bubble; no avatar/label — position identifies sender ── */
 .msg-row[data-role="user"] .msg-body {
   background: var(--user-bubble-bg);
   border: 1px solid var(--user-bubble-border);
   border-radius: 14px;
   padding: 10px 14px;
-  margin-left: var(--msg-rail);
-  max-width: calc(var(--msg-max) - 40px);
+  margin-left: 0;
+  padding-left: 14px;
+  max-width: none;
 }
-.msg-row[data-role="user"] .msg-files { padding-left: 0; margin-left: var(--msg-rail); }
+.msg-row[data-role="user"] .msg-files { padding-left: 0; margin-left: 0; justify-content: flex-end; }
 .msg-row[data-role="user"][data-editing="1"] .msg-edit-area { background: var(--user-bubble-bg); border-color: var(--user-bubble-border); }
 
 /* Bubble-layout mode: user-card stays intact, just drop the rail margin.
@@ -1233,12 +1243,52 @@ body.bubble-layout .msg-row:has(.msg-role.user) .msg-body { margin-left: 0; padd
 body.bubble-layout .msg-row:has(.msg-role.user) .msg-files { margin-left: 0; padding-left: 0; }
 body.bubble-layout .msg-row + .msg-row[data-role="user"] { border-top: none; padding-top: 10px; margin-top: 0; }
 
-/* Turn boundary: subtle dashed divider before each user turn except the first */
+/* Turn boundary: right alignment already separates user turns — keep only vertical spacing */
 .msg-row + .msg-row[data-role="user"] {
-  border-top: 1px dashed var(--border);
-  margin-top: 18px;
-  padding-top: 22px;
+  border-top: none;
+  margin-top: 10px;
+  padding-top: 12px;
 }
+
+/* ── Message footer: actions (and user timestamp) sit below the bubble ── */
+.msg-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.msg-foot .msg-actions { opacity: 1; margin-left: 0; }
+.msg-foot .msg-time { font-size: 10.5px; opacity: .75; }
+
+/* User footer: visible only on row hover (bubble identifies sender without needing persistent chrome) */
+.msg-row[data-role="user"] .msg-foot {
+  opacity: 0;
+  transition: opacity .15s;
+  padding-right: 2px;
+}
+.msg-row[data-role="user"]:hover .msg-foot,
+.msg-row[data-role="user"]:focus-within .msg-foot { opacity: 1; }
+
+/* Assistant footer: left-aligned under the body rail, subtle at rest */
+.msg-row[data-role="assistant"] .msg-foot,
+.assistant-turn .msg-foot {
+  justify-content: flex-start;
+  padding-left: var(--msg-rail);
+  max-width: var(--msg-max);
+  opacity: .45;
+  transition: opacity .15s;
+}
+.msg-row[data-role="assistant"]:hover .msg-foot,
+.assistant-turn:hover .msg-foot { opacity: 1; }
+
+/* Hide footer while editing to keep the edit bar the only footer-level affordance */
+.msg-row[data-editing="1"] .msg-foot { display: none; }
+
+/* Empty tool-anchor rows: hide footer alongside role/files so the row stays invisible */
+.msg-row[data-role="assistant"]:has(.msg-body:empty) .msg-foot { display: none; }
 
 /* ── Thinking card: quieter than before (no background panel) but still
    clearly a gold-accented affordance so users know it's collapsible. ── */
@@ -1266,8 +1316,8 @@ body.bubble-layout .msg-row + .msg-row[data-role="user"] { border-top: none; pad
 
 /* ── Streaming cursor at the end of the live assistant body ── */
 @keyframes hermes-cursor-blink { 0%,49% { opacity: 1; } 50%,100% { opacity: 0; } }
-.msg-row[data-live-assistant="1"] .msg-body > :last-child::after,
-.msg-row[data-live-assistant="1"] .msg-body:not(:has(> *))::after {
+[data-live-assistant="1"] .msg-body > :last-child::after,
+[data-live-assistant="1"] .msg-body:not(:has(> *))::after {
   content: '';
   display: inline-block;
   width: 7px;
@@ -1280,7 +1330,8 @@ body.bubble-layout .msg-row + .msg-row[data-role="user"] { border-top: none; pad
 }
 
 /* ── Error state: distinct red-accent card, not italic emphasis ── */
-.msg-row[data-error="1"] .msg-body {
+.msg-row[data-error="1"] .msg-body,
+.assistant-segment[data-error="1"] .msg-body {
   background: rgba(233,69,96,.06);
   border: 1px solid rgba(233,69,96,.22);
   border-left: 2px solid var(--accent);
@@ -1291,9 +1342,13 @@ body.bubble-layout .msg-row + .msg-row[data-role="user"] { border-top: none; pad
   color: var(--text);
 }
 .msg-row[data-error="1"] .msg-body em,
-.msg-row[data-error="1"] .msg-body p em { font-style: normal; color: inherit; }
-.msg-row[data-error="1"] .msg-role { color: var(--accent); opacity: 1; }
-.msg-row[data-error="1"] .role-icon { background: rgba(233,69,96,.15); color: var(--accent); border-color: rgba(233,69,96,.3); }
+.msg-row[data-error="1"] .msg-body p em,
+.assistant-segment[data-error="1"] .msg-body em,
+.assistant-segment[data-error="1"] .msg-body p em { font-style: normal; color: inherit; }
+.msg-row[data-error="1"] .msg-role,
+.assistant-segment[data-error="1"] .msg-role { color: var(--accent); opacity: 1; }
+.msg-row[data-error="1"] .role-icon,
+.assistant-segment[data-error="1"] .role-icon { background: rgba(233,69,96,.15); color: var(--accent); border-color: rgba(233,69,96,.3); }
 
 /* ── Day-change separator ── */
 .msg-date-sep {

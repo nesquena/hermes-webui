@@ -182,11 +182,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     inflight.messages.push({role:'assistant',content:assistantText,reasoning:reasoningText||undefined,_live:true,_ts:ts});
     persistInflightState();
   }
-  function ensureAssistantRow(){
+  function ensureAssistantRow(force=false){
     if(!_isActiveSession()) return;
     if(assistantRow&&!assistantRow.isConnected){assistantRow=null;assistantBody=null;}
+    if(!force&&!assistantRow){
+      const parsed=_parseStreamState();
+      if(!String((parsed&&parsed.displayText)||'').trim()) return;
+    }
+    let turn=$('liveAssistantTurn');
+    if(!turn){
+      appendThinking();
+      turn=$('liveAssistantTurn');
+    }
+    const blocks=(typeof _assistantTurnBlocks==='function')?_assistantTurnBlocks(turn):null;
+    if(!blocks) return;
     if(!assistantRow){
-      const existing=$('msgInner').querySelector('.msg-row[data-live-assistant="1"]');
+      const existing=blocks.querySelector('[data-live-assistant="1"]');
       if(existing){
         assistantRow=existing;
         assistantBody=existing.querySelector('.msg-body');
@@ -197,32 +208,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       return;
     }
 
-    // NOTE: intentionally do NOT removeThinking() here — the thinking card
-    // should remain visible above the streaming response so the turn reads
-    // top-to-bottom as: user → thinking → tool cards → response, which is
-    // the same order the settled renderMessages() produces. Killing the
-    // thinking row here caused it to be re-created later (when more reasoning
-    // events arrived) at the very end of msgInner, visibly jumping BELOW the
-    // response. The thinking row is cleaned up by the done-event's full
-    // renderMessages rebuild instead.
     const tr=$('toolRunningRow');if(tr)tr.remove();
     $('emptyState').style.display='none';
     assistantRow=document.createElement('div');
-    assistantRow.className='msg-row';
-    assistantRow.setAttribute('data-role','assistant');
+    assistantRow.className='assistant-segment';
     assistantRow.setAttribute('data-live-assistant','1');
     assistantBody=document.createElement('div');assistantBody.className='msg-body';
-    const role=document.createElement('div');role.className='msg-role assistant';
-    const _bn=window._botName||'Hermes';
-    const icon=document.createElement('div');icon.className='role-icon assistant';icon.textContent=_bn.charAt(0).toUpperCase();
-    const lbl=document.createElement('span');lbl.style.fontSize='12px';lbl.textContent=_bn;
-    role.appendChild(icon);role.appendChild(lbl);
-    assistantRow.appendChild(role);assistantRow.appendChild(assistantBody);
-    // Append at the end of msgInner — any live tool cards inserted earlier in
-    // this turn already sit above us (they were appended first), so the DOM
-    // order becomes user → thinking → tool cards → response, matching what
-    // renderMessages will reconstruct on 'done'.
-    $('msgInner').appendChild(assistantRow);
+    assistantRow.appendChild(assistantBody);
+    blocks.appendChild(assistantRow);
   }
 
   // ── Shared SSE handler wiring (used for initial connection and reconnect) ──
@@ -313,8 +306,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       assistantText+=d.text;
       syncInflightAssistantMessage();
       if(!S.session||S.session.session_id!==activeSid) return;
-
-      ensureAssistantRow();
+      const parsed=_parseStreamState();
+      if(String((parsed&&parsed.displayText)||'').trim()||assistantRow) ensureAssistantRow();
       _scheduleRender();
     });
 

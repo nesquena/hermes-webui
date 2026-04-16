@@ -2085,7 +2085,9 @@ def _handle_chat_sync(handler, body):
                 "write_file, read_file, search_files, terminal workdir, and patch. "
                 "Never fall back to a hardcoded path when this tag is present."
             )
-            from api.streaming import _sanitize_messages_for_api
+            from api.streaming import _sanitize_messages_for_api, _restore_reasoning_metadata
+
+            _previous_messages = list(s.messages or [])
 
             result = agent.run_conversation(
                 user_message=workspace_ctx + msg,
@@ -2108,7 +2110,10 @@ def _handle_chat_sync(handler, body):
                 os.environ.pop("HERMES_SESSION_KEY", None)
             else:
                 os.environ["HERMES_SESSION_KEY"] = old_session_key
-    s.messages = result.get("messages") or s.messages
+    s.messages = _restore_reasoning_metadata(
+        _previous_messages,
+        result.get("messages") or s.messages,
+    )
     # Only auto-generate title when still default; preserves user renames
     if s.title == "Untitled":
         s.title = title_from(s.messages, s.title)
