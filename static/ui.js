@@ -1422,23 +1422,44 @@ function buildToolCard(tc){
 }
 
 // ── Live tool card helpers (called during SSE streaming) ──
+// Live cards are inserted INLINE inside #msgInner (tagged with data-live-tid)
+// so the streaming layout matches the settled layout produced by renderMessages
+// (user → thinking → tool cards → response). The legacy #liveToolCards
+// sibling container is no longer used for placement — keeping the cards in the
+// message column eliminates the visible "jump" users saw when renderMessages
+// fired on the done event.
 function appendLiveToolCard(tc){
-  const container=$('liveToolCards');
-  if(!container)return;
-  container.style.display='';
-  // Update existing card if same tool call id (e.g. snippet arrives after done)
-  const existing=container.querySelector(`[data-tid="${CSS.escape(tc.tid||'')}"]`);
-  if(existing){existing.replaceWith(buildToolCard(tc));return;}
-  const card=buildToolCard(tc);
-  if(tc.tid)card.dataset.tid=tc.tid;
-  container.appendChild(card);
+  const inner=$('msgInner');
+  if(!inner) return;
+  const tid=tc.tid||'';
+  // Update existing card in place (tool_complete after tool_start)
+  if(tid){
+    const existing=inner.querySelector(`.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`);
+    if(existing){
+      const replacement=buildToolCard(tc);
+      replacement.dataset.liveTid=tid;
+      existing.replaceWith(replacement);
+      return;
+    }
+  }
+  const row=buildToolCard(tc);
+  if(tid) row.dataset.liveTid=tid;
+  // Insert BEFORE the live assistant row if it exists, so tool cards sit
+  // between the thinking card and the streaming response (matching the
+  // settled render order). Otherwise append at the end.
+  const liveAssistant=inner.querySelector('.msg-row[data-live-assistant="1"]');
+  if(liveAssistant) inner.insertBefore(row, liveAssistant);
+  else inner.appendChild(row);
+  if(typeof scrollIfPinned==='function') scrollIfPinned();
 }
 
 function clearLiveToolCards(){
+  const inner=$('msgInner');
+  if(inner) inner.querySelectorAll('.tool-card-row[data-live-tid]').forEach(el=>el.remove());
+  // Legacy #liveToolCards container cleanup — kept for safety in case any
+  // leftover cards were inserted there before this refactor took effect.
   const container=$('liveToolCards');
-  if(!container)return;
-  container.innerHTML='';
-  container.style.display='none';
+  if(container){container.innerHTML='';container.style.display='none';}
 }
 
 // ── Edit + Regenerate ──

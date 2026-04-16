@@ -197,10 +197,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       return;
     }
 
-    removeThinking();
+    // NOTE: intentionally do NOT removeThinking() here — the thinking card
+    // should remain visible above the streaming response so the turn reads
+    // top-to-bottom as: user → thinking → tool cards → response, which is
+    // the same order the settled renderMessages() produces. Killing the
+    // thinking row here caused it to be re-created later (when more reasoning
+    // events arrived) at the very end of msgInner, visibly jumping BELOW the
+    // response. The thinking row is cleaned up by the done-event's full
+    // renderMessages rebuild instead.
     const tr=$('toolRunningRow');if(tr)tr.remove();
     $('emptyState').style.display='none';
-    assistantRow=document.createElement('div');assistantRow.className='msg-row';
+    assistantRow=document.createElement('div');
+    assistantRow.className='msg-row';
+    assistantRow.setAttribute('data-role','assistant');
+    assistantRow.setAttribute('data-live-assistant','1');
     assistantBody=document.createElement('div');assistantBody.className='msg-body';
     const role=document.createElement('div');role.className='msg-role assistant';
     const _bn=window._botName||'Hermes';
@@ -208,6 +218,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const lbl=document.createElement('span');lbl.style.fontSize='12px';lbl.textContent=_bn;
     role.appendChild(icon);role.appendChild(lbl);
     assistantRow.appendChild(role);assistantRow.appendChild(assistantBody);
+    // Append at the end of msgInner — any live tool cards inserted earlier in
+    // this turn already sit above us (they were appended first), so the DOM
+    // order becomes user → thinking → tool cards → response, matching what
+    // renderMessages will reconstruct on 'done'.
     $('msgInner').appendChild(assistantRow);
   }
 
@@ -327,7 +341,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       persistInflightState();
 
       if(!S.session||S.session.session_id!==activeSid) return;
-      removeThinking();
+      // NOTE: don't removeThinking() here — keep the thinking card visible
+      // above the tool card so the turn reads top-to-bottom as:
+      // user → thinking → tool cards → response. Removing it caused the card
+      // to be re-created below everything when reasoning resumed post-tool.
       const oldRow=$('toolRunningRow');if(oldRow)oldRow.remove();
       appendLiveToolCard(tc);
       scrollIfPinned();

@@ -1186,6 +1186,14 @@ body.resizing{user-select:none;cursor:col-resize;}
 .msg-row { padding: 12px 0; }
 .msg-body { padding-left: var(--msg-rail); max-width: var(--msg-max); }
 .msg-body:empty { display: none; }
+/* Hide the entire "empty tool-anchor" assistant row (content='' with
+   tool_calls). renderMessages keeps it in the DOM so tool cards can anchor
+   to it, but visually it adds a ghost "Hermes" header above the tool cards.
+   With the row hidden the transition from live → settled on 'done' is
+   seamless. */
+.msg-row[data-role="assistant"]:has(.msg-body:empty) { padding: 0; margin: 0; }
+.msg-row[data-role="assistant"]:has(.msg-body:empty) .msg-role,
+.msg-row[data-role="assistant"]:has(.msg-body:empty) .msg-files { display: none; }
 .msg-files { padding-left: var(--msg-rail); }
 .msg-usage { padding-left: var(--msg-rail); opacity: 1; margin-top: 6px; font-size: 11px; }
 .tool-card { margin-left: var(--msg-rail); max-width: calc(var(--msg-max) + 40px); }
