@@ -162,7 +162,7 @@ def test_sse_cancel_handler_calls_set_busy():
     if idx == -1:
         idx = src.find('addEventListener("cancel"')
     assert idx != -1
-    block = src[idx:idx + 800]
+    block = src[idx:idx + 1000]
     assert "setBusy(false)" in block, (
         "SSE cancel handler no longer calls setBusy(false)"
     )

@@ -20,6 +20,14 @@ from unittest import mock
 
 import pytest
 
+# Skip tests that call apply_onboarding_setup → _save_yaml_config when PyYAML is missing
+try:
+    import yaml as _yaml
+    _HAS_YAML = True
+except ImportError:
+    _HAS_YAML = False
+_needs_yaml = pytest.mark.skipif(not _HAS_YAML, reason="PyYAML not installed — onboarding setup tests require it")
+
 # ---------------------------------------------------------------------------
 # Unit tests — no live server needed, test logic directly via imports
 # ---------------------------------------------------------------------------
@@ -139,6 +147,7 @@ class TestApplyOnboardingSetupGuard:
         )
         assert result.get("requires_confirm") is True
 
+    @_needs_yaml
     def test_setup_allowed_with_confirm_overwrite(self):
         """With confirm_overwrite=True, setup may proceed (will hit real logic)."""
         import api.onboarding as mod
@@ -163,6 +172,7 @@ class TestApplyOnboardingSetupGuard:
         finally:
             fake_config_path.unlink(missing_ok=True)
 
+    @_needs_yaml
     def test_setup_allowed_when_no_config_exists(self):
         """Fresh install: no config.yaml → setup proceeds normally (no blocking error)."""
         import api.onboarding as mod
@@ -225,27 +235,20 @@ def _server_reachable() -> bool:
         return False
 
 
-# Mark integration tests to only run when test server is up
-requires_server = pytest.mark.skipif(
-    not _server_reachable(),
-    reason="Test server on :8788 not reachable",
-)
+# No collection-time skip guard — conftest.py starts the server via its
+# autouse session fixture BEFORE tests run.  A collection-time check always
+# sees no server and turns every test into a skip.  Server reachability is
+# asserted inside the _require_server fixture instead so failures are loud.
 
 
-try:
-    import yaml as _yaml
-    _HAS_YAML = True
-except ImportError:
-    _HAS_YAML = False
-
-_needs_yaml = pytest.mark.skipif(
-    not _HAS_YAML, reason="PyYAML not installed"
-)
-
-
-@requires_server
 class TestOnboardingGateIntegration:
     """Live-server integration tests for the onboarding gate fix."""
+
+    @pytest.fixture(autouse=True)
+    def _require_server(self):
+        """Assert server is reachable at test runtime (not collection time)."""
+        if not _server_reachable():
+            pytest.fail(f"Test server at {BASE} is not reachable")
 
     @pytest.fixture(autouse=True)
     def _clean(self):
@@ -255,6 +258,16 @@ class TestOnboardingGateIntegration:
         yield
         for rel in ("config.yaml", ".env"):
             (hermes_home / rel).unlink(missing_ok=True)
+        # Force the server to reload its in-memory config after file deletion.
+        # apply_onboarding_setup() calls reload_config() which caches provider
+        # state in the server process.  Deleting files on disk does not clear
+        # that cache — the next test would see provider_configured=True.
+        # GET /api/personalities always calls reload_config(), giving us a
+        # cheap way to flush the cache without a server restart.
+        try:
+            _http_get("/api/personalities")
+        except Exception:
+            pass
 
     def test_no_config_wizard_fires(self):
         """No config.yaml → completed=False."""

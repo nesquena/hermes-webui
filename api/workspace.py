@@ -243,7 +243,7 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
     _BLOCKED_SYSTEM_ROOTS = {
         # Linux / macOS
         Path('/etc'), Path('/usr'), Path('/var'), Path('/bin'), Path('/sbin'),
-        Path('/boot'), Path('/proc'), Path('/sys'), Path('/dev'), Path('/root'),
+        Path('/boot'), Path('/proc'), Path('/sys'), Path('/dev'),
         Path('/lib'), Path('/lib64'), Path('/opt/homebrew'),
     }
 

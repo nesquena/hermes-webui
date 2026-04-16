@@ -80,3 +80,24 @@ def test_workspace_panel_restore_before_sync():
     assert sync_pos >= 0,    "syncWorkspacePanelState call must be present in boot IIFE"
     assert restore_pos < sync_pos, \
         "Workspace panel restore must happen BEFORE syncWorkspacePanelState() so the correct mode is applied"
+
+
+def test_workspace_panel_preload_marker_restored_in_head():
+    """index.html must preload the workspace panel state before the main stylesheet paints."""
+    marker = "document.documentElement.dataset.workspacePanel"
+    css_link = '<link rel="stylesheet" href="static/style.css">'
+    marker_pos = HTML.find(marker)
+    css_pos = HTML.find(css_link)
+    assert marker_pos >= 0, "index.html must preload documentElement.dataset.workspacePanel from localStorage"
+    assert css_pos >= 0, "main stylesheet link missing from index.html"
+    assert marker_pos < css_pos, \
+        "workspace panel preload marker must be set before style.css loads to avoid first-paint flash"
+
+
+def test_workspace_panel_mode_syncs_document_dataset():
+    """_setWorkspacePanelMode must update documentElement.dataset.workspacePanel for runtime parity."""
+    fn_idx = BOOT_JS.find("function _setWorkspacePanelMode(")
+    fn_end = BOOT_JS.find("\n}", fn_idx) + 2
+    fn_body = BOOT_JS[fn_idx:fn_end]
+    assert "document.documentElement.dataset.workspacePanel" in fn_body, \
+        "_setWorkspacePanelMode must keep documentElement.dataset.workspacePanel in sync with the panel state"

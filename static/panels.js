@@ -97,10 +97,9 @@ function toggleCronForm(){
     _renderCronSkillTags();
     const search=$('cronFormSkillSearch');
     if(search)search.value='';
-    // Pre-fetch skills for the picker
-    if(!_cronSkillsCache){
-      api('/api/skills').then(d=>{_cronSkillsCache=d.skills||[];}).catch(()=>{});
-    }
+    // Always re-fetch skills to avoid stale cache
+    _cronSkillsCache=null;
+    api('/api/skills').then(d=>{_cronSkillsCache=d.skills||[];}).catch(()=>{});
     $('cronFormName').focus();
   }
 }
@@ -485,6 +484,7 @@ async function submitSkillSave() {
     await api('/api/skills/save', {method:'POST', body: JSON.stringify({name, category: category||undefined, content})});
     showToast(_editingSkillName ? t('skill_updated') : t('skill_created'));
     _skillsData = null;
+    _cronSkillsCache = null;
     toggleSkillForm();
     await loadSkills();
   } catch(e) { errEl.textContent = t('error_prefix') + e.message; errEl.style.display = ''; }
@@ -1114,7 +1114,7 @@ function toggleSettings(){
   if(!overlay) return;
   if(overlay.style.display==='none'){
     _settingsDirty = false;
-    _settingsThemeOnOpen = document.documentElement.dataset.theme || 'dark';
+    _settingsThemeOnOpen = localStorage.getItem('hermes-theme') || document.documentElement.dataset.theme || 'dark';
     _settingsSection = 'conversation';
     overlay.style.display='';
     loadSettingsPanel();
@@ -1152,8 +1152,9 @@ function _closeSettingsPanel(){
 // Revert live DOM/localStorage to what they were when the panel opened
 function _revertSettingsPreview(){
   if(_settingsThemeOnOpen){
-    document.documentElement.dataset.theme = _settingsThemeOnOpen;
     localStorage.setItem('hermes-theme', _settingsThemeOnOpen);
+    if(typeof _applyTheme==='function') _applyTheme(_settingsThemeOnOpen);
+    else document.documentElement.dataset.theme = _settingsThemeOnOpen;
   }
 }
 
@@ -1348,7 +1349,7 @@ async function saveSettings(andClose){
 async function signOut(){
   try{
     await api('/api/auth/logout',{method:'POST',body:'{}'});
-    window.location.href='/login';
+    window.location.href='login';
   }catch(e){
     showToast(t('sign_out_failed')+e.message);
   }

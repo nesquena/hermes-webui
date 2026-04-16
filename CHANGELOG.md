@@ -1,5 +1,262 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.70] — 2026-04-16
+
+### Changed
+- **Chat transcript redesigned** — unified `--msg-rail`/`--msg-max` CSS variables align all message elements on one column. User turns render as per-theme tinted cards. Thinking cards are bordered panels with gold rule. Inline code inherits `--strong`. Action toolbar fades in on hover. Error-prefixed assistant rows get `[data-error="1"]` red-accent card treatment. Day-change `.msg-date-sep` separators added. Transcript fades to transparent behind composer. (PR #587 by @aronprins)
+- **Approval and clarify cards as composer flyouts** — cards slide up from behind the composer top edge rather than floating as disconnected banners. `overflow:hidden` outer + `translateY` inner animation clips travel. `focus({preventScroll:true})` prevents autoscrolling. (PR #587 by @aronprins)
+
+### Fixed
+- **Streaming lifecycle stabilised** — DOM order stays `user → thinking → tool cards → response` with no mid-stream jump. Live tool cards inserted inline before the live assistant row. Ghost empty assistant header suppressed on pure-tool turns. (PR #587 by @aronprins)
+- **Session reload persistence hardened** — last-turn reasoning attached before `s.save()`, so hard-refresh right after a response preserves the thinking trace. `role=tool` rows preserved in `S.messages`. CLI-session tool-result fallback parses output envelopes and attaches snippets to matching cards. (PR #587 by @aronprins)
+- **Workspace panel first-paint flash fixed** — `[data-workspace-panel]` attribute set at document parse time via inline script. (PR #587 by @aronprins)
+
+### Added
+- `docs/ui-ux/index.html` — static inventory of every message-area element loading live `static/style.css`. (PR #587 by @aronprins)
+- `docs/ui-ux/two-stage-proposal.html` — proposal page for the two-stage plan/execute flow (#536). (PR #587 by @aronprins)
+
+## [v0.50.69] — 2026-04-16
+
+### Fixed
+- **Docker: workspace file browser no longer appears empty on macOS** — `docker_init.bash` now auto-detects the correct `WANTED_UID` and `WANTED_GID` from the mounted `/workspace` directory at startup. On macOS, host UIDs start at 501 (not 1000), so the default value of 1024 caused the container user to run as a different UID than the files, making the workspace appear empty. The auto-detect reads `stat -c '%u'` on `/workspace` and uses it when no explicit `WANTED_UID` is set — falling back to 1024 if the path doesn't exist or returns 0 (root). Setting `WANTED_UID` explicitly in a `.env` file still takes full precedence. (Closes #569)
+- **Session message count inconsistency resolved** — the topbar already correctly shows only visible messages (excluding `role='tool'` tool-call entries). The sidebar previously showed raw `message_count` which included tool messages, but PR #584 removed that display entirely — there is no longer any count displayed in the sidebar. No code change needed; documenting with regression tests. (Closes #579)
+
+## [v0.50.68] — 2026-04-16
+
+### Fixed
+- **Light theme: add/rename folder dialogs now use correct light colors** — `.app-dialog`, `.app-dialog-input`, `.app-dialog-btn`, `.app-dialog-close`, and `.file-rename-input` had hardcoded dark-mode backgrounds with no light-theme overrides. Dialog backgrounds, borders, and inputs now adapt correctly to the light theme. (Closes #594)
+- **Workspace panel no longer snaps open then immediately closed** — on page load, `boot.js` was restoring the panel open/closed state from `localStorage` before knowing whether the loaded session has a workspace. `syncWorkspacePanelState()` then snapped it closed, causing a visible jank. The restore is now deferred until after `loadSession()` and only applied when the session actually has a workspace. (Closes #576)
+- **Model dropdown reflects CLI model changes without server restart** — `/api/models` was returning a startup-cached snapshot of `config.yaml`. The fix adds a mtime-based reload check: if `config.yaml` has changed on disk since last read, the cache is refreshed before building the model list. Page refresh now picks up CLI model changes immediately. (Closes #585)
+- **Docker Compose: macOS users guided on UID/GID setup** — the `docker-compose.yml` comment for `WANTED_UID`/`WANTED_GID` now explicitly notes that macOS UIDs start at 501 (not 1000) and tells users to run `id -u`/`id -g`. Also clarifies that the default `${HOME}/.hermes` volume mount works on both macOS and Linux. (Closes #567)
+- **Voice transcription already shows "Transcribing…" spinner** — issue #590 noted that no feedback was shown between pressing stop and text appearing. This was already implemented (`setComposerStatus('Transcribing…')` fires before the fetch in `_transcribeBlob`). Confirmed and documented; closing as already fixed.
+
+## [v0.50.67] — 2026-04-16
+
+### Added
+- **Subpath mount support** — Hermes WebUI can now be served behind a reverse proxy at any subpath (e.g. `/hermes-webui/` via Tailscale Serve, nginx, or Caddy). A dynamic `<base href>` is injected as the first script in `<head>`, and all client-side URL references are converted from absolute to relative. The server-side route handlers are unchanged. No configuration needed — works transparently for both root (`/`) and subpath deployments. (PR #588 by @vcavichini)
+
+## [v0.50.66] — 2026-04-16
+
+### Fixed
+- **WebUI agent now receives full runtime route from provider resolver** — previously `api_mode`, `acp_command`, `acp_args`, and `credential_pool` were not forwarded into `AIAgent.__init__()` in the WebUI streaming path. Users switching between Codex accounts or using credential pools found the switch worked in the CLI but not the WebUI. The fix passes all four fields from the resolved runtime into the agent constructor. (PR #582 by @suinia)
+
+## [v0.50.65] — 2026-04-16
+
+### Fixed
+- **`HERMES_WEBUI_SKIP_ONBOARDING=1` now works unconditionally** — previously the env var was gated on `chat_ready=True`, so hosting providers (e.g. Agent37) that set it but hadn't yet wired up a provider key would still see the wizard on every page load. The var is now honoured as a hard operator override regardless of `chat_ready`. If you set it, the wizard is gone. (Fixes skip-onboarding regression)
+- **Onboarding wizard can no longer overwrite config or env files when `SKIP_ONBOARDING` is set** — `apply_onboarding_setup` now checks the env var first and refuses to touch `config.yaml` or `.env` if it is set. This is a belt-and-suspenders guard: even if a stale JS bundle somehow triggers the setup endpoint while `SKIP_ONBOARDING` is active, no files are written.
+
+
+## [v0.50.64] — 2026-04-16
+
+### Changed
+- **Sidebar session items decluttered** — the meta row under every session title (message count, model slug, and source-tag badge) has been removed. Each session now renders as a single line: title + relative-time bucket headers. The visible session count at a typical viewport height roughly doubles. The `source_tag` field is still populated on the session object and available for a future tooltip or filter facet. `[SYSTEM:]`-prefixed gateway titles fall back to `"Session"` rather than leaking system-prompt content. Removes `_formatSourceTag()`, `.session-meta`, `cli-session`, `[data-source=…]`, `_SOURCE_DISPLAY`, and the associated CSS badge rules. (PR #584 by @aronprins)
+
+## [v0.50.63] — 2026-04-16
+
+### Fixed
+- **Onboarding wizard no longer fires for non-standard providers** — providers outside the quick-setup list (`minimax-cn`, `deepseek`, `xai`, `gemini`, etc.) were always evaluated as `chat_ready=False` because `_provider_api_key_present()` only knew the four built-in env-var names. Those users saw the wizard on every page load and risked `config.yaml` being silently overwritten if the provider dropdown defaulted. The fix adds a `hermes_cli.auth.get_auth_status()` fallback covering every API-key provider in the full registry, and tightens the frontend guard so an unchanged unsupported-provider form never POSTs. (Fixes #572, PR #575)
+- **MCP server toolsets now included in WebUI agent sessions** — previously the WebUI read `platform_toolsets.cli` directly from `config.yaml`, which only carries built-in toolset names. MCP server names (`tidb`, `kyuubi`, etc.) were silently dropped, so MCP tools configured via `~/.hermes/config.yaml` were unavailable in chat. The fix delegates to `hermes_cli.tools_config._get_platform_tools()` — the same code the CLI uses — which merges all enabled MCP servers automatically. Falls back gracefully when `hermes_cli` is unavailable. (PR #574 by @renheqiang)
+
+## [v0.50.62] — 2026-04-16
+
+### Fixed
+- **Docker startup no longer hard-exits when hermes-agent source is not mounted** — previously `docker_init.bash` would call `error_exit` if the agent source directory was missing, preventing the container from starting at all. Users running a minimal `docker run` without the two-container compose setup hit this immediately. Now the script checks for the directory and `pyproject.toml` first, prints a clear warning explaining reduced functionality, and continues startup. The WebUI already has `try/except` fallbacks throughout for when hermes-agent is unavailable. (Fixes #570, PR #573)
+
+## [v0.50.61] — 2026-04-16
+
+### Added
+- **Office file attachments** — `.xls`, `.xlsx`, `.doc`, and `.docx` files can now be selected via the attach button. The file picker's `accept` attribute is extended to include Office MIME types, and the backend MIME map is updated so these files are served with correct content-type headers when accessed through the workspace file browser. Files are saved as binary to the workspace; the AI can reference them by name the same way it does PDFs. (PR #566 by @renheqiang)
+
+## [v0.50.60] — 2026-04-16
+
+### Changed
+- **Test robustness** — two onboarding setup tests (`test_setup_allowed_with_confirm_overwrite`, `test_setup_allowed_when_no_config_exists`) now skip gracefully when PyYAML is not installed in the test environment, matching the pattern already used in `test_onboarding_mvp.py`. No production code changed. (PR #564)
+
+## [v0.50.59] — 2026-04-16
+
+### Fixed
+- **False "Connection lost" message after settled stream** — the UI no longer injects a fake `**Error:** Connection lost` assistant message when an SSE connection drops after the stream already completed normally. The fix tracks terminal stream states (`done`, `stream_end`, `cancel`, `apperror`) and, on a disconnect, fetches `/api/session` to confirm the session is settled before silently restoring it instead of calling the error path. Real failures still go through the error path as before. (Fixes #561, PR #562 by @halmisen)
+
+## [v0.50.58] — 2026-04-16
+
+### Fixed
+- **Custom provider name in model dropdown** — when a `custom_providers` entry in `config.yaml` has a `name` field (e.g. `Agent37`), the model picker now shows that name as the group header instead of the generic `Custom` label. Multiple named providers each get their own group. Unnamed entries still fall back to `Custom`. Brings the web UI into parity with the terminal's provider display. (Fixes #557)
+
+## [v0.50.57] — 2026-04-15
+
+### Added
+- **Auto-generated session titles** — after the first exchange, a background thread generates a concise title from the first user message and assistant reply, replacing the default first-message substring. Updates live in the UI via a new `title` SSE event. Manual renames are preserved; generation only runs once per session. Includes MiniMax token budget handling and a local heuristic fallback. (Fixes #495, PR #535 by @franksong2702)
+
+### Changed
+- **SSE stream termination** — streams now end with `stream_end` instead of `done` so the background title generation thread has time to emit the title update before the client disconnects.
+
+## [v0.50.55] — 2026-04-15
+
+### Fixed
+- **Docker honcho extra** — `docker_init.bash` now installs `hermes-agent[honcho]` so `honcho-ai` is included in the venv on every fresh Docker build. Fixes `"Honcho session could not be initialized."` errors on rebuilt containers. (Fixes #553)
+- **Version badge** — `index.html` version badge corrected to v0.50.55 (was missing the bump for this release).
+
+## [v0.50.54] — 2026-04-15
+
+### Changed
+- **OpenRouter model list** — updated to 14 current models across 7 providers. All slugs verified live against the OpenRouter catalog. Removed `o4-mini`, old Gemini 2.x entries, and Llama 4. Added Claude Opus 4.6, GPT-5.4, Gemini 3.1 Pro Preview, Gemini 3 Flash Preview, DeepSeek R1, Qwen3 Coder, Qwen3.6 Plus, Grok 4.20, and Mistral Large. Both Claude 4.6 and 4.5 generations preserved. Fixed `grok-4-20` → `grok-4.20` slug and Gemini `-preview` suffixes.
+
+## [v0.50.53] — 2026-04-15
+
+### Fixed
+- **Custom endpoint slash model IDs** — model IDs with vendor prefixes that are intrinsic (e.g. `zai-org/GLM-5.1` on DeepInfra) are now preserved when routing to a custom `base_url` endpoint. Previously, all prefixed IDs were stripped, causing `model_not_found` errors on providers that require the full vendor/model format. Known provider namespaces (`openai/`, `google/`, `anthropic/`, etc.) are still stripped as before. (Fixes #548, PR #549 by @eba8)
+
+## [v0.50.52] — 2026-04-15
+
+### Fixed
+- **Simultaneous approval requests** — parallel tool calls that each require approval no longer overwrite each other. `_pending` is now a list per session; each entry gets a stable `approval_id` (uuid4) so `/api/approval/respond` can target a specific request. The UI shows a "1 of N pending" counter when multiple approvals are queued. Backward-compatible with old agent versions and old frontend clients. Adds 14 regression tests. (Fixes #527)
+
+## [v0.50.51] — 2026-04-15
+
+### Fixed
+- **Orphaned tool messages** — conversation histories containing `role: tool` messages with no matching `tool_call_id` in a prior assistant message are now silently stripped before sending to the provider API. Fixes 400 errors from strictly-conformant providers (Mercury-2/Inception, newer OpenAI models). Adds 13 regression tests. (Fixes #534)
+
+## [v0.50.50] — 2026-04-15
+
+### Fixed
+- **Code block syntax highlighting** — Prism theme now follows the active UI theme. Light mode uses the default Prism light theme; dark mode uses `prism-tomorrow`. Theme swaps happen immediately on toggle including on first load. Adds `id="prism-theme"` to the Prism CSS link so JavaScript can locate and swap it. (Closes #505, PR #530 by @mariosam95)
+
+## [v0.50.49] — 2026-04-15
+
+### Fixed
+- **IME composition** — `isComposing` guard added to every Enter keydown handler so CJK/Japanese/Korean input method users never accidentally send mid-composition (fixes #531). Covers chat composer, command dropdown, session rename, project create/rename, app dialog, message edit, and workspace rename. Adds 3 regression tests. (PR #537 by @vansour)
+
+## [v0.50.48] fix: toast when model is switched during active session (#419)
+
+Synthesized from PRs #516 (armorbreak001), #517 and #518 (cloudyun888).
+
+When a user switches the model via the model picker while a session already
+has messages, a 3-second toast now reads: "Model change takes effect in
+your next conversation." This avoids the confusing situation where the
+dropdown shows the new model but the current conversation continues with
+the original one.
+
+The toast fires from `modelSelect.onchange` in `static/boot.js`, after the
+existing provider-mismatch warning. It checks `S.messages.length > 0` (the
+reliable in-memory array, always initialized by `loadSession`). The
+`showToast` call is guarded with `typeof` for safety during boot.
+
+Key differences from submitted PRs: placement in boot.js onchange (covers
+all selection paths including chip dropdown, since `selectModelFromDropdown`
+calls `sel.onchange`), and uses `S.messages` not `S.session.messages`.
+
+4 new tests in `tests/test_provider_mismatch.py::TestModelSwitchToast`.
+
+Total tests: 1272 (was 1268)
+
+
+## [v0.50.47] fix/feat: batch fixes — root workspace, custom providers, cron cache, system theme
+
+Synthesized from PRs #506, #507, #508, #509, #510, #514, #515, #519, #521.
+
+### Fixes
+
+**Allow /root as a workspace path** (PRs #510, #521 by @ccqqlo)
+Removes `/root` from `_BLOCKED_SYSTEM_ROOTS` in `api/workspace.py`, so
+deployments running as root (Docker, VPS) can set `/root` as their workspace
+without a "system directory" rejection.
+
+**Guard against split on missing [Attached files:]** (PR #521 by @ccqqlo)
+`base_text` extraction in `api/streaming.py` now guards: `msg_text.split(...)[0]
+if ... in msg_text else msg_text`. Previously split on the empty case returned
+an empty string, causing attachment-matching to silently fail on messages with
+no attachments.
+
+**custom_providers models visible regardless of active provider** (#515, #519 by @shruggr, @cloudyun888)
+`get_available_models()` in `api/config.py` no longer discards the 'custom'
+provider from `detected_providers` when the user has `custom_providers` entries
+in `config.yaml`. Previously, switching active_provider away from 'custom'
+hid all custom model definitions from the picker.
+
+**Cron skill picker cache invalidated on form open and skill save** (PRs #507, #508 by @armorbreak001)
+`toggleCronForm()` now unconditionally nulls `_cronSkillsCache` before fetching,
+so skills created in the same session appear immediately. `submitSkillSave()` also
+nulls `_cronSkillsCache` after a successful write, mirroring the existing
+`_skillsData = null` pattern. Fixes #502.
+
+### Features
+
+**System (auto) theme following OS prefers-color-scheme** (#504 / PRs #506, #509, #514 by @armorbreak001, @cloudyun888)
+New "System (auto)" option in the theme picker follows the OS dark/light preference
+via `window.matchMedia`. Changes:
+- `static/boot.js`: `_applyTheme(name)` helper resolves 'system' via matchMedia,
+  sets `data-theme`, and registers a MQ change listener for live OS tracking.
+  `loadSettings()` calls `_applyTheme()` instead of direct assignment.
+- `static/index.html`: flicker-prevention script resolves 'system' before first
+  paint. Adds "System (auto)" as first theme option. onchange calls `_applyTheme()`.
+- `static/commands.js`: adds 'system' to valid `/theme` names.
+- `static/panels.js`: `_settingsThemeOnOpen` reads from localStorage (preserves
+  'system' string). `_revertSettingsPreview` calls `_applyTheme()`.
+- `static/i18n.js`: cmd_theme description lists 'system' first in all 5 locales.
+
+### Tests
+
+22 new tests in `tests/test_batch_fixes.py`.
+
+Total tests: 1268 (was 1246)
+
+
+## [v0.50.46] feat: clarify dialog flow and refresh recovery (#520)
+
+Adds a full clarify dialog UX for interactive agent questions — modeled after
+the approval card but for free-form clarification prompts.
+
+### Backend
+
+New `api/clarify.py` module with a per-session pending queue backed by
+`threading.Event` unblocking, gateway notify callbacks, duplicate deduplication
+while unresolved, and resolve/clear helpers.
+
+Three new HTTP endpoints in `api/routes.py`:
+- `GET /api/clarify/pending` — poll for pending clarify prompt
+- `POST /api/clarify/respond` — resolve the pending prompt
+- `GET /api/clarify/inject_test` — loopback-only, for automated tests
+
+`api/streaming.py` wires `clarify_callback` into `AIAgent.run_conversation()`.
+Emits `clarify` SSE events; blocks the tool flow until the user responds, times
+out (120s), or the stream is cancelled. Also adds a 409 guard on `chat/start` so
+page-refresh races return the active stream id instead of starting a duplicate.
+
+### Frontend
+
+`static/messages.js`: clarify card with numbered choices, Other button, and
+free-text input. Composer is locked while clarify is active. DOM self-heals if
+the card node is removed during a rerender. SSE `clarify` event listener plus
+1.5s fallback polling. Session switch and reconnect start/stop clarify polling.
+409 conflict flow reattaches to the active stream and queues the user message.
+`CLARIFY_MIN_VISIBLE_MS = 30000` timer dedup mirrors the approval card pattern.
+
+`static/ui.js`: `lockComposerForClarify()` / `unlockComposerForClarify()` with
+saved-state restore. `updateSendBtn()` respects the disabled state.
+
+`static/sessions.js`: `loadSession()` starts/stops clarify polling on switch
+and inflight reattach.
+
+`static/index.html` / `static/style.css`: clarify card markup with ARIA roles
+and full responsive/mobile styles.
+
+`static/i18n.js`: 6 new keys in all 5 locales (en, es, de, zh-Hans, zh-Hant).
+
+### Tests
+
+- `tests/test_clarify_unblock.py`: 14 new tests covering queue resolution,
+  notify callbacks, clear-on-cancel, and all three HTTP endpoints.
+- `tests/test_sprint30.py`: 31 new clarify tests (HTML markup, CSS classes,
+  i18n keys, messages.js functions, streaming registration flags).
+- `tests/test_sprint36.py`: expand search window for `setBusy` check after
+  additional `stopClarifyPolling()` calls push it past the old 800-char limit.
+
+Total tests: 1246 (was 1209)
+
+Co-authored-by: franksong2702
+
+
 ## [v0.50.45] fix: suppress N/A source_tag in session list (#429)
 
 Feishu and WeChat sessions (and any session with an unrecognised or legacy

@@ -121,14 +121,14 @@ async function cmdUsage(){
 }
 
 async function cmdTheme(args){
-  const themes=['dark','light','slate','solarized','monokai','nord','oled'];
+  const themes=['system','dark','light','slate','solarized','monokai','nord','oled'];
   if(!args||!themes.includes(args.toLowerCase())){
     showToast(t('theme_usage')+themes.join('|'));
     return;
   }
   const themeName=args.toLowerCase();
-  document.documentElement.dataset.theme=themeName;
   localStorage.setItem('hermes-theme',themeName);
+  _applyTheme(themeName);
   try{await api('/api/settings',{method:'POST',body:JSON.stringify({theme:themeName})});}catch(e){}
   // Update settings dropdown if panel is open
   const sel=$('settingsTheme');

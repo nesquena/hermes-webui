@@ -602,6 +602,8 @@ def test_messages_js_supports_live_reasoning_and_tool_completion(cleanup_test_se
     src = (REPO_ROOT / "static/messages.js").read_text()
     assert "let reasoningText=''" in src, \
         "messages.js must track streamed reasoning text separately from assistant text"
+    assert "let liveReasoningText=''" in src or 'let liveReasoningText = ""' in src, \
+        "messages.js must track the currently active reasoning segment separately from cumulative reasoning"
     assert "source.addEventListener('reasoning'" in src or 'source.addEventListener("reasoning"' in src, \
         "messages.js must listen for live reasoning SSE events"
     assert "source.addEventListener('tool_complete'" in src or 'source.addEventListener("tool_complete"' in src, \
@@ -619,6 +621,71 @@ def test_ui_js_can_upgrade_thinking_spinner_into_live_reasoning_card(cleanup_tes
         "ui.js must centralize thinking row markup so it can switch between spinner and live text"
     assert "function updateThinking(text=''){appendThinking(text);}" in src or 'function updateThinking(text=""){appendThinking(text);}' in src, \
         "ui.js must expose an updateThinking helper for live reasoning rendering"
+    assert "function finalizeThinkingCard()" in src, \
+        "ui.js must expose a helper to finalize one live thinking card before starting another"
+
+
+def test_ui_js_keeps_split_thinking_cards_and_assistant_header(cleanup_test_sessions):
+    """R19b: settled render should keep distinct thinking cards for split assistant
+    turns inside a single assistant turn container, preserving one assistant header
+    for the whole response while keeping multiple thinking cards distinct.
+    """
+    src = (REPO_ROOT / "static" / "ui.js").read_text()
+    assert "pendingTurnThinking" not in src, \
+        "renderMessages must not merge distinct thinking blocks into one settled card"
+    assert "_createAssistantTurn(" in src, \
+        "renderMessages must build a shared assistant turn wrapper instead of separate top-level rows"
+    assert "assistant-segment" in src, \
+        "settled assistant turns must preserve per-message segments for multiple thinking/tool/result blocks"
+
+
+def test_ui_js_keeps_reasoning_only_assistant_messages_visible(cleanup_test_sessions):
+    """R19c: assistant messages that only contain reasoning must still survive
+    rerenders, otherwise prior thinking cards disappear on the next turn.
+    """
+    src = (REPO_ROOT / "static" / "ui.js").read_text()
+    assert "function _messageHasReasoningPayload(m)" in src, \
+        "ui.js must detect reasoning-only assistant messages"
+    assert "hasTc||hasTu||_messageHasReasoningPayload(m)" in src.replace(' ', ''), \
+        "renderMessages visibility filter must preserve reasoning-only assistant messages"
+
+
+def test_ui_js_does_not_hide_anchor_segments_that_contain_thinking(cleanup_test_sessions):
+    """R19c2: assistant anchor segments that contain a thinking card must remain
+    visible; only truly empty tool-call anchor segments should be hidden.
+    """
+    src = (REPO_ROOT / "static" / "ui.js").read_text()
+    compact = src.replace(' ', '').replace('\n', '')
+    assert "}elseif(!thinkingText){" in compact, \
+        "renderMessages must only hide assistant anchor segments when they have no thinking content"
+
+
+def test_messages_js_live_assistant_segment_reuses_live_turn_wrapper(cleanup_test_sessions):
+    """R19d: live streaming must reuse the existing live assistant turn wrapper created
+    by appendThinking(), otherwise the header gets recreated when answer tokens start.
+    """
+    src = (REPO_ROOT / "static" / "messages.js").read_text()
+    assert "function ensureAssistantRow(force=false)" in src or 'function ensureAssistantRow(force = false)' in src, \
+        "ensureAssistantRow should manage the live assistant content segment"
+    assert "let turn=$('liveAssistantTurn');" in src, \
+        "ensureAssistantRow must bind to the existing live assistant turn wrapper"
+    assert "appendThinking();" in src, \
+        "ensureAssistantRow should create the live turn via appendThinking() when needed"
+    assert "assistantRow.className='assistant-segment';" in src or 'assistantRow.className = \'assistant-segment\';' in src, \
+        "live answer content should be appended as a segment inside the live turn wrapper"
+    assert "if(!force&&!assistantRow){" in src.replace(' ', ''), \
+        "ensureAssistantRow must still avoid creating the live answer segment when no display text exists yet"
+    assert "if(String((parsed&&parsed.displayText)||'').trim()||assistantRow) ensureAssistantRow();" in src, \
+        "token handler must only create the live answer segment once visible answer text starts"
+
+
+def test_messages_js_finalizes_thinking_card_before_tool_card(cleanup_test_sessions):
+    """R19e: later reasoning after a tool call must render in a fresh card."""
+    src = (REPO_ROOT / "static/messages.js").read_text()
+    assert "finalizeThinkingCard" in src, \
+        "tool handler must finalize the current live thinking card before appending a tool card"
+    assert "liveReasoningText='';" in src or 'liveReasoningText = "";' in src, \
+        "tool handler must reset the active reasoning segment before post-tool reasoning arrives"
 
 
 # ── R17: Stack traces must not leak to clients in 500 responses ────────────

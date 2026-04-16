@@ -25,6 +25,31 @@
     --input-bg:rgba(0,0,0,.03);--hover-bg:rgba(0,0,0,.05);
     --strong:#1a1715;--em:#5a544a;--code-text:#8b4513;--code-inline-bg:rgba(0,0,0,.06);--pre-text:#2c2825;
   }
+  /* #594: app-dialog light theme overrides — base styles use hardcoded dark gradients */
+  :root[data-theme="light"] .app-dialog{
+    background:linear-gradient(180deg,rgba(240,237,232,.99),rgba(228,224,216,.99));
+    border-color:rgba(0,0,0,.12);
+    box-shadow:0 12px 40px rgba(0,0,0,.15);
+  }
+  :root[data-theme="light"] .app-dialog-input{
+    background:rgba(0,0,0,.04);border-color:rgba(0,0,0,.2);
+  }
+  :root[data-theme="light"] .app-dialog-input:focus{
+    border-color:rgba(45,111,163,.5);box-shadow:0 0 0 3px rgba(45,111,163,.12);
+  }
+  :root[data-theme="light"] .app-dialog-close{
+    background:rgba(0,0,0,.04);
+  }
+  :root[data-theme="light"] .app-dialog-close:hover{background:rgba(0,0,0,.09);}
+  :root[data-theme="light"] .app-dialog-btn{background:rgba(0,0,0,.04);}
+  :root[data-theme="light"] .app-dialog-btn:hover{background:rgba(0,0,0,.09);}
+  :root[data-theme="light"] .app-dialog-btn.confirm{
+    border-color:rgba(45,111,163,.45);background:rgba(45,111,163,.12);color:var(--blue);
+  }
+  :root[data-theme="light"] .app-dialog-btn.confirm:hover{background:rgba(45,111,163,.2);}
+  :root[data-theme="light"] .file-rename-input{
+    background:rgba(0,0,0,.04);
+  }
   :root[data-theme="light"] ::-webkit-scrollbar-thumb{background:rgba(0,0,0,.15);}
   :root[data-theme="light"] ::-webkit-scrollbar-thumb:hover{background:rgba(0,0,0,.3);}
   :root[data-theme="light"] ::selection{background:rgba(45,111,163,.2);}
@@ -170,11 +195,10 @@
   .session-item:hover{background:var(--hover-bg);color:var(--text);}
   .session-item.active{background:rgba(232,160,48,0.12);color:#e8a030;}
   .session-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;overflow:hidden;}
-  .session-title-row{display:flex;align-items:flex-start;gap:8px;min-width:0;}
+  .session-title-row{display:flex;align-items:center;gap:6px;min-width:0;}
   .session-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);}
   .session-item.active .session-title{color:var(--gold);}
   .session-time{display:none;}
-  .session-meta{font-size:11px;line-height:1.35;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
   /* ── Session action trigger + dropdown ── */
   .session-actions{position:absolute;right:6px;top:50%;transform:translateY(-50%);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .15s ease;}
   .session-item:hover .session-actions,.session-item:focus-within .session-actions,.session-item.menu-open .session-actions{opacity:1;pointer-events:auto;}
@@ -280,10 +304,13 @@
   .update-btn:hover{background:rgba(124,185,255,0.2);}
   .update-primary{background:rgba(124,185,255,0.2);border-color:rgba(124,185,255,0.5);}
   .update-btn:disabled{opacity:0.5;cursor:not-allowed;}
+  /* ── Composer flyout (approval/clarify slide up from behind composer) ── */
+  .composer-flyout{position:relative;height:0;z-index:1;}
   /* ── Approval card ── */
-  .approval-card{display:none;max-width:780px;margin:0 auto 0;padding:0 20px 12px;}
-  .approval-card.visible{display:block;}
-  .approval-inner{background:var(--surface);backdrop-filter:blur(8px);border:1px solid rgba(233,69,96,0.35);border-radius:14px;padding:16px 18px;}
+  .approval-card{position:absolute;left:0;right:0;bottom:-24px;max-width:var(--msg-max);margin:0 auto;padding:0 20px;box-sizing:border-box;width:100%;overflow:hidden;pointer-events:none;}
+  .approval-card.visible{pointer-events:auto;}
+  .approval-inner{background:var(--surface);backdrop-filter:blur(8px);border:1px solid rgba(124,185,255,0.35);border-radius:14px;padding:16px 18px 40px;transform:translateY(100%);opacity:0;transition:transform .4s cubic-bezier(.32,.72,.16,1),opacity .25s ease;}
+  .approval-card.visible .approval-inner{transform:translateY(0);opacity:1;}
   .approval-header{display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:13px;font-weight:600;color:#e94560;}
   .approval-desc{font-size:12px;color:var(--muted);margin-bottom:8px;line-height:1.5;}
   .approval-cmd{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-family:"SF Mono",ui-monospace,monospace;font-size:12px;color:var(--pre-text);white-space:pre-wrap;word-break:break-all;margin-bottom:14px;max-height:120px;overflow-y:auto;}
@@ -304,6 +331,32 @@
   .approval-btn.deny{border-color:rgba(233,69,96,0.5);color:var(--accent);}
   .approval-btn.deny:hover{background:rgba(233,69,96,0.12);border-color:rgba(233,69,96,0.7);}
   .approval-btn.loading{opacity:.7;cursor:wait;}
+  /* ── Clarify card ── */
+  .clarify-card{position:absolute;left:0;right:0;bottom:-24px;max-width:var(--msg-max);margin:0 auto;padding:0 20px;box-sizing:border-box;width:100%;overflow:hidden;pointer-events:none;max-height:min(calc(100vh - 280px),420px);}
+  .clarify-card.visible{pointer-events:auto;}
+  .clarify-card .clarify-inner{max-height:min(calc(100vh - 280px),420px);overflow-y:auto;transform:translateY(100%);opacity:0;transition:transform .4s cubic-bezier(.32,.72,.16,1),opacity .25s ease;}
+  .clarify-card.visible .clarify-inner{transform:translateY(0);opacity:1;}
+  .clarify-inner{background:var(--surface);backdrop-filter:blur(8px);border:1px solid rgba(124,185,255,0.35);border-radius:12px;padding:12px 14px 36px;box-shadow:0 1px 0 rgba(255,255,255,.02) inset;}
+  .clarify-header{display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:12px;font-weight:700;color:var(--blue);letter-spacing:.01em;}
+  .clarify-question{font-size:14px;color:var(--text);line-height:1.7;white-space:pre-wrap;margin-bottom:12px;}
+  .clarify-choices{display:flex;flex-direction:column;gap:8px;margin-bottom:12px;}
+  .clarify-choice{display:flex;align-items:flex-start;gap:10px;width:100%;padding:11px 14px;border-radius:12px;font-size:13px;font-weight:600;border:1px solid rgba(124,185,255,0.3);background:rgba(124,185,255,0.08);color:var(--blue);cursor:pointer;transition:all .15s;white-space:normal;text-align:left;box-shadow:0 1px 0 rgba(255,255,255,.03) inset;}
+  .clarify-choice:hover{background:rgba(124,185,255,0.16);transform:translateY(-1px);box-shadow:0 4px 12px rgba(0,0,0,0.18);}
+  .clarify-choice:focus-visible{outline:2px solid rgba(124,185,255,.75);outline-offset:2px;}
+  .clarify-choice-badge{display:inline-flex;align-items:center;justify-content:center;min-width:24px;height:24px;border-radius:999px;background:rgba(124,185,255,0.16);border:1px solid rgba(124,185,255,0.3);color:var(--blue);font-size:11px;font-weight:800;flex-shrink:0;line-height:1;}
+  .clarify-choice-badge.other{background:rgba(201,168,76,0.12);border-color:rgba(201,168,76,0.32);color:var(--gold);}
+  .clarify-choice-text{flex:1;line-height:1.45;min-width:0;}
+  .clarify-choice.other{border-color:rgba(201,168,76,0.35);color:var(--gold);background:rgba(201,168,76,0.08);}
+  .clarify-choice.other:hover{background:rgba(201,168,76,0.14);border-color:rgba(201,168,76,0.55);}
+  .clarify-response{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
+  .clarify-input{flex:1;min-width:220px;padding:10px 12px;border-radius:8px;border:1px solid var(--border2);background:var(--input-bg);color:var(--text);font:inherit;outline:none;transition:all .15s;}
+  .clarify-input:focus{border-color:rgba(124,185,255,.5);box-shadow:0 0 0 3px rgba(124,185,255,.08);background:var(--hover-bg);}
+  .clarify-submit{display:inline-flex;align-items:center;justify-content:center;min-width:92px;padding:10px 14px;border-radius:8px;border:1px solid rgba(124,185,255,0.35);background:rgba(124,185,255,0.14);color:var(--blue);font-size:12px;font-weight:700;cursor:pointer;transition:all .15s;white-space:nowrap;}
+  .clarify-submit:hover{background:rgba(124,185,255,0.22);transform:translateY(-1px);}
+  .clarify-submit:disabled{opacity:.6;cursor:not-allowed;transform:none;}
+  .clarify-submit.loading{opacity:.75;cursor:wait;}
+  .clarify-hint{margin-top:8px;font-size:11px;line-height:1.45;color:var(--muted);}
+  .clarify-card.visible .clarify-question{padding-left:1px;}
   /* Sidebar navigation tabs */
   .sidebar-nav{display:flex;border-bottom:1px solid var(--border);flex-shrink:0;padding:6px 8px 0;gap:2px;}
   .nav-tab{flex:1;padding:10px 4px 8px;font-size:20px;text-align:center;cursor:pointer;color:var(--muted);border:none;background:none;transition:color .15s;border-bottom:2px solid transparent;white-space:nowrap;overflow:hidden;position:relative;}
@@ -457,8 +510,8 @@
   .suggestion{padding:12px 14px;background:var(--input-bg);border:1px solid var(--border);border-radius:10px;font-size:13px;color:var(--muted);cursor:pointer;transition:all .15s;text-align:left;}
   .suggestion:hover{background:rgba(124,185,255,0.07);color:var(--text);border-color:rgba(124,185,255,.3);transform:translateX(2px);}
   /* ── Composer ── */
-  .composer-wrap{border-top:1px solid var(--border);padding:12px 20px 16px;background:var(--bg);flex-shrink:0;}
-  .composer-box{max-width:780px;margin:0 auto;background:var(--input-bg);border:1px solid var(--border2);border-radius:16px;display:flex;flex-direction:column;transition:border-color .2s,box-shadow .2s;position:relative;}
+  .composer-wrap{padding:12px 20px 16px;background:var(--bg);flex-shrink:0;}
+  .composer-box{max-width:780px;margin:0 auto;background:linear-gradient(var(--input-bg),var(--input-bg)),var(--bg);border:1px solid var(--border2);border-radius:16px;display:flex;flex-direction:column;transition:border-color .2s,box-shadow .2s;position:relative;z-index:2;}
   .composer-box:focus-within{border-color:rgba(124,185,255,0.5);box-shadow:0 0 0 3px rgba(124,185,255,0.08);}
   .composer-wrap.drag-over .composer-box{border-color:var(--blue);background:rgba(124,185,255,0.06);}
   .drop-hint{display:none;position:absolute;inset:0;align-items:center;justify-content:center;background:rgba(124,185,255,0.08);border:2px dashed var(--blue);border-radius:14px;font-size:14px;color:var(--blue);pointer-events:none;z-index:10;flex-direction:column;gap:8px;}
@@ -608,6 +661,7 @@
   .mobile-overlay{display:none;}
 
   @media(min-width:901px){
+    html[data-workspace-panel="closed"] .rightpanel{width:0 !important;opacity:0;transform:translateX(14px);border-left-color:transparent;pointer-events:none;}
     .layout.workspace-panel-collapsed .rightpanel{width:0 !important;opacity:0;transform:translateX(14px);border-left-color:transparent;pointer-events:none;}
   }
 
@@ -687,10 +741,17 @@
     .suggestion-grid{max-width:100%!important;}
     .suggestion{font-size:12px;padding:10px 12px;}
     /* Approval card */
-    .approval-card{padding:0 10px 8px;}
+    .approval-card{padding-left:10px;padding-right:10px;}
     .approval-btns{gap:6px;}
     .approval-btn{padding:8px 12px;font-size:12px;min-height:44px;}
     .approval-kbd{display:none;}
+    /* Clarify card */
+    .clarify-card{padding-left:10px;padding-right:10px;}
+    .clarify-inner{padding:12px 12px 13px;}
+    .clarify-response{flex-direction:column;align-items:stretch;}
+    .clarify-input,.clarify-submit{width:100%;min-height:44px;}
+    .clarify-choice{min-height:44px;}
+    .clarify-choice-badge{min-width:22px;height:22px;}
     .app-dialog-overlay{padding:12px;}
     .app-dialog{width:100%;padding:16px 16px 14px;border-radius:16px;}
     .app-dialog-actions{flex-direction:column-reverse;align-items:stretch;}
@@ -825,12 +886,14 @@
 
 /* Approval buttons: tab stops */
 .approval-btn:focus{outline:2px solid var(--blue);outline-offset:2px;}
+.clarify-choice:focus,.clarify-submit:focus,.clarify-input:focus{outline:2px solid var(--blue);outline-offset:2px;}
 
 /* Message role: breathing room between icon and name */
 .msg-role > span{line-height:1;}
 
 /* Composer wrap: slightly less padding on smaller heights */
-.composer-wrap{border-top:1px solid rgba(255,255,255,.07);padding:10px 20px 14px;position:relative;z-index:10;}
+.composer-wrap{padding:10px 20px 14px;position:relative;z-index:10;}
+.composer-wrap::before{content:"";position:absolute;left:0;right:0;bottom:100%;height:32px;background:linear-gradient(to bottom,transparent,var(--bg));pointer-events:none;}
 
 /* Cron status badges: pill shape refinement */
 .cron-status{border-radius:99px;font-size:10px;letter-spacing:.04em;}
@@ -971,10 +1034,10 @@ body.resizing{user-select:none;cursor:col-resize;}
 .tool-card-icon{font-size:13px;flex-shrink:0;opacity:.8;}
 .tool-card-name{font-size:12px;font-weight:600;color:var(--muted);font-family:'SF Mono',ui-monospace,monospace;flex-shrink:0;}
 .tool-card-preview{font-size:11px;color:var(--muted);opacity:.6;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.tool-card-toggle{font-size:10px;color:var(--muted);opacity:.5;flex-shrink:0;transition:transform .15s;}
+.tool-card-toggle{font-size:10px;color:var(--muted);opacity:.5;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;transform-origin:center;transition:transform .18s ease;will-change:transform;}
 .tool-card.open .tool-card-toggle{transform:rotate(90deg);}
-.tool-card-detail{display:none;border-top:1px solid rgba(255,255,255,.06);padding:8px 12px;}
-.tool-card.open .tool-card-detail{display:block;}
+.tool-card-detail{display:block;max-height:0;opacity:0;overflow:hidden;border-top:1px solid transparent;padding:0 12px;transition:max-height .22s ease,opacity .18s ease,padding .22s ease,border-top-color .22s ease;}
+.tool-card.open .tool-card-detail{max-height:520px;opacity:1;padding:8px 12px;border-top-color:rgba(255,255,255,.06);}
 .tool-card-args{margin-bottom:6px;}
 .tool-card-args div{font-size:11px;line-height:1.6;}
 .tool-arg-key{color:var(--blue);font-family:'SF Mono',ui-monospace,monospace;font-size:11px;}
@@ -1083,10 +1146,10 @@ body.resizing{user-select:none;cursor:col-resize;}
 .thinking-card-header{display:flex;align-items:center;gap:6px;padding:6px 12px;cursor:pointer;font-size:12px;color:var(--gold);user-select:none;}
 .thinking-card-icon{font-size:14px;}
 .thinking-card-label{font-weight:600;letter-spacing:.02em;}
-.thinking-card-toggle{margin-left:auto;font-size:10px;transition:transform .15s;}
+.thinking-card-toggle{margin-left:auto;font-size:10px;display:inline-flex;align-items:center;justify-content:center;transform-origin:center;transition:transform .18s ease;will-change:transform;}
 .thinking-card.open .thinking-card-toggle{transform:rotate(90deg);}
-.thinking-card-body{display:none;padding:0 12px 10px;max-height:300px;overflow-y:auto;}
-.thinking-card.open .thinking-card-body{display:block;}
+.thinking-card-body{display:block;max-height:0;opacity:0;overflow:hidden;padding:0 12px;transition:max-height .22s ease,opacity .18s ease,padding .22s ease;}
+.thinking-card.open .thinking-card-body{max-height:300px;opacity:1;padding:0 12px 10px;}
 .thinking-card-body pre{font-family:'SF Mono',ui-monospace,monospace;font-size:11px;line-height:1.5;color:var(--muted);white-space:pre-wrap;word-break:break-word;margin:0;}
 
 .bg-error-banner{background:rgba(229,62,62,.15);border:1px solid rgba(229,62,62,.3);color:#fca5a5;padding:8px 16px;font-size:12px;display:flex;align-items:center;justify-content:space-between;gap:12px;border-radius:0;}
@@ -1120,3 +1183,230 @@ body.resizing{user-select:none;cursor:col-resize;}
 .session-item.cli-session[data-source="discord"]::after { color: #5865F2; }
 .session-item.cli-session[data-source="slack"] { border-left-color: #4A154B; }
 .session-item.cli-session[data-source="slack"]::after { color: #4A154B; }
+
+/* ═══════════════════════════════════════════════════════════════════
+   Messages redesign — additive overrides for the transcript area.
+   Fixes the issues catalogued in docs/ui-ux/index.html:
+     • single indent rail (one var, one column)
+     • quieter thinking card (was louder than the answer)
+     • user-message bubble so user vs. assistant reads at a glance
+     • persistent affordances (timestamps, actions, usage always visible)
+     • unified widths (body + tool cards share one max)
+     • tamed inline-code colour (no longer outshouts links)
+     • streaming cursor at end of live assistant body
+     • [data-error="1"] marker for error bubbles
+     • .msg-date-sep for day-change separators
+     • tighter type scale (11/12/13/14/16 — no more 10/10.5/12.5)
+   ═══════════════════════════════════════════════════════════════════ */
+:root {
+  --msg-rail: 0;
+  --msg-max: 780px;
+  --user-bubble-bg: rgba(124,185,255,.05);
+  --user-bubble-border: rgba(124,185,255,.16);
+}
+:root[data-theme="light"]     { --user-bubble-bg: rgba(45,111,163,.06);  --user-bubble-border: rgba(45,111,163,.18); }
+:root[data-theme="solarized"] { --user-bubble-bg: rgba(38,139,210,.08);  --user-bubble-border: rgba(38,139,210,.22); }
+:root[data-theme="monokai"]   { --user-bubble-bg: rgba(102,217,232,.06); --user-bubble-border: rgba(102,217,232,.18); }
+:root[data-theme="nord"]      { --user-bubble-bg: rgba(129,161,193,.08); --user-bubble-border: rgba(129,161,193,.22); }
+:root[data-theme="oled"]      { --user-bubble-bg: rgba(108,180,255,.05); --user-bubble-border: rgba(108,180,255,.16); }
+
+/* Inline code: stop shouting orange; inherit strong text colour instead */
+.msg-body code { color: var(--strong); background: var(--code-inline-bg); font-size: 12.5px; }
+
+/* ── Unified indent rail — every child of a turn lines up on --msg-rail ── */
+.msg-row { padding: 12px 0; }
+.msg-body { padding-left: var(--msg-rail); padding-top: 8px; max-width: var(--msg-max); }
+.msg-body:empty { display: none; }
+.assistant-turn { width: 100%; }
+.assistant-turn-blocks { display: flex; flex-direction: column; }
+.assistant-segment-anchor { display: none; }
+
+/* ── Classic conversation layout: user right, half-width; assistant left ── */
+.msg-row[data-role="user"] { align-self: flex-end; max-width: 60%; }
+@media (max-width: 900px) { .msg-row[data-role="user"] { max-width: 78%; } }
+@media (max-width: 600px) { .msg-row[data-role="user"] { max-width: 90%; } }
+/* Hide the entire "empty tool-anchor" assistant row (content='' with
+   tool_calls). renderMessages keeps it in the DOM so tool cards can anchor
+   to it, but visually it adds a ghost "Hermes" header above the tool cards.
+   With the row hidden the transition from live → settled on 'done' is
+   seamless. */
+.msg-row[data-role="assistant"]:has(.msg-body:empty) { padding: 0; margin: 0; }
+.msg-row[data-role="assistant"]:has(.msg-body:empty) .msg-role,
+.msg-row[data-role="assistant"]:has(.msg-body:empty) .msg-files { display: none; }
+.msg-files { padding-left: var(--msg-rail); }
+.msg-usage { padding-left: var(--msg-rail); opacity: 1; margin-top: 6px; font-size: 11px; }
+.tool-card { margin-left: var(--msg-rail); max-width: var(--msg-max); }
+.thinking-card { margin-left: var(--msg-rail); max-width: var(--msg-max); }
+.tool-cards-toggle { margin-left: var(--msg-rail); }
+.msg-row[data-editing="1"] { width: 100%; }
+.msg-row[data-editing="1"] .msg-edit-area,
+.msg-row[data-editing="1"] .msg-edit-bar { margin-left: var(--msg-rail); }
+
+/* Quieter, always-visible role header (smaller avatar, always-visible timestamp) */
+.msg-role { font-size: 11px; font-weight: 500; margin-bottom: 6px; opacity: .8; letter-spacing: 0; }
+.msg-role:hover { opacity: 1; }
+.role-icon { width: 20px; height: 20px; font-size: 9px; }
+.msg-time { opacity: .65; font-size: 10px; }
+.msg-role:hover .msg-time { opacity: 1; }
+
+/* Persistent action toolbar: subtle at rest, full on hover */
+.msg-actions { opacity: .25; }
+.msg-row:hover .msg-actions { opacity: 1; }
+.assistant-turn:hover .msg-actions { opacity: 1; }
+
+/* ── User message: right-aligned bubble; no avatar/label — position identifies sender ── */
+.msg-row[data-role="user"] .msg-body {
+  background: var(--user-bubble-bg);
+  border: 1px solid var(--user-bubble-border);
+  border-radius: 14px;
+  padding: 10px 14px;
+  margin-left: 0;
+  padding-left: 14px;
+  max-width: none;
+}
+.msg-row[data-role="user"] .msg-files { padding-left: 0; margin-left: 0; justify-content: flex-end; }
+.msg-row[data-role="user"][data-editing="1"] .msg-edit-area { background: var(--user-bubble-bg); border-color: var(--user-bubble-border); }
+
+/* Bubble-layout mode: user-card stays intact, just drop the rail margin.
+   (:has() form matches the existing bubble-layout rule's specificity so this
+   wins by source order rather than relying on !important.) */
+body.bubble-layout .msg-row:has(.msg-role.user) .msg-body { margin-left: 0; padding: 10px 14px; max-width: none; }
+body.bubble-layout .msg-row:has(.msg-role.user) .msg-files { margin-left: 0; padding-left: 0; }
+body.bubble-layout .msg-row + .msg-row[data-role="user"] { border-top: none; padding-top: 10px; margin-top: 0; }
+
+/* Turn boundary: right alignment already separates user turns — keep only vertical spacing */
+.msg-row + .msg-row[data-role="user"] {
+  border-top: none;
+  margin-top: 10px;
+  padding-top: 12px;
+}
+
+/* ── Message footer: actions (and user timestamp) sit below the bubble ── */
+.msg-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.msg-foot .msg-actions { opacity: 1; margin-left: 0; }
+.msg-foot .msg-time { font-size: 10.5px; opacity: .75; }
+
+/* User footer: visible only on row hover (bubble identifies sender without needing persistent chrome) */
+.msg-row[data-role="user"] .msg-foot {
+  opacity: 0;
+  transition: opacity .15s;
+  padding-right: 2px;
+}
+.msg-row[data-role="user"]:hover .msg-foot,
+.msg-row[data-role="user"]:focus-within .msg-foot { opacity: 1; }
+
+/* Assistant footer: left-aligned under the body rail, subtle at rest */
+.msg-row[data-role="assistant"] .msg-foot,
+.assistant-turn .msg-foot {
+  justify-content: flex-start;
+  padding-left: var(--msg-rail);
+  max-width: var(--msg-max);
+  opacity: .45;
+  transition: opacity .15s;
+}
+.msg-row[data-role="assistant"]:hover .msg-foot,
+.assistant-turn:hover .msg-foot { opacity: 1; }
+
+/* Hide footer while editing to keep the edit bar the only footer-level affordance */
+.msg-row[data-editing="1"] .msg-foot { display: none; }
+
+/* Empty tool-anchor rows: hide footer alongside role/files so the row stays invisible */
+.msg-row[data-role="assistant"]:has(.msg-body:empty) .msg-foot { display: none; }
+
+/* ── Thinking card: quieter than before (no background panel) but still
+   clearly a gold-accented affordance so users know it's collapsible. ── */
+.thinking-card {
+  background: rgba(201,168,76,.05);
+  border: 1px solid rgba(201,168,76,.18);
+  border-radius: 8px;
+  padding: 0;
+  margin: 3px 0 3px var(--msg-rail);
+  transition: border-color .15s, background .15s;
+}
+.thinking-card:hover {
+  border-color: rgba(201,168,76,.3);
+  background: rgba(201,168,76,.07);
+}
+.thinking-card-header { padding: 5px 10px; color: var(--gold); font-size: 12px; font-weight: 600; opacity: .85; }
+.thinking-card-header:hover { opacity: 1; }
+.thinking-card-icon { opacity: .7; }
+.thinking-card-body {
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  padding: 0 12px;
+  border-top: 1px solid transparent;
+  transition: max-height .22s ease, opacity .18s ease, padding .22s ease, border-top-color .22s ease;
+}
+.thinking-card.open .thinking-card-body { max-height: 260px; opacity: 1; padding: 8px 12px; border-top-color: rgba(201,168,76,.12); }
+.thinking-card-body pre { font-size: 11px; line-height: 1.6; color: var(--muted); }
+
+/* ── Tool cards: tighter chrome to match quieter thinking card ── */
+.tool-card { border-radius: 8px; margin-top: 3px; margin-bottom: 3px; }
+.tool-card-header { padding: 5px 10px; }
+.tool-card-name { font-size: 11px; }
+.tool-card-preview { font-size: 11px; }
+
+/* ── Streaming cursor at the end of the live assistant body ── */
+@keyframes hermes-cursor-blink { 0%,49% { opacity: 1; } 50%,100% { opacity: 0; } }
+[data-live-assistant="1"] .msg-body > :last-child::after,
+[data-live-assistant="1"] .msg-body:not(:has(> *))::after {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 1em;
+  background: var(--blue);
+  border-radius: 1px;
+  margin-left: 3px;
+  vertical-align: -0.16em;
+  animation: hermes-cursor-blink 1.05s steps(2, start) infinite;
+}
+
+/* ── Error state: distinct red-accent card, not italic emphasis ── */
+.msg-row[data-error="1"] .msg-body,
+.assistant-segment[data-error="1"] .msg-body {
+  background: rgba(233,69,96,.06);
+  border: 1px solid rgba(233,69,96,.22);
+  border-left: 2px solid var(--accent);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-left: var(--msg-rail);
+  max-width: calc(var(--msg-max) - 40px);
+  color: var(--text);
+}
+.msg-row[data-error="1"] .msg-body em,
+.msg-row[data-error="1"] .msg-body p em,
+.assistant-segment[data-error="1"] .msg-body em,
+.assistant-segment[data-error="1"] .msg-body p em { font-style: normal; color: inherit; }
+.msg-row[data-error="1"] .msg-role,
+.assistant-segment[data-error="1"] .msg-role { color: var(--accent); opacity: 1; }
+.msg-row[data-error="1"] .role-icon,
+.assistant-segment[data-error="1"] .role-icon { background: rgba(233,69,96,.15); color: var(--accent); border-color: rgba(233,69,96,.3); }
+
+/* ── Day-change separator ── */
+.msg-date-sep {
+  display: flex; align-items: center; gap: 10px;
+  margin: 22px 0 10px; padding: 0 var(--msg-rail);
+  color: var(--muted); font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .12em; opacity: .55;
+}
+.msg-date-sep::before, .msg-date-sep::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+
+/* ── Widths: collapse messages-inner to match content column ── */
+.messages-inner { max-width: var(--msg-max); }
+@media (min-width: 1400px) { .messages-inner { max-width: calc(var(--msg-max) + 40px); } }
+@media (min-width: 1800px) { .messages-inner { max-width: calc(var(--msg-max) + 80px); } }
+
+@media (max-width: 700px) {
+  .msg-role { margin-bottom: 4px; }
+  .msg-row[data-role="user"] .msg-body { padding: 8px 12px; }
+  .msg-row[data-error="1"] .msg-body { padding: 8px 12px; }
+}

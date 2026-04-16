@@ -29,7 +29,7 @@ from api.config import (
     STREAMS_LOCK,
     CANCEL_FLAGS,
     SERVER_START_TIME,
-    CLI_TOOLSETS,
+    _resolve_cli_toolsets,
     _INDEX_HTML_PATH,
     get_available_models,
     IMAGE_EXTS,
@@ -193,7 +193,7 @@ from api.onboarding import (
 # Approval system (optional -- graceful fallback if agent not available)
 try:
     from tools.approval import (
-        submit_pending,
+        submit_pending as _submit_pending_raw,
         approve_session,
         approve_permanent,
         save_permanent_allowlist,
@@ -204,7 +204,7 @@ try:
         resolve_gateway_approval,
     )
 except ImportError:
-    submit_pending = lambda *a, **k: None
+    _submit_pending_raw = lambda *a, **k: None
     approve_session = lambda *a, **k: None
     approve_permanent = lambda *a, **k: None
     save_permanent_allowlist = lambda *a, **k: None
@@ -213,6 +213,43 @@ except ImportError:
     _pending = {}
     _lock = threading.Lock()
     _permanent_approved = set()
+
+
+def submit_pending(session_key: str, approval: dict) -> None:
+    """Append a pending approval to the per-session queue.
+
+    Wraps the agent's submit_pending to:
+    - Add a stable approval_id (uuid4 hex) so the respond endpoint can target
+      a specific entry even when multiple approvals are queued simultaneously.
+    - Change the storage from a single overwriting dict value to a list, so
+      parallel tool calls each get their own approval slot (fixes #527).
+    """
+    entry = dict(approval)
+    entry.setdefault("approval_id", uuid.uuid4().hex)
+    with _lock:
+        queue = _pending.setdefault(session_key, [])
+        # Replace a legacy non-list value if the agent version uses the old pattern.
+        if not isinstance(queue, list):
+            _pending[session_key] = [queue]
+            queue = _pending[session_key]
+        queue.append(entry)
+    # NOTE: We do NOT call _submit_pending_raw here — that function overwrites
+    # _pending[session_key] with a single dict, which would undo the list we just
+    # built. The gateway blocking path uses _gateway_queues (a separate mechanism
+    # managed by check_all_command_guards / register_gateway_notify), which is
+    # unaffected by _pending. The _pending dict is only used for UI polling.
+
+# Clarify prompts (optional -- graceful fallback if agent not available)
+try:
+    from api.clarify import (
+        submit_pending as submit_clarify_pending,
+        get_pending as get_clarify_pending,
+        resolve_clarify,
+    )
+except ImportError:
+    submit_clarify_pending = lambda *a, **k: None
+    get_clarify_pending = lambda *a, **k: None
+    resolve_clarify = lambda *a, **k: 0
 
 
 # ── Login page locale strings ─────────────────────────────────────────────────
@@ -612,6 +649,15 @@ def handle_get(handler, parsed) -> bool:
             return j(handler, {"error": "not found"}, status=404)
         return _handle_approval_inject(handler, parsed)
 
+    if parsed.path == "/api/clarify/pending":
+        return _handle_clarify_pending(handler, parsed)
+
+    if parsed.path == "/api/clarify/inject_test":
+        # Loopback-only: used by automated tests; blocked from any remote client
+        if handler.client_address[0] != "127.0.0.1":
+            return j(handler, {"error": "not found"}, status=404)
+        return _handle_clarify_inject(handler, parsed)
+
     # ── Cron API (GET) ──
     if parsed.path == "/api/crons":
         from cron.jobs import list_jobs
@@ -919,6 +965,10 @@ def handle_post(handler, parsed) -> bool:
     # ── Approval (POST) ──
     if parsed.path == "/api/approval/respond":
         return _handle_approval_respond(handler, body)
+
+    # ── Clarify (POST) ──
+    if parsed.path == "/api/clarify/respond":
+        return _handle_clarify_respond(handler, body)
 
     # ── Skills (POST) ──
     if parsed.path == "/api/skills/save":
@@ -1418,7 +1468,7 @@ def _handle_sse_stream(handler, parsed):
                 handler.wfile.flush()
                 continue
             _sse(handler, event, data)
-            if event in ("done", "error", "cancel"):
+            if event in ("stream_end", "error", "cancel"):
                 break
     except (BrokenPipeError, ConnectionResetError):
         pass
@@ -1655,10 +1705,20 @@ def _handle_file_read(handler, parsed):
 def _handle_approval_pending(handler, parsed):
     sid = parse_qs(parsed.query).get("session_id", [""])[0]
     with _lock:
-        p = _pending.get(sid)
+        queue = _pending.get(sid)
+        # Support both the new list format and a legacy single-dict value.
+        if isinstance(queue, list):
+            p = queue[0] if queue else None
+            total = len(queue)
+        elif queue:
+            p = queue
+            total = 1
+        else:
+            p = None
+            total = 0
     if p:
-        return j(handler, {"pending": dict(p)})
-    return j(handler, {"pending": None})
+        return j(handler, {"pending": dict(p), "pending_count": total})
+    return j(handler, {"pending": None, "pending_count": 0})
 
 
 def _handle_approval_inject(handler, parsed):
@@ -1675,6 +1735,34 @@ def _handle_approval_inject(handler, parsed):
                 "pattern_key": key,
                 "pattern_keys": [key],
                 "description": "test pattern",
+            },
+        )
+        return j(handler, {"ok": True, "session_id": sid})
+    return j(handler, {"error": "session_id required"}, status=400)
+
+
+def _handle_clarify_pending(handler, parsed):
+    sid = parse_qs(parsed.query).get("session_id", [""])[0]
+    pending = get_clarify_pending(sid)
+    if pending:
+        return j(handler, {"pending": pending})
+    return j(handler, {"pending": None})
+
+
+def _handle_clarify_inject(handler, parsed):
+    """Inject a fake pending clarify prompt -- loopback-only, used by automated tests."""
+    qs = parse_qs(parsed.query)
+    sid = qs.get("session_id", [""])[0]
+    question = qs.get("question", ["Which option?"])[0]
+    choices = qs.get("choices", [])
+    if sid:
+        submit_clarify_pending(
+            sid,
+            {
+                "question": question,
+                "choices_offered": choices,
+                "session_id": sid,
+                "kind": "clarify",
             },
         )
         return j(handler, {"ok": True, "session_id": sid})
@@ -1901,6 +1989,24 @@ def _handle_chat_start(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
     model = body.get("model") or s.model
+    # Prevent duplicate runs in the same session while a stream is still active.
+    # This commonly happens after page refresh/reconnect races and can produce
+    # duplicated clarify cards for what appears to be a single user request.
+    current_stream_id = getattr(s, "active_stream_id", None)
+    if current_stream_id:
+        with STREAMS_LOCK:
+            current_active = current_stream_id in STREAMS
+        if current_active:
+            return j(
+                handler,
+                {
+                    "error": "session already has an active stream",
+                    "active_stream_id": current_stream_id,
+                },
+                status=409,
+            )
+        # Stale stream id from a previous run; clear and continue.
+        s.active_stream_id = None
     stream_id = uuid.uuid4().hex
     s.workspace = workspace
     s.model = model
@@ -1973,7 +2079,7 @@ def _handle_chat_sync(handler, body):
                 api_key=_api_key,
                 platform="cli",
                 quiet_mode=True,
-                enabled_toolsets=CLI_TOOLSETS,
+                enabled_toolsets=_resolve_cli_toolsets(),
                 session_id=s.session_id,
             )
             workspace_ctx = f"[Workspace: {s.workspace}]\n"
@@ -1988,7 +2094,9 @@ def _handle_chat_sync(handler, body):
                 "write_file, read_file, search_files, terminal workdir, and patch. "
                 "Never fall back to a hardcoded path when this tag is present."
             )
-            from api.streaming import _sanitize_messages_for_api
+            from api.streaming import _sanitize_messages_for_api, _restore_reasoning_metadata
+
+            _previous_messages = list(s.messages or [])
 
             result = agent.run_conversation(
                 user_message=workspace_ctx + msg,
@@ -2011,7 +2119,10 @@ def _handle_chat_sync(handler, body):
                 os.environ.pop("HERMES_SESSION_KEY", None)
             else:
                 os.environ["HERMES_SESSION_KEY"] = old_session_key
-    s.messages = result.get("messages") or s.messages
+    s.messages = _restore_reasoning_metadata(
+        _previous_messages,
+        result.get("messages") or s.messages,
+    )
     # Only auto-generate title when still default; preserves user renames
     if s.title == "Untitled":
         s.title = title_from(s.messages, s.title)
@@ -2292,9 +2403,31 @@ def _handle_approval_respond(handler, body):
     choice = body.get("choice", "deny")
     if choice not in ("once", "session", "always", "deny"):
         return bad(handler, f"Invalid choice: {choice}")
-    # Pop the legacy polling-mode pending entry (no-op when gateway path is active).
+    approval_id = body.get("approval_id", "")
+
+    # Pop the targeted entry from the pending queue by approval_id.
+    # Falls back to popping the first entry for backward-compat with old clients.
+    pending = None
     with _lock:
-        pending = _pending.pop(sid, None)
+        queue = _pending.get(sid)
+        if isinstance(queue, list):
+            if approval_id:
+                # Find and remove the specific entry by approval_id.
+                for i, entry in enumerate(queue):
+                    if entry.get("approval_id") == approval_id:
+                        pending = queue.pop(i)
+                        break
+                else:
+                    # approval_id not found -- fall back to oldest entry.
+                    pending = queue.pop(0) if queue else None
+            else:
+                pending = queue.pop(0) if queue else None
+            if not queue:
+                _pending.pop(sid, None)
+        elif queue:
+            # Legacy single-dict value.
+            pending = _pending.pop(sid, None)
+
     if pending:
         keys = pending.get("pattern_keys") or [pending.get("pattern_key", "")]
         if choice in ("once", "session"):
@@ -2310,6 +2443,22 @@ def _handle_approval_respond(handler, body):
     # thread is parked in entry.event.wait() and needs to be woken up.
     resolve_gateway_approval(sid, choice, resolve_all=False)
     return j(handler, {"ok": True, "choice": choice})
+
+
+def _handle_clarify_respond(handler, body):
+    sid = body.get("session_id", "")
+    if not sid:
+        return bad(handler, "session_id is required")
+    response = body.get("response")
+    if response is None:
+        response = body.get("answer")
+    if response is None:
+        response = body.get("choice")
+    response = str(response or "").strip()
+    if not response:
+        return bad(handler, "response is required")
+    resolve_clarify(sid, response, resolve_all=False)
+    return j(handler, {"ok": True, "response": response})
 
 
 def _handle_skill_save(handler, body):

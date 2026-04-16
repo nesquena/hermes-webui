@@ -91,6 +91,31 @@ class TestApprovalCardHTML:
             "approval card missing aria-labelledby"
 
 
+class TestClarifyCardHTML:
+
+    def test_clarify_card_markup_present(self):
+        html = read(REPO / "static/index.html")
+        assert 'id="clarifyCard"' in html, "clarify card missing from index.html"
+        assert 'id="clarifyHeading"' in html, "clarify heading missing"
+        assert 'id="clarifyQuestion"' in html, "clarify question text missing"
+        assert 'id="clarifyChoices"' in html, "clarify choices container missing"
+        assert 'id="clarifyInput"' in html, "clarify input missing"
+        assert 'id="clarifySubmit"' in html, "clarify submit button missing"
+
+    def test_clarify_card_has_data_i18n(self):
+        html = read(REPO / "static/index.html")
+        assert 'data-i18n="clarify_heading"' in html
+        assert 'data-i18n="clarify_send"' in html
+        assert 'data-i18n-placeholder="clarify_input_placeholder"' in html
+
+    def test_clarify_card_has_aria_roles(self):
+        html = read(REPO / "static/index.html")
+        assert 'role="dialog"' in html, \
+            "clarify card missing role=dialog for accessibility"
+        assert 'aria-labelledby="clarifyHeading"' in html, \
+            "clarify card missing aria-labelledby"
+
+
 # ── CSS ──────────────────────────────────────────────────────────────────────
 
 class TestApprovalCardCSS:
@@ -128,6 +153,37 @@ class TestApprovalCardCSS:
         for cls in (".approval-btn.once", ".approval-btn.session",
                     ".approval-btn.always", ".approval-btn.deny"):
             assert cls in css, f"CSS class '{cls}' missing"
+
+
+class TestClarifyCardCSS:
+
+    def test_clarify_styles_present(self):
+        css = read(REPO / "static/style.css")
+        for cls in (
+            ".clarify-card",
+            ".clarify-card.visible",
+            ".clarify-inner",
+            ".clarify-header",
+            ".clarify-question",
+            ".clarify-choices",
+            ".clarify-choice",
+            ".clarify-response",
+            ".clarify-input",
+            ".clarify-submit",
+            ".clarify-hint",
+        ):
+            assert cls in css, f"CSS class '{cls}' missing"
+
+    def test_clarify_mobile_styles_present(self):
+        css = read(REPO / "static/style.css")
+        assert ".clarify-card{padding:0 10px 8px;}" in css or \
+               ".clarify-card { padding:0 10px 8px; }" in css or \
+               "clarify-card" in css, "clarify mobile styles missing"
+
+    def test_clarify_focus_styles_present(self):
+        css = read(REPO / "static/style.css")
+        assert ".clarify-choice:focus" in css and ".clarify-submit:focus" in css, \
+            "clarify focus styles missing"
 
 
 # ── i18n keys ────────────────────────────────────────────────────────────────
@@ -178,6 +234,38 @@ class TestApprovalI18nKeys:
             "English approval_btn_deny value incorrect"
 
 
+class TestClarifyI18nKeys:
+
+    REQUIRED_KEYS = [
+        "clarify_heading",
+        "clarify_hint",
+        "clarify_other",
+        "clarify_send",
+        "clarify_input_placeholder",
+        "clarify_responding",
+    ]
+
+    def test_english_locale_has_all_clarify_keys(self):
+        src = read(REPO / "static/i18n.js")
+        en_block_end = src.find("\n};")
+        en_block = src[:en_block_end]
+        for key in self.REQUIRED_KEYS:
+            assert f"{key}:" in en_block, f"English locale missing i18n key: {key}"
+
+    def test_chinese_locale_has_all_clarify_keys(self):
+        src = read(REPO / "static/i18n.js")
+        zh_start = src.find("\n  zh: {")
+        assert zh_start != -1, "zh locale block not found in i18n.js"
+        zh_block = src[zh_start:]
+        for key in self.REQUIRED_KEYS:
+            assert f"{key}:" in zh_block, f"Chinese locale missing i18n key: {key}"
+
+    def test_clarify_heading_english_value(self):
+        src = read(REPO / "static/i18n.js")
+        assert "clarify_heading: 'Clarification needed'" in src, \
+            "English clarify_heading value incorrect"
+
+
 # ── messages.js behaviour ────────────────────────────────────────────────────
 
 class TestApprovalMessagesJS:
@@ -207,6 +295,30 @@ class TestApprovalMessagesJS:
         src = read(REPO / "static/messages.js")
         assert "approvalBtnOnce" in src and "focus()" in src, \
             "showApprovalCard should focus the Allow once button"
+
+
+class TestClarifyMessagesJS:
+
+    def test_clarify_event_listener_present(self):
+        src = read(REPO / "static/messages.js")
+        assert "addEventListener('clarify'" in src, \
+            "clarify SSE listener missing from messages.js"
+
+    def test_show_clarify_card_present(self):
+        src = read(REPO / "static/messages.js")
+        assert "function showClarifyCard" in src, "showClarifyCard missing"
+        assert "clarifyChoices" in src and "clarifyInput" in src, \
+            "showClarifyCard should manage clarify DOM elements"
+
+    def test_respond_clarify_uses_api_endpoint(self):
+        src = read(REPO / "static/messages.js")
+        assert '/api/clarify/respond' in src, \
+            "respondClarify should POST to /api/clarify/respond"
+
+    def test_clarify_polling_helpers_present(self):
+        src = read(REPO / "static/messages.js")
+        for token in ("startClarifyPolling", "stopClarifyPolling", "hideClarifyCard", "_clarifySessionId"):
+            assert token in src, f"{token} missing from messages.js"
 
 
 # ── boot.js keyboard shortcut ────────────────────────────────────────────────
@@ -247,6 +359,21 @@ class TestStreamingApprovalScoping:
         src = read(REPO / "api/streaming.py")
         assert "_approval_registered = False" in src, \
             "_approval_registered flag must be initialised to False"
+
+    def test_clarify_registered_flag_present(self):
+        src = read(REPO / "api/streaming.py")
+        assert "_clarify_registered = False" in src, \
+            "_clarify_registered flag must be initialised to False"
+
+    def test_clarify_unreg_notify_initialised_to_none(self):
+        src = read(REPO / "api/streaming.py")
+        assert "_unreg_clarify_notify = None" in src, \
+            "_unreg_clarify_notify must be initialised to None before the try block"
+
+    def test_finally_checks_clarify_unreg_notify_not_none(self):
+        src = read(REPO / "api/streaming.py")
+        assert "_unreg_clarify_notify is not None" in src, \
+            "finally block must check '_unreg_clarify_notify is not None' before calling it"
 
 
 # ── HTTP regression: approval respond ────────────────────────────────────────
@@ -384,3 +511,66 @@ class TestApprovalCardTimerLogic:
         src = self._get_js().read_text()
         assert '_clearApprovalHideTimer' in src, \
             '_clearApprovalHideTimer helper must exist to cancel deferred setTimeout'
+
+
+class TestClarifyCardTimerLogic:
+
+    def _get_js(self):
+        return pathlib.Path(__file__).parent.parent / 'static' / 'messages.js'
+
+    def test_clarify_min_visible_ms_constant_present(self):
+        src = self._get_js().read_text()
+        assert 'CLARIFY_MIN_VISIBLE_MS' in src
+        import re
+        m = re.search(r'CLARIFY_MIN_VISIBLE_MS\s*=\s*(\d+)', src)
+        assert m is not None, 'CLARIFY_MIN_VISIBLE_MS not assigned'
+        assert int(m.group(1)) == 30000, f'Expected 30000, got {m.group(1)}'
+
+    def test_hide_clarify_card_has_force_parameter(self):
+        src = self._get_js().read_text()
+        assert 'hideClarifyCard(force=false)' in src or \
+               'hideClarifyCard(force = false)' in src, \
+            'hideClarifyCard must have force=false default parameter'
+
+    def test_hide_clarify_card_checks_force_flag(self):
+        src = self._get_js().read_text()
+        assert '!force' in src, 'hideClarifyCard must check !force before deferred hide'
+
+    def test_clarify_hide_timer_variable_present(self):
+        src = self._get_js().read_text()
+        assert '_clarifyHideTimer' in src
+
+    def test_clarify_visible_since_variable_present(self):
+        src = self._get_js().read_text()
+        assert '_clarifyVisibleSince' in src
+
+    def test_clarify_signature_variable_present(self):
+        src = self._get_js().read_text()
+        assert '_clarifySignature' in src
+
+    def test_respond_clarify_calls_hide_with_force(self):
+        src = self._get_js().read_text()
+        import re
+        m = re.search(r'async function respondClarify.*?(?=\nasync function|\nfunction |\Z)',
+                      src, re.DOTALL)
+        assert m, 'respondClarify function not found'
+        body = m.group(0)
+        assert 'hideClarifyCard(true)' in body, \
+            'respondClarify must call hideClarifyCard(true) so card hides immediately after user clicks'
+
+    def test_clarify_poll_loop_uses_no_force(self):
+        src = self._get_js().read_text()
+        assert 'else { hideClarifyCard(); }' in src or \
+               'else {hideClarifyCard();}' in src or \
+               'else { hideClarifyCard() }' in src, \
+            'Clarify poll loop should hide without force=true'
+
+    def test_show_clarify_card_signature_dedup(self):
+        src = self._get_js().read_text()
+        import re
+        m = re.search(r'function showClarifyCard.*?(?=\nfunction |\nasync function |\Z)',
+                      src, re.DOTALL)
+        assert m, 'showClarifyCard function not found'
+        body = m.group(0)
+        assert 'JSON.stringify' in body, 'showClarifyCard must compute a signature via JSON.stringify'
+        assert '_clarifySignature' in body, 'showClarifyCard must check/set _clarifySignature'

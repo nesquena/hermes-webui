@@ -2,7 +2,7 @@ async function cancelStream(){
   const streamId = S.activeStreamId;
   if(!streamId) return;
   try{
-    await fetch(new URL(`/api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,location.origin).href,{credentials:'include'});
+    await fetch(new URL(`api/chat/cancel?stream_id=${encodeURIComponent(streamId)}`,location.href).href,{credentials:'include'});
   }catch(e){/* cancel request failed — cleanup below still runs */}
   // Clear status unconditionally after the cancel request completes.
   // The SSE cancel event may also fire, but if the connection is already
@@ -40,6 +40,7 @@ function _setWorkspacePanelMode(mode){
   if(!layout||!panel)return;
   _workspacePanelMode=(mode==='browse'||mode==='preview')?mode:'closed';
   const open=_workspacePanelMode!=='closed';
+  document.documentElement.dataset.workspacePanel=open?'open':'closed';
   // Persist open/closed across refreshes (browse/preview → open; closed → closed)
   localStorage.setItem('hermes-webui-workspace-panel', open ? 'open' : 'closed');
   layout.classList.toggle('workspace-panel-collapsed',!open);
@@ -226,7 +227,7 @@ $('btnAttach').onclick=()=>$('fileInput').click();
     form.append('file',new File([blob],`voice-input.${ext}`,{type:blob.type||`audio/${ext}`}));
     setComposerStatus('Transcribing…');
     try{
-      const res=await fetch('/api/transcribe',{method:'POST',body:form});
+      const res=await fetch('api/transcribe',{method:'POST',body:form});
       const data=await res.json().catch(()=>({}));
       if(!res.ok) throw new Error(data.error||'Transcription failed');
       _commitTranscript(data.transcript||'');
@@ -420,6 +421,10 @@ $('modelSelect').onchange=async()=>{
     const warn=_checkProviderMismatch(selectedModel);
     if(warn&&typeof showToast==='function') showToast(warn,4000);
   }
+  // Notify user that model changes only take effect in the next conversation (#419)
+  if(S.messages && S.messages.length > 0 && typeof showToast==='function'){
+    showToast('Model change takes effect in your next conversation', 3000);
+  }
 };
 $('msg').addEventListener('input',()=>{
   autoResize();
@@ -442,7 +447,12 @@ $('msg').addEventListener('keydown',e=>{
     if(e.key==='ArrowDown'){e.preventDefault();navigateCmdDropdown(1);return;}
     if(e.key==='Tab'){e.preventDefault();selectCmdDropdownItem();return;}
     if(e.key==='Escape'){e.preventDefault();hideCmdDropdown();return;}
-    if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();selectCmdDropdownItem();return;}
+    if(e.key==='Enter'&&!e.shiftKey){
+      if(e.isComposing){return;}
+      e.preventDefault();
+      selectCmdDropdownItem();
+      return;
+    }
   }
   // Send key: respect user preference.
   // On touch-primary devices (software keyboard), default to Enter = newline
@@ -450,6 +460,7 @@ $('msg').addEventListener('keydown',e=>{
   // The 'ctrl+enter' setting also uses this behavior (Enter = newline).
   // Users can override in Settings by explicitly choosing 'enter' mode.
   if(e.key==='Enter'){
+    if(e.isComposing){return;}
     const _mobileDefault=matchMedia('(pointer:coarse)').matches&&window._sendKey==='enter';
     if(window._sendKey==='ctrl+enter'||_mobileDefault){
       if(e.ctrlKey||e.metaKey){e.preventDefault();send();}
@@ -568,6 +579,31 @@ window.addEventListener('resize',()=>{
   };
 })();
 
+// ── System theme helper ──────────────────────────────────────────────────────
+function _applyTheme(name){
+  const resolved=(name==='system')
+    ?(window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light')
+    :name;
+  document.documentElement.dataset.theme=resolved||'dark';
+  // Swap Prism syntax-highlighting theme to match UI theme
+  (function(){
+    const link=document.getElementById('prism-theme');
+    if(!link) return;
+    const isDark=(resolved!=='light');
+    const want=isDark
+      ?'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css'
+      :'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css';
+    if(link.href!==want){ link.href=want; }
+  })();
+  // Re-register OS change listener whenever system theme is active
+  if(name==='system'){
+    const mq=window.matchMedia('(prefers-color-scheme:dark)');
+    const _onOsChange=()=>{ document.documentElement.dataset.theme=mq.matches?'dark':'light'; };
+    mq.removeEventListener('change',_onOsChange);
+    mq.addEventListener('change',_onOsChange);
+  }
+}
+
 function applyBotName(){
   const name=window._botName||'Hermes';
   document.title=name;
@@ -594,8 +630,8 @@ function applyBotName(){
     window._notificationsEnabled=!!s.notifications_enabled;
     window._botName=s.bot_name||'Hermes';
     const _theme=s.theme||'dark';
-    document.documentElement.dataset.theme=_theme;
     localStorage.setItem('hermes-theme',_theme);
+    _applyTheme(_theme);
     document.body.classList.toggle('bubble-layout',!!s.bubble_layout);
     if(typeof setLocale==='function'){
       const _lang=typeof resolvePreferredLocale==='function'
@@ -648,13 +684,18 @@ function applyBotName(){
   await loadWorkspaceList();
   await loadOnboardingWizard();
   _initResizePanels();
-  // Restore workspace panel open/closed state from last visit
-  if(localStorage.getItem('hermes-webui-workspace-panel')==='open'){
-    _workspacePanelMode='browse';
-  }
+  // Workspace panel restore happens AFTER loadSession so we know if
+  // the session has a workspace — prevents the snap-open-then-closed flash (#576).
   const saved=localStorage.getItem('hermes-webui-session');
   if(saved){
-    try{await loadSession(saved);syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);return;}
+    try{
+      await loadSession(saved);
+      // Only restore the panel from localStorage when the session actually has a workspace.
+      // Without this guard, sessions without a workspace snap open then immediately closed.
+      if(S.session&&S.session.workspace&&localStorage.getItem('hermes-webui-workspace-panel')==='open'){
+        _workspacePanelMode='browse';
+      }
+      syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);return;}
     catch(e){localStorage.removeItem('hermes-webui-session');}
   }
   // no saved session - show empty state, wait for user to hit +

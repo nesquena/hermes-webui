@@ -210,6 +210,22 @@ def _provider_api_key_present(
                 and str(custom_cfg.get("api_key") or "").strip()
             ):
                 return True
+
+    # For providers not in _SUPPORTED_PROVIDER_SETUPS (e.g. minimax-cn, deepseek,
+    # xai, etc.), ask the hermes_cli auth registry — it knows every provider's env
+    # var names and can check os.environ for a valid key.
+    # Exclude known OAuth/token-flow providers — those are handled separately by
+    # _provider_oauth_authenticated() and should not be short-circuited here.
+    _known_oauth = {"openai-codex", "copilot", "copilot-acp", "qwen-oauth", "nous"}
+    if provider not in _SUPPORTED_PROVIDER_SETUPS and provider not in _known_oauth:
+        try:
+            from hermes_cli.auth import get_auth_status as _gas
+            status = _gas(provider)
+            if isinstance(status, dict) and status.get("logged_in"):
+                return True
+        except Exception:
+            pass
+
     return False
 
 
@@ -288,11 +304,13 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
         elif provider in _SUPPORTED_PROVIDER_SETUPS:
             provider_ready = _provider_api_key_present(provider, cfg, env_values)
         else:
-            # Unknown / OAuth provider (e.g. openai-codex, copilot, qwen-oauth).
-            # These do not use a plain API key; auth lives in auth.json or a
-            # credential pool managed by hermes_cli.
-            provider_ready = _provider_oauth_authenticated(
-                provider, _get_active_hermes_home()
+            # Unknown provider — may be an OAuth flow (openai-codex, copilot, etc.)
+            # OR an API-key provider not in the quick-setup list (minimax-cn, deepseek,
+            # xai, etc.).  Check both: api key presence first (covers the majority of
+            # third-party providers), then OAuth auth.json.
+            provider_ready = (
+                _provider_api_key_present(provider, cfg, env_values)
+                or _provider_oauth_authenticated(provider, _get_active_hermes_home())
             )
 
     chat_ready = bool(_HERMES_FOUND and imports_ok and provider_ready)
@@ -398,11 +416,12 @@ def get_onboarding_status() -> dict:
 
     # HERMES_WEBUI_SKIP_ONBOARDING=1 lets hosting providers (e.g. Agent37) ship
     # a pre-configured instance without the wizard blocking the first load.
-    # Only takes effect when the system is actually chat_ready — a misconfigured
-    # deployment still shows the wizard so the user can fix it.
+    # This is an operator-level override and is honoured unconditionally —
+    # the operator knows their deployment is configured; we must not second-guess
+    # it by requiring chat_ready to also be true.
     skip_env = os.environ.get("HERMES_WEBUI_SKIP_ONBOARDING", "").strip()
     skip_requested = skip_env in {"1", "true", "yes"}
-    auto_completed = skip_requested and bool(runtime.get("chat_ready"))
+    auto_completed = skip_requested  # unconditional: operator says skip, we skip
 
     # Auto-complete for existing Hermes users: if config.yaml already exists
     # AND the system is chat_ready, treat onboarding as done.  These users
@@ -439,6 +458,16 @@ def get_onboarding_status() -> dict:
 
 
 def apply_onboarding_setup(body: dict) -> dict:
+    # Hard guard: if the operator set SKIP_ONBOARDING, the wizard should never
+    # have appeared.  Even if the frontend somehow calls this endpoint anyway
+    # (e.g. a stale JS bundle or a curious user), we must not overwrite the
+    # operator's config.yaml or .env files.  Just mark onboarding complete and
+    # return the current status — no file writes.
+    skip_env = os.environ.get("HERMES_WEBUI_SKIP_ONBOARDING", "").strip()
+    if skip_env in {"1", "true", "yes"}:
+        save_settings({"onboarding_completed": True})
+        return get_onboarding_status()
+
     provider = str(body.get("provider") or "").strip().lower()
     model = str(body.get("model") or "").strip()
     api_key = str(body.get("api_key") or "").strip()

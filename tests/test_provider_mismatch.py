@@ -276,3 +276,50 @@ def test_api_models_includes_active_provider():
         "/api/models response missing 'active_provider' field — "
         "frontend needs this to detect provider mismatches"
     )
+
+
+# ── Model switch toast (#419) ─────────────────────────────────────────────────
+
+class TestModelSwitchToast:
+    """Toast appears when user switches model during an active session."""
+
+    def test_toast_in_model_select_onchange(self):
+        """modelSelect.onchange must show a toast when S.messages is non-empty."""
+        src = _read("static/boot.js")
+        # Find the onchange block
+        idx = src.find("modelSelect').onchange")
+        assert idx != -1, "modelSelect.onchange not found in boot.js"
+        block = src[idx:idx + 1100]
+        assert "Model change takes effect in your next conversation" in block, (
+            "modelSelect.onchange must show a toast when switching model mid-session"
+        )
+
+    def test_toast_guards_on_messages_length(self):
+        """Toast must only fire when there are existing messages (active session)."""
+        src = _read("static/boot.js")
+        idx = src.find("Model change takes effect in your next conversation")
+        assert idx != -1
+        # Look back 200 chars for the S.messages guard
+        surrounding = src[max(0, idx - 200):idx + 50]
+        assert "S.messages" in surrounding and ".length" in surrounding, (
+            "Model switch toast must be gated on S.messages.length > 0"
+        )
+
+    def test_toast_uses_show_toast_not_alert(self):
+        """Toast must use showToast(), not alert()."""
+        src = _read("static/boot.js")
+        idx = src.find("Model change takes effect in your next conversation")
+        assert idx != -1
+        surrounding = src[max(0, idx - 50):idx + 100]
+        assert "showToast" in surrounding, "Must use showToast() not alert()"
+        assert "alert(" not in surrounding, "Must not use alert()"
+
+    def test_toast_has_typeof_showtoast_guard(self):
+        """Toast call must guard typeof showToast to be safe during boot."""
+        src = _read("static/boot.js")
+        idx = src.find("Model change takes effect in your next conversation")
+        assert idx != -1
+        surrounding = src[max(0, idx - 100):idx + 50]
+        assert "typeof showToast" in surrounding, (
+            "showToast call must be guarded with typeof check"
+        )

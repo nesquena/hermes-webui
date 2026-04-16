@@ -1,0 +1,742 @@
+<!doctype html>
+<html lang="en" data-theme="slate">
+<head>
+  <meta charset="utf-8">
+  <title>Hermes WebUI — Two-Stage Chat Proposal (Issue #536)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="stylesheet" href="../../static/style.css">
+  <style>
+    /* ──────────────────────────────────────────────────────────────
+       Doc-chrome scaffold (same pattern as index.html) — real app CSS
+       is used unchanged inside .messages / .msg-row. New proposed
+       elements are prefixed .p2s- so nothing collides with the app.
+       ────────────────────────────────────────────────────────────── */
+    body{display:block !important;height:auto !important;min-height:100vh;overflow:auto !important;}
+    .doc-header{position:sticky;top:0;z-index:50;background:var(--topbar-bg);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;flex-wrap:wrap;align-items:center;gap:14px;}
+    .doc-title{font-size:16px;font-weight:700;letter-spacing:-.01em;color:var(--text);}
+    .doc-title small{display:block;font-size:11px;font-weight:500;color:var(--muted);margin-top:3px;}
+    .doc-title a{color:var(--blue);text-decoration:none;}
+    .doc-toggles{display:flex;flex-wrap:wrap;gap:6px;margin-left:auto;}
+    .doc-toggles button{font:inherit;font-size:11px;padding:5px 10px;border-radius:7px;border:1px solid var(--border2);background:var(--input-bg);color:var(--muted);cursor:pointer;}
+    .doc-toggles button.on{background:rgba(124,185,255,.12);border-color:rgba(124,185,255,.4);color:var(--blue);}
+    .doc-main{max-width:1180px;margin:0 auto;padding:24px 24px 120px;}
+    .doc-section{margin:48px 0 8px;padding-top:22px;border-top:1px dashed var(--border);}
+    .doc-section:first-of-type{border-top:none;padding-top:0;margin-top:0;}
+    .doc-kicker{font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--blue);}
+    .doc-h{font-size:20px;font-weight:700;color:var(--text);margin:4px 0 6px;letter-spacing:-.01em;}
+    .doc-note{font-size:12.5px;color:var(--muted);line-height:1.6;max-width:780px;margin-bottom:14px;}
+    .doc-note code{color:var(--text);background:rgba(255,255,255,.05);padding:1px 5px;border-radius:4px;font-size:11.5px;}
+    .doc-card{position:relative;background:var(--main-bg);border:1px solid var(--border);border-radius:14px;padding:6px 8px;margin:14px 0;}
+    .doc-label{position:absolute;top:-9px;left:14px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;padding:2px 9px;background:var(--bg);color:var(--muted);border:1px solid var(--border);border-radius:999px;}
+    .doc-label.current{color:var(--muted);}
+    .doc-label.proposed{color:var(--gold);border-color:rgba(201,168,76,.35);background:var(--bg);}
+    .force-show .msg-actions,.force-show .msg-time,.force-show .msg-foot{opacity:1 !important;}
+    .messages.doc-messages{overflow:visible;display:block;}
+    .messages-inner.doc-inner{padding:14px 16px;}
+    .approval-card.doc-visible,.clarify-card.doc-visible{display:block;}
+    .doc-grid-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(440px,1fr));gap:14px;}
+
+    /* ──────────────────────────────────────────────────────────────
+       Proposed two-stage elements (prefix .p2s-)
+
+       The proposal introduces one container (.p2s-stage1) that wraps
+       the execution history (thinking + tool cards) and one visual
+       treatment (.p2s-answer) for the final-answer segment. The same
+       DOM can be rendered in three modes:
+
+         .p2s-stage1.is-live      →  Working timer + expanded history
+         .p2s-stage1.is-settled   →  Collapsed to one-line summary
+         .p2s-stage1.is-settled.is-open → expanded on demand
+
+       Everything else (thinking-card, tool-card-row, msg-body) is the
+       existing app CSS unchanged.
+       ────────────────────────────────────────────────────────────── */
+
+    /* Worklog bar — the header of Stage 1.
+       Aligns with every other rail child via --msg-rail / --msg-max. */
+    .p2s-worklog{
+      display:flex;align-items:center;gap:10px;
+      margin:4px 0 6px var(--msg-rail);
+      max-width:var(--msg-max);
+      padding:8px 12px;
+      border:1px solid var(--border);
+      border-radius:10px;
+      background:rgba(255,255,255,.025);
+      font-size:12px;color:var(--muted);
+      cursor:pointer;user-select:none;
+      transition:border-color .15s,background .15s;
+    }
+    .p2s-worklog:hover{border-color:var(--border2);background:rgba(255,255,255,.04);}
+    .p2s-worklog-dot{
+      width:8px;height:8px;border-radius:50%;background:var(--gold);flex-shrink:0;
+      box-shadow:0 0 0 0 rgba(201,168,76,.4);
+    }
+    .p2s-stage1.is-live .p2s-worklog-dot{
+      animation:p2sPulse 1.4s ease-in-out infinite;
+    }
+    .p2s-stage1.is-settled .p2s-worklog-dot{
+      background:var(--muted);opacity:.6;
+    }
+    @keyframes p2sPulse{
+      0%,100%{box-shadow:0 0 0 0 rgba(201,168,76,.45);}
+      50%{box-shadow:0 0 0 6px rgba(201,168,76,0);}
+    }
+    .p2s-worklog-label{color:var(--text);font-weight:500;}
+    .p2s-worklog-stats{margin-left:auto;display:flex;gap:12px;color:var(--muted);font-size:11.5px;}
+    .p2s-worklog-stats b{color:var(--text);font-weight:600;}
+    .p2s-worklog-caret{
+      display:inline-block;width:14px;height:14px;line-height:14px;text-align:center;
+      color:var(--muted);font-size:10px;transition:transform .2s;
+      margin-left:6px;
+    }
+    .p2s-stage1.is-live .p2s-worklog-caret{display:none;}
+    .p2s-stage1.is-settled.is-open .p2s-worklog-caret{transform:rotate(90deg);}
+
+    /* Stage 1 body — holds thinking + tool cards + round separators. */
+    .p2s-stage1-body{
+      overflow:hidden;
+      transition:max-height .35s ease,opacity .25s ease;
+    }
+    .p2s-stage1.is-live .p2s-stage1-body,
+    .p2s-stage1.is-settled.is-open .p2s-stage1-body{
+      max-height:2000px;opacity:1;
+    }
+    .p2s-stage1.is-settled:not(.is-open) .p2s-stage1-body{
+      max-height:0;opacity:0;pointer-events:none;
+    }
+
+    /* Round separator — shown inside Stage 1 between execution rounds. */
+    .p2s-round-sep{
+      display:flex;align-items:center;gap:10px;
+      margin:10px 0 6px var(--msg-rail);
+      max-width:var(--msg-max);
+      color:var(--muted);
+      font-size:10.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
+    }
+    .p2s-round-sep::before,.p2s-round-sep::after{
+      content:"";flex:1;height:1px;background:var(--border);
+    }
+
+    /* Stage 1 → Stage 2 transition divider. */
+    .p2s-transition{
+      margin:14px 0 10px var(--msg-rail);
+      max-width:var(--msg-max);
+      height:1px;
+      background:linear-gradient(
+        to right,transparent,var(--border) 20%,var(--border) 80%,transparent
+      );
+    }
+
+    /* Stage 2 — the final answer wrapper.
+
+       Design intent: nothing loud. A small "Answer" kicker in gold,
+       slightly taller line-height, the existing .msg-body styling,
+       and a gentle top breathing-space. The user arrives at this
+       block and it *feels* like a conclusion, not another tool row.
+    */
+    .p2s-answer{margin-top:8px;}
+    .p2s-answer-kicker{
+      margin:0 0 4px var(--msg-rail);
+      max-width:var(--msg-max);
+      font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;
+      color:var(--gold);opacity:.8;
+    }
+    .p2s-answer .msg-body{
+      font-size:14.5px;line-height:1.78;
+    }
+
+    /* Clarify slot — placed at the transition rather than inline. */
+    .p2s-clarify-slot{
+      margin:12px 0 4px var(--msg-rail);
+      max-width:var(--msg-max);
+    }
+    .p2s-clarify-slot .clarify-card{margin:0;}
+
+    /* Comparison-grid accents. */
+    .doc-compare-caption{
+      font-size:11px;color:var(--muted);text-align:center;padding:6px 0;
+    }
+  </style>
+</head>
+<body>
+
+<header class="doc-header">
+  <div class="doc-title">
+    Two-Stage Chat UX — Proposal for <a href="https://github.com/nesquena/hermes-webui/issues/536" target="_blank">issue #536</a>
+    <small>Companion to <a href="./index.html">index.html</a> — shows <em>Working → Final answer</em> as a distinct two-phase interaction model.</small>
+  </div>
+  <div class="doc-toggles">
+    <strong style="font-size:10px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase;align-self:center;margin-right:4px;">Theme</strong>
+    <button data-theme-btn="default">Default</button>
+    <button data-theme-btn="slate" class="on">Slate</button>
+    <button data-theme-btn="light">Light</button>
+    <button data-theme-btn="solarized">Solarized</button>
+    <button data-theme-btn="monokai">Monokai</button>
+    <button data-theme-btn="nord">Nord</button>
+    <button data-theme-btn="oled">OLED</button>
+  </div>
+</header>
+
+<main class="doc-main">
+
+<!-- ============================================================= -->
+<section class="doc-section">
+  <div class="doc-kicker">0 · The model</div>
+  <h2 class="doc-h">One turn, two stages</h2>
+  <p class="doc-note">
+    Today an assistant turn is a flat stream: thinking card → tool cards → answer, all stacked
+    inline with equal visual weight. The proposal wraps the execution history in a
+    <code>.p2s-stage1</code> container with a <em>worklog bar</em> as its header, and marks the
+    final answer as <code>.p2s-answer</code>. The same DOM renders three ways:
+  </p>
+  <ul class="doc-note" style="padding-left:18px;list-style:disc;">
+    <li><b>Live</b> — worklog shows <em>Working… 0:42 · 2 tools</em> with a pulsing dot; history is fully visible.</li>
+    <li><b>Settled</b> — worklog collapses to a single line (<em>Worked 1:42 · 4 tools · 2 thinking</em>); final answer sits below as the calm conclusion.</li>
+    <li><b>Settled + opened</b> — user clicks the worklog to re-expand the history for audit.</li>
+  </ul>
+</section>
+
+<!-- ============================================================= -->
+<section class="doc-section">
+  <div class="doc-kicker">1 · Current vs proposed — settled turn</div>
+  <h2 class="doc-h">Side-by-side comparison</h2>
+  <p class="doc-note">
+    Same turn, same tool calls, same answer. Left is what #587 ships today. Right is the
+    proposal: execution history collapses to a one-line summary; the final answer stands alone
+    with a small <em>Answer</em> kicker.
+  </p>
+
+  <div class="doc-grid-2">
+
+    <!-- CURRENT ──────────────────────────────────────────────── -->
+    <div class="doc-card"><span class="doc-label current">Current (PR #587)</span>
+      <div class="messages doc-messages"><div class="messages-inner doc-inner">
+        <div class="msg-row" data-role="user">
+          <div class="msg-body"><p>Does our dev server pick up the workspace from an env var or a flag?</p></div>
+        </div>
+        <div class="msg-row assistant-turn" data-role="assistant">
+          <div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div>
+          <div class="assistant-turn-blocks"><div class="assistant-segment">
+            <div class="thinking-card open">
+              <div class="thinking-card-header">
+                <span class="thinking-card-icon">💡</span>
+                <span class="thinking-card-label">Thought for 3.1s</span>
+                <span class="thinking-card-toggle">▶</span>
+              </div>
+              <div class="thinking-card-body"><pre>Check how the CLI resolves workspace:
+grep for HERMES_WORKSPACE and --workspace
+inspect argv vs env precedence.</pre></div>
+            </div>
+          </div></div>
+        </div>
+        <div class="tool-card-row">
+          <div class="tool-card open">
+            <div class="tool-card-header">
+              <span class="tool-card-icon">⚡</span>
+              <span class="tool-card-name">bash</span>
+              <span class="tool-card-preview">grep -rn "HERMES_WORKSPACE" . · exit 0</span>
+              <span class="tool-card-toggle">▶</span>
+            </div>
+            <div class="tool-card-detail">
+              <div class="tool-card-result"><pre>cli/main.py:14:WORKSPACE_ENV = "HERMES_WORKSPACE"
+cli/main.py:92:    ws = os.getenv(WORKSPACE_ENV) or args.workspace</pre></div>
+            </div>
+          </div>
+        </div>
+        <div class="tool-card-row">
+          <div class="tool-card">
+            <div class="tool-card-header">
+              <span class="tool-card-icon">📄</span>
+              <span class="tool-card-name">read_file</span>
+              <span class="tool-card-preview">cli/main.py · 148 lines</span>
+              <span class="tool-card-toggle">▶</span>
+            </div>
+          </div>
+        </div>
+        <div class="msg-row assistant-turn" data-role="assistant">
+          <div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div>
+          <div class="assistant-turn-blocks"><div class="assistant-segment">
+            <div class="msg-body">
+              <p>Both work, but <strong>env wins</strong>. The CLI reads
+              <code>HERMES_WORKSPACE</code> first and only falls back to the
+              <code>--workspace</code> flag if the env var is unset.</p>
+              <p>So in practice:</p>
+              <ul>
+                <li>CI / daemons → set the env var.</li>
+                <li>Ad-hoc runs → pass <code>--workspace</code>.</li>
+              </ul>
+            </div>
+          </div></div>
+        </div>
+      </div></div>
+      <div class="doc-compare-caption">Everything stacks equally — the answer is just the next block.</div>
+    </div>
+
+    <!-- PROPOSED ─────────────────────────────────────────────── -->
+    <div class="doc-card"><span class="doc-label proposed">Proposed — two-stage, settled</span>
+      <div class="messages doc-messages"><div class="messages-inner doc-inner">
+        <div class="msg-row" data-role="user">
+          <div class="msg-body"><p>Does our dev server pick up the workspace from an env var or a flag?</p></div>
+        </div>
+        <div class="msg-row assistant-turn" data-role="assistant">
+          <div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div>
+          <div class="assistant-turn-blocks"><div class="assistant-segment">
+
+            <!-- Stage 1 — settled, collapsed to summary (click to expand) -->
+            <div class="p2s-stage1 is-settled" data-p2s-toggle>
+              <div class="p2s-worklog">
+                <span class="p2s-worklog-dot"></span>
+                <span class="p2s-worklog-label">Worked for 0:08</span>
+                <span class="p2s-worklog-stats">
+                  <span><b>2</b> tools</span>
+                  <span><b>1</b> thinking round</span>
+                </span>
+                <span class="p2s-worklog-caret">▶</span>
+              </div>
+              <div class="p2s-stage1-body">
+                <div class="thinking-card open">
+                  <div class="thinking-card-header">
+                    <span class="thinking-card-icon">💡</span>
+                    <span class="thinking-card-label">Thought for 3.1s</span>
+                    <span class="thinking-card-toggle">▶</span>
+                  </div>
+                  <div class="thinking-card-body"><pre>Check how the CLI resolves workspace:
+grep for HERMES_WORKSPACE and --workspace
+inspect argv vs env precedence.</pre></div>
+                </div>
+                <div class="tool-card-row">
+                  <div class="tool-card">
+                    <div class="tool-card-header">
+                      <span class="tool-card-icon">⚡</span>
+                      <span class="tool-card-name">bash</span>
+                      <span class="tool-card-preview">grep -rn "HERMES_WORKSPACE" . · exit 0</span>
+                      <span class="tool-card-toggle">▶</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="tool-card-row">
+                  <div class="tool-card">
+                    <div class="tool-card-header">
+                      <span class="tool-card-icon">📄</span>
+                      <span class="tool-card-name">read_file</span>
+                      <span class="tool-card-preview">cli/main.py · 148 lines</span>
+                      <span class="tool-card-toggle">▶</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Stage 2 — the final answer -->
+            <div class="p2s-transition"></div>
+            <div class="p2s-answer">
+              <div class="p2s-answer-kicker">Answer</div>
+              <div class="msg-body">
+                <p>Both work, but <strong>env wins</strong>. The CLI reads
+                <code>HERMES_WORKSPACE</code> first and only falls back to the
+                <code>--workspace</code> flag if the env var is unset.</p>
+                <p>So in practice:</p>
+                <ul>
+                  <li>CI / daemons → set the env var.</li>
+                  <li>Ad-hoc runs → pass <code>--workspace</code>.</li>
+                </ul>
+              </div>
+            </div>
+
+          </div></div>
+        </div>
+      </div></div>
+      <div class="doc-compare-caption">Click the worklog bar to expand the execution history.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<section class="doc-section">
+  <div class="doc-kicker">2 · Stage 1 · Live run</div>
+  <h2 class="doc-h">Working timer + live execution history</h2>
+  <p class="doc-note">
+    The worklog bar at the top is the anchor for the whole active run: pulsing dot, elapsed
+    timer that ticks every second, and live counts that increment as tool cards resolve.
+    Thinking cards and tool cards render inside <code>.p2s-stage1-body</code> exactly as today.
+    A <em>Round N</em> separator is inserted when the agent starts a new reasoning/tool cycle.
+  </p>
+
+  <div class="doc-card"><span class="doc-label proposed">.p2s-stage1.is-live — Round 1 done, Round 2 running</span>
+    <div class="messages doc-messages"><div class="messages-inner doc-inner">
+      <div class="msg-row assistant-turn" data-role="assistant">
+        <div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div>
+        <div class="assistant-turn-blocks"><div class="assistant-segment" data-live-assistant="1">
+
+          <div class="p2s-stage1 is-live">
+            <div class="p2s-worklog">
+              <span class="p2s-worklog-dot"></span>
+              <span class="p2s-worklog-label">Working… <span id="p2sTimer">0:42</span></span>
+              <span class="p2s-worklog-stats">
+                <span><b>3</b> tools</span>
+                <span><b>2</b> thinking</span>
+              </span>
+            </div>
+            <div class="p2s-stage1-body">
+
+              <div class="thinking-card open">
+                <div class="thinking-card-header">
+                  <span class="thinking-card-icon">💡</span>
+                  <span class="thinking-card-label">Thought for 2.4s</span>
+                  <span class="thinking-card-toggle">▶</span>
+                </div>
+                <div class="thinking-card-body"><pre>Need to map the streaming code path first,
+then check the persistence layer.</pre></div>
+              </div>
+
+              <div class="tool-card-row">
+                <div class="tool-card">
+                  <div class="tool-card-header">
+                    <span class="tool-card-icon">📄</span>
+                    <span class="tool-card-name">read_file</span>
+                    <span class="tool-card-preview">api/streaming.py · 612 lines</span>
+                    <span class="tool-card-toggle">▶</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="tool-card-row">
+                <div class="tool-card">
+                  <div class="tool-card-header">
+                    <span class="tool-card-icon">⚡</span>
+                    <span class="tool-card-name">bash</span>
+                    <span class="tool-card-preview">grep -rn "tool_call_id" api/ · exit 0 · 88ms</span>
+                    <span class="tool-card-toggle">▶</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="p2s-round-sep">Round 2</div>
+
+              <div class="thinking-card">
+                <div class="thinking-card-header">
+                  <span class="thinking-card-icon">💡</span>
+                  <span class="thinking-card-label">Thought for 1.8s</span>
+                  <span class="thinking-card-toggle">▶</span>
+                </div>
+                <div class="thinking-card-body"><pre>Streaming looks fine — drill into how
+tool_calls get attached before save.</pre></div>
+              </div>
+
+              <div class="tool-card-row">
+                <div class="tool-card tool-card-running">
+                  <div class="tool-card-header">
+                    <span class="tool-card-running-dot"></span>
+                    <span class="tool-card-icon">⚡</span>
+                    <span class="tool-card-name">bash</span>
+                    <span class="tool-card-preview">pytest tests/test_tool_call_persistence.py -q</span>
+                    <span class="tool-card-toggle">▶</span>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+        </div></div>
+      </div>
+    </div></div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<section class="doc-section">
+  <div class="doc-kicker">3 · Approve vs Clarify — placement</div>
+  <h2 class="doc-h">Approvals stay in Stage 1; Clarify moves to the transition</h2>
+  <p class="doc-note">
+    Per the issue: <em>approvals are part of doing the work</em> (they gate a single tool),
+    <em>clarifications stabilise the answer path</em> (they precede the conclusion). The
+    proposal keeps <code>.approval-card</code> inline among tool cards, and places
+    <code>.clarify-card</code> at the Stage 1 → Stage 2 seam, above the final answer.
+  </p>
+
+  <div class="doc-grid-2">
+
+    <!-- Approve inline in Stage 1 -->
+    <div class="doc-card"><span class="doc-label proposed">Approve card — inline in Stage 1</span>
+      <div class="messages doc-messages"><div class="messages-inner doc-inner">
+        <div class="msg-row assistant-turn" data-role="assistant">
+          <div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div>
+          <div class="assistant-turn-blocks"><div class="assistant-segment" data-live-assistant="1">
+
+            <div class="p2s-stage1 is-live">
+              <div class="p2s-worklog">
+                <span class="p2s-worklog-dot"></span>
+                <span class="p2s-worklog-label">Working… 0:18</span>
+                <span class="p2s-worklog-stats"><span><b>1</b> tool</span></span>
+              </div>
+              <div class="p2s-stage1-body">
+                <div class="tool-card-row">
+                  <div class="tool-card">
+                    <div class="tool-card-header">
+                      <span class="tool-card-icon">⚡</span>
+                      <span class="tool-card-name">bash</span>
+                      <span class="tool-card-preview">ls -la ~/.hermes/sessions · exit 0</span>
+                      <span class="tool-card-toggle">▶</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="approval-card doc-visible">
+                  <div class="approval-card-header">
+                    <span class="approval-card-icon">🔐</span>
+                    <span class="approval-card-title">Approve command</span>
+                  </div>
+                  <div class="approval-card-body">
+                    <p class="approval-card-desc">Hermes wants to run a potentially destructive command:</p>
+                    <pre class="approval-card-cmd">rm -rf ~/.hermes/sessions/*.json.bak</pre>
+                  </div>
+                  <div class="approval-card-actions">
+                    <button class="approval-btn approve">Approve</button>
+                    <button class="approval-btn deny">Deny</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+          </div></div>
+        </div>
+      </div></div>
+      <div class="doc-compare-caption">Permission gate sits next to the tools it gates.</div>
+    </div>
+
+    <!-- Clarify at transition -->
+    <div class="doc-card"><span class="doc-label proposed">Clarify card — Stage 1 → Stage 2 transition</span>
+      <div class="messages doc-messages"><div class="messages-inner doc-inner">
+        <div class="msg-row assistant-turn" data-role="assistant">
+          <div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div>
+          <div class="assistant-turn-blocks"><div class="assistant-segment">
+
+            <div class="p2s-stage1 is-settled" data-p2s-toggle>
+              <div class="p2s-worklog">
+                <span class="p2s-worklog-dot"></span>
+                <span class="p2s-worklog-label">Worked for 0:12</span>
+                <span class="p2s-worklog-stats"><span><b>2</b> tools</span></span>
+                <span class="p2s-worklog-caret">▶</span>
+              </div>
+              <div class="p2s-stage1-body">
+                <div class="tool-card-row">
+                  <div class="tool-card">
+                    <div class="tool-card-header">
+                      <span class="tool-card-icon">📄</span>
+                      <span class="tool-card-name">read_file</span>
+                      <span class="tool-card-preview">package.json · 48 lines</span>
+                      <span class="tool-card-toggle">▶</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="tool-card-row">
+                  <div class="tool-card">
+                    <div class="tool-card-header">
+                      <span class="tool-card-icon">⚡</span>
+                      <span class="tool-card-name">bash</span>
+                      <span class="tool-card-preview">ls src/ · exit 0</span>
+                      <span class="tool-card-toggle">▶</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="p2s-transition"></div>
+            <div class="p2s-clarify-slot">
+              <div class="clarify-card doc-visible">
+                <div class="clarify-card-header">
+                  <span class="clarify-card-icon">❓</span>
+                  <span class="clarify-card-title">One quick question before I answer</span>
+                </div>
+                <div class="clarify-card-body">
+                  <p>I can wire the dev server either as an <strong>npm script</strong> in the
+                  existing <code>package.json</code>, or as a standalone <strong>CLI
+                  entry-point</strong>. Which would you prefer?</p>
+                </div>
+                <div class="clarify-card-actions">
+                  <button class="clarify-opt">npm script</button>
+                  <button class="clarify-opt">CLI entry-point</button>
+                  <button class="clarify-opt">Let Hermes pick</button>
+                </div>
+              </div>
+            </div>
+
+          </div></div>
+        </div>
+      </div></div>
+      <div class="doc-compare-caption">Stage 1 is already settled; the answer is paused on clarification.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<section class="doc-section">
+  <div class="doc-kicker">4 · Stage 2 · Calm conclusion</div>
+  <h2 class="doc-h">What the "Answer" stage looks like on its own</h2>
+  <p class="doc-note">
+    Three small choices distinguish Stage 2 from a regular text block:
+    (1) a thin horizontal divider above it, (2) a tiny gold <em>Answer</em> kicker aligned to
+    the text rail, (3) a slightly taller line-height. No heavy borders, no boxed treatment —
+    the emphasis comes from <em>what is missing around it</em>, not ornament.
+  </p>
+
+  <div class="doc-card"><span class="doc-label proposed">.p2s-answer (Stage 1 collapsed above)</span>
+    <div class="messages doc-messages"><div class="messages-inner doc-inner">
+      <div class="msg-row assistant-turn" data-role="assistant">
+        <div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div>
+        <div class="assistant-turn-blocks"><div class="assistant-segment">
+
+          <div class="p2s-stage1 is-settled" data-p2s-toggle>
+            <div class="p2s-worklog">
+              <span class="p2s-worklog-dot"></span>
+              <span class="p2s-worklog-label">Worked for 1:42</span>
+              <span class="p2s-worklog-stats">
+                <span><b>4</b> tools</span>
+                <span><b>2</b> thinking</span>
+                <span><b>1</b> approval</span>
+              </span>
+              <span class="p2s-worklog-caret">▶</span>
+            </div>
+            <div class="p2s-stage1-body">
+              <div class="thinking-card"><div class="thinking-card-header"><span class="thinking-card-icon">💡</span><span class="thinking-card-label">Thought for 2.4s</span><span class="thinking-card-toggle">▶</span></div></div>
+              <div class="tool-card-row"><div class="tool-card"><div class="tool-card-header"><span class="tool-card-icon">📄</span><span class="tool-card-name">read_file</span><span class="tool-card-preview">api/streaming.py</span><span class="tool-card-toggle">▶</span></div></div></div>
+              <div class="tool-card-row"><div class="tool-card"><div class="tool-card-header"><span class="tool-card-icon">⚡</span><span class="tool-card-name">bash</span><span class="tool-card-preview">grep -rn "tool_call_id" api/</span><span class="tool-card-toggle">▶</span></div></div></div>
+              <div class="p2s-round-sep">Round 2</div>
+              <div class="thinking-card"><div class="thinking-card-header"><span class="thinking-card-icon">💡</span><span class="thinking-card-label">Thought for 1.8s</span><span class="thinking-card-toggle">▶</span></div></div>
+              <div class="tool-card-row"><div class="tool-card"><div class="tool-card-header"><span class="tool-card-icon">⚡</span><span class="tool-card-name">bash</span><span class="tool-card-preview">pytest -q · exit 0 · 2.4s</span><span class="tool-card-toggle">▶</span></div></div></div>
+              <div class="tool-card-row"><div class="tool-card"><div class="tool-card-header"><span class="tool-card-icon">✍️</span><span class="tool-card-name">edit_file</span><span class="tool-card-preview">api/streaming.py · +12 −3</span><span class="tool-card-toggle">▶</span></div></div></div>
+            </div>
+          </div>
+
+          <div class="p2s-transition"></div>
+          <div class="p2s-answer">
+            <div class="p2s-answer-kicker">Answer</div>
+            <div class="msg-body">
+              <p>Tool-call persistence was breaking because <code>session.tool_calls</code> was
+              written <em>after</em> <code>s.save()</code> in <code>api/streaming.py</code>.
+              I moved the attach step above the save, and added a fallback that reconstructs
+              ordering from live tool-progress events when <code>tool_call_id</code> is absent
+              on older sessions.</p>
+              <p>Net result:</p>
+              <ul>
+                <li>Reloading mid-stream now preserves every tool card with args + output snippet.</li>
+                <li>Last-turn reasoning survives reload.</li>
+                <li>No schema migration needed — old sessions degrade gracefully.</li>
+              </ul>
+              <p>Covered by the new regression in <code>tests/test_tool_call_persistence.py</code>.</p>
+            </div>
+            <div class="msg-foot" style="opacity:1;padding-left:var(--msg-rail);">
+              <span class="msg-time">11:42 AM · 2,481 tokens · 1.42s</span>
+              <span class="msg-actions">
+                <button class="msg-act" title="Copy">⧉</button>
+                <button class="msg-act" title="Regenerate">↻</button>
+              </span>
+            </div>
+          </div>
+
+        </div></div>
+      </div>
+    </div></div>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<section class="doc-section">
+  <div class="doc-kicker">5 · Open-question answers (picked defaults)</div>
+  <h2 class="doc-h">What this proposal commits to</h2>
+  <div class="doc-card" style="padding:16px 20px;">
+    <ul style="color:var(--muted);font-size:13px;line-height:1.85;list-style:disc;padding-left:22px;margin:0;">
+      <li><b style="color:var(--text);">Stage 1 on settle →</b> <em>partial</em> collapse to a
+        single worklog bar with counts. Click to re-expand. No "nuke to black box", no "keep
+        everything open forever".</li>
+      <li><b style="color:var(--text);">Final answer placement →</b> sits <em>beneath</em> Stage 1,
+        not replacing it. Visual distinction comes from the divider + kicker + spacing, not from
+        a two-panel layout.</li>
+      <li><b style="color:var(--text);">Clarify placement →</b> at the Stage 1 → Stage 2 seam.
+        Approvals stay inline with tools.</li>
+      <li><b style="color:var(--text);">Timer →</b> lives on Stage 1 only. Stops when the agent
+        emits the first Stage 2 token; final label becomes "Worked for N:NN".</li>
+      <li><b style="color:var(--text);">Signal for "answer has started" →</b> first assistant
+        text delta after all tool calls have resolved and no new <code>tool_use</code> is pending
+        in the current round. Already present in the SSE stream per maintainer comment.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<section class="doc-section">
+  <div class="doc-kicker">6 · DOM cheat-sheet</div>
+  <h2 class="doc-h">What changes vs index.html</h2>
+  <div class="doc-card" style="padding:14px 18px;">
+    <h3 style="font-size:13px;color:var(--text);margin:0 0 8px;">New wrappers</h3>
+    <ul style="color:var(--muted);font-size:12px;line-height:1.9;list-style:disc;padding-left:20px;">
+      <li><code>.p2s-stage1[is-live|is-settled][is-open]</code> — wraps the execution history inside an <code>.assistant-segment</code>.</li>
+      <li><code>.p2s-worklog</code> — header of Stage 1. Pulsing dot + label + counts + caret. Clickable when settled.</li>
+      <li><code>.p2s-stage1-body</code> — holds <code>.thinking-card</code> + <code>.tool-card-row</code> + <code>.p2s-round-sep</code>. Animated via <code>max-height</code>.</li>
+      <li><code>.p2s-round-sep</code> — inline horizontal separator between tool/reasoning rounds.</li>
+      <li><code>.p2s-transition</code> — thin gradient divider between Stage 1 and Stage 2.</li>
+      <li><code>.p2s-answer</code> — wraps the final <code>.msg-body</code> + <code>.msg-foot</code>.</li>
+      <li><code>.p2s-answer-kicker</code> — small gold <em>Answer</em> label.</li>
+      <li><code>.p2s-clarify-slot</code> — placement slot for <code>.clarify-card</code> at the Stage 1/2 seam.</li>
+    </ul>
+    <h3 style="font-size:13px;color:var(--text);margin:14px 0 8px;">Unchanged</h3>
+    <ul style="color:var(--muted);font-size:12px;line-height:1.9;list-style:disc;padding-left:20px;">
+      <li><code>.thinking-card</code>, <code>.tool-card</code>, <code>.approval-card</code>, <code>.clarify-card</code>, <code>.msg-body</code>, <code>.msg-foot</code> — all existing app CSS and existing markup.</li>
+      <li><code>.assistant-turn-blocks</code> and <code>.assistant-segment</code> remain the top-level wrappers.</li>
+      <li>Tool cards still live as <code>.tool-card-row</code> siblings — now nested <em>inside</em> <code>.p2s-stage1-body</code> rather than as direct children of <code>.messages-inner</code>.</li>
+    </ul>
+    <h3 style="font-size:13px;color:var(--text);margin:14px 0 8px;">Implementation notes</h3>
+    <ul style="color:var(--muted);font-size:12px;line-height:1.9;list-style:disc;padding-left:20px;">
+      <li>Renderer in <code>static/messages.js</code> wraps an assistant turn's non-final blocks in <code>.p2s-stage1-body</code> and appends the <code>.p2s-worklog</code> header once; toggles <code>is-live</code>/<code>is-settled</code> based on <code>data-live-assistant</code>.</li>
+      <li><code>static/boot.js</code> SSE handler ticks the timer while <code>is-live</code>, increments counts on each <code>tool_use</code>, and flips the class when the first Stage 2 delta arrives.</li>
+      <li>Persistence: no schema change needed — the worklog summary can be derived on reload from the existing persisted tool-call list + thinking rounds.</li>
+    </ul>
+  </div>
+</section>
+
+</main>
+
+<script>
+  // Theme picker (matches index.html)
+  document.querySelectorAll('[data-theme-btn]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const t = btn.dataset.themeBtn;
+      if (t === 'default') document.documentElement.removeAttribute('data-theme');
+      else document.documentElement.setAttribute('data-theme', t);
+      document.querySelectorAll('[data-theme-btn]').forEach(b => b.classList.toggle('on', b === btn));
+    });
+  });
+
+  // Existing thinking/tool cards click-to-toggle.
+  document.querySelectorAll('.thinking-card-header, .tool-card-header').forEach(h => {
+    h.addEventListener('click', (e) => {
+      e.stopPropagation();
+      h.parentElement.classList.toggle('open');
+    });
+  });
+
+  // Click the worklog bar on a settled Stage 1 to expand/collapse the history.
+  document.querySelectorAll('.p2s-stage1[data-p2s-toggle] .p2s-worklog').forEach(bar => {
+    bar.addEventListener('click', () => {
+      const stage = bar.closest('.p2s-stage1');
+      if (!stage.classList.contains('is-settled')) return;
+      stage.classList.toggle('is-open');
+    });
+  });
+
+  // Live timer demo in section 2 — ticks so the page feels alive.
+  (function(){
+    const el = document.getElementById('p2sTimer');
+    if (!el) return;
+    let [m, s] = el.textContent.split(':').map(Number);
+    setInterval(() => {
+      s = (s + 1) % 60;
+      if (s === 0) m += 1;
+      el.textContent = m + ':' + String(s).padStart(2,'0');
+    }, 1000);
+  })();
+</script>
+
+</body>
+</html>

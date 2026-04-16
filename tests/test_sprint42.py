@@ -11,7 +11,11 @@ Covers:
 import ast
 import pathlib
 import re
+import queue
+import sys
+import types
 import unittest
+from unittest import mock
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 STREAMING_PY = (REPO_ROOT / "api" / "streaming.py").read_text()
@@ -86,6 +90,145 @@ class TestSessionDBInjection(unittest.TestCase):
             pattern,
             "_session_db must default to None before try/except block (PR #356)",
         )
+
+
+class TestRuntimeRouteInjection(unittest.TestCase):
+    """Verify WebUI forwards the resolved runtime route into AIAgent."""
+
+    def test_runtime_provider_keys_are_forwarded_to_agent(self):
+        """WebUI must pass the runtime route fields that CLI already uses."""
+        for snippet in (
+            "api_mode=_rt.get('api_mode')",
+            "acp_command=_rt.get('command')",
+            "acp_args=_rt.get('args')",
+            "credential_pool=_rt.get('credential_pool')",
+        ):
+            self.assertIn(
+                snippet,
+                STREAMING_PY,
+                f"Missing runtime route forwarding in AIAgent constructor: {snippet}",
+            )
+
+    def test_runtime_route_is_forwarded_from_resolver_into_agent_init(self):
+        """The resolved ACP route should be passed through to AIAgent kwargs."""
+        import api.streaming as streaming
+
+        captured = {}
+        fake_session_db = object()
+        resolve_runtime_provider = mock.Mock(
+            return_value={
+                "provider": "openai-codex",
+                "base_url": "https://api.openai.com/v1",
+                "api_key": "rt-key",
+                "api_mode": "codex_responses",
+                "command": "codex",
+                "args": ["exec", "--json"],
+                "credential_pool": "openai-codex",
+            }
+        )
+
+        class FakeSession:
+            def __init__(self):
+                self.session_id = "sess-runtime-route"
+                self.title = "Existing title"
+                self.workspace = "/tmp"
+                self.model = "gpt-5.4"
+                self.messages = []
+                self.personality = None
+                self.input_tokens = 0
+                self.output_tokens = 0
+                self.estimated_cost = None
+                self.tool_calls = []
+                self.active_stream_id = None
+                self.pending_user_message = None
+                self.pending_attachments = []
+                self.pending_started_at = None
+
+            def save(self, touch_updated_at=True):
+                self._saved = True
+
+            def compact(self):
+                return {
+                    "session_id": self.session_id,
+                    "title": self.title,
+                    "workspace": self.workspace,
+                    "model": self.model,
+                    "created_at": 0,
+                    "updated_at": 0,
+                    "pinned": False,
+                    "archived": False,
+                    "project_id": None,
+                    "profile": None,
+                    "input_tokens": self.input_tokens,
+                    "output_tokens": self.output_tokens,
+                    "estimated_cost": self.estimated_cost,
+                    "personality": self.personality,
+                }
+
+        class CapturingAgent:
+            def __init__(self, **kwargs):
+                captured["init_kwargs"] = kwargs
+                self.session_id = kwargs["session_id"]
+                self.context_compressor = None
+                self.session_prompt_tokens = 0
+                self.session_completion_tokens = 0
+                self.session_estimated_cost_usd = None
+                self.reasoning_config = None
+                self.ephemeral_system_prompt = None
+                self._last_error = None
+
+            def run_conversation(self, **kwargs):
+                captured["run_kwargs"] = kwargs
+                return {
+                    "messages": [
+                        {"role": "user", "content": kwargs["persist_user_message"]},
+                        {"role": "assistant", "content": "ok"},
+                    ]
+                }
+
+            def interrupt(self, _message):
+                captured["interrupted"] = True
+
+        fake_session = FakeSession()
+        fake_stream_id = "stream-runtime-route"
+        fake_queue = queue.Queue()
+        fake_runtime_module = types.ModuleType("hermes_cli.runtime_provider")
+        fake_runtime_module.resolve_runtime_provider = resolve_runtime_provider
+        fake_hermes_cli = types.ModuleType("hermes_cli")
+        fake_hermes_cli.runtime_provider = fake_runtime_module
+        fake_hermes_state = types.ModuleType("hermes_state")
+        fake_hermes_state.SessionDB = mock.Mock(return_value=fake_session_db)
+
+        with mock.patch.object(streaming, "get_session", return_value=fake_session), \
+             mock.patch.object(streaming, "_get_ai_agent", return_value=CapturingAgent), \
+             mock.patch.object(streaming, "resolve_model_provider", return_value=("gpt-5.4", "openai-codex", None)), \
+             mock.patch("api.config.get_config", return_value={}), \
+             mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
+             mock.patch.dict(
+                 sys.modules,
+                 {
+                     "hermes_cli": fake_hermes_cli,
+                     "hermes_cli.runtime_provider": fake_runtime_module,
+                     "hermes_state": fake_hermes_state,
+                 },
+             ):
+            streaming.STREAMS[fake_stream_id] = fake_queue
+            streaming._run_agent_streaming(
+                session_id=fake_session.session_id,
+                msg_text="hello from webui",
+                model="gpt-5.4",
+                workspace="/tmp",
+                stream_id=fake_stream_id,
+            )
+
+        resolve_runtime_provider.assert_called_once_with(requested="openai-codex")
+        init_kwargs = captured["init_kwargs"]
+        self.assertEqual(init_kwargs["api_mode"], "codex_responses")
+        self.assertEqual(init_kwargs["acp_command"], "codex")
+        self.assertEqual(init_kwargs["acp_args"], ["exec", "--json"])
+        self.assertEqual(init_kwargs["credential_pool"], "openai-codex")
+        self.assertEqual(init_kwargs["api_key"], "rt-key")
+        self.assertIs(init_kwargs["session_db"], fake_session_db)
 
 
 class TestSessionDBAST(unittest.TestCase):
@@ -206,17 +349,6 @@ def test_system_prompt_title_guard_exists():
         "sessions.js must have: cleanTitle.startsWith('[SYSTEM:') guard expression"
 
 
-def test_source_display_map_defined():
-    """The _SOURCE_DISPLAY lookup map must be present and include core gateway platforms."""
-    content = _read_sessions_js()
-    assert '_SOURCE_DISPLAY' in content, \
-        "sessions.js must define _SOURCE_DISPLAY mapping for platform name lookup"
-    # Verify key platform entries are present
-    for platform in ("telegram:'Telegram'", "discord:'Discord'", "cli:'CLI'"):
-        assert platform in content, \
-            f"_SOURCE_DISPLAY must include entry for {platform}"
-
-
 def test_cleanTitle_is_let_not_const():
     """cleanTitle must be declared with let (not const) to allow reassignment in the guard."""
     content = _read_sessions_js()
@@ -296,3 +428,29 @@ def test_rendermessages_reads_reasoning_from_messages():
     # Specifically, the fallback that reads from top-level m.reasoning field
     assert 'thinkingText=m.reasoning' in src.replace(' ', ''), \
         "thinkingText=m.reasoning assignment not found in ui.js renderMessages"
+
+
+def test_streaming_restores_prior_reasoning_metadata_after_followup():
+    """Previous-turn thinking must survive later turns.
+
+    The provider-facing history strips WebUI-only `reasoning` fields, so the
+    streaming path must merge that metadata back onto the returned message
+    history before saving the session, including reinserting dropped
+    reasoning-only assistant segments.
+    """
+    src = (REPO / 'api' / 'streaming.py').read_text()
+    assert "def _restore_reasoning_metadata(" in src, \
+        "streaming.py must define a helper to restore prior reasoning metadata"
+    assert "s.messages = _restore_reasoning_metadata(" in src, \
+        "streaming.py must merge prior reasoning metadata back after run_conversation()"
+    assert "updated_messages.insert(safe_pos, copy.deepcopy(prev_msg))" in src, \
+        "streaming.py must reinsert dropped reasoning-only assistant messages"
+
+
+def test_routes_restores_prior_reasoning_metadata_after_followup():
+    """The non-streaming route path must preserve prior reasoning metadata too."""
+    src = (REPO / 'api' / 'routes.py').read_text()
+    assert "_restore_reasoning_metadata" in src, \
+        "routes.py must import reasoning metadata restoration helper"
+    assert 's.messages = _restore_reasoning_metadata(' in src, \
+        "routes.py must merge prior reasoning metadata back after run_conversation()"

@@ -1,4 +1,4 @@
-"""
+r"""
 Regression test for image src URL corruption by the autolink pass.
 
 Bug: the _al_stash before the autolink pass only stashed <a> tags.

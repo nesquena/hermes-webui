@@ -18,6 +18,7 @@ import unittest
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 CSS = (REPO_ROOT / "static" / "style.css").read_text()
 HTML = (REPO_ROOT / "static" / "index.html").read_text()
+MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text()
 STREAMING_PY = (REPO_ROOT / "api" / "streaming.py").read_text()
 
 
@@ -123,6 +124,94 @@ class TestWorkspacePanelButtons(unittest.TestCase):
         self.assertIsNotNone(m, "Could not find mobile-close-btn element")
         self.assertIn("aria-label", m.group(0),
                       "mobile-close-btn must have aria-label for accessibility")
+
+
+class TestIssue495TitleStreaming(unittest.TestCase):
+    """Regression checks for issue #495 title SSE behavior."""
+
+    def test_streaming_has_llm_title_helper(self):
+        self.assertIn(
+            "def _generate_llm_session_title_for_agent(",
+            STREAMING_PY,
+            "streaming.py should define an agent-backed LLM title helper for session titles",
+        )
+
+    def test_streaming_rejects_generic_completion_titles(self):
+        self.assertIn(
+            "测试完成",
+            STREAMING_PY,
+            "streaming.py should reject generic completion phrases as session titles",
+        )
+        self.assertIn(
+            "all set",
+            STREAMING_PY,
+            "streaming.py should reject generic English completion phrases as session titles",
+        )
+
+    def test_streaming_uses_reasoning_split_for_minimax_titles(self):
+        self.assertIn(
+            "reasoning_split",
+            STREAMING_PY,
+            "streaming.py should request MiniMax title calls with reasoning_split so final text is separated from thinking",
+        )
+
+    def test_streaming_emits_title_sse_event(self):
+        self.assertIn(
+            "put_event('title', {'session_id': s.session_id, 'title': s.title})",
+            STREAMING_PY,
+            "streaming.py should emit a title SSE event when title is updated",
+        )
+
+    def test_streaming_emits_title_status_sse_event(self):
+        self.assertIn(
+            "put_event('title_status', payload)",
+            STREAMING_PY,
+            "streaming.py should emit a title_status SSE event for title generation diagnostics",
+        )
+
+    def test_streaming_emits_stream_end_event(self):
+        self.assertIn(
+            "put_event('stream_end', {'session_id': session_id})",
+            STREAMING_PY,
+            "background title path should end the SSE stream with stream_end",
+        )
+
+    def test_frontend_listens_for_title_event(self):
+        self.assertIn(
+            "addEventListener('title'",
+            MESSAGES_JS,
+            "messages.js should listen for title SSE events",
+        )
+
+    def test_frontend_listens_for_title_status_event(self):
+        self.assertIn(
+            "addEventListener('title_status'",
+            MESSAGES_JS,
+            "messages.js should listen for title_status SSE events",
+        )
+        self.assertIn(
+            "console.info('[title]'",
+            MESSAGES_JS,
+            "messages.js should log title generation diagnostics to the browser console",
+        )
+
+    def test_frontend_refreshes_title_ui_after_title_event(self):
+        self.assertIn(
+            "syncTopbar()",
+            MESSAGES_JS,
+            "messages.js title listener should sync top bar title",
+        )
+        self.assertTrue(
+            ("renderSessionListFromCache()" in MESSAGES_JS) or ("renderSessionList()" in MESSAGES_JS),
+            "messages.js title listener should refresh session list UI",
+        )
+
+    def test_frontend_waits_for_stream_end_before_closing(self):
+        self.assertIn(
+            "addEventListener('stream_end'",
+            MESSAGES_JS,
+            "messages.js should close SSE connection on stream_end (not immediately on done)",
+        )
 
 
 if __name__ == "__main__":

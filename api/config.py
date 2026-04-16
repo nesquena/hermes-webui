@@ -165,6 +165,7 @@ else:
 # ── Config file (reloadable -- supports profile switching) ──────────────────
 _cfg_cache = {}
 _cfg_lock = threading.Lock()
+_cfg_mtime: float = 0.0  # last known mtime of config.yaml; 0 = never loaded
 
 
 def _get_config_path() -> Path:
@@ -189,6 +190,7 @@ def get_config() -> dict:
 
 def reload_config() -> None:
     """Reload config.yaml from the active profile's directory."""
+    global _cfg_mtime
     with _cfg_lock:
         _cfg_cache.clear()
         config_path = _get_config_path()
@@ -199,6 +201,10 @@ def reload_config() -> None:
                 loaded = _yaml.safe_load(config_path.read_text())
                 if isinstance(loaded, dict):
                     _cfg_cache.update(loaded)
+                    try:
+                        _cfg_mtime = Path(config_path).stat().st_mtime
+                    except OSError:
+                        _cfg_mtime = 0.0
         except Exception:
             logger.debug("Failed to load yaml config from %s", config_path)
 
@@ -380,6 +386,10 @@ MIME_MAP = {
     ".bmp": "image/bmp",
     ".pdf": "application/pdf",
     ".json": "application/json",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 }
 
 # ── Toolsets (from config.yaml or hardcoded default) ─────────────────────────
@@ -399,36 +409,46 @@ _DEFAULT_TOOLSETS = [
     "web",
     "webhook",
 ]
-CLI_TOOLSETS = get_config().get("platform_toolsets", {}).get("cli", _DEFAULT_TOOLSETS)
+def _resolve_cli_toolsets(cfg=None):
+    """Resolve CLI toolsets using the agent's _get_platform_tools() so that
+    MCP server toolsets are automatically included, matching CLI behaviour."""
+    if cfg is None:
+        cfg = get_config()
+    try:
+        from hermes_cli.tools_config import _get_platform_tools
+        return list(_get_platform_tools(cfg, "cli"))
+    except Exception:
+        # Fallback: read raw list from config (MCP toolsets will be missing)
+        return cfg.get("platform_toolsets", {}).get("cli", _DEFAULT_TOOLSETS)
+
+CLI_TOOLSETS = _resolve_cli_toolsets()
 
 # ── Model / provider discovery ───────────────────────────────────────────────
 
 # Hardcoded fallback models (used when no config.yaml or agent is available)
+# Also used as the OpenRouter model list — keep this curated to current, widely-used models.
 _FALLBACK_MODELS = [
-    {"provider": "OpenAI", "id": "openai/gpt-5.4-mini", "label": "GPT-5.4 Mini"},
-    {"provider": "OpenAI", "id": "openai/o4-mini", "label": "o4-mini"},
-    {
-        "provider": "Anthropic",
-        "id": "anthropic/claude-sonnet-4.6",
-        "label": "Claude Sonnet 4.6",
-    },
-    {
-        "provider": "Anthropic",
-        "id": "anthropic/claude-sonnet-4-5",
-        "label": "Claude Sonnet 4.5",
-    },
-    {
-        "provider": "Anthropic",
-        "id": "anthropic/claude-haiku-4-5",
-        "label": "Claude Haiku 4.5",
-    },
-    {"provider": "Other", "id": "google/gemini-2.5-pro", "label": "Gemini 2.5 Pro"},
-    {
-        "provider": "Other",
-        "id": "deepseek/deepseek-chat-v3-0324",
-        "label": "DeepSeek V3",
-    },
-    {"provider": "Other", "id": "meta-llama/llama-4-scout", "label": "Llama 4 Scout"},
+    # OpenAI
+    {"provider": "OpenAI",    "id": "openai/gpt-5.4-mini",                "label": "GPT-5.4 Mini"},
+    {"provider": "OpenAI",    "id": "openai/gpt-5.4",                     "label": "GPT-5.4"},
+    # Anthropic — 4.6 flagship + 4.5 generation
+    {"provider": "Anthropic", "id": "anthropic/claude-opus-4.6",          "label": "Claude Opus 4.6"},
+    {"provider": "Anthropic", "id": "anthropic/claude-sonnet-4.6",        "label": "Claude Sonnet 4.6"},
+    {"provider": "Anthropic", "id": "anthropic/claude-sonnet-4-5",        "label": "Claude Sonnet 4.5"},
+    {"provider": "Anthropic", "id": "anthropic/claude-haiku-4-5",         "label": "Claude Haiku 4.5"},
+    # Google
+    {"provider": "Google",    "id": "google/gemini-3.1-pro-preview",              "label": "Gemini 3.1 Pro Preview"},
+    {"provider": "Google",    "id": "google/gemini-3-flash-preview",              "label": "Gemini 3 Flash Preview"},
+    # DeepSeek
+    {"provider": "DeepSeek",  "id": "deepseek/deepseek-chat-v3-0324",     "label": "DeepSeek V3"},
+    {"provider": "DeepSeek",  "id": "deepseek/deepseek-r1",               "label": "DeepSeek R1"},
+    # Qwen (Alibaba) — strong coding and general models
+    {"provider": "Qwen",      "id": "qwen/qwen3-coder",                   "label": "Qwen3 Coder"},
+    {"provider": "Qwen",      "id": "qwen/qwen3.6-plus",                  "label": "Qwen3.6 Plus"},
+    # xAI
+    {"provider": "xAI",       "id": "x-ai/grok-4.20",                    "label": "Grok 4.20"},
+    # Mistral
+    {"provider": "Mistral",   "id": "mistralai/mistral-large-latest",     "label": "Mistral Large"},
 ]
 
 # Provider display names for known Hermes provider IDs
@@ -451,6 +471,9 @@ _PROVIDER_DISPLAY = {
     "opencode-zen": "OpenCode Zen",
     "opencode-go": "OpenCode Go",
     "lmstudio": "LM Studio",
+    "mistralai": "Mistral",
+    "qwen": "Qwen",
+    "x-ai": "xAI",
 }
 
 # Well-known models per provider (used to populate dropdown for direct API providers)
@@ -463,7 +486,7 @@ _PROVIDER_MODELS = {
     ],
     "openai": [
         {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
-        {"id": "o4-mini", "label": "o4-mini"},
+        {"id": "gpt-5.4",      "label": "GPT-5.4"},
     ],
     "openai-codex": [
         {"id": "gpt-5.4", "label": "GPT-5.4"},
@@ -475,7 +498,8 @@ _PROVIDER_MODELS = {
         {"id": "codex-mini-latest", "label": "Codex Mini (latest)"},
     ],
     "google": [
-        {"id": "gemini-2.5-pro", "label": "Gemini 2.5 Pro"},
+        {"id": "gemini-3.1-pro-preview",   "label": "Gemini 3.1 Pro Preview"},
+        {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash Preview"},
     ],
     "deepseek": [
         {"id": "deepseek-chat-v3-0324", "label": "DeepSeek V3"},
@@ -485,7 +509,7 @@ _PROVIDER_MODELS = {
         {"id": "claude-opus-4.6", "label": "Claude Opus 4.6 (via Nous)"},
         {"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6 (via Nous)"},
         {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini (via Nous)"},
-        {"id": "gemini-2.5-pro", "label": "Gemini 2.5 Pro (via Nous)"},
+        {"id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro Preview (via Nous)"},
     ],
     "zai": [
         {"id": "glm-5.1", "label": "GLM-5.1"},
@@ -515,7 +539,7 @@ _PROVIDER_MODELS = {
         {"id": "gpt-4o", "label": "GPT-4o"},
         {"id": "claude-opus-4.6", "label": "Claude Opus 4.6"},
         {"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6"},
-        {"id": "gemini-2.5-pro", "label": "Gemini 2.5 Pro"},
+        {"id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro Preview"},
     ],
     # OpenCode Zen — curated models via opencode.ai/zen (pay-as-you-go credits)
     "opencode-zen": [
@@ -542,8 +566,8 @@ _PROVIDER_MODELS = {
         {"id": "claude-sonnet-4", "label": "Claude Sonnet 4"},
         {"id": "claude-haiku-4-5", "label": "Claude Haiku 4.5"},
         {"id": "claude-3-5-haiku", "label": "Claude 3.5 Haiku"},
-        {"id": "gemini-3.1-pro", "label": "Gemini 3.1 Pro"},
-        {"id": "gemini-3-flash", "label": "Gemini 3 Flash"},
+        {"id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro Preview"},
+        {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash Preview"},
         {"id": "glm-5.1", "label": "GLM-5.1"},
         {"id": "glm-5", "label": "GLM-5"},
         {"id": "kimi-k2.5", "label": "Kimi K2.5"},
@@ -564,8 +588,22 @@ _PROVIDER_MODELS = {
     ],
     # 'gemini' is the hermes_cli provider ID for Google AI Studio
     "gemini": [
-        {"id": "gemini-2.5-pro", "label": "Gemini 2.5 Pro"},
-        {"id": "gemini-2.0-flash", "label": "Gemini 2.0 Flash"},
+        {"id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro Preview"},
+        {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash Preview"},
+    ],
+    # Mistral — prefix used in OpenRouter model IDs (mistralai/mistral-large-latest)
+    "mistralai": [
+        {"id": "mistral-large-latest", "label": "Mistral Large"},
+        {"id": "mistral-small-latest", "label": "Mistral Small"},
+    ],
+    # Qwen (Alibaba) — prefix used in OpenRouter model IDs (qwen/qwen3-coder)
+    "qwen": [
+        {"id": "qwen3-coder",   "label": "Qwen3 Coder"},
+        {"id": "qwen3.6-plus",  "label": "Qwen3.6 Plus"},
+    ],
+    # xAI — prefix used in OpenRouter model IDs (x-ai/grok-4-20)
+    "x-ai": [
+        {"id": "grok-4.20", "label": "Grok 4.20"},
     ],
 }
 
@@ -637,10 +675,14 @@ def resolve_model_provider(model_id: str) -> tuple:
         # just because the model name contains a slash (e.g. google/gemma-4-26b-a4b).
         # The user has explicitly pointed at a base_url, so trust their routing config.
         if config_base_url:
-            # Strip provider prefix (e.g. 'openai/gpt-5.4' -> 'gpt-5.4') so prefixed
-            # model IDs from previous sessions don't break custom endpoint routing.
-            bare_model = model_id.split('/', 1)[-1]
-            return bare_model, config_provider, config_base_url
+            # Only strip the provider prefix when it's a known provider namespace
+            # (e.g. "openai/gpt-5.4" → "gpt-5.4" for a custom OpenAI-compatible proxy).
+            # Unknown prefixes (e.g. "zai-org/GLM-5.1" on DeepInfra) are intrinsic to
+            # the model ID and must be preserved — stripping them causes model_not_found.
+            if prefix in _PROVIDER_MODELS:
+                return bare, config_provider, config_base_url
+            # Unknown prefix (not a named provider) — pass full model_id through.
+            return model_id, config_provider, config_base_url
         # If prefix does NOT match config provider, the user picked a cross-provider model
         # from the OpenRouter dropdown (e.g. config=anthropic but picked openai/gpt-5.4-mini).
         # In this case always route through openrouter with the full provider/model string.
@@ -666,6 +708,15 @@ def get_available_models() -> dict:
         'groups': [{'provider': str, 'models': [{'id': str, 'label': str}]}]
     }
     """
+    # Reload config from disk if config.yaml has changed since last load.
+    # This ensures CLI model changes are picked up on page refresh without
+    # a server restart, while avoiding clearing in-memory mocks during tests. (#585)
+    try:
+        _current_mtime = Path(_get_config_path()).stat().st_mtime
+    except OSError:
+        _current_mtime = 0.0
+    if _current_mtime != _cfg_mtime:
+        reload_config()
     active_provider = None
     default_model = DEFAULT_MODEL
     groups = []
@@ -932,30 +983,76 @@ def get_available_models() -> dict:
     # 3b. Include models from custom_providers config entries.
     # These are explicitly configured and should always appear even when the
     # /v1/models endpoint is unreachable or returns a subset.
+    #
+    # Each entry may carry a `name` field (e.g. "Agent37").  When present we
+    # use it as the dropdown section header instead of the generic "Custom"
+    # label.  Internally we key these providers as "custom:<slug>" so that
+    # multiple named custom providers can coexist as separate groups.
     _custom_providers_cfg = cfg.get("custom_providers", [])
+    # Maps "custom:<slug>" -> (display_name, [model_dicts])
+    _named_custom_groups: dict = {}
     if isinstance(_custom_providers_cfg, list):
         _seen_custom_ids = {m["id"] for m in auto_detected_models}
         for _cp in _custom_providers_cfg:
             if not isinstance(_cp, dict):
                 continue
             _cp_model = _cp.get("model", "")
+            _cp_name = (_cp.get("name") or "").strip()
             if _cp_model and _cp_model not in _seen_custom_ids:
                 _cp_label = _cp_model.split("/")[-1] if "/" in _cp_model else _cp_model
-                auto_detected_models.append({"id": _cp_model, "label": _cp_label})
                 _seen_custom_ids.add(_cp_model)
-                detected_providers.add("custom")
+                if _cp_name:
+                    # Named custom provider — own group keyed by slug
+                    _slug = "custom:" + _cp_name.lower().replace(" ", "-")
+                    if _slug not in _named_custom_groups:
+                        _named_custom_groups[_slug] = (_cp_name, [])
+                        detected_providers.add(_slug)
+                    _named_custom_groups[_slug][1].append(
+                        {"id": _cp_model, "label": _cp_label}
+                    )
+                else:
+                    # Unnamed — falls into the generic "Custom" bucket
+                    auto_detected_models.append({"id": _cp_model, "label": _cp_label})
+                    detected_providers.add("custom")
 
     # If the user configured a real model.provider, the base_url belongs to
     # THAT provider, not to a separate "Custom" group. hermes_cli reports
     # 'custom' as authenticated whenever base_url is set, which would otherwise
     # build a phantom "Custom" bucket next to the real provider's group. Drop
-    # it unless the user explicitly chose 'custom' as their active provider.
-    if active_provider and active_provider != "custom":
+    # it unless (a) the user explicitly chose 'custom' as their active provider,
+    # or (b) the user has custom_providers entries in config.yaml (those models
+    # were already added above and should still be shown).
+    _has_custom_providers = isinstance(_custom_providers_cfg, list) and len(_custom_providers_cfg) > 0
+    if active_provider and active_provider != "custom" and not _has_custom_providers:
         detected_providers.discard("custom")
+        # Also drop named custom slugs when active provider is a real named one
+        # and there are no custom_providers entries to show.
+        for _slug in list(detected_providers):
+            if _slug.startswith("custom:") and not _has_custom_providers:
+                detected_providers.discard(_slug)
+    elif active_provider == "custom" and _has_custom_providers:
+        # When the active provider is 'custom' and all custom_providers entries
+        # are named (i.e. every entry produced a "custom:<slug>" key), the bare
+        # "custom" bucket is empty noise — discard it so the dropdown only shows
+        # the named groups.  We keep "custom" if there are unnamed entries (they
+        # were added to auto_detected_models and will render under the generic
+        # "Custom" header via the else branch in the group builder).
+        _has_unnamed = any(
+            isinstance(_cp, dict) and not (_cp.get("name") or "").strip()
+            for _cp in _custom_providers_cfg
+        )
+        if not _has_unnamed:
+            detected_providers.discard("custom")
 
     # 5. Build model groups
     if detected_providers:
         for pid in sorted(detected_providers):
+            if pid.startswith("custom:") and pid in _named_custom_groups:
+                # Named custom provider — use the stored display name and its own model list
+                _nc_display, _nc_models = _named_custom_groups[pid]
+                if _nc_models:
+                    groups.append({"provider": _nc_display, "models": _nc_models})
+                continue
             provider_name = _PROVIDER_DISPLAY.get(pid, pid.title())
             if pid == "openrouter":
                 # OpenRouter uses provider/model format -- show the fallback list

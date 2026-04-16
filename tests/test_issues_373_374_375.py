@@ -127,10 +127,12 @@ class TestStaleModelListCleanup:
             "_FALLBACK_MODELS must keep gpt-5.4-mini as primary OpenAI model (#374)"
         )
 
-    def test_fallback_still_has_o4_mini(self):
-        """_FALLBACK_MODELS must still contain o4-mini (reasoning model)."""
-        assert "o4-mini" in CONFIG_PY, (
-            "_FALLBACK_MODELS must keep o4-mini as reasoning model (#374)"
+    def test_fallback_has_gpt54(self):
+        """_FALLBACK_MODELS must contain gpt-5.4-mini as the primary OpenAI option."""
+        from api.config import _FALLBACK_MODELS
+        ids = [m["id"] for m in _FALLBACK_MODELS]
+        assert any("gpt-5.4-mini" in mid for mid in ids), (
+            "_FALLBACK_MODELS must include gpt-5.4-mini as the primary OpenAI option"
         )
 
     def test_copilot_list_unchanged(self):

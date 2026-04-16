@@ -47,8 +47,8 @@ class TestMediaRenderMdStash(unittest.TestCase):
                       "restore pass must produce download link for non-image files")
 
     def test_media_api_url_pattern(self):
-        self.assertIn("/api/media?path=", UI_JS,
-                      "renderMd must build /api/media?path=... URL for local files")
+        self.assertIn("api/media?path=", UI_JS,
+                      "renderMd must build api/media?path=... URL for local files")
 
     def test_media_stash_uses_null_byte_token(self):
         self.assertIn("\\x00D", UI_JS,
@@ -144,22 +144,19 @@ class TestMediaEndpointUnit(unittest.TestCase):
 
 
 # ── Integration tests: live server on TEST_PORT ───────────────────────────────
-
-def _server_reachable() -> bool:
-    try:
-        urllib.request.urlopen(BASE + "/health", timeout=3)
-        return True
-    except Exception:
-        return False
+# No collection-time skip guard — conftest.py starts the server via its
+# autouse session fixture BEFORE tests run.  A collection-time check always
+# sees no server and turns every test into a skip.  Instead we assert
+# reachability inside setUp() so failures are loud errors, not silent skips.
 
 
-requires_server = unittest.skipUnless(
-    _server_reachable(), f"Test server not reachable at {BASE}"
-)
-
-
-@requires_server
 class TestMediaEndpointIntegration(unittest.TestCase):
+
+    def setUp(self):
+        try:
+            urllib.request.urlopen(BASE + "/health", timeout=5)
+        except Exception as exc:
+            self.fail(f"Test server at {BASE} is not reachable: {exc}")
 
     def _get(self, path):
         try:
