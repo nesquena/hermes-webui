@@ -29,7 +29,6 @@ from api.config import (
     STREAMS_LOCK,
     CANCEL_FLAGS,
     SERVER_START_TIME,
-    CLI_TOOLSETS,
     _resolve_cli_toolsets,
     _INDEX_HTML_PATH,
     get_available_models,
