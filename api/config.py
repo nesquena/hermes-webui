@@ -342,6 +342,7 @@ MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 # ── File type maps ───────────────────────────────────────────────────────────
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".bmp"}
 MD_EXTS = {".md", ".markdown", ".mdown"}
+OFFICE_EXTS = {".xls", ".xlsx", ".doc", ".docx"}
 CODE_EXTS = {
     ".py",
     ".js",
@@ -380,6 +381,10 @@ MIME_MAP = {
     ".bmp": "image/bmp",
     ".pdf": "application/pdf",
     ".json": "application/json",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 }
 
 # ── Toolsets (from config.yaml or hardcoded default) ─────────────────────────
