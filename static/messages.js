@@ -761,12 +761,9 @@ function showApprovalCard(pending, pendingCount) {
     const b = $(id); if (b) { b.disabled = false; b.classList.remove("loading"); }
   });
   card.classList.add("visible");
-  if (!sameApproval) card.scrollIntoView({block:"nearest", behavior:"smooth"});
-  // Apply current locale to data-i18n elements inside the card
   if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
-  // Focus Allow once button so Enter works immediately
   const onceBtn = $("approvalBtnOnce");
-  if (onceBtn) setTimeout(() => onceBtn.focus(), 50);
+  if (onceBtn) setTimeout(() => onceBtn.focus({preventScroll: true}), 50);
 }
 
 async function respondApproval(choice) {
@@ -995,14 +992,9 @@ function showClarifyCard(pending) {
     lockComposerForClarify(question ? `Clarification needed: ${question}` : "Clarification needed");
   }
   _clarifySetControlsDisabled(false, false);
-  const msgInner = $("msgInner");
-  if (msgInner && card.parentElement !== msgInner) {
-    msgInner.appendChild(card);
-  }
   card.classList.add("visible");
-  if (!sameClarify) card.scrollIntoView({block:"nearest", behavior:"smooth"});
   if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
-  if (input && !sameClarify) setTimeout(() => input.focus(), 50);
+  if (input && !sameClarify) setTimeout(() => input.focus({preventScroll: true}), 50);
 }
 
 async function respondClarify(response) {

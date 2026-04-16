@@ -284,7 +284,7 @@
   /* ── Approval card ── */
   .approval-card{position:absolute;left:0;right:0;bottom:-24px;max-width:var(--msg-max);margin:0 auto;padding:0 20px;box-sizing:border-box;width:100%;opacity:0;transform:translateY(100%);pointer-events:none;transition:transform .4s cubic-bezier(.32,.72,.16,1),opacity .25s ease;}
   .approval-card.visible{transform:translateY(0);opacity:1;pointer-events:auto;}
-  .approval-inner{background:var(--surface);backdrop-filter:blur(8px);border:1px solid rgba(233,69,96,0.35);border-radius:14px;padding:16px 18px 40px;}
+  .approval-inner{background:var(--surface);backdrop-filter:blur(8px);border:1px solid rgba(124,185,255,0.35);border-radius:14px;padding:16px 18px 40px;}
   .approval-header{display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:13px;font-weight:600;color:#e94560;}
   .approval-desc{font-size:12px;color:var(--muted);margin-bottom:8px;line-height:1.5;}
   .approval-cmd{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-family:"SF Mono",ui-monospace,monospace;font-size:12px;color:var(--pre-text);white-space:pre-wrap;word-break:break-all;margin-bottom:14px;max-height:120px;overflow-y:auto;}
@@ -309,7 +309,7 @@
   .clarify-card{position:absolute;left:0;right:0;bottom:-24px;max-width:var(--msg-max);margin:0 auto;padding:0 20px;box-sizing:border-box;width:100%;opacity:0;transform:translateY(100%);pointer-events:none;transition:transform .4s cubic-bezier(.32,.72,.16,1),opacity .25s ease;max-height:min(calc(100vh - 280px),420px);}
   .clarify-card.visible{transform:translateY(0);opacity:1;pointer-events:auto;}
   .clarify-card .clarify-inner{max-height:min(calc(100vh - 280px),420px);overflow-y:auto;}
-  .clarify-inner{background:rgba(255,255,255,.03);backdrop-filter:blur(8px);border:1px solid rgba(124,185,255,0.16);border-radius:12px;padding:12px 14px 36px;box-shadow:0 1px 0 rgba(255,255,255,.02) inset;}
+  .clarify-inner{background:var(--surface);backdrop-filter:blur(8px);border:1px solid rgba(124,185,255,0.35);border-radius:12px;padding:12px 14px 36px;box-shadow:0 1px 0 rgba(255,255,255,.02) inset;}
   .clarify-header{display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:12px;font-weight:700;color:var(--blue);letter-spacing:.01em;}
   .clarify-question{font-size:14px;color:var(--text);line-height:1.7;white-space:pre-wrap;margin-bottom:12px;}
   .clarify-choices{display:flex;flex-direction:column;gap:8px;margin-bottom:12px;}
