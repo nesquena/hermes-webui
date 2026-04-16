@@ -1854,7 +1854,7 @@ async function uploadPendingFiles(){
     const f=S.pendingFiles[i];const fd=new FormData();
     fd.append('session_id',S.session.session_id);fd.append('file',f,f.name);
     try{
-      const res=await fetch(new URL('/api/upload',location.origin).href,{method:'POST',credentials:'include',body:fd});
+      const res=await fetch(new URL('api/upload',location.href).href,{method:'POST',credentials:'include',body:fd});
       if(!res.ok){const err=await res.text();throw new Error(err);}
       const data=await res.json();
       if(data.error)throw new Error(data.error);
