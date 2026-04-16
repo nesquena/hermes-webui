@@ -19,8 +19,8 @@ services:
     environment:
       # Set to your host user ID: run `id -u` and `id -g` to find them.
       # On macOS, UIDs start at 501 (not 1000), so set UID and GID in a .env file:
-      #   echo "UID=$(id -u)
-GID=$(id -g)" >> .env
+      #   echo "UID=$(id -u)" >> .env
+      #   echo "GID=$(id -g)" >> .env
       # Without this, the container may not be able to read your mounted files.
       - WANTED_UID=${UID:-1000}
       - WANTED_GID=${GID:-1000}
