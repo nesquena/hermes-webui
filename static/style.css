@@ -1152,3 +1152,159 @@ body.resizing{user-select:none;cursor:col-resize;}
 .session-item.cli-session[data-source="discord"]::after { color: #5865F2; }
 .session-item.cli-session[data-source="slack"] { border-left-color: #4A154B; }
 .session-item.cli-session[data-source="slack"]::after { color: #4A154B; }
+
+/* ═══════════════════════════════════════════════════════════════════
+   Messages redesign — additive overrides for the transcript area.
+   Fixes the issues catalogued in docs/ui-ux/index.html:
+     • single indent rail (one var, one column)
+     • quieter thinking card (was louder than the answer)
+     • user-message bubble so user vs. assistant reads at a glance
+     • persistent affordances (timestamps, actions, usage always visible)
+     • unified widths (body + tool cards share one max)
+     • tamed inline-code colour (no longer outshouts links)
+     • streaming cursor at end of live assistant body
+     • [data-error="1"] marker for error bubbles
+     • .msg-date-sep for day-change separators
+     • tighter type scale (11/12/13/14/16 — no more 10/10.5/12.5)
+   ═══════════════════════════════════════════════════════════════════ */
+:root {
+  --msg-rail: 40px;
+  --msg-max: 780px;
+  --user-bubble-bg: rgba(124,185,255,.05);
+  --user-bubble-border: rgba(124,185,255,.16);
+}
+:root[data-theme="light"]     { --user-bubble-bg: rgba(45,111,163,.06);  --user-bubble-border: rgba(45,111,163,.18); }
+:root[data-theme="solarized"] { --user-bubble-bg: rgba(38,139,210,.08);  --user-bubble-border: rgba(38,139,210,.22); }
+:root[data-theme="monokai"]   { --user-bubble-bg: rgba(102,217,232,.06); --user-bubble-border: rgba(102,217,232,.18); }
+:root[data-theme="nord"]      { --user-bubble-bg: rgba(129,161,193,.08); --user-bubble-border: rgba(129,161,193,.22); }
+:root[data-theme="oled"]      { --user-bubble-bg: rgba(108,180,255,.05); --user-bubble-border: rgba(108,180,255,.16); }
+
+/* Inline code: stop shouting orange; inherit strong text colour instead */
+.msg-body code { color: var(--strong); background: var(--code-inline-bg); font-size: 12.5px; }
+
+/* ── Unified indent rail — every child of a turn lines up on --msg-rail ── */
+.msg-row { padding: 12px 0; }
+.msg-body { padding-left: var(--msg-rail); max-width: var(--msg-max); }
+.msg-body:empty { display: none; }
+.msg-files { padding-left: var(--msg-rail); }
+.msg-usage { padding-left: var(--msg-rail); opacity: 1; margin-top: 6px; font-size: 11px; }
+.tool-card { margin-left: var(--msg-rail); max-width: calc(var(--msg-max) + 40px); }
+.thinking-card { margin-left: var(--msg-rail); max-width: calc(var(--msg-max) + 40px); }
+.tool-cards-toggle { margin-left: var(--msg-rail); }
+.clarify-card { margin-left: var(--msg-rail); max-width: calc(var(--msg-max) + 40px); }
+.msg-row[data-editing="1"] .msg-edit-area,
+.msg-row[data-editing="1"] .msg-edit-bar { margin-left: var(--msg-rail); }
+
+/* Quieter, always-visible role header (smaller avatar, always-visible timestamp) */
+.msg-role { font-size: 11px; font-weight: 500; margin-bottom: 6px; opacity: .8; letter-spacing: 0; }
+.msg-role:hover { opacity: 1; }
+.role-icon { width: 20px; height: 20px; font-size: 9px; }
+.msg-time { opacity: .65; font-size: 10px; }
+.msg-role:hover .msg-time { opacity: 1; }
+
+/* Persistent action toolbar: subtle at rest, full on hover */
+.msg-actions { opacity: .25; }
+.msg-row:hover .msg-actions { opacity: 1; }
+
+/* ── User message: becomes a subtle card so it visually reads as "my input" ── */
+.msg-row[data-role="user"] .msg-body {
+  background: var(--user-bubble-bg);
+  border: 1px solid var(--user-bubble-border);
+  border-radius: 14px;
+  padding: 10px 14px;
+  margin-left: var(--msg-rail);
+  max-width: calc(var(--msg-max) - 40px);
+}
+.msg-row[data-role="user"] .msg-files { padding-left: 0; margin-left: var(--msg-rail); }
+.msg-row[data-role="user"][data-editing="1"] .msg-edit-area { background: var(--user-bubble-bg); border-color: var(--user-bubble-border); }
+
+/* Bubble-layout mode: user-card stays intact, just drop the rail margin.
+   (:has() form matches the existing bubble-layout rule's specificity so this
+   wins by source order rather than relying on !important.) */
+body.bubble-layout .msg-row:has(.msg-role.user) .msg-body { margin-left: 0; padding: 10px 14px; max-width: none; }
+body.bubble-layout .msg-row:has(.msg-role.user) .msg-files { margin-left: 0; padding-left: 0; }
+body.bubble-layout .msg-row + .msg-row[data-role="user"] { border-top: none; padding-top: 10px; margin-top: 0; }
+
+/* Turn boundary: subtle dashed divider before each user turn except the first */
+.msg-row + .msg-row[data-role="user"] {
+  border-top: 1px dashed var(--border);
+  margin-top: 18px;
+  padding-top: 22px;
+}
+
+/* ── Thinking card: quieter than before (no background panel) but still
+   clearly a gold-accented affordance so users know it's collapsible. ── */
+.thinking-card {
+  background: transparent;
+  border: none;
+  border-left: 2px solid rgba(201,168,76,.4);
+  border-radius: 0;
+  padding: 0 0 0 12px;
+  margin: 4px 0 4px var(--msg-rail);
+  transition: border-left-color .15s;
+}
+.thinking-card:hover { border-left-color: rgba(201,168,76,.7); }
+.thinking-card-header { padding: 5px 0; color: var(--gold); font-size: 12px; font-weight: 600; opacity: .85; }
+.thinking-card-header:hover { opacity: 1; }
+.thinking-card-icon { opacity: .7; }
+.thinking-card-body { padding: 2px 0 8px; max-height: 260px; }
+.thinking-card-body pre { font-size: 11px; line-height: 1.6; color: var(--muted); }
+
+/* ── Tool cards: tighter chrome to match quieter thinking card ── */
+.tool-card { border-radius: 8px; margin-top: 3px; margin-bottom: 3px; }
+.tool-card-header { padding: 5px 10px; }
+.tool-card-name { font-size: 11px; }
+.tool-card-preview { font-size: 11px; }
+
+/* ── Streaming cursor at the end of the live assistant body ── */
+@keyframes hermes-cursor-blink { 0%,49% { opacity: 1; } 50%,100% { opacity: 0; } }
+.msg-row[data-live-assistant="1"] .msg-body > :last-child::after,
+.msg-row[data-live-assistant="1"] .msg-body:not(:has(> *))::after {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 1em;
+  background: var(--blue);
+  border-radius: 1px;
+  margin-left: 3px;
+  vertical-align: -0.16em;
+  animation: hermes-cursor-blink 1.05s steps(2, start) infinite;
+}
+
+/* ── Error state: distinct red-accent card, not italic emphasis ── */
+.msg-row[data-error="1"] .msg-body {
+  background: rgba(233,69,96,.06);
+  border: 1px solid rgba(233,69,96,.22);
+  border-left: 2px solid var(--accent);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-left: var(--msg-rail);
+  max-width: calc(var(--msg-max) - 40px);
+  color: var(--text);
+}
+.msg-row[data-error="1"] .msg-body em,
+.msg-row[data-error="1"] .msg-body p em { font-style: normal; color: inherit; }
+.msg-row[data-error="1"] .msg-role { color: var(--accent); opacity: 1; }
+.msg-row[data-error="1"] .role-icon { background: rgba(233,69,96,.15); color: var(--accent); border-color: rgba(233,69,96,.3); }
+
+/* ── Day-change separator ── */
+.msg-date-sep {
+  display: flex; align-items: center; gap: 10px;
+  margin: 22px 0 10px; padding: 0 var(--msg-rail);
+  color: var(--muted); font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .12em; opacity: .55;
+}
+.msg-date-sep::before, .msg-date-sep::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+
+/* ── Widths: collapse messages-inner to match content column ── */
+.messages-inner { max-width: calc(var(--msg-max) + var(--msg-rail) + 40px); }
+@media (min-width: 1400px) { .messages-inner { max-width: calc(var(--msg-max) + var(--msg-rail) + 80px); } }
+@media (min-width: 1800px) { .messages-inner { max-width: calc(var(--msg-max) + var(--msg-rail) + 120px); } }
+
+/* Mobile: shrink the rail so narrow screens don't waste horizontal space */
+@media (max-width: 700px) {
+  :root { --msg-rail: 24px; }
+  .msg-role { margin-bottom: 4px; }
+  .msg-row[data-role="user"] .msg-body { padding: 8px 12px; }
+  .msg-row[data-error="1"] .msg-body { padding: 8px 12px; }
+}

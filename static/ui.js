@@ -1075,6 +1075,18 @@ function msgContent(m){
   return String(c).trim();
 }
 
+function _fmtDateSep(d){
+  const todayStart=new Date();todayStart.setHours(0,0,0,0);
+  const dStart=new Date(d);dStart.setHours(0,0,0,0);
+  const diffDays=Math.round((todayStart-dStart)/86400000);
+  if(diffDays===0) return 'Today';
+  if(diffDays===1) return 'Yesterday';
+  if(diffDays>0 && diffDays<7) return dStart.toLocaleDateString([], {weekday:'long'});
+  const opts={month:'short', day:'numeric'};
+  if(todayStart.getFullYear()!==dStart.getFullYear()) opts.year='numeric';
+  return dStart.toLocaleDateString([], opts);
+}
+const _ERR_MSG_RE=/^(?:\*\*error\b|error:|connection lost|no response received)/i;
 function renderMessages(){
   const inner=$('msgInner');
   const vis=S.messages.filter(m=>{
@@ -1099,8 +1111,22 @@ function renderMessages(){
     if(msgContent(m)||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu))) visWithIdx.push({m,rawIdx});
     rawIdx++;
   }
+  let _prevSepKey=null;
   for(let vi=0;vi<visWithIdx.length;vi++){
     const {m,rawIdx}=visWithIdx[vi];
+    // Day-change separator (only when timestamps exist on both sides of the change)
+    const _tsSep=m._ts||m.timestamp;
+    if(_tsSep){
+      const _d=new Date(_tsSep*1000);
+      const _key=_d.toDateString();
+      if(_prevSepKey && _prevSepKey!==_key){
+        const sep=document.createElement('div');
+        sep.className='msg-date-sep';
+        sep.textContent=_fmtDateSep(_d);
+        inner.appendChild(sep);
+      }
+      _prevSepKey=_key;
+    }
     let content=m.content||'';
     // Extract thinking/reasoning blocks from structured content (Claude extended thinking, o3)
     let thinkingText='';
@@ -1140,6 +1166,7 @@ function renderMessages(){
     const row=document.createElement('div');row.className='msg-row';
     row.dataset.msgIdx=rawIdx;row.dataset.role=m.role||'assistant';
     if(m._live) row.setAttribute('data-live-assistant','1');
+    if(!isUser && _ERR_MSG_RE.test(String(content||'').trim())) row.dataset.error='1';
     let filesHtml='';
     if(m.attachments&&m.attachments.length)
       filesHtml=`<div class="msg-files">${m.attachments.map(f=>`<div class="msg-file-badge">${li('paperclip',12)} ${esc(f)}</div>`).join('')}</div>`;
