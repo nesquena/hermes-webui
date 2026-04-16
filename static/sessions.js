@@ -226,8 +226,8 @@ function _openSessionActionMenu(session, anchorEl){
   const menu=document.createElement('div');
   menu.className='session-action-menu open';
   menu.appendChild(_buildSessionAction(
-    session.pinned?'Открепить беседу':'Закрепить беседу',
-    session.pinned?'Убрать из закреплённых':'Оставить эту беседу сверху',
+    session.pinned?'Unpin conversation':'Pin conversation',
+    session.pinned?'Remove from pinned':'Keep this conversation at the top',
     session.pinned?ICONS.pin:ICONS.unpin,
     async()=>{
       closeSessionActionMenu();
@@ -237,13 +237,13 @@ function _openSessionActionMenu(session, anchorEl){
         session.pinned=newPinned;
         if(S.session&&S.session.session_id===session.session_id) S.session.pinned=newPinned;
         renderSessionList();
-      }catch(err){showToast('Не удалось закрепить: '+err.message);}
+      }catch(err){showToast('Pin failed: '+err.message);}
     },
     session.pinned?'is-active':''
   ));
   menu.appendChild(_buildSessionAction(
-    'Переместить в проект',
-    session.project_id?'Изменить проект этой беседы':'Назначить этой беседе проект',
+    'Move to project',
+    session.project_id?'Change the project for this conversation':'Assign a project to this conversation',
     ICONS.folder,
     async()=>{
       closeSessionActionMenu();
