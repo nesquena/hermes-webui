@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.61] — 2026-04-16
+
+### Added
+- **Office file attachments** — `.xls`, `.xlsx`, `.doc`, and `.docx` files can now be selected via the attach button. The file picker's `accept` attribute is extended to include Office MIME types, and the backend MIME map is updated so these files are served with correct content-type headers when accessed through the workspace file browser. Files are saved as binary to the workspace; the AI can reference them by name the same way it does PDFs. (PR #566 by @renheqiang)
+
 ## [v0.50.60] — 2026-04-16
 
 ### Changed
