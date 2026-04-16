@@ -590,26 +590,17 @@ function renderSessionListFromCache(){
   }
   // ── Render session items (extracted for group body use) ──
   // Note: declared after the groups loop but available via function hoisting.
-  function _formatSourceTag(tag){
-    // #429: return null for unknown/unrecognised tags so callers can suppress display.
-    // Previously returned the raw tag string, causing 'N/A' or other junk values
-    // from older hermes-agent state.db records to surface in the session list.
-    const names={telegram:'via Telegram',discord:'via Discord',slack:'via Slack',cli:'CLI',feishu:'via Feishu',weixin:'via WeChat'};
-    return names[tag]||null;
-  }
   function _renderOneSession(s){
     const el=document.createElement('div');
     const isActive=S.session&&s.session_id===S.session.session_id;
-    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(s.is_cli_session?' cli-session':'');
-    if(s.source_tag) el.dataset.source=s.source_tag;
+    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'');
     if(isActive&&S.session&&S.session._flash)delete S.session._flash;
     const rawTitle=s.title||'Untitled';
     const tags=(rawTitle.match(/#[\w-]+/g)||[]);
     let cleanTitle=tags.length?rawTitle.replace(/#[\w-]+/g,'').trim():rawTitle;
     // Guard: system prompt content must never surface as a visible session title
-    const _SOURCE_DISPLAY={telegram:'Telegram',discord:'Discord',slack:'Slack',cli:'CLI',feishu:'Feishu',weixin:'WeChat'};
     if(cleanTitle.startsWith('[SYSTEM:')){
-      cleanTitle=(_SOURCE_DISPLAY[s.source_tag]||'Gateway')+' session';
+      cleanTitle='Session';
     }
     const sessionText=document.createElement('div');
     sessionText.className='session-text';
@@ -621,15 +612,7 @@ function renderSessionListFromCache(){
     title.title='Double-click to rename';
     const tsMs=_sessionTimestampMs(s);
     titleRow.appendChild(title);
-    const metaBits=[];
-    if(s.is_cli_session && s.source_tag){const _stLabel=_formatSourceTag(s.source_tag);if(_stLabel)metaBits.push(_stLabel);}
     sessionText.appendChild(titleRow);
-    if(metaBits.length){
-      const meta=document.createElement('div');
-      meta.className='session-meta';
-      meta.textContent=metaBits.join(' · ');
-      sessionText.appendChild(meta);
-    }
     // Append tag chips after the title text
     for(const tag of tags){
       const chip=document.createElement('span');

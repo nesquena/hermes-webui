@@ -206,17 +206,6 @@ def test_system_prompt_title_guard_exists():
         "sessions.js must have: cleanTitle.startsWith('[SYSTEM:') guard expression"
 
 
-def test_source_display_map_defined():
-    """The _SOURCE_DISPLAY lookup map must be present and include core gateway platforms."""
-    content = _read_sessions_js()
-    assert '_SOURCE_DISPLAY' in content, \
-        "sessions.js must define _SOURCE_DISPLAY mapping for platform name lookup"
-    # Verify key platform entries are present
-    for platform in ("telegram:'Telegram'", "discord:'Discord'", "cli:'CLI'"):
-        assert platform in content, \
-            f"_SOURCE_DISPLAY must include entry for {platform}"
-
-
 def test_cleanTitle_is_let_not_const():
     """cleanTitle must be declared with let (not const) to allow reassignment in the guard."""
     content = _read_sessions_js()
