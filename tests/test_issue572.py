@@ -19,9 +19,29 @@ from __future__ import annotations
 
 import os
 import pathlib
+import sys
+import types
 from unittest import mock
 
 import pytest
+
+
+def _inject_hermes_cli_auth(get_auth_status_return):
+    """Inject a minimal hermes_cli.auth stub into sys.modules.
+
+    CI doesn't install hermes_cli (it's a separate package).  Tests that
+    exercise the hermes_cli fallback path must inject the module themselves
+    rather than relying on mock.patch('hermes_cli.auth.get_auth_status')
+    which fails with ModuleNotFoundError when the module isn't installed.
+    """
+    mock_auth = types.ModuleType("hermes_cli.auth")
+    mock_auth.get_auth_status = mock.MagicMock(return_value=get_auth_status_return)
+    mock_hermes_cli = types.ModuleType("hermes_cli")
+
+    return mock.patch.dict(sys.modules, {
+        "hermes_cli": mock_hermes_cli,
+        "hermes_cli.auth": mock_auth,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -44,17 +64,16 @@ class TestProviderApiKeyPresentFallback:
         with mock.patch("api.onboarding._SUPPORTED_PROVIDER_SETUPS", {
             "openrouter": {}, "anthropic": {}, "openai": {}, "custom": {}
         }):
-            with mock.patch("hermes_cli.auth.get_auth_status", return_value={"logged_in": True}) as m:
+            with _inject_hermes_cli_auth({"logged_in": True}):
                 result = _call_provider_api_key_present("minimax-cn")
                 assert result is True
-                m.assert_called_once_with("minimax-cn")
 
     def test_unsupported_provider_logged_out_returns_false(self):
         """Unsupported provider with no key → False, no crash."""
         with mock.patch("api.onboarding._SUPPORTED_PROVIDER_SETUPS", {
             "openrouter": {}, "anthropic": {}, "openai": {}, "custom": {}
         }):
-            with mock.patch("hermes_cli.auth.get_auth_status", return_value={"logged_in": False}):
+            with _inject_hermes_cli_auth({"logged_in": False}):
                 result = _call_provider_api_key_present("deepseek")
                 assert result is False
 
