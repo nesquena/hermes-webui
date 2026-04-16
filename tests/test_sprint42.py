@@ -88,6 +88,24 @@ class TestSessionDBInjection(unittest.TestCase):
         )
 
 
+class TestRuntimeRouteInjection(unittest.TestCase):
+    """Verify WebUI forwards the resolved runtime route into AIAgent."""
+
+    def test_runtime_provider_keys_are_forwarded_to_agent(self):
+        """WebUI must pass the runtime route fields that CLI already uses."""
+        for snippet in (
+            "api_mode=_rt.get('api_mode')",
+            "acp_command=_rt.get('command')",
+            "acp_args=_rt.get('args')",
+            "credential_pool=_rt.get('credential_pool')",
+        ):
+            self.assertIn(
+                snippet,
+                STREAMING_PY,
+                f"Missing runtime route forwarding in AIAgent constructor: {snippet}",
+            )
+
+
 class TestSessionDBAST(unittest.TestCase):
     """AST-level checks: verify the try/except is not inside _ENV_LOCK (deadlock guard)."""
 
