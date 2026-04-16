@@ -33,7 +33,8 @@
     .doc-label{position:absolute;top:-9px;left:12px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;padding:2px 8px;background:var(--bg);color:var(--muted);border:1px solid var(--border);border-radius:999px;}
     /* Force-show hover-only affordances inside explicitly flagged demos */
     .force-show .msg-actions,
-    .force-show .msg-time{opacity:1 !important;}
+    .force-show .msg-time,
+    .force-show .msg-foot{opacity:1 !important;}
     /* Chat demo container mimics the app's .messages scroll wrapper but not fullscreen */
     .messages.doc-messages{overflow:visible;display:block;}
     .messages-inner.doc-inner{padding:14px 16px;}
@@ -91,29 +92,27 @@
 <!-- ============================================================= -->
 <section class="doc-section">
   <div class="doc-kicker">2 · User messages</div>
-  <h2 class="doc-h">Plain, with attachments, and in edit mode</h2>
+  <h2 class="doc-h">Right-aligned bubble, attachments, and edit mode</h2>
+  <p class="doc-note">User rows have no avatar/label — the right-edge alignment and tinted bubble identify the sender. Timestamp + edit/copy live in a <code>.msg-foot</code> below the bubble, revealed on hover (forced visible here).</p>
 
   <div class="doc-card"><span class="doc-label">.msg-row[data-role="user"] — plain</span>
     <div class="messages doc-messages"><div class="messages-inner doc-inner">
-      <div class="msg-row force-show" data-role="user">
-        <div class="msg-role user">
-          <span class="role-icon user">Y</span>
-          <span>You</span>
-          <span class="msg-time" title="Thu, Apr 16 2026, 10:42 AM">10:42</span>
-          <div class="msg-actions">
-            <button class="msg-action-btn" title="Edit"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
-            <button class="msg-action-btn" title="Copy"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
-          </div>
-        </div>
+      <div class="msg-row force-show" data-role="user" data-raw-text="How do I run the dev server and point it at a specific workspace path?">
         <div class="msg-body"><p>How do I run the dev server and point it at a specific workspace path?</p></div>
+        <div class="msg-foot">
+          <span class="msg-time" title="Thu, Apr 16 2026, 10:42 AM">10:42</span>
+          <span class="msg-actions">
+            <button class="msg-action-btn" title="Edit"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
+            <button class="msg-copy-btn msg-action-btn" title="Copy"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+          </span>
+        </div>
       </div>
     </div></div>
   </div>
 
-  <div class="doc-card"><span class="doc-label">.msg-files — attachments above body</span>
+  <div class="doc-card"><span class="doc-label">.msg-files — attachments above body (right-aligned)</span>
     <div class="messages doc-messages"><div class="messages-inner doc-inner">
       <div class="msg-row" data-role="user">
-        <div class="msg-role user"><span class="role-icon user">Y</span><span>You</span></div>
         <div class="msg-files">
           <span class="msg-file-badge">📎 architecture-notes.pdf</span>
           <span class="msg-file-badge">📎 Q1-forecast.xlsx</span>
@@ -128,9 +127,8 @@
   <div class="doc-card"><span class="doc-label">.msg-edit-area + .msg-edit-bar — edit mode</span>
     <div class="messages doc-messages"><div class="messages-inner doc-inner">
       <div class="msg-row" data-role="user" data-editing="1">
-        <div class="msg-role user"><span class="role-icon user">Y</span><span>You</span></div>
-        <textarea class="msg-edit-area" style="margin-left:30px;width:calc(100% - 30px);">How do I run the dev server and point it at a specific workspace path — and can I do it without docker?</textarea>
-        <div class="msg-edit-bar" style="margin-left:30px;">
+        <textarea class="msg-edit-area">How do I run the dev server and point it at a specific workspace path — and can I do it without docker?</textarea>
+        <div class="msg-edit-bar">
           <button class="msg-edit-send">Send edit</button>
           <button class="msg-edit-cancel">Cancel</button>
         </div>
@@ -143,42 +141,48 @@
 <section class="doc-section">
   <div class="doc-kicker">3 · Assistant — markdown basics</div>
   <h2 class="doc-h">Paragraphs, emphasis, lists, blockquote, hr, links</h2>
+  <p class="doc-note">Assistant output is a single <code>.msg-row.assistant-turn</code> that holds one role header + an <code>.assistant-turn-blocks</code> column of one-or-more <code>.assistant-segment</code> children. Each segment may contain a <code>.thinking-card</code>, a <code>.msg-body</code>, and its own <code>.msg-foot</code> (copy / regen). This lets a turn stream reasoning → text → tool calls → more text without repeating the Hermes avatar each time.</p>
 
   <div class="doc-card"><span class="doc-label">.msg-body — rich prose</span>
     <div class="messages doc-messages"><div class="messages-inner doc-inner">
-      <div class="msg-row force-show" data-role="assistant">
-        <div class="msg-role assistant">
+      <div class="msg-row assistant-turn force-show" data-role="assistant">
+        <div class="msg-role assistant" title="Thu, Apr 16 2026, 10:42 AM">
           <span class="role-icon assistant">H</span>
           <span>Hermes</span>
-          <span class="msg-time" title="Thu, Apr 16 2026, 10:42 AM">10:42</span>
-          <div class="msg-actions">
-            <button class="msg-action-btn" title="Copy"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
-            <button class="msg-action-btn" title="Regenerate"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg></button>
-          </div>
         </div>
-        <div class="msg-body">
-          <h1>Running the dev server</h1>
-          <p>You can start Hermes with the built-in launcher. The <strong>simplest path</strong> is <em>no docker, no proxy</em> — the CLI handles everything.</p>
-          <h2>Prerequisites</h2>
-          <ul>
-            <li>Node <code>&gt;= 18</code></li>
-            <li>A workspace directory you own
+        <div class="assistant-turn-blocks">
+          <div class="assistant-segment" data-raw-text="Running the dev server...">
+            <div class="msg-body">
+              <h1>Running the dev server</h1>
+              <p>You can start Hermes with the built-in launcher. The <strong>simplest path</strong> is <em>no docker, no proxy</em> — the CLI handles everything.</p>
+              <h2>Prerequisites</h2>
               <ul>
-                <li>Read/write permissions</li>
-                <li>No existing <code>.hermes</code> folder</li>
+                <li>Node <code>&gt;= 18</code></li>
+                <li>A workspace directory you own
+                  <ul>
+                    <li>Read/write permissions</li>
+                    <li>No existing <code>.hermes</code> folder</li>
+                  </ul>
+                </li>
+                <li>An API key set via <code>HERMES_API_KEY</code></li>
               </ul>
-            </li>
-            <li>An API key set via <code>HERMES_API_KEY</code></li>
-          </ul>
-          <h2>Steps</h2>
-          <ol>
-            <li>Clone the repo</li>
-            <li>Run <code>npm install</code></li>
-            <li>Start with <code>npm run dev -- --workspace ~/code</code></li>
-          </ol>
-          <blockquote>Tip: the <code>--workspace</code> flag accepts absolute or <code>~</code>-prefixed paths. Relative paths are resolved against the CWD.</blockquote>
-          <hr>
-          <p>For full setup options see the <a href="#">configuration guide</a>.</p>
+              <h2>Steps</h2>
+              <ol>
+                <li>Clone the repo</li>
+                <li>Run <code>npm install</code></li>
+                <li>Start with <code>npm run dev -- --workspace ~/code</code></li>
+              </ol>
+              <blockquote>Tip: the <code>--workspace</code> flag accepts absolute or <code>~</code>-prefixed paths. Relative paths are resolved against the CWD.</blockquote>
+              <hr>
+              <p>For full setup options see the <a href="#">configuration guide</a>.</p>
+            </div>
+            <div class="msg-foot">
+              <span class="msg-actions">
+                <button class="msg-copy-btn msg-action-btn" title="Copy"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+                <button class="msg-action-btn" title="Regenerate"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg></button>
+              </span>
+            </div>
+          </div>
         </div>
       </div>
     </div></div>
@@ -186,18 +190,22 @@
 
   <div class="doc-card"><span class="doc-label">.msg-body table</span>
     <div class="messages doc-messages"><div class="messages-inner doc-inner">
-      <div class="msg-row" data-role="assistant">
+      <div class="msg-row assistant-turn" data-role="assistant">
         <div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div>
-        <div class="msg-body">
-          <p>Model comparison:</p>
-          <table>
-            <thead><tr><th>Model</th><th>Context</th><th>Good for</th><th>Cost / 1M in</th></tr></thead>
-            <tbody>
-              <tr><td>Opus 4.6</td><td>1M</td><td>Deep reasoning, long code</td><td><code>$15.00</code></td></tr>
-              <tr><td>Sonnet 4.6</td><td>1M</td><td>Daily driver, agents</td><td><code>$3.00</code></td></tr>
-              <tr><td>Haiku 4.5</td><td>200k</td><td>Fast tasks, tool loops</td><td><code>$0.80</code></td></tr>
-            </tbody>
-          </table>
+        <div class="assistant-turn-blocks">
+          <div class="assistant-segment">
+            <div class="msg-body">
+              <p>Model comparison:</p>
+              <table>
+                <thead><tr><th>Model</th><th>Context</th><th>Good for</th><th>Cost / 1M in</th></tr></thead>
+                <tbody>
+                  <tr><td>Opus 4.6</td><td>1M</td><td>Deep reasoning, long code</td><td><code>$15.00</code></td></tr>
+                  <tr><td>Sonnet 4.6</td><td>1M</td><td>Daily driver, agents</td><td><code>$3.00</code></td></tr>
+                  <tr><td>Haiku 4.5</td><td>200k</td><td>Fast tasks, tool loops</td><td><code>$0.80</code></td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </div>
     </div></div>
@@ -211,23 +219,26 @@
 
   <div class="doc-card"><span class="doc-label">pre + code (no header)</span>
     <div class="messages doc-messages"><div class="messages-inner doc-inner">
-      <div class="msg-row" data-role="assistant">
+      <div class="msg-row assistant-turn" data-role="assistant">
         <div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div>
-        <div class="msg-body">
+        <div class="assistant-turn-blocks"><div class="assistant-segment">
+          <div class="msg-body">
 <pre><code class="language-bash">npm install
 npm run dev -- --workspace ~/code</code></pre>
-        </div>
+          </div>
+        </div></div>
       </div>
     </div></div>
   </div>
 
   <div class="doc-card"><span class="doc-label">.pre-header + pre + .code-copy-btn</span>
     <div class="messages doc-messages"><div class="messages-inner doc-inner">
-      <div class="msg-row" data-role="assistant">
+      <div class="msg-row assistant-turn" data-role="assistant">
         <div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div>
-        <div class="msg-body">
-          <div style="position:relative;">
-            <div class="pre-header">typescript <button class="code-copy-btn" style="margin-left:auto;">Copy</button></div>
+        <div class="assistant-turn-blocks"><div class="assistant-segment">
+          <div class="msg-body">
+            <div style="position:relative;">
+              <div class="pre-header">typescript <button class="code-copy-btn" style="margin-left:auto;">Copy</button></div>
 <pre><code class="language-typescript">export async function startServer(opts: ServerOptions) {
   const port = opts.port ?? 3000;
   const app = createApp();
@@ -236,9 +247,9 @@ npm run dev -- --workspace ~/code</code></pre>
   });
   return app;
 }</code></pre>
-          </div>
-          <div style="position:relative;margin-top:14px;">
-            <div class="pre-header">python <button class="code-copy-btn" style="margin-left:auto;">Copy</button></div>
+            </div>
+            <div style="position:relative;margin-top:14px;">
+              <div class="pre-header">python <button class="code-copy-btn" style="margin-left:auto;">Copy</button></div>
 <pre><code class="language-python">from hermes import Agent
 
 def main() -&gt; None:
@@ -248,16 +259,17 @@ def main() -&gt; None:
 
 if __name__ == "__main__":
     main()</code></pre>
-          </div>
-          <div style="position:relative;margin-top:14px;">
-            <div class="pre-header">json <button class="code-copy-btn" style="margin-left:auto;">Copy</button></div>
+            </div>
+            <div style="position:relative;margin-top:14px;">
+              <div class="pre-header">json <button class="code-copy-btn" style="margin-left:auto;">Copy</button></div>
 <pre><code class="language-json">{
   "model": "claude-sonnet-4-6",
   "stream": true,
   "tools": ["bash", "edit_file", "search"]
 }</code></pre>
+            </div>
           </div>
-        </div>
+        </div></div>
       </div>
     </div></div>
   </div>
@@ -270,26 +282,30 @@ if __name__ == "__main__":
 
   <div class="doc-card"><span class="doc-label">.msg-media-img (default + .msg-media-img--full)</span>
     <div class="messages doc-messages"><div class="messages-inner doc-inner">
-      <div class="msg-row" data-role="assistant">
+      <div class="msg-row assistant-turn" data-role="assistant">
         <div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div>
-        <div class="msg-body">
-          <p>Here's the screenshot you asked for (click to zoom):</p>
-          <img class="msg-media-img" alt="demo" src="data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='640' height='360'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' x2='1'%3E%3Cstop offset='0' stop-color='%237cb9ff'/%3E%3Cstop offset='1' stop-color='%23c9a84c'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect fill='url(%23g)' width='640' height='360'/%3E%3Ctext x='50%25' y='50%25' font-family='system-ui' font-size='28' fill='white' text-anchor='middle' dominant-baseline='middle'%3E.msg-media-img (480×400 cap)%3C/text%3E%3C/svg%3E">
-          <p style="margin-top:10px;">And the full-width variant:</p>
-          <img class="msg-media-img msg-media-img--full" alt="demo-full" src="data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1280' height='320'%3E%3Crect fill='%231e2023' width='1280' height='320'/%3E%3Ctext x='50%25' y='50%25' font-family='system-ui' font-size='28' fill='%2382aaff' text-anchor='middle' dominant-baseline='middle'%3E.msg-media-img--full (unbounded)%3C/text%3E%3C/svg%3E">
-        </div>
+        <div class="assistant-turn-blocks"><div class="assistant-segment">
+          <div class="msg-body">
+            <p>Here's the screenshot you asked for (click to zoom):</p>
+            <img class="msg-media-img" alt="demo" src="data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='640' height='360'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' x2='1'%3E%3Cstop offset='0' stop-color='%237cb9ff'/%3E%3Cstop offset='1' stop-color='%23c9a84c'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect fill='url(%23g)' width='640' height='360'/%3E%3Ctext x='50%25' y='50%25' font-family='system-ui' font-size='28' fill='white' text-anchor='middle' dominant-baseline='middle'%3E.msg-media-img (480×400 cap)%3C/text%3E%3C/svg%3E">
+            <p style="margin-top:10px;">And the full-width variant:</p>
+            <img class="msg-media-img msg-media-img--full" alt="demo-full" src="data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1280' height='320'%3E%3Crect fill='%231e2023' width='1280' height='320'/%3E%3Ctext x='50%25' y='50%25' font-family='system-ui' font-size='28' fill='%2382aaff' text-anchor='middle' dominant-baseline='middle'%3E.msg-media-img--full (unbounded)%3C/text%3E%3C/svg%3E">
+          </div>
+        </div></div>
       </div>
     </div></div>
   </div>
 
   <div class="doc-card"><span class="doc-label">.msg-media-link — non-image downloads</span>
     <div class="messages doc-messages"><div class="messages-inner doc-inner">
-      <div class="msg-row" data-role="assistant">
+      <div class="msg-row assistant-turn" data-role="assistant">
         <div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div>
-        <div class="msg-body">
-          <p>I saved the generated files:</p>
-          <p><a class="msg-media-link" href="#">📎 report-2026-Q1.pdf</a> <a class="msg-media-link" href="#">📎 revenue.csv</a> <a class="msg-media-link" href="#">📎 diagram.svg</a></p>
-        </div>
+        <div class="assistant-turn-blocks"><div class="assistant-segment">
+          <div class="msg-body">
+            <p>I saved the generated files:</p>
+            <p><a class="msg-media-link" href="#">📎 report-2026-Q1.pdf</a> <a class="msg-media-link" href="#">📎 revenue.csv</a> <a class="msg-media-link" href="#">📎 diagram.svg</a></p>
+          </div>
+        </div></div>
       </div>
     </div></div>
   </div>
@@ -302,25 +318,28 @@ if __name__ == "__main__":
 
   <div class="doc-card"><span class="doc-label">.katex-inline + .katex-block</span>
     <div class="messages doc-messages"><div class="messages-inner doc-inner">
-      <div class="msg-row" data-role="assistant">
+      <div class="msg-row assistant-turn" data-role="assistant">
         <div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div>
-        <div class="msg-body">
-          <p>Inline math: <span class="katex-inline" data-math-inline>\(E = mc^2\)</span> and the quadratic formula below:</p>
-          <div class="katex-block" data-math-block>$$x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$$</div>
-          <p>A tidier form: <span class="katex-inline" data-math-inline>\(\sum_{i=1}^{n} i = \frac{n(n+1)}{2}\)</span>.</p>
-          <div class="katex-block" data-math-block>$$\int_{-\infty}^{\infty} e^{-x^2}\,dx = \sqrt{\pi}$$</div>
-        </div>
+        <div class="assistant-turn-blocks"><div class="assistant-segment">
+          <div class="msg-body">
+            <p>Inline math: <span class="katex-inline" data-math-inline>\(E = mc^2\)</span> and the quadratic formula below:</p>
+            <div class="katex-block" data-math-block>$$x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$$</div>
+            <p>A tidier form: <span class="katex-inline" data-math-inline>\(\sum_{i=1}^{n} i = \frac{n(n+1)}{2}\)</span>.</p>
+            <div class="katex-block" data-math-block>$$\int_{-\infty}^{\infty} e^{-x^2}\,dx = \sqrt{\pi}$$</div>
+          </div>
+        </div></div>
       </div>
     </div></div>
   </div>
 
   <div class="doc-card"><span class="doc-label">.mermaid-block (pre-render placeholder)</span>
     <div class="messages doc-messages"><div class="messages-inner doc-inner">
-      <div class="msg-row" data-role="assistant">
+      <div class="msg-row assistant-turn" data-role="assistant">
         <div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div>
-        <div class="msg-body">
-          <p>The request flow:</p>
-          <div class="mermaid-block"><pre style="margin:0;background:none;border:none;padding:0;color:var(--muted);font-family:'SF Mono',ui-monospace,monospace;font-size:12px;">graph LR
+        <div class="assistant-turn-blocks"><div class="assistant-segment">
+          <div class="msg-body">
+            <p>The request flow:</p>
+            <div class="mermaid-block"><pre style="margin:0;background:none;border:none;padding:0;color:var(--muted);font-family:'SF Mono',ui-monospace,monospace;font-size:12px;">graph LR
   U[User] --&gt; C[Composer]
   C --&gt; API[/api/chat/]
   API --&gt; M((Model))
@@ -329,7 +348,8 @@ if __name__ == "__main__":
   T -- no  --&gt; R[Reply]
   X --&gt; R
   R --&gt; U</pre></div>
-        </div>
+          </div>
+        </div></div>
       </div>
     </div></div>
   </div>
@@ -338,66 +358,71 @@ if __name__ == "__main__":
 <!-- ============================================================= -->
 <section class="doc-section">
   <div class="doc-kicker">7 · Thinking / reasoning</div>
-  <h2 class="doc-h">Card (collapsed / open) and live loader</h2>
+  <h2 class="doc-h">Bordered panel (collapsed / open, animated), live loader, streaming cursor</h2>
+  <p class="doc-note">Thinking cards are rendered at the top of an <code>.assistant-segment</code>. They're now bordered gold-tinted panels (no more left-rule-only look) and expand/collapse with a <code>max-height</code> + opacity transition. Click the header in either example below to see the animation live.</p>
 
   <div class="doc-grid">
-    <div class="doc-card"><span class="doc-label">.thinking-card (collapsed)</span>
+    <div class="doc-card"><span class="doc-label">.thinking-card (collapsed, inside .assistant-segment)</span>
       <div class="messages doc-messages"><div class="messages-inner doc-inner" style="padding-top:8px;">
-        <div class="msg-row thinking-card-row">
-          <div class="thinking-card">
-            <div class="thinking-card-header">
-              <span class="thinking-card-icon">💡</span>
-              <span class="thinking-card-label">Thought for 4.3s</span>
-              <span class="thinking-card-toggle">▶</span>
-            </div>
-            <div class="thinking-card-body"><pre>The user asked about the dev server...</pre></div>
-          </div>
-        </div>
-        <div class="msg-row" data-role="assistant">
+        <div class="msg-row assistant-turn" data-role="assistant">
           <div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div>
-          <div class="msg-body"><p>Here's the shortest path…</p></div>
+          <div class="assistant-turn-blocks"><div class="assistant-segment">
+            <div class="thinking-card">
+              <div class="thinking-card-header">
+                <span class="thinking-card-icon">💡</span>
+                <span class="thinking-card-label">Thought for 4.3s</span>
+                <span class="thinking-card-toggle">▶</span>
+              </div>
+              <div class="thinking-card-body"><pre>The user asked about the dev server...</pre></div>
+            </div>
+            <div class="msg-body"><p>Here's the shortest path…</p></div>
+          </div></div>
         </div>
       </div></div>
     </div>
 
-    <div class="doc-card"><span class="doc-label">.thinking-card.open</span>
+    <div class="doc-card"><span class="doc-label">.thinking-card.open (animated — max-height + opacity)</span>
       <div class="messages doc-messages"><div class="messages-inner doc-inner" style="padding-top:8px;">
-        <div class="msg-row thinking-card-row">
-          <div class="thinking-card open">
-            <div class="thinking-card-header">
-              <span class="thinking-card-icon">💡</span>
-              <span class="thinking-card-label">Thought for 4.3s</span>
-              <span class="thinking-card-toggle">▶</span>
-            </div>
-            <div class="thinking-card-body"><pre>The user is asking about launching the dev server.
+        <div class="msg-row assistant-turn" data-role="assistant">
+          <div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div>
+          <div class="assistant-turn-blocks"><div class="assistant-segment">
+            <div class="thinking-card open">
+              <div class="thinking-card-header">
+                <span class="thinking-card-icon">💡</span>
+                <span class="thinking-card-label">Thought for 4.3s</span>
+                <span class="thinking-card-toggle">▶</span>
+              </div>
+              <div class="thinking-card-body"><pre>The user is asking about launching the dev server.
 Options: npm script, docker, or the bundled CLI.
 The CLI is the simplest — no container runtime needed.
 I should show the exact commands and the --workspace flag,
 then mention the env var for the API key at the end.</pre></div>
-          </div>
-        </div>
-        <div class="msg-row" data-role="assistant">
-          <div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div>
-          <div class="msg-body"><p>Here's the shortest path…</p></div>
+            </div>
+            <div class="msg-body"><p>Here's the shortest path…</p></div>
+          </div></div>
         </div>
       </div></div>
     </div>
   </div>
 
-  <div class="doc-card"><span class="doc-label">.thinking — live 3-dot loader</span>
+  <div class="doc-card"><span class="doc-label">.thinking — live 3-dot loader (pre-reasoning)</span>
     <div class="messages doc-messages"><div class="messages-inner doc-inner">
-      <div class="msg-row" data-role="assistant" data-live-assistant="1">
+      <div class="msg-row assistant-turn" data-role="assistant">
         <div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div>
-        <div class="thinking">Thinking <span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+        <div class="assistant-turn-blocks"><div class="assistant-segment" data-live-assistant="1">
+          <div class="thinking">Thinking <span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+        </div></div>
       </div>
     </div></div>
   </div>
 
-  <div class="doc-card"><span class="doc-label">.msg-row[data-live-assistant="1"] — streaming cursor (blink at end of last child)</span>
+  <div class="doc-card"><span class="doc-label">[data-live-assistant="1"] — streaming cursor at end of last child</span>
     <div class="messages doc-messages"><div class="messages-inner doc-inner">
-      <div class="msg-row" data-role="assistant" data-live-assistant="1">
+      <div class="msg-row assistant-turn" data-role="assistant" id="liveAssistantTurn">
         <div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div>
-        <div class="msg-body"><p>Sure — the simplest way is to run <code>npm run dev</code>. The CLI will pick up the default</p></div>
+        <div class="assistant-turn-blocks"><div class="assistant-segment" data-live-assistant="1">
+          <div class="msg-body"><p>Sure — the simplest way is to run <code>npm run dev</code>. The CLI will pick up the default</p></div>
+        </div></div>
       </div>
     </div></div>
   </div>
@@ -407,10 +432,11 @@ then mention the env var for the API key at the end.</pre></div>
 <section class="doc-section">
   <div class="doc-kicker">8 · Tool cards</div>
   <h2 class="doc-h">Running, done, expanded, subagent, error, multi-card toggle</h2>
+  <p class="doc-note">Tool cards sit in <code>.tool-card-row</code> wrappers (no longer nested under <code>.msg-row</code>). The details panel now animates open/closed via <code>max-height</code> + opacity — click any header below to see the transition.</p>
 
   <div class="doc-card"><span class="doc-label">.tool-card.tool-card-running (collapsed, pulsing dot)</span>
     <div class="messages doc-messages"><div class="messages-inner doc-inner">
-      <div class="msg-row tool-card-row">
+      <div class="tool-card-row">
         <div class="tool-card tool-card-running">
           <div class="tool-card-header">
             <span class="tool-card-running-dot"></span>
@@ -426,7 +452,7 @@ then mention the env var for the API key at the end.</pre></div>
 
   <div class="doc-card"><span class="doc-label">.tool-card — done, collapsed</span>
     <div class="messages doc-messages"><div class="messages-inner doc-inner">
-      <div class="msg-row tool-card-row">
+      <div class="tool-card-row">
         <div class="tool-card">
           <div class="tool-card-header">
             <span class="tool-card-icon">📄</span>
@@ -439,9 +465,9 @@ then mention the env var for the API key at the end.</pre></div>
     </div></div>
   </div>
 
-  <div class="doc-card"><span class="doc-label">.tool-card.open — args table + result snippet + Show more</span>
+  <div class="doc-card"><span class="doc-label">.tool-card.open — args table + result snippet + Show more (animated detail)</span>
     <div class="messages doc-messages"><div class="messages-inner doc-inner">
-      <div class="msg-row tool-card-row">
+      <div class="tool-card-row">
         <div class="tool-card open">
           <div class="tool-card-header">
             <span class="tool-card-icon">⚡</span>
@@ -470,7 +496,7 @@ static/ui.js:1141:    const roleEl = el('div', 'msg-role ' + role);</pre>
 
   <div class="doc-card"><span class="doc-label">.tool-card.tool-card-subagent — delegated work</span>
     <div class="messages doc-messages"><div class="messages-inner doc-inner">
-      <div class="msg-row tool-card-row">
+      <div class="tool-card-row">
         <div class="tool-card tool-card-subagent">
           <div class="tool-card-header">
             <span class="tool-card-icon">🤖</span>
@@ -480,11 +506,11 @@ static/ui.js:1141:    const roleEl = el('div', 'msg-role ' + role);</pre>
           </div>
         </div>
       </div>
-      <div class="msg-row tool-card-row">
+      <div class="tool-card-row">
         <div class="tool-card tool-card-subagent">
           <div class="tool-card-header">
             <span class="tool-card-icon">🤖</span>
-            <span class="tool-card-name">delegate_task</span>
+            <span class="tool-card-name">Delegate task</span>
             <span class="tool-card-preview">Plan · Propose redesign variants</span>
             <span class="tool-card-toggle">▶</span>
           </div>
@@ -495,7 +521,7 @@ static/ui.js:1141:    const roleEl = el('div', 'msg-role ' + role);</pre>
 
   <div class="doc-card"><span class="doc-label">.tool-card (error snippet)</span>
     <div class="messages doc-messages"><div class="messages-inner doc-inner">
-      <div class="msg-row tool-card-row">
+      <div class="tool-card-row">
         <div class="tool-card open">
           <div class="tool-card-header">
             <span class="tool-card-icon">⚡</span>
@@ -526,9 +552,9 @@ static/ui.js:1141:    const roleEl = el('div', 'msg-role ' + role);</pre>
         <button>Expand all (3)</button>
         <button>Collapse all</button>
       </div>
-      <div class="msg-row tool-card-row"><div class="tool-card"><div class="tool-card-header"><span class="tool-card-icon">📄</span><span class="tool-card-name">read_file</span><span class="tool-card-preview">package.json</span><span class="tool-card-toggle">▶</span></div></div></div>
-      <div class="msg-row tool-card-row"><div class="tool-card"><div class="tool-card-header"><span class="tool-card-icon">🔎</span><span class="tool-card-name">grep</span><span class="tool-card-preview">"listen" in src/</span><span class="tool-card-toggle">▶</span></div></div></div>
-      <div class="msg-row tool-card-row"><div class="tool-card"><div class="tool-card-header"><span class="tool-card-icon">⚡</span><span class="tool-card-name">bash</span><span class="tool-card-preview">npm run typecheck · exit 0 · 4.1s</span><span class="tool-card-toggle">▶</span></div></div></div>
+      <div class="tool-card-row"><div class="tool-card"><div class="tool-card-header"><span class="tool-card-icon">📄</span><span class="tool-card-name">read_file</span><span class="tool-card-preview">package.json</span><span class="tool-card-toggle">▶</span></div></div></div>
+      <div class="tool-card-row"><div class="tool-card"><div class="tool-card-header"><span class="tool-card-icon">🔎</span><span class="tool-card-name">grep</span><span class="tool-card-preview">"listen" in src/</span><span class="tool-card-toggle">▶</span></div></div></div>
+      <div class="tool-card-row"><div class="tool-card"><div class="tool-card-header"><span class="tool-card-icon">⚡</span><span class="tool-card-name">bash</span><span class="tool-card-preview">npm run typecheck · exit 0 · 4.1s</span><span class="tool-card-toggle">▶</span></div></div></div>
     </div></div>
   </div>
 </section>
@@ -536,21 +562,25 @@ static/ui.js:1141:    const roleEl = el('div', 'msg-role ' + role);</pre>
 <!-- ============================================================= -->
 <section class="doc-section">
   <div class="doc-kicker">9 · Meta affordances</div>
-  <h2 class="doc-h">Timestamp, action toolbar, token-usage badge</h2>
+  <h2 class="doc-h">Role timestamp tooltip, footer action toolbar, token-usage badge</h2>
+  <p class="doc-note">Assistant timestamps live on the <code>.msg-role</code> <code>title</code> attribute (hover for full date). Copy/regen buttons sit in the per-segment <code>.msg-foot</code>, 45% opacity at rest, full on turn hover. The <code>.msg-usage</code> badge is always visible at the bottom of the turn.</p>
 
-  <div class="doc-card"><span class="doc-label">Full hover state — timestamp + edit/copy/regen + .msg-usage</span>
+  <div class="doc-card"><span class="doc-label">Full hover state — .msg-foot actions + .msg-usage</span>
     <div class="messages doc-messages"><div class="messages-inner doc-inner">
-      <div class="msg-row force-show" data-role="assistant">
-        <div class="msg-role assistant">
+      <div class="msg-row assistant-turn force-show" data-role="assistant">
+        <div class="msg-role assistant" title="Thu, Apr 16 2026, 10:42 AM">
           <span class="role-icon assistant">H</span>
           <span>Hermes</span>
-          <span class="msg-time" title="Thu, Apr 16 2026, 10:42 AM">10:42</span>
-          <div class="msg-actions">
-            <button class="msg-action-btn" title="Copy"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
-            <button class="msg-action-btn" title="Regenerate"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg></button>
-          </div>
         </div>
-        <div class="msg-body"><p>Built and type-checked successfully — server is running on <code>:3000</code>.</p></div>
+        <div class="assistant-turn-blocks"><div class="assistant-segment">
+          <div class="msg-body"><p>Built and type-checked successfully — server is running on <code>:3000</code>.</p></div>
+          <div class="msg-foot">
+            <span class="msg-actions">
+              <button class="msg-copy-btn msg-action-btn" title="Copy"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+              <button class="msg-action-btn" title="Regenerate"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg></button>
+            </span>
+          </div>
+        </div></div>
         <div class="msg-usage">3.2K in · 481 out · ~$0.012</div>
       </div>
     </div></div>
@@ -560,52 +590,62 @@ static/ui.js:1141:    const roleEl = el('div', 'msg-role ' + role);</pre>
 <!-- ============================================================= -->
 <section class="doc-section">
   <div class="doc-kicker">10 · Full composition</div>
-  <h2 class="doc-h">One assistant turn: thinking card → body w/ markdown + code → tool cards → usage</h2>
+  <h2 class="doc-h">User turn → assistant turn (segment 1: thinking + body + tool cards) → usage</h2>
+  <p class="doc-note">A realistic turn: one role header up top, then the segment hosting a thinking card plus the first body; tool cards follow as siblings of the turn inside <code>.messages-inner</code>; the usage badge closes the turn.</p>
 
   <div class="doc-card"><span class="doc-label">All-in-one turn</span>
     <div class="messages doc-messages"><div class="messages-inner doc-inner">
-      <div class="msg-row" data-role="user">
-        <div class="msg-role user"><span class="role-icon user">Y</span><span>You</span><span class="msg-time" style="opacity:1;">10:40</span></div>
+      <div class="msg-row force-show" data-role="user">
         <div class="msg-files"><span class="msg-file-badge">📎 server.ts</span></div>
         <div class="msg-body"><p>The build fails — can you type-check and explain?</p></div>
-      </div>
-
-      <div class="msg-row thinking-card-row">
-        <div class="thinking-card open">
-          <div class="thinking-card-header"><span class="thinking-card-icon">💡</span><span class="thinking-card-label">Thought for 2.1s</span><span class="thinking-card-toggle">▶</span></div>
-          <div class="thinking-card-body"><pre>Attached server.ts — probably typing issue.
-Run typecheck to confirm, then patch.</pre></div>
+        <div class="msg-foot">
+          <span class="msg-time">10:40</span>
+          <span class="msg-actions">
+            <button class="msg-action-btn" title="Edit">✎</button>
+            <button class="msg-copy-btn msg-action-btn" title="Copy">⎘</button>
+          </span>
         </div>
       </div>
 
-      <div class="msg-row force-show" data-role="assistant">
-        <div class="msg-role assistant">
+      <div class="msg-row assistant-turn force-show" data-role="assistant">
+        <div class="msg-role assistant" title="Thu, Apr 16 2026, 10:42 AM">
           <span class="role-icon assistant">H</span><span>Hermes</span>
-          <span class="msg-time" style="opacity:1;">10:42</span>
-          <div class="msg-actions">
-            <button class="msg-action-btn" title="Copy">⎘</button>
-            <button class="msg-action-btn" title="Regenerate">↻</button>
-          </div>
         </div>
-        <div class="msg-body">
-          <p>The build fails because <code>opts.port</code> can be <code>undefined</code>. Two fixes below — pick the one that matches your intent.</p>
-          <h3>Option A — require the port</h3>
+        <div class="assistant-turn-blocks">
+          <div class="assistant-segment">
+            <div class="thinking-card open">
+              <div class="thinking-card-header"><span class="thinking-card-icon">💡</span><span class="thinking-card-label">Thought for 2.1s</span><span class="thinking-card-toggle">▶</span></div>
+              <div class="thinking-card-body"><pre>Attached server.ts — probably typing issue.
+Run typecheck to confirm, then patch.</pre></div>
+            </div>
+            <div class="msg-body">
+              <p>The build fails because <code>opts.port</code> can be <code>undefined</code>. Two fixes below — pick the one that matches your intent.</p>
+              <h3>Option A — require the port</h3>
 <pre><code class="language-typescript">export function startServer(opts: { port: number }) {
   app.listen(opts.port);
 }</code></pre>
-          <h3>Option B — default to 3000</h3>
+              <h3>Option B — default to 3000</h3>
 <pre><code class="language-typescript">export function startServer(opts: { port?: number } = {}) {
   const port = opts.port ?? 3000;
   app.listen(port);
 }</code></pre>
-          <p>I ran the checks below to confirm.</p>
+              <p>I ran the checks below to confirm.</p>
+            </div>
+            <div class="msg-foot">
+              <span class="msg-actions">
+                <button class="msg-copy-btn msg-action-btn" title="Copy">⎘</button>
+                <button class="msg-action-btn" title="Regenerate">↻</button>
+              </span>
+            </div>
+          </div>
         </div>
+        <div class="msg-usage">11.4K in · 612 out · ~$0.049</div>
       </div>
 
       <div class="tool-cards-toggle">
         <button>Expand all (3)</button><button>Collapse all</button>
       </div>
-      <div class="msg-row tool-card-row"><div class="tool-card open">
+      <div class="tool-card-row"><div class="tool-card open">
         <div class="tool-card-header"><span class="tool-card-icon">📄</span><span class="tool-card-name">read_file</span><span class="tool-card-preview">src/server.ts · 58 lines</span><span class="tool-card-toggle">▶</span></div>
         <div class="tool-card-detail">
           <div class="tool-card-args"><div><span class="tool-arg-key">path:</span> <span class="tool-arg-val">src/server.ts</span></div></div>
@@ -614,16 +654,12 @@ Run typecheck to confirm, then patch.</pre></div>
 }</pre></div>
         </div>
       </div></div>
-      <div class="msg-row tool-card-row"><div class="tool-card">
+      <div class="tool-card-row"><div class="tool-card">
         <div class="tool-card-header"><span class="tool-card-icon">⚡</span><span class="tool-card-name">bash</span><span class="tool-card-preview">npm run typecheck · exit 1 · 2.3s</span><span class="tool-card-toggle">▶</span></div>
       </div></div>
-      <div class="msg-row tool-card-row"><div class="tool-card">
+      <div class="tool-card-row"><div class="tool-card">
         <div class="tool-card-header"><span class="tool-card-icon">✏️</span><span class="tool-card-name">edit_file</span><span class="tool-card-preview">src/server.ts +1 / -1</span><span class="tool-card-toggle">▶</span></div>
       </div></div>
-
-      <div class="msg-row force-show" data-role="assistant">
-        <div class="msg-usage">11.4K in · 612 out · ~$0.049</div>
-      </div>
     </div></div>
   </div>
 </section>
@@ -631,13 +667,18 @@ Run typecheck to confirm, then patch.</pre></div>
 <!-- ============================================================= -->
 <section class="doc-section">
   <div class="doc-kicker">11 · Bubble layout</div>
-  <h2 class="doc-h">Opt-in via <code>body.bubble-layout</code> — user right, assistant left, max 75%</h2>
-  <p class="doc-note">Flip the <strong>Bubble layout</strong> toggle at the top of the page to see this mode applied globally.</p>
+  <h2 class="doc-h">Opt-in via <code>body.bubble-layout</code> — extra bubble padding for assistant too</h2>
+  <p class="doc-note">The default layout already right-aligns user messages (the redesign adopted it globally), so this toggle mostly affects additional padding / boundary handling. Flip the <strong>Bubble layout</strong> toggle in the header to see the mode applied.</p>
   <div class="doc-card"><span class="doc-label">Conversation sample</span>
     <div class="messages doc-messages"><div class="messages-inner doc-inner">
-      <div class="msg-row" data-role="user"><div class="msg-role user"><span class="role-icon user">Y</span><span>You</span></div><div class="msg-body"><p>Can you add a retry button next to the regenerate one?</p></div></div>
-      <div class="msg-row" data-role="assistant"><div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div><div class="msg-body"><p>Yes — it can share <code>.msg-action-btn</code> and live in the same <code>.msg-actions</code> container. I'll wire it up on <code>_lastError</code>.</p></div></div>
-      <div class="msg-row" data-role="user"><div class="msg-role user"><span class="role-icon user">Y</span><span>You</span></div><div class="msg-body"><p>Perfect, go for it.</p></div></div>
+      <div class="msg-row" data-role="user"><div class="msg-body"><p>Can you add a retry button next to the regenerate one?</p></div></div>
+      <div class="msg-row assistant-turn" data-role="assistant">
+        <div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div>
+        <div class="assistant-turn-blocks"><div class="assistant-segment">
+          <div class="msg-body"><p>Yes — it can share <code>.msg-action-btn</code> and live in the same <code>.msg-actions</code> container. I'll wire it up on <code>_lastError</code>.</p></div>
+        </div></div>
+      </div>
+      <div class="msg-row" data-role="user"><div class="msg-body"><p>Perfect, go for it.</p></div></div>
     </div></div>
   </div>
 </section>
@@ -649,20 +690,24 @@ Run typecheck to confirm, then patch.</pre></div>
 
   <div class="doc-card"><span class="doc-label">Italic system notices (still italic — info, not errors)</span>
     <div class="messages doc-messages"><div class="messages-inner doc-inner">
-      <div class="msg-row" data-role="assistant"><div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div><div class="msg-body"><p><em>[Context was auto-compressed to continue the conversation]</em></p></div></div>
-      <div class="msg-row" data-role="assistant"><div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div><div class="msg-body"><p><em>Task cancelled.</em></p></div></div>
+      <div class="msg-row assistant-turn" data-role="assistant">
+        <div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div>
+        <div class="assistant-turn-blocks">
+          <div class="assistant-segment"><div class="msg-body"><p><em>[Context was auto-compressed to continue the conversation]</em></p></div></div>
+          <div class="assistant-segment"><div class="msg-body"><p><em>Task cancelled.</em></p></div></div>
+        </div>
+      </div>
     </div></div>
   </div>
 
-  <div class="doc-card"><span class="doc-label">.msg-row[data-error="1"] — real error card, red accent, no italic</span>
+  <div class="doc-card"><span class="doc-label">.assistant-segment[data-error="1"] — real error card, red accent, no italic</span>
     <div class="messages doc-messages"><div class="messages-inner doc-inner">
-      <div class="msg-row" data-role="assistant" data-error="1">
+      <div class="msg-row assistant-turn" data-role="assistant">
         <div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div>
-        <div class="msg-body"><p><strong>Error:</strong> Connection lost. Your last message was saved — refresh to continue.</p></div>
-      </div>
-      <div class="msg-row" data-role="assistant" data-error="1">
-        <div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div>
-        <div class="msg-body"><p><strong>Error:</strong> Upstream rate-limited (429). Retrying in 30s…</p></div>
+        <div class="assistant-turn-blocks">
+          <div class="assistant-segment" data-error="1"><div class="msg-body"><p><strong>Error:</strong> Connection lost. Your last message was saved — refresh to continue.</p></div></div>
+          <div class="assistant-segment" data-error="1"><div class="msg-body"><p><strong>Error:</strong> Upstream rate-limited (429). Retrying in 30s…</p></div></div>
+        </div>
       </div>
     </div></div>
   </div>
@@ -671,15 +716,22 @@ Run typecheck to confirm, then patch.</pre></div>
 <!-- ============================================================= -->
 <section class="doc-section">
   <div class="doc-kicker">12b · Turn boundaries &amp; date separators</div>
-  <h2 class="doc-h">Dashed divider before each user turn + day-change separator</h2>
+  <h2 class="doc-h">Right-alignment separates user turns · day-change separator</h2>
+  <p class="doc-note">The dashed divider before each user turn was removed — the right-edge bubble alignment is its own visual break, so only a small vertical gap (10px top margin) remains between turns. Day changes still get a centred <code>.msg-date-sep</code>.</p>
   <div class="doc-card"><span class="doc-label">.msg-date-sep — Today / Yesterday / weekday / date</span>
     <div class="messages doc-messages"><div class="messages-inner doc-inner">
       <div class="msg-date-sep">Yesterday</div>
-      <div class="msg-row" data-role="user"><div class="msg-role user"><span class="role-icon user">Y</span><span>You</span></div><div class="msg-body"><p>Can you summarise the PR I opened earlier?</p></div></div>
-      <div class="msg-row" data-role="assistant"><div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div><div class="msg-body"><p>Yes — three files changed, net +42 / -18. Main change is the new rail variable…</p></div></div>
+      <div class="msg-row" data-role="user"><div class="msg-body"><p>Can you summarise the PR I opened earlier?</p></div></div>
+      <div class="msg-row assistant-turn" data-role="assistant">
+        <div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div>
+        <div class="assistant-turn-blocks"><div class="assistant-segment"><div class="msg-body"><p>Yes — three files changed, net +42 / -18. Main change is the new rail variable…</p></div></div></div>
+      </div>
       <div class="msg-date-sep">Today</div>
-      <div class="msg-row" data-role="user"><div class="msg-role user"><span class="role-icon user">Y</span><span>You</span></div><div class="msg-body"><p>Did CI pass overnight?</p></div></div>
-      <div class="msg-row" data-role="assistant"><div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div><div class="msg-body"><p>All green — three jobs, 4m 12s total. Here's the breakdown:</p></div></div>
+      <div class="msg-row" data-role="user"><div class="msg-body"><p>Did CI pass overnight?</p></div></div>
+      <div class="msg-row assistant-turn" data-role="assistant">
+        <div class="msg-role assistant"><span class="role-icon assistant">H</span><span>Hermes</span></div>
+        <div class="assistant-turn-blocks"><div class="assistant-segment"><div class="msg-body"><p>All green — three jobs, 4m 12s total. Here's the breakdown:</p></div></div></div>
+      </div>
     </div></div>
   </div>
 </section>
@@ -742,16 +794,30 @@ Run typecheck to confirm, then patch.</pre></div>
 
 <!-- ============================================================= -->
 <section class="doc-section">
-  <div class="doc-kicker">14 · Data-attribute cheat sheet</div>
-  <h2 class="doc-h">State markers on <code>.msg-row</code></h2>
+  <div class="doc-kicker">14 · Structure &amp; data-attribute cheat sheet</div>
+  <h2 class="doc-h">Wrappers and state markers produced by <code>renderMessages()</code></h2>
+
   <div class="doc-card" style="padding:14px 18px;">
+    <h3 style="font-size:13px;color:var(--text);margin:0 0 8px;">Wrappers</h3>
     <ul style="color:var(--muted);font-size:12px;line-height:1.9;list-style:disc;padding-left:20px;">
-      <li><code>data-role="user|assistant"</code> — role</li>
-      <li><code>data-msgIdx="N"</code> — index into <code>S.messages</code></li>
-      <li><code>data-live-assistant="1"</code> — live streaming row</li>
+      <li><code>.msg-row[data-role="user"]</code> — one user turn (right-aligned bubble, 60% max-width)</li>
+      <li><code>.msg-row.assistant-turn[data-role="assistant"]</code> — one assistant turn; contains <strong>one</strong> <code>.msg-role</code> and <strong>one</strong> <code>.assistant-turn-blocks</code></li>
+      <li><code>.assistant-turn-blocks</code> — flex-column holder for segments</li>
+      <li><code>.assistant-segment</code> — a single logical chunk inside a turn: optional <code>.thinking-card</code> + optional <code>.msg-body</code> + optional <code>.msg-foot</code></li>
+      <li><code>.assistant-segment-anchor</code> — hidden segment kept as a DOM anchor for tool cards when the model emitted no text</li>
+      <li><code>.tool-card-row</code> — per-tool-card wrapper, sibling of the turn inside <code>.messages-inner</code></li>
+      <li><code>.msg-foot</code> — per-segment (or per-user-row) footer holding <code>.msg-time</code> + <code>.msg-actions</code></li>
+    </ul>
+    <h3 style="font-size:13px;color:var(--text);margin:14px 0 8px;">Data attributes &amp; IDs</h3>
+    <ul style="color:var(--muted);font-size:12px;line-height:1.9;list-style:disc;padding-left:20px;">
+      <li><code>data-role="user|assistant"</code> — role marker on the row</li>
+      <li><code>data-msgIdx="N"</code> — index into <code>S.messages</code>; on user rows <em>and</em> assistant segments</li>
+      <li><code>data-raw-text="…"</code> — plain-text source for copy (now lives on <code>.assistant-segment</code> for assistant output)</li>
+      <li><code>data-live-assistant="1"</code> — the segment that's currently streaming</li>
       <li><code>data-editing="1"</code> — row is in edit mode</li>
-      <li><code>data-rawText="…"</code> — plain-text source for copy</li>
-      <li><code>data-tid="live-…"</code> — tool-call id (live cards)</li>
+      <li><code>data-error="1"</code> — error state; applies to <code>.msg-row</code> (user) or <code>.assistant-segment</code></li>
+      <li><code>id="liveAssistantTurn"</code> — on the turn that contains the streaming segment</li>
+      <li><code>.tool-card-row[data-live-tid="…"]</code> — live tool-call card (removed when the turn settles)</li>
       <li><code>data-mermaid-id</code>, <code>data-katex</code>, <code>data-rendered</code> — block rendering state</li>
     </ul>
   </div>
