@@ -683,13 +683,18 @@ function applyBotName(){
   await loadWorkspaceList();
   await loadOnboardingWizard();
   _initResizePanels();
-  // Restore workspace panel open/closed state from last visit
-  if(localStorage.getItem('hermes-webui-workspace-panel')==='open'){
-    _workspacePanelMode='browse';
-  }
+  // Workspace panel restore happens AFTER loadSession so we know if
+  // the session has a workspace — prevents the snap-open-then-closed flash (#576).
   const saved=localStorage.getItem('hermes-webui-session');
   if(saved){
-    try{await loadSession(saved);syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);return;}
+    try{
+      await loadSession(saved);
+      // Only restore the panel from localStorage when the session actually has a workspace.
+      // Without this guard, sessions without a workspace snap open then immediately closed.
+      if(S.session&&S.session.workspace&&localStorage.getItem('hermes-webui-workspace-panel')==='open'){
+        _workspacePanelMode='browse';
+      }
+      syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);return;}
     catch(e){localStorage.removeItem('hermes-webui-session');}
   }
   // no saved session - show empty state, wait for user to hit +

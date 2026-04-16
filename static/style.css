@@ -25,6 +25,31 @@
     --input-bg:rgba(0,0,0,.03);--hover-bg:rgba(0,0,0,.05);
     --strong:#1a1715;--em:#5a544a;--code-text:#8b4513;--code-inline-bg:rgba(0,0,0,.06);--pre-text:#2c2825;
   }
+  /* #594: app-dialog light theme overrides — base styles use hardcoded dark gradients */
+  :root[data-theme="light"] .app-dialog{
+    background:linear-gradient(180deg,rgba(240,237,232,.99),rgba(228,224,216,.99));
+    border-color:rgba(0,0,0,.12);
+    box-shadow:0 12px 40px rgba(0,0,0,.15);
+  }
+  :root[data-theme="light"] .app-dialog-input{
+    background:rgba(0,0,0,.04);border-color:rgba(0,0,0,.2);
+  }
+  :root[data-theme="light"] .app-dialog-input:focus{
+    border-color:rgba(45,111,163,.5);box-shadow:0 0 0 3px rgba(45,111,163,.12);
+  }
+  :root[data-theme="light"] .app-dialog-close{
+    background:rgba(0,0,0,.04);
+  }
+  :root[data-theme="light"] .app-dialog-close:hover{background:rgba(0,0,0,.09);}
+  :root[data-theme="light"] .app-dialog-btn{background:rgba(0,0,0,.04);}
+  :root[data-theme="light"] .app-dialog-btn:hover{background:rgba(0,0,0,.09);}
+  :root[data-theme="light"] .app-dialog-btn.confirm{
+    border-color:rgba(45,111,163,.45);background:rgba(45,111,163,.12);color:var(--blue);
+  }
+  :root[data-theme="light"] .app-dialog-btn.confirm:hover{background:rgba(45,111,163,.2);}
+  :root[data-theme="light"] .file-rename-input{
+    background:rgba(0,0,0,.04);
+  }
   :root[data-theme="light"] ::-webkit-scrollbar-thumb{background:rgba(0,0,0,.15);}
   :root[data-theme="light"] ::-webkit-scrollbar-thumb:hover{background:rgba(0,0,0,.3);}
   :root[data-theme="light"] ::selection{background:rgba(45,111,163,.2);}

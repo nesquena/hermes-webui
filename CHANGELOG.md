@@ -1,5 +1,14 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.68] — 2026-04-16
+
+### Fixed
+- **Light theme: add/rename folder dialogs now use correct light colors** — `.app-dialog`, `.app-dialog-input`, `.app-dialog-btn`, `.app-dialog-close`, and `.file-rename-input` had hardcoded dark-mode backgrounds with no light-theme overrides. Dialog backgrounds, borders, and inputs now adapt correctly to the light theme. (Closes #594)
+- **Workspace panel no longer snaps open then immediately closed** — on page load, `boot.js` was restoring the panel open/closed state from `localStorage` before knowing whether the loaded session has a workspace. `syncWorkspacePanelState()` then snapped it closed, causing a visible jank. The restore is now deferred until after `loadSession()` and only applied when the session actually has a workspace. (Closes #576)
+- **Model dropdown reflects CLI model changes without server restart** — `/api/models` was returning a startup-cached snapshot of `config.yaml`. The fix adds a mtime-based reload check: if `config.yaml` has changed on disk since last read, the cache is refreshed before building the model list. Page refresh now picks up CLI model changes immediately. (Closes #585)
+- **Docker Compose: macOS users guided on UID/GID setup** — the `docker-compose.yml` comment for `WANTED_UID`/`WANTED_GID` now explicitly notes that macOS UIDs start at 501 (not 1000) and tells users to run `id -u`/`id -g`. Also clarifies that the default `${HOME}/.hermes` volume mount works on both macOS and Linux. (Closes #567)
+- **Voice transcription already shows "Transcribing…" spinner** — issue #590 noted that no feedback was shown between pressing stop and text appearing. This was already implemented (`setComposerStatus('Transcribing…')` fires before the fetch in `_transcribeBlob`). Confirmed and documented; closing as already fixed.
+
 ## [v0.50.67] — 2026-04-16
 
 ### Added

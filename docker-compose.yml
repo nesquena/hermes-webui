@@ -8,13 +8,20 @@ services:
       - "127.0.0.1:8787:8787"
 #      - "8787:8787"
     volumes:
-      # Within the containe the tool expects to find the .hermes location at /home/hermeswebui/.hermes, so we mount it there; this allows you to manage agent profiles and other features that rely on the .hermes directory from your host machine, make sure to adapt the path if your HERMES_HOME is different
-      # Mount hermes home for agent features and profile management
+      # Mount your Hermes home directory into the container.
+      # The default (${HOME}/.hermes) works on both macOS (/Users/<you>/.hermes)
+      # and Linux (/home/<you>/.hermes) — no change needed for standard installs.
+      # Only set HERMES_HOME explicitly if your .hermes lives somewhere non-standard.
+      # macOS note: set UID and GID below to match your user ID (run `id -u` and `id -g`).
       - ${HERMES_HOME:-${HOME}/.hermes}:/home/hermeswebui/.hermes
       # Your workspace directory shown on first launch (adapt if yours is different, the container will use the mounted /workspace)
       - ${HERMES_HOME:-${HOME}}/workspace:/workspace
     environment:
-      # Modify the UID and GID to match your user; docker compose starts as root by default, but the container will drop privileges to the specified UID/GID
+      # Set to your host user ID: run `id -u` and `id -g` to find them.
+      # On macOS, UIDs start at 501 (not 1000), so set UID and GID in a .env file:
+      #   echo "UID=$(id -u)
+GID=$(id -g)" >> .env
+      # Without this, the container may not be able to read your mounted files.
       - WANTED_UID=${UID:-1000}
       - WANTED_GID=${GID:-1000}
       # Required: bind address and port
