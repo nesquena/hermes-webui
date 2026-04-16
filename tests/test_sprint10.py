@@ -94,7 +94,7 @@ def test_cancel_button_in_html(cleanup_test_sessions):
 def test_cancel_function_in_boot_js(cleanup_test_sessions):
     src, _ = get_text("/static/boot.js")
     assert "async function cancelStream(" in src
-    assert "/api/chat/cancel" in src
+    assert "api/chat/cancel" in src
 
 # ── Cron history ───────────────────────────────────────────────────────────
 

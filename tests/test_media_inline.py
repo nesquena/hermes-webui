@@ -47,8 +47,8 @@ class TestMediaRenderMdStash(unittest.TestCase):
                       "restore pass must produce download link for non-image files")
 
     def test_media_api_url_pattern(self):
-        self.assertIn("/api/media?path=", UI_JS,
-                      "renderMd must build /api/media?path=... URL for local files")
+        self.assertIn("api/media?path=", UI_JS,
+                      "renderMd must build api/media?path=... URL for local files")
 
     def test_media_stash_uses_null_byte_token(self):
         self.assertIn("\\x00D", UI_JS,
