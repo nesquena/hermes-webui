@@ -10,6 +10,8 @@
 >
 > Automated tests: 1195 total (1195 passing, 0 known failures). Includes onboarding coverage for bootstrap/static wizard presence, real provider config persistence (`config.yaml` + `.env`), the `/api/onboarding/*` backend, and the onboarding skip/existing-config guard.
 > Run: `pytest tests/ -v --timeout=60`
+>
+> Local regression focus: verify that a previously closed workspace panel stays visually closed from first paint through boot completion on desktop refresh; there should be no brief open-then-close flash.
 
 ---
 

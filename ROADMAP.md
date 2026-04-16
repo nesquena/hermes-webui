@@ -4,7 +4,7 @@
 > Everything you can do from the CLI terminal, you can do from this UI.
 >
 > Last updated: v0.50.44 (April 14, 2026) — 1195 tests, 1195 passing
-> Local delta: enabling password from Settings keeps the current browser signed in; the former Assistant Reply Language enhancement has been removed.
+> Local delta: enabling password from Settings keeps the current browser signed in; the former Assistant Reply Language enhancement has been removed; workspace panel closed-state now preloads in `<head>` so desktop first paint no longer flashes open before boot sync.
 > Tests: 1059 total (1059 passing, 0 failures)
 > Source: <repo>/
 

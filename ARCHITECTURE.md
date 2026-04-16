@@ -9,7 +9,7 @@
 
 > Current shipped build: `v0.50.36-local.1` (April 14, 2026).
 > Baseline: upstream `nesquena/hermes-webui` `v0.50.36`.
-> Intentional local delta: first-time password enablement from Settings immediately issues a `hermes_session` cookie so the current browser remains signed in. The previous `Assistant Reply Language` customization has been removed, and legacy `assistant_language` settings are filtered out on load/save.
+> Intentional local delta: first-time password enablement from Settings immediately issues a `hermes_session` cookie so the current browser remains signed in. The previous `Assistant Reply Language` customization has been removed, legacy `assistant_language` settings are filtered out on load/save, and the workspace panel closed/open state is preloaded via a `documentElement` dataset marker before `style.css` paints to avoid a first-load desktop flash.
 > Automated coverage: 1059 passing tests.
 
 ---
@@ -22,6 +22,11 @@ the Claude-style interface: a sidebar for session management, a central chat are
 and a demand-driven right panel used for workspace browsing and preview surfaces.
 The right panel is closed by default on desktop and opens only when it is actively
 being used for browsing or previewing content.
+
+To prevent a visible first-paint mismatch on refresh, `static/index.html` preloads the
+saved workspace panel state into `document.documentElement.dataset.workspacePanel`
+before the main stylesheet loads. Desktop CSS honors that preload marker immediately,
+and `static/boot.js` keeps the dataset synchronized with the runtime panel state machine.
 
 The design philosophy is deliberately minimal. There is no build step, no bundler, no
 frontend framework. The Python server is split into a routing shell (server.py) and
