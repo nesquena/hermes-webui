@@ -1,5 +1,7 @@
 async function api(path,opts={}){
-  const url=new URL(path,location.href);
+  // Strip leading slash so URL resolves relative to location.href (supports subpath mounts)
+  const rel = path.startsWith('/') ? path.slice(1) : path;
+  const url=new URL(rel,location.href);
   const res=await fetch(url.href,{credentials:'include',headers:{'Content-Type':'application/json'},...opts});
   if(!res.ok){
     const text=await res.text();
