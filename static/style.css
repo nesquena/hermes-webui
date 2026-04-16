@@ -1169,7 +1169,7 @@ body.resizing{user-select:none;cursor:col-resize;}
      • tighter type scale (11/12/13/14/16 — no more 10/10.5/12.5)
    ═══════════════════════════════════════════════════════════════════ */
 :root {
-  --msg-rail: 40px;
+  --msg-rail: 0;
   --msg-max: 780px;
   --user-bubble-bg: rgba(124,185,255,.05);
   --user-bubble-border: rgba(124,185,255,.16);
@@ -1205,10 +1205,10 @@ body.resizing{user-select:none;cursor:col-resize;}
 .msg-row[data-role="assistant"]:has(.msg-body:empty) .msg-files { display: none; }
 .msg-files { padding-left: var(--msg-rail); }
 .msg-usage { padding-left: var(--msg-rail); opacity: 1; margin-top: 6px; font-size: 11px; }
-.tool-card { margin-left: var(--msg-rail); max-width: calc(var(--msg-max) + 40px); }
-.thinking-card { margin-left: var(--msg-rail); max-width: calc(var(--msg-max) + 40px); }
+.tool-card { margin-left: var(--msg-rail); max-width: var(--msg-max); }
+.thinking-card { margin-left: var(--msg-rail); max-width: var(--msg-max); }
 .tool-cards-toggle { margin-left: var(--msg-rail); }
-.clarify-card { margin-left: var(--msg-rail); max-width: calc(var(--msg-max) + 40px); }
+.clarify-card { margin-left: var(--msg-rail); max-width: var(--msg-max); }
 .msg-row[data-editing="1"] .msg-edit-area,
 .msg-row[data-editing="1"] .msg-edit-bar { margin-left: var(--msg-rail); }
 
@@ -1371,13 +1371,11 @@ body.bubble-layout .msg-row + .msg-row[data-role="user"] { border-top: none; pad
 .msg-date-sep::before, .msg-date-sep::after { content: ''; flex: 1; height: 1px; background: var(--border); }
 
 /* ── Widths: collapse messages-inner to match content column ── */
-.messages-inner { max-width: calc(var(--msg-max) + var(--msg-rail) + 40px); }
-@media (min-width: 1400px) { .messages-inner { max-width: calc(var(--msg-max) + var(--msg-rail) + 80px); } }
-@media (min-width: 1800px) { .messages-inner { max-width: calc(var(--msg-max) + var(--msg-rail) + 120px); } }
+.messages-inner { max-width: var(--msg-max); }
+@media (min-width: 1400px) { .messages-inner { max-width: calc(var(--msg-max) + 40px); } }
+@media (min-width: 1800px) { .messages-inner { max-width: calc(var(--msg-max) + 80px); } }
 
-/* Mobile: shrink the rail so narrow screens don't waste horizontal space */
 @media (max-width: 700px) {
-  :root { --msg-rail: 24px; }
   .msg-role { margin-bottom: 4px; }
   .msg-row[data-role="user"] .msg-body { padding: 8px 12px; }
   .msg-row[data-error="1"] .msg-body { padding: 8px 12px; }
