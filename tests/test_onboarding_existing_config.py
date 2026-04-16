@@ -20,6 +20,14 @@ from unittest import mock
 
 import pytest
 
+# Skip tests that call apply_onboarding_setup → _save_yaml_config when PyYAML is missing
+try:
+    import yaml as _yaml
+    _HAS_YAML = True
+except ImportError:
+    _HAS_YAML = False
+_needs_yaml = pytest.mark.skipif(not _HAS_YAML, reason="PyYAML not installed — onboarding setup tests require it")
+
 # ---------------------------------------------------------------------------
 # Unit tests — no live server needed, test logic directly via imports
 # ---------------------------------------------------------------------------
@@ -139,6 +147,7 @@ class TestApplyOnboardingSetupGuard:
         )
         assert result.get("requires_confirm") is True
 
+    @_needs_yaml
     def test_setup_allowed_with_confirm_overwrite(self):
         """With confirm_overwrite=True, setup may proceed (will hit real logic)."""
         import api.onboarding as mod
@@ -163,6 +172,7 @@ class TestApplyOnboardingSetupGuard:
         finally:
             fake_config_path.unlink(missing_ok=True)
 
+    @_needs_yaml
     def test_setup_allowed_when_no_config_exists(self):
         """Fresh install: no config.yaml → setup proceeds normally (no blocking error)."""
         import api.onboarding as mod
