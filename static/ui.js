@@ -1190,9 +1190,43 @@ function renderMessages(){
   // a display list from per-message tool_calls (OpenAI format) stored in each
   // assistant message. This covers the reload case described in issue #140.
   if(!S.busy && (!S.toolCalls||!S.toolCalls.length)){
+    // Pass 1: index tool outputs by tool_call_id / tool_use_id so the
+    // fallback-built cards carry their result snippet (not just the command).
+    // Without this step CLI-origin sessions reload with empty tool cards.
+    const resultsByTid={};
+    const _snipFromRaw=(raw)=>{
+      const s=String(raw||'');
+      try{
+        const rd=JSON.parse(s);
+        if(rd && typeof rd==='object') return String(rd.output||rd.result||rd.error||s).slice(0,200);
+      }catch(e){}
+      return s.slice(0,200);
+    };
+    S.messages.forEach(m=>{
+      if(!m) return;
+      // OpenAI / Hermes CLI format: role=tool with tool_call_id
+      if(m.role==='tool'){
+        const tid=m.tool_call_id||m.tool_use_id||'';
+        if(tid) resultsByTid[tid]=_snipFromRaw(m.content);
+        return;
+      }
+      // Anthropic format: tool_result blocks inside a user message content array
+      if(Array.isArray(m.content)){
+        m.content.forEach(p=>{
+          if(!p||typeof p!=='object'||p.type!=='tool_result') return;
+          const tid=p.tool_use_id||'';
+          if(!tid) return;
+          const raw=typeof p.content==='string'?p.content
+                   :Array.isArray(p.content)?p.content.map(c=>c&&c.text?c.text:'').join('')
+                   :'';
+          resultsByTid[tid]=_snipFromRaw(raw);
+        });
+      }
+    });
     const derived=[];
     S.messages.forEach((m,rawIdx)=>{
       if(m.role!=='assistant') return;
+      // OpenAI format: top-level tool_calls field on the assistant message
       (m.tool_calls||[]).forEach(tc=>{
         if(!tc||typeof tc!=='object') return;
         const fn=tc.function||{};
@@ -1201,8 +1235,23 @@ function renderMessages(){
         try{ args=JSON.parse(fn.arguments||'{}'); }catch(e){}
         let argsSnap={};
         Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });
-        derived.push({name,snippet:'',tid:tc.id||tc.call_id||'',assistant_msg_idx:rawIdx,args:argsSnap,done:true});
+        const tid=tc.id||tc.call_id||'';
+        derived.push({name,snippet:resultsByTid[tid]||'',tid,assistant_msg_idx:rawIdx,args:argsSnap,done:true});
       });
+      // Anthropic format: tool_use blocks inside assistant content array
+      if(Array.isArray(m.content)){
+        m.content.forEach(p=>{
+          if(!p||typeof p!=='object'||p.type!=='tool_use') return;
+          const name=p.name||'tool';
+          const args=p.input||{};
+          const argsSnap={};
+          if(args && typeof args==='object'){
+            Object.keys(args).slice(0,4).forEach(k=>{ const v=String(args[k]); argsSnap[k]=v.slice(0,120)+(v.length>120?'...':''); });
+          }
+          const tid=p.id||'';
+          derived.push({name,snippet:resultsByTid[tid]||'',tid,assistant_msg_idx:rawIdx,args:argsSnap,done:true});
+        });
+      }
     });
     if(derived.length) S.toolCalls=derived;
   }

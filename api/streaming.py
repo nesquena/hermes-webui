@@ -1075,6 +1075,15 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                         if base_text[:60] in content or content[:60] in msg_text:
                             m['attachments'] = attachments
                             break
+            # Persist reasoning trace in the session so it survives reload.
+            # Must run BEFORE s.save() — otherwise the mutation lives only in
+            # memory until the next turn's save, and the last-turn thinking card
+            # is lost when the user reloads immediately after a response.
+            if _reasoning_text and s.messages:
+                for _rm in reversed(s.messages):
+                    if isinstance(_rm, dict) and _rm.get('role') == 'assistant':
+                        _rm['reasoning'] = _reasoning_text
+                        break
             s.save()
             # Sync to state.db for /insights (opt-in setting)
             try:
@@ -1099,12 +1108,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 usage['context_length'] = getattr(_cc, 'context_length', 0) or 0
                 usage['threshold_tokens'] = getattr(_cc, 'threshold_tokens', 0) or 0
                 usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
-            # Persist reasoning trace in the session so it survives reload
-            if _reasoning_text and s.messages:
-                for _rm in reversed(s.messages):
-                    if isinstance(_rm, dict) and _rm.get('role') == 'assistant':
-                        _rm['reasoning'] = _reasoning_text
-                        break
+            # (reasoning trace already attached + saved above, before s.save())
             raw_session = s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}
             put('done', {'session': redact_session_data(raw_session), 'usage': usage})
             if _should_bg_title and _u0 and _a0:
