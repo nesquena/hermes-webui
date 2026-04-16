@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.60] — 2026-04-16
+
+### Changed
+- **Test robustness** — two onboarding setup tests (`test_setup_allowed_with_confirm_overwrite`, `test_setup_allowed_when_no_config_exists`) now skip gracefully when PyYAML is not installed in the test environment, matching the pattern already used in `test_onboarding_mvp.py`. No production code changed. (PR #564)
+
 ## [v0.50.59] — 2026-04-16
 
 ### Fixed

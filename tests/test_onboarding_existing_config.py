@@ -242,17 +242,6 @@ requires_server = pytest.mark.skipif(
 )
 
 
-try:
-    import yaml as _yaml
-    _HAS_YAML = True
-except ImportError:
-    _HAS_YAML = False
-
-_needs_yaml = pytest.mark.skipif(
-    not _HAS_YAML, reason="PyYAML not installed"
-)
-
-
 @requires_server
 class TestOnboardingGateIntegration:
     """Live-server integration tests for the onboarding gate fix."""
