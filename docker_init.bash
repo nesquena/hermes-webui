@@ -235,7 +235,17 @@ else
   test -x /app/venv/bin/pip
 
   echo ""; echo "== Adding hermes-agent's pyproject.toml base dependencies to the virtual environment"
-  uv pip install "/home/hermeswebui/.hermes/hermes-agent[honcho]" --trusted-host pypi.org --trusted-host files.pythonhosted.org || error_exit "Failed to install hermes-agent's requirements"
+  if [ -d "/home/hermeswebui/.hermes/hermes-agent" ] && [ -f "/home/hermeswebui/.hermes/hermes-agent/pyproject.toml" ]; then
+    uv pip install "/home/hermeswebui/.hermes/hermes-agent[honcho]" --trusted-host pypi.org --trusted-host files.pythonhosted.org || error_exit "Failed to install hermes-agent's requirements"
+  else
+    echo ""
+    echo "!! WARNING: hermes-agent source not found at /home/hermeswebui/.hermes/hermes-agent"
+    echo "!! The WebUI will start with reduced functionality (no model auto-detection,"
+    echo "!! no personality routing, no CLI session imports)."
+    echo "!! To fix: mount the agent source volume into the container. See:"
+    echo "!!   https://github.com/nesquena/hermes-webui/blob/master/docker-compose.two-container.yml"
+    echo ""
+  fi
   touch /app/venv/.deps_installed
 fi
 
