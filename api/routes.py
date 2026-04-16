@@ -30,6 +30,7 @@ from api.config import (
     CANCEL_FLAGS,
     SERVER_START_TIME,
     _resolve_cli_toolsets,
+    CLI_TOOLSETS,
     _INDEX_HTML_PATH,
     get_available_models,
     IMAGE_EXTS,
