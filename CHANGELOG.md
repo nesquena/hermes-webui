@@ -1,5 +1,20 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.70] — 2026-04-16
+
+### Changed
+- **Chat transcript redesigned** — unified `--msg-rail`/`--msg-max` CSS variables align all message elements on one column. User turns render as per-theme tinted cards. Thinking cards are bordered panels with gold rule. Inline code inherits `--strong`. Action toolbar fades in on hover. Error-prefixed assistant rows get `[data-error="1"]` red-accent card treatment. Day-change `.msg-date-sep` separators added. Transcript fades to transparent behind composer. (PR #587 by @aronprins)
+- **Approval and clarify cards as composer flyouts** — cards slide up from behind the composer top edge rather than floating as disconnected banners. `overflow:hidden` outer + `translateY` inner animation clips travel. `focus({preventScroll:true})` prevents autoscrolling. (PR #587 by @aronprins)
+
+### Fixed
+- **Streaming lifecycle stabilised** — DOM order stays `user → thinking → tool cards → response` with no mid-stream jump. Live tool cards inserted inline before the live assistant row. Ghost empty assistant header suppressed on pure-tool turns. (PR #587 by @aronprins)
+- **Session reload persistence hardened** — last-turn reasoning attached before `s.save()`, so hard-refresh right after a response preserves the thinking trace. `role=tool` rows preserved in `S.messages`. CLI-session tool-result fallback parses output envelopes and attaches snippets to matching cards. (PR #587 by @aronprins)
+- **Workspace panel first-paint flash fixed** — `[data-workspace-panel]` attribute set at document parse time via inline script. (PR #587 by @aronprins)
+
+### Added
+- `docs/ui-ux/index.html` — static inventory of every message-area element loading live `static/style.css`. (PR #587 by @aronprins)
+- `docs/ui-ux/two-stage-proposal.html` — proposal page for the two-stage plan/execute flow (#536). (PR #587 by @aronprins)
+
 ## [v0.50.69] — 2026-04-16
 
 ### Fixed
