@@ -213,6 +213,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
   // ── Shared SSE handler wiring (used for initial connection and reconnect) ──
   let _reconnectAttempted=false;
+  let _terminalStateReached=false;
 
   // rAF-throttled rendering: buffer tokens, render at most once per frame
   let _renderPending=false;
@@ -412,6 +413,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('done',e=>{
+      _terminalStateReached=true;
       const d=JSON.parse(e.data);
       delete INFLIGHT[activeSid];
       clearInflight();clearInflightState(activeSid);
@@ -454,6 +456,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('stream_end',e=>{
+      _terminalStateReached=true;
       try{
         const d=JSON.parse(e.data||'{}');
         if((d.session_id||activeSid)!==activeSid) return;
@@ -473,6 +476,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('apperror',e=>{
+      _terminalStateReached=true;
       // Application-level error sent explicitly by the server (rate limit, crash, etc.)
       // This is distinct from the SSE network 'error' event below.
       source.close();
@@ -514,8 +518,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(_){}
     });
 
-    source.addEventListener('error',e=>{
+    source.addEventListener('error',async e=>{
       source.close();
+      if(_terminalStateReached){
+        _closeSource();
+        return;
+      }
       // Attempt one reconnect if the stream is still active server-side
       if(!_reconnectAttempted && streamId){
         _reconnectAttempted=true;
@@ -529,14 +537,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               return;
             }
           }catch(_){}
+          if(await _restoreSettledSession()) return;
           _handleStreamError();
         },1500);
         return;
       }
+      if(await _restoreSettledSession()) return;
       _handleStreamError();
     });
 
     source.addEventListener('cancel',e=>{
+      _terminalStateReached=true;
       source.close();
       delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPolling();stopClarifyPolling();
       if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);
@@ -551,6 +562,29 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       renderSessionList();
       if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setComposerStatus('');}
     });
+  }
+
+  async function _restoreSettledSession(){
+    try{
+      const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+      const session=data&&data.session;
+      if(!session) return false;
+      if(session.active_stream_id||session.pending_user_message) return false;
+      delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPolling();stopClarifyPolling();
+      _closeSource();
+      if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);
+      if(!_clarifySessionId||_clarifySessionId===activeSid) hideClarifyCard(true);
+      if(S.session&&S.session.session_id===activeSid){
+        S.activeStreamId=null;const _cbe=$('btnCancel');if(_cbe)_cbe.style.display='none';
+        clearLiveToolCards();if(!assistantText)removeThinking();
+        S.session=session;S.messages=session.messages||[];
+        syncTopbar();renderMessages();
+      }
+      renderSessionList();setBusy(false);setComposerStatus('');
+      return true;
+    }catch(_){
+      return false;
+    }
   }
 
   function _handleStreamError(){
