@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.66] — 2026-04-16
+
+### Fixed
+- **WebUI agent now receives full runtime route from provider resolver** — previously `api_mode`, `acp_command`, `acp_args`, and `credential_pool` were not forwarded into `AIAgent.__init__()` in the WebUI streaming path. Users switching between Codex accounts or using credential pools found the switch worked in the CLI but not the WebUI. The fix passes all four fields from the resolved runtime into the agent constructor. (PR #582 by @suinia)
+
 ## [v0.50.65] — 2026-04-16
 
 ### Fixed
