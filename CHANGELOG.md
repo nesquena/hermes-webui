@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.59] — 2026-04-16
+
+### Fixed
+- **False "Connection lost" message after settled stream** — the UI no longer injects a fake `**Error:** Connection lost` assistant message when an SSE connection drops after the stream already completed normally. The fix tracks terminal stream states (`done`, `stream_end`, `cancel`, `apperror`) and, on a disconnect, fetches `/api/session` to confirm the session is settled before silently restoring it instead of calling the error path. Real failures still go through the error path as before. (Fixes #561, PR #562 by @halmisen)
+
 ## [v0.50.58] — 2026-04-16
 
 ### Fixed
