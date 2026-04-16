@@ -1,5 +1,11 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.69] — 2026-04-16
+
+### Fixed
+- **Docker: workspace file browser no longer appears empty on macOS** — `docker_init.bash` now auto-detects the correct `WANTED_UID` and `WANTED_GID` from the mounted `/workspace` directory at startup. On macOS, host UIDs start at 501 (not 1000), so the default value of 1024 caused the container user to run as a different UID than the files, making the workspace appear empty. The auto-detect reads `stat -c '%u'` on `/workspace` and uses it when no explicit `WANTED_UID` is set — falling back to 1024 if the path doesn't exist or returns 0 (root). Setting `WANTED_UID` explicitly in a `.env` file still takes full precedence. (Closes #569)
+- **Session message count inconsistency resolved** — the topbar already correctly shows only visible messages (excluding `role='tool'` tool-call entries). The sidebar previously showed raw `message_count` which included tool messages, but PR #584 removed that display entirely — there is no longer any count displayed in the sidebar. No code change needed; documenting with regression tests. (Closes #579)
+
 ## [v0.50.68] — 2026-04-16
 
 ### Fixed
