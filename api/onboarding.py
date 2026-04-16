@@ -210,6 +210,22 @@ def _provider_api_key_present(
                 and str(custom_cfg.get("api_key") or "").strip()
             ):
                 return True
+
+    # For providers not in _SUPPORTED_PROVIDER_SETUPS (e.g. minimax-cn, deepseek,
+    # xai, etc.), ask the hermes_cli auth registry — it knows every provider's env
+    # var names and can check os.environ for a valid key.
+    # Exclude known OAuth/token-flow providers — those are handled separately by
+    # _provider_oauth_authenticated() and should not be short-circuited here.
+    _known_oauth = {"openai-codex", "copilot", "copilot-acp", "qwen-oauth", "nous"}
+    if provider not in _SUPPORTED_PROVIDER_SETUPS and provider not in _known_oauth:
+        try:
+            from hermes_cli.auth import get_auth_status as _gas
+            status = _gas(provider)
+            if isinstance(status, dict) and status.get("logged_in"):
+                return True
+        except Exception:
+            pass
+
     return False
 
 
@@ -288,11 +304,13 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
         elif provider in _SUPPORTED_PROVIDER_SETUPS:
             provider_ready = _provider_api_key_present(provider, cfg, env_values)
         else:
-            # Unknown / OAuth provider (e.g. openai-codex, copilot, qwen-oauth).
-            # These do not use a plain API key; auth lives in auth.json or a
-            # credential pool managed by hermes_cli.
-            provider_ready = _provider_oauth_authenticated(
-                provider, _get_active_hermes_home()
+            # Unknown provider — may be an OAuth flow (openai-codex, copilot, etc.)
+            # OR an API-key provider not in the quick-setup list (minimax-cn, deepseek,
+            # xai, etc.).  Check both: api key presence first (covers the majority of
+            # third-party providers), then OAuth auth.json.
+            provider_ready = (
+                _provider_api_key_present(provider, cfg, env_values)
+                or _provider_oauth_authenticated(provider, _get_active_hermes_home())
             )
 
     chat_ready = bool(_HERMES_FOUND and imports_ok and provider_ready)

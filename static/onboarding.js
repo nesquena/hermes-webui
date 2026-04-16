@@ -296,7 +296,14 @@ async function _saveOnboardingProviderSetup(){
   const baseUrl=(ONBOARDING.form.baseUrl||'').trim();
   const current=_getOnboardingCurrentSetup();
   const isUnchanged=current.provider===provider&&((current.model||'')===model)&&((current.base_url||'')===baseUrl);
-  if(isUnchanged && !apiKey && (ONBOARDING.status.system||{}).chat_ready) return;
+  // Skip the POST when nothing changed.  We also skip when the provider is
+  // unsupported/OAuth-based and already working — chat_ready may be false for
+  // providers not in the quick-setup list (e.g. minimax-cn) even though they are
+  // fully configured.  Posting in that case would either be a no-op (the server
+  // just marks complete for unsupported providers) or could silently overwrite
+  // config.yaml if the user accidentally changed the provider dropdown.
+  const currentIsOauth=!!(ONBOARDING.status&&ONBOARDING.status.setup&&ONBOARDING.status.setup.current_is_oauth);
+  if(isUnchanged && !apiKey && ((ONBOARDING.status.system||{}).chat_ready || currentIsOauth)) return;
   const body={provider,model};
   if(apiKey) body.api_key=apiKey;
   if(baseUrl) body.base_url=baseUrl;
