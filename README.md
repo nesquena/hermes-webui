@@ -436,7 +436,7 @@ across 53 test files.
 
 ### Slash commands
 - Type `/` in the composer for autocomplete dropdown
-- Built-in: `/help`, `/clear`, `/model <name>`, `/workspace <name>`, `/new`, `/usage`, `/theme`, `/compact`
+- Built-in: `/help`, `/clear`, `/compress [focus topic]`, `/compact` (alias), `/model <name>`, `/workspace <name>`, `/new`, `/usage`, `/theme`
 - Arrow keys navigate, Tab/Enter select, Escape closes
 - Unrecognized commands pass through to the agent
 

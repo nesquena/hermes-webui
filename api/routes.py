@@ -902,6 +902,9 @@ def handle_post(handler, parsed) -> bool:
             handler, {"ok": True, "session": s.compact() | {"messages": s.messages}}
         )
 
+    if parsed.path == "/api/session/compress":
+        return _handle_session_compress(handler, body)
+
     if parsed.path == "/api/chat/start":
         return _handle_chat_start(handler, body)
 
@@ -2445,6 +2448,114 @@ def _handle_clarify_respond(handler, body):
         return bad(handler, "response is required")
     resolve_clarify(sid, response, resolve_all=False)
     return j(handler, {"ok": True, "response": response})
+
+
+def _handle_session_compress(handler, body):
+    try:
+        require(body, "session_id")
+    except ValueError as e:
+        return bad(handler, str(e))
+
+    sid = str(body.get("session_id") or "").strip()
+    if not sid:
+        return bad(handler, "session_id is required")
+
+    focus_topic = str(body.get("focus_topic") or body.get("topic") or "").strip() or None
+
+    try:
+        s = get_session(sid)
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+
+    if getattr(s, "active_stream_id", None):
+        return bad(handler, "Session is still streaming; wait for the current turn to finish.", 409)
+
+    try:
+        from api.streaming import _sanitize_messages_for_api
+
+        messages = _sanitize_messages_for_api(s.messages)
+        if len(messages) < 4:
+            return bad(handler, "Not enough conversation to compress (need at least 4 messages).")
+
+        import api.config as _cfg
+        import hermes_cli.runtime_provider as _runtime_provider
+        import run_agent as _run_agent
+        from agent.manual_compression_feedback import summarize_manual_compression
+        from agent.model_metadata import estimate_messages_tokens_rough
+
+        resolved_model, resolved_provider, resolved_base_url = _cfg.resolve_model_provider(s.model)
+
+        resolved_api_key = None
+        try:
+            _rt = _runtime_provider.resolve_runtime_provider(requested=resolved_provider)
+            resolved_api_key = _rt.get("api_key")
+            if not resolved_provider:
+                resolved_provider = _rt.get("provider")
+            if not resolved_base_url:
+                resolved_base_url = _rt.get("base_url")
+        except Exception as _e:
+            logger.warning("resolve_runtime_provider failed for compression: %s", _e)
+
+        if not resolved_api_key:
+            return bad(handler, "No provider configured -- cannot compress.")
+
+        with _cfg._get_session_agent_lock(sid):
+            original_messages = list(messages)
+            approx_tokens = estimate_messages_tokens_rough(original_messages)
+
+            agent = _run_agent.AIAgent(
+                model=resolved_model,
+                provider=resolved_provider,
+                base_url=resolved_base_url,
+                api_key=resolved_api_key,
+                platform="cli",
+                quiet_mode=True,
+                enabled_toolsets=CLI_TOOLSETS,
+                session_id=sid,
+            )
+            compressed = agent.context_compressor.compress(
+                original_messages,
+                current_tokens=approx_tokens,
+                focus_topic=focus_topic,
+            )
+            new_tokens = estimate_messages_tokens_rough(compressed)
+            summary = summarize_manual_compression(
+                original_messages,
+                compressed,
+                approx_tokens,
+                new_tokens,
+            )
+
+            s.messages = compressed
+            s.tool_calls = []
+            s.active_stream_id = None
+            s.pending_user_message = None
+            s.pending_attachments = []
+            s.pending_started_at = None
+            s.save()
+
+        session_payload = redact_session_data(
+            s.compact() | {
+                "messages": s.messages,
+                "tool_calls": s.tool_calls,
+                "active_stream_id": s.active_stream_id,
+                "pending_user_message": s.pending_user_message,
+                "pending_attachments": s.pending_attachments,
+                "pending_started_at": s.pending_started_at,
+            }
+        )
+        return j(
+            handler,
+            {
+                "ok": True,
+                "session": session_payload,
+                "summary": summary,
+                "focus_topic": focus_topic,
+            },
+        )
+    except Exception as e:
+        logger.warning("Manual session compression failed: %s", e)
+        return bad(handler, f"Compression failed: {_sanitize_error(e)}")
 
 
 def _handle_skill_save(handler, body):
