@@ -5,6 +5,7 @@
 const COMMANDS=[
   {name:'help',      desc:t('cmd_help'),             fn:cmdHelp},
   {name:'clear',     desc:t('cmd_clear'),         fn:cmdClear},
+  {name:'compress',  desc:t('cmd_compact'),       fn:cmdCompress, arg:'focus topic'},
   {name:'compact',   desc:t('cmd_compact'),       fn:cmdCompact},
   {name:'model',     desc:t('cmd_model'),  fn:cmdModel,     arg:'model_name'},
   {name:'workspace', desc:t('cmd_workspace'),            fn:cmdWorkspace, arg:'name'},
@@ -98,13 +99,42 @@ async function cmdNew(){
   showToast(t('new_session'));
 }
 
-function cmdCompact(){
-  // Send as a regular message to the agent -- the agent's run_conversation
-  // preflight will detect the high token count and trigger _compress_context.
-  // We send a user message so it appears in the conversation.
-  $('msg').value='Please compress and summarize the conversation context to free up space.';
-  send();
-  showToast(t('compressing'));
+async function _runManualCompression(focusTopic){
+  if(!S.session){showToast(t('no_active_session'));return;}
+  try{
+    const body={session_id:S.session.session_id};
+    if(focusTopic) body.focus_topic=focusTopic;
+    const data=await api('/api/session/compress',{method:'POST',body:JSON.stringify(body)});
+    if(data&&data.session){
+      const currentSid=S.session&&S.session.session_id;
+      if(data.session.session_id&&data.session.session_id!==currentSid){
+        await loadSession(data.session.session_id);
+      }else{
+        S.session=data.session;
+        S.messages=data.session.messages||[];
+        S.toolCalls=data.session.tool_calls||[];
+        clearLiveToolCards();
+        localStorage.setItem('hermes-webui-session',S.session.session_id);
+        syncTopbar();
+        renderMessages();
+        await renderSessionList();
+        updateQueueBadge(S.session.session_id);
+      }
+    }
+    const summary=data&&data.summary;
+    if(summary&&summary.headline) showToast(summary.headline);
+    else showToast(t('compressing'));
+  }catch(e){
+    showToast('Compression failed: '+e.message);
+  }
+}
+
+async function cmdCompress(args){
+  await _runManualCompression((args||'').trim());
+}
+
+async function cmdCompact(args){
+  await _runManualCompression((args||'').trim());
 }
 
 async function cmdUsage(){
