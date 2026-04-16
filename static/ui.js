@@ -1215,7 +1215,7 @@ function renderMessages(){
     const hasVisibleBody=!!(String(content||'').trim()||filesHtml);
     if(hasVisibleBody){
       seg.insertAdjacentHTML('beforeend', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
-    }else{
+    }else if(!thinkingText){
       seg.classList.add('assistant-segment-anchor');
     }
     _assistantTurnBlocks(currentAssistantTurn).appendChild(seg);
@@ -1708,6 +1708,12 @@ function _thinkingMarkup(text=''){
     ? `<div class="thinking-card open"><div class="thinking-card-header"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span></div><div class="thinking-card-body"><pre>${esc(String(text).trim())}</pre></div></div>`
     : `<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
 }
+function finalizeThinkingCard(){
+  const row=$('thinkingRow');
+  if(!row) return;
+  row.removeAttribute('id');
+  row.removeAttribute('data-thinking-active');
+}
 function appendThinking(text=''){
   $('emptyState').style.display='none';
   let turn=$('liveAssistantTurn');
@@ -1722,6 +1728,7 @@ function appendThinking(text=''){
     row=document.createElement('div');
     row.className='assistant-segment';
     row.id='thinkingRow';
+    row.setAttribute('data-thinking-active','1');
     blocks.appendChild(row);
   }
   row.className=(text&&String(text).trim())?'assistant-segment thinking-card-row':'assistant-segment';

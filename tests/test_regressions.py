@@ -602,6 +602,8 @@ def test_messages_js_supports_live_reasoning_and_tool_completion(cleanup_test_se
     src = (REPO_ROOT / "static/messages.js").read_text()
     assert "let reasoningText=''" in src, \
         "messages.js must track streamed reasoning text separately from assistant text"
+    assert "let liveReasoningText=''" in src or 'let liveReasoningText = ""' in src, \
+        "messages.js must track the currently active reasoning segment separately from cumulative reasoning"
     assert "source.addEventListener('reasoning'" in src or 'source.addEventListener("reasoning"' in src, \
         "messages.js must listen for live reasoning SSE events"
     assert "source.addEventListener('tool_complete'" in src or 'source.addEventListener("tool_complete"' in src, \
@@ -619,6 +621,8 @@ def test_ui_js_can_upgrade_thinking_spinner_into_live_reasoning_card(cleanup_tes
         "ui.js must centralize thinking row markup so it can switch between spinner and live text"
     assert "function updateThinking(text=''){appendThinking(text);}" in src or 'function updateThinking(text=""){appendThinking(text);}' in src, \
         "ui.js must expose an updateThinking helper for live reasoning rendering"
+    assert "function finalizeThinkingCard()" in src, \
+        "ui.js must expose a helper to finalize one live thinking card before starting another"
 
 
 def test_ui_js_keeps_split_thinking_cards_and_assistant_header(cleanup_test_sessions):
@@ -646,6 +650,16 @@ def test_ui_js_keeps_reasoning_only_assistant_messages_visible(cleanup_test_sess
         "renderMessages visibility filter must preserve reasoning-only assistant messages"
 
 
+def test_ui_js_does_not_hide_anchor_segments_that_contain_thinking(cleanup_test_sessions):
+    """R19c2: assistant anchor segments that contain a thinking card must remain
+    visible; only truly empty tool-call anchor segments should be hidden.
+    """
+    src = (REPO_ROOT / "static" / "ui.js").read_text()
+    compact = src.replace(' ', '').replace('\n', '')
+    assert "}elseif(!thinkingText){" in compact, \
+        "renderMessages must only hide assistant anchor segments when they have no thinking content"
+
+
 def test_messages_js_live_assistant_segment_reuses_live_turn_wrapper(cleanup_test_sessions):
     """R19d: live streaming must reuse the existing live assistant turn wrapper created
     by appendThinking(), otherwise the header gets recreated when answer tokens start.
@@ -663,6 +677,15 @@ def test_messages_js_live_assistant_segment_reuses_live_turn_wrapper(cleanup_tes
         "ensureAssistantRow must still avoid creating the live answer segment when no display text exists yet"
     assert "if(String((parsed&&parsed.displayText)||'').trim()||assistantRow) ensureAssistantRow();" in src, \
         "token handler must only create the live answer segment once visible answer text starts"
+
+
+def test_messages_js_finalizes_thinking_card_before_tool_card(cleanup_test_sessions):
+    """R19e: later reasoning after a tool call must render in a fresh card."""
+    src = (REPO_ROOT / "static/messages.js").read_text()
+    assert "finalizeThinkingCard" in src, \
+        "tool handler must finalize the current live thinking card before appending a tool card"
+    assert "liveReasoningText='';" in src or 'liveReasoningText = "";' in src, \
+        "tool handler must reset the active reasoning segment before post-tool reasoning arrives"
 
 
 # ── R17: Stack traces must not leak to clients in 500 responses ────────────

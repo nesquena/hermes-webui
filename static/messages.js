@@ -138,6 +138,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
   let assistantText='';
   let reasoningText='';
+  let liveReasoningText='';
   let assistantRow=null;
   let assistantBody=null;
   // Thinking tag patterns for streaming display
@@ -251,7 +252,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _parseStreamState(){
     const raw=assistantText;
     if(reasoningText){
-      return {thinkingText:reasoningText, displayText:_streamDisplay(), inThinking:false};
+      return {thinkingText:liveReasoningText, displayText:_streamDisplay(), inThinking:false};
     }
     for(const {open,close} of _thinkPairs){
       const trimmed=raw.trimStart();
@@ -314,6 +315,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('reasoning',e=>{
       const d=JSON.parse(e.data);
       reasoningText += d.text || '';
+      liveReasoningText += d.text || '';
       syncInflightAssistantMessage();
       if(!S.session||S.session.session_id!==activeSid) return;
       _scheduleRender();
@@ -338,6 +340,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // above the tool card so the turn reads top-to-bottom as:
       // user → thinking → tool cards → response. Removing it caused the card
       // to be re-created below everything when reasoning resumed post-tool.
+      if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
+      liveReasoningText='';
       const oldRow=$('toolRunningRow');if(oldRow)oldRow.remove();
       appendLiveToolCard(tc);
       scrollIfPinned();
