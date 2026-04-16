@@ -104,6 +104,22 @@ def test_relative_time_uses_calendar_boundaries_and_year_for_old_sessions():
     assert "2024" in result["oldDate"]
 
 
+def test_relative_time_today_bucket():
+    """Session from 2 hours ago should bucket as 'Today'."""
+    result = _run_session_time_case(
+        """
+        const now = Date.UTC(2026, 3, 15, 14, 0, 0);
+        const twoHoursAgo = now - 2 * 60 * 60 * 1000;
+        process.stdout.write(JSON.stringify({
+          relative: _formatRelativeSessionTime(twoHoursAgo, now),
+          bucket: _sessionTimeBucketLabel(twoHoursAgo, now),
+        }));
+        """
+    )
+    assert result["relative"] == "2 hours ago"
+    assert result["bucket"] == "Today"
+
+
 def test_relative_time_handles_just_now_and_dst_safe_yesterday_boundary():
     result = _run_session_time_case(
         """

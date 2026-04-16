@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.64] — 2026-04-16
+
+### Changed
+- **Sidebar session items decluttered** — the meta row under every session title (message count, model slug, and source-tag badge) has been removed. Each session now renders as a single line: title + relative-time bucket headers. The visible session count at a typical viewport height roughly doubles. The `source_tag` field is still populated on the session object and available for a future tooltip or filter facet. `[SYSTEM:]`-prefixed gateway titles fall back to `"Session"` rather than leaking system-prompt content. Removes `_formatSourceTag()`, `.session-meta`, `cli-session`, `[data-source=…]`, `_SOURCE_DISPLAY`, and the associated CSS badge rules. (PR #584 by @aronprins)
+
 ## [v0.50.63] — 2026-04-16
 
 ### Fixed
