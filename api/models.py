@@ -24,7 +24,7 @@ def _write_session_index():
     for p in SESSION_DIR.glob('*.json'):
         if p.name.startswith('_'): continue
         try:
-            s = Session.load(p.stem)
+            s = Session.load(p.stem, persist=False)
             if s: entries.append(s.compact())
         except Exception:
             logger.debug("Failed to load session from %s", p)
@@ -34,6 +34,79 @@ def _write_session_index():
                 entries.append(s.compact())
     entries.sort(key=lambda s: s['updated_at'], reverse=True)
     SESSION_INDEX_FILE.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
+def _message_ts_value(msg):
+    """Return an integer timestamp from a session message, if present."""
+    if not isinstance(msg, dict):
+        return None
+    ts = msg.get('timestamp')
+    if ts is None:
+        ts = msg.get('_ts')
+    if ts is None:
+        return None
+    try:
+        return int(float(ts))
+    except (TypeError, ValueError):
+        return None
+
+
+def normalize_message_timestamps(messages, *, anchor_ts=None) -> bool:
+    """Spread obviously collapsed message timestamps back into order.
+
+    Older WebUI sessions can end up with every message stamped with the same
+    second. That makes the chat history look like it happened at one instant.
+    When all message timestamps are missing or effectively identical, we
+    synthesize a monotonic sequence so the UI can show a real progression.
+
+    Returns True if any message was changed.
+    """
+    if not isinstance(messages, list):
+        return False
+
+    dict_messages = [m for m in messages if isinstance(m, dict)]
+    if len(dict_messages) < 2:
+        return False
+
+    seen_ts = []
+    for msg in dict_messages:
+        ts = _message_ts_value(msg)
+        if ts is None:
+            continue
+        if ts not in seen_ts:
+            seen_ts.append(ts)
+
+    changed = False
+
+    # If every message points at the same timestamp (or none of them have one),
+    # spread them out in message order instead of leaving the entire session at
+    # one second. This keeps the UI chronologically readable.
+    if len(seen_ts) <= 1:
+        base_ts = int(anchor_ts if anchor_ts is not None else (seen_ts[0] if seen_ts else time.time()))
+        start_ts = base_ts - len(dict_messages) + 1
+        for idx, msg in enumerate(dict_messages):
+            new_ts = start_ts + idx
+            if msg.get('timestamp') != new_ts:
+                msg['timestamp'] = new_ts
+                changed = True
+            if msg.get('_ts') != new_ts:
+                msg['_ts'] = new_ts
+                changed = True
+        return changed
+
+    # Mixed history: preserve any existing timestamps and only fill in gaps.
+    base_ts = int(anchor_ts if anchor_ts is not None else seen_ts[-1])
+    prev_ts = None
+    for msg in dict_messages:
+        ts = _message_ts_value(msg)
+        if ts is None:
+            ts = prev_ts + 1 if prev_ts is not None else base_ts
+            msg['timestamp'] = ts
+            msg['_ts'] = ts
+            changed = True
+        prev_ts = ts
+
+    return changed
 
 
 class Session:
@@ -77,6 +150,7 @@ class Session:
     def save(self, touch_updated_at: bool = True) -> None:
         if touch_updated_at:
             self.updated_at = time.time()
+        normalize_message_timestamps(self.messages, anchor_ts=self.updated_at or time.time())
         self.path.write_text(
             json.dumps(self.__dict__, ensure_ascii=False, indent=2),
             encoding='utf-8',
@@ -84,14 +158,20 @@ class Session:
         _write_session_index()
 
     @classmethod
-    def load(cls, sid):
+    def load(cls, sid, persist: bool = False):
         # Validate session ID format to prevent path traversal
         if not sid or not all(c in '0123456789abcdefghijklmnopqrstuvwxyz_' for c in sid):
             return None
         p = SESSION_DIR / f'{sid}.json'
         if not p.exists():
             return None
-        return cls(**json.loads(p.read_text(encoding='utf-8')))
+        sess = cls(**json.loads(p.read_text(encoding='utf-8')))
+        if persist and normalize_message_timestamps(sess.messages, anchor_ts=sess.updated_at or sess.created_at):
+            try:
+                sess.save(touch_updated_at=False)
+            except Exception:
+                logger.debug("Failed to persist normalized message timestamps for %s", sid)
+        return sess
 
     def compact(self) -> dict:
         return {
@@ -117,7 +197,7 @@ def get_session(sid):
         if sid in SESSIONS:
             SESSIONS.move_to_end(sid)  # LRU: mark as recently used
             return SESSIONS[sid]
-    s = Session.load(sid)
+    s = Session.load(sid, persist=True)
     if s:
         with LOCK:
             SESSIONS[sid] = s
@@ -169,7 +249,7 @@ def all_sessions():
     for p in SESSION_DIR.glob('*.json'):
         if p.name.startswith('_'): continue
         try:
-            s = Session.load(p.stem)
+            s = Session.load(p.stem, persist=False)
             if s: out.append(s)
         except Exception:
             logger.debug("Failed to load session from %s", p)
