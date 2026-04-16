@@ -623,8 +623,6 @@ function renderSessionListFromCache(){
     titleRow.appendChild(title);
     const metaBits=[];
     if(s.is_cli_session && s.source_tag){const _stLabel=_formatSourceTag(s.source_tag);if(_stLabel)metaBits.push(_stLabel);}
-    if(s.message_count) metaBits.push(t('n_messages', s.message_count));
-    if(s.model) metaBits.push(String(s.model).split('/').pop());
     sessionText.appendChild(titleRow);
     if(metaBits.length){
       const meta=document.createElement('div');
