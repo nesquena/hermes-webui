@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.62] — 2026-04-16
+
+### Fixed
+- **Onboarding wizard no longer fires for non-standard providers** — providers not in the quick-setup list (e.g. `minimax-cn`, `deepseek`, `xai`, `gemini`, `zai`, `arcee`, and many others) were always evaluated as `chat_ready=False` because `_provider_api_key_present` only knew the four quick-setup env var names. Those users saw the wizard on every page load even with a working config, and clicking through could silently overwrite `config.yaml` with `openrouter` defaults. The fix adds a `hermes_cli.auth.get_auth_status()` fallback that covers every API-key provider in the full Hermes registry. The frontend `_saveOnboardingProviderSetup` guard is also tightened so it skips the POST when the current provider is unsupported and nothing was changed, removing the overwrite risk entirely. (Fixes #572)
+
 ## [v0.50.61] — 2026-04-16
 
 ### Added
