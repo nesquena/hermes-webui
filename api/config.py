@@ -404,7 +404,19 @@ _DEFAULT_TOOLSETS = [
     "web",
     "webhook",
 ]
-CLI_TOOLSETS = get_config().get("platform_toolsets", {}).get("cli", _DEFAULT_TOOLSETS)
+def _resolve_cli_toolsets(cfg=None):
+    """Resolve CLI toolsets using the agent's _get_platform_tools() so that
+    MCP server toolsets are automatically included, matching CLI behaviour."""
+    if cfg is None:
+        cfg = get_config()
+    try:
+        from hermes_cli.tools_config import _get_platform_tools
+        return list(_get_platform_tools(cfg, "cli"))
+    except Exception:
+        # Fallback: read raw list from config (MCP toolsets will be missing)
+        return cfg.get("platform_toolsets", {}).get("cli", _DEFAULT_TOOLSETS)
+
+CLI_TOOLSETS = _resolve_cli_toolsets()
 
 # ── Model / provider discovery ───────────────────────────────────────────────
 

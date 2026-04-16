@@ -30,6 +30,7 @@ from api.config import (
     CANCEL_FLAGS,
     SERVER_START_TIME,
     CLI_TOOLSETS,
+    _resolve_cli_toolsets,
     _INDEX_HTML_PATH,
     get_available_models,
     IMAGE_EXTS,
@@ -2070,7 +2071,7 @@ def _handle_chat_sync(handler, body):
                 api_key=_api_key,
                 platform="cli",
                 quiet_mode=True,
-                enabled_toolsets=CLI_TOOLSETS,
+                enabled_toolsets=_resolve_cli_toolsets(),
                 session_id=s.session_id,
             )
             workspace_ctx = f"[Workspace: {s.workspace}]\n"
