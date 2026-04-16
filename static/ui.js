@@ -1426,7 +1426,7 @@ function buildToolCard(tc){
         <span class="tool-card-icon">${icon}</span>
         <span class="tool-card-name">${esc(displayName)}</span>
         <span class="tool-card-preview">${esc(previewText)}</span>
-        ${hasDetail?'<span class="tool-card-toggle">▸</span>':''}
+        ${hasDetail?`<span class="tool-card-toggle">${li('chevron-right',12)}</span>`:''}
       </div>
       ${hasDetail?`<div class="tool-card-detail">
         ${tc.args&&Object.keys(tc.args).length?`<div class="tool-card-args">${

@@ -8,7 +8,7 @@
 > Prerequisites: SSH tunnel is active on port 8787. Open http://localhost:8787 in browser.
 > Server health check: curl http://127.0.0.1:8787/health should return {"status":"ok"}.
 >
-> Automated tests: 1195 total (1195 passing, 0 known failures). Includes onboarding coverage for bootstrap/static wizard presence, real provider config persistence (`config.yaml` + `.env`), the `/api/onboarding/*` backend, and the onboarding skip/existing-config guard.
+> Automated coverage: 1353 tests collected via `pytest tests/ --collect-only -q`. Includes onboarding coverage for bootstrap/static wizard presence, real provider config persistence (`config.yaml` + `.env`), the `/api/onboarding/*` backend, the onboarding skip/existing-config guard, and CSS regression coverage for smooth thinking/tool card disclosure animation.
 > Run: `pytest tests/ -v --timeout=60`
 >
 > Local regression focus: verify that a previously closed workspace panel stays visually closed from first paint through boot completion on desktop refresh; there should be no brief open-then-close flash.
@@ -1688,6 +1688,12 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 - Click a directory toggle arrow (▸) → expands in-place showing children.
 - Click again (▾) → collapses. Double-click navigates into it (breadcrumb view).
 - If model returns thinking blocks (Claude extended thinking), verify collapsible gold card appears above response.
+- Open and close a thinking card. Verify the caret rotation and the content reveal both animate smoothly instead of snapping open.
+
+### UI Polish: Tool Card Disclosure Animation
+- Trigger a response with at least one completed tool call card.
+- Open and close the tool call card. Verify the caret rotates smoothly and the args/result section animates open and closed instead of appearing instantly.
+- If a turn has 2+ tool cards, use "Expand all / Collapse all" and verify the same smooth animation applies to every card in the group.
 
 ### Sprint 19: Auth + Security
 - No password set: everything works as normal. No login page.
@@ -1742,8 +1748,8 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 
 ---
 
-*Last updated: v0.50.44, April 14, 2026*
-*Total automated tests: 1195 (1195 passing, 0 failures)*
+*Last updated: v0.50.44, April 16, 2026*
+*Total automated tests collected: 1353*
 *Regression gate: tests/test_regressions.py*
 *Run: pytest tests/ -v --timeout=60*
 *Source: <repo>/*
