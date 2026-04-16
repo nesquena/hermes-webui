@@ -1,5 +1,22 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.66] — 2026-04-16
+
+### Fixed
+- **WebUI agent now receives full runtime route from provider resolver** — previously `api_mode`, `acp_command`, `acp_args`, and `credential_pool` were not forwarded into `AIAgent.__init__()` in the WebUI streaming path. Users switching between Codex accounts or using credential pools found the switch worked in the CLI but not the WebUI. The fix passes all four fields from the resolved runtime into the agent constructor. (PR #582 by @suinia)
+
+## [v0.50.65] — 2026-04-16
+
+### Fixed
+- **`HERMES_WEBUI_SKIP_ONBOARDING=1` now works unconditionally** — previously the env var was gated on `chat_ready=True`, so hosting providers (e.g. Agent37) that set it but hadn't yet wired up a provider key would still see the wizard on every page load. The var is now honoured as a hard operator override regardless of `chat_ready`. If you set it, the wizard is gone. (Fixes skip-onboarding regression)
+- **Onboarding wizard can no longer overwrite config or env files when `SKIP_ONBOARDING` is set** — `apply_onboarding_setup` now checks the env var first and refuses to touch `config.yaml` or `.env` if it is set. This is a belt-and-suspenders guard: even if a stale JS bundle somehow triggers the setup endpoint while `SKIP_ONBOARDING` is active, no files are written.
+
+
+## [v0.50.64] — 2026-04-16
+
+### Changed
+- **Sidebar session items decluttered** — the meta row under every session title (message count, model slug, and source-tag badge) has been removed. Each session now renders as a single line: title + relative-time bucket headers. The visible session count at a typical viewport height roughly doubles. The `source_tag` field is still populated on the session object and available for a future tooltip or filter facet. `[SYSTEM:]`-prefixed gateway titles fall back to `"Session"` rather than leaking system-prompt content. Removes `_formatSourceTag()`, `.session-meta`, `cli-session`, `[data-source=…]`, `_SOURCE_DISPLAY`, and the associated CSS badge rules. (PR #584 by @aronprins)
+
 ## [v0.50.63] — 2026-04-16
 
 ### Fixed

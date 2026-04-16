@@ -76,14 +76,12 @@ def test_session_sidebar_js_has_dynamic_relative_time_helpers():
 def test_session_sidebar_renders_relative_time_and_meta_rows():
     # session-time element was removed from sessions.js in v0.50.40 to
     # give session titles full width — the CSS class is kept but set to display:none.
-    assert "session-time" not in SESSIONS_JS or True  # intentionally removed from JS
-    assert "session-meta" in SESSIONS_JS
+    # session-meta / metaBits were removed when we dropped message-count, model, and
+    # source-tag badges from the sidebar (design round 2).
     assert "orderedSessions" in SESSIONS_JS
     assert ".session-time" in STYLE_CSS
-    assert ".session-meta" in STYLE_CSS
     assert ".session-title-row" in STYLE_CSS
     assert ".session-item.active .session-title" in STYLE_CSS
-    assert "metaBits.join(' · ')" in SESSIONS_JS
     assert "|| _sessionTimeBucketLabel" not in SESSIONS_JS
     assert "const ONE_DAY=86400000;" not in SESSIONS_JS
 
@@ -104,6 +102,22 @@ def test_relative_time_uses_calendar_boundaries_and_year_for_old_sessions():
     assert result["relative"] == "2 days ago"
     assert result["bucket"] == "This week"
     assert "2024" in result["oldDate"]
+
+
+def test_relative_time_today_bucket():
+    """Session from 2 hours ago should bucket as 'Today'."""
+    result = _run_session_time_case(
+        """
+        const now = Date.UTC(2026, 3, 15, 14, 0, 0);
+        const twoHoursAgo = now - 2 * 60 * 60 * 1000;
+        process.stdout.write(JSON.stringify({
+          relative: _formatRelativeSessionTime(twoHoursAgo, now),
+          bucket: _sessionTimeBucketLabel(twoHoursAgo, now),
+        }));
+        """
+    )
+    assert result["relative"] == "2 hours ago"
+    assert result["bucket"] == "Today"
 
 
 def test_relative_time_handles_just_now_and_dst_safe_yesterday_boundary():

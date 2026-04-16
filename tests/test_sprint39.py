@@ -2,13 +2,14 @@
 Sprint 39 Tests: Skip-onboarding env var + onboarding key reload fix (PR A of issue #329).
 
 Covers:
-- HERMES_WEBUI_SKIP_ONBOARDING=1 bypasses the wizard when chat_ready is true
-- HERMES_WEBUI_SKIP_ONBOARDING=1 does NOT bypass when chat_ready is false
+- HERMES_WEBUI_SKIP_ONBOARDING=1 bypasses the wizard unconditionally (chat_ready not required)
 - HERMES_WEBUI_SKIP_ONBOARDING unset leaves default behaviour unchanged
 - apply_onboarding_setup sets os.environ synchronously when an API key is saved
+- apply_onboarding_setup refuses to write config/env files when SKIP_ONBOARDING is set
 """
 import os
 import unittest
+import unittest.mock
 from unittest.mock import patch
 
 import api.onboarding as mod
@@ -92,11 +93,11 @@ class TestSkipOnboardingEnvVar(unittest.TestCase):
         status = self._run_status(_READY_RUNTIME, {"HERMES_WEBUI_SKIP_ONBOARDING": "yes"})
         self.assertTrue(status["completed"])
 
-    def test_skip_env_set_but_not_chat_ready_does_not_skip(self):
-        """HERMES_WEBUI_SKIP_ONBOARDING=1 + chat_ready=False → still shows wizard."""
+    def test_skip_env_1_works_even_when_not_chat_ready(self):
+        """HERMES_WEBUI_SKIP_ONBOARDING=1 skips unconditionally — chat_ready is NOT required."""
         status = self._run_status(_NOT_READY_RUNTIME, {"HERMES_WEBUI_SKIP_ONBOARDING": "1"})
-        self.assertFalse(status["completed"],
-                         "completed must be False when not chat_ready even if skip env set")
+        self.assertTrue(status["completed"],
+                        "completed must be True when skip env var is set, regardless of chat_ready")
 
     def test_skip_env_unset_leaves_default_false(self):
         """Without the env var, completed is False when settings are empty."""
@@ -180,6 +181,54 @@ class TestApplyOnboardingKeySync(unittest.TestCase):
         # Key must be unchanged
         self.assertEqual(os.environ.get("OPENAI_API_KEY"), "sk-existing-key")
         os.environ.pop("OPENAI_API_KEY", None)
+
+
+class TestApplyOnboardingSkipGuard(unittest.TestCase):
+    """apply_onboarding_setup must not write config/env when SKIP_ONBOARDING is set."""
+
+    def test_apply_setup_blocked_when_skip_env_set(self):
+        """SKIP_ONBOARDING=1 → apply_onboarding_setup never touches disk."""
+        save_yaml_mock = unittest.mock.MagicMock()
+        write_env_mock = unittest.mock.MagicMock()
+
+        with patch.dict(os.environ, {"HERMES_WEBUI_SKIP_ONBOARDING": "1"}, clear=False), \
+             patch("api.onboarding._save_yaml_config", save_yaml_mock), \
+             patch("api.onboarding._write_env_file", write_env_mock), \
+             patch("api.onboarding.save_settings"), \
+             patch("api.onboarding.get_onboarding_status", return_value={"completed": True}):
+            mod.apply_onboarding_setup({
+                "provider": "openai",
+                "model": "gpt-4o",
+                "api_key": "should-not-be-saved",
+            })
+
+        save_yaml_mock.assert_not_called()
+        write_env_mock.assert_not_called()
+
+    def test_apply_setup_proceeds_normally_without_skip_env(self):
+        """Without SKIP_ONBOARDING, apply_onboarding_setup writes config as usual."""
+        import pathlib
+        save_yaml_mock = unittest.mock.MagicMock()
+
+        mock_cfg = {"model": {"provider": "openai", "default": "gpt-4o"}}
+        env = {k: v for k, v in os.environ.items() if k != "HERMES_WEBUI_SKIP_ONBOARDING"}
+
+        with patch.dict(os.environ, env, clear=True), \
+             patch("api.onboarding._load_yaml_config", return_value=mock_cfg), \
+             patch("api.onboarding._save_yaml_config", save_yaml_mock), \
+             patch("api.onboarding._write_env_file"), \
+             patch("api.onboarding.reload_config"), \
+             patch("api.onboarding.get_onboarding_status", return_value={"completed": True}), \
+             patch("api.onboarding._get_config_path", return_value=pathlib.Path("/tmp/fake.yaml")), \
+             patch("api.onboarding._load_env_file", return_value={"OPENAI_API_KEY": "existing"}), \
+             patch("api.onboarding._provider_api_key_present", return_value=True), \
+             patch("api.onboarding._get_active_hermes_home", return_value=pathlib.Path("/tmp")):
+            mod.apply_onboarding_setup({
+                "provider": "openai",
+                "model": "gpt-4o",
+            })
+
+        save_yaml_mock.assert_called_once()
 
 
 if __name__ == "__main__":

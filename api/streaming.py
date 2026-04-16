@@ -729,6 +729,12 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
     q = STREAMS.get(stream_id)
     if q is None:
         return
+    s = None
+    _rt = {}
+    old_cwd = None
+    old_exec_ask = None
+    old_session_key = None
+    old_hermes_home = None
 
     # ── MCP Server Discovery (lazy import, idempotent) ──
     # discover_mcp_tools() is called here (rather than at server startup) so that
@@ -1020,6 +1026,10 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 provider=resolved_provider,
                 base_url=resolved_base_url,
                 api_key=resolved_api_key,
+                api_mode=_rt.get('api_mode'),
+                acp_command=_rt.get('command'),
+                acp_args=_rt.get('args'),
+                credential_pool=_rt.get('credential_pool'),
                 platform='cli',
                 quiet_mode=True,
                 enabled_toolsets=_toolsets,

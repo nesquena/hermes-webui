@@ -416,11 +416,12 @@ def get_onboarding_status() -> dict:
 
     # HERMES_WEBUI_SKIP_ONBOARDING=1 lets hosting providers (e.g. Agent37) ship
     # a pre-configured instance without the wizard blocking the first load.
-    # Only takes effect when the system is actually chat_ready — a misconfigured
-    # deployment still shows the wizard so the user can fix it.
+    # This is an operator-level override and is honoured unconditionally —
+    # the operator knows their deployment is configured; we must not second-guess
+    # it by requiring chat_ready to also be true.
     skip_env = os.environ.get("HERMES_WEBUI_SKIP_ONBOARDING", "").strip()
     skip_requested = skip_env in {"1", "true", "yes"}
-    auto_completed = skip_requested and bool(runtime.get("chat_ready"))
+    auto_completed = skip_requested  # unconditional: operator says skip, we skip
 
     # Auto-complete for existing Hermes users: if config.yaml already exists
     # AND the system is chat_ready, treat onboarding as done.  These users
@@ -457,6 +458,16 @@ def get_onboarding_status() -> dict:
 
 
 def apply_onboarding_setup(body: dict) -> dict:
+    # Hard guard: if the operator set SKIP_ONBOARDING, the wizard should never
+    # have appeared.  Even if the frontend somehow calls this endpoint anyway
+    # (e.g. a stale JS bundle or a curious user), we must not overwrite the
+    # operator's config.yaml or .env files.  Just mark onboarding complete and
+    # return the current status — no file writes.
+    skip_env = os.environ.get("HERMES_WEBUI_SKIP_ONBOARDING", "").strip()
+    if skip_env in {"1", "true", "yes"}:
+        save_settings({"onboarding_completed": True})
+        return get_onboarding_status()
+
     provider = str(body.get("provider") or "").strip().lower()
     model = str(body.get("model") or "").strip()
     api_key = str(body.get("api_key") or "").strip()
