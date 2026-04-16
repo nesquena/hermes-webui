@@ -59,6 +59,20 @@ it=$itdir/hermeswebui_user_uid
 if [ -z "${WANTED_UID+x}" ]; then
   if [ -f $it ]; then WANTED_UID=$(cat $it); fi
 fi
+# Auto-detect from mounted workspace if still unset (#569).
+# On macOS, host UIDs start at 501. Using the wrong UID means the container
+# user cannot read the bind-mounted files, making the workspace appear empty.
+# Prefer the workspace mount UID over the hardcoded default of 1024.
+if [ -z "${WANTED_UID+x}" ] || [ "${WANTED_UID}" = "1024" ]; then
+  # Use /workspace — the standard bind-mount point — to read the host UID.
+  if [ -d "/workspace" ]; then
+    _detected_uid=$(stat -c '%u' "/workspace" 2>/dev/null || echo "")
+    if [ -n "$_detected_uid" ] && [ "$_detected_uid" != "0" ]; then
+      echo "-- Auto-detected workspace UID: $_detected_uid (from /workspace)"
+      WANTED_UID=$_detected_uid
+    fi
+  fi
+fi
 WANTED_UID=${WANTED_UID:-1024}
 write_worldtmpfile $it "$WANTED_UID"
 echo "-- WANTED_UID: \"${WANTED_UID}\""
@@ -66,6 +80,16 @@ echo "-- WANTED_UID: \"${WANTED_UID}\""
 it=$itdir/hermeswebui_user_gid
 if [ -z "${WANTED_GID+x}" ]; then
   if [ -f $it ]; then WANTED_GID=$(cat $it); fi
+fi
+# Auto-detect GID from mounted workspace to match (#569)
+if [ -z "${WANTED_GID+x}" ] || [ "${WANTED_GID}" = "1024" ]; then
+  if [ -d "/workspace" ]; then
+    _detected_gid=$(stat -c '%g' "/workspace" 2>/dev/null || echo "")
+    if [ -n "$_detected_gid" ] && [ "$_detected_gid" != "0" ]; then
+      echo "-- Auto-detected workspace GID: $_detected_gid (from /workspace)"
+      WANTED_GID=$_detected_gid
+    fi
+  fi
 fi
 WANTED_GID=${WANTED_GID:-1024}
 write_worldtmpfile $it "$WANTED_GID"

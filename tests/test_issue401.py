@@ -36,7 +36,7 @@ def test_loadsession_uses_session_toolcalls_only_as_fallback():
 def test_rendermessages_treats_openai_toolcall_assistants_as_visible():
     """OpenAI assistant rows with empty content but tool_calls must stay anchorable."""
     assert "const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;" in UI_JS
-    assert "if(hasTc||hasTu)return true;" in UI_JS
+    assert "if(hasTc||hasTu||_messageHasReasoningPayload(m)) return true;" in UI_JS
 
 
 def _run_js(script_body: str) -> dict:

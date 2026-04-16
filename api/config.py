@@ -165,6 +165,7 @@ else:
 # ── Config file (reloadable -- supports profile switching) ──────────────────
 _cfg_cache = {}
 _cfg_lock = threading.Lock()
+_cfg_mtime: float = 0.0  # last known mtime of config.yaml; 0 = never loaded
 
 
 def _get_config_path() -> Path:
@@ -189,6 +190,7 @@ def get_config() -> dict:
 
 def reload_config() -> None:
     """Reload config.yaml from the active profile's directory."""
+    global _cfg_mtime
     with _cfg_lock:
         _cfg_cache.clear()
         config_path = _get_config_path()
@@ -199,6 +201,10 @@ def reload_config() -> None:
                 loaded = _yaml.safe_load(config_path.read_text())
                 if isinstance(loaded, dict):
                     _cfg_cache.update(loaded)
+                    try:
+                        _cfg_mtime = Path(config_path).stat().st_mtime
+                    except OSError:
+                        _cfg_mtime = 0.0
         except Exception:
             logger.debug("Failed to load yaml config from %s", config_path)
 
@@ -702,6 +708,15 @@ def get_available_models() -> dict:
         'groups': [{'provider': str, 'models': [{'id': str, 'label': str}]}]
     }
     """
+    # Reload config from disk if config.yaml has changed since last load.
+    # This ensures CLI model changes are picked up on page refresh without
+    # a server restart, while avoiding clearing in-memory mocks during tests. (#585)
+    try:
+        _current_mtime = Path(_get_config_path()).stat().st_mtime
+    except OSError:
+        _current_mtime = 0.0
+    if _current_mtime != _cfg_mtime:
+        reload_config()
     active_provider = None
     default_model = DEFAULT_MODEL
     groups = []

@@ -329,7 +329,7 @@ def test_boot_js_browser_unsupported_guard_uses_fallback_capabilities():
 def test_boot_js_media_recorder_fallback_posts_to_transcribe_api():
     """Desktop fallback must send recorded audio to /api/transcribe for transcription."""
     js, _ = get_text("/static/boot.js")
-    assert '/api/transcribe' in js
+    assert 'api/transcribe' in js
     assert 'fetch(' in js
 
 

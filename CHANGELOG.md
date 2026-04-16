@@ -1,5 +1,25 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.69] — 2026-04-16
+
+### Fixed
+- **Docker: workspace file browser no longer appears empty on macOS** — `docker_init.bash` now auto-detects the correct `WANTED_UID` and `WANTED_GID` from the mounted `/workspace` directory at startup. On macOS, host UIDs start at 501 (not 1000), so the default value of 1024 caused the container user to run as a different UID than the files, making the workspace appear empty. The auto-detect reads `stat -c '%u'` on `/workspace` and uses it when no explicit `WANTED_UID` is set — falling back to 1024 if the path doesn't exist or returns 0 (root). Setting `WANTED_UID` explicitly in a `.env` file still takes full precedence. (Closes #569)
+- **Session message count inconsistency resolved** — the topbar already correctly shows only visible messages (excluding `role='tool'` tool-call entries). The sidebar previously showed raw `message_count` which included tool messages, but PR #584 removed that display entirely — there is no longer any count displayed in the sidebar. No code change needed; documenting with regression tests. (Closes #579)
+
+## [v0.50.68] — 2026-04-16
+
+### Fixed
+- **Light theme: add/rename folder dialogs now use correct light colors** — `.app-dialog`, `.app-dialog-input`, `.app-dialog-btn`, `.app-dialog-close`, and `.file-rename-input` had hardcoded dark-mode backgrounds with no light-theme overrides. Dialog backgrounds, borders, and inputs now adapt correctly to the light theme. (Closes #594)
+- **Workspace panel no longer snaps open then immediately closed** — on page load, `boot.js` was restoring the panel open/closed state from `localStorage` before knowing whether the loaded session has a workspace. `syncWorkspacePanelState()` then snapped it closed, causing a visible jank. The restore is now deferred until after `loadSession()` and only applied when the session actually has a workspace. (Closes #576)
+- **Model dropdown reflects CLI model changes without server restart** — `/api/models` was returning a startup-cached snapshot of `config.yaml`. The fix adds a mtime-based reload check: if `config.yaml` has changed on disk since last read, the cache is refreshed before building the model list. Page refresh now picks up CLI model changes immediately. (Closes #585)
+- **Docker Compose: macOS users guided on UID/GID setup** — the `docker-compose.yml` comment for `WANTED_UID`/`WANTED_GID` now explicitly notes that macOS UIDs start at 501 (not 1000) and tells users to run `id -u`/`id -g`. Also clarifies that the default `${HOME}/.hermes` volume mount works on both macOS and Linux. (Closes #567)
+- **Voice transcription already shows "Transcribing…" spinner** — issue #590 noted that no feedback was shown between pressing stop and text appearing. This was already implemented (`setComposerStatus('Transcribing…')` fires before the fetch in `_transcribeBlob`). Confirmed and documented; closing as already fixed.
+
+## [v0.50.67] — 2026-04-16
+
+### Added
+- **Subpath mount support** — Hermes WebUI can now be served behind a reverse proxy at any subpath (e.g. `/hermes-webui/` via Tailscale Serve, nginx, or Caddy). A dynamic `<base href>` is injected as the first script in `<head>`, and all client-side URL references are converted from absolute to relative. The server-side route handlers are unchanged. No configuration needed — works transparently for both root (`/`) and subpath deployments. (PR #588 by @vcavichini)
+
 ## [v0.50.66] — 2026-04-16
 
 ### Fixed
