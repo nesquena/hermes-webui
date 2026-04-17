@@ -134,7 +134,9 @@ def _first_exchange_snippets(messages):
         if role == 'user' and not user_text:
             user_text = _message_text(m.get('content'))
         elif role == 'assistant' and not asst_text:
-            asst_text = _message_text(m.get('content'))
+            candidate = _message_text(m.get('content'))
+            if candidate:
+                asst_text = candidate
         if user_text and asst_text:
             break
     return user_text[:500], asst_text[:500]
