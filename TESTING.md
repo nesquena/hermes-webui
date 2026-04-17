@@ -1759,7 +1759,7 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 - [ ] Brightness change without Save → close panel via Discard → reverts
 - [ ] Brightness change with Save → close + reopen panel → slider stays at saved value
 - [ ] Page reload → wallpaper + brightness persist
-- [ ] Upload 6MB+ file → toast "too large", original wallpaper unchanged
+- [ ] Upload 11MB+ file → centered modal alert "too large (max 10MB)" appears (NOT a corner toast); original wallpaper unchanged
 - [ ] Rename `.svg` to `.jpg` and upload → toast "must be JPEG/PNG/WebP" (backend magic-byte check)
 - [ ] Upload new image → old image file replaced (`ls ~/.hermes/webui/wallpaper-*` shows only one)
 - [ ] Click Remove → wallpaper disappears, theme color returns

@@ -344,7 +344,7 @@ def verify_hermes_imports() -> tuple:
 # ── Limits ───────────────────────────────────────────────────────────────────
 MAX_FILE_BYTES = 200_000
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
-MAX_WALLPAPER_BYTES = 5_000_000  # 5MB cap for /api/wallpaper uploads
+MAX_WALLPAPER_BYTES = 10_000_000  # 10MB cap for /api/wallpaper uploads
 
 # ── File type maps ───────────────────────────────────────────────────────────
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".bmp"}

@@ -14,7 +14,7 @@
 const _WALLPAPER_ALLOWED_TYPES = new Set([
   'image/jpeg', 'image/png', 'image/webp',
 ]);
-const _WALLPAPER_MAX_BYTES = 5_000_000;
+const _WALLPAPER_MAX_BYTES = 10_000_000;
 
 async function applyWallpaper(){
   let info;
@@ -55,7 +55,7 @@ async function uploadWallpaper(file){
     return;
   }
   if(file.size > _WALLPAPER_MAX_BYTES){
-    showToast(t('wallpaper_size_too_large'));
+    showCenterAlert(t('wallpaper_size_too_large'));
     return;
   }
   try{
@@ -69,7 +69,13 @@ async function uploadWallpaper(file){
     if(!res.ok){
       let msg;
       try{ msg = (await res.json()).error; }catch(_){ msg = await res.text(); }
-      showToast(msg || ('Upload failed: ' + res.status));
+      // Backend rejects oversize with HTTP 413; surface in the prominent
+      // center alert so users notice immediately, not a corner toast.
+      if(res.status === 413){
+        showCenterAlert(msg || t('wallpaper_size_too_large'));
+      }else{
+        showToast(msg || ('Upload failed: ' + res.status));
+      }
       return;
     }
     await applyWallpaper();
@@ -93,4 +99,71 @@ function setBrightness(percent){
   // Slider is 10..150; CSS variable expects 0.1..1.5.
   const decimal = Math.max(0.1, Math.min(1.5, percent / 100));
   document.documentElement.style.setProperty('--wallpaper-brightness', String(decimal));
+}
+
+// ── Center alert ───────────────────────────────────────────────────────────
+// Prominent center-of-screen modal for important warnings (e.g. file too
+// large) where a corner toast is too easy to miss. Auto-dismisses after
+// 4s and on click/Escape. Uses inline styles so it works without CSS edits
+// and doesn't depend on theme variables (always visible regardless of bg).
+function showCenterAlert(msg){
+  // Remove any existing alert before showing a new one
+  const existing = document.getElementById('wallpaperCenterAlert');
+  if(existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'wallpaperCenterAlert';
+  overlay.style.cssText = [
+    'position:fixed', 'inset:0', 'z-index:99999',
+    'display:flex', 'align-items:center', 'justify-content:center',
+    'background:rgba(0,0,0,0.45)', 'backdrop-filter:blur(2px)',
+    'animation:fadeIn 0.15s ease-out',
+  ].join(';');
+
+  const card = document.createElement('div');
+  card.style.cssText = [
+    'max-width:420px', 'min-width:280px',
+    'padding:24px 28px', 'border-radius:12px',
+    'background:#2a1f2e', 'color:#fff',
+    'border:1px solid rgba(233,69,96,0.55)',
+    'box-shadow:0 10px 40px rgba(0,0,0,0.5)',
+    'font-size:15px', 'line-height:1.5',
+    'text-align:center',
+  ].join(';');
+
+  const icon = document.createElement('div');
+  icon.textContent = '⚠️';
+  icon.style.cssText = 'font-size:36px;margin-bottom:8px;';
+  card.appendChild(icon);
+
+  const text = document.createElement('div');
+  text.textContent = msg;
+  text.style.cssText = 'margin-bottom:14px;color:#f0e0e0;';
+  card.appendChild(text);
+
+  const btn = document.createElement('button');
+  btn.textContent = 'OK';
+  btn.style.cssText = [
+    'padding:7px 20px', 'border-radius:6px', 'border:none',
+    'background:rgba(233,69,96,0.85)', 'color:#fff',
+    'cursor:pointer', 'font-size:14px', 'font-weight:600',
+  ].join(';');
+  card.appendChild(btn);
+
+  overlay.appendChild(card);
+
+  function dismiss(){
+    overlay.remove();
+    document.removeEventListener('keydown', onKey);
+  }
+  function onKey(e){
+    if(e.key === 'Escape' || e.key === 'Enter') dismiss();
+  }
+  overlay.onclick = (e) => { if(e.target === overlay) dismiss(); };
+  btn.onclick = dismiss;
+  document.addEventListener('keydown', onKey);
+
+  document.body.appendChild(overlay);
+  // Auto-dismiss after 4s in case user walks away
+  setTimeout(() => { if(document.body.contains(overlay)) dismiss(); }, 4000);
 }
