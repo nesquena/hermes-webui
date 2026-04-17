@@ -654,6 +654,8 @@ function updateSendBtn(){
   if(canSend&&!btn.classList.contains('visible')){
     btn.classList.remove('visible');
     requestAnimationFrame(()=>btn.classList.add('visible'));
+  } else if(!canSend){
+    btn.classList.remove('visible');
   }
 }
 function setBusy(v){
