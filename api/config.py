@@ -282,7 +282,7 @@ def _discover_default_workspace() -> Path:
 
 
 DEFAULT_WORKSPACE = _discover_default_workspace()
-DEFAULT_MODEL = os.getenv("HERMES_WEBUI_DEFAULT_MODEL", "openai/gpt-5.4-mini")
+DEFAULT_MODEL = os.getenv("HERMES_WEBUI_DEFAULT_MODEL", "")  # Empty = use provider default; avoids showing unavailable OpenAI model to non-OpenAI users (#646)
 
 
 # ── Startup diagnostics ───────────────────────────────────────────────────────
