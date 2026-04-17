@@ -1237,7 +1237,7 @@ def load_settings() -> dict:
     except OSError:
         # PermissionError or other OS-level error (e.g. UID mismatch in Docker)
         # Treat as missing — start with defaults rather than crashing.
-        logger.debug("Cannot stat settings file %s (permission denied?)", SETTINGS_FILE)
+        logger.debug("Cannot stat settings file %s (inaccessible?)", SETTINGS_FILE)
         settings_exists = False
     if settings_exists:
         try:

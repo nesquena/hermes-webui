@@ -40,15 +40,12 @@ def test_load_settings_returns_defaults_when_settings_file_unreadable(monkeypatc
 
 def test_load_settings_returns_defaults_when_exists_raises_permission_error(monkeypatch, tmp_path):
     """Direct simulation: monkeypatch SETTINGS_FILE.exists to raise PermissionError."""
-    from pathlib import Path
     from unittest import mock
 
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     settings_file = state_dir / "settings.json"
 
-    # Patch the specific instance's exists() to raise PermissionError
-    original_settings_file = config.SETTINGS_FILE
     monkeypatch.setattr(config, "SETTINGS_FILE", settings_file)
 
     with mock.patch.object(type(settings_file), "exists",
