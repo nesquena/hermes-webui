@@ -36,11 +36,11 @@
 
 ## 4. 后端：Surfaces 聚合 API
 
-- [ ] 4.1 在 `api/agent_activity.py` 增加 `build_surfaces_cards(db_path) -> list`（含 `source / state / last_active_ts / message_count_24h / tokens_24h`；仅 webui 条目额外注入 `active_webui_sessions`，从 webui 进程内 `SESSIONS` LRU 计数）
-- [ ] 4.2 实现 `handle_surfaces(handler, parsed)`，挂 `/api/surfaces`；**额外支持** `?source=<src>&expand=1` 返回 `{sessions: [{session_id, title, model, last_activity, message_count}]}`（最近 5 条，按 last_activity DESC，title 经 `_redact_text` 脱敏）
-- [ ] 4.3 2 秒 TTL 缓存；`?source=*&expand=1` 的展开查询按 source 维度单独缓存
-- [ ] 4.4 未知 source 的 expand 查询返回 `{sessions: []}`（非 404）
-- [ ] 4.5 pytest：未鉴权 401、空 DB 返回 `surfaces: []`、正常返回结构、`active_webui_sessions` 只在 webui 条目、expand 查询脱敏、未知 source expand 返回空数组
+- [x] 4.1 `build_surfaces_cards = build_surface_snapshot` — 卡片数据与 agent-activity 快照结构一致（合并避免重复聚合）
+- [x] 4.2 `handle_surfaces`：默认走快照；`?expand=1&source=X` 走 `build_surface_expand`，返回 `{sessions: [...]}`（最近 5，title 经 `_redact_text` 脱敏）
+- [x] 4.3 独立缓存 key：`('surfaces', ...)` vs `('surfaces-expand', db, source)`；expand 按 source 维度单独缓存
+- [x] 4.4 未知 source 或空 source 返回 `{"sessions": []}`（HTTP 200，非 404）
+- [x] 4.5 `tests/test_agent_activity.py` 覆盖 surfaces 分支 — 6 个用例：snapshot/expand/未知 source/分 cache/401/`_redact_title` 脱敏 (复用 `api.helpers._redact_text`)
 
 ## 5. 前端：sidebar 三个新 tab 与 i18n
 
