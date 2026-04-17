@@ -1072,10 +1072,10 @@ let _settingsSkinOnOpen = null; // track skin at open time for discard revert
 let _settingsSection = 'conversation';
 
 function switchSettingsSection(name){
-  const section=(name==='preferences'||name==='system')?name:'conversation';
+  const section=(name==='appearance'||name==='preferences'||name==='system')?name:'conversation';
   _settingsSection=section;
-  const map={conversation:'Conversation',preferences:'Preferences',system:'System'};
-  ['conversation','preferences','system'].forEach(key=>{
+  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',system:'System'};
+  ['conversation','appearance','preferences','system'].forEach(key=>{
     const tab=$('settingsTab'+map[key]);
     const pane=$('settingsPane'+map[key]);
     const active=key===section;
