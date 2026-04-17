@@ -1749,6 +1749,39 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 
 ---
 
+## Slash command parity (manual checklist)
+
+For each batch-1 command, run via webui slash menu AND via `hermes` CLI in the
+same `HERMES_HOME` (when applicable) and verify identical effect.
+
+- [ ] `/help` — dropdown lists 25+ commands; selecting `/help` posts an assistant message listing them.
+- [ ] `/new` (and alias `/reset`) — starts fresh session.
+- [ ] `/clear` — clears current transcript display (webui-only meaning, distinct from CLI's "clear screen").
+- [ ] `/title <name>` — renames active session, topbar + sidebar update; `/title` alone shows current title.
+- [ ] `/status` — assistant message shows session_id, model, workspace, message count.
+- [ ] `/usage` — assistant message shows token counts; the "show token usage" setting is unchanged (toggle still in Settings panel).
+- [ ] `/stop` — interrupts a running stream; with no active stream toasts "No active task to stop."
+- [ ] `/retry` — removes last user+assistant exchange, refills composer with last user text, resends. Final transcript has only ONE copy of the resent message.
+- [ ] `/undo` — removes last user+assistant exchange; toast confirms; repeated until empty toasts "Nothing to undo."
+- [ ] `/model <name>` — switches model dropdown.
+- [ ] `/personality` — lists personalities; `/personality <name>` switches.
+- [ ] `/skills [query]` — lists matching skills.
+- [ ] `/theme <name>` — switches webui theme.
+- [ ] `/workspace <name>` — switches workspace.
+
+Unknown / deferred:
+
+- [ ] `/yolo`, `/reasoning`, `/compress`, `/voice`, `/branch`, `/insights`, `/debug`, `/reload`, etc. — toast "Web UI 暂未实现该命令: /<name>". MUST NOT be sent as plain text to the LLM.
+- [ ] `/compact` — toast "/compress is not available in the web UI yet — use the CLI for now." (was sending free text to LLM before this batch.)
+- [ ] Made-up command (e.g. `/fhfajl`) — fall through to send as text (existing behavior preserved for typos vs. real commands).
+
+Bridged CLI sessions:
+
+- [ ] Open a CLI-bridged session in webui sidebar (if `show_cli_sessions` setting enabled).
+- [ ] `/retry`, `/undo` toast "该命令仅支持 Web UI 原生会话…" and do nothing.
+
+---
+
 *Last updated: v0.50.44, April 16, 2026*
 *Total automated tests collected: 1353*
 *Regression gate: tests/test_regressions.py*
