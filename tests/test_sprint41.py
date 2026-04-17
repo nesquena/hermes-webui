@@ -213,6 +213,65 @@ class TestIssue495TitleStreaming(unittest.TestCase):
             "messages.js should close SSE connection on stream_end (not immediately on done)",
         )
 
+    def test_title_snippet_uses_visible_assistant_reply_after_tools(self):
+        """Tool-heavy opening turns should use the final visible assistant reply."""
+        from api.streaming import _first_exchange_snippets
+
+        user_msg = {
+            "role": "user",
+            "content": "Please look up the earlier context and then summarize it.",
+        }
+        preamble_asst = {
+            "role": "assistant",
+            "content": "Let me check my memory first.",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "function": {
+                        "name": "memory",
+                        "arguments": '{"action":"search"}',
+                    },
+                }
+            ],
+        }
+        tool_result = {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "content": '{"result":"background info"}',
+        }
+        final_asst = {
+            "role": "assistant",
+            "content": "Here is the substantive answer after the tool work.",
+        }
+
+        user_text, assistant_text = _first_exchange_snippets(
+            [user_msg, preamble_asst, tool_result, final_asst]
+        )
+
+        self.assertEqual(user_text, user_msg["content"][:500])
+        self.assertEqual(assistant_text, final_asst["content"][:500])
+
+    def test_provisional_title_detection_ignores_whitespace_noise(self):
+        """Temporary first-message titles should still match with whitespace normalization."""
+        from api.streaming import _is_provisional_title, title_from
+
+        messages = [
+            {
+                "role": "user",
+                "content": "过去两个礼拜发生了一些事情。最重要的一点就是我加入了一个 Hermes Web UI 的项目。\n\n因为我开始使用 Hermes 这个 agent 以后，就逐渐不再使用 OpenClaw了。",
+            },
+            {"role": "assistant", "content": "Sure, let me help."},
+        ]
+
+        derived = title_from(messages, "")
+        current = derived[:63]  # Simulate the provisional title the UI writes immediately.
+
+        self.assertNotEqual(current, derived[:64])
+        self.assertTrue(
+            _is_provisional_title(current, messages),
+            "Whitespace-normalized provisional titles should still be recognized",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
