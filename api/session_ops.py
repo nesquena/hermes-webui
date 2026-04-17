@@ -87,6 +87,47 @@ def undo_last(session_id: str) -> dict[str, Any]:
     }
 
 
+def session_status(session_id: str) -> dict[str, Any]:
+    """Return a snapshot of session state for /status.
+
+    Webui equivalent of gateway/run.py:_handle_status_command. The agent's
+    "agent_running" comes from `session_key in self._running_agents`; the
+    webui equivalent is whether the session has an active stream
+    (active_stream_id is set).
+    """
+    s = get_session(session_id)
+    return {
+        'session_id': s.session_id,
+        'title': s.title,
+        'model': s.model,
+        'workspace': s.workspace,
+        'personality': s.personality,
+        'message_count': len(s.messages or []),
+        'created_at': s.created_at,
+        'updated_at': s.updated_at,
+        'agent_running': bool(getattr(s, 'active_stream_id', None)),
+    }
+
+
+def session_usage(session_id: str) -> dict[str, Any]:
+    """Return token usage and cost for /usage.
+
+    Mirrors gateway/run.py:_handle_usage_command's basic counters. The
+    agent shows additional fields (rate-limit headroom etc.) that depend
+    on provider API responses we don't have in webui -- those are deferred.
+    """
+    s = get_session(session_id)
+    inp = int(s.input_tokens or 0)
+    out = int(s.output_tokens or 0)
+    return {
+        'input_tokens': inp,
+        'output_tokens': out,
+        'total_tokens': inp + out,
+        'estimated_cost': s.estimated_cost,
+        'model': s.model,
+    }
+
+
 def _extract_text(content: Any) -> str:
     """Flatten message content to plain text. Agent stores either a string
     or a list of {type, text|...} parts; webui needs the user-typed text."""
