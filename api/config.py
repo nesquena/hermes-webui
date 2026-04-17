@@ -344,6 +344,7 @@ def verify_hermes_imports() -> tuple:
 # ── Limits ───────────────────────────────────────────────────────────────────
 MAX_FILE_BYTES = 200_000
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_WALLPAPER_BYTES = 5_000_000  # 5MB cap for /api/wallpaper uploads
 
 # ── File type maps ───────────────────────────────────────────────────────────
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".ico", ".bmp"}
@@ -1224,6 +1225,7 @@ _SETTINGS_DEFAULTS = {
     "sound_enabled": False,  # play notification sound when assistant finishes
     "notifications_enabled": False,  # browser notification when tab is in background
     "bubble_layout": False,  # right-aligned user / left-aligned assistant chat bubbles
+    "wallpaper_file": None,  # filename of current wallpaper in STATE_DIR; None = no wallpaper
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
 }
 _SETTINGS_LEGACY_DROP_KEYS = {"assistant_language"}
