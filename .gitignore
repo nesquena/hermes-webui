@@ -17,6 +17,8 @@ archive/
 .env.*
 !.env.example
 .claude/*
+.venv/
+venv/
 
 # Generated screenshots and transient artifacts
 screenshot-*.png
