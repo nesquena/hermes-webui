@@ -40,7 +40,7 @@ class TestActiveSessionTitleThemeColor(unittest.TestCase):
     def test_active_session_title_uses_theme_variable(self):
         """
         .session-item.active .session-title must use var(--gold) not a hardcoded hex.
-        The light-theme override line (data-theme="light") is allowed to keep its own
+        The light-mode override line (:not(.dark)) is allowed to keep its own
         hardcoded color; we only check the base/dark rule.
         """
         # Find all lines that match the active session title selector
@@ -48,7 +48,7 @@ class TestActiveSessionTitleThemeColor(unittest.TestCase):
         base_rule_lines = [
             line for line in lines
             if ".session-item.active .session-title" in line
-            and 'data-theme="light"' not in line
+            and ':not(.dark)' not in line
         ]
 
         self.assertTrue(
@@ -57,10 +57,9 @@ class TestActiveSessionTitleThemeColor(unittest.TestCase):
         )
 
         for line in base_rule_lines:
-            self.assertIn(
-                "var(--gold)",
-                line,
-                f"Expected var(--gold) in active session title rule, got: {line.strip()}"
+            self.assertTrue(
+                "var(--gold)" in line or "var(--accent-text)" in line,
+                f"Expected var(--gold) or var(--accent-text) in active session title rule, got: {line.strip()}"
             )
             self.assertNotIn(
                 "#e8a030",

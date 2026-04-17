@@ -579,17 +579,27 @@ window.addEventListener('resize',()=>{
   };
 })();
 
-// ── System theme helper ──────────────────────────────────────────────────────
+// ── Appearance helpers (theme = light/dark/system, skin = accent color) ──────
+const _SKINS=[
+  {name:'Default',  colors:['#FFD700','#FFBF00','#CD7F32']},
+  {name:'Ares',     colors:['#FF4444','#CC3333','#992222']},
+  {name:'Mono',     colors:['#CCCCCC','#999999','#666666']},
+  {name:'Slate',    colors:['#334155','#475569','#64748b']},
+  {name:'Poseidon', colors:['#0EA5E9','#0284C7','#0369A1']},
+  {name:'Sisyphus', colors:['#A78BFA','#8B5CF6','#7C3AED']},
+  {name:'Charizard',colors:['#FB923C','#F97316','#EA580C']},
+];
+
 function _applyTheme(name){
   const resolved=(name==='system')
     ?(window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light')
     :name;
-  document.documentElement.dataset.theme=resolved||'dark';
-  // Swap Prism syntax-highlighting theme to match UI theme
+  const isDark=(resolved==='dark');
+  document.documentElement.classList.toggle('dark',isDark);
+  // Swap Prism syntax-highlighting theme to match
   (function(){
     const link=document.getElementById('prism-theme');
     if(!link) return;
-    const isDark=(resolved!=='light');
     const want=isDark
       ?'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css'
       :'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css';
@@ -598,10 +608,76 @@ function _applyTheme(name){
   // Re-register OS change listener whenever system theme is active
   if(name==='system'){
     const mq=window.matchMedia('(prefers-color-scheme:dark)');
-    const _onOsChange=()=>{ document.documentElement.dataset.theme=mq.matches?'dark':'light'; };
+    const _onOsChange=()=>{
+      const d=mq.matches;
+      document.documentElement.classList.toggle('dark',d);
+      // Also swap Prism theme on OS change
+      const link=document.getElementById('prism-theme');
+      if(link){link.href=d?'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css':'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css';}
+    };
     mq.removeEventListener('change',_onOsChange);
     mq.addEventListener('change',_onOsChange);
   }
+}
+
+function _applySkin(name){
+  const key=(name||'default').toLowerCase();
+  if(key==='default') delete document.documentElement.dataset.skin;
+  else document.documentElement.dataset.skin=key;
+}
+
+function _pickTheme(name){
+  localStorage.setItem('hermes-theme',name);
+  _applyTheme(name);
+  _syncThemePicker(name);
+  if(typeof _markSettingsDirty==='function') _markSettingsDirty();
+  const hidden=$('settingsTheme');
+  if(hidden) hidden.value=name;
+}
+
+function _pickSkin(name){
+  const key=(name||'default').toLowerCase();
+  localStorage.setItem('hermes-skin',key);
+  _applySkin(key);
+  _syncSkinPicker(key);
+  if(typeof _markSettingsDirty==='function') _markSettingsDirty();
+  const hidden=$('settingsSkin');
+  if(hidden) hidden.value=key;
+}
+
+function _syncThemePicker(active){
+  document.querySelectorAll('#themePickerGrid .theme-pick-btn').forEach(btn=>{
+    const sel=btn.dataset.themeVal===active;
+    btn.style.borderColor=sel?'var(--accent)':'var(--border2)';
+    btn.style.boxShadow=sel?'0 0 0 1px var(--accent-bg-strong)':'none';
+  });
+}
+
+function _syncSkinPicker(active){
+  document.querySelectorAll('#skinPickerGrid .skin-pick-btn').forEach(btn=>{
+    const sel=btn.dataset.skinVal===active;
+    btn.style.borderColor=sel?'var(--accent)':'var(--border2)';
+    btn.style.boxShadow=sel?'0 0 0 1px var(--accent-bg-strong)':'none';
+  });
+}
+
+function _buildSkinPicker(activeSkin){
+  const grid=$('skinPickerGrid');
+  if(!grid) return;
+  grid.innerHTML='';
+  for(const skin of _SKINS){
+    const key=skin.name.toLowerCase();
+    const btn=document.createElement('button');
+    btn.type='button';
+    btn.className='skin-pick-btn';
+    btn.dataset.skinVal=key;
+    btn.style.cssText='border:1px solid var(--border2);border-radius:8px;padding:8px 4px;text-align:center;cursor:pointer;background:none;transition:all .15s';
+    btn.onclick=()=>_pickSkin(skin.name);
+    const dots=skin.colors.map(c=>`<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${c}"></span>`).join('');
+    btn.innerHTML=`<div style="display:flex;gap:3px;justify-content:center;margin-bottom:4px">${dots}</div><span style="font-size:11px;color:var(--text)">${skin.name}</span>`;
+    grid.appendChild(btn);
+  }
+  _syncSkinPicker((activeSkin||'default').toLowerCase());
 }
 
 function applyBotName(){
@@ -632,6 +708,9 @@ function applyBotName(){
     const _theme=s.theme||'dark';
     localStorage.setItem('hermes-theme',_theme);
     _applyTheme(_theme);
+    const _skin=s.skin||'default';
+    localStorage.setItem('hermes-skin',_skin);
+    _applySkin(_skin);
     document.body.classList.toggle('bubble-layout',!!s.bubble_layout);
     if(typeof setLocale==='function'){
       const _lang=typeof resolvePreferredLocale==='function'

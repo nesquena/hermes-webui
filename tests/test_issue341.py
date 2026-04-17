@@ -28,7 +28,7 @@ def test_msg_body_table_tr_stripe_present():
 
 def test_msg_body_light_theme_overrides():
     css = _read_css()
-    assert ':root[data-theme="light"] .msg-body th' in css, \
-        'Light-theme override for .msg-body th missing from style.css'
-    assert ':root[data-theme="light"] .msg-body td' in css, \
-        'Light-theme override for .msg-body td missing from style.css'
+    assert ':root:not(.dark) .msg-body th' in css, \
+        'Light-mode override for .msg-body th missing from style.css'
+    assert ':root:not(.dark) .msg-body td' in css, \
+        'Light-mode override for .msg-body td missing from style.css'

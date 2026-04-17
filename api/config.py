@@ -1216,7 +1216,8 @@ _SETTINGS_DEFAULTS = {
     "show_cli_sessions": False,  # merge CLI sessions from state.db into the sidebar
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
     "check_for_updates": True,  # check if webui/agent repos are behind upstream
-    "theme": "dark",  # active UI theme name (no enum gate -- allows custom themes)
+    "theme": "dark",  # light | dark | system
+    "skin": "default",  # accent color skin: default | ares | mono | slate | poseidon | sisyphus | charizard
     "language": "en",  # UI locale code; must match a key in static/i18n.js LOCALES
     "bot_name": os.getenv(
         "HERMES_WEBUI_BOT_NAME", "Hermes"

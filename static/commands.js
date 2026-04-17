@@ -121,19 +121,32 @@ async function cmdUsage(){
 }
 
 async function cmdTheme(args){
-  const themes=['system','dark','light','slate','solarized','monokai','nord','oled'];
-  if(!args||!themes.includes(args.toLowerCase())){
-    showToast(t('theme_usage')+themes.join('|'));
+  const themes=['system','dark','light'];
+  const skins=(_SKINS||[]).map(s=>s.name.toLowerCase());
+  const val=(args||'').toLowerCase().trim();
+  // Check if it's a theme
+  if(themes.includes(val)){
+    localStorage.setItem('hermes-theme',val);
+    _applyTheme(val);
+    try{await api('/api/settings',{method:'POST',body:JSON.stringify({theme:val})});}catch(e){}
+    const sel=$('settingsTheme');
+    if(sel)sel.value=val;
+    if(typeof _syncThemePicker==='function') _syncThemePicker(val);
+    showToast(t('theme_set')+val);
     return;
   }
-  const themeName=args.toLowerCase();
-  localStorage.setItem('hermes-theme',themeName);
-  _applyTheme(themeName);
-  try{await api('/api/settings',{method:'POST',body:JSON.stringify({theme:themeName})});}catch(e){}
-  // Update settings dropdown if panel is open
-  const sel=$('settingsTheme');
-  if(sel)sel.value=themeName;
-  showToast(t('theme_set')+themeName);
+  // Check if it's a skin
+  if(skins.includes(val)){
+    localStorage.setItem('hermes-skin',val);
+    _applySkin(val);
+    try{await api('/api/settings',{method:'POST',body:JSON.stringify({skin:val})});}catch(e){}
+    const sel=$('settingsSkin');
+    if(sel)sel.value=val;
+    if(typeof _syncSkinPicker==='function') _syncSkinPicker(val);
+    showToast(t('theme_set')+val);
+    return;
+  }
+  showToast(t('theme_usage')+themes.join('|')+' | '+skins.join('|'));
 }
 
 async function cmdSkills(args){

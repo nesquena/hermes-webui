@@ -44,44 +44,44 @@ def test_settings_set_theme_light():
         post("/api/settings", {"theme": "dark"})
 
 
-def test_settings_set_theme_solarized():
-    """Setting theme to 'solarized' should persist."""
+def test_settings_set_theme_light():
+    """Setting theme to 'light' should persist."""
     try:
-        post("/api/settings", {"theme": "solarized"})
+        post("/api/settings", {"theme": "light"})
         d, _ = get("/api/settings")
-        assert d.get("theme") == "solarized"
+        assert d.get("theme") == "light"
     finally:
         post("/api/settings", {"theme": "dark"})
 
 
-def test_settings_set_theme_monokai():
-    """Setting theme to 'monokai' should persist."""
+def test_settings_set_theme_system():
+    """Setting theme to 'system' should persist."""
     try:
-        post("/api/settings", {"theme": "monokai"})
+        post("/api/settings", {"theme": "system"})
         d, _ = get("/api/settings")
-        assert d.get("theme") == "monokai"
+        assert d.get("theme") == "system"
     finally:
         post("/api/settings", {"theme": "dark"})
 
 
-def test_settings_set_theme_nord():
-    """Setting theme to 'nord' should persist."""
+def test_settings_set_skin():
+    """Setting skin should persist."""
     try:
-        post("/api/settings", {"theme": "nord"})
+        post("/api/settings", {"skin": "ares"})
         d, _ = get("/api/settings")
-        assert d.get("theme") == "nord"
+        assert d.get("skin") == "ares"
     finally:
-        post("/api/settings", {"theme": "dark"})
+        post("/api/settings", {"skin": "default"})
 
 
-def test_settings_set_theme_slate():
-    """Setting theme to 'slate' should persist."""
+def test_settings_set_skin_poseidon():
+    """Setting skin to 'poseidon' should persist."""
     try:
-        post("/api/settings", {"theme": "slate"})
+        post("/api/settings", {"skin": "poseidon"})
         d, _ = get("/api/settings")
-        assert d.get("theme") == "slate"
+        assert d.get("skin") == "poseidon"
     finally:
-        post("/api/settings", {"theme": "dark"})
+        post("/api/settings", {"skin": "default"})
 
 
 def test_settings_custom_theme_accepted():
@@ -100,10 +100,10 @@ def test_theme_does_not_break_other_settings():
     d_before, _ = get("/api/settings")
     send_key_before = d_before.get("send_key")
     try:
-        post("/api/settings", {"theme": "nord"})
+        post("/api/settings", {"theme": "light"})
         d_after, _ = get("/api/settings")
         assert d_after.get("send_key") == send_key_before
-        assert d_after.get("theme") == "nord"
+        assert d_after.get("theme") == "light"
     finally:
         post("/api/settings", {"theme": "dark"})
 
@@ -111,9 +111,9 @@ def test_theme_does_not_break_other_settings():
 def test_theme_survives_round_trip():
     """Theme set via POST should appear in subsequent GET."""
     try:
-        post("/api/settings", {"theme": "monokai"})
+        post("/api/settings", {"theme": "light"})
         d, status = get("/api/settings")
         assert status == 200
-        assert d["theme"] == "monokai"
+        assert d["theme"] == "light"
     finally:
         post("/api/settings", {"theme": "dark"})

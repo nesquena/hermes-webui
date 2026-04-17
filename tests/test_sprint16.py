@@ -694,12 +694,12 @@ def test_style_css_has_session_actions_dropdown(cleanup_test_sessions):
         ".session-action-menu must use position:fixed to avoid sidebar clipping"
 
 
-def test_style_css_active_session_uses_gold(cleanup_test_sessions):
-    """Active session style should use gold/amber color (#e8a030) not just blue."""
+def test_style_css_active_session_uses_accent(cleanup_test_sessions):
+    """Active session style should use accent color variable, not hardcoded hex."""
     src = REPO_ROOT / "static" / "style.css"
     code = src.read_text()
-    assert "#e8a030" in code, \
-        "Active session gold color (#e8a030) not found in style.css"
+    assert "var(--accent" in code and ".session-item.active" in code, \
+        "Active session must use var(--accent) variables in style.css"
 
 
 def test_sessions_js_uses_action_menu_not_per_row_buttons(cleanup_test_sessions):

@@ -1068,6 +1068,7 @@ document.addEventListener('drop',e=>{e.preventDefault();dragCounter=0;wrap.class
 
 let _settingsDirty = false;
 let _settingsThemeOnOpen = null; // track theme at open time for discard revert
+let _settingsSkinOnOpen = null; // track skin at open time for discard revert
 let _settingsSection = 'conversation';
 
 function switchSettingsSection(name){
@@ -1112,7 +1113,8 @@ function toggleSettings(){
   if(!overlay) return;
   if(overlay.style.display==='none'){
     _settingsDirty = false;
-    _settingsThemeOnOpen = localStorage.getItem('hermes-theme') || document.documentElement.dataset.theme || 'dark';
+    _settingsThemeOnOpen = localStorage.getItem('hermes-theme') || 'dark';
+    _settingsSkinOnOpen = localStorage.getItem('hermes-skin') || 'default';
     _settingsSection = 'conversation';
     overlay.style.display='';
     loadSettingsPanel();
@@ -1152,7 +1154,10 @@ function _revertSettingsPreview(){
   if(_settingsThemeOnOpen){
     localStorage.setItem('hermes-theme', _settingsThemeOnOpen);
     if(typeof _applyTheme==='function') _applyTheme(_settingsThemeOnOpen);
-    else document.documentElement.dataset.theme = _settingsThemeOnOpen;
+  }
+  if(_settingsSkinOnOpen){
+    localStorage.setItem('hermes-skin', _settingsSkinOnOpen);
+    if(typeof _applySkin==='function') _applySkin(_settingsSkinOnOpen);
   }
 }
 
@@ -1218,9 +1223,16 @@ async function loadSettingsPanel(){
     // Send key preference
     const sendKeySel=$('settingsSendKey');
     if(sendKeySel){sendKeySel.value=settings.send_key||'enter';sendKeySel.addEventListener('change',_markSettingsDirty,{once:false});}
-    // Theme preference
+    // Theme preference (hidden input + button grid)
     const themeSel=$('settingsTheme');
-    if(themeSel){themeSel.value=settings.theme||'dark';themeSel.addEventListener('change',_markSettingsDirty,{once:false});}
+    const themeVal=settings.theme||'dark';
+    if(themeSel) themeSel.value=themeVal;
+    if(typeof _syncThemePicker==='function') _syncThemePicker(themeVal);
+    // Skin preference
+    const skinVal=(settings.skin||'default').toLowerCase();
+    const skinSel=$('settingsSkin');
+    if(skinSel) skinSel.value=skinVal;
+    if(typeof _buildSkinPicker==='function') _buildSkinPicker(skinVal);
     // Language preference — populate from LOCALES bundle
     const langSel=$('settingsLanguage');
     if(langSel){
@@ -1275,7 +1287,7 @@ function _setSettingsAuthButtonsVisible(active){
 }
 
 function _applySavedSettingsUi(saved, body, opts){
-  const {sendKey,showTokenUsage,showCliSessions,theme,language}=opts;
+  const {sendKey,showTokenUsage,showCliSessions,theme,skin,language}=opts;
   window._sendKey=sendKey||'enter';
   window._showTokenUsage=showTokenUsage;
   window._showCliSessions=showCliSessions;
@@ -1293,6 +1305,7 @@ function _applySavedSettingsUi(saved, body, opts){
   _setSettingsAuthButtonsVisible(!!saved.auth_enabled);
   _settingsDirty=false;
   _settingsThemeOnOpen=theme;
+  _settingsSkinOnOpen=skin||'default';
   const bar=$('settingsUnsavedBar');
   if(bar) bar.style.display='none';
   renderMessages();
@@ -1307,12 +1320,14 @@ async function saveSettings(andClose){
   const showCliSessions=!!($('settingsShowCliSessions')||{}).checked;
   const pw=($('settingsPassword')||{}).value;
   const theme=($('settingsTheme')||{}).value||'dark';
+  const skin=($('settingsSkin')||{}).value||'default';
   const language=($('settingsLanguage')||{}).value||'en';
   const body={};
   if(model) body.default_model=model;
 
   if(sendKey) body.send_key=sendKey;
   body.theme=theme;
+  body.skin=skin;
   body.language=language;
   body.show_token_usage=showTokenUsage;
   body.show_cli_sessions=showCliSessions;
@@ -1328,7 +1343,7 @@ async function saveSettings(andClose){
   if(pw && pw.trim()){
     try{
       const saved=await api('/api/settings',{method:'POST',body:JSON.stringify({...body,_set_password:pw.trim()})});
-      _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,language});
+      _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,skin,language});
       showToast(t(saved.auth_just_enabled?'settings_saved_pw':'settings_saved_pw_updated'));
       _hideSettingsPanel();
       return;
@@ -1336,7 +1351,7 @@ async function saveSettings(andClose){
   }
   try{
     const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(body)});
-    _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,language});
+    _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,skin,language});
     showToast(t('settings_saved'));
     _hideSettingsPanel();
   }catch(e){

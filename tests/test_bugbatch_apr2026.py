@@ -19,39 +19,38 @@ COMPOSE   = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 
 # ── #594: light theme dialog overrides ───────────────────────────────────────
 
-def test_594_app_dialog_has_light_theme_override():
-    """style.css must have a light theme rule targeting .app-dialog background."""
-    assert ':root[data-theme="light"] .app-dialog{' in STYLE_CSS or \
-           ":root[data-theme='light'] .app-dialog{" in STYLE_CSS, (
-        "Missing light theme override for .app-dialog — dialogs appear dark on light theme"
+def test_594_app_dialog_has_light_mode_override():
+    """style.css must have a light mode rule targeting .app-dialog background."""
+    assert ':root:not(.dark) .app-dialog{' in STYLE_CSS, (
+        "Missing light mode override for .app-dialog — dialogs appear dark on light theme"
     )
 
 
-def test_594_app_dialog_input_has_light_theme_override():
-    """style.css must have a light theme rule for .app-dialog-input."""
-    assert ":root[data-theme=\"light\"] .app-dialog-input{" in STYLE_CSS, (
-        "Missing light theme override for .app-dialog-input"
+def test_594_app_dialog_input_has_light_mode_override():
+    """style.css must have a light mode rule for .app-dialog-input."""
+    assert ":root:not(.dark) .app-dialog-input{" in STYLE_CSS, (
+        "Missing light mode override for .app-dialog-input"
     )
 
 
-def test_594_app_dialog_btn_has_light_theme_override():
-    """style.css must have a light theme rule for .app-dialog-btn."""
-    assert ":root[data-theme=\"light\"] .app-dialog-btn{" in STYLE_CSS, (
-        "Missing light theme override for .app-dialog-btn"
+def test_594_app_dialog_btn_has_light_mode_override():
+    """style.css must have a light mode rule for .app-dialog-btn."""
+    assert ":root:not(.dark) .app-dialog-btn{" in STYLE_CSS, (
+        "Missing light mode override for .app-dialog-btn"
     )
 
 
-def test_594_app_dialog_close_has_light_theme_override():
-    """style.css must have a light theme rule for .app-dialog-close."""
-    assert ":root[data-theme=\"light\"] .app-dialog-close{" in STYLE_CSS, (
-        "Missing light theme override for .app-dialog-close"
+def test_594_app_dialog_close_has_light_mode_override():
+    """style.css must have a light mode rule for .app-dialog-close."""
+    assert ":root:not(.dark) .app-dialog-close{" in STYLE_CSS, (
+        "Missing light mode override for .app-dialog-close"
     )
 
 
-def test_594_file_rename_input_has_light_theme_override():
-    """style.css must have a light theme rule for .file-rename-input."""
-    assert ":root[data-theme=\"light\"] .file-rename-input{" in STYLE_CSS, (
-        "Missing light theme override for .file-rename-input"
+def test_594_file_rename_input_has_light_mode_override():
+    """style.css must have a light mode rule for .file-rename-input."""
+    assert ":root:not(.dark) .file-rename-input{" in STYLE_CSS, (
+        "Missing light mode override for .file-rename-input"
     )
 
 

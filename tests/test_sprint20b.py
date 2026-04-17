@@ -109,14 +109,14 @@ def test_send_btn_no_old_padding():
     assert 'padding:7px' not in rule and 'padding: 7px' not in rule
 
 
-def test_send_btn_blue_background():
-    """send-btn background must use the blue accent (#7cb9ff or similar)."""
+def test_send_btn_accent_background():
+    """send-btn background must use the accent color variable."""
     css, _ = get_text("/static/style.css")
     send_idx = css.find('.send-btn{')
     brace_open = css.find('{', send_idx)
     brace_close = css.find('}', brace_open)
     rule = css[brace_open:brace_close]
-    assert '7cb9ff' in rule or '5ba8f5' in rule or 'var(--blue)' in rule
+    assert 'var(--accent)' in rule or 'var(--blue)' in rule or '7cb9ff' in rule
 
 
 def test_send_btn_has_transition():

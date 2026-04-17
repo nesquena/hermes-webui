@@ -9,7 +9,7 @@
 <link rel="shortcut icon" href="static/favicon.ico">
 <!-- base href enables subpath mount support; all static paths must stay relative (no leading slash) -->
 <script>(function(){var p=location.pathname.endsWith('/')?location.pathname:(location.pathname.replace(/\/[^\/]*$/,'/')||'/');document.write('<base href="'+location.origin+p+'">');})()</script>
-<script>(function(){var t=localStorage.getItem('hermes-theme');if(t==='system'){t=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';}if(t&&t!=='dark')document.documentElement.dataset.theme=t;})()</script>
+<script>(function(){var t=localStorage.getItem('hermes-theme')||'dark';if(t==='system')t=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(t==='dark')document.documentElement.classList.add('dark');var s=localStorage.getItem('hermes-skin');if(s&&s!=='default')document.documentElement.dataset.skin=s;})()</script>
 <script>(function(){try{document.documentElement.dataset.workspacePanel=localStorage.getItem('hermes-webui-workspace-panel')==='open'?'open':'closed';}catch(e){document.documentElement.dataset.workspacePanel='closed';}})()</script>
 <link rel="stylesheet" href="static/style.css">
   <!-- KaTeX math rendering CSS (loaded eagerly to prevent layout shift) -->
@@ -483,17 +483,34 @@
               </select>
             </div>
             <div class="settings-field">
-              <label for="settingsTheme" data-i18n="settings_label_theme">Theme</label>
-              <select id="settingsTheme" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px" onchange="_applyTheme(this.value)">
-                <option value="system">System (auto)</option>
-                <option value="dark">Dark (default)</option>
-                <option value="light">Light</option>
-                <option value="slate">Slate (charcoal)</option>
-                <option value="solarized">Solarized Dark</option>
-                <option value="monokai">Monokai</option>
-                <option value="nord">Nord</option>
-                <option value="oled">OLED</option>
-              </select>
+              <label data-i18n="settings_label_theme">Theme</label>
+              <div id="themePickerGrid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:4px">
+                <button type="button" data-theme-val="light" onclick="_pickTheme('light')" class="theme-pick-btn" style="border:1px solid var(--border2);border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;background:none;transition:all .15s">
+                  <div style="width:100%;height:40px;border-radius:6px;background:#fff;border:1px solid rgba(0,0,0,.12);margin-bottom:6px;display:flex;align-items:center;justify-content:center">
+                    <svg width="16" height="16" fill="none" stroke="#999" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+                  </div>
+                  <span style="font-size:12px;font-weight:500;color:var(--text)">Light</span>
+                </button>
+                <button type="button" data-theme-val="dark" onclick="_pickTheme('dark')" class="theme-pick-btn" style="border:1px solid var(--border2);border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;background:none;transition:all .15s">
+                  <div style="width:100%;height:40px;border-radius:6px;background:#1a1a2e;border:1px solid rgba(255,255,255,.1);margin-bottom:6px;display:flex;align-items:center;justify-content:center">
+                    <svg width="16" height="16" fill="none" stroke="#666" stroke-width="2" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1111.21 3a7 7 0 009.79 9.79z"/></svg>
+                  </div>
+                  <span style="font-size:12px;font-weight:500;color:var(--text)">Dark</span>
+                </button>
+                <button type="button" data-theme-val="system" onclick="_pickTheme('system')" class="theme-pick-btn" style="border:1px solid var(--border2);border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;background:none;transition:all .15s">
+                  <div style="width:100%;height:40px;border-radius:6px;background:linear-gradient(to right,#fff,#1a1a2e);border:1px solid rgba(0,0,0,.12);margin-bottom:6px;display:flex;align-items:center;justify-content:center">
+                    <svg width="16" height="16" fill="none" stroke="#888" stroke-width="2" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+                  </div>
+                  <span style="font-size:12px;font-weight:500;color:var(--text)">System</span>
+                </button>
+              </div>
+              <input type="hidden" id="settingsTheme" value="dark">
+            </div>
+            <div class="settings-field">
+              <label data-i18n="settings_label_skin">Skin</label>
+              <div id="skinPickerGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:4px">
+              </div>
+              <input type="hidden" id="settingsSkin" value="default">
             </div>
             <div class="settings-field">
               <label for="settingsLanguage" data-i18n="settings_label_language">Language</label>

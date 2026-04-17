@@ -135,19 +135,19 @@ class TestSystemTheme:
             "loadSettings must call _applyTheme() instead of direct data-theme assignment"
         )
 
-    def test_system_option_in_theme_select(self):
+    def test_system_option_in_theme_picker(self):
         html = read("static/index.html")
-        assert 'value="system"' in html, (
-            "Theme <select> must include <option value=\"system\">"
+        assert "_pickTheme('system')" in html, (
+            "Theme picker must include a system theme button"
         )
-        assert "System (auto)" in html, (
-            "Theme picker must show 'System (auto)' label"
+        assert ">System<" in html, (
+            "Theme picker must show 'System' label"
         )
 
-    def test_theme_select_uses_apply_theme_onchange(self):
+    def test_theme_picker_uses_pick_theme(self):
         html = read("static/index.html")
-        assert "_applyTheme(this.value)" in html, (
-            "Theme <select> onchange must call _applyTheme(this.value)"
+        assert "_pickTheme(" in html, (
+            "Theme buttons must call _pickTheme()"
         )
 
     def test_flicker_script_resolves_system(self):
@@ -165,7 +165,7 @@ class TestSystemTheme:
 
     def test_commands_uses_apply_theme(self):
         src = read("static/commands.js")
-        assert "_applyTheme(themeName)" in src, (
+        assert "_applyTheme(val)" in src, (
             "cmdTheme must call _applyTheme() to handle system resolution"
         )
 

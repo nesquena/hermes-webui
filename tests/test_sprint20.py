@@ -120,15 +120,15 @@ def test_mic_btn_recording_state_css():
     assert '.mic-btn.recording' in css
 
 
-def test_mic_recording_color_red():
-    """.mic-btn.recording must use the red accent color #e94560."""
+def test_mic_recording_color_error():
+    """.mic-btn.recording must use the error color variable or red."""
     css, _ = get_text("/static/style.css")
     recording_idx = css.find('.mic-btn.recording')
     # Find the rule block after the selector
     brace_open = css.find('{', recording_idx)
     brace_close = css.find('}', brace_open)
     rule = css[brace_open:brace_close]
-    assert '#e94560' in rule or 'e94560' in rule
+    assert 'var(--error)' in rule or '#e94560' in rule
 
 
 def test_mic_recording_has_animation():
