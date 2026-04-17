@@ -589,35 +589,52 @@ const _SKINS=[
   {name:'Sisyphus', colors:['#A78BFA','#8B5CF6','#7C3AED']},
   {name:'Charizard',colors:['#FB923C','#F97316','#EA580C']},
 ];
+const _VALID_THEMES=new Set(['system','dark','light']);
+const _VALID_SKINS=new Set((_SKINS||[]).map(s=>s.name.toLowerCase()));
+const _LEGACY_THEME_MAP={
+  slate:{theme:'dark',skin:'slate'},
+  solarized:{theme:'dark',skin:'poseidon'},
+  monokai:{theme:'dark',skin:'sisyphus'},
+  nord:{theme:'dark',skin:'slate'},
+  oled:{theme:'dark',skin:'default'},
+};
+let _systemThemeMq=null;
+let _onSystemThemeChange=null;
+
+function _normalizeAppearance(theme,skin){
+  const rawTheme=typeof theme==='string'?theme.trim().toLowerCase():'';
+  const rawSkin=typeof skin==='string'?skin.trim().toLowerCase():'';
+  const legacy=_LEGACY_THEME_MAP[rawTheme];
+  const nextTheme=legacy?legacy.theme:(_VALID_THEMES.has(rawTheme)?rawTheme:'dark');
+  const nextSkin=_VALID_SKINS.has(rawSkin)?rawSkin:(legacy?legacy.skin:'default');
+  return {theme:nextTheme,skin:nextSkin};
+}
+
+function _setResolvedTheme(isDark){
+  document.documentElement.classList.toggle('dark',!!isDark);
+  const link=document.getElementById('prism-theme');
+  if(!link) return;
+  const want=isDark
+    ?'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css'
+    :'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css';
+  if(link.href!==want){ link.href=want; }
+}
 
 function _applyTheme(name){
-  const resolved=(name==='system')
-    ?(window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light')
-    :name;
-  const isDark=(resolved==='dark');
-  document.documentElement.classList.toggle('dark',isDark);
-  // Swap Prism syntax-highlighting theme to match
-  (function(){
-    const link=document.getElementById('prism-theme');
-    if(!link) return;
-    const want=isDark
-      ?'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css'
-      :'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css';
-    if(link.href!==want){ link.href=want; }
-  })();
-  // Re-register OS change listener whenever system theme is active
-  if(name==='system'){
-    const mq=window.matchMedia('(prefers-color-scheme:dark)');
-    const _onOsChange=()=>{
-      const d=mq.matches;
-      document.documentElement.classList.toggle('dark',d);
-      // Also swap Prism theme on OS change
-      const link=document.getElementById('prism-theme');
-      if(link){link.href=d?'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css':'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css';}
-    };
-    mq.removeEventListener('change',_onOsChange);
-    mq.addEventListener('change',_onOsChange);
+  const normalized=_normalizeAppearance(name,'default');
+  if(_systemThemeMq&&_onSystemThemeChange){
+    _systemThemeMq.removeEventListener('change',_onSystemThemeChange);
+    _systemThemeMq=null;
+    _onSystemThemeChange=null;
   }
+  if(normalized.theme==='system'){
+    _systemThemeMq=window.matchMedia('(prefers-color-scheme:dark)');
+    _onSystemThemeChange=()=>_setResolvedTheme(_systemThemeMq.matches);
+    _setResolvedTheme(_systemThemeMq.matches);
+    _systemThemeMq.addEventListener('change',_onSystemThemeChange);
+    return;
+  }
+  _setResolvedTheme(normalized.theme==='dark');
 }
 
 function _applySkin(name){
@@ -627,22 +644,34 @@ function _applySkin(name){
 }
 
 function _pickTheme(name){
-  localStorage.setItem('hermes-theme',name);
-  _applyTheme(name);
-  _syncThemePicker(name);
+  const currentSkin=localStorage.getItem('hermes-skin');
+  const appearance=_normalizeAppearance(name,currentSkin);
+  localStorage.setItem('hermes-theme',appearance.theme);
+  localStorage.setItem('hermes-skin',appearance.skin);
+  _applyTheme(appearance.theme);
+  _applySkin(appearance.skin);
+  _syncThemePicker(appearance.theme);
+  _syncSkinPicker(appearance.skin);
   if(typeof _markSettingsDirty==='function') _markSettingsDirty();
   const hidden=$('settingsTheme');
-  if(hidden) hidden.value=name;
+  if(hidden) hidden.value=appearance.theme;
+  const skinHidden=$('settingsSkin');
+  if(skinHidden) skinHidden.value=appearance.skin;
 }
 
 function _pickSkin(name){
-  const key=(name||'default').toLowerCase();
-  localStorage.setItem('hermes-skin',key);
-  _applySkin(key);
-  _syncSkinPicker(key);
+  const appearance=_normalizeAppearance(localStorage.getItem('hermes-theme'),name);
+  localStorage.setItem('hermes-theme',appearance.theme);
+  localStorage.setItem('hermes-skin',appearance.skin);
+  _applyTheme(appearance.theme);
+  _applySkin(appearance.skin);
+  _syncThemePicker(appearance.theme);
+  _syncSkinPicker(appearance.skin);
   if(typeof _markSettingsDirty==='function') _markSettingsDirty();
   const hidden=$('settingsSkin');
-  if(hidden) hidden.value=key;
+  if(hidden) hidden.value=appearance.skin;
+  const themeHidden=$('settingsTheme');
+  if(themeHidden) themeHidden.value=appearance.theme;
 }
 
 function _syncThemePicker(active){
@@ -705,12 +734,11 @@ function applyBotName(){
     window._soundEnabled=!!s.sound_enabled;
     window._notificationsEnabled=!!s.notifications_enabled;
     window._botName=s.bot_name||'Hermes';
-    const _theme=s.theme||'dark';
-    localStorage.setItem('hermes-theme',_theme);
-    _applyTheme(_theme);
-    const _skin=s.skin||'default';
-    localStorage.setItem('hermes-skin',_skin);
-    _applySkin(_skin);
+    const appearance=_normalizeAppearance(s.theme,s.skin);
+    localStorage.setItem('hermes-theme',appearance.theme);
+    _applyTheme(appearance.theme);
+    localStorage.setItem('hermes-skin',appearance.skin);
+    _applySkin(appearance.skin);
     document.body.classList.toggle('bubble-layout',!!s.bubble_layout);
     if(typeof setLocale==='function'){
       const _lang=typeof resolvePreferredLocale==='function'

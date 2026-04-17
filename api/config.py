@@ -1228,11 +1228,49 @@ _SETTINGS_DEFAULTS = {
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
 }
 _SETTINGS_LEGACY_DROP_KEYS = {"assistant_language"}
+_SETTINGS_THEME_VALUES = {"light", "dark", "system"}
+_SETTINGS_SKIN_VALUES = {
+    "default",
+    "ares",
+    "mono",
+    "slate",
+    "poseidon",
+    "sisyphus",
+    "charizard",
+}
+_SETTINGS_LEGACY_THEME_MAP = {
+    # Legacy full themes now map onto the closest supported theme + accent skin pair.
+    "slate": ("dark", "slate"),
+    "solarized": ("dark", "poseidon"),
+    "monokai": ("dark", "sisyphus"),
+    "nord": ("dark", "slate"),
+    "oled": ("dark", "default"),
+}
+
+
+def _normalize_appearance(theme, skin) -> tuple[str, str]:
+    raw_theme = theme.strip().lower() if isinstance(theme, str) else ""
+    raw_skin = skin.strip().lower() if isinstance(skin, str) else ""
+    legacy = _SETTINGS_LEGACY_THEME_MAP.get(raw_theme)
+    if legacy:
+        next_theme, legacy_skin = legacy
+    elif raw_theme in _SETTINGS_THEME_VALUES:
+        next_theme, legacy_skin = raw_theme, "default"
+    else:
+        # Unknown themes used to exist; default to dark so upgrades stay visually stable.
+        next_theme, legacy_skin = "dark", "default"
+    next_skin = (
+        raw_skin
+        if raw_skin in _SETTINGS_SKIN_VALUES
+        else legacy_skin
+    )
+    return next_theme, next_skin
 
 
 def load_settings() -> dict:
     """Load settings from disk, merging with defaults for any missing keys."""
     settings = dict(_SETTINGS_DEFAULTS)
+    stored = None
     try:
         settings_exists = SETTINGS_FILE.exists()
     except OSError:
@@ -1253,6 +1291,10 @@ def load_settings() -> dict:
                 )
         except Exception:
             logger.debug("Failed to load settings from %s", SETTINGS_FILE)
+    settings["theme"], settings["skin"] = _normalize_appearance(
+        stored.get("theme") if isinstance(stored, dict) else settings.get("theme"),
+        stored.get("skin") if isinstance(stored, dict) else settings.get("skin"),
+    )
     return settings
 
 
@@ -1277,6 +1319,10 @@ _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8}
 def save_settings(settings: dict) -> dict:
     """Save settings to disk. Returns the merged settings. Ignores unknown keys."""
     current = load_settings()
+    pending_theme = current.get("theme")
+    pending_skin = current.get("skin")
+    theme_was_explicit = False
+    skin_was_explicit = False
     # Handle _set_password: hash and store as password_hash
     raw_pw = settings.pop("_set_password", None)
     if raw_pw and isinstance(raw_pw, str) and raw_pw.strip():
@@ -1289,6 +1335,16 @@ def save_settings(settings: dict) -> dict:
         current["password_hash"] = None
     for k, v in settings.items():
         if k in _SETTINGS_ALLOWED_KEYS:
+            if k == "theme":
+                if isinstance(v, str) and v.strip():
+                    pending_theme = v
+                    theme_was_explicit = True
+                continue
+            if k == "skin":
+                if isinstance(v, str) and v.strip():
+                    pending_skin = v
+                    skin_was_explicit = True
+                continue
             # Validate enum-constrained keys
             if k in _SETTINGS_ENUM_VALUES and v not in _SETTINGS_ENUM_VALUES[k]:
                 continue
@@ -1301,6 +1357,13 @@ def save_settings(settings: dict) -> dict:
             if k in _SETTINGS_BOOL_KEYS:
                 v = bool(v)
             current[k] = v
+    theme_value = pending_theme
+    skin_value = pending_skin
+    if theme_was_explicit and not skin_was_explicit:
+        raw_theme = pending_theme.strip().lower() if isinstance(pending_theme, str) else ""
+        if raw_theme not in _SETTINGS_THEME_VALUES:
+            skin_value = None
+    current["theme"], current["skin"] = _normalize_appearance(theme_value, skin_value)
 
     current["default_workspace"] = str(
         resolve_default_workspace(current.get("default_workspace"))

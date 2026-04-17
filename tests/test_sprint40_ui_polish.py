@@ -68,6 +68,21 @@ class TestActiveSessionTitleThemeColor(unittest.TestCase):
             )
 
 
+class TestDarkTopbarSelector(unittest.TestCase):
+
+    def test_topbar_dark_border_uses_root_dark_selector(self):
+        self.assertIn(
+            ":root.dark .topbar{border-bottom:1px solid rgba(255,255,255,.07);}",
+            STYLE_CSS,
+            "Topbar dark border override must target :root.dark after the theme-class migration",
+        )
+        self.assertNotIn(
+            '[data-theme="dark"] .topbar',
+            STYLE_CSS,
+            "Topbar dark border override must not keep the removed data-theme selector",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
 
