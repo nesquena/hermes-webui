@@ -99,7 +99,9 @@
   :root:not(.dark) .sm-btn{border-color:rgba(0,0,0,.1);}
   :root:not(.dark) .sm-btn:hover{background:rgba(0,0,0,.06);border-color:rgba(0,0,0,.15);}
   :root:not(.dark) select{border-color:rgba(0,0,0,.12);}
-  :root:not(.dark) .composer-box{border-color:rgba(0,0,0,.12);}
+  :root:not(.dark) .composer-wrap{background:var(--sidebar);border-top:1px solid var(--border);}
+  :root:not(.dark) .composer-wrap::before{background:linear-gradient(to bottom,transparent,var(--sidebar));}
+  :root:not(.dark) .composer-box{background:var(--bg);border-color:rgba(0,0,0,.12);}
   :root:not(.dark) .composer-box:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg);}
   :root:not(.dark) .suggestion{border-color:rgba(0,0,0,.08);}
   :root:not(.dark) .suggestion:hover{background:var(--accent-bg);border-color:var(--accent-bg-strong);}
