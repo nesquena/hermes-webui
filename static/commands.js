@@ -305,6 +305,23 @@ async function cmdPersonality(args){
   }catch(e){showToast(t('failed_colon')+e.message);}
 }
 
+async function cmdStop(){
+  if(!S.session){showToast(t('no_active_session'));return;}
+  if(!S.activeStreamId){
+    // Match agent /stop: "No active task to stop."
+    showToast('No active task to stop.');
+    return;
+  }
+  // Reuse existing cancelStream() from boot.js -- it already handles
+  // cleanup of UI state (cancel button, S.activeStreamId, busy state).
+  if(typeof cancelStream === 'function'){
+    await cancelStream();
+    showToast('⚡ Stopped. You can continue this session.');
+  }else{
+    showToast('Cancel function unavailable.');
+  }
+}
+
 // ── Autocomplete dropdown ───────────────────────────────────────────────────
 
 let _cmdSelectedIdx=-1;
@@ -373,5 +390,6 @@ HANDLERS.workspace   = cmdWorkspace;
 HANDLERS.theme       = cmdTheme;
 HANDLERS.personality = cmdPersonality;
 HANDLERS.skills      = cmdSkills;
+HANDLERS.stop        = cmdStop;
 HANDLERS.usage       = cmdUsage;     // body replaced in Task 7
 // Tasks 3-7 add: stop, title, retry, undo, status
