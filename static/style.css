@@ -175,7 +175,8 @@
     --strong:#ffffff;--em:#c0c0d0;--code-text:#e8b86d;--code-inline-bg:rgba(255,255,255,.06);--pre-text:#d0d0d8;
     --input-bg:rgba(255,255,255,.03);--hover-bg:rgba(255,255,255,.05);
   }
-  body{background:var(--bg);color:var(--text);height:100vh;height:100dvh;overflow:hidden;display:flex;}
+  html{background:var(--bg);height:100%;}
+  body{background:transparent;color:var(--text);height:100vh;height:100dvh;overflow:hidden;display:flex;}
   .layout{display:flex;width:100%;height:100vh;height:100dvh;min-height:0;}
   .sidebar{width:300px;background:var(--sidebar);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:visible;flex-shrink:0;}
   .sidebar-header{padding:16px 18px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;}
@@ -1410,3 +1411,20 @@ body.bubble-layout .msg-row + .msg-row[data-role="user"] { border-top: none; pad
   .msg-row[data-role="user"] .msg-body { padding: 8px 12px; }
   .msg-row[data-error="1"] .msg-body { padding: 8px 12px; }
 }
+/* ── Wallpaper layer ─────────────────────────────────────────────────────
+   Fixed full-viewport background image, sits behind body content via
+   z-index:-1 (only visible because body has background:transparent).
+   Theme color from html{background:var(--bg)} is the fallback when no
+   wallpaper is set (data-active absent → display:none). */
+#wallpaper{
+  position:fixed;
+  inset:0;
+  z-index:-1;
+  background-size:cover;
+  background-position:center;
+  background-repeat:no-repeat;
+  filter:brightness(var(--wallpaper-brightness,1));
+  pointer-events:none;
+  display:none;
+}
+#wallpaper[data-active]{display:block;}
