@@ -101,6 +101,10 @@ def test_session_compress_roundtrip(monkeypatch, cleanup_test_sessions):
         "provider": requested or "openai",
         "base_url": "https://api.openai.com/v1",
     }
+    fake_hermes_cli = types.ModuleType("hermes_cli")
+    fake_hermes_cli.__path__ = []
+    fake_hermes_cli.runtime_provider = fake_runtime_provider
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
     monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", fake_runtime_provider)
     import hermes_cli.runtime_provider as _rtp
 
@@ -142,7 +146,9 @@ def test_session_compress_roundtrip(monkeypatch, cleanup_test_sessions):
 
 
 def test_static_commands_js_registers_compress_alias(cleanup_test_sessions):
-    with open("/Users/xuefusong/hermes-webui/static/commands.js", encoding="utf-8") as f:
+    from pathlib import Path
+
+    with open(Path(__file__).resolve().parents[1] / "static" / "commands.js", encoding="utf-8") as f:
         src = f.read()
     assert "name:'compress'" in src
     assert "name:'compact'" in src
