@@ -159,6 +159,15 @@ def test_surfaces_js_subscribes_to_agent_activity_stream():
     assert "api/agent-activity/stream" in src
 
 
+def test_surfaces_js_sse_sends_credentials():
+    """EventSource must pass withCredentials:true — otherwise auth-enabled
+    setups hit 401 because browsers omit cookies from same-origin
+    EventSource without this flag. Matches messages.js convention."""
+    src = _read("surfaces.js")
+    assert "withCredentials" in src
+    assert "withCredentials: true" in src or "withCredentials:true" in src
+
+
 def test_surfaces_js_handles_three_sse_event_types():
     src = _read("surfaces.js")
     for event in ("'snapshot'", "'delta'", "'heartbeat'"):

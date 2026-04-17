@@ -59,7 +59,10 @@
   function _openStream() {
     _closeStream();
     try {
-      state.sse = new EventSource('api/agent-activity/stream');
+      // withCredentials:true matches messages.js — hermes cookies are only
+      // forwarded on EventSource when this is set, otherwise auth-enabled
+      // setups get 401 on every /stream request.
+      state.sse = new EventSource('api/agent-activity/stream', { withCredentials: true });
     } catch (e) { _setConnLight('offline'); return _scheduleReconnect(); }
     _setConnLight('connecting');
     state.sse.addEventListener('snapshot', _onSnapshot);
