@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.76] — 2026-04-17
+
+### Fixed
+- **CSP blocked external images in chat** — `img-src` in the Content Security Policy was restricted to `'self'` and `data:`, causing the browser to block any external image URLs (e.g. from Wikipedia, GitHub, or other HTTPS sources) that the agent rendered in a response. Expanded to `img-src 'self' data: https: blob:` so external images load correctly. (Closes #608)
+
 ## [v0.50.75] — 2026-04-17
 
 ### Fixed
