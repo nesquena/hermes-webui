@@ -1139,11 +1139,6 @@ body.resizing{user-select:none;cursor:col-resize;}
   background:rgba(124,185,255,.04);
 }
 .compression-card-running-row .compression-card-label{color:var(--blue);}
-.compression-card-done-row{
-  border-color:rgba(78,201,132,.24);
-  background:rgba(78,201,132,.04);
-}
-.compression-card-done-row .compression-card-label{color:var(--green);}
 .compression-card-error-row{
   border-color:rgba(248,113,113,.28);
   background:rgba(248,113,113,.05);
@@ -1249,6 +1244,82 @@ body.resizing{user-select:none;cursor:col-resize;}
   white-space:pre-wrap;
   word-break:break-word;
   color:var(--muted);
+}
+
+.compression-complete-card{
+  background:rgba(78,201,132,.05);
+  border:1px solid rgba(78,201,132,.18);
+  border-radius:8px;
+  padding:0;
+  margin-left:var(--msg-rail);
+  max-width:var(--msg-max);
+  transition:border-color .15s, background .15s;
+}
+.compression-complete-card:hover{
+  border-color:rgba(78,201,132,.3);
+  background:rgba(78,201,132,.07);
+}
+.compression-complete-header{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  padding:5px 10px;
+  cursor:pointer;
+  user-select:none;
+  color:var(--green);
+  font-size:12px;
+  font-weight:600;
+  opacity:.88;
+}
+.compression-complete-header:hover{opacity:1;}
+.compression-complete-icon{opacity:.78;flex-shrink:0;}
+.compression-complete-label{
+  font-size:11px;
+  font-weight:700;
+  font-family:'SF Mono',ui-monospace,monospace;
+  letter-spacing:.03em;
+  flex-shrink:0;
+}
+.compression-complete-title{
+  flex:1;
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  color:var(--text);
+  font-family:'SF Mono',ui-monospace,monospace;
+  font-size:11px;
+}
+.compression-complete-toggle{
+  margin-left:auto;
+  font-size:10px;
+  color:var(--muted);
+  opacity:.55;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  transform-origin:center;
+  transition:transform .18s ease;
+}
+.compression-complete-card.open .compression-complete-toggle{
+  transform:rotate(90deg);
+}
+.compression-complete-body{
+  max-height:0;
+  opacity:0;
+  overflow:hidden;
+  padding:0 12px;
+  border-top:1px solid transparent;
+  transition:max-height .22s ease, opacity .18s ease, padding .22s ease, border-top-color .22s ease;
+  color:var(--muted);
+  font-size:11px;
+  line-height:1.55;
+}
+.compression-complete-card.open .compression-complete-body{
+  max-height:220px;
+  opacity:1;
+  padding:8px 12px;
+  border-top-color:rgba(78,201,132,.12);
 }
 
 /* ── Scrollbar polish ── */

@@ -1174,6 +1174,21 @@ function _compressionCardsHtml(state){
     : state.phase==='error'
       ? li('x',13)
     : `<span class="compression-card-bubbles"><span></span><span></span><span></span></span>`;
+  const doneCardHtml=state.phase==='done'
+    ? `<div class="compression-complete-card">
+        <div class="compression-complete-header" onclick="this.parentElement.classList.toggle('open')">
+          <span class="compression-complete-icon">${statusIcon}</span>
+          <span class="compression-complete-label">${esc(statusLabel)}</span>
+          <span class="compression-complete-title">${esc(headerText)}</span>
+          <span class="compression-complete-toggle">${li('chevron-right',12)}</span>
+        </div>
+        <div class="compression-complete-body">
+          ${state.summary?.token_line?`<div>${esc(state.summary.token_line)}</div>`:''}
+          ${state.summary?.note?`<span class="compression-note">${esc(state.summary.note)}</span>`:''}
+          ${focusText}
+        </div>
+      </div>`
+    : '';
   const referenceHtml=(state.phase==='done'&&state.referenceText)
     ? _compressionReferenceCardHtml(state.referenceText, false)
     : '';
@@ -1188,14 +1203,16 @@ function _compressionCardsHtml(state){
       </div>
     </div>
     <div class="msg-row compression-row compression-status-row">
-      <div class="compression-card ${state.phase==='done'?'compression-card-done-row':state.phase==='error'?'compression-card-error-row':'compression-card-running-row'}">
-        <div class="compression-card-header">
-          <span class="compression-card-icon">${statusIcon}</span>
-          <span class="compression-card-label">${esc(statusLabel)}</span>
-          <span class="compression-card-command">${esc(headerText)}</span>
-        </div>
-        ${statusBody}
-      </div>
+      ${state.phase==='done'
+        ? doneCardHtml
+        : `<div class="compression-card ${state.phase==='error'?'compression-card-error-row':'compression-card-running-row'}">
+            <div class="compression-card-header">
+              <span class="compression-card-icon">${statusIcon}</span>
+              <span class="compression-card-label">${esc(statusLabel)}</span>
+              <span class="compression-card-command">${esc(headerText)}</span>
+            </div>
+            ${statusBody}
+          </div>`}
     </div>
     ${referenceHtml}`;
 }
