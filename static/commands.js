@@ -5,7 +5,7 @@
 const COMMANDS=[
   {name:'help',      desc:t('cmd_help'),             fn:cmdHelp},
   {name:'clear',     desc:t('cmd_clear'),         fn:cmdClear},
-  {name:'compress',  desc:t('cmd_compress'),       fn:cmdCompress, arg:'focus topic'},
+  {name:'compress',  desc:t('cmd_compress'),       fn:cmdCompress, arg:'[focus topic]'},
   {name:'compact',   desc:t('cmd_compact_alias'),       fn:cmdCompact},
   {name:'model',     desc:t('cmd_model'),  fn:cmdModel,     arg:'model_name'},
   {name:'workspace', desc:t('cmd_workspace'),            fn:cmdWorkspace, arg:'name'},
@@ -57,7 +57,7 @@ function _compressionAnchorMessageKey(m){
 
 function cmdHelp(){
   const lines=COMMANDS.map(c=>{
-    const usage=c.arg?` <${c.arg}>`:'';
+    const usage=c.arg ? (String(c.arg).startsWith('[') ? ` ${c.arg}` : ` <${c.arg}>`) : '';
     return `  /${c.name}${usage} — ${c.desc}`;
   });
   const msg={role:'assistant',content:t('available_commands')+'\n'+lines.join('\n')};

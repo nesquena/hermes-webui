@@ -1057,9 +1057,16 @@ body.resizing{user-select:none;cursor:col-resize;}
   flex-direction:column;
   width:100%;
 }
+.compression-turn{
+  width:100%;
+}
+.compression-turn-blocks{
+  display:flex;
+  flex-direction:column;
+}
 .compression-row{
   margin:0;
-  padding:2px 0;
+  padding:1px 0;
 }
 .compression-card{
   margin-left:var(--msg-rail);

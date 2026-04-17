@@ -1193,7 +1193,7 @@ function _compressionCardsHtml(state){
     ? _compressionReferenceCardHtml(state.referenceText, false)
     : '';
   return `
-    <div class="msg-row compression-row compression-command-row">
+    <div class="compression-row compression-command-row">
       <div class="compression-card compression-card-command-row">
         <div class="compression-card-header">
           <span class="compression-card-icon">${li('settings',13)}</span>
@@ -1202,7 +1202,7 @@ function _compressionCardsHtml(state){
         </div>
       </div>
     </div>
-    <div class="msg-row compression-row compression-status-row">
+    <div class="compression-row compression-status-row">
       ${state.phase==='done'
         ? doneCardHtml
         : `<div class="compression-card ${state.phase==='error'?'compression-card-error-row':'compression-card-running-row'}">
@@ -1218,8 +1218,8 @@ function _compressionCardsHtml(state){
 }
 function _compressionCardsNode(state){
   const wrap=document.createElement('div');
-  wrap.className='compression-block';
-  wrap.innerHTML=_compressionCardsHtml(state);
+  wrap.className='compression-turn';
+  wrap.innerHTML=`<div class="compression-turn-blocks">${_compressionCardsHtml(state)}</div>`;
   return wrap;
 }
 function _isContextCompactionMessage(m){
@@ -1261,7 +1261,7 @@ function _compressionAnchorIndex(visWithIdx, anchorKey, fallbackIdx=null){
 function _compressionReferenceCardHtml(text, open=false){
   const preview=text.split(/\n+/).filter(Boolean).slice(0,2).join(' ');
   return `
-    <div class="msg-row compression-row compression-reference-row" data-raw-text="${esc(text)}">
+    <div class="compression-row compression-reference-row" data-raw-text="${esc(text)}">
       <div class="compression-reference-card${open?' open':''}">
         <div class="compression-reference-header" onclick="this.parentElement.classList.toggle('open')">
           <span class="compression-reference-icon">${li('star',13)}</span>
@@ -1279,7 +1279,7 @@ function _compressionReferenceCardHtml(text, open=false){
 }
 function _contextCompactionMessageHtml(m, tsTitle=''){
   const text=msgContent(m)||String(m.content||'');
-  return _compressionReferenceCardHtml(text, false, tsTitle);
+  return `<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(text, false, tsTitle)}</div></div>`;
 }
 function renderCompressionUi(){
   const el=$('liveCompressionCards');
@@ -1314,8 +1314,6 @@ function renderMessages(){
   const referenceNode=(!compressionState && referenceMessage && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey))
     ? (()=>{const row=document.createElement('div');row.innerHTML=_compressionReferenceCardHtml(referenceText,false);return row.firstElementChild;})()
     : null;
-  let compressionInserted=!compressionNode;
-  let referenceInserted=!referenceNode;
   const visWithIdx=[];
   let rawIdx=0;
   for(const m of S.messages){
@@ -1335,16 +1333,9 @@ function renderMessages(){
   let _prevSepKey=null;
   let currentAssistantTurn=null;
   const assistantSegments=new Map();
+  const userRows=new Map();
   for(let vi=0;vi<visWithIdx.length;vi++){
     const {m,rawIdx}=visWithIdx[vi];
-    if(compressionNode && !compressionInserted && insertionAnchor!==null && vi>Number(insertionAnchor)){
-      inner.appendChild(compressionNode);
-      compressionInserted=true;
-    }
-    if(referenceNode && !referenceInserted && insertionAnchor!==null && vi>Number(insertionAnchor)){
-      inner.appendChild(referenceNode);
-      referenceInserted=true;
-    }
     const _tsSep=m._ts||m.timestamp;
     if(_tsSep){
       const _d=new Date(_tsSep*1000);
@@ -1403,6 +1394,7 @@ function renderMessages(){
       row.dataset.rawText=String(content).trim();
       row.innerHTML=`${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`;
       inner.appendChild(row);
+      userRows.set(rawIdx, row);
       continue;
     }
 
@@ -1441,14 +1433,31 @@ function renderMessages(){
     _assistantTurnBlocks(currentAssistantTurn).appendChild(seg);
     assistantSegments.set(rawIdx, seg);
   }
-  if(compressionNode && !compressionInserted){
-    inner.appendChild(compressionNode);
-    compressionInserted=true;
+
+  function _insertCompressionLikeNode(node){
+    if(!node) return;
+    if(insertionAnchor!==null && visWithIdx[insertionAnchor]){
+      const anchorRawIdx=visWithIdx[insertionAnchor].rawIdx;
+      const anchorSeg=assistantSegments.get(anchorRawIdx);
+      if(anchorSeg){
+        const turn=anchorSeg.closest('.assistant-turn');
+        const blocks=_assistantTurnBlocks(turn);
+        if(blocks){
+          blocks.appendChild(node);
+          return;
+        }
+      }
+      const userRow=userRows.get(anchorRawIdx);
+      if(userRow && userRow.parentElement){
+        userRow.parentElement.insertBefore(node, userRow.nextSibling);
+        return;
+      }
+    }
+    inner.appendChild(node);
   }
-  if(referenceNode && !referenceInserted){
-    inner.appendChild(referenceNode);
-    referenceInserted=true;
-  }
+
+  _insertCompressionLikeNode(compressionNode);
+  _insertCompressionLikeNode(referenceNode);
   renderCompressionUi();
   // Insert settled tool call cards (history view only).
   // During live streaming, tool cards are rendered in #liveToolCards by the
