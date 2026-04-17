@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.75] — 2026-04-17
+
+### Fixed
+- **Test isolation: `pytest tests/` was overwriting `~/.hermes/.env` with test placeholder keys** — two unit tests in `test_onboarding_existing_config.py` called `apply_onboarding_setup()` in-process without mocking `_get_active_hermes_home`, so every test run wrote `OPENROUTER_API_KEY=test-key-fresh` (or `test-key-confirm`) to the production `.env`. Also added `HERMES_BASE_HOME` to the test server subprocess env (hard-locks profile resolution inside the server to the isolated temp state dir) and stripped real provider keys from the inherited subprocess environment. (PR #620)
+
 ## [v0.50.71] — 2026-04-16
 
 ### Fixed
