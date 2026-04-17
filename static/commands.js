@@ -375,6 +375,27 @@ async function cmdRetry(){
   }
 }
 
+async function cmdUndo(){
+  if(!S.session){showToast(t('no_active_session'));return;}
+  if(S.session.is_cli_session){showToast(t('cmd_webui_only_session'));return;}
+  const activeSid = S.session.session_id;
+  try{
+    const r = await api('/api/session/undo',{method:'POST',body:JSON.stringify({session_id:activeSid})});
+    if(r && r.error){showToast(r.error);return;}
+    if(!S.session || S.session.session_id !== activeSid) return;
+    const data = await api('/api/session?session_id=' + encodeURIComponent(activeSid));
+    if(data && data.session){
+      S.messages = data.session.messages || [];
+      S.toolCalls = [];
+      if(typeof clearLiveToolCards === 'function') clearLiveToolCards();
+      renderMessages();
+    }
+    showToast(`↩ Undid ${r.removed_count} message(s).`);
+  }catch(e){
+    showToast('Undo failed: ' + e.message);
+  }
+}
+
 // ── Autocomplete dropdown ───────────────────────────────────────────────────
 
 let _cmdSelectedIdx=-1;
@@ -446,5 +467,6 @@ HANDLERS.skills      = cmdSkills;
 HANDLERS.stop        = cmdStop;
 HANDLERS.title       = cmdTitle;
 HANDLERS.retry       = cmdRetry;
+HANDLERS.undo        = cmdUndo;
 HANDLERS.usage       = cmdUsage;     // body replaced in Task 7
 // Tasks 3-7 add: stop, title, retry, undo, status

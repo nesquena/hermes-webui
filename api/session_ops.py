@@ -55,6 +55,38 @@ def retry_last(session_id: str) -> dict[str, Any]:
     return {'last_user_text': last_user_text, 'removed_count': removed_count}
 
 
+def undo_last(session_id: str) -> dict[str, Any]:
+    """Remove the most recent user message and everything after it.
+
+    Mirrors gateway/run.py:_handle_undo_command. Returns a preview of the
+    removed text so the UI can confirm to the user.
+
+    Raises:
+        KeyError: session not found
+        ValueError: no user message in transcript
+    """
+    s = get_session(session_id)  # acquires LOCK transiently
+    with LOCK:
+        history = s.messages or []
+        last_user_idx = None
+        for i in range(len(history) - 1, -1, -1):
+            if history[i].get('role') == 'user':
+                last_user_idx = i
+                break
+        if last_user_idx is None:
+            raise ValueError('Nothing to undo.')
+
+        removed_text = _extract_text(history[last_user_idx].get('content', ''))
+        removed_count = len(history) - last_user_idx
+        s.messages = history[:last_user_idx]
+    s.save()  # outside LOCK -- save() re-acquires LOCK via _write_session_index()
+    preview = (removed_text[:40] + '...') if len(removed_text) > 40 else removed_text
+    return {
+        'removed_count': removed_count,
+        'removed_preview': preview,
+    }
+
+
 def _extract_text(content: Any) -> str:
     """Flatten message content to plain text. Agent stores either a string
     or a list of {type, text|...} parts; webui needs the user-typed text."""

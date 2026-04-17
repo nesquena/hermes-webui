@@ -113,3 +113,49 @@ def test_retry_does_not_double_append(cleanup_test_sessions):
     assert len(msgs) == 2
     assert msgs[0]['content'] == 'msg A'
     assert msgs[1]['content'] == 'reply A'
+
+
+# ── /api/session/undo ─────────────────────────────────────────────────────
+
+def test_undo_returns_removed_preview(cleanup_test_sessions):
+    sid = _import_session_with_messages(cleanup_test_sessions, [
+        {'role': 'user', 'content': 'first user msg'},
+        {'role': 'assistant', 'content': 'first reply'},
+        {'role': 'user', 'content': 'second user msg'},
+        {'role': 'assistant', 'content': 'second reply'},
+        {'role': 'tool', 'content': 'tool output'},
+    ])
+    r = _post(TEST_BASE, '/api/session/undo', {'session_id': sid})
+    assert r.get('ok') is True
+    assert r.get('removed_count') == 3
+    assert 'second user msg' in r.get('removed_preview', '')
+
+
+def test_undo_truncates_transcript(cleanup_test_sessions):
+    sid = _import_session_with_messages(cleanup_test_sessions, [
+        {'role': 'user', 'content': 'first user msg'},
+        {'role': 'assistant', 'content': 'first reply'},
+        {'role': 'user', 'content': 'second user msg'},
+        {'role': 'assistant', 'content': 'second reply'},
+    ])
+    _post(TEST_BASE, '/api/session/undo', {'session_id': sid})
+    sess = _get(f'/api/session?session_id={sid}')['session']
+    assert len(sess['messages']) == 2
+    assert sess['messages'][-1]['content'] == 'first reply'
+
+
+def test_undo_repeated_until_empty(cleanup_test_sessions):
+    sid = _import_session_with_messages(cleanup_test_sessions, [
+        {'role': 'user', 'content': 'msg A'},
+        {'role': 'assistant', 'content': 'reply A'},
+    ])
+    _post(TEST_BASE, '/api/session/undo', {'session_id': sid})
+    r = _post(TEST_BASE, '/api/session/undo', {'session_id': sid})
+    assert 'error' in r
+    assert 'nothing to undo' in r['error'].lower()
+
+
+def test_undo_unknown_session_returns_404():
+    r = _post(TEST_BASE, '/api/session/undo', {'session_id': 'nonexistent_zzz'})
+    assert 'error' in r
+    assert 'not found' in r['error'].lower()
