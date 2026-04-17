@@ -405,6 +405,8 @@ async function openSkill(name, el) {
   // Highlight active skill
   document.querySelectorAll('.skill-item').forEach(e => e.classList.remove('active'));
   if (el) el.classList.add('active');
+  // Ensure the workspace panel is open so the skill content is actually visible (#643)
+  if (typeof ensureWorkspacePreviewVisible === 'function') ensureWorkspacePreviewVisible();
   try {
     const data = await api(`/api/skills/content?name=${encodeURIComponent(name)}`);
     // Show skill content in right panel preview

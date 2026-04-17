@@ -347,7 +347,7 @@
   .clarify-card.visible .clarify-question{padding-left:1px;}
   /* Sidebar navigation tabs */
   .sidebar-nav{display:flex;border-bottom:1px solid var(--border);flex-shrink:0;padding:6px 8px 0;gap:2px;}
-  .nav-tab{flex:1;padding:10px 4px 8px;font-size:20px;text-align:center;cursor:pointer;color:var(--muted);border:none;background:none;transition:color .15s;border-bottom:2px solid transparent;white-space:nowrap;overflow:hidden;position:relative;}
+  .nav-tab{flex:1;padding:10px 4px 8px;font-size:20px;text-align:center;cursor:pointer;color:var(--muted);border:none;background:none;transition:color .15s;border-bottom:2px solid transparent;white-space:nowrap;overflow:hidden;position:relative;display:flex;align-items:center;justify-content:center;}
   .nav-tab:hover{color:var(--text);}
   .nav-tab:hover::after{content:attr(data-label);position:absolute;bottom:calc(100% + 8px);left:50%;transform:translateX(-50%);background:var(--surface);border:1px solid var(--accent-bg-strong);color:var(--accent-text);font-size:12px;font-weight:700;letter-spacing:.02em;padding:6px 12px;border-radius:8px;white-space:nowrap;pointer-events:none;z-index:50;box-shadow:0 4px 12px rgba(0,0,0,.3);}
   .nav-tab.active{color:var(--accent-text);}
@@ -509,7 +509,7 @@
   .attach-chip{display:flex;align-items:center;gap:5px;background:var(--accent-bg);border:1px solid var(--accent-bg-strong);border-radius:8px;padding:4px 10px;font-size:11px;font-weight:500;color:var(--accent-text);}
   .attach-chip button{background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;line-height:1;padding:0 0 0 3px;}
   .attach-chip button:hover{color:var(--accent);}
-  textarea#msg{width:100%;background:transparent;border:none;outline:none;color:var(--text);font-size:14px;line-height:1.65;padding:12px 16px 6px;resize:none;min-height:44px;max-height:200px;font-family:inherit;}
+  textarea#msg{width:100%;background:transparent;border:none;outline:none;color:var(--text);font-size:16px;line-height:1.65;padding:12px 16px 6px;resize:none;min-height:44px;max-height:200px;font-family:inherit;}
   textarea#msg::placeholder{color:var(--muted);}
   .composer-footer{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 10px 10px;position:relative;}
   .composer-left{display:flex;align-items:center;gap:4px;min-width:0;flex:1;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;}
@@ -701,7 +701,7 @@
     .msg-role{font-size:12px;}
     .composer-wrap{padding:8px 10px 12px!important;}
     .composer-box{border-radius:12px;}
-    .composer-box textarea{font-size:16px;min-height:40px;}
+    .composer-box textarea{min-height:40px;}
     .composer-footer{padding:6px 8px 8px!important;gap:8px;}
     /* icon-only composer chips below 768px */
     .composer-profile-label,
@@ -1341,7 +1341,7 @@ body.bubble-layout .msg-row + .msg-row[data-role="user"] { border-top: none; pad
   border-top: 1px solid transparent;
   transition: max-height .22s ease, opacity .18s ease, padding .22s ease, border-top-color .22s ease;
 }
-.thinking-card.open .thinking-card-body { max-height: 260px; opacity: 1; padding: 8px 12px; border-top-color: var(--accent-bg-strong); }
+.thinking-card.open .thinking-card-body { max-height: 260px; overflow-y: auto; opacity: 1; padding: 8px 12px; border-top-color: var(--accent-bg-strong); }
 .thinking-card-body pre { font-family: 'SF Mono', ui-monospace, monospace; font-size: 11px; line-height: 1.6; color: var(--muted); white-space: pre-wrap; word-break: break-word; margin: 0; }
 
 /* ── Tool cards: tighter chrome to match quieter thinking card ── */
