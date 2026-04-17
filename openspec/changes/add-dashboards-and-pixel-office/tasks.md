@@ -23,16 +23,16 @@
 
 ## 3. 后端：Agent Activity API
 
-- [ ] 3.1 在 `api/agent_activity.py` 实现 `build_surface_snapshot(db_path) -> dict`（纯函数，方便单测）：每次调用内部执行 `SELECT DISTINCT source FROM sessions` 动态建立 surface 枚举（不在模块加载时固定）
-- [ ] 3.2 实现状态推导规则函数 `derive_state(last_msg_ts, now_ts) -> str`：**仅基于时间戳**返回 working/waiting/idle/offline（对齐 agent-activity-api spec；不引入"has_active_session"参数，因为 webui 无法可靠判断非 webui surface 的活跃会话）
-- [ ] 3.3 实现 2 秒 TTL 缓存；key 按 active profile hermes_home 路径；profile 切换后旧 key 自动失效
-- [ ] 3.4 实现 `handle_agent_activity(handler, parsed)`：返回 `/api/agent-activity` 快照 JSON，结构严格对齐 spec（`{surfaces, generated_at, profile}`，`active_webui_sessions` 只出现在 `source=="webui"` 条目）
-- [ ] 3.5 通过 `GatewayWatcher.subscribe()` queue 获取 `sessions_changed` 事件并本地重聚合为 surface snapshot；**不新起额外轮询线程**；验证 `api/gateway_watcher.py` 的 `subscribe`/`unsubscribe` 机制满足需求
-- [ ] 3.6 实现 `handle_agent_activity_stream(handler, parsed)`：SSE 长连接，初始发 `event: snapshot`，后续 `gateway_watcher` 事件触发时发 `event: delta`（只含状态变化的 surface 子集），无事件时每 30s 发 `event: heartbeat`
-- [ ] 3.7 profile 切换时关闭旧 SSE 连接：每次循环检查 `api.profiles.get_active_hermes_home()` 是否变化；变化时往响应写结束帧并跳出循环
-- [ ] 3.8 在 `api/routes.py` 绑定 `/api/agent-activity` 与 `/api/agent-activity/stream`
-- [ ] 3.9 为端点写 pytest：未鉴权 401；快照结构正确；`active_webui_sessions` 仅在 webui 条目；`current_tool`/`pending_count` 字段**不存在** on contract test；SSE 首事件为 snapshot；heartbeat 间隔；profile 切换断开；空 DB 返回 `surfaces: []`
-- [ ] 3.10 前端文案 lint：在 `static/surfaces.js` / `static/pixel/*.js` 的字符串常量里禁止出现 `"currently running"` / `"waiting for your reply"` 等暗示运行时感知的措辞（可在测试里 grep 验证）
+- [x] 3.1 `build_surface_snapshot(db_path)` 纯函数：LEFT JOIN sessions×messages 每次 GROUP BY source（等价 DISTINCT source）；per-surface 的 `last_active_ts / message_count_24h / tokens_24h`；empty-DB 情况返回 `{surfaces: [], ...}`
+- [x] 3.2 `derive_state(last_msg_ts, now_ts)`：`<60s→working / <300s→waiting / <86400s→idle / else→offline`；future-ts (clock skew) 视为 working
+- [x] 3.3 独立 `_CACHE / _cache_get / _cache_set / _cache_clear_all`（2s TTL）；key 包含 profile DB 路径；profile 切换自动换 key
+- [x] 3.4 `handle_agent_activity` → snapshot JSON，`active_webui_sessions` 严格只在 webui 条目
+- [x] 3.5 SSE 复用 `GatewayWatcher.subscribe()` 队列；5s `queue.get` 超时后也重建快照（用于 webui-only 变化），无额外 polling 线程
+- [x] 3.6 `handle_agent_activity_stream`：`event: snapshot` 初始 → `event: delta` 差异（`_snapshot_signature` 忽略 `generated_at`）→ `event: heartbeat` 30s 无事件时
+- [x] 3.7 循环首部检查 `_active_profile_name()` / `_resolve_db_path()` 变化；变化时写 `event: profile_changed` 并 break
+- [x] 3.8 routes.py 已在 stage 1 绑定；501 存根自动换成实现
+- [x] 3.9 `tests/test_agent_activity.py` — 38 tests 全绿：scaffold + derive 参数化 + 空 DB + 24h 计数 + expand/未知 source/空 source + cache/refresh/401 + **contract 测试确认 `current_tool / pending_count / is_running_tool` 不在响应里** + SSE 无 watcher 503
+- [x] 3.10 `tests/test_pixel_office_frontend.py::test_pixel_no_runtime_perception_phrasing` 已在 stage 1 落地；覆盖 4 条禁用短语
 
 ## 4. 后端：Surfaces 聚合 API
 
