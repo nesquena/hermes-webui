@@ -76,8 +76,14 @@ def _strip_thinking_markup(text: str) -> str:
 def _sanitize_generated_title(text: str) -> str:
     """Sanitize LLM-generated title text before persisting to session."""
     s = _strip_thinking_markup(text or '')
+    s = re.sub(
+        r'^\s*(?:[*_`~]+\s*)?(?:session\s+title|title)\s*[:：]\s*(?:[*_`~]+\s*)?',
+        '',
+        s,
+        flags=re.IGNORECASE,
+    )
     s = re.sub(r'^\s*title\s*:\s*', '', s, flags=re.IGNORECASE)
-    s = s.strip(" \t\r\n\"'`")
+    s = s.strip(" \t\r\n\"'`*_~")
     s = re.sub(r'\s+', ' ', s).strip()
     # Guard against chain-of-thought leakage and meta-reasoning patterns.
     if _looks_invalid_generated_title(s):
@@ -149,6 +155,7 @@ def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]
             "Generate a short session title from this conversation start.\n"
             "Use BOTH the user's question and the assistant's visible answer.\n"
             "Return only the title text, 3-8 words, as a topic label.\n"
+            "Do not use markdown, bullets, labels, or prefixes like Session Title:.\n"
             "Do not output a full sentence.\n"
             "Do not output acknowledgements or completion phrases like OK, done, all set, 测试完成.\n"
             "Do not describe internal reasoning.\n"
@@ -159,6 +166,7 @@ def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]
             "Rewrite this conversation start as a concise noun-phrase title.\n"
             "Use the actual topic, not the task outcome.\n"
             "Return title text only.\n"
+            "Do not use markdown, bullets, labels, or prefixes like Session Title:.\n"
             "Never output acknowledgements, completion status, or meta commentary."
         ),
     ]
