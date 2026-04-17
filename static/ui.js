@@ -1143,27 +1143,15 @@ function setCompressionUi(state){
 function _compressionCardsHtml(state){
   if(!state) return '';
   const cmdText=state.commandText||'/compress';
-  const focusText=state.focusTopic?`<div class="compression-card-focus"><span class="compression-card-focus-label">${esc(t('focus_label'))}:</span> ${esc(state.focusTopic)}</div>`:'';
+  const focusText=state.focusTopic?`${t('focus_label')}: ${state.focusTopic}`:'';
   const headerText=state.phase==='done'
     ? (state.summary?.headline||t('compress_complete_label'))
     : state.phase==='error'
       ? (state.errorText||t('compress_failed_label'))
       : (typeof state.beforeCount==='number' ? t('n_messages', state.beforeCount) : '');
-  const statusBody=state.phase==='done'
-    ? `<div class="compression-card-body">
-        ${state.summary?.token_line?`<div>${esc(state.summary.token_line)}</div>`:''}
-        ${state.summary?.note?`<span class="compression-note">${esc(state.summary.note)}</span>`:''}
-        ${focusText}
-      </div>`
-    : state.phase==='error'
-      ? `<div class="compression-card-body compression-card-error-body">
-          <div>${esc(state.errorText||t('compress_failed_label'))}</div>
-          ${focusText}
-        </div>`
-    : `<div class="compression-card-body">
-        <div>${esc(t('compressing'))}</div>
-        ${focusText}
-      </div>`;
+  const statusBody=state.phase==='error'
+    ? [state.errorText||t('compress_failed_label'), focusText].filter(Boolean).join('\n')
+    : [t('compressing'), focusText].filter(Boolean).join('\n');
   const statusLabel=state.phase==='done'
     ? t('compress_complete_label')
     : state.phase==='error'
@@ -1173,46 +1161,44 @@ function _compressionCardsHtml(state){
     ? li('check',13)
     : state.phase==='error'
       ? li('x',13)
-    : `<span class="compression-card-bubbles"><span></span><span></span><span></span></span>`;
+    : `<span class="tool-card-running-dot"></span>`;
   const doneCardHtml=state.phase==='done'
-    ? `<div class="compression-complete-card">
-        <div class="compression-complete-header" onclick="this.parentElement.classList.toggle('open')">
-          <span class="compression-complete-icon">${statusIcon}</span>
-          <span class="compression-complete-label">${esc(statusLabel)}</span>
-          <span class="compression-complete-title">${esc(headerText)}</span>
-          <span class="compression-complete-toggle">${li('chevron-right',12)}</span>
-        </div>
-        <div class="compression-complete-body">
-          ${state.summary?.token_line?`<div>${esc(state.summary.token_line)}</div>`:''}
-          ${state.summary?.note?`<span class="compression-note">${esc(state.summary.note)}</span>`:''}
-          ${focusText}
-        </div>
-      </div>`
+    ? _compressionStatusCardHtml({
+        statusLabel,
+        previewText: headerText,
+        detail: [state.summary?.token_line, state.summary?.note, focusText].filter(Boolean).join('\n'),
+        icon: statusIcon,
+        open: true,
+        variantClass: 'tool-card-compress-complete',
+      })
     : '';
   const referenceHtml=(state.phase==='done'&&state.referenceText)
     ? _compressionReferenceCardHtml(state.referenceText, false)
     : '';
   return `
-    <div class="compression-row compression-command-row">
-      <div class="compression-card compression-card-command-row">
-        <div class="compression-card-header">
-          <span class="compression-card-icon">${li('settings',13)}</span>
-          <span class="compression-card-label">${esc(t('command_label'))}</span>
-          <span class="compression-card-command">${esc(cmdText)}</span>
+    <div class="tool-card-row compression-card-row" data-compression-card="1">
+      <div class="tool-card tool-card-compress-command">
+        <div class="tool-card-header" onclick="this.closest('.tool-card').classList.toggle('open')">
+          <span class="tool-card-icon">${li('settings',13)}</span>
+          <span class="tool-card-name">${esc(t('command_label'))}</span>
+          <span class="tool-card-preview">${esc(cmdText)}</span>
         </div>
       </div>
     </div>
-    <div class="compression-row compression-status-row">
+    <div class="tool-card-row compression-card-row" data-compression-card="1">
       ${state.phase==='done'
         ? doneCardHtml
-        : `<div class="compression-card ${state.phase==='error'?'compression-card-error-row':'compression-card-running-row'}">
-            <div class="compression-card-header">
-              <span class="compression-card-icon">${statusIcon}</span>
-              <span class="compression-card-label">${esc(statusLabel)}</span>
-              <span class="compression-card-command">${esc(headerText)}</span>
-            </div>
-            ${statusBody}
-          </div>`}
+        : _compressionStatusCardHtml({
+            statusLabel,
+            previewText: headerText,
+            detail: statusBody,
+            icon: statusIcon,
+            open: false,
+            variantClass: state.phase==='error'
+              ? 'tool-card-compress-error'
+              : 'tool-card-compress-running',
+          })
+      }
     </div>
     ${referenceHtml}`;
 }
@@ -1261,20 +1247,47 @@ function _compressionAnchorIndex(visWithIdx, anchorKey, fallbackIdx=null){
 function _compressionReferenceCardHtml(text, open=false){
   const preview=text.split(/\n+/).filter(Boolean).slice(0,2).join(' ');
   return `
-    <div class="compression-row compression-reference-row" data-raw-text="${esc(text)}">
-      <div class="compression-reference-card${open?' open':''}">
-        <div class="compression-reference-header" onclick="this.parentElement.classList.toggle('open')">
-          <span class="compression-reference-icon">${li('star',13)}</span>
-          <span class="compression-reference-label">${esc(t('context_compaction_label'))}</span>
-          <span class="compression-reference-kind">${esc(t('reference_only_label'))}</span>
-          <span class="compression-reference-preview">${esc(preview)}</span>
-          <span class="compression-reference-toggle">${li('chevron-right',12)}</span>
-          <button class="msg-copy-btn msg-action-btn compression-reference-copy" title="${t('copy')}" onclick="copyMsg(this);event.stopPropagation()">${li('copy',13)}</button>
+    <div class="tool-card-row compression-card-row" data-compression-card="1" data-raw-text="${esc(text)}">
+      <div class="tool-card tool-card-compress-reference${open?' open':''}">
+        <div class="tool-card-header" onclick="this.closest('.tool-card').classList.toggle('open')">
+          <span class="tool-card-icon">${li('star',13)}</span>
+          <span class="tool-card-name">${esc(t('context_compaction_label'))}</span>
+          <span class="tool-card-preview">${esc(t('reference_only_label'))} · ${esc(preview)}</span>
+          <span class="tool-card-toggle">${li('chevron-right',12)}</span>
+          <button class="msg-copy-btn msg-action-btn tool-card-copy compression-reference-copy" title="${t('copy')}" onclick="copyMsg(this);event.stopPropagation()">${li('copy',13)}</button>
         </div>
-        <div class="compression-reference-body">
+        <div class="tool-card-detail">
+          <div class="tool-card-result">
           <pre>${esc(text)}</pre>
         </div>
+        </div>
       </div>
+      
+    </div>`;
+}
+function _compressionStatusCardHtml({
+  statusLabel,
+  previewText,
+  detail,
+  icon,
+  open=false,
+  variantClass='',
+}){
+  const statusDetail = String(detail || '').trim();
+  const hasBody = !!statusDetail;
+  const openClass = open ? ' open' : '';
+  const statusIcon = icon;
+  const bodyHtml = hasBody ? `<div class="tool-card-detail"><div class="tool-card-result"><pre>${esc(statusDetail)}</pre></div></div>` : '';
+  const toggleHtml = hasBody ? `<span class="tool-card-toggle">${li('chevron-right',12)}</span>` : '';
+  return `
+    <div class="tool-card ${variantClass}${openClass}">
+      <div class="tool-card-header" onclick="this.closest('.tool-card').classList.toggle('open')">
+        ${statusIcon}
+        <span class="tool-card-name">${esc(statusLabel)}</span>
+        <span class="tool-card-preview">${esc(previewText)}</span>
+        ${toggleHtml}
+      </div>
+      ${bodyHtml}
     </div>`;
 }
 function _contextCompactionMessageHtml(m, tsTitle=''){
@@ -1534,7 +1547,7 @@ function renderMessages(){
     if(derived.length) S.toolCalls=derived;
   }
   if(!S.busy && S.toolCalls && S.toolCalls.length){
-    inner.querySelectorAll('.tool-card-row').forEach(el=>el.remove());
+    inner.querySelectorAll('.tool-card-row:not([data-compression-card])').forEach(el=>el.remove());
     const byAssistant = {};
     for(const tc of S.toolCalls){
       const key = tc.assistant_msg_idx !== undefined ? tc.assistant_msg_idx : -1;

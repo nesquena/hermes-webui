@@ -1074,8 +1074,55 @@ body.resizing{user-select:none;cursor:col-resize;}
   display:flex;
   flex-direction:column;
 }
+
+.compression-card-row{
+  margin:0;
+  padding:0;
+}
+.compression-card-row + .compression-card-row{
+  margin-top:2px;
+}
+.tool-card-compress-command{
+  background:rgba(201,168,76,.04);
+  border-color:rgba(201,168,76,.22);
+}
+.tool-card-compress-command .tool-card-name{
+  color:var(--gold);
+}
+.tool-card-compress-running{
+  background:rgba(124,185,255,.04);
+  border-color:rgba(124,185,255,.24);
+}
+.tool-card-compress-running .tool-card-name{
+  color:var(--blue);
+}
+.tool-card-compress-error{
+  background:rgba(248,113,113,.05);
+  border-color:rgba(248,113,113,.28);
+}
+.tool-card-compress-error .tool-card-name{
+  color:#fca5a5;
+}
+.tool-card-compress-complete{
+  background:rgba(78,201,132,.05);
+  border-color:rgba(78,201,132,.18);
+}
+.tool-card-compress-complete .tool-card-name{
+  color:var(--green);
+}
+.tool-card-compress-reference{
+  background:rgba(124,185,255,.04);
+  border-color:rgba(124,185,255,.18);
+}
+.tool-card-compress-reference:hover{
+  border-color:rgba(124,185,255,.28);
+}
+.tool-card-compress-reference .tool-card-name{
+  color:var(--blue);
+}
+
 .compression-row{
-  margin:0 0 3px;
+  margin:0 0 4px;
   padding:0;
 }
 .compression-card{
