@@ -1200,7 +1200,7 @@ body.resizing{user-select:none;cursor:col-resize;}
 :root.dark[data-skin="ares"] { --user-bubble-text: #1a1a2a; }
 :root.dark[data-skin="mono"] { --user-bubble-text: #1a1a2a; }
 :root.dark[data-skin="slate"] { --user-bubble-text: #0f172a; }
-:root.dark[data-skin="poseidon"] { --user-bubble-text: #fff; }
+:root.dark[data-skin="poseidon"] { --user-bubble-text: #0a1628; }
 :root.dark[data-skin="sisyphus"] { --user-bubble-text: #1a1a2a; }
 :root.dark[data-skin="charizard"] { --user-bubble-text: #1a1a2a; }
 
