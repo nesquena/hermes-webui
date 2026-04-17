@@ -16,23 +16,36 @@
 - **THEN** 该记录在前端合并入 `other` 卡片，卡片标题显示原始字符串 `line` 以便识别
 
 ### Requirement: Surface 卡片内容
-每张 surface 卡 SHALL 展示以下字段（严格对齐 agent-activity-api 的数据能力边界，不含 `current_tool`）：surface 名称 + 图标、`active_session_count`（过去 30min 有活动且未 ended 的 session 数）、最近一次活动时间（相对时间）、最近 24h 消息数、最近 24h token 消耗（来自 `sessions` SUM）、状态指示灯（working / waiting / idle / offline）。
+每张 surface 卡 SHALL 展示至少以下字段：surface 名称 + 图标、最近一次活动时间（相对时间）、最近 24h 消息数、最近 24h token 消耗、状态指示灯（working / waiting / idle / offline）。仅当 `source == "webui"` 时 SHALL 额外显示 "active webui sessions: N"；非 webui surface **不展示** "active sessions" 字段（因为 webui 无法可靠获取 telegram/discord 等 surface 的活跃会话数，避免误导）。
 
 #### Scenario: 活跃 surface 卡
 - **WHEN** 某 surface 最近 60s 内有新消息
-- **THEN** 卡片状态灯为 `working`（绿色），顶部显示 "active now"
+- **THEN** 卡片状态灯为 `working`（绿色），顶部显示 "Last message N seconds ago"
 
 #### Scenario: 离线 surface 卡
-- **WHEN** 某 surface 当前无任何活跃 session 且过去 24h 无活动
-- **THEN** 卡片状态灯为 `offline`（灰色），依然展示历史累计 token 但不显示 "active now"
+- **WHEN** 某 surface 最近 24h 无活动
+- **THEN** 卡片状态灯为 `offline`（灰色），依然展示历史累计 24h 计数（可能全 0）
 
-#### Scenario: 点击卡片跳转（依赖前置任务）
+#### Scenario: webui 卡独占 active sessions 字段
+- **WHEN** 卡片渲染 webui surface
+- **THEN** 显示 "N active sessions" 字样并取值自 `active_webui_sessions`
+- **WHEN** 卡片渲染 telegram surface
+- **THEN** 不渲染 "active sessions" 字样
+
+### Requirement: 点击卡片就地展开详情
+系统 SHALL 在用户点击某 surface 卡片时**就地展开**该 surface 的最近 N 条 session 摘要（折叠式抽屉），而**不跳转**到 Chat 面板。理由：现有 `/api/sessions` 对 webui 会话无统一 `source` 字段（`api/routes.py:554`），现有 `filterSessions()`（`static/sessions.js:353`）只支持标题/内容关键字搜索，不支持按 source 筛选。跨面板 source 过滤需要改动 `/api/sessions` 响应契约与 `filterSessions` 函数——不在本 change 范围。
+
+#### Scenario: 点击展开
 - **WHEN** 用户点击某 surface 卡片
-- **THEN** 跳转到 Chat 面板并筛选该 surface 的 session 列表
-- **PREREQUISITE**: 该 Scenario 依赖两个前置变更（见 tasks 2.0a / 2.0b）：
-  1. 后端 `/api/sessions` 响应中**所有** session（含 webui）SHALL 返回统一的 `source` 字段；当前 WebUI 会话无此字段，CLI 会话用 `source_tag`，需合并为统一 `source`
-  2. 前端 `static/sessions.js` 的 `filterSessions()` 当前仅按标题 / 内容过滤（`sessions.js:353`），需扩展为支持按 `source` 过滤，接受一个可选的 `sourceFilter` 参数
-- **AND** 若上述两个前置任务在本 change 未完成，本 Scenario SHALL 降级：点击卡片改为 Toast 提示 "Session filtering by surface coming soon"，不做跳转
+- **THEN** 卡片下方折叠展开区域，异步拉取 `/api/surfaces?source=<src>&expand=1` 获取该 surface 最近 5 条 session 摘要（title / model / last_activity / message_count）
+
+#### Scenario: 再次点击折叠
+- **WHEN** 用户再次点击已展开的卡片
+- **THEN** 抽屉收起；再次展开时复用最近一次拉取结果（30s 内）
+
+#### Scenario: 不跨面板跳转
+- **WHEN** 用户点击卡片
+- **THEN** 不切换 panel tab，不调用 `switchPanel('chat')`，不调用 `filterSessions()`
 
 ### Requirement: 实时更新
 Surface Dashboard SHALL 通过 SSE 实时接收 surface 状态变更，延迟不超过 10 秒。
@@ -47,20 +60,25 @@ Surface Dashboard SHALL 通过 SSE 实时接收 surface 状态变更，延迟不
 - **THEN** 客户端在 5 秒内自动重连（复用现有 `EventSource` 重连策略）；重连成功后立即拉取最新全量快照
 
 ### Requirement: 后端聚合端点 /api/surfaces
-系统 SHALL 提供 `GET /api/surfaces` 返回当前 active profile 全部 surface 的快照数据 `{surfaces: [{source, icon_key, state, active_session_count, last_activity, messages_24h, tokens_24h}]}`。经 `require_auth` 鉴权。数据源严格限定为 `state.db` SELECT 聚合；**不得** 从 `SESSIONS` LRU 推断非 webui surface 的 `active_session_count`（见 agent-activity-api spec 的"数据能力边界"）。
+系统 SHALL 提供 `GET /api/surfaces` 返回当前 active profile 全部 surface 的快照 `{surfaces: [{source, state, last_active_ts, message_count_24h, tokens_24h, active_webui_sessions?}], profile, generated_at}`。`active_webui_sessions` 仅出现在 `source=="webui"` 的条目。本端点 SHALL 支持查询参数 `?source=<src>&expand=1` 返回指定 surface 的最近 5 条 session 摘要 `{sessions: [{session_id, title, model, last_activity, message_count}]}`，用于"点击卡片就地展开"。端点 SHALL 经 `require_auth` 鉴权。
 
 #### Scenario: 全量快照
 - **WHEN** 客户端首次打开 Surfaces 面板
 - **THEN** GET `/api/surfaces` 返回所有 surface 的当前快照
-- **AND** 快照完全来自 `state.db` 聚合查询（`sessions` + `messages` JOIN）
+- **AND** 快照来自 `state.db` 的 SELECT-only 查询；webui 条目额外注入 `active_webui_sessions`（从 webui 进程内的 `SESSIONS` LRU 缓存计数）
 
-#### Scenario: icon_key 由后端发出
-- **WHEN** 响应构建时遇到已知 source（如 `weixin`）
-- **THEN** 附加 `icon_key = "weixin"` 供前端字典映射；未知 source 的 `icon_key = "other"` 但 `source` 字段仍保留原始字符串
+#### Scenario: 展开查询
+- **WHEN** 客户端请求 `/api/surfaces?source=telegram&expand=1`
+- **THEN** 响应为 `{sessions: [...]}`，包含该 source 下按 `last_activity DESC` 排序的前 5 条 session 摘要
+- **AND** session 标题经 `_redact_text` 脱敏
 
 #### Scenario: 查询缓存
-- **WHEN** 2 秒内重复请求
+- **WHEN** 2 秒内重复请求（相同参数）
 - **THEN** 命中内存缓存，不再触发 DB 查询
+
+#### Scenario: 未知 source 的展开请求
+- **WHEN** 客户端请求 `?source=bogus&expand=1` 但该 source 不在 `SELECT DISTINCT source` 结果内
+- **THEN** 返回 `{sessions: []}`（空列表，非 404）
 
 ### Requirement: 移动端降级
 在视口宽度小于 640px 时，Surface Dashboard SHALL 仍可用，卡片 SHALL 垂直堆叠成单列。

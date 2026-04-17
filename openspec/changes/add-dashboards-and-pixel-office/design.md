@@ -103,21 +103,21 @@ OpenClaw 一个 agent = 一个角色。hermes 单 agent，需要重新定义"谁
 - 放弃：按 session —— 数量膨胀到几十个，办公室会挤爆
 - 放弃：按 profile —— 多 profile 用户占比低，覆盖面窄
 
-`surface` 的枚举值以 `state.db` 的 `sessions.source` 列实际值为准。**每次查询都按当前 active profile 独立 `SELECT DISTINCT source FROM sessions`**（不得在启动时一次性固定）——不同 profile 的 source 集合不同，按 profile hermes_home 路径做缓存 key、profile 切换时失效对应缓存。**2026-04-17 验证**：当前 DB 仅观察到 `cli` 和 `weixin`；`sessions` 有 `idx_sessions_source` 索引保证 `DISTINCT source` 查询 O(log n)。前端图标字典预置以下已知 surface：`cli / webui / weixin / telegram / discord / slack / signal / whatsapp / sms / email / cron`。未在字典中的归 `other` 卡片，label 仍显示原始 source 字符串。
+`surface` 的枚举值以 `state.db` 的 `sessions.source` 列实际值为准——**每次构建快照时对 active profile 的 DB 执行 `SELECT DISTINCT source FROM sessions`**，不在启动时固定。理由：不同 profile 的 source 集合可能完全不同（比如 profile A 只用过 cli，profile B 有 telegram+webui），启动时固定枚举会在 profile 切换后漏 surface 或残留旧 surface。动态查询成本可忽略：`sessions` 有 `idx_sessions_source` 索引，DISTINCT 查询 O(log n)，且与 D6 的 2 秒快照缓存叠加后每 profile 只实际查一次/2s。
 
-### D4. 实时通道 —— 复用现有 SSE（但注意数据源边界）
+**2026-04-17 验证**：当前 DB 仅观察到 `cli` 和 `weixin`。前端图标字典预置以下已知 surface：`cli / webui / weixin / telegram / discord / slack / signal / whatsapp / sms / email / cron`。未在字典中的归 `other` 卡片，label 仍显示原始 source 字符串。
 
-已有 `/api/sessions/gateway/stream`（SSE）由 `gateway_watcher` 5s 推送。新增 `/api/agent-activity/stream` **独立 endpoint** 但共享 DB 快照缓存，不改动现有 `gateway_watcher` 事件契约。前端 Pixel Office 和 Surface Dashboard 共用同一个 EventSource。
+### D4. 实时通道 —— 复用现有 SSE
 
-**⚠️ 数据源真相（源码已核实，见 D9）**：
-- `gateway_watcher._get_agent_sessions_from_db()` WHERE 子句是 `source != 'webui'`——**只**返回非 webui 会话；本 change 需额外查询 webui surface
-- `api/models.py` 的 `SESSIONS` 是 WebUI 会话的 **LRU 缓存**（`SESSIONS_MAX=100`），**不是** 跨 surface 实时注册表——不得用它判定 telegram/discord 的 active session 状态
-- `current_tool`（"该 surface 此刻正在执行哪个工具"）**无真相源**——已从本 change 响应字段中移除
+已有 `/api/sessions/gateway/stream`（SSE）由 `gateway_watcher` 5s 推送。新增 `/api/agent-activity/stream` 作为**独立 endpoint 但共享 gateway_watcher 的轮询结果**——通过 `GatewayWatcher.subscribe()` 的 queue 机制拿到 `sessions_changed` 事件，本地 agent_activity 模块再按 surface 聚合产出 `snapshot` / `delta` 事件。不改现有 `/api/sessions/gateway/stream` 的事件格式。前端 Pixel Office 和 Surface Dashboard 共用同一个 EventSource。
 
-状态推导（只用能获得的数据，定义详见 agent-activity-api spec）：
-- 基于 `sessions.ended_at IS NULL AND MAX(messages.timestamp) > now-1800s` 判定 `active_session`
-- `working / waiting / idle / offline` 仅从 session × message timestamp 推导
-- `last_tool_name`（可选字段）：来自 `messages.tool_name` 最近一条记录，UI 必须显示为"最近一次工具调用"而非"正在使用"
+空闲状态推导（仅基于 `MAX(messages.timestamp)` per surface，不依赖 hermes-agent 内部状态）：
+- `working`: 该 surface 最近 60 秒内 `state.db` 有新 message
+- `waiting`: 该 surface 最近一条 message 在 60–300s 前
+- `idle`: 该 surface 最近一条 message 在 300s – 24h 前
+- `offline`: 该 surface 超过 24h 无 message，或该 profile 的 `sessions.source` 枚举里根本不存在
+
+⚠️ **重要**：这是"数据库视角"的状态，不是"agent 真实工作视角"。例如 telegram surface 此刻正在处理一条慢工具调用（webui 不可见），从 state.db 看可能是 `waiting`。这个不准确我们接受——文案上明确写 "based on message activity"，不使用 "the agent is currently doing X" 这种暗示运行时感知的措辞。真正的运行时状态采集需要 agent↔webui IPC，属 D9 范围。
 
 ### D5. 图表渲染 —— Inline SVG，不引第三方库
 
@@ -143,20 +143,36 @@ hermes 已有 sidebar nav-tab 模式（Chat/Tasks/Skills/Memory/Spaces/Profiles/
 - 数据 redaction：复用 `redact_session_data` / `_redact_text`，若 surface 展示 session 标题需脱敏
 - Profile 隔离：所有 DB path 经 `api.profiles.get_active_hermes_home()`，切 profile 后 cache 失效（mtime check）
 
-### D9. 源码核实的数据真相源（反向约束设计）
+### D9. 运行时真相源边界（本 change 不做的事）
 
-审查反馈（2026-04-17）发现原方案引用了若干"看似存在但其实没有"的运行时真相源，本节把已核实的**真相边界**落成设计约束：
+hermes 的运行时分两个进程：
+- **hermes-agent** —— 真正执行模型调用、工具调用、收发 telegram/discord 消息的长进程
+- **hermes-webui** —— 本项目，HTTP 服务 + 浏览器 UI
 
-| 声明 | 源码核实结果 | 设计应对 |
-|---|---|---|
-| `SESSIONS` 是"跨 surface 活跃会话注册表" | ❌ 错。它是 `api/models.py` 定义、`SESSIONS_MAX=100` 的 WebUI JSON LRU 缓存；telegram/discord 等 surface 的会话不会进这个 map | `/api/agent-activity` 后端**不得** 用 `SESSIONS` 推断非 webui surface 的 `active_session_count`；仅用它判定"当前浏览器 session 是否属于某 surface" |
-| `gateway_watcher` 能提供 `current_tool` | ❌ 错。该模块 `_get_agent_sessions_from_db` 只返 `source/message_count/last_activity` 等字段，没有任何实时 tool 状态 | 从响应中删除 `current_tool`；改为可选的 `last_tool_name`（来自 `messages.tool_name`）并明确 UI 文案 |
-| `gateway_watcher` 覆盖所有 surface | ❌ 错。它 WHERE 子句 `source != 'webui'` | 本 change 需在 `api/agent_activity.py` **额外** 聚合 webui surface |
-| `/api/sessions` 返回统一 source 字段 | ❌ 错。WebUI 会话无 source 字段，CLI 会话用 `source_tag`（`api/models.py:306`，`routes.py:554`） | 新增前置任务 2.0a：为所有 session 返回统一 `source` 字段 |
-| `filterSessions()` 支持按 surface 过滤 | ❌ 错。它当前仅按标题/内容搜（`static/sessions.js:353`） | 新增前置任务 2.0b：扩展 `filterSessions(sourceFilter?)`；若任务未完成，"点击卡片跳转"降级为 Toast |
-| `switchPanel()` 在 `static/ui.js` | ❌ 错。定义在 `static/panels.js:1` | 修正 tasks 5.3 的文件路径 |
+两个进程目前**只通过 `state.db` 文件共享数据**。这意味着从 webui 侧能看到的 "真相" 只有：
+- 已经写入 `state.db` 的 session 元数据和历史 message（append-only，带时间戳）
+- 本 webui 进程内的 `SESSIONS` LRU 缓存（**仅 WebUI 会话**的临时状态，如 `active_stream_id` / `pending_user_message`）—— 不覆盖 telegram/discord 等 gateway surface
 
-这一节不是风险记录，而是**设计层的硬边界**：任何 spec 或任务只要依赖这里标 ❌ 的假设，都必须改成真相源或降级处理。
+webui **无法**从现有通道可靠获知：
+- telegram / discord surface 当前是否正在处理一条消息（agent 进程内部的 tool-call 栈）
+- 任何 surface 的 `current_tool`（哪个工具在跑）
+- `pending_approval_count`（approval 也只在 webui 进程内部）
+- 其他 surface 的 `is_waiting_for_user_input`
+
+因此本 change 的 spec / 前端文案明确：
+- **仅使用"数据库视角"的状态**（基于 message timestamp + source 聚合）
+- 不承诺 `current_tool` / `pending_count` 等运行时字段
+- Pixel Office 的角色动作（type / walk / sit）只由 surface.state（working/waiting/idle/offline）决定，**不**依赖 current_tool
+- 未来补 agent↔webui IPC（比如 agent 通过 UNIX socket 或 state.db 新表写入 heartbeat/current_tool）属另一个 change
+
+### D10. "点击 Surface 卡片"的交互范围收敛
+
+proposal 初稿写"点击卡片跳到 Chat 并用 filterSessions 过滤该 surface"。核实发现：
+- `filterSessions()`（`static/sessions.js:353`）只按标题 + 消息内容关键字搜索，无 source 筛选能力
+- `/api/sessions`（`api/routes.py:554`）合并 webui + cli 两路；webui session 没有统一的 `source` 字段；cli session 暴露的是 `source_tag`（`api/models.py:320`）
+- 要按 source 筛选 session 列表，需要（a）统一 `/api/sessions` 的 source 字段（b）扩展 `filterSessions` 支持 source 过滤——**两者本身是一个独立 change**
+
+本 change 范围收敛：点击卡片**不跳转**，而是**就地展开**该 surface 的最近 N 条 session（调用 `/api/surfaces?source=telegram&expand=1` 返回 session 子集，前端在卡片内渲染折叠详情）。保持本 change 自包含、不改 `/api/sessions`。future change 再做"按 surface 筛选 session 列表"的整合。
 
 ## Risks / Trade-offs
 
@@ -170,6 +186,8 @@ hermes 已有 sidebar nav-tab 模式（Chat/Tasks/Skills/Memory/Spaces/Profiles/
 | sprite base64 太大撑爆 HTML | Sprites 放独立 `.js` 文件加载，首屏不 inline；仅 Pixel tab 打开时按需 `<script>` 注入 |
 | Surface Dashboard 的 source 枚举不稳定（将来新增 slack/sms） | 后端 distinct 查询动态建立；未知值归 `other` 角色；前端字典失败时 fallback 到 source 字符串 |
 | OpenClaw 代码的许可证（参考移植）| OpenClaw 是 MIT；我们不是"修改+再发布"而是"重新实现"，行为层借鉴但代码独立编写，许可兼容 |
+| 用户误以为 Pixel Office 的 "working 角色" 代表 agent 正在执行工具 | 文案明确 "based on recent messages"；角色 tooltip 显示 "Last message: 42s ago"；不用 "Agent is currently running Bash" 这类暗示运行时感知的语言（见 D9） |
+| `/api/surfaces` 的 `active_webui_sessions` 字段只反映 webui 进程缓存，不反映 telegram/discord | 字段名明确加 `webui_` 前缀；其他 surface 的 `active_sessions` 字段不存在（而非返回 0，避免误导） |
 
 ## Migration Plan
 

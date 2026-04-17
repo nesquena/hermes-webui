@@ -781,6 +781,33 @@ def handle_get(handler, parsed) -> bool:
             {"name": get_active_profile_name(), "path": str(get_active_hermes_home())},
         )
 
+    # ── Dashboards API (stubs for add-dashboards-and-pixel-office change) ──
+    # All handlers return 501 until sections 2-4 in tasks.md land.
+    if parsed.path == "/api/stats/summary":
+        from api.stats import handle_stats_summary
+        return handle_stats_summary(handler, parsed)
+    if parsed.path == "/api/stats/timeseries":
+        from api.stats import handle_stats_timeseries
+        return handle_stats_timeseries(handler, parsed)
+    if parsed.path == "/api/stats/response-time":
+        from api.stats import handle_stats_response_time
+        return handle_stats_response_time(handler, parsed)
+    if parsed.path == "/api/stats/heatmap":
+        from api.stats import handle_stats_heatmap
+        return handle_stats_heatmap(handler, parsed)
+    if parsed.path == "/api/stats/models":
+        from api.stats import handle_stats_models
+        return handle_stats_models(handler, parsed)
+    if parsed.path == "/api/agent-activity":
+        from api.agent_activity import handle_agent_activity
+        return handle_agent_activity(handler, parsed)
+    if parsed.path == "/api/agent-activity/stream":
+        from api.agent_activity import handle_agent_activity_stream
+        return handle_agent_activity_stream(handler, parsed)
+    if parsed.path == "/api/surfaces":
+        from api.agent_activity import handle_surfaces
+        return handle_surfaces(handler, parsed)
+
     return False  # 404
 
 

@@ -28,19 +28,24 @@ Pixel Office SHALL 为每个活跃 surface 创建一个像素角色。角色数 
 - **THEN** 超出的 surface 合并为一个 `+N` 徽章角色，避免画面拥挤
 
 ### Requirement: 角色行为状态机
-角色 SHALL 根据桥接层推送的 surface 状态表现对应行为：
+角色 SHALL 仅根据桥接层推送的 surface `state`（working/waiting/idle/offline）决定行为——**不依赖 `current_tool` 等运行时字段**（agent-activity API 不提供，见 agent-activity-api spec 的数据视角 requirement）：
 
-- `working` → 坐在工位执行 TYPE 动画
-- `waiting` → 坐在工位上方显示气泡 💬
-- `idle` → 离开工位执行 WALK 巡游
-- `offline` → 不在画布
+- `working` → 坐在工位执行 TYPE 动画（含义：最近 60s 有新 message）
+- `waiting` → 坐在工位，头顶显示时钟气泡 ⏱（含义：60–300s 内无新 message）
+- `idle` → 离开工位执行 WALK 巡游（含义：300s – 24h 无新 message）
+- `offline` → 不在画布（含义：超过 24h 无 message 或该 source 不存在）
 
 #### Scenario: working 态打字
-- **WHEN** surface 进入 `working`
+- **WHEN** surface state = `working`
 - **THEN** 角色移动到工位并播放 TYPE 动画（精灵帧循环）
 
+#### Scenario: waiting 态时钟气泡
+- **WHEN** surface state = `waiting`
+- **THEN** 角色坐在工位不打字，头顶显示 ⏱ 气泡
+- **AND** 气泡文案（tooltip）为 "Last message <N> seconds ago"，**不**使用 "Waiting for your reply" 等暗示运行时感知的措辞
+
 #### Scenario: idle 态巡游
-- **WHEN** surface 进入 `idle`（超过 5 分钟无新消息但仍有活跃 session）
+- **WHEN** surface state = `idle`（300s – 24h 无新消息）
 - **THEN** 角色起身，按 BFS 寻路在可走 tile 之间随机游走
 
 ### Requirement: Canvas 2D 引擎（vanilla JS）
