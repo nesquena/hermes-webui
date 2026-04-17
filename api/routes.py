@@ -636,6 +636,44 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/media":
         return _handle_media(handler, parsed)
 
+    if parsed.path == "/api/wallpaper":
+        from api.wallpaper import read_wallpaper
+        try:
+            raw, mime, etag = read_wallpaper()
+        except FileNotFoundError as e:
+            return bad(handler, str(e), 404)
+        handler.send_response(200)
+        handler.send_header("Content-Type", mime)
+        handler.send_header("Content-Length", str(len(raw)))
+        handler.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        handler.send_header("ETag", f'"{etag}"')
+        handler.end_headers()
+        handler.wfile.write(raw)
+        return
+
+    if parsed.path == "/api/wallpaper/info":
+        from api.wallpaper import get_wallpaper_path, read_wallpaper
+        settings = load_settings()
+        path = get_wallpaper_path()
+        if path is None:
+            return j(handler, {
+                "has_wallpaper": False,
+                "brightness": float(settings.get("wallpaper_brightness", 0.6)),
+                "mime": None,
+                "file": None,
+            })
+        try:
+            _raw, mime, etag = read_wallpaper()
+        except FileNotFoundError:
+            mime = None
+            etag = None
+        return j(handler, {
+            "has_wallpaper": True,
+            "brightness": float(settings.get("wallpaper_brightness", 0.6)),
+            "mime": mime,
+            "file": settings.get("wallpaper_file"),
+        })
+
     if parsed.path == "/api/file/raw":
         return _handle_file_raw(handler, parsed)
 
@@ -756,6 +794,45 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/transcribe":
         return handle_transcribe(handler)
+
+    if parsed.path == "/api/wallpaper":
+        from api.config import MAX_WALLPAPER_BYTES
+        from api.wallpaper import save_wallpaper
+        # Pre-check Content-Length so we don't read a huge body into memory
+        try:
+            content_length = int(handler.headers.get("Content-Length", 0))
+        except (TypeError, ValueError):
+            return bad(handler, "Content-Length required", 400)
+        if content_length <= 0:
+            return bad(handler, "Empty body", 400)
+        if content_length > MAX_WALLPAPER_BYTES:
+            # Drain the request body in chunks so the client doesn't get
+            # a broken-pipe error before it can read our 413 response.
+            remaining = content_length
+            while remaining > 0:
+                chunk = handler.rfile.read(min(remaining, 65536))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+            return bad(
+                handler,
+                f"wallpaper file too large (max {MAX_WALLPAPER_BYTES // 1_000_000}MB)",
+                413,
+            )
+        raw_body = handler.rfile.read(content_length)
+        try:
+            result = save_wallpaper(raw_body)
+        except ValueError as e:
+            # ValueError covers magic-byte and size violations (defensive size check)
+            msg = str(e)
+            code = 413 if "too large" in msg else 400
+            return bad(handler, msg, code)
+        return j(handler, {"ok": True, **result})
+
+    if parsed.path == "/api/wallpaper/delete":
+        from api.wallpaper import delete_wallpaper
+        delete_wallpaper()
+        return j(handler, {"ok": True})
 
     body = read_body(handler)
 

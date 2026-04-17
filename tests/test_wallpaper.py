@@ -122,3 +122,110 @@ def test_delete_wallpaper_when_unset_is_noop(isolated_state):
     from api.wallpaper import delete_wallpaper, get_wallpaper_path
     delete_wallpaper()  # must not raise
     assert get_wallpaper_path() is None
+
+
+# ── HTTP-level tests (against the test subprocess server) ──────────────────
+
+import urllib.request
+import urllib.error
+
+from tests.conftest import TEST_BASE, _post
+
+
+def _post_raw(path, body, mime):
+    """POST raw bytes (not JSON / not multipart) with the given Content-Type."""
+    req = urllib.request.Request(
+        TEST_BASE + path,
+        data=body,
+        headers={'Content-Type': mime},
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read())
+        except Exception:
+            return e.code, {}
+
+
+def _get_raw(path):
+    """GET raw bytes; returns (status, headers, body_bytes)."""
+    try:
+        with urllib.request.urlopen(TEST_BASE + path, timeout=10) as r:
+            return r.status, dict(r.headers), r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers), e.read()
+
+
+def _cleanup_wallpaper():
+    """Remove wallpaper via API after each HTTP test."""
+    try:
+        _post(TEST_BASE, '/api/wallpaper/delete', {})
+    except Exception:
+        pass
+
+
+def test_http_post_wallpaper_jpeg_happy_path():
+    status, body = _post_raw('/api/wallpaper', _JPEG_BYTES, 'image/jpeg')
+    try:
+        assert status == 200
+        assert body['ok'] is True
+        assert body['file'].startswith('wallpaper-') and body['file'].endswith('.jpg')
+
+        # GET /info should reflect new wallpaper
+        info_status, _hdrs, info_body = _get_raw('/api/wallpaper/info')
+        assert info_status == 200
+        info = json.loads(info_body)
+        assert info['has_wallpaper'] is True
+        assert info['mime'] == 'image/jpeg'
+    finally:
+        _cleanup_wallpaper()
+
+
+def test_http_get_wallpaper_returns_bytes_with_cache_headers():
+    _post_raw('/api/wallpaper', _PNG_BYTES, 'image/png')
+    try:
+        status, headers, body = _get_raw('/api/wallpaper')
+        assert status == 200
+        assert body == _PNG_BYTES
+        assert headers.get('Content-Type') == 'image/png'
+        cc = headers.get('Cache-Control', '')
+        assert 'immutable' in cc
+        assert 'max-age=' in cc
+        assert headers.get('ETag')  # any non-empty etag is fine
+    finally:
+        _cleanup_wallpaper()
+
+
+def test_http_get_wallpaper_404_when_unset():
+    _cleanup_wallpaper()  # ensure clean state
+    status, _hdrs, body_bytes = _get_raw('/api/wallpaper')
+    assert status == 404
+    assert json.loads(body_bytes)['error']  # any error message present
+
+
+def test_http_post_wallpaper_rejects_oversize():
+    from api.config import MAX_WALLPAPER_BYTES
+    oversize = _JPEG_BYTES + b'\x00' * (MAX_WALLPAPER_BYTES + 1)
+    status, body = _post_raw('/api/wallpaper', oversize, 'image/jpeg')
+    assert status == 413
+    assert 'too large' in body['error']
+
+
+def test_http_post_wallpaper_rejects_bad_magic():
+    # Fake jpeg Content-Type, but body is HTML
+    status, body = _post_raw('/api/wallpaper', _HTML_BYTES, 'image/jpeg')
+    assert status == 400
+    assert 'JPEG, PNG, or WebP' in body['error']
+
+
+def test_http_delete_wallpaper_clears_file_and_settings():
+    _post_raw('/api/wallpaper', _WEBP_BYTES, 'image/webp')
+    # Use POST /api/wallpaper/delete (DELETE method may not be supported)
+    resp = _post(TEST_BASE, '/api/wallpaper/delete', {})
+    assert resp.get('ok') is True
+    info_status, _hdrs, info_body = _get_raw('/api/wallpaper/info')
+    info = json.loads(info_body)
+    assert info['has_wallpaper'] is False
