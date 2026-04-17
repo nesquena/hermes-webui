@@ -1232,7 +1232,14 @@ _SETTINGS_LEGACY_DROP_KEYS = {"assistant_language"}
 def load_settings() -> dict:
     """Load settings from disk, merging with defaults for any missing keys."""
     settings = dict(_SETTINGS_DEFAULTS)
-    if SETTINGS_FILE.exists():
+    try:
+        settings_exists = SETTINGS_FILE.exists()
+    except OSError:
+        # PermissionError or other OS-level error (e.g. UID mismatch in Docker)
+        # Treat as missing — start with defaults rather than crashing.
+        logger.debug("Cannot stat settings file %s (permission denied?)", SETTINGS_FILE)
+        settings_exists = False
+    if settings_exists:
         try:
             stored = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
             if isinstance(stored, dict):
@@ -1316,7 +1323,11 @@ def save_settings(settings: dict) -> dict:
 # config must never shadow an explicit env-var override (Docker deployments
 # rely on this — otherwise deleting settings.json is the only escape).
 _startup_settings = load_settings()
-if SETTINGS_FILE.exists():
+try:
+    _settings_file_exists = SETTINGS_FILE.exists()
+except OSError:
+    _settings_file_exists = False
+if _settings_file_exists:
     if _startup_settings.get("default_model"):
         DEFAULT_MODEL = _startup_settings["default_model"]
     if not os.getenv("HERMES_WEBUI_DEFAULT_WORKSPACE"):
