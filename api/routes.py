@@ -498,6 +498,26 @@ def handle_get(handler, parsed) -> bool:
                 return j(handler, {"session": redact_session_data(sess)})
             return bad(handler, "Session not found", 404)
 
+    if parsed.path == "/api/session/status":
+        sid = parse_qs(parsed.query).get("session_id", [""])[0]
+        if not sid:
+            return bad(handler, "Missing session_id")
+        try:
+            from api.session_ops import session_status
+            return j(handler, session_status(sid))
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+
+    if parsed.path == "/api/session/usage":
+        sid = parse_qs(parsed.query).get("session_id", [""])[0]
+        if not sid:
+            return bad(handler, "Missing session_id")
+        try:
+            from api.session_ops import session_usage
+            return j(handler, session_usage(sid))
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+
     if parsed.path == "/api/sessions":
         webui_sessions = all_sessions()
         settings = load_settings()

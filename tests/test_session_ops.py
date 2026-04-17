@@ -159,3 +159,49 @@ def test_undo_unknown_session_returns_404():
     r = _post(TEST_BASE, '/api/session/undo', {'session_id': 'nonexistent_zzz'})
     assert 'error' in r
     assert 'not found' in r['error'].lower()
+
+
+# ── /api/session/status ───────────────────────────────────────────────────
+
+def test_status_returns_summary(cleanup_test_sessions):
+    sid = _import_session_with_messages(cleanup_test_sessions, [
+        {'role': 'user', 'content': 'a'},
+        {'role': 'assistant', 'content': 'b'},
+        {'role': 'user', 'content': 'c'},
+    ])
+    r = _get(f'/api/session/status?session_id={sid}')
+    assert r['session_id'] == sid
+    assert r['title'] == 'test'
+    assert r['message_count'] == 3
+    assert 'model' in r
+    assert 'workspace' in r
+    assert 'created_at' in r
+    assert 'updated_at' in r
+    assert r['agent_running'] is False  # no active stream
+
+
+def test_status_unknown_returns_404():
+    try:
+        _get('/api/session/status?session_id=nonexistent_zzz')
+        pytest.fail('Expected HTTPError')
+    except urllib.error.HTTPError as e:
+        assert e.code == 404
+
+
+def test_status_missing_param():
+    try:
+        _get('/api/session/status')
+        pytest.fail('Expected HTTPError')
+    except urllib.error.HTTPError as e:
+        assert e.code == 400
+
+
+# ── /api/session/usage ────────────────────────────────────────────────────
+
+def test_usage_returns_token_counts(cleanup_test_sessions):
+    sid, _ws = make_session_tracked(cleanup_test_sessions)
+    # Usage on a new session: zero everything.
+    r = _get(f'/api/session/usage?session_id={sid}')
+    assert r['input_tokens'] == 0
+    assert r['output_tokens'] == 0
+    assert r['total_tokens'] == 0

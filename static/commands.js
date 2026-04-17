@@ -1,7 +1,7 @@
 // ── Slash commands ──────────────────────────────────────────────────────────
 // Registry is sourced from hermes-agent's COMMAND_REGISTRY at boot via
-// GET /api/commands. WEBUI_ONLY_COMMANDS (theme, workspace, clear) are
-// merged in. Each command's handler comes from HANDLERS below; commands
+// GET /api/commands. WEBUI_ONLY_COMMANDS (theme, workspace, clear, compact)
+// are merged in. Each command's handler comes from HANDLERS below; commands
 // without a handler are shown in the dropdown but emit a "not yet
 // supported" toast when invoked, rather than being silently sent as
 // text to the LLM.
@@ -17,6 +17,9 @@ const WEBUI_ONLY_COMMANDS = [
   // (clear messages display, keep session) -- different semantic, so we
   // own it here.
   {name:'clear',     description:'Clear messages display (keep session)',
+   category:'WebUI', aliases:[], args_hint:'',
+   subcommands:[], cli_only:false, gateway_only:false},
+  {name:'compact',   description:'(deferred) Compress conversation context — coming soon',
    category:'WebUI', aliases:[], args_hint:'',
    subcommands:[], cli_only:false, gateway_only:false},
   {name:'theme',     description:'Change UI theme (webui-only)',
@@ -36,15 +39,7 @@ const UNSUPPORTED_IN_WEBUI = new Set([
   'history', 'save',
   // Deferred until webui<->agent IPC is designed:
   'yolo', 'reasoning', 'fast', 'compress',
-  // Replaced by webui-native equivalents handled via WEBUI_ALIASES:
-  'compact',
 ]);
-
-// Frontend aliases that don't exist in the agent registry but we want to
-// preserve for muscle memory. Resolution happens BEFORE registry lookup.
-const WEBUI_ALIASES = {
-  'compact': 'compress',  // /compress is in UNSUPPORTED_IN_WEBUI -> toast
-};
 
 // Minimal fallback if /api/commands fetch fails (network error, agent
 // missing, etc.). Keeps the slash menu functional.
@@ -84,15 +79,7 @@ async function bootCommands(){
 function parseCommand(text){
   if(!text.startsWith('/'))return null;
   const parts=text.slice(1).split(/\s+/);
-  let name=parts[0].toLowerCase();
-  // Special-case: /compact is in WEBUI_ALIASES but its target is
-  // UNSUPPORTED_IN_WEBUI (compress). Route to a dedicated handler that
-  // shows a deferred-feature toast.
-  if(name === 'compact'){
-    return {name:'compact', args:parts.slice(1).join(' ').trim(), _localHandler:cmdCompact};
-  }
-  // Resolve frontend alias before registry lookup
-  if(WEBUI_ALIASES[name]) name = WEBUI_ALIASES[name];
+  const name=parts[0].toLowerCase();
   const args=parts.slice(1).join(' ').trim();
   return {name,args};
 }
@@ -109,7 +96,6 @@ function _findCommand(name){
 function executeCommand(text){
   const parsed=parseCommand(text);
   if(!parsed)return false;
-  if(parsed._localHandler){parsed._localHandler(parsed.args);return true;}
   const cmd=_findCommand(parsed.name);
   if(!cmd)return false;  // unknown -- fall through to send as text to LLM
   const handler = HANDLERS[cmd.name];
@@ -204,16 +190,27 @@ function cmdCompact(){
 }
 
 async function cmdUsage(){
-  const next=!window._showTokenUsage;
-  window._showTokenUsage=next;
+  if(!S.session){showToast(t('no_active_session'));return;}
   try{
-    await api('/api/settings',{method:'POST',body:JSON.stringify({show_token_usage:next})});
-  }catch(e){}
-  // Update the settings checkbox if the panel is open
-  const cb=$('settingsShowTokenUsage');
-  if(cb) cb.checked=next;
-  renderMessages();
-  showToast(next?t('token_usage_on'):t('token_usage_off'));
+    const r = await api('/api/session/usage?session_id=' + encodeURIComponent(S.session.session_id));
+    if(r && r.error){showToast(r.error);return;}
+    const cost = (r.estimated_cost != null) ? `$${Number(r.estimated_cost).toFixed(4)}` : '(unknown)';
+    const lines = [
+      '📈 **Token Usage**',
+      '',
+      `**Model:** ${r.model || '(default)'}`,
+      `**Input tokens:** ${r.input_tokens.toLocaleString()}`,
+      `**Output tokens:** ${r.output_tokens.toLocaleString()}`,
+      `**Total:** ${r.total_tokens.toLocaleString()}`,
+      `**Estimated cost:** ${cost}`,
+      '',
+      '_Tip: toggle "Show token usage" in Settings to see this in every message._',
+    ];
+    S.messages.push({role:'assistant', content:lines.join('\n')});
+    renderMessages();
+  }catch(e){
+    showToast('Failed to load usage: ' + e.message);
+  }
 }
 
 async function cmdTheme(args){
@@ -396,6 +393,29 @@ async function cmdUndo(){
   }
 }
 
+async function cmdStatus(){
+  if(!S.session){showToast(t('no_active_session'));return;}
+  try{
+    const r = await api('/api/session/status?session_id=' + encodeURIComponent(S.session.session_id));
+    if(r && r.error){showToast(r.error);return;}
+    const lines = [
+      '📊 **Session Status**',
+      '',
+      `**Session ID:** \`${r.session_id}\``,
+      `**Title:** ${r.title || 'Untitled'}`,
+      `**Model:** ${r.model || '(default)'}`,
+      `**Workspace:** ${r.workspace}`,
+      `**Personality:** ${r.personality || '(none)'}`,
+      `**Messages:** ${r.message_count}`,
+      `**Agent Running:** ${r.agent_running ? 'Yes ⚡' : 'No'}`,
+    ];
+    S.messages.push({role:'assistant', content:lines.join('\n')});
+    renderMessages();
+  }catch(e){
+    showToast('Failed to load status: ' + e.message);
+  }
+}
+
 // ── Autocomplete dropdown ───────────────────────────────────────────────────
 
 let _cmdSelectedIdx=-1;
@@ -468,5 +488,6 @@ HANDLERS.stop        = cmdStop;
 HANDLERS.title       = cmdTitle;
 HANDLERS.retry       = cmdRetry;
 HANDLERS.undo        = cmdUndo;
-HANDLERS.usage       = cmdUsage;     // body replaced in Task 7
-// Tasks 3-7 add: stop, title, retry, undo, status
+HANDLERS.status      = cmdStatus;
+HANDLERS.usage       = cmdUsage;
+HANDLERS.compact     = cmdCompact;
