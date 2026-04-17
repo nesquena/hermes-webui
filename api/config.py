@@ -300,6 +300,8 @@ _FALLBACK_MODELS = [
     {'provider': 'Other',     'id': 'google/gemini-2.5-pro',            'label': 'Gemini 2.5 Pro'},
     {'provider': 'Other',     'id': 'deepseek/deepseek-chat-v3-0324',   'label': 'DeepSeek V3'},
     {'provider': 'Other',     'id': 'meta-llama/llama-4-scout',         'label': 'Llama 4 Scout'},
+    {'provider': 'MiniMax',   'id': 'minimax/MiniMax-M2.7',             'label': 'MiniMax M2.7'},
+    {'provider': 'MiniMax',   'id': 'minimax/MiniMax-M2.7-highspeed',   'label': 'MiniMax M2.7 Highspeed'},
 ]
 
 # Provider display names for known Hermes provider IDs
@@ -534,7 +536,8 @@ def get_available_models() -> dict:
                 pass
         all_env = {**env_keys}
         for k in ('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'OPENROUTER_API_KEY',
-                  'GOOGLE_API_KEY', 'GLM_API_KEY', 'KIMI_API_KEY', 'DEEPSEEK_API_KEY'):
+                  'GOOGLE_API_KEY', 'GLM_API_KEY', 'KIMI_API_KEY', 'DEEPSEEK_API_KEY',
+                  'MINIMAX_API_KEY', 'MINIMAX_CN_API_KEY'):
             val = os.getenv(k)
             if val:
                 all_env[k] = val
