@@ -44,21 +44,21 @@
 
 ## 5. 前端：sidebar 三个新 tab 与 i18n
 
-- [ ] 5.1 `static/index.html`：在 sidebar-nav 内追加 `Insights` / `Surfaces` / `Pixel` 三个 `button.nav-tab` 和对应 `panel-view` 容器
-- [ ] 5.2 `static/i18n.js`：为 en/zh/de/zh-Hant 添加键 `tab_insights` / `tab_surfaces` / `tab_pixel` 以及各子区块文案；字符串严格避免 "currently running X" / "waiting for reply" 之类暗示运行时感知的措辞
-- [ ] 5.3 **`static/panels.js`**（不是 ui.js）：`switchPanel()` 定义在此（`static/panels.js:4`）；在其分支结构里新增 `insights` / `surfaces` / `pixel` 三个 case，每个 case 调用对应 module 的 `onShow()` / `onHide()`
-- [ ] 5.4 `static/style.css`：追加 Insights 折线/柱状/热力图用 CSS 变量，以及 Surface 卡片网格 + 就地展开抽屉样式
+- [x] 5.1 `static/index.html`：3 新 nav-tab + 3 sidebar panel-view shell + 3 main-dashboard div（`mainInsights` / `mainSurfaces` / `mainPixel`）；额外 `<script src="static/insights.js">` + `surfaces.js`
+- [x] 5.2 `static/i18n.js`：5 语言（en/zh/de/zh-Hant/es）各补 28 个新键 `tab_*` / `insights_*` / `granularity_*` / `surface_*` / `pixel_*` / `refresh` / `back`
+- [x] 5.3 `static/panels.js`：新增 `_DASHBOARD_PANELS` + `_switchMainView()`；`switchPanel()` 追加 `insights / surfaces / pixel` 三个 case；离开 surfaces/pixel 时调对应 `hide*` 清理
+- [x] 5.4 `static/style.css`：追加 `.dashboard-main / .insights-card / .insights-chart / .insights-heatmap / .surfaces-grid / .surface-card / .surface-state-light` 及 <640px 单列媒体查询
 
 ## 6. 前端：Insights 面板
 
-- [ ] 6.1 `static/insights.js`：实现 `renderInsightsPanel()` 入口，首次打开时拉取 `/api/stats/summary` 填充顶部卡片
-- [ ] 6.2 实现 `renderTokenTimeseries(container, data)`：主折线（单线 total token from messages，area fill）+ 次级堆叠柱状（input/output/cache_read/reasoning from sessions），两图上下布局并各自标注数据来源注脚；支持粒度切换按钮
-- [ ] 6.3 实现 `renderResponseTimeBuckets(container, data)`：纯 SVG 柱状图 + 窗口切换（7/30 天）
-- [ ] 6.4 实现 `renderHeatmap(container, data)`：SVG 7×24 矩形网格，tooltip 显示 "周X HH:00 — N messages"
-- [ ] 6.5 实现 `renderModelsTable(container, data)`：HTML 表格，按 total token 降序
-- [ ] 6.6 空态：任一 API 返回空数据时显示友好提示（i18n key `insights_empty`）
-- [ ] 6.7 手动刷新按钮：`?refresh=1` 绕过缓存
-- [ ] 6.8 Playwright / 人工 QA：跑起 server，手动验证四个子区块渲染、粒度切换、空数据、亮暗主题
+- [x] 6.1 `static/insights.js` IIFE：`showInsights()` 一次拉取五端点并填充顶部 summary cards
+- [x] 6.2 `_renderTokenTimeseries`（SVG 折线+面积，Y 轴 3 刻度）+ `_renderSplitBars`（堆叠柱：input/output/cache/reasoning），含数据来源 caption；三按钮（日/周/月）切换粒度并重新拉取
+- [x] 6.3 `_renderResponseTime` 5 桶 SVG 柱状图 + 7/30 day pill 切换
+- [x] 6.4 `_renderHeatmap` CSS grid 7×24 cell，对数强度映射；每 cell title 为 "Sun 14:00 — N messages"
+- [x] 6.5 `_renderModelsTable` HTML 表格：model/input/output/msgs/cost/pct，按 total DESC
+- [x] 6.6 每个 `_render*` 在空数据时输出 `.insights-empty` 文案（`insights_empty` key，5 语言）
+- [x] 6.7 `refreshInsights()` 按钮（sidebar + 主视图）通过 `_get(path, refresh=true)` 自动追加 `?refresh=1`
+- [ ] 6.8 Playwright / 人工 QA：跑起 server，手动验证四个子区块渲染、粒度切换、空数据、亮暗主题（留给人工验收）
 
 ## 7. 前端：Surface Dashboard 面板
 

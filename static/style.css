@@ -1410,3 +1410,97 @@ body.bubble-layout .msg-row + .msg-row[data-role="user"] { border-top: none; pad
   .msg-row[data-role="user"] .msg-body { padding: 8px 12px; }
   .msg-row[data-error="1"] .msg-body { padding: 8px 12px; }
 }
+
+/* ── Dashboards (Insights / Surfaces / Pixel) ─────────────────────────── */
+.dashboard-main { display: flex; color: var(--text); }
+.dashboard-header h2 { color: var(--text); }
+
+/* Insights */
+.insights-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+.insights-card {
+  background: rgba(255,255,255,.04);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.insights-card-label { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+.insights-card-value { font-size: 22px; font-weight: 600; }
+.insights-card-sub { font-size: 10px; color: var(--muted); margin-top: 4px; }
+
+.insights-chart-block {
+  background: rgba(255,255,255,.03);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 18px;
+}
+.insights-chart-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 10px;
+}
+.insights-chart-head h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.insights-chart-ctrls { display: flex; gap: 4px; }
+.insights-chart-ctrls .pill {
+  background: transparent; border: 1px solid var(--border2); color: var(--muted);
+  padding: 3px 10px; border-radius: 99px; font-size: 11px; cursor: pointer;
+}
+.insights-chart-ctrls .pill.active { background: var(--accent); color: #111; border-color: var(--accent); }
+.insights-chart { width: 100%; height: 200px; }
+.insights-chart-small { height: 120px; margin-top: 8px; }
+.insights-chart-caption { font-size: 10px; color: var(--muted); margin-top: 4px; font-style: italic; }
+.insights-heatmap { display: grid; grid-template-columns: auto repeat(24, 1fr); gap: 2px; align-items: center; }
+.insights-heatmap .hm-label { font-size: 10px; color: var(--muted); padding-right: 6px; text-align: right; }
+.insights-heatmap .hm-cell { aspect-ratio: 1; border-radius: 2px; background: rgba(255,255,255,.05); cursor: help; }
+.insights-heatmap .hm-hours { display: contents; }
+.insights-heatmap .hm-hour-label { font-size: 9px; color: var(--muted); text-align: center; }
+#insightsModelsTable table { width: 100%; border-collapse: collapse; font-size: 12px; }
+#insightsModelsTable th, #insightsModelsTable td {
+  padding: 6px 10px; text-align: right; border-bottom: 1px solid var(--border);
+}
+#insightsModelsTable th:first-child, #insightsModelsTable td:first-child { text-align: left; }
+#insightsModelsTable th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+.insights-empty {
+  padding: 32px 20px; text-align: center; color: var(--muted); font-size: 13px;
+}
+
+/* Surfaces */
+.surfaces-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+}
+.surface-card {
+  background: rgba(255,255,255,.03);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  cursor: pointer;
+  transition: border-color .15s ease, background .15s ease;
+}
+.surface-card:hover { border-color: var(--accent); background: rgba(255,255,255,.05); }
+.surface-card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.surface-card-icon { font-size: 18px; }
+.surface-card-name { flex: 1; font-weight: 600; font-size: 13px; }
+.surface-state-light { width: 10px; height: 10px; border-radius: 50%; }
+.surface-state-light.working { background: #4ade80; box-shadow: 0 0 6px rgba(74,222,128,.6); }
+.surface-state-light.waiting { background: #fbbf24; }
+.surface-state-light.idle    { background: #9ca3af; }
+.surface-state-light.offline { background: #4b5563; }
+.surface-card-row { font-size: 11px; color: var(--muted); margin: 3px 0; }
+.surface-card-expand {
+  margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border);
+  font-size: 11px;
+}
+.surface-card-expand-item {
+  padding: 4px 0; display: flex; justify-content: space-between; gap: 8px;
+}
+.surface-card-expand-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.surface-card-expand-meta { color: var(--muted); font-size: 10px; }
+
+@media (max-width: 640px) {
+  .surfaces-grid { grid-template-columns: 1fr; }
+  .insights-cards { grid-template-columns: repeat(2, 1fr); }
+}

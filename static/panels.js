@@ -1,6 +1,21 @@
 let _currentPanel = 'chat';
 let _skillsData = null; // cached skills list
 
+const _DASHBOARD_PANELS = ['insights', 'surfaces', 'pixel'];
+
+function _switchMainView(name) {
+  // Dashboard panels replace the messages/composer region with their own canvas.
+  const isDashboard = _DASHBOARD_PANELS.includes(name);
+  const msgsEl = $('messages');
+  const composerEl = $('composerWrap');
+  if (msgsEl) msgsEl.style.display = isDashboard ? 'none' : '';
+  if (composerEl) composerEl.style.display = isDashboard ? 'none' : '';
+  for (const p of _DASHBOARD_PANELS) {
+    const el = $('main' + p.charAt(0).toUpperCase() + p.slice(1));
+    if (el) el.style.display = (p === name) ? 'flex' : 'none';
+  }
+}
+
 async function switchPanel(name) {
   _currentPanel = name;
   // Update nav tabs
@@ -9,6 +24,8 @@ async function switchPanel(name) {
   document.querySelectorAll('.panel-view').forEach(p => p.classList.remove('active'));
   const panelEl = $('panel' + name.charAt(0).toUpperCase() + name.slice(1));
   if (panelEl) panelEl.classList.add('active');
+  // Route main view for dashboard panels
+  _switchMainView(name);
   // Lazy-load panel data
   if (name === 'tasks') await loadCrons();
   if (name === 'skills') await loadSkills();
@@ -16,6 +33,15 @@ async function switchPanel(name) {
   if (name === 'workspaces') await loadWorkspacesPanel();
   if (name === 'profiles') await loadProfilesPanel();
   if (name === 'todos') loadTodos();
+  if (name === 'insights') { if (typeof showInsights === 'function') await showInsights(); }
+  if (name === 'surfaces') { if (typeof showSurfaces === 'function') await showSurfaces(); }
+  if (name === 'pixel')    { if (typeof showPixelOffice === 'function') await showPixelOffice(); }
+  else {
+    // Tear down pixel engine when leaving the pixel panel
+    if (typeof hidePixelOffice === 'function') hidePixelOffice();
+  }
+  // Tear down SSE for surfaces when leaving the surfaces panel
+  if (name !== 'surfaces' && typeof hideSurfaces === 'function') hideSurfaces();
 }
 
 // ── Cron panel ──

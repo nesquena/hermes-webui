@@ -31,6 +31,9 @@
       <button class="nav-tab" data-panel="workspaces" data-label="Spaces" onclick="switchPanel('workspaces')" title="Spaces" data-i18n-title="tab_workspaces"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button>
       <button class="nav-tab" data-panel="profiles" data-label="Profiles" onclick="switchPanel('profiles')" title="Agent profiles" data-i18n-title="tab_profiles"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></button>
       <button class="nav-tab" data-panel="todos" data-label="Todos" onclick="switchPanel('todos')" title="Current task list" data-i18n-title="tab_todos"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="6" height="6" rx="1"/><path d="m3 17 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg></button>
+      <button class="nav-tab" data-panel="insights" data-label="Insights" onclick="switchPanel('insights')" title="Insights" data-i18n-title="tab_insights"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg></button>
+      <button class="nav-tab" data-panel="surfaces" data-label="Surfaces" onclick="switchPanel('surfaces')" title="Surfaces" data-i18n-title="tab_surfaces"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></button>
+      <button class="nav-tab" data-panel="pixel" data-label="Pixel" onclick="switchPanel('pixel')" title="Pixel office" data-i18n-title="tab_pixel"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 10h18"/><path d="M10 3v18"/></svg></button>
     </div>
     <!-- Chat panel -->
     <div class="panel-view active" id="panelChat">
@@ -141,6 +144,29 @@
       </div>
       <div style="flex:1;overflow-y:auto;padding:0 12px 12px" id="profilesPanel"><div style="color:var(--muted);font-size:12px">Loading...</div></div>
     </div>
+    <!-- Insights panel (sidebar shell — charts render in main via #mainInsights) -->
+    <div class="panel-view" id="panelInsights">
+      <div class="sidebar-section" style="padding-bottom:4px;display:flex;align-items:center;justify-content:space-between">
+        <div style="font-size:11px;color:var(--muted)" data-i18n="tab_insights">Insights</div>
+        <button class="cron-btn run" style="padding:3px 8px;font-size:10px" onclick="refreshInsights()" data-i18n="refresh">Refresh</button>
+      </div>
+      <div id="insightsSummary" style="padding:6px 12px;font-size:11px;color:var(--muted)"><span data-i18n="loading">Loading...</span></div>
+    </div>
+    <!-- Surfaces panel (sidebar shell — cards render in main via #mainSurfaces) -->
+    <div class="panel-view" id="panelSurfaces">
+      <div class="sidebar-section" style="padding-bottom:4px;display:flex;align-items:center;justify-content:space-between">
+        <div style="font-size:11px;color:var(--muted)" data-i18n="tab_surfaces">Surfaces</div>
+        <span id="surfacesConnLight" class="surface-conn" title="SSE connection" style="width:8px;height:8px;border-radius:50%;background:var(--muted)"></span>
+      </div>
+      <div id="surfacesSidebar" style="padding:6px 12px;font-size:11px;color:var(--muted)"><span data-i18n="loading">Loading...</span></div>
+    </div>
+    <!-- Pixel panel (sidebar shell — canvas renders in main via #mainPixel) -->
+    <div class="panel-view" id="panelPixel">
+      <div class="sidebar-section" style="padding-bottom:4px">
+        <div style="font-size:11px;color:var(--muted)" data-i18n="tab_pixel">Pixel office</div>
+      </div>
+      <div style="padding:6px 12px;font-size:11px;color:var(--muted)" data-i18n="pixel_panel_hint">One pixel character per surface. Based on recent messages.</div>
+    </div>
     <div class="sidebar-bottom">
       <button class="hermes-launch-btn" id="btnHermesPanel" onclick="toggleSettings()" title="Open Hermes control center">
         <span class="hermes-launch-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
@@ -178,6 +204,67 @@
       <div class="topbar-chips">
         <button class="chip workspace-toggle-btn" id="btnWorkspacePanelToggle" onclick="toggleWorkspacePanel()" title="Show workspace panel" aria-pressed="false"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg><span class="workspace-toggle-label">Files</span></button>
       </div>
+    </div>
+    <!-- Dashboard main views (toggled by switchPanel) -->
+    <div class="dashboard-main" id="mainInsights" style="display:none;overflow-y:auto;padding:24px;gap:24px;flex-direction:column;flex:1">
+      <div class="dashboard-header" style="display:flex;align-items:center;justify-content:space-between">
+        <div>
+          <h2 style="margin:0;font-size:18px;font-weight:600" data-i18n="insights_title">Insights</h2>
+          <div id="insightsUpdatedAt" style="font-size:11px;color:var(--muted);margin-top:2px"></div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="cron-btn" onclick="refreshInsights()" data-i18n="refresh">Refresh</button>
+        </div>
+      </div>
+      <div id="insightsSummaryCards" class="insights-cards"></div>
+      <div class="insights-chart-block">
+        <div class="insights-chart-head">
+          <h3 data-i18n="insights_timeseries_title">Token trend</h3>
+          <div class="insights-chart-ctrls">
+            <button class="pill" data-granularity="day" onclick="setInsightsGranularity('day')" data-i18n="granularity_day">Day</button>
+            <button class="pill" data-granularity="week" onclick="setInsightsGranularity('week')" data-i18n="granularity_week">Week</button>
+            <button class="pill" data-granularity="month" onclick="setInsightsGranularity('month')" data-i18n="granularity_month">Month</button>
+          </div>
+        </div>
+        <div id="insightsTimeseriesChart" class="insights-chart"></div>
+        <div class="insights-chart-caption" data-i18n="insights_timeseries_caption">Total tokens per day from messages.token_count.</div>
+        <div id="insightsSplitChart" class="insights-chart insights-chart-small"></div>
+        <div class="insights-chart-caption" data-i18n="insights_split_caption">Input / output / cache / reasoning by session start date.</div>
+      </div>
+      <div class="insights-chart-block">
+        <div class="insights-chart-head">
+          <h3 data-i18n="insights_responsetime_title">Response time</h3>
+          <div class="insights-chart-ctrls">
+            <button class="pill" data-window="7" onclick="setInsightsResponseWindow(7)">7d</button>
+            <button class="pill" data-window="30" onclick="setInsightsResponseWindow(30)">30d</button>
+          </div>
+        </div>
+        <div id="insightsResponseChart" class="insights-chart"></div>
+      </div>
+      <div class="insights-chart-block">
+        <div class="insights-chart-head"><h3 data-i18n="insights_heatmap_title">Activity heatmap (last 7 days)</h3></div>
+        <div id="insightsHeatmap" class="insights-heatmap"></div>
+      </div>
+      <div class="insights-chart-block">
+        <div class="insights-chart-head"><h3 data-i18n="insights_models_title">Token usage by model</h3></div>
+        <div id="insightsModelsTable"></div>
+      </div>
+    </div>
+    <div class="dashboard-main" id="mainSurfaces" style="display:none;overflow-y:auto;padding:24px;flex-direction:column;flex:1">
+      <div class="dashboard-header" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+        <div>
+          <h2 style="margin:0;font-size:18px;font-weight:600" data-i18n="surfaces_title">Surfaces</h2>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px" data-i18n="surfaces_subtitle">Per-surface activity, based on state.db messages.</div>
+        </div>
+      </div>
+      <div id="surfacesCardGrid" class="surfaces-grid"></div>
+    </div>
+    <div class="dashboard-main" id="mainPixel" style="display:none;overflow:hidden;flex-direction:column;flex:1">
+      <div class="dashboard-header" style="display:flex;align-items:center;justify-content:space-between;padding:12px 16px">
+        <h2 style="margin:0;font-size:16px;font-weight:600" data-i18n="pixel_title">Pixel office</h2>
+        <button class="cron-btn" onclick="switchPanel('chat')" data-i18n="back">Back</button>
+      </div>
+      <div id="pixelCanvasWrap" style="flex:1;position:relative;background:var(--bg)"></div>
     </div>
     <div class="messages" id="messages">
       <div class="empty-state" id="emptyState">
@@ -603,6 +690,8 @@
 <script src="static/commands.js"></script>
 <script src="static/messages.js"></script>
 <script src="static/panels.js"></script>
+<script src="static/insights.js"></script>
+<script src="static/surfaces.js"></script>
 <script src="static/onboarding.js"></script>
 <script src="static/boot.js"></script>
 </body>
