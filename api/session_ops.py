@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from api.config import LOCK
 from api.models import get_session
 
 logger = logging.getLogger(__name__)
@@ -26,19 +27,30 @@ def retry_last(session_id: str) -> dict[str, Any]:
         KeyError: session not found
         ValueError: no user message in transcript
     """
+    # get_session() and Session.save() both acquire the module-level LOCK
+    # internally (the latter via _write_session_index()), and LOCK is a
+    # non-reentrant threading.Lock — so they MUST be called outside our
+    # own `with LOCK:` block to avoid self-deadlocking.
+    #
+    # The race we close is the read-modify-write of s.messages: two
+    # concurrent /api/session/retry calls could otherwise both compute the
+    # same last_user_idx from the same history and double-truncate. We
+    # serialize just the in-memory mutation; persistence happens outside
+    # the lock and is naturally last-write-wins on a consistent state.
     s = get_session(session_id)  # raises KeyError if missing
-    history = s.messages or []
-    last_user_idx = None
-    for i in range(len(history) - 1, -1, -1):
-        if history[i].get('role') == 'user':
-            last_user_idx = i
-            break
-    if last_user_idx is None:
-        raise ValueError('No previous message to retry.')
+    with LOCK:
+        history = s.messages or []
+        last_user_idx = None
+        for i in range(len(history) - 1, -1, -1):
+            if history[i].get('role') == 'user':
+                last_user_idx = i
+                break
+        if last_user_idx is None:
+            raise ValueError('No previous message to retry.')
 
-    last_user_text = _extract_text(history[last_user_idx].get('content', ''))
-    removed_count = len(history) - last_user_idx
-    s.messages = history[:last_user_idx]
+        last_user_text = _extract_text(history[last_user_idx].get('content', ''))
+        removed_count = len(history) - last_user_idx
+        s.messages = history[:last_user_idx]
     s.save()
     return {'last_user_text': last_user_text, 'removed_count': removed_count}
 
