@@ -1002,7 +1002,17 @@ body.resizing{user-select:none;cursor:col-resize;}
 
 /* ── Tool call cards ── */
 /* Running indicator dot (pulsing) */
-.tool-card-running-dot{width:7px;height:7px;border-radius:50%;background:var(--blue);opacity:.8;flex-shrink:0;animation:pulse 1.2s ease-in-out infinite;}
+.tool-card-running-dot{
+  display:inline-block;
+  width:7px;
+  height:7px;
+  border-radius:50%;
+  background:var(--blue);
+  opacity:.8;
+  flex-shrink:0;
+  vertical-align:middle;
+  animation:pulse 1.2s ease-in-out infinite;
+}
 /* Show more button inside tool card result */
 .tool-card-more{background:none;border:none;color:var(--blue);font-size:10px;cursor:pointer;padding:3px 0 0;opacity:.7;display:block;}
 .tool-card-more:hover{opacity:1;}
@@ -1065,8 +1075,8 @@ body.resizing{user-select:none;cursor:col-resize;}
   flex-direction:column;
 }
 .compression-row{
-  margin:0;
-  padding:1px 0;
+  margin:0 0 3px;
+  padding:0;
 }
 .compression-card{
   margin-left:var(--msg-rail);
@@ -1163,7 +1173,7 @@ body.resizing{user-select:none;cursor:col-resize;}
   color:#fecaca;
 }
 .compression-reference-row{
-  margin-top:4px;
+  margin-top:0;
 }
 .compression-reference-card{
   margin-left:var(--msg-rail);
