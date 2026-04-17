@@ -30,7 +30,6 @@ from api.config import (
     CANCEL_FLAGS,
     SERVER_START_TIME,
     _resolve_cli_toolsets,
-    CLI_TOOLSETS,
     _INDEX_HTML_PATH,
     get_available_models,
     IMAGE_EXTS,
@@ -421,8 +420,19 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, {"auth_enabled": is_auth_enabled(), "logged_in": logged_in})
 
     if parsed.path == "/favicon.ico":
-        handler.send_response(204)
-        handler.end_headers()
+        static_root = Path(__file__).parent.parent / "static"
+        ico_path = (static_root / "favicon.ico").resolve()
+        if ico_path.exists() and ico_path.is_file():
+            data = ico_path.read_bytes()
+            handler.send_response(200)
+            handler.send_header("Content-Type", "image/x-icon")
+            handler.send_header("Content-Length", str(len(data)))
+            handler.send_header("Cache-Control", "public, max-age=86400")
+            handler.end_headers()
+            handler.wfile.write(data)
+        else:
+            handler.send_response(204)
+            handler.end_headers()
         return True
 
     if parsed.path == "/health":
@@ -1314,8 +1324,26 @@ def handle_post(handler, parsed) -> bool:
 
     return False  # 404
 
-
 # ── GET route helpers ─────────────────────────────────────────────────────────
+
+# MIME types for static file serving. Hoisted to module scope to avoid
+# rebuilding the dict on every request.
+_STATIC_MIME = {
+    "css": "text/css",
+    "js": "application/javascript",
+    "html": "text/html",
+    "svg": "image/svg+xml",
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "ico": "image/x-icon",
+    "gif": "image/gif",
+    "webp": "image/webp",
+    "woff": "font/woff",
+    "woff2": "font/woff2",
+}
+# MIME types that are text-based and should carry charset=utf-8
+_TEXT_MIME_TYPES = {"text/css", "application/javascript", "text/html", "image/svg+xml", "text/plain"}
 
 
 def _serve_static(handler, parsed):
@@ -1330,11 +1358,10 @@ def _serve_static(handler, parsed):
     if not static_file.exists() or not static_file.is_file():
         return j(handler, {"error": "not found"}, status=404)
     ext = static_file.suffix.lower()
-    ct = {"css": "text/css", "js": "application/javascript", "html": "text/html"}.get(
-        ext.lstrip("."), "text/plain"
-    )
+    ct = _STATIC_MIME.get(ext.lstrip("."), "text/plain")
+    ct_header = f"{ct}; charset=utf-8" if ct in _TEXT_MIME_TYPES else ct
     handler.send_response(200)
-    handler.send_header("Content-Type", f"{ct}; charset=utf-8")
+    handler.send_header("Content-Type", ct_header)
     handler.send_header("Cache-Control", "no-store")
     raw = static_file.read_bytes()
     handler.send_header("Content-Length", str(len(raw)))
@@ -2584,7 +2611,7 @@ def _handle_session_compress(handler, body):
                 api_key=resolved_api_key,
                 platform="cli",
                 quiet_mode=True,
-                enabled_toolsets=CLI_TOOLSETS,
+                enabled_toolsets=_resolve_cli_toolsets(),
                 session_id=sid,
             )
             compressed = agent.context_compressor.compress(
