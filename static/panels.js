@@ -50,7 +50,7 @@ async function loadCrons() {
               ? `<button class="cron-btn" onclick="cronResume('${job.id}')">${li('play',12)} ${esc(t('cron_resume'))}</button>`
               : `<button class="cron-btn pause" onclick="cronPause('${job.id}')">${li('pause',12)} ${esc(t('cron_pause'))}</button>`}
             <button class="cron-btn" onclick="cronEditOpen('${job.id}',${JSON.stringify(job).replace(/"/g,'&quot;')})">${li('pencil',12)} ${esc(t('edit'))}</button>
-            <button class="cron-btn" style="border-color:rgba(201,168,76,.3);color:var(--accent)" onclick="cronDelete('${job.id}')">${li('trash-2',12)} ${esc(t('delete_title'))}</button>
+            <button class="cron-btn" style="border-color:var(--accent-bg-strong);color:var(--accent-text)" onclick="cronDelete('${job.id}')">${li('trash-2',12)} ${esc(t('delete_title'))}</button>
           </div>
           <!-- Inline edit form, hidden by default -->
           <div id="cron-edit-${job.id}" style="display:none;margin-top:8px;border-top:1px solid var(--border);padding-top:8px">
