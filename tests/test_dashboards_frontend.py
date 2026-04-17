@@ -151,6 +151,63 @@ def test_surfaces_js_webui_only_active_sessions():
     assert "active_webui_sessions" in src
 
 
+# ── Section 7: Surfaces SSE + expand drawer ──────────────────────────────
+
+def test_surfaces_js_subscribes_to_agent_activity_stream():
+    src = _read("surfaces.js")
+    assert "EventSource" in src
+    assert "api/agent-activity/stream" in src
+
+
+def test_surfaces_js_handles_three_sse_event_types():
+    src = _read("surfaces.js")
+    for event in ("'snapshot'", "'delta'", "'heartbeat'"):
+        assert event in src, f"surfaces.js missing listener for {event}"
+
+
+def test_surfaces_js_reconnects_after_error():
+    src = _read("surfaces.js")
+    assert "_scheduleReconnect" in src
+    assert "reconnectDelayMs" in src
+    # 5-second default per spec
+    assert "5000" in src
+
+
+def test_surfaces_js_closes_stream_on_hide():
+    src = _read("surfaces.js")
+    assert "hideSurfaces" in src
+    assert "_closeStream" in src
+
+
+def test_surfaces_js_click_expands_and_uses_expand_endpoint():
+    src = _read("surfaces.js")
+    assert "addEventListener('click'" in src
+    # must call /api/surfaces?source=X&expand=1
+    assert "expand=1" in src
+    assert "source=" in src
+
+
+def test_surfaces_js_expand_has_30s_cache():
+    src = _read("surfaces.js")
+    assert "EXPAND_CACHE_TTL_MS" in src
+    # the spec (surface-dashboard "Scenario: 再次点击折叠") requires 30s reuse
+    assert "30 * 1000" in src or "30_000" in src or "30000" in src
+
+
+def test_surfaces_js_does_not_call_filterSessions_or_switchPanelChat():
+    """spec surface-dashboard 'Scenario: 不跨面板跳转': don't navigate away."""
+    src = _read("surfaces.js")
+    assert "filterSessions" not in src
+    assert "switchPanel('chat')" not in src
+    assert "switchPanel(\"chat\")" not in src
+
+
+def test_surfaces_js_state_light_class_names_match_spec():
+    src = _read("surfaces.js")
+    for state_name in ("working", "waiting", "idle", "offline"):
+        assert f"'{state_name}'" in src, f"state {state_name} missing"
+
+
 # ── Section 3.10 lint (already existed; keep it here with a tighter check) ─
 
 def test_no_runtime_perception_phrasing_in_new_frontend_files():

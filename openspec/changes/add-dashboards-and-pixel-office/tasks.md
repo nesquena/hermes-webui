@@ -62,13 +62,13 @@
 
 ## 7. 前端：Surface Dashboard 面板
 
-- [ ] 7.1 `static/surfaces.js`：实现 `renderSurfacesPanel()`，首次打开拉取 `/api/surfaces`
-- [ ] 7.2 实现卡片模板：icon / name / state 灯 / last activity（"Last message Ns ago"） / 24h msgs / 24h tokens；**仅 webui 卡**额外渲染 "N active sessions"，其他 surface 不渲染该字段（避免误导）
-- [ ] 7.3 Icon 字典（cli / webui / weixin / telegram / discord / slack / signal / whatsapp / sms / email / cron）定义在 `surfaces.js` 顶部，未识别归 other 卡片但 label 保留原始 source 字符串
-- [ ] 7.4 订阅 `/api/agent-activity/stream` SSE，解析 `snapshot`/`delta`/`heartbeat` 事件增量更新卡片
-- [ ] 7.5 SSE 断线 5 秒重连
-- [ ] 7.6 **点击卡片就地展开**（不跳转）：异步拉取 `/api/surfaces?source=<src>&expand=1`，在卡片下方渲染折叠抽屉显示该 surface 最近 5 条 session 摘要；再次点击折叠；30s 内复用结果；**不调用** `switchPanel('chat')`，**不调用** `filterSessions()`
-- [ ] 7.7 < 640px 视口切换单列布局（纯 CSS 媒体查询）
+- [x] 7.1 `static/surfaces.js` IIFE：`showSurfaces()` 首次拉取 `/api/surfaces`，之后交给 SSE 增量更新
+- [x] 7.2 卡片模板：icon / name / state 灯（working/waiting/idle/offline）/ last activity / 24h msgs / 24h tokens；`active_webui_sessions` 仅当 `source === 'webui'` 且字段存在时渲染
+- [x] 7.3 `ICONS` 字典含 11 个 source；未识别的 source 使用 `📦` 占位并保留原字符串
+- [x] 7.4 `EventSource('api/agent-activity/stream')`：`snapshot` 全量替换 / `delta` 按 source patch / `heartbeat` 只更新连接灯 / `profile_changed` 清空后重连
+- [x] 7.5 `_scheduleReconnect` 5 秒 setTimeout；仅当 Surfaces tab 仍激活才重连
+- [x] 7.6 点击卡片切换 `state.openSource`；`_renderExpandInline` 拉取 `?source=X&expand=1`，抽屉内渲染最近 5 条 session；30s 内命中 `state.expanded` cache；**不跳转**，`filterSessions` 与 `switchPanel('chat')` 在 grep 测试里断言不出现
+- [x] 7.7 已在 stage 5.4 的 `@media (max-width: 640px)` 内完成单列布局
 
 ## 8. 前端：Pixel Office 引擎移植
 
