@@ -319,11 +319,11 @@ function showCmdDropdown(matches){
     const el=document.createElement('div');
     el.className='cmd-item';
     el.dataset.idx=i;
-    const usage=c.arg?` <span class="cmd-item-arg">${esc(c.arg)}</span>`:'';
-    el.innerHTML=`<div class="cmd-item-name">/${esc(c.name)}${usage}</div><div class="cmd-item-desc">${esc(c.desc)}</div>`;
+    const usage=c.args_hint?` <span class="cmd-item-arg">${esc(c.args_hint)}</span>`:'';
+    el.innerHTML=`<div class="cmd-item-name">/${esc(c.name)}${usage}</div><div class="cmd-item-desc">${esc(c.description||'')}</div>`;
     el.onmousedown=(e)=>{
       e.preventDefault();
-      $('msg').value='/'+c.name+(c.arg?' ':'');
+      $('msg').value='/'+c.name+(c.args_hint?' ':'');
       hideCmdDropdown();
       $('msg').focus();
     };
