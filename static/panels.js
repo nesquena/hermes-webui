@@ -1225,6 +1225,8 @@ async function loadSettingsPanel(){
     // Theme preference
     const themeSel=$('settingsTheme');
     if(themeSel){themeSel.value=settings.theme||'dark';themeSel.addEventListener('change',_markSettingsDirty,{once:false});}
+    // Refresh wallpaper preview (panel may open after applyWallpaper has already run)
+    if(typeof applyWallpaper === 'function') applyWallpaper();
     // Wallpaper brightness slider — load value from settings + capture for Discard
     const wpBrightSlider = $('settingsWallpaperBrightness');
     if(wpBrightSlider){

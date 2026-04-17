@@ -35,15 +35,35 @@ async function applyWallpaper(){
     root.style.setProperty('--wallpaper-brightness', String(info.brightness));
   }
 
+  let imageUrl = '';
   if(info.has_wallpaper && info.file){
     // ?v=<hash> for cache busting -- file name itself includes the hash but
     // browsers may key cache by URL, so the query string is belt-and-suspenders.
     const hash = info.file.replace(/^wallpaper-/, '').replace(/\.[a-z]+$/, '');
-    div.style.backgroundImage = `url("/api/wallpaper?v=${encodeURIComponent(hash)}")`;
+    imageUrl = `/api/wallpaper?v=${encodeURIComponent(hash)}`;
+    div.style.backgroundImage = `url("${imageUrl}")`;
     div.setAttribute('data-active', '');
   }else{
     div.style.backgroundImage = '';
     div.removeAttribute('data-active');
+  }
+  // Mirror to settings-panel preview if present (panel may not be open).
+  _updateWallpaperPreview(imageUrl, info.file);
+}
+
+function _updateWallpaperPreview(imageUrl, filename){
+  const wrap = document.getElementById('settingsWallpaperPreviewWrap');
+  const preview = document.getElementById('settingsWallpaperPreview');
+  const nameEl = document.getElementById('settingsWallpaperFilename');
+  if(!wrap || !preview) return;
+  if(imageUrl){
+    preview.style.backgroundImage = `url("${imageUrl}")`;
+    if(nameEl) nameEl.textContent = filename || '';
+    wrap.style.display = '';
+  }else{
+    preview.style.backgroundImage = '';
+    if(nameEl) nameEl.textContent = '';
+    wrap.style.display = 'none';
   }
 }
 

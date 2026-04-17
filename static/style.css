@@ -511,7 +511,7 @@
   .suggestion{padding:12px 14px;background:var(--input-bg);border:1px solid var(--border);border-radius:10px;font-size:13px;color:var(--muted);cursor:pointer;transition:all .15s;text-align:left;}
   .suggestion:hover{background:rgba(124,185,255,0.07);color:var(--text);border-color:rgba(124,185,255,.3);transform:translateX(2px);}
   /* ── Composer ── */
-  .composer-wrap{padding:12px 20px 16px;background:var(--bg);flex-shrink:0;}
+  .composer-wrap{padding:12px 20px 16px;background:transparent;flex-shrink:0;}
   .composer-box{max-width:780px;margin:0 auto;background:linear-gradient(var(--input-bg),var(--input-bg)),var(--bg);border:1px solid var(--border2);border-radius:16px;display:flex;flex-direction:column;transition:border-color .2s,box-shadow .2s;position:relative;z-index:2;}
   .composer-box:focus-within{border-color:rgba(124,185,255,0.5);box-shadow:0 0 0 3px rgba(124,185,255,0.08);}
   .composer-wrap.drag-over .composer-box{border-color:var(--blue);background:rgba(124,185,255,0.06);}
