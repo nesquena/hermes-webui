@@ -37,7 +37,7 @@ def test_tool_card_toggle_uses_same_chevron_icon_markup_as_thinking_card():
 
 def test_thinking_card_uses_panel_chrome_with_gold_palette():
     assert re.search(
-        r"\.thinking-card\s*\{[^}]*background:\s*rgba\(201,168,76,.05\);[^}]*border:\s*1px\s+solid\s+rgba\(201,168,76,.18\);[^}]*border-radius:\s*8px;",
+        r"\.thinking-card\s*\{[^}]*background:\s*var\(--accent-bg\);[^}]*border:\s*1px\s+solid\s+var\(--accent-bg-strong\);[^}]*border-radius:\s*10px;",
         STYLE_CSS,
     )
     assert "border-left: 2px solid rgba(201,168,76,.4);" not in STYLE_CSS
