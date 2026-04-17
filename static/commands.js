@@ -1,48 +1,145 @@
 // ── Slash commands ──────────────────────────────────────────────────────────
-// Built-in commands intercepted before send(). Each command runs locally
-// (no round-trip to the agent) and shows feedback via toast or local message.
+// Registry is sourced from hermes-agent's COMMAND_REGISTRY at boot via
+// GET /api/commands. WEBUI_ONLY_COMMANDS (theme, workspace, clear) are
+// merged in. Each command's handler comes from HANDLERS below; commands
+// without a handler are shown in the dropdown but emit a "not yet
+// supported" toast when invoked, rather than being silently sent as
+// text to the LLM.
 
-const COMMANDS=[
-  {name:'help',      desc:t('cmd_help'),             fn:cmdHelp},
-  {name:'clear',     desc:t('cmd_clear'),         fn:cmdClear},
-  {name:'compact',   desc:t('cmd_compact'),       fn:cmdCompact},
-  {name:'model',     desc:t('cmd_model'),  fn:cmdModel,     arg:'model_name'},
-  {name:'workspace', desc:t('cmd_workspace'),            fn:cmdWorkspace, arg:'name'},
-  {name:'new',       desc:t('cmd_new'),            fn:cmdNew},
-  {name:'usage',     desc:t('cmd_usage'),   fn:cmdUsage},
-  {name:'theme',     desc:t('cmd_theme'), fn:cmdTheme, arg:'name'},
-  {name:'personality', desc:t('cmd_personality'), fn:cmdPersonality, arg:'name'},
-  {name:'skills', desc:t('cmd_skills'), fn:cmdSkills, arg:'query'},
+let REGISTRY = [];      // populated by bootCommands() at app start
+const HANDLERS = {};    // name -> fn(args), populated below
+
+// Commands implemented purely in the webui (not in agent registry, or
+// agent-cli_only and we re-add them here as webui-only).
+const WEBUI_ONLY_COMMANDS = [
+  // /clear is cli_only in the agent registry (it means "clear terminal
+  // screen + new session"). The webui's /clear is a UI-state operation
+  // (clear messages display, keep session) -- different semantic, so we
+  // own it here.
+  {name:'clear',     description:'Clear messages display (keep session)',
+   category:'WebUI', aliases:[], args_hint:'',
+   subcommands:[], cli_only:false, gateway_only:false},
+  {name:'theme',     description:'Change UI theme (webui-only)',
+   category:'WebUI', aliases:[], args_hint:'name',
+   subcommands:['system','dark','light','slate','solarized','monokai','nord','oled'],
+   cli_only:false, gateway_only:false},
+  {name:'workspace', description:'Switch active workspace (webui-only)',
+   category:'WebUI', aliases:[], args_hint:'name',
+   subcommands:[], cli_only:false, gateway_only:false},
 ];
+
+// Commands the agent exposes but webui cannot/should not surface.
+// (These are filtered AFTER /api/commands already excludes gateway_only.)
+const UNSUPPORTED_IN_WEBUI = new Set([
+  'voice', 'paste', 'image', 'skin', 'browser',
+  'platforms', 'plan', 'config', 'tools', 'toolsets', 'plugins',
+  'history', 'save',
+  // Deferred until webui<->agent IPC is designed:
+  'yolo', 'reasoning', 'fast', 'compress',
+  // Replaced by webui-native equivalents handled via WEBUI_ALIASES:
+  'compact',
+]);
+
+// Frontend aliases that don't exist in the agent registry but we want to
+// preserve for muscle memory. Resolution happens BEFORE registry lookup.
+const WEBUI_ALIASES = {
+  'compact': 'compress',  // /compress is in UNSUPPORTED_IN_WEBUI -> toast
+};
+
+// Minimal fallback if /api/commands fetch fails (network error, agent
+// missing, etc.). Keeps the slash menu functional.
+const FALLBACK_REGISTRY = [
+  {name:'help',  description:'Show available commands', category:'Info',
+   aliases:[], args_hint:'', subcommands:[], cli_only:false, gateway_only:false},
+  {name:'clear', description:'Clear messages display (keep session)', category:'WebUI',
+   aliases:[], args_hint:'', subcommands:[], cli_only:false, gateway_only:false},
+  {name:'new',   description:'Start a new session', category:'Session',
+   aliases:['reset'], args_hint:'', subcommands:[], cli_only:false, gateway_only:false},
+  {name:'theme', description:'Change UI theme', category:'WebUI',
+   aliases:[], args_hint:'name', subcommands:[], cli_only:false, gateway_only:false},
+  {name:'workspace', description:'Switch active workspace', category:'WebUI',
+   aliases:[], args_hint:'name', subcommands:[], cli_only:false, gateway_only:false},
+];
+
+async function bootCommands(){
+  let serverList = [];
+  try{
+    const data = await api('/api/commands');
+    serverList = (data && data.commands) || [];
+  }catch(e){
+    console.warn('Failed to load /api/commands, using fallback', e);
+    REGISTRY = FALLBACK_REGISTRY.slice();
+    return;
+  }
+  // Filter: drop cli_only and webui-unsupported.
+  serverList = serverList.filter(c =>
+    !c.cli_only && !UNSUPPORTED_IN_WEBUI.has(c.name)
+  );
+  // Merge webui-only commands. If a name collision exists, webui wins.
+  const seenNames = new Set(serverList.map(c => c.name));
+  const webuiExtras = WEBUI_ONLY_COMMANDS.filter(c => !seenNames.has(c.name));
+  REGISTRY = [...serverList, ...webuiExtras];
+}
 
 function parseCommand(text){
   if(!text.startsWith('/'))return null;
   const parts=text.slice(1).split(/\s+/);
-  const name=parts[0].toLowerCase();
+  let name=parts[0].toLowerCase();
+  // Special-case: /compact is in WEBUI_ALIASES but its target is
+  // UNSUPPORTED_IN_WEBUI (compress). Route to a dedicated handler that
+  // shows a deferred-feature toast.
+  if(name === 'compact'){
+    return {name:'compact', args:parts.slice(1).join(' ').trim(), _localHandler:cmdCompact};
+  }
+  // Resolve frontend alias before registry lookup
+  if(WEBUI_ALIASES[name]) name = WEBUI_ALIASES[name];
   const args=parts.slice(1).join(' ').trim();
   return {name,args};
+}
+
+function _findCommand(name){
+  // Direct match
+  let cmd = REGISTRY.find(c => c.name === name);
+  if(cmd) return cmd;
+  // Alias match (registry entries carry their own aliases array from agent)
+  cmd = REGISTRY.find(c => c.aliases && c.aliases.includes(name));
+  return cmd || null;
 }
 
 function executeCommand(text){
   const parsed=parseCommand(text);
   if(!parsed)return false;
-  const cmd=COMMANDS.find(c=>c.name===parsed.name);
-  if(!cmd)return false;
-  cmd.fn(parsed.args);
+  if(parsed._localHandler){parsed._localHandler(parsed.args);return true;}
+  const cmd=_findCommand(parsed.name);
+  if(!cmd)return false;  // unknown -- fall through to send as text to LLM
+  const handler = HANDLERS[cmd.name];
+  if(!handler){
+    // Known to registry but not implemented in webui yet.
+    // CRITICAL: do NOT fall through to send() -- that would silently forward
+    // unknown slash commands as plain text and the LLM would invent fake
+    // tool calls.
+    showToast(t('cmd_not_supported_yet') + '/' + cmd.name);
+    return true;
+  }
+  handler(parsed.args);
   return true;
 }
 
 function getMatchingCommands(prefix){
   const q=prefix.toLowerCase();
-  return COMMANDS.filter(c=>c.name.startsWith(q));
+  // Match by name OR alias (so typing /reset shows up under /new)
+  return REGISTRY.filter(c =>
+    c.name.startsWith(q) ||
+    (c.aliases && c.aliases.some(a => a.startsWith(q)))
+  );
 }
 
 // ── Command handlers ────────────────────────────────────────────────────────
 
 function cmdHelp(){
-  const lines=COMMANDS.map(c=>{
-    const usage=c.arg?` <${c.arg}>`:'';
-    return `  /${c.name}${usage} — ${c.desc}`;
+  const lines=REGISTRY.map(c=>{
+    const usage=c.args_hint?` <${c.args_hint}>`:'';
+    return `  /${c.name}${usage} — ${c.description}`;
   });
   const msg={role:'assistant',content:t('available_commands')+'\n'+lines.join('\n')};
   S.messages.push(msg);
@@ -99,12 +196,11 @@ async function cmdNew(){
 }
 
 function cmdCompact(){
-  // Send as a regular message to the agent -- the agent's run_conversation
-  // preflight will detect the high token count and trigger _compress_context.
-  // We send a user message so it appears in the conversation.
-  $('msg').value='Please compress and summarize the conversation context to free up space.';
-  send();
-  showToast(t('compressing'));
+  // /compact (formerly: send free text to LLM asking it to compress) is
+  // deferred. The agent's /compress requires a full AIAgent instantiation
+  // in the webui process -- a separate batch will design that. Show a
+  // clear message instead of silently doing the wrong thing.
+  showToast(t('cmd_compress_deferred'));
 }
 
 async function cmdUsage(){
@@ -265,3 +361,17 @@ function selectCmdDropdownItem(){
   }
   hideCmdDropdown();
 }
+
+// ── Handler registration ───────────────────────────────────────────────────
+// Map registry command names to their implementations. Commands not in
+// this map will toast "not yet supported" when invoked (via executeCommand).
+HANDLERS.help        = cmdHelp;
+HANDLERS.clear       = cmdClear;
+HANDLERS.new         = cmdNew;
+HANDLERS.model       = cmdModel;
+HANDLERS.workspace   = cmdWorkspace;
+HANDLERS.theme       = cmdTheme;
+HANDLERS.personality = cmdPersonality;
+HANDLERS.skills      = cmdSkills;
+HANDLERS.usage       = cmdUsage;     // body replaced in Task 7
+// Tasks 3-7 add: stop, title, retry, undo, status
