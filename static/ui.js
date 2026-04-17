@@ -23,6 +23,12 @@ function shiftQueuedSessionMessage(sid){
 function getQueuedSessionCount(sid){
   return _getSessionQueue(sid,false).length;
 }
+function _compressionSessionLock(){
+  return window._compressionLockSid||null;
+}
+function _setCompressionSessionLock(sid){
+  window._compressionLockSid=sid||null;
+}
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
@@ -1110,8 +1116,170 @@ function _assistantTurnBlocks(turn){
 function _thinkingCardHtml(text){
   return `<div class="thinking-card"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(text)}</pre></div></div>`;
 }
+function _compressionStateForCurrentSession(){
+  const state=window._compressionUi;
+  if(!state||!S.session||state.sessionId!==S.session.session_id) return null;
+  return state;
+}
+function isCompressionUiRunning(){
+  const state=_compressionStateForCurrentSession();
+  const lock=_compressionSessionLock();
+  return !!((state&&state.phase==='running') || (lock && S.session && lock===S.session.session_id));
+}
+function clearCompressionUi(){
+  window._compressionUi=null;
+  _setCompressionSessionLock(null);
+  renderCompressionUi();
+}
+function setCompressionUi(state){
+  if(!state){
+    clearCompressionUi();
+    return;
+  }
+  window._compressionUi={...state};
+  if(state.sessionId) _setCompressionSessionLock(state.sessionId);
+  renderCompressionUi();
+}
+function _compressionCardsHtml(state){
+  if(!state) return '';
+  const cmdText=state.commandText||'/compress';
+  const focusText=state.focusTopic?`<div class="compression-card-focus"><span class="compression-card-focus-label">${esc(t('focus_label'))}:</span> ${esc(state.focusTopic)}</div>`:'';
+  const headerText=state.phase==='done'
+    ? (state.summary?.headline||t('compress_complete_label'))
+    : state.phase==='error'
+      ? (state.errorText||t('compress_failed_label'))
+      : (typeof state.beforeCount==='number' ? t('n_messages', state.beforeCount) : '');
+  const statusBody=state.phase==='done'
+    ? `<div class="compression-card-body">
+        ${state.summary?.token_line?`<div>${esc(state.summary.token_line)}</div>`:''}
+        ${state.summary?.note?`<span class="compression-note">${esc(state.summary.note)}</span>`:''}
+        ${focusText}
+      </div>`
+    : state.phase==='error'
+      ? `<div class="compression-card-body compression-card-error-body">
+          <div>${esc(state.errorText||t('compress_failed_label'))}</div>
+          ${focusText}
+        </div>`
+    : `<div class="compression-card-body">
+        <div>${esc(t('compressing'))}</div>
+        ${focusText}
+      </div>`;
+  const statusLabel=state.phase==='done'
+    ? t('compress_complete_label')
+    : state.phase==='error'
+      ? t('compress_failed_label')
+      : t('compress_running_label');
+  const statusIcon=state.phase==='done'
+    ? li('check',13)
+    : state.phase==='error'
+      ? li('x',13)
+    : `<span class="compression-card-bubbles"><span></span><span></span><span></span></span>`;
+  const referenceHtml=(state.phase==='done'&&state.referenceText)
+    ? _compressionReferenceCardHtml(state.referenceText, false)
+    : '';
+  return `
+    <div class="msg-row compression-row compression-command-row">
+      <div class="compression-card compression-card-command-row">
+        <div class="compression-card-header">
+          <span class="compression-card-icon">${li('settings',13)}</span>
+          <span class="compression-card-label">${esc(t('command_label'))}</span>
+          <span class="compression-card-command">${esc(cmdText)}</span>
+        </div>
+      </div>
+    </div>
+    <div class="msg-row compression-row compression-status-row">
+      <div class="compression-card ${state.phase==='done'?'compression-card-done-row':state.phase==='error'?'compression-card-error-row':'compression-card-running-row'}">
+        <div class="compression-card-header">
+          <span class="compression-card-icon">${statusIcon}</span>
+          <span class="compression-card-label">${esc(statusLabel)}</span>
+          <span class="compression-card-command">${esc(headerText)}</span>
+        </div>
+        ${statusBody}
+      </div>
+    </div>
+    ${referenceHtml}`;
+}
+function _compressionCardsNode(state){
+  const wrap=document.createElement('div');
+  wrap.className='compression-block';
+  wrap.innerHTML=_compressionCardsHtml(state);
+  return wrap;
+}
+function _isContextCompactionMessage(m){
+  if(!m||m.role!=='assistant') return false;
+  const text=msgContent(m)||String(m.content||'');
+  return /^\s*\[context compaction/i.test(text) || /^\s*context compaction/i.test(text);
+}
+function _compressionMessageAnchorKey(m){
+  if(!m||!m.role||m.role==='tool') return null;
+  let content='';
+  try{
+    content=String(msgContent(m)||'');
+  }catch(_){
+    content=String(m.content||'');
+  }
+  const norm=content.replace(/\s+/g,' ').trim().slice(0,160);
+  const ts=m._ts||m.timestamp||null;
+  const attachments=Array.isArray(m.attachments)?m.attachments.length:0;
+  if(!norm && !attachments && !ts) return null;
+  return {role:String(m.role||''), ts, text:norm, attachments};
+}
+function _compressionAnchorIndex(visWithIdx, anchorKey, fallbackIdx=null){
+  if(anchorKey&&Array.isArray(visWithIdx)){
+    for(let i=visWithIdx.length-1;i>=0;i--){
+      const candidate=_compressionMessageAnchorKey(visWithIdx[i].m);
+      if(!candidate) continue;
+      if(
+        candidate.role===String(anchorKey.role||'') &&
+        String(candidate.ts??'')===String(anchorKey.ts??'') &&
+        String(candidate.text||'')===String(anchorKey.text||'') &&
+        Number(candidate.attachments||0)===Number(anchorKey.attachments||0)
+      ){
+        return i;
+      }
+    }
+  }
+  return typeof fallbackIdx==='number' ? fallbackIdx : null;
+}
+function _compressionReferenceCardHtml(text, open=false){
+  const preview=text.split(/\n+/).filter(Boolean).slice(0,2).join(' ');
+  return `
+    <div class="msg-row compression-row compression-reference-row" data-raw-text="${esc(text)}">
+      <div class="compression-reference-card${open?' open':''}">
+        <div class="compression-reference-header" onclick="this.parentElement.classList.toggle('open')">
+          <span class="compression-reference-icon">${li('star',13)}</span>
+          <span class="compression-reference-label">${esc(t('context_compaction_label'))}</span>
+          <span class="compression-reference-kind">${esc(t('reference_only_label'))}</span>
+          <span class="compression-reference-preview">${esc(preview)}</span>
+          <span class="compression-reference-toggle">${li('chevron-right',12)}</span>
+          <button class="msg-copy-btn msg-action-btn compression-reference-copy" title="${t('copy')}" onclick="copyMsg(this);event.stopPropagation()">${li('copy',13)}</button>
+        </div>
+        <div class="compression-reference-body">
+          <pre>${esc(text)}</pre>
+        </div>
+      </div>
+    </div>`;
+}
+function _contextCompactionMessageHtml(m, tsTitle=''){
+  const text=msgContent(m)||String(m.content||'');
+  return _compressionReferenceCardHtml(text, false, tsTitle);
+}
+function renderCompressionUi(){
+  const el=$('liveCompressionCards');
+  if(!el) return;
+  el.innerHTML='';
+  el.style.display='none';
+}
 function renderMessages(){
   const inner=$('msgInner');
+  const compressionState=_compressionStateForCurrentSession();
+  if(window._compressionUi && !compressionState) clearCompressionUi();
+  const sessionCompressionAnchor=(
+    S.session && typeof S.session.compression_anchor_visible_idx==='number'
+  ) ? S.session.compression_anchor_visible_idx : null;
+  const sessionCompressionAnchorKey=(
+    S.session && S.session.compression_anchor_message_key && typeof S.session.compression_anchor_message_key==='object'
+  ) ? S.session.compression_anchor_message_key : null;
   const vis=S.messages.filter(m=>{
     if(!m||!m.role||m.role==='tool')return false;
     if(m.role==='assistant'){
@@ -1123,6 +1291,14 @@ function renderMessages(){
   });
   $('emptyState').style.display=vis.length?'none':'';
   inner.innerHTML='';
+  const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
+  const referenceMessage=S.messages.find(m=>_isContextCompactionMessage(m));
+  const referenceText=referenceMessage?msgContent(referenceMessage)||String(referenceMessage.content||''):'';
+  const referenceNode=(!compressionState && referenceMessage && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey))
+    ? (()=>{const row=document.createElement('div');row.innerHTML=_compressionReferenceCardHtml(referenceText,false);return row.firstElementChild;})()
+    : null;
+  let compressionInserted=!compressionNode;
+  let referenceInserted=!referenceNode;
   const visWithIdx=[];
   let rawIdx=0;
   for(const m of S.messages){
@@ -1132,11 +1308,26 @@ function renderMessages(){
     if(msgContent(m)||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)))) visWithIdx.push({m,rawIdx});
     rawIdx++;
   }
+  const insertionAnchor=_compressionAnchorIndex(
+    visWithIdx,
+    compressionState ? compressionState.anchorMessageKey : sessionCompressionAnchorKey,
+    compressionState
+      ? (typeof compressionState.anchorVisibleIdx==='number' ? compressionState.anchorVisibleIdx : compressionState.anchorRawIdx)
+      : sessionCompressionAnchor
+  );
   let _prevSepKey=null;
   let currentAssistantTurn=null;
   const assistantSegments=new Map();
   for(let vi=0;vi<visWithIdx.length;vi++){
     const {m,rawIdx}=visWithIdx[vi];
+    if(compressionNode && !compressionInserted && insertionAnchor!==null && vi>Number(insertionAnchor)){
+      inner.appendChild(compressionNode);
+      compressionInserted=true;
+    }
+    if(referenceNode && !referenceInserted && insertionAnchor!==null && vi>Number(insertionAnchor)){
+      inner.appendChild(referenceNode);
+      referenceInserted=true;
+    }
     const _tsSep=m._ts||m.timestamp;
     if(_tsSep){
       const _d=new Date(_tsSep*1000);
@@ -1198,6 +1389,18 @@ function renderMessages(){
       continue;
     }
 
+    if(_isContextCompactionMessage(m)){
+      if(compressionState || referenceNode){
+        continue;
+      }else{
+        currentAssistantTurn=null;
+        const row=document.createElement('div');
+        row.innerHTML=_contextCompactionMessageHtml(m, tsTitle);
+        inner.appendChild(row.firstElementChild);
+        continue;
+      }
+    }
+
     if(!currentAssistantTurn){
       currentAssistantTurn=_createAssistantTurn(tsTitle);
       inner.appendChild(currentAssistantTurn);
@@ -1221,6 +1424,15 @@ function renderMessages(){
     _assistantTurnBlocks(currentAssistantTurn).appendChild(seg);
     assistantSegments.set(rawIdx, seg);
   }
+  if(compressionNode && !compressionInserted){
+    inner.appendChild(compressionNode);
+    compressionInserted=true;
+  }
+  if(referenceNode && !referenceInserted){
+    inner.appendChild(referenceNode);
+    referenceInserted=true;
+  }
+  renderCompressionUi();
   // Insert settled tool call cards (history view only).
   // During live streaming, tool cards are rendered in #liveToolCards by the
   // tool SSE handler and never mixed into the message list until done fires.
