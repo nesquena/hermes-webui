@@ -1311,13 +1311,18 @@ def save_settings(settings: dict) -> dict:
 
 
 # Apply saved settings on startup (override env-derived defaults)
+# Exception: if HERMES_WEBUI_DEFAULT_WORKSPACE is explicitly set in the
+# environment, it wins over whatever settings.json has stored.  Persisted
+# config must never shadow an explicit env-var override (Docker deployments
+# rely on this — otherwise deleting settings.json is the only escape).
 _startup_settings = load_settings()
 if SETTINGS_FILE.exists():
     if _startup_settings.get("default_model"):
         DEFAULT_MODEL = _startup_settings["default_model"]
-    DEFAULT_WORKSPACE = resolve_default_workspace(
-        _startup_settings.get("default_workspace")
-    )
+    if not os.getenv("HERMES_WEBUI_DEFAULT_WORKSPACE"):
+        DEFAULT_WORKSPACE = resolve_default_workspace(
+            _startup_settings.get("default_workspace")
+        )
     if _startup_settings.get("default_workspace") != str(DEFAULT_WORKSPACE):
         _startup_settings["default_workspace"] = str(DEFAULT_WORKSPACE)
         try:

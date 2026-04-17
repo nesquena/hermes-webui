@@ -283,6 +283,18 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
     except Exception:
         pass
 
+    # (C) Trusted if it is equal to or under the boot-time DEFAULT_WORKSPACE.
+    #     In Docker deployments HERMES_WEBUI_DEFAULT_WORKSPACE is often set to a
+    #     volume mount outside the user's home (e.g. /data/workspace).  That path
+    #     was already validated at server startup, so any sub-path of it is safe
+    #     without requiring the user to add it to the workspace list manually.
+    try:
+        boot_default = Path(_BOOT_DEFAULT_WORKSPACE).expanduser().resolve()
+        candidate.relative_to(boot_default)
+        return candidate
+    except ValueError:
+        pass
+
     raise ValueError(
         f"Path is outside the user home directory and not in the saved workspace "
         f"list: {candidate}. Add it via Settings → Workspaces first."
