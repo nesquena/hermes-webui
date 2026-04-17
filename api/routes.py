@@ -55,6 +55,7 @@ from api.helpers import (
 )
 
 # ── CSRF: validate Origin/Referer on POST ────────────────────────────────────
+import ipaddress as _ipaddress
 import re as _re
 
 
@@ -96,6 +97,31 @@ def _ports_match(origin_scheme: str, origin_port: str | None, allowed_port: str 
     return False
 
 
+def _is_loopback_host(value: str) -> bool:
+    """Return True when the host refers to the local machine's loopback interface."""
+    value = value.strip().lower()
+    if not value:
+        return False
+    if value == "localhost":
+        return True
+    try:
+        return _ipaddress.ip_address(value).is_loopback
+    except ValueError:
+        return False
+
+
+def _hosts_match(origin_name: str, allowed_name: str) -> bool:
+    """Allow exact matches plus localhost/loopback aliases.
+
+    Reverse proxies and SSH tunnels sometimes surface the same local endpoint as
+    `localhost`, `127.0.0.1`, or `::1`. Treat those loopback aliases as the same
+    target so browser POSTs do not get rejected as cross-origin during local use.
+    """
+    if origin_name == allowed_name:
+        return True
+    return _is_loopback_host(origin_name) and _is_loopback_host(allowed_name)
+
+
 def _allowed_public_origins() -> set[str]:
     """Parse HERMES_WEBUI_ALLOWED_ORIGINS env var (comma-separated) into a set.
 
@@ -120,14 +146,9 @@ def _allowed_public_origins() -> set[str]:
     return result
 
 
-def _check_csrf(handler) -> bool:
-    """Reject cross-origin POST requests. Returns True if OK."""
-    origin = handler.headers.get("Origin", "")
-    referer = handler.headers.get("Referer", "")
+def _target_matches_request(target: str, handler) -> bool:
+    """Return True when an Origin/Referer points at this request's host."""
     host = handler.headers.get("Host", "")
-    if not origin and not referer:
-        return True  # non-browser clients (curl, agent) have no Origin
-    target = origin or referer
     # Extract host:port from origin/referer
     m = _re.match(r"^https?://([^/]+)", target)
     if not m:
@@ -153,8 +174,29 @@ def _check_csrf(handler) -> bool:
     ]
     for allowed in allowed_hosts:
         allowed_name, allowed_port = _normalize_host_port(allowed)
-        if origin_name == allowed_name and _ports_match(origin_scheme, origin_port, allowed_port):
+        if _hosts_match(origin_name, allowed_name) and _ports_match(origin_scheme, origin_port, allowed_port):
             return True
+    return False
+
+
+def _allowed_cors_origin(handler) -> str | None:
+    """Return the request Origin when CORS should be permitted."""
+    origin = handler.headers.get("Origin", "").strip()
+    if not origin:
+        return None
+    return origin if _target_matches_request(origin, handler) else None
+
+
+def _check_csrf(handler) -> bool:
+    """Reject cross-origin POST requests. Returns True if OK."""
+    origin = handler.headers.get("Origin", "")
+    referer = handler.headers.get("Referer", "")
+    if not origin and not referer:
+        return True  # non-browser clients (curl, agent) have no Origin
+    if origin and _target_matches_request(origin, handler):
+        return True
+    if referer and _target_matches_request(referer, handler):
+        return True
     return False
 
 
@@ -1320,6 +1362,25 @@ def handle_post(handler, parsed) -> bool:
         return True
 
     return False  # 404
+
+
+def handle_options(handler, parsed) -> bool:
+    """Handle browser CORS preflight for allowed origins."""
+    origin = _allowed_cors_origin(handler)
+    if not origin:
+        return j(handler, {"error": "Cross-origin request rejected"}, status=403)
+
+    requested_headers = handler.headers.get("Access-Control-Request-Headers", "").strip()
+    handler.send_response(204)
+    handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+    handler.send_header(
+        "Access-Control-Allow-Headers",
+        requested_headers or "Content-Type",
+    )
+    handler.send_header("Access-Control-Max-Age", "600")
+    _security_headers(handler)
+    handler.end_headers()
+    return True
 
 
 # ── GET route helpers ─────────────────────────────────────────────────────────

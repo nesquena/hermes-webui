@@ -40,6 +40,15 @@ def _security_headers(handler):
     handler.send_header('X-Content-Type-Options', 'nosniff')
     handler.send_header('X-Frame-Options', 'DENY')
     handler.send_header('Referrer-Policy', 'same-origin')
+    try:
+        from api.routes import _allowed_cors_origin
+        cors_origin = _allowed_cors_origin(handler)
+    except Exception:
+        cors_origin = None
+    if cors_origin:
+        handler.send_header('Access-Control-Allow-Origin', cors_origin)
+        handler.send_header('Access-Control-Allow-Credentials', 'true')
+        handler.send_header('Vary', 'Origin')
     handler.send_header(
         'Content-Security-Policy',
         "default-src 'self'; "

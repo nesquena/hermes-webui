@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 from api.auth import check_auth
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import j
-from api.routes import handle_get, handle_post
+from api.routes import handle_get, handle_options, handle_post
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 
 
@@ -78,6 +78,18 @@ class Handler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             if not check_auth(self, parsed): return
             result = handle_post(self, parsed)
+            if result is False:
+                return j(self, {'error': 'not found'}, status=404)
+        except Exception as e:
+            print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
+            return j(self, {'error': 'Internal server error'}, status=500)
+
+    def do_OPTIONS(self) -> None:
+        self._req_t0 = time.time()
+        try:
+            parsed = urlparse(self.path)
+            if not check_auth(self, parsed): return
+            result = handle_options(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
         except Exception as e:

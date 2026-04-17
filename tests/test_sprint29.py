@@ -52,6 +52,15 @@ def post(path, body=None, headers=None):
         return json.loads(e.read()), e.code
 
 
+def options(path, headers=None):
+    req = urllib.request.Request(BASE + path, method="OPTIONS", headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return dict(r.headers.items()), r.status
+    except urllib.error.HTTPError as e:
+        return dict(e.headers.items()), e.code
+
+
 def get_raw_with_headers(path):
     req = urllib.request.Request(BASE + path)
     with urllib.request.urlopen(req, timeout=10) as r:
@@ -93,6 +102,31 @@ class TestCSRF:
             headers={"Origin": "http://127.0.0.1:8788", "Host": "127.0.0.1:8788"},
         )
         assert status != 403, f"Expected non-403 for same-origin request, got {status}: {body}"
+
+    def test_loopback_alias_origin_127_host_localhost_allowed(self):
+        """Local loopback aliases should be treated as the same target."""
+        assert self._csrf_allowed({
+            "Origin": "http://127.0.0.1:8788",
+            "Host": "localhost:8788",
+        })
+
+    def test_loopback_alias_origin_localhost_host_ipv6_allowed(self):
+        """localhost and ::1 should not trip CSRF checks during local use."""
+        assert self._csrf_allowed({
+            "Origin": "http://localhost:8788",
+            "Host": "[::1]:8788",
+        })
+
+    def test_allowed_cors_origin_returns_exact_origin(self):
+        """Allowed cross-origin local requests should echo the browser Origin."""
+        from types import SimpleNamespace
+        from api.routes import _allowed_cors_origin
+
+        origin = _allowed_cors_origin(SimpleNamespace(headers={
+            "Origin": "http://localhost:8788",
+            "Host": "127.0.0.1:8788",
+        }))
+        assert origin == "http://localhost:8788"
 
     def test_same_origin_referer_allowed(self):
         """Same-origin Referer (matching Host) must be allowed."""
@@ -233,6 +267,21 @@ class TestCSRF:
             'Origin': 'https://myapp.example.com:8000',
             'Host': 'proxy.internal',
         })
+
+    def test_options_preflight_allowed_for_loopback_aliases(self):
+        """Browser preflight should succeed for localhost<->127 loopback aliases."""
+        headers, status = options(
+            "/api/file/save",
+            headers={
+                "Origin": "http://localhost:8788",
+                "Host": "127.0.0.1:8788",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+        assert status == 204
+        assert headers.get("Access-Control-Allow-Origin") == "http://localhost:8788"
+        assert headers.get("Access-Control-Allow-Credentials") == "true"
 
 
 # ── CSRF helpers: unit tests ─────────────────────────────────────────────────
