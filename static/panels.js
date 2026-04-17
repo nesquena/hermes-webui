@@ -547,7 +547,9 @@ function syncWorkspaceDisplays(){
   const composerLabel=$('composerWorkspaceLabel');
   const composerDropdown=$('composerWsDropdown');
   if(!hasSession && composerDropdown) composerDropdown.classList.remove('open');
-  if(composerLabel) composerLabel.textContent=label;
+  // Only show workspace label once boot has finished to prevent
+  // flash of "No workspace" before the saved session finishes loading.
+  if(composerLabel) composerLabel.textContent=S._bootReady?label:'';
   if(composerChip){
     composerChip.disabled=!hasSession;
     composerChip.title=hasSession?ws:t('no_workspace');

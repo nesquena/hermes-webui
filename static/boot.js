@@ -774,10 +774,12 @@ function applyBotName(){
       if(S.session&&S.session.workspace&&localStorage.getItem('hermes-webui-workspace-panel')==='open'){
         _workspacePanelMode='browse';
       }
-      syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);return;}
+      S._bootReady=true;
+      syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);return;}
     catch(e){localStorage.removeItem('hermes-webui-session');}
   }
   // no saved session - show empty state, wait for user to hit +
+  S._bootReady=true;
   syncTopbar();
   syncWorkspacePanelState();
   $('emptyState').style.display='';

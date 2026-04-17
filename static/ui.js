@@ -191,6 +191,8 @@ function syncModelChip(){
   const label=$('composerModelLabel');
   const dd=$('composerModelDropdown');
   if(!sel||!chip||!label) return;
+  // Don't show a model label until boot has finished loading to prevent flash of wrong default
+  if(!S._bootReady){ label.textContent=''; chip.title='Conversation model'; return; }
   const opt=_selectedModelOption();
   label.textContent=opt?opt.textContent:getModelLabel(sel.value||'');
   chip.title=sel.value||'Conversation model';
