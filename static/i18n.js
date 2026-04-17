@@ -510,6 +510,9 @@ const LOCALES = {
     personality_cleared: 'Personalidad borrada',
     personality_set: 'Personalidad: ',
     failed_colon: 'Error: ',
+    cmd_not_supported_yet: 'Comando aún no compatible con la interfaz web: ',
+    cmd_compress_deferred: '/compress aún no está disponible en la interfaz web — usa la CLI por ahora.',
+    cmd_webui_only_session: 'Este comando funciona solo en sesiones de la interfaz web (la sesión activa proviene de la CLI).',
     // ui.js
     no_workspace: 'Sin espacio de trabajo',
     // workspace.js
@@ -914,6 +917,9 @@ const LOCALES = {
     personality_cleared: 'Persönlichkeit gelöscht',
     personality_set: 'Persönlichkeit: ',
     failed_colon: 'Fehlgeschlagen: ',
+    cmd_not_supported_yet: 'Befehl noch nicht in der Web-UI unterstützt: ',
+    cmd_compress_deferred: '/compress ist in der Web-UI noch nicht verfügbar — bitte vorerst die CLI verwenden.',
+    cmd_webui_only_session: 'Dieser Befehl funktioniert nur mit Web-UI-Sitzungen (die aktive Sitzung stammt aus der CLI).',
     // ui.js
     no_workspace: 'Kein Workspace',
     dialog_confirm_title: 'Aktion bestätigen',
@@ -1532,6 +1538,9 @@ const LOCALES = {
     personality_cleared: '\u4eba\u8a2d\u5df2\u6e05\u7a7a',
     personality_set: '\u7576\u524d\u4eba\u8a2d\uff1a',
     failed_colon: '\u5931\u6557\uff1a',
+    cmd_not_supported_yet: 'Web UI \u66ab\u672a\u5be6\u4f5c\u8a72\u547d\u4ee4\uff1a',
+    cmd_compress_deferred: '/compress \u5728 Web UI \u4e2d\u5c1a\u672a\u53ef\u7528\uff0c\u8acb\u66ab\u6642\u4f7f\u7528 CLI\u3002',
+    cmd_webui_only_session: '\u8a72\u547d\u4ee4\u50c5\u652f\u63f4 Web UI \u539f\u751f\u5de5\u4f5c\u968e\u6bb5\uff08\u7576\u524d\u5de5\u4f5c\u968e\u6bb5\u4f86\u81ea CLI \u6a4b\u63a5\uff09\u3002',
     // ui.js
     no_workspace: '\u672a\u9078\u64c7\u5de5\u4f5c\u5340',
     // workspace.js
