@@ -673,6 +673,8 @@ function applyBotName(){
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
   // Fetch available models from server and populate dropdown dynamically
   await populateModelDropdown();
+  // Load slash command registry from /api/commands (sources hermes-agent COMMAND_REGISTRY)
+  await bootCommands();
   // Restore last-used model preference
   const savedModel=localStorage.getItem('hermes-webui-model');
   if(savedModel && $('modelSelect')){

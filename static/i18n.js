@@ -93,6 +93,9 @@ const LOCALES = {
     personality_cleared: 'Personality cleared',
     personality_set: 'Personality: ',
     failed_colon: 'Failed: ',
+    cmd_not_supported_yet: 'Command not yet supported in web UI: ',
+    cmd_compress_deferred: '/compress is not available in the web UI yet — use the CLI for now.',
+    cmd_webui_only_session: 'This command works on web-UI sessions only (the active session is bridged from the CLI).',
     // ui.js
     no_workspace: 'No workspace',
     dialog_confirm_title: 'Confirm action',
@@ -1123,6 +1126,9 @@ const LOCALES = {
     personality_cleared: '\u4eba\u8bbe\u5df2\u6e05\u7a7a',
     personality_set: '\u5f53\u524d\u4eba\u8bbe\uff1a',
     failed_colon: '\u5931\u8d25\uff1a',
+    cmd_not_supported_yet: 'Web UI \u6682\u672a\u5b9e\u73b0\u8be5\u547d\u4ee4\uff1a',
+    cmd_compress_deferred: '/compress \u5728 Web UI \u4e2d\u5c1a\u672a\u53ef\u7528\uff0c\u8bf7\u6682\u65f6\u4f7f\u7528 CLI\u3002',
+    cmd_webui_only_session: '\u8be5\u547d\u4ee4\u4ec5\u652f\u6301 Web UI \u539f\u751f\u4f1a\u8bdd\uff08\u5f53\u524d\u4f1a\u8bdd\u6765\u81ea CLI \u6865\u63a5\uff09\u3002',
     // ui.js
     no_workspace: '\u672a\u9009\u62e9\u5de5\u4f5c\u533a',
     dialog_confirm_title: '\u786e\u8ba4\u64cd\u4f5c',
