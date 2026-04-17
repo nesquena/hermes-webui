@@ -151,19 +151,25 @@ class TestApplyOnboardingSetupGuard:
     def test_setup_allowed_with_confirm_overwrite(self):
         """With confirm_overwrite=True, setup may proceed (will hit real logic)."""
         import api.onboarding as mod
+        import tempfile
 
         fake_config_path = pathlib.Path("/tmp/_test_config_confirm.yaml")
         fake_config_path.unlink(missing_ok=True)  # start clean
         try:
-            # Without patching Path.exists, use a non-existent path so it won't block
-            result = mod.apply_onboarding_setup(
-                {
-                    "provider": "openrouter",
-                    "model": "anthropic/claude-sonnet-4.6",
-                    "api_key": "test-key-confirm",
-                    "confirm_overwrite": True,
-                }
-            )
+            with tempfile.TemporaryDirectory() as tmp_home:
+                tmp_home_path = pathlib.Path(tmp_home)
+                # Without patching Path.exists, use a non-existent path so it won't block.
+                # Also redirect _get_active_hermes_home so .env writes go to the temp dir,
+                # never to the real ~/.hermes/.env.
+                with mock.patch.object(mod, "_get_active_hermes_home", return_value=tmp_home_path):
+                    result = mod.apply_onboarding_setup(
+                        {
+                            "provider": "openrouter",
+                            "model": "anthropic/claude-sonnet-4.6",
+                            "api_key": "test-key-confirm",
+                            "confirm_overwrite": True,
+                        }
+                    )
             # Should NOT return config_exists error
             if isinstance(result, dict):
                 assert result.get("error") != "config_exists", (
@@ -176,18 +182,26 @@ class TestApplyOnboardingSetupGuard:
     def test_setup_allowed_when_no_config_exists(self):
         """Fresh install: no config.yaml → setup proceeds normally (no blocking error)."""
         import api.onboarding as mod
+        import tempfile
 
         fake_config_path = pathlib.Path("/tmp/_test_config_fresh.yaml")
         fake_config_path.unlink(missing_ok=True)
         try:
-            with mock.patch.object(mod, "_get_config_path", return_value=fake_config_path):
-                result = mod.apply_onboarding_setup(
-                    {
-                        "provider": "openrouter",
-                        "model": "anthropic/claude-sonnet-4.6",
-                        "api_key": "test-key-fresh",
-                    }
-                )
+            with tempfile.TemporaryDirectory() as tmp_home:
+                tmp_home_path = pathlib.Path(tmp_home)
+                # Redirect both config path and hermes home so writes stay in /tmp,
+                # never touching the real ~/.hermes/.env.
+                with (
+                    mock.patch.object(mod, "_get_config_path", return_value=fake_config_path),
+                    mock.patch.object(mod, "_get_active_hermes_home", return_value=tmp_home_path),
+                ):
+                    result = mod.apply_onboarding_setup(
+                        {
+                            "provider": "openrouter",
+                            "model": "anthropic/claude-sonnet-4.6",
+                            "api_key": "test-key-fresh",
+                        }
+                    )
             if isinstance(result, dict):
                 assert result.get("error") != "config_exists"
         finally:
