@@ -20,20 +20,25 @@ _NEVER_EXPOSE: frozenset[str] = frozenset({
 })
 
 
-def list_commands() -> list[dict[str, Any]]:
+def list_commands(_registry=None) -> list[dict[str, Any]]:
     """Return COMMAND_REGISTRY entries as JSON-friendly dicts.
 
     Returns empty list if hermes_cli is not installed (graceful
     degradation -- the frontend has its own fallback minimum set).
+
+    Args:
+        _registry: Optional injected registry for testing. When None
+            (production), imports COMMAND_REGISTRY from hermes_cli.
     """
-    try:
-        from hermes_cli.commands import COMMAND_REGISTRY
-    except ImportError:
-        logger.warning("hermes_cli.commands not importable -- /api/commands returns []")
-        return []
+    if _registry is None:
+        try:
+            from hermes_cli.commands import COMMAND_REGISTRY as _registry
+        except ImportError:
+            logger.warning("hermes_cli.commands not importable -- /api/commands returns []")
+            return []
 
     out: list[dict[str, Any]] = []
-    for cmd in COMMAND_REGISTRY:
+    for cmd in _registry:
         if cmd.gateway_only:
             continue
         if cmd.name in _NEVER_EXPOSE:
