@@ -274,6 +274,14 @@ def test_server():
     # os.environ already set at module level above; no-op here.
 
     env = os.environ.copy()
+    # Strip real provider keys so test subprocess never inherits production credentials.
+    # The test server uses a mock/isolated config — no real API calls are made.
+    for _k in list(env):
+        if any(_k.startswith(p) for p in (
+            'OPENROUTER_API_KEY', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY',
+            'GOOGLE_API_KEY', 'DEEPSEEK_API_KEY',
+        )):
+            del env[_k]
     env.update({
         "HERMES_WEBUI_PORT":              str(TEST_PORT),
         "HERMES_WEBUI_HOST":              "127.0.0.1",
@@ -281,6 +289,14 @@ def test_server():
         "HERMES_WEBUI_DEFAULT_WORKSPACE": str(TEST_WORKSPACE),
         "HERMES_WEBUI_DEFAULT_MODEL":     "openai/gpt-5.4-mini",
         "HERMES_HOME":                    str(TEST_STATE_DIR),
+        # Belt-and-suspenders: HERMES_BASE_HOME hard-locks _DEFAULT_HERMES_HOME
+        # in api/profiles.py to the test state dir regardless of profile switching
+        # or any os.environ mutation that happens inside the server process.
+        # Without this, a profile switch or active_profile file in the real
+        # ~/.hermes can redirect _get_active_hermes_home() out of the sandbox,
+        # causing onboarding writes (config.yaml, .env) to land in the production
+        # ~/.hermes/profiles/webui/ and overwrite real API keys.
+        "HERMES_BASE_HOME":               str(TEST_STATE_DIR),
     })
 
     # Pass agent dir if discovered so server.py doesn't have to re-discover
