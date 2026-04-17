@@ -9,17 +9,17 @@
 
 ## 2. 后端：Stats 聚合 API
 
-- [ ] 2.1 在 `api/stats.py` 实现 `_open_state_db_readonly()` 工具函数（使用 `mode=ro` URI 连接）
-- [ ] 2.2 实现 `_get_profile_db_path()` 复用 `api.profiles.get_active_hermes_home()`
-- [ ] 2.3 实现 30 秒 TTL 内存缓存装饰器 `@cached(ttl=30, key=profile_path)`
-- [ ] 2.4 实现 `handle_stats_summary(handler, parsed)`：`sessions` SUM input/output/cost + `MAX(messages.timestamp)` + webui `SESSIONS` LRU 计数作为 `active_webui_sessions`（不含其他 surface 的活跃会话数，因为 webui 无从判断）
-- [ ] 2.5 实现 `handle_stats_timeseries(handler, parsed)`：`source=total` 走 `messages.token_count` 按 `DATE(timestamp, 'unixepoch')` 聚合；`source=split` 走 `sessions` 按 `DATE(started_at, 'unixepoch')` 聚合；支持 granularity=day|week|month，window clamp 到 365
-- [ ] 2.6 实现 `handle_stats_response_time(handler, parsed)`：同 session 内 user→assistant 连续消息时延分桶（0–1s / 1–3s / 3–10s / 10–30s / 30s+），过滤 >600s
-- [ ] 2.7 实现 `handle_stats_heatmap(handler, parsed)`：7×24 bucket，用 `strftime('%w', timestamp, 'unixepoch')` + `strftime('%H', timestamp, 'unixepoch')` 分组
-- [ ] 2.8 实现 `handle_stats_models(handler, parsed)`：`sessions` GROUP BY `model`，返回 `input_tokens / output_tokens / message_count / estimated_cost_usd / pct`
-- [ ] 2.9 实现 `?refresh=1` 绕过缓存的逻辑；在响应头加 `X-Cache: HIT|MISS`
-- [ ] 2.10 在 `api/routes.py` 的 GET dispatch 把 5 个 `/api/stats/*` 路由绑定到 2.4–2.8
-- [ ] 2.11 为以上 5 个端点写 pytest：未鉴权 401、正常返回、缓存命中、强制刷新、窗口夹紧、空 DB 返回空态结构
+- [x] 2.1 `_open_state_db_readonly(db_path)` using `file:...?mode=ro` URI; readonly verified by test
+- [x] 2.2 `_get_profile_db_path()` resolves via `api.profiles.get_active_hermes_home()` with env fallback; returns `None` if state.db missing
+- [x] 2.3 module-level `_CACHE` dict + `_cache_get/_cache_set/_cache_clear_all`; key includes profile DB path; TTL 30 s
+- [x] 2.4 `handle_stats_summary` → `_build_summary`: sessions SUM + `MAX(messages.timestamp)` + webui SESSIONS count
+- [x] 2.5 `handle_stats_timeseries` → `_build_timeseries`: `source=total` via messages.token_count, `source=split` via sessions; granularity day/week/month; window clamped to [1,365]
+- [x] 2.6 `handle_stats_response_time` → `_build_response_time`: 5-bucket (`0-1s / 1-3s / 3-10s / 10-30s / 30s+`), filters `delta <= 0 or delta > 600`
+- [x] 2.7 `handle_stats_heatmap` → `_build_heatmap`: 7×24 matrix via `strftime('%w'/%H, timestamp, 'unixepoch')`
+- [x] 2.8 `handle_stats_models` → `_build_models`: sessions GROUP BY model, returns input/output/count/cost/pct
+- [x] 2.9 `?refresh=1` bypasses `_cache_get`; response header `X-Cache: HIT|MISS` added in `_j_cached`
+- [x] 2.10 routes dispatch already wired in stage 1 (501→live handlers; no routing change needed)
+- [x] 2.11 `tests/test_stats_endpoints.py` — 19 tests: 3 scaffold + 9 pure builders (incl. empty-DB, over-10-min filter, window-clamp, granularity, model ranking) + 7 handler-level (401, cache HIT/MISS, refresh, empty-DB, window-clamp, 200, readonly-write rejected). All pass
 
 ## 3. 后端：Agent Activity API
 
