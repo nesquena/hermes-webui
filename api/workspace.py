@@ -296,8 +296,9 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
         pass
 
     raise ValueError(
-        f"Path is outside the user home directory and not in the saved workspace "
-        f"list: {candidate}. Add it via Settings → Workspaces first."
+        f"Path is outside the user home directory, not in the saved workspace "
+        f"list, and not under the default workspace: {candidate}. "
+        f"Add it via Settings → Workspaces first."
     )
 
 

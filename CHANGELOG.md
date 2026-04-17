@@ -1,5 +1,11 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.71] — 2026-04-16
+
+### Fixed
+- **Docker: `HERMES_WEBUI_DEFAULT_WORKSPACE` was silently overridden by `settings.json`** — the startup block in `api/config.py` unconditionally restored the persisted `default_workspace`, so any container that had previously written `settings.json` would shadow the env var on the next start. The env var now wins when explicitly set, matching the documented priority order. (Closes #609, PR #610)
+- **Docker: workspace trust validation rejected subdirectories of `DEFAULT_WORKSPACE`** — `resolve_trusted_workspace()` only trusted paths under `Path.home()` or in the saved list; subpaths of a Docker volume mount like `/data/workspace/myproject` failed with "outside the user home directory". Added a third trust condition for paths under the boot-time `DEFAULT_WORKSPACE`, which was already validated at startup. (Closes #609, PR #610)
+
 ## [v0.50.70] — 2026-04-16
 
 ### Changed

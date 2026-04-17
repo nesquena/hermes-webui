@@ -81,3 +81,27 @@ def test_none_path_returns_boot_default(monkeypatch, tmp_path):
 
     result = resolve_trusted_workspace(None)
     assert result == boot_default.resolve()
+
+
+def test_path_traversal_via_dotdot_does_not_escape_boot_default(monkeypatch, tmp_path):
+    """A path that uses `..` to escape DEFAULT_WORKSPACE must not be trusted by (C).
+
+    `Path.resolve()` collapses `..` before the `relative_to(boot_default)` check
+    runs, so `/data/workspace/../etc` resolves to `/etc` and is rejected (it's
+    also caught earlier by the system-roots block, but this test pins the
+    behavior in case the order of conditions ever changes).
+    """
+    import api.workspace as ws_mod
+
+    boot_default = tmp_path / "data" / "workspace"
+    boot_default.mkdir(parents=True)
+    sibling = tmp_path / "data" / "private"
+    sibling.mkdir(parents=True)
+
+    monkeypatch.setattr(ws_mod, "_BOOT_DEFAULT_WORKSPACE", str(boot_default))
+
+    # `boot_default/../private` resolves to `tmp_path/data/private`, which is
+    # NOT a child of boot_default and not under home — must reject.
+    escape = boot_default / ".." / "private"
+    with pytest.raises(ValueError, match="outside the user home"):
+        resolve_trusted_workspace(str(escape))
