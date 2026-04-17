@@ -194,22 +194,22 @@ async function cmdUsage(){
   try{
     const r = await api('/api/session/usage?session_id=' + encodeURIComponent(S.session.session_id));
     if(r && r.error){showToast(r.error);return;}
-    const cost = (r.estimated_cost != null) ? `$${Number(r.estimated_cost).toFixed(4)}` : '(unknown)';
+    const cost = (r.estimated_cost != null) ? `$${Number(r.estimated_cost).toFixed(4)}` : t('usage_unknown');
     const lines = [
-      '📈 **Token Usage**',
+      `**${t('usage_heading')}**`,
       '',
-      `**Model:** ${r.model || '(default)'}`,
-      `**Input tokens:** ${r.input_tokens.toLocaleString()}`,
-      `**Output tokens:** ${r.output_tokens.toLocaleString()}`,
-      `**Total:** ${r.total_tokens.toLocaleString()}`,
-      `**Estimated cost:** ${cost}`,
+      `**${t('status_model')}:** ${r.model || t('usage_default_model')}`,
+      `**${t('usage_input_tokens')}:** ${r.input_tokens.toLocaleString()}`,
+      `**${t('usage_output_tokens')}:** ${r.output_tokens.toLocaleString()}`,
+      `**${t('usage_total')}:** ${r.total_tokens.toLocaleString()}`,
+      `**${t('usage_estimated_cost')}:** ${cost}`,
       '',
-      '_Tip: toggle "Show token usage" in Settings to see this in every message._',
+      t('usage_settings_tip'),
     ];
     S.messages.push({role:'assistant', content:lines.join('\n')});
     renderMessages();
   }catch(e){
-    showToast('Failed to load usage: ' + e.message);
+    showToast(t('usage_load_failed') + e.message);
   }
 }
 
@@ -305,17 +305,17 @@ async function cmdPersonality(args){
 async function cmdStop(){
   if(!S.session){showToast(t('no_active_session'));return;}
   if(!S.activeStreamId){
-    // Match agent /stop: "No active task to stop."
-    showToast('No active task to stop.');
+    // Match agent /stop: shows the no-active-task toast (i18n: no_active_task).
+    showToast(t('no_active_task'));
     return;
   }
   // Reuse existing cancelStream() from boot.js -- it already handles
   // cleanup of UI state (cancel button, S.activeStreamId, busy state).
   if(typeof cancelStream === 'function'){
     await cancelStream();
-    showToast('⚡ Stopped. You can continue this session.');
+    showToast(t('stream_stopped'));
   }else{
-    showToast('Cancel function unavailable.');
+    showToast(t('cancel_unavailable'));
   }
 }
 
@@ -324,8 +324,8 @@ async function cmdTitle(args){
   const name = (args || '').trim();
   if(!name){
     // Match agent: print current title.
-    const cur = S.session.title || 'Untitled';
-    S.messages.push({role:'assistant', content:`Current title: **${cur}**\n\nUse \`/title <name>\` to change it.`});
+    const cur = S.session.title || t('untitled');
+    S.messages.push({role:'assistant', content:`${t('title_current')}: **${cur}**\n\n${t('title_change_hint')}`});
     renderMessages();
     return;
   }
@@ -338,7 +338,7 @@ async function cmdTitle(args){
     S.session.title = (r && r.session && r.session.title) || name;
     if(typeof syncTopbar === 'function') syncTopbar();
     if(typeof renderSessionList === 'function') renderSessionList();
-    showToast(`Title set to "${S.session.title}"`);
+    showToast(`${t('title_set')} "${S.session.title}"`);
   }catch(e){
     // api() throws Error with message from {error: ...} body on non-2xx.
     showToast(t('failed_colon') + e.message);
@@ -368,7 +368,7 @@ async function cmdRetry(){
     if(typeof autoResize === 'function') autoResize();
     await send();   // existing pipeline -> /api/chat/start
   }catch(e){
-    showToast('Retry failed: ' + e.message);
+    showToast(t('retry_failed') + e.message);
   }
 }
 
@@ -387,9 +387,9 @@ async function cmdUndo(){
       if(typeof clearLiveToolCards === 'function') clearLiveToolCards();
       renderMessages();
     }
-    showToast(`↩ Undid ${r.removed_count} message(s).`);
+    showToast(`↩ ${t('undid_n_messages')} ${r.removed_count} ${t('undid_messages_suffix')}`);
   }catch(e){
-    showToast('Undo failed: ' + e.message);
+    showToast(t('undo_failed') + e.message);
   }
 }
 
@@ -399,20 +399,20 @@ async function cmdStatus(){
     const r = await api('/api/session/status?session_id=' + encodeURIComponent(S.session.session_id));
     if(r && r.error){showToast(r.error);return;}
     const lines = [
-      '📊 **Session Status**',
+      `**${t('status_heading')}**`,
       '',
-      `**Session ID:** \`${r.session_id}\``,
-      `**Title:** ${r.title || 'Untitled'}`,
-      `**Model:** ${r.model || '(default)'}`,
-      `**Workspace:** ${r.workspace}`,
-      `**Personality:** ${r.personality || '(none)'}`,
-      `**Messages:** ${r.message_count}`,
-      `**Agent Running:** ${r.agent_running ? 'Yes ⚡' : 'No'}`,
+      `**${t('status_session_id')}:** \`${r.session_id}\``,
+      `**${t('status_title')}:** ${r.title || t('untitled')}`,
+      `**${t('status_model')}:** ${r.model || t('usage_default_model')}`,
+      `**${t('status_workspace')}:** ${r.workspace}`,
+      `**${t('status_personality')}:** ${r.personality || t('usage_personality_none')}`,
+      `**${t('status_messages')}:** ${r.message_count}`,
+      `**${t('status_agent_running')}:** ${r.agent_running ? t('status_yes') : t('status_no')}`,
     ];
     S.messages.push({role:'assistant', content:lines.join('\n')});
     renderMessages();
   }catch(e){
-    showToast('Failed to load status: ' + e.message);
+    showToast(t('status_load_failed') + e.message);
   }
 }
 
