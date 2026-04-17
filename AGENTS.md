@@ -51,3 +51,11 @@ Apply it as the default working directory for ALL file operations:
 
 If no [Workspace: ...] tag is present (e.g., CLI sessions), fall back to
 ~/workspace as the default.
+
+# UI / Design System
+
+For any UI, component, or styling work (HTML/CSS/JS in `static/`, templates,
+new pages, visual tweaks), follow the design system in `@DESIGN.md` (Genesis
+by chef, sourced from designmd.ai). Use its color tokens, typography scale,
+spacing, and component conventions instead of inventing new ones. Update
+`DESIGN.md` itself if a new pattern becomes canonical.
