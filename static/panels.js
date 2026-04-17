@@ -1192,6 +1192,16 @@ function _markSettingsDirty(){
 async function loadSettingsPanel(){
   try{
     const settings=await api('/api/settings');
+    // Hydrate appearance controls first so a slow /api/models request
+    // cannot overwrite an in-progress theme/skin selection.
+    const themeSel=$('settingsTheme');
+    const themeVal=settings.theme||'dark';
+    if(themeSel) themeSel.value=themeVal;
+    if(typeof _syncThemePicker==='function') _syncThemePicker(themeVal);
+    const skinVal=(settings.skin||'default').toLowerCase();
+    const skinSel=$('settingsSkin');
+    if(skinSel) skinSel.value=skinVal;
+    if(typeof _buildSkinPicker==='function') _buildSkinPicker(skinVal);
     const resolvedLanguage=(typeof resolvePreferredLocale==='function')
       ? resolvePreferredLocale(settings.language, localStorage.getItem('hermes-lang'))
       : (settings.language || localStorage.getItem('hermes-lang') || 'en');
@@ -1223,16 +1233,6 @@ async function loadSettingsPanel(){
     // Send key preference
     const sendKeySel=$('settingsSendKey');
     if(sendKeySel){sendKeySel.value=settings.send_key||'enter';sendKeySel.addEventListener('change',_markSettingsDirty,{once:false});}
-    // Theme preference (hidden input + button grid)
-    const themeSel=$('settingsTheme');
-    const themeVal=settings.theme||'dark';
-    if(themeSel) themeSel.value=themeVal;
-    if(typeof _syncThemePicker==='function') _syncThemePicker(themeVal);
-    // Skin preference
-    const skinVal=(settings.skin||'default').toLowerCase();
-    const skinSel=$('settingsSkin');
-    if(skinSel) skinSel.value=skinVal;
-    if(typeof _buildSkinPicker==='function') _buildSkinPicker(skinVal);
     // Language preference — populate from LOCALES bundle
     const langSel=$('settingsLanguage');
     if(langSel){

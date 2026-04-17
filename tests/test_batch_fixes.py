@@ -197,3 +197,12 @@ class TestSystemTheme:
             f"cmd_theme description should mention 'system' in all 5 locales; "
             f"found {count}"
         )
+
+    def test_panels_hydrates_appearance_before_models_fetch(self):
+        src = read("static/panels.js")
+        skin_idx = src.index("const skinVal=(settings.skin||'default').toLowerCase();")
+        models_idx = src.index("const models=await api('/api/models');")
+        assert skin_idx < models_idx, (
+            "loadSettingsPanel must hydrate theme/skin before awaiting /api/models, "
+            "otherwise a slow model fetch can clobber an in-progress skin selection"
+        )
