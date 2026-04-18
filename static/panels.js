@@ -1224,7 +1224,7 @@ async function loadSettingsPanel(){
         const models=await api('/api/models');
         for(const g of (models.groups||[])){
           const og=document.createElement('optgroup');
-          og.label=g.provider;
+          og.label=(PROVIDER_ICONS[g.provider]||'')+' '+g.provider;
           for(const m of g.models){
             const opt=document.createElement('option');
             opt.value=m.id;opt.textContent=m.label;

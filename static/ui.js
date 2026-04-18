@@ -34,6 +34,32 @@ const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
 
+const PROVIDER_ICONS = {
+  'OpenRouter': '🔀',
+  'Anthropic': '🧠',
+  'OpenAI': '🤖',
+  'OpenAI Codex': '⚡',
+  'Google': '🔵',
+  'DeepSeek': '🔮',
+  'Nous Portal': '🌟',
+  'Z.AI / GLM': '📊',
+  'Kimi / Moonshot': '🌙',
+  'MiniMax': '⚡',
+  'xAI': '❌',
+  'Mistral': '🌬️',
+  'Qwen': '🍡',
+  'HuggingFace': '🤗',
+  'Alibaba': '🏢',
+  'Meta Llama': '🦙',
+  'Ollama': '🦕',
+  'LM Studio': '💻',
+  'OpenCode Zen': '🧘',
+  'OpenCode Go': '🚀',
+  'Xiaomi': '📱',
+  'Kilo Code': '⚡',
+  'Copilot': '🔷',
+};
+
 // ── Smart model resolver ────────────────────────────────────────────────────
 // Finds the best matching option value in a <select> for a given model ID.
 // Handles mismatches like 'claude-sonnet-4-6' vs 'anthropic/claude-sonnet-4.6'.
@@ -80,7 +106,7 @@ async function populateModelDropdown(){
     _dynamicModelLabels={};
     for(const g of data.groups){
       const og=document.createElement('optgroup');
-      og.label=g.provider;
+      og.label=(PROVIDER_ICONS[g.provider]||'')+' '+g.provider;
       for(const m of g.models){
         const opt=document.createElement('option');
         opt.value=m.id;
