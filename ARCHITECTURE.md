@@ -68,6 +68,8 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       streaming.py         SSE engine, run_agent, cancel, HERMES_HOME save/restore (~236 lines)
       upload.py            Multipart parser, file upload handler (~78 lines)
       workspace.py         File ops: list_dir, read_file_content, workspace helpers (~77 lines)
+      stats.py             /api/stats/* aggregation over state.db (summary / timeseries / response-time / heatmap / models). Read-only SQL, 30s TTL cache, X-Cache header. Used by the Insights panel.
+      agent_activity.py    /api/agent-activity (+ /stream SSE) and /api/surfaces endpoints. Builds surface-level snapshots, reuses gateway_watcher's subscribe() queue for change events. Data view is strictly message-timestamp + session-source — no runtime fields (current_tool / pending_count) are ever exposed.
     static/
       index.html           HTML template (~364 lines)
       style.css            All CSS incl. mobile responsive (~670 lines)
@@ -79,6 +81,9 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       commands.js          Slash command registry, parser, autocomplete dropdown (~156 lines)
       onboarding.js        First-run wizard overlay, provider setup flow, and settings/workspace orchestration.
       boot.js              Event wiring, mobile sidebar/workspace nav, voice input, boot IIFE (~338 lines)
+      insights.js          Insights panel renderer — 4 inline-SVG charts + models table fed by /api/stats/*.
+      surfaces.js          Surfaces card grid + live EventSource to /api/agent-activity/stream + per-card expand drawer fed by /api/surfaces?source=X&expand=1.
+      pixel/               Scaffold for the Pixel Office engine port (engine/{tile-map,state,characters,renderer,game-loop}.js + sprites.js + surface-bridge.js + pixel-office.js). Filled in by a follow-up change; current files are attribution-only stubs.
     tests/
       conftest.py          Isolated test server (port 8788, separate HERMES_HOME) (~240 lines)
       test_sprint{1-20b}.py Feature tests per sprint (21 files, 415 test functions)
@@ -818,6 +823,29 @@ For scale beyond single-user casual use.
 5. File tree lazy loading: expand-on-click fetches subdirectory contents
 
 ---
+
+## 10b. Dashboards and Pixel Office (add-dashboards-and-pixel-office)
+
+Landed in a dedicated OpenSpec change (`openspec/changes/add-dashboards-and-pixel-office/`). Provides three sidebar tabs backed by read-only aggregation over `state.db`.
+
+**Data view boundary**. The webui process and the `hermes-agent` process only share state through `state.db`. This means the webui can observe session metadata, message timestamps, and WebUI-side in-memory `SESSIONS`, but it has NO reliable window into the agent's runtime state: which tool is executing, what the agent is waiting on, or whether a non-webui surface is in the middle of a long operation. All Insights/Surfaces/Pixel features are therefore built strictly from state.db; response fields like `current_tool` or `pending_count` are deliberately absent, and frontend copy avoids phrases like "currently running" or "waiting for your reply" (a pytest string lint guards against regression). Adding those fields would require a new IPC channel and is explicitly out of scope for this change — see `openspec/changes/add-dashboards-and-pixel-office/design.md` §D9.
+
+**Backend**
+
+- `api/stats.py` owns the Insights endpoints (`/api/stats/summary | timeseries | response-time | heatmap | models`). Each handler goes through a shared `_serve(...)` helper that does auth → profile DB resolution → 30 s TTL cache → build. Responses set `X-Cache: HIT|MISS`; `?refresh=1` bypasses the cache. Connections open with `file:...?mode=ro` so any accidental write is rejected by SQLite.
+- `api/agent_activity.py` owns `/api/agent-activity`, `/api/agent-activity/stream`, and `/api/surfaces`. `build_surface_snapshot(db_path)` runs `SELECT DISTINCT source` on every call (per-profile enumeration, no startup freezing), then a LEFT JOIN sessions × messages grouping by source for `last_active_ts / message_count_24h / tokens_24h`. The SSE handler shares the `GatewayWatcher.subscribe()` queue — no new polling thread — and rebuilds+diffs the snapshot on each event or 5 s timeout, emitting `event: delta` on change and `event: heartbeat` every 30 s of idleness. Active-profile changes are detected inside the loop and close the connection so the client reconnects under the new profile.
+- Both modules share `_require_auth` / `_j_cached` / query-string helpers defined in `api/stats.py`. `agent_activity.py` uses `import api.stats as _stats` + an indirection helper so pytest monkeypatching works.
+
+**Frontend**
+
+- `static/index.html` adds three sidebar nav-tabs (`Insights / Surfaces / Pixel`), matching `panel-view` shells, and three main-view containers (`#mainInsights / #mainSurfaces / #mainPixel`). `static/panels.js::switchPanel()` routes dashboard panels through `_switchMainView()`, which hides the chat messages + composer and surfaces the matching dashboard container.
+- `static/insights.js` renders four blocks with inline SVG: a Token trend chart (single line for `messages.token_count` per day plus a secondary stacked bar for input/output/cache/reasoning by session start date), a response-time bucket chart, a 7×24 activity heatmap (CSS grid, log-scaled opacity), and a models table sorted by total tokens. Day/week/month granularity and 7d/30d response-time window are user-togglable. `Refresh` appends `?refresh=1`.
+- `static/surfaces.js` opens an `EventSource('api/agent-activity/stream', { withCredentials: true })` — the `withCredentials` flag is critical for auth-enabled deployments, the lack of it was the cause of an early 401 bug. Snapshot/delta/heartbeat/profile_changed events update the card grid; errors trigger a 5 s reconnect. Clicking a card toggles an inline expand drawer that lazy-fetches `/api/surfaces?source=X&expand=1` with a 30 s cache. No cross-panel navigation (`filterSessions` / `switchPanel('chat')` are explicitly not called).
+- `static/pixel/` holds the Pixel Office scaffold. Files exist with OpenClaw attribution comments but await the engine port.
+
+**i18n**. 28 new keys land in `en / zh / de / zh-Hant / es` (tab labels, chart titles and captions, granularity buttons, state names, surface card copy, pixel panel hints).
+
+**Tests**. `tests/test_stats_endpoints.py` (19), `tests/test_agent_activity.py` (38), and `tests/test_dashboards_frontend.py` (26) cover pure aggregation, handler plumbing (auth, cache, refresh, empty DB), SSE shape, field-absence contracts (`current_tool` / `pending_count` never leak), string-lint for runtime-perception phrasing, and all frontend wire-ups (nav tabs, main containers, script loads, i18n coverage in 5 locales, EventSource credentials, 30 s expand cache, and the no-cross-panel-navigation guarantee).
 
 ## 11. How To Add a New API Endpoint
 

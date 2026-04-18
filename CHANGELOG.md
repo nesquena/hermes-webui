@@ -1,5 +1,29 @@
 # Hermes Web UI -- Changelog
 
+## [Unreleased] — `feat/dashboards-and-pixel-office`
+
+### Added
+- **Insights panel** — new sidebar tab rendering four blocks in the main view: summary cards, Token trend (single-line `messages.token_count` per day + stacked bars breaking it into input / output / cache / reasoning from `sessions`), response-time distribution (5 buckets, 7d/30d toggle), 7×24 activity heatmap, and per-model usage table. Day / week / month granularity, `?refresh=1` bypass, 30-second server cache. All SVG is inline, no third-party chart libs.
+- **Surfaces panel** — card wall grouped by `sessions.source`, live-updated via SSE (shared with gateway_watcher's 5-second poll). Each card shows the icon, state light (working / waiting / idle / offline), last-message timestamp, 24h message and token counts. WebUI card also shows "N active webui sessions"; non-webui cards intentionally omit any active-sessions line (the webui process has no reliable view into another surface's runtime state). Click-to-expand drawer fetches the 5 most recent sessions per surface via `/api/surfaces?source=X&expand=1`. No cross-panel navigation.
+- **Pixel office panel (scaffold only)** — sidebar tab and full-screen canvas region land in this change; the engine port (tile-map BFS, character state machine, Canvas 2D renderer, game loop, sprites) ships in a follow-up.
+- **Backend endpoints**:
+  - `GET /api/stats/summary | timeseries | response-time | heatmap | models` — SELECT-only aggregates over `state.db`, 30-second in-memory TTL cache, `X-Cache: HIT|MISS` header, `?refresh=1` bypass. (`api/stats.py`)
+  - `GET /api/agent-activity` — per-surface `{state, last_active_ts, message_count_24h, tokens_24h}`; `active_webui_sessions` only on the `webui` entry. Reads `SELECT DISTINCT source` dynamically per active profile (no startup freeze). (`api/agent_activity.py`)
+  - `GET /api/agent-activity/stream` — SSE: `snapshot` on connect, `delta` on change, `heartbeat` every 30 s of idleness, `profile_changed` when the active profile switches. Reuses `GatewayWatcher.subscribe()` — no new polling thread.
+  - `GET /api/surfaces` and `GET /api/surfaces?source=X&expand=1` — Surfaces card data + per-surface session drawer (title redacted via `_redact_text`, returns `{sessions: []}` for unknown source, not 404).
+- **i18n** — 28 new keys across 5 locales (`en / zh / de / zh-Hant / es`) covering tabs, chart labels, state wording, granularity and refresh copy.
+
+### Design notes (see `openspec/changes/add-dashboards-and-pixel-office/`)
+- **Data-view boundary locked down**: no response field (`current_tool`, `pending_count`, `is_running_tool`) ever reflects hermes-agent's internal runtime state — webui has no reliable access to it. Pixel character animations are driven solely by the `state` field. String lint test (`test_pixel_no_runtime_perception_phrasing`) blocks phrases like "currently running" / "waiting for your reply" from landing in frontend copy.
+- **Schema-verified aggregation**: `messages.token_count` is a single aggregate column, so the Token-trend main line shows totals only; input/output/cache/reasoning split is aggregated from `sessions` and labelled as such ("by session start date"). No schema changes in this release.
+- **Dynamic surface enumeration**: `SELECT DISTINCT source FROM sessions` runs on every snapshot rather than at startup, so profile switches immediately reflect the new profile's surfaces without residue.
+- **SSE credentials**: `EventSource` opens with `{withCredentials: true}` so hermes's session cookie is forwarded — browsers otherwise 401 on auth-enabled deployments.
+
+### Known limits (deliberate)
+- Pixel Office engine not yet ported (sections 8–9). The tab is clickable but the canvas stays empty pending the TypeScript-to-vanilla-JS engine rewrite.
+- Day-granularity input/output token split is bucketed by `sessions.started_at`, so long sessions that cross midnight land fully in the start day. A future change may add `messages.input_tokens` / `output_tokens` columns to remove that bias.
+- `active_webui_sessions` reflects the in-process `SESSIONS` LRU only — headless daemons, other hermes processes, or other surfaces are NOT counted there.
+
 ## [v0.50.76] — 2026-04-17
 
 ### Fixed

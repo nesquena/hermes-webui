@@ -409,6 +409,27 @@ across 53 test files.
 - Seamless switching -- no server restart; reloads config, skills, memory, cron, models
 - Per-session profile tracking (records which profile was active at creation)
 
+### Insights
+- Token consumption, response-time distribution, 7x24 activity heatmap, per-model breakdown
+- Main Token trend chart: single line (messages.token_count per day) + stacked-bar breakdown (input / output / cache / reasoning from sessions, by session start date)
+- Day / week / month granularity toggle; 7-day / 30-day response-time window toggle
+- Refresh button bypasses the 30-second server cache (`?refresh=1`)
+- All data comes from a SELECT-only connection to `state.db`; no schema changes, no writes
+- Works per active profile -- switching profiles shows that profile's numbers
+
+### Surfaces
+- Card wall grouping activity by `sessions.source` (cli, webui, weixin, telegram, discord, slack, signal, whatsapp, sms, email, cron, ...)
+- Each card: icon, state light (working / waiting / idle / offline), last message timestamp, 24h message count, 24h token count
+- WebUI card is the only one that shows "N active webui sessions" -- webui cannot reliably observe active sessions for non-webui surfaces, so that line is intentionally omitted elsewhere
+- Live updates over SSE: snapshot on connect, deltas on change, heartbeats every 30s, 5-second reconnect on drop
+- Click a card to expand a drawer of the 5 most recent sessions for that surface (title, model, message count, last activity) -- no cross-panel navigation, no dependency on sidebar filter
+- Profile switch closes the stream and reconnects with the new profile's surfaces
+
+### Pixel office (P1 -- engine in flight)
+- Sidebar tab and main canvas region are scaffolded; the surface-level SSE stream is live (shared with Surfaces)
+- Engine port (tilemap + BFS pathfinding, character state machine, Canvas 2D renderer, rAF game loop) ships in a follow-up section
+- By design: character actions are driven ONLY by surface state (working / waiting / idle / offline); no runtime-only fields like `current_tool` are used (the webui does not have reliable access to the hermes-agent process's internal state)
+
 ### Authentication and security
 - Optional password auth -- off by default, zero friction for localhost
 - Enable via `HERMES_WEBUI_PASSWORD` env var or Settings panel

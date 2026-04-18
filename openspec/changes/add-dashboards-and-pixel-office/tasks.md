@@ -92,11 +92,11 @@
 
 ## 10. 文档与兼容性
 
-- [ ] 10.1 更新 `README.md` 在 Features 章节添加 Insights / Surfaces / Pixel Office 三条，附截图
-- [ ] 10.2 更新 `CHANGELOG.md`：本次 change 的用户侧变更摘要
-- [ ] 10.3 确认 `static/boot.js` / `static/ui.js` 的老逻辑不受影响（现有面板切换、i18n、主题切换回归测试）
-- [ ] 10.4 更新 `ARCHITECTURE.md`：新增"Dashboard / Pixel Office 模块"小节，引用本 change 的 design.md
-- [ ] 10.5 新增 follow-up change 备忘：未来补 `messages.input_tokens/output_tokens` 列可让日粒度精确拆分；当前 change 已通过双图组合规避
+- [x] 10.1 README Features：Insights / Surfaces / Pixel office (P1) 三条功能描述（无截图 — 由用户后续补）
+- [x] 10.2 CHANGELOG `[Unreleased]` 段：Added / Design notes / Known limits 三节，列全 8 个端点与 Pixel P1 状态
+- [x] 10.3 全量 pytest 通过（1418 tests；4 pre-existing OAuth 失败无关）；前端契约测试覆盖 switchPanel / i18n / style.css 未动现有文件的关键字
+- [x] 10.4 ARCHITECTURE 文件清单加 stats.py / agent_activity.py / insights.js / surfaces.js / pixel/ 条目；新增 §10b Dashboards and Pixel Office 设计摘要（数据视角边界、后端、前端、i18n、测试）
+- [x] 10.5 Follow-up 备忘已在 Risk 表 + CHANGELOG Known Limits + 本 tasks 10.5 留档：未来可补 `messages.input_tokens / output_tokens` 列，去除长 session 归属偏前问题
 
 ## 11. 验收与合并
 
