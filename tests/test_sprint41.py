@@ -251,6 +251,20 @@ class TestIssue495TitleStreaming(unittest.TestCase):
         self.assertEqual(user_text, user_msg["content"][:500])
         self.assertEqual(assistant_text, final_asst["content"][:500])
 
+    def test_title_snippet_keeps_short_substantive_assistant_reply(self):
+        """Short but real assistant answers should still be eligible for titles."""
+        from api.streaming import _first_exchange_snippets
+
+        messages = [
+            {"role": "user", "content": "Can you help me rename this session?"},
+            {"role": "assistant", "content": "Sure."},
+        ]
+
+        user_text, assistant_text = _first_exchange_snippets(messages)
+
+        self.assertEqual(user_text, "Can you help me rename this session?")
+        self.assertEqual(assistant_text, "Sure.")
+
     def test_provisional_title_detection_ignores_whitespace_noise(self):
         """Temporary first-message titles should still match with whitespace normalization."""
         from api.streaming import _is_provisional_title, title_from
