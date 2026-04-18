@@ -189,7 +189,8 @@ async function _runManualCompression(focusTopic){
     const summary=data&&data.summary;
     if(typeof setCompressionUi==='function'&&S.session){
       const referenceMsg=(S.messages||[]).find(m=>typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(m));
-      const referenceText=referenceMsg?msgContent(referenceMsg)||String(referenceMsg.content||''):'';
+      const summaryRef=summary&&typeof summary.reference_message==='string' ? String(summary.reference_message||'').trim() : '';
+      const referenceText=summaryRef || (referenceMsg?msgContent(referenceMsg)||String(referenceMsg.content||''):'');
       const effectiveFocus=(data&&data.focus_topic)||focusTopic||'';
       setCompressionUi({
         sessionId:S.session.session_id,
