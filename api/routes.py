@@ -2579,7 +2579,12 @@ def _handle_session_compress(handler, body):
             return bad(handler, "Not enough conversation to compress (need at least 4 messages).")
 
         def _fallback_estimate_messages_tokens_rough(msgs):
-            """Fallback heuristic token estimate when runtime metadata helpers are absent."""
+            """Fallback heuristic token estimate when runtime metadata helpers are absent.
+
+            Uses whitespace token-like word counting only. This intentionally
+            over/under-estimates BPE token counts (roughly around x3/x4 scale),
+            and is only for resilient fallback behavior.
+            """
             total = 0
             for m in msgs or []:
                 if not isinstance(m, dict):
