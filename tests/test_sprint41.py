@@ -286,6 +286,96 @@ class TestIssue495TitleStreaming(unittest.TestCase):
             "Whitespace-normalized provisional titles should still be recognized",
         )
 
+    def test_title_snippet_keeps_tool_call_with_substantive_text(self):
+        """An assistant row with tool_calls AND a substantive answer text
+        must still be used as the first-exchange snippet — it's not a
+        preamble, it's an agentic first-turn plan."""
+        from api.streaming import _first_exchange_snippets
+
+        user_msg = {
+            "role": "user",
+            "content": "Can you schedule a reminder for the Q3 kickoff meeting?",
+        }
+        # Assistant row with both a real answer AND a tool_call
+        agentic_asst = {
+            "role": "assistant",
+            "content": "I'll schedule the Q3 kickoff reminder for next Monday at 9am.",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "function": {
+                        "name": "cronjob",
+                        "arguments": '{"action":"create","when":"mon 9am"}',
+                    },
+                }
+            ],
+        }
+
+        user_text, assistant_text = _first_exchange_snippets([user_msg, agentic_asst])
+
+        self.assertEqual(user_text, user_msg["content"][:500])
+        self.assertEqual(
+            assistant_text,
+            agentic_asst["content"][:500],
+            "Substantive answer text on a tool_call row must be preserved",
+        )
+
+    def test_title_snippet_skips_tool_call_preamble_only_rows(self):
+        """Tool-call rows whose content is empty or meta-reasoning preamble
+        ('Let me check my memory first.') must still be skipped — those are
+        orchestration scaffolding, not title material."""
+        from api.streaming import _first_exchange_snippets
+
+        user_msg = {
+            "role": "user",
+            "content": "Summarize my notes from last week.",
+        }
+        empty_preamble = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "function": {
+                        "name": "memory",
+                        "arguments": '{"action":"search"}',
+                    },
+                }
+            ],
+        }
+        meta_preamble = {
+            "role": "assistant",
+            "content": "Let me check my memory first.",
+            "tool_calls": [
+                {
+                    "id": "call-2",
+                    "function": {
+                        "name": "memory",
+                        "arguments": '{"action":"search","q":"last week"}',
+                    },
+                }
+            ],
+        }
+        tool_result = {
+            "role": "tool",
+            "tool_call_id": "call-2",
+            "content": '{"result":"background info"}',
+        }
+        final_asst = {
+            "role": "assistant",
+            "content": "Here's a summary of your notes from last week.",
+        }
+
+        _, assistant_text = _first_exchange_snippets(
+            [user_msg, empty_preamble, meta_preamble, tool_result, final_asst]
+        )
+
+        self.assertEqual(
+            assistant_text,
+            final_asst["content"][:500],
+            "Empty and meta-reasoning preamble rows must be skipped",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
