@@ -214,45 +214,91 @@ function renderModelDropdown(){
   const dd=$('composerModelDropdown');
   const sel=$('modelSelect');
   if(!dd||!sel) return;
-  dd.innerHTML='';
+  // Store model data for filtering
+  const _modelData=[];
   for(const child of Array.from(sel.children)){
     if(child.tagName==='OPTGROUP'){
-      const heading=document.createElement('div');
-      heading.className='model-group';
-      heading.textContent=child.label||'Models';
-      dd.appendChild(heading);
       for(const opt of Array.from(child.children)){
-        const row=document.createElement('div');
-        row.className='model-opt'+(opt.value===sel.value?' active':'');
-        row.innerHTML=`<span class="model-opt-name">${esc(opt.textContent||getModelLabel(opt.value))}</span><span class="model-opt-id">${esc(opt.value)}</span>`;
-        row.onclick=()=>selectModelFromDropdown(opt.value);
-        dd.appendChild(row);
+        _modelData.push({value:opt.value,name:esc(opt.textContent||getModelLabel(opt.value)),id:esc(opt.value)});
       }
-      continue;
     }
     if(child.tagName==='OPTION'){
-      const row=document.createElement('div');
-      row.className='model-opt'+(child.value===sel.value?' active':'');
-      row.innerHTML=`<span class="model-opt-name">${esc(child.textContent||getModelLabel(child.value))}</span><span class="model-opt-id">${esc(child.value)}</span>`;
-      row.onclick=()=>selectModelFromDropdown(child.value);
-      dd.appendChild(row);
+      _modelData.push({value:child.value,name:esc(child.textContent||getModelLabel(child.value)),id:esc(child.value)});
     }
   }
-  // Custom model ID input — lets users type any model not in the curated list
+  // Create search input FIRST before filterModels definition
+  const _searchRow=document.createElement('div');
+  _searchRow.className='model-search-row';
+  _searchRow.innerHTML=`<input class="model-search-input" type="text" placeholder="${esc(t('model_search_placeholder')||'Search models…')}" spellcheck="false" autocomplete="off"><button class="model-search-clear" title="Clear search">${li('x',10)}</button>`;
+  const _si=_searchRow.querySelector('.model-search-input');
+  const _sc=_searchRow.querySelector('.model-search-clear');
+  // Create custom model section elements
   const _custSep=document.createElement('div');
   _custSep.className='model-group model-custom-sep';
   _custSep.textContent=t('model_custom_label')||'Custom model ID';
-  dd.appendChild(_custSep);
   const _custRow=document.createElement('div');
   _custRow.className='model-custom-row';
   _custRow.innerHTML=`<input class="model-custom-input" type="text" placeholder="${esc(t('model_custom_placeholder')||'e.g. openai/gpt-5.4')}" spellcheck="false" autocomplete="off"><button class="model-custom-btn" title="Use this model">${li('plus',12)}</button>`;
   const _ci=_custRow.querySelector('.model-custom-input');
   const _cb=_custRow.querySelector('.model-custom-btn');
+  // Filter function (defined AFTER _searchRow and _cust* are created)
+  const _filterModels=(term)=>{
+    term=term.trim().toLowerCase();
+    const found=new Set();
+    for(const m of _modelData){
+      const name=m.name.toLowerCase();
+      const id=m.id.toLowerCase();
+      if(name.includes(term)||id.includes(term)){
+        found.add(m.value);
+      }
+    }
+    // Clear and rebuild
+    dd.innerHTML='';
+    // Add search and custom elements first (CRITICAL: must be before models)
+    dd.appendChild(_searchRow);
+    dd.appendChild(_custSep);
+    dd.appendChild(_custRow);
+    // Add models matching filter
+    for(const m of _modelData){
+      if(!term||found.has(m.value)){
+        const row=document.createElement('div');
+        row.className='model-opt'+(m.value===sel.value?' active':'');
+        row.innerHTML=`<span class="model-opt-name">${m.name}</span><span class="model-opt-id">${m.id}</span>`;
+        row.onclick=()=>selectModelFromDropdown(m.value);
+        dd.appendChild(row);
+      }
+    }
+    // Show "No results" if filtered and nothing matched
+    if(term&&found.size===0){
+      const noResult=document.createElement('div');
+      noResult.className='model-search-no-results';
+      noResult.textContent=t('model_search_no_results')||'No models found';
+      noResult.style.padding='12px 14px';
+      noResult.style.color='var(--muted)';
+      noResult.style.textAlign='center';
+      dd.appendChild(noResult);
+    }
+    // Restore focus to search input
+    _si.focus();
+  };
+  // Event handlers for search input
+  _si.addEventListener('input',()=>_filterModels(_si.value));
+  _si.addEventListener('keydown',e=>{if(e.key==='Enter') {e.preventDefault();}if(e.key==='Escape') {closeModelDropdown();}});
+  _si.addEventListener('click',e=>e.stopPropagation());
+  // Event handlers for clear button
+  _sc.onclick=()=>{ _si.value=''; _filterModels(''); _si.focus(); };
+  _sc.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){ _si.value=''; _filterModels(''); _si.focus(); e.preventDefault(); }});
+  // Event handlers for custom input
   const _applyCustom=()=>{const v=_ci.value.trim();if(!v)return;selectModelFromDropdown(v);_ci.value='';};
   _cb.onclick=_applyCustom;
   _ci.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();_applyCustom();}if(e.key==='Escape'){closeModelDropdown();}});
   _ci.addEventListener('click',e=>e.stopPropagation());
+  // Add search and custom elements to dropdown (initial render)
+  dd.appendChild(_searchRow);
+  dd.appendChild(_custSep);
   dd.appendChild(_custRow);
+  // Apply initial filter (empty shows all)
+  _filterModels('');
 }
 
 async function selectModelFromDropdown(value){
