@@ -369,14 +369,16 @@ window.addEventListener('resize',()=>{
 
 // ── Scroll pinning ──────────────────────────────────────────────────────────
 // When streaming, auto-scroll only if the user hasn't manually scrolled up.
-// Once the user scrolls back to within 80px of the bottom, re-pin.
+// Once the user scrolls back to within 150px of the bottom, re-pin.
 let _scrollPinned=true;
 (function(){
   const el=document.getElementById('messages');
   if(!el) return;
   el.addEventListener('scroll',()=>{
-    const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<80;
+    const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<150;
     _scrollPinned=nearBottom;
+    const btn=$('scrollToBottomBtn');
+    if(btn) btn.style.display=_scrollPinned?'none':'flex';
   });
 })();
 function _fmtTokens(n){if(!n||n<0)return'0';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'k';return String(n);}
@@ -447,6 +449,8 @@ function scrollToBottom(){
   _scrollPinned=true;
   const el=$('messages');
   if(el) el.scrollTop=el.scrollHeight;
+  const btn=$('scrollToBottomBtn');
+  if(btn) btn.style.display='none';
 }
 
 function getModelLabel(modelId){
@@ -454,7 +458,7 @@ function getModelLabel(modelId){
   // Check dynamic labels first, then fall back to splitting the ID
   if(_dynamicModelLabels[modelId]) return _dynamicModelLabels[modelId];
   // Static fallback for common models
-  const STATIC_LABELS={'openai/gpt-5.4-mini':'GPT-5.4 Mini','openai/gpt-4o':'GPT-4o','openai/o3':'o3','openai/o4-mini':'o4-mini','anthropic/claude-sonnet-4.6':'Sonnet 4.6','anthropic/claude-sonnet-4-5':'Sonnet 4.5','anthropic/claude-haiku-3-5':'Haiku 3.5','google/gemini-2.5-pro':'Gemini 2.5 Pro','deepseek/deepseek-chat-v3-0324':'DeepSeek V3','meta-llama/llama-4-scout':'Llama 4 Scout'};
+  const STATIC_LABELS={'openai/gpt-5.4-mini':'GPT-5.4 Mini','openai/gpt-4o':'GPT-4o','openai/o3':'o3','openai/o4-mini':'o4-mini','anthropic/claude-sonnet-4.6':'Sonnet 4.6','anthropic/claude-sonnet-4-5':'Sonnet 4.5','anthropic/claude-haiku-3-5':'Haiku 3.5','google/gemini-3.1-pro-preview':'Gemini 3.1 Pro','google/gemini-3-flash-preview':'Gemini 3 Flash','google/gemini-3.1-flash-lite-preview':'Gemini 3.1 Flash Lite','google/gemini-2.5-pro':'Gemini 2.5 Pro','google/gemini-2.5-flash':'Gemini 2.5 Flash','deepseek/deepseek-chat-v3-0324':'DeepSeek V3','meta-llama/llama-4-scout':'Llama 4 Scout'};
   if(STATIC_LABELS[modelId]) return STATIC_LABELS[modelId];
   return modelId.split('/').pop()||'Unknown';
 }
@@ -1679,7 +1683,14 @@ function renderMessages(){
       _assistantTurnBlocks(lastAssist).appendChild(usage);
     }
   }
-  scrollToBottom();
+  // Only force-scroll when not actively streaming — mid-stream re-renders
+  // (tool completion, session switch) must not override the user's scroll position.
+  // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
+  if(S.activeStreamId){
+    scrollIfPinned();
+  } else {
+    scrollToBottom();
+  }
   // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>{highlightCode();addCopyButtons();renderMermaidBlocks();renderKatexBlocks();});
   // Refresh todo panel if it's currently open
@@ -2051,7 +2062,7 @@ function appendThinking(text=''){
   }
   row.className=(text&&String(text).trim())?'assistant-segment thinking-card-row':'assistant-segment';
   row.innerHTML=_thinkingMarkup(text);
-  scrollToBottom();
+  scrollIfPinned();
 }
 function updateThinking(text=''){appendThinking(text);}
 function removeThinking(){

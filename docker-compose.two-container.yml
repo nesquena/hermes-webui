@@ -46,7 +46,9 @@ services:
       - HERMES_WEBUI_HOST=0.0.0.0
       - HERMES_WEBUI_PORT=8787
       - HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui-mvp
-      # Match your host user's UID/GID for correct file permissions
+      # Match your host user's UID/GID for correct file permissions.
+      # In two-container setups the WebUI auto-detects UID/GID from the shared
+      # hermes-home volume, but you can override explicitly if needed (#668):
       - WANTED_UID=${UID:-1000}
       - WANTED_GID=${GID:-1000}
       # Optional: set a password for remote access

@@ -180,6 +180,7 @@
       </div>
     </div>
     <div class="messages" id="messages">
+      <button id="scrollToBottomBtn" class="scroll-to-bottom-btn" aria-label="Scroll to bottom" onclick="scrollToBottom()" style="display:none">↓</button>
       <div class="empty-state" id="emptyState">
         <div class="empty-logo"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="80" height="80" aria-label="Hermes caduceus">
           <defs>
@@ -329,7 +330,8 @@
                 <option value="anthropic/claude-haiku-3-5">Claude Haiku 3.5</option>
               </optgroup>
               <optgroup label="Other">
-                <option value="google/gemini-2.5-pro">Gemini 2.5 Pro</option>
+                <option value="google/gemini-3.1-pro-preview">Gemini 3.1 Pro Preview</option>
+                <option value="google/gemini-3-flash-preview">Gemini 3 Flash Preview</option>
                 <option value="deepseek/deepseek-chat-v3-0324">DeepSeek V3</option>
                 <option value="meta-llama/llama-4-scout">Llama 4 Scout</option>
               </optgroup>
@@ -592,7 +594,7 @@
                 <div class="settings-section-title">System</div>
                 <div class="settings-section-meta">Instance version and access controls.</div>
               </div>
-              <span class="settings-version-badge">v0.50.86</span>
+              <span class="settings-version-badge">v0.50.87</span>
             </div>
             <div class="settings-field" style="border-top:1px solid var(--border);padding-top:12px;margin-top:8px">
               <label for="settingsPassword" data-i18n="settings_label_password">Access Password</label>

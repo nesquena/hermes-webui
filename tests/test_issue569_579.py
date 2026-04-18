@@ -47,9 +47,9 @@ def test_569_autodetect_before_usermod():
 
 def test_569_skips_root_uid():
     """Auto-detect must not use UID 0 (root-owned mount = untrustworthy)."""
-    detect_block_start = INIT_SH.find("Auto-detect from mounted workspace")
+    detect_block_start = INIT_SH.find("Auto-detect from mounted volumes")
     assert detect_block_start != -1, "auto-detect comment block not found"
-    block = INIT_SH[detect_block_start:detect_block_start + 600]
+    block = INIT_SH[detect_block_start:detect_block_start + 1200]
     assert '"0"' in block or "'0'" in block, (
         "Auto-detect block must skip UID 0 to avoid incorrectly using root ownership"
     )
@@ -62,6 +62,58 @@ def test_569_fallback_preserved():
     )
     assert "WANTED_GID=${WANTED_GID:-1024}" in INIT_SH, (
         "WANTED_GID default fallback must remain"
+    )
+
+
+# ── #668: UID/GID auto-detect from hermes-home shared volume (two-container) ──
+
+def test_668_uid_autodetect_checks_hermes_home():
+    """docker_init.bash must probe hermes-home dirs for UID in two-container setups.
+
+    When hermes-agent and hermes-webui run in separate containers sharing a
+    named volume, /workspace may not exist but ~/.hermes will be owned by the
+    agent's UID. The init script must probe it so the webui user is remapped
+    to match (#668).
+    """
+    assert "/home/hermeswebui/.hermes" in INIT_SH, (
+        "docker_init.bash must probe /home/hermeswebui/.hermes for UID detection "
+        "to support two-container setups where /workspace may not exist (#668)"
+    )
+
+
+def test_668_gid_autodetect_checks_hermes_home():
+    """docker_init.bash must probe hermes-home dirs for GID in two-container setups (#668)."""
+    # Both UID and GID detection share the same probe dirs — check GID block too
+    gid_detect_start = INIT_SH.find("Auto-detect GID from mounted volumes")
+    assert gid_detect_start != -1, (
+        "GID auto-detect comment must be updated to mention shared volumes (#668)"
+    )
+    gid_block = INIT_SH[gid_detect_start:gid_detect_start + 600]
+    assert "/home/hermeswebui/.hermes" in gid_block or "HERMES_HOME" in gid_block, (
+        "GID auto-detect block must probe hermes-home dirs (#668)"
+    )
+
+
+def test_668_uid_probe_loop_uses_break():
+    """UID probe loop must stop on first match (no double-detection)."""
+    uid_detect_start = INIT_SH.find("Auto-detect from mounted volumes")
+    assert uid_detect_start != -1, "UID auto-detect comment not found"
+    uid_block = INIT_SH[uid_detect_start:uid_detect_start + 1200]
+    assert "break" in uid_block, (
+        "UID probe loop must break after first successful detection "
+        "to avoid being overridden by a later probe dir (#668)"
+    )
+
+
+def test_668_hermes_home_probe_before_workspace():
+    """Hermes-home probe must appear before /workspace probe in docker_init.bash (#668)."""
+    hermes_home_pos = INIT_SH.find("/home/hermeswebui/.hermes")
+    workspace_pos = INIT_SH.find('if [ -d "/workspace" ]')
+    assert hermes_home_pos != -1, "/home/hermeswebui/.hermes probe not found"
+    assert workspace_pos != -1, "/workspace probe not found"
+    assert hermes_home_pos < workspace_pos, (
+        "Hermes-home probe must come before /workspace probe — "
+        "shared volume UID should take priority over workspace UID (#668)"
     )
 
 
