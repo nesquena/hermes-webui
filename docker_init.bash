@@ -260,6 +260,13 @@ else
   test -x /app/venv/bin/pip
 
   echo ""; echo "== Adding hermes-agent's pyproject.toml base dependencies to the virtual environment"
+  
+  if [ ! -d "/home/hermeswebui/.hermes/hermes-agent" ]; then
+  echo "== Downloading hermes-agent (The Brain) ..."
+  mkdir -p /home/hermeswebui/.hermes
+  git clone https://github.com/nesquena/hermes-agent.git /home/hermeswebui/.hermes/hermes-agent
+fi
+
   if [ -d "/home/hermeswebui/.hermes/hermes-agent" ] && [ -f "/home/hermeswebui/.hermes/hermes-agent/pyproject.toml" ]; then
     uv pip install "/home/hermeswebui/.hermes/hermes-agent[honcho]" --trusted-host pypi.org --trusted-host files.pythonhosted.org || error_exit "Failed to install hermes-agent's requirements"
   else
