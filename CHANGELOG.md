@@ -1,5 +1,11 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.84] — 2026-04-18
+
+### Fixed
+- **MiniMax M2.7 now appears in the model dropdown for OpenRouter users** — `MiniMax-M2.7` and `MiniMax-M2.7-highspeed` were present in `_PROVIDER_MODELS['minimax']` but absent from `_FALLBACK_MODELS`, so OpenRouter users (who see the fallback list) never saw them. Both models added to the fallback list under the `MiniMax` provider label.
+- **`MINIMAX_API_KEY` env var now triggers MiniMax detection** — the env scan tuple in `get_available_models()` was missing `MINIMAX_API_KEY` and `MINIMAX_CN_API_KEY`, so users who set those vars directly in `os.environ` (rather than in `~/.hermes/.env`) did not see the MiniMax provider in the dropdown. Both keys now scanned. (PR #650 by @octo-patch)
+
 ## [v0.50.83] — 2026-04-18
 
 ### Fixed

@@ -449,6 +449,9 @@ _FALLBACK_MODELS = [
     {"provider": "xAI",       "id": "x-ai/grok-4.20",                    "label": "Grok 4.20"},
     # Mistral
     {"provider": "Mistral",   "id": "mistralai/mistral-large-latest",     "label": "Mistral Large"},
+    # MiniMax
+    {"provider": "MiniMax",   "id": "minimax/MiniMax-M2.7",             "label": "MiniMax M2.7"},
+    {"provider": "MiniMax",   "id": "minimax/MiniMax-M2.7-highspeed",   "label": "MiniMax M2.7 Highspeed"},
 ]
 
 # Provider display names for known Hermes provider IDs
@@ -819,6 +822,8 @@ def get_available_models() -> dict:
             "DEEPSEEK_API_KEY",
             "OPENCODE_ZEN_API_KEY",
             "OPENCODE_GO_API_KEY",
+            "MINIMAX_API_KEY",
+            "MINIMAX_CN_API_KEY",
         ):
             val = os.getenv(k)
             if val:
