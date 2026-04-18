@@ -855,12 +855,16 @@ def get_available_models() -> dict:
                         ],
                     }
                 )
-            elif pid in _PROVIDER_MODELS:
-                # For non-default providers, prefix model IDs with @provider:model
-                # so resolve_model_provider() routes through that specific provider
-                # via resolve_runtime_provider(requested=provider).
-                # The default provider's models keep bare names for direct API routing.
-                raw_models = _PROVIDER_MODELS[pid]
+            elif pid in _PROVIDER_MODELS or pid in cfg.get("providers", {}):
+                raw_models = _PROVIDER_MODELS.get(pid, [])
+                provider_cfg = cfg.get("providers", {}).get(pid, {})
+                if isinstance(provider_cfg, dict) and "models" in provider_cfg:
+                    cfg_models = provider_cfg["models"]
+                    if isinstance(cfg_models, dict):
+                        raw_models = [{"id": k, "label": k} for k in cfg_models.keys()]
+                    elif isinstance(cfg_models, list):
+                        raw_models = [{"id": k, "label": k} for k in cfg_models]
+                
                 _active = (active_provider or "").lower()
                 if _active and pid != _active:
                     models = []
