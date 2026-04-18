@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.83] — 2026-04-18
+
+### Fixed
+- **Provider models from `config.yaml` now appear in the model dropdown** — users who configured custom providers in `config.yaml` with an explicit `models:` list saw the hardcoded `_PROVIDER_MODELS` fallback instead of their configured models. The fix extends the model-list builder to check `cfg.providers[pid].models` and use it when present, supporting both dict format (`models: {model-id: {context_length: ...}}`) and list format (`models: [model-id, ...]`). Providers only in `config.yaml` (not in `_PROVIDER_MODELS`) are now included in the dropdown instead of being silently skipped. (PR #644 by @ccqqlo)
+
 ## [v0.50.82] — 2026-04-18
 
 ### Added
