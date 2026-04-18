@@ -44,7 +44,7 @@ const WEBUI_ONLY_COMMANDS = [
 // supported in web UI" instead of silently forwarding the literal text
 // to the LLM (the failure mode the parity spec calls out as critical).
 const UNSUPPORTED_IN_WEBUI = new Set([
-  'voice', 'paste', 'image', 'skin', 'browser',
+  'paste', 'image', 'skin', 'browser',
   'platforms', 'plan', 'config', 'tools', 'toolsets', 'plugins',
   'history', 'save',
 ]);
@@ -195,6 +195,18 @@ function cmdCompact(){
   // in the webui process -- a separate batch will design that. Show a
   // clear message instead of silently doing the wrong thing.
   showToast(t('cmd_compress_deferred'));
+}
+
+function cmdVoice(){
+  // /voice is supported via the mic button (#btnMic) in the composer —
+  // the slash command is a discoverability alias that triggers a click
+  // when the button is visible (Web Speech API or MediaRecorder is
+  // available), or a toast pointing the user to it.
+  const mic = document.getElementById('btnMic');
+  if(mic && mic.style.display !== 'none' && !mic.disabled){
+    try{ mic.click(); return; }catch(_){ /* fall through to toast */ }
+  }
+  showToast(t('cmd_voice_use_mic'));
 }
 
 async function cmdUsage(){
@@ -499,3 +511,4 @@ HANDLERS.undo        = cmdUndo;
 HANDLERS.status      = cmdStatus;
 HANDLERS.usage       = cmdUsage;
 HANDLERS.compact     = cmdCompact;
+HANDLERS.voice       = cmdVoice;

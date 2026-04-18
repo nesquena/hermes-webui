@@ -95,6 +95,7 @@ const LOCALES = {
     failed_colon: 'Failed: ',
     cmd_not_supported_yet: 'Command not yet supported in web UI: ',
     cmd_compress_deferred: '/compress is not available in the web UI yet — use the CLI for now.',
+    cmd_voice_use_mic: 'Voice input: click the mic button in the composer (or your browser may not support it).',
     cmd_webui_only_session: 'This command works on web-UI sessions only (the active session is bridged from the CLI).',
     // ui.js
     no_workspace: 'No workspace',
@@ -544,6 +545,7 @@ const LOCALES = {
     failed_colon: 'Error: ',
     cmd_not_supported_yet: 'Comando aún no compatible con la interfaz web: ',
     cmd_compress_deferred: '/compress aún no está disponible en la interfaz web — usa la CLI por ahora.',
+    cmd_voice_use_mic: 'Entrada de voz: usa el botón del micrófono en el compositor (o tu navegador no lo soporta).',
     cmd_webui_only_session: 'Este comando funciona solo en sesiones de la interfaz web (la sesión activa proviene de la CLI).',
     // ui.js
     no_workspace: 'Sin espacio de trabajo',
@@ -983,6 +985,7 @@ const LOCALES = {
     failed_colon: 'Fehlgeschlagen: ',
     cmd_not_supported_yet: 'Befehl noch nicht in der Web-UI unterstützt: ',
     cmd_compress_deferred: '/compress ist in der Web-UI noch nicht verfügbar — bitte vorerst die CLI verwenden.',
+    cmd_voice_use_mic: 'Spracheingabe: klicke das Mikrofon-Symbol im Eingabefeld (oder dein Browser unterstützt es nicht).',
     cmd_webui_only_session: 'Dieser Befehl funktioniert nur mit Web-UI-Sitzungen (die aktive Sitzung stammt aus der CLI).',
     // ui.js
     no_workspace: 'Kein Workspace',
@@ -1230,6 +1233,7 @@ const LOCALES = {
     failed_colon: '\u5931\u8d25\uff1a',
     cmd_not_supported_yet: 'Web UI \u6682\u672a\u5b9e\u73b0\u8be5\u547d\u4ee4\uff1a',
     cmd_compress_deferred: '/compress \u5728 Web UI \u4e2d\u5c1a\u672a\u53ef\u7528\uff0c\u8bf7\u6682\u65f6\u4f7f\u7528 CLI\u3002',
+    cmd_voice_use_mic: '\u8bed\u97f3\u8f93\u5165\uff1a\u8bf7\u70b9\u51fb\u8f93\u5165\u6846\u4e2d\u7684\u9ea6\u514b\u98ce\u6309\u94ae\uff08\u6216\u4f60\u7684\u6d4f\u89c8\u5668\u4e0d\u652f\u6301\uff09\u3002',
     cmd_webui_only_session: '\u8be5\u547d\u4ee4\u4ec5\u652f\u6301 Web UI \u539f\u751f\u4f1a\u8bdd\uff08\u5f53\u524d\u4f1a\u8bdd\u6765\u81ea CLI \u6865\u63a5\uff09\u3002',
     // ui.js
     no_workspace: '\u672a\u9009\u62e9\u5de5\u4f5c\u533a',
@@ -1668,6 +1672,7 @@ const LOCALES = {
     failed_colon: '\u5931\u6557\uff1a',
     cmd_not_supported_yet: 'Web UI \u66ab\u672a\u5be6\u4f5c\u8a72\u547d\u4ee4\uff1a',
     cmd_compress_deferred: '/compress \u5728 Web UI \u4e2d\u5c1a\u672a\u53ef\u7528\uff0c\u8acb\u66ab\u6642\u4f7f\u7528 CLI\u3002',
+    cmd_voice_use_mic: '\u8a9e\u97f3\u8f38\u5165\uff1a\u8acb\u9ede\u64ca\u8f38\u5165\u6846\u4e2d\u7684\u9ea5\u514b\u98a8\u6309\u9215\uff08\u6216\u4f60\u7684\u700f\u89bd\u5668\u4e0d\u652f\u63f4\uff09\u3002',
     cmd_webui_only_session: '\u8a72\u547d\u4ee4\u50c5\u652f\u63f4 Web UI \u539f\u751f\u5de5\u4f5c\u968e\u6bb5\uff08\u7576\u524d\u5de5\u4f5c\u968e\u6bb5\u4f86\u81ea CLI \u6a4b\u63a5\uff09\u3002',
     // ui.js
     no_workspace: '\u672a\u9078\u64c7\u5de5\u4f5c\u5340',

@@ -10,7 +10,7 @@ import logging
 from typing import Any
 
 from api.config import LOCK
-from api.models import get_session
+from api.models import get_session, SESSIONS
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +37,15 @@ def retry_last(session_id: str) -> dict[str, Any]:
     # same last_user_idx from the same history and double-truncate. We
     # serialize just the in-memory mutation; persistence happens outside
     # the lock and is naturally last-write-wins on a consistent state.
+    #
+    # Stale-object guard: on a cache miss, two concurrent get_session()
+    # calls can each load and cache a *different* Session instance for the
+    # same session_id (the second store_clobbers the first). Re-bind to
+    # the canonical cached instance inside the lock so the mutation lands
+    # on the object the next reader will see, not a stale parallel copy.
     s = get_session(session_id)  # raises KeyError if missing
     with LOCK:
+        s = SESSIONS.get(session_id, s)
         history = s.messages or []
         last_user_idx = None
         for i in range(len(history) - 1, -1, -1):
@@ -67,6 +74,8 @@ def undo_last(session_id: str) -> dict[str, Any]:
     """
     s = get_session(session_id)  # acquires LOCK transiently
     with LOCK:
+        # Stale-object guard — see retry_last for the rationale.
+        s = SESSIONS.get(session_id, s)
         history = s.messages or []
         last_user_idx = None
         for i in range(len(history) - 1, -1, -1):

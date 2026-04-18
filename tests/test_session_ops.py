@@ -115,6 +115,50 @@ def test_retry_does_not_double_append(cleanup_test_sessions):
     assert msgs[1]['content'] == 'reply A'
 
 
+def test_retry_concurrent_requests_are_safe(cleanup_test_sessions):
+    """Two concurrent /api/session/retry calls on the same session must not
+    leave the transcript in a torn or doubly-truncated state.
+
+    Pre-fix race: get_session() outside `with LOCK:` could return a stale
+    (non-cached) Session instance to one thread; both threads then mutated
+    different in-memory objects, and the second s.save() overwrote the
+    first with stale data. The fix re-binds `s = SESSIONS.get(sid, s)`
+    inside the lock so both threads converge on the canonical instance.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    sid = _import_session_with_messages(cleanup_test_sessions, [
+        {'role': 'user', 'content': 'msg A'},
+        {'role': 'assistant', 'content': 'reply A'},
+        {'role': 'user', 'content': 'msg B'},
+        {'role': 'assistant', 'content': 'reply B'},
+    ])
+
+    def _do_retry():
+        return _post(TEST_BASE, '/api/session/retry', {'session_id': sid})
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futures = [ex.submit(_do_retry) for _ in range(4)]
+        results = [f.result() for f in futures]
+
+    # Each call either succeeds (truncating further) or raises 'no previous
+    # message to retry' once nothing is left. After the dust settles, the
+    # transcript must be a strict prefix of the original — never have a
+    # phantom duplicate of the resent message.
+    sess = _get(f'/api/session?session_id={sid}')['session']
+    msgs = sess['messages']
+    valid_prefixes = (
+        [],
+        [{'role': 'user', 'content': 'msg A'}, {'role': 'assistant', 'content': 'reply A'}],
+        [{'role': 'user', 'content': 'msg A'}],
+    )
+    msg_pairs = [(m['role'], m.get('content', '')) for m in msgs]
+    valid_pairs = [[(m['role'], m['content']) for m in p] for p in valid_prefixes]
+    assert msg_pairs in valid_pairs, (
+        f"Concurrent retries left transcript in unexpected state: {msg_pairs}. "
+        "TOCTOU race in get_session/save likely re-introduced."
+    )
+
+
 # ── /api/session/undo ─────────────────────────────────────────────────────
 
 def test_undo_returns_removed_preview(cleanup_test_sessions):
