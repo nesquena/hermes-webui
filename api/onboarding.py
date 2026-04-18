@@ -28,39 +28,94 @@ from api.workspace import get_last_workspace, load_workspaces
 logger = logging.getLogger(__name__)
 
 
-_SUPPORTED_PROVIDER_SETUPS = {
+# ---------------------------------------------------------------------------
+# Provider setup metadata -- used to build _SUPPORTED_PROVIDER_SETUPS lazily.
+# ---------------------------------------------------------------------------
+_PROVIDER_SETUP_METADATA = {
     "openrouter": {
         "label": "OpenRouter",
         "env_var": "OPENROUTER_API_KEY",
         "default_model": "anthropic/claude-sonnet-4.6",
         "requires_base_url": False,
-        "models": [
-            {"id": model["id"], "label": model["label"]} for model in _FALLBACK_MODELS
-        ],
+        "default_base_url": "",
+        "models_key": "_fallback",
     },
     "anthropic": {
         "label": "Anthropic",
         "env_var": "ANTHROPIC_API_KEY",
         "default_model": "claude-sonnet-4.6",
         "requires_base_url": False,
-        "models": list(_PROVIDER_MODELS.get("anthropic", [])),
+        "default_base_url": "",
+        "models_key": "anthropic",
     },
     "openai": {
         "label": "OpenAI",
         "env_var": "OPENAI_API_KEY",
         "default_model": "gpt-4o",
-        "default_base_url": "https://api.openai.com/v1",
         "requires_base_url": False,
-        "models": list(_PROVIDER_MODELS.get("openai", [])),
+        "default_base_url": "https://api.openai.com/v1",
+        "models_key": "openai",
+    },
+    "deepseek": {
+        "label": "DeepSeek",
+        "env_var": "DEEPSEEK_API_KEY",
+        "default_model": "deepseek-chat",
+        "requires_base_url": False,
+        "default_base_url": "https://api.deepseek.com/v1",
+        "models_key": "deepseek",
+    },
+    "minimax": {
+        "label": "MiniMax",
+        "env_var": "MINIMAX_API_KEY",
+        "default_model": "MiniMax-Text-01",
+        "requires_base_url": False,
+        "default_base_url": "https://api.minimax.chat/v1",
+        "models_key": "minimax",
+    },
+    "ollama": {
+        "label": "Ollama (Local)",
+        "env_var": "OLLAMA_HOST",
+        "default_model": "llama3",
+        "requires_base_url": True,
+        "default_base_url": "http://localhost:11434",
+        "models_key": "ollama",
     },
     "custom": {
         "label": "Custom OpenAI-compatible",
         "env_var": "OPENAI_API_KEY",
         "default_model": "gpt-4o-mini",
         "requires_base_url": True,
-        "models": [],
+        "default_base_url": "",
+        "models_key": None,
     },
 }
+
+
+def _build_supported_provider_setups() -> dict:
+    """Lazily build _SUPPORTED_PROVIDER_SETUPS from _PROVIDER_SETUP_METADATA."""
+    setups = {}
+    for provider_id, meta in _PROVIDER_SETUP_METADATA.items():
+        models_key = meta.get("models_key")
+        if models_key == "_fallback":
+            models = [{"id": m["id"], "label": m["label"]} for m in _FALLBACK_MODELS]
+        elif models_key:
+            models = list(_PROVIDER_MODELS.get(models_key, []))
+        else:
+            models = []
+
+        setups[provider_id] = {
+            "label": meta["label"],
+            "env_var": meta["env_var"],
+            "default_model": meta["default_model"],
+            "requires_base_url": bool(meta.get("requires_base_url")),
+            "default_base_url": meta.get("default_base_url") or "",
+            "models": models,
+        }
+    return setups
+
+
+# Immutable after module load -- populated by _build_supported_provider_setups()
+_SUPPORTED_PROVIDER_SETUPS: dict = {**_build_supported_provider_setups()}
 
 _UNSUPPORTED_PROVIDER_NOTE = (
     "OAuth and advanced provider flows such as Nous Portal, OpenAI Codex, and GitHub "
@@ -143,10 +198,17 @@ def _save_yaml_config(config_path: Path, config: dict) -> None:
 
 
 def _normalize_model_for_provider(provider: str, model: str) -> str:
+    """Strip provider prefix (e.g. 'anthropic/claude-sonnet-4.6' → 'claude-sonnet-4.6')
+    for providers that embed the provider name in the model ID.  Also handles
+    empty/blank inputs and strips surrounding whitespace."""
     clean = (model or "").strip()
     if not clean:
         return ""
-    if provider in {"anthropic", "openai"} and clean.startswith(provider + "/"):
+    # Providers that embed their own name in model IDs
+    if provider in {"anthropic", "openai", "openrouter"} and clean.startswith(provider + "/"):
+        return clean.split("/", 1)[1]
+    # DeepSeek uses provider/model-style IDs in some contexts
+    if provider == "deepseek" and clean.startswith("deepseek/"):
         return clean.split("/", 1)[1]
     return clean
 
@@ -371,7 +433,7 @@ def _build_setup_catalog(cfg: dict) -> dict:
                 "default_base_url": meta.get("default_base_url") or "",
                 "requires_base_url": bool(meta.get("requires_base_url")),
                 "models": list(meta.get("models", [])),
-                "quick": provider_id == "openrouter",
+                "quick": provider_id in {"openrouter", "anthropic", "openai"},
             }
         )
 
