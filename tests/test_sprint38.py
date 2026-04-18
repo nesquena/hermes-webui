@@ -57,6 +57,34 @@ def test_gemma_content_removal_uses_replace_not_slice():
         "ui.js must call .trimStart() on content after removing the Gemma channel block"
 
 
+def test_gemma_turn_regex_in_ui_js():
+    """The Gemma 4 <|turn>thinking\\n...<turn|> pattern must be extracted from persisted content."""
+    # Detection in _messageHasReasoningPayload
+    assert "<\\|turn>thinking" in UI_JS, (
+        "ui.js _messageHasReasoningPayload must detect Gemma 4 <|turn>thinking\\n...<turn|> pattern"
+    )
+    # Extraction block
+    match = re.search(r'const gemmaTurnMatch=content\.match\((/[^/]+/)\)', UI_JS)
+    assert match, "gemmaTurnMatch line not found in ui.js"
+    pattern = match.group(1)
+    assert not pattern.startswith('/^'), (
+        f"gemmaTurnMatch regex must not use ^ anchor — got {pattern}"
+    )
+
+
+def test_gemma_turn_content_removal_uses_replace_not_slice():
+    """Gemma 4 turn token removal must use .replace() not .slice()."""
+    idx = UI_JS.find("if(gemmaTurnMatch){")
+    assert idx >= 0, "gemmaTurnMatch handler block not found in ui.js"
+    block = UI_JS[idx:idx+240]
+    assert "content.replace(" in block, (
+        "ui.js must use content.replace() to remove Gemma 4 turn block (not .slice())"
+    )
+    assert ".trimStart()" in block, (
+        "ui.js must call .trimStart() on content after removing the Gemma 4 turn block"
+    )
+
+
 # ── messages.js: streaming render path ───────────────────────────────────────
 
 def test_stream_display_trims_before_startswith():
