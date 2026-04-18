@@ -469,6 +469,10 @@ def handle_get(handler, parsed) -> bool:
         settings.pop("password_hash", None)
         return j(handler, settings)
 
+    if parsed.path == "/api/settings/all":
+        from api.settings_api import get_all_settings
+        return j(handler, get_all_settings())
+
     if parsed.path == "/api/onboarding/status":
         return j(handler, get_onboarding_status())
 
@@ -1165,6 +1169,16 @@ def handle_post(handler, parsed) -> bool:
         handler.end_headers()
         handler.wfile.write(response_body)
         return True
+
+    # ── Config.yaml section settings (POST /api/settings/section/{name}) ──
+    if parsed.path.startswith("/api/settings/section/"):
+        section = parsed.path[len("/api/settings/section/"):]
+        from api.settings_api import update_section
+        try:
+            result = update_section(section, body)
+            return j(handler, {"section": section, "data": result})
+        except ValueError as e:
+            return bad(handler, str(e), 400)
 
     if parsed.path == "/api/onboarding/setup":
         # Writing API keys to disk - restrict to local/private networks unless auth is active.
