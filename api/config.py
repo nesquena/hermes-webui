@@ -1249,6 +1249,25 @@ _SETTINGS_LEGACY_THEME_MAP = {
 
 
 def _normalize_appearance(theme, skin) -> tuple[str, str]:
+    """Normalize a (theme, skin) pair, migrating legacy theme names.
+
+    Legacy migration table (from `_SETTINGS_LEGACY_THEME_MAP`):
+
+        slate     → ("dark", "slate")
+        solarized → ("dark", "poseidon")
+        monokai   → ("dark", "sisyphus")
+        nord      → ("dark", "slate")
+        oled      → ("dark", "default")
+
+    Unknown / custom theme names fall back to ("dark", "default").  This is a
+    behavior change vs. the pre-PR-#627 state, where the `theme` field was
+    open-ended ("no enum gate -- allows custom themes").  Users who set a
+    custom CSS theme via `data-theme` will need to re-apply via skin or
+    custom CSS — see CHANGELOG entry for details.
+
+    The same mapping is mirrored in `static/boot.js` (`_LEGACY_THEME_MAP`)
+    so client and server normalize identically; keep them in sync.
+    """
     raw_theme = theme.strip().lower() if isinstance(theme, str) else ""
     raw_skin = skin.strip().lower() if isinstance(skin, str) else ""
     legacy = _SETTINGS_LEGACY_THEME_MAP.get(raw_theme)

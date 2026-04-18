@@ -362,7 +362,7 @@
   .cron-header{display:flex;align-items:center;gap:8px;padding:10px 12px;cursor:pointer;}
   .cron-name{flex:1;font-size:13px;color:var(--text);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .cron-status{font-size:10px;font-weight:700;padding:2px 8px;border-radius:99px;flex-shrink:0;}
-  .cron-status.active{background:rgba(34,197,94,.15);color:#4ade80;}
+  .cron-status.active{background:rgba(34,197,94,.15);color:var(--success);}
   .cron-status.paused{background:var(--accent-bg-strong);color:var(--accent-text);}
   .cron-status.disabled{background:rgba(255,255,255,.07);color:var(--muted);}
   .cron-status.error{background:rgba(239,83,80,.12);color:var(--error);}
@@ -548,8 +548,8 @@
   .ctx-ring-track{stroke:rgba(255,255,255,.12);}
   .ctx-ring-value{stroke:var(--muted);stroke-linecap:round;stroke-dasharray:61.261056745;stroke-dashoffset:61.261056745;transition:stroke-dashoffset .45s ease,stroke .25s ease;}
   .ctx-ring-center{position:relative;display:flex;width:15px;height:15px;align-items:center;justify-content:center;border-radius:999px;background:var(--bg);font-size:8px;font-weight:600;line-height:1;color:var(--muted);font-variant-numeric:tabular-nums;}
-  .ctx-indicator.ctx-mid .ctx-ring-value{stroke:#e6a817;}
-  .ctx-indicator.ctx-high .ctx-ring-value{stroke:#e05252;}
+  .ctx-indicator.ctx-mid .ctx-ring-value{stroke:var(--warning);}
+  .ctx-indicator.ctx-high .ctx-ring-value{stroke:var(--error);}
   .ctx-tooltip{position:absolute;right:0;bottom:calc(100% + 10px);min-width:210px;max-width:250px;padding:10px 12px;border:1px solid var(--border2);border-radius:12px;background:var(--surface);box-shadow:0 12px 30px rgba(0,0,0,.28);font-size:11px;line-height:1.45;color:var(--muted);opacity:0;transform:translateY(4px);pointer-events:none;transition:opacity .14s ease,transform .14s ease;z-index:30;}
   .ctx-tooltip::after{content:'';position:absolute;right:10px;top:100%;border-width:6px 6px 0 6px;border-style:solid;border-color:var(--surface) transparent transparent transparent;}
   .ctx-indicator-wrap:hover .ctx-tooltip,.ctx-indicator-wrap:focus-within .ctx-tooltip{opacity:1;transform:translateY(0);}
@@ -608,7 +608,7 @@
   .preview-area{flex:1;overflow:auto;padding:14px;flex-direction:column;gap:8px;display:none;opacity:0;transition:opacity .15s;}
   .preview-area.visible{display:flex;opacity:1;}
   .preview-path{font-size:11px;color:var(--muted);padding-bottom:8px;border-bottom:1px solid var(--border);flex-shrink:0;}
-  .preview-code{font-family:"SF Mono","Fira Code",ui-monospace,monospace;font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-word;color:#cdd6e0;}
+  .preview-code{font-family:"SF Mono","Fira Code",ui-monospace,monospace;font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-word;color:var(--pre-text);}
   /* Image preview */
   .preview-img-wrap{display:flex;align-items:center;justify-content:center;flex:1;padding:8px 0;min-height:0;}
   .preview-img{max-width:100%;max-height:100%;object-fit:contain;border-radius:6px;box-shadow:0 2px 12px rgba(0,0,0,.4);}
@@ -617,7 +617,7 @@
   .preview-md p{margin-bottom:10px;}.preview-md p:last-child{margin-bottom:0;}
   .preview-md h1{font-size:18px;font-weight:700;margin:16px 0 8px;color:var(--strong);border-bottom:1px solid var(--border);padding-bottom:6px;}
   .preview-md h2{font-size:15px;font-weight:600;margin:14px 0 6px;color:var(--strong);}
-  .preview-md h3{font-size:13px;font-weight:600;margin:12px 0 4px;color:#e8e8f0;}
+  .preview-md h3{font-size:13px;font-weight:600;margin:12px 0 4px;color:var(--strong);}
   .preview-md ul,.preview-md ol{margin:4px 0 10px 18px;}.preview-md li{margin-bottom:3px;}
   .preview-md code{font-family:"SF Mono",ui-monospace,monospace;font-size:11.5px;background:var(--code-inline-bg);padding:1px 5px;border-radius:4px;color:var(--code-text);}
   .preview-md pre{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:10px 12px;overflow-x:auto;margin:8px 0;}
@@ -1128,17 +1128,14 @@ body.resizing{user-select:none;cursor:col-resize;}
 .tool-cards-toggle button{background:none;border:none;color:var(--blue);font-size:10px;cursor:pointer;opacity:.6;padding:0;}
 .tool-cards-toggle button:hover{opacity:1;text-decoration:underline;}
 
-/* ── Thinking/reasoning card ── */
-.thinking-card{background:var(--accent-bg);border:1px solid var(--accent-bg-strong);border-radius:10px;margin:4px 0 2px 40px;overflow:hidden;transition:border-color .15s;}
-.thinking-card:hover{border-color:var(--accent-hover);}
-.thinking-card-header{display:flex;align-items:center;gap:6px;padding:6px 12px;cursor:pointer;font-size:12px;color:var(--accent-text);user-select:none;}
-.thinking-card-icon{font-size:14px;}
+/* ── Thinking/reasoning card: structural sub-selectors. ──
+   The canonical visual rules (background, border, padding, max-height,
+   etc.) live in the consolidated block further down (around line 1320).
+   Only sub-element selectors that the consolidated block doesn't cover
+   (label, toggle, rotate animation) are kept here. ── */
 .thinking-card-label{font-weight:600;letter-spacing:.02em;}
 .thinking-card-toggle{margin-left:auto;font-size:10px;display:inline-flex;align-items:center;justify-content:center;transform-origin:center;transition:transform .18s ease;will-change:transform;}
 .thinking-card.open .thinking-card-toggle{transform:rotate(90deg);}
-.thinking-card-body{display:block;max-height:0;opacity:0;overflow:hidden;padding:0 12px;transition:max-height .22s ease,opacity .18s ease,padding .22s ease;}
-.thinking-card.open .thinking-card-body{max-height:300px;opacity:1;padding:0 12px 10px;}
-.thinking-card-body pre{font-family:'SF Mono',ui-monospace,monospace;font-size:11px;line-height:1.5;color:var(--muted);white-space:pre-wrap;word-break:break-word;margin:0;}
 
 .bg-error-banner{background:rgba(229,62,62,.15);border:1px solid rgba(229,62,62,.3);color:#fca5a5;padding:8px 16px;font-size:12px;display:flex;align-items:center;justify-content:space-between;gap:12px;border-radius:0;}
 
@@ -1345,7 +1342,7 @@ body.bubble-layout .msg-row + .msg-row[data-role="user"] { border-top: none; pad
   transition: max-height .22s ease, opacity .18s ease, padding .22s ease, border-top-color .22s ease;
 }
 .thinking-card.open .thinking-card-body { max-height: 260px; opacity: 1; padding: 8px 12px; border-top-color: var(--accent-bg-strong); }
-.thinking-card-body pre { font-size: 11px; line-height: 1.6; color: var(--muted); }
+.thinking-card-body pre { font-family: 'SF Mono', ui-monospace, monospace; font-size: 11px; line-height: 1.6; color: var(--muted); white-space: pre-wrap; word-break: break-word; margin: 0; }
 
 /* ── Tool cards: tighter chrome to match quieter thinking card ── */
 .tool-card { border-radius: 8px; margin-top: 3px; margin-bottom: 3px; }

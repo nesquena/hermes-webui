@@ -1,5 +1,21 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.77] — 2026-04-17
+
+### Changed
+- **Color scheme system replaced with theme + skin axes** — the old monolithic theme list (`dark`, `slate`, `solarized`, `monokai`, `nord`, `oled`, `light`) is split into two orthogonal axes: **theme** (`light` / `dark` / `system`) and **skin** (accent palette: Default gold, Ares red, Mono gray, Slate blue-gray, Poseidon ocean blue, Sisyphus purple, Charizard orange). Users can now mix any theme with any skin via the new **Appearance** settings tab. Internally, `.dark` class on `<html>` replaces `data-theme`; skin uses `data-skin` attribute and overrides only 5 accent CSS vars per skin, eliminating ~200 lines of duplicated palette overrides. (PR #627 by @aronprins)
+
+### Migration notes
+- **Legacy theme names are silently migrated on first load** to the closest theme + skin pair: `slate → dark+slate`, `solarized → dark+poseidon`, `monokai → dark+sisyphus`, `nord → dark+slate`, `oled → dark+default`. Both backend (`api/config.py::_normalize_appearance`) and frontend (`static/boot.js::_normalizeAppearance`) apply the same mapping.
+- **Custom themes set via `data-theme` CSS overrides will reset** to `dark + default` on first load. The pre-PR `theme` setting was open-ended ("no enum gate -- allows custom themes"); the new system enumerates valid values. Users who maintained custom CSS will need to re-apply via a skin choice or by overriding skin variables (`--accent`, `--accent-hover`, `--accent-bg`, `--accent-bg-strong`, `--accent-text`).
+
+### Fixed
+- **Send button stays active after clearing composer text** — input listener now correctly toggles disabled state. (PR #627)
+- **Composer workspace/model label flash on page load** — chips now wait for `_bootReady` before populating, eliminating the placeholder-then-real-value flicker. (PR #627)
+- **Topbar border invisible in light mode** — added `:root:not(.dark)` border override. (PR #627)
+- **User message bubble text contrast** — accent-colored bubbles now use skin-aware text colors meeting WCAG AA (Poseidon dark improved from 2.8 → 6.5 ratio). (PR #627)
+- **Settings skin persistence race condition** — save now waits for server confirmation before applying. (PR #627)
+
 ## [v0.50.76] — 2026-04-17
 
 ### Fixed
