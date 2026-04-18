@@ -1,14 +1,11 @@
 async function send(){
   const text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length)return;
-  // Slash command intercept -- local commands handled without agent round-trip
-  if(text.startsWith('/')&&!S.pendingFiles.length&&executeCommand(text)){
-    $('msg').value='';autoResize();hideCmdDropdown();return;
-  }
   // Don't send while an inline message edit is active
   if(document.querySelector('.msg-edit-area'))return;
-  // If busy, queue the message instead of dropping it
-  if(S.busy){
+  const compressionRunning=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
+  // If busy or a manual compression is still running, queue the message instead
+  if(S.busy||compressionRunning){
     if(text){
       if(!S.session){await newSession();await renderSessionList();}
       queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles]});
@@ -18,6 +15,10 @@ async function send(){
       showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
     }
     return;
+  }
+  // Slash command intercept -- local commands handled without agent round-trip
+  if(text.startsWith('/')&&!S.pendingFiles.length&&executeCommand(text)){
+    $('msg').value='';autoResize();hideCmdDropdown();return;
   }
   if(!S.session){await newSession();await renderSessionList();}
 

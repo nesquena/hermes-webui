@@ -48,6 +48,8 @@ class Session:
                  pending_user_message: str=None,
                  pending_attachments=None,
                  pending_started_at=None,
+                 compression_anchor_visible_idx=None,
+                 compression_anchor_message_key=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
@@ -69,6 +71,8 @@ class Session:
         self.pending_user_message = pending_user_message
         self.pending_attachments = pending_attachments or []
         self.pending_started_at = pending_started_at
+        self.compression_anchor_visible_idx = compression_anchor_visible_idx
+        self.compression_anchor_message_key = compression_anchor_message_key
 
     @property
     def path(self):
@@ -110,6 +114,8 @@ class Session:
             'output_tokens': self.output_tokens,
             'estimated_cost': self.estimated_cost,
             'personality': self.personality,
+            'compression_anchor_visible_idx': self.compression_anchor_visible_idx,
+            'compression_anchor_message_key': self.compression_anchor_message_key,
         }
 
 def get_session(sid):

@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.82] — 2026-04-18
+
+### Added
+- **`/compress` command with optional focus topic** — manual session compression runs as a real API call via `POST /api/session/compress`, replacing the old agent-message-based `/compact`. Accepts an optional focus topic (`/compress summarize code changes`) that guides what the compression preserves. The compression flow is shown as three transcript-inline cards: a command card (gold), a running card (blue with animated dots), and a collapsible green success card showing the message-count delta and token savings. A reference card renders the full context compaction summary. `/compact` continues to work as an alias. `focus_topic` capped at 500 chars for defense-in-depth. Fallback token estimation uses word-count approximation when model metadata helpers are unavailable — intentional for resilience. (Closes #469, PR #619 by @franksong2702)
+
 ## [v0.50.77] — 2026-04-17
 
 ### Changed
