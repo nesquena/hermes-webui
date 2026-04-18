@@ -1080,14 +1080,15 @@ body.resizing{user-select:none;cursor:col-resize;}
   padding:0;
 }
 .compression-card-row + .compression-card-row{
-  margin-top:2px;
+  margin-top:4px;
 }
 .tool-card-compress-command{
-  background:rgba(201,168,76,.04);
-  border-color:rgba(201,168,76,.22);
+  background:rgba(201,168,76,.02);
+  border-color:rgba(201,168,76,.16);
 }
 .tool-card-compress-command .tool-card-name{
   color:var(--gold);
+  font-weight:600;
 }
 .tool-card-compress-running{
   background:rgba(124,185,255,.04);
