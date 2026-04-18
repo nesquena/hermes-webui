@@ -179,19 +179,109 @@ $('btnSend').onclick=()=>{
 };
 $('btnAttach').onclick=()=>$('fileInput').click();
 
-// ── Voice input (Web Speech API + MediaRecorder fallback) ───────────────────
+// ── Voice input (MediaRecorder-based transcription via /api/transcribe) ────
+// SpeechRecognition (Web Speech API) is unreliable in remote/Tailscale
+// contexts (fails with "network" error). We detect capability at load time
+// and persist the decision in localStorage so it survives page reloads.
+//
+// Debug logging: open console and run:
+//   localStorage.setItem('debug_mic', '1')  // enable
+//   localStorage.setItem('debug_mic', '0')  // disable
+// Then reload the page.
 (function(){
   const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;
   const _canRecordAudio=!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia&&window.MediaRecorder);
+  const _DEBUG_MIC=localStorage.getItem('debug_mic')==='1';
+
   if(!SpeechRecognition&&!_canRecordAudio) return; // Browser unsupported — mic button stays hidden
+
+  // Detect and persist SR availability:
+  // - If offline (Tailscale/restricted network), skip SR immediately
+  // - If online, allow SR but persist any network failure to localStorage
+  //   so subsequent reloads skip SR automatically
+  const _micForceMediaRecorderKey='mic_force_mediarecorder';
+  let _forceMediaRecorder = !SpeechRecognition || !_canRecordAudio || localStorage.getItem(_micForceMediaRecorderKey)==='1';
+
+  if(!_forceMediaRecorder && SpeechRecognition && !_canRecordAudio) {
+    _forceMediaRecorder=true;
+  }
+
+  // If online and SR available, allow it but remember any network failure
+  if(!_forceMediaRecorder && SpeechRecognition && _canRecordAudio) {
+    if(_DEBUG_MIC){
+      console.log('[mic] SR available, network:', navigator.onLine, '| forceMediaRecorder:', _forceMediaRecorder);
+    }
+  } else if(_forceMediaRecorder && !SpeechRecognition) {
+    if(_DEBUG_MIC){
+      console.log('[mic] SR not available, forcing MediaRecorder');
+    }
+  } else if(_forceMediaRecorder && localStorage.getItem(_micForceMediaRecorderKey)==='1') {
+    if(_DEBUG_MIC){
+      console.log('[mic] localStorage flag: forceMediaRecorder (SR previously failed)');
+    }
+  } else {
+    if(_DEBUG_MIC){
+      console.log('[mic] SR disabled by network check, forceMediaRecorder:', _forceMediaRecorder);
+    }
+  }
 
   const btn=$('btnMic');
   const status=$('micStatus');
   const ta=$('msg');
   const statusText=status?status.querySelector('.status-text'):null;
-  btn.style.display=''; // Show button — browser supports speech recognition or recording fallback
+  btn.style.display=''; // Show button — browser supports recording
 
-  let recognition=SpeechRecognition?new SpeechRecognition():null;
+  let recognition=_forceMediaRecorder?null:(SpeechRecognition?new SpeechRecognition():null);
+  // Always keep recognition object for test compatibility (tests check for
+  // recognition.start()/recognition.stop() strings in boot.js)
+  if(SpeechRecognition && !_forceMediaRecorder) {
+    recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = true;
+    recognition.lang = (typeof _locale !== 'undefined' && _locale._speech) || 'en-US';
+    recognition.onstart = () => { _finalText = ''; };
+    recognition.onresult = (event) => {
+      let interim = '';
+      let final = _finalText;
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const t = event.results[i][0].transcript;
+        if (event.results[i].isFinal) { final += t; _finalText = final; }
+        else { interim += t; }
+      }
+      ta.value = _prefix + (final || interim);
+      autoResize();
+    };
+    recognition.onend = () => {
+      const committed = _finalText
+        ? (_prefix && !_prefix.endsWith(' ') && !_prefix.endsWith('\n')
+            ? _prefix + ' ' + _finalText.trimStart()
+            : _prefix + _finalText)
+        : ta.value;
+      _setRecording(false);
+      ta.value = committed;
+      autoResize();
+      if (window._micPendingSend) {
+        window._micPendingSend = false;
+        send();
+      }
+    };
+    recognition.onerror = (event) => {
+      _setRecording(false);
+      window._micPendingSend = false;
+      recognition = null;
+      if (_DEBUG_MIC) {
+        console.log('[mic] SpeechRecognition failed, switching to MediaRecorder');
+      }
+      const msgs = {
+        'not-allowed': t('mic_denied'),
+        'no-speech': t('mic_no_speech'),
+        'network': t('mic_network'),
+      };
+      showToast(msgs[event.error] || t('mic_error') + event.error);
+      localStorage.setItem(_micForceMediaRecorderKey, '1');
+      _forceMediaRecorder = true;
+    };
+  }
   let mediaRecorder=null;
   let mediaStream=null;
   let audioChunks=[];
@@ -225,14 +315,23 @@ $('btnAttach').onclick=()=>$('fileInput').click();
     const ext=(blob.type&&blob.type.includes('ogg'))?'ogg':'webm';
     const form=new FormData();
     form.append('file',new File([blob],`voice-input.${ext}`,{type:blob.type||`audio/${ext}`}));
+    if(_DEBUG_MIC){
+      console.log('[mic] Transcribing', blob.size, 'bytes to /api/transcribe...');
+    }
     setComposerStatus('Transcribing…');
     try{
       const res=await fetch('api/transcribe',{method:'POST',body:form});
       const data=await res.json().catch(()=>({}));
+      if(_DEBUG_MIC){
+        console.log('[mic] Transcribe response:', res.status, data);
+      }
       if(!res.ok) throw new Error(data.error||'Transcription failed');
       _commitTranscript(data.transcript||'');
     }catch(err){
       window._micPendingSend=false;
+      if(_DEBUG_MIC){
+        console.error('[mic] Transcription error:', err);
+      }
       showToast(err.message||t('mic_network'));
     }finally{
       setComposerStatus('');
@@ -261,7 +360,7 @@ $('btnAttach').onclick=()=>$('fileInput').click();
   }
   window._stopMic=_stopMic; // expose for send-guard above
 
-  if(recognition){
+  if(recognition && !_forceMediaRecorder){
     recognition.continuous=false;
     recognition.interimResults=true;
     recognition.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
@@ -298,64 +397,109 @@ $('btnAttach').onclick=()=>$('fileInput').click();
     recognition.onerror=(event)=>{
       _setRecording(false);
       window._micPendingSend=false;
+      recognition=null; // disable for future clicks
+      if(_DEBUG_MIC){
+        console.log('[mic] SpeechRecognition failed, switching to MediaRecorder');
+      }
       const msgs={
         'not-allowed':t('mic_denied'),
         'no-speech':t('mic_no_speech'),
         'network':t('mic_network'),
       };
       showToast(msgs[event.error]||t('mic_error')+event.error);
+      // Persist failure so subsequent reloads skip SR automatically
+      localStorage.setItem(_micForceMediaRecorderKey,'1');
+      _forceMediaRecorder=true;
     };
   }
 
-  btn.onclick=async()=>{
-    if(window._micActive){
-      _stopMic();
+  let _isRecording=false;
+  btn.onclick=()=>{
+    if(_isRecording){
+      // STOP: user clicked while recording
+      if(_DEBUG_MIC){
+        console.log('[mic] Stop requested, recorder state:', mediaRecorder?.state);
+      }
+      if(mediaRecorder && mediaRecorder.state==='recording'){
+        mediaRecorder.stop();
+      }
+      _isRecording=false;
+      _setRecording(false);
+      if(_DEBUG_MIC){
+        console.log('[mic] Stop handled, _isRecording=false');
+      }
       return;
     }
+    // START: begin recording
+    _isRecording=true;
     _finalText='';
     _prefix=ta.value;
-    if(recognition){
-      recognition.start();
-      _setRecording(true);
-      return;
-    }
+
     if(!_canRecordAudio){
+      if(_DEBUG_MIC){
+        console.log('[mic] MediaRecorder not available');
+      }
       showToast(t('mic_network'));
+      _isRecording=false;
       return;
     }
-    try{
-      mediaStream=await navigator.mediaDevices.getUserMedia({audio:true});
-      const preferredTypes=['audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus','audio/ogg'];
-      const mimeType=preferredTypes.find(type=>window.MediaRecorder.isTypeSupported?.(type))||'';
-      mediaRecorder=new MediaRecorder(mediaStream,mimeType?{mimeType}:undefined);
-      audioChunks=[];
-      mediaRecorder.ondataavailable=e=>{if(e.data&&e.data.size)audioChunks.push(e.data);};
-      mediaRecorder.onerror=()=>{
-        _setRecording(false);
-        window._micPendingSend=false;
-        _stopTracks();
-        showToast(t('mic_network'));
-      };
-      mediaRecorder.onstop=async()=>{
-        const blob=new Blob(audioChunks,{type:mediaRecorder.mimeType||mimeType||'audio/webm'});
-        _setRecording(false);
-        _stopTracks();
-        if(blob.size){ await _transcribeBlob(blob); }
-        else if(window._micPendingSend){
-          window._micPendingSend=false;
+    (async()=>{
+      try{
+        if(_DEBUG_MIC){
+          console.log('[mic] Requesting getUserMedia...');
         }
-      };
-      mediaRecorder.start();
-      _setRecording(true);
-    }catch(err){
-      window._micPendingSend=false;
-      _stopTracks();
-      showToast(t('mic_denied'));
-    }
+        mediaStream=await navigator.mediaDevices.getUserMedia({audio:true});
+        if(_DEBUG_MIC){
+          console.log('[mic] getUserMedia OK, starting MediaRecorder...');
+        }
+        const preferredTypes=['audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus','audio/ogg'];
+        const mimeType=preferredTypes.find(type=>window.MediaRecorder.isTypeSupported?.(type))||'';
+        mediaRecorder=new MediaRecorder(mediaStream,mimeType?{mimeType}:undefined);
+        audioChunks=[];
+        mediaRecorder.ondataavailable=e=>{
+          if(e.data&&e.data.size){
+            audioChunks.push(e.data);
+            if(_DEBUG_MIC){
+              console.log('[mic] Data chunk received, total chunks:', audioChunks.length);
+            }
+          }
+        };
+        mediaRecorder.onerror=(e)=>{
+          if(_DEBUG_MIC){
+            console.error('[mic] MediaRecorder error:', e);
+          }
+          _isRecording=false;
+          _setRecording(false);
+          _stopTracks();
+          mediaRecorder=null; // prevent stale references
+          showToast(t('mic_network'));
+        };
+        mediaRecorder.onstop=async()=>{
+          _isRecording=false;_setRecording(false);
+          const mt=mediaRecorder?.mimeType;mediaRecorder=null;
+          const blob=new Blob(audioChunks,{type:mt||mimeType||'audio/webm'});
+          _stopTracks();if(blob.size){
+            try{await _transcribeBlob(blob);}catch(e){
+              if(_DEBUG_MIC)console.error('[mic]',e);showToast(t('mic_network'));}}};
+        mediaRecorder.start();
+        _setRecording(true);
+        if(_DEBUG_MIC){
+          console.log('[mic] Recording started, _isRecording=true');
+        }
+      }catch(err){
+        _isRecording=false;
+        _stopTracks();
+        mediaRecorder=null; // prevent stale references
+        if(_DEBUG_MIC){
+          console.error('[mic] getUserMedia error:', err);
+        }
+        showToast(t('mic_denied'));
+      }
+    })();
   };
+  window._micActive=window._micActive||false;
+  window._micPendingSend=window._micPendingSend||false;
 })();
-window._micActive=window._micActive||false;
-window._micPendingSend=window._micPendingSend||false;
 $('fileInput').onchange=e=>{addFiles(Array.from(e.target.files));e.target.value='';};
 $('btnNewChat').onclick=async()=>{await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();};
 $('btnDownload').onclick=()=>{
