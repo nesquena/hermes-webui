@@ -245,19 +245,11 @@ def _provider_oauth_authenticated(provider: str, hermes_home: "Path") -> bool:
     if not provider:
         return False
 
-    # Fast path: ask hermes_cli directly — the authoritative source
-    try:
-        from hermes_cli.auth import get_auth_status as _gas
-
-        status = _gas(provider)
-        if isinstance(status, dict) and status.get("logged_in"):
-            return True
-    except Exception:
-        logger.debug("Failed to get auth status for provider %s", provider)
-
-    # Fallback: parse auth.json ourselves for known OAuth provider IDs.
-    # Covers deployments where hermes_cli is installed but the import above
-    # fails for an unexpected reason (version mismatch, import cycle, etc.).
+    # Check auth.json for known OAuth provider IDs.
+    # hermes_home scopes the check — callers must pass the correct home directory.
+    # (A prior CLI fast path via hermes_cli.auth.get_auth_status() was removed
+    # because it ignored hermes_home and read from the real system home, breaking
+    # both test isolation and deployments with multiple profiles.)
     _known_oauth_providers = {"openai-codex", "copilot", "copilot-acp", "qwen-oauth", "nous"}
     if provider not in _known_oauth_providers:
         return False

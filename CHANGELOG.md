@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.85] — 2026-04-18
+
+### Fixed
+- **`_provider_oauth_authenticated()` now respects the `hermes_home` parameter** — the function had a CLI fast path (`hermes_cli.auth.get_auth_status()`) that ignored the caller-supplied `hermes_home` and read from the real system home. On machines where `openai-codex` (or another OAuth provider) was genuinely authenticated, this caused three test assertions to return `True` instead of `False`, regardless of the isolated `tmp_path` the test passed in. Removed the CLI fast path; the function now reads exclusively from `hermes_home/auth.json`, which is both the correct scoped behavior and what the docstring described. No functional change for production (the auth.json path was already the complete fallback). (Fixes pre-existing test_sprint34 failures)
+
 ## [v0.50.84] — 2026-04-18
 
 ### Fixed
