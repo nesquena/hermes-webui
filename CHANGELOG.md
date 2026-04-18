@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.80] — 2026-04-17
+
+### Fixed
+- **Auto-title extraction: better handling of tool-heavy first turns** — `_first_exchange_snippets()` now prefers the first substantive assistant answer and skips empty / meta-reasoning tool-call preambles (e.g. "Let me check my memory first."), while still preserving agentic first-turn replies that carry both substantive text AND a `tool_calls` field. The whitespace-normalized provisional-title check prevents the background title update from skipping when the UI placeholder differs from the derived title only by whitespace. (Closes #639, PR #640 by @franksong2702)
+
 ## [v0.50.76] — 2026-04-17
 
 ### Fixed
