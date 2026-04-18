@@ -219,11 +219,11 @@ function renderModelDropdown(){
   for(const child of Array.from(sel.children)){
     if(child.tagName==='OPTGROUP'){
       for(const opt of Array.from(child.children)){
-        _modelData.push({value:opt.value,name:esc(opt.textContent||getModelLabel(opt.value)),id:esc(opt.value)});
+        _modelData.push({value:opt.value,name:esc(opt.textContent||getModelLabel(opt.value)),id:esc(opt.value),group:child.label||''});
       }
     }
     if(child.tagName==='OPTION'){
-      _modelData.push({value:child.value,name:esc(child.textContent||getModelLabel(child.value)),id:esc(child.value)});
+      _modelData.push({value:child.value,name:esc(child.textContent||getModelLabel(child.value)),id:esc(child.value),group:''});
     }
   }
   // Create search input FIRST before filterModels definition
@@ -259,8 +259,16 @@ function renderModelDropdown(){
     dd.appendChild(_custSep);
     dd.appendChild(_custRow);
     // Add models matching filter
+    let _lastGroup=null;
     for(const m of _modelData){
       if(!term||found.has(m.value)){
+        if(m.group&&m.group!==_lastGroup){
+          const heading=document.createElement('div');
+          heading.className='model-group';
+          heading.textContent=m.group;
+          dd.appendChild(heading);
+          _lastGroup=m.group;
+        }
         const row=document.createElement('div');
         row.className='model-opt'+(m.value===sel.value?' active':'');
         row.innerHTML=`<span class="model-opt-name">${m.name}</span><span class="model-opt-id">${m.id}</span>`;
