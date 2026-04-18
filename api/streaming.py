@@ -125,17 +125,33 @@ def _message_text(value) -> str:
 
 
 def _first_exchange_snippets(messages):
-    """Return (first_user_text, first_assistant_text) snippets for title generation."""
+    """Return (first_user_text, first_assistant_text) snippets for title generation.
+
+    Prefer the first substantive assistant answer in the opening exchange,
+    skipping empty placeholders and assistant tool-call preambles.
+    """
     user_text = ''
     asst_text = ''
     for m in messages or []:
         if not isinstance(m, dict):
             continue
         role = m.get('role')
-        if role == 'user' and not user_text:
-            user_text = _message_text(m.get('content'))
-        elif role == 'assistant' and not asst_text:
+        if role == 'user':
             candidate = _message_text(m.get('content'))
+            if not user_text and candidate:
+                user_text = candidate
+                continue
+            if user_text and candidate:
+                break
+        elif role == 'assistant' and user_text:
+            candidate = _message_text(m.get('content'))
+            # Skip tool-call preambles *only* when content is empty or looks
+            # like meta-reasoning ("Let me check my memory first.", "The user
+            # is asking...", etc.). Assistant rows that carry tool_calls but
+            # also contain a substantive answer text are kept — those are
+            # agentic first-turn plans that are legitimate title candidates.
+            if m.get('tool_calls') and (not candidate or _looks_invalid_generated_title(candidate)):
+                continue
             if candidate:
                 asst_text = candidate
         if user_text and asst_text:
@@ -148,7 +164,11 @@ def _is_provisional_title(current_title: str, messages) -> bool:
     derived = title_from(messages, '') or ''
     if not derived:
         return False
-    return (str(current_title or '').strip() == derived[:64])
+    current = re.sub(r'\s+', ' ', str(current_title or '')).strip()
+    candidate = re.sub(r'\s+', ' ', str(derived[:64] or '')).strip()
+    if not current or not candidate:
+        return False
+    return current == candidate or candidate.startswith(current)
 
 
 def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]:

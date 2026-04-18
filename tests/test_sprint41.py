@@ -213,6 +213,169 @@ class TestIssue495TitleStreaming(unittest.TestCase):
             "messages.js should close SSE connection on stream_end (not immediately on done)",
         )
 
+    def test_title_snippet_uses_visible_assistant_reply_after_tools(self):
+        """Tool-heavy opening turns should use the final visible assistant reply."""
+        from api.streaming import _first_exchange_snippets
+
+        user_msg = {
+            "role": "user",
+            "content": "Please look up the earlier context and then summarize it.",
+        }
+        preamble_asst = {
+            "role": "assistant",
+            "content": "Let me check my memory first.",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "function": {
+                        "name": "memory",
+                        "arguments": '{"action":"search"}',
+                    },
+                }
+            ],
+        }
+        tool_result = {
+            "role": "tool",
+            "tool_call_id": "call-1",
+            "content": '{"result":"background info"}',
+        }
+        final_asst = {
+            "role": "assistant",
+            "content": "Here is the substantive answer after the tool work.",
+        }
+
+        user_text, assistant_text = _first_exchange_snippets(
+            [user_msg, preamble_asst, tool_result, final_asst]
+        )
+
+        self.assertEqual(user_text, user_msg["content"][:500])
+        self.assertEqual(assistant_text, final_asst["content"][:500])
+
+    def test_title_snippet_keeps_short_substantive_assistant_reply(self):
+        """Short but real assistant answers should still be eligible for titles."""
+        from api.streaming import _first_exchange_snippets
+
+        messages = [
+            {"role": "user", "content": "Can you help me rename this session?"},
+            {"role": "assistant", "content": "Sure."},
+        ]
+
+        user_text, assistant_text = _first_exchange_snippets(messages)
+
+        self.assertEqual(user_text, "Can you help me rename this session?")
+        self.assertEqual(assistant_text, "Sure.")
+
+    def test_provisional_title_detection_ignores_whitespace_noise(self):
+        """Temporary first-message titles should still match with whitespace normalization."""
+        from api.streaming import _is_provisional_title, title_from
+
+        messages = [
+            {
+                "role": "user",
+                "content": "过去两个礼拜发生了一些事情。最重要的一点就是我加入了一个 Hermes Web UI 的项目。\n\n因为我开始使用 Hermes 这个 agent 以后，就逐渐不再使用 OpenClaw了。",
+            },
+            {"role": "assistant", "content": "Sure, let me help."},
+        ]
+
+        derived = title_from(messages, "")
+        current = derived[:63]  # Simulate the provisional title the UI writes immediately.
+
+        self.assertNotEqual(current, derived[:64])
+        self.assertTrue(
+            _is_provisional_title(current, messages),
+            "Whitespace-normalized provisional titles should still be recognized",
+        )
+
+    def test_title_snippet_keeps_tool_call_with_substantive_text(self):
+        """An assistant row with tool_calls AND a substantive answer text
+        must still be used as the first-exchange snippet — it's not a
+        preamble, it's an agentic first-turn plan."""
+        from api.streaming import _first_exchange_snippets
+
+        user_msg = {
+            "role": "user",
+            "content": "Can you schedule a reminder for the Q3 kickoff meeting?",
+        }
+        # Assistant row with both a real answer AND a tool_call
+        agentic_asst = {
+            "role": "assistant",
+            "content": "I'll schedule the Q3 kickoff reminder for next Monday at 9am.",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "function": {
+                        "name": "cronjob",
+                        "arguments": '{"action":"create","when":"mon 9am"}',
+                    },
+                }
+            ],
+        }
+
+        user_text, assistant_text = _first_exchange_snippets([user_msg, agentic_asst])
+
+        self.assertEqual(user_text, user_msg["content"][:500])
+        self.assertEqual(
+            assistant_text,
+            agentic_asst["content"][:500],
+            "Substantive answer text on a tool_call row must be preserved",
+        )
+
+    def test_title_snippet_skips_tool_call_preamble_only_rows(self):
+        """Tool-call rows whose content is empty or meta-reasoning preamble
+        ('Let me check my memory first.') must still be skipped — those are
+        orchestration scaffolding, not title material."""
+        from api.streaming import _first_exchange_snippets
+
+        user_msg = {
+            "role": "user",
+            "content": "Summarize my notes from last week.",
+        }
+        empty_preamble = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "function": {
+                        "name": "memory",
+                        "arguments": '{"action":"search"}',
+                    },
+                }
+            ],
+        }
+        meta_preamble = {
+            "role": "assistant",
+            "content": "Let me check my memory first.",
+            "tool_calls": [
+                {
+                    "id": "call-2",
+                    "function": {
+                        "name": "memory",
+                        "arguments": '{"action":"search","q":"last week"}',
+                    },
+                }
+            ],
+        }
+        tool_result = {
+            "role": "tool",
+            "tool_call_id": "call-2",
+            "content": '{"result":"background info"}',
+        }
+        final_asst = {
+            "role": "assistant",
+            "content": "Here's a summary of your notes from last week.",
+        }
+
+        _, assistant_text = _first_exchange_snippets(
+            [user_msg, empty_preamble, meta_preamble, tool_result, final_asst]
+        )
+
+        self.assertEqual(
+            assistant_text,
+            final_asst["content"][:500],
+            "Empty and meta-reasoning preamble rows must be skipped",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

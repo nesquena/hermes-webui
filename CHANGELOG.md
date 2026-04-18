@@ -32,6 +32,12 @@
 - **Sidebar nav icon hit targets are now correctly aligned** — added `display:flex; align-items:center; justify-content:center` to `.nav-tab` so clicking the icon itself (not below it) activates the tab. (Closes #636)
 - **Safari iOS input auto-zoom fixed** — bumped `textarea#msg` base font-size from 14px to 16px, which prevents Safari from zooming the viewport on input focus (Safari zooms when font-size < 16px). Visual difference is negligible. (Closes #630)
 
+## [v0.50.81] — 2026-04-18
+
+### Fixed
+- **Auto-title extraction improved for tool-heavy first turns** — sessions where the agent's first response involved tool calls (e.g. memory lookups, file reads) were generating poor titles because the title extractor skipped all assistant messages with `tool_calls`, even when those messages contained substantive visible text. The extractor now picks the first pure (non-tool-call) assistant reply as the title source, using `_looks_invalid_generated_title()` to distinguish meta-reasoning preambles from real agentic replies. Also fixes `_is_provisional_title()` to normalize whitespace before comparing, so CJK text truncated at 64 characters correctly re-triggers title updates. (Closes #639, PR #640 by @franksong2702)
+
+
 ## [v0.50.76] — 2026-04-17
 
 ### Fixed
