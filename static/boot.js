@@ -673,6 +673,8 @@ function applyBotName(){
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
   // Fetch available models from server and populate dropdown dynamically
   await populateModelDropdown();
+  // Apply wallpaper background (decorative — no await, slow load is fine)
+  if(typeof applyWallpaper === 'function') applyWallpaper();
   // Restore last-used model preference
   const savedModel=localStorage.getItem('hermes-webui-model');
   if(savedModel && $('modelSelect')){

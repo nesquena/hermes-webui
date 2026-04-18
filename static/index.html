@@ -20,6 +20,7 @@
   <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/plugins/autoloader/prism-autoloader.min.js" integrity="sha384-Uq05+JLko69eOiPr39ta9bh7kld5PKZoU+fF7g0EXTAriEollhZ+DrN8Q/Oi8J2Q" crossorigin="anonymous" defer></script>
 </head>
 <body>
+<div id="wallpaper"></div>
 <div class="layout">
   <aside class="sidebar">
 
@@ -496,6 +497,21 @@
               </select>
             </div>
             <div class="settings-field">
+              <label data-i18n="wallpaper_label">Wallpaper</label>
+              <div id="settingsWallpaperPreviewWrap" style="display:none;margin-bottom:10px;">
+                <div id="settingsWallpaperPreview" style="width:100%;height:120px;border-radius:8px;border:1px solid var(--border2);background-size:cover;background-position:center;background-repeat:no-repeat;background-color:rgba(255,255,255,.04);"></div>
+                <div id="settingsWallpaperFilename" style="font-size:11px;color:var(--muted);margin-top:4px;text-align:center;font-family:monospace;"></div>
+              </div>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                <input type="file" id="settingsWallpaperFile" accept="image/jpeg,image/png,image/webp" style="flex:1;font-size:12px;color:var(--text);">
+                <button type="button" id="settingsWallpaperRemove" data-i18n="wallpaper_remove" style="padding:6px 10px;border-radius:6px;border:1px solid var(--border2);background:rgba(255,255,255,.06);color:var(--text);cursor:pointer;font-size:12px;">Remove</button>
+              </div>
+              <div style="margin-top:10px;">
+                <label for="settingsWallpaperBrightness" data-i18n="wallpaper_brightness_label" style="font-size:12px;color:var(--muted);">Brightness</label>
+                <input type="range" id="settingsWallpaperBrightness" min="10" max="150" step="5" value="60" style="width:100%;margin-top:4px;">
+              </div>
+            </div>
+            <div class="settings-field">
               <label for="settingsLanguage" data-i18n="settings_label_language">Language</label>
               <select id="settingsLanguage" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
             </div>
@@ -604,6 +620,7 @@
 <script src="static/messages.js"></script>
 <script src="static/panels.js"></script>
 <script src="static/onboarding.js"></script>
+<script src="static/wallpaper.js"></script>
 <script src="static/boot.js"></script>
 </body>
 </html>

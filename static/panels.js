@@ -1068,6 +1068,7 @@ document.addEventListener('drop',e=>{e.preventDefault();dragCounter=0;wrap.class
 
 let _settingsDirty = false;
 let _settingsThemeOnOpen = null; // track theme at open time for discard revert
+let _settingsBrightnessOnOpen = null; // track brightness at open time for discard revert
 let _settingsSection = 'conversation';
 
 function switchSettingsSection(name){
@@ -1154,16 +1155,38 @@ function _revertSettingsPreview(){
     if(typeof _applyTheme==='function') _applyTheme(_settingsThemeOnOpen);
     else document.documentElement.dataset.theme = _settingsThemeOnOpen;
   }
+  if(_settingsBrightnessOnOpen !== null && typeof setBrightness === 'function'){
+    setBrightness(_settingsBrightnessOnOpen * 100);  // setBrightness expects percent
+  }
 }
 
-// Show the "Unsaved changes" bar inside the settings panel
+// Show the "Unsaved changes" bar inside the settings panel.
+// The bar uses position:sticky so it stays visible regardless of how
+// far the user has scrolled inside the settings body. We also scroll
+// it into view + briefly flash on (re)show so a click-to-close after
+// changes feels responsive (root cause of "X has no reaction" UX bug
+// when user scrolled below the bar).
 function _showSettingsUnsavedBar(){
   let bar = $('settingsUnsavedBar');
-  if(bar){ bar.style.display=''; return; }
+  const flash = () => {
+    if(!bar) return;
+    bar.style.transition = 'box-shadow .25s, transform .25s';
+    bar.style.boxShadow = '0 0 0 3px rgba(233,69,96,.55)';
+    bar.style.transform = 'scale(1.02)';
+    setTimeout(() => {
+      if(!bar) return;
+      bar.style.boxShadow = '';
+      bar.style.transform = '';
+    }, 250);
+    if(typeof bar.scrollIntoView === 'function'){
+      bar.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+    }
+  };
+  if(bar){ bar.style.display=''; flash(); return; }
   // Create it
   bar = document.createElement('div');
   bar.id = 'settingsUnsavedBar';
-  bar.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;background:rgba(233,69,96,.12);border:1px solid rgba(233,69,96,.3);border-radius:8px;padding:10px 14px;margin:0 0 12px;font-size:13px;';
+  bar.style.cssText = 'position:sticky;top:0;z-index:5;display:flex;align-items:center;justify-content:space-between;gap:8px;background:rgba(233,69,96,.18);backdrop-filter:blur(6px);border:1px solid rgba(233,69,96,.45);border-radius:8px;padding:10px 14px;margin:0 0 12px;font-size:13px;';
   bar.innerHTML = `<span style="color:var(--text)">${esc(t('settings_unsaved_changes'))}</span>`
     + '<span style="display:flex;gap:8px">'
     + `<button onclick="_discardSettings()" style="padding:5px 12px;border-radius:6px;border:1px solid var(--border2);background:rgba(255,255,255,.06);color:var(--muted);cursor:pointer;font-size:12px;font-weight:600">${esc(t('discard'))}</button>`
@@ -1171,6 +1194,7 @@ function _showSettingsUnsavedBar(){
     + '</span>';
   const body = document.querySelector('.settings-main') || document.querySelector('.settings-body') || document.querySelector('.settings-panel');
   if(body) body.prepend(bar);
+  flash();
 }
 
 function _discardSettings(){
@@ -1221,6 +1245,40 @@ async function loadSettingsPanel(){
     // Theme preference
     const themeSel=$('settingsTheme');
     if(themeSel){themeSel.value=settings.theme||'dark';themeSel.addEventListener('change',_markSettingsDirty,{once:false});}
+    // Refresh wallpaper preview (panel may open after applyWallpaper has already run)
+    if(typeof applyWallpaper === 'function') applyWallpaper();
+    // Wallpaper brightness slider — load value from settings + capture for Discard
+    const wpBrightSlider = $('settingsWallpaperBrightness');
+    if(wpBrightSlider){
+      const dec = (typeof settings.wallpaper_brightness === 'number') ? settings.wallpaper_brightness : 0.6;
+      wpBrightSlider.value = String(Math.round(dec * 100));
+      // Capture the at-open value so Discard can revert the live CSS variable
+      _settingsBrightnessOnOpen = dec;
+      wpBrightSlider.addEventListener('input', (e) => {
+        const pct = parseInt(e.target.value, 10);
+        if(typeof setBrightness === 'function') setBrightness(pct);
+        _markSettingsDirty();
+      });
+    }
+    // Wallpaper file picker — upload immediately on change (not save-gated)
+    const wpFile = $('settingsWallpaperFile');
+    if(wpFile){
+      wpFile.addEventListener('change', async (e) => {
+        const file = e.target.files && e.target.files[0];
+        if(file && typeof uploadWallpaper === 'function'){
+          await uploadWallpaper(file);
+          // Reset the input so re-selecting the same file fires another change event
+          e.target.value = '';
+        }
+      });
+    }
+    // Wallpaper remove button — also immediate (not save-gated)
+    const wpRemove = $('settingsWallpaperRemove');
+    if(wpRemove){
+      wpRemove.onclick = async () => {
+        if(typeof removeWallpaper === 'function') await removeWallpaper();
+      };
+    }
     // Language preference — populate from LOCALES bundle
     const langSel=$('settingsLanguage');
     if(langSel){
@@ -1324,6 +1382,14 @@ async function saveSettings(andClose){
   document.body.classList.toggle('bubble-layout', body.bubble_layout);
   const botName=(($('settingsBotName')||{}).value||'').trim();
   body.bot_name=botName||'Hermes';
+  // Wallpaper brightness: convert slider percent (10..150) back to decimal (0.1..1.5)
+  const wpBrightSlider = $('settingsWallpaperBrightness');
+  if(wpBrightSlider){
+    const pct = parseInt(wpBrightSlider.value, 10);
+    if(!isNaN(pct)){
+      body.wallpaper_brightness = Math.max(0.1, Math.min(1.5, pct / 100));
+    }
+  }
   // Password: only act if the field has content; blank = leave auth unchanged
   if(pw && pw.trim()){
     try{

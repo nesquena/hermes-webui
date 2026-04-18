@@ -93,6 +93,15 @@ const LOCALES = {
     personality_cleared: 'Personality cleared',
     personality_set: 'Personality: ',
     failed_colon: 'Failed: ',
+    // wallpaper.js
+    wallpaper_uploaded: 'Wallpaper applied',
+    wallpaper_removed: 'Wallpaper removed',
+    wallpaper_size_too_large: 'Wallpaper file is too large (max 10MB).',
+    wallpaper_invalid_format: 'Wallpaper must be JPEG, PNG, or WebP.',
+    wallpaper_label: 'Wallpaper',
+    wallpaper_upload: 'Upload image',
+    wallpaper_remove: 'Remove',
+    wallpaper_brightness_label: 'Brightness',
     // ui.js
     no_workspace: 'No workspace',
     dialog_confirm_title: 'Confirm action',
@@ -507,6 +516,15 @@ const LOCALES = {
     personality_cleared: 'Personalidad borrada',
     personality_set: 'Personalidad: ',
     failed_colon: 'Error: ',
+    // wallpaper.js
+    wallpaper_uploaded: 'Fondo aplicado',
+    wallpaper_removed: 'Fondo eliminado',
+    wallpaper_size_too_large: 'El archivo es demasiado grande (máx. 10 MB).',
+    wallpaper_invalid_format: 'El fondo debe ser JPEG, PNG o WebP.',
+    wallpaper_label: 'Fondo',
+    wallpaper_upload: 'Subir imagen',
+    wallpaper_remove: 'Quitar',
+    wallpaper_brightness_label: 'Brillo',
     // ui.js
     no_workspace: 'Sin espacio de trabajo',
     // workspace.js
@@ -911,6 +929,15 @@ const LOCALES = {
     personality_cleared: 'Persönlichkeit gelöscht',
     personality_set: 'Persönlichkeit: ',
     failed_colon: 'Fehlgeschlagen: ',
+    // wallpaper.js
+    wallpaper_uploaded: 'Hintergrund angewendet',
+    wallpaper_removed: 'Hintergrund entfernt',
+    wallpaper_size_too_large: 'Die Datei ist zu groß (max. 10 MB).',
+    wallpaper_invalid_format: 'Hintergrund muss JPEG, PNG oder WebP sein.',
+    wallpaper_label: 'Hintergrund',
+    wallpaper_upload: 'Bild hochladen',
+    wallpaper_remove: 'Entfernen',
+    wallpaper_brightness_label: 'Helligkeit',
     // ui.js
     no_workspace: 'Kein Workspace',
     dialog_confirm_title: 'Aktion bestätigen',
@@ -1123,6 +1150,15 @@ const LOCALES = {
     personality_cleared: '\u4eba\u8bbe\u5df2\u6e05\u7a7a',
     personality_set: '\u5f53\u524d\u4eba\u8bbe\uff1a',
     failed_colon: '\u5931\u8d25\uff1a',
+    // wallpaper.js
+    wallpaper_uploaded: '壁纸已应用',
+    wallpaper_removed: '壁纸已移除',
+    wallpaper_size_too_large: '壁纸文件过大（最大 10MB）。',
+    wallpaper_invalid_format: '壁纸必须是 JPEG、PNG 或 WebP。',
+    wallpaper_label: '壁纸',
+    wallpaper_upload: '上传图片',
+    wallpaper_remove: '移除',
+    wallpaper_brightness_label: '亮度',
     // ui.js
     no_workspace: '\u672a\u9009\u62e9\u5de5\u4f5c\u533a',
     dialog_confirm_title: '\u786e\u8ba4\u64cd\u4f5c',
@@ -1526,6 +1562,15 @@ const LOCALES = {
     personality_cleared: '\u4eba\u8a2d\u5df2\u6e05\u7a7a',
     personality_set: '\u7576\u524d\u4eba\u8a2d\uff1a',
     failed_colon: '\u5931\u6557\uff1a',
+    // wallpaper.js
+    wallpaper_uploaded: '桌布已套用',
+    wallpaper_removed: '桌布已移除',
+    wallpaper_size_too_large: '桌布檔案過大（最大 10MB）。',
+    wallpaper_invalid_format: '桌布必須為 JPEG、PNG 或 WebP。',
+    wallpaper_label: '桌布',
+    wallpaper_upload: '上傳圖片',
+    wallpaper_remove: '移除',
+    wallpaper_brightness_label: '亮度',
     // ui.js
     no_workspace: '\u672a\u9078\u64c7\u5de5\u4f5c\u5340',
     // workspace.js
