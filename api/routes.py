@@ -2561,7 +2561,12 @@ def _handle_session_compress(handler, body):
     if not sid:
         return bad(handler, "session_id is required")
 
-    focus_topic = str(body.get("focus_topic") or body.get("topic") or "").strip() or None
+    # Cap focus_topic to 500 chars — matches the defensive input-size pattern
+    # used elsewhere (session title :80, first-exchange snippets :500) and
+    # prevents a user from forwarding an unbounded string into the compressor
+    # prompt path. No privilege boundary here (user prompting themself), just
+    # cheap bound-checking.
+    focus_topic = str(body.get("focus_topic") or body.get("topic") or "").strip()[:500] or None
 
     try:
         s = get_session(sid)
