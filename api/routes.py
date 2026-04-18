@@ -2817,9 +2817,13 @@ def _handle_session_import_cli(handler, body):
 
     sid = str(body["session_id"])
 
-    # Check if already imported — idempotent
+    # Check if already imported — refresh messages from CLI store if new ones arrived
     existing = Session.load(sid)
     if existing:
+        fresh_msgs = get_cli_session_messages(sid)
+        if fresh_msgs and len(fresh_msgs) > len(existing.messages):
+            existing.messages = fresh_msgs
+            existing.save(touch_updated_at=False)
         return j(
             handler,
             {

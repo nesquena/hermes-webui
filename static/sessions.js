@@ -331,6 +331,25 @@ function startGatewaySSE(){
         const data = JSON.parse(ev.data);
         if(data.sessions){
           renderSessionList(); // re-fetch and re-render
+          // If the active session received new gateway messages, refresh the conversation view.
+          // We check S.busy so we don't stomp on an in-progress WebUI response.
+          if(S.session && !S.busy){
+            const changedIds = new Set((data.sessions||[]).map(s=>s.session_id));
+            if(changedIds.has(S.session.session_id)){
+              api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:S.session.session_id})})
+                .then(res=>{
+                  if(res && res.session && Array.isArray(res.session.messages)){
+                    const prev = S.messages.length;
+                    S.messages = res.session.messages.filter(m=>m&&m.role);
+                    if(S.messages.length !== prev){
+                      renderMessages();
+                      if(typeof highlightCode==='function') highlightCode();
+                    }
+                  }
+                })
+                .catch(()=>{ /* ignore — next poll will retry */ });
+            }
+          }
         }
       }catch(e){ /* ignore parse errors */ }
     });
