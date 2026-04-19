@@ -38,7 +38,7 @@ services:
     depends_on:
       - hermes-agent
     ports:
-      - "127.0.0.1:8787:8787"
+      - "8787:8787"
     volumes:
       # Same hermes home as the agent — shares config, sessions, state
       - hermes-home:/home/hermeswebui/.hermes
