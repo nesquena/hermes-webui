@@ -198,7 +198,7 @@ def reload_config() -> None:
             import yaml as _yaml
 
             if config_path.exists():
-                loaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
+                loaded = _yaml.safe_load(config_path.read_text())
                 if isinstance(loaded, dict):
                     _cfg_cache.update(loaded)
                     try:
@@ -207,6 +207,9 @@ def reload_config() -> None:
                         _cfg_mtime = 0.0
         except Exception:
             logger.debug("Failed to load yaml config from %s", config_path)
+
+
+
 
 
 # Initial load
@@ -533,6 +536,7 @@ _PROVIDER_MODELS = {
         {"id": "moonshot-v1-32k", "label": "Moonshot v1 32k"},
         {"id": "moonshot-v1-128k", "label": "Moonshot v1 128k"},
         {"id": "kimi-latest", "label": "Kimi Latest"},
+        {"id": "kimi-k2.5", "label": "Kimi K2.5"},
     ],
     "minimax": [
         {"id": "MiniMax-M2.7", "label": "MiniMax M2.7"},
@@ -770,7 +774,7 @@ def get_available_models() -> dict:
             try:
                 import json as _j
 
-                auth_store = _j.loads(auth_store_path.read_text(encoding="utf-8"))
+                auth_store = _j.loads(auth_store_path.read_text())
                 active_provider = auth_store.get("active_provider")
             except Exception:
                 logger.debug("Failed to load auth store from %s", auth_store_path)
@@ -818,7 +822,7 @@ def get_available_models() -> dict:
         env_keys = {}
         if hermes_env_path.exists():
             try:
-                for line in hermes_env_path.read_text(encoding="utf-8").splitlines():
+                for line in hermes_env_path.read_text(encoding='utf-8').splitlines():
                     line = line.strip()
                     if line and not line.startswith("#") and "=" in line:
                         k, v = line.split("=", 1)
@@ -1123,9 +1127,7 @@ def get_available_models() -> dict:
                 )
             else:
                 # Unknown provider -- use auto-detected models if available,
-                # otherwise skip it for the model dropdown. Do NOT inject the
-                # global default_model here: that would incorrectly imply the
-                # provider can serve the default model (e.g. Alibaba -> gpt-5.4-mini).
+                # otherwise fall back to default model placeholder
                 if auto_detected_models:
                     groups.append(
                         {
@@ -1133,6 +1135,19 @@ def get_available_models() -> dict:
                             "models": auto_detected_models,
                         }
                     )
+                else:
+                    if default_model:
+                        groups.append(
+                            {
+                                "provider": provider_name,
+                                "models": [
+                                    {
+                                        "id": default_model,
+                                        "label": default_model.split("/")[-1],
+                                    }
+                                ],
+                            }
+                        )
     else:
         # No providers detected. Show only the configured default model so the user
         # can at least send messages with their current setting. Avoid showing a
@@ -1175,14 +1190,7 @@ def get_available_models() -> dict:
                     injected = True
                     break
             if not injected and groups:
-                # Keep the default isolated rather than polluting the first
-                # detected provider group.
-                groups.append(
-                    {
-                        "provider": "Default",
-                        "models": [{"id": default_model, "label": label}],
-                    }
-                )
+                groups[0]["models"].insert(0, {"id": default_model, "label": label})
             elif not groups:
                 groups.append(
                     {
