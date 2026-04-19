@@ -825,7 +825,7 @@
 .profile-card-meta{font-size:11px;color:var(--muted);margin-top:3px;padding-left:12px;}
 .profile-card-actions{display:flex;gap:4px;flex-shrink:0;}
 /* ── Slash command autocomplete dropdown ── */
-.cmd-dropdown{display:none;position:absolute;bottom:100%;left:0;right:0;background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -8px 24px rgba(0,0,0,.4);z-index:200;max-height:240px;overflow-y:auto;margin-bottom:4px;}
+.cmd-dropdown{display:none;position:absolute;left:0;right:0;bottom:calc(100% + 4px);width:auto;max-width:100%;background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -8px 24px rgba(0,0,0,.4);z-index:200;max-height:240px;overflow-y:auto;}
 .cmd-dropdown.open{display:block;}
 .cmd-item{padding:8px 14px;cursor:pointer;transition:background .12s;}
 .cmd-item:hover,.cmd-item.selected{background:rgba(255,255,255,.07);}
