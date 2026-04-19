@@ -90,6 +90,12 @@ services:
       #   echo "UID=$(id -u)" >> .env && echo "GID=$(id -g)" >> .env
       - WANTED_UID=${UID:-1000}
       - WANTED_GID=${GID:-1000}
+      # NOTE: When using bind-mount volumes shared across containers, ALL containers
+      # that write to the same host directory must run as the same UID/GID.
+      # If hermes-agent initialises the state dir as root (UID 0), hermes-webui
+      # will get a PermissionError accessing those paths — including a crash on every
+      # HTTP request if the auth signing-key file is unreadable. Either set WANTED_UID
+      # to match the agent container's UID, or use a named Docker volume (preferred).
       # Optional: set a password for remote access
       # - HERMES_WEBUI_PASSWORD=your-secret-password
     restart: unless-stopped

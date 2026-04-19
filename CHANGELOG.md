@@ -3,6 +3,7 @@
 <<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 ## [v0.50.102] — 2026-04-20
 
 ### Fixed
@@ -25,6 +26,12 @@
 ### Fixed
 - **Profile deletion warning now leads with destructive impact** — the confirmation dialog message now reads: "All sessions, config, skills, and memory for this profile will be permanently deleted. This cannot be undone." Updated across all 6 supported locales (en, es, de, zh, zh-Hant, ru). The `focusCancel: true` option was already present in `deleteProfile()`, ensuring the Cancel button receives default focus for safety. (Fixes #637)
 >>>>>>> 3fff167 (fix(ux): strengthen profile deletion warning to clarify irreversibility)
+=======
+## [v0.50.106] — 2026-04-20
+
+### Fixed
+- **`PermissionError` in auth signing key no longer crashes every HTTP request** — `key_file.exists()` in `api/auth.py`'s `_signing_key()` was called *outside* the try/except block. In three-container bind-mount setups where the agent container initialises the state directory under a different UID, `pathlib.Path.exists()` raises `PermissionError`, which escaped up through `is_auth_enabled()` → `check_auth()` and crashed every HTTP request with HTTP 500. Fix: wrap the `exists()` call inside the try block so `PermissionError` (and any other `OSError`) is caught and logged, then falls back to an in-memory key. Added a UID/GID alignment note to `docker-compose.three-container.yml` to prevent the underlying misconfiguration. (PR #625)
+>>>>>>> ee22213 (fix(docker): catch PermissionError in _signing_key + three-container UID note)
 
 ## [v0.50.101] — 2026-04-20
 

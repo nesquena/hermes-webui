@@ -51,13 +51,13 @@ def _record_login_attempt(ip: str) -> None:
 def _signing_key():
     """Return a random signing key, generating and persisting one on first call."""
     key_file = STATE_DIR / '.signing_key'
-    if key_file.exists():
-        try:
+    try:
+        if key_file.exists():
             raw = key_file.read_bytes()
             if len(raw) >= 32:
                 return raw[:32]
-        except Exception:
-            logger.debug("Failed to read signing key from file, generating new key")
+    except Exception:
+        logger.debug("Failed to read or access signing key file, using in-memory key")
     # Generate a new random key
     key = secrets.token_bytes(32)
     try:
