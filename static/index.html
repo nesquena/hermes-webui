@@ -211,6 +211,16 @@
       <div id="liveCompressionCards" class="live-compression-cards"></div>
       <div id="liveToolCards" style="display:none;max-width:800px;margin:0 auto;width:100%;padding:0 24px;"></div>
     </div>
+    <div class="security-banner" id="securityBanner">
+      <span id="securityMsg">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-1px"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        No password set. This WebUI is not protected. Anyone on this machine can access sessions and memory.
+      </span>
+      <div style="display:flex;gap:8px;flex-shrink:0">
+        <button class="security-btn" onclick="dismissSecurityBanner()">Dismiss</button>
+        <button class="security-btn security-primary" onclick="openSecuritySettings()">Set Password</button>
+      </div>
+    </div>
     <div class="update-banner" id="updateBanner">
       <span id="updateMsg"></span>
       <div style="display:flex;gap:8px;flex-shrink:0">
@@ -333,7 +343,7 @@
                 <option value="google/gemini-3.1-pro-preview">Gemini 3.1 Pro Preview</option>
                 <option value="google/gemini-3-flash-preview">Gemini 3 Flash Preview</option>
                 <option value="deepseek/deepseek-chat-v3-0324">DeepSeek V3</option>
-                <option value="meta-llama/llama-4-scout">Llama 4 Scout</option>
+
               </optgroup>
             </select>
             </div>
@@ -454,6 +464,54 @@
           <button class="settings-tab" id="settingsTabSystem" type="button" role="tab" aria-selected="false" aria-controls="settingsPaneSystem" onclick="switchSettingsSection('system')">
             <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><line x1="6" y1="7" x2="6.01" y2="7"/><line x1="6" y1="17" x2="6.01" y2="17"/></svg>
             <span class="settings-tab-title">System</span>
+          </button>
+          <button class="settings-tab" id="settingsTabAgent" type="button" role="tab" aria-selected="false" aria-controls="settingsPaneAgent" onclick="switchSettingsSection('agent')">
+            <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a4 4 0 0 1 4 4v1h1a3 3 0 0 1 3 3v1a3 3 0 0 1-3 3h-1v1a4 4 0 0 1-8 0v-1H8a3 3 0 0 1-3-3v-1a3 3 0 0 1 3-3h1V6a4 4 0 0 1 4-4z"/><circle cx="9" cy="10" r="1"/><circle cx="15" cy="10" r="1"/><path d="M9 15c1 1 2.5 2 3 2s2-1 3-2"/></svg>
+            <span class="settings-tab-title">Agent</span>
+          </button>
+          <button class="settings-tab" id="settingsTabProvider" type="button" role="tab" aria-selected="false" aria-controls="settingsPaneProvider" onclick="switchSettingsSection('provider')">
+            <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+            <span class="settings-tab-title">Provider</span>
+          </button>
+          <button class="settings-tab" id="settingsTabTools" type="button" role="tab" aria-selected="false" aria-controls="settingsPaneTools" onclick="switchSettingsSection('tools')">
+            <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+            <span class="settings-tab-title">Tools</span>
+          </button>
+          <button class="settings-tab" id="settingsTabTTS" type="button" role="tab" aria-selected="false" aria-controls="settingsPaneTTS" onclick="switchSettingsSection('tts')">
+            <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>
+            <span class="settings-tab-title">TTS</span>
+          </button>
+          <button class="settings-tab" id="settingsTabTerminal" type="button" role="tab" aria-selected="false" aria-controls="settingsPaneTerminal" onclick="switchSettingsSection('terminal')">
+            <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+            <span class="settings-tab-title">Terminal</span>
+          </button>
+          <button class="settings-tab" id="settingsTabDisplay" type="button" role="tab" aria-selected="false" aria-controls="settingsPaneDisplay" onclick="switchSettingsSection('display')">
+            <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+            <span class="settings-tab-title">Display</span>
+          </button>
+          <button class="settings-tab" id="settingsTabBrowser" type="button" role="tab" aria-selected="false" aria-controls="settingsPaneBrowser" onclick="switchSettingsSection('browser')">
+            <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+            <span class="settings-tab-title">Browser</span>
+          </button>
+          <button class="settings-tab" id="settingsTabCheckpoints" type="button" role="tab" aria-selected="false" aria-controls="settingsPaneCheckpoints" onclick="switchSettingsSection('checkpoints')">
+            <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+            <span class="settings-tab-title">Checkpoints</span>
+          </button>
+          <button class="settings-tab" id="settingsTabLogging" type="button" role="tab" aria-selected="false" aria-controls="settingsPaneLogging" onclick="switchSettingsSection('logging')">
+            <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+            <span class="settings-tab-title">Logging</span>
+          </button>
+          <button class="settings-tab" id="settingsTabSSH" type="button" role="tab" aria-selected="false" aria-controls="settingsPaneSSH" onclick="switchSettingsSection('ssh')">
+            <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+            <span class="settings-tab-title">SSH</span>
+          </button>
+          <button class="settings-tab" id="settingsTabMessaging" type="button" role="tab" aria-selected="false" aria-controls="settingsPaneMessaging" onclick="switchSettingsSection('messaging')">
+            <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            <span class="settings-tab-title">Messaging</span>
+          </button>
+          <button class="settings-tab" id="settingsTabVoice" type="button" role="tab" aria-selected="false" aria-controls="settingsPaneVoice" onclick="switchSettingsSection('voice')">
+            <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+            <span class="settings-tab-title">Voice</span>
           </button>
         </div>
         <div class="settings-main">
@@ -604,6 +662,684 @@
             </div>
             <button class="sm-btn" id="btnDisableAuth" onclick="disableAuth()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:#e8a030;border-color:rgba(232,160,48,.3);display:none" data-i18n="disable_auth">Disable Auth</button>
             <button class="sm-btn" id="btnSignOut" onclick="signOut()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:var(--accent);border-color:rgba(233,69,96,.3);display:none" data-i18n="sign_out">Sign Out</button>
+          </div>
+          <div class="settings-pane" id="settingsPaneAgent" role="tabpanel" aria-labelledby="settingsTabAgent">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title">Agent</div>
+                <div class="settings-section-meta">Agent behavior, timeouts, and tool use.</div>
+              </div>
+            </div>
+            <div class="settings-field">
+              <label for="agentMaxTurns">Max Turns</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Maximum number of conversation turns before the agent stops.</div>
+              <input type="number" id="agentMaxTurns" min="1" max="10000" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+            </div>
+            <div class="settings-field">
+              <label for="agentGatewayTimeout">Gateway Timeout (seconds)</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Seconds to wait for gateway responses.</div>
+              <input type="number" id="agentGatewayTimeout" min="1" max="86400" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+            </div>
+            <div class="settings-field">
+              <label for="agentGatewayTimeoutWarning">Gateway Timeout Warning (seconds)</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Show a warning after this many seconds.</div>
+              <input type="number" id="agentGatewayTimeoutWarning" min="1" max="86400" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+            </div>
+            <div class="settings-field">
+              <label for="agentGatewayNotifyInterval">Gateway Notify Interval (seconds)</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Notify every N seconds during long operations.</div>
+              <input type="number" id="agentGatewayNotifyInterval" min="1" max="86400" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+            </div>
+            <div class="settings-field">
+              <label for="agentRestartDrainTimeout">Restart Drain Timeout (seconds)</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Seconds to wait for drain on restart.</div>
+              <input type="number" id="agentRestartDrainTimeout" min="1" max="3600" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+            </div>
+            <div class="settings-field">
+              <label for="agentToolUseEnforcement">Tool Use Enforcement</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px">When and how the agent may use tools.</div>
+              <select id="agentToolUseEnforcement" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                <option value="auto">auto</option>
+                <option value="required">required</option>
+                <option value="optional">optional</option>
+                <option value="disabled">disabled</option>
+              </select>
+            </div>
+            <div class="settings-field">
+              <label for="delegationReasoningEffort">Reasoning Effort</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px">How much reasoning effort the agent should use. Leave blank for default.</div>
+              <select id="delegationReasoningEffort" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                <option value="">— default —</option>
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+              </select>
+            </div>
+            <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600" data-i18n="settings_save_btn">Save Settings</button>
+          </div>
+          <div class="settings-pane" id="settingsPaneProvider" role="tabpanel" aria-labelledby="settingsTabProvider">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title">Provider</div>
+                <div class="settings-section-meta">API key status and provider configuration.</div>
+              </div>
+            </div>
+            <div id="providerKeysContent">
+              <div class="settings-section-head" style="padding-top:8px">
+                <div class="settings-section-title" style="font-size:14px">Provider API Keys</div>
+              </div>
+              <div id="providerKeysList"></div>
+            </div>
+            <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border2)">
+              <div style="font-size:12px;color:var(--muted)">Use the onboarding wizard (settings icon + prompt) to configure additional providers.</div>
+            </div>
+          </div>
+          <div class="settings-pane" id="settingsPaneTools" role="tabpanel" aria-labelledby="settingsTabTools">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title">Tools</div>
+                <div class="settings-section-meta">Configured MCP toolsets and their tools.</div>
+              </div>
+            </div>
+            <div id="toolsPaneContent"></div>
+          </div>
+          <div class="settings-pane" id="settingsPaneTTS" role="tabpanel" aria-labelledby="settingsTabTTS">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title">Text-to-Speech</div>
+                <div class="settings-section-meta">Voice provider, API key, and voice model.</div>
+              </div>
+            </div>
+
+            <div class="settings-field">
+              <label for="ttsProvider">Provider</label>
+              <select id="ttsProvider" onchange="_onTtsProviderChange()" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                <option value="edge">Edge (built-in, no API key)</option>
+                <option value="elevenlabs">ElevenLabs</option>
+                <option value="openai">OpenAI</option>
+                <option value="minimax">MiniMax</option>
+                <option value="mistral">Mistral</option>
+                <option value="gemini">Google Gemini</option>
+                <option value="xai">xAI</option>
+                <option value="neutts">NeuTTS (local, no API key)</option>
+              </select>
+            </div>
+
+            <div id="ttsFields">
+              <!-- Edge -->
+              <div id="ttsEdgeFields" class="tts-provider-fields" style="display:none">
+                <div class="settings-field">
+                  <label for="ttsEdgeVoice">Voice</label>
+                  <select id="ttsEdgeVoice" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
+                </div>
+              </div>
+
+              <!-- ElevenLabs -->
+              <div id="ttsElevenlabsFields" class="tts-provider-fields" style="display:none">
+                <div class="settings-field">
+                  <label for="ttsElevenlabsVoice">Voice ID</label>
+                  <input type="text" id="ttsElevenlabsVoice" placeholder="e.g. Rachel (pNInz6obpgDQGcFmaJgB)" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                </div>
+                <div class="settings-field">
+                  <label for="ttsElevenlabsModel">Model</label>
+                  <select id="ttsElevenlabsModel" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                    <option value="eleven_v3">Eleven v3 (recommended)</option>
+                    <option value="eleven_v2">Eleven v2</option>
+                    <option value="eleven_multilingual_v2">Multilingual v2</option>
+                  </select>
+                </div>
+                <div class="settings-field" id="ttsElevenlabsKeyField">
+                  <label>API Key</label>
+                  <div id="ttsElevenlabsKeyDisplay"></div>
+                </div>
+              </div>
+
+              <!-- OpenAI -->
+              <div id="ttsOpenaiFields" class="tts-provider-fields" style="display:none">
+                <div class="settings-field">
+                  <label for="ttsOpenaiVoice">Voice</label>
+                  <select id="ttsOpenaiVoice" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
+                </div>
+                <div class="settings-field">
+                  <label for="ttsOpenaiModel">Model</label>
+                  <input type="text" id="ttsOpenaiModel" placeholder="gpt-4o-mini-tts" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                </div>
+                <div class="settings-field" id="ttsOpenaiKeyField">
+                  <label>API Key</label>
+                  <div id="ttsOpenaiKeyDisplay"></div>
+                </div>
+              </div>
+
+              <!-- MiniMax -->
+              <div id="ttsMinimaxFields" class="tts-provider-fields" style="display:none">
+                <div class="settings-field">
+                  <label for="ttsMinimaxVoice">Voice</label>
+                  <select id="ttsMinimaxVoice" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
+                </div>
+                <div class="settings-field">
+                  <label for="ttsMinimaxModel">Model</label>
+                  <input type="text" id="ttsMinimaxModel" placeholder="speech-02-hd" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                </div>
+                <div class="settings-field" id="ttsMinimaxKeyField">
+                  <label>API Key</label>
+                  <div id="ttsMinimaxKeyDisplay"></div>
+                </div>
+              </div>
+
+              <!-- Mistral -->
+              <div id="ttsMistralFields" class="tts-provider-fields" style="display:none">
+                <div class="settings-field">
+                  <label for="ttsMistralVoice">Voice</label>
+                  <select id="ttsMistralVoice" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
+                </div>
+                <div class="settings-field">
+                  <label for="ttsMistralModel">Model</label>
+                  <input type="text" id="ttsMistralModel" placeholder="voxtral-mini-tts-2603" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                </div>
+                <div class="settings-field" id="ttsMistralKeyField">
+                  <label>API Key</label>
+                  <div id="ttsMistralKeyDisplay"></div>
+                </div>
+              </div>
+
+              <!-- Gemini -->
+              <div id="ttsGeminiFields" class="tts-provider-fields" style="display:none">
+                <div class="settings-field">
+                  <label for="ttsGeminiModel">Model</label>
+                  <input type="text" id="ttsGeminiModel" placeholder="gemini-2.5-flash-preview-05-20" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                </div>
+                <div class="settings-field" id="ttsGeminiKeyField">
+                  <label>API Key</label>
+                  <div id="ttsGeminiKeyDisplay"></div>
+                </div>
+              </div>
+
+              <!-- xAI -->
+              <div id="ttsXaiFields" class="tts-provider-fields" style="display:none">
+                <div class="settings-field">
+                  <label for="ttsXaiModel">Model</label>
+                  <input type="text" id="ttsXaiModel" placeholder="grok" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                </div>
+                <div class="settings-field" id="ttsXaiKeyField">
+                  <label>API Key</label>
+                  <div id="ttsXaiKeyDisplay"></div>
+                </div>
+              </div>
+
+              <!-- NeuTTS -->
+              <div id="ttsNeuttsFields" class="tts-provider-fields" style="display:none">
+                <div class="settings-field">
+                  <label for="ttsNeuttsModel">HuggingFace Model</label>
+                  <input type="text" id="ttsNeuttsModel" placeholder="neuphonic/neutts-air-q4-gguf" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                </div>
+                <div class="settings-field">
+                  <div style="color:var(--muted);font-size:12px">No API key required — runs locally via 🤗 Transformers.</div>
+                </div>
+              </div>
+            </div>
+
+            <button class="sm-btn" onclick="saveTtsSettings()" style="margin-top:16px;width:100%;padding:8px;font-weight:600">Save TTS Settings</button>
+          </div>
+
+          <!-- Terminal Backend Pane -->
+          <div class="settings-pane" id="settingsPaneTerminal" role="tabpanel" aria-labelledby="settingsTabTerminal">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title">Terminal Backend</div>
+                <div class="settings-section-meta">Code execution environment and SSH credentials.</div>
+              </div>
+            </div>
+
+            <div class="settings-field">
+              <label for="termBackend">Backend</label>
+              <select id="termBackend" onchange="_onTermBackendChange()" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                <option value="local">Local</option>
+                <option value="ssh">SSH</option>
+                <option value="modal">Modal</option>
+                <option value="daytona">Daytona</option>
+                <option value="singularity">Singularity</option>
+                <option value="docker">Docker</option>
+              </select>
+            </div>
+
+            <!-- SSH Credentials (shown in .env, not config.yaml) -->
+            <div id="termSshSection" style="display:none;margin-top:12px;padding:12px;background:rgba(255,180,0,.08);border:1px solid rgba(255,180,0,.2);border-radius:8px">
+              <div style="font-size:13px;font-weight:600;color:var(--gold);margin-bottom:8px">SSH Credentials — stored in ~/.hermes/.env</div>
+              <div class="settings-field">
+                <label for="termSshHost">Host</label>
+                <input type="text" id="termSshHost" placeholder="192.168.1.100 or hostname" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+              </div>
+              <div class="settings-field">
+                <label for="termSshUser">User</label>
+                <input type="text" id="termSshUser" placeholder="root" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+              </div>
+              <div class="settings-field">
+                <label for="termSshKey">SSH Key Path</label>
+                <input type="text" id="termSshKey" placeholder="~/.ssh/id_rsa" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+              </div>
+              <div class="settings-field">
+                <label for="termSshPort">Port</label>
+                <input type="text" id="termSshPort" placeholder="22" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+              </div>
+            </div>
+
+            <!-- Common fields (Local, Docker, Singularity, Daytona) -->
+            <div id="termCommonFields">
+              <div class="settings-field">
+                <label for="termCwd">Working Directory</label>
+                <input type="text" id="termCwd" placeholder="." style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+              </div>
+              <div class="settings-field">
+                <label for="termTimeout">Timeout (seconds)</label>
+                <input type="number" id="termTimeout" placeholder="180" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+              </div>
+            </div>
+
+            <!-- Docker-specific -->
+            <div id="termDockerFields" style="display:none;margin-top:12px">
+              <div class="settings-field">
+                <label for="termDockerImage">Docker Image</label>
+                <input type="text" id="termDockerImage" placeholder="nikolaik/python-nodejs:python3.11-nodejs20" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+              </div>
+              <div class="settings-field">
+                <label for="termContainerCpu">Container CPU (cores)</label>
+                <input type="number" id="termContainerCpu" placeholder="2" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+              </div>
+              <div class="settings-field">
+                <label for="termContainerMemory">Container Memory</label>
+                <input type="text" id="termContainerMemory" placeholder="8g" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+              </div>
+              <div class="settings-field">
+                <label for="termContainerDisk">Container Disk</label>
+                <input type="text" id="termContainerDisk" placeholder="20g" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+              </div>
+            </div>
+
+            <!-- Modal-specific -->
+            <div id="termModalFields" style="display:none;margin-top:12px">
+              <div class="settings-field">
+                <label for="termModalMode">Mode</label>
+                <select id="termModalMode" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                  <option value="container">Container</option>
+                  <option value="sandbox">Sandbox</option>
+                </select>
+              </div>
+              <div class="settings-field">
+                <label for="termModalImage">Modal Image</label>
+                <input type="text" id="termModalImage" placeholder="nikolaik/python-nodejs:python3.11-nodejs20" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+              </div>
+              <div class="settings-field">
+                <label for="termSandboxDir">Sandbox Directory</label>
+                <input type="text" id="termSandboxDir" placeholder="" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+              </div>
+            </div>
+
+            <!-- Daytona-specific -->
+            <div id="termDaytonaFields" style="display:none;margin-top:12px">
+              <div class="settings-field">
+                <label for="termDaytonaImage">Daytona Image</label>
+                <input type="text" id="termDaytonaImage" placeholder="nikolaik/python-nodejs:python3.11-nodejs20" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+              </div>
+              <div class="settings-field">
+                <label for="termContainerCpu2">Container CPU (cores)</label>
+                <input type="number" id="termContainerCpu2" placeholder="2" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+              </div>
+              <div class="settings-field">
+                <label for="termContainerMemory2">Container Memory</label>
+                <input type="text" id="termContainerMemory2" placeholder="8g" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+              </div>
+            </div>
+
+            <!-- Singularity-specific -->
+            <div id="termSingularityFields" style="display:none;margin-top:12px">
+              <div class="settings-field">
+                <label for="termSingularityImage">Singularity Image</label>
+                <input type="text" id="termSingularityImage" placeholder="docker://nikolaik/python-nodejs:python3.11-nodejs20" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+              </div>
+            </div>
+
+            <button class="sm-btn" onclick="saveTerminalSettings()" style="margin-top:16px;width:100%;padding:8px;font-weight:600">Save Terminal Settings</button>
+          </div>
+
+          <!-- Display Pane -->
+          <div class="settings-pane" id="settingsPaneDisplay" role="tabpanel" aria-labelledby="settingsTabDisplay">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title">Display</div>
+                <div class="settings-section-meta">Personality, UI density, notification sounds, and per-platform overrides.</div>
+              </div>
+            </div>
+
+            <div class="settings-field">
+              <label for="dispPersonality">Personality</label>
+              <select id="dispPersonality" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                <option value="kawaii">Kawaii</option>
+                <option value="professional">Professional</option>
+                <option value="minimal">Minimal</option>
+                <option value="pirate">Pirate</option>
+                <option value="vtuber">VTuber</option>
+              </select>
+            </div>
+
+            <div class="settings-field">
+              <label for="dispResumeDisplay">Resume Display</label>
+              <select id="dispResumeDisplay" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                <option value="full">Full</option>
+                <option value="compact">Compact</option>
+                <option value="summary">Summary</option>
+              </select>
+            </div>
+
+            <div class="settings-field">
+              <label for="dispBusyInput">Busy Input Mode</label>
+              <select id="dispBusyInput" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                <option value="interrupt">Interrupt</option>
+                <option value="queue">Queue</option>
+                <option value="ignore">Ignore</option>
+              </select>
+            </div>
+
+            <div class="settings-field" style="display:flex;align-items:center;gap:12px;margin-top:8px">
+              <input type="checkbox" id="dispCompact">
+              <label for="dispCompact" style="margin:0;font-weight:normal">Compact mode</label>
+            </div>
+
+            <div class="settings-field" style="display:flex;align-items:center;gap:12px">
+              <input type="checkbox" id="dispBell">
+              <label for="dispBell" style="margin:0;font-weight:normal">Bell on complete</label>
+            </div>
+
+            <div class="settings-field" style="display:flex;align-items:center;gap:12px">
+              <input type="checkbox" id="dispSilentOverflow">
+              <label for="dispSilentOverflow" style="margin:0;font-weight:normal">Silent overflow</label>
+            </div>
+
+            <div class="settings-field" style="display:flex;align-items:center;gap:12px">
+              <input type="checkbox" id="dispShowModel">
+              <label for="dispShowModel" style="margin:0;font-weight:normal">Show model name</label>
+            </div>
+
+            <div class="settings-field" style="display:flex;align-items:center;gap:12px">
+              <input type="checkbox" id="dispToolProgress">
+              <label for="dispToolProgress" style="margin:0;font-weight:normal">Show tool progress</label>
+            </div>
+
+            <div class="settings-field" style="display:flex;align-items:center;gap:12px">
+              <input type="checkbox" id="dispToolPreview">
+              <label for="dispToolPreview" style="margin:0;font-weight:normal">Show tool preview</label>
+            </div>
+
+            <button class="sm-btn" onclick="saveDisplaySettings()" style="margin-top:16px;width:100%;padding:8px;font-weight:600">Save Display Settings</button>
+          </div>
+
+          <!-- Browser Pane -->
+          <div class="settings-pane" id="settingsPaneBrowser" role="tabpanel" aria-labelledby="settingsTabBrowser">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title">Browser</div>
+                <div class="settings-section-meta">Headless browser configuration for web browsing and screenshot tools.</div>
+              </div>
+            </div>
+
+            <div class="settings-field">
+              <label for="browserInactivityTimeout">Inactivity Timeout (seconds)</label>
+              <input type="number" id="browserInactivityTimeout" placeholder="120" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+            </div>
+
+            <div class="settings-field">
+              <label for="browserCommandTimeout">Command Timeout (seconds)</label>
+              <input type="number" id="browserCommandTimeout" placeholder="30" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+            </div>
+
+            <div class="settings-field" style="display:flex;align-items:center;gap:12px">
+              <input type="checkbox" id="browserRecordSessions">
+              <label for="browserRecordSessions" style="margin:0;font-weight:normal">Record sessions</label>
+            </div>
+
+            <div class="settings-field" style="display:flex;align-items:center;gap:12px">
+              <input type="checkbox" id="browserAllowPrivateUrls">
+              <label for="browserAllowPrivateUrls" style="margin:0;font-weight:normal">Allow private URLs</label>
+            </div>
+
+            <button class="sm-btn" onclick="saveBrowserSettings()" style="margin-top:16px;width:100%;padding:8px;font-weight:600">Save Browser Settings</button>
+          </div>
+
+          <!-- Checkpoints Pane -->
+          <div class="settings-pane" id="settingsPaneCheckpoints" role="tabpanel" aria-labelledby="settingsTabCheckpoints">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title">Checkpoints</div>
+                <div class="settings-section-meta">Conversation snapshot retention and format.</div>
+              </div>
+            </div>
+
+            <div class="settings-field" style="display:flex;align-items:center;gap:12px">
+              <input type="checkbox" id="ckptEnabled">
+              <label for="ckptEnabled" style="margin:0;font-weight:normal">Enable checkpoints</label>
+            </div>
+
+            <div class="settings-field">
+              <label for="ckptMaxSnapshots">Max Snapshots</label>
+              <input type="number" id="ckptMaxSnapshots" placeholder="50" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+            </div>
+
+            <button class="sm-btn" onclick="saveCheckpointsSettings()" style="margin-top:16px;width:100%;padding:8px;font-weight:600">Save Checkpoints Settings</button>
+          </div>
+
+          <!-- Logging Pane -->
+          <div class="settings-pane" id="settingsPaneLogging" role="tabpanel" aria-labelledby="settingsTabLogging">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title">Logging</div>
+                <div class="settings-section-meta">Log level, file rotation, and structured logging.</div>
+              </div>
+            </div>
+
+            <div class="settings-field">
+              <label for="logLevel">Log Level</label>
+              <select id="logLevel" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                <option value="DEBUG">DEBUG</option>
+                <option value="INFO">INFO</option>
+                <option value="WARNING">WARNING</option>
+                <option value="ERROR">ERROR</option>
+              </select>
+            </div>
+
+            <div class="settings-field">
+              <label for="logMaxSize">Max File Size (MB)</label>
+              <input type="number" id="logMaxSize" placeholder="5" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+            </div>
+
+            <div class="settings-field">
+              <label for="logBackupCount">Backup Count</label>
+              <input type="number" id="logBackupCount" placeholder="3" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+            </div>
+
+            <button class="sm-btn" onclick="saveLoggingSettings()" style="margin-top:16px;width:100%;padding:8px;font-weight:600">Save Logging Settings</button>
+          </div>
+
+          <!-- SSH Pane -->
+          <div class="settings-pane" id="settingsPaneSSH" role="tabpanel" aria-labelledby="settingsTabSSH">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title">SSH Credentials</div>
+                <div class="settings-section-meta">Stored in ~/.hermes/.env — not in config.yaml.</div>
+              </div>
+            </div>
+
+            <div style="padding:12px;background:rgba(255,180,0,.08);border:1px solid rgba(255,180,0,.2);border-radius:8px;margin-bottom:16px">
+              <div style="display:flex;align-items:center;gap:8px;color:var(--gold);font-size:13px">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                SSH credentials are stored in <code>~/.hermes/.env</code> and used when Terminal Backend is set to SSH.
+              </div>
+            </div>
+
+            <div class="settings-field">
+              <label for="sshHost">Host</label>
+              <input type="text" id="sshHost" placeholder="192.168.1.100 or hostname" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+            </div>
+
+            <div class="settings-field">
+              <label for="sshUser">User</label>
+              <input type="text" id="sshUser" placeholder="root" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+            </div>
+
+            <div class="settings-field">
+              <label for="sshKey">SSH Key Path</label>
+              <input type="text" id="sshKey" placeholder="~/.ssh/id_rsa" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+            </div>
+
+            <div class="settings-field">
+              <label for="sshPort">Port</label>
+              <input type="text" id="sshPort" placeholder="22" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+            </div>
+
+            <button class="sm-btn" onclick="saveSshSettings()" style="margin-top:16px;width:100%;padding:8px;font-weight:600">Save SSH Credentials</button>
+          </div>
+
+          <!-- Messaging Pane -->
+          <div class="settings-pane" id="settingsPaneMessaging" role="tabpanel" aria-labelledby="settingsTabMessaging">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title">Messaging Platforms</div>
+                <div class="settings-section-meta">Token-based integrations for Discord, Telegram, Signal, Email, and more.</div>
+              </div>
+            </div>
+
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:8px">
+              <!-- Discord -->
+              <div style="padding:14px;background:var(--code-bg);border:1px solid var(--border2);border-radius:8px">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                  <span style="font-weight:600;font-size:14px">Discord</span>
+                </div>
+                <div style="font-size:12px;color:var(--muted)">Not configured — coming soon</div>
+              </div>
+
+              <!-- Telegram -->
+              <div style="padding:14px;background:var(--code-bg);border:1px solid var(--border2);border-radius:8px">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                  <span style="font-weight:600;font-size:14px">Telegram</span>
+                </div>
+                <div style="font-size:12px;color:var(--muted)">Not configured — coming soon</div>
+              </div>
+
+              <!-- Signal -->
+              <div style="padding:14px;background:var(--code-bg);border:1px solid var(--border2);border-radius:8px">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                  <span style="font-weight:600;font-size:14px">Signal</span>
+                </div>
+                <div style="font-size:12px;color:var(--muted)">Not configured — coming soon</div>
+              </div>
+
+              <!-- Email -->
+              <div style="padding:14px;background:var(--code-bg);border:1px solid var(--border2);border-radius:8px">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                  <span style="font-weight:600;font-size:14px">Email (SMTP/IMAP)</span>
+                </div>
+                <div style="font-size:12px;color:var(--muted)">Not configured — coming soon</div>
+              </div>
+
+              <!-- Slack -->
+              <div style="padding:14px;background:var(--code-bg);border:1px solid var(--border2);border-radius:8px">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                  <span style="font-weight:600;font-size:14px">Slack</span>
+                </div>
+                <div style="font-size:12px;color:var(--muted)">Not configured — coming soon</div>
+              </div>
+
+              <!-- Matrix -->
+              <div style="padding:14px;background:var(--code-bg);border:1px solid var(--border2);border-radius:8px">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                  <span style="font-weight:600;font-size:14px">Matrix</span>
+                </div>
+                <div style="font-size:12px;color:var(--muted)">Not configured — coming soon</div>
+              </div>
+
+              <!-- WhatsApp -->
+              <div style="padding:14px;background:var(--code-bg);border:1px solid var(--border2);border-radius:8px">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                  <span style="font-weight:600;font-size:14px">WhatsApp</span>
+                </div>
+                <div style="font-size:12px;color:var(--muted)">Not configured — coming soon</div>
+              </div>
+
+              <!-- Home Assistant -->
+              <div style="padding:14px;background:var(--code-bg);border:1px solid var(--border2);border-radius:8px">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                  <span style="font-weight:600;font-size:14px">Home Assistant</span>
+                </div>
+                <div style="font-size:12px;color:var(--muted)">Not configured — coming soon</div>
+              </div>
+
+              <!-- DingTalk -->
+              <div style="padding:14px;background:var(--code-bg);border:1px solid var(--border2);border-radius:8px">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                  <span style="font-weight:600;font-size:14px">DingTalk</span>
+                </div>
+                <div style="font-size:12px;color:var(--muted)">Not configured — coming soon</div>
+              </div>
+
+              <!-- Feishu -->
+              <div style="padding:14px;background:var(--code-bg);border:1px solid var(--border2);border-radius:8px">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                  <span style="font-weight:600;font-size:14px">Feishu</span>
+                </div>
+                <div style="font-size:12px;color:var(--muted)">Not configured — coming soon</div>
+              </div>
+
+              <!-- WeCom -->
+              <div style="padding:14px;background:var(--code-bg);border:1px solid var(--border2);border-radius:8px">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                  <span style="font-weight:600;font-size:14px">WeCom</span>
+                </div>
+                <div style="font-size:12px;color:var(--muted)">Not configured — coming soon</div>
+              </div>
+
+              <!-- QQ Bot -->
+              <div style="padding:14px;background:var(--code-bg);border:1px solid var(--border2);border-radius:8px">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+                  <span style="font-weight:600;font-size:14px">QQ Bot</span>
+                </div>
+                <div style="font-size:12px;color:var(--muted)">Not configured — coming soon</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Voice Recording Pane -->
+          <div class="settings-pane" id="settingsPaneVoice" role="tabpanel" aria-labelledby="settingsTabVoice">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title">Voice Recording</div>
+                <div class="settings-section-meta">Push-to-talk hotkey, silence detection, and auto-TTS settings.</div>
+              </div>
+            </div>
+
+            <div class="settings-field">
+              <label for="voiceRecordKey">Record Hotkey</label>
+              <input type="text" id="voiceRecordKey" placeholder="ctrl+b" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+            </div>
+
+            <div class="settings-field">
+              <label for="voiceMaxRecSec">Max Recording (seconds)</label>
+              <input type="number" id="voiceMaxRecSec" placeholder="120" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+            </div>
+
+            <div class="settings-field">
+              <label for="voiceSilenceThreshold">Silence Threshold (ms)</label>
+              <input type="number" id="voiceSilenceThreshold" placeholder="200" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+            </div>
+
+            <div class="settings-field">
+              <label for="voiceSilenceDur">Silence Duration (seconds)</label>
+              <input type="number" id="voiceSilenceDur" placeholder="3.0" step="0.1" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+            </div>
+
+            <div class="settings-field" style="display:flex;align-items:center;gap:12px;margin-top:8px">
+              <input type="checkbox" id="voiceAutoTts">
+              <label for="voiceAutoTts" style="margin:0;font-weight:normal">Auto-TTS (speak responses aloud)</label>
+            </div>
+
+            <button class="sm-btn" onclick="saveVoiceSettings()" style="margin-top:16px;width:100%;padding:8px;font-weight:600">Save Voice Settings</button>
           </div>
         </div>
       </div>

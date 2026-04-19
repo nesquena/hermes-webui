@@ -28,43 +28,266 @@ from api.workspace import get_last_workspace, load_workspaces
 logger = logging.getLogger(__name__)
 
 
-_SUPPORTED_PROVIDER_SETUPS = {
+# ---------------------------------------------------------------------------
+# Provider setup metadata -- single source of truth for onboarding.
+# Only providers that differ from the default assumptions need an entry.
+# Default: env_var=f"{PID.upper()}_API_KEY", requires_base_url=False.
+# None = OAuth/CLI-only provider, excluded from the wizard.
+# ---------------------------------------------------------------------------
+_PROVIDER_SETUP_METADATA: dict[str, dict | None] = {
     "openrouter": {
         "label": "OpenRouter",
         "env_var": "OPENROUTER_API_KEY",
-        "default_model": "anthropic/claude-sonnet-4.6",
         "requires_base_url": False,
-        "models": [
-            {"id": model["id"], "label": model["label"]} for model in _FALLBACK_MODELS
-        ],
+        "default_base_url": "",
+        "models_key": "_fallback",
     },
     "anthropic": {
         "label": "Anthropic",
         "env_var": "ANTHROPIC_API_KEY",
-        "default_model": "claude-sonnet-4.6",
         "requires_base_url": False,
-        "models": list(_PROVIDER_MODELS.get("anthropic", [])),
+        "default_base_url": "",
+        "models_key": "anthropic",
     },
     "openai": {
         "label": "OpenAI",
         "env_var": "OPENAI_API_KEY",
-        "default_model": "gpt-4o",
-        "default_base_url": "https://api.openai.com/v1",
         "requires_base_url": False,
-        "models": list(_PROVIDER_MODELS.get("openai", [])),
+        "default_base_url": "https://api.openai.com/v1",
+        "models_key": "openai",
     },
+    "google": {
+        "label": "Google",
+        "env_var": "GOOGLE_API_KEY",
+        "requires_base_url": False,
+        "default_base_url": "",
+        "models_key": "google",
+    },
+    "gemini": {
+        "label": "Gemini",
+        "env_var": "GEMINI_API_KEY",
+        "requires_base_url": False,
+        "default_base_url": "",
+        "models_key": "gemini",
+    },
+    "deepseek": {
+        "label": "DeepSeek",
+        "env_var": "DEEPSEEK_API_KEY",
+        "requires_base_url": False,
+        "default_base_url": "https://api.deepseek.com/v1",
+        "models_key": "deepseek",
+    },
+    "minimax": {
+        "label": "MiniMax",
+        "env_var": "MINIMAX_API_KEY",
+        "requires_base_url": False,
+        "default_base_url": "https://api.minimax.chat/v1",
+        "models_key": "minimax",
+    },
+    "x-ai": {
+        "label": "xAI",
+        "env_var": "XAI_API_KEY",
+        "requires_base_url": False,
+        "default_base_url": "",
+        "models_key": "x-ai",
+    },
+    "zai": {
+        "label": "Z.AI / GLM",
+        "env_var": "GLM_API_KEY",
+        "requires_base_url": False,
+        "default_base_url": "",
+        "models_key": "zai",
+    },
+    "kimi-coding": {
+        "label": "Kimi / Moonshot",
+        "env_var": "KIMI_API_KEY",
+        "requires_base_url": False,
+        "default_base_url": "",
+        "models_key": "kimi-coding",
+    },
+    "huggingface": {
+        "label": "HuggingFace",
+        "env_var": "HF_TOKEN",
+        "requires_base_url": False,
+        "default_base_url": "",
+        "models_key": "huggingface",
+    },
+    "alibaba": {
+        "label": "Alibaba / DashScope",
+        "env_var": "DASHSCOPE_API_KEY",
+        "requires_base_url": False,
+        "default_base_url": "",
+        "models_key": "alibaba",
+    },
+    "ollama": {
+        "label": "Ollama",
+        "env_var": "",  # local provider; no key needed
+        "requires_base_url": True,
+        "default_base_url": "http://localhost:11434",
+        "models_key": "ollama",
+    },
+    "lmstudio": {
+        "label": "LM Studio",
+        "env_var": "",  # local provider; no key needed
+        "requires_base_url": True,
+        "default_base_url": "http://localhost:1234",
+        "models_key": "lmstudio",
+    },
+    "opencode-zen": {
+        "label": "OpenCode Zen",
+        "env_var": "OPENCODE_ZEN_API_KEY",
+        "requires_base_url": False,
+        "default_base_url": "",
+        "models_key": "opencode-zen",
+    },
+    "opencode-go": {
+        "label": "OpenCode Go",
+        "env_var": "OPENCODE_GO_API_KEY",
+        "requires_base_url": False,
+        "default_base_url": "",
+        "models_key": "opencode-go",
+    },
+    "mistralai": {
+        "label": "Mistral",
+        "env_var": "MISTRAL_API_KEY",
+        "requires_base_url": False,
+        "default_base_url": "",
+        "models_key": "mistralai",
+    },
+    "qwen": {
+        "label": "Qwen",
+        "env_var": "QWEN_API_KEY",
+        "requires_base_url": False,
+        "default_base_url": "",
+        "models_key": "qwen",
+    },
+    "xiaomi": {
+        "label": "Xiaomi MiMo",
+        "env_var": "XIAOMI_API_KEY",
+        "requires_base_url": False,
+        "default_base_url": "",
+        "models_key": "xiaomi",
+    },
+    "kilocode": {
+        "label": "Kilo Code",
+        "env_var": "KILOCODE_API_KEY",
+        "requires_base_url": False,
+        "default_base_url": "",
+        "models_key": "kilocode",
+    },
+    # OAuth / CLI-only providers — excluded from wizard
+    "openai-codex": None,
+    "copilot": None,
+    "copilot-acp": None,
+    "qwen-oauth": None,
+    "nous": None,
+    # Custom always last — manual endpoint fallback
     "custom": {
         "label": "Custom OpenAI-compatible",
         "env_var": "OPENAI_API_KEY",
-        "default_model": "gpt-4o-mini",
         "requires_base_url": True,
-        "models": [],
+        "default_base_url": "",
+        "models_key": None,
     },
 }
 
+
+def _build_supported_provider_setups() -> dict:
+    """
+    Dynamically build the provider setup catalog from:
+    - _PROVIDER_SETUP_METADATA  (local overrides — env_var, base_url, models_key)
+    - _PROVIDER_MODELS         (model lists from config.py)
+    - _PROVIDER_DISPLAY        (display names from config.py)
+    - _FALLBACK_MODELS         (OpenRouter's model list from config.py)
+    """
+    setups = {}
+
+    # 1. Providers with explicit metadata entries (includes all original 4)
+    for pid, meta in _PROVIDER_SETUP_METADATA.items():
+        if meta is None:
+            continue  # OAuth providers
+
+        models_key = meta.get("models_key")
+        if models_key == "_fallback":
+            models = [{"id": m["id"], "label": m["label"]} for m in _FALLBACK_MODELS]
+        elif models_key:
+            models = list(_PROVIDER_MODELS.get(models_key, []))
+        else:
+            models = []
+
+        # Resolve default_model: prefer metadata override, else first non-prefixed model
+        # ID.  Provider-prefixed IDs like "ollama/llama-5-pro" shouldn't be used as
+        # defaults since the API form only wants the short ID (e.g. "llama-5-pro").
+        default_model = meta.get("default_model") or ""
+        if not default_model:
+            for m in models:
+                mid = m.get("id", "")
+                # Good default = no "/" or the part before "/" is the provider itself
+                # (i.e. the second part is what the API actually uses)
+                if mid and "/" in mid:
+                    default_model = mid.split("/", 1)[1]
+                    break
+            if not default_model and models:
+                default_model = models[0].get("id", "")
+
+        setups[pid] = {
+            "label": meta["label"],
+            "env_var": meta.get("env_var") or f"{pid.upper()}_API_KEY",
+            "default_model": default_model,
+            "requires_base_url": bool(meta.get("requires_base_url")),
+            "default_base_url": meta.get("default_base_url", ""),
+            "models": models,
+        }
+
+    # 2. Any provider in _PROVIDER_MODELS not yet covered — use defaults.
+    # Skip any provider explicitly marked as None (OAuth / CLI-only) in metadata.
+    for pid, models in _PROVIDER_MODELS.items():
+        if pid in setups:
+            continue
+        meta = _PROVIDER_SETUP_METADATA.get(pid)
+        if meta is None:
+            continue  # OAuth / CLI-only provider
+        label = _PROVIDER_DISPLAY.get(pid, pid.title())
+        model_list = list(models)
+        # Default to first model; don't use provider-prefixed IDs as defaults
+        # (ollama/lmstudio store e.g. "ollama/llama-5-pro" but the API just wants "llama-5-pro")
+        default_model = ""
+        for m in model_list:
+            mid = m.get("id", "")
+            if mid and "/" not in mid.split("/")[0]:
+                default_model = mid
+                break
+        if not default_model and model_list:
+            default_model = model_list[0].get("id", "")
+        setups[pid] = {
+            "label": label,
+            "env_var": f"{pid.upper()}_API_KEY",
+            "default_model": model_list[0]["id"] if model_list else "",
+            "requires_base_url": False,
+            "default_base_url": "",
+            "models": model_list,
+        }
+
+    # 3. OpenRouter uses _FALLBACK_MODELS (may not be in _PROVIDER_MODELS)
+    if "openrouter" not in setups:
+        setups["openrouter"] = {
+            "label": "OpenRouter",
+            "env_var": "OPENROUTER_API_KEY",
+            "default_model": "anthropic/claude-sonnet-4.6",
+            "requires_base_url": False,
+            "default_base_url": "",
+            "models": [{"id": m["id"], "label": m["label"]} for m in _FALLBACK_MODELS],
+        }
+
+    return setups
+
+
+# Build once at import time
+_SUPPORTED_PROVIDER_SETUPS: dict = {**_build_supported_provider_setups()}
+
 _UNSUPPORTED_PROVIDER_NOTE = (
-    "OAuth and advanced provider flows such as Nous Portal, OpenAI Codex, and GitHub "
-    "Copilot are still terminal-first. Use `hermes model` for those flows."
+    "OAuth-based providers (Nous Portal, OpenAI Codex, GitHub Copilot, Qwen OAuth) "
+    "must be configured via `hermes auth` in a terminal first."
 )
 
 
@@ -143,10 +366,17 @@ def _save_yaml_config(config_path: Path, config: dict) -> None:
 
 
 def _normalize_model_for_provider(provider: str, model: str) -> str:
+    """Strip provider prefix from model IDs for providers that don't use it in their API."""
     clean = (model or "").strip()
     if not clean:
         return ""
-    if provider in {"anthropic", "openai"} and clean.startswith(provider + "/"):
+    # These providers embed provider/name format in their API
+    _uses_provider_prefix = {
+        "openrouter", "openai-codex", "google", "gemini",
+        "deepseek", "huggingface", "kimi-coding", "x-ai",
+        "zai", "alibaba", "qwen", "mistralai",
+    }
+    if provider in _uses_provider_prefix and "/" in clean:
         return clean.split("/", 1)[1]
     return clean
 
@@ -371,7 +601,7 @@ def _build_setup_catalog(cfg: dict) -> dict:
                 "default_base_url": meta.get("default_base_url") or "",
                 "requires_base_url": bool(meta.get("requires_base_url")),
                 "models": list(meta.get("models", [])),
-                "quick": provider_id == "openrouter",
+                "quick": provider_id in {"openrouter", "anthropic", "openai"},
             }
         )
 

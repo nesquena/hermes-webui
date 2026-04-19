@@ -1078,10 +1078,10 @@ let _settingsSkinOnOpen = null; // track skin at open time for discard revert
 let _settingsSection = 'conversation';
 
 function switchSettingsSection(name){
-  const section=(name==='appearance'||name==='preferences'||name==='system')?name:'conversation';
+  const section=(name==='appearance'||name==='preferences'||name==='system'||name==='agent'||name==='provider'||name==='tools'||name==='tts'||name==='terminal'||name==='display'||name==='browser'||name==='checkpoints'||name==='logging'||name==='ssh'||name==='messaging'||name==='voice')?name:'conversation';
   _settingsSection=section;
-  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',system:'System'};
-  ['conversation','appearance','preferences','system'].forEach(key=>{
+  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',system:'System',agent:'Agent',provider:'Provider',tools:'Tools',tts:'TTS',terminal:'Terminal',display:'Display',browser:'Browser',checkpoints:'Checkpoints',logging:'Logging',ssh:'SSH',messaging:'Messaging',voice:'Voice'};
+  ['conversation','appearance','preferences','system','agent','provider','tools','tts','terminal','display','browser','checkpoints','logging','ssh','messaging','voice'].forEach(key=>{
     const tab=$('settingsTab'+map[key]);
     const pane=$('settingsPane'+map[key]);
     const active=key===section;
@@ -1197,7 +1197,10 @@ function _markSettingsDirty(){
 
 async function loadSettingsPanel(){
   try{
-    const settings=await api('/api/settings');
+    const [settings, allSettings] = await Promise.all([
+      api('/api/settings'),
+      api('/api/settings/all')
+    ]);
     // Hydrate appearance controls first so a slow /api/models request
     // cannot overwrite an in-progress theme/skin selection.
     const themeSel=$('settingsTheme');
@@ -1224,7 +1227,7 @@ async function loadSettingsPanel(){
         const models=await api('/api/models');
         for(const g of (models.groups||[])){
           const og=document.createElement('optgroup');
-          og.label=g.provider;
+          og.label=(PROVIDER_ICONS[g.provider]||'')+' '+g.provider;
           for(const m of g.models){
             const opt=document.createElement('option');
             opt.value=m.id;opt.textContent=m.label;
@@ -1273,6 +1276,82 @@ async function loadSettingsPanel(){
     // Password field: always blank (we don't send hash back)
     const pwField=$('settingsPassword');
     if(pwField){pwField.value='';pwField.addEventListener('input',_markSettingsDirty,{once:false});}
+    // Agent pane
+    const agentData = allSettings.agent || {};
+    const maxTurns = $('agentMaxTurns');
+    if(maxTurns) { maxTurns.value = agentData.max_turns || 90; maxTurns.addEventListener('change', _markSettingsDirty, {once:false}); }
+    const gwTimeout = $('agentGatewayTimeout');
+    if(gwTimeout) { gwTimeout.value = agentData.gateway_timeout || 1800; gwTimeout.addEventListener('change', _markSettingsDirty, {once:false}); }
+    const gwWarn = $('agentGatewayTimeoutWarning');
+    if(gwWarn) { gwWarn.value = agentData.gateway_timeout_warning || 900; gwWarn.addEventListener('change', _markSettingsDirty, {once:false}); }
+    const gwNotify = $('agentGatewayNotifyInterval');
+    if(gwNotify) { gwNotify.value = agentData.gateway_notify_interval || 600; gwNotify.addEventListener('change', _markSettingsDirty, {once:false}); }
+    const restartDrain = $('agentRestartDrainTimeout');
+    if(restartDrain) { restartDrain.value = agentData.restart_drain_timeout || 60; restartDrain.addEventListener('change', _markSettingsDirty, {once:false}); }
+    const toolEnforce = $('agentToolUseEnforcement');
+    if(toolEnforce) { toolEnforce.value = agentData.tool_use_enforcement || 'auto'; toolEnforce.addEventListener('change', _markSettingsDirty, {once:false}); }
+    // Delegation pane (reasoning_effort in delegation section)
+    const delegationData = allSettings.delegation || {};
+    const reasoningEffort = $('delegationReasoningEffort');
+    if(reasoningEffort) { reasoningEffort.value = delegationData.reasoning_effort || ''; reasoningEffort.addEventListener('change', _markSettingsDirty, {once:false}); }
+    // Provider pane
+    const providerKeys = allSettings.provider_keys;
+    const providerKeysList = $('providerKeysList');
+    if(providerKeysList){
+      if(!providerKeys || providerKeys.length === 0){
+        providerKeysList.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:8px 0">No provider key information available.</div>';
+      } else {
+        const rows = providerKeys.map(pk => {
+          const status = pk.status || 'unset';
+          const statusLabel = status.charAt(0).toUpperCase() + status.slice(1);
+          const lockIcon = pk.shared ? '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-right:4px"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>' : '';
+          return '<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border2)">' +
+            '<div style="flex:1"><div style="font-size:13px;font-weight:500;color:var(--text)">' + esc(pk.provider||'Unknown') + '</div>' +
+            '<div style="font-size:11px;color:var(--muted);margin-top:1px">' + statusLabel + (pk.shared ? ' (shared)' : '') + '</div></div>' +
+            (pk.shared ? '<div style="color:var(--muted);display:flex;align-items:center">' + lockIcon + '</div>' : '') +
+            '</div>';
+        }).join('');
+        providerKeysList.innerHTML = rows;
+      }
+    }
+    // Tools pane
+    const toolsData = allSettings.tools || {};
+    _renderToolsPane(toolsData);
+    // TTS pane
+    const ttsData = (allSettings || {}).tts || {};
+    _loadTtsPane(ttsData);
+    // Terminal pane
+    const termData = (allSettings || {}).terminal || {};
+    _loadTerminalPane(termData);
+
+    // Display pane
+    const dispData = (allSettings || {}).display || {};
+    _loadDisplayPane(dispData);
+
+    // Browser pane
+    const browserData = (allSettings || {}).browser || {};
+    _loadBrowserPane(browserData);
+
+    // Checkpoints pane
+    const ckptData = (allSettings || {}).checkpoints || {};
+    _loadCheckpointsPane(ckptData);
+
+    // Logging pane
+    const logData = (allSettings || {}).logging || {};
+    _loadLoggingPane(logData);
+
+    // SSH pane
+    const sshData = (allSettings || {}).ssh || {};
+    _loadSshPane(sshData);
+
+    // Messaging pane
+    const msgData = (allSettings || {}).messaging || {};
+    _loadMessagingPane(msgData);
+
+    // Voice pane
+    const voiceData = (allSettings || {}).voice || {};
+    _loadVoicePane(voiceData);
+
     // Show auth buttons only when auth is active
     try{
       const authStatus=await api('/api/auth/status');
@@ -1345,6 +1424,30 @@ async function saveSettings(andClose){
   document.body.classList.toggle('bubble-layout', body.bubble_layout);
   const botName=(($('settingsBotName')||{}).value||'').trim();
   body.bot_name=botName||'Hermes';
+  // Save agent settings
+  const agentBody = {};
+  const maxTurns = $('agentMaxTurns');
+  if(maxTurns) agentBody.max_turns = parseInt(maxTurns.value) || 90;
+  const gwTimeout = $('agentGatewayTimeout');
+  if(gwTimeout) agentBody.gateway_timeout = parseInt(gwTimeout.value) || 1800;
+  const gwWarn = $('agentGatewayTimeoutWarning');
+  if(gwWarn) agentBody.gateway_timeout_warning = parseInt(gwWarn.value) || 900;
+  const gwNotify = $('agentGatewayNotifyInterval');
+  if(gwNotify) agentBody.gateway_notify_interval = parseInt(gwNotify.value) || 600;
+  const restartDrain = $('agentRestartDrainTimeout');
+  if(restartDrain) agentBody.restart_drain_timeout = parseInt(restartDrain.value) || 60;
+  const toolEnforce = $('agentToolUseEnforcement');
+  if(toolEnforce) agentBody.tool_use_enforcement = toolEnforce.value;
+  try {
+    await api('/api/settings/section/agent', {method:'POST', body:JSON.stringify(agentBody)});
+  } catch(e) { /* non-fatal */ }
+  // Save delegation settings
+  const delegationBody = {};
+  const reasoningEffort = $('delegationReasoningEffort');
+  if(reasoningEffort && reasoningEffort.value) delegationBody.reasoning_effort = reasoningEffort.value;
+  try {
+    await api('/api/settings/section/delegation', {method:'POST', body:JSON.stringify(delegationBody)});
+  } catch(e) { /* non-fatal */ }
   // Password: only act if the field has content; blank = leave auth unchanged
   if(pw && pw.trim()){
     try{
@@ -1490,6 +1593,437 @@ function dismissErrorBanner(){
   _backgroundErrors.length=0;
   const banner=$('bgErrorBanner');
   if(banner) banner.style.display='none';
+}
+
+// ── Tools pane renderer ───────────────────────────────────────────────────────
+
+function _renderToolsPane(toolsData) {
+  const container = $('toolsPaneContent');
+  if (!container) return;
+  if (!toolsData || !toolsData.mcp_servers || toolsData.mcp_servers.length === 0) {
+    container.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:12px 0">No tools configured. Use <code>/tools</code> to manage MCP toolsets.</div>';
+    return;
+  }
+  const rows = toolsData.mcp_servers.map(srv => `
+    <div style="display:flex;align-items:start;gap:10px;padding:10px 0;border-bottom:1px solid var(--border2)">
+      <div style="flex:1">
+        <div style="font-weight:600;font-size:13px;color:var(--text)">${esc(srv.name||'unnamed')}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px">${esc(srv.command||'')} ${esc((srv.args||[]).join(' '))}</div>
+      </div>
+      ${srv.tools&&srv.tools.length>0?`<div style="font-size:11px;color:var(--accent)">${srv.tools.length} tools</div>`:''}
+    </div>
+  `).join('');
+  container.innerHTML = rows;
+}
+
+function _loadTtsPane(ttsData) {
+  if (!ttsData || !ttsData.config) return;
+  const provider = ttsData.provider || 'edge';
+  const config = ttsData.config || {};
+  const detected = ttsData.detected_keys || {};
+  const keyStatus = ttsData.key_status || 'none';
+  const voices = ttsData.voices || [];
+
+  // Set provider dropdown
+  const providerSel = $('ttsProvider');
+  if (providerSel) providerSel.value = provider;
+
+  // Hide all provider field groups
+  document.querySelectorAll('.tts-provider-fields').forEach(el => el.style.display = 'none');
+
+  // Show the selected provider's fields
+  const fieldsMap = {
+    'edge': 'ttsEdgeFields',
+    'elevenlabs': 'ttsElevenlabsFields',
+    'openai': 'ttsOpenaiFields',
+    'minimax': 'ttsMinimaxFields',
+    'mistral': 'ttsMistralFields',
+    'gemini': 'ttsGeminiFields',
+    'xai': 'ttsXaiFields',
+    'neutts': 'ttsNeuttsFields',
+  };
+  const fieldEl = $(fieldsMap[provider] || 'ttsEdgeFields');
+  if (fieldEl) fieldEl.style.display = '';
+
+  // Populate voice selects with current voices
+  const voiceIdFields = {
+    'edge': 'ttsEdgeVoice',
+    'openai': 'ttsOpenaiVoice',
+    'minimax': 'ttsMinimaxVoice',
+    'mistral': 'ttsMistralVoice',
+  };
+  for (const [p, selectId] of Object.entries(voiceIdFields)) {
+    const sel = $(selectId);
+    if (!sel) continue;
+    sel.innerHTML = '';
+    for (const v of voices) {
+      const opt = document.createElement('option');
+      opt.value = v.id;
+      opt.textContent = v.label;
+      sel.appendChild(opt);
+    }
+    // Set current value based on provider config
+    const cfg = config[p] || {};
+    const voiceKey = p === 'minimax' || p === 'elevenlabs' ? 'voice_id' : 'voice';
+    sel.value = cfg[voiceKey] || '';
+  }
+
+  // Set text fields
+  const setVal = (id, val) => { const el = $(id); if (el) el.value = val || ''; };
+  setVal('ttsElevenlabsVoice', config.elevenlabs?.voice_id || '');
+  setVal('ttsElevenlabsModel', config.elevenlabs?.model_id || 'eleven_v3');
+  setVal('ttsOpenaiModel', config.openai?.model || 'gpt-4o-mini-tts');
+  setVal('ttsMinimaxModel', config.minimax?.model || 'speech-02-hd');
+  setVal('ttsMistralModel', config.mistral?.model || 'voxtral-mini-tts-2603');
+  setVal('ttsGeminiModel', config.gemini?.model || 'gemini-2.5-flash-preview-05-20');
+  setVal('ttsXaiModel', config.xai?.model || 'grok');
+  setVal('ttsNeuttsModel', config.neutts?.model || 'neuphonic/neutts-air-q4-gguf');
+
+  // Render API key fields
+  const providersWithKeys = ['elevenlabs', 'openai', 'minimax', 'mistral', 'gemini', 'xai'];
+  for (const p of providersWithKeys) {
+    const keyInfo = detected[p];
+    const keyDisplay = $(`tts${_capitalize(p)}KeyDisplay`);
+    if (!keyDisplay) continue;
+
+    if (!keyInfo || !keyInfo.set) {
+      // No key — show empty editable input
+      keyDisplay.innerHTML = `<input type="password" id="tts_${p}_api_key" placeholder="Not set — enter to configure" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">`;
+    } else if (keyStatus === 'shared' && p === provider) {
+      // Shared key — locked display
+      keyDisplay.innerHTML = `<div style="display:flex;align-items:center;gap:8px;padding:8px;background:rgba(255,180,0,.1);border:1px solid rgba(255,180,0,.3);border-radius:6px;color:var(--gold);font-size:13px">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <span>[${esc(keyInfo.masked)}] (shared with model provider)</span>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-top:4px">This key is also used for chat. To use a different key for TTS, change your Model Provider first.</div>`;
+    } else {
+      // Separate/standalone key — masked with edit
+      keyDisplay.innerHTML = `<div style="display:flex;align-items:center;gap:8px">
+        <input type="password" id="tts_${p}_api_key" value="${esc(keyInfo.masked)}" style="flex:1;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+        <span style="font-size:11px;color:var(--muted);white-space:nowrap">${esc(keyInfo.env_var)}</span>
+      </div>`;
+    }
+  }
+}
+
+function _capitalize(s) {
+  return s ? s.charAt(0).toUpperCase() + s.slice(1) : '';
+}
+
+function _onTtsProviderChange() {
+  const provider = ($('ttsProvider') || {}).value || 'edge';
+  document.querySelectorAll('.tts-provider-fields').forEach(el => el.style.display = 'none');
+  const fieldMap = {
+    'edge': 'ttsEdgeFields',
+    'elevenlabs': 'ttsElevenlabsFields',
+    'openai': 'ttsOpenaiFields',
+    'minimax': 'ttsMinimaxFields',
+    'mistral': 'ttsMistralFields',
+    'gemini': 'ttsGeminiFields',
+    'xai': 'ttsXaiFields',
+    'neutts': 'ttsNeuttsFields',
+  };
+  const el = $(fieldMap[provider] || 'ttsEdgeFields');
+  if (el) el.style.display = '';
+  _markSettingsDirty();
+}
+
+async function saveTtsSettings() {
+  const provider = ($('ttsProvider') || {}).value || 'edge';
+  const body = { provider };
+
+  const val = (id) => { const el = $(id); return el ? el.value : ''; };
+  const apiKeyVal = (p) => {
+    const input = $(`tts_${p}_api_key`);
+    if (!input) return '';
+    const v = input.value || '';
+    // If value contains mask chars, treat as empty (user didn't change it)
+    if (v.includes('●') || v.includes('****')) return '';
+    return v;
+  };
+
+  if (provider === 'edge') {
+    body.edge = { voice_id: val('ttsEdgeVoice') };
+  } else if (provider === 'elevenlabs') {
+    body.elevenlabs = { voice_id: val('ttsElevenlabsVoice'), model_id: val('ttsElevenlabsModel') };
+    const k = apiKeyVal('elevenlabs');
+    if (k) body.elevenlabs.api_key = k;
+  } else if (provider === 'openai') {
+    body.openai = { voice: val('ttsOpenaiVoice'), model: val('ttsOpenaiModel') };
+    const k = apiKeyVal('openai');
+    if (k) body.openai.api_key = k;
+  } else if (provider === 'minimax') {
+    body.minimax = { voice_id: val('ttsMinimaxVoice'), model: val('ttsMinimaxModel') };
+    const k = apiKeyVal('minimax');
+    if (k) body.minimax.api_key = k;
+  } else if (provider === 'mistral') {
+    body.mistral = { voice: val('ttsMistralVoice'), model: val('ttsMistralModel') };
+    const k = apiKeyVal('mistral');
+    if (k) body.mistral.api_key = k;
+  } else if (provider === 'gemini') {
+    body.gemini = { model: val('ttsGeminiModel') };
+    const k = apiKeyVal('gemini');
+    if (k) body.gemini.api_key = k;
+  } else if (provider === 'xai') {
+    body.xai = { model: val('ttsXaiModel') };
+    const k = apiKeyVal('xai');
+    if (k) body.xai.api_key = k;
+  } else if (provider === 'neutts') {
+    body.neutts = { model: val('ttsNeuttsModel') };
+  }
+
+  try {
+    await api('/api/settings/section/tts', {method:'POST', body:JSON.stringify(body)});
+    showToast('TTS settings saved');
+  } catch(e) {
+    showToast('Failed to save TTS settings: ' + e.message);
+  }
+}
+
+// ---- Terminal Backend ----
+function _loadTerminalPane(data) {
+  if (!data) return;
+  const setVal = (id, v) => { const el = $(id); if (el) el.value = v !== undefined && v !== null ? v : ''; };
+  const setCheck = (id, v) => { const el = $(id); if (el) el.checked = !!v; };
+  setVal('termBackend', data.backend || 'local');
+  setVal('termCwd', data.cwd || '.');
+  setVal('termTimeout', data.timeout || 180);
+  setVal('termDockerImage', data.docker_image || 'nikolaik/python-nodejs:python3.11-nodejs20');
+  setVal('termContainerCpu', data.container_cpu || 2);
+  setVal('termContainerMemory', data.container_memory || '8g');
+  setVal('termContainerDisk', data.container_disk || '20g');
+  setVal('termModalMode', data.modal_mode || 'container');
+  setVal('termModalImage', data.modal_image || 'nikolaik/python-nodejs:python3.11-nodejs20');
+  setVal('termSandboxDir', data.sandbox_dir || '');
+  setVal('termDaytonaImage', data.daytona_image || 'nikolaik/python-nodejs:python3.11-nodejs20');
+  setVal('termSingularityImage', data.singularity_image || 'docker://nikolaik/python-nodejs:python3.11-nodejs20');
+  // SSH fields from .env
+  setVal('termSshHost', data.ssh?.host || '');
+  setVal('termSshUser', data.ssh?.user || '');
+  setVal('termSshKey', data.ssh?.key || '');
+  setVal('termSshPort', data.ssh?.port || '22');
+  _onTermBackendChange();
+}
+
+function _onTermBackendChange() {
+  const backend = ($('termBackend') || {}).value || 'local';
+  const sshSection = $('termSshSection');
+  const dockerFields = $('termDockerFields');
+  const modalFields = $('termModalFields');
+  const daytonaFields = $('termDaytonaFields');
+  const singularityFields = $('termSingularityFields');
+  const commonFields = $('termCommonFields');
+  if (sshSection) sshSection.style.display = backend === 'ssh' ? '' : 'none';
+  if (dockerFields) dockerFields.style.display = backend === 'docker' ? '' : 'none';
+  if (modalFields) modalFields.style.display = backend === 'modal' ? '' : 'none';
+  if (daytonaFields) daytonaFields.style.display = backend === 'daytona' ? '' : 'none';
+  if (singularityFields) singularityFields.style.display = backend === 'singularity' ? '' : 'none';
+  if (commonFields) commonFields.style.display = backend === 'local' || backend === 'docker' || backend === 'singularity' || backend === 'daytona' ? '' : 'none';
+  _markSettingsDirty();
+}
+
+async function saveTerminalSettings() {
+  const body = {
+    backend: ($('termBackend') || {}).value || 'local',
+    cwd: ($('termCwd') || {}).value || '.',
+    timeout: parseInt(($('termTimeout') || {}).value) || 180,
+    docker_image: ($('termDockerImage') || {}).value || 'nikolaik/python-nodejs:python3.11-nodejs20',
+    container_cpu: parseInt(($('termContainerCpu') || {}).value) || 2,
+    container_memory: ($('termContainerMemory') || {}).value || '8g',
+    container_disk: ($('termContainerDisk') || {}).value || '20g',
+    modal_mode: ($('termModalMode') || {}).value || 'container',
+    modal_image: ($('termModalImage') || {}).value || 'nikolaik/python-nodejs:python3.11-nodejs20',
+    sandbox_dir: ($('termSandboxDir') || {}).value || '',
+    daytona_image: ($('termDaytonaImage') || {}).value || 'nikolaik/python-nodejs:python3.11-nodejs20',
+    singularity_image: ($('termSingularityImage') || {}).value || 'docker://nikolaik/python-nodejs:python3.11-nodejs20',
+  };
+  try {
+    await api('/api/settings/section/terminal', {method:'POST', body:JSON.stringify(body)});
+    // Also save SSH credentials to .env via ssh section
+    const sshBody = {
+      host: ($('termSshHost') || {}).value || '',
+      user: ($('termSshUser') || {}).value || '',
+      key: ($('termSshKey') || {}).value || '',
+      port: ($('termSshPort') || {}).value || '22',
+    };
+    if (sshBody.host || sshBody.user) {
+      await api('/api/settings/section/ssh', {method:'POST', body:JSON.stringify(sshBody)});
+    }
+    showToast('Terminal settings saved');
+  } catch(e) {
+    showToast('Failed to save terminal settings: ' + e.message);
+  }
+}
+
+// ---- Display ----
+function _loadDisplayPane(data) {
+  if (!data) return;
+  const setVal = (id, v) => { const el = $(id); if (el) el.value = v !== undefined && v !== null ? v : ''; };
+  const setCheck = (id, v) => { const el = $(id); if (el) el.checked = !!v; };
+  setVal('dispPersonality', data.personality || 'kawaii');
+  setVal('dispResumeDisplay', data.resume_display || 'full');
+  setVal('dispBusyInput', data.busy_input_mode || 'interrupt');
+  setCheck('dispCompact', data.compact);
+  setCheck('dispBell', data.bell_on_complete);
+  setCheck('dispSilentOverflow', data.silent_overflow);
+  setCheck('dispShowModel', data.show_model);
+  setCheck('dispToolProgress', data.tool_progress);
+  setCheck('dispToolPreview', data.tool_preview);
+}
+
+async function saveDisplaySettings() {
+  const body = {
+    personality: ($('dispPersonality') || {}).value || 'kawaii',
+    resume_display: ($('dispResumeDisplay') || {}).value || 'full',
+    busy_input_mode: ($('dispBusyInput') || {}).value || 'interrupt',
+    compact: ($('dispCompact') || {}).checked || false,
+    bell_on_complete: ($('dispBell') || {}).checked || false,
+    silent_overflow: ($('dispSilentOverflow') || {}).checked || false,
+    show_model: ($('dispShowModel') || {}).checked || true,
+    tool_progress: ($('dispToolProgress') || {}).checked || true,
+    tool_preview: ($('dispToolPreview') || {}).checked || true,
+  };
+  try {
+    await api('/api/settings/section/display', {method:'POST', body:JSON.stringify(body)});
+    showToast('Display settings saved');
+  } catch(e) {
+    showToast('Failed to save display settings: ' + e.message);
+  }
+}
+
+// ---- Browser ----
+function _loadBrowserPane(data) {
+  if (!data) return;
+  const setVal = (id, v) => { const el = $(id); if (el) el.value = v !== undefined && v !== null ? v : ''; };
+  const setCheck = (id, v) => { const el = $(id); if (el) el.checked = !!v; };
+  setVal('browserInactivityTimeout', data.inactivity_timeout || 120);
+  setVal('browserCommandTimeout', data.command_timeout || 30);
+  setCheck('browserRecordSessions', data.record_sessions);
+  setCheck('browserAllowPrivateUrls', data.allow_private_urls);
+}
+
+async function saveBrowserSettings() {
+  const body = {
+    inactivity_timeout: parseInt(($('browserInactivityTimeout') || {}).value) || 120,
+    command_timeout: parseInt(($('browserCommandTimeout') || {}).value) || 30,
+    record_sessions: ($('browserRecordSessions') || {}).checked || false,
+    allow_private_urls: ($('browserAllowPrivateUrls') || {}).checked || false,
+  };
+  try {
+    await api('/api/settings/section/browser', {method:'POST', body:JSON.stringify(body)});
+    showToast('Browser settings saved');
+  } catch(e) {
+    showToast('Failed to save browser settings: ' + e.message);
+  }
+}
+
+// ---- Checkpoints ----
+function _loadCheckpointsPane(data) {
+  if (!data) return;
+  const setCheck = (id, v) => { const el = $(id); if (el) el.checked = !!v; };
+  const setVal = (id, v) => { const el = $(id); if (el) el.value = v !== undefined && v !== null ? v : ''; };
+  setCheck('ckptEnabled', data.enabled);
+  setVal('ckptMaxSnapshots', data.max_snapshots || 50);
+}
+
+async function saveCheckpointsSettings() {
+  const body = {
+    enabled: ($('ckptEnabled') || {}).checked !== undefined ? ($('ckptEnabled').checked) : true,
+    max_snapshots: parseInt(($('ckptMaxSnapshots') || {}).value) || 50,
+  };
+  try {
+    await api('/api/settings/section/checkpoints', {method:'POST', body:JSON.stringify(body)});
+    showToast('Checkpoint settings saved');
+  } catch(e) {
+    showToast('Failed to save checkpoint settings: ' + e.message);
+  }
+}
+
+// ---- Logging ----
+function _loadLoggingPane(data) {
+  if (!data) return;
+  const setVal = (id, v) => { const el = $(id); if (el) el.value = v !== undefined && v !== null ? v : ''; };
+  setVal('logLevel', data.level || 'INFO');
+  setVal('logMaxSize', data.max_size_mb || 5);
+  setVal('logBackupCount', data.backup_count || 3);
+}
+
+async function saveLoggingSettings() {
+  const body = {
+    level: ($('logLevel') || {}).value || 'INFO',
+    max_size_mb: parseInt(($('logMaxSize') || {}).value) || 5,
+    backup_count: parseInt(($('logBackupCount') || {}).value) || 3,
+  };
+  try {
+    await api('/api/settings/section/logging', {method:'POST', body:JSON.stringify(body)});
+    showToast('Logging settings saved');
+  } catch(e) {
+    showToast('Failed to save logging settings: ' + e.message);
+  }
+}
+
+// ---- SSH ----
+function _loadSshPane(data) {
+  if (!data) return;
+  const setVal = (id, v) => { const el = $(id); if (el) el.value = v || ''; };
+  setVal('sshHost', data.host || '');
+  setVal('sshUser', data.user || '');
+  setVal('sshKey', data.key || '');
+  setVal('sshPort', data.port || '22');
+}
+
+async function saveSshSettings() {
+  const body = {
+    host: ($('sshHost') || {}).value || '',
+    user: ($('sshUser') || {}).value || '',
+    key: ($('sshKey') || {}).value || '',
+    port: ($('sshPort') || {}).value || '22',
+  };
+  try {
+    await api('/api/settings/section/ssh', {method:'POST', body:JSON.stringify(body)});
+    showToast('SSH credentials saved to ~/.hermes/.env');
+  } catch(e) {
+    showToast('Failed to save SSH credentials: ' + e.message);
+  }
+}
+
+// ---- Messaging ----
+function _loadMessagingPane(data) {
+  // Currently a shell — platforms shown as "not configured"
+  // Future: per-platform config loaded here
+}
+
+async function saveMessagingSettings() {
+  // Currently no-op — platforms are read-only shell
+  showToast('Messaging platform configuration coming soon');
+}
+
+// ---- Voice Recording ----
+function _loadVoicePane(data) {
+  if (!data) return;
+  const setVal = (id, v) => { const el = $(id); if (el) el.value = v !== undefined && v !== null ? v : ''; };
+  const setCheck = (id, v) => { const el = $(id); if (el) el.checked = !!v; };
+  setVal('voiceRecordKey', data.record_key || 'ctrl+b');
+  setVal('voiceMaxRecSec', data.max_recording_seconds || 120);
+  setVal('voiceSilenceThreshold', data.silence_threshold || 200);
+  setVal('voiceSilenceDur', data.silence_duration || 3.0);
+  setCheck('voiceAutoTts', data.auto_tts);
+}
+
+async function saveVoiceSettings() {
+  const body = {
+    record_key: ($('voiceRecordKey') || {}).value || 'ctrl+b',
+    max_recording_seconds: parseInt(($('voiceMaxRecSec') || {}).value) || 120,
+    silence_threshold: parseInt(($('voiceSilenceThreshold') || {}).value) || 200,
+    silence_duration: parseFloat(($('voiceSilenceDur') || {}).value) || 3.0,
+    auto_tts: ($('voiceAutoTts') || {}).checked || false,
+  };
+  try {
+    await api('/api/settings/section/voice', {method:'POST', body:JSON.stringify(body)});
+    showToast('Voice settings saved');
+  } catch(e) {
+    showToast('Failed to save voice settings: ' + e.message);
+  }
 }
 
 // Event wiring

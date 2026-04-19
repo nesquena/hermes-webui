@@ -470,7 +470,6 @@ _PROVIDER_DISPLAY = {
     "deepseek": "DeepSeek",
     "minimax": "MiniMax",
     "google": "Google",
-    "meta-llama": "Meta Llama",
     "huggingface": "HuggingFace",
     "alibaba": "Alibaba",
     "ollama": "Ollama",
@@ -519,6 +518,9 @@ _PROVIDER_MODELS = {
         {"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6 (via Nous)"},
         {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini (via Nous)"},
         {"id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro Preview (via Nous)"},
+        {"id": "gpt-5.4", "label": "GPT-5.4 (via Nous)"},
+        {"id": "claude-opus-4.5", "label": "Claude Opus 4.5 (via Nous)"},
+        {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash Preview (via Nous)"},
     ],
     "zai": [
         {"id": "glm-5.1", "label": "GLM-5.1"},
@@ -621,6 +623,35 @@ _PROVIDER_MODELS = {
     # xAI — prefix used in OpenRouter model IDs (x-ai/grok-4-20)
     "x-ai": [
         {"id": "grok-4.20", "label": "Grok 4.20"},
+    ],
+    # Hugging Face — prefix used in OpenRouter model IDs (huggingface/...)
+    "huggingface": [
+        {"id": "huggingface/h4", "label": "Hugging Face H4"},
+    ],
+    # Alibaba (Qwen) — prefix used in OpenRouter model IDs (alibaba/...)
+    "alibaba": [
+        {"id": "alibaba/qwen3-coder", "label": "Qwen3 Coder (Alibaba)"},
+        {"id": "alibaba/qwen3.6-plus", "label": "Qwen3.6 Plus (Alibaba)"},
+    ],
+    # Ollama — prefix used in OpenRouter model IDs (ollama/...)
+    "ollama": [
+        {"id": "ollama/llama-5-pro", "label": "LLaMA 5 Pro (Ollama)"},
+        {"id": "ollama/qwen3-coder", "label": "Qwen3 Coder (Ollama)"},
+    ],
+    # LM Studio — prefix used in OpenRouter model IDs (lmstudio/...)
+    "lmstudio": [
+        {"id": "lmstudio/llama-5-pro", "label": "LLaMA 5 Pro (LM Studio)"},
+        {"id": "lmstudio/qwen3-coder", "label": "Qwen3 Coder (LM Studio)"},
+    ],
+    # Xiaomi — prefix used in OpenRouter model IDs (xiaomi/...)
+    "xiaomi": [
+        {"id": "xiaomi/mimo-3-pro", "label": "MiMo 3 Pro (Xiaomi)"},
+        {"id": "xiaomi/mimo-3-ultra", "label": "MiMo 3 Ultra (Xiaomi)"},
+    ],
+    # Kilocode — prefix used in OpenRouter model IDs (kilocode/...)
+    "kilocode": [
+        {"id": "kilocode/k2.5-coder", "label": "K2.5 Coder (Kilocode)"},
+        {"id": "kilocode/k2.5-pro", "label": "K2.5 Pro (Kilocode)"},
     ],
 }
 
@@ -839,6 +870,12 @@ def get_available_models() -> dict:
             "OPENCODE_GO_API_KEY",
             "MINIMAX_API_KEY",
             "MINIMAX_CN_API_KEY",
+            "XAI_API_KEY",
+            "HF_TOKEN",
+            "HUGGINGFACE_TOKEN",
+            "DASHSCOPE_API_KEY",
+            "XIAOMI_API_KEY",
+            "KILOCODE_API_KEY",
         ):
             val = os.getenv(k)
             if val:
@@ -865,6 +902,16 @@ def get_available_models() -> dict:
             detected_providers.add("opencode-zen")
         if all_env.get("OPENCODE_GO_API_KEY"):
             detected_providers.add("opencode-go")
+        if all_env.get("XAI_API_KEY"):
+            detected_providers.add("x-ai")
+        if all_env.get("HF_TOKEN") or all_env.get("HUGGINGFACE_TOKEN"):
+            detected_providers.add("huggingface")
+        if all_env.get("DASHSCOPE_API_KEY"):
+            detected_providers.add("alibaba")
+        if all_env.get("XIAOMI_API_KEY"):
+            detected_providers.add("xiaomi")
+        if all_env.get("KILOCODE_API_KEY"):
+            detected_providers.add("kilocode")
 
     # 3. Fetch models from custom endpoint if base_url is configured
     auto_detected_models = []

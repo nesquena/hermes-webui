@@ -34,6 +34,32 @@ const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
 
+const PROVIDER_ICONS = {
+  'OpenRouter': '🔀',
+  'Anthropic': '🧠',
+  'OpenAI': '🤖',
+  'OpenAI Codex': '⚡',
+  'Google': '🔵',
+  'DeepSeek': '🔮',
+  'Nous Portal': '🌟',
+  'Z.AI / GLM': '📊',
+  'Kimi / Moonshot': '🌙',
+  'MiniMax': '⚡',
+  'xAI': '❌',
+  'Mistral': '🌬️',
+  'Qwen': '🍡',
+  'HuggingFace': '🤗',
+  'Alibaba': '🏢',
+  'Meta Llama': '🦙',
+  'Ollama': '🦕',
+  'LM Studio': '💻',
+  'OpenCode Zen': '🧘',
+  'OpenCode Go': '🚀',
+  'Xiaomi': '📱',
+  'Kilo Code': '⚡',
+  'Copilot': '🔷',
+};
+
 // ── Smart model resolver ────────────────────────────────────────────────────
 // Finds the best matching option value in a <select> for a given model ID.
 // Handles mismatches like 'claude-sonnet-4-6' vs 'anthropic/claude-sonnet-4.6'.
@@ -80,7 +106,7 @@ async function populateModelDropdown(){
     _dynamicModelLabels={};
     for(const g of data.groups){
       const og=document.createElement('optgroup');
-      og.label=g.provider;
+      og.label=(PROVIDER_ICONS[g.provider]||'')+' '+g.provider;
       for(const m of g.models){
         const opt=document.createElement('option');
         opt.value=m.id;
@@ -458,7 +484,7 @@ function getModelLabel(modelId){
   // Check dynamic labels first, then fall back to splitting the ID
   if(_dynamicModelLabels[modelId]) return _dynamicModelLabels[modelId];
   // Static fallback for common models
-  const STATIC_LABELS={'openai/gpt-5.4-mini':'GPT-5.4 Mini','openai/gpt-4o':'GPT-4o','openai/o3':'o3','openai/o4-mini':'o4-mini','anthropic/claude-sonnet-4.6':'Sonnet 4.6','anthropic/claude-sonnet-4-5':'Sonnet 4.5','anthropic/claude-haiku-3-5':'Haiku 3.5','google/gemini-3.1-pro-preview':'Gemini 3.1 Pro','google/gemini-3-flash-preview':'Gemini 3 Flash','google/gemini-3.1-flash-lite-preview':'Gemini 3.1 Flash Lite','google/gemini-2.5-pro':'Gemini 2.5 Pro','google/gemini-2.5-flash':'Gemini 2.5 Flash','deepseek/deepseek-chat-v3-0324':'DeepSeek V3','meta-llama/llama-4-scout':'Llama 4 Scout'};
+  const STATIC_LABELS={'openai/gpt-5.4-mini':'GPT-5.4 Mini','openai/gpt-4o':'GPT-4o','openai/o3':'o3','openai/o4-mini':'o4-mini','anthropic/claude-sonnet-4.6':'Sonnet 4.6','anthropic/claude-sonnet-4-5':'Sonnet 4.5','anthropic/claude-haiku-3-5':'Haiku 3.5','google/gemini-3.1-pro-preview':'Gemini 3.1 Pro','google/gemini-3-flash-preview':'Gemini 3 Flash','google/gemini-3.1-flash-lite-preview':'Gemini 3.1 Flash Lite','google/gemini-2.5-pro':'Gemini 2.5 Pro','google/gemini-2.5-flash':'Gemini 2.5 Flash','deepseek/deepseek-chat-v3-0324':'DeepSeek V3'};
   if(STATIC_LABELS[modelId]) return STATIC_LABELS[modelId];
   return modelId.split('/').pop()||'Unknown';
 }

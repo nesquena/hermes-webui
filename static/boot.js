@@ -554,8 +554,39 @@ window.addEventListener('resize',()=>{
   syncWorkspacePanelState();
 });
 
-// Boot: restore last session or start fresh
-// ── Resizable panels ──────────────────────────────────────────────────────
+  // Boot: restore last session or start fresh
+  // Check auth status and show security banner if no password is set
+  (async function _checkSecurityBanner(){
+    // Don't show if user already dismissed this session
+    if(sessionStorage.getItem('hermes-webui-security-dismissed')) return;
+    try{
+      const r=await fetch(new URL('api/auth/status',location.href).href,{credentials:'include'});
+      if(!r.ok) return;
+      const d=await r.json();
+      if(!d.auth_enabled){
+        const b=$('securityBanner');
+        if(b){b.classList.add('visible');}
+      }
+    }catch(e){}
+  })();
+
+  function dismissSecurityBanner(){
+    const b=$('securityBanner');
+    if(b) b.classList.remove('visible');
+    sessionStorage.setItem('hermes-webui-security-dismissed','1');
+  }
+  function openSecuritySettings(){
+    dismissSecurityBanner();
+    // Open settings panel on the System tab where password is configured
+    if(typeof switchSettingsSection==='function') switchSettingsSection('system');
+    if(typeof _openSettingsPanel==='function') _openSettingsPanel();
+    else{
+      const overlay=$('settingsOverlay');
+      if(overlay) overlay.style.display='';
+    }
+  }
+
+  // ── Resizable panels ──────────────────────────────────────────────────────
 (function(){
   const SIDEBAR_MIN=180, SIDEBAR_MAX=420;
   const PANEL_MIN=180,   PANEL_MAX=1200;
@@ -796,6 +827,26 @@ function applyBotName(){
   if(_testUpdates||(_bootSettings.check_for_updates!==false&&!sessionStorage.getItem('hermes-update-checked')&&!sessionStorage.getItem('hermes-update-dismissed'))){
     const _checkUrl='/api/updates/check'+(_testUpdates?'?simulate=1':'');
     api(_checkUrl).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d);}).catch(()=>{});
+  }
+  // Security banner: warn if no password is set
+  if(!sessionStorage.getItem('hermes-webui-security-dismissed')){
+    api('/api/auth/status').then(r=>r.json()).then(d=>{
+      if(!d.auth_enabled){
+        const b=$('securityBanner');
+        if(b) b.classList.add('visible');
+      }
+    }).catch(()=>{});
+  }
+  function dismissSecurityBanner(){
+    const b=$('securityBanner');
+    if(b) b.classList.remove('visible');
+    sessionStorage.setItem('hermes-webui-security-dismissed','1');
+  }
+  function openSecuritySettings(){
+    dismissSecurityBanner();
+    if(typeof switchSettingsSection==='function') switchSettingsSection('system');
+    const overlay=$('settingsOverlay');
+    if(overlay) overlay.style.display='';
   }
   // Fetch active profile
   try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';}catch(e){S.activeProfile='default';}

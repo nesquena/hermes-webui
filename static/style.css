@@ -285,14 +285,21 @@
   .reconnect-banner.visible{display:flex;}
   .reconnect-btn{padding:6px 12px;border-radius:8px;font-size:12px;font-weight:600;background:var(--accent-bg-strong);border:1px solid var(--accent-bg-strong);color:var(--accent-text);cursor:pointer;}
   .reconnect-btn:hover{background:var(--accent-bg-strong);}
+  /* ── Security warning banner ── */
+  .security-banner{display:none;background:rgba(180,60,20,.18);border:1px solid rgba(220,90,40,.4);border-radius:10px;padding:10px 16px;margin:10px auto;max-width:780px;font-size:13px;color:#e87050;align-items:center;justify-content:space-between;gap:12px}
+  .security-banner.visible{display:flex}
+  .security-btn{padding:6px 12px;border-radius:8px;font-size:12px;font-weight:600;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);color:#e87050;cursor:pointer;transition:background .15s}
+  .security-btn:hover{background:rgba(255,255,255,.14)}
+  .security-primary{background:rgba(220,90,40,.3);border-color:rgba(220,90,40,.5);color:#ffb09a}
+  .security-primary:hover{background:rgba(220,90,40,.45)}
   /* ── Update banner ── */
-  .update-banner{display:none;background:var(--surface);border:1px solid var(--accent);border-radius:10px;padding:10px 16px;margin:10px auto;max-width:780px;font-size:13px;color:var(--accent-text);align-items:center;justify-content:space-between;gap:12px;}
-  .update-banner.visible{display:flex;}
-  .update-btn{padding:6px 12px;border-radius:8px;font-size:12px;font-weight:600;background:var(--accent-bg);border:1px solid var(--accent-bg-strong);color:var(--accent-text);cursor:pointer;transition:background .15s;}
-  .update-btn:hover{background:var(--accent-bg-strong);}
-  .update-primary{background:var(--accent-bg-strong);border-color:var(--accent);}
-  .update-btn:disabled{opacity:0.5;cursor:not-allowed;}
-  /* ── Composer flyout (approval/clarify slide up from behind composer) ── */
+  .update-banner{display:none;background:var(--surface);border:1px solid var(--accent);border-radius:10px;padding:10px 16px;margin:10px auto;max-width:780px;font-size:13px;color:var(--accent-text);align-items:center;justify-content:space-between;gap:12px}
+  .update-banner.visible{display:flex}
+  .update-btn{padding:6px 12px;border-radius:8px;font-size:12px;font-weight:600;background:var(--accent-bg);border:1px solid var(--accent-bg-strong);color:var(--accent-text);cursor:pointer;transition:background .15s}
+  .update-btn:hover{background:var(--accent-bg-strong)}
+  .update-primary{background:var(--accent-bg-strong);border-color:var(--accent)}
+  .update-btn:disabled{opacity:0.5;cursor:not-allowed}
+  /* ── Composer flyout
   .composer-flyout{position:relative;height:0;z-index:1;}
   /* ── Approval card ── */
   .approval-card{position:absolute;left:0;right:0;bottom:-24px;max-width:var(--msg-max);margin:0 auto;padding:0 20px;box-sizing:border-box;width:100%;overflow:hidden;pointer-events:none;}
