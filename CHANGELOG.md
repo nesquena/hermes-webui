@@ -4,6 +4,7 @@
 <<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 ## [v0.50.102] — 2026-04-20
 
 ### Fixed
@@ -32,6 +33,12 @@
 ### Fixed
 - **`PermissionError` in auth signing key no longer crashes every HTTP request** — `key_file.exists()` in `api/auth.py`'s `_signing_key()` was called *outside* the try/except block. In three-container bind-mount setups where the agent container initialises the state directory under a different UID, `pathlib.Path.exists()` raises `PermissionError`, which escaped up through `is_auth_enabled()` → `check_auth()` and crashed every HTTP request with HTTP 500. Fix: wrap the `exists()` call inside the try block so `PermissionError` (and any other `OSError`) is caught and logged, then falls back to an in-memory key. Added a UID/GID alignment note to `docker-compose.three-container.yml` to prevent the underlying misconfiguration. (PR #625)
 >>>>>>> ee22213 (fix(docker): catch PermissionError in _signing_key + three-container UID note)
+=======
+## [v0.50.102] — 2026-04-20
+
+### Added
+- **Three-container UID/GID alignment guide in README** — new subsection "Running alongside hermes-dashboard (three-container setup)" explains why UIDs must match across containers sharing a bind-mounted volume, documents the variable name asymmetry (`HERMES_UID`/`HERMES_GID` for the agent image vs `WANTED_UID`/`WANTED_GID` for the WebUI image), gives the recommended `.env` setup for standard Linux and NAS/Unraid deployments, provides the one-time `chown` fix for existing installs, and notes that the dashboard volume must be read-write. (Fixes #645)
+>>>>>>> 01e8cd0 (docs(docker): add three-container UID/GID alignment guide)
 
 ## [v0.50.101] — 2026-04-20
 

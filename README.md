@@ -200,6 +200,75 @@ first boot. Subsequent restarts reuse the installed packages.
 
 See `docker-compose.two-container.yml` for the full configuration.
 
+### Running alongside hermes-dashboard (three-container setup)
+
+To run the Hermes Agent, Hermes Dashboard, and the WebUI together on a
+shared volume, use the three-container Compose file:
+
+```bash
+docker compose -f docker-compose.three-container.yml up -d
+```
+
+This brings up:
+- **`hermes-agent`** — gateway API on port 8642
+- **`hermes-dashboard`** — monitoring UI on port 9119
+- **`hermes-webui`** — browser chat interface on port 8787
+
+All three services share the same `hermes-home` named volume so config,
+sessions, skills, and memory are consistent across all surfaces.
+
+#### Why UIDs must match
+
+The `hermes-home` volume is a bind-mount in practice — all three containers
+write to the same filesystem tree under `~/.hermes`. If the containers run
+as different UIDs, whichever container creates a file first becomes its
+owner, and the others hit `PermissionError` on subsequent writes.
+
+The fix is to make all containers run as **your host user's UID and GID**.
+
+#### Variable name asymmetry
+
+> ⚠️ **The two image families use different environment variable names** for
+> the UID/GID setting:
+>
+> | Image | Variable |
+> |---|---|
+> | `nousresearch/hermes-agent` (agent + dashboard) | `HERMES_UID` / `HERMES_GID` |
+> | `ghcr.io/nesquena/hermes-webui` | `WANTED_UID` / `WANTED_GID` |
+>
+> You must set **both pairs** when using a `.env` file.
+
+#### Recommended setup
+
+For a standard Linux user (UID ≥ 1000):
+
+```bash
+# Create a .env file with your host UID/GID
+echo "UID=$(id -u)" >> .env
+echo "GID=$(id -g)" >> .env
+# hermes-agent / hermes-dashboard
+echo "HERMES_UID=$(id -u)" >> .env
+echo "HERMES_GID=$(id -g)" >> .env
+```
+
+For NAS/Unraid deployments where a fixed service account is preferred, use
+`10000:10000` (or your NAS service UID) instead of `$(id -u)`.
+
+If you get `PermissionError` on an **existing** `~/.hermes` directory, run
+the one-time ownership fix:
+
+```bash
+chown -R $(id -u):$(id -g) ~/.hermes
+```
+
+#### Volume mount mode
+
+The dashboard container needs **read-write** access to the shared volume
+(it writes session logs and dashboard state). Do **not** add `:ro` to the
+`hermes-home` volume in `hermes-dashboard`'s `volumes:` entry.
+
+See `docker-compose.three-container.yml` for the full reference configuration.
+
 ---
 
 ## What start.sh discovers automatically
