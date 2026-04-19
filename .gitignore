@@ -16,7 +16,13 @@ archive/
 .env
 .env.*
 !.env.example
-.claude/*
+.claude/
+CLAUDE.md
+AGENTS.md
+.cursorrules
+.windsurfrules
+.aider*
+copilot-instructions.md
 
 # Generated screenshots and transient artifacts
 screenshot-*.png
