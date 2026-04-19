@@ -1,0 +1,57 @@
+# Local testing Docker Compose: builds the Dockerfile against the current
+# feat/all-providers branch and runs Agent + WebUI in two containers.
+#
+# Usage:
+#   docker compose -f docker-compose.testing.yml up --build
+#
+# For a clean slate (rebuilds from scratch):
+#   docker compose -f docker-compose.testing.yml down -v --rmi local
+#   docker compose -f docker-compose.testing.yml up --build
+
+services:
+  hermes-agent:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes-agent
+    volumes:
+      # Persist config, state, sessions, skills, memory across restarts
+      - hermes-home:/opt/hermes
+      # Expose agent source so the WebUI can install dependencies from it
+      - hermes-agent-src:/opt/hermes
+    environment:
+      - HERMES_HOME=/opt/hermes
+    restart: unless-stopped
+
+  hermes-webui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hermes-webui
+    depends_on:
+      - hermes-agent
+    ports:
+      - "8787:8787"
+    volumes:
+      # Same hermes home as the agent — shares config, sessions, state
+      - hermes-home:/opt/hermes
+      # Agent source mounted where docker_init.bash expects it.
+      # At startup the init script runs:
+      #   uv pip install /opt/hermes/hermes-agent
+      # which installs the agent and all its Python dependencies.
+      - hermes-agent-src:/opt/hermes/hermes-agent
+      # Workspace directory — browse and edit files from the WebUI.
+      # Adapt the host path to your project directory.
+      - ~/workspace:/workspace
+    environment:
+      - HERMES_WEBUI_HOST=0.0.0.0
+      - HERMES_WEBUI_PORT=8787
+      - HERMES_WEBUI_STATE_DIR=/opt/hermes/webui-mvp
+      # Match your host user's UID/GID for correct file permissions.
+      - WANTED_UID=${UID:-1000}
+      - WANTED_GID=${GID:-1000}
+      # Optional: set a password for remote access
+      # - HERMES_WEBUI_PASSWORD=your-secret-password
+    restart: unless-stopped
+
+volumes:
+  hermes-home:
+  hermes-agent-src:
