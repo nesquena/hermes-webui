@@ -1,5 +1,6 @@
 # Hermes Web UI -- Changelog
 
+<<<<<<< HEAD
 ## [v0.50.109] — 2026-04-20
 
 ### Fixed
@@ -91,6 +92,12 @@
 - **Workspace file panel shows an empty-state message** instead of a blank pane when no workspace is configured or the directory is empty. (#703)
 - **Notification settings description uses "app" instead of "tab"** — more accurate for native Mac app users. (#704)
 (PR #712)
+=======
+## [v0.50.95] — 2026-04-19
+
+### Fixed
+- **Assistant messages now show footer timestamps, and older messages show a fuller date+time** — assistant response segments now render the same footer timestamp affordance as user messages, using the existing message `_ts` / `timestamp` fields already stamped by the WebUI. Messages from today still show a compact time-only label, while older messages now show a fuller date+time string directly in the footer for better readability when reviewing past sessions.
+>>>>>>> 1ca683a (fix(ui): preserve message timestamps and show assistant footer times)
 
 ## [v0.50.94] — 2026-04-19
 
