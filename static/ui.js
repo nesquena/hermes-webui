@@ -1338,6 +1338,25 @@ function _compressionReferenceCardHtml(text, open=false){
       
     </div>`;
 }
+function _isSameLocalDay(dateA, dateB){
+  return dateA.getFullYear()===dateB.getFullYear()
+    && dateA.getMonth()===dateB.getMonth()
+    && dateA.getDate()===dateB.getDate();
+}
+function _formatMessageFooterTimestamp(tsVal){
+  if(!tsVal) return '';
+  const date=new Date(tsVal*1000);
+  const now=new Date();
+  if(_isSameLocalDay(date, now)){
+    return date.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  }
+  return date.toLocaleString([], {
+    month:'short',
+    day:'numeric',
+    hour:'numeric',
+    minute:'2-digit',
+  });
+}
 function _compressionStatusCardHtml({
   statusLabel,
   previewText,
@@ -1476,9 +1495,9 @@ function renderMessages(){
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
     const tsVal=m._ts||m.timestamp;
     const tsTitle=tsVal?new Date(tsVal*1000).toLocaleString():'';
-    const tsTime=tsVal?new Date(tsVal*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'';
-    const userTimeHtml = (isUser && tsTime) ? `<span class="msg-time" title="${esc(tsTitle)}">${tsTime}</span>` : '';
-    const footHtml = `<div class="msg-foot">${userTimeHtml}<span class="msg-actions">${editBtn}${copyBtn}${retryBtn}</span></div>`;
+    const tsTime=_formatMessageFooterTimestamp(tsVal);
+    const timeHtml = tsTime ? `<span class="msg-time" title="${esc(tsTitle)}">${tsTime}</span>` : '';
+    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${copyBtn}${retryBtn}</span></div>`;
 
     if(isUser){
       currentAssistantTurn=null;

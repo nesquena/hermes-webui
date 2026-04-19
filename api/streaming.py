@@ -619,11 +619,16 @@ def _api_safe_message_positions(messages):
 
 
 def _restore_reasoning_metadata(previous_messages, updated_messages):
-    """Carry forward assistant reasoning metadata lost during API-safe history sanitization.
+    """Carry forward display-only metadata lost during API-safe history sanitization.
 
     The provider-facing history strips WebUI-only fields like `reasoning`. When the
     agent returns its new full message history, prior assistant messages come back
     without that metadata unless we merge it back in by API-history position.
+
+    This also preserves existing timestamps for unchanged historical messages.
+    Without that, older turns that come back from the agent without `_ts` /
+    `timestamp` can be re-stamped with the current time on every new assistant
+    response, making prior messages appear to "move" in time.
     """
     if not previous_messages or not updated_messages:
         return updated_messages
@@ -651,6 +656,10 @@ def _restore_reasoning_metadata(previous_messages, updated_messages):
         if isinstance(prev_msg, dict) and isinstance(cur_msg, dict) and _safe_projection(prev_msg) == _safe_projection(cur_msg):
             if prev_msg.get('role') == 'assistant' and prev_msg.get('reasoning') and not cur_msg.get('reasoning'):
                 cur_msg['reasoning'] = prev_msg['reasoning']
+            if prev_msg.get('timestamp') and not cur_msg.get('timestamp'):
+                cur_msg['timestamp'] = prev_msg['timestamp']
+            elif prev_msg.get('_ts') and not cur_msg.get('_ts') and not cur_msg.get('timestamp'):
+                cur_msg['_ts'] = prev_msg['_ts']
             safe_pos += 1
             continue
 
