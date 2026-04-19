@@ -757,6 +757,7 @@ function applyBotName(){
     window._showCliSessions=!!s.show_cli_sessions;
     window._soundEnabled=!!s.sound_enabled;
     window._notificationsEnabled=!!s.notifications_enabled;
+    window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
     window._botName=s.bot_name||'Hermes';
     const appearance=_normalizeAppearance(s.theme,s.skin);
     localStorage.setItem('hermes-theme',appearance.theme);
@@ -778,6 +779,7 @@ function applyBotName(){
     window._showCliSessions=false;
     window._soundEnabled=false;
     window._notificationsEnabled=false;
+    window._sidebarDensity='compact';
     window._botName='Hermes';
     _bootSettings={check_for_updates:false};
     document.body.classList.remove('bubble-layout');

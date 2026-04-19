@@ -1256,6 +1256,7 @@ _SETTINGS_DEFAULTS = {
     "sound_enabled": False,  # play notification sound when assistant finishes
     "notifications_enabled": False,  # browser notification when tab is in background
     "bubble_layout": False,  # right-aligned user / left-aligned assistant chat bubbles
+    "sidebar_density": "compact",  # compact | detailed
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
 }
 _SETTINGS_LEGACY_DROP_KEYS = {"assistant_language"}
@@ -1351,6 +1352,7 @@ def load_settings() -> dict:
 _SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {"password_hash"}
 _SETTINGS_ENUM_VALUES = {
     "send_key": {"enter", "ctrl+enter"},
+    "sidebar_density": {"compact", "detailed"},
 }
 _SETTINGS_BOOL_KEYS = {
     "onboarding_completed",

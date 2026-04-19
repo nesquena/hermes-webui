@@ -186,6 +186,8 @@
   .session-title-row{display:flex;align-items:center;gap:6px;min-width:0;}
   .session-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);}
   .session-item.active .session-title{color:var(--accent-text);}
+  .session-meta{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .session-item.active .session-meta{color:var(--accent-text);opacity:.8;}
   .session-time{display:none;}
   /* ── Session action trigger + dropdown ── */
   .session-actions{position:absolute;right:6px;top:50%;transform:translateY(-50%);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .15s ease;}

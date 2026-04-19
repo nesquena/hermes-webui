@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.112] — 2026-04-20
+
+### Added
+- **Sidebar density mode for the session list** — new Settings option toggles the left session list between a compact default and a detailed view that shows message count and model. Profile names only appear in detailed mode when "Show active profile only" is disabled. (#673)
+
 ## [v0.50.111] — 2026-04-20
 
 ### Fixed

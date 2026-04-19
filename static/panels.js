@@ -1267,6 +1267,11 @@ async function loadSettingsPanel(){
     if(notifCb){notifCb.checked=!!settings.notifications_enabled;notifCb.addEventListener('change',_markSettingsDirty,{once:false});}
     const bubbleCb=$('settingsBubbleLayout');
     if(bubbleCb){bubbleCb.checked=!!settings.bubble_layout;bubbleCb.addEventListener('change',_markSettingsDirty,{once:false});}
+    const sidebarDensitySel=$('settingsSidebarDensity');
+    if(sidebarDensitySel){
+      sidebarDensitySel.value=settings.sidebar_density==='detailed'?'detailed':'compact';
+      sidebarDensitySel.addEventListener('change',_markSettingsDirty,{once:false});
+    }
     // Bot name
     const botNameField=$('settingsBotName');
     if(botNameField){botNameField.value=settings.bot_name||'Hermes';botNameField.addEventListener('input',_markSettingsDirty,{once:false});}
@@ -1293,12 +1298,13 @@ function _setSettingsAuthButtonsVisible(active){
 }
 
 function _applySavedSettingsUi(saved, body, opts){
-  const {sendKey,showTokenUsage,showCliSessions,theme,skin,language}=opts;
+  const {sendKey,showTokenUsage,showCliSessions,theme,skin,language,sidebarDensity}=opts;
   window._sendKey=sendKey||'enter';
   window._showTokenUsage=showTokenUsage;
   window._showCliSessions=showCliSessions;
   window._soundEnabled=body.sound_enabled;
   window._notificationsEnabled=body.notifications_enabled;
+  window._sidebarDensity=sidebarDensity==='detailed'?'detailed':'compact';
   window._botName=body.bot_name||'Hermes';
   document.body.classList.toggle('bubble-layout', !!body.bubble_layout);
   if(typeof applyBotName==='function') applyBotName();
@@ -1328,6 +1334,7 @@ async function saveSettings(andClose){
   const theme=($('settingsTheme')||{}).value||'dark';
   const skin=($('settingsSkin')||{}).value||'default';
   const language=($('settingsLanguage')||{}).value||'en';
+  const sidebarDensity=($('settingsSidebarDensity')||{}).value==='detailed'?'detailed':'compact';
   const body={};
   if(model) body.default_model=model;
 
@@ -1342,6 +1349,7 @@ async function saveSettings(andClose){
   body.sound_enabled=!!($('settingsSoundEnabled')||{}).checked;
   body.notifications_enabled=!!($('settingsNotificationsEnabled')||{}).checked;
   body.bubble_layout=!!($('settingsBubbleLayout')||{}).checked;
+  body.sidebar_density=sidebarDensity;
   document.body.classList.toggle('bubble-layout', body.bubble_layout);
   const botName=(($('settingsBotName')||{}).value||'').trim();
   body.bot_name=botName||'Hermes';
@@ -1349,7 +1357,7 @@ async function saveSettings(andClose){
   if(pw && pw.trim()){
     try{
       const saved=await api('/api/settings',{method:'POST',body:JSON.stringify({...body,_set_password:pw.trim()})});
-      _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,skin,language});
+      _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,skin,language,sidebarDensity});
       showToast(t(saved.auth_just_enabled?'settings_saved_pw':'settings_saved_pw_updated'));
       _hideSettingsPanel();
       return;
@@ -1357,7 +1365,7 @@ async function saveSettings(andClose){
   }
   try{
     const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(body)});
-    _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,skin,language});
+    _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,skin,language,sidebarDensity});
     showToast(t('settings_saved'));
     _hideSettingsPanel();
   }catch(e){

@@ -618,6 +618,21 @@ function renderSessionListFromCache(){
     const tsMs=_sessionTimestampMs(s);
     titleRow.appendChild(title);
     sessionText.appendChild(titleRow);
+    const density=(window._sidebarDensity==='detailed'?'detailed':'compact');
+    if(density==='detailed'){
+      const metaBits=[];
+      const msgCount=typeof s.message_count==='number'?s.message_count:0;
+      const msgLabel=(typeof t==='function')
+        ? t('session_meta_messages', msgCount)
+        : `${msgCount} msg${msgCount===1?'':'s'}`;
+      metaBits.push(msgLabel);
+      if(s.model) metaBits.push(s.model);
+      if(_showAllProfiles&&s.profile) metaBits.push(s.profile);
+      const meta=document.createElement('div');
+      meta.className='session-meta';
+      meta.textContent=metaBits.join(' · ');
+      sessionText.appendChild(meta);
+    }
     // Append tag chips after the title text
     for(const tag of tags){
       const chip=document.createElement('span');
