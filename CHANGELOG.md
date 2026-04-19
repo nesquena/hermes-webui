@@ -1,6 +1,7 @@
 # Hermes Web UI -- Changelog
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 ## [v0.50.102] — 2026-04-20
 
 ### Fixed
@@ -11,6 +12,12 @@
 ### Fixed
 - **Windows .env encoding fix** — `write_text()` calls in `api/profiles.py` were missing `encoding='utf-8'`, which could cause failures on Windows systems with non-UTF-8 locale encodings (e.g. cp936/GBK). All `read_text()` and `write_text()` calls in `api/` now explicitly specify `encoding='utf-8'`, per the project coding standard. (PR #741)
 >>>>>>> df83f98 (fix(api): add encoding=utf-8 to all read_text/write_text calls in api/)
+=======
+## [v0.50.104] — 2026-04-20
+
+### Fixed
+- **Agent image URLs rewritten to actual server base** — when an agent emits a `MEDIA:http://localhost:8787/api/media?path=...` URL, the WebUI now rewrites the `localhost`/`127.0.0.1` host to the page's base URL (`document.baseURI`) before using it as an `<img>` `src`. This fixes broken images for all remote users (VPN, Docker, deployed servers) who cannot reach the server's localhost address from their browser, and preserves the subpath prefix (e.g. `/hermes/`) under reverse-proxy mounts. (fix #642)
+>>>>>>> e4d1bf8 (fix(ui): rewrite localhost image URLs to window.location.origin for remote access)
 
 ## [v0.50.101] — 2026-04-20
 

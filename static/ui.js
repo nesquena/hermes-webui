@@ -663,10 +663,16 @@ function renderMd(raw){
     const ref=media_stash[+i];
     // HTTP(S) URL
     if(/^https?:\/\//i.test(ref)){
-      if(_IMAGE_EXTS.test(ref.split('?')[0])){
-        return `<img class="msg-media-img" src="${esc(ref)}" alt="image" loading="lazy" onclick="this.classList.toggle('msg-media-img--full')">`;
+      // Rewrite localhost/127.0.0.1 to actual server origin so remote
+      // users (VPN, Docker, deployed) can load agent-generated images (#642)
+      let src=ref;
+      if(/https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/.test(src)){
+        src=src.replace(/https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/,window.location.origin);
       }
-      return `<a href="${esc(ref)}" target="_blank" rel="noopener">${esc(ref)}</a>`;
+      if(_IMAGE_EXTS.test(src.split('?')[0])){
+        return `<img class="msg-media-img" src="${esc(src)}" alt="image" loading="lazy" onclick="this.classList.toggle('msg-media-img--full')">`;
+      }
+      return `<a href="${esc(src)}" target="_blank" rel="noopener">${esc(src)}</a>`;
     }
     // Local file path
     const apiUrl='api/media?path='+encodeURIComponent(ref);
