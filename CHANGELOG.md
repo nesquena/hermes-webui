@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.88] — 2026-04-19
+
+### Added
+- **Skill slash commands now appear in the `/` autocomplete dropdown (#460)** — the composer's slash-command menu now merges Hermes skills from `/api/skills` into the existing built-in command list. Skill-backed entries are shown with a small `Skill` badge, built-in commands still take precedence on name collisions, and selecting a skill command inserts `/<skill-slug> ` into the composer so the message continues through to the agent unchanged.
+
 ## [v0.50.87] — 2026-04-18
 
 ### Fixed
@@ -1641,4 +1646,3 @@ Critical regressions introduced during the server.py split, caught by users and 
 - **Regression test file added** (`tests/test_regressions.py`): 10 tests, one per introduced bug. These form a permanent regression gate so each class of error can never silently return.
 
 ---
-

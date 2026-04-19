@@ -16,6 +16,10 @@ const COMMANDS=[
   {name:'skills', desc:t('cmd_skills'), fn:cmdSkills, arg:'query'},
 ];
 
+let _skillCommandCache = [];
+let _skillCommandLoadPromise = null;
+let _skillCommandCacheReady = false;
+
 function parseCommand(text){
   if(!text.startsWith('/'))return null;
   const parts=text.slice(1).split(/\s+/);
@@ -33,9 +37,83 @@ function executeCommand(text){
   return true;
 }
 
+function _skillCommandSlug(name){
+  const raw=String(name||'').trim().toLowerCase();
+  if(!raw)return'';
+  return raw
+    .replace(/[\s_]+/g,'-')
+    .replace(/[^a-z0-9-]/g,'')
+    .replace(/-{2,}/g,'-')
+    .replace(/^-+|-+$/g,'');
+}
+
+function _buildSkillCommandEntry(skill){
+  const skillName=String(skill&&skill.name||'').trim();
+  const slug=_skillCommandSlug(skillName);
+  if(!slug) return null;
+  if(COMMANDS.some(c=>c.name===slug)) return null; // built-ins win on collisions
+  return {
+    name:slug,
+    desc:String(skill&&skill.description||'').trim()||t('slash_skill_desc'),
+    source:'skill',
+    skillName,
+  };
+}
+
+async function loadSkillCommands(force=false){
+  if(_skillCommandCacheReady&&!force) return _skillCommandCache;
+  if(_skillCommandLoadPromise&&!force) return _skillCommandLoadPromise;
+  _skillCommandLoadPromise=(async()=>{
+    try{
+      const data=await api('/api/skills');
+      const deduped=new Map();
+      for(const skill of (data&&data.skills)||[]){
+        const entry=_buildSkillCommandEntry(skill);
+        if(entry&&!deduped.has(entry.name)) deduped.set(entry.name, entry);
+      }
+      _skillCommandCache=Array.from(deduped.values()).sort((a,b)=>a.name.localeCompare(b.name));
+    }catch(_){
+      _skillCommandCache=[];
+    }finally{
+      _skillCommandCacheReady=true;
+      _skillCommandLoadPromise=null;
+    }
+    return _skillCommandCache;
+  })();
+  return _skillCommandLoadPromise;
+}
+
+function refreshSlashCommandDropdown(){
+  const ta=$('msg');
+  if(!ta) return;
+  const text=ta.value||'';
+  if(!text.startsWith('/')||text.indexOf('\n')!==-1){
+    hideCmdDropdown();
+    return;
+  }
+  const matches=getMatchingCommands(text.slice(1));
+  if(matches.length) showCmdDropdown(matches);
+  else hideCmdDropdown();
+}
+
+function ensureSkillCommandsLoadedForAutocomplete(){
+  if(_skillCommandCacheReady||_skillCommandLoadPromise) return;
+  loadSkillCommands().then(()=>{
+    refreshSlashCommandDropdown();
+  });
+}
+
 function getMatchingCommands(prefix){
   const q=prefix.toLowerCase();
-  return COMMANDS.filter(c=>c.name.startsWith(q));
+  const matches=COMMANDS
+    .filter(c=>c.name.startsWith(q))
+    .map(c=>({...c,source:'builtin'}));
+  const seen=new Set(matches.map(c=>c.name));
+  for(const skill of _skillCommandCache){
+    if(!skill.name.startsWith(q)||seen.has(skill.name)) continue;
+    matches.push(skill);
+  }
+  return matches;
 }
 
 function _compressionAnchorMessageKey(m){
@@ -384,11 +462,22 @@ function showCmdDropdown(matches){
     const el=document.createElement('div');
     el.className='cmd-item';
     el.dataset.idx=i;
+    if(c.source==='skill') el.classList.add('cmd-item-skill');
     const usage=c.arg?` <span class="cmd-item-arg">${esc(c.arg)}</span>`:'';
-    el.innerHTML=`<div class="cmd-item-name">/${esc(c.name)}${usage}</div><div class="cmd-item-desc">${esc(c.desc)}</div>`;
+    const badge=c.source==='skill'
+      ? `<span class="cmd-item-badge cmd-item-badge-skill">${esc(t('slash_skill_badge'))}</span>`
+      : '';
+    el.innerHTML=`
+      <div class="cmd-item-head">
+        <div class="cmd-item-name">/${esc(c.name)}${usage}</div>
+        ${badge}
+      </div>
+      <div class="cmd-item-desc">${esc(c.desc)}</div>
+    `;
     el.onmousedown=(e)=>{
       e.preventDefault();
-      $('msg').value='/'+c.name+(c.arg?' ':'');
+      const needsTrailingSpace=!!(c.arg||c.source==='skill');
+      $('msg').value='/'+c.name+(needsTrailingSpace?' ':'');
       hideCmdDropdown();
       $('msg').focus();
     };

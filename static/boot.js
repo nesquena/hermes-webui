@@ -434,6 +434,7 @@ $('msg').addEventListener('input',()=>{
     const prefix=text.slice(1);
     const matches=getMatchingCommands(prefix);
     if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
+    if(typeof ensureSkillCommandsLoadedForAutocomplete==='function') ensureSkillCommandsLoadedForAutocomplete();
   } else {
     hideCmdDropdown();
   }
