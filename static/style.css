@@ -829,9 +829,12 @@
 .cmd-dropdown.open{display:block;}
 .cmd-item{padding:8px 14px;cursor:pointer;transition:background .12s;}
 .cmd-item:hover,.cmd-item.selected{background:rgba(255,255,255,.07);}
+.cmd-item-head{display:flex;align-items:center;justify-content:space-between;gap:10px;}
 .cmd-item-name{font-size:13px;color:var(--text);font-weight:500;}
 .cmd-item-arg{color:var(--muted);font-weight:400;font-style:italic;}
 .cmd-item-desc{font-size:11px;color:var(--muted);margin-top:1px;}
+.cmd-item-badge{flex-shrink:0;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:2px 6px;border-radius:999px;border:1px solid var(--border2);color:var(--muted);background:var(--hover-bg);}
+.cmd-item-badge-skill{color:var(--accent-text);background:var(--accent-bg);border-color:var(--accent-bg-strong);}
 .ws-action-btn.danger:hover{background:rgba(239,83,80,.1);color:var(--error);border-color:var(--error);}
 .ws-add-row{display:flex;gap:8px;align-items:center;padding:10px 0 4px;}
 /* ── Message action buttons (copy, edit, retry) ── */

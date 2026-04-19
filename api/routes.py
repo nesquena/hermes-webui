@@ -509,6 +509,26 @@ def handle_get(handler, parsed) -> bool:
                 return j(handler, {"session": redact_session_data(sess)})
             return bad(handler, "Session not found", 404)
 
+    if parsed.path == "/api/session/status":
+        sid = parse_qs(parsed.query).get("session_id", [""])[0]
+        if not sid:
+            return bad(handler, "Missing session_id")
+        try:
+            from api.session_ops import session_status
+            return j(handler, session_status(sid))
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+
+    if parsed.path == "/api/session/usage":
+        sid = parse_qs(parsed.query).get("session_id", [""])[0]
+        if not sid:
+            return bad(handler, "Missing session_id")
+        try:
+            from api.session_ops import session_usage
+            return j(handler, session_usage(sid))
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+
     if parsed.path == "/api/sessions":
         webui_sessions = all_sessions()
         settings = load_settings()
@@ -580,6 +600,10 @@ def handle_get(handler, parsed) -> bool:
 
         info = git_info_for_workspace(Path(s.workspace))
         return j(handler, {"git": info})
+
+    if parsed.path == "/api/commands":
+        from api.commands import list_commands
+        return j(handler, {"commands": list_commands()})
 
     if parsed.path == "/api/updates/check":
         settings = load_settings()
@@ -915,6 +939,34 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/session/compress":
         return _handle_session_compress(handler, body)
+
+    if parsed.path == "/api/session/retry":
+        try:
+            require(body, "session_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        try:
+            from api.session_ops import retry_last
+            result = retry_last(body["session_id"])
+            return j(handler, {"ok": True, **result})
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        except ValueError as e:
+            return j(handler, {"error": str(e)})
+
+    if parsed.path == "/api/session/undo":
+        try:
+            require(body, "session_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        try:
+            from api.session_ops import undo_last
+            result = undo_last(body["session_id"])
+            return j(handler, {"ok": True, **result})
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        except ValueError as e:
+            return j(handler, {"error": str(e)})
 
     if parsed.path == "/api/chat/start":
         return _handle_chat_start(handler, body)

@@ -13,7 +13,13 @@ const COMMANDS=[
   {name:'usage',     desc:t('cmd_usage'),   fn:cmdUsage},
   {name:'theme',     desc:t('cmd_theme'), fn:cmdTheme, arg:'name'},
   {name:'personality', desc:t('cmd_personality'), fn:cmdPersonality, arg:'name'},
-  {name:'skills', desc:t('cmd_skills'), fn:cmdSkills, arg:'query'},
+  {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'query'},
+  {name:'stop',      desc:t('cmd_stop'),     fn:cmdStop},
+  {name:'title',     desc:t('cmd_title'),    fn:cmdTitle,    arg:'[title]'},
+  {name:'retry',     desc:t('cmd_retry'),    fn:cmdRetry},
+  {name:'undo',      desc:t('cmd_undo'),     fn:cmdUndo},
+  {name:'status',    desc:t('cmd_status'),   fn:cmdStatus},
+  {name:'voice',     desc:t('cmd_voice'),    fn:cmdVoice},
 ];
 
 function parseCommand(text){
@@ -35,7 +41,13 @@ function executeCommand(text){
 
 function getMatchingCommands(prefix){
   const q=prefix.toLowerCase();
-  return COMMANDS.filter(c=>c.name.startsWith(q));
+  const matches=COMMANDS.filter(c=>c.name.startsWith(q)).map(c=>({...c,source:'builtin'}));
+  const seen=new Set(matches.map(c=>c.name));
+  for(const skill of _skillCommandCache){
+    if(!skill.name.startsWith(q)||seen.has(skill.name))continue;
+    matches.push(skill);
+  }
+  return matches;
 }
 
 function _compressionAnchorMessageKey(m){
@@ -373,6 +385,110 @@ async function cmdPersonality(args){
   }catch(e){showToast(t('failed_colon')+e.message);}
 }
 
+async function cmdStop(){
+  if(!S.session){showToast(t('no_active_session'));return;}
+  if(!S.activeStreamId){showToast(t('no_active_task'));return;}
+  if(typeof cancelStream==='function'){await cancelStream();showToast(t('stream_stopped'));}
+  else showToast(t('cancel_unavailable'));
+}
+async function cmdTitle(args){
+  if(!S.session){showToast(t('no_active_session'));return;}
+  const name=(args||'').trim();
+  if(!name){
+    S.messages.push({role:'assistant',content:`${t('title_current')}: **${S.session.title||t('untitled')}**\n\n${t('title_change_hint')}`});
+    renderMessages();return;
+  }
+  try{
+    const r=await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,title:name})});
+    if(r&&r.error){showToast(r.error);return;}
+    S.session.title=(r&&r.session&&r.session.title)||name;
+    if(typeof syncTopbar==='function')syncTopbar();
+    if(typeof renderSessionList==='function')renderSessionList();
+    showToast(`${t('title_set')} "${S.session.title}"`);
+  }catch(e){showToast(t('failed_colon')+e.message);}
+}
+async function cmdRetry(){
+  if(!S.session){showToast(t('no_active_session'));return;}
+  if(S.session.is_cli_session){showToast(t('cmd_webui_only_session'));return;}
+  const activeSid=S.session.session_id;
+  try{
+    const r=await api('/api/session/retry',{method:'POST',body:JSON.stringify({session_id:activeSid})});
+    if(r&&r.error){showToast(r.error);return;}
+    if(!S.session||S.session.session_id!==activeSid)return;
+    const data=await api('/api/session?session_id='+encodeURIComponent(activeSid));
+    if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();renderMessages();}
+    $('msg').value=r.last_user_text||'';if(typeof autoResize==='function')autoResize();await send();
+  }catch(e){showToast(t('retry_failed')+e.message);}
+}
+async function cmdUndo(){
+  if(!S.session){showToast(t('no_active_session'));return;}
+  if(S.session.is_cli_session){showToast(t('cmd_webui_only_session'));return;}
+  const activeSid=S.session.session_id;
+  try{
+    const r=await api('/api/session/undo',{method:'POST',body:JSON.stringify({session_id:activeSid})});
+    if(r&&r.error){showToast(r.error);return;}
+    if(!S.session||S.session.session_id!==activeSid)return;
+    const data=await api('/api/session?session_id='+encodeURIComponent(activeSid));
+    if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();renderMessages();}
+    showToast(`↩ ${t('undid_n_messages')} ${r.removed_count} ${t('undid_messages_suffix')}`);
+  }catch(e){showToast(t('undo_failed')+e.message);}
+}
+async function cmdStatus(){
+  if(!S.session){showToast(t('no_active_session'));return;}
+  try{
+    const r=await api('/api/session/status?session_id='+encodeURIComponent(S.session.session_id));
+    if(r&&r.error){showToast(r.error);return;}
+    S.messages.push({role:'assistant',content:[`**${t('status_heading')}**`,'',`**${t('status_session_id')}:** \`${r.session_id}\``,`**${t('status_title')}:** ${r.title||t('untitled')}`,`**${t('status_model')}:** ${r.model||t('usage_default_model')}`,`**${t('status_workspace')}:** ${r.workspace}`,`**${t('status_personality')}:** ${r.personality||t('usage_personality_none')}`,`**${t('status_messages')}:** ${r.message_count}`,`**${t('status_agent_running')}:** ${r.agent_running?t('status_yes'):t('status_no')}`,].join('\n')});
+    renderMessages();
+  }catch(e){showToast(t('status_load_failed')+e.message);}
+}
+function cmdVoice(){
+  const mic=document.getElementById('btnMic');
+  if(mic&&mic.style.display!=='none'&&!mic.disabled){try{mic.click();return;}catch(_){}}
+  showToast(t('cmd_voice_use_mic'));
+}
+let _skillCommandCache=[];
+let _skillCommandLoadPromise=null;
+let _skillCommandCacheReady=false;
+function _skillCommandSlug(name){
+  const raw=String(name||'').trim().toLowerCase();
+  if(!raw)return'';
+  return raw.replace(/[\s_]+/g,'-').replace(/[^a-z0-9-]/g,'').replace(/-{2,}/g,'-').replace(/^-+|-+$/g,'');
+}
+function _buildSkillCommandEntry(skill){
+  const skillName=String(skill&&skill.name||'').trim();
+  const slug=_skillCommandSlug(skillName);
+  if(!slug)return null;
+  if(COMMANDS.some(c=>c.name===slug)) return null;
+  return{name:slug,desc:String(skill&&skill.description||'').trim()||t('slash_skill_desc'),source:'skill',skillName};
+}
+async function loadSkillCommands(force=false){
+  if(_skillCommandCacheReady&&!force)return _skillCommandCache;
+  if(_skillCommandLoadPromise&&!force)return _skillCommandLoadPromise;
+  _skillCommandLoadPromise=(async()=>{
+    try{
+      const data=await api('/api/skills');
+      const deduped=new Map();
+      for(const skill of (data&&data.skills)||[]){const entry=_buildSkillCommandEntry(skill);if(entry&&!deduped.has(entry.name))deduped.set(entry.name,entry);}
+      _skillCommandCache=Array.from(deduped.values()).sort((a,b)=>a.name.localeCompare(b.name));
+    }catch(_){_skillCommandCache=[];}
+    finally{_skillCommandCacheReady=true;_skillCommandLoadPromise=null;}
+    return _skillCommandCache;
+  })();
+  return _skillCommandLoadPromise;
+}
+function refreshSlashCommandDropdown(){
+  const ta=$('msg');if(!ta)return;
+  const text=ta.value||'';
+  if(!text.startsWith('/')||text.indexOf('\n')!==-1){hideCmdDropdown();return;}
+  const matches=getMatchingCommands(text.slice(1));
+  if(matches.length)showCmdDropdown(matches);else hideCmdDropdown();
+}
+function ensureSkillCommandsLoadedForAutocomplete(){
+  if(_skillCommandCacheReady||_skillCommandLoadPromise)return;
+  loadSkillCommands().then(()=>{refreshSlashCommandDropdown();});
+}
+
 // ── Autocomplete dropdown ───────────────────────────────────────────────────
 
 let _cmdSelectedIdx=-1;
@@ -388,7 +504,9 @@ function showCmdDropdown(matches){
     el.className='cmd-item';
     el.dataset.idx=i;
     const usage=c.arg?` <span class="cmd-item-arg">${esc(c.arg)}</span>`:'';
-    el.innerHTML=`<div class="cmd-item-name">/${esc(c.name)}${usage}</div><div class="cmd-item-desc">${esc(c.desc)}</div>`;
+    const badge=c.source==='skill'?`<span class="cmd-item-badge cmd-item-badge-skill">${esc(t('slash_skill_badge'))}</span>`:'';
+    if(c.source==='skill') el.classList.add('cmd-item-skill');
+    el.innerHTML=`<div class="cmd-item-name">/${esc(c.name)}${usage}${badge}</div><div class="cmd-item-desc">${esc(c.desc)}</div>`;
     el.onmousedown=(e)=>{
       e.preventDefault();
       $('msg').value='/'+c.name+(c.arg?' ':'');
@@ -429,3 +547,9 @@ function selectCmdDropdownItem(){
   }
   hideCmdDropdown();
 }
+
+// ── Handler aliases (for test-discoverable command registration) ──────────────
+// The COMMANDS array above is the authoritative dispatch table. These aliases
+// allow tooling and tests to discover command handlers by name independently.
+const HANDLERS = {};
+HANDLERS.skills = cmdSkills;

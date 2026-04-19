@@ -13,6 +13,12 @@
 ### Added
 - **Searchable model picker** — the model dropdown now has a live search input at the top. Type any part of a model name or ID to filter the list instantly; provider group headers (Anthropic, OpenAI, OpenRouter, etc.) remain visible in filtered results. Includes a clear button, Escape-to-close support, and a "No models found" empty state. i18n strings added for English, Spanish, and zh-CN. (PR #659 by @mmartial)
 
+## [v0.50.91] — 2026-04-19
+
+### Added
+- **Slash command parity with hermes-agent** — `/retry`, `/undo`, `/stop`, `/title`, `/status`, `/voice` commands now work in the Web UI, matching gateway behaviour. New `GET /api/commands` endpoint and `api/session_ops.py` backend. (PR #618 by @renheqiang)
+- **Skills appear in `/` autocomplete** — the composer slash-command dropdown now surfaces Hermes skills from `/api/skills`. Skill entries show a `Skill` badge and are ranked below built-ins on collisions. (PR #701 by @franksong2702)
+
 ## [v0.50.90] — 2026-04-19
 
 ### Fixed

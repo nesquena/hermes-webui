@@ -725,22 +725,24 @@ def test_upload_error_has_no_trace_field():
 # ── #248: /skills slash command ───────────────────────────────────────────────
 
 def test_skills_slash_command_defined():
-    """#248: /skills command must be registered in COMMANDS and implemented.
-    Verifies the command entry, function definition, and i18n key are all present.
+    """#248: /skills slash command must be wired up.
+
+    Pre-Task 2 (slash-command-parity batch 1) this checked for the
+    hardcoded ``name:'skills'`` entry in the COMMANDS array. The COMMANDS
+    array is now sourced from hermes-agent's ``COMMAND_REGISTRY`` at boot
+    via ``GET /api/commands``, so the literal string is gone. The handler
+    must still exist and be registered, otherwise ``/skills`` would fall
+    through to \"not yet supported\".
     """
     src = (REPO_ROOT / "static/commands.js").read_text()
 
-    # 1. 'skills' must appear in the COMMANDS array definition
-    assert "name:'skills'" in src or 'name:"skills"' in src, \
-        "COMMANDS array must include an entry with name:'skills'"
+    # 1. cmdSkills function must be defined
+    assert "async function cmdSkills" in src or "function cmdSkills" in src, \
+        "cmdSkills function missing from commands.js"
 
-    # 2. cmdSkills function must be defined
-    assert "function cmdSkills" in src, \
-        "cmdSkills function must be defined in commands.js"
-
-    # 3. i18n key cmd_skills must be referenced (wired to COMMANDS entry)
-    assert "cmd_skills" in src, \
-        "cmd_skills i18n key must be referenced in commands.js"
+    # 2. HANDLERS.skills must be registered to dispatch /skills to cmdSkills
+    assert "HANDLERS.skills" in src, \
+        "HANDLERS.skills registration missing from commands.js"
 
 
 def test_reload_recovery_persists_durable_inflight_state(cleanup_test_sessions):
