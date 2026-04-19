@@ -1770,6 +1770,8 @@ body.bubble-layout .msg-row + .msg-row[data-role="user"] { border-top: none; pad
 /* ── Widths: topbar title row and chat body share one content column ── */
 @media (min-width: 1400px) { :root { --content-column-max: calc(var(--msg-max) + 40px); } }
 @media (min-width: 1800px) { :root { --content-column-max: calc(var(--msg-max) + 80px); } }
+@media (min-width: 1400px) { .messages-inner { max-width: 1100px; } }
+@media (min-width: 1800px) { .messages-inner { max-width: 1200px; } }
 
 @media (max-width: 700px) {
   .msg-role { margin-bottom: 4px; }
