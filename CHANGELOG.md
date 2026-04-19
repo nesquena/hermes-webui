@@ -2,6 +2,7 @@
 
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 ## [v0.50.102] — 2026-04-20
 
 ### Fixed
@@ -18,6 +19,12 @@
 ### Fixed
 - **Agent image URLs rewritten to actual server base** — when an agent emits a `MEDIA:http://localhost:8787/api/media?path=...` URL, the WebUI now rewrites the `localhost`/`127.0.0.1` host to the page's base URL (`document.baseURI`) before using it as an `<img>` `src`. This fixes broken images for all remote users (VPN, Docker, deployed servers) who cannot reach the server's localhost address from their browser, and preserves the subpath prefix (e.g. `/hermes/`) under reverse-proxy mounts. (fix #642)
 >>>>>>> e4d1bf8 (fix(ui): rewrite localhost image URLs to window.location.origin for remote access)
+=======
+## [v0.50.105] — 2026-04-20
+
+### Fixed
+- **Profile deletion warning now leads with destructive impact** — the confirmation dialog message now reads: "All sessions, config, skills, and memory for this profile will be permanently deleted. This cannot be undone." Updated across all 6 supported locales (en, es, de, zh, zh-Hant, ru). The `focusCancel: true` option was already present in `deleteProfile()`, ensuring the Cancel button receives default focus for safety. (Fixes #637)
+>>>>>>> 3fff167 (fix(ux): strengthen profile deletion warning to clarify irreversibility)
 
 ## [v0.50.101] — 2026-04-20
 

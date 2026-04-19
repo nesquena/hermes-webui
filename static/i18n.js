@@ -464,7 +464,7 @@ const LOCALES = {
     profile_base_url_rule: 'Base URL must start with http:// or https://',
     profile_created: (name) => `Profile created: ${name}`,
     profile_delete_confirm_title: (name) => `Delete profile "${name}"?`,
-    profile_delete_confirm_message: 'This removes all config, skills, memory, and sessions for this profile.',
+    profile_delete_confirm_message: 'All sessions, config, skills, and memory for this profile will be permanently deleted. This cannot be undone.',
     profile_deleted: (name) => `Profile deleted: ${name}`,
     active_conversation_none: 'No active conversation selected.',
     active_conversation_meta: (title, count) => `${title} · ${count} message${count === 1 ? '' : 's'}`,
@@ -914,7 +914,7 @@ const LOCALES = {
     profile_base_url_rule: 'Базовый URL должен начинаться с http:// или https://',
     profile_created: (name) => `Профиль создан: ${name}`,
     profile_delete_confirm_title: (name) => `Удалить профиль «${name}»?`,
-    profile_delete_confirm_message: 'Это удалит всю конфигурацию, навыки, память и сеансы этого профиля.',
+    profile_delete_confirm_message: 'Все сеансы, конфигурация, навыки и память этого профиля будут удалены безвозвратно. Это действие невозможно отменить.',
     profile_deleted: (name) => `Профиль удалён: ${name}`,
     active_conversation_none: 'Активная беседа не выбрана.',
     active_conversation_meta: (title, count) => {
@@ -1348,7 +1348,7 @@ const LOCALES = {
     profile_base_url_rule: 'Base URL must start with http:// or https://',
     profile_created: (name) => `Profile created: ${name}`,
     profile_delete_confirm_title: (name) => `Delete profile "${name}"?`,
-    profile_delete_confirm_message: 'This removes all config, skills, memory, and sessions for this profile.',
+    profile_delete_confirm_message: 'Todas las sesiones, configuración, habilidades y memoria de este perfil se eliminarán de forma permanente. Esta acción no se puede deshacer.',
     profile_deleted: (name) => `Profile deleted: ${name}`,
     active_conversation_none: 'No active conversation selected.',
     active_conversation_meta: (title, count) => `${title} · ${count} message${count === 1 ? '' : 's'}`,
@@ -1581,6 +1581,7 @@ const LOCALES = {
     onboarding_password_will_replace: 'Wird ersetzt',
     onboarding_password_keep_existing: 'Aktuelles Passwort beibehalten',
     onboarding_password_remains_disabled: 'Bleibt deaktiviert',
+    profile_delete_confirm_message: 'Alle Sitzungen, Konfigurationen, Fähigkeiten und Erinnerungen dieses Profils werden dauerhaft gelöscht. Diese Aktion kann nicht rückgängig gemacht werden.',
   },
 
   zh: {
@@ -1992,7 +1993,7 @@ const LOCALES = {
     profile_base_url_rule: 'Base URL 必须以 http:// 或 https:// 开头',
     profile_created: (name) => `配置档已创建：${name}`,
     profile_delete_confirm_title: (name) => `删除配置档“${name}”？`,
-    profile_delete_confirm_message: '这将删除该配置档的所有配置、技能、记忆和会话。',
+    profile_delete_confirm_message: '该配置档的所有会话、配置、技能和记忆将被永久删除。此操作无法撤销。',
     profile_deleted: (name) => `配置档已删除：${name}`,
     active_conversation_none: '当前未选择活动会话。',
     active_conversation_meta: (title, count) => `${title} · ${count} 条消息`,
@@ -2235,6 +2236,7 @@ const LOCALES = {
     // ui.js
     workspace_desc: '\u8acb\u9078\u64c7\u5de5\u4f5c\u5340\uff0c\u6216\u8f09\u5165\u65b0\u540d\u7a31\u5beb\u4e00\u500b',
     tab_profiles: '\u914d\u7f6e',
+    profile_delete_confirm_message: '\u6b64\u914d\u7f6e\u6a94\u7684\u6240\u6709\u6703\u8a71\u3001\u8a2d\u5b9a\u3001\u6280\u80fd\u548c\u8a18\u61b6\u5c07\u88ab\u6c38\u4e45\u522a\u9664\u3002\u6b64\u64cd\u4f5c\u7121\u6cd5\u64a4\u92b7\u3002',
   },
 };
 
