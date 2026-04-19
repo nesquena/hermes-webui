@@ -197,6 +197,52 @@ _TTS_DEFAULTS = {
     "mistral": {"voice": "sapphire", "model": "voxtral-mini-tts-2603"},
     "gemini": {"model": "gemini-2.5-flash-preview-05-20"},
     "neutts": {"model": "neuphonic/neutts-air-q4-gguf"},
+    "xai": {"model": "grok"},
+}
+
+# Voice catalog per TTS provider
+_TTS_VOICES = {
+    "edge": [
+        {"id": "en-US-AriaNeural", "label": "Aria (US English)"},
+        {"id": "en-GB-SoniaNeural", "label": "Sonia (UK English)"},
+        {"id": "de-DE-KatjaNeural", "label": "Katja (German)"},
+        {"id": "fr-FR-DeniseNeural", "label": "Denise (French)"},
+        {"id": "ja-JP-NanamiNeural", "label": "Nanami (Japanese)"},
+        {"id": "zh-CN-XiaoxiaoNeural", "label": "Xiaoxiao (Mandarin)"},
+    ],
+    "openai": [
+        {"id": "alloy", "label": "Alloy"},
+        {"id": "echo", "label": "Echo"},
+        {"id": "shimmer", "label": "Shimmer"},
+        {"id": "nova", "label": "Nova"},
+        {"id": "fable", "label": "Fable"},
+        {"id": "onyx", "label": "Onyx"},
+    ],
+    "minimax": [
+        {"id": "speech-02-hd", "label": "Speech 02 HD"},
+        {"id": "speech-02", "label": "Speech 02"},
+        {"id": "speech-01", "label": "Speech 01"},
+    ],
+    "mistral": [
+        {"id": "sapphire", "label": "Sapphire"},
+        {"id": "mistral", "label": "Mistral"},
+        {"id": "echo", "label": "Echo"},
+        {"id": "alloy", "label": "Alloy"},
+    ],
+    "xai": [
+        {"id": "grok", "label": "Grok"},
+    ],
+    "gemini": [
+        {"id": "gemini-2.5-flash-preview-05-20", "label": "Gemini 2.5 Flash (default)"},
+    ],
+    "neutts": [
+        {"id": "neuphonic/neutts-air-q4-gguf", "label": "Neutts Air (local GGUF)"},
+    ],
+    "elevenlabs": [
+        # ElevenLabs uses dynamic voice list — show common voices as placeholders
+        {"id": "pNInz6obpgDQGcFmaJgB", "label": "Rachel (Multilingual v2)"},
+        {"id": "EXAVITQu4vr4xnSDxMaL", "label": "Bella (Multilingual v2)"},
+    ],
 }
 
 _VOICE_DEFAULTS = {
@@ -245,44 +291,65 @@ def get_all_settings() -> dict:
 
 
 def _get_tts_settings(cfg: dict, env: dict) -> dict:
-    """Build TTS section with detected key info."""
+    """Build TTS section with voice catalog and per-provider key detection."""
     tts_cfg = cfg.get("tts", {})
     provider = tts_cfg.get("provider", "edge")
-
-    # Detect which env vars are already set
-    detected_keys: dict[str, dict] = {}
-    key_to_tts = {
-        "ELEVENLABS_API_KEY": "elevenlabs",
-        "OPENAI_API_KEY": "openai",
-        "VOICE_TOOLS_OPENAI_KEY": "openai",
-        "MINIMAX_API_KEY": "minimax",
-        "MISTRAL_API_KEY": "mistral",
-        "GEMINI_API_KEY": "gemini",
-        "XAI_API_KEY": "xai",
-    }
-    for var, tts_provider in key_to_tts.items():
-        if env.get(var):
-            source = "coding_plan" if var == "MINIMAX_API_KEY" else "standalone"
-            detected_keys[var] = {"set": True, "source": source, "tts_provider": tts_provider}
-
-    # Determine if current model provider shares a key with TTS
     model_provider = cfg.get("model", {}).get("provider", "")
-    key_status = "none"  # no key detected
-    if "MINIMAX_API_KEY" in detected_keys and model_provider == "minimax":
-        key_status = "shared"
-    elif "OPENAI_API_KEY" in detected_keys or "VOICE_TOOLS_OPENAI_KEY" in detected_keys:
-        key_status = "separate"
-    elif "ELEVENLABS_API_KEY" in detected_keys:
-        key_status = "standalone"
-    elif "GEMINI_API_KEY" in detected_keys:
-        key_status = "standalone"
-    elif "MISTRAL_API_KEY" in detected_keys:
-        key_status = "standalone"
-    elif "XAI_API_KEY" in detected_keys:
-        key_status = "standalone"
+
+    # Per-provider env var → TTS provider mapping
+    _KEY_MAP = [
+        ("ELEVENLABS_API_KEY", "elevenlabs"),
+        ("VOICE_TOOLS_OPENAI_KEY", "openai"),
+        ("OPENAI_API_KEY", "openai"),
+        ("MINIMAX_API_KEY", "minimax"),
+        ("MISTRAL_API_KEY", "mistral"),
+        ("GEMINI_API_KEY", "gemini"),
+        ("XAI_API_KEY", "xai"),
+    ]
+
+    # detected_keys — keyed by TTS provider for easy frontend access
+    detected_keys: dict[str, dict] = {}
+    for var, tts_p in _KEY_MAP:
+        if env.get(var):
+            # Determine if this key is also the model provider's key
+            model_key_vars = {
+                "minimax": "MINIMAX_API_KEY",
+                "openai": "OPENAI_API_KEY",
+                "openrouter": "OPENAI_API_KEY",
+                "google": "GOOGLE_API_KEY",
+                "xai": "XAI_API_KEY",
+                "mistral": "MISTRAL_API_KEY",
+                "deepseek": "DEEPSEEK_API_KEY",
+            }
+            is_shared = (
+                model_provider == tts_p
+                and model_key_vars.get(model_provider) == var
+            )
+            source = "shared_with_model" if is_shared else "standalone"
+            # Mask the key for display
+            raw = env.get(var, "")
+            masked = raw[:4] + "****" + raw[-4:] if len(raw) > 8 else raw[:3] + "****"
+            detected_keys[tts_p] = {
+                "env_var": var,
+                "set": True,
+                "source": source,
+                "masked": masked,
+            }
+
+    # key_status — relationship between selected TTS provider and its key
+    key_status = "none"
+    if provider in detected_keys:
+        dk = detected_keys[provider]
+        if dk["source"] == "shared_with_model":
+            key_status = "shared"
+        elif provider == "openai" and "VOICE_TOOLS_OPENAI_KEY" in [d["env_var"] for d in detected_keys.values()]:
+            key_status = "separate"
+        else:
+            key_status = "standalone"
 
     return {
         "provider": provider,
+        "voices": _TTS_VOICES.get(provider, []),
         "config": {k: tts_cfg.get(k, v) if not isinstance(v, dict) else tts_cfg.get(k, v) for k, v in _TTS_DEFAULTS.items()},
         "detected_keys": detected_keys,
         "key_status": key_status,
