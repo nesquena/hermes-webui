@@ -146,6 +146,7 @@ function _setSidebarPanelMode(mode){
   _sidebarPanelMode=mode==='closed'?'closed':'open';
   document.documentElement.dataset.sidebarPanel=_sidebarPanelMode;
   localStorage.setItem('hermes-webui-sidebar-panel', _sidebarPanelMode);
+  if(!_isCompactSidebarViewport()) sidebar.classList.remove('mobile-open');
   layout.classList.toggle('sidebar-collapsed', _sidebarPanelMode==='closed');
   syncSidebarPanelUI();
 }
@@ -158,18 +159,26 @@ function syncSidebarPanelUI(){
   const isOpen=isCompact ? sidebar.classList.contains('mobile-open') : _sidebarPanelMode!=='closed';
   layout.classList.toggle('sidebar-collapsed', !isCompact && _sidebarPanelMode==='closed');
   if(toggleBtn){
+    toggleBtn.hidden=!isCompact && _sidebarPanelMode!=='closed';
     toggleBtn.classList.toggle('active', isOpen);
     toggleBtn.setAttribute('aria-pressed', isOpen?'true':'false');
     toggleBtn.title=isOpen?'Hide sidebar':'Show sidebar';
+    toggleBtn.setAttribute('aria-label', isOpen?'Hide sidebar':'Show sidebar');
   }
   if(collapseBtn){
     collapseBtn.title=isCompact?'Close sidebar':'Hide sidebar';
+    collapseBtn.setAttribute('aria-label', isCompact?'Close sidebar':'Hide sidebar');
   }
 }
 
 function toggleSidebarPanel(force){
-  if(_isCompactSidebarViewport()){
-    toggleMobileSidebar();
+  const isCompact=_isCompactSidebarViewport();
+  const {sidebar}= _sidebarPanelEls();
+  if(!sidebar)return;
+  if(isCompact){
+    const nextOpen=typeof force==='boolean' ? force : !sidebar.classList.contains('mobile-open');
+    if(nextOpen) openSidebarOverlay();
+    else closeMobileSidebar();
     return;
   }
   const currentlyOpen=_sidebarPanelMode!=='closed';
@@ -178,6 +187,8 @@ function toggleSidebarPanel(force){
 }
 
 function closeSidebarPanel(){
+  const {sidebar}= _sidebarPanelEls();
+  if(!sidebar)return;
   if(_isCompactSidebarViewport()){
     closeMobileSidebar();
     return;
@@ -185,13 +196,21 @@ function closeSidebarPanel(){
   _setSidebarPanelMode('closed');
 }
 
-function toggleMobileSidebar(){
+function openSidebarOverlay(){
   const sidebar=document.querySelector('.sidebar');
   const overlay=$('mobileOverlay');
   if(!sidebar)return;
+  sidebar.classList.add('mobile-open');
+  if(overlay)overlay.classList.add('visible');
+  syncSidebarPanelUI();
+}
+
+function toggleMobileSidebar(){
+  const sidebar=document.querySelector('.sidebar');
+  if(!sidebar)return;
   const isOpen=sidebar.classList.contains('mobile-open');
   if(isOpen){closeMobileSidebar();}
-  else{sidebar.classList.add('mobile-open');if(overlay)overlay.classList.add('visible');syncSidebarPanelUI();}
+  else{openSidebarOverlay();}
 }
 function closeMobileSidebar(){
   const sidebar=document.querySelector('.sidebar');

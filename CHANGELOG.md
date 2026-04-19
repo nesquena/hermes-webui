@@ -3,7 +3,7 @@
 ## [v0.50.97] — 2026-04-19
 
 ### Added
-- **Left sidebar can now be collapsed on desktop and reopened from the top bar** — the session/navigation sidebar now has a dedicated hide button, remembers its collapsed state across reloads, and exposes a matching top-bar toggle so narrow desktop layouts can reclaim more space without losing access to navigation. (Closes #431)
+- **Left sidebar desktop collapse now uses a cleaner pull-out interaction** — the hide control now lives inline with the sidebar icon row instead of taking its own header line, while the reopen control moves to the top-left of the chat header. When the desktop sidebar is collapsed, tapping that top-left control pulls the sidebar back out as an overlay and clicking the scrim closes it again, reusing the mobile-style interaction without wasting chat width. (Closes #431)
 
 ## [v0.50.96] — 2026-04-19
 
