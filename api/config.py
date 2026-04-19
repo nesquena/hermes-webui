@@ -633,7 +633,6 @@ _PROVIDER_MODELS = {
         {"id": "alibaba/qwen3-coder", "label": "Qwen3 Coder (Alibaba)"},
         {"id": "alibaba/qwen3.6-plus", "label": "Qwen3.6 Plus (Alibaba)"},
     ],
-    ],
     # Ollama — prefix used in OpenRouter model IDs (ollama/...)
     "ollama": [
         {"id": "ollama/llama-5-pro", "label": "LLaMA 5 Pro (Ollama)"},
