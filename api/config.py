@@ -470,7 +470,6 @@ _PROVIDER_DISPLAY = {
     "deepseek": "DeepSeek",
     "minimax": "MiniMax",
     "google": "Google",
-    "meta-llama": "Meta Llama",
     "huggingface": "HuggingFace",
     "alibaba": "Alibaba",
     "ollama": "Ollama",
@@ -634,10 +633,6 @@ _PROVIDER_MODELS = {
         {"id": "alibaba/qwen3-coder", "label": "Qwen3 Coder (Alibaba)"},
         {"id": "alibaba/qwen3.6-plus", "label": "Qwen3.6 Plus (Alibaba)"},
     ],
-    # Meta LLaMA — prefix used in OpenRouter model IDs (meta-llama/...)
-    "meta-llama": [
-        {"id": "meta-llama/llama-5-pro", "label": "LLaMA 5 Pro"},
-        {"id": "meta-llama/llama-5-ultra", "label": "LLaMA 5 Ultra"},
     ],
     # Ollama — prefix used in OpenRouter model IDs (ollama/...)
     "ollama": [
@@ -882,7 +877,6 @@ def get_available_models() -> dict:
             "DASHSCOPE_API_KEY",
             "XIAOMI_API_KEY",
             "KILOCODE_API_KEY",
-            "METALLAMA_API_KEY",
         ):
             val = os.getenv(k)
             if val:
@@ -919,8 +913,6 @@ def get_available_models() -> dict:
             detected_providers.add("xiaomi")
         if all_env.get("KILOCODE_API_KEY"):
             detected_providers.add("kilocode")
-        if all_env.get("METALLAMA_API_KEY"):
-            detected_providers.add("meta-llama")
 
     # 3. Fetch models from custom endpoint if base_url is configured
     auto_detected_models = []

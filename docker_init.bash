@@ -66,7 +66,7 @@ fi
 # volume may be owned by the agent container's UID — detect from there first.
 if [ -z "${WANTED_UID+x}" ] || [ "${WANTED_UID}" = "1024" ]; then
   # Priority 1: hermes-home shared volume — covers two-container Zeabur/Compose setups (#668)
-  for _probe_dir in "/home/hermeswebui/.hermes" "$HERMES_HOME" "/opt/data"; do
+  for _probe_dir in "/opt/hermes" "$HERMES_HOME" "/opt/data"; do
     if [ -d "$_probe_dir" ]; then
       _detected_uid=$(stat -c '%u' "$_probe_dir" 2>/dev/null || echo "")
       if [ -n "$_detected_uid" ] && [ "$_detected_uid" != "0" ]; then
@@ -98,7 +98,7 @@ fi
 # Auto-detect GID from mounted volumes to match (#569, #668)
 if [ -z "${WANTED_GID+x}" ] || [ "${WANTED_GID}" = "1024" ]; then
   # Priority 1: hermes-home shared volume
-  for _probe_dir in "/home/hermeswebui/.hermes" "$HERMES_HOME" "/opt/data"; do
+  for _probe_dir in "/opt/hermes" "$HERMES_HOME" "/opt/data"; do
     if [ -d "$_probe_dir" ]; then
       _detected_gid=$(stat -c '%g' "$_probe_dir" 2>/dev/null || echo "")
       if [ -n "$_detected_gid" ] && [ "$_detected_gid" != "0" ]; then
@@ -190,7 +190,7 @@ if [ "A${whoami}" == "Ahermeswebuitoo" ]; then
   # per usermod manual: "You must make certain that the named user is not executing any processes when this command is being executed"
   sudo groupmod -o -g ${WANTED_GID} hermeswebui || error_exit "Failed to set GID of hermeswebui user"
   sudo usermod -o -u ${WANTED_UID} hermeswebui || error_exit "Failed to set UID of hermeswebui user"
-  sudo chown -R ${WANTED_UID}:${WANTED_GID} /home/hermeswebui || error_exit "Failed to set owner of /home/hermeswebui"
+  sudo chown -R ${WANTED_UID}:${WANTED_GID} /opt/hermes || error_exit "Failed to set owner of /opt/hermes"
   save_env /tmp/hermeswebuitoo_env.txt  
   # restart the script as hermeswebui set with the correct UID/GID this time
   echo "-- Restarting as hermeswebui user with UID ${WANTED_UID} GID ${WANTED_GID}"
@@ -228,7 +228,7 @@ rm -f $it || error_exit "Failed to delete test file in /app"
 
 echo ""; echo "== Checking required environment variables for hermes-webui"
 
-echo ""; echo "-- HERMES_WEBUI_VERSION: Where to store sessions, workspaces, and other state (default: ~/.hermes/webui-mvp)"
+echo ""; echo "-- HERMES_WEBUI_VERSION: Where to store sessions, workspaces, and other state (default: /opt/hermes/webui-mvp)"
 if [ -z "${HERMES_WEBUI_STATE_DIR+x}" ]; then error_exit "HERMES_WEBUI_STATE_DIR not set"; fi; 
 echo "-- HERMES_WEBUI_STATE_DIR: $HERMES_WEBUI_STATE_DIR"
 if [ ! -d "$HERMES_WEBUI_STATE_DIR" ]; then mkdir -p $HERMES_WEBUI_STATE_DIR || error_exit "Failed to create state directory at $HERMES_WEBUI_STATE_DIR"; fi
@@ -257,7 +257,7 @@ fi
 echo ""; echo "==================="
 echo ""; echo "== Installing uv and creating a new virtual environment for hermes-webui"
 
-export PATH="/home/hermeswebui/.local/bin/:$PATH"
+export PATH="/opt/hermes/.local/bin/:$PATH"
 if command -v uv &>/dev/null; then
   echo "-- uv already installed ($(uv --version)), skipping download"
 else
@@ -294,11 +294,11 @@ else
   test -x /app/venv/bin/pip
 
   echo ""; echo "== Adding hermes-agent's pyproject.toml base dependencies to the virtual environment"
-  if [ -d "/home/hermeswebui/.hermes/hermes-agent" ] && [ -f "/home/hermeswebui/.hermes/hermes-agent/pyproject.toml" ]; then
-    uv pip install "/home/hermeswebui/.hermes/hermes-agent[honcho]" --trusted-host pypi.org --trusted-host files.pythonhosted.org || error_exit "Failed to install hermes-agent's requirements"
+  if [ -d "/opt/hermes/hermes-agent" ] && [ -f "/opt/hermes/hermes-agent/pyproject.toml" ]; then
+    uv pip install "/opt/hermes/hermes-agent[honcho]" --trusted-host pypi.org --trusted-host files.pythonhosted.org || error_exit "Failed to install hermes-agent's requirements"
   else
     echo ""
-    echo "!! WARNING: hermes-agent source not found at /home/hermeswebui/.hermes/hermes-agent"
+    echo "!! WARNING: hermes-agent source not found at /opt/hermes/hermes-agent"
     echo "!! The WebUI will start with reduced functionality (no model auto-detection,"
     echo "!! no personality routing, no CLI session imports)."
     echo "!! To fix: mount the agent source volume into the container. See:"

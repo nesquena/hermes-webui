@@ -119,13 +119,6 @@ _PROVIDER_SETUP_METADATA: dict[str, dict | None] = {
         "default_base_url": "",
         "models_key": "alibaba",
     },
-    "meta-llama": {
-        "label": "Meta Llama",
-        "env_var": "METALLAMA_API_KEY",
-        "requires_base_url": False,
-        "default_base_url": "",
-        "models_key": "meta-llama",
-    },
     "ollama": {
         "label": "Ollama",
         "env_var": "",  # local provider; no key needed
@@ -381,7 +374,7 @@ def _normalize_model_for_provider(provider: str, model: str) -> str:
     _uses_provider_prefix = {
         "openrouter", "openai-codex", "google", "gemini",
         "deepseek", "huggingface", "kimi-coding", "x-ai",
-        "zai", "meta-llama", "alibaba", "qwen", "mistralai",
+        "zai", "alibaba", "qwen", "mistralai",
     }
     if provider in _uses_provider_prefix and "/" in clean:
         return clean.split("/", 1)[1]
