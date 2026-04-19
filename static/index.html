@@ -455,6 +455,18 @@
             <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><line x1="6" y1="7" x2="6.01" y2="7"/><line x1="6" y1="17" x2="6.01" y2="17"/></svg>
             <span class="settings-tab-title">System</span>
           </button>
+          <button class="settings-tab" id="settingsTabAgent" type="button" role="tab" aria-selected="false" aria-controls="settingsPaneAgent" onclick="switchSettingsSection('agent')">
+            <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a4 4 0 0 1 4 4v1h1a3 3 0 0 1 3 3v1a3 3 0 0 1-3 3h-1v1a4 4 0 0 1-8 0v-1H8a3 3 0 0 1-3-3v-1a3 3 0 0 1 3-3h1V6a4 4 0 0 1 4-4z"/><circle cx="9" cy="10" r="1"/><circle cx="15" cy="10" r="1"/><path d="M9 15c1 1 2.5 2 3 2s2-1 3-2"/></svg>
+            <span class="settings-tab-title">Agent</span>
+          </button>
+          <button class="settings-tab" id="settingsTabProvider" type="button" role="tab" aria-selected="false" aria-controls="settingsPaneProvider" onclick="switchSettingsSection('provider')">
+            <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+            <span class="settings-tab-title">Provider</span>
+          </button>
+          <button class="settings-tab" id="settingsTabTools" type="button" role="tab" aria-selected="false" aria-controls="settingsPaneTools" onclick="switchSettingsSection('tools')">
+            <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+            <span class="settings-tab-title">Tools</span>
+          </button>
         </div>
         <div class="settings-main">
           <div class="settings-pane active" id="settingsPaneConversation" role="tabpanel" aria-labelledby="settingsTabConversation">
@@ -604,6 +616,86 @@
             </div>
             <button class="sm-btn" id="btnDisableAuth" onclick="disableAuth()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:#e8a030;border-color:rgba(232,160,48,.3);display:none" data-i18n="disable_auth">Disable Auth</button>
             <button class="sm-btn" id="btnSignOut" onclick="signOut()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:var(--accent);border-color:rgba(233,69,96,.3);display:none" data-i18n="sign_out">Sign Out</button>
+          </div>
+          <div class="settings-pane" id="settingsPaneAgent" role="tabpanel" aria-labelledby="settingsTabAgent">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title">Agent</div>
+                <div class="settings-section-meta">Agent behavior, timeouts, and tool use.</div>
+              </div>
+            </div>
+            <div class="settings-field">
+              <label for="agentMaxTurns">Max Turns</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Maximum number of conversation turns before the agent stops.</div>
+              <input type="number" id="agentMaxTurns" min="1" max="10000" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+            </div>
+            <div class="settings-field">
+              <label for="agentGatewayTimeout">Gateway Timeout (seconds)</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Seconds to wait for gateway responses.</div>
+              <input type="number" id="agentGatewayTimeout" min="1" max="86400" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+            </div>
+            <div class="settings-field">
+              <label for="agentGatewayTimeoutWarning">Gateway Timeout Warning (seconds)</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Show a warning after this many seconds.</div>
+              <input type="number" id="agentGatewayTimeoutWarning" min="1" max="86400" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+            </div>
+            <div class="settings-field">
+              <label for="agentGatewayNotifyInterval">Gateway Notify Interval (seconds)</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Notify every N seconds during long operations.</div>
+              <input type="number" id="agentGatewayNotifyInterval" min="1" max="86400" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+            </div>
+            <div class="settings-field">
+              <label for="agentRestartDrainTimeout">Restart Drain Timeout (seconds)</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Seconds to wait for drain on restart.</div>
+              <input type="number" id="agentRestartDrainTimeout" min="1" max="3600" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+            </div>
+            <div class="settings-field">
+              <label for="agentToolUseEnforcement">Tool Use Enforcement</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px">When and how the agent may use tools.</div>
+              <select id="agentToolUseEnforcement" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                <option value="auto">auto</option>
+                <option value="required">required</option>
+                <option value="optional">optional</option>
+                <option value="disabled">disabled</option>
+              </select>
+            </div>
+            <div class="settings-field">
+              <label for="delegationReasoningEffort">Reasoning Effort</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px">How much reasoning effort the agent should use. Leave blank for default.</div>
+              <select id="delegationReasoningEffort" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                <option value="">— default —</option>
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+              </select>
+            </div>
+            <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600" data-i18n="settings_save_btn">Save Settings</button>
+          </div>
+          <div class="settings-pane" id="settingsPaneProvider" role="tabpanel" aria-labelledby="settingsTabProvider">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title">Provider</div>
+                <div class="settings-section-meta">API key status and provider configuration.</div>
+              </div>
+            </div>
+            <div id="providerKeysContent">
+              <div class="settings-section-head" style="padding-top:8px">
+                <div class="settings-section-title" style="font-size:14px">Provider API Keys</div>
+              </div>
+              <div id="providerKeysList"></div>
+            </div>
+            <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border2)">
+              <div style="font-size:12px;color:var(--muted)">Use the onboarding wizard (settings icon + prompt) to configure additional providers.</div>
+            </div>
+          </div>
+          <div class="settings-pane" id="settingsPaneTools" role="tabpanel" aria-labelledby="settingsTabTools">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title">Tools</div>
+                <div class="settings-section-meta">Configured MCP toolsets and their tools.</div>
+              </div>
+            </div>
+            <div id="toolsPaneContent"></div>
           </div>
         </div>
       </div>

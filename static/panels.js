@@ -1078,10 +1078,10 @@ let _settingsSkinOnOpen = null; // track skin at open time for discard revert
 let _settingsSection = 'conversation';
 
 function switchSettingsSection(name){
-  const section=(name==='appearance'||name==='preferences'||name==='system')?name:'conversation';
+  const section=(name==='appearance'||name==='preferences'||name==='system'||name==='agent'||name==='provider'||name==='tools')?name:'conversation';
   _settingsSection=section;
-  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',system:'System'};
-  ['conversation','appearance','preferences','system'].forEach(key=>{
+  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',system:'System',agent:'Agent',provider:'Provider',tools:'Tools'};
+  ['conversation','appearance','preferences','system','agent','provider','tools'].forEach(key=>{
     const tab=$('settingsTab'+map[key]);
     const pane=$('settingsPane'+map[key]);
     const active=key===section;
@@ -1197,7 +1197,10 @@ function _markSettingsDirty(){
 
 async function loadSettingsPanel(){
   try{
-    const settings=await api('/api/settings');
+    const [settings, allSettings] = await Promise.all([
+      api('/api/settings'),
+      api('/api/settings/all')
+    ]);
     // Hydrate appearance controls first so a slow /api/models request
     // cannot overwrite an in-progress theme/skin selection.
     const themeSel=$('settingsTheme');
@@ -1273,6 +1276,47 @@ async function loadSettingsPanel(){
     // Password field: always blank (we don't send hash back)
     const pwField=$('settingsPassword');
     if(pwField){pwField.value='';pwField.addEventListener('input',_markSettingsDirty,{once:false});}
+    // Agent pane
+    const agentData = allSettings.agent || {};
+    const maxTurns = $('agentMaxTurns');
+    if(maxTurns) { maxTurns.value = agentData.max_turns || 90; maxTurns.addEventListener('change', _markSettingsDirty, {once:false}); }
+    const gwTimeout = $('agentGatewayTimeout');
+    if(gwTimeout) { gwTimeout.value = agentData.gateway_timeout || 1800; gwTimeout.addEventListener('change', _markSettingsDirty, {once:false}); }
+    const gwWarn = $('agentGatewayTimeoutWarning');
+    if(gwWarn) { gwWarn.value = agentData.gateway_timeout_warning || 900; gwWarn.addEventListener('change', _markSettingsDirty, {once:false}); }
+    const gwNotify = $('agentGatewayNotifyInterval');
+    if(gwNotify) { gwNotify.value = agentData.gateway_notify_interval || 600; gwNotify.addEventListener('change', _markSettingsDirty, {once:false}); }
+    const restartDrain = $('agentRestartDrainTimeout');
+    if(restartDrain) { restartDrain.value = agentData.restart_drain_timeout || 60; restartDrain.addEventListener('change', _markSettingsDirty, {once:false}); }
+    const toolEnforce = $('agentToolUseEnforcement');
+    if(toolEnforce) { toolEnforce.value = agentData.tool_use_enforcement || 'auto'; toolEnforce.addEventListener('change', _markSettingsDirty, {once:false}); }
+    // Delegation pane (reasoning_effort in delegation section)
+    const delegationData = allSettings.delegation || {};
+    const reasoningEffort = $('delegationReasoningEffort');
+    if(reasoningEffort) { reasoningEffort.value = delegationData.reasoning_effort || ''; reasoningEffort.addEventListener('change', _markSettingsDirty, {once:false}); }
+    // Provider pane
+    const providerKeys = allSettings.provider_keys;
+    const providerKeysList = $('providerKeysList');
+    if(providerKeysList){
+      if(!providerKeys || providerKeys.length === 0){
+        providerKeysList.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:8px 0">No provider key information available.</div>';
+      } else {
+        const rows = providerKeys.map(pk => {
+          const status = pk.status || 'unset';
+          const statusLabel = status.charAt(0).toUpperCase() + status.slice(1);
+          const lockIcon = pk.shared ? '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-right:4px"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>' : '';
+          return '<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--border2)">' +
+            '<div style="flex:1"><div style="font-size:13px;font-weight:500;color:var(--text)">' + esc(pk.provider||'Unknown') + '</div>' +
+            '<div style="font-size:11px;color:var(--muted);margin-top:1px">' + statusLabel + (pk.shared ? ' (shared)' : '') + '</div></div>' +
+            (pk.shared ? '<div style="color:var(--muted);display:flex;align-items:center">' + lockIcon + '</div>' : '') +
+            '</div>';
+        }).join('');
+        providerKeysList.innerHTML = rows;
+      }
+    }
+    // Tools pane
+    const toolsData = allSettings.tools || {};
+    _renderToolsPane(toolsData);
     // Show auth buttons only when auth is active
     try{
       const authStatus=await api('/api/auth/status');
@@ -1345,6 +1389,30 @@ async function saveSettings(andClose){
   document.body.classList.toggle('bubble-layout', body.bubble_layout);
   const botName=(($('settingsBotName')||{}).value||'').trim();
   body.bot_name=botName||'Hermes';
+  // Save agent settings
+  const agentBody = {};
+  const maxTurns = $('agentMaxTurns');
+  if(maxTurns) agentBody.max_turns = parseInt(maxTurns.value) || 90;
+  const gwTimeout = $('agentGatewayTimeout');
+  if(gwTimeout) agentBody.gateway_timeout = parseInt(gwTimeout.value) || 1800;
+  const gwWarn = $('agentGatewayTimeoutWarning');
+  if(gwWarn) agentBody.gateway_timeout_warning = parseInt(gwWarn.value) || 900;
+  const gwNotify = $('agentGatewayNotifyInterval');
+  if(gwNotify) agentBody.gateway_notify_interval = parseInt(gwNotify.value) || 600;
+  const restartDrain = $('agentRestartDrainTimeout');
+  if(restartDrain) agentBody.restart_drain_timeout = parseInt(restartDrain.value) || 60;
+  const toolEnforce = $('agentToolUseEnforcement');
+  if(toolEnforce) agentBody.tool_use_enforcement = toolEnforce.value;
+  try {
+    await api('/api/settings/section/agent', {method:'POST', body:JSON.stringify(agentBody)});
+  } catch(e) { /* non-fatal */ }
+  // Save delegation settings
+  const delegationBody = {};
+  const reasoningEffort = $('delegationReasoningEffort');
+  if(reasoningEffort && reasoningEffort.value) delegationBody.reasoning_effort = reasoningEffort.value;
+  try {
+    await api('/api/settings/section/delegation', {method:'POST', body:JSON.stringify(delegationBody)});
+  } catch(e) { /* non-fatal */ }
   // Password: only act if the field has content; blank = leave auth unchanged
   if(pw && pw.trim()){
     try{
@@ -1490,6 +1558,27 @@ function dismissErrorBanner(){
   _backgroundErrors.length=0;
   const banner=$('bgErrorBanner');
   if(banner) banner.style.display='none';
+}
+
+// ── Tools pane renderer ───────────────────────────────────────────────────────
+
+function _renderToolsPane(toolsData) {
+  const container = $('toolsPaneContent');
+  if (!container) return;
+  if (!toolsData || !toolsData.mcp_servers || toolsData.mcp_servers.length === 0) {
+    container.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:12px 0">No tools configured. Use <code>/tools</code> to manage MCP toolsets.</div>';
+    return;
+  }
+  const rows = toolsData.mcp_servers.map(srv => `
+    <div style="display:flex;align-items:start;gap:10px;padding:10px 0;border-bottom:1px solid var(--border2)">
+      <div style="flex:1">
+        <div style="font-weight:600;font-size:13px;color:var(--text)">${esc(srv.name||'unnamed')}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px">${esc(srv.command||'')} ${esc((srv.args||[]).join(' '))}</div>
+      </div>
+      ${srv.tools&&srv.tools.length>0?`<div style="font-size:11px;color:var(--accent)">${srv.tools.length} tools</div>`:''}
+    </div>
+  `).join('');
+  container.innerHTML = rows;
 }
 
 // Event wiring
