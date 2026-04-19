@@ -212,7 +212,7 @@ function _openSessionActionMenu(session, anchorEl){
   menu.className='session-action-menu open';
   menu.appendChild(_buildSessionAction(
     session.pinned?'Unpin conversation':'Pin conversation',
-    session.pinned?'Remove from the pinned section':'Keep this conversation at the top',
+    session.pinned?'Remove from pinned':'Keep this conversation at the top',
     session.pinned?ICONS.pin:ICONS.unpin,
     async()=>{
       closeSessionActionMenu();
@@ -228,7 +228,7 @@ function _openSessionActionMenu(session, anchorEl){
   ));
   menu.appendChild(_buildSessionAction(
     'Move to project',
-    session.project_id?'Change which project this conversation belongs to':'Assign this conversation to a project',
+    session.project_id?'Change the project for this conversation':'Assign a project to this conversation',
     ICONS.folder,
     async()=>{
       closeSessionActionMenu();

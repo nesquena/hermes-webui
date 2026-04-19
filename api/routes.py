@@ -283,6 +283,15 @@ _LOGIN_LOCALE = {
         "invalid_pw": "Ung\u00fcltiges Passwort",
         "conn_failed": "Verbindung fehlgeschlagen",
     },
+    "ru": {
+        "lang": "ru-RU",
+        "title": "\u0412\u043e\u0439\u0442\u0438",
+        "subtitle": "\u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043f\u0430\u0440\u043e\u043b\u044c, \u0447\u0442\u043e\u0431\u044b \u043f\u0440\u043e\u0434\u043e\u043b\u0436\u0438\u0442\u044c",
+        "placeholder": "\u041f\u0430\u0440\u043e\u043b\u044c",
+        "btn": "\u0412\u043e\u0439\u0442\u0438",
+        "invalid_pw": "\u041d\u0435\u0432\u0435\u0440\u043d\u044b\u0439 \u043f\u0430\u0440\u043e\u043b\u044c",
+        "conn_failed": "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0438\u0442\u044c\u0441\u044f",
+    },
     "zh": {
         "lang": "zh-CN",
         "title": "\u767b\u5f55",

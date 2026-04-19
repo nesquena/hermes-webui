@@ -15,7 +15,7 @@ services:
       # macOS note: set UID and GID below to match your user ID (run `id -u` and `id -g`).
       - ${HERMES_HOME:-${HOME}/.hermes}:/home/hermeswebui/.hermes
       # Your workspace directory shown on first launch (adapt if yours is different, the container will use the mounted /workspace)
-      - ${HERMES_HOME:-${HOME}}/workspace:/workspace
+      - ${HERMES_WORKSPACE:-${HOME}/workspace}:/workspace
     environment:
       # Set to your host user ID: run `id -u` and `id -g` to find them.
       # On macOS, UIDs start at 501 (not 1000), so set UID and GID in a .env file:
@@ -27,8 +27,8 @@ services:
       # Required: bind address and port
       - HERMES_WEBUI_HOST=0.0.0.0
       - HERMES_WEBUI_PORT=8787
-      # Where to store sessions, workspaces, and other state (default: ~/.hermes/webui-mvp)
-      - HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui-mvp
+      # Where to store sessions, workspaces, and other state (default: ~/.hermes/webui)
+      - HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui
       # Default workspace directory shown on first launch
 #      - HERMES_WEBUI_DEFAULT_WORKSPACE=/workspace
       # Optional: set a password for remote access

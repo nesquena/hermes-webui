@@ -1,9 +1,33 @@
 # Hermes Web UI -- Changelog
 
-## [v0.50.95] — 2026-04-19
+## [v0.50.97] — 2026-04-19
 
 ### Fixed
-- **Assistant messages now show footer timestamps, and older messages show a fuller date+time** — assistant response segments now render the same footer timestamp affordance as user messages, using the existing message `_ts` / `timestamp` fields already stamped by the WebUI. Messages from today still show a compact time-only label, while older messages now show a fuller date+time string directly in the footer for better readability when reviewing past sessions.
+- **Assistant messages now show footer timestamps, and older messages show a fuller date+time** — assistant response segments now render the same footer timestamp affordance as user messages, using the existing message `_ts` / `timestamp` fields already stamped by the WebUI. Existing timestamps for unchanged historical messages are also preserved during transcript rebuilds, so older turns no longer get re-stamped to the newest reply time.
+
+## [v0.50.96] — 2026-04-19
+
+### Added
+- **Three-container Docker Compose reference config** — new `docker-compose.three-container.yml` adds an agent + dashboard + WebUI configuration on a shared `hermes-net` bridge, with memory/CPU limits and localhost-only port bindings by default.
+
+### Fixed
+- **Two-container compose: gateway port now exposed** — `127.0.0.1:8642:8642` added so the gateway is reachable from the host for debugging. Explicit `command: gateway run` replaces entrypoint defaults.
+- **Workspace path expansion** — `${HERMES_WORKSPACE:-~/workspace}` uses tilde in the default value, which Docker Compose correctly expands. `docker-compose.yml` also fixed to use `${HERMES_WORKSPACE:-${HOME}/workspace}` instead of nesting workspace inside the hermes home dir.
+- **`HERMES_WEBUI_STATE_DIR` default corrected** — `webui-mvp` → `webui`, matching the current default in `config.py`. Prevents silent state directory split for new deployments.
+(PR #708)
+
+## [v0.50.95] — 2026-04-19
+
+### Added
+- **Full Russian (ru-RU) localization** — 389/389 English keys covered, Slavic plural forms correctly implemented, native Cyrillic characters throughout. Login page Russian added. Russian locale now leads all non-English locales on key coverage. (PR #713, credit: @DrMaks22 and @renheqiang)
+
+## [v0.50.92] — 2026-04-19
+
+### Fixed
+- **XML tool-call syntax no longer leaks into chat bubbles** — `<function_calls>` blocks stripped server-side in the streaming pipeline and client-side in both the live stream and history render. Fixes the default DeepSeek profile showing raw XML on starter prompts. (#702)
+- **Workspace file panel shows an empty-state message** instead of a blank pane when no workspace is configured or the directory is empty. (#703)
+- **Notification settings description uses "app" instead of "tab"** — more accurate for native Mac app users. (#704)
+(PR #712)
 
 ## [v0.50.94] — 2026-04-19
 

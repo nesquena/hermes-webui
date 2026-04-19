@@ -1,15 +1,18 @@
-# Two-container Docker Compose: Hermes Agent + Hermes WebUI
+# Three-container Docker Compose: Hermes Agent + Dashboard + WebUI
 #
-# This runs the agent and web UI in separate containers connected via
-# shared volumes. The WebUI installs the agent's Python dependencies
-# at startup from the shared agent source volume.
+# This extends the two-container setup with the Hermes Dashboard for
+# monitoring agent activity, sessions, and resource usage.
 #
 # Usage:
-#   docker compose -f docker-compose.two-container.yml up -d
+#   docker compose -f docker-compose.three-container.yml up -d
 #
-# The agent container runs the gateway (CLI, Telegram, cron, etc.).
-# The WebUI container serves the browser interface on port 8787.
-# Both share ~/.hermes for config, sessions, and state.
+# Services:
+#   hermes-agent   — gateway API on port 8642 (CLI, Telegram, cron, tools)
+#   hermes-dashboard — monitoring dashboard on port 9119
+#   hermes-webui   — browser chat interface on port 8787
+#
+# All three share the same hermes-home volume so config, sessions,
+# skills, and memory are consistent across all surfaces.
 
 services:
   hermes-agent:
@@ -17,9 +20,6 @@ services:
     container_name: hermes-agent
     command: gateway run
     ports:
-      # Gateway API — exposed on localhost only.
-      # Other containers on hermes-net reach it via http://hermes-agent:8642.
-      # Remove 127.0.0.1: to expose on the host network (e.g. for remote clients).
       - "127.0.0.1:8642:8642"
     volumes:
       # Persist config, state, sessions, skills, memory across restarts
@@ -29,6 +29,34 @@ services:
     environment:
       - HERMES_HOME=/root/.hermes
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "2.0"
+    networks:
+      - hermes-net
+
+  hermes-dashboard:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes-dashboard
+    command: dashboard --host 0.0.0.0 --insecure
+    ports:
+      - "127.0.0.1:9119:9119"
+    volumes:
+      - hermes-home:/root/.hermes
+    environment:
+      - HERMES_HOME=/root/.hermes
+      # Dashboard connects to the gateway for health/session data
+      - GATEWAY_HEALTH_URL=http://hermes-agent:8642
+    depends_on:
+      - hermes-agent
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
     networks:
       - hermes-net
 
@@ -38,6 +66,8 @@ services:
     depends_on:
       - hermes-agent
     ports:
+      # Expose on localhost only. Remove 127.0.0.1: to expose on all interfaces
+      # (set HERMES_WEBUI_PASSWORD if doing so).
       - "127.0.0.1:8787:8787"
     volumes:
       # Same hermes home as the agent — shares config, sessions, state
@@ -49,22 +79,19 @@ services:
       - hermes-agent-src:/home/hermeswebui/.hermes/hermes-agent
       # Workspace directory — browse and edit files from the WebUI.
       # Adapt the host path to your project directory.
-      # Override with: HERMES_WORKSPACE=/your/path docker compose up
       - ${HERMES_WORKSPACE:-~/workspace}:/workspace
     environment:
       - HERMES_WEBUI_HOST=0.0.0.0
       - HERMES_WEBUI_PORT=8787
       - HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui
       # Match your host user's UID/GID for correct file permissions.
-      # In two-container setups the WebUI auto-detects UID/GID from the shared
-      # hermes-home volume, but you can override explicitly if needed (#668):
       # Run `id -u` and `id -g` to find your values.
-      # On macOS, UIDs start at 501 — set these in a .env file:
+      # On macOS, UIDs start at 501 (not 1000) — set these in a .env file:
       #   echo "UID=$(id -u)" >> .env && echo "GID=$(id -g)" >> .env
       - WANTED_UID=${UID:-1000}
       - WANTED_GID=${GID:-1000}
       # Optional: set a password for remote access
-      # - HERMES_WEBUI_PASSWORD=***
+      # - HERMES_WEBUI_PASSWORD=your-secret-password
     restart: unless-stopped
     networks:
       - hermes-net
