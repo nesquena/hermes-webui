@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.97] — 2026-04-19
+
+### Added
+- **Left sidebar can now be collapsed on desktop and reopened from the top bar** — the session/navigation sidebar now has a dedicated hide button, remembers its collapsed state across reloads, and exposes a matching top-bar toggle so narrow desktop layouts can reclaim more space without losing access to navigation. (Closes #431)
+
 ## [v0.50.96] — 2026-04-19
 
 ### Added

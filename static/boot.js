@@ -16,9 +16,14 @@ async function cancelStream(){
 
 // ── Mobile navigation ──────────────────────────────────────────────────────
 let _workspacePanelMode='closed'; // 'closed' | 'browse' | 'preview'
+let _sidebarPanelMode=document.documentElement.dataset.sidebarPanel==='closed'?'closed':'open';
 
 function _isCompactWorkspaceViewport(){
   return window.matchMedia('(max-width: 900px)').matches;
+}
+
+function _isCompactSidebarViewport(){
+  return window.matchMedia('(max-width: 640px)').matches;
 }
 
 function _workspacePanelEls(){
@@ -126,19 +131,74 @@ function syncWorkspacePanelUI(){
   }
 }
 
+function _sidebarPanelEls(){
+  return {
+    layout: document.querySelector('.layout'),
+    sidebar: document.querySelector('.sidebar'),
+    toggleBtn: $('btnSidebarPanelToggle'),
+    collapseBtn: $('btnCollapseSidebar'),
+  };
+}
+
+function _setSidebarPanelMode(mode){
+  const {layout,sidebar}= _sidebarPanelEls();
+  if(!layout||!sidebar) return;
+  _sidebarPanelMode=mode==='closed'?'closed':'open';
+  document.documentElement.dataset.sidebarPanel=_sidebarPanelMode;
+  localStorage.setItem('hermes-webui-sidebar-panel', _sidebarPanelMode);
+  layout.classList.toggle('sidebar-collapsed', _sidebarPanelMode==='closed');
+  syncSidebarPanelUI();
+}
+
+function syncSidebarPanelUI(){
+  const {layout,sidebar,toggleBtn,collapseBtn}= _sidebarPanelEls();
+  if(!layout||!sidebar) return;
+  const isCompact=_isCompactSidebarViewport();
+  if(!isCompact) sidebar.classList.remove('mobile-open');
+  const isOpen=isCompact ? sidebar.classList.contains('mobile-open') : _sidebarPanelMode!=='closed';
+  layout.classList.toggle('sidebar-collapsed', !isCompact && _sidebarPanelMode==='closed');
+  if(toggleBtn){
+    toggleBtn.classList.toggle('active', isOpen);
+    toggleBtn.setAttribute('aria-pressed', isOpen?'true':'false');
+    toggleBtn.title=isOpen?'Hide sidebar':'Show sidebar';
+  }
+  if(collapseBtn){
+    collapseBtn.title=isCompact?'Close sidebar':'Hide sidebar';
+  }
+}
+
+function toggleSidebarPanel(force){
+  if(_isCompactSidebarViewport()){
+    toggleMobileSidebar();
+    return;
+  }
+  const currentlyOpen=_sidebarPanelMode!=='closed';
+  const nextOpen=typeof force==='boolean' ? force : !currentlyOpen;
+  _setSidebarPanelMode(nextOpen?'open':'closed');
+}
+
+function closeSidebarPanel(){
+  if(_isCompactSidebarViewport()){
+    closeMobileSidebar();
+    return;
+  }
+  _setSidebarPanelMode('closed');
+}
+
 function toggleMobileSidebar(){
   const sidebar=document.querySelector('.sidebar');
   const overlay=$('mobileOverlay');
   if(!sidebar)return;
   const isOpen=sidebar.classList.contains('mobile-open');
   if(isOpen){closeMobileSidebar();}
-  else{sidebar.classList.add('mobile-open');if(overlay)overlay.classList.add('visible');}
+  else{sidebar.classList.add('mobile-open');if(overlay)overlay.classList.add('visible');syncSidebarPanelUI();}
 }
 function closeMobileSidebar(){
   const sidebar=document.querySelector('.sidebar');
   const overlay=$('mobileOverlay');
   if(sidebar)sidebar.classList.remove('mobile-open');
   if(overlay)overlay.classList.remove('visible');
+  syncSidebarPanelUI();
 }
 function toggleMobileFiles(){
   toggleWorkspacePanel();
@@ -815,6 +875,8 @@ function applyBotName(){
   await loadWorkspaceList();
   await loadOnboardingWizard();
   _initResizePanels();
+  _setSidebarPanelMode(document.documentElement.dataset.sidebarPanel==='closed'?'closed':'open');
+  window.addEventListener('resize',syncSidebarPanelUI);
   // Workspace panel restore happens AFTER loadSession so we know if
   // the session has a workspace — prevents the snap-open-then-closed flash (#576).
   const saved=localStorage.getItem('hermes-webui-session');
