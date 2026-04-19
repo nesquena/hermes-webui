@@ -13,7 +13,12 @@
 ### Added
 - **Searchable model picker** — the model dropdown now has a live search input at the top. Type any part of a model name or ID to filter the list instantly; provider group headers (Anthropic, OpenAI, OpenRouter, etc.) remain visible in filtered results. Includes a clear button, Escape-to-close support, and a "No models found" empty state. i18n strings added for English, Spanish, and zh-CN. (PR #659 by @mmartial)
 
+## [v0.50.88] — 2026-04-19
 
+### Fixed
+- **`/compress` now shows the full persisted reference handoff immediately after completion** — the immediate post-compression `Reference only` card previously preferred the short `summary.reference_message` payload, which could collapse the card down to a redundant 3-line summary even when the full compaction handoff had already been saved in session history. The UI now prefers the persisted compaction message from session state and only falls back to the short summary when no persisted handoff is available, so the immediate card matches the version seen after reload. (Refs #695)
+
+## [v0.50.85] — 2026-04-18
 
 ### Fixed
 - **`_provider_oauth_authenticated()` now respects the `hermes_home` parameter** — the function had a CLI fast path (`hermes_cli.auth.get_auth_status()`) that ignored the caller-supplied `hermes_home` and read from the real system home. On machines where `openai-codex` (or another OAuth provider) was genuinely authenticated, this caused three test assertions to return `True` instead of `False`, regardless of the isolated `tmp_path` the test passed in. Removed the CLI fast path; the function now reads exclusively from `hermes_home/auth.json`, which is both the correct scoped behavior and what the docstring described. No functional change for production (the auth.json path was already the complete fallback). (Fixes pre-existing test_sprint34 failures)
@@ -1641,4 +1646,3 @@ Critical regressions introduced during the server.py split, caught by users and 
 - **Regression test file added** (`tests/test_regressions.py`): 10 tests, one per introduced bug. These form a permanent regression gate so each class of error can never silently return.
 
 ---
-

@@ -189,8 +189,11 @@ async function _runManualCompression(focusTopic){
     const summary=data&&data.summary;
     if(typeof setCompressionUi==='function'&&S.session){
       const referenceMsg=(S.messages||[]).find(m=>typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(m));
+      const messageRef=referenceMsg?msgContent(referenceMsg)||String(referenceMsg.content||''):'';
       const summaryRef=summary&&typeof summary.reference_message==='string' ? String(summary.reference_message||'').trim() : '';
-      const referenceText=summaryRef || (referenceMsg?msgContent(referenceMsg)||String(referenceMsg.content||''):'');
+      // Prefer the persisted compaction handoff when it already exists in session state.
+      // The short summary fallback is only for environments where that message is unavailable.
+      const referenceText=messageRef || summaryRef;
       const effectiveFocus=(data&&data.focus_topic)||focusTopic||'';
       setCompressionUi({
         sessionId:S.session.session_id,
