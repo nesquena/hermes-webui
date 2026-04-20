@@ -98,17 +98,20 @@ async function loadSession(sid){
             const _lastAsst=_lastMsg?(_lastMsg.timestamp||_lastMsg._ts||0)*1000:0;
             const _fresh=_entries.filter(e=>!e._queued_at||e._queued_at>_lastAsst);
             if(_fresh.length){
-              // Populate SESSION_QUEUES so updateQueueBadge shows the count
-              _fresh.forEach(e=>{ if(typeof queueSessionMessage==='function') queueSessionMessage(sid, e); });
-              sessionStorage.removeItem('hermes-queue-'+sid); // let the re-enqueue above repersist cleanly
-              // Restore the first entry as a composer draft so the user can review before sending
+              // Idle path: restore the first entry as a composer draft only. Do NOT
+              // re-enqueue into SESSION_QUEUES — if we did, send() would dispatch the
+              // draft directly (S.busy=false) and then setBusy(false) would drain the
+              // same entry from the queue, causing a duplicate send. Any follow-up
+              // entries (2..N) are discarded by design; the toast tells the user so.
               const _first=_fresh[0];
               const _msg=$&&$('msg');
               if(_msg&&_first.text&&!_msg.value){
                 _msg.value=_first.text||'';
                 if(typeof autoResize==='function') autoResize();
-                if(typeof showToast==='function') showToast((_fresh.length>1?`${_fresh.length} queued messages restored`:'Queued message restored')+' — review and send when ready');
+                if(typeof showToast==='function') showToast((_fresh.length>1?`${_fresh.length} queued messages restored (showing first)`:'Queued message restored')+' — review and send when ready');
               }
+              // Clear persisted queue now that the draft is in the composer
+              sessionStorage.removeItem('hermes-queue-'+sid);
             } else {
               sessionStorage.removeItem('hermes-queue-'+sid);
             }
