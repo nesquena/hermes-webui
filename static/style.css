@@ -1642,6 +1642,27 @@ body.bubble-layout .msg-row + .msg-row[data-role="user"] { border-top: none; pad
 }
 .msg-foot .msg-actions { opacity: 1; margin-left: 0; }
 .msg-foot .msg-time { font-size: 10.5px; opacity: .75; }
+.msg-foot-with-usage {
+  justify-content: flex-start;
+  gap: 8px;
+}
+.msg-usage-inline {
+  font-size: 11px;
+  color: var(--muted);
+  opacity: .7;
+  flex: 0 0 auto;
+}
+.msg-foot-with-usage .msg-time,
+.msg-foot-with-usage .msg-actions {
+  opacity: 0;
+  transition: opacity .15s;
+}
+.msg-foot-with-usage .msg-time {
+  margin-left: 4px;
+}
+.msg-foot-with-usage .msg-actions {
+  margin-left: 2px;
+}
 
 /* User footer: visible only on row hover (bubble identifies sender without needing persistent chrome) */
 .msg-row[data-role="user"] .msg-foot {
@@ -1658,11 +1679,24 @@ body.bubble-layout .msg-row + .msg-row[data-role="user"] { border-top: none; pad
   justify-content: flex-start;
   padding-left: var(--msg-rail);
   max-width: var(--msg-max);
-  opacity: .45;
+  opacity: 0;
   transition: opacity .15s;
 }
 .msg-row[data-role="assistant"]:hover .msg-foot,
-.assistant-turn:hover .msg-foot { opacity: 1; }
+.assistant-turn:hover .msg-foot,
+.assistant-turn:focus-within .msg-foot { opacity: 1; }
+.assistant-turn .msg-foot-with-usage,
+.msg-row[data-role="assistant"] .msg-foot-with-usage {
+  opacity: 1;
+}
+.assistant-turn:hover .msg-foot-with-usage .msg-time,
+.assistant-turn:hover .msg-foot-with-usage .msg-actions,
+.assistant-turn:focus-within .msg-foot-with-usage .msg-time,
+.assistant-turn:focus-within .msg-foot-with-usage .msg-actions,
+.msg-row[data-role="assistant"]:hover .msg-foot-with-usage .msg-time,
+.msg-row[data-role="assistant"]:hover .msg-foot-with-usage .msg-actions {
+  opacity: 1;
+}
 
 /* Hide footer while editing to keep the edit bar the only footer-level affordance */
 .msg-row[data-editing="1"] .msg-foot { display: none; }

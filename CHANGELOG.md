@@ -1,6 +1,10 @@
 # Hermes Web UI -- Changelog
 
-<<<<<<< HEAD
+## [v0.50.110] — 2026-04-20
+
+### Fixed
+- **Message footer metadata is now consistent across user and assistant turns** — timestamps are available on both sides, but footer chrome stays hidden until hover instead of being always visible on assistant messages. The last assistant turn keeps cumulative `in/out/cost` usage visible, then reveals timestamp and actions inline on hover. Existing timestamps for unchanged historical messages are also preserved during transcript rebuilds, so older turns no longer get re-stamped to the newest reply time. (Fixes #680, credit: @franksong2702)
+
 ## [v0.50.109] — 2026-04-20
 
 ### Fixed
@@ -68,6 +72,7 @@
 
 ### Fixed
 - **Only the latest user message can be edited** — older user turns no longer show the pencil/edit affordance. This avoids implying that historical turns can be lightly edited when the actual action truncates the session and restarts the conversation from that point. (Closes #744)
+- **Message footer metadata is now consistent across user and assistant turns** — timestamps are available on both sides using the existing `_ts` / `timestamp` fields, but footer chrome now stays hidden until hover instead of being always visible on assistant messages. The last assistant turn keeps cumulative `in/out/cost` usage visible, then reveals timestamp and actions inline on hover so the footer does not grow an extra row. Existing timestamps for unchanged historical messages are also preserved during transcript rebuilds, so older turns no longer get re-stamped to the newest reply time.
 
 ## [v0.50.96] — 2026-04-19
 
@@ -92,12 +97,10 @@
 - **Workspace file panel shows an empty-state message** instead of a blank pane when no workspace is configured or the directory is empty. (#703)
 - **Notification settings description uses "app" instead of "tab"** — more accurate for native Mac app users. (#704)
 (PR #712)
-=======
 ## [v0.50.95] — 2026-04-19
 
 ### Fixed
 - **Assistant messages now show footer timestamps, and older messages show a fuller date+time** — assistant response segments now render the same footer timestamp affordance as user messages, using the existing message `_ts` / `timestamp` fields already stamped by the WebUI. Messages from today still show a compact time-only label, while older messages now show a fuller date+time string directly in the footer for better readability when reviewing past sessions.
->>>>>>> 1ca683a (fix(ui): preserve message timestamps and show assistant footer times)
 
 ## [v0.50.94] — 2026-04-19
 
