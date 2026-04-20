@@ -3,9 +3,9 @@ Tests for fixes:
 
 - #569: docker_init.bash auto-detects WANTED_UID/WANTED_GID from mounted workspace
          so macOS users (UID 501) don't need to manually set the env var.
-- #579: Topbar message count already filters tool messages (role !== 'tool') —
-         confirmed present. Closing as already fixed by #584 which removed the
-         sidebar meta row (the only place raw message_count was ever displayed).
+- #579: Topbar message count already filters tool messages (role !== 'tool').
+         The legacy raw sidebar count was removed by #584, and later reintroduced
+         in a gated detailed-density mode by #673.
 """
 import pathlib
 import re
@@ -143,15 +143,21 @@ def test_579_topbar_filters_tool_messages():
     )
 
 
-def test_579_sidebar_no_longer_shows_raw_count():
-    """sessions.js must not reference message_count in the render path (#579).
+def test_579_sidebar_count_is_gated_behind_detailed_density():
+    """sessions.js may only show sidebar count inside detailed density mode.
 
-    After PR #584, the sidebar no longer shows message_count at all,
-    eliminating the inconsistency between sidebar (raw) and topbar (filtered).
+    PR #584 removed the always-visible raw sidebar count to avoid mismatching the
+    topbar's filtered count. PR #673 later reintroduced message_count as
+    optional metadata, but only when the user explicitly opts into detailed
+    sidebar density.
     """
     sessions_js = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
-    # message_count should not appear in the client-side session renderer
-    assert "message_count" not in sessions_js, (
-        "sessions.js must not reference message_count — "
-        "the meta row that displayed it was removed in PR #584"
+    assert "const density=(window._sidebarDensity==='detailed'?'detailed':'compact');" in sessions_js, (
+        "sessions.js must normalize sidebar density before rendering metadata"
+    )
+    assert "if(density==='detailed'){" in sessions_js, (
+        "sessions.js must gate sidebar metadata behind detailed density mode"
+    )
+    assert "typeof s.message_count==='number'?s.message_count:0" in sessions_js, (
+        "message_count may be rendered only inside the detailed-density branch"
     )
