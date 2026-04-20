@@ -47,6 +47,7 @@ from api.config import (
     CHAT_LOCK,
     load_settings,
     save_settings,
+    set_hermes_default_model,
 )
 from api.helpers import (
     require,
@@ -880,6 +881,14 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         s = new_session(workspace=workspace, model=body.get("model"))
         return j(handler, {"session": s.compact() | {"messages": s.messages}})
+
+    if parsed.path == "/api/default-model":
+        try:
+            return j(handler, set_hermes_default_model(body.get("model")))
+        except ValueError as e:
+            return bad(handler, str(e))
+        except RuntimeError as e:
+            return bad(handler, str(e), 500)
 
     if parsed.path == "/api/sessions/cleanup":
         return _handle_sessions_cleanup(handler, body, zero_only=False)

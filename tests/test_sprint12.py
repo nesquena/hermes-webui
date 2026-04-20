@@ -38,27 +38,26 @@ def test_settings_get_returns_defaults():
     assert 'default_model' in d
     assert 'default_workspace' in d
 
-def test_settings_post_persists():
-    """POST /api/settings saves and returns merged settings."""
-    d, status = post("/api/settings", {"default_model": "test/model-123"})
+def test_default_model_updates_hermes_config():
+    """POST /api/default-model updates the effective Hermes default model."""
+    original, _ = get("/api/models")
+    original_model = original["default_model"]
+    d, status = post("/api/default-model", {"model": "anthropic/claude-sonnet-4.6"})
     assert status == 200
-    assert d['default_model'] == 'test/model-123'
-    # Verify it persisted
+    assert d['default_model'].endswith('claude-sonnet-4.6')
     d2, _ = get("/api/settings")
-    assert d2['default_model'] == 'test/model-123'
-    # Restore
-    post("/api/settings", {"default_model": "openai/gpt-5.4-mini"})
+    assert d2['default_model'] == d['default_model']
+    post("/api/default-model", {"model": original_model})
 
 def test_settings_partial_update():
     """POST /api/settings with partial data doesn't clobber other fields."""
     d1, _ = get("/api/settings")
     original_ws = d1['default_workspace']
-    post("/api/settings", {"default_model": "anthropic/claude-sonnet-4.6"})
+    post("/api/settings", {"send_key": "ctrl+enter"})
     d2, _ = get("/api/settings")
-    assert d2['default_model'] == 'anthropic/claude-sonnet-4.6'
+    assert d2['send_key'] == 'ctrl+enter'
     assert d2['default_workspace'] == original_ws
-    # Restore
-    post("/api/settings", {"default_model": "openai/gpt-5.4-mini"})
+    post("/api/settings", {"send_key": "enter"})
 
 
 # ── Session Pinning ───────────────────────────────────────────────────────

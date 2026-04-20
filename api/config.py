@@ -209,6 +209,35 @@ def reload_config() -> None:
             logger.debug("Failed to load yaml config from %s", config_path)
 
 
+def _load_yaml_config_file(config_path: Path) -> dict:
+    try:
+        import yaml as _yaml
+    except ImportError:
+        return {}
+
+    if not config_path.exists():
+        return {}
+    try:
+        loaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        return loaded if isinstance(loaded, dict) else {}
+    except Exception:
+        logger.debug("Failed to parse yaml config from %s", config_path)
+        return {}
+
+
+def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
+    try:
+        import yaml as _yaml
+    except ImportError as exc:
+        raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        _yaml.safe_dump(config_data, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+
 # Initial load
 reload_config()
 cfg = _cfg_cache  # alias for backward compat with existing references
@@ -710,6 +739,64 @@ def resolve_model_provider(model_id: str) -> tuple:
     return model_id, config_provider, config_base_url
 
 
+def get_effective_default_model(config_data: dict | None = None) -> str:
+    """Resolve the effective Hermes default model from config, then env overrides."""
+    active_cfg = config_data if config_data is not None else cfg
+    default_model = DEFAULT_MODEL
+
+    model_cfg = active_cfg.get("model", {})
+    if isinstance(model_cfg, str):
+        default_model = model_cfg.strip()
+    elif isinstance(model_cfg, dict):
+        cfg_default = str(model_cfg.get("default") or "").strip()
+        if cfg_default:
+            default_model = cfg_default
+
+    env_model = (
+        os.getenv("HERMES_MODEL") or os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL")
+    )
+    if env_model:
+        default_model = env_model.strip()
+    return default_model
+
+
+def set_hermes_default_model(model_id: str) -> dict:
+    """Persist the Hermes default model in config.yaml and reload runtime config."""
+    selected_model = str(model_id or "").strip()
+    if not selected_model:
+        raise ValueError("model is required")
+
+    config_path = _get_config_path()
+    config_data = _load_yaml_config_file(config_path)
+    model_cfg = config_data.get("model", {})
+    if not isinstance(model_cfg, dict):
+        model_cfg = {}
+
+    previous_provider = str(model_cfg.get("provider") or "").strip()
+    resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
+        selected_model
+    )
+    persisted_model = str(resolved_model or selected_model).strip()
+    persisted_provider = str(resolved_provider or previous_provider or "").strip()
+
+    model_cfg["default"] = persisted_model
+    if persisted_provider:
+        model_cfg["provider"] = persisted_provider
+
+    if resolved_base_url:
+        model_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
+    elif persisted_provider != previous_provider:
+        if persisted_provider == "openai":
+            model_cfg["base_url"] = "https://api.openai.com/v1"
+        elif not persisted_provider.startswith("custom:"):
+            model_cfg.pop("base_url", None)
+
+    config_data["model"] = model_cfg
+    _save_yaml_config_file(config_path, config_data)
+    reload_config()
+    return get_available_models()
+
+
 def get_available_models() -> dict:
     """
     Return available models grouped by provider.
@@ -736,7 +823,7 @@ def get_available_models() -> dict:
     if _current_mtime != _cfg_mtime:
         reload_config()
     active_provider = None
-    default_model = DEFAULT_MODEL
+    default_model = get_effective_default_model(cfg)
     groups = []
 
     # 1. Read config.yaml model section
@@ -752,14 +839,7 @@ def get_available_models() -> dict:
         if cfg_default:
             default_model = cfg_default
 
-    # 2. Also check env vars for model override
-    env_model = (
-        os.getenv("HERMES_MODEL") or os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL")
-    )
-    if env_model:
-        default_model = env_model.strip()
-
-    # 3. Try to read auth store for active provider (if hermes is installed)
+    # 2. Try to read auth store for active provider (if hermes is installed)
     if not active_provider:
         try:
             from api.profiles import get_active_hermes_home as _gah
@@ -1258,7 +1338,7 @@ _SETTINGS_DEFAULTS = {
     "bubble_layout": False,  # right-aligned user / left-aligned assistant chat bubbles
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
 }
-_SETTINGS_LEGACY_DROP_KEYS = {"assistant_language"}
+_SETTINGS_LEGACY_DROP_KEYS = {"assistant_language", "default_model"}
 _SETTINGS_THEME_VALUES = {"light", "dark", "system"}
 _SETTINGS_SKIN_VALUES = {
     "default",
@@ -1345,10 +1425,14 @@ def load_settings() -> dict:
         stored.get("theme") if isinstance(stored, dict) else settings.get("theme"),
         stored.get("skin") if isinstance(stored, dict) else settings.get("skin"),
     )
+    settings["default_model"] = get_effective_default_model()
     return settings
 
 
-_SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {"password_hash"}
+_SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {
+    "password_hash",
+    "default_model",
+}
 _SETTINGS_ENUM_VALUES = {
     "send_key": {"enter", "ctrl+enter"},
 }
@@ -1418,16 +1502,16 @@ def save_settings(settings: dict) -> dict:
     current["default_workspace"] = str(
         resolve_default_workspace(current.get("default_workspace"))
     )
+    persisted = {k: v for k, v in current.items() if k != "default_model"}
     SETTINGS_FILE.write_text(
-        json.dumps(current, ensure_ascii=False, indent=2),
+        json.dumps(persisted, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     # Update runtime defaults so new sessions use them immediately
-    global DEFAULT_MODEL, DEFAULT_WORKSPACE
-    if "default_model" in current:
-        DEFAULT_MODEL = current["default_model"]
+    global DEFAULT_WORKSPACE
     if "default_workspace" in current:
         DEFAULT_WORKSPACE = resolve_default_workspace(current["default_workspace"])
+    current["default_model"] = get_effective_default_model()
     return current
 
 
@@ -1442,14 +1526,13 @@ try:
 except OSError:
     _settings_file_exists = False
 if _settings_file_exists:
-    if _startup_settings.get("default_model"):
-        DEFAULT_MODEL = _startup_settings["default_model"]
     if not os.getenv("HERMES_WEBUI_DEFAULT_WORKSPACE"):
         DEFAULT_WORKSPACE = resolve_default_workspace(
             _startup_settings.get("default_workspace")
         )
     if _startup_settings.get("default_workspace") != str(DEFAULT_WORKSPACE):
         _startup_settings["default_workspace"] = str(DEFAULT_WORKSPACE)
+        _startup_settings.pop("default_model", None)
         try:
             SETTINGS_FILE.write_text(
                 json.dumps(_startup_settings, ensure_ascii=False, indent=2),

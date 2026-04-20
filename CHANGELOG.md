@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.112] — 2026-04-20
+
+### Fixed
+- **Default model now follows Hermes config instead of a separate WebUI setting** — the Settings modal and onboarding flow no longer persist `default_model` into `~/.hermes/webui/settings.json`. The effective default model now comes from Hermes `config.yaml` and model updates write back there, so saving unrelated WebUI preferences can no longer overwrite the runtime model fallback used by new sessions. This keeps the browser UI aligned with Hermes CLI / gateway defaults and avoids split-brain model state. (Fixes #761)
+
 ## [v0.50.111] — 2026-04-20
 
 ### Fixed
