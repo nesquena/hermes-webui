@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.98] — 2026-04-20
+
+### Fixed
+- **Slash command autocomplete constrained to composer width** — the `/` command dropdown is now positioned inside the composer box, so suggestions stay visually anchored to the input area rather than expanding across the full chat panel. (Closes #633, credit: @franksong2702)
+
 ## [v0.50.97] — 2026-04-20
 
 ### Fixed
