@@ -278,6 +278,78 @@ def test_api_models_includes_active_provider():
     )
 
 
+def test_bare_gemini_session_model_normalizes_to_active_provider_default(monkeypatch):
+    """Persisted bare Gemini IDs must not survive a provider switch."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.4-mini",
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "gemini-3.1-pro-preview"
+    )
+
+    assert changed is True
+    assert effective == "gpt-5.4-mini"
+
+
+def test_prefixed_google_session_model_normalizes_to_active_provider_default(monkeypatch):
+    """Persisted provider-prefixed Gemini IDs must normalize too."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.4-mini",
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "google/gemini-3.1-pro-preview"
+    )
+
+    assert changed is True
+    assert effective == "gpt-5.4-mini"
+
+
+def test_session_model_normalizer_persists_corrected_model(monkeypatch):
+    """GET /api/session should persist the corrected model back to disk/state."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.4-mini",
+        },
+    )
+
+    save_calls = []
+
+    class DummySession:
+        def __init__(self):
+            self.model = "gemini-3.1-pro-preview"
+
+        def save(self, touch_updated_at=True):
+            save_calls.append(touch_updated_at)
+
+    session = DummySession()
+    effective = routes._normalize_session_model_in_place(session)
+
+    assert effective == "gpt-5.4-mini"
+    assert session.model == "gpt-5.4-mini"
+    assert save_calls == [False]
+
+
 # ── Model switch toast (#419) ─────────────────────────────────────────────────
 
 class TestModelSwitchToast:
@@ -322,4 +394,18 @@ class TestModelSwitchToast:
         surrounding = src[max(0, idx - 100):idx + 50]
         assert "typeof showToast" in surrounding, (
             "showToast call must be guarded with typeof check"
+        )
+
+
+class TestChatStartEffectiveModelRecovery:
+    """messages.js must accept an effective_model correction from the backend."""
+
+    def test_send_applies_effective_model_from_chat_start(self):
+        src = _read("static/messages.js")
+        assert "startData.effective_model" in src, (
+            "send() must read effective_model from /api/chat/start so the UI can "
+            "recover from stale persisted session models"
+        )
+        assert "localStorage.setItem('hermes-webui-model', startData.effective_model)" in src, (
+            "effective_model correction must update the saved model preference"
         )
