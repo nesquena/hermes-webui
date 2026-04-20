@@ -1221,9 +1221,10 @@ async function loadSettingsPanel(){
     const modelSel=$('settingsModel');
     if(modelSel){
       modelSel.innerHTML='';
+      let models=null;
       try{
-        const models=await api('/api/models');
-        for(const g of (models.groups||[])){
+        models=await api('/api/models');
+        for(const g of ((models||{}).groups||[])){
           const og=document.createElement('optgroup');
           og.label=g.provider;
           for(const m of g.models){
@@ -1234,8 +1235,8 @@ async function loadSettingsPanel(){
           modelSel.appendChild(og);
         }
       }catch(e){}
-      _settingsHermesDefaultModelOnOpen=models.default_model||'';
-        modelSel.value=_settingsHermesDefaultModelOnOpen;
+      _settingsHermesDefaultModelOnOpen=(models&&models.default_model)||'';
+      modelSel.value=_settingsHermesDefaultModelOnOpen;
       modelSel.addEventListener('change',_markSettingsDirty,{once:false});
     }
     // Send key preference
