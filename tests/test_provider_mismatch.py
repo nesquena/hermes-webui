@@ -320,6 +320,27 @@ def test_prefixed_google_session_model_normalizes_to_active_provider_default(mon
     assert effective == "gpt-5.4-mini"
 
 
+def test_google_active_provider_keeps_valid_gemini_session_model(monkeypatch):
+    """A Google-configured session must keep its Gemini model."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "google",
+            "default_model": "gemini-3.1-pro-preview",
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "gemini-3.1-pro-preview"
+    )
+
+    assert changed is False
+    assert effective == "gemini-3.1-pro-preview"
+
+
 def test_session_model_normalizer_persists_corrected_model(monkeypatch):
     """GET /api/session should persist the corrected model back to disk/state."""
     import api.routes as routes
