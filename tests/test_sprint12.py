@@ -38,27 +38,49 @@ def test_settings_get_returns_defaults():
     assert 'default_model' in d
     assert 'default_workspace' in d
 
-def test_settings_post_persists():
-    """POST /api/settings saves and returns merged settings."""
-    d, status = post("/api/settings", {"default_model": "test/model-123"})
-    assert status == 200
-    assert d['default_model'] == 'test/model-123'
-    # Verify it persisted
+def test_default_model_updates_hermes_config():
+    """POST /api/default-model updates the effective Hermes default model."""
+    original, _ = get("/api/models")
+    original_model = original.get("default_model") or ""
+    try:
+        d, status = post("/api/default-model", {"model": "anthropic/claude-sonnet-4.6"})
+        assert status == 200
+        assert 'claude-sonnet-4.6' in d['default_model']
+        d2, _ = get("/api/settings")
+        # Both should resolve to the same model (may differ in prefix normalization)
+        assert 'claude-sonnet-4.6' in d2['default_model']
+    finally:
+        # Always restore — regardless of test ordering or failures
+        if original_model:
+            post("/api/default-model", {"model": original_model})
+
+
+def test_settings_does_not_persist_default_model():
+    """POST /api/settings with default_model in body is silently ignored."""
+    d1, _ = get("/api/settings")
+    original_model = d1['default_model']
+    # Send default_model via /api/settings — it must be dropped (not persisted)
+    post("/api/settings", {"default_model": "openai/fake-model-xyz"})
     d2, _ = get("/api/settings")
-    assert d2['default_model'] == 'test/model-123'
-    # Restore
-    post("/api/settings", {"default_model": "openai/gpt-5.4-mini"})
+    assert d2['default_model'] == original_model, (
+        "POST /api/settings must not persist default_model — use /api/default-model instead"
+    )
+
+
+def test_default_model_empty_returns_400():
+    """POST /api/default-model with empty model returns 400."""
+    d, status = post("/api/default-model", {"model": ""})
+    assert status == 400
 
 def test_settings_partial_update():
     """POST /api/settings with partial data doesn't clobber other fields."""
     d1, _ = get("/api/settings")
     original_ws = d1['default_workspace']
-    post("/api/settings", {"default_model": "anthropic/claude-sonnet-4.6"})
+    post("/api/settings", {"send_key": "ctrl+enter"})
     d2, _ = get("/api/settings")
-    assert d2['default_model'] == 'anthropic/claude-sonnet-4.6'
+    assert d2['send_key'] == 'ctrl+enter'
     assert d2['default_workspace'] == original_ws
-    # Restore
-    post("/api/settings", {"default_model": "openai/gpt-5.4-mini"})
+    post("/api/settings", {"send_key": "enter"})
 
 
 # ── Session Pinning ───────────────────────────────────────────────────────

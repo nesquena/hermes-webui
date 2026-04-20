@@ -321,7 +321,8 @@ async function _saveOnboardingDefaults(){
   if(!known){
     await api('/api/workspaces/add',{method:'POST',body:JSON.stringify({path:workspace})});
   }
-  const body={default_workspace:workspace,default_model:model};
+  // Model persisted by /api/onboarding/setup — no /api/default-model call needed here
+  const body={default_workspace:workspace};
   if(password) body._set_password=password;
   const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(body)});
   if(ONBOARDING.status){

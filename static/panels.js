@@ -1075,6 +1075,7 @@ document.addEventListener('drop',e=>{e.preventDefault();dragCounter=0;wrap.class
 let _settingsDirty = false;
 let _settingsThemeOnOpen = null; // track theme at open time for discard revert
 let _settingsSkinOnOpen = null; // track skin at open time for discard revert
+let _settingsHermesDefaultModelOnOpen = '';
 let _settingsSection = 'conversation';
 
 function switchSettingsSection(name){
@@ -1233,7 +1234,8 @@ async function loadSettingsPanel(){
           modelSel.appendChild(og);
         }
       }catch(e){}
-      modelSel.value=settings.default_model||'';
+      _settingsHermesDefaultModelOnOpen=models.default_model||'';
+        modelSel.value=_settingsHermesDefaultModelOnOpen;
       modelSel.addEventListener('change',_markSettingsDirty,{once:false});
     }
     // Send key preference
@@ -1320,6 +1322,7 @@ function _applySavedSettingsUi(saved, body, opts){
   _settingsSkinOnOpen=skin||'default';
   const bar=$('settingsUnsavedBar');
   if(bar) bar.style.display='none';
+  _settingsHermesDefaultModelOnOpen=body.default_model||_settingsHermesDefaultModelOnOpen||'';
   renderMessages();
   if(typeof syncTopbar==='function') syncTopbar();
   if(typeof renderSessionList==='function') renderSessionList();
@@ -1327,6 +1330,7 @@ function _applySavedSettingsUi(saved, body, opts){
 
 async function saveSettings(andClose){
   const model=($('settingsModel')||{}).value;
+  const modelChanged=(model||'')!==(_settingsHermesDefaultModelOnOpen||'');
   const sendKey=($('settingsSendKey')||{}).value;
   const showTokenUsage=!!($('settingsShowTokenUsage')||{}).checked;
   const showCliSessions=!!($('settingsShowCliSessions')||{}).checked;
@@ -1336,7 +1340,6 @@ async function saveSettings(andClose){
   const language=($('settingsLanguage')||{}).value||'en';
   const sidebarDensity=($('settingsSidebarDensity')||{}).value==='detailed'?'detailed':'compact';
   const body={};
-  if(model) body.default_model=model;
 
   if(sendKey) body.send_key=sendKey;
   body.theme=theme;
@@ -1357,6 +1360,14 @@ async function saveSettings(andClose){
   if(pw && pw.trim()){
     try{
       const saved=await api('/api/settings',{method:'POST',body:JSON.stringify({...body,_set_password:pw.trim()})});
+      if(modelChanged && model){
+        try{
+          await api('/api/default-model',{method:'POST',body:JSON.stringify({model})});
+          body.default_model=model;
+        }catch(_modelErr){
+          if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
+        }
+      }
       _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,skin,language,sidebarDensity});
       showToast(t(saved.auth_just_enabled?'settings_saved_pw':'settings_saved_pw_updated'));
       _hideSettingsPanel();
@@ -1365,6 +1376,14 @@ async function saveSettings(andClose){
   }
   try{
     const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(body)});
+    if(modelChanged && model){
+      try{
+        await api('/api/default-model',{method:'POST',body:JSON.stringify({model})});
+        body.default_model=model;
+      }catch(_modelErr){
+        if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
+      }
+    }
     _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,skin,language,sidebarDensity});
     showToast(t('settings_saved'));
     _hideSettingsPanel();

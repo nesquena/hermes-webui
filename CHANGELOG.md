@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.114] — 2026-04-20
+
+### Fixed
+- **Default model now reads from Hermes config.yaml** — removes the split-brain state where WebUI Settings and the Hermes runtime/CLI/gateway could have different default models. `default_model` is no longer persisted in `settings.json`; it is read from and written to `config.yaml` via a new `POST /api/default-model` endpoint. Existing saved `default_model` values in `settings.json` are silently migrated away on first load. Saving Settings now calls `/api/default-model` when the model changed, with error handling so a config.yaml write failure doesn't leave the UI in a broken state. (#761, credit: @aronprins)
+
 ## [v0.50.113] — 2026-04-20
 
 ### Fixed

@@ -11,7 +11,8 @@ from pathlib import Path
 import api.config as _cfg
 from api.config import (
     SESSION_DIR, SESSION_INDEX_FILE, SESSIONS, SESSIONS_MAX,
-    LOCK, DEFAULT_WORKSPACE, DEFAULT_MODEL, PROJECTS_FILE, HOME
+    LOCK, DEFAULT_WORKSPACE, DEFAULT_MODEL, PROJECTS_FILE, HOME,
+    get_effective_default_model,
 )
 from api.workspace import get_last_workspace
 
@@ -134,13 +135,18 @@ def get_session(sid):
     raise KeyError(sid)
 
 def new_session(workspace=None, model=None):
-    # Use _cfg.DEFAULT_MODEL (not the import-time snapshot) so save_settings() changes take effect
+    # Use the live config-derived default so Hermes config changes apply without restart.
     try:
         from api.profiles import get_active_profile_name
         _profile = get_active_profile_name()
     except ImportError:
         _profile = None
-    s = Session(workspace=workspace or get_last_workspace(), model=model or _cfg.DEFAULT_MODEL, profile=_profile)
+    effective_model = model or get_effective_default_model()
+    s = Session(
+        workspace=workspace or get_last_workspace(),
+        model=effective_model,
+        profile=_profile,
+    )
     with LOCK:
         SESSIONS[s.session_id] = s
         SESSIONS.move_to_end(s.session_id)
