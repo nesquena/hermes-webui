@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.99] — 2026-04-20
+
+### Fixed
+- **Stale session models normalized after provider switch** — sessions that still reference a model from a previous provider (e.g. a `gemini-*` model after switching to OpenAI Codex) are silently corrected to the current provider's default on load, preventing startup failures. (Closes #748, credit: @likawa3b)
+
 ## [v0.50.98] — 2026-04-20
 
 ### Fixed
