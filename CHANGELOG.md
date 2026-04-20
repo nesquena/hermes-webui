@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.115] — 2026-04-20
+
+### Removed
+- **Chat bubble layout setting removed** — the opt-in `bubble_layout` toggle (issue #336) is removed end-to-end: the Settings checkbox, all related CSS (`.bubble-layout` selectors), the config.py default/bool-key entries, the boot.js/panels.js class toggles, and all locale strings across 6 languages. Stale `bubble_layout` values in existing `settings.json` files are silently dropped on load via the legacy-drop-keys migration path. (Fixes #760, credit: @aronprins)
+
 ## [v0.50.114] — 2026-04-20
 
 ### Fixed

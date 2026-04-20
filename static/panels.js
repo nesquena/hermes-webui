@@ -1268,8 +1268,6 @@ async function loadSettingsPanel(){
     if(soundCb){soundCb.checked=!!settings.sound_enabled;soundCb.addEventListener('change',_markSettingsDirty,{once:false});}
     const notifCb=$('settingsNotificationsEnabled');
     if(notifCb){notifCb.checked=!!settings.notifications_enabled;notifCb.addEventListener('change',_markSettingsDirty,{once:false});}
-    const bubbleCb=$('settingsBubbleLayout');
-    if(bubbleCb){bubbleCb.checked=!!settings.bubble_layout;bubbleCb.addEventListener('change',_markSettingsDirty,{once:false});}
     const sidebarDensitySel=$('settingsSidebarDensity');
     if(sidebarDensitySel){
       sidebarDensitySel.value=settings.sidebar_density==='detailed'?'detailed':'compact';
@@ -1309,7 +1307,6 @@ function _applySavedSettingsUi(saved, body, opts){
   window._notificationsEnabled=body.notifications_enabled;
   window._sidebarDensity=sidebarDensity==='detailed'?'detailed':'compact';
   window._botName=body.bot_name||'Hermes';
-  document.body.classList.toggle('bubble-layout', !!body.bubble_layout);
   if(typeof applyBotName==='function') applyBotName();
   if(typeof setLocale==='function') setLocale(language);
   if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
@@ -1352,9 +1349,7 @@ async function saveSettings(andClose){
   body.check_for_updates=!!($('settingsCheckUpdates')||{}).checked;
   body.sound_enabled=!!($('settingsSoundEnabled')||{}).checked;
   body.notifications_enabled=!!($('settingsNotificationsEnabled')||{}).checked;
-  body.bubble_layout=!!($('settingsBubbleLayout')||{}).checked;
   body.sidebar_density=sidebarDensity;
-  document.body.classList.toggle('bubble-layout', body.bubble_layout);
   const botName=(($('settingsBotName')||{}).value||'').trim();
   body.bot_name=botName||'Hermes';
   // Password: only act if the field has content; blank = leave auth unchanged
