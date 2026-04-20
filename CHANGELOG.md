@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.102] — 2026-04-20
+
+### Fixed
+- **Code blocks no longer lose newlines when not preceded by a blank line** — `renderMd()` in `static/ui.js` now stashes `<pre>` blocks (including language-labelled blocks with `<div class="pre-header">` wrappers), mermaid diagrams, and katex blocks before the paragraph-splitting pass, then restores them. Previously, if a fenced code block was not separated from surrounding text by a double newline, all `\n` inside it were replaced with `<br>`, causing Prism.js to collapse the entire block to one line and misidentify everything after a `//` comment as a comment. (Fixes #745, reported by @qqxpee)
+
 ## [v0.50.101] — 2026-04-20
 
 ### Fixed
