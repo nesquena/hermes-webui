@@ -2072,7 +2072,7 @@ function renderKatexBlocks(){
 
 function _thinkingMarkup(text=''){
   return (text&&String(text).trim())
-    ? `<div class="thinking-card open"><div class="thinking-card-header"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span></div><div class="thinking-card-body"><pre>${esc(String(text).trim())}</pre></div></div>`
+    ? `<div class="thinking-card open"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(text).trim())}</pre></div></div>`
     : `<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
 }
 function finalizeThinkingCard(){

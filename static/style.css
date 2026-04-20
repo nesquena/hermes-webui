@@ -1682,7 +1682,7 @@ body.bubble-layout .msg-row + .msg-row[data-role="user"] { border-top: none; pad
   border-color: var(--accent-hover);
   background: var(--accent-bg);
 }
-.thinking-card-header { padding: 5px 10px; color: var(--accent-text); font-size: 12px; font-weight: 600; opacity: .85; }
+.thinking-card-header { display:flex; align-items:center; gap:8px; padding: 5px 10px; color: var(--accent-text); font-size: 12px; font-weight: 600; opacity: .85; }
 .thinking-card-header:hover { opacity: 1; }
 .thinking-card-icon { opacity: .7; }
 .thinking-card-body {
