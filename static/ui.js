@@ -1696,21 +1696,26 @@ function renderMessages(){
       if(anchorRow&&lastInsertedNode) anchorInsertAfter.set(anchorRow, lastInsertedNode);
     }
   }
-  // Render usage badge on the last assistant turn (if enabled and usage data exists)
+  // Render cumulative usage on the last assistant footer row (if enabled).
   if(window._showTokenUsage&&S.session&&(S.session.input_tokens||S.session.output_tokens)){
     const rows=inner.querySelectorAll('.assistant-turn');
     let lastAssist=null;
     for(let i=rows.length-1;i>=0;i--){lastAssist=rows[i];break;}
-    if(lastAssist&&!lastAssist.querySelector('.msg-usage')){
-      const usage=document.createElement('div');
-      usage.className='msg-usage';
-      const inTok=S.session.input_tokens||0;
-      const outTok=S.session.output_tokens||0;
-      const cost=S.session.estimated_cost;
-      let text=`${_fmtTokens(inTok)} in · ${_fmtTokens(outTok)} out`;
-      if(cost) text+=` · ~$${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
-      usage.textContent=text;
-      _assistantTurnBlocks(lastAssist).appendChild(usage);
+    if(lastAssist){
+      const footerRows=lastAssist.querySelectorAll('.msg-foot');
+      const targetFoot=footerRows.length?footerRows[footerRows.length-1]:null;
+      if(targetFoot&&!targetFoot.querySelector('.msg-usage-inline')){
+        const usage=document.createElement('span');
+        usage.className='msg-usage-inline';
+        const inTok=S.session.input_tokens||0;
+        const outTok=S.session.output_tokens||0;
+        const cost=S.session.estimated_cost;
+        let text=`${_fmtTokens(inTok)} in · ${_fmtTokens(outTok)} out`;
+        if(cost) text+=` · ~$${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
+        usage.textContent=text;
+        targetFoot.classList.add('msg-foot-with-usage');
+        targetFoot.insertBefore(usage, targetFoot.firstChild);
+      }
     }
   }
   // Only force-scroll when not actively streaming — mid-stream re-renders

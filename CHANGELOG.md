@@ -3,7 +3,7 @@
 ## [v0.50.97] — 2026-04-19
 
 ### Fixed
-- **Assistant messages now show footer timestamps, and older messages show a fuller date+time** — assistant response segments now render the same footer timestamp affordance as user messages, using the existing message `_ts` / `timestamp` fields already stamped by the WebUI. Existing timestamps for unchanged historical messages are also preserved during transcript rebuilds, so older turns no longer get re-stamped to the newest reply time.
+- **Message footer metadata is now consistent across user and assistant turns** — timestamps are available on both sides using the existing `_ts` / `timestamp` fields, but footer chrome now stays hidden until hover instead of being always visible on assistant messages. The last assistant turn keeps cumulative `in/out/cost` usage visible, then reveals timestamp and actions inline on hover so the footer does not grow an extra row. Existing timestamps for unchanged historical messages are also preserved during transcript rebuilds, so older turns no longer get re-stamped to the newest reply time.
 
 ## [v0.50.96] — 2026-04-19
 
