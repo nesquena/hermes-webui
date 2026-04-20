@@ -297,6 +297,21 @@ def get_cli_sessions() -> list:
         with sqlite3.connect(str(db_path)) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
+            # Introspect schema to handle older hermes-agent versions that
+            # may not have a 'source' column. Without this check the query raises
+            # OperationalError which is silently swallowed, causing the empty-list bug.
+            cur.execute("PRAGMA table_info(sessions)")
+            _session_cols = {row[1] for row in cur.fetchall()}
+            if 'source' not in _session_cols:
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "get_cli_sessions(): state.db at %s has no 'source' column "
+                    "(older hermes-agent?). CLI sessions unavailable. "
+                    "Upgrade hermes-agent to fix this.",
+                    db_path,
+                )
+                return cli_sessions
+
             cur.execute("""
                 SELECT s.id, s.title, s.model, s.message_count,
                        s.started_at, s.source,
@@ -332,8 +347,14 @@ def get_cli_sessions() -> list:
                     'source_tag': _source,
                     'is_cli_session': True,
                 })
-    except Exception:
-        # DB schema changed, locked, or corrupted -- silently degrade
+    except Exception as _cli_err:
+        # DB schema changed, locked, or corrupted -- log warning so admins can diagnose.
+        # Still degrade gracefully (don't crash the WebUI).
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "get_cli_sessions() failed — check state.db schema or path (%s): %s",
+            db_path, _cli_err,
+        )
         return []
 
     return cli_sessions

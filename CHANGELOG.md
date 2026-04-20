@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.118] — 2026-04-20
+
+### Fixed
+- **CLI sessions: silent failure now logged** — `get_cli_sessions()` no longer swallows DB errors silently. If `state.db` is missing the `source` column (older hermes-agent) or has any other schema/lock issue, a warning is now logged with the DB path and a hint to upgrade hermes-agent. This makes "Show CLI sessions in sidebar has no effect" diagnosable from the server log instead of requiring code archaeology. (#634)
+
 ## [v0.50.117] — 2026-04-20
 
 ### Fixed
