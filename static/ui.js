@@ -10,14 +10,23 @@ function _getSessionQueue(sid, create=false){
 function queueSessionMessage(sid, payload){
   if(!sid||!payload) return 0;
   const q=_getSessionQueue(sid,true);
-  q.push(payload);
+  // Stamp created_at so the restore path can detect stale entries (agent already responded)
+  const entry={...payload, _queued_at: Date.now()};
+  q.push(entry);
+  // Persist to sessionStorage so the queue survives page refresh
+  try{ sessionStorage.setItem('hermes-queue-'+sid, JSON.stringify(q)); }catch(_){}
   return q.length;
 }
 function shiftQueuedSessionMessage(sid){
   const q=_getSessionQueue(sid,false);
   if(!q.length) return null;
   const next=q.shift();
-  if(!q.length) delete SESSION_QUEUES[sid];
+  if(!q.length){
+    delete SESSION_QUEUES[sid];
+    try{ sessionStorage.removeItem('hermes-queue-'+sid); }catch(_){}
+  } else {
+    try{ sessionStorage.setItem('hermes-queue-'+sid, JSON.stringify(q)); }catch(_){}
+  }
   return next;
 }
 function getQueuedSessionCount(sid){

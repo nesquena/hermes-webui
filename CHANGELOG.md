@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.117] — 2026-04-20
+
+### Fixed
+- **Queued messages survive page refresh** — when a follow-up message is submitted while the agent is busy, the queue is now persisted to `sessionStorage`. On reload, if the agent is still running the queue is silently restored and will drain normally. If the agent has finished, the first queued message is restored into the composer as a draft with a toast notification ("Queued message restored — review and send when ready"), preventing accidental auto-send. Stale entries (created before the last assistant response) are automatically discarded. (#660)
+
 ## [v0.50.116] — 2026-04-20
 
 ### Fixed

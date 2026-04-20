@@ -83,6 +83,41 @@ async function loadSession(sid){
       attachLiveStream(sid, activeStreamId, data.session.pending_attachments||[], {reconnecting:true});
     }
   }else{
+    // Restore any queued message that survived page refresh via sessionStorage.
+    // Only restore when the agent is idle — if active, the done handler drains it.
+    if(typeof queueSessionMessage==='function'){
+      try{
+        const _storedQ=sessionStorage.getItem('hermes-queue-'+sid);
+        if(_storedQ){
+          const _entries=JSON.parse(_storedQ);
+          if(Array.isArray(_entries)&&_entries.length){
+            // Timestamp guard: drop entries older than the last assistant response
+            // (means the agent already ran and the queue was already dispatched)
+            const _lastMsg=(data.session.messages||[]).slice().reverse()
+              .find(m=>m&&m.role==='assistant');
+            const _lastAsst=_lastMsg?(_lastMsg.timestamp||_lastMsg._ts||0)*1000:0;
+            const _fresh=_entries.filter(e=>!e._queued_at||e._queued_at>_lastAsst);
+            if(_fresh.length){
+              // Populate SESSION_QUEUES so updateQueueBadge shows the count
+              _fresh.forEach(e=>{ if(typeof queueSessionMessage==='function') queueSessionMessage(sid, e); });
+              sessionStorage.removeItem('hermes-queue-'+sid); // let the re-enqueue above repersist cleanly
+              // Restore the first entry as a composer draft so the user can review before sending
+              const _first=_fresh[0];
+              const _msg=$&&$('msg');
+              if(_msg&&_first.text&&!_msg.value){
+                _msg.value=_first.text||'';
+                if(typeof autoResize==='function') autoResize();
+                if(typeof showToast==='function') showToast((_fresh.length>1?`${_fresh.length} queued messages restored`:'Queued message restored')+' — review and send when ready');
+              }
+            } else {
+              sessionStorage.removeItem('hermes-queue-'+sid);
+            }
+          } else {
+            sessionStorage.removeItem('hermes-queue-'+sid);
+          }
+        }
+      }catch(_){sessionStorage.removeItem('hermes-queue-'+sid);}
+    }
     updateQueueBadge(sid);
     S.messages=data.session.messages||[];
     const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(data.session):null;
