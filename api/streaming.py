@@ -1237,6 +1237,12 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                     'type': _err_type,
                     'hint': _err_hint,
                 })
+                # Clear stream/pending state so the session does not appear
+                # "agent_running" on reload after a silent failure.
+                s.active_stream_id = None
+                s.pending_user_message = None
+                s.pending_attachments = []
+                s.pending_started_at = None
                 # Persist the error so it survives page reload.
                 # _error=True ensures _sanitize_messages_for_api excludes it from
                 # subsequent API calls so the LLM never sees its own error as prior context.
