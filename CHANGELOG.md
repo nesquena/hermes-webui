@@ -6,6 +6,7 @@
 <<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 ## [v0.50.102] — 2026-04-20
 
 ### Fixed
@@ -43,6 +44,12 @@
 ### Added
 - **Three-container UID/GID alignment guide in README** — new subsection "Running alongside hermes-dashboard (three-container setup)" explains why UIDs must match across containers sharing a bind-mounted volume, documents the variable name asymmetry (`HERMES_UID`/`HERMES_GID` for the agent image vs `WANTED_UID`/`WANTED_GID` for the WebUI image), gives the recommended `.env` setup for standard Linux and NAS/Unraid deployments, provides the one-time `chown` fix for existing installs, and notes that the dashboard volume must be read-write. (Fixes #645)
 >>>>>>> 01e8cd0 (docs(docker): add three-container UID/GID alignment guide)
+=======
+## [v0.50.107] — 2026-04-20
+
+### Fixed
+- **Kimi K2.5 added to Kimi/Moonshot provider model list** — `kimi-k2.5` was present in `hermes_cli` but missing from the WebUI's `api/config.py` kimi-coding provider, making it unavailable in the model selector. (Fixes #740)
+>>>>>>> dc08017 (fix(models): add kimi-k2.5 to Kimi/Moonshot provider model list)
 
 ## [v0.50.101] — 2026-04-20
 

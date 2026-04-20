@@ -533,6 +533,7 @@ _PROVIDER_MODELS = {
         {"id": "moonshot-v1-32k", "label": "Moonshot v1 32k"},
         {"id": "moonshot-v1-128k", "label": "Moonshot v1 128k"},
         {"id": "kimi-latest", "label": "Kimi Latest"},
+        {"id": "kimi-k2.5", "label": "Kimi K2.5"},
     ],
     "minimax": [
         {"id": "MiniMax-M2.7", "label": "MiniMax M2.7"},
