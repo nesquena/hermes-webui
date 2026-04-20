@@ -208,7 +208,7 @@ def switch_profile(name: str) -> dict:
     # Write sticky default for CLI consistency
     try:
         ap_file = _DEFAULT_HERMES_HOME / 'active_profile'
-        ap_file.write_text(name if name != 'default' else '')
+        ap_file.write_text(name if name != 'default' else '', encoding='utf-8')
     except Exception:
         logger.debug("Failed to write active profile file")
 
@@ -357,7 +357,7 @@ def _write_endpoint_to_config(profile_dir: Path, base_url: str = None, api_key: 
     if api_key:
         model_section['api_key'] = api_key
     cfg['model'] = model_section
-    config_path.write_text(_yaml.dump(cfg, default_flow_style=False, allow_unicode=True))
+    config_path.write_text(_yaml.dump(cfg, default_flow_style=False, allow_unicode=True), encoding='utf-8')
 
 
 def create_profile_api(name: str, clone_from: str = None,
