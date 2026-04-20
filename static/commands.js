@@ -49,9 +49,20 @@ function getMatchingCommands(prefix){
   const q=prefix.toLowerCase();
   const matches=COMMANDS.filter(c=>c.name.startsWith(q)).map(c=>({...c,source:'builtin'}));
   const seen=new Set(matches.map(c=>c.name));
+  for(const [name, spec] of Object.entries(SLASH_SUBARG_SOURCES)){
+    if(!name.startsWith(q)||seen.has(name))continue;
+    matches.push({
+      name,
+      desc:spec.desc,
+      arg:'name',
+      source:'subarg-command',
+    });
+    seen.add(name);
+  }
   for(const skill of _skillCommandCache){
     if(!skill.name.startsWith(q)||seen.has(skill.name))continue;
     matches.push(skill);
+    seen.add(skill.name);
   }
   return matches;
 }
@@ -618,11 +629,12 @@ function showCmdDropdown(matches){
   const dd=$('cmdDropdown');
   if(!dd)return;
   dd.innerHTML='';
-  _cmdSelectedIdx=-1;
+  _cmdSelectedIdx=matches.length?0:-1;
   for(let i=0;i<matches.length;i++){
     const c=matches[i];
     const el=document.createElement('div');
     el.className='cmd-item';
+    if(i===_cmdSelectedIdx) el.classList.add('selected');
     el.dataset.idx=i;
     const isSubArg=c.source==='subarg';
     const usage=(!isSubArg&&c.arg)?` <span class="cmd-item-arg">${esc(c.arg)}</span>`:'';
@@ -635,9 +647,18 @@ function showCmdDropdown(matches){
     el.innerHTML=`${nameHtml}${descHtml}`;
     el.onmousedown=(e)=>{
       e.preventDefault();
-      $('msg').value=isSubArg?('/'+c.parent+' '+c.value):('/'+c.name+(c.arg?' ':''));
-      hideCmdDropdown();
+      const nextValue=isSubArg?('/'+c.parent+' '+c.value):('/'+c.name+(c.arg?' ':''));
+      $('msg').value=nextValue;
       $('msg').focus();
+      if(!isSubArg&&c.source!=='skill'&&typeof getSlashAutocompleteMatches==='function'){
+        getSlashAutocompleteMatches(nextValue).then(matches=>{
+          if(($('msg').value||'')!==nextValue) return;
+          if(matches.length) showCmdDropdown(matches);
+          else hideCmdDropdown();
+        });
+      }else{
+        hideCmdDropdown();
+      }
     };
     dd.appendChild(el);
   }

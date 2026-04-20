@@ -23,6 +23,8 @@ def test_subarg_registry_exists_without_promoting_reasoning_to_builtin():
     assert "reasoning:{desc:'Set reasoning effort', subArgs:['low','medium','high']}" in COMMANDS_JS
     assert "{name:'reasoning'" not in COMMANDS_JS, \
         "/reasoning suggestions must not register as a local built-in command"
+    assert "source:'subarg-command'" in COMMANDS_JS, \
+        "top-level autocomplete should still surface subarg-only commands like /reasoning"
 
 
 def test_model_and_personality_subargs_load_from_existing_apis():
@@ -45,3 +47,7 @@ def test_boot_uses_async_slash_autocomplete_helper():
 def test_subarg_dropdown_has_distinct_parent_and_argument_styling():
     assert ".cmd-item-parent" in STYLE_CSS
     assert ".cmd-item-subarg" in STYLE_CSS
+    assert ".cmd-item.selected{background:var(--accent-bg);" in STYLE_CSS
+    assert "_cmdSelectedIdx=matches.length?0:-1;" in COMMANDS_JS
+    assert "getSlashAutocompleteMatches(nextValue).then(matches=>" in COMMANDS_JS, \
+        "selecting a first-level command with sub-args should immediately open second-level suggestions"

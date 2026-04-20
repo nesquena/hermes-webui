@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.112] — 2026-04-20
+
+### Fixed
+- **Slash autocomplete now keeps command completion flowing into sub-arguments** — sub-argument-only commands like `/reasoning` now appear in the first suggestion list, the current dropdown selection is visibly highlighted while navigating with arrow keys, and accepting a top-level command like `/reasoning` immediately opens the second-level suggestions instead of requiring an extra space press. (Fixes #632, credit: @franksong2702)
+
 ## [v0.50.111] — 2026-04-20
 
 ### Fixed
