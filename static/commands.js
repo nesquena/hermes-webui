@@ -233,7 +233,12 @@ async function cmdModel(args){
   if(!args){showToast(t('model_usage'));return;}
   const sel=$('modelSelect');
   if(!sel)return;
-  const q=args.toLowerCase();
+  let q=args.toLowerCase();
+  // Support copilot-local/model/keyword → @gateway-local:model/keyword shorthand
+  const gwMatch=q.match(/^copilot-(\w+)\/([\w.-]+)\/([\w.-]+)$/);
+  if(gwMatch){
+    q=`@gateway-${gwMatch[1]}:${gwMatch[2]}/${gwMatch[3]}`;
+  }
   // Fuzzy match: find first option whose label or value contains the query
   let match=null;
   for(const opt of sel.options){
