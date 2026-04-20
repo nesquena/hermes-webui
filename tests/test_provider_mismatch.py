@@ -459,3 +459,36 @@ def test_unknown_prefix_model_passes_through_unchanged(monkeypatch):
         assert effective == custom_model, (
             f"Expected '{custom_model}', got '{effective}'"
         )
+
+
+def test_empty_model_session_does_not_trigger_save(monkeypatch):
+    """Sessions with no model stored must not trigger session.save() — index rebuild is expensive."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.4-mini",
+        },
+    )
+
+    save_calls = []
+
+    class DummySession:
+        def __init__(self):
+            self.model = None  # no model stored
+
+        def save(self, touch_updated_at=True):
+            save_calls.append(touch_updated_at)
+
+    session = DummySession()
+    effective = routes._normalize_session_model_in_place(session)
+
+    # Must return the default, but must NOT write to disk
+    assert effective == "gpt-5.4-mini"
+    assert save_calls == [], (
+        "_normalize_session_model_in_place must not call session.save() when "
+        "the session has no stored model — no correction needed, just a fallback."
+    )

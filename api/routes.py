@@ -227,8 +227,12 @@ def _resolve_compatible_session_model(model_id: str | None) -> tuple[str, bool]:
 
 
 def _normalize_session_model_in_place(session) -> str:
-    effective_model, changed = _resolve_compatible_session_model(getattr(session, "model", None))
-    if changed and effective_model and getattr(session, "model", None) != effective_model:
+    original_model = getattr(session, "model", None) or ""
+    effective_model, changed = _resolve_compatible_session_model(original_model or None)
+    # Only persist the correction if the session had an explicit model that needed changing.
+    # Sessions with no model stored (empty/None) get the effective default returned without
+    # a disk write — no need to rebuild the index for a fill-in-blank operation.
+    if changed and effective_model and original_model and original_model != effective_model:
         session.model = effective_model
         session.save(touch_updated_at=False)
     return effective_model

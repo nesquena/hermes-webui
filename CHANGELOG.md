@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.101] — 2026-04-20
+
+### Fixed
+- **Session model normalization: null/empty model no longer triggers index rebuild** — sessions with no stored model (`model: null` or missing) now return the provider default without writing to disk. Previously a spurious `session.save()` (and full session index rebuild) could fire for any such session. (#751 follow-up)
+
 ## [v0.50.100] — 2026-04-20
 
 ### Fixed
