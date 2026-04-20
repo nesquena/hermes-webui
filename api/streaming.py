@@ -1426,7 +1426,14 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
 
 
 def cancel_stream(stream_id: str) -> bool:
-    """Signal an in-flight stream to cancel. Returns True if the stream existed."""
+    """Signal an in-flight stream to cancel. Returns True if the stream existed.
+
+    Eagerly releases the session lock (pops STREAMS, clears active_stream_id)
+    so that new /api/chat/start requests succeed immediately after cancel,
+    even if the agent thread is still blocked in a C-level syscall.
+    The worker thread's eventual STREAMS.pop() in the finally block is a
+    no-op (dict.pop with default None), so there is no double-pop risk.
+    """
     with STREAMS_LOCK:
         if stream_id not in STREAMS:
             return False
@@ -1471,4 +1478,28 @@ def cancel_stream(stream_id: str) -> bool:
                 q.put_nowait(('cancel', {'message': 'Cancelled by user'}))
             except Exception:
                 logger.debug("Failed to put cancel event to queue")
+
+        # --- Eager session lock release (fixes #653) ---
+        # Pop stream state so the 409 guard in routes.py sees the session
+        # as idle and allows new /api/chat/start requests.  The worker
+        # thread's finally-block already uses .pop(key, None), so a
+        # double-pop here is safe (no-op).
+        STREAMS.pop(stream_id, None)
+        CANCEL_FLAGS.pop(stream_id, None)
+        AGENT_INSTANCES.pop(stream_id, None)
+
+        # Also clear the session's active_stream_id so the next request
+        # doesn't hit the stale-id fallback path either.
+        _session_id = getattr(agent, 'session_id', None) if agent else None
+        if _session_id:
+            try:
+                s = get_session(_session_id)
+                s.active_stream_id = None
+                s.pending_user_message = None
+                s.pending_attachments = []
+                s.pending_started_at = None
+                s.save()
+            except Exception:
+                logger.debug("Failed to clear session lock on cancel for %s", _session_id)
+
     return True
