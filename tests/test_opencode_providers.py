@@ -50,6 +50,8 @@ def _models_with_env_key(monkeypatch, env_var, expected_provider_display):
     old_cfg = dict(config.cfg)
     config.cfg["model"] = {}
     config.cfg.pop("custom_providers", None)
+    # Invalidate TTL cache so the env-var change is visible
+    config.invalidate_models_cache()
     monkeypatch.setenv(env_var, "test-key")
     try:
         result = config.get_available_models()
