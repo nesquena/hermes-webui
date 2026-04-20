@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.109] — 2026-04-20
+
+### Fixed
+- **Dark-mode user bubbles no longer render as bright accent pills** — the user chat bubble now uses the dark accent tint (`--accent-bg-strong`) for both fill and border in dark mode, preserving the selected skin hue without forcing a bright high-contrast surface. Edit-state placeholder/focus styling now follows the same bubble tokens, and regression coverage locks the dark-mode bubble token contract in place.
+
 ## [v0.50.108] — 2026-04-20
 
 ### Fixed
