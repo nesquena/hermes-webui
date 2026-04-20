@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.109] — 2026-04-20
+
+### Fixed
+- **Named custom provider test isolation** — `_models_with_cfg()` in `tests/test_custom_provider_display_name.py` now pins `_cfg_mtime` before calling `get_available_models()`, preventing the mtime-guard inside that function from firing `reload_config()` and silently discarding the patched `config.cfg`. This fixes an ordering-dependent test failure where any test that wrote `config.yaml` before this test ran would cause `get_available_models()` to return the real OpenRouter model list instead of the patched Agent37 group. (Fixes #754)
+
 ## [v0.50.108] — 2026-04-20
 
 ### Fixed
