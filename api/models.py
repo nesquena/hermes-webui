@@ -49,7 +49,7 @@ def _write_session_index(updates=None):
         return
 
     # Fast path: patch existing index with updated sessions.
-    # This avoids loading all 170+ session files on every single save().
+    # This avoids loading every session file on every single save().
     # LOCK covers the entire read-patch-write to prevent concurrent save() calls
     # from both reading the same baseline and one losing its update.
     _fallback = False
