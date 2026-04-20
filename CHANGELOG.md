@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.120] — 2026-04-20
+
+### Fixed
+- **Cancelled sessions no longer get stuck** — `cancel_stream()` now eagerly pops stream state (`STREAMS`, `CANCEL_FLAGS`, `AGENT_INSTANCES`) and clears `session.active_stream_id` immediately after signalling cancel. Previously, the 409 "session already has an active stream" guard would block all new chat requests until the agent thread's `finally` block ran — which never happens when the thread is blocked in a C-level syscall on a bad tool call. Session cleanup runs outside `STREAMS_LOCK` to preserve lock ordering and avoid deadlock. (Fixes #653, credit: @bergeouss)
+
 ## [v0.50.119] — 2026-04-20
 
 ### Fixed

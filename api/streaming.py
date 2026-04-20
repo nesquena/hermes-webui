@@ -1507,7 +1507,16 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
 
 
 def cancel_stream(stream_id: str) -> bool:
-    """Signal an in-flight stream to cancel. Returns True if the stream existed."""
+    """Signal an in-flight stream to cancel. Returns True if the stream existed.
+
+    Eagerly releases the session lock (pops STREAMS/CANCEL_FLAGS/AGENT_INSTANCES
+    and clears session.active_stream_id) so new /api/chat/start requests succeed
+    immediately after cancel, even if the agent thread is still blocked.
+
+    The worker thread's finally block uses .pop(key, None), so the double-pop is
+    a safe no-op. Session cleanup runs outside STREAMS_LOCK to preserve lock
+    ordering (streaming thread does LOCK → STREAMS_LOCK; inverting would deadlock).
+    """
     with STREAMS_LOCK:
         if stream_id not in STREAMS:
             return False
@@ -1552,4 +1561,34 @@ def cancel_stream(stream_id: str) -> bool:
                 q.put_nowait(('cancel', {'message': 'Cancelled by user'}))
             except Exception:
                 logger.debug("Failed to put cancel event to queue")
+
+        # ── Eager session lock release (fixes #653) ──────────────────────────
+        # Pop stream state now so the 409 guard in routes.py sees the session
+        # as idle and allows new /api/chat/start immediately after cancel,
+        # even if the agent thread is still blocked in a C-level syscall.
+        # The worker thread's finally block uses .pop(key, None) too, so a
+        # double-pop here is safe (no-op).
+        STREAMS.pop(stream_id, None)
+        CANCEL_FLAGS.pop(stream_id, None)
+        AGENT_INSTANCES.pop(stream_id, None)
+
+        # Capture session_id while holding STREAMS_LOCK (avoids a race where
+        # the agent thread deallocates the agent object after we release).
+        # Session cleanup (get_session + save) must happen OUTSIDE the lock —
+        # get_session() acquires LOCK, and the streaming thread does LOCK first
+        # then STREAMS_LOCK, so inverting the order here would cause deadlock.
+        _cancel_session_id = getattr(agent, 'session_id', None) if agent else None
+
+    # Session cleanup outside STREAMS_LOCK to preserve lock ordering.
+    if _cancel_session_id:
+        try:
+            _cs = get_session(_cancel_session_id)
+            _cs.active_stream_id = None
+            _cs.pending_user_message = None
+            _cs.pending_attachments = []
+            _cs.pending_started_at = None
+            _cs.save()
+        except Exception:
+            logger.debug("Failed to clear session state on cancel for %s", _cancel_session_id)
+
     return True
