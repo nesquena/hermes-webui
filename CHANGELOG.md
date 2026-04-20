@@ -5,6 +5,7 @@
 <<<<<<< HEAD
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
 ## [v0.50.102] — 2026-04-20
 
 ### Fixed
@@ -35,6 +36,9 @@
 >>>>>>> ee22213 (fix(docker): catch PermissionError in _signing_key + three-container UID note)
 =======
 ## [v0.50.102] — 2026-04-20
+=======
+## [v0.50.108] — 2026-04-20
+>>>>>>> 734060d (fix(docker): forward HERMES_UID/GID to agent+dashboard containers)
 
 ### Added
 - **Three-container UID/GID alignment guide in README** — new subsection "Running alongside hermes-dashboard (three-container setup)" explains why UIDs must match across containers sharing a bind-mounted volume, documents the variable name asymmetry (`HERMES_UID`/`HERMES_GID` for the agent image vs `WANTED_UID`/`WANTED_GID` for the WebUI image), gives the recommended `.env` setup for standard Linux and NAS/Unraid deployments, provides the one-time `chown` fix for existing installs, and notes that the dashboard volume must be read-write. (Fixes #645)

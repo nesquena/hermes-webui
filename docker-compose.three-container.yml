@@ -28,6 +28,8 @@ services:
       - hermes-agent-src:/opt/hermes
     environment:
       - HERMES_HOME=/root/.hermes
+      - HERMES_UID=${HERMES_UID:-10000}
+      - HERMES_GID=${HERMES_GID:-10000}
     restart: unless-stopped
     deploy:
       resources:
@@ -47,6 +49,8 @@ services:
       - hermes-home:/root/.hermes
     environment:
       - HERMES_HOME=/root/.hermes
+      - HERMES_UID=${HERMES_UID:-10000}
+      - HERMES_GID=${HERMES_GID:-10000}
       # Dashboard connects to the gateway for health/session data
       - GATEWAY_HEALTH_URL=http://hermes-agent:8642
     depends_on:
