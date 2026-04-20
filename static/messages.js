@@ -71,6 +71,12 @@ async function send(){
       model:S.session.model||$('modelSelect').value,workspace:S.session.workspace,
       attachments:uploaded.length?uploaded:undefined
     })});
+    if(startData.effective_model && S.session){
+      S.session.model=startData.effective_model;
+      localStorage.setItem('hermes-webui-model', startData.effective_model);
+      if($('modelSelect')) _applyModelToDropdown(startData.effective_model, $('modelSelect'));
+      if(typeof syncTopbar==='function') syncTopbar();
+    }
     streamId=startData.stream_id;
     S.activeStreamId = streamId;
     markInflight(activeSid, streamId);
