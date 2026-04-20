@@ -436,17 +436,6 @@
   @media(min-width:1800px){.messages-inner{max-width:1200px;}}
   .msg-row{padding:10px 0;}
   .msg-row+.msg-row{border-top:none;}
-  /* Bubble layout (issue #336): opt-in chat-bubble look with user messages right-aligned
-     and assistant messages left-aligned. Uses :has() to tag rows by role without JS
-     changes. Full-width by default -- enabled via body.bubble-layout from settings. */
-  body.bubble-layout .msg-row:has(.msg-role.user){align-self:flex-end;max-width:75%;}
-  body.bubble-layout .msg-row:has(.msg-role.user) .msg-body{padding-left:0;padding-right:30px;max-width:none;}
-  body.bubble-layout .msg-row:has(.msg-role.user) .msg-role{flex-direction:row-reverse;}
-  body.bubble-layout .msg-row:has(.msg-role.assistant){align-self:flex-start;max-width:75%;}
-  @media(max-width:700px){
-    body.bubble-layout .msg-row:has(.msg-role.user),
-    body.bubble-layout .msg-row:has(.msg-role.assistant){max-width:92%;}
-  }
   .msg-role{font-size:12px;font-weight:500;letter-spacing:.01em;margin-bottom:8px;display:flex;align-items:center;gap:8px;}
   .msg-role.user{color:var(--accent);}
   .msg-role.assistant{color:var(--accent-text);opacity:.6;}
@@ -1613,13 +1602,6 @@ body.resizing{user-select:none;cursor:col-resize;}
 .msg-row[data-role="user"] .msg-files { padding-left: 0; margin-left: 0; justify-content: flex-end; }
 .msg-row[data-role="user"][data-editing="1"] .msg-edit-area { background: var(--user-bubble-bg); border-color: var(--user-bubble-border); color: var(--user-bubble-text); box-shadow: 0 0 0 3px var(--focus-ring); }
 .msg-row[data-role="user"][data-editing="1"] .msg-edit-area::placeholder { color: var(--user-bubble-placeholder); }
-
-/* Bubble-layout mode: user-card stays intact, just drop the rail margin.
-   (:has() form matches the existing bubble-layout rule's specificity so this
-   wins by source order rather than relying on !important.) */
-body.bubble-layout .msg-row:has(.msg-role.user) .msg-body { margin-left: 0; padding: 10px 14px; max-width: none; }
-body.bubble-layout .msg-row:has(.msg-role.user) .msg-files { margin-left: 0; padding-left: 0; }
-body.bubble-layout .msg-row + .msg-row[data-role="user"] { border-top: none; padding-top: 10px; margin-top: 0; }
 
 /* Turn boundary: right alignment already separates user turns — keep only vertical spacing */
 .msg-row + .msg-row[data-role="user"] {

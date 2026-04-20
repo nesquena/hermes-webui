@@ -151,6 +151,17 @@ def test_load_settings_normalizes_legacy_theme_from_file(monkeypatch, tmp_path):
     assert loaded["skin"] == "poseidon"
 
 
+def test_load_settings_drops_removed_bubble_layout_key(monkeypatch, tmp_path):
+    """Removed settings should not leak back into the loaded settings payload."""
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({"bubble_layout": True}), encoding="utf-8")
+    monkeypatch.setattr(config, "SETTINGS_FILE", settings_path)
+
+    loaded = config.load_settings()
+
+    assert "bubble_layout" not in loaded
+
+
 def test_theme_does_not_break_other_settings():
     """Setting theme should not disturb other settings."""
     d_before, _ = get("/api/settings")

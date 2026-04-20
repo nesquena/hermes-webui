@@ -61,8 +61,6 @@
     <button data-theme-btn="monokai">Monokai</button>
     <button data-theme-btn="nord">Nord</button>
     <button data-theme-btn="oled">OLED</button>
-    <span style="width:1px;height:18px;background:var(--border);margin:0 4px;align-self:center;"></span>
-    <button id="toggleBubble">Bubble layout: off</button>
   </div>
 </header>
 
@@ -666,9 +664,9 @@ Run typecheck to confirm, then patch.</pre></div>
 
 <!-- ============================================================= -->
 <section class="doc-section">
-  <div class="doc-kicker">11 · Bubble layout</div>
-  <h2 class="doc-h">Opt-in via <code>body.bubble-layout</code> — extra bubble padding for assistant too</h2>
-  <p class="doc-note">The default layout already right-aligns user messages (the redesign adopted it globally), so this toggle mostly affects additional padding / boundary handling. Flip the <strong>Bubble layout</strong> toggle in the header to see the mode applied.</p>
+  <div class="doc-kicker">11 · Conversation sample</div>
+  <h2 class="doc-h">Default message alignment and spacing</h2>
+  <p class="doc-note">The current UI keeps the right-aligned user treatment and the assistant rail by default, without a separate appearance toggle.</p>
   <div class="doc-card"><span class="doc-label">Conversation sample</span>
     <div class="messages doc-messages"><div class="messages-inner doc-inner">
       <div class="msg-row" data-role="user"><div class="msg-body"><p>Can you add a retry button next to the regenerate one?</p></div></div>
@@ -843,14 +841,6 @@ Run typecheck to confirm, then patch.</pre></div>
       else document.documentElement.setAttribute('data-theme', t);
       document.querySelectorAll('[data-theme-btn]').forEach(b => b.classList.toggle('on', b === btn));
     });
-  });
-  // Bubble-layout toggle
-  const bubbleBtn = document.getElementById('toggleBubble');
-  bubbleBtn.addEventListener('click', () => {
-    document.body.classList.toggle('bubble-layout');
-    const on = document.body.classList.contains('bubble-layout');
-    bubbleBtn.textContent = 'Bubble layout: ' + (on ? 'on' : 'off');
-    bubbleBtn.classList.toggle('on', on);
   });
   // Thinking / tool-card click-to-toggle (so the demo feels live)
   document.querySelectorAll('.thinking-card-header, .tool-card-header').forEach(h => {
