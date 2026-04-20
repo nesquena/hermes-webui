@@ -1,5 +1,12 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.116] — 2026-04-20
+
+### Fixed
+- **Session errors survive page reload** — provider quota exhaustion, rate limit, auth, and agent errors are now persisted to the session file as a special error message. Reloading the page after an error no longer shows a blank conversation. Error messages are excluded from the next API call's conversation history so the LLM never sees its own error as prior context. (#739)
+- **Quota/credit exhaustion shows a distinct error** — "Out of credits" now appears instead of the generic "No response received" message when a Codex or other provider account runs out of credits. Both the silent-failure path and the exception path now classify `insufficient_credits` / `quota_exceeded` separately from rate limits, with a targeted hint to top up the balance or switch providers. (#739)
+- **Context compaction no longer hangs the session** — when `run_conversation()` rotates the session_id during context compaction, `stream_end` now uses the original session_id (captured before the run), matching what the client captured in `activeSid`. Previously the mismatch caused the EventSource to stay open, trigger a reconnect loop, and show "Connection lost." The same fix also corrects the `title` SSE event. (#652, #653)
+
 ## [v0.50.115] — 2026-04-20
 
 ### Removed

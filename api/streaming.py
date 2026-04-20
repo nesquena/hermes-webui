@@ -540,7 +540,7 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                 _put_title_status(put_event, session_id, source, 'local_summary', s.title, raw_preview)
             else:
                 _put_title_status(put_event, session_id, source, llm_status, s.title, raw_preview)
-            put_event('title', {'session_id': s.session_id, 'title': s.title})
+            put_event('title', {'session_id': session_id, 'title': s.title})
         else:
             _put_title_status(put_event, session_id, 'skipped', source or 'unchanged', current, raw_preview)
     finally:
@@ -577,6 +577,9 @@ def _sanitize_messages_for_api(messages):
     clean = []
     for msg in messages:
         if not isinstance(msg, dict):
+            continue
+        # Skip persisted error markers — never send them to the LLM as prior context.
+        if msg.get('_error'):
             continue
         role = msg.get('role')
         if role == 'tool':
@@ -1194,31 +1197,60 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             if not _assistant_added and not _token_sent:
                 _last_err = getattr(agent, '_last_error', None) or result.get('error') or ''
                 _err_str = str(_last_err) if _last_err else ''
-                _is_auth = (
-                    '401' in _err_str
-                    or (_last_err and 'AuthenticationError' in type(_last_err).__name__)
-                    or 'authentication' in _err_str.lower()
-                    or 'unauthorized' in _err_str.lower()
-                    or 'invalid api key' in _err_str.lower()
-                    or 'invalid_api_key' in _err_str.lower()
+                _err_lower = _err_str.lower()
+                _is_quota = (
+                    'insufficient credit' in _err_lower
+                    or 'credit balance' in _err_lower
+                    or 'credits exhausted' in _err_lower
+                    or 'quota_exceeded' in _err_lower
+                    or 'quota exceeded' in _err_lower
+                    or 'exceeded your current quota' in _err_lower
                 )
-                if _is_auth:
-                    put('apperror', {
-                        'message': _err_str or 'Authentication failed — check your API key.',
-                        'type': 'auth_mismatch',
-                        'hint': (
-                            'The selected model may not be supported by your configured provider or '
-                            'your API key is invalid. Run `hermes model` in your terminal to '
-                            'update credentials, then restart the WebUI.'
-                        ),
-                    })
+                _is_auth = (
+                    not _is_quota and (
+                        '401' in _err_str
+                        or (_last_err and 'AuthenticationError' in type(_last_err).__name__)
+                        or 'authentication' in _err_lower
+                        or 'unauthorized' in _err_lower
+                        or 'invalid api key' in _err_lower
+                        or 'invalid_api_key' in _err_lower
+                    )
+                )
+                if _is_quota:
+                    _err_label = 'Out of credits'
+                    _err_type = 'quota_exhausted'
+                    _err_hint = 'Your provider account is out of credits. Top up your balance or switch providers via `hermes model`.'
+                elif _is_auth:
+                    _err_label = 'Authentication failed'
+                    _err_type = 'auth_mismatch'
+                    _err_hint = (
+                        'The selected model may not be supported by your configured provider or '
+                        'your API key is invalid. Run `hermes model` in your terminal to '
+                        'update credentials, then restart the WebUI.'
+                    )
                 else:
-                    put('apperror', {
-                        'message': _err_str or 'The agent returned no response. Check your API key and model selection.',
-                        'type': 'no_response',
-                        'hint': 'Verify your API key is valid and the selected model is available for your account.',
-                    })
-                return  # Don't emit done — the apperror already closes the stream on the client
+                    _err_label = 'No response received'
+                    _err_type = 'no_response'
+                    _err_hint = 'Verify your API key is valid and the selected model is available for your account.'
+                put('apperror', {
+                    'message': _err_str or f'{_err_label}.',
+                    'type': _err_type,
+                    'hint': _err_hint,
+                })
+                # Persist the error so it survives page reload.
+                # _error=True ensures _sanitize_messages_for_api excludes it from
+                # subsequent API calls so the LLM never sees its own error as prior context.
+                s.messages.append({
+                    'role': 'assistant',
+                    'content': f'**{_err_label}:** {_err_str or _err_label}\n\n*{_err_hint}*',
+                    'timestamp': int(time.time()),
+                    '_error': True,
+                })
+                try:
+                    s.save()
+                except Exception:
+                    pass
+                return  # apperror already closes the stream on the client side
 
             # ── Handle context compression side effects ──
             # If compression fired inside run_conversation, the agent may have
@@ -1346,7 +1378,10 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                     daemon=True,
                 ).start()
             else:
-                put('stream_end', {'session_id': s.session_id})
+                # Use the original session_id parameter (never reassigned), not s.session_id
+                # which may be rotated during context compression. The client captured
+                # activeSid = original session_id so they must match for stream_end to close.
+                put('stream_end', {'session_id': session_id})
         finally:
             # Unregister the gateway approval callback and unblock any threads
             # still waiting on approval (e.g. stream cancelled mid-approval).
@@ -1372,44 +1407,70 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
 
     except Exception as e:
         print('[webui] stream error:\n' + traceback.format_exc(), flush=True)
+        err_str = str(e)
+        _exc_lower = err_str.lower()
+        # Classify before saving so the error message can be persisted to the session.
+        # Check quota exhaustion first — OpenAI billing 429s use insufficient_quota which
+        # also matches rate-limit patterns, so order matters.
+        _exc_is_quota = (
+            'insufficient credit' in _exc_lower
+            or 'credit balance' in _exc_lower
+            or 'credits exhausted' in _exc_lower
+            or 'quota_exceeded' in _exc_lower
+            or 'quota exceeded' in _exc_lower
+            or 'exceeded your current quota' in _exc_lower
+        )
+        _exc_is_rate_limit = (not _exc_is_quota) and (
+            'rate limit' in _exc_lower or '429' in err_str or 'RateLimitError' in type(e).__name__
+        )
+        _exc_is_auth = (
+            '401' in err_str
+            or 'AuthenticationError' in type(e).__name__
+            or 'authentication' in _exc_lower
+            or 'unauthorized' in _exc_lower
+            or 'invalid api key' in _exc_lower
+            or 'no cookie auth credentials' in _exc_lower
+        )
+        if _exc_is_quota:
+            _exc_label, _exc_type, _exc_hint = (
+                'Out of credits', 'quota_exhausted',
+                'Your provider account is out of credits. Top up your balance or switch providers via `hermes model`.',
+            )
+        elif _exc_is_rate_limit:
+            _exc_label, _exc_type, _exc_hint = (
+                'Rate limit reached', 'rate_limit',
+                'Rate limit reached. The fallback model (if configured) was also exhausted. Try again in a moment.',
+            )
+        elif _exc_is_auth:
+            _exc_label, _exc_type, _exc_hint = (
+                'Authentication error', 'auth_mismatch',
+                'The selected model may not be supported by your configured provider. '
+                'Run `hermes model` in your terminal to switch providers, then restart the WebUI.',
+            )
+        else:
+            _exc_label, _exc_type, _exc_hint = 'Error', 'error', ''
         if s is not None:
             s.active_stream_id = None
             s.pending_user_message = None
             s.pending_attachments = []
             s.pending_started_at = None
+            # Persist the error so it survives page reload.
+            # _error=True ensures _sanitize_messages_for_api excludes it from subsequent
+            # API calls so the LLM never sees its own error as prior context on the next turn.
+            s.messages.append({
+                'role': 'assistant',
+                'content': f'**{_exc_label}:** {err_str}' + (f'\n\n*{_exc_hint}*' if _exc_hint else ''),
+                'timestamp': int(time.time()),
+                '_error': True,
+            })
             try:
                 s.save()
             except Exception:
                 pass
-        err_str = str(e)
-        # Detect rate limit errors specifically so the client can show a helpful card
-        # rather than the generic "Connection lost" message
-        is_rate_limit = 'rate limit' in err_str.lower() or '429' in err_str or 'RateLimitError' in type(e).__name__
-        is_auth_error = (
-            '401' in err_str
-            or 'AuthenticationError' in type(e).__name__
-            or 'authentication' in err_str.lower()
-            or 'unauthorized' in err_str.lower()
-            or 'invalid api key' in err_str.lower()
-            or 'no cookie auth credentials' in err_str.lower()
-        )
-        if is_rate_limit:
-            put('apperror', {
-                'message': err_str,
-                'type': 'rate_limit',
-                'hint': 'Rate limit reached. The fallback model (if configured) was also exhausted. Try again in a moment.',
-            })
-        elif is_auth_error:
-            put('apperror', {
-                'message': err_str,
-                'type': 'auth_mismatch',
-                'hint': (
-                    'The selected model may not be supported by your configured provider. '
-                    'Run `hermes model` in your terminal to switch providers, then restart the WebUI.'
-                ),
-            })
-        else:
-            put('apperror', {'message': err_str, 'type': 'error'})
+        _apperror_payload: dict = {'message': err_str, 'type': _exc_type}
+        if _exc_hint:
+            _apperror_payload['hint'] = _exc_hint
+        put('apperror', _apperror_payload)
     finally:
         _clear_thread_env()  # TD1: always clear thread-local context
         with STREAMS_LOCK:

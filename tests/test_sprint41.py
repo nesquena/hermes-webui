@@ -156,8 +156,10 @@ class TestIssue495TitleStreaming(unittest.TestCase):
         )
 
     def test_streaming_emits_title_sse_event(self):
+        # After the stream_end fix, title uses original session_id param (not s.session_id
+        # which can be rotated during context compression — see #652 fix)
         self.assertIn(
-            "put_event('title', {'session_id': s.session_id, 'title': s.title})",
+            "put_event('title', {'session_id': session_id, 'title': s.title})",
             STREAMING_PY,
             "streaming.py should emit a title SSE event when title is updated",
         )

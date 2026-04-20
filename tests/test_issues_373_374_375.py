@@ -37,7 +37,8 @@ class TestSilentErrorDetection:
         """streaming.py must return after emitting apperror (not also emit done)."""
         # The return statement must come after the put('apperror') for no_response
         no_resp_pos = STREAMING_PY.find("'no_response'")
-        return_pos = STREAMING_PY.find("return  # Don't emit done", no_resp_pos)
+        # Comment updated: "apperror already closes the stream on the client side"
+        return_pos = STREAMING_PY.find("return  # apperror already closes the stream", no_resp_pos)
         assert no_resp_pos != -1, "no_response type not found in streaming.py"
         assert return_pos != -1, (
             "streaming.py must return after emitting apperror to prevent also emitting done (#373)"

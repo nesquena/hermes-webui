@@ -520,9 +520,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         try{
           const d=JSON.parse(e.data);
           const isRateLimit=d.type==='rate_limit';
+          const isQuotaExhausted=d.type==='quota_exhausted';
           const isAuthMismatch=d.type==='auth_mismatch';
           const isNoResponse=d.type==='no_response';
-          const label=isRateLimit?'Rate limit reached':isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isNoResponse?'No response received':'Error';
+          const label=isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isNoResponse?'No response received':'Error';
           const hint=d.hint?`\n\n*${d.hint}*`:'';
           S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`});
         }catch(_){

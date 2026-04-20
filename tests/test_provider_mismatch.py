@@ -37,30 +37,33 @@ class TestStreamingAuthErrorDetection:
         )
 
     def test_is_auth_error_flag_defined(self):
-        """is_auth_error variable must exist in the error handler."""
+        """auth error variable must exist in the error handler (exception path and silent-failure path)."""
         src = _read("api/streaming.py")
-        assert "is_auth_error" in src, (
-            "is_auth_error flag not found in streaming.py"
+        # Variable renamed to _exc_is_auth in exception path, _is_auth in silent-failure path
+        assert "_exc_is_auth" in src or "_is_auth" in src, (
+            "auth error flag not found in streaming.py"
         )
 
     def test_auth_error_detects_401(self):
         """'401' must be part of the auth error detection logic."""
         src = _read("api/streaming.py")
         # Find the is_auth_error block
-        idx = src.find("is_auth_error")
+        # Variable renamed to _exc_is_auth in exception path, _is_auth in silent-failure path
+        idx = src.find("_exc_is_auth")
         assert idx != -1
-        block = src[idx:idx + 400]
+        block = src[idx:idx + 500]
         assert "'401'" in block or '"401"' in block, (
-            "'401' not in is_auth_error detection block"
+            "'401' not in auth error detection block"
         )
 
     def test_auth_error_detects_unauthorized(self):
         """'unauthorized' must be part of the auth error detection logic."""
         src = _read("api/streaming.py")
-        idx = src.find("is_auth_error")
-        block = src[idx:idx + 400]
+        # Variable renamed to _exc_is_auth in exception path
+        idx = src.find("_exc_is_auth")
+        block = src[idx:idx + 500]
         assert "unauthorized" in block.lower(), (
-            "'unauthorized' not in is_auth_error detection block"
+            "'unauthorized' not in auth error detection block"
         )
 
     def test_auth_error_hint_mentions_hermes_model(self):
@@ -77,11 +80,14 @@ class TestStreamingAuthErrorDetection:
     def test_auth_error_does_not_catch_rate_limit(self):
         """Rate limit errors must not be reclassified as auth_mismatch."""
         src = _read("api/streaming.py")
-        # is_rate_limit must come before is_auth_error in the elif chain
-        rl_idx = src.find("is_rate_limit")
-        ae_idx = src.find("is_auth_error")
+        # Variables renamed: _exc_is_rate_limit / _exc_is_auth in exception path
+        # Quota check comes first (before rate limit), then rate limit, then auth
+        rl_idx = src.find("_exc_is_rate_limit")
+        ae_idx = src.find("_exc_is_auth")
+        assert rl_idx != -1, "_exc_is_rate_limit not found in streaming.py exception path"
+        assert ae_idx != -1, "_exc_is_auth not found in streaming.py exception path"
         assert rl_idx < ae_idx, (
-            "is_rate_limit check should precede is_auth_error — "
+            "_exc_is_rate_limit check should precede _exc_is_auth — "
             "rate limit errors must not be mistaken for auth errors"
         )
 
