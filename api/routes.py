@@ -183,7 +183,9 @@ def _normalize_provider_id(value: str | None) -> str:
     ):
         if raw.startswith(prefix):
             return normalized
-    return raw
+    # Unknown prefix — return empty so callers treat it as "no match" and pass
+    # the model through unchanged rather than incorrectly stripping it.
+    return "" 
 
 
 def _resolve_compatible_session_model(model_id: str | None) -> tuple[str, bool]:
@@ -217,7 +219,9 @@ def _resolve_compatible_session_model(model_id: str | None) -> tuple[str, bool]:
         return model, False
 
     model_provider = _normalize_provider_id(model[:slash])
-    if model_provider and model_provider != active_provider and default_model:
+    # Skip normalization for models on custom/openrouter namespaces — these are
+    # user-controlled and should never be silently replaced.
+    if model_provider and model_provider not in {"", "custom", "openrouter"} and model_provider != active_provider and default_model:
         return default_model, True
     return model, False
 

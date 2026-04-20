@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.100] — 2026-04-20
+
+### Fixed
+- **Session model normalization: unknown provider prefixes now pass through** — custom/unlisted model prefixes (e.g. `custom-provider/my-model`) are no longer incorrectly stripped when switching providers. Only well-known provider prefixes (`gpt-`, `claude-`, `gemini-`, etc.) are normalized. Regression introduced in v0.50.99. (#751)
+
 ## [v0.50.99] — 2026-04-20
 
 ### Fixed

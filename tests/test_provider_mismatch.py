@@ -430,3 +430,32 @@ class TestChatStartEffectiveModelRecovery:
         assert "localStorage.setItem('hermes-webui-model', startData.effective_model)" in src, (
             "effective_model correction must update the saved model preference"
         )
+
+
+def test_unknown_prefix_model_passes_through_unchanged(monkeypatch):
+    """Models with unknown/custom prefixes must never be stripped — regression test for #751."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.4-mini",
+        },
+    )
+
+    for custom_model in (
+        "custom-provider/test-model-999",
+        "test/import-model",
+        "my-local-llm/variant-1",
+        "lmstudio-community/Qwen2.5-Coder-7B-Instruct-GGUF",
+    ):
+        effective, changed = routes._resolve_compatible_session_model(custom_model)
+        assert changed is False, (
+            f"Model '{custom_model}' has an unknown prefix and must pass through unchanged, "
+            f"but _resolve_compatible_session_model returned changed=True (effective='{effective}')"
+        )
+        assert effective == custom_model, (
+            f"Expected '{custom_model}', got '{effective}'"
+        )
