@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.97] — 2026-04-20
+
+### Fixed
+- **Only the latest user message can be edited** — older user turns no longer show the pencil/edit affordance. This avoids implying that historical turns can be lightly edited when the actual action truncates the session and restarts the conversation from that point. (Closes #744)
+
 ## [v0.50.96] — 2026-04-19
 
 ### Added

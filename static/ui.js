@@ -1409,6 +1409,13 @@ function renderMessages(){
     if(msgContent(m)||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)))) visWithIdx.push({m,rawIdx});
     rawIdx++;
   }
+  let lastUserRawIdx=-1;
+  for(let i=visWithIdx.length-1;i>=0;i--){
+    if(visWithIdx[i].m&&visWithIdx[i].m.role==='user'){
+      lastUserRawIdx=visWithIdx[i].rawIdx;
+      break;
+    }
+  }
   const insertionAnchor=_compressionAnchorIndex(
     visWithIdx,
     compressionState ? compressionState.anchorMessageKey : sessionCompressionAnchorKey,
@@ -1471,7 +1478,8 @@ function renderMessages(){
       filesHtml=`<div class="msg-files">${m.attachments.map(f=>`<div class="msg-file-badge">${li('paperclip',12)} ${esc(f)}</div>`).join('')}</div>`;
     }
     const bodyHtml = isUser ? esc(String(content)).replace(/\n/g,'<br>') : renderMd(_stripXmlToolCallsDisplay(String(content)));
-    const editBtn  = isUser  ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
+    const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
+    const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
     const tsVal=m._ts||m.timestamp;
