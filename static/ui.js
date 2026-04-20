@@ -663,11 +663,14 @@ function renderMd(raw){
     const ref=media_stash[+i];
     // HTTP(S) URL
     if(/^https?:\/\//i.test(ref)){
-      // Rewrite localhost/127.0.0.1 to actual server origin so remote
-      // users (VPN, Docker, deployed) can load agent-generated images (#642)
+      // Rewrite localhost/127.0.0.1 to the actual server base URL so remote
+      // users (VPN, Docker, deployed) can load agent-generated images (#642).
+      // Strip the trailing slash from document.baseURI so the URL's own path
+      // joins cleanly — this preserves any subpath mount (e.g. /hermes/).
       let src=ref;
-      if(/https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/.test(src)){
-        src=src.replace(/https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/,window.location.origin);
+      if(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(src)){
+        const base=document.baseURI.replace(/\/$/,'');
+        src=src.replace(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i,base);
       }
       if(_IMAGE_EXTS.test(src.split('?')[0])){
         return `<img class="msg-media-img" src="${esc(src)}" alt="image" loading="lazy" onclick="this.classList.toggle('msg-media-img--full')">`;
