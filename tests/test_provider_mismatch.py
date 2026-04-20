@@ -278,6 +278,99 @@ def test_api_models_includes_active_provider():
     )
 
 
+def test_bare_gemini_session_model_normalizes_to_active_provider_default(monkeypatch):
+    """Persisted bare Gemini IDs must not survive a provider switch."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.4-mini",
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "gemini-3.1-pro-preview"
+    )
+
+    assert changed is True
+    assert effective == "gpt-5.4-mini"
+
+
+def test_prefixed_google_session_model_normalizes_to_active_provider_default(monkeypatch):
+    """Persisted provider-prefixed Gemini IDs must normalize too."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.4-mini",
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "google/gemini-3.1-pro-preview"
+    )
+
+    assert changed is True
+    assert effective == "gpt-5.4-mini"
+
+
+def test_google_active_provider_keeps_valid_gemini_session_model(monkeypatch):
+    """A Google-configured session must keep its Gemini model."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "google",
+            "default_model": "gemini-3.1-pro-preview",
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "gemini-3.1-pro-preview"
+    )
+
+    assert changed is False
+    assert effective == "gemini-3.1-pro-preview"
+
+
+def test_session_model_normalizer_persists_corrected_model(monkeypatch):
+    """GET /api/session should persist the corrected model back to disk/state."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.4-mini",
+        },
+    )
+
+    save_calls = []
+
+    class DummySession:
+        def __init__(self):
+            self.model = "gemini-3.1-pro-preview"
+
+        def save(self, touch_updated_at=True):
+            save_calls.append(touch_updated_at)
+
+    session = DummySession()
+    effective = routes._normalize_session_model_in_place(session)
+
+    assert effective == "gpt-5.4-mini"
+    assert session.model == "gpt-5.4-mini"
+    assert save_calls == [False]
+
+
 # ── Model switch toast (#419) ─────────────────────────────────────────────────
 
 class TestModelSwitchToast:
@@ -323,3 +416,79 @@ class TestModelSwitchToast:
         assert "typeof showToast" in surrounding, (
             "showToast call must be guarded with typeof check"
         )
+
+
+class TestChatStartEffectiveModelRecovery:
+    """messages.js must accept an effective_model correction from the backend."""
+
+    def test_send_applies_effective_model_from_chat_start(self):
+        src = _read("static/messages.js")
+        assert "startData.effective_model" in src, (
+            "send() must read effective_model from /api/chat/start so the UI can "
+            "recover from stale persisted session models"
+        )
+        assert "localStorage.setItem('hermes-webui-model', startData.effective_model)" in src, (
+            "effective_model correction must update the saved model preference"
+        )
+
+
+def test_unknown_prefix_model_passes_through_unchanged(monkeypatch):
+    """Models with unknown/custom prefixes must never be stripped — regression test for #751."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.4-mini",
+        },
+    )
+
+    for custom_model in (
+        "custom-provider/test-model-999",
+        "test/import-model",
+        "my-local-llm/variant-1",
+        "lmstudio-community/Qwen2.5-Coder-7B-Instruct-GGUF",
+    ):
+        effective, changed = routes._resolve_compatible_session_model(custom_model)
+        assert changed is False, (
+            f"Model '{custom_model}' has an unknown prefix and must pass through unchanged, "
+            f"but _resolve_compatible_session_model returned changed=True (effective='{effective}')"
+        )
+        assert effective == custom_model, (
+            f"Expected '{custom_model}', got '{effective}'"
+        )
+
+
+def test_empty_model_session_does_not_trigger_save(monkeypatch):
+    """Sessions with no model stored must not trigger session.save() — index rebuild is expensive."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.4-mini",
+        },
+    )
+
+    save_calls = []
+
+    class DummySession:
+        def __init__(self):
+            self.model = None  # no model stored
+
+        def save(self, touch_updated_at=True):
+            save_calls.append(touch_updated_at)
+
+    session = DummySession()
+    effective = routes._normalize_session_model_in_place(session)
+
+    # Must return the default, but must NOT write to disk
+    assert effective == "gpt-5.4-mini"
+    assert save_calls == [], (
+        "_normalize_session_model_in_place must not call session.save() when "
+        "the session has no stored model — no correction needed, just a fallback."
+    )

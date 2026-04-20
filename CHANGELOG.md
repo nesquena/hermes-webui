@@ -1,9 +1,34 @@
 # Hermes Web UI -- Changelog
 
-## [v0.50.97] — 2026-04-19
+## [v0.50.102] — 2026-04-20
 
 ### Fixed
 - **Message footer metadata is now consistent across user and assistant turns** — timestamps are available on both sides using the existing `_ts` / `timestamp` fields, but footer chrome now stays hidden until hover instead of being always visible on assistant messages. The last assistant turn keeps cumulative `in/out/cost` usage visible, then reveals timestamp and actions inline on hover so the footer does not grow an extra row. Existing timestamps for unchanged historical messages are also preserved during transcript rebuilds, so older turns no longer get re-stamped to the newest reply time.
+
+## [v0.50.101] — 2026-04-20
+
+### Fixed
+- **Session model normalization: null/empty model no longer triggers index rebuild** — sessions with no stored model (`model: null` or missing) now return the provider default without writing to disk. Previously a spurious `session.save()` (and full session index rebuild) could fire for any such session. (#751 follow-up)
+
+## [v0.50.100] — 2026-04-20
+
+### Fixed
+- **Session model normalization: unknown provider prefixes now pass through** — custom/unlisted model prefixes (e.g. `custom-provider/my-model`) are no longer incorrectly stripped when switching providers. Only well-known provider prefixes (`gpt-`, `claude-`, `gemini-`, etc.) are normalized. Regression introduced in v0.50.99. (#751)
+
+## [v0.50.99] — 2026-04-20
+
+### Fixed
+- **Stale session models normalized after provider switch** — sessions that still reference a model from a previous provider (e.g. a `gemini-*` model after switching to OpenAI Codex) are silently corrected to the current provider's default on load, preventing startup failures. (Closes #748, credit: @likawa3b)
+
+## [v0.50.98] — 2026-04-20
+
+### Fixed
+- **Slash command autocomplete constrained to composer width** — the `/` command dropdown is now positioned inside the composer box, so suggestions stay visually anchored to the input area rather than expanding across the full chat panel. (Closes #633, credit: @franksong2702)
+
+## [v0.50.97] — 2026-04-20
+
+### Fixed
+- **Only the latest user message can be edited** — older user turns no longer show the pencil/edit affordance. This avoids implying that historical turns can be lightly edited when the actual action truncates the session and restarts the conversation from that point. (Closes #744)
 
 ## [v0.50.96] — 2026-04-19
 
