@@ -819,6 +819,7 @@ def invalidate_models_cache():
     """
     global _AVAILABLE_MODELS_CACHE, _AVAILABLE_MODELS_CACHE_TS
     _AVAILABLE_MODELS_CACHE = None
+    _AVAILABLE_MODELS_CACHE_TS = 0.0
 
 
 def get_available_models() -> dict:
@@ -851,6 +852,7 @@ def get_available_models() -> dict:
         _current_mtime = Path(_get_config_path()).stat().st_mtime
     except OSError:
         _current_mtime = 0.0
+    # Note: env-var changes (e.g. API key rotation) are not detected by mtime; cache will stale for up to TTL seconds
     if _current_mtime != _cfg_mtime:
         reload_config()
         # Config changed — force cache invalidation

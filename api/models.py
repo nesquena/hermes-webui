@@ -42,10 +42,10 @@ def _write_session_index(updates=None):
             for s in SESSIONS.values():
                 if not any(e['session_id'] == s.session_id for e in entries):
                     entries.append(s.compact())
-        entries.sort(key=lambda s: s['updated_at'], reverse=True)
-        _tmp = SESSION_INDEX_FILE.with_suffix('.tmp')
-        _tmp.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding='utf-8')
-        os.replace(str(_tmp), str(SESSION_INDEX_FILE))
+            entries.sort(key=lambda s: s['updated_at'], reverse=True)
+            _tmp = SESSION_INDEX_FILE.with_suffix('.tmp')
+            _tmp.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding='utf-8')
+            os.replace(str(_tmp), str(SESSION_INDEX_FILE))
         return
 
     # Fast path: patch existing index with updated sessions.
