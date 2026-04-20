@@ -1083,15 +1083,18 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             else:
                 _fallback_resolved = None
 
-            agent = _AIAgent(
+            # Build kwargs defensively — guard newer params so the WebUI
+            # degrades gracefully when run against an older hermes-agent build.
+            # (fixes: TypeError: AIAgent.__init__() got an unexpected keyword
+            # argument 'credential_pool' — issue #772)
+            import inspect as _inspect
+            _agent_params = set(_inspect.signature(_AIAgent.__init__).parameters)
+
+            _agent_kwargs = dict(
                 model=resolved_model,
                 provider=resolved_provider,
                 base_url=resolved_base_url,
                 api_key=resolved_api_key,
-                api_mode=_rt.get('api_mode'),
-                acp_command=_rt.get('command'),
-                acp_args=_rt.get('args'),
-                credential_pool=_rt.get('credential_pool'),
                 platform='cli',
                 quiet_mode=True,
                 enabled_toolsets=_toolsets,
@@ -1107,6 +1110,17 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                     )
                 ),
             )
+            # Params added in newer hermes-agent — skip if not supported
+            if 'api_mode' in _agent_params:
+                _agent_kwargs['api_mode'] = _rt.get('api_mode')
+            if 'acp_command' in _agent_params:
+                _agent_kwargs['acp_command'] = _rt.get('command')
+            if 'acp_args' in _agent_params:
+                _agent_kwargs['acp_args'] = _rt.get('args')
+            if 'credential_pool' in _agent_params:
+                _agent_kwargs['credential_pool'] = _rt.get('credential_pool')
+
+            agent = _AIAgent(**_agent_kwargs)
 
             # Store agent instance for cancel/interrupt propagation
             with STREAMS_LOCK:

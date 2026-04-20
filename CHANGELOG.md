@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.119] — 2026-04-20
+
+### Fixed
+- **Older hermes-agent builds no longer crash on startup** — the WebUI now checks which params `AIAgent.__init__` actually accepts (via `inspect.signature`) before constructing the agent. The four params added in newer builds (`api_mode`, `acp_command`, `acp_args`, `credential_pool`) are passed only when present, so older installs degrade gracefully instead of throwing `TypeError`. (#772)
+
 ## [v0.50.118] — 2026-04-20
 
 ### Fixed
