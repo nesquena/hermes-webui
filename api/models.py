@@ -19,22 +19,58 @@ from api.workspace import get_last_workspace
 logger = logging.getLogger(__name__)
 
 
-def _write_session_index():
-    """Rebuild the session index file for O(1) future reads."""
-    entries = []
-    for p in SESSION_DIR.glob('*.json'):
-        if p.name.startswith('_'): continue
-        try:
-            s = Session.load(p.stem)
-            if s: entries.append(s.compact())
-        except Exception:
-            logger.debug("Failed to load session from %s", p)
-    with LOCK:
-        for s in SESSIONS.values():
-            if not any(e['session_id'] == s.session_id for e in entries):
-                entries.append(s.compact())
-    entries.sort(key=lambda s: s['updated_at'], reverse=True)
-    SESSION_INDEX_FILE.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding='utf-8')
+def _write_session_index(updates=None):
+    """Update the session index file.
+
+    When *updates* is provided (a list of Session objects whose compact
+    entries should be refreshed), this does a targeted in-place update of
+    the existing index — O(1) for single-session changes.  When *updates*
+    is None, a full rebuild is performed (used on startup / first call).
+    """
+    # Lazy full-rebuild path — used when index doesn't exist yet.
+    if updates is None or not SESSION_INDEX_FILE.exists():
+        entries = []
+        for p in SESSION_DIR.glob('*.json'):
+            if p.name.startswith('_'): continue
+            try:
+                s = Session.load(p.stem)
+                if s: entries.append(s.compact())
+            except Exception:
+                logger.debug("Failed to load session from %s", p)
+        with LOCK:
+            for s in SESSIONS.values():
+                if not any(e['session_id'] == s.session_id for e in entries):
+                    entries.append(s.compact())
+        entries.sort(key=lambda s: s['updated_at'], reverse=True)
+        SESSION_INDEX_FILE.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding='utf-8')
+        return
+
+    # Fast path: patch existing index with updated sessions.
+    # This avoids loading all 170+ session files on every single save().
+    try:
+        existing = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
+    except Exception:
+        # Corrupt or missing — fall back to full rebuild
+        _write_session_index(updates=None)
+        return
+
+    # Build lookup of updated entries
+    updated_map = {s.session_id: s.compact() for s in updates}
+    # Remove deleted sessions (files that no longer exist) and update existing
+    existing_ids = {e.get('session_id') for e in existing}
+    # Add any updated entries not yet in the index
+    for sid, entry in updated_map.items():
+        if sid not in existing_ids:
+            existing.append(entry)
+
+    # Replace matching entries in-place
+    for i, e in enumerate(existing):
+        sid = e.get('session_id')
+        if sid in updated_map:
+            existing[i] = updated_map[sid]
+
+    existing.sort(key=lambda s: s.get('updated_at', 0), reverse=True)
+    SESSION_INDEX_FILE.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding='utf-8')
 
 
 class Session:
@@ -86,7 +122,7 @@ class Session:
             json.dumps(self.__dict__, ensure_ascii=False, indent=2),
             encoding='utf-8',
         )
-        _write_session_index()
+        _write_session_index(updates=[self])
 
     @classmethod
     def load(cls, sid):

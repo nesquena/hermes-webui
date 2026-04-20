@@ -802,6 +802,13 @@ def set_hermes_default_model(model_id: str) -> dict:
     return get_available_models()
 
 
+# ── TTL cache for get_available_models() ─────────────────────────────────────
+_available_models_cache: dict | None = None
+_available_models_cache_ts: float = 0.0
+_AVAILABLE_MODELS_CACHE_TTL: float = 60.0  # seconds — refresh at most once per minute
+_available_models_cache_lock = threading.Lock()
+
+
 def get_available_models() -> dict:
     """
     Return available models grouped by provider.
@@ -812,12 +819,24 @@ def get_available_models() -> dict:
       3. Fetch models from custom endpoint if base_url is configured
       4. Fall back to hardcoded model list (OpenRouter-style)
 
+    The result is cached for up to 60 seconds to avoid re-scanning auth
+    providers (which includes a slow ~4s AWS IMDS timeout) on every
+    session load. Config changes (config.yaml mtime) invalidate the cache
+    immediately.
+
     Returns: {
         'active_provider': str|None,
         'default_model': str,
         'groups': [{'provider': str, 'models': [{'id': str, 'label': str}]}]
     }
     """
+    # Serve from TTL cache if fresh.
+    global _AVAILABLE_MODELS_CACHE, _AVAILABLE_MODELS_CACHE_TS
+    import time as _time
+    now = _time.monotonic()
+    if _AVAILABLE_MODELS_CACHE is not None and (now - _AVAILABLE_MODELS_CACHE_TS) < _AVAILABLE_MODELS_CACHE_TTL:
+        return _AVAILABLE_MODELS_CACHE
+
     # Reload config from disk if config.yaml has changed since last load.
     # This ensures CLI model changes are picked up on page refresh without
     # a server restart, while avoiding clearing in-memory mocks during tests. (#585)
@@ -827,6 +846,8 @@ def get_available_models() -> dict:
         _current_mtime = 0.0
     if _current_mtime != _cfg_mtime:
         reload_config()
+        # Config changed — force cache invalidation
+        _AVAILABLE_MODELS_CACHE = None
     active_provider = None
     default_model = get_effective_default_model(cfg)
     groups = []
@@ -1277,11 +1298,15 @@ def get_available_models() -> dict:
                     }
                 )
 
-    return {
+    result = {
         "active_provider": active_provider,
         "default_model": default_model,
         "groups": groups,
     }
+    # Cache the result for TTL seconds
+    _AVAILABLE_MODELS_CACHE = result
+    _AVAILABLE_MODELS_CACHE_TS = _time.monotonic()
+    return result
 
 
 # ── Static file path ─────────────────────────────────────────────────────────
