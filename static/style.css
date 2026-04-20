@@ -1543,17 +1543,15 @@ body.resizing{user-select:none;cursor:col-resize;}
   --user-bubble-bg: var(--accent);
   --user-bubble-border: var(--accent-hover);
   --user-bubble-text: #fff;
+  --user-bubble-placeholder: rgba(255,255,255,.7);
 }
-/* Dark mode: bright accents need dark text for contrast */
+/* Dark mode: keep user bubbles dark; skin remains a tint via border/fill. */
 :root.dark {
-  --user-bubble-text: #1a1a2a;
+  --user-bubble-bg: var(--accent-bg-strong);
+  --user-bubble-border: var(--accent-bg-strong);
+  --user-bubble-text: var(--text);
+  --user-bubble-placeholder: var(--muted);
 }
-:root.dark[data-skin="ares"] { --user-bubble-text: #1a1a2a; }
-:root.dark[data-skin="mono"] { --user-bubble-text: #1a1a2a; }
-:root.dark[data-skin="slate"] { --user-bubble-text: #0f172a; }
-:root.dark[data-skin="poseidon"] { --user-bubble-text: #0a1628; }
-:root.dark[data-skin="sisyphus"] { --user-bubble-text: #1a1a2a; }
-:root.dark[data-skin="charizard"] { --user-bubble-text: #1a1a2a; }
 
 /* Inline code: stop shouting orange; inherit strong text colour instead */
 .msg-body code { color: var(--strong); background: var(--code-inline-bg); font-size: 12.5px; }
@@ -1613,8 +1611,8 @@ body.resizing{user-select:none;cursor:col-resize;}
 .msg-row[data-role="user"] .msg-body code { color: var(--user-bubble-text); background: rgba(0,0,0,.1); }
 .msg-row[data-role="user"] .msg-body a { color: var(--user-bubble-text); text-decoration: underline; }
 .msg-row[data-role="user"] .msg-files { padding-left: 0; margin-left: 0; justify-content: flex-end; }
-.msg-row[data-role="user"][data-editing="1"] .msg-edit-area { background: var(--user-bubble-bg); border-color: var(--user-bubble-border); color: var(--user-bubble-text); box-shadow: 0 0 0 3px rgba(255,255,255,.15); }
-.msg-row[data-role="user"][data-editing="1"] .msg-edit-area::placeholder { color: rgba(255,255,255,.5); }
+.msg-row[data-role="user"][data-editing="1"] .msg-edit-area { background: var(--user-bubble-bg); border-color: var(--user-bubble-border); color: var(--user-bubble-text); box-shadow: 0 0 0 3px var(--focus-ring); }
+.msg-row[data-role="user"][data-editing="1"] .msg-edit-area::placeholder { color: var(--user-bubble-placeholder); }
 
 /* Bubble-layout mode: user-card stays intact, just drop the rail margin.
    (:has() form matches the existing bubble-layout rule's specificity so this

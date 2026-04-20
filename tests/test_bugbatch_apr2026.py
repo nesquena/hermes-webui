@@ -54,6 +54,28 @@ def test_594_file_rename_input_has_light_mode_override():
     )
 
 
+# ── dark-mode user bubble semantics ──────────────────────────────────────────
+
+def test_dark_user_bubbles_use_dark_tinted_surface():
+    """Dark mode should keep user bubbles dark, with skin only tinting the bubble."""
+    assert "--user-bubble-bg: var(--accent-bg-strong);" in STYLE_CSS, (
+        "Dark mode user bubbles should use the dark accent tint, not the full bright accent fill"
+    )
+    assert "--user-bubble-border: var(--accent-bg-strong);" in STYLE_CSS, (
+        "Dark mode user bubble borders should match the quieter thinking-card border intensity"
+    )
+    assert "--user-bubble-text: var(--text);" in STYLE_CSS, (
+        "Dark mode user bubble text should inherit the theme text color"
+    )
+
+
+def test_dark_user_bubbles_do_not_need_per_skin_text_hacks():
+    """Dark-mode user bubble contrast should not rely on per-skin text overrides."""
+    assert re.search(r':root\.dark\[data-skin="[^"]+"\]\s*\{\s*--user-bubble-text:', STYLE_CSS) is None, (
+        "Dark-mode user bubble contrast should come from shared theme tokens, not per-skin text hacks"
+    )
+
+
 # ── #576: workspace panel snap fix ───────────────────────────────────────────
 
 def test_576_panel_restore_gated_on_workspace():
