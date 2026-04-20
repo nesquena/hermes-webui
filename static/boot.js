@@ -454,9 +454,16 @@ $('msg').addEventListener('input',()=>{
   updateSendBtn();
   const text=$('msg').value;
   if(text.startsWith('/')&&text.indexOf('\n')===-1){
-    const prefix=text.slice(1);
-    const matches=getMatchingCommands(prefix);
-    if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
+    if(typeof getSlashAutocompleteMatches==='function'){
+      getSlashAutocompleteMatches(text).then(matches=>{
+        if(($('msg').value||'')!==text) return;
+        if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
+      });
+    }else{
+      const prefix=text.slice(1);
+      const matches=getMatchingCommands(prefix);
+      if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
+    }
     if(typeof ensureSkillCommandsLoadedForAutocomplete==='function') ensureSkillCommandsLoadedForAutocomplete();
   } else {
     hideCmdDropdown();

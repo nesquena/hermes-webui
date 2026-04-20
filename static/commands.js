@@ -7,12 +7,12 @@ const COMMANDS=[
   {name:'clear',     desc:t('cmd_clear'),         fn:cmdClear},
   {name:'compress',  desc:t('cmd_compress'),       fn:cmdCompress, arg:'[focus topic]'},
   {name:'compact',   desc:t('cmd_compact_alias'),       fn:cmdCompact},
-  {name:'model',     desc:t('cmd_model'),  fn:cmdModel,     arg:'model_name'},
+  {name:'model',     desc:t('cmd_model'),  fn:cmdModel,     arg:'model_name', subArgs:'models'},
   {name:'workspace', desc:t('cmd_workspace'),            fn:cmdWorkspace, arg:'name'},
   {name:'new',       desc:t('cmd_new'),            fn:cmdNew},
   {name:'usage',     desc:t('cmd_usage'),   fn:cmdUsage},
   {name:'theme',     desc:t('cmd_theme'), fn:cmdTheme, arg:'name'},
-  {name:'personality', desc:t('cmd_personality'), fn:cmdPersonality, arg:'name'},
+  {name:'personality', desc:t('cmd_personality'), fn:cmdPersonality, arg:'name', subArgs:'personalities'},
   {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'query'},
   {name:'stop',      desc:t('cmd_stop'),     fn:cmdStop},
   {name:'title',     desc:t('cmd_title'),    fn:cmdTitle,    arg:'[title]'},
@@ -21,6 +21,12 @@ const COMMANDS=[
   {name:'status',    desc:t('cmd_status'),   fn:cmdStatus},
   {name:'voice',     desc:t('cmd_voice'),    fn:cmdVoice},
 ];
+
+const SLASH_SUBARG_SOURCES={
+  model:{desc:t('cmd_model'), subArgs:'models'},
+  personality:{desc:t('cmd_personality'), subArgs:'personalities'},
+  reasoning:{desc:'Set reasoning effort', subArgs:['low','medium','high']},
+};
 
 function parseCommand(text){
   if(!text.startsWith('/'))return null;
@@ -43,11 +49,135 @@ function getMatchingCommands(prefix){
   const q=prefix.toLowerCase();
   const matches=COMMANDS.filter(c=>c.name.startsWith(q)).map(c=>({...c,source:'builtin'}));
   const seen=new Set(matches.map(c=>c.name));
+  for(const [name, spec] of Object.entries(SLASH_SUBARG_SOURCES)){
+    if(!name.startsWith(q)||seen.has(name))continue;
+    matches.push({
+      name,
+      desc:spec.desc,
+      arg:'name',
+      source:'subarg-command',
+    });
+    seen.add(name);
+  }
   for(const skill of _skillCommandCache){
     if(!skill.name.startsWith(q)||seen.has(skill.name))continue;
     matches.push(skill);
+    seen.add(skill.name);
   }
   return matches;
+}
+
+let _slashModelCache=null;
+let _slashModelCachePromise=null;
+let _slashPersonalityCache=null;
+let _slashPersonalityCachePromise=null;
+
+function _normalizeSlashSubArg(value){
+  return String(value||'').trim();
+}
+
+function _getSlashModelSubArgsFromDom(){
+  const sel=$('modelSelect');
+  if(!sel) return [];
+  const values=[];
+  for(const opt of Array.from(sel.options||[])){
+    const value=_normalizeSlashSubArg(opt.value||opt.textContent||'');
+    if(value) values.push(value);
+  }
+  return Array.from(new Set(values)).sort((a,b)=>a.localeCompare(b));
+}
+
+async function _loadSlashModelSubArgs(force=false){
+  const domValues=_getSlashModelSubArgsFromDom();
+  if(domValues.length&&!force){
+    _slashModelCache=domValues;
+    return domValues;
+  }
+  if(_slashModelCache&&!force) return _slashModelCache;
+  if(_slashModelCachePromise&&!force) return _slashModelCachePromise;
+  _slashModelCachePromise=(async()=>{
+    try{
+      const data=await api('/api/models');
+      const values=[];
+      for(const group of (data&&data.groups)||[]){
+        for(const model of (group&&group.models)||[]){
+          const id=_normalizeSlashSubArg(model&&model.id);
+          if(id) values.push(id);
+        }
+      }
+      const deduped=Array.from(new Set(values)).sort((a,b)=>a.localeCompare(b));
+      _slashModelCache=deduped;
+      return deduped;
+    }catch(_){
+      _slashModelCache=domValues;
+      return domValues;
+    }finally{
+      _slashModelCachePromise=null;
+    }
+  })();
+  return _slashModelCachePromise;
+}
+
+async function _loadSlashPersonalitySubArgs(force=false){
+  if(_slashPersonalityCache&&!force) return _slashPersonalityCache;
+  if(_slashPersonalityCachePromise&&!force) return _slashPersonalityCachePromise;
+  _slashPersonalityCachePromise=(async()=>{
+    try{
+      const data=await api('/api/personalities');
+      const values=['none'];
+      for(const p of (data&&data.personalities)||[]){
+        const name=_normalizeSlashSubArg(p&&p.name);
+        if(name) values.push(name);
+      }
+      const deduped=Array.from(new Set(values)).sort((a,b)=>a.localeCompare(b));
+      _slashPersonalityCache=deduped;
+      return deduped;
+    }catch(_){
+      _slashPersonalityCache=['none'];
+      return _slashPersonalityCache;
+    }finally{
+      _slashPersonalityCachePromise=null;
+    }
+  })();
+  return _slashPersonalityCachePromise;
+}
+
+function _getSlashSubArgOptions(spec){
+  if(Array.isArray(spec)) return Promise.resolve(spec.slice());
+  if(spec==='models') return _loadSlashModelSubArgs();
+  if(spec==='personalities') return _loadSlashPersonalitySubArgs();
+  return Promise.resolve([]);
+}
+
+function _parseSlashAutocomplete(text){
+  if(!text.startsWith('/')||text.indexOf('\n')!==-1) return null;
+  const raw=text.slice(1);
+  const hasSpace=/\s/.test(raw);
+  const parts=raw.split(/\s+/);
+  const cmdName=(parts[0]||'').toLowerCase();
+  const command=COMMANDS.find(c=>c.name===cmdName);
+  const subArgSource=(command&&command.subArgs)?command:SLASH_SUBARG_SOURCES[cmdName];
+  if(!hasSpace||!subArgSource){
+    return {kind:'commands', query:raw};
+  }
+  const argText=raw.slice(cmdName.length).replace(/^\s+/,'');
+  return {kind:'subargs', command:{name:cmdName, desc:subArgSource.desc, subArgs:subArgSource.subArgs}, query:argText.toLowerCase(), rawQuery:argText};
+}
+
+async function getSlashAutocompleteMatches(text){
+  const parsed=_parseSlashAutocomplete(text);
+  if(!parsed) return [];
+  if(parsed.kind==='commands') return getMatchingCommands(parsed.query);
+  const options=await _getSlashSubArgOptions(parsed.command.subArgs);
+  return options
+    .filter(opt=>String(opt).toLowerCase().startsWith(parsed.query))
+    .map(opt=>({
+      name:parsed.command.name,
+      value:String(opt),
+      desc:parsed.command.desc,
+      source:'subarg',
+      parent:parsed.command.name,
+    }));
 }
 
 function _compressionAnchorMessageKey(m){
@@ -481,8 +611,10 @@ function refreshSlashCommandDropdown(){
   const ta=$('msg');if(!ta)return;
   const text=ta.value||'';
   if(!text.startsWith('/')||text.indexOf('\n')!==-1){hideCmdDropdown();return;}
-  const matches=getMatchingCommands(text.slice(1));
-  if(matches.length)showCmdDropdown(matches);else hideCmdDropdown();
+  getSlashAutocompleteMatches(text).then(matches=>{
+    if(($('msg').value||'')!==text) return;
+    if(matches.length)showCmdDropdown(matches);else hideCmdDropdown();
+  });
 }
 function ensureSkillCommandsLoadedForAutocomplete(){
   if(_skillCommandCacheReady||_skillCommandLoadPromise)return;
@@ -497,21 +629,36 @@ function showCmdDropdown(matches){
   const dd=$('cmdDropdown');
   if(!dd)return;
   dd.innerHTML='';
-  _cmdSelectedIdx=-1;
+  _cmdSelectedIdx=matches.length?0:-1;
   for(let i=0;i<matches.length;i++){
     const c=matches[i];
     const el=document.createElement('div');
     el.className='cmd-item';
+    if(i===_cmdSelectedIdx) el.classList.add('selected');
     el.dataset.idx=i;
-    const usage=c.arg?` <span class="cmd-item-arg">${esc(c.arg)}</span>`:'';
+    const isSubArg=c.source==='subarg';
+    const usage=(!isSubArg&&c.arg)?` <span class="cmd-item-arg">${esc(c.arg)}</span>`:'';
     const badge=c.source==='skill'?`<span class="cmd-item-badge cmd-item-badge-skill">${esc(t('slash_skill_badge'))}</span>`:'';
     if(c.source==='skill') el.classList.add('cmd-item-skill');
-    el.innerHTML=`<div class="cmd-item-name">/${esc(c.name)}${usage}${badge}</div><div class="cmd-item-desc">${esc(c.desc)}</div>`;
+    const nameHtml=isSubArg
+      ? `<div class="cmd-item-name"><span class="cmd-item-parent">/${esc(c.parent)}</span> <span class="cmd-item-subarg">${esc(c.value)}</span></div>`
+      : `<div class="cmd-item-name">/${esc(c.name)}${usage}${badge}</div>`;
+    const descHtml=`<div class="cmd-item-desc">${esc(c.desc)}</div>`;
+    el.innerHTML=`${nameHtml}${descHtml}`;
     el.onmousedown=(e)=>{
       e.preventDefault();
-      $('msg').value='/'+c.name+(c.arg?' ':'');
-      hideCmdDropdown();
+      const nextValue=isSubArg?('/'+c.parent+' '+c.value):('/'+c.name+(c.arg?' ':''));
+      $('msg').value=nextValue;
       $('msg').focus();
+      if(!isSubArg&&c.source!=='skill'&&nextValue.endsWith(' ')&&typeof getSlashAutocompleteMatches==='function'){
+        getSlashAutocompleteMatches(nextValue).then(matches=>{
+          if(($('msg').value||'')!==nextValue) return;
+          if(matches.length) showCmdDropdown(matches);
+          else hideCmdDropdown();
+        });
+      }else{
+        hideCmdDropdown();
+      }
     };
     dd.appendChild(el);
   }
