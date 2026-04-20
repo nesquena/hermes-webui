@@ -859,6 +859,7 @@ def get_available_models() -> dict:
             reload_config()
             # Config changed — force cache invalidation
             _available_models_cache = None
+            _available_models_cache_ts = 0.0
         # Serve from TTL cache if fresh.
         now = time.monotonic()
         if _available_models_cache is not None and (now - _available_models_cache_ts) < _AVAILABLE_MODELS_CACHE_TTL:
