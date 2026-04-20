@@ -1,5 +1,11 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.111] — 2026-04-20
+
+### Fixed
+- **Dark-mode user bubbles no longer use a glaring bright accent fill** — `:root.dark` now overrides `--user-bubble-bg`/`--user-bubble-border` to `var(--accent-bg-strong)` (a 15% tint), keeping the bubble visually subdued in dark skins. The 6 per-skin `--user-bubble-text` hacks are removed; text color falls back to `var(--text)`. Edit-area box-shadow now uses the shared `--focus-ring` token. (credit: @aronprins)
+- **Thinking card header is now collapsible** — the main `_thinkingMarkup()` function now includes `onclick` toggle and the chevron affordance, matching the compression reference card pattern. The header has `display:flex` for proper icon/label/chevron alignment.
+
 ## [v0.50.110] — 2026-04-20
 
 ### Fixed
