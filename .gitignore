@@ -28,6 +28,9 @@ copilot-instructions.md
 screenshot-*.png
 full-UI.png
 
+# Version file written by Docker/CI build — generated, never committed
+api/_version.py
+
 # OS files
 .DS_Store
 Thumbs.db

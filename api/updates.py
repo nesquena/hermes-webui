@@ -53,6 +53,42 @@ def _run_git(args, cwd, timeout=10):
         return f'git failed to start: {exc}', False
 
 
+def _detect_webui_version() -> str:
+    """Detect the running WebUI version from git or a baked-in fallback file.
+
+    Resolution order:
+      1. ``git describe --tags --always --dirty`` — works in any git checkout.
+         Returns the exact tag on tagged commits (e.g. ``v0.50.123``), a
+         post-tag descriptor between releases (e.g. ``v0.50.123-1-ge91325d``),
+         or a bare SHA when no tags exist (shallow clones, fresh forks).
+      2. ``api/_version.py`` — a fallback written by the Docker / CI release
+         workflow when ``.git`` is not present in the image.  Expected to define
+         ``__version__ = 'vX.Y.Z'``.
+      3. ``'unknown'`` — last resort; displayed as-is in the settings badge.
+    """
+    out, ok = _run_git(['describe', '--tags', '--always', '--dirty'], REPO_ROOT)
+    if ok and out:
+        return out
+
+    # Docker / baked-image fallback: api/_version.py written by CI at build time.
+    version_file = REPO_ROOT / 'api' / '_version.py'
+    if version_file.exists():
+        try:
+            ns: dict = {}
+            exec(version_file.read_text(encoding='utf-8'), ns)  # noqa: S102
+            v = ns.get('__version__', '')
+            if v:
+                return str(v)
+        except Exception:
+            pass
+
+    return 'unknown'
+
+
+# Resolved once at import time — tags cannot change without a process restart.
+WEBUI_VERSION: str = _detect_webui_version()
+
+
 def _split_remote_ref(ref):
     """Split 'origin/branch-name' into ('origin', 'branch-name').
 

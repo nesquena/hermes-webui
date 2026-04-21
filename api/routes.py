@@ -548,6 +548,13 @@ def handle_get(handler, parsed) -> bool:
         settings = load_settings()
         # Never expose the stored password hash to clients
         settings.pop("password_hash", None)
+        # Inject the running version so the UI badge stays in sync with git tags
+        # without any manual release step.
+        try:
+            from api.updates import WEBUI_VERSION
+            settings["webui_version"] = WEBUI_VERSION
+        except Exception:
+            pass
         return j(handler, settings)
 
     if parsed.path == "/api/onboarding/status":

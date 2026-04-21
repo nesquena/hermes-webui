@@ -1199,6 +1199,10 @@ function _markSettingsDirty(){
 async function loadSettingsPanel(){
   try{
     const settings=await api('/api/settings');
+    // Populate the version badge from the server — keeps it in sync with git
+    // tags automatically without any manual release step.
+    const vbadge=document.querySelector('.settings-version-badge');
+    if(vbadge && settings.webui_version) vbadge.textContent=settings.webui_version;
     // Hydrate appearance controls first so a slow /api/models request
     // cannot overwrite an in-progress theme/skin selection.
     const themeSel=$('settingsTheme');
