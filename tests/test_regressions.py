@@ -807,6 +807,31 @@ def test_provider_oauth_authenticated_accepts_credential_pool_entries(
     assert _provider_oauth_authenticated("openai-codex", tmp_path) is True
 
 
+def test_provider_oauth_authenticated_rejects_flag_only_credential_pool_entries(
+    cleanup_test_sessions, tmp_path
+):
+    """R18a2: metadata flags alone must not count as usable OAuth auth."""
+    _make_auth_json_with_credential_pool(
+        "openai-codex",
+        [
+            {
+                "id": "pool1",
+                "label": "device_code",
+                "source": "device_code",
+                "auth_type": "oauth",
+                "has_access_token": True,
+                "has_refresh_token": True,
+                "base_url": "https://chatgpt.com/backend-api/codex",
+            }
+        ],
+        tmp_path,
+    )
+
+    from api.onboarding import _provider_oauth_authenticated
+
+    assert _provider_oauth_authenticated("openai-codex", tmp_path) is False
+
+
 def test_status_from_runtime_marks_openai_codex_ready_from_credential_pool(
     cleanup_test_sessions, tmp_path
 ):

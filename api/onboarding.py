@@ -230,26 +230,39 @@ def _provider_api_key_present(
 
 
 
+def _oauth_payload_has_token(payload: dict) -> bool:
+    """Return True if an auth payload contains usable token material."""
+    if not isinstance(payload, dict):
+        return False
+
+    token_fields = (
+        payload,
+        payload.get("tokens") if isinstance(payload.get("tokens"), dict) else {},
+    )
+    for candidate in token_fields:
+        if not isinstance(candidate, dict):
+            continue
+        if any(
+            str(candidate.get(key) or "").strip()
+            for key in ("access_token", "refresh_token", "api_key")
+        ):
+            return True
+    return False
+
+
+
 def _provider_oauth_authenticated(provider: str, hermes_home: "Path") -> bool:
     """Return True if the provider has valid OAuth credentials.
 
-    Checks via hermes_cli.auth.get_auth_status() when available, then falls
-    back to reading auth.json directly for the known OAuth provider IDs
-    (openai-codex, copilot, copilot-acp, qwen-oauth, nous).
-
-    This covers users who authenticated via 'hermes auth' or 'hermes model'
-    but whose provider is not in _SUPPORTED_PROVIDER_SETUPS because it does
-    not use a plain API key.
+    Reads the profile-scoped auth.json directly so onboarding respects the
+    requested Hermes home. Known OAuth providers may store auth either in the
+    legacy providers[provider_id] singleton state or in credential_pool entries
+    used by current Hermes runtime auth resolution.
     """
     provider = (provider or "").strip().lower()
     if not provider:
         return False
 
-    # Check auth.json for known OAuth provider IDs.
-    # hermes_home scopes the check — callers must pass the correct home directory.
-    # (A prior CLI fast path via hermes_cli.auth.get_auth_status() was removed
-    # because it ignored hermes_home and read from the real system home, breaking
-    # both test isolation and deployments with multiple profiles.)
     _known_oauth_providers = {"openai-codex", "copilot", "copilot-acp", "qwen-oauth", "nous"}
     if provider not in _known_oauth_providers:
         return False
@@ -261,20 +274,20 @@ def _provider_oauth_authenticated(provider: str, hermes_home: "Path") -> bool:
         if not auth_path.exists():
             return False
         store = _j.loads(auth_path.read_text(encoding="utf-8"))
+
         providers_store = store.get("providers")
-        if not isinstance(providers_store, dict):
-            return False
-        state = providers_store.get(provider)
-        if not isinstance(state, dict):
-            return False
-        # Any non-empty token is enough to confirm the user has credentials.
-        # Token refresh happens at runtime inside the agent.
-        has_token = bool(
-            str(state.get("access_token") or "").strip()
-            or str(state.get("api_key") or "").strip()
-            or str(state.get("refresh_token") or "").strip()
-        )
-        return has_token
+        if isinstance(providers_store, dict):
+            state = providers_store.get(provider)
+            if _oauth_payload_has_token(state):
+                return True
+
+        pool_store = store.get("credential_pool")
+        if isinstance(pool_store, dict):
+            entries = pool_store.get(provider)
+            if isinstance(entries, list):
+                return any(_oauth_payload_has_token(entry) for entry in entries)
+
+        return False
     except Exception:
         return False
 
