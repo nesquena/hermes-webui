@@ -41,8 +41,10 @@ function executeCommand(text){
   if(!parsed)return false;
   const cmd=COMMANDS.find(c=>c.name===parsed.name);
   if(!cmd)return false;
-  cmd.fn(parsed.args);
-  return true;
+  // A handler may return `false` to opt out of interception — e.g. /reasoning
+  // with an effort level falls through so the agent's own handler sees it,
+  // preserving the pre-existing pass-through behaviour for that subcommand.
+  return cmd.fn(parsed.args) !== false;
 }
 
 function getMatchingCommands(prefix){
@@ -574,37 +576,28 @@ async function cmdStatus(){
 }
 function cmdReasoning(args){
   const arg=(args||'').trim().toLowerCase();
-  if(!arg){
-    // Status — mirrors CLI /reasoning with no args
-    const level=window._reasoningEffort||'default';
-    const vis=(window._showThinking!==false)?'on':'off';
-    showToast('\uD83E\uDDE0 Reasoning effort: '+level+' \u00B7 display: '+vis+'  |  /reasoning show|hide|low|medium|high');
-    return;
-  }
+  // Only show|hide|on|off are WebUI-local (display toggle). Everything else
+  // — including no-arg status and effort levels (none|minimal|low|medium|
+  // high|xhigh) — is delegated to the agent's own /reasoning handler by
+  // returning `false`, which tells executeCommand() to let the message fall
+  // through to the chat send path. This preserves the pre-existing
+  // pass-through behaviour that was already making /reasoning <level> work.
   if(arg==='show'||arg==='on'){
     window._showThinking=true;
     if(typeof renderMessages==='function') renderMessages();
     api('/api/settings',{method:'POST',body:JSON.stringify({show_thinking:true})}).catch(function(){});
     showToast('\uD83E\uDDE0 Thinking blocks: on');
-    return;
+    return true;
   }
   if(arg==='hide'||arg==='off'){
     window._showThinking=false;
     if(typeof renderMessages==='function') renderMessages();
     api('/api/settings',{method:'POST',body:JSON.stringify({show_thinking:false})}).catch(function(){});
     showToast('\uD83E\uDDE0 Thinking blocks: off');
-    return;
+    return true;
   }
-  // Effort levels — stored client-side only for now; agent routing is a
-  // follow-up (see #461 PR body). Toast avoids promising behaviour the
-  // back-end doesn't yet honour.
-  var levels=['none','minimal','low','medium','high','xhigh'];
-  if(levels.includes(arg)){
-    window._reasoningEffort=arg;
-    showToast('\uD83E\uDDE0 Reasoning effort noted: '+arg+' (display only; agent routing pending)');
-    return;
-  }
-  showToast('Unknown argument: '+arg+' \u2014 use show|hide|low|medium|high');
+  // Fall through: no args (agent shows status), effort levels, unknown args.
+  return false;
 }
 function cmdVoice(){
   const mic=document.getElementById('btnMic');

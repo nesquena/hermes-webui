@@ -194,3 +194,41 @@ class TestReasoningCommand:
             assert 'JSON.stringify' in call, (
                 f"/api/settings call missing JSON body: {call}"
             )
+
+    def test_cmd_reasoning_falls_through_for_effort_levels(self):
+        """Effort levels (low|medium|high|none|minimal|xhigh) must NOT be
+        intercepted locally — they need to reach the agent's own /reasoning
+        handler, which was already working via pass-through before this PR.
+        cmdReasoning must return false for anything other than show|hide|on|off
+        so executeCommand() lets the message fall through to the chat path."""
+        src = read('static/commands.js')
+        m = re.search(r'function cmdReasoning\(.*?\n\}', src, re.DOTALL)
+        assert m
+        fn = m.group(0)
+        # The function must end with a `return false` path so unhandled args
+        # (including effort levels and no-args status) fall through.
+        assert 'return false' in fn, (
+            "cmdReasoning must `return false` for effort levels so the message "
+            "falls through to the agent (which already handles /reasoning <level>)"
+        )
+        # There must NOT be a local branch that swallows effort levels and
+        # returns intercepted, otherwise the agent never sees them.
+        assert '_reasoningEffort=' not in fn, (
+            "cmdReasoning must not locally handle effort levels (regression: "
+            "setting a dead client variable blocks the pre-existing agent "
+            "pass-through that actually changed the effort)"
+        )
+
+    def test_execute_command_respects_handler_return_false(self):
+        """executeCommand() must treat a handler's `return false` as opt-out —
+        so the caller can fall through to the chat send path instead of
+        intercepting. Used by cmdReasoning to delegate effort levels to the
+        agent's own /reasoning handler."""
+        src = read('static/commands.js')
+        m = re.search(r'function executeCommand\(.*?\n\}', src, re.DOTALL)
+        assert m, "executeCommand not found"
+        fn = m.group(0)
+        assert 'cmd.fn(parsed.args) !== false' in fn or "cmd.fn(parsed.args)!==false" in fn, (
+            "executeCommand must honour `return false` from a handler so "
+            "/reasoning effort levels can fall through to the agent"
+        )
