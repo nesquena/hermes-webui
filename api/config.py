@@ -504,6 +504,7 @@ _PROVIDER_DISPLAY = {
     "huggingface": "HuggingFace",
     "alibaba": "Alibaba",
     "ollama": "Ollama",
+    "ollama-cloud": "Ollama Cloud",
     "opencode-zen": "OpenCode Zen",
     "opencode-go": "OpenCode Go",
     "lmstudio": "LM Studio",
@@ -1049,21 +1050,22 @@ def get_available_models() -> dict:
         active_provider = _resolve_provider_alias(active_provider)
 
     # 2. Try to read auth store for active provider (if hermes is installed)
-    if not active_provider:
+    auth_store = {}
+    try:
+        from api.profiles import get_active_hermes_home as _gah
+
+        auth_store_path = _gah() / "auth.json"
+    except ImportError:
+        auth_store_path = HOME / ".hermes" / "auth.json"
+    if auth_store_path.exists():
         try:
-            from api.profiles import get_active_hermes_home as _gah
+            import json as _j
 
-            auth_store_path = _gah() / "auth.json"
-        except ImportError:
-            auth_store_path = HOME / ".hermes" / "auth.json"
-        if auth_store_path.exists():
-            try:
-                import json as _j
-
-                auth_store = _j.loads(auth_store_path.read_text(encoding="utf-8"))
+            auth_store = _j.loads(auth_store_path.read_text(encoding="utf-8"))
+            if not active_provider:
                 active_provider = auth_store.get("active_provider")
-            except Exception:
-                logger.debug("Failed to load auth store from %s", auth_store_path)
+        except Exception:
+            logger.debug("Failed to load auth store from %s", auth_store_path)
 
     # 4. Detect available providers.
     # Primary: ask hermes-agent's auth layer — the authoritative source. It checks
@@ -1073,6 +1075,35 @@ def get_available_models() -> dict:
     detected_providers = set()
     if active_provider:
         detected_providers.add(active_provider)
+
+    # Include providers that have explicit credential-pool entries even when
+    # no process env var is present (e.g. service launched without shell env).
+    # Keep parity with the hermes_cli path below by excluding ambient
+    # GitHub CLI-derived Copilot credentials ("gh auth token").
+    try:
+        _pool = auth_store.get("credential_pool", {}) if isinstance(auth_store, dict) else {}
+        if isinstance(_pool, dict):
+            for _pid, _entries in _pool.items():
+                if not isinstance(_entries, list) or len(_entries) == 0:
+                    continue
+                _has_explicit_cred = False
+                for _entry in _entries:
+                    if not isinstance(_entry, dict):
+                        continue
+                    _src = str(_entry.get("source", "") or "").strip().lower()
+                    _label = str(_entry.get("label", "") or "").strip().lower()
+                    _key_src = str(_entry.get("key_source", "") or "").strip().lower()
+                    if _src in {"gh_cli", "gh auth token"}:
+                        continue
+                    if _label == "gh auth token" or _key_src == "gh auth token":
+                        continue
+                    _has_explicit_cred = True
+                    break
+                if _has_explicit_cred:
+                    detected_providers.add(str(_pid))
+    except Exception:
+        logger.debug("Failed to inspect credential_pool from auth store")
+
     all_env: dict = {}  # profile .env keys — populated below, used by custom endpoint auth
 
     _hermes_auth_used = False
@@ -1378,6 +1409,39 @@ def get_available_models() -> dict:
                         ],
                     }
                 )
+            elif pid == "ollama-cloud":
+                # Ollama Cloud list is dynamic; fetch via hermes_cli provider catalog
+                # (live /v1/models + models.dev + disk cache fallback).
+                raw_models = []
+                try:
+                    from hermes_cli.models import provider_model_ids as _provider_model_ids
+
+                    raw_models = [
+                        {"id": mid, "label": mid}
+                        for mid in (_provider_model_ids("ollama-cloud") or [])
+                    ]
+                except Exception:
+                    logger.debug("Failed to load Ollama Cloud models from hermes_cli")
+
+                if raw_models:
+                    _active = (active_provider or "").lower()
+                    if _active and pid != _active:
+                        models = []
+                        for m in raw_models:
+                            mid = m["id"]
+                            if mid.startswith("@") or "/" in mid:
+                                models.append({"id": mid, "label": m["label"]})
+                            else:
+                                models.append({"id": f"@{pid}:{mid}", "label": m["label"]})
+                    else:
+                        models = list(raw_models)
+
+                    groups.append(
+                        {
+                            "provider": provider_name,
+                            "models": models,
+                        }
+                    )
             elif pid in _PROVIDER_MODELS or pid in cfg.get("providers", {}):
                 # For non-default providers, prefix model IDs with @provider:model
                 # so resolve_model_provider() routes through that specific provider
