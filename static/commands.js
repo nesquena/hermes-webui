@@ -20,7 +20,7 @@ const COMMANDS=[
   {name:'undo',      desc:t('cmd_undo'),     fn:cmdUndo},
   {name:'status',    desc:t('cmd_status'),   fn:cmdStatus},
   {name:'voice',     desc:t('cmd_voice'),    fn:cmdVoice},
-  {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|low|medium|high', subArgs:['show','hide','low','medium','high']},
+  {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|none|minimal|low|medium|high|xhigh', subArgs:['show','hide','none','minimal','low','medium','high','xhigh']},
 ];
 
 const SLASH_SUBARG_SOURCES={
@@ -576,28 +576,53 @@ async function cmdStatus(){
 }
 function cmdReasoning(args){
   const arg=(args||'').trim().toLowerCase();
-  // Only show|hide|on|off are WebUI-local (display toggle). Everything else
-  // — including no-arg status and effort levels (none|minimal|low|medium|
-  // high|xhigh) — is delegated to the agent's own /reasoning handler by
-  // returning `false`, which tells executeCommand() to let the message fall
-  // through to the chat send path. This preserves the pre-existing
-  // pass-through behaviour that was already making /reasoning <level> work.
-  if(arg==='show'||arg==='on'){
-    window._showThinking=true;
-    if(typeof renderMessages==='function') renderMessages();
-    api('/api/settings',{method:'POST',body:JSON.stringify({show_thinking:true})}).catch(function(){});
-    showToast('\uD83E\uDDE0 Thinking blocks: on');
+  const BRAIN='\uD83E\uDDE0';
+  // Matches hermes_constants.VALID_REASONING_EFFORTS + 'none' (CLI parity).
+  const EFFORTS=['none','minimal','low','medium','high','xhigh'];
+  // Shared status renderer used by the no-args branch and as a fallback.
+  function _fmtStatus(st){
+    const vis=(st && st.show_reasoning===false)?'off':'on';
+    const eff=(st && st.reasoning_effort)||'default';
+    return BRAIN+' Reasoning effort: '+eff+' \u00B7 display: '+vis
+      +'  |  /reasoning show|hide|none|minimal|low|medium|high|xhigh';
+  }
+  if(!arg){
+    // Status — read from the same config.yaml keys the CLI uses.
+    api('/api/reasoning').then(function(st){showToast(_fmtStatus(st));})
+      .catch(function(){showToast(BRAIN+' /reasoning — status unavailable');});
     return true;
   }
-  if(arg==='hide'||arg==='off'){
-    window._showThinking=false;
+  if(arg==='show'||arg==='on'||arg==='hide'||arg==='off'){
+    const on=(arg==='show'||arg==='on');
+    // Update the UI render gate immediately for responsiveness.
+    window._showThinking=on;
     if(typeof renderMessages==='function') renderMessages();
-    api('/api/settings',{method:'POST',body:JSON.stringify({show_thinking:false})}).catch(function(){});
-    showToast('\uD83E\uDDE0 Thinking blocks: off');
+    // Persist via /api/reasoning → config.yaml display.show_reasoning
+    // (CLI reads the same key).  Also mirror into WebUI settings.json
+    // show_thinking so boot.js picks it up on reload without hitting
+    // /api/reasoning on every page load.
+    api('/api/reasoning',{method:'POST',body:JSON.stringify({display:arg})}).catch(function(){});
+    api('/api/settings',{method:'POST',body:JSON.stringify({show_thinking:on})}).catch(function(){});
+    showToast(BRAIN+' Thinking blocks: '+(on?'on':'off')+' (saved)');
     return true;
   }
-  // Fall through: no args (agent shows status), effort levels, unknown args.
-  return false;
+  if(EFFORTS.includes(arg)){
+    // Persist via /api/reasoning → config.yaml agent.reasoning_effort.
+    // Takes effect on the NEXT session/turn (agent re-reads config at
+    // construction time), matching CLI semantics where `/reasoning high`
+    // also forces an agent re-init.
+    api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:arg})})
+      .then(function(st){
+        const eff=(st && st.reasoning_effort)||arg;
+        showToast(BRAIN+' Reasoning effort set to '+eff+' (saved; applies to next turn)');
+      })
+      .catch(function(e){
+        showToast(BRAIN+' Failed to set effort: '+(e && e.message ? e.message : arg));
+      });
+    return true;
+  }
+  showToast('Unknown argument: '+arg+' \u2014 use show|hide|'+EFFORTS.join('|'));
+  return true;
 }
 function cmdVoice(){
   const mic=document.getElementById('btnMic');

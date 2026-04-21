@@ -1100,6 +1100,18 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             import inspect as _inspect
             _agent_params = set(_inspect.signature(_AIAgent.__init__).parameters)
 
+            # CLI-parity reasoning effort: read agent.reasoning_effort from the
+            # active profile's config.yaml (the same key the CLI writes via
+            # `/reasoning <level>`) and hand the parsed dict to AIAgent.  When
+            # the key is absent or invalid, pass None → agent uses its default.
+            try:
+                from api.config import parse_reasoning_effort as _parse_reff
+                _effort_cfg = _cfg.cfg.get('agent', {}) if isinstance(_cfg.cfg, dict) else {}
+                _effort_raw = _effort_cfg.get('reasoning_effort') if isinstance(_effort_cfg, dict) else None
+                _reasoning_config = _parse_reff(_effort_raw)
+            except Exception:
+                _reasoning_config = None
+
             _agent_kwargs = dict(
                 model=resolved_model,
                 provider=resolved_provider,
@@ -1120,6 +1132,10 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                     )
                 ),
             )
+            # reasoning_config has been an AIAgent param for several releases,
+            # but guard defensively to avoid TypeError on an older agent build.
+            if 'reasoning_config' in _agent_params and _reasoning_config is not None:
+                _agent_kwargs['reasoning_config'] = _reasoning_config
             # Params added in newer hermes-agent — skip if not supported
             if 'api_mode' in _agent_params:
                 _agent_kwargs['api_mode'] = _rt.get('api_mode')

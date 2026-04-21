@@ -48,6 +48,9 @@ from api.config import (
     load_settings,
     save_settings,
     set_hermes_default_model,
+    get_reasoning_status,
+    set_reasoning_display,
+    set_reasoning_effort,
 )
 from api.helpers import (
     require,
@@ -557,6 +560,12 @@ def handle_get(handler, parsed) -> bool:
             pass
         return j(handler, settings)
 
+    if parsed.path == "/api/reasoning":
+        # Current reasoning config (shared source of truth with the CLI —
+        # reads display.show_reasoning and agent.reasoning_effort from
+        # the active profile's config.yaml).
+        return j(handler, get_reasoning_status())
+
     if parsed.path == "/api/onboarding/status":
         return j(handler, get_onboarding_status())
 
@@ -894,6 +903,32 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/default-model":
         try:
             return j(handler, set_hermes_default_model(body.get("model")))
+        except ValueError as e:
+            return bad(handler, str(e))
+        except RuntimeError as e:
+            return bad(handler, str(e), 500)
+
+    if parsed.path == "/api/reasoning":
+        # CLI-parity /reasoning handler — writes to the same config.yaml keys
+        # the CLI uses (display.show_reasoning, agent.reasoning_effort) so a
+        # preference set via WebUI is honoured in the terminal REPL and vice
+        # versa.  Body is one of:
+        #   {"display": "show"|"hide"|"on"|"off"}   → display.show_reasoning
+        #   {"effort":  "none"|"minimal"|"low"|"medium"|"high"|"xhigh"}
+        #                                            → agent.reasoning_effort
+        try:
+            display = body.get("display")
+            effort = body.get("effort")
+            if display is not None:
+                flag = str(display).strip().lower()
+                if flag in ("show", "on", "true", "1"):
+                    return j(handler, set_reasoning_display(True))
+                if flag in ("hide", "off", "false", "0"):
+                    return j(handler, set_reasoning_display(False))
+                return bad(handler, f"display must be show|hide|on|off (got '{display}')")
+            if effort is not None:
+                return j(handler, set_reasoning_effort(effort))
+            return bad(handler, "reasoning: must supply 'display' or 'effort'")
         except ValueError as e:
             return bad(handler, str(e))
         except RuntimeError as e:
