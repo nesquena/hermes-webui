@@ -18,7 +18,7 @@ async function newSession(flash){
   // otherwise inherit from the current session (or let server pick the default)
   const inheritWs=S._profileDefaultWorkspace||(S.session?S.session.workspace:null);
   S._profileDefaultWorkspace=null; // consume — only applies to the first new session after switch
-  const data=await api('/api/session/new',{method:'POST',body:JSON.stringify({model:$('modelSelect').value,workspace:inheritWs})});
+  const data=await api('/api/session/new',{method:'POST',body:JSON.stringify({model:$('modelSelect').value,workspace:inheritWs,profile:S.activeProfile||'default'})});
   S.session=data.session;S.messages=data.session.messages||[];
   S.lastUsage={...(data.session.last_usage||{})};
   if(flash)S.session._flash=true;

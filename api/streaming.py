@@ -834,10 +834,13 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             put('cancel', {'message': 'Cancelled before start'})
             return
 
-        # Resolve profile home for this agent run (snapshot at start)
+        # Resolve profile home for this agent run — use the session's own profile
+        # (stamped at new_session() time from the client's S.activeProfile) so that
+        # two concurrent tabs on different profiles don't clobber each other via the
+        # process-level active-profile global.  Falls back gracefully.
         try:
-            from api.profiles import get_active_hermes_home
-            _profile_home = str(get_active_hermes_home())
+            from api.profiles import get_hermes_home_for_profile
+            _profile_home = str(get_hermes_home_for_profile(getattr(s, 'profile', None)))
         except ImportError:
             _profile_home = os.environ.get('HERMES_HOME', '')
 

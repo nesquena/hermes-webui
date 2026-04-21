@@ -176,18 +176,27 @@ def get_session(sid):
         return s
     raise KeyError(sid)
 
-def new_session(workspace=None, model=None):
-    # Use the live config-derived default so Hermes config changes apply without restart.
-    try:
-        from api.profiles import get_active_profile_name
-        _profile = get_active_profile_name()
-    except ImportError:
-        _profile = None
+def new_session(workspace=None, model=None, profile=None):
+    """Create a new in-memory session and persist it.
+
+    *profile* — when supplied by the caller (e.g. from the request body sent
+    by the active browser tab), it is used directly so that concurrent clients
+    on different profiles don't fight over a shared process-global.  If not
+    supplied, we fall back to the process-level active profile (the pre-#798
+    behaviour, preserved for calls that originate outside a request context).
+    """
+    if profile is None:
+        # Fallback: read process-level global (single-client or startup path)
+        try:
+            from api.profiles import get_active_profile_name
+            profile = get_active_profile_name()
+        except ImportError:
+            profile = None
     effective_model = model or get_effective_default_model()
     s = Session(
         workspace=workspace or get_last_workspace(),
         model=effective_model,
-        profile=_profile,
+        profile=profile,
     )
     with LOCK:
         SESSIONS[s.session_id] = s

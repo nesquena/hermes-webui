@@ -100,6 +100,25 @@ def get_active_hermes_home() -> Path:
     return _DEFAULT_HERMES_HOME
 
 
+
+def get_hermes_home_for_profile(name: str) -> Path:
+    """Return the HERMES_HOME Path for *name* without mutating any process state.
+
+    Safe to call from per-request context (streaming, session creation) because
+    it reads only the filesystem — it never touches os.environ, module-level
+    cached paths, or the process-level _active_profile global.
+
+    Falls back to _DEFAULT_HERMES_HOME (same as 'default') when *name* is None,
+    empty, or 'default'.
+    """
+    if not name or name == 'default':
+        return _DEFAULT_HERMES_HOME
+    profile_dir = _DEFAULT_HERMES_HOME / 'profiles' / name
+    if profile_dir.is_dir():
+        return profile_dir
+    return _DEFAULT_HERMES_HOME
+
+
 def _set_hermes_home(home: Path):
     """Set HERMES_HOME env var and monkey-patch cached module-level paths."""
     os.environ['HERMES_HOME'] = str(home)

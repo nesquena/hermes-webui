@@ -886,7 +886,9 @@ def handle_post(handler, parsed) -> bool:
             workspace = str(resolve_trusted_workspace(body.get("workspace"))) if body.get("workspace") else None
         except ValueError as e:
             return bad(handler, str(e))
-        s = new_session(workspace=workspace, model=body.get("model"))
+        # Use the profile sent by the client tab (if any) so that two tabs on
+        # different profiles never clobber each other via the process-level global.
+        s = new_session(workspace=workspace, model=body.get("model"), profile=body.get("profile") or None)
         return j(handler, {"session": s.compact() | {"messages": s.messages}})
 
     if parsed.path == "/api/default-model":
