@@ -253,3 +253,52 @@ class TestPeriodicCheckpoint:
 
         data = json.loads(s.path.read_text())
         assert data["updated_at"] > ts_before, "Checkpoint should update updated_at"
+
+
+class TestCheckpointVariableLifecycle:
+    """Regression guard: the outer `finally` must not UnboundLocalError when an
+    exception fires before the checkpoint thread is created.  _checkpoint_stop
+    is initialised to None at the very top of the outer try block so the
+    finally's `if _checkpoint_stop is not None` branch is always safe.
+    """
+
+    def test_checkpoint_stop_initialised_before_any_raiseable_code(self):
+        """Static check: `_checkpoint_stop = None` must appear before any code
+        that could raise inside _run_agent_streaming's outer try."""
+        src = (Path(__file__).parent.parent / "api" / "streaming.py").read_text(
+            encoding="utf-8"
+        )
+        lines = src.splitlines()
+        try_line = next(
+            i for i, ln in enumerate(lines, 1)
+            if ln.rstrip().endswith("try:") and lines[i - 2].strip().startswith("_checkpoint_stop")
+        )
+        # The assignment must precede the `try:` — not sit inside the nested
+        # block where an earlier line could raise before it runs.
+        init_line = next(
+            i for i, ln in enumerate(lines, 1)
+            if "_checkpoint_stop = None" in ln
+        )
+        assert init_line < try_line, (
+            f"_checkpoint_stop = None (line {init_line}) must precede the outer "
+            f"try block (line {try_line}) so the finally can safely check it."
+        )
+
+    def test_finally_path_when_early_exception_does_not_unbound_error(self):
+        """Mirror the _run_agent_streaming try/finally structure — proves that
+        pre-initialising _checkpoint_stop = None outside any raiseable code
+        keeps the finally safe."""
+
+        def mimic_run_agent_streaming():
+            _checkpoint_stop = None  # pre-init (the fix)
+            try:
+                # Anything here could raise — simulate early failure
+                raise ValueError("early failure, e.g. get_session KeyError")
+                _checkpoint_stop = threading.Event()  # never reached
+            finally:
+                # The guard the PR added — must not itself raise
+                if _checkpoint_stop is not None:
+                    _checkpoint_stop.set()
+
+        with pytest.raises(ValueError, match="early failure"):
+            mimic_run_agent_streaming()

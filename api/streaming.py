@@ -822,6 +822,10 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
         except Exception:
             logger.debug("Failed to put event to queue")
 
+    # Initialised here (before any code that may raise) so the outer `finally`
+    # block can safely check `if _checkpoint_stop is not None` even when an
+    # exception fires before the checkpoint thread is created (Issue #765).
+    _checkpoint_stop = None
     try:
         s = get_session(session_id)
         s.workspace = str(Path(workspace).expanduser().resolve())
@@ -1190,7 +1194,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             # On a server restart the UI will see a session with a pending message and no
             # response — better than a silent loss of the entire conversation turn.
             # The final s.save() at task completion handles the full session update + index.
-            _checkpoint_stop = None
+            # (_checkpoint_stop is pre-initialised at the top of the outer try.)
             _checkpoint_activity = [0]
 
             def _periodic_checkpoint():
