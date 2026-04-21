@@ -15,6 +15,10 @@ services:
       - ${HERMES_HOME:-${HOME}/.hermes}:/home/hermeswebui/.hermes
       # Your workspace directory shown on first launch (adapt if yours is different, the container will use the mounted /workspace)
       - ${HERMES_WORKSPACE:-${HOME}/workspace}:/workspace
+      # Bind-mount config.yml and .env from the host for easy editing without entering the container.
+      # Create these next to your docker-compose.yml (or adjust the host paths).
+      - ${PWD}/config.yml:/home/hermeswebui/.hermes/config.yml:ro
+      - ${PWD}/.env:/home/hermeswebui/.hermes/.env:ro
     environment:
       # Set to your host user ID: run `id -u` and `id -g` to find them.
       # On macOS, UIDs start at 501 (not 1000), so set UID and GID in a .env file:

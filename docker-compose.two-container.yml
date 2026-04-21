@@ -26,6 +26,10 @@ services:
       - hermes-home:/root/.hermes
       # Expose agent source so the WebUI can install dependencies from it
       - hermes-agent-src:/opt/hermes
+      # Bind-mount config.yml and .env from the host for easy editing without entering the container.
+      # Create these next to your docker-compose.yml (or adjust the host paths).
+      - ${PWD}/config.yml:/root/.hermes/config.yml:ro
+      - ${PWD}/.env:/root/.hermes/.env:ro
     environment:
       - HERMES_HOME=/root/.hermes
     restart: unless-stopped
