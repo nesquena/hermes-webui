@@ -17,9 +17,8 @@ services:
     ports:
       - "8787:8787"
     volumes:
-      # Mount agent source for dependency installation during init.
-      # Using a top-level path avoids the nested-mount conflict with hermes-home.
-      - hermes-agent-src:/opt/hermes-agent
+      # Mount hermes-agent source (read-only) for AIAgent imports.
+      - ~/hermes-agent:/opt/hermes-agent:ro
       # Workspace directory — browse and edit files from the WebUI.
       # Adapt the host path to your project directory.
       - ~/workspace:/workspace
@@ -31,13 +30,10 @@ services:
       - HERMES_WEBUI_HOST=0.0.0.0
       - HERMES_WEBUI_PORT=8787
       - HERMES_WEBUI_STATE_DIR=/opt/hermes/webui-mvp
-      - HERMES_WEBUI_AGENT_DIR=/does-not-exist
+      - HERMES_WEBUI_AGENT_DIR=/opt/hermes-agent
       # Match your host user's UID/GID for correct file permissions.
       - WANTED_UID=${UID:-1000}
       - WANTED_GID=${GID:-1000}
       # Optional: set a password for remote access
       # - HERMES_WEBUI_PASSWORD=your-s...word
     restart: unless-stopped
-
-volumes:
-  hermes-agent-src:
