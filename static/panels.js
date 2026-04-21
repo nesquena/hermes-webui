@@ -1272,6 +1272,8 @@ async function loadSettingsPanel(){
     if(soundCb){soundCb.checked=!!settings.sound_enabled;soundCb.addEventListener('change',_markSettingsDirty,{once:false});}
     const notifCb=$('settingsNotificationsEnabled');
     if(notifCb){notifCb.checked=!!settings.notifications_enabled;notifCb.addEventListener('change',_markSettingsDirty,{once:false});}
+    const showThinkingCb=$('settingsShowThinking');
+    if(showThinkingCb){showThinkingCb.checked=settings.show_thinking!==false;showThinkingCb.addEventListener('change',_markSettingsDirty,{once:false});}
     const sidebarDensitySel=$('settingsSidebarDensity');
     if(sidebarDensitySel){
       sidebarDensitySel.value=settings.sidebar_density==='detailed'?'detailed':'compact';
@@ -1309,6 +1311,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._showCliSessions=showCliSessions;
   window._soundEnabled=body.sound_enabled;
   window._notificationsEnabled=body.notifications_enabled;
+  window._showThinking=body.show_thinking!==false;
   window._sidebarDensity=sidebarDensity==='detailed'?'detailed':'compact';
   window._botName=body.bot_name||'Hermes';
   if(typeof applyBotName==='function') applyBotName();
@@ -1353,6 +1356,7 @@ async function saveSettings(andClose){
   body.check_for_updates=!!($('settingsCheckUpdates')||{}).checked;
   body.sound_enabled=!!($('settingsSoundEnabled')||{}).checked;
   body.notifications_enabled=!!($('settingsNotificationsEnabled')||{}).checked;
+  body.show_thinking=!!($('settingsShowThinking')||{}).checked;
   body.sidebar_density=sidebarDensity;
   const botName=(($('settingsBotName')||{}).value||'').trim();
   body.bot_name=botName||'Hermes';
