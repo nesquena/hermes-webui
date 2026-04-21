@@ -1174,6 +1174,30 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             if _personality_prompt:
                 agent.ephemeral_system_prompt = _personality_prompt
             _previous_messages = list(s.messages or [])
+            # ── Periodic checkpoint during streaming (Issue #765) ──
+            # Saves session to disk every 15 seconds so that messages are
+            # not lost if the server restarts mid-task.  The session index
+            # rebuild is skipped for performance; the final s.save() at task
+            # completion handles the full persist + index update.
+            _checkpoint_stop = threading.Event()
+            _checkpoint_msg_count = [len(s.messages or [])]
+
+            def _periodic_checkpoint():
+                while not _checkpoint_stop.wait(15):
+                    try:
+                        _cur = len(s.messages or [])
+                        if _cur > _checkpoint_msg_count[0]:
+                            s.save(skip_index=True)
+                            _checkpoint_msg_count[0] = _cur
+                    except Exception:
+                        pass
+
+            _ckpt_thread = threading.Thread(
+                target=_periodic_checkpoint, daemon=True,
+                name=f"ckpt-{session_id[:8]}",
+            )
+            _ckpt_thread.start()
+
             result = agent.run_conversation(
                 user_message=workspace_ctx + msg_text,
                 system_message=workspace_system_msg,
@@ -1495,6 +1519,11 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             _apperror_payload['hint'] = _exc_hint
         put('apperror', _apperror_payload)
     finally:
+        # Stop periodic checkpoint thread if it was started (Issue #765)
+        try:
+            _checkpoint_stop.set()
+        except Exception:
+            pass
         _clear_thread_env()  # TD1: always clear thread-local context
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
