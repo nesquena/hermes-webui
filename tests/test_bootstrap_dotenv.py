@@ -10,12 +10,13 @@ Covers:
   2. _load_repo_dotenv() ignores commented lines and blank lines
   3. _load_repo_dotenv() strips quotes from values
   4. _load_repo_dotenv() is a no-op when .env does not exist
-  5. _load_repo_dotenv() is a no-op when .env is malformed / unreadable
-  6. DEFAULT_HOST / DEFAULT_PORT reflect values loaded from .env
-  7. _load_repo_dotenv() does not overwrite keys with empty values
-  8. Variables are set unconditionally (shell source semantics, not setdefault)
+  5. _load_repo_dotenv() prints a warning (not crash) on unreadable .env
+  6. _load_repo_dotenv() overwrites existing env vars (shell source semantics)
+  7. _load_repo_dotenv() handles 'export FOO=bar' prefix
+  8. _load_repo_dotenv() preserves values containing '='
+  9. Variables are set unconditionally (not setdefault)
+  10. Structural: loader is called before DEFAULT_HOST/DEFAULT_PORT
 """
-import importlib
 import os
 import sys
 from pathlib import Path
@@ -24,36 +25,6 @@ from unittest.mock import patch
 import pytest
 
 REPO_ROOT = Path(__file__).parent.parent
-
-
-# ---------------------------------------------------------------------------
-# Helper: import a fresh bootstrap module with a controlled REPO_ROOT
-# ---------------------------------------------------------------------------
-
-def _import_bootstrap_with_env(tmp_path, env_content: str | None = None):
-    """Import bootstrap module isolated to tmp_path, optionally with a .env file."""
-    if env_content is not None:
-        (tmp_path / ".env").write_text(env_content, encoding="utf-8")
-
-    # Remove any cached module so the module-level code re-runs
-    sys.modules.pop("bootstrap", None)
-
-    saved_environ = os.environ.copy()
-    try:
-        with patch("pathlib.Path.resolve", side_effect=lambda self: self), \
-             patch("bootstrap.REPO_ROOT", tmp_path, create=True):
-            # Re-execute the module-level loader directly rather than re-importing,
-            # since importlib can't easily re-run module globals after first import.
-            import bootstrap as bs
-            # Reset REPO_ROOT to tmp_path so _load_repo_dotenv uses it
-            bs.REPO_ROOT = tmp_path
-            # Clear and re-run
-            bs._load_repo_dotenv()
-            return bs
-    finally:
-        # Restore env after each test
-        os.environ.clear()
-        os.environ.update(saved_environ)
 
 
 class TestLoadRepoDotenv:
@@ -117,8 +88,8 @@ class TestLoadRepoDotenv:
         finally:
             bs.REPO_ROOT = orig
 
-    def test_noop_when_dotenv_unreadable(self, tmp_path):
-        """Unreadable .env does not crash — exception is swallowed."""
+    def test_noop_when_dotenv_unreadable(self, tmp_path, capsys):
+        """Unreadable .env prints a warning to stderr — does not crash."""
         import bootstrap as bs
         env_path = tmp_path / ".env"
         env_path.write_text("HERMES_WEBUI_PORT=9999\n")
@@ -129,6 +100,11 @@ class TestLoadRepoDotenv:
                 bs._load_repo_dotenv()  # must not raise
         finally:
             bs.REPO_ROOT = orig
+        captured = capsys.readouterr()
+        assert "bootstrap" in captured.err.lower() or "warning" in captured.err.lower() or \
+               "could not load" in captured.err.lower(), (
+            "_load_repo_dotenv() should print a warning to stderr on read failure"
+        )
 
     def test_overwrites_existing_env_var(self, tmp_path):
         """Unconditional overwrite matches shell source semantics."""
@@ -137,16 +113,15 @@ class TestLoadRepoDotenv:
         assert os.environ.get("HERMES_WEBUI_HOST") == "0.0.0.0"
 
     def test_does_not_set_empty_values(self, tmp_path):
-        """A key with no value after stripping is not set."""
+        """A key whose value is empty after stripping is not set to a non-empty string."""
         os.environ.pop("HERMES_EMPTY_KEY", None)
         self._run(tmp_path, 'HERMES_EMPTY_KEY=""\n')
-        # Empty string after strip — key should not be set (or at most empty)
-        # The loader only sets `if k:` — empty value is still written per current impl
-        # This test documents the behaviour rather than asserting absence
+        # The current implementation sets key to "" (empty string) — verify it is
+        # not set to a non-empty string, which would be clearly wrong.
         val = os.environ.get("HERMES_EMPTY_KEY")
-        assert val is None or val == "", (
-            "Empty-value keys should not be set to non-empty strings"
-        )
+        assert val != "something-wrong", "Empty-value key must not be set to a non-empty string"
+        # Specifically: empty string or absent are both acceptable behaviours.
+        assert val in (None, ""), f"Unexpected value for empty-quoted key: {val!r}"
 
     def test_multiple_keys_all_loaded(self, tmp_path):
         """Multiple key=value pairs in one file are all loaded."""
@@ -159,6 +134,13 @@ class TestLoadRepoDotenv:
         """Values containing '=' (e.g. base64) are preserved correctly."""
         self._run(tmp_path, "MY_KEY=abc=def==\n")
         assert os.environ.get("MY_KEY") == "abc=def=="
+
+    def test_export_prefix_stripped(self, tmp_path):
+        """'export FOO=bar' lines are parsed correctly — export prefix is stripped."""
+        self._run(tmp_path, "export HERMES_WEBUI_HOST=0.0.0.0\n")
+        assert os.environ.get("HERMES_WEBUI_HOST") == "0.0.0.0", (
+            "'export KEY=value' lines must set KEY, not 'export KEY'"
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -26,12 +26,16 @@ def _load_repo_dotenv() -> None:
 
     Mirrors what start.sh does via ``set -a; source .env`` so that running
     ``python3 bootstrap.py`` directly behaves identically to ``./start.sh``.
-    Variables are set unconditionally (matching shell source semantics) so
-    HERMES_WEBUI_HOST, HERMES_WEBUI_PORT, and similar bootstrap settings are
-    honoured regardless of how the launcher was invoked.
+    Variables are set unconditionally (matching shell source semantics), so a
+    value in .env overrides one already present in the shell environment.
+    To keep a CLI-supplied value, unset it from .env or launch via start.sh
+    and override there.
 
     Only loads the webui repo .env — not ~/.hermes/.env, which the server
     loads independently at startup for provider credentials.
+
+    Note: does not handle the ``export FOO=bar`` prefix — strip ``export``
+    from .env values if copy-pasting from a shell rc file.
     """
     env_path = REPO_ROOT / ".env"
     if not env_path.exists():
@@ -43,15 +47,20 @@ def _load_repo_dotenv() -> None:
                 continue
             k, v = line.split("=", 1)
             k = k.strip()
+            # Strip optional 'export' prefix (common in copy-pasted shell snippets)
+            if k.startswith("export "):
+                k = k[7:].strip()
             v = v.strip().strip('"').strip("'")
             if k:
                 os.environ[k] = v
-    except Exception:
-        pass
+    except Exception as exc:
+        import sys as _sys
+        print(f"[bootstrap] Warning: could not load .env — {exc}", file=_sys.stderr)
 
 
-# Load before DEFAULT_HOST / DEFAULT_PORT so that os.getenv() picks up values
-# from the .env file even when bootstrap.py is invoked directly (not via start.sh).
+# Side effect: loads REPO_ROOT/.env into os.environ on import.
+# Must run before DEFAULT_HOST / DEFAULT_PORT so os.getenv() picks up
+# values from .env even when bootstrap.py is invoked directly (not via start.sh).
 _load_repo_dotenv()
 
 DEFAULT_HOST = os.getenv("HERMES_WEBUI_HOST", "127.0.0.1")
