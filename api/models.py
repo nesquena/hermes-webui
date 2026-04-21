@@ -218,7 +218,13 @@ def all_sessions():
                     index_map[s.session_id] = s.compact()
             result = sorted(index_map.values(), key=lambda s: (s.get('pinned', False), s['updated_at']), reverse=True)
             # Hide empty Untitled sessions from the UI (created by tests, page refreshes, etc.)
-            result = [s for s in result if not (s.get('title','Untitled')=='Untitled' and s.get('message_count',0)==0)]
+            # Exempt sessions younger than 60 s so a brand-new session stays visible (#789)
+            _now = time.time()
+            result = [s for s in result if not (
+                s.get('title', 'Untitled') == 'Untitled'
+                and s.get('message_count', 0) == 0
+                and (_now - s.get('updated_at', _now)) > 60
+            )]
             # Backfill: sessions created before Sprint 22 have no profile tag.
             # Attribute them to 'default' so the client profile filter works correctly.
             for s in result:
@@ -239,7 +245,12 @@ def all_sessions():
     for s in SESSIONS.values():
         if all(s.session_id != x.session_id for x in out): out.append(s)
     out.sort(key=lambda s: (getattr(s, 'pinned', False), s.updated_at), reverse=True)
-    result = [s.compact() for s in out if not (s.title=='Untitled' and len(s.messages)==0)]
+    _now = time.time()
+    result = [s.compact() for s in out if not (
+        s.title == 'Untitled'
+        and len(s.messages) == 0
+        and (_now - s.updated_at) > 60
+    )]
     for s in result:
         if not s.get('profile'):
             s['profile'] = 'default'

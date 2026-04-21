@@ -1,9 +1,14 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.130] — 2026-04-21
+
+### Fixed
+- **New sessions now appear immediately in the sidebar** — the zero-message Untitled filter now exempts sessions younger than 60 seconds, so clicking New Chat shows the session right away instead of waiting for the first message. Sessions older than 60 seconds that are still Untitled with 0 messages continue to be suppressed (ghost sessions from test runs / accidental page reloads). Addresses Bug A only of #789; Bug B (SSE refetch resetting sidebar mid-interaction) is a separate fix. (#806)
+
 ## [v0.50.129] — 2026-04-21
 
 ### Fixed
-- **Profile isolation: complete fix via cookie + thread-local context** — PR #800 (v0.50.127) only fixed `POST /api/session/new`. `GET /api/profile/active` still read the process-level `_active_profile` global, so a page refresh while another client had a different profile active would corrupt `S.activeProfile` in JS, defeating the session-creation fix on the next new chat. This release completes the isolation: profile switches now set a `hermes_profile` cookie (HttpOnly, SameSite=Lax) and never mutate the process global. Every request handler reads the cookie into a thread-local; all server functions (`get_active_profile_name()`, `get_active_hermes_home()`, `list_profiles_api()`, memory endpoints, model loading) automatically see the per-client profile. `switch_profile()` gains a `process_wide` kwarg — the HTTP route passes `False`, keeping the global clean; CLI callers default to `True` (unchanged behaviour). Absorbed from PR #803 by @bergeouss with correctness fixes reviewed by Opus. (#804-not-yet — see PR #803 absorption)
+- **Profile isolation: complete fix via cookie + thread-local context** — PR #800 (v0.50.127) only fixed `POST /api/session/new`. `GET /api/profile/active` still read the process-level `_active_profile` global, so a page refresh while another client had a different profile active would corrupt `S.activeProfile` in JS, defeating the session-creation fix on the next new chat. This release completes the isolation: profile switches now set a `hermes_profile` cookie (HttpOnly, SameSite=Lax) and never mutate the process global. Every request handler reads the cookie into a thread-local; all server functions (`get_active_profile_name()`, `get_active_hermes_home()`, `list_profiles_api()`, memory endpoints, model loading) automatically see the per-client profile. `switch_profile()` gains a `process_wide` kwarg — the HTTP route passes `False`, keeping the global clean; CLI callers default to `True` (unchanged behaviour). Absorbed from PR #803 by @bergeouss with correctness fixes reviewed by Opus. (#805)
 
 ## [v0.50.128] — 2026-04-21
 
