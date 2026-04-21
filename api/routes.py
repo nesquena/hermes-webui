@@ -2031,11 +2031,10 @@ def _handle_live_models(handler, parsed):
         # Normalize provider alias so 'z.ai' -> 'zai', 'x.ai' -> 'xai', etc.
         # The browser sends whatever active_provider the static endpoint returned;
         # without normalization, provider_model_ids() misses the alias and returns [].
-        try:
-            from hermes_cli.models import _PROVIDER_ALIASES as _pa
-            provider = _pa.get(provider, provider)
-        except Exception:
-            pass
+        # Uses the WebUI-owned table (api/config._resolve_provider_alias) which
+        # works even when hermes_cli is not on sys.path.
+        from api.config import _resolve_provider_alias
+        provider = _resolve_provider_alias(provider)
 
         # Delegate to the agent's live-fetch + fallback resolver.
         # provider_model_ids() tries live endpoints first and falls back to

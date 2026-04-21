@@ -17,6 +17,8 @@ import re
 import sys
 import unittest.mock as mock
 
+import pytest
+
 REPO = pathlib.Path(__file__).parent.parent
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO.parent / ".hermes" / "hermes-agent"))
@@ -24,6 +26,29 @@ sys.path.insert(0, str(REPO.parent / ".hermes" / "hermes-agent"))
 
 def read(rel):
     return (REPO / rel).read_text(encoding="utf-8")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_models_cache():
+    """Invalidate the TTL model cache before AND after every test.
+
+    ``get_available_models()`` caches its result keyed on config.yaml mtime.
+    Tests in this file repoint ``_get_config_path`` to a tmp_path, populate
+    the cache there, then let monkeypatch restore the original path.  The
+    cache, keyed on the tmp_path's mtime, then poisons downstream tests
+    (e.g. test_model_resolver) which see stale data and never hit their
+    mocks.  Clearing the cache around each test breaks that linkage.
+    """
+    import api.config as c
+    try:
+        c.invalidate_models_cache()
+    except Exception:
+        pass
+    yield
+    try:
+        c.invalidate_models_cache()
+    except Exception:
+        pass
 
 
 # ── api/config.py — active_provider normalization ─────────────────────────────
@@ -101,28 +126,49 @@ class TestLiveModelsProviderNormalization:
         )
         assert m, "_handle_live_models not found"
         fn = m.group(0)
-        assert "_PROVIDER_ALIASES" in fn, (
-            "_handle_live_models must normalize provider via _PROVIDER_ALIASES "
-            "so 'z.ai' -> 'zai' before calling provider_model_ids()"
+        assert "_resolve_provider_alias" in fn, (
+            "_handle_live_models must normalize provider via "
+            "api.config._resolve_provider_alias so 'z.ai' -> 'zai' "
+            "before calling provider_model_ids()"
         )
 
     def test_live_models_normalization_before_provider_model_ids(self):
-        """Normalization block must appear before the provider_model_ids call site."""
+        """Normalization call must appear before the provider_model_ids call site."""
         src = read("api/routes.py")
-        # Find the normalization block and the _pmi(provider) call site
         alias_match = re.search(
-            r"from hermes_cli\.models import _PROVIDER_ALIASES",
+            r"provider\s*=\s*_resolve_provider_alias\(provider\)",
             src,
         )
         pmi_call_match = re.search(
             r"ids\s*=\s*_pmi\(provider\)",
             src,
         )
-        assert alias_match, "_PROVIDER_ALIASES import not found in routes.py"
+        assert alias_match, "_resolve_provider_alias call not found in routes.py"
         assert pmi_call_match, "ids = _pmi(provider) call not found"
         assert alias_match.start() < pmi_call_match.start(), (
             "alias normalization must occur before ids = _pmi(provider)"
         )
+
+    def test_alias_resolver_works_without_hermes_cli(self):
+        """Normalization must work even when hermes_cli is not importable —
+        CI and installs without the agent cloned alongside the WebUI.
+        The WebUI ships its own _PROVIDER_ALIASES table; the agent's table
+        is merged only when available."""
+        import api.config as c
+        # Core CLI aliases from #815's bug report
+        assert c._resolve_provider_alias('z.ai') == 'zai'
+        assert c._resolve_provider_alias('x.ai') == 'xai'
+        assert c._resolve_provider_alias('google') == 'gemini'
+        assert c._resolve_provider_alias('grok') == 'xai'
+        # Case / whitespace insensitive
+        assert c._resolve_provider_alias('  Z.AI  ') == 'zai'
+        # Canonical names pass through unchanged
+        assert c._resolve_provider_alias('openrouter') == 'openrouter'
+        assert c._resolve_provider_alias('anthropic') == 'anthropic'
+        assert c._resolve_provider_alias('custom') == 'custom'
+        # Empty / None pass through
+        assert c._resolve_provider_alias('') == ''
+        assert c._resolve_provider_alias(None) is None
 
 
 # ── api/routes.py — /api/models/live custom_providers fallback ────────────────

@@ -512,6 +512,73 @@ _PROVIDER_DISPLAY = {
     "x-ai": "xAI",
 }
 
+# Provider alias → canonical slug.  Users configure providers using the
+# dotted/hyphenated form they see on the provider website (``z.ai``,
+# ``x.ai``, ``google``) but the internal catalog (``_PROVIDER_MODELS``)
+# uses slugs without punctuation (``zai``, ``xai``, ``gemini``).  Without
+# normalisation the provider lands in the ``else`` branch of the group
+# builder and no models are returned — the bug behind #815.
+#
+# This table is authoritative for the WebUI.  When ``hermes_cli.models``
+# is importable we also merge its ``_PROVIDER_ALIASES`` on top so any
+# new aliases added to the agent automatically apply.  Keeping the local
+# copy means the fix works even in environments where the agent tree is
+# not on ``sys.path`` (CI, installs without hermes-agent cloned
+# alongside the WebUI).
+_PROVIDER_ALIASES = {
+    "glm": "zai",
+    "z-ai": "zai",
+    "z.ai": "zai",
+    "zhipu": "zai",
+    "github": "copilot",
+    "github-copilot": "copilot",
+    "github-models": "copilot",
+    "github-model": "copilot",
+    "google": "gemini",
+    "google-gemini": "gemini",
+    "google-ai-studio": "gemini",
+    "kimi": "kimi-coding",
+    "moonshot": "kimi-coding",
+    "claude": "anthropic",
+    "claude-code": "anthropic",
+    "deep-seek": "deepseek",
+    "opencode": "opencode-zen",
+    "grok": "xai",
+    "x-ai": "xai",
+    "x.ai": "xai",
+    "aws": "bedrock",
+    "aws-bedrock": "bedrock",
+    "amazon": "bedrock",
+    "amazon-bedrock": "bedrock",
+    "qwen": "alibaba",
+    "aliyun": "alibaba",
+    "dashscope": "alibaba",
+    "alibaba-cloud": "alibaba",
+}
+
+
+def _resolve_provider_alias(name: str) -> str:
+    """Return the canonical provider slug for *name*.
+
+    Applies the WebUI's local alias table first, then merges any
+    additional aliases the agent provides (when hermes_cli is on
+    sys.path). Lookup is case-insensitive and whitespace-trimmed.
+    Unknown names pass through unchanged.
+    """
+    if not name:
+        return name
+    raw = str(name).strip().lower()
+    # Prefer the agent's table when available so new aliases added there
+    # work automatically; otherwise fall through to our local copy.
+    try:
+        from hermes_cli.models import _PROVIDER_ALIASES as _agent_aliases
+        if raw in _agent_aliases:
+            return _agent_aliases[raw]
+    except Exception:
+        pass
+    return _PROVIDER_ALIASES.get(raw, name)
+
+
 # Well-known models per provider (used to populate dropdown for direct API providers)
 _PROVIDER_MODELS = {
     "anthropic": [
@@ -976,17 +1043,10 @@ def get_available_models() -> dict:
 
     # Normalize active_provider to its canonical key so it matches the
     # _PROVIDER_MODELS lookup below (e.g. 'z.ai' -> 'zai', 'x.ai' -> 'xai',
-    # 'google' -> 'gemini').  Users often type the dotted/hyphenated form
-    # they see on the provider website; the internal catalog uses the
-    # canonical slug.  Without this, the provider lands in the 'else' branch
-    # of the group builder and its models are never shown.
+    # 'google' -> 'gemini').  Works even when hermes_cli is not on sys.path
+    # because the WebUI ships its own _PROVIDER_ALIASES table.
     if active_provider:
-        try:
-            from hermes_cli.models import _PROVIDER_ALIASES as _pa
-            _raw = str(active_provider).strip().lower()
-            active_provider = _pa.get(_raw, active_provider)
-        except Exception:
-            pass
+        active_provider = _resolve_provider_alias(active_provider)
 
     # 2. Try to read auth store for active provider (if hermes is installed)
     if not active_provider:
