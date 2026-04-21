@@ -24,8 +24,10 @@ services:
     volumes:
       # Persist config, state, sessions, skills, memory across restarts
       - hermes-home:/root/.hermes
-      # Expose agent source so the WebUI can install dependencies from it
-      - hermes-agent-src:/opt/hermes
+      # Bind-mount config.yml and .env from the host for easy editing without entering the container.
+      # Create these next to your docker-compose.yml (or adjust the host paths).
+      - ${PWD}/config.yml:/root/.hermes/config.yml:ro
+      - ${PWD}/.env:/root/.hermes/.env:ro
     environment:
       - HERMES_HOME=/root/.hermes
     restart: unless-stopped
@@ -77,6 +79,10 @@ services:
       #   uv pip install /home/hermeswebui/.hermes/hermes-agent
       # which installs the agent and all its Python dependencies.
       - hermes-agent-src:/home/hermeswebui/.hermes/hermes-agent
+      # Bind-mount config.yml and .env from the host for easy editing without entering the container.
+      # Create these next to your docker-compose.yml (or adjust the host paths).
+      - ${PWD}/config.yml:/home/hermeswebui/.hermes/config.yml:ro
+      - ${PWD}/.env:/home/hermeswebui/.hermes/.env:ro
       # Workspace directory — browse and edit files from the WebUI.
       # Adapt the host path to your project directory.
       - ${HERMES_WORKSPACE:-~/workspace}:/workspace
