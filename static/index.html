@@ -213,9 +213,11 @@
     </div>
     <div class="update-banner" id="updateBanner">
       <span id="updateMsg"></span>
-      <div style="display:flex;gap:8px;flex-shrink:0">
+      <div id="updateError" style="display:none;font-size:12px;color:var(--error,#e05);margin-top:4px;word-break:break-word;max-width:600px"></div>
+      <div style="display:flex;gap:8px;flex-shrink:0;flex-wrap:wrap">
         <button class="update-btn" onclick="dismissUpdate()">Later</button>
         <button class="update-btn update-primary" id="btnApplyUpdate" onclick="applyUpdates()">Update Now</button>
+        <button class="update-btn" id="btnForceUpdate" style="display:none;background:var(--error,#e05);color:#fff;border-color:var(--error,#e05)" onclick="forceUpdate(this)">Force update</button>
       </div>
     </div>
     <div class="reconnect-banner" id="reconnectBanner">

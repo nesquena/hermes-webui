@@ -183,6 +183,94 @@ def check_for_updates(force=False):
         _check_in_progress = False
 
 
+def _schedule_restart(delay: float = 2.0) -> None:
+    """Re-exec this process after *delay* seconds.
+
+    Called after a successful update so that the freshly-pulled code is
+    loaded on the next request, rather than running with a mix of old and
+    new Python modules in sys.modules.
+
+    os.execv() replaces the current process image with a fresh interpreter
+    running the same argv — sessions are preserved on disk, the HTTP port
+    is reclaimed within the delay window, and the client's own
+    ``setTimeout(() => location.reload(), 1500)`` lands after the restart.
+    """
+    import os
+    import sys
+
+    def _do():
+        import time
+        time.sleep(delay)
+        try:
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        except Exception:
+            # Last-resort: if execv fails (e.g. frozen binary), just exit
+            # so the process supervisor (start.sh / Docker) restarts us.
+            os._exit(0)
+
+    threading.Thread(target=_do, daemon=True).start()
+
+
+def apply_force_update(target: str) -> dict:
+    """Force-reset the target repo to the latest remote HEAD.
+
+    Unlike apply_update() which requires a clean working tree and refuses
+    merge conflicts, this discards all local modifications (checkout .) and
+    resets to origin/<branch> — equivalent to what the diverged/conflict
+    error messages ask the user to run manually.
+
+    Should only be called when apply_update() has already returned a
+    response with ``conflict: True`` or ``diverged: True`` and the user
+    has confirmed they want to discard local changes.
+    """
+    if not _apply_lock.acquire(blocking=False):
+        return {'ok': False, 'message': 'Update already in progress'}
+    try:
+        if target == 'webui':
+            path = REPO_ROOT
+        elif target == 'agent':
+            path = _AGENT_DIR
+        else:
+            return {'ok': False, 'message': f'Unknown target: {target}'}
+
+        if path is None or not (path / '.git').exists():
+            return {'ok': False, 'message': 'Not a git repository'}
+
+        _, fetch_ok = _run_git(['fetch', 'origin', '--quiet'], path, timeout=15)
+        if not fetch_ok:
+            return {
+                'ok': False,
+                'message': 'Could not reach the remote repository. Check your connection.',
+            }
+
+        upstream, ok = _run_git(['rev-parse', '--abbrev-ref', '@{upstream}'], path)
+        if ok and upstream:
+            compare_ref = upstream
+        else:
+            branch = _detect_default_branch(path)
+            compare_ref = f'origin/{branch}'
+
+        # Discard local modifications then reset to remote HEAD
+        _run_git(['checkout', '.'], path)
+        _, ok = _run_git(['reset', '--hard', compare_ref], path)
+        if not ok:
+            return {'ok': False, 'message': f'Force reset to {compare_ref} failed'}
+
+        with _cache_lock:
+            _update_cache['checked_at'] = 0
+
+        _schedule_restart()
+
+        return {
+            'ok': True,
+            'message': f'{target} force-updated to {compare_ref}',
+            'target': target,
+            'restart_scheduled': True,
+        }
+    finally:
+        _apply_lock.release()
+
+
 def apply_update(target):
     """Stash, pull --ff-only, pop for the given target repo."""
     if not _apply_lock.acquire(blocking=False):
@@ -235,7 +323,16 @@ def _apply_update_inner(target):
     # Fail early on unresolved merge conflicts
     if any(line[:2] in {'DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU'}
            for line in status_out.splitlines()):
-        return {'ok': False, 'message': 'Repository has unresolved merge conflicts'}
+        return {
+            'ok': False,
+            'message': (
+                f'The local {target} repo has unresolved merge conflicts. '
+                'To reset to the latest remote version run: '
+                'git -C ' + str(path) + ' checkout . && '
+                'git -C ' + str(path) + ' pull --ff-only'
+            ),
+            'conflict': True,
+        }
     stashed = False
     if status_out:
         _, ok = _run_git(['stash'], path)
@@ -296,4 +393,22 @@ def _apply_update_inner(target):
     with _cache_lock:
         _update_cache['checked_at'] = 0
 
-    return {'ok': True, 'message': f'{target} updated successfully', 'target': target}
+    # Schedule a self-restart so the updated code is loaded fresh.  A plain
+    # git pull leaves stale Python modules in sys.modules — agent imports that
+    # reference new symbols (functions, classes) added in the update will fail
+    # on the next request with AttributeError / ImportError.  os.execv() re-
+    # execs the same interpreter with the same argv, picking up the new code
+    # cleanly without requiring the user to restart manually.
+    #
+    # The 2 s delay gives the HTTP response time to flush to the client before
+    # the process replaces itself.  The client already does
+    # setTimeout(() => location.reload(), 1500) on success, so the page reload
+    # and the restart land at roughly the same time.
+    _schedule_restart()
+
+    return {
+        'ok': True,
+        'message': f'{target} updated successfully',
+        'target': target,
+        'restart_scheduled': True,
+    }

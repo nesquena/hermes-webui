@@ -1469,6 +1469,14 @@ def handle_post(handler, parsed) -> bool:
 
         return j(handler, apply_update(target))
 
+    if parsed.path == "/api/updates/force":
+        target = body.get("target", "")
+        if target not in ("webui", "agent"):
+            return bad(handler, 'target must be "webui" or "agent"')
+        from api.updates import apply_force_update
+
+        return j(handler, apply_force_update(target))
+
     # ── CLI session import (POST) ──
     if parsed.path == "/api/session/import_cli":
         return _handle_session_import_cli(handler, body)

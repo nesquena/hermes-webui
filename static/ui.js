@@ -1051,6 +1051,8 @@ function dismissUpdate(){
 async function applyUpdates(){
   const btn=$('btnApplyUpdate');
   if(btn){btn.disabled=true;btn.textContent='Updating\u2026';}
+  const errEl=$('updateError');
+  if(errEl){errEl.style.display='none';errEl.textContent='';}
   const targets=[];
   if(window._updateData?.webui?.behind>0) targets.push('webui');
   if(window._updateData?.agent?.behind>0) targets.push('agent');
@@ -1058,18 +1060,65 @@ async function applyUpdates(){
     for(const target of targets){
       const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify({target})});
       if(!res.ok){
-        showToast('Update failed ('+target+'): '+(res.message||'unknown error'));
+        _showUpdateError(target,res);
         if(btn){btn.disabled=false;btn.textContent='Update Now';}
         return;
       }
     }
-    showToast('Updated! Reloading\u2026');
+    showToast('Updated! Restarting\u2026');
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
-    setTimeout(()=>location.reload(),1500);
+    setTimeout(()=>location.reload(),2500);
   }catch(e){
-    showToast('Update failed: '+e.message);
+    if(errEl){errEl.textContent='Update failed: '+e.message;errEl.style.display='block';}
+    else showToast('Update failed: '+e.message);
     if(btn){btn.disabled=false;btn.textContent='Update Now';}
+  }
+}
+function _showUpdateError(target,res){
+  const errEl=$('updateError');
+  const forceBtn=$('btnForceUpdate');
+  const msg='Update failed ('+target+'): '+(res.message||'unknown error');
+  if(errEl){
+    errEl.textContent=msg;
+    errEl.style.display='block';
+  } else {
+    showToast(msg);
+  }
+  // Show "Force update" button when the error is recoverable by a hard reset
+  if(forceBtn&&(res.conflict||res.diverged)){
+    forceBtn.dataset.target=target;
+    forceBtn.style.display='inline-block';
+  }
+}
+async function forceUpdate(btn){
+  const target=btn&&btn.dataset.target;
+  if(!target) return;
+  const confirmed=await showConfirmDialog({
+    title:'Force update '+target+'?',
+    message:'This will discard all local changes in the '+target+' repo and reset to the latest remote version. This cannot be undone.',
+    confirmLabel:'Force update',
+    danger:true,
+    focusCancel:true,
+  });
+  if(!confirmed) return;
+  btn.disabled=true;btn.textContent='Force updating\u2026';
+  const errEl=$('updateError');
+  if(errEl){errEl.style.display='none';}
+  try{
+    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify({target})});
+    if(!res.ok){
+      if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
+      btn.disabled=false;btn.textContent='Force update';
+      return;
+    }
+    showToast('Force updated! Restarting\u2026');
+    sessionStorage.removeItem('hermes-update-checked');
+    sessionStorage.removeItem('hermes-update-dismissed');
+    setTimeout(()=>location.reload(),2500);
+  }catch(e){
+    if(errEl){errEl.textContent='Force update failed: '+e.message;errEl.style.display='block';}
+    btn.disabled=false;btn.textContent='Force update';
   }
 }
 
