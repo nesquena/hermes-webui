@@ -1,6 +1,10 @@
 # Hermes Web UI -- Changelog
 
-## [v0.50.124] — 2026-04-21
+## [v0.50.125] — 2026-04-21
+
+### Fixed
+- **`python3 bootstrap.py` now honours `.env` settings** — running bootstrap.py directly (the primary documented entry point) previously ignored `HERMES_WEBUI_HOST`, `HERMES_WEBUI_PORT`, and other repo `.env` settings because `start.sh`'s `source .env` step was skipped. bootstrap.py now loads `REPO_ROOT/.env` itself before reading any env-var defaults, making the two launch paths identical. Reported in #730 by @leap233. (#791)
+
 
 ### Fixed
 - **Settings version badge now shows the real running version** — the badge in the Settings → System panel was hardcoded to `v0.50.87` (36 releases behind) and the HTTP `Server:` header said `HermesWebUI/0.50.38` (85 behind). Both are now resolved dynamically at server startup from `git describe --tags --always --dirty`. Docker images (where `.git` is excluded) receive the correct tag via a build-time `ARG HERMES_VERSION` written to `api/_version.py`. No manual "update the badge" step is needed going forward — tagging is sufficient. Version file parsing uses regex instead of `exec()` for supply-chain safety. (#790)

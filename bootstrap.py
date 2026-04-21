@@ -19,6 +19,41 @@ from pathlib import Path
 
 INSTALLER_URL = "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh"
 REPO_ROOT = Path(__file__).resolve().parent
+
+
+def _load_repo_dotenv() -> None:
+    """Load REPO_ROOT/.env into os.environ.
+
+    Mirrors what start.sh does via ``set -a; source .env`` so that running
+    ``python3 bootstrap.py`` directly behaves identically to ``./start.sh``.
+    Variables are set unconditionally (matching shell source semantics) so
+    HERMES_WEBUI_HOST, HERMES_WEBUI_PORT, and similar bootstrap settings are
+    honoured regardless of how the launcher was invoked.
+
+    Only loads the webui repo .env — not ~/.hermes/.env, which the server
+    loads independently at startup for provider credentials.
+    """
+    env_path = REPO_ROOT / ".env"
+    if not env_path.exists():
+        return
+    try:
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip()
+            v = v.strip().strip('"').strip("'")
+            if k:
+                os.environ[k] = v
+    except Exception:
+        pass
+
+
+# Load before DEFAULT_HOST / DEFAULT_PORT so that os.getenv() picks up values
+# from the .env file even when bootstrap.py is invoked directly (not via start.sh).
+_load_repo_dotenv()
+
 DEFAULT_HOST = os.getenv("HERMES_WEBUI_HOST", "127.0.0.1")
 DEFAULT_PORT = int(os.getenv("HERMES_WEBUI_PORT", "8787"))
 # Set HERMES_WEBUI_SKIP_ONBOARDING=1 to bypass the first-run wizard when
