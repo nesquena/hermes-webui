@@ -1022,7 +1022,13 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
 
             _AIAgent = _get_ai_agent()
             if _AIAgent is None:
-                raise ImportError("AIAgent not available -- check that hermes-agent is on sys.path")
+                put('apperror', {
+                    'message': 'Hermes agent is not available. The WebUI cannot run conversations without the agent. '
+                               'Set HERMES_WEBUI_AGENT_DIR to a valid hermes-agent source directory.',
+                    'type': 'agent_unavailable',
+                    'hint': 'The hermes-agent source must be mounted at HERMES_WEBUI_AGENT_DIR for chat to work.',
+                })
+                return
 
             # Initialize SessionDB so session_search works in WebUI sessions
             _session_db = None
