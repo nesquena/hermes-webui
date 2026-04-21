@@ -1025,6 +1025,9 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                             live_tc['duration'] = cb_kwargs.get('duration')
                             live_tc['is_error'] = bool(cb_kwargs.get('is_error', False))
                             break
+                    # Signal the checkpoint thread that new work has completed (Issue #765).
+                    # Each completed tool call is a meaningful unit of progress worth persisting.
+                    _checkpoint_activity[0] += 1
                     put('tool_complete', {
                         'event_type': event_type,
                         'name': name,
@@ -1174,6 +1177,40 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             if _personality_prompt:
                 agent.ephemeral_system_prompt = _personality_prompt
             _previous_messages = list(s.messages or [])
+
+            # ── Periodic checkpoint during streaming (Issue #765) ──
+            # The agent works on an internal copy of s.messages during run_conversation()
+            # so we cannot watch s.messages for growth. Instead, on_tool() increments
+            # _checkpoint_activity[0] each time a tool call completes — that is the real
+            # signal that progress has been made worth persisting.
+            #
+            # What gets saved on each checkpoint:
+            #   - s.pending_user_message (already written before run starts)
+            #   - s.pending_started_at / s.active_stream_id (turn bookkeeping)
+            # On a server restart the UI will see a session with a pending message and no
+            # response — better than a silent loss of the entire conversation turn.
+            # The final s.save() at task completion handles the full session update + index.
+            _checkpoint_stop = None
+            _checkpoint_activity = [0]
+
+            def _periodic_checkpoint():
+                last_saved_activity = 0
+                while not _checkpoint_stop.wait(15):
+                    try:
+                        cur = _checkpoint_activity[0]
+                        if cur > last_saved_activity:
+                            s.save(skip_index=True)
+                            last_saved_activity = cur
+                    except Exception as e:
+                        logger.debug("Periodic checkpoint save failed: %s", e)
+
+            _checkpoint_stop = threading.Event()
+            _ckpt_thread = threading.Thread(
+                target=_periodic_checkpoint, daemon=True,
+                name=f"ckpt-{session_id[:8]}",
+            )
+            _ckpt_thread.start()
+
             result = agent.run_conversation(
                 user_message=workspace_ctx + msg_text,
                 system_message=workspace_system_msg,
@@ -1495,6 +1532,9 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             _apperror_payload['hint'] = _exc_hint
         put('apperror', _apperror_payload)
     finally:
+        # Stop periodic checkpoint thread if it was started (Issue #765)
+        if _checkpoint_stop is not None:
+            _checkpoint_stop.set()
         _clear_thread_env()  # TD1: always clear thread-local context
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)

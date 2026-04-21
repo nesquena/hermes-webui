@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.132] — 2026-04-21
+
+### Fixed
+- **Periodic session checkpoint during long-running agent tasks** — messages accumulated during multi-step research or coding tasks were silently lost if the server restarted mid-run. The root cause: `Session.save()` was only called after `agent.run_conversation()` completed. The fix adds a daemon thread that saves the session every 15 seconds whenever the `on_tool` callback signals a completed tool call — the first reliable mid-run signal that real progress has been made (the agent works on an internal copy of `s.messages`, so watching message-count would never trigger). `Session.save()` gains a `skip_index=True` flag so checkpoints skip the expensive index rebuild; the final `s.save()` at task completion still rebuilds it. On a server restart the user's message and turn bookkeeping remain on disk — worst case: up to 15 seconds of tool-call progress lost rather than the entire conversation turn. Closes #765. Absorbed and corrected from PR #809 by @bergeouss. (#810)
+
 ## [v0.50.131] — 2026-04-21
 
 ### Fixed

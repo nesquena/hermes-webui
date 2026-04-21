@@ -121,14 +121,15 @@ class Session:
     def path(self):
         return SESSION_DIR / f'{self.session_id}.json'
 
-    def save(self, touch_updated_at: bool = True) -> None:
+    def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
         if touch_updated_at:
             self.updated_at = time.time()
         self.path.write_text(
             json.dumps(self.__dict__, ensure_ascii=False, indent=2),
             encoding='utf-8',
         )
-        _write_session_index(updates=[self])
+        if not skip_index:
+            _write_session_index(updates=[self])
 
     @classmethod
     def load(cls, sid):
