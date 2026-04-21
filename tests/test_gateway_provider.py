@@ -433,7 +433,7 @@ class TestResolveGatewayModel(unittest.TestCase):
                         return_value=[{"label": "local", "url": url}]):
                 result = resolve_gateway_model("@gateway-local:claude-4.6-opus-high/test")
                 self.assertIsNotNone(result)
-                self.assertEqual(result["model"], "claude-4.6-opus-high")
+                self.assertEqual(result["model"], "gw:claude-4.6-opus-high")
                 self.assertEqual(result["base_url"], f"{url}/cursor/v1")
                 self.assertEqual(result["api_key"], "agent-gateway-no-key-required")
                 self.assertEqual(result["extra_headers"]["x-instance-keyword"], "test")
