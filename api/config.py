@@ -1381,6 +1381,7 @@ _SETTINGS_DEFAULTS = {
     ),  # display name for the assistant
     "sound_enabled": False,  # play notification sound when assistant finishes
     "notifications_enabled": False,  # browser notification when tab is in background
+    "show_thinking": True,  # show/hide thinking/reasoning blocks in chat view
     "sidebar_density": "compact",  # compact | detailed
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
 }
@@ -1491,6 +1492,7 @@ _SETTINGS_BOOL_KEYS = {
     "check_for_updates",
     "sound_enabled",
     "notifications_enabled",
+    "show_thinking",
 }
 # Language codes are validated as short alphanumeric BCP-47-like tags (e.g. 'en', 'zh', 'fr')
 _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8})?$")
