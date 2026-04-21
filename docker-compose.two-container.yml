@@ -17,10 +17,8 @@ services:
     container_name: hermes-agent
     command: gateway run
     ports:
-      # Gateway API — exposed on localhost only.
-      # Other containers on hermes-net reach it via http://hermes-agent:8642.
-      # Remove 127.0.0.1: to expose on the host network (e.g. for remote clients).
-      - "127.0.0.1:8642:8642"
+      # Gateway API — other containers reach it via http://hermes-agent:8642.
+      - "8642:8642"
     volumes:
       # Persist config, state, sessions, skills, memory across restarts
       - hermes-home:/root/.hermes

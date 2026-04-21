@@ -20,7 +20,7 @@ services:
     container_name: hermes-agent
     command: gateway run
     ports:
-      - "127.0.0.1:8642:8642"
+      - "8642:8642"
     volumes:
       # Persist config, state, sessions, skills, memory across restarts
       - hermes-home:/root/.hermes
@@ -44,7 +44,7 @@ services:
     container_name: hermes-dashboard
     command: dashboard --host 0.0.0.0 --insecure
     ports:
-      - "127.0.0.1:9119:9119"
+      - "9119:9119"
     volumes:
       - hermes-home:/root/.hermes
     environment:
@@ -68,9 +68,8 @@ services:
     depends_on:
       - hermes-agent
     ports:
-      # Expose on localhost only. Remove 127.0.0.1: to expose on all interfaces
-      # (set HERMES_WEBUI_PASSWORD if doing so).
-      - "127.0.0.1:8787:8787"
+      # Expose on all interfaces (set HERMES_WEBUI_PASSWORD if doing so).
+      - "8787:8787"
     volumes:
       # Same hermes home as the agent — shares config, sessions, state
       - hermes-home:/home/hermeswebui/.hermes
