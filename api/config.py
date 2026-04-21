@@ -10,6 +10,7 @@ Discovery order for all paths:
 """
 
 import collections
+import copy
 import json
 import logging
 import os
@@ -802,6 +803,26 @@ def set_hermes_default_model(model_id: str) -> dict:
     return get_available_models()
 
 
+# ── TTL cache for get_available_models() ─────────────────────────────────────
+_available_models_cache: dict | None = None
+_available_models_cache_ts: float = 0.0
+_AVAILABLE_MODELS_CACHE_TTL: float = 60.0  # seconds — refresh at most once per minute
+_available_models_cache_lock = threading.Lock()
+
+
+def invalidate_models_cache():
+    """Force the TTL cache for get_available_models() to be cleared.
+
+    Call this after modifying config.cfg in-memory (e.g. in tests) so
+    the next call to get_available_models() picks up the changes rather
+    than returning a stale cached result.
+    """
+    global _available_models_cache, _available_models_cache_ts
+    with _available_models_cache_lock:
+        _available_models_cache = None
+        _available_models_cache_ts = 0.0
+
+
 def get_available_models() -> dict:
     """
     Return available models grouped by provider.
@@ -821,12 +842,24 @@ def get_available_models() -> dict:
     # Reload config from disk if config.yaml has changed since last load.
     # This ensures CLI model changes are picked up on page refresh without
     # a server restart, while avoiding clearing in-memory mocks during tests. (#585)
-    try:
-        _current_mtime = Path(_get_config_path()).stat().st_mtime
-    except OSError:
-        _current_mtime = 0.0
-    if _current_mtime != _cfg_mtime:
-        reload_config()
+    # Must run BEFORE the TTL check so config edits within the 60s window are visible.
+    global _available_models_cache, _available_models_cache_ts
+    with _available_models_cache_lock:
+        try:
+            _current_mtime = Path(_get_config_path()).stat().st_mtime
+        except OSError:
+            _current_mtime = 0.0
+        # Note: env-var changes (e.g. API key rotation) are not detected by mtime;
+        # cache will be stale for up to TTL seconds in that case.
+        if _current_mtime != _cfg_mtime:
+            reload_config()
+            # Config changed — force cache invalidation
+            _available_models_cache = None
+            _available_models_cache_ts = 0.0
+        # Serve from TTL cache if fresh.
+        now = time.monotonic()
+        if _available_models_cache is not None and (now - _available_models_cache_ts) < _AVAILABLE_MODELS_CACHE_TTL:
+            return copy.deepcopy(_available_models_cache)
     active_provider = None
     default_model = get_effective_default_model(cfg)
     groups = []
@@ -1277,11 +1310,16 @@ def get_available_models() -> dict:
                     }
                 )
 
-    return {
+    result = {
         "active_provider": active_provider,
         "default_model": default_model,
         "groups": groups,
     }
+    # Cache the result for TTL seconds
+    with _available_models_cache_lock:
+        _available_models_cache = result
+        _available_models_cache_ts = time.monotonic()
+    return copy.deepcopy(result)
 
 
 # ── Static file path ─────────────────────────────────────────────────────────
