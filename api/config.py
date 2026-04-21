@@ -724,6 +724,29 @@ _PROVIDER_MODELS = {
 }
 
 
+def _apply_provider_prefix(
+    raw_models: list[dict],
+    provider_id: str,
+    active_provider: str | None,
+) -> list[dict]:
+    """Return *raw_models* with @provider: prefixes applied when needed.
+
+    Prefixing is skipped when (a) the provider is already the active one, or
+    (b) a model id already starts with '@' or contains '/' (already routable).
+    """
+    _active = (active_provider or "").lower()
+    if not _active or provider_id == _active:
+        return list(raw_models)
+    result = []
+    for m in raw_models:
+        mid = m["id"]
+        if mid.startswith("@") or "/" in mid:
+            result.append({"id": mid, "label": m["label"]})
+        else:
+            result.append({"id": f"@{provider_id}:{mid}", "label": m["label"]})
+    return result
+
+
 def resolve_model_provider(model_id: str) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
@@ -1436,18 +1459,7 @@ def get_available_models() -> dict:
                     logger.debug("Failed to load Ollama Cloud models from hermes_cli")
 
                 if raw_models:
-                    _active = (active_provider or "").lower()
-                    if _active and pid != _active:
-                        models = []
-                        for m in raw_models:
-                            mid = m["id"]
-                            if mid.startswith("@") or "/" in mid:
-                                models.append({"id": mid, "label": m["label"]})
-                            else:
-                                models.append({"id": f"@{pid}:{mid}", "label": m["label"]})
-                    else:
-                        models = list(raw_models)
-
+                    models = _apply_provider_prefix(raw_models, pid, active_provider)
                     groups.append(
                         {
                             "provider": provider_name,
@@ -1470,18 +1482,7 @@ def get_available_models() -> dict:
                         raw_models = [{"id": k, "label": k} for k in cfg_models.keys()]
                     elif isinstance(cfg_models, list):
                         raw_models = [{"id": k, "label": k} for k in cfg_models]
-                _active = (active_provider or "").lower()
-                if _active and pid != _active:
-                    models = []
-                    for m in raw_models:
-                        mid = m["id"]
-                        # Don't double-prefix; use @provider: hint for bare names
-                        if mid.startswith("@") or "/" in mid:
-                            models.append({"id": mid, "label": m["label"]})
-                        else:
-                            models.append({"id": f"@{pid}:{mid}", "label": m["label"]})
-                else:
-                    models = list(raw_models)
+                models = _apply_provider_prefix(raw_models, pid, active_provider)
                 groups.append(
                     {
                         "provider": provider_name,

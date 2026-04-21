@@ -280,3 +280,76 @@ def test_load_pool_explicit_credential_shows_provider(monkeypatch, tmp_path):
     assert "GitHub Copilot" in groups, (
         f"GitHub Copilot must appear when load_pool has at least one usable entry; got {list(groups)}"
     )
+
+
+# --- _apply_provider_prefix helper ---
+
+
+def test_apply_provider_prefix_ollama_cloud_non_active():
+    """Bare ollama-cloud model ids get @ollama-cloud: prefix when not active."""
+    from api.config import _apply_provider_prefix
+
+    raw = [{"id": "gpt-oss:20b", "label": "gpt-oss:20b"}, {"id": "qwen3:30b-a3b", "label": "qwen3:30b-a3b"}]
+    result = _apply_provider_prefix(raw, "ollama-cloud", "openai-codex")
+    ids = [m["id"] for m in result]
+    assert ids == ["@ollama-cloud:gpt-oss:20b", "@ollama-cloud:qwen3:30b-a3b"], ids
+
+
+def test_apply_provider_prefix_copilot_non_active():
+    """Bare copilot model ids get @copilot: prefix when not active."""
+    from api.config import _apply_provider_prefix
+
+    raw = [{"id": "gpt-5.4", "label": "GPT-5.4"}, {"id": "claude-opus-4.6", "label": "Claude Opus 4.6"}]
+    result = _apply_provider_prefix(raw, "copilot", "openai-codex")
+    ids = [m["id"] for m in result]
+    assert ids == ["@copilot:gpt-5.4", "@copilot:claude-opus-4.6"], ids
+
+
+def test_apply_provider_prefix_no_double_prefix():
+    """Already-prefixed or provider/model ids are not double-prefixed."""
+    from api.config import _apply_provider_prefix
+
+    raw = [
+        {"id": "@copilot:gpt-5.4", "label": "already prefixed"},
+        {"id": "openai/gpt-5.4", "label": "slash form"},
+        {"id": "bare-model", "label": "bare"},
+    ]
+    result = _apply_provider_prefix(raw, "copilot", "openai-codex")
+    ids = [m["id"] for m in result]
+    assert ids == ["@copilot:gpt-5.4", "openai/gpt-5.4", "@copilot:bare-model"], ids
+
+
+def test_apply_provider_prefix_active_provider_no_prefix():
+    """No prefix is added when the provider is already the active one."""
+    from api.config import _apply_provider_prefix
+
+    raw = [{"id": "gpt-5.4", "label": "GPT-5.4"}]
+    result = _apply_provider_prefix(raw, "openai-codex", "openai-codex")
+    ids = [m["id"] for m in result]
+    assert ids == ["gpt-5.4"], ids
+
+
+def test_copilot_mixed_pool_prefixed_models(monkeypatch, tmp_path):
+    """Copilot with mixed pool and non-active provider has @copilot: prefixed model ids."""
+    auth_payload = {
+        "version": 1,
+        "providers": {},
+        "active_provider": "openai-codex",
+        "credential_pool": {
+            "copilot": [
+                {
+                    "id": "lp010",
+                    "label": "explicit-copilot",
+                    "source": "manual",
+                    "auth_type": "api_key",
+                    "base_url": "https://api.githubcopilot.com",
+                }
+            ]
+        },
+    }
+
+    result = _call_get_available_models(monkeypatch, tmp_path, auth_payload)
+    groups = _group_by_provider(result)
+    assert "GitHub Copilot" in groups
+    model_ids = [m["id"] for m in groups["GitHub Copilot"]]
+    assert all(mid.startswith("@copilot:") for mid in model_ids), model_ids
