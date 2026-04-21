@@ -584,22 +584,24 @@ function cmdReasoning(args){
   if(arg==='show'||arg==='on'){
     window._showThinking=true;
     if(typeof renderMessages==='function') renderMessages();
-    api('/api/settings',{show_thinking:true}).catch(function(){});
+    api('/api/settings',{method:'POST',body:JSON.stringify({show_thinking:true})}).catch(function(){});
     showToast('\uD83E\uDDE0 Thinking blocks: on');
     return;
   }
   if(arg==='hide'||arg==='off'){
     window._showThinking=false;
     if(typeof renderMessages==='function') renderMessages();
-    api('/api/settings',{show_thinking:false}).catch(function(){});
+    api('/api/settings',{method:'POST',body:JSON.stringify({show_thinking:false})}).catch(function(){});
     showToast('\uD83E\uDDE0 Thinking blocks: off');
     return;
   }
-  // Effort levels — stored for next message
+  // Effort levels — stored client-side only for now; agent routing is a
+  // follow-up (see #461 PR body). Toast avoids promising behaviour the
+  // back-end doesn't yet honour.
   var levels=['none','minimal','low','medium','high','xhigh'];
   if(levels.includes(arg)){
     window._reasoningEffort=arg;
-    showToast('\uD83E\uDDE0 Reasoning effort: '+arg+' (applies to next message)');
+    showToast('\uD83E\uDDE0 Reasoning effort noted: '+arg+' (display only; agent routing pending)');
     return;
   }
   showToast('Unknown argument: '+arg+' \u2014 use show|hide|low|medium|high');

@@ -174,3 +174,23 @@ class TestReasoningCommand:
         assert 'cmd_reasoning' in i18n, (
             "i18n.js must define the cmd_reasoning key"
         )
+
+    def test_cmd_reasoning_posts_settings_not_gets(self):
+        """Regression: the api() helper spreads its 2nd arg into fetch(), so
+        passing `{show_thinking:true}` alone would silently become a GET —
+        the persistence would never happen. Every /api/settings call inside
+        cmdReasoning must explicitly use method:'POST' + JSON body."""
+        src = read('static/commands.js')
+        m = re.search(r'function cmdReasoning\(.*?\n\}', src, re.DOTALL)
+        assert m
+        fn = m.group(0)
+        api_calls = re.findall(r"api\('/api/settings'[^)]*\)", fn)
+        assert api_calls, "cmdReasoning must call /api/settings at least once"
+        for call in api_calls:
+            assert "method:'POST'" in call or 'method: "POST"' in call, (
+                f"/api/settings call missing method:'POST' — would fall "
+                f"through to GET and silently drop the update: {call}"
+            )
+            assert 'JSON.stringify' in call, (
+                f"/api/settings call missing JSON body: {call}"
+            )
