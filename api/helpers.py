@@ -54,14 +54,21 @@ def _security_headers(handler):
     )
 
 
-def j(handler, payload, status: int=200) -> None:
-    """Send a JSON response."""
+def j(handler, payload, status: int=200, extra_headers: dict=None) -> None:
+    """Send a JSON response.
+
+    *extra_headers*: optional dict of additional headers to include
+    (e.g., {'Set-Cookie': '...'}).  Headers are sent before end_headers().
+    """
     body = _json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
     handler.send_response(status)
     handler.send_header('Content-Type', 'application/json; charset=utf-8')
     handler.send_header('Content-Length', str(len(body)))
     handler.send_header('Cache-Control', 'no-store')
     _security_headers(handler)
+    if extra_headers:
+        for k, v in extra_headers.items():
+            handler.send_header(k, v)
     handler.end_headers()
     handler.wfile.write(body)
 
@@ -173,3 +180,47 @@ def read_body(handler) -> dict:
         return _json.loads(raw)
     except Exception:
         return {}
+
+
+# ── Profile cookie helpers (issue #798) ─────────────────────────────────────
+
+PROFILE_COOKIE_NAME = 'hermes_profile'
+
+
+def get_profile_cookie(handler) -> str | None:
+    """Extract the hermes_profile cookie from the request, or None."""
+    cookie_header = handler.headers.get('Cookie', '')
+    if not cookie_header:
+        return None
+    import http.cookies as _hc
+    cookie = _hc.SimpleCookie()
+    try:
+        cookie.load(cookie_header)
+    except _hc.CookieError:
+        return None
+    morsel = cookie.get(PROFILE_COOKIE_NAME)
+    if morsel and morsel.value:
+        return morsel.value
+    return None
+
+
+def set_profile_cookie(handler, name: str) -> None:
+    """Set the hermes_profile cookie on the response."""
+    import http.cookies as _hc
+    cookie = _hc.SimpleCookie()
+    cookie[PROFILE_COOKIE_NAME] = name
+    cookie[PROFILE_COOKIE_NAME]['path'] = '/'
+    cookie[PROFILE_COOKIE_NAME]['httponly'] = False  # frontend needs to read it
+    cookie[PROFILE_COOKIE_NAME]['samesite'] = 'Lax'
+    # No max-age — cookie lives for the browser session
+    handler.send_header('Set-Cookie', cookie[PROFILE_COOKIE_NAME].OutputString())
+
+
+def clear_profile_cookie(handler) -> None:
+    """Clear the hermes_profile cookie (set to empty, max-age=0)."""
+    import http.cookies as _hc
+    cookie = _hc.SimpleCookie()
+    cookie[PROFILE_COOKIE_NAME] = ''
+    cookie[PROFILE_COOKIE_NAME]['path'] = '/'
+    cookie[PROFILE_COOKIE_NAME]['max-age'] = '0'
+    handler.send_header('Set-Cookie', cookie[PROFILE_COOKIE_NAME].OutputString())

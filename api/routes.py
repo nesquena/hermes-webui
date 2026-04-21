@@ -1151,11 +1151,27 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "name is required")
         try:
             from api.profiles import switch_profile, _validate_profile_name
+            from api.helpers import set_profile_cookie, clear_profile_cookie
 
             if name != 'default':
                 _validate_profile_name(name)
-            result = switch_profile(name)
-            return j(handler, result)
+            # process_wide=False: don't mutate process-global _active_profile.
+            # Per-client profile is managed via cookie + thread-local (issue #798).
+            result = switch_profile(name, process_wide=False)
+
+            # Build per-client profile cookie (issue #798)
+            import http.cookies as _hc
+            _ck = _hc.SimpleCookie()
+            _ck['hermes_profile'] = '' if name == 'default' else name
+            _ck['hermes_profile']['path'] = '/'
+            _ck['hermes_profile']['httponly'] = False  # frontend may read it
+            _ck['hermes_profile']['samesite'] = 'Lax'
+            if name == 'default':
+                _ck['hermes_profile']['max-age'] = '0'
+
+            return j(handler, result, extra_headers={
+                'Set-Cookie': _ck['hermes_profile'].OutputString(),
+            })
         except (ValueError, FileNotFoundError) as e:
             return bad(handler, _sanitize_error(e), 404)
         except RuntimeError as e:

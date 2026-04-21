@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 
 from api.auth import check_auth
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
-from api.helpers import j
+from api.helpers import j, get_profile_cookie
+from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_get, handle_post
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
@@ -64,6 +65,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         self._req_t0 = time.time()
+        # Set per-request profile context from cookie (issue #798)
+        cookie_profile = get_profile_cookie(self)
+        if cookie_profile:
+            set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
             if not check_auth(self, parsed): return
@@ -73,9 +78,15 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
             return j(self, {'error': 'Internal server error'}, status=500)
+        finally:
+            clear_request_profile()
 
     def do_POST(self) -> None:
         self._req_t0 = time.time()
+        # Set per-request profile context from cookie (issue #798)
+        cookie_profile = get_profile_cookie(self)
+        if cookie_profile:
+            set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
             if not check_auth(self, parsed): return
@@ -85,6 +96,8 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             print(f'[webui] ERROR {self.command} {self.path}\n' + traceback.format_exc(), flush=True)
             return j(self, {'error': 'Internal server error'}, status=500)
+        finally:
+            clear_request_profile()
 
 
 def main() -> None:

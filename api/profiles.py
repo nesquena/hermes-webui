@@ -31,6 +31,12 @@ _active_profile = 'default'
 _profile_lock = threading.Lock()
 _loaded_profile_env_keys: set[str] = set()
 
+# Thread-local profile context: set per-request by server.py, cleared after.
+# This enables per-client profile isolation (issue #798) — each HTTP request
+# thread reads its own profile from the hermes_profile cookie instead of the
+# process-global _active_profile.
+_tls = threading.local()
+
 def _resolve_base_hermes_home() -> Path:
     """Return the BASE ~/.hermes directory — the root that contains profiles/.
 
@@ -86,18 +92,44 @@ def _read_active_profile_file() -> str:
 # ── Public API ──────────────────────────────────────────────────────────────
 
 def get_active_profile_name() -> str:
-    """Return the currently active profile name."""
+    """Return the currently active profile name.
+
+    Priority:
+      1. Thread-local (set per-request from hermes_profile cookie) — issue #798
+      2. Process-level default (_active_profile)
+    """
+    tls_name = getattr(_tls, 'profile', None)
+    if tls_name is not None:
+        return tls_name
     return _active_profile
 
 
 def get_active_hermes_home() -> Path:
     """Return the HERMES_HOME path for the currently active profile."""
-    if _active_profile == 'default':
+    name = get_active_profile_name()
+    if name == 'default':
         return _DEFAULT_HERMES_HOME
-    profile_dir = _DEFAULT_HERMES_HOME / 'profiles' / _active_profile
+    profile_dir = _DEFAULT_HERMES_HOME / 'profiles' / name
     if profile_dir.is_dir():
         return profile_dir
     return _DEFAULT_HERMES_HOME
+
+
+def set_request_profile(name: str) -> None:
+    """Set the thread-local profile for the current request (issue #798).
+
+    Called by server.py at the start of each HTTP request after reading
+    the hermes_profile cookie.
+    """
+    _tls.profile = name
+
+
+def clear_request_profile() -> None:
+    """Clear the thread-local profile after request handling.
+
+    Called by server.py in the finally block to prevent thread pool leaks.
+    """
+    _tls.profile = None
 
 
 def _set_hermes_home(home: Path):
@@ -170,17 +202,21 @@ def init_profile_state() -> None:
     _reload_dotenv(home)
 
 
-def switch_profile(name: str) -> dict:
+def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     """Switch the active profile.
 
     Validates the profile exists, updates process state, patches module caches,
     reloads .env, and reloads config.yaml.
 
+    Args:
+        name: Profile name to switch to.
+        process_wide: If True (default), updates the process-global _active_profile.
+            Set to False for per-client switches from the WebUI where the profile
+            is managed via cookie + thread-local (issue #798).
+
     Returns: {'profiles': [...], 'active': name}
     Raises ValueError if profile doesn't exist or agent is busy.
     """
-    global _active_profile
-
     # Import here to avoid circular import at module load
     from api.config import STREAMS, STREAMS_LOCK, reload_config
 
@@ -201,7 +237,12 @@ def switch_profile(name: str) -> dict:
             raise ValueError(f"Profile '{name}' does not exist.")
 
     with _profile_lock:
-        _active_profile = name
+        # Only update process-global _active_profile when explicitly requested
+        # (e.g., server startup via init_profile_state, or delete_profile_api).
+        # Per-client switches from the WebUI set the cookie + thread-local instead.
+        if process_wide:
+            global _active_profile
+            _active_profile = name
         _set_hermes_home(home)
         _reload_dotenv(home)
 
@@ -243,7 +284,7 @@ def list_profiles_api() -> list:
         # hermes_cli not available -- return just the default
         return [_default_profile_dict()]
 
-    active = _active_profile
+    active = get_active_profile_name()
     result = []
     for p in infos:
         result.append({
@@ -266,7 +307,7 @@ def _default_profile_dict() -> dict:
         'name': 'default',
         'path': str(_DEFAULT_HERMES_HOME),
         'is_default': True,
-        'is_active': True,
+        'is_active': get_active_profile_name() == 'default',
         'gateway_running': False,
         'model': None,
         'provider': None,
@@ -410,7 +451,7 @@ def create_profile_api(name: str, clone_from: str = None,
         'name': name,
         'path': str(profile_path),
         'is_default': False,
-        'is_active': _active_profile == name,
+        'is_active': get_active_profile_name() == name,
         'gateway_running': False,
         'model': None,
         'provider': None,
@@ -428,7 +469,7 @@ def delete_profile_api(name: str) -> dict:
     # If deleting the active profile, switch to default first
     if _active_profile == name:
         try:
-            switch_profile('default')
+            switch_profile('default', process_wide=True)
         except RuntimeError:
             raise RuntimeError(
                 f"Cannot delete active profile '{name}' while an agent is running. "
