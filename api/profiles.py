@@ -109,9 +109,10 @@ def get_hermes_home_for_profile(name: str) -> Path:
     cached paths, or the process-level _active_profile global.
 
     Falls back to _DEFAULT_HERMES_HOME (same as 'default') when *name* is None,
-    empty, or 'default'.
+    empty, 'default', or does not match the profile-name format (rejects path
+    traversal such as '../../etc').
     """
-    if not name or name == 'default':
+    if not name or name == 'default' or not _PROFILE_ID_RE.match(name):
         return _DEFAULT_HERMES_HOME
     profile_dir = _DEFAULT_HERMES_HOME / 'profiles' / name
     if profile_dir.is_dir():

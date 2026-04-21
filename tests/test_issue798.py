@@ -161,3 +161,20 @@ def test_sessions_js_sends_profile_in_new_session_post():
         "sessions.js newSession() must send profile: S.activeProfile in the POST body "
         "so the server uses the tab's active profile, not the process global."
     )
+
+
+def test_get_hermes_home_for_profile_rejects_path_traversal():
+    """R19j: get_hermes_home_for_profile() must reject names that don't match
+    _PROFILE_ID_RE (e.g. path traversal like '../../etc') and return the base home.
+    The regex guard is defence-in-depth on top of the is_dir() fallback."""
+    import api.profiles as p
+    base = p._DEFAULT_HERMES_HOME
+    assert p.get_hermes_home_for_profile('../../etc') == base
+    assert p.get_hermes_home_for_profile('../escape') == base
+    assert p.get_hermes_home_for_profile('/absolute/path') == base
+    assert p.get_hermes_home_for_profile('has spaces') == base
+    assert p.get_hermes_home_for_profile('UPPERCASE') == base
+    # Valid names still work
+    assert p.get_hermes_home_for_profile('alice') == base   # nonexistent → fallback
+    assert p.get_hermes_home_for_profile('my-profile') == base
+    assert p.get_hermes_home_for_profile('profile_1') == base
