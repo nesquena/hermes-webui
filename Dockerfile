@@ -74,6 +74,10 @@ USER root
 # The init script will skip the download when uv is already on PATH.
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 
+# Create /opt/hermes so the init script's chown does not fail (it is used as
+# the hermes-home base directory and chowned unconditionally).
+RUN mkdir -p /opt/hermes && chown hermeswebuitoo:hermeswebuitoo /opt/hermes
+
 USER hermeswebuitoo
 
 COPY . /apptoo
