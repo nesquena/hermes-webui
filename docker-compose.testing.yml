@@ -31,7 +31,7 @@ services:
       - HERMES_WEBUI_HOST=0.0.0.0
       - HERMES_WEBUI_PORT=8787
       - HERMES_WEBUI_STATE_DIR=/opt/hermes/webui-mvp
-      - HERMES_WEBUI_AGENT_DIR=/opt/hermes-agent
+      - HERMES_WEBUI_AGENT_DIR=/does-not-exist
       # Match your host user's UID/GID for correct file permissions.
       - WANTED_UID=${UID:-1000}
       - WANTED_GID=${GID:-1000}
