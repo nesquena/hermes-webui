@@ -1153,11 +1153,15 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "name is required")
         try:
             from api.profiles import switch_profile, _validate_profile_name
-
+            from api.helpers import build_profile_cookie
             if name != 'default':
                 _validate_profile_name(name)
-            result = switch_profile(name)
-            return j(handler, result)
+            # process_wide=False: don't mutate the process-global _active_profile.
+            # Per-client profile is managed via cookie + thread-local (#798).
+            result = switch_profile(name, process_wide=False)
+            return j(handler, result, extra_headers={
+                'Set-Cookie': build_profile_cookie(name),
+            })
         except (ValueError, FileNotFoundError) as e:
             return bad(handler, _sanitize_error(e), 404)
         except RuntimeError as e:
