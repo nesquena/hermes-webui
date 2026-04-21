@@ -29,42 +29,24 @@ def test_get_hermes_home_for_profile_returns_default_for_none():
     assert p.get_hermes_home_for_profile('default') == base
 
 
-def test_get_hermes_home_for_profile_returns_profile_subdir(tmp_path):
+def test_get_hermes_home_for_profile_returns_profile_subdir(tmp_path, monkeypatch):
     """R19b: Named profile that exists returns its subdirectory."""
-    os.environ['HERMES_BASE_HOME'] = str(tmp_path)
-    for mod in list(sys.modules):
-        if mod in ('api.config', 'api.profiles'):
-            del sys.modules[mod]
     import api.profiles as p
 
-    try:
-        profile_dir = tmp_path / 'profiles' / 'alice'
-        profile_dir.mkdir(parents=True)
-        result = p.get_hermes_home_for_profile('alice')
-        assert result == profile_dir
-    finally:
-        os.environ.pop('HERMES_BASE_HOME', None)
-        for mod in ('api.config', 'api.profiles'):
-            sys.modules.pop(mod, None)
-        import api.profiles  # noqa: F401  — re-import with real home
+    profile_dir = tmp_path / 'profiles' / 'alice'
+    profile_dir.mkdir(parents=True)
+    monkeypatch.setattr(p, '_DEFAULT_HERMES_HOME', tmp_path)
+    result = p.get_hermes_home_for_profile('alice')
+    assert result == profile_dir
 
 
-def test_get_hermes_home_for_profile_falls_back_for_missing_profile(tmp_path):
+def test_get_hermes_home_for_profile_falls_back_for_missing_profile(tmp_path, monkeypatch):
     """R19c: Named profile that does not exist falls back to base home."""
-    os.environ['HERMES_BASE_HOME'] = str(tmp_path)
-    for mod in list(sys.modules):
-        if mod in ('api.config', 'api.profiles'):
-            del sys.modules[mod]
     import api.profiles as p
 
-    try:
-        result = p.get_hermes_home_for_profile('ghost')
-        assert result == tmp_path
-    finally:
-        os.environ.pop('HERMES_BASE_HOME', None)
-        for mod in ('api.config', 'api.profiles'):
-            sys.modules.pop(mod, None)
-        import api.profiles  # noqa: F401
+    monkeypatch.setattr(p, '_DEFAULT_HERMES_HOME', tmp_path)
+    result = p.get_hermes_home_for_profile('ghost')
+    assert result == tmp_path
 
 
 def test_get_hermes_home_for_profile_does_not_mutate_globals():
