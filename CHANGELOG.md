@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.126] — 2026-04-21
+
+### Fixed
+- **Onboarding now recognizes `credential_pool` OAuth auth for openai-codex** — the readiness check in `api/onboarding.py` only looked at the legacy `providers[provider]` key in `auth.json`. Hermes runtime resolves OAuth tokens from `credential_pool[provider]` (device-code / OAuth flows), so WebUI could report "not ready" while the runtime chatted successfully. The check now covers both storage locations with a fail-closed helper. Adds three regression tests. Reported in #796, fixed by @davidsben. (#797)
+
 ## [v0.50.125] — 2026-04-21
 
 ### Fixed
