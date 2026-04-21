@@ -3,7 +3,7 @@
 ## [v0.50.127] — 2026-04-21
 
 ### Fixed
-- **Profile isolation: switching profiles in one browser client no longer affects concurrent clients** — `api/profiles.py` stored `_active_profile` as a process-level global; `switch_profile()` mutated it for the whole server, so a second user switching profiles would clobber new-session creation for all other active tabs. The fix has two parts: (1) `get_hermes_home_for_profile(name)` — a pure path resolver that reads only the filesystem, never touching `os.environ` or module-level state; (2) `new_session()` now accepts an explicit `profile` param (passed from the client's `S.activeProfile` in the POST body) which short-circuits the process global. The streaming handler also uses the per-session `s.profile` to resolve `HERMES_HOME` instead of the shared global. Reported in #798. (#800)
+- **Profile isolation: switching profiles in one browser client no longer affects concurrent clients** — `api/profiles.py` stored `_active_profile` as a process-level global; `switch_profile()` mutated it for the whole server, so a second user switching profiles would clobber new-session creation for all other active tabs. The fix: (1) `get_hermes_home_for_profile(name)` — a pure path resolver that reads only the filesystem, validates the profile name against the existing `_PROFILE_ID_RE` pattern (rejects path traversal), and never mutates `os.environ` or module state; (2) `new_session()` now accepts an explicit `profile` param passed from the client's `S.activeProfile` in the POST body, short-circuiting the process global; (3) the streaming handler resolves `HERMES_HOME` from the per-session `s.profile` instead of the shared global. Reported in #798. (#800)
 
 ## [v0.50.126] — 2026-04-21
 
