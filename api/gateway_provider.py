@@ -290,16 +290,11 @@ def resolve_gateway_model(model_id: str) -> Optional[Dict[str, str]]:
             cli_route = inst.get("cli", "cursor")
             break
 
-    # Embed keyword in URL path so no extra HTTP headers are needed.
-    # This avoids issues with AIAgent's codex_responses mode for GPT-5+ models
-    # rejecting extra_headers in request_overrides.
-    base_url = f"{gateway_url}/{cli_route}/v1/k/{keyword}"
+    base_url = f"{gateway_url}/{cli_route}/v1"
 
     # Use a prefixed model name (e.g. "gw:gpt-5.4") to prevent the AI agent
     # from auto-switching to the Responses API for GPT-5+ models.  The gateway
-    # proxies everything as chat completions regardless of the underlying model.
-    # The "gw:" prefix ensures _model_requires_responses_api("gw:gpt-5.4")
-    # returns False (doesn't start with "gpt-5").
+    # strips the "gw:" prefix and matches the real model name strictly.
     safe_model = f"gw:{model_name}"
 
     return {
@@ -307,5 +302,7 @@ def resolve_gateway_model(model_id: str) -> Optional[Dict[str, str]]:
         "provider": "openai",
         "base_url": base_url,
         "api_key": "agent-gateway-no-key-required",
-        "extra_headers": {},
+        "extra_headers": {
+            "x-instance-keyword": keyword,
+        },
     }
