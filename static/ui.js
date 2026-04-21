@@ -90,6 +90,7 @@ async function populateModelDropdown(){
     for(const g of data.groups){
       const og=document.createElement('optgroup');
       og.label=g.provider;
+      if(g.provider_id) og.dataset.provider=g.provider_id;
       for(const m of g.models){
         const opt=document.createElement('option');
         opt.value=m.id;
@@ -134,6 +135,12 @@ async function _fetchLiveModels(provider, sel){
     // Keep other providers' optgroups intact
     let providerGroup=null;
     for(const og of sel.querySelectorAll('optgroup')){
+      // Prefer exact data-provider match (set from provider_id in API response)
+      // over substring label match — avoids false positives like 'zai' not matching
+      // 'Z.AI / GLM' and vice versa.
+      if(og.dataset.provider&&og.dataset.provider===provider){
+        providerGroup=og; break;
+      }
       if(og.label&&og.label.toLowerCase().includes(provider.toLowerCase())){
         providerGroup=og; break;
       }

@@ -974,6 +974,20 @@ def get_available_models() -> dict:
         if cfg_default:
             default_model = cfg_default
 
+    # Normalize active_provider to its canonical key so it matches the
+    # _PROVIDER_MODELS lookup below (e.g. 'z.ai' -> 'zai', 'x.ai' -> 'xai',
+    # 'google' -> 'gemini').  Users often type the dotted/hyphenated form
+    # they see on the provider website; the internal catalog uses the
+    # canonical slug.  Without this, the provider lands in the 'else' branch
+    # of the group builder and its models are never shown.
+    if active_provider:
+        try:
+            from hermes_cli.models import _PROVIDER_ALIASES as _pa
+            _raw = str(active_provider).strip().lower()
+            active_provider = _pa.get(_raw, active_provider)
+        except Exception:
+            pass
+
     # 2. Try to read auth store for active provider (if hermes is installed)
     if not active_provider:
         try:
@@ -1289,7 +1303,7 @@ def get_available_models() -> dict:
                 # Named custom provider — use the stored display name and its own model list
                 _nc_display, _nc_models = _named_custom_groups[pid]
                 if _nc_models:
-                    groups.append({"provider": _nc_display, "models": _nc_models})
+                    groups.append({"provider": _nc_display, "provider_id": pid, "models": _nc_models})
                 continue
             provider_name = _PROVIDER_DISPLAY.get(pid, pid.title())
             if pid == "openrouter":
@@ -1297,6 +1311,7 @@ def get_available_models() -> dict:
                 groups.append(
                     {
                         "provider": "OpenRouter",
+                        "provider_id": "openrouter",
                         "models": [
                             {"id": m["id"], "label": m["label"]}
                             for m in _FALLBACK_MODELS
@@ -1334,6 +1349,7 @@ def get_available_models() -> dict:
                 groups.append(
                     {
                         "provider": provider_name,
+                        "provider_id": pid,
                         "models": models,
                     }
                 )
@@ -1346,6 +1362,7 @@ def get_available_models() -> dict:
                     groups.append(
                         {
                             "provider": provider_name,
+                            "provider_id": pid,
                             "models": auto_detected_models,
                         }
                     )
@@ -1356,7 +1373,7 @@ def get_available_models() -> dict:
         if default_model:
             label = default_model.split("/")[-1] if "/" in default_model else default_model
             groups.append(
-                {"provider": "Default", "models": [{"id": default_model, "label": label}]}
+                {"provider": "Default", "provider_id": "default", "models": [{"id": default_model, "label": label}]}
             )
 
     # Ensure the user's configured default_model always appears in the dropdown.
@@ -1396,6 +1413,7 @@ def get_available_models() -> dict:
                 groups.append(
                     {
                         "provider": "Default",
+                        "provider_id": "default",
                         "models": [{"id": default_model, "label": label}],
                     }
                 )
@@ -1403,6 +1421,7 @@ def get_available_models() -> dict:
                 groups.append(
                     {
                         "provider": active_provider or "Default",
+                        "provider_id": active_provider or "default",
                         "models": [{"id": default_model, "label": label}],
                     }
                 )
