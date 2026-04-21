@@ -3,7 +3,7 @@
 ## [v0.50.131] — 2026-04-21
 
 ### Fixed
-- **Workspace pane now respects the app theme** — six hardcoded dark-mode `rgba(255,255,255,...)` colors in the workspace panel CSS have been replaced with theme-aware CSS variables (`--hover-bg`, `--border2`, `--code-inline-bg`). The file list hover, panel icon buttons, preview table rows, and the preview edit textarea now all update correctly when switching between light and dark themes. Reported in #786. (#807)
+- **Workspace pane now respects the app theme** — seven hardcoded dark-mode `rgba(255,255,255,...)` colors in the workspace panel CSS have been replaced with theme-aware CSS variables (`--hover-bg`, `--border2`, `--code-inline-bg`). The file list hover, panel icon buttons, preview table rows, and the preview edit textarea now all update correctly when switching between light and dark themes. Reported in #786. (#807)
 
 ## [v0.50.130] — 2026-04-21
 
