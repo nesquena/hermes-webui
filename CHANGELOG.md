@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.128] — 2026-04-21
+
+### Fixed
+- **`"` no longer mangles to `&amp;quot;` inside code blocks** — the autolink pass in `renderMd()` was operating inside `<pre><code>` blocks because they weren't stashed before the pass ran. When a code block contained a URL adjacent to `&quot;` (the HTML-escaped form of `"`), the autolink regex captured the entity suffix and `esc()` double-encoded it, producing `&amp;quot;` in the rendered HTML and copy buffer. Fixed by adding `<pre>` blocks to `_al_stash` so the autolink regex never touches code-block content. Reported and fixed by @starship-s. (#801)
+
 ## [v0.50.127] — 2026-04-21
 
 ### Fixed

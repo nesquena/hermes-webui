@@ -636,9 +636,9 @@ function renderMd(raw){
   const SAFE_TAGS=/^<\/?(strong|em|code|pre|h[1-6]|ul|ol|li|table|thead|tbody|tr|th|td|hr|blockquote|p|br|a|img|div|span)([\s>]|$)/i;
   s=s.replace(/<\/?[a-z][^>]*>/gi,tag=>SAFE_TAGS.test(tag)?tag:esc(tag));
   // Autolink: convert plain URLs to clickable links.
-  // Stash existing <a> tags first so we never re-link a URL already inside href="...".
+  // Stash <a>, <img> and <pre> blocks so autolink never runs inside them.
   const _al_stash=[];
-  s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>)/g,m=>{_al_stash.push(m);return `\x00B${_al_stash.length-1}\x00`;});
+  s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>|<pre\b[^>]*>[\s\S]*?<\/pre>)/g,m=>{_al_stash.push(m);return `\x00B${_al_stash.length-1}\x00`;});
   s=s.replace(/(https?:\/\/[^\s<>"'\)\]]+)/g,(url)=>{
     // Strip trailing punctuation that was likely not part of the URL
     const trail=url.match(/[.,;:!?)]$/)?url.slice(-1):'';
