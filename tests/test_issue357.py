@@ -49,10 +49,13 @@ class TestDockerfileUvPreinstall:
 
     def test_dockerfile_uv_installed_before_copy(self):
         """uv installation must happen before COPY . /apptoo so it's in the image."""
+        import re
         uv_pos = DOCKERFILE.find("uv/install.sh")
-        copy_pos = DOCKERFILE.find("COPY . /apptoo")
+        # Match COPY regardless of flags (e.g. --chown=...) — only the destination matters.
+        m = re.search(r"^COPY\b.*\s/apptoo\b", DOCKERFILE, re.MULTILINE)
         assert uv_pos != -1, "uv install not found in Dockerfile"
-        assert copy_pos != -1, "COPY . /apptoo not found in Dockerfile"
+        assert m is not None, "COPY ... /apptoo not found in Dockerfile"
+        copy_pos = m.start()
         assert uv_pos < copy_pos, "uv must be installed before COPY . /apptoo"
 
     def test_dockerfile_uv_installed_as_root_or_before_user_switch(self):

@@ -76,7 +76,7 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/b
 
 USER hermeswebuitoo
 
-COPY . /apptoo
+COPY --chown=hermeswebuitoo:hermeswebuitoo . /apptoo
 
 # Bake the git version tag into the image so the settings badge works even
 # when .git is not present (it is excluded by .dockerignore).

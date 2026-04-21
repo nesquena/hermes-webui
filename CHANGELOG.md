@@ -8,7 +8,7 @@
 ## [v0.50.124] — 2026-04-21
 
 ### Fixed
-- **Settings version badge now shows the real running version** — the badge in the Settings → System panel was hardcoded to `v0.50.87` (36 releases behind) and the HTTP `Server:` header said `HermesWebUI/0.50.38` (85 behind). Both are now resolved dynamically at server startup from `git describe --tags --always --dirty`. Docker images (where `.git` is excluded) receive the correct tag via a build-time `ARG HERMES_VERSION` written to `api/_version.py`. No manual "update the badge" step is needed going forward — tagging is sufficient. Version file parsing uses regex instead of `exec()` for supply-chain safety. (#790, #792)
+- **Settings version badge now shows the real running version** — the badge in the Settings → System panel was hardcoded to `v0.50.87` (36 releases behind) and the HTTP `Server:` header said `HermesWebUI/0.50.38` (85 behind). Both are now resolved dynamically at server startup from `git describe --tags --always --dirty`. Docker images (where `.git` is excluded) receive the correct tag via a build-time `ARG HERMES_VERSION` written to `api/_version.py`. `COPY` now uses `--chown=hermeswebuitoo:hermeswebuitoo` so the write succeeds under the unprivileged container user. No manual "update the badge" step is needed going forward — tagging is sufficient. Version file parsing uses regex instead of `exec()` for supply-chain safety. (#790, #793)
 
 ## [v0.50.123] — 2026-04-21
 
