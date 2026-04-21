@@ -55,9 +55,9 @@ def _install_fake_hermes_cli(monkeypatch, *, with_load_pool: bool = False, pool_
                 usable.append(e)
             return _FakePool(usable)
 
-        fake_cp = types.ModuleType("hermes_cli.credential_pool")
+        fake_cp = types.ModuleType("agent.credential_pool")
         fake_cp.load_pool = _fake_load_pool
-        monkeypatch.setitem(sys.modules, "hermes_cli.credential_pool", fake_cp)
+        monkeypatch.setitem(sys.modules, "agent.credential_pool", fake_cp)
 
 
 def _call_get_available_models(monkeypatch, tmp_path, auth_payload, *, with_load_pool: bool = False):

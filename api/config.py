@@ -1085,7 +1085,7 @@ def get_available_models() -> dict:
         _pool = auth_store.get("credential_pool", {}) if isinstance(auth_store, dict) else {}
         if isinstance(_pool, dict) and _pool:
             try:
-                from hermes_cli.credential_pool import load_pool as _load_pool
+                from agent.credential_pool import load_pool as _load_pool
 
                 for _pid in list(_pool.keys()):
                     try:
