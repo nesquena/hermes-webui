@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.126] — 2026-04-21
+
+### Fixed
+- **Quote entity double-escaping in code blocks** — `renderMd()`'s `_al_stash` regex now also stashes `<pre>…</pre>` blocks before the autolink pass. Previously a URL inside a fenced code block followed by `&quot;` (the `esc()`-encoded form of `"`) was captured by the autolink regex, which then double-escaped the `&` into `&amp;`, yielding `&amp;quot;` in both the rendered HTML and the clipboard copy buffer. Regression tests added in `tests/test_quote_entity_mangling.py` (19 tests).
+
 ## [v0.50.125] — 2026-04-21
 
 ### Fixed
