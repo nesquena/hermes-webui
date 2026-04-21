@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.122] — 2026-04-21
+
+### Fixed
+- **Duplicate X button in workspace panel header on mobile** — at viewport widths ≤900px the desktop close-preview button (`.close-preview` / `btnClearPreview`) is now hidden via CSS, leaving only the mobile close button (`.mobile-close-btn`) visible. Previously both buttons appeared side-by-side when the window was resized below the 900px breakpoint. (#781)
+
 ## [v0.50.121] — 2026-04-20
 
 ### Performance

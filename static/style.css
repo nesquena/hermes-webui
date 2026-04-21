@@ -651,6 +651,7 @@
     .rightpanel{display:none}
     .workspace-toggle-btn,.mobile-files-btn{display:inline-flex!important;}
     .mobile-close-btn{display:flex;}
+    .close-preview{display:none;}
     #btnCollapseWorkspacePanel{display:none;}
   }
 
