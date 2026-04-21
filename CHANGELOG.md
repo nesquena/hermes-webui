@@ -1,6 +1,10 @@
 # Hermes Web UI -- Changelog
 
-## [v0.50.123] — 2026-04-21
+## [v0.50.124] — 2026-04-21
+
+### Fixed
+- **Settings version badge now shows the real running version** — the badge in the Settings → System panel was hardcoded to `v0.50.87` (36 releases behind) and the HTTP `Server:` header said `HermesWebUI/0.50.38` (85 behind). Both are now resolved dynamically at server startup from `git describe --tags --always --dirty`. Docker images (where `.git` is excluded) receive the correct tag via a build-time `ARG HERMES_VERSION` written to `api/_version.py`. No manual "update the badge" step is needed going forward — tagging is sufficient. Version file parsing uses regex instead of `exec()` for supply-chain safety. (#790)
+
 
 ### Fixed
 - **Default model change surfaced stale value after model-list TTL cache landed** — `set_hermes_default_model()` now explicitly invalidates `_available_models_cache` after `reload_config()`. The 60s TTL cache introduced in v0.50.121 (#780) only invalidates on config-file mtime change, but `reload_config()` resyncs `_cfg_mtime` before `get_available_models()` runs — so the mtime check never fires and the POST response (plus downstream reads within the TTL window) returned the previous model until the cache expired. Root cause of the `test_default_model_updates_hermes_config` CI flake as well. (#788)

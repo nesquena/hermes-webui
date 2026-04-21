@@ -77,8 +77,8 @@ class TestDetectWebUIVersion:
         )
         assert result == 'unknown'
 
-    def test_version_file_exec_error_returns_unknown(self, tmp_path):
-        """Malformed _version.py doesn't crash — falls through to 'unknown'."""
+    def test_version_file_malformed_returns_unknown(self, tmp_path):
+        """Malformed _version.py (no recognisable __version__ assignment) returns 'unknown'."""
         result = self._fresh_detect(
             mock_run_git=lambda args, cwd, timeout: ('', False),
             version_file_content="this is not valid python !!! ~~~\n",
@@ -274,4 +274,23 @@ class TestServerVersionHeader:
         src = (REPO_ROOT / 'server.py').read_text(encoding='utf-8')
         assert 'from api.updates import WEBUI_VERSION' in src, (
             'server.py must import WEBUI_VERSION from api.updates'
+        )
+
+    def test_server_version_no_slash_when_unknown(self):
+        """When WEBUI_VERSION is 'unknown', server_version must be bare 'HermesWebUI' with no slash."""
+        src = (REPO_ROOT / 'server.py').read_text(encoding='utf-8')
+        # The guard must be present so log aggregators don't see 'HermesWebUI/unknown'
+        assert "'unknown'" in src or '"unknown"' in src, (
+            "server.py must guard against emitting 'HermesWebUI/unknown' as the server header"
+        )
+
+    def test_server_version_uses_removeprefix_not_lstrip(self):
+        """server.py must use str.removeprefix() to strip 'v', not lstrip() which strips chars."""
+        src = (REPO_ROOT / 'server.py').read_text(encoding='utf-8')
+        assert 'lstrip' not in src, (
+            "server.py must use removeprefix('v') not lstrip('v') — lstrip strips characters, "
+            "not a prefix, and would incorrectly mangle strings like 'vvv0.50.124'"
+        )
+        assert 'removeprefix' in src, (
+            "server.py must use removeprefix('v') to strip the leading 'v' from the version tag"
         )
