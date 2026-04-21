@@ -1076,31 +1076,43 @@ def get_available_models() -> dict:
     if active_provider:
         detected_providers.add(active_provider)
 
-    # Include providers that have explicit credential-pool entries even when
-    # no process env var is present (e.g. service launched without shell env).
-    # This keeps the dropdown in sync with auth.json while still ignoring
-    # ambient GitHub CLI-derived Copilot credentials ("gh auth token").
+    # Include providers that have usable credential-pool entries even when no
+    # process env var is present (e.g. service launched without shell env).
+    # Primary: delegate to upstream credential_pool.load_pool() so suppression
+    # and seeding/pruning rules live in one place.
+    # Fallback: manual field inspection when the upstream module is unavailable.
     try:
         _pool = auth_store.get("credential_pool", {}) if isinstance(auth_store, dict) else {}
-        if isinstance(_pool, dict):
-            for _pid, _entries in _pool.items():
-                if not isinstance(_entries, list) or len(_entries) == 0:
-                    continue
-                _has_explicit_cred = False
-                for _entry in _entries:
-                    if not isinstance(_entry, dict):
+        if isinstance(_pool, dict) and _pool:
+            try:
+                from hermes_cli.credential_pool import load_pool as _load_pool
+
+                for _pid in list(_pool.keys()):
+                    try:
+                        if _load_pool(_pid).entries():
+                            detected_providers.add(str(_pid))
+                    except Exception:
+                        logger.debug("credential_pool.load_pool(%s) failed", _pid)
+            except ImportError:
+                # Fallback: inspect raw entry fields for suppression signals.
+                for _pid, _entries in _pool.items():
+                    if not isinstance(_entries, list) or len(_entries) == 0:
                         continue
-                    _src = str(_entry.get("source", "") or "").strip().lower()
-                    _label = str(_entry.get("label", "") or "").strip().lower()
-                    _key_src = str(_entry.get("key_source", "") or "").strip().lower()
-                    if _src in {"gh_cli", "gh auth token"}:
-                        continue
-                    if _label == "gh auth token" or _key_src == "gh auth token":
-                        continue
-                    _has_explicit_cred = True
-                    break
-                if _has_explicit_cred:
-                    detected_providers.add(str(_pid))
+                    _has_explicit_cred = False
+                    for _entry in _entries:
+                        if not isinstance(_entry, dict):
+                            continue
+                        _src = str(_entry.get("source", "") or "").strip().lower()
+                        _label = str(_entry.get("label", "") or "").strip().lower()
+                        _key_src = str(_entry.get("key_source", "") or "").strip().lower()
+                        if _src in {"gh_cli", "gh auth token"}:
+                            continue
+                        if _label == "gh auth token" or _key_src == "gh auth token":
+                            continue
+                        _has_explicit_cred = True
+                        break
+                    if _has_explicit_cred:
+                        detected_providers.add(str(_pid))
     except Exception:
         logger.debug("Failed to inspect credential_pool from auth store")
 
