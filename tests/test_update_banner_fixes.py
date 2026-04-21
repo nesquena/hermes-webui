@@ -317,3 +317,113 @@ class TestIndexHtmlBanner:
         assert 'display:none' in tag, (
             "#btnForceUpdate must be hidden by default (display:none)"
         )
+
+
+# ── Regression: sequential webui+agent update — restart coordination ──────────
+
+class TestSequentialUpdateRestartCoordination:
+    """Regression guard for the two-target race: when both webui and agent
+    have updates, the client POSTs them sequentially (webui → agent). The
+    first update's success schedules a restart timer; without coordination
+    that timer fires while the second update's git-pull is still running,
+    killing it mid-stream and leaving the second repo partial.
+
+    Fix: `_schedule_restart` must acquire `_apply_lock` before calling
+    `os.execv`, so a pending second update always completes first.
+    """
+
+    def test_schedule_restart_waits_for_apply_lock(self, monkeypatch):
+        """The restart thread must wait for any in-flight update before
+        calling execv. Exercised by holding _apply_lock from another thread
+        and verifying execv is delayed until the lock is released."""
+        import api.updates as upd
+        import threading as _th
+        import time as _t
+
+        execv_called = _th.Event()
+        execv_time = []
+
+        def fake_execv(exe, args):
+            execv_time.append(_t.monotonic())
+            execv_called.set()
+
+        monkeypatch.setattr(os, 'execv', fake_execv)
+
+        # Hold _apply_lock from another thread (simulating an in-flight
+        # second update) for 0.4 s.
+        release_time = []
+        lock_held = _th.Event()
+
+        def holder():
+            with upd._apply_lock:
+                lock_held.set()
+                _t.sleep(0.4)
+                release_time.append(_t.monotonic())
+
+        holder_thread = _th.Thread(target=holder, daemon=True)
+        holder_thread.start()
+        lock_held.wait(timeout=2)
+
+        # Schedule a restart with a short delay. The lock is held;
+        # the restart thread should block on it.
+        upd._schedule_restart(delay=0.05)
+        _t.sleep(0.15)
+        assert not execv_called.is_set(), (
+            "execv called while _apply_lock was still held by another "
+            "thread — restart must wait for in-flight updates to finish"
+        )
+
+        # Let the holder release.
+        holder_thread.join(timeout=2)
+        assert release_time, "holder didn't release the lock"
+
+        # execv should fire shortly after the lock release.
+        assert execv_called.wait(timeout=2), (
+            "execv never fired after _apply_lock was released"
+        )
+        assert execv_time[0] >= release_time[0], (
+            f"execv fired before lock was released "
+            f"(execv={execv_time[0]}, release={release_time[0]})"
+        )
+
+    def test_schedule_restart_still_fires_when_no_update_in_flight(self, monkeypatch):
+        """Sanity: with nothing holding the lock, restart still fires promptly."""
+        import api.updates as upd
+        import time as _t
+
+        execv_called = []
+        def fake_execv(exe, args):
+            execv_called.append(True)
+        monkeypatch.setattr(os, 'execv', fake_execv)
+
+        upd._schedule_restart(delay=0.05)
+        _t.sleep(0.25)
+        assert execv_called, (
+            "restart must still fire when _apply_lock is free"
+        )
+
+
+# ── Regression: force button reset on retry ──────────────────────────────────
+
+class TestForceButtonResetOnRetry:
+    """#813 UX: if a prior update attempt showed the force button (conflict),
+    the next call to applyUpdates() must reset it — otherwise a subsequent
+    non-conflict error (e.g. network) leaves the stale force button visible
+    pointing at the wrong target."""
+
+    def test_apply_updates_resets_force_button_at_start(self):
+        src = read('static/ui.js')
+        m = re.search(r'async function applyUpdates\b.*?\n\}', src, re.DOTALL)
+        assert m, "applyUpdates() not found"
+        fn = m.group(0)
+        # The reset must appear BEFORE the main update loop, so it runs on
+        # every retry — not only on first invocation.
+        setup, _, rest = fn.partition('const targets=')
+        assert 'btnForceUpdate' in setup, (
+            "applyUpdates must reset btnForceUpdate visibility before "
+            "starting the update loop (stale conflict state otherwise "
+            "persists across retries)"
+        )
+        assert "display='none'" in setup or "display = 'none'" in setup, (
+            "applyUpdates setup must hide btnForceUpdate via display:none"
+        )

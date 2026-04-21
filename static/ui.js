@@ -1053,6 +1053,10 @@ async function applyUpdates(){
   if(btn){btn.disabled=true;btn.textContent='Updating\u2026';}
   const errEl=$('updateError');
   if(errEl){errEl.style.display='none';errEl.textContent='';}
+  // Hide any leftover force-update button from a prior conflict so a fresh
+  // retry starts clean (otherwise stale state points at the wrong target).
+  const forceBtnReset=$('btnForceUpdate');
+  if(forceBtnReset){forceBtnReset.style.display='none';forceBtnReset.dataset.target='';}
   const targets=[];
   if(window._updateData?.webui?.behind>0) targets.push('webui');
   if(window._updateData?.agent?.behind>0) targets.push('agent');

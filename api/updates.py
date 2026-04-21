@@ -193,7 +193,15 @@ def _schedule_restart(delay: float = 2.0) -> None:
     os.execv() replaces the current process image with a fresh interpreter
     running the same argv — sessions are preserved on disk, the HTTP port
     is reclaimed within the delay window, and the client's own
-    ``setTimeout(() => location.reload(), 1500)`` lands after the restart.
+    ``setTimeout(() => location.reload(), 2500)`` lands after the restart.
+
+    Coordinates with ``_apply_lock``: when the user updates both webui
+    and agent, the client POSTs them sequentially.  Without coordination
+    the restart timer scheduled by the first update's success would fire
+    while the second update's git-pull is still running, killing it mid-
+    stream and leaving the second repo in an unknown partial state.
+    Blocking on ``_apply_lock`` before ``os.execv`` means a pending
+    second update always completes before the restart happens.
     """
     import os
     import sys
@@ -201,6 +209,12 @@ def _schedule_restart(delay: float = 2.0) -> None:
     def _do():
         import time
         time.sleep(delay)
+        # Wait for any in-flight update to complete before re-execing.
+        # Brief window — the lock is only held for the duration of the
+        # actual git commands, so this is either instant (no concurrent
+        # update) or at most one pull's worth of time.
+        with _apply_lock:
+            pass
         try:
             os.execv(sys.executable, [sys.executable] + sys.argv)
         except Exception:
