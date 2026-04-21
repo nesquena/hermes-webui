@@ -52,6 +52,10 @@ def _call_get_available_models(monkeypatch, tmp_path, auth_payload):
         config._cfg_mtime = old_mtime
 
 
+def _group_by_provider(result):
+    return {g["provider"]: g["models"] for g in result.get("groups", [])}
+
+
 def test_ollama_cloud_manual_credential_shows_group(monkeypatch, tmp_path):
     auth_payload = {
         "version": 1,
@@ -71,8 +75,10 @@ def test_ollama_cloud_manual_credential_shows_group(monkeypatch, tmp_path):
     }
 
     result = _call_get_available_models(monkeypatch, tmp_path, auth_payload)
-    providers = [g["provider"] for g in result.get("groups", [])]
-    assert "Ollama Cloud" in providers, f"Expected Ollama Cloud in {providers}"
+    groups = _group_by_provider(result)
+    assert "Ollama Cloud" in groups, f"Expected Ollama Cloud in {list(groups)}"
+    model_ids = [m["id"] for m in groups["Ollama Cloud"]]
+    assert model_ids == ["@ollama-cloud:gpt-oss:20b", "@ollama-cloud:qwen3:30b-a3b"], model_ids
 
 
 def test_copilot_gh_cli_only_credential_hidden(monkeypatch, tmp_path):
@@ -94,8 +100,83 @@ def test_copilot_gh_cli_only_credential_hidden(monkeypatch, tmp_path):
     }
 
     result = _call_get_available_models(monkeypatch, tmp_path, auth_payload)
-    providers = [g["provider"] for g in result.get("groups", [])]
-    assert "GitHub Copilot" not in providers, (
+    groups = _group_by_provider(result)
+    assert "GitHub Copilot" not in groups, (
         "GitHub Copilot should be hidden when only ambient gh auth token is present; "
-        f"got {providers}"
+        f"got {list(groups)}"
     )
+
+
+def test_copilot_mixed_credential_pool_remains_visible(monkeypatch, tmp_path):
+    auth_payload = {
+        "version": 1,
+        "providers": {},
+        "active_provider": "openai-codex",
+        "credential_pool": {
+            "copilot": [
+                {
+                    "id": "def456",
+                    "label": "gh auth token",
+                    "source": "gh_cli",
+                    "auth_type": "api_key",
+                    "base_url": "https://api.githubcopilot.com",
+                },
+                {
+                    "id": "ghi789",
+                    "label": "explicit-copilot",
+                    "source": "manual",
+                    "auth_type": "api_key",
+                    "base_url": "https://api.githubcopilot.com",
+                },
+            ]
+        },
+    }
+
+    result = _call_get_available_models(monkeypatch, tmp_path, auth_payload)
+    groups = _group_by_provider(result)
+    assert "GitHub Copilot" in groups, f"Expected GitHub Copilot in {list(groups)}"
+    model_ids = [m["id"] for m in groups["GitHub Copilot"]]
+    assert "@copilot:gpt-5.4" in model_ids, model_ids
+    assert "@copilot:claude-opus-4.6" in model_ids, model_ids
+
+
+def test_copilot_empty_field_entries_are_treated_as_explicit(monkeypatch, tmp_path):
+    auth_payload = {
+        "version": 1,
+        "providers": {},
+        "active_provider": "openai-codex",
+        "credential_pool": {
+            "copilot": [
+                {
+                    "id": "jkl012",
+                }
+            ]
+        },
+    }
+
+    result = _call_get_available_models(monkeypatch, tmp_path, auth_payload)
+    groups = _group_by_provider(result)
+    assert "GitHub Copilot" in groups, f"Expected GitHub Copilot in {list(groups)}"
+
+
+def test_copilot_oauth_credential_is_visible(monkeypatch, tmp_path):
+    auth_payload = {
+        "version": 1,
+        "providers": {},
+        "active_provider": "openai-codex",
+        "credential_pool": {
+            "copilot": [
+                {
+                    "id": "mno345",
+                    "label": "github-oauth",
+                    "source": "oauth",
+                    "auth_type": "oauth",
+                    "base_url": "https://api.githubcopilot.com",
+                }
+            ]
+        },
+    }
+
+    result = _call_get_available_models(monkeypatch, tmp_path, auth_payload)
+    groups = _group_by_provider(result)
+    assert "GitHub Copilot" in groups, f"Expected GitHub Copilot in {list(groups)}"

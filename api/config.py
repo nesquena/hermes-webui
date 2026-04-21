@@ -1049,7 +1049,7 @@ def get_available_models() -> dict:
     if active_provider:
         active_provider = _resolve_provider_alias(active_provider)
 
-    # 2. Try to read auth store for active provider (if hermes is installed)
+    # 2. Read auth store (active_provider fallback + credential_pool inspection)
     auth_store = {}
     try:
         from api.profiles import get_active_hermes_home as _gah
@@ -1078,8 +1078,8 @@ def get_available_models() -> dict:
 
     # Include providers that have explicit credential-pool entries even when
     # no process env var is present (e.g. service launched without shell env).
-    # Keep parity with the hermes_cli path below by excluding ambient
-    # GitHub CLI-derived Copilot credentials ("gh auth token").
+    # This keeps the dropdown in sync with auth.json while still ignoring
+    # ambient GitHub CLI-derived Copilot credentials ("gh auth token").
     try:
         _pool = auth_store.get("credential_pool", {}) if isinstance(auth_store, dict) else {}
         if isinstance(_pool, dict):
