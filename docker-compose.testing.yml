@@ -20,8 +20,6 @@ services:
       # Mount agent source for dependency installation during init.
       # Using a top-level path avoids the nested-mount conflict with hermes-home.
       - hermes-agent-src:/opt/hermes-agent
-      # Named volume so /opt/hermes exists (init script chowns it unconditionally).
-      - hermes-home:/opt/hermes
       # Workspace directory — browse and edit files from the WebUI.
       # Adapt the host path to your project directory.
       - ~/workspace:/workspace
@@ -43,4 +41,3 @@ services:
 
 volumes:
   hermes-agent-src:
-  hermes-home:
