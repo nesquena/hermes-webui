@@ -169,16 +169,43 @@ _cfg_mtime: float = 0.0  # last known mtime of config.yaml; 0 = never loaded
 
 
 def _get_config_path() -> Path:
-    """Return config.yaml path for the active profile."""
-    env_override = os.getenv("HERMES_CONFIG_PATH")
-    if env_override:
-        return Path(env_override).expanduser()
+    """Return config.yaml path for the active profile.
+
+    Priority:
+      1. HERMES_WEBUI_CONFIG_YAML env var  -- explicit user-supplied config
+      2. HERMES_CONFIG_PATH env var        -- legacy override
+      3. HERMES_HOME/config.yaml           -- profile-based location
+      4. ~/.hermes/config.yaml             -- default fallback
+    """
+    for env_var in ("HERMES_WEBUI_CONFIG_YAML", "HERMES_CONFIG_PATH"):
+        env_override = os.getenv(env_var)
+        if env_override:
+            return Path(env_override).expanduser()
     try:
         from api.profiles import get_active_hermes_home
 
         return get_active_hermes_home() / "config.yaml"
     except ImportError:
         return HOME / ".hermes" / "config.yaml"
+
+
+def _get_env_path() -> Path:
+    """Return .env path for the active profile.
+
+    Priority:
+      1. HERMES_WEBUI_ENV_FILE env var  -- explicit user-supplied env file
+      2. HERMES_HOME/.env               -- profile-based location
+      3. ~/.hermes/.env                 -- default fallback
+    """
+    env_override = os.getenv("HERMES_WEBUI_ENV_FILE")
+    if env_override:
+        return Path(env_override).expanduser()
+    try:
+        from api.profiles import get_active_hermes_home
+
+        return get_active_hermes_home() / ".env"
+    except ImportError:
+        return HOME / ".hermes" / ".env"
 
 
 def get_config() -> dict:
@@ -840,12 +867,7 @@ def get_available_models() -> dict:
 
     if not _hermes_auth_used:
         # Fallback: scan .env and os.environ for known API key variables
-        try:
-            from api.profiles import get_active_hermes_home as _gah2
-
-            hermes_env_path = _gah2() / ".env"
-        except ImportError:
-            hermes_env_path = HOME / ".hermes" / ".env"
+        hermes_env_path = _get_env_path()
         env_keys = {}
         if hermes_env_path.exists():
             try:

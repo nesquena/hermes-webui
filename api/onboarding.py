@@ -297,6 +297,10 @@ def _get_active_hermes_home() -> Path:
 
         return get_active_hermes_home()
     except ImportError:
+        # Fallback: respect HERMES_HOME env var like profiles.py does
+        hermes_home = os.getenv("HERMES_HOME", "").strip()
+        if hermes_home:
+            return Path(hermes_home).expanduser()
         return Path.home() / ".hermes"
 
 
@@ -645,12 +649,16 @@ def get_onboarding_status() -> dict:
     skip_requested = skip_env in {"1", "true", "yes"}
     auto_completed = skip_requested  # unconditional: operator says skip, we skip
 
-    # Auto-complete for existing Hermes users: if config.yaml already exists
-    # AND the system is chat_ready, treat onboarding as done.  These users
-    # configured Hermes via the CLI before the Web UI existed; they must never
-    # be shown the first-run wizard — it would silently overwrite their config.
+    # Auto-complete for existing Hermes users on two paths:
+    # 1. BYO (bring your own): operator placed config.yaml AND .env files where
+    #    Hermes can find them — skip regardless of agent availability.  This lets
+    #    users who pre-configured Hermes drop in a config without running setup.
+    # 2. CLI-configured: config.yaml exists + chat_ready.  These users configured
+    #    Hermes via the CLI before the Web UI existed; they must never be shown
+    #    the first-run wizard — it would silently overwrite their config.
     config_exists = Path(_get_config_path()).exists()
-    config_auto_completed = config_exists and bool(runtime.get("chat_ready"))
+    env_exists = _get_env_path().exists()
+    config_auto_completed = (config_exists and env_exists) or (config_exists and bool(runtime.get("chat_ready")))
 
     return {
         "completed": bool(settings.get("onboarding_completed")) or auto_completed or config_auto_completed,
@@ -782,4 +790,84 @@ def apply_onboarding_setup(body: dict) -> dict:
 
 def complete_onboarding() -> dict:
     save_settings({"onboarding_completed": True})
+    return get_onboarding_status()
+
+
+def import_config_file(config_content: str | None, env_content: str | None) -> dict:
+    """
+    Import config.yaml and/or .env from pasted/file content.
+
+    - config_content: raw YAML text for config.yaml
+    - env_content: raw .env text
+
+    Merges into the active profile's config.yaml and .env (existing keys are
+    not removed, new keys are added).  After writing, fires the full reload
+    chain so the next streaming request uses the new credentials without
+    requiring a server restart.
+
+    Returns the updated onboarding status.
+    """
+    hermes_home = _get_active_hermes_home()
+    config_path = _get_config_path()
+    env_path = hermes_home / ".env"
+
+    if config_content:
+        try:
+            import yaml as _yaml
+            parsed = _yaml.safe_load(config_content)
+            if not isinstance(parsed, dict):
+                raise ValueError("config.yaml must be a YAML object (key: value pairs)")
+        except Exception as exc:
+            raise ValueError(f"Invalid config.yaml: {exc}") from exc
+
+        # Read existing config and merge
+        existing = _load_yaml_config(config_path)
+        # Shallow merge: top-level keys from imported config win
+        for k, v in parsed.items():
+            if isinstance(v, dict) and k in existing and isinstance(existing.get(k), dict):
+                existing[k] = {**existing[k], **v}
+            else:
+                existing[k] = v
+        _save_yaml_config(config_path, existing)
+
+    if env_content:
+        try:
+            # Parse as .env format: KEY=value lines
+            updates: dict[str, str] = {}
+            for line in env_content.strip().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                key = k.strip()
+                val = v.strip().strip('"').strip("'")
+                if key:
+                    updates[key] = val
+            if updates:
+                _write_env_file(env_path, updates)
+        except Exception as exc:
+            raise ValueError(f"Invalid .env content: {exc}") from exc
+
+    # ── Full reload chain (same as apply_onboarding_setup) ────────────────────
+    try:
+        from api.profiles import _reload_dotenv
+        _reload_dotenv(hermes_home)
+    except Exception:
+        logger.debug("Failed to reload dotenv after import")
+
+    try:
+        from hermes_cli.config import reload as _cli_reload
+        _cli_reload()
+    except Exception:
+        logger.debug("Failed to reload hermes_cli config after import")
+
+    reload_config()
+
+    # Mark onboarding as complete so the wizard closes after restart
+    try:
+        from api.config import save_settings
+        save_settings({"onboarding_completed": True})
+    except Exception:
+        logger.debug("Failed to save onboarding_completed after import")
+
     return get_onboarding_status()
