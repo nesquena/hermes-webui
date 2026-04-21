@@ -18,13 +18,19 @@ BOOT_JS = (REPO_ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 
-def test_subarg_registry_exists_without_promoting_reasoning_to_builtin():
+def test_subarg_registry_exists_and_reasoning_is_promoted_to_builtin():
+    # SLASH_SUBARG_SOURCES still exists for model and personality
     assert "const SLASH_SUBARG_SOURCES=" in COMMANDS_JS
-    assert "reasoning:{desc:'Set reasoning effort', subArgs:['low','medium','high']}" in COMMANDS_JS
-    assert "{name:'reasoning'" not in COMMANDS_JS, \
-        "/reasoning suggestions must not register as a local built-in command"
-    assert "source:'subarg-command'" in COMMANDS_JS, \
-        "top-level autocomplete should still surface subarg-only commands like /reasoning"
+    # /reasoning is now a proper builtin command with a fn: handler (cmdReasoning)
+    # so it is in the COMMANDS array, not SLASH_SUBARG_SOURCES
+    assert "{name:'reasoning'" in COMMANDS_JS, \
+        "/reasoning must be registered as a local built-in command with fn: handler"
+    assert "fn:cmdReasoning" in COMMANDS_JS, \
+        "/reasoning entry must reference cmdReasoning function"
+    assert "function cmdReasoning" in COMMANDS_JS, \
+        "cmdReasoning function must be defined"
+    # source:'subarg-command' is still used for model/personality in SLASH_SUBARG_SOURCES
+    assert "source:'subarg-command'" in COMMANDS_JS
 
 
 def test_model_and_personality_subargs_load_from_existing_apis():

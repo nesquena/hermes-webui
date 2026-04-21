@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.133] — 2026-04-21
+
+### Added
+- **`/reasoning show` and `/reasoning hide` slash commands** — toggle thinking/reasoning block visibility directly from the chat composer, matching the Hermes CLI/TUI parity. `/reasoning show` reveals all thinking cards (live and historical) and persists the preference; `/reasoning hide` collapses them. `/reasoning` with no args shows current state. The `show|hide` options now appear in autocomplete alongside the existing `low|medium|high` effort levels. The `show_thinking` setting is persisted via `/api/settings` so the preference survives page reloads. Closes #461 (partial — effort level routing to agent is a follow-up). (#812)
+
 ## [v0.50.132] — 2026-04-21
 
 ### Fixed

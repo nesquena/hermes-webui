@@ -295,6 +295,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return {thinkingText:'', displayText:raw, inThinking:false};
   }
   function _renderLiveThinking(parsed){
+    if(window._showThinking===false){removeThinking();return;}
     const text=(parsed&&parsed.thinkingText)||'';
     if(text||(parsed&&parsed.inThinking)){
       if(typeof updateThinking==='function') updateThinking(text||'Thinking…');

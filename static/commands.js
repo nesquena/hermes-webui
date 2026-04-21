@@ -20,12 +20,12 @@ const COMMANDS=[
   {name:'undo',      desc:t('cmd_undo'),     fn:cmdUndo},
   {name:'status',    desc:t('cmd_status'),   fn:cmdStatus},
   {name:'voice',     desc:t('cmd_voice'),    fn:cmdVoice},
+  {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|low|medium|high', subArgs:['show','hide','low','medium','high']},
 ];
 
 const SLASH_SUBARG_SOURCES={
   model:{desc:t('cmd_model'), subArgs:'models'},
   personality:{desc:t('cmd_personality'), subArgs:'personalities'},
-  reasoning:{desc:'Set reasoning effort', subArgs:['low','medium','high']},
 };
 
 function parseCommand(text){
@@ -571,6 +571,38 @@ async function cmdStatus(){
     S.messages.push({role:'assistant',content:[`**${t('status_heading')}**`,'',`**${t('status_session_id')}:** \`${r.session_id}\``,`**${t('status_title')}:** ${r.title||t('untitled')}`,`**${t('status_model')}:** ${r.model||t('usage_default_model')}`,`**${t('status_workspace')}:** ${r.workspace}`,`**${t('status_personality')}:** ${r.personality||t('usage_personality_none')}`,`**${t('status_messages')}:** ${r.message_count}`,`**${t('status_agent_running')}:** ${r.agent_running?t('status_yes'):t('status_no')}`,].join('\n')});
     renderMessages();
   }catch(e){showToast(t('status_load_failed')+e.message);}
+}
+function cmdReasoning(args){
+  const arg=(args||'').trim().toLowerCase();
+  if(!arg){
+    // Status — mirrors CLI /reasoning with no args
+    const level=window._reasoningEffort||'default';
+    const vis=(window._showThinking!==false)?'on':'off';
+    showToast('\uD83E\uDDE0 Reasoning effort: '+level+' \u00B7 display: '+vis+'  |  /reasoning show|hide|low|medium|high');
+    return;
+  }
+  if(arg==='show'||arg==='on'){
+    window._showThinking=true;
+    if(typeof renderMessages==='function') renderMessages();
+    api('/api/settings',{show_thinking:true}).catch(function(){});
+    showToast('\uD83E\uDDE0 Thinking blocks: on');
+    return;
+  }
+  if(arg==='hide'||arg==='off'){
+    window._showThinking=false;
+    if(typeof renderMessages==='function') renderMessages();
+    api('/api/settings',{show_thinking:false}).catch(function(){});
+    showToast('\uD83E\uDDE0 Thinking blocks: off');
+    return;
+  }
+  // Effort levels — stored for next message
+  var levels=['none','minimal','low','medium','high','xhigh'];
+  if(levels.includes(arg)){
+    window._reasoningEffort=arg;
+    showToast('\uD83E\uDDE0 Reasoning effort: '+arg+' (applies to next message)');
+    return;
+  }
+  showToast('Unknown argument: '+arg+' \u2014 use show|hide|low|medium|high');
 }
 function cmdVoice(){
   const mic=document.getElementById('btnMic');
