@@ -1,5 +1,36 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.151] — 2026-04-22
+
+### Added
+- **Ollama Cloud support** — added `ollama-cloud` display name + dynamic model-list
+  handler backed by `hermes_cli.models.provider_model_ids()`. Live-models endpoint
+  routes `ollama-cloud` through the same formatter. Server-side `_format_ollama_label()`
+  and matching client-side `_fmtOllamaLabel()` turn Ollama tag IDs into readable
+  labels (e.g. `qwen3-vl:235b-instruct` → `Qwen3 VL (235B Instruct)`). (#820 by @starship-s, #860)
+
+### Fixed
+- **`credential_pool` providers now visible in the model dropdown** —
+  `get_available_models()` previously only read `active_provider` from the auth
+  store. Providers added via `credential_pool` (e.g. an Ollama Cloud key stored by
+  the auth layer without a matching shell env var) were silently invisible. The
+  fix loads `credential_pool` entries and adds any provider with at least one
+  non-ambient credential to `detected_providers`. Ambient gh-cli tokens (source
+  `gh_cli` / label `gh auth token`) are explicitly excluded so Copilot doesn't
+  appear merely because `gh` is installed. Two-tier detection: primary via
+  `agent.credential_pool.load_pool()`, fallback via raw field inspection when
+  the upstream module isn't importable. (#820 by @starship-s, #860)
+- **`_apply_provider_prefix()` helper extracted** — removes ~15 lines of
+  duplicated inline `@provider:` prefixing logic for non-active providers.
+  Semantics unchanged; one fewer place for drift. (#860)
+- **Model chip shows friendly labels for bare Ollama IDs** —
+  `static/ui.js:getModelLabel()` now routes Ollama tag-format IDs (e.g.
+  `kimi-k2.6` or `@ollama-cloud:glm5.1`) through `_fmtOllamaLabel()`. Custom
+  `<option>` text uses the same helper. `looksLikeBareOllamaId` narrowed to
+  `@ollama*` or colon-tag patterns — does not reformat generic IDs like
+  `gpt-5.4-mini`. `syncModelChip()` is now called after localStorage restore
+  so the chip reflects the saved selection on first paint. (#860)
+
 ## [v0.50.150] — 2026-04-22
 
 ### Fixed
@@ -94,7 +125,7 @@
 - **Streaming: response no longer renders twice or leaves thinking block below the answer** — two race conditions in `attachLiveStream` fixed. (A) A trailing `token`/`reasoning` event could queue a `requestAnimationFrame` that fired after `done` had already called `renderMessages()`, inserting a duplicate live-turn wrapper below the settled response. Fixed via `_streamFinalized` flag + `cancelAnimationFrame` in all terminal handlers (`done`, `apperror`, `cancel`, `_handleStreamError`). (B) A proposed accumulator-reset on SSE reconnect was reverted — the server uses a one-shot queue and does not replay events; the reset would have wiped pre-drop response content. Bug A's fix alone resolves all three reported symptoms (double render, thinking card below answer, stuck cursor). (#821, closes #631)
 - **Blank new-chat page now shows default workspace and allows workspace actions** — `syncWorkspaceDisplays()` uses `S._profileDefaultWorkspace` as fallback when no session is active; the workspace chip is now enabled on the blank page; `promptNewFile`, `promptNewFolder`, `switchToWorkspace`, and `promptWorkspacePath` all auto-create a session bound to the default workspace when called on the blank page, rather than silently returning. Boot.js hydrates `S._profileDefaultWorkspace` from `/api/settings.default_workspace` before any session is created. (#821, closes #804)
 
-## [v0.50.151] — 2026-04-22
+## [v0.50.135] — 2026-04-22
 
 ### Fixed
 - **BYOK/custom provider models now appear in the WebUI model dropdown** — three root causes fixed. (1) Provider aliases like `z.ai`, `x.ai`, `google`, `grok`, `claude`, `aws-bedrock`, `dashscope`, and ~25 others were not normalized to their internal catalog slugs, causing the provider to miss `_PROVIDER_MODELS` lookup and show an empty dropdown while the TUI worked. (2) The fix works even without `hermes-agent` on `sys.path` (CI, minimal installs) via an inlined `_PROVIDER_ALIASES` table in `api/config.py` — the previous `try/except ImportError` was silently swallowing the failure. (3) `custom_providers` entries now appear in the live model enrichment path. `provider_id` on every group makes optgroup matching deterministic. Closes #815. (#817)
