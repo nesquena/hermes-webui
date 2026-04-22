@@ -1,5 +1,11 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.138] — 2026-04-22
+
+### Fixed
+- **Streaming: response no longer renders twice or leaves thinking block below the answer** — two race conditions in `attachLiveStream` fixed. (A) A trailing `token`/`reasoning` event could queue a `requestAnimationFrame` that fired after `done` had already called `renderMessages()`, inserting a duplicate live-turn wrapper below the settled response. Fixed via `_streamFinalized` flag + `cancelAnimationFrame` in all terminal handlers (`done`, `apperror`, `cancel`, `_handleStreamError`). (B) A proposed accumulator-reset on SSE reconnect was reverted — the server uses a one-shot queue and does not replay events; the reset would have wiped pre-drop response content. Bug A's fix alone resolves all three reported symptoms (double render, thinking card below answer, stuck cursor). (#821, closes #631)
+- **Blank new-chat page now shows default workspace and allows workspace actions** — `syncWorkspaceDisplays()` uses `S._profileDefaultWorkspace` as fallback when no session is active; the workspace chip is now enabled on the blank page; `promptNewFile`, `promptNewFolder`, `switchToWorkspace`, and `promptWorkspacePath` all auto-create a session bound to the default workspace when called on the blank page, rather than silently returning. Boot.js hydrates `S._profileDefaultWorkspace` from `/api/settings.default_workspace` before any session is created. (#821, closes #804)
+
 ## [v0.50.135] — 2026-04-22
 
 ### Fixed
