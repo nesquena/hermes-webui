@@ -733,6 +733,9 @@ function navigateCmdDropdown(dir){
   if(_cmdSelectedIdx<0)_cmdSelectedIdx=items.length-1;
   if(_cmdSelectedIdx>=items.length)_cmdSelectedIdx=0;
   items[_cmdSelectedIdx].classList.add('selected');
+  // Scroll the newly highlighted item into view so it stays visible when the
+  // dropdown overflows and the user navigates with keyboard (#838).
+  items[_cmdSelectedIdx].scrollIntoView({block:'nearest'});
 }
 
 function selectCmdDropdownItem(){

@@ -1,28 +1,12 @@
 # Hermes Web UI -- Changelog
 
-## [v0.50.144] — 2026-04-22
-
-### Added
-- **Refresh button in Tasks/Scheduled Jobs panel** — a ↺ button next to "+ New job"
-  reloads the job list without a full page reload. Dims while fetching and restores on
-  completion (using `finally`). Also wires a `hermes:cron_created` window event so the
-  list auto-refreshes when a job is created from chat. Closes #835. (#837)
-
-## [v0.50.143] — 2026-04-22
+## [v0.50.145] — 2026-04-22
 
 ### Fixed
-- **Stale model no longer shows as "(unavailable)" in the model picker** — users with
-  only `custom_providers` configured (no OpenAI key) were seeing "GPT-5.4 Mini (unavailable)"
-  appear in the picker, visually grouped under their custom provider section and selected
-  as the default model. Two root causes: (1) `_resolve_compatible_session_model()` in
-  `api/routes.py` had a blanket skip for `active_provider == "custom"` that prevented
-  stale cross-provider session models (e.g. `openai/gpt-5.4-mini` from a pre-v0.50 default)
-  from ever being cleaned up. Fixed to only skip normalization when the model's prefix is
-  actually routable by a group in the catalog. (2) `renderSession()` in `static/ui.js`
-  injected a bare `<option>` for unavailable models, which visually inherited the last
-  rendered provider heading in the picker due to missing `<optgroup>` context. Fixed to
-  silently reset to the first available model instead. Closes #829. (#831)
-
+- **Slash command dropdown scrolls to keep highlighted item visible** — pressing ↓/↑
+  to navigate the autocomplete list no longer lets the selected item move out of the
+  visible dropdown area. Added `scrollIntoView({block:'nearest'})` after updating the
+  selected class in `navigateCmdDropdown()`. Closes #838. (#839)
 
 ## [v0.50.141] — 2026-04-22
 
