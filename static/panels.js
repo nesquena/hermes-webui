@@ -8,6 +8,8 @@ let _currentWorkspaceDetail = null; // { path, name, is_default }
 let _workspaceMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _workspacePreFormDetail = null;
 let _currentProfileDetail = null; // full profile object
+let _profileMode = 'empty'; // 'empty' | 'read' | 'create'
+let _profilePreFormDetail = null;
 
 async function switchPanel(name) {
   _currentPanel = name;
@@ -1324,8 +1326,8 @@ async function loadProfilesPanel() {
       if (_currentProfileDetail && _currentProfileDetail.name === p.name) card.classList.add('active');
       panel.appendChild(card);
     }
-    // Re-render detail with fresh data if we have one
-    if (_currentProfileDetail) {
+    // Re-render detail with fresh data if we have one and we're not in a form
+    if (_currentProfileDetail && _profileMode !== 'create') {
       const refreshed = data.profiles.find(p => p.name === _currentProfileDetail.name);
       if (refreshed) _renderProfileDetail(refreshed, data.active);
     }
@@ -1368,10 +1370,28 @@ function _renderProfileDetail(p, activeName){
     </div>`;
   body.style.display = '';
   if (empty) empty.style.display = 'none';
+  _profileMode = 'read';
+  _setProfileHeaderButtons('read', p, activeName);
+}
+
+function _setProfileHeaderButtons(mode, p, activeName){
   const actBtn = $('btnActivateProfileDetail');
   const delBtn = $('btnDeleteProfileDetail');
-  if (actBtn) actBtn.style.display = isActive ? 'none' : '';
-  if (delBtn) delBtn.style.display = isDefault ? 'none' : '';
+  const cancelBtn = $('btnCancelProfileDetail');
+  const saveBtn = $('btnSaveProfileDetail');
+  const show = b => b && (b.style.display = '');
+  const hide = b => b && (b.style.display = 'none');
+  if (mode === 'read') {
+    const isActive = p && p.name === activeName;
+    const isDefault = !!(p && p.is_default);
+    if (isActive) hide(actBtn); else show(actBtn);
+    if (isDefault) hide(delBtn); else show(delBtn);
+    hide(cancelBtn); hide(saveBtn);
+  } else if (mode === 'create') {
+    hide(actBtn); hide(delBtn); show(cancelBtn); show(saveBtn);
+  } else {
+    [actBtn, delBtn, cancelBtn, saveBtn].forEach(hide);
+  }
 }
 
 function openProfileDetail(name, el){
@@ -1381,20 +1401,20 @@ function openProfileDetail(name, el){
   document.querySelectorAll('.profile-card').forEach(e => e.classList.remove('active'));
   const target = el || document.querySelector(`.profile-card[data-name="${CSS.escape(name)}"]`);
   if (target) target.classList.add('active');
+  _profilePreFormDetail = null;
   _renderProfileDetail(p, _profilesCache.active);
 }
 
 function _clearProfileDetail(){
   _currentProfileDetail = null;
+  _profileMode = 'empty';
   const title = $('profileDetailTitle');
   const body = $('profileDetailBody');
   const empty = $('profileDetailEmpty');
   if (title) title.textContent = '';
   if (body) { body.innerHTML = ''; body.style.display = 'none'; }
   if (empty) empty.style.display = '';
-  ['btnActivateProfileDetail','btnDeleteProfileDetail'].forEach(id => {
-    const b = $(id); if (b) b.style.display = 'none';
-  });
+  _setProfileHeaderButtons('empty');
 }
 
 async function activateCurrentProfile(){
@@ -1565,38 +1585,82 @@ async function switchToProfile(name) {
   } catch (e) { showToast(t('switch_failed') + e.message); }
 }
 
-function toggleProfileForm() {
-  const form = $('profileCreateForm');
-  if (!form) return;
-  form.style.display = form.style.display === 'none' ? '' : 'none';
-  if (form.style.display !== 'none') {
-    $('profileFormName').value = '';
-    $('profileFormClone').checked = false;
-    if ($('profileFormBaseUrl')) $('profileFormBaseUrl').value = '';
-    if ($('profileFormApiKey')) $('profileFormApiKey').value = '';
-    const errEl = $('profileFormError');
-    if (errEl) errEl.style.display = 'none';
-    $('profileFormName').focus();
-  }
+function openProfileCreate(){
+  if (typeof switchPanel === 'function' && _currentPanel !== 'profiles') switchPanel('profiles');
+  _profilePreFormDetail = _currentProfileDetail ? { ..._currentProfileDetail } : null;
+  _profileMode = 'create';
+  _renderProfileForm();
 }
 
-async function submitProfileCreate() {
-  const name = ($('profileFormName').value || '').trim().toLowerCase();
-  const cloneConfig = $('profileFormClone').checked;
+function _renderProfileForm(){
+  const title = $('profileDetailTitle');
+  const body = $('profileDetailBody');
+  const empty = $('profileDetailEmpty');
+  if (!title || !body) return;
+  title.textContent = t('new_profile');
+  body.innerHTML = `
+    <div class="main-view-content">
+      <form class="detail-form" onsubmit="event.preventDefault(); saveProfileForm();">
+        <div class="detail-form-row">
+          <label for="profileFormName">${esc(t('profile_name_label') || 'Name')}</label>
+          <input type="text" id="profileFormName" placeholder="${esc(t('profile_name_placeholder') || 'lowercase, a-z 0-9 hyphens')}" autocomplete="off" required>
+          <div class="detail-form-hint">${esc(t('profile_name_rule') || 'Lowercase letters, numbers, hyphens, underscores only.')}</div>
+        </div>
+        <div class="detail-form-row">
+          <label class="detail-form-check" for="profileFormClone">
+            <input type="checkbox" id="profileFormClone"> <span>${esc(t('profile_clone_label') || 'Clone config from active profile')}</span>
+          </label>
+        </div>
+        <div class="detail-form-row">
+          <label for="profileFormBaseUrl">${esc(t('profile_base_url_label') || 'Base URL')}</label>
+          <input type="text" id="profileFormBaseUrl" placeholder="${esc(t('profile_base_url_placeholder') || 'Optional, e.g. http://localhost:11434')}" autocomplete="off">
+        </div>
+        <div class="detail-form-row">
+          <label for="profileFormApiKey">${esc(t('profile_api_key_label') || 'API key')}</label>
+          <input type="password" id="profileFormApiKey" placeholder="${esc(t('profile_api_key_placeholder') || 'Optional')}" autocomplete="off">
+        </div>
+        <div id="profileFormError" class="detail-form-error" style="display:none"></div>
+      </form>
+    </div>`;
+  body.style.display = '';
+  if (empty) empty.style.display = 'none';
+  _setProfileHeaderButtons('create');
+  const n = $('profileFormName');
+  if (n) n.focus();
+}
+
+function cancelProfileForm(){
+  if (_profilePreFormDetail) {
+    const snap = _profilePreFormDetail;
+    _profilePreFormDetail = null;
+    const activeName = _profilesCache ? _profilesCache.active : null;
+    _renderProfileDetail(snap, activeName);
+    return;
+  }
+  _clearProfileDetail();
+}
+
+async function saveProfileForm(){
+  const nameEl = $('profileFormName');
+  const cloneEl = $('profileFormClone');
+  const baseEl = $('profileFormBaseUrl');
+  const apiKeyEl = $('profileFormApiKey');
   const errEl = $('profileFormError');
+  if (!nameEl || !errEl) return;
+  const name = (nameEl.value || '').trim().toLowerCase();
+  const cloneConfig = !!(cloneEl && cloneEl.checked);
+  errEl.style.display = 'none';
   if (!name) { errEl.textContent = t('name_required'); errEl.style.display = ''; return; }
   if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)) { errEl.textContent = t('profile_name_rule'); errEl.style.display = ''; return; }
+  const baseUrl = (baseEl ? (baseEl.value || '') : '').trim();
+  const apiKey = (apiKeyEl ? (apiKeyEl.value || '') : '').trim();
+  if (baseUrl && !/^https?:\/\//.test(baseUrl)) { errEl.textContent = t('profile_base_url_rule'); errEl.style.display = ''; return; }
   try {
-    const baseUrl = (($('profileFormBaseUrl') && $('profileFormBaseUrl').value) || '').trim();
-    const apiKey = (($('profileFormApiKey') && $('profileFormApiKey').value) || '').trim();
-    if (baseUrl && !/^https?:\/\//.test(baseUrl)) {
-      errEl.textContent = t('profile_base_url_rule'); errEl.style.display = ''; return;
-    }
     const payload = { name, clone_config: cloneConfig };
     if (baseUrl) payload.base_url = baseUrl;
     if (apiKey) payload.api_key = apiKey;
     await api('/api/profile/create', { method: 'POST', body: JSON.stringify(payload) });
-    toggleProfileForm();
+    _profilePreFormDetail = null;
     await loadProfilesPanel();
     showToast(t('profile_created', name));
     openProfileDetail(name);
@@ -1604,6 +1668,11 @@ async function submitProfileCreate() {
     errEl.textContent = e.message || t('create_failed');
     errEl.style.display = '';
   }
+}
+
+// Back-compat
+const submitProfileCreate = saveProfileForm;
+function toggleProfileForm(){ openProfileCreate();
 }
 
 async function deleteProfile(name) {
