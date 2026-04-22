@@ -491,3 +491,97 @@ def test_ollama_cloud_empty_catalog_skips_group(monkeypatch, tmp_path):
     assert "Ollama Cloud" not in groups, (
         f"Ollama Cloud group should be skipped when catalog is empty; got {list(groups)}"
     )
+
+
+# --- _format_ollama_label helper ---
+
+
+def test_format_ollama_label_simple():
+    from api.config import _format_ollama_label
+
+    assert _format_ollama_label("kimi-k2.5") == "Kimi K2.5"
+
+
+def test_format_ollama_label_with_variant():
+    from api.config import _format_ollama_label
+
+    assert _format_ollama_label("qwen3-vl:235b-instruct") == "Qwen3 VL (235B Instruct)"
+
+
+def test_format_ollama_label_short_acronym():
+    from api.config import _format_ollama_label
+
+    assert _format_ollama_label("glm-5.1") == "GLM 5.1"
+
+
+def test_format_ollama_label_gpt_oss_with_size():
+    from api.config import _format_ollama_label
+
+    assert _format_ollama_label("gpt-oss:20b") == "GPT OSS (20B)"
+
+
+def test_format_ollama_label_empty_string():
+    from api.config import _format_ollama_label
+
+    assert _format_ollama_label("") == ""
+
+
+def test_format_ollama_label_no_variant():
+    from api.config import _format_ollama_label
+
+    assert _format_ollama_label("nemotron-3-super") == "Nemotron 3 Super"
+
+
+# --- Fallback-path (ImportError branch) alias resolution ---
+
+
+def test_fallback_path_resolves_alias_when_load_pool_unavailable(monkeypatch, tmp_path):
+    """When agent.credential_pool can't be imported, the manual-inspection
+    branch must still canonicalize pool keys so aliased names (e.g. 'google')
+    end up under their canonical provider id ('gemini')."""
+    _install_fake_hermes_cli(monkeypatch)
+    # Ensure agent.credential_pool is not importable so the fallback branch runs.
+    monkeypatch.setitem(sys.modules, "agent.credential_pool", None)
+
+    auth_payload = {
+        "version": 1,
+        "providers": {},
+        "active_provider": "openai-codex",
+        "credential_pool": {
+            "google": [
+                {
+                    "id": "gp-fallback",
+                    "label": "explicit-gemini",
+                    "source": "manual",
+                    "auth_type": "api_key",
+                }
+            ]
+        },
+    }
+
+    (tmp_path / "auth.json").write_text(json.dumps(auth_payload), encoding="utf-8")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+    old_cfg = dict(config.cfg)
+    old_mtime = config._cfg_mtime
+    config.cfg.clear()
+    config.cfg["model"] = {}
+    try:
+        config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
+    except Exception:
+        config._cfg_mtime = 0.0
+
+    try:
+        result = config.get_available_models()
+    finally:
+        config.cfg.clear()
+        config.cfg.update(old_cfg)
+        config._cfg_mtime = old_mtime
+
+    groups = _group_by_provider(result)
+    assert "Gemini" in groups, (
+        f"Fallback path must resolve 'google' -> 'gemini'; got {list(groups)}"
+    )
+    assert "Google" not in groups, (
+        f"Raw alias name must not leak when fallback path runs; got {list(groups)}"
+    )

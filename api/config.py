@@ -724,6 +724,21 @@ _PROVIDER_MODELS = {
 }
 
 
+_AMBIENT_GH_CLI_MARKERS = frozenset({"gh_cli", "gh auth token"})
+
+
+def _is_ambient_gh_cli_entry(source: str, label: str, key_source: str) -> bool:
+    """True when a credential-pool entry is a seeded gh-cli token rather than
+    one the user added explicitly. Filter these so Copilot doesn't appear in
+    the dropdown just because `gh` is installed on the system.
+    """
+    return (
+        source.strip().lower() in _AMBIENT_GH_CLI_MARKERS
+        or label.strip().lower() == "gh auth token"
+        or key_source.strip().lower() == "gh auth token"
+    )
+
+
 def _format_ollama_label(mid: str) -> str:
     """Turn an Ollama model id (Ollama tag format) into a readable display label.
 
@@ -1139,19 +1154,20 @@ def get_available_models() -> dict:
             try:
                 from agent.credential_pool import load_pool as _load_pool
 
-                _AMBIENT_SRC = {"gh_cli", "gh auth token"}
+                # load_pool() does NOT suppress ambient gh-cli tokens — filter
+                # them here so Copilot doesn't reappear just because the agent
+                # seeded 'gh auth token' into the pool.
                 for _pid in list(_pool.keys()):
                     try:
                         _canonical_pid = _resolve_provider_alias(str(_pid))
                         _all_entries = _load_pool(_pid).entries()
-                        # load_pool() does NOT suppress ambient gh-cli tokens —
-                        # filter them here so Copilot doesn't reappear just because
-                        # 'gh auth token' is seeded into the pool by the agent.
                         _explicit = [
                             e for e in _all_entries
-                            if str(getattr(e, "source", "") or "").strip().lower() not in _AMBIENT_SRC
-                            and str(getattr(e, "label", "") or "").strip().lower() != "gh auth token"
-                            and str(getattr(e, "key_source", "") or "").strip().lower() != "gh auth token"
+                            if not _is_ambient_gh_cli_entry(
+                                str(getattr(e, "source", "") or ""),
+                                str(getattr(e, "label", "") or ""),
+                                str(getattr(e, "key_source", "") or ""),
+                            )
                         ]
                         if _explicit:
                             detected_providers.add(_canonical_pid)
@@ -1162,21 +1178,17 @@ def get_available_models() -> dict:
                 for _pid, _entries in _pool.items():
                     if not isinstance(_entries, list) or len(_entries) == 0:
                         continue
-                    _has_explicit_cred = False
-                    for _entry in _entries:
-                        if not isinstance(_entry, dict):
-                            continue
-                        _src = str(_entry.get("source", "") or "").strip().lower()
-                        _label = str(_entry.get("label", "") or "").strip().lower()
-                        _key_src = str(_entry.get("key_source", "") or "").strip().lower()
-                        if _src in {"gh_cli", "gh auth token"}:
-                            continue
-                        if _label == "gh auth token" or _key_src == "gh auth token":
-                            continue
-                        _has_explicit_cred = True
-                        break
+                    _has_explicit_cred = any(
+                        isinstance(_entry, dict)
+                        and not _is_ambient_gh_cli_entry(
+                            str(_entry.get("source", "") or ""),
+                            str(_entry.get("label", "") or ""),
+                            str(_entry.get("key_source", "") or ""),
+                        )
+                        for _entry in _entries
+                    )
                     if _has_explicit_cred:
-                        detected_providers.add(str(_pid))
+                        detected_providers.add(_resolve_provider_alias(str(_pid)))
     except Exception:
         logger.debug("Failed to inspect credential_pool from auth store")
 
