@@ -273,7 +273,10 @@ def _available_models_with_full_cfg(provider, default, base_url):
     try:
         _cfg._cfg_mtime = _cfg.Path(_cfg._get_config_path()).stat().st_mtime
     except Exception:
-        pass
+        # No config.yaml on this machine (e.g. CI); pin to 0.0 so the mtime check
+        # inside get_available_models() sees 0.0 == 0.0 and doesn't call reload_config(),
+        # which would overwrite the in-memory cfg we just set up.
+        _cfg._cfg_mtime = 0.0
     # Clear model-override env vars to prevent the real profile from leaking in
     _model_env_keys = ('HERMES_MODEL', 'OPENAI_MODEL', 'LLM_MODEL')
     _saved_env = {k: os.environ.pop(k, None) for k in _model_env_keys}
@@ -417,7 +420,9 @@ def test_custom_endpoint_uses_model_config_api_key_for_model_discovery(monkeypat
     try:
         _cfg._cfg_mtime = _cfg.Path(_cfg._get_config_path()).stat().st_mtime
     except Exception:
-        pass
+        # No config.yaml on this machine (e.g. CI); pin to 0.0 so the mtime check
+        # inside get_available_models() sees 0.0 == 0.0 and skips reload_config().
+        _cfg._cfg_mtime = 0.0
     _cfg.cfg.pop('providers', None)
 
     captured = {}
