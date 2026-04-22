@@ -279,7 +279,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _streamDisplay(){
     const raw=_stripXmlToolCalls(assistantText);
-    if(reasoningText) return raw;
+    // Always run think-block stripping even when reasoningText is populated.
+    // Some providers emit reasoning content via on_reasoning AND wrap it in
+    // <think> tags in the token stream — the early-return caused the thinking
+    // card and main response to show identical content (closes #852).
     for(const {open,close} of _thinkPairs){
       // Trim leading whitespace before checking for the open tag — some models
       // (e.g. MiniMax) emit newlines before <think>.

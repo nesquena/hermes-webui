@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.154] — 2026-04-22
+
+### Fixed
+- **Thinking card no longer mirrors main response** — removed early return in `_streamDisplay()` that bypassed think-block stripping when `reasoningText` was populated. (`static/messages.js`) (closes #852)
+
 ## [v0.50.153] — 2026-04-22
 
 ### Fixed
