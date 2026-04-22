@@ -255,16 +255,12 @@ class TestPeriodicCheckpoint:
         assert data["updated_at"] > ts_before, "Checkpoint should update updated_at"
 
 
-class TestCheckpointVariableLifecycle:
-    """Regression guard: the outer `finally` must not UnboundLocalError when an
-    exception fires before the checkpoint thread is created.  _checkpoint_stop
-    is initialised to None at the very top of the outer try block so the
-    finally's `if _checkpoint_stop is not None` branch is always safe.
-    """
-
-
 class TestIssue765FollowupHardening:
-    """Regression tests for the follow-up hardening pass on Issue #765."""
+    """Regression tests for the follow-up hardening pass on Issue #765.
+
+    Includes the guard that the outer `finally` must not UnboundLocalError when
+    an exception fires before the checkpoint thread is created.
+    """
 
     def test_same_session_concurrent_saves_use_distinct_temp_files(self, monkeypatch):
         """Two concurrent saves of the same session must not collide on one tmp path.
@@ -431,10 +427,31 @@ class TestIssue765FollowupHardening:
         ckpt_idx = src.find("def _periodic_checkpoint():")
         assert ckpt_idx != -1, "_periodic_checkpoint function not found"
         ckpt_block = src[ckpt_idx:ckpt_idx + 600]
-        assert "_lock" in ckpt_block or "_agent_lock" in ckpt_block, (
-            "_periodic_checkpoint must hold _agent_lock (or its nullcontext "
-            "fallback) while calling s.save() to prevent race conditions with "
-            "other session-mutating endpoints"
+        assert "with _agent_lock:" in ckpt_block, (
+            "_periodic_checkpoint must hold _agent_lock while calling s.save() "
+            "to prevent race conditions with other session-mutating endpoints"
+        )
+
+    def test_background_title_update_rebinds_to_canonical_session_instance(self):
+        """Guard against stale Session object mutation after LLM round-trip.
+
+        _run_background_title_update must re-bind `s` to SESSIONS.get(session_id,
+        s) under LOCK before deciding whether a manual rename should block the
+        generated title write.
+        """
+        src = (Path(__file__).parent.parent / "api" / "streaming.py").read_text(
+            encoding="utf-8"
+        )
+        fn_idx = src.find("def _run_background_title_update(")
+        assert fn_idx != -1, "_run_background_title_update not found"
+        fn_block = src[fn_idx:fn_idx + 3200]
+        assert "with LOCK:" in fn_block, (
+            "_run_background_title_update must acquire LOCK before rebinding "
+            "to canonical cached session instance"
+        )
+        assert "s = SESSIONS.get(session_id, s)" in fn_block, (
+            "_run_background_title_update must rebind to canonical cached "
+            "session instance under LOCK"
         )
 
     def test_cancel_stream_uses_agent_lock(self):
@@ -766,9 +783,10 @@ class TestIssue765FollowupHardening:
         old_lock = _get_session_agent_lock(old_sid)
 
         # Simulate the migration that streaming.py does during compression:
-        # alias new_sid → same Lock, then pop old_sid.
+        # alias new_sid → held _agent_lock reference, then pop old_sid.
+        _agent_lock = old_lock
         with SESSION_AGENT_LOCKS_LOCK:
-            SESSION_AGENT_LOCKS[new_sid] = SESSION_AGENT_LOCKS[old_sid]
+            SESSION_AGENT_LOCKS[new_sid] = _agent_lock
             SESSION_AGENT_LOCKS.pop(old_sid, None)
 
         # Now looking up the new ID must return the exact same Lock object
@@ -787,5 +805,35 @@ class TestIssue765FollowupHardening:
             )
 
         # Cleanup
+        with SESSION_AGENT_LOCKS_LOCK:
+            SESSION_AGENT_LOCKS.pop(new_sid, None)
+
+    def test_lock_rotation_migration_survives_old_id_already_pruned(self):
+        """Compression lock migration must not require old_sid to exist in dict.
+
+        A concurrent /api/session/delete can prune old_sid before rotation code
+        runs. The migration must still succeed by assigning the held _agent_lock
+        reference directly.
+        """
+        from api.config import (
+            _get_session_agent_lock,
+            SESSION_AGENT_LOCKS,
+            SESSION_AGENT_LOCKS_LOCK,
+        )
+        old_sid = "pre-rotation-pruned"
+        new_sid = "post-rotation-pruned"
+
+        _agent_lock = _get_session_agent_lock(old_sid)
+        with SESSION_AGENT_LOCKS_LOCK:
+            SESSION_AGENT_LOCKS.pop(old_sid, None)  # simulate concurrent prune
+
+        # Must not raise KeyError even though old_sid is absent.
+        with SESSION_AGENT_LOCKS_LOCK:
+            SESSION_AGENT_LOCKS[new_sid] = _agent_lock
+            SESSION_AGENT_LOCKS.pop(old_sid, None)
+
+        new_lock = _get_session_agent_lock(new_sid)
+        assert new_lock is _agent_lock
+
         with SESSION_AGENT_LOCKS_LOCK:
             SESSION_AGENT_LOCKS.pop(new_sid, None)

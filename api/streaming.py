@@ -543,23 +543,46 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
             if next_title:
                 logger.debug("Using local fallback for session title generation")
                 source = 'fallback'
-        if next_title and next_title != current:
-            # Hold _agent_lock only for the in-memory mutation + save so the
-            # title write is serialized with checkpoint saves, cancel_stream,
-            # and other session-mutating endpoints.  The LLM round-trip above
-            # ran *outside* the lock to avoid blocking other writers.
+        wrote_title = False
+        effective_title = current
+        if next_title:
+            # Hold _agent_lock only for in-memory mutation + save so title write
+            # is serialized with checkpoint saves, cancel_stream, and other
+            # session-mutating endpoints. The LLM round-trip above ran outside
+            # the lock to avoid blocking other writers.
             with _get_session_agent_lock(session_id):
-                s.title = next_title
-                s.llm_title_generated = True
-                # Keep chronological ordering stable in the sidebar.
-                s.save(touch_updated_at=False)
+                # Stale-object guard: rebind to the canonical cached Session
+                # instance under LOCK before checking whether a user rename
+                # landed while the LLM title request was in-flight.
+                with LOCK:
+                    s = SESSIONS.get(session_id, s)
+                    effective_title = str(s.title or '').strip()
+                    invalid_existing_now = _looks_invalid_generated_title(s.title)
+                    still_auto = (
+                        effective_title == placeholder_title
+                        or effective_title in ('Untitled', 'New Chat', '')
+                        or _is_provisional_title(effective_title, s.messages)
+                        or invalid_existing_now
+                    )
+                if not still_auto:
+                    _put_title_status(put_event, session_id, 'skipped', 'manual_title', effective_title)
+                    return
+                if next_title != effective_title:
+                    s.title = next_title
+                    s.llm_title_generated = True
+                    # Keep chronological ordering stable in the sidebar.
+                    s.save(touch_updated_at=False)
+                    effective_title = s.title
+                    wrote_title = True
+
+        if wrote_title:
             if source == 'fallback':
-                _put_title_status(put_event, session_id, source, 'local_summary', s.title, raw_preview)
+                _put_title_status(put_event, session_id, source, 'local_summary', effective_title, raw_preview)
             else:
-                _put_title_status(put_event, session_id, source, llm_status, s.title, raw_preview)
-            put_event('title', {'session_id': session_id, 'title': s.title})
+                _put_title_status(put_event, session_id, source, llm_status, effective_title, raw_preview)
+            put_event('title', {'session_id': session_id, 'title': effective_title})
         else:
-            _put_title_status(put_event, session_id, 'skipped', source or 'unchanged', current, raw_preview)
+            _put_title_status(put_event, session_id, 'skipped', source or 'unchanged', effective_title, raw_preview)
     finally:
         put_event('stream_end', {'session_id': session_id})
 
@@ -1249,8 +1272,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                     try:
                         cur = _checkpoint_activity[0]
                         if cur > last_saved_activity:
-                            _lock = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
-                            with _lock:
+                            with _agent_lock:
                                 s.save(skip_index=True)
                             last_saved_activity = cur
                     except Exception as e:
@@ -1395,10 +1417,11 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                     with LOCK:
                         if old_sid in SESSIONS:
                             SESSIONS[new_sid] = SESSIONS.pop(old_sid)
-                    # Migrate the per-session lock: alias new_sid → same Lock,
+                    # Migrate the per-session lock: alias new_sid to the held
+                    # _agent_lock reference directly (not via old_sid lookup),
                     # then remove the old_sid entry to prevent a leak.
                     with SESSION_AGENT_LOCKS_LOCK:
-                        SESSION_AGENT_LOCKS[new_sid] = SESSION_AGENT_LOCKS[old_sid]
+                        SESSION_AGENT_LOCKS[new_sid] = _agent_lock
                         SESSION_AGENT_LOCKS.pop(old_sid, None)
                     if old_path.exists() and not new_path.exists():
                         try:
