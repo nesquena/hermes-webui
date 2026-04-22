@@ -212,8 +212,10 @@
       <div id="liveToolCards" style="display:none;max-width:800px;margin:0 auto;width:100%;padding:0 24px;"></div>
     </div>
     <div class="update-banner" id="updateBanner">
-      <span id="updateMsg"></span>
-      <div id="updateError" style="display:none;font-size:12px;color:var(--error,#e05);margin-top:4px;word-break:break-word;max-width:600px"></div>
+      <div style="display:flex;flex-direction:column;flex:1;min-width:0">
+        <span id="updateMsg"></span>
+        <div id="updateError" style="display:none;font-size:12px;color:var(--error,#e05);margin-top:4px;word-break:break-word"></div>
+      </div>
       <div style="display:flex;gap:8px;flex-shrink:0;flex-wrap:wrap">
         <button class="update-btn" onclick="dismissUpdate()">Later</button>
         <button class="update-btn update-primary" id="btnApplyUpdate" onclick="applyUpdates()">Update Now</button>

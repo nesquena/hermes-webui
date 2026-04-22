@@ -209,18 +209,21 @@ def _schedule_restart(delay: float = 2.0) -> None:
     def _do():
         import time
         time.sleep(delay)
-        # Wait for any in-flight update to complete before re-execing.
-        # Brief window — the lock is only held for the duration of the
-        # actual git commands, so this is either instant (no concurrent
-        # update) or at most one pull's worth of time.
+        # Hold _apply_lock through os.execv so no new update can start between
+        # the lock-release and the process replacement.  Any in-flight update
+        # finishes first (since it holds the lock), and then the process is
+        # replaced while still holding the lock — meaning no new update can
+        # sneak in during the brief TOCTOU window that existed with the
+        # original acquire-release-execv sequence.
+        # Threads die when execv replaces the process image, so the lock is
+        # released atomically by the kernel.
         with _apply_lock:
-            pass
-        try:
-            os.execv(sys.executable, [sys.executable] + sys.argv)
-        except Exception:
-            # Last-resort: if execv fails (e.g. frozen binary), just exit
-            # so the process supervisor (start.sh / Docker) restarts us.
-            os._exit(0)
+            try:
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+            except Exception:
+                # Last-resort: if execv fails (e.g. frozen binary), just exit
+                # so the process supervisor (start.sh / Docker) restarts us.
+                os._exit(0)
 
     threading.Thread(target=_do, daemon=True).start()
 
