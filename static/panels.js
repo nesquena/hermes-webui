@@ -464,6 +464,9 @@ function filterSkills() {
 // Currently selected skill detail — kept across panel switches so re-entering
 // the Skills view shows the last-viewed skill.
 let _currentSkillDetail = null; // { name, category, content }
+let _skillMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
+let _skillPreFormDetail = null; // snapshot of previously-viewed skill when entering a form
+let _editingSkillName = null;
 
 function _renderSkillDetail(name, content, linkedFiles) {
   const title = $('skillDetailTitle');
@@ -492,14 +495,28 @@ function _renderSkillDetail(name, content, linkedFiles) {
   });
   body.style.display = '';
   if (empty) empty.style.display = 'none';
-  if (editBtn) editBtn.style.display = '';
-  if (delBtn) delBtn.style.display = '';
+  _skillMode = 'read';
+  _setSkillHeaderButtons('read');
+}
+
+function _setSkillHeaderButtons(mode) {
+  const editBtn = $('btnEditSkillDetail');
+  const delBtn = $('btnDeleteSkillDetail');
+  const cancelBtn = $('btnCancelSkillDetail');
+  const saveBtn = $('btnSaveSkillDetail');
+  const show = b => b && (b.style.display = '');
+  const hide = b => b && (b.style.display = 'none');
+  if (mode === 'read') { show(editBtn); show(delBtn); hide(cancelBtn); hide(saveBtn); }
+  else if (mode === 'create' || mode === 'edit') { hide(editBtn); hide(delBtn); show(cancelBtn); show(saveBtn); }
+  else { hide(editBtn); hide(delBtn); hide(cancelBtn); hide(saveBtn); }
 }
 
 async function openSkill(name, el) {
   // Highlight active skill in the sidebar list
   document.querySelectorAll('.skill-item').forEach(e => e.classList.remove('active'));
   if (el) el.classList.add('active');
+  _skillPreFormDetail = null;
+  _editingSkillName = null;
   try {
     const data = await api(`/api/skills/content?name=${encodeURIComponent(name)}`);
     _currentSkillDetail = { name, content: data.content || '', linked_files: data.linked_files || {} };
@@ -541,68 +558,93 @@ async function openSkillFile(skillName, filePath) {
   } catch(e) { setStatus(t('skill_file_load_failed') + e.message); }
 }
 
-// Edit current skill in the main detail view — delegates to the existing
-// sidebar inline form (#skillCreateForm). A future phase will move editing
-// fully into #mainSkills.
 function editCurrentSkill() {
   if (!_currentSkillDetail) return;
   const s = _currentSkillDetail;
-  // Try to find category from the cached list
   let category = '';
   if (_skillsData) {
     const match = _skillsData.find(x => x.name === s.name);
     if (match) category = match.category || '';
   }
-  toggleSkillForm(s.name, category, s.content);
+  _skillPreFormDetail = { name: s.name, content: s.content, linked_files: s.linked_files };
+  _editingSkillName = s.name;
+  _skillMode = 'edit';
+  _renderSkillForm({ name: s.name, category, content: s.content || '', isEdit: true });
 }
 
-async function deleteCurrentSkill() {
-  if (!_currentSkillDetail) return;
-  const name = _currentSkillDetail.name;
-  if (!confirm(t('skill_delete_confirm') ? t('skill_delete_confirm').replace('{0}', name) : `Delete skill "${name}"?`)) return;
-  try {
-    await api('/api/skills/delete', { method:'POST', body: JSON.stringify({ name }) });
-    _currentSkillDetail = null;
-    _skillsData = null;
-    _cronSkillsCache = null;
-    // Reset detail view to empty state
-    const body = $('skillDetailBody');
-    const empty = $('skillDetailEmpty');
-    const title = $('skillDetailTitle');
-    const editBtn = $('btnEditSkillDetail');
-    const delBtn = $('btnDeleteSkillDetail');
-    if (body) { body.innerHTML = ''; body.style.display = 'none'; }
-    if (empty) empty.style.display = '';
-    if (title) title.textContent = '';
-    if (editBtn) editBtn.style.display = 'none';
-    if (delBtn) delBtn.style.display = 'none';
-    await loadSkills();
-    showToast(t('skill_deleted') || 'Skill deleted');
-  } catch(e) { setStatus(t('error_prefix') + e.message); }
+function openSkillCreate() {
+  if (typeof switchPanel === 'function' && _currentPanel !== 'skills') switchPanel('skills');
+  _skillPreFormDetail = _currentSkillDetail ? { ..._currentSkillDetail } : null;
+  _editingSkillName = null;
+  _skillMode = 'create';
+  _renderSkillForm({ name: '', category: '', content: '', isEdit: false });
 }
 
-// ── Skill create/edit form ──
-let _editingSkillName = null;
-
-function toggleSkillForm(prefillName, prefillCategory, prefillContent) {
-  const form = $('skillCreateForm');
-  if (!form) return;
-  const open = form.style.display !== 'none';
-  if (open) { form.style.display = 'none'; _editingSkillName = null; return; }
-  $('skillFormName').value = prefillName || '';
-  $('skillFormCategory').value = prefillCategory || '';
-  $('skillFormContent').value = prefillContent || '';
-  $('skillFormError').style.display = 'none';
-  _editingSkillName = prefillName || null;
-  form.style.display = '';
-  $('skillFormName').focus();
+function _renderSkillForm({ name, category, content, isEdit }) {
+  const title = $('skillDetailTitle');
+  const body = $('skillDetailBody');
+  const empty = $('skillDetailEmpty');
+  if (!body || !title) return;
+  title.textContent = isEdit ? t('skills_edit') + ' · ' + name : t('new_skill');
+  const nameDisabled = isEdit ? 'disabled' : '';
+  const nameHint = isEdit ? `<div class="detail-form-hint">${esc(t('skill_rename_not_supported') || 'Renaming a skill is not supported. Create a new skill and delete the old one to rename.')}</div>` : '';
+  body.innerHTML = `
+    <div class="main-view-content">
+      <form class="detail-form" onsubmit="event.preventDefault(); saveSkillForm();">
+        <div class="detail-form-row">
+          <label for="skillFormName">${esc(t('skill_name') || 'Name')}</label>
+          <input type="text" id="skillFormName" value="${esc(name || '')}" placeholder="my-skill" autocomplete="off" ${nameDisabled} required>
+          ${nameHint}
+        </div>
+        <div class="detail-form-row">
+          <label for="skillFormCategory">${esc(t('skill_category') || 'Category')}</label>
+          <input type="text" id="skillFormCategory" value="${esc(category || '')}" placeholder="${esc(t('skill_category_placeholder') || 'Optional, e.g. devops')}" autocomplete="off">
+        </div>
+        <div class="detail-form-row">
+          <label for="skillFormContent">${esc(t('skill_content') || 'SKILL.md content')}</label>
+          <textarea id="skillFormContent" rows="18" placeholder="${esc(t('skill_content_placeholder') || 'YAML frontmatter + markdown body')}">${esc(content || '')}</textarea>
+        </div>
+        <div id="skillFormError" class="detail-form-error" style="display:none"></div>
+      </form>
+    </div>`;
+  body.style.display = '';
+  if (empty) empty.style.display = 'none';
+  _setSkillHeaderButtons(isEdit ? 'edit' : 'create');
+  const focusEl = isEdit ? $('skillFormCategory') : $('skillFormName');
+  if (focusEl) focusEl.focus();
 }
 
-async function submitSkillSave() {
-  const name = ($('skillFormName').value||'').trim().toLowerCase().replace(/\s+/g, '-');
-  const category = ($('skillFormCategory').value||'').trim();
-  const content = $('skillFormContent').value;
+function cancelSkillForm() {
+  _editingSkillName = null;
+  if (_skillPreFormDetail) {
+    const snap = _skillPreFormDetail;
+    _skillPreFormDetail = null;
+    _currentSkillDetail = snap;
+    _renderSkillDetail(snap.name, snap.content || '', snap.linked_files || {});
+    return;
+  }
+  // Revert to empty state
+  _skillPreFormDetail = null;
+  _currentSkillDetail = null;
+  _skillMode = 'empty';
+  const body = $('skillDetailBody');
+  const empty = $('skillDetailEmpty');
+  const title = $('skillDetailTitle');
+  if (body) { body.innerHTML = ''; body.style.display = 'none'; }
+  if (empty) empty.style.display = '';
+  if (title) title.textContent = '';
+  _setSkillHeaderButtons('empty');
+}
+
+async function saveSkillForm() {
+  const nameInput = $('skillFormName');
+  const catInput = $('skillFormCategory');
+  const contentInput = $('skillFormContent');
   const errEl = $('skillFormError');
+  if (!nameInput || !contentInput || !errEl) return;
+  const name = (nameInput.value || '').trim().toLowerCase().replace(/\s+/g, '-');
+  const category = (catInput ? (catInput.value || '').trim() : '');
+  const content = contentInput.value;
   errEl.style.display = 'none';
   if (!name) { errEl.textContent = t('skill_name_required'); errEl.style.display = ''; return; }
   if (!content.trim()) { errEl.textContent = t('content_required'); errEl.style.display = ''; return; }
@@ -611,9 +653,46 @@ async function submitSkillSave() {
     showToast(_editingSkillName ? t('skill_updated') : t('skill_created'));
     _skillsData = null;
     _cronSkillsCache = null;
-    toggleSkillForm();
+    _editingSkillName = null;
+    _skillPreFormDetail = null;
     await loadSkills();
+    // Reload the saved skill in read mode with fresh content
+    const row = document.querySelector(`.skill-item .skill-name`);
+    const match = document.querySelectorAll('.skill-item');
+    let targetEl = null;
+    match.forEach(el => {
+      const nm = el.querySelector('.skill-name');
+      if (nm && nm.textContent === name) targetEl = el;
+    });
+    await openSkill(name, targetEl);
   } catch(e) { errEl.textContent = t('error_prefix') + e.message; errEl.style.display = ''; }
+}
+
+// Back-compat aliases (delete flow + any old callers)
+const submitSkillSave = saveSkillForm;
+function toggleSkillForm(){ openSkillCreate(); }
+
+async function deleteCurrentSkill() {
+  if (!_currentSkillDetail) return;
+  const name = _currentSkillDetail.name;
+  if (!confirm(t('skill_delete_confirm') ? t('skill_delete_confirm').replace('{0}', name) : `Delete skill "${name}"?`)) return;
+  try {
+    await api('/api/skills/delete', { method:'POST', body: JSON.stringify({ name }) });
+    _currentSkillDetail = null;
+    _skillPreFormDetail = null;
+    _skillsData = null;
+    _cronSkillsCache = null;
+    _skillMode = 'empty';
+    const body = $('skillDetailBody');
+    const empty = $('skillDetailEmpty');
+    const title = $('skillDetailTitle');
+    if (body) { body.innerHTML = ''; body.style.display = 'none'; }
+    if (empty) empty.style.display = '';
+    if (title) title.textContent = '';
+    _setSkillHeaderButtons('empty');
+    await loadSkills();
+    showToast(t('skill_deleted') || 'Skill deleted');
+  } catch(e) { setStatus(t('error_prefix') + e.message); }
 }
 
 // ── Memory inline edit ──

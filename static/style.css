@@ -1950,3 +1950,37 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .detail-run-item.open .detail-run-body{display:block;}
 .cron-item.active,.ws-row.active,.profile-card.active{background:var(--accent-bg);}
 .cron-item.active .cron-name,.ws-row.active .ws-row-name,.profile-card.active .profile-card-name{color:var(--accent-text);}
+
+/* ── Shared in-main form (create/edit) for skills/tasks/workspaces/profiles ── */
+.detail-form{display:flex;flex-direction:column;gap:14px;}
+.detail-form-row{display:flex;flex-direction:column;gap:6px;}
+.detail-form-row > label{font-size:12px;font-weight:500;color:var(--muted);letter-spacing:.01em;}
+.detail-form-row input[type="text"],
+.detail-form-row input[type="password"],
+.detail-form-row input:not([type]),
+.detail-form-row select,
+.detail-form-row textarea{
+  width:100%;box-sizing:border-box;
+  background:var(--sidebar);border:1px solid var(--border);border-radius:8px;
+  color:var(--text);padding:9px 11px;font-size:13px;outline:none;
+  font-family:inherit;line-height:1.5;
+  transition:border-color .15s,background .15s;
+}
+.detail-form-row input[type="text"]:focus,
+.detail-form-row input[type="password"]:focus,
+.detail-form-row input:not([type]):focus,
+.detail-form-row select:focus,
+.detail-form-row textarea:focus{border-color:var(--accent,var(--accent-bg-strong,var(--border)));}
+.detail-form-row input:disabled{opacity:.6;cursor:not-allowed;}
+.detail-form-row textarea{resize:vertical;font-family:'SF Mono',ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;}
+.detail-form-row .detail-form-hint{font-size:11px;color:var(--muted);line-height:1.5;}
+.detail-form-row label.detail-form-check{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text);cursor:pointer;font-weight:400;}
+.detail-form-row label.detail-form-check input{accent-color:var(--accent,var(--link));}
+.detail-form-error{font-size:12px;color:var(--error,#e05);padding:8px 10px;border:1px solid color-mix(in srgb,var(--error,#e05) 35%,transparent);background:color-mix(in srgb,var(--error,#e05) 8%,transparent);border-radius:8px;line-height:1.5;}
+.panel-head-btn.primary{background:var(--accent,var(--link));color:#fff;border:none;}
+.panel-head-btn.primary:hover{background:var(--accent-hover,var(--accent,var(--link)));color:#fff;}
+.panel-head-btn.primary svg{color:#fff;}
+/* Skill-picker inside in-main forms reuses the sidebar styles but needs light tweaks */
+.detail-form-row .skill-picker-wrap{position:relative;}
+.detail-form-row .skill-picker-tags{margin-top:6px;display:flex;flex-wrap:wrap;gap:4px;}
+
