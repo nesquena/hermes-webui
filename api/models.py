@@ -18,6 +18,42 @@ from api.workspace import get_last_workspace
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Stale temp-file cleanup
+# ---------------------------------------------------------------------------
+# Both Session.save() and _write_session_index() use the atomic-write pattern:
+#   write to  <path>.tmp.<pid>.<tid>  →  os.replace() to final path
+# If the process crashes between write and replace the .tmp file is left
+# behind.  Because the name embeds pid + tid, leftover files can never be
+# reused by a different process/thread, so they are safe to remove on the
+# next startup.  _cleanup_stale_tmp_files() is called from the full-rebuild
+# path of _write_session_index (i.e. at first index access / startup) and
+# removes any *.tmp.* file whose mtime is older than one hour.
+# ---------------------------------------------------------------------------
+
+_STALE_TMP_AGE_SECONDS = 3600  # 1 hour
+
+
+def _cleanup_stale_tmp_files() -> None:
+    """Best-effort removal of stale ``*.tmp.*`` files from SESSION_DIR.
+
+    Only files whose mtime is older than ``_STALE_TMP_AGE_SECONDS`` are
+    removed so that in-flight writes from a long-running sibling process
+    are not disturbed.  Errors are logged and swallowed — this must never
+    prevent startup.
+    """
+    cutoff = time.time() - _STALE_TMP_AGE_SECONDS
+    try:
+        for p in SESSION_DIR.glob('*.tmp.*'):
+            try:
+                if p.stat().st_mtime < cutoff:
+                    p.unlink(missing_ok=True)
+                    logger.debug("Cleaned up stale tmp file: %s", p.name)
+            except OSError:
+                pass  # best-effort
+    except Exception:
+        pass  # SESSION_DIR may not exist yet; that's fine
+
 
 def _index_entry_exists(session_id: str, in_memory_ids=None) -> bool:
     """Return True if an index entry still has backing state.
@@ -48,6 +84,7 @@ def _write_session_index(updates=None):
     """
     # Lazy full-rebuild path — used when index doesn't exist yet.
     if updates is None or not SESSION_INDEX_FILE.exists():
+        _cleanup_stale_tmp_files()  # best-effort sweep on startup / first call
         entries = []
         for p in SESSION_DIR.glob('*.json'):
             if p.name.startswith('_'): continue

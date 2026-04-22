@@ -21,6 +21,7 @@ from api.config import (
     STREAMS, STREAMS_LOCK, CANCEL_FLAGS, AGENT_INSTANCES,
     LOCK, SESSIONS, SESSION_DIR,
     _get_session_agent_lock, _set_thread_env, _clear_thread_env,
+    SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK,
     resolve_model_provider,
 )
 from api.helpers import redact_session_data
@@ -533,10 +534,15 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                 logger.debug("Using local fallback for session title generation")
                 source = 'fallback'
         if next_title and next_title != current:
-            s.title = next_title
-            s.llm_title_generated = True
-            # Keep chronological ordering stable in the sidebar.
-            s.save(touch_updated_at=False)
+            # Hold _agent_lock only for the in-memory mutation + save so the
+            # title write is serialized with checkpoint saves, cancel_stream,
+            # and other session-mutating endpoints.  The LLM round-trip above
+            # ran *outside* the lock to avoid blocking other writers.
+            with _get_session_agent_lock(session_id):
+                s.title = next_title
+                s.llm_title_generated = True
+                # Keep chronological ordering stable in the sidebar.
+                s.save(touch_updated_at=False)
             if source == 'fallback':
                 _put_title_status(put_event, session_id, source, 'local_summary', s.title, raw_preview)
             else:
@@ -1351,6 +1357,16 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 # If compression fired inside run_conversation, the agent may have
                 # rotated its session_id. Detect and fix the mismatch so the WebUI
                 # continues writing to the correct session file.
+                #
+                # Lock migration: when session_id rotates, we alias the new ID to
+                # the *same* Lock object under SESSION_AGENT_LOCKS so that
+                # subsequent callers using _get_session_agent_lock(new_sid) get the
+                # same Lock the streaming thread is already holding.  We then pop
+                # the old-id entry to prevent a leak.  This is safe because we
+                # already hold _agent_lock (the Lock object itself), so the
+                # reference stays alive even after the dict entry is removed.
+                # Concurrent readers that already looked up the old ID will still
+                # see the same Lock object until they release it.
                 _agent_sid = getattr(agent, 'session_id', None)
                 _compressed = False
                 if _agent_sid and _agent_sid != session_id:
@@ -1363,6 +1379,11 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                     with LOCK:
                         if old_sid in SESSIONS:
                             SESSIONS[new_sid] = SESSIONS.pop(old_sid)
+                    # Migrate the per-session lock: alias new_sid → same Lock,
+                    # then remove the old_sid entry to prevent a leak.
+                    with SESSION_AGENT_LOCKS_LOCK:
+                        SESSION_AGENT_LOCKS[new_sid] = SESSION_AGENT_LOCKS[old_sid]
+                        SESSION_AGENT_LOCKS.pop(old_sid, None)
                     if old_path.exists() and not new_path.exists():
                         try:
                             old_path.rename(new_path)

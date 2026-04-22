@@ -1529,6 +1529,25 @@ SESSION_AGENT_LOCKS_LOCK = threading.Lock()
 
 
 def _get_session_agent_lock(session_id: str) -> threading.Lock:
+    """Return the per-session Lock used to serialize all Session mutations.
+
+    Lock lifecycle invariant:
+      - A Lock is created lazily on first access and lives in SESSION_AGENT_LOCKS
+        for the lifetime of the session.
+      - The entry is pruned in /api/session/delete (under SESSION_AGENT_LOCKS_LOCK)
+        so deleted sessions don't leak a Lock forever.
+      - During context compression the agent may rotate session_id.  The
+        streaming thread migrates the lock entry atomically under
+        SESSION_AGENT_LOCKS_LOCK: it aliases the new session_id to the *same*
+        Lock object and pops the old-id entry (see streaming.py compression
+        block).  This ensures that subsequent callers using the new ID still
+        acquire the same Lock, while the old-id entry is removed to prevent a
+        leak.  The streaming thread already holds the Lock during this
+        migration, so the reference stays alive even after the dict entry is
+        removed.
+      - Lock contract: hold for the in-memory mutation + s.save() only; never
+        across network I/O (LLM calls, HTTP requests).
+    """
     with SESSION_AGENT_LOCKS_LOCK:
         if session_id not in SESSION_AGENT_LOCKS:
             SESSION_AGENT_LOCKS[session_id] = threading.Lock()

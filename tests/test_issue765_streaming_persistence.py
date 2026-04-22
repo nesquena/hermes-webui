@@ -478,7 +478,13 @@ class TestIssue765FollowupHardening:
     def test_periodic_checkpoint_mutation_race_with_undo_last(self, tmp_path, monkeypatch):
         """Run _periodic_checkpoint against a session whose messages list is
         concurrently truncated by undo_last; the on-disk JSON must remain
-        parseable and internally consistent."""
+        parseable and internally consistent.
+
+        The simulated checkpoint mirrors production by acquiring
+        _get_session_agent_lock around s.save(), and we assert that every
+        on-disk snapshot's messages list is one of the allowed snapshots
+        (never an interleaving of fields from two different saves).
+        """
         session_dir = tmp_path / "sessions_undo_race"
         session_dir.mkdir()
         index_file = session_dir / "_index.json"
@@ -504,6 +510,13 @@ class TestIssue765FollowupHardening:
             _checkpoint_stop = threading.Event()
             _checkpoint_activity = [0]
             errors = []
+            # Collect every on-disk messages snapshot observed by the
+            # checkpoint thread so we can assert atomicity after the run.
+            checkpoint_snapshots = []
+            _lock = threading.Lock()
+
+            from api.config import _get_session_agent_lock
+            _agent_lock = _get_session_agent_lock("race_test")
 
             def _periodic_checkpoint():
                 last = 0
@@ -511,7 +524,15 @@ class TestIssue765FollowupHardening:
                     try:
                         cur = _checkpoint_activity[0]
                         if cur > last:
-                            s.save(skip_index=True)
+                            with _agent_lock:
+                                s.save(skip_index=True)
+                            # Read back the on-disk JSON to verify atomicity
+                            try:
+                                snap = json.loads(s.path.read_text())
+                                with _lock:
+                                    checkpoint_snapshots.append(snap.get("messages"))
+                            except Exception:
+                                pass
                             last = cur
                     except Exception as e:
                         errors.append(e)
@@ -520,6 +541,13 @@ class TestIssue765FollowupHardening:
             t.start()
 
             from api.session_ops import undo_last
+            # Collect the allowed message snapshots (each state the session
+            # is in at a point where a checkpoint might observe it).
+            allowed_message_snapshots = []
+            # The initial state (before any undo) is a valid checkpoint target.
+            allowed_message_snapshots.append(
+                [dict(m) if isinstance(m, dict) else m for m in s.messages]
+            )
             for _ in range(5):
                 _checkpoint_activity[0] += 1
                 time.sleep(0.02)
@@ -527,9 +555,24 @@ class TestIssue765FollowupHardening:
                     undo_last("race_test")
                 except ValueError:
                     pass
-                s.messages.append({"role": "user", "content": f"msg-{_}"})
-                s.messages.append({"role": "assistant", "content": f"ans-{_}"})
-                s.save()
+                # Record the post-undo state (before appending new messages)
+                # as an allowed snapshot — the checkpoint may observe this.
+                allowed_message_snapshots.append(
+                    [dict(m) if isinstance(m, dict) else m for m in s.messages]
+                )
+                # Wrap mutation + save in _agent_lock to mirror production
+                # paths and prevent the checkpoint from observing an
+                # intermediate +1-message snapshot.
+                with _agent_lock:
+                    s.messages.append({"role": "user", "content": f"msg-{_}"})
+                    s.messages.append({"role": "assistant", "content": f"ans-{_}"})
+                    # Record the in-memory messages list *before* save so we
+                    # can verify that every checkpoint snapshot matches one
+                    # of these.
+                    allowed_message_snapshots.append(
+                        [dict(m) if isinstance(m, dict) else m for m in s.messages]
+                    )
+                    s.save()
 
             _checkpoint_stop.set()
             t.join(timeout=2)
@@ -540,13 +583,50 @@ class TestIssue765FollowupHardening:
             assert data["session_id"] == "race_test"
             # Messages must be a list (not corrupted by concurrent mutation)
             assert isinstance(data["messages"], list)
+            # Contract assertion: every checkpoint snapshot's messages must
+            # equal one of the allowed in-memory snapshots, never an
+            # interleaving of fields from two different saves.  This assertion
+            # has teeth: if the _agent_lock were removed from the checkpoint
+            # or the undo path, concurrent mutations would produce snapshots
+            # that match no allowed state (e.g. a list with some messages
+            # from before undo and some from after).
+            for snap_msgs in checkpoint_snapshots:
+                if snap_msgs is None:
+                    continue
+                # Normalize for comparison (strip display-only metadata)
+                normalized = [
+                    {k: v for k, v in m.items() if k in ("role", "content")}
+                    if isinstance(m, dict) else m
+                    for m in snap_msgs
+                ]
+                matched = False
+                for allowed in allowed_message_snapshots:
+                    norm_allowed = [
+                        {k: v for k, v in m.items() if k in ("role", "content")}
+                        if isinstance(m, dict) else m
+                        for m in allowed
+                    ]
+                    if normalized == norm_allowed:
+                        matched = True
+                        break
+                assert matched, (
+                    f"Checkpoint snapshot {normalized!r} does not match any "
+                    f"allowed state — this indicates a serialization failure "
+                    f"(the _agent_lock is not preventing interleaved writes)."
+                )
         finally:
             models.SESSIONS.clear()
 
     def test_cancel_stream_concurrent_checkpoint_produces_valid_json(self, tmp_path, monkeypatch):
         """Run cancel_stream while a _periodic_checkpoint thread is concurrently
         saving the same session; the resulting on-disk JSON must be parseable
-        and active_stream_id must be None."""
+        and active_stream_id must be None.
+
+        The simulated checkpoint mirrors production by acquiring
+        _get_session_agent_lock around s.save(), and we assert that every
+        on-disk snapshot is internally consistent (never an interleaving
+        of fields from two different saves).
+        """
         session_dir = tmp_path / "sessions_cancel_race"
         session_dir.mkdir()
         index_file = session_dir / "_index.json"
@@ -569,6 +649,12 @@ class TestIssue765FollowupHardening:
             _checkpoint_stop = threading.Event()
             _checkpoint_activity = [0]
             errors = []
+            # Collect every on-disk snapshot observed by the checkpoint thread.
+            checkpoint_snapshots = []
+            _snap_lock = threading.Lock()
+
+            from api.config import _get_session_agent_lock
+            _agent_lock = _get_session_agent_lock("cancel_race")
 
             def _periodic_checkpoint():
                 last = 0
@@ -576,7 +662,15 @@ class TestIssue765FollowupHardening:
                     try:
                         cur = _checkpoint_activity[0]
                         if cur > last:
-                            s.save(skip_index=True)
+                            with _agent_lock:
+                                s.save(skip_index=True)
+                            # Read back the on-disk JSON to verify atomicity
+                            try:
+                                snap = json.loads(s.path.read_text())
+                                with _snap_lock:
+                                    checkpoint_snapshots.append(snap)
+                            except Exception:
+                                pass
                             last = cur
                     except Exception as e:
                         errors.append(e)
@@ -585,7 +679,6 @@ class TestIssue765FollowupHardening:
             t.start()
 
             # Simulate cancel_stream session cleanup directly
-            from api.config import _get_session_agent_lock
             for i in range(10):
                 _checkpoint_activity[0] += 1
                 time.sleep(0.01)
@@ -606,5 +699,93 @@ class TestIssue765FollowupHardening:
                 "active_stream_id must be None after cancel cleanup"
             )
             assert isinstance(data["messages"], list)
+            # Contract assertion: every checkpoint snapshot must be
+            # internally consistent (no interleaving of fields from two
+            # different saves).  Because both the cancel cleanup and the
+            # checkpoint hold the same _agent_lock, they are serialized —
+            # but ordering is nondeterministic, so a snapshot taken
+            # *before* cancel will see active_stream_id="stream-abc" and
+            # one taken *after* will see None.  The guarantee is that
+            # each snapshot is self-consistent, never a partial mix.
+            #
+            # This assertion has teeth: if the _agent_lock were removed
+            # from either the checkpoint or the cancel path, a snapshot
+            # could see active_stream_id=None while pending_user_message
+            # still holds the pre-cancel value — a partial state that
+            # violates the atomicity contract.
+            for snap in checkpoint_snapshots:
+                assert isinstance(snap.get("messages"), list), (
+                    "Checkpoint snapshot messages must be a list"
+                )
+                assert snap.get("active_stream_id") in ("stream-abc", None), (
+                    "Checkpoint snapshot active_stream_id must be either "
+                    "the initial value or None (serialized, not interleaved), "
+                    f"got {snap.get('active_stream_id')!r}"
+                )
+                # When active_stream_id is None, the cancel cleanup must
+                # have run — so all four cancel fields must be cleared
+                # atomically.  A partial state (e.g. active_stream_id=None
+                # but pending_user_message still set) would indicate a
+                # serialization failure.
+                if snap.get("active_stream_id") is None:
+                    assert snap.get("pending_user_message") is None, (
+                        "Snapshot with active_stream_id=None must also have "
+                        "pending_user_message=None (atomic cancel cleanup "
+                        "under _agent_lock)"
+                    )
+                    assert snap.get("pending_attachments") == [] or snap.get("pending_attachments") is None, (
+                        "Snapshot with active_stream_id=None must also have "
+                        "empty pending_attachments (atomic cancel cleanup "
+                        "under _agent_lock)"
+                    )
+                    assert snap.get("pending_started_at") is None, (
+                        "Snapshot with active_stream_id=None must also have "
+                        "pending_started_at=None (atomic cancel cleanup "
+                        "under _agent_lock)"
+                    )
         finally:
             models.SESSIONS.clear()
+
+    def test_lock_identity_preserved_after_session_id_rotation(self):
+        """When compression rotates session_id, the per-session lock must be
+        aliased so that _get_session_agent_lock(new_sid) returns the *same*
+        Lock object as _get_session_agent_lock(old_sid).
+
+        This is a static guard: it directly simulates the migration that
+        streaming.py performs inside the compression rotation block.
+        """
+        from api.config import (
+            _get_session_agent_lock,
+            SESSION_AGENT_LOCKS,
+            SESSION_AGENT_LOCKS_LOCK,
+        )
+        old_sid = "pre-rotation-id"
+        new_sid = "post-rotation-id"
+
+        # Acquire the lock under the old ID
+        old_lock = _get_session_agent_lock(old_sid)
+
+        # Simulate the migration that streaming.py does during compression:
+        # alias new_sid → same Lock, then pop old_sid.
+        with SESSION_AGENT_LOCKS_LOCK:
+            SESSION_AGENT_LOCKS[new_sid] = SESSION_AGENT_LOCKS[old_sid]
+            SESSION_AGENT_LOCKS.pop(old_sid, None)
+
+        # Now looking up the new ID must return the exact same Lock object
+        new_lock = _get_session_agent_lock(new_sid)
+        assert new_lock is old_lock, (
+            f"After rotation, _get_session_agent_lock({new_sid!r}) must "
+            f"return the same Lock object as _get_session_agent_lock({old_sid!r}); "
+            f"got {new_lock!r} vs {old_lock!r}"
+        )
+
+        # The old ID entry must no longer exist (it was popped)
+        with SESSION_AGENT_LOCKS_LOCK:
+            assert old_sid not in SESSION_AGENT_LOCKS, (
+                f"Old session ID {old_sid!r} must be removed from "
+                f"SESSION_AGENT_LOCKS after rotation"
+            )
+
+        # Cleanup
+        with SESSION_AGENT_LOCKS_LOCK:
+            SESSION_AGENT_LOCKS.pop(new_sid, None)
