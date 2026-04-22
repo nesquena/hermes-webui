@@ -1419,37 +1419,81 @@ body.resizing{user-select:none;cursor:col-resize;}
 ::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.22);}
 * { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.12) transparent; }
 
-/* ── Settings overlay ── */
-/* Settings panel: sidebar menu + main content area */
-#mainSettings{flex:1;overflow-y:auto;min-height:0;display:none;flex-direction:column;}
+/* ── Settings view (rail cog → sidebar menu + main pane) ── */
+#mainSettings{flex:1;overflow-y:auto;min-height:0;display:none;flex-direction:column;background:var(--bg);}
 main.main.showing-settings .topbar,
 main.main.showing-settings .messages,
 main.main.showing-settings .composer-wrap{display:none;}
 main.main.showing-settings #mainSettings{display:flex;}
+
+/* Sidebar menu (lives in the left sidebar under the cog panel) */
 .settings-menu{display:flex;flex-direction:column;gap:2px;padding:4px 8px 8px;}
 .settings-menu-item{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:8px;border:1px solid transparent;background:transparent;color:var(--muted);cursor:pointer;text-align:left;font-size:13px;font-weight:500;transition:background .15s,border-color .15s,color .15s;width:100%;}
-.settings-menu-item:hover{background:rgba(255,255,255,.05);color:var(--text);}
-.settings-menu-item.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--text);}
+.settings-menu-item:hover{background:var(--hover-bg);color:var(--text);}
+.settings-menu-item.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--accent-text);}
+.settings-menu-item.active svg{color:var(--accent-text);}
 .settings-menu-item svg{flex-shrink:0;opacity:.9;}
-.settings-main{padding:22px 24px;max-width:720px;width:100%;margin:0 auto;min-width:0;}
+
+/* Main canvas: centered, comfortable max-width */
+.settings-main{padding:28px 32px 48px;max-width:768px;width:100%;margin:0 auto;min-width:0;}
 .settings-pane{display:none;}
 .settings-pane.active{display:block;}
-.settings-section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px;}
-.settings-section-title{font-size:13px;font-weight:700;letter-spacing:.01em;color:var(--text);}
-.settings-section-meta{font-size:11px;color:var(--muted);margin-top:3px;line-height:1.5;}
-.settings-version-badge{display:inline-flex;align-items:center;padding:4px 8px;border-radius:999px;border:1px solid var(--accent-bg);background:var(--accent-bg);color:var(--accent-text);font-size:11px;font-weight:700;flex-shrink:0;}
-.hermes-action-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;}
-.settings-action-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 12px;border-radius:10px;border:1px solid var(--border2);background:var(--input-bg);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;transition:background .15s,border-color .15s,color .15s;}
-.settings-action-btn:hover{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.18);}
-.settings-action-btn.danger{color:var(--error);border-color:var(--error);}
-.settings-action-btn.danger:hover{background:rgba(239,83,80,.08);border-color:var(--error);}
+
+/* Large page-style section header (title + subtitle) */
+.settings-section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:20px;padding-bottom:14px;border-bottom:1px solid var(--border);}
+.settings-section-title{font-size:18px;font-weight:600;letter-spacing:-.01em;color:var(--text);line-height:1.3;}
+.settings-section-meta{font-size:12px;color:var(--muted);margin-top:4px;line-height:1.55;}
+.settings-version-badge{display:inline-flex;align-items:center;padding:4px 10px;border-radius:999px;border:1px solid var(--accent-bg-strong);background:var(--accent-bg);color:var(--accent-text);font-size:11px;font-weight:700;flex-shrink:0;align-self:flex-start;}
+
+/* Group form rows into a card surface (scoped so existing inline
+   field styles are preserved and markup stays stable). */
+#mainSettings .settings-field{margin-bottom:14px;padding:12px 14px;border:1px solid var(--border);border-radius:12px;background:var(--surface);}
+#mainSettings .settings-field:last-of-type{margin-bottom:18px;}
+#mainSettings .settings-field label{display:block;font-size:12px;font-weight:600;letter-spacing:0;text-transform:none;color:var(--text);margin-bottom:6px;}
+#mainSettings .settings-field label[style*="display:flex"]{margin-bottom:0;}
+#mainSettings .settings-field > div[style*="color:var(--muted)"],
+#mainSettings .settings-field > div[style*="color: var(--muted)"]{font-size:11px;color:var(--muted);line-height:1.55;}
+
+/* Quick-action grid in Conversation pane */
+.hermes-action-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-bottom:18px;}
+.settings-action-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:10px 14px;border-radius:10px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:12px;font-weight:600;cursor:pointer;transition:background .15s,border-color .15s,color .15s,box-shadow .15s;}
+.settings-action-btn:hover{background:var(--hover-bg);border-color:var(--accent-bg-strong);}
+.settings-action-btn.danger{color:var(--error,#e05);border-color:color-mix(in srgb,var(--error,#e05) 30%,transparent);}
+.settings-action-btn.danger:hover{background:color-mix(in srgb,var(--error,#e05) 8%,transparent);border-color:var(--error,#e05);}
 .settings-action-btn:disabled,.settings-action-btn.disabled{opacity:.45;cursor:not-allowed;}
-.settings-action-btn:disabled:hover,.settings-action-btn.disabled:hover{background:var(--input-bg);border-color:var(--border2);}
-.settings-field{margin-bottom:16px;}
-.settings-field label{display:block;font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;}
-/* Save button inside the settings panel */
-#mainSettings .settings-btn{background:var(--accent);color:#fff;border:none;border-radius:6px;padding:8px 16px;cursor:pointer;font-weight:600;font-size:13px;}
-#mainSettings .settings-btn:hover{opacity:.9;}
+.settings-action-btn:disabled:hover,.settings-action-btn.disabled:hover{background:var(--surface);border-color:var(--border);}
+
+/* Save / action buttons inside the settings panel — primary style. */
+#mainSettings .settings-btn,
+#mainSettings .sm-btn[onclick^="saveSettings"]{background:var(--accent);color:#fff;border:1px solid var(--accent);border-radius:8px;padding:9px 16px;cursor:pointer;font-weight:600;font-size:13px;transition:background .15s,border-color .15s,opacity .15s;}
+#mainSettings .settings-btn:hover,
+#mainSettings .sm-btn[onclick^="saveSettings"]:hover{background:var(--accent-hover);border-color:var(--accent-hover);}
+
+/* Non-primary sm-btn (Sign out / Disable auth) — neutral outline. */
+#mainSettings .sm-btn{border-radius:8px;padding:9px 16px;font-weight:600;font-size:13px;background:var(--surface);border:1px solid var(--border);color:var(--text);cursor:pointer;transition:background .15s,border-color .15s;}
+#mainSettings .sm-btn:hover{background:var(--hover-bg);}
+
+/* Picker grids (theme / skin / font-size) sit nicely inside cards. */
+#mainSettings .theme-pick-btn,
+#mainSettings .font-size-pick-btn{background:var(--bg)!important;}
+#mainSettings .theme-pick-btn:hover,
+#mainSettings .font-size-pick-btn:hover{border-color:var(--accent-bg-strong)!important;background:var(--hover-bg)!important;}
+
+/* Selects & text inputs inside settings — consistent look regardless
+   of legacy inline styles (inline wins, but these are fallbacks). */
+#mainSettings select,
+#mainSettings input[type="text"],
+#mainSettings input[type="password"]{font-size:13px;}
+#mainSettings select:focus,
+#mainSettings input[type="text"]:focus,
+#mainSettings input[type="password"]:focus{border-color:var(--accent)!important;box-shadow:0 0 0 3px var(--accent-bg);outline:none;}
+
+/* Responsive: tighten canvas on small screens (mobile settings panel). */
+@media (max-width: 768px){
+  .settings-main{padding:20px 16px 40px;}
+  .settings-section-title{font-size:16px;}
+  .hermes-action-grid{grid-template-columns:1fr;}
+}
 
 /* ── Session pin indicator (inline, only when pinned) ── */
 .session-pin-indicator{flex-shrink:0;color:#f5c542;line-height:1;display:flex;align-items:center;}
