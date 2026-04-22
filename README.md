@@ -408,7 +408,7 @@ Or using the agent venv explicitly:
 ```
 
 Tests run against an isolated server on port 8788 with a separate state directory.
-Production data and real cron jobs are never touched. Current count: **961 tests**
+Production data and real cron jobs are never touched. Current count: **1858 tests**
 across 53 test files.
 
 ---
