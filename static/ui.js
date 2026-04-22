@@ -1215,9 +1215,10 @@ function syncTopbar(){
       // Stale session model not in the current provider catalog — reset to the
       // first available model rather than injecting an "(unavailable)" option
       // that visually appears under the wrong provider group (#829).
-      const first=sel.querySelector('optgroup > option, option');
+      const modelSel=$('modelSelect');
+      const first=modelSel&&modelSel.querySelector('optgroup > option, option');
       if(first){
-        sel.value=first.value;
+        modelSel.value=first.value;
         S.session.model=first.value;
         // Persist the correction so the session doesn't re-inject on next load.
         fetch(new URL('api/session/update',location.href).href,{

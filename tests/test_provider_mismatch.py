@@ -617,8 +617,8 @@ def test_stale_ui_js_does_not_inject_unavailable_option():
     src = open(os.path.join(os.path.dirname(__file__), "..", "static", "ui.js"),
                encoding="utf-8").read()
 
-    # The old pattern must be gone
-    assert "model_unavailable" not in src or "model_unavailable_title" not in src, (
+    # The old pattern must be gone — both keys removed from ui.js
+    assert "model_unavailable" not in src and "model_unavailable_title" not in src, (
         "renderSession() must not inject '(unavailable)' options — "
         "stale models should be silently reset to the first available model (#829)"
     )
