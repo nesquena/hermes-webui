@@ -111,6 +111,9 @@
     <div class="panel-view" id="panelWorkspaces">
       <div class="panel-head">
         <span data-i18n="tab_workspaces">Spaces</span>
+        <div class="panel-head-actions">
+          <button class="panel-head-btn" onclick="openWorkspaceCreate()" title="Add space" data-i18n-title="workspace_add_title" aria-label="Add space"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+        </div>
       </div>
       <div class="panel-head-sub" data-i18n="workspace_desc">Add and switch workspaces for your sessions.</div>
       <div style="flex:1;overflow-y:auto;padding:0 12px 12px" id="workspacesPanel"><div style="color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
@@ -416,7 +419,10 @@
         <div class="main-view-title" id="workspaceDetailTitle"></div>
         <div class="main-view-actions">
           <button id="btnActivateWorkspaceDetail" class="panel-head-btn" title="Use this space" data-i18n-title="workspace_use_title" onclick="activateCurrentWorkspace()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></button>
+          <button id="btnEditWorkspaceDetail" class="panel-head-btn" title="Rename" data-i18n-title="edit" onclick="editCurrentWorkspace()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
           <button id="btnDeleteWorkspaceDetail" class="panel-head-btn" title="Remove" data-i18n-title="remove" onclick="deleteCurrentWorkspace()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+          <button id="btnCancelWorkspaceDetail" class="panel-head-btn" title="Cancel" data-i18n-title="cancel" onclick="cancelWorkspaceForm()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+          <button id="btnSaveWorkspaceDetail" class="panel-head-btn primary" title="Save" data-i18n-title="save" onclick="saveWorkspaceForm()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></button>
         </div>
       </div>
       <div class="main-view-body" id="workspaceDetailBody" style="display:none"></div>

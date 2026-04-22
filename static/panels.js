@@ -5,6 +5,8 @@ let _currentCronDetail = null; // full cron job object
 let _cronMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _cronPreFormDetail = null; // snapshot of prior selection when entering a form
 let _currentWorkspaceDetail = null; // { path, name, is_default }
+let _workspaceMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
+let _workspacePreFormDetail = null;
 let _currentProfileDetail = null; // full profile object
 
 async function switchPanel(name) {
@@ -987,17 +989,12 @@ function renderWorkspacesPanel(workspaces){
     if (_currentWorkspaceDetail && _currentWorkspaceDetail.path === w.path) row.classList.add('active');
     panel.appendChild(row);
   }
-  const addRow=document.createElement('div');addRow.className='ws-add-row';
-  addRow.innerHTML=`
-    <input id="wsAddInput" placeholder="${esc(t('workspace_add_path_placeholder'))}" style="flex:1;background:rgba(255,255,255,.06);border:1px solid var(--border2);border-radius:7px;color:var(--text);padding:7px 10px;font-size:12px;outline:none;">
-    <button class="ws-action-btn" onclick="addWorkspace()">${li('plus',12)} ${esc(t('add'))}</button>`;
-  panel.appendChild(addRow);
   const hint=document.createElement('div');
-  hint.style.cssText='font-size:11px;color:var(--muted);padding:4px 0 8px';
+  hint.style.cssText='font-size:11px;color:var(--muted);padding:8px 0';
   hint.textContent=t('workspace_paths_validated_hint');
   panel.appendChild(hint);
-  // Re-render detail if we have one cached
-  if (_currentWorkspaceDetail) {
+  // Re-render detail if we have one cached and we're not in a form
+  if (_currentWorkspaceDetail && _workspaceMode !== 'create' && _workspaceMode !== 'edit') {
     const refreshed = workspaces.find(w => w.path === _currentWorkspaceDetail.path);
     if (refreshed) _renderWorkspaceDetail(refreshed);
   }
@@ -1028,10 +1025,31 @@ function _renderWorkspaceDetail(ws){
     </div>`;
   body.style.display = '';
   if (empty) empty.style.display = 'none';
+  _workspaceMode = 'read';
+  _setWorkspaceHeaderButtons('read', ws);
+}
+
+function _setWorkspaceHeaderButtons(mode, ws){
   const actBtn = $('btnActivateWorkspaceDetail');
+  const editBtn = $('btnEditWorkspaceDetail');
   const delBtn = $('btnDeleteWorkspaceDetail');
-  if (actBtn) actBtn.style.display = isActive ? 'none' : '';
-  if (delBtn) delBtn.style.display = isDefault ? 'none' : '';
+  const cancelBtn = $('btnCancelWorkspaceDetail');
+  const saveBtn = $('btnSaveWorkspaceDetail');
+  const show = b => b && (b.style.display = '');
+  const hide = b => b && (b.style.display = 'none');
+  if (mode === 'read') {
+    const activePath = S.session ? S.session.workspace : '';
+    const isActive = ws && ws.path === activePath;
+    const isDefault = !!(ws && ws.is_default);
+    if (isActive) hide(actBtn); else show(actBtn);
+    show(editBtn);
+    if (isDefault) hide(delBtn); else show(delBtn);
+    hide(cancelBtn); hide(saveBtn);
+  } else if (mode === 'create' || mode === 'edit') {
+    hide(actBtn); hide(editBtn); hide(delBtn); show(cancelBtn); show(saveBtn);
+  } else {
+    [actBtn, editBtn, delBtn, cancelBtn, saveBtn].forEach(hide);
+  }
 }
 
 function openWorkspaceDetail(path, el){
@@ -1041,20 +1059,20 @@ function openWorkspaceDetail(path, el){
   document.querySelectorAll('.ws-row').forEach(e => e.classList.remove('active'));
   const target = el || document.querySelector(`.ws-row[data-path="${CSS.escape(path)}"]`);
   if (target) target.classList.add('active');
+  _workspacePreFormDetail = null;
   _renderWorkspaceDetail(ws);
 }
 
 function _clearWorkspaceDetail(){
   _currentWorkspaceDetail = null;
+  _workspaceMode = 'empty';
   const title = $('workspaceDetailTitle');
   const body = $('workspaceDetailBody');
   const empty = $('workspaceDetailEmpty');
   if (title) title.textContent = '';
   if (body) { body.innerHTML = ''; body.style.display = 'none'; }
   if (empty) empty.style.display = '';
-  ['btnActivateWorkspaceDetail','btnDeleteWorkspaceDetail'].forEach(id => {
-    const b = $(id); if (b) b.style.display = 'none';
-  });
+  _setWorkspaceHeaderButtons('empty');
 }
 
 async function activateCurrentWorkspace(){
@@ -1078,21 +1096,106 @@ async function deleteCurrentWorkspace(){
   }catch(e){setStatus(t('remove_failed')+e.message);}
 }
 
-async function addWorkspace(){
-  const input=$('wsAddInput');
-  const path=(input?input.value:'').trim();
-  if(!path)return;
-  try{
-    const data=await api('/api/workspaces/add',{method:'POST',body:JSON.stringify({path})});
-    _workspaceList=data.workspaces;
-    renderWorkspacesPanel(data.workspaces);
-    if(input)input.value='';
+function openWorkspaceCreate(){
+  if (typeof switchPanel === 'function' && _currentPanel !== 'workspaces') switchPanel('workspaces');
+  _workspacePreFormDetail = _currentWorkspaceDetail ? { ..._currentWorkspaceDetail } : null;
+  _workspaceMode = 'create';
+  _renderWorkspaceForm({ name:'', path:'', isEdit:false });
+}
+
+function editCurrentWorkspace(){
+  if (!_currentWorkspaceDetail) return;
+  _workspacePreFormDetail = { ..._currentWorkspaceDetail };
+  _workspaceMode = 'edit';
+  _renderWorkspaceForm({ name: _currentWorkspaceDetail.name || '', path: _currentWorkspaceDetail.path || '', isEdit: true });
+}
+
+function _renderWorkspaceForm({ name, path, isEdit }){
+  const title = $('workspaceDetailTitle');
+  const body = $('workspaceDetailBody');
+  const empty = $('workspaceDetailEmpty');
+  if (!title || !body) return;
+  title.textContent = isEdit ? (t('edit') + ' · ' + (name || path)) : (t('workspace_new_title') || 'New space');
+  const pathDisabled = isEdit ? 'disabled' : '';
+  const pathHint = isEdit
+    ? `<div class="detail-form-hint">${esc(t('workspace_path_readonly') || 'Path cannot be changed. Rename only.')}</div>`
+    : `<div class="detail-form-hint">${esc(t('workspace_paths_validated_hint'))}</div>`;
+  body.innerHTML = `
+    <div class="main-view-content">
+      <form class="detail-form" onsubmit="event.preventDefault(); saveWorkspaceForm();">
+        <div class="detail-form-row">
+          <label for="workspaceFormName">${esc(t('workspace_name_label') || 'Name')}</label>
+          <input type="text" id="workspaceFormName" value="${esc(name || '')}" placeholder="${esc(t('workspace_name_placeholder') || 'Optional friendly name')}" autocomplete="off">
+        </div>
+        <div class="detail-form-row">
+          <label for="workspaceFormPath">${esc(t('workspace_path_label') || 'Path')}</label>
+          <input type="text" id="workspaceFormPath" value="${esc(path || '')}" placeholder="${esc(t('workspace_add_path_placeholder') || '/absolute/path/to/folder')}" autocomplete="off" ${pathDisabled} required>
+          ${pathHint}
+        </div>
+        <div id="workspaceFormError" class="detail-form-error" style="display:none"></div>
+      </form>
+    </div>`;
+  body.style.display = '';
+  if (empty) empty.style.display = 'none';
+  _setWorkspaceHeaderButtons(isEdit ? 'edit' : 'create');
+  const focus = isEdit ? $('workspaceFormName') : $('workspaceFormPath');
+  if (focus) focus.focus();
+}
+
+function cancelWorkspaceForm(){
+  if (_workspacePreFormDetail) {
+    const snap = _workspacePreFormDetail;
+    _workspacePreFormDetail = null;
+    _renderWorkspaceDetail(snap);
+    return;
+  }
+  _clearWorkspaceDetail();
+}
+
+async function saveWorkspaceForm(){
+  const nameEl = $('workspaceFormName');
+  const pathEl = $('workspaceFormPath');
+  const errEl = $('workspaceFormError');
+  if (!pathEl || !errEl) return;
+  const name = (nameEl ? nameEl.value : '').trim();
+  const path = (pathEl.value || '').trim();
+  errEl.style.display = 'none';
+  if (!path) { errEl.textContent = t('workspace_path_required') || 'Path is required'; errEl.style.display = ''; return; }
+  try {
+    if (_workspaceMode === 'edit' && _currentWorkspaceDetail) {
+      const targetPath = _currentWorkspaceDetail.path;
+      const newName = name || _currentWorkspaceDetail.name || '';
+      await api('/api/workspaces/rename', { method:'POST', body: JSON.stringify({ path: targetPath, name: newName }) });
+      // Refresh list and re-render detail
+      const data = await api('/api/workspaces');
+      _workspaceList = data.workspaces || [];
+      _workspacePreFormDetail = null;
+      showToast(t('workspace_renamed') || t('workspace_added'));
+      renderWorkspacesPanel(_workspaceList);
+      openWorkspaceDetail(targetPath);
+      return;
+    }
+    const data = await api('/api/workspaces/add', { method:'POST', body: JSON.stringify({ path }) });
+    _workspaceList = data.workspaces || [];
+    _workspacePreFormDetail = null;
+    // Apply rename if a friendly name was supplied
+    if (name) {
+      try { await api('/api/workspaces/rename', { method:'POST', body: JSON.stringify({ path, name }) }); } catch(_) {}
+      const refreshed = await api('/api/workspaces');
+      _workspaceList = refreshed.workspaces || _workspaceList;
+    }
+    renderWorkspacesPanel(_workspaceList);
     showToast(t('workspace_added'));
-    // Auto-select the newly added workspace in the main detail
     const added = _workspaceList.find(w => w.path === path) || _workspaceList[_workspaceList.length - 1];
     if (added) openWorkspaceDetail(added.path);
-  }catch(e){setStatus(t('add_failed')+e.message);}
+  } catch (e) {
+    errEl.textContent = t('error_prefix') + e.message;
+    errEl.style.display = '';
+  }
 }
+
+// Back-compat: any legacy caller of addWorkspace() opens the new form instead.
+function addWorkspace(){ openWorkspaceCreate(); }
 
 async function removeWorkspace(path){
   const _rmWs=await showConfirmDialog({title:t('workspace_remove_confirm_title'),message:t('workspace_remove_confirm_message',path),confirmLabel:t('remove'),danger:true,focusCancel:true});
