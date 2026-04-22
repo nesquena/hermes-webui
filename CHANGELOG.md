@@ -6,7 +6,7 @@
 - **Gateway SSE sync failures now surface to the user** — when the gateway watcher
   thread is not running, the browser now shows a toast notification and automatically
   falls back to 30-second polling for session sync. Previously this failed silently
-  with no feedback. (#826, fixes #635, @cloudyun888)
+  with no feedback. (#828, absorbs PR #826 by @cloudyun888, fixes #635)
 - `_gateway_sse_probe_payload` now checks `watcher._thread.is_alive()` rather than
   just `watcher is not None`, so a watcher instance with a dead poll thread correctly
   reports unavailable and triggers the polling fallback.

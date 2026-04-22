@@ -517,3 +517,42 @@ def test_probe_payload_when_watcher_thread_dead():
     assert status == 503
     assert body['watcher_running'] is False
     assert body['ok'] is False
+
+
+def test_gateway_watcher_is_alive_public_method():
+    """GatewayWatcher.is_alive() is the public API the probe uses. Cover all
+    three states: before start(), while running, after stop()."""
+    from api.gateway_watcher import GatewayWatcher
+    w = GatewayWatcher()
+    # Before start(): no thread
+    assert w.is_alive() is False, "is_alive() must be False before start()"
+    # After start(): thread running
+    w.start()
+    try:
+        assert w.is_alive() is True, "is_alive() must be True while running"
+    finally:
+        w.stop()
+    # After stop(): thread cleared
+    assert w.is_alive() is False, "is_alive() must be False after stop()"
+
+
+def test_probe_payload_prefers_public_is_alive():
+    """Regression guard: _gateway_sse_probe_payload must call watcher.is_alive()
+    rather than poking at _thread directly when the public method exists."""
+    calls = []
+
+    class _WatcherWithPublicApi:
+        def is_alive(self):
+            calls.append('is_alive')
+            return True
+        # _thread is deliberately absent — must not be accessed.
+
+    body, status = _gateway_sse_probe_payload(
+        {'show_cli_sessions': True},
+        watcher=_WatcherWithPublicApi(),
+    )
+    assert status == 200
+    assert body['watcher_running'] is True
+    assert calls == ['is_alive'], (
+        "probe must prefer the public is_alive() method over poking _thread"
+    )

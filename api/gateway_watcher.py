@@ -119,6 +119,19 @@ class GatewayWatcher:
         self._thread = threading.Thread(target=self._poll_loop, daemon=True, name='gateway-watcher')
         self._thread.start()
 
+    def is_alive(self) -> bool:
+        """Return True when the poll thread is running.
+
+        Public accessor used by ``/api/sessions/gateway/stream`` probe mode and
+        the live SSE handler to detect a watcher instance whose poll thread
+        died silently (e.g. uncaught exception in ``_poll_loop``).  Callers
+        use this to decide whether to return 503 and trigger the client-side
+        polling fallback, instead of handing out an SSE connection that would
+        never emit events.
+        """
+        t = self._thread
+        return t is not None and t.is_alive()
+
     def stop(self):
         """Stop the watcher thread."""
         self._stop_event.set()

@@ -1706,11 +1706,17 @@ def _handle_sse_stream(handler, parsed):
 
 def _gateway_sse_probe_payload(settings, watcher):
     enabled = bool(settings.get('show_cli_sessions'))
-    watcher_alive = (
-        watcher is not None
-        and getattr(watcher, '_thread', None) is not None
-        and watcher._thread.is_alive()
-    )
+    # Use the public is_alive() accessor where available (current GatewayWatcher);
+    # fall back to the private _thread check for any older in-memory instance
+    # that might still be hanging around mid-upgrade, and for test doubles that
+    # don't implement the full public API.
+    if watcher is None:
+        watcher_alive = False
+    elif hasattr(watcher, 'is_alive') and callable(getattr(watcher, 'is_alive')):
+        watcher_alive = bool(watcher.is_alive())
+    else:
+        _t = getattr(watcher, '_thread', None)
+        watcher_alive = _t is not None and _t.is_alive()
     payload = {
         'enabled': enabled,
         'fallback_poll_ms': 30000,
@@ -1745,12 +1751,10 @@ def _handle_gateway_sse_stream(handler, parsed):
     if not settings.get('show_cli_sessions'):
         return j(handler, {'error': 'agent sessions not enabled'}, status=404)
 
-    watcher_alive = (
-        watcher is not None
-        and getattr(watcher, '_thread', None) is not None
-        and watcher._thread.is_alive()
-    )
-    if not watcher_alive:
+    # Same watcher_alive semantics as the probe path — centralised via
+    # the helper so both branches stay in sync.
+    _probe_body, _probe_status = _gateway_sse_probe_payload(settings, watcher)
+    if not _probe_body['watcher_running']:
         return j(handler, {'error': 'watcher not started'}, status=503)
 
     handler.send_response(200)
