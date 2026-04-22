@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.135] — 2026-04-22
+
+### Fixed
+- **BYOK/custom provider models now appear in the WebUI model dropdown** — three root causes fixed. (1) Provider aliases like `z.ai`, `x.ai`, `google`, `grok`, `claude`, `aws-bedrock`, `dashscope`, and ~25 others were not normalized to their internal catalog slugs, causing the provider to miss `_PROVIDER_MODELS` lookup and show an empty dropdown while the TUI worked. (2) The fix works even without `hermes-agent` on `sys.path` (CI, minimal installs) via an inlined `_PROVIDER_ALIASES` table in `api/config.py` — the previous `try/except ImportError` was silently swallowing the failure. (3) `custom_providers` entries now appear in the live model enrichment path. `provider_id` on every group makes optgroup matching deterministic. Closes #815. (#817)
+
 ## [v0.50.134] — 2026-04-21
 
 ### Fixed
