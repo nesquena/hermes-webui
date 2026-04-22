@@ -211,6 +211,11 @@ class TestFontSizeCssTargetedOverrides:
         css = _read("static/style.css")
         assert ':root[data-font-size="large"] #msg' in css, \
             "Composer textarea must be explicitly scaled for large"
+        # Large composer must not equal the default 16px — that's a no-op
+        import re
+        m = re.search(r':root\[data-font-size="large"\] #msg \{ font-size: (\d+)px', css)
+        assert m and int(m.group(1)) != 16, \
+            "Large composer font-size must differ from default (16px) to have visible effect"
 
     def test_file_item_overridden_for_small(self):
         css = _read("static/style.css")

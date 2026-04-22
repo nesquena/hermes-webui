@@ -42,9 +42,9 @@
   :root[data-font-size="small"] .msg-body table { font-size: 11px; }
   :root[data-font-size="large"] .msg-body table { font-size: 14px; }
 
-  /* Composer textarea */
-  :root[data-font-size="small"] #msg { font-size: 12px; }
-  :root[data-font-size="large"] #msg { font-size: 16px; }
+  /* Composer textarea (default is 16px in stylesheet) */
+  :root[data-font-size="small"] #msg { font-size: 14px; }
+  :root[data-font-size="large"] #msg { font-size: 18px; }
 
   /* Workspace file tree */
   :root[data-font-size="small"] .file-item { font-size: 11px; }
