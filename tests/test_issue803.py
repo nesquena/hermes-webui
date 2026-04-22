@@ -33,12 +33,11 @@ class TestProfileCookieHelpers:
         assert 'SameSite=Lax' in s
         assert 'Path=/' in s
 
-    def test_build_profile_cookie_default_clears(self):
+    def test_build_profile_cookie_default_persists(self):
         from api.helpers import build_profile_cookie
         s = build_profile_cookie('default')
-        assert 'Max-Age=0' in s
-        # Empty value indicates clear
-        assert 'hermes_profile=""' in s or 'hermes_profile=;' in s
+        assert 'hermes_profile=default' in s
+        assert 'Max-Age=0' not in s
 
     def test_get_profile_cookie_returns_none_when_absent(self):
         from api.helpers import get_profile_cookie

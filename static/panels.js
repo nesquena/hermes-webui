@@ -843,6 +843,9 @@ async function loadProfilesPanel() {
       panel.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:12px">${esc(t('profiles_no_profiles'))}</div>`;
       return;
     }
+    const activeName = (S.activeProfile && data.profiles.some(p => p.name === S.activeProfile))
+      ? S.activeProfile
+      : (data.active || 'default');
     for (const p of data.profiles) {
       const card = document.createElement('div');
       card.className = 'profile-card';
@@ -854,7 +857,7 @@ async function loadProfilesPanel() {
       const gwDot = p.gateway_running
         ? `<span class="profile-opt-badge running" title="${esc(t('profile_gateway_running'))}"></span>`
         : `<span class="profile-opt-badge stopped" title="${esc(t('profile_gateway_stopped'))}"></span>`;
-      const isActive = p.name === data.active;
+      const isActive = p.name === activeName;
       const activeBadge = isActive ? `<span style="color:var(--link);font-size:10px;font-weight:600;margin-left:6px">${esc(t('profile_active'))}</span>` : '';
       const defaultBadge = p.is_default ? ` <span style="opacity:.5">${esc(t('profile_default_label'))}</span>` : '';
       card.innerHTML = `
@@ -880,7 +883,9 @@ function renderProfileDropdown(data) {
   if (!dd) return;
   dd.innerHTML = '';
   const profiles = data.profiles || [];
-  const active = data.active || 'default';
+  const active = (S.activeProfile && profiles.some(p => p.name === S.activeProfile))
+    ? S.activeProfile
+    : (data.active || 'default');
   for (const p of profiles) {
     const opt = document.createElement('div');
     opt.className = 'profile-opt' + (p.name === active ? ' active' : '');
@@ -1005,7 +1010,9 @@ async function switchToProfile(name) {
           S.session.workspace = S._profileDefaultWorkspace;
         } catch (_) {}
       }
-      updateWorkspaceChip();
+      // Keep topbar chips (workspace/profile) in sync after creating the
+      // new profile-scoped session.
+      syncTopbar();
       await renderSessionList();
       showToast(t('profile_switched_new_conversation', name));
     } else {

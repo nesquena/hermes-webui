@@ -211,17 +211,18 @@ def get_profile_cookie(handler) -> str | None:
 def build_profile_cookie(name: str) -> str:
     """Build a Set-Cookie header value for the hermes_profile cookie.
 
-    name='default' clears the cookie (max-age=0).
-    Any other valid profile name sets it for the browser session.
+    Always persist the selected profile in the cookie, including 'default'.
+    Clearing the cookie causes the backend to fall back to process-global
+    _active_profile, which can unexpectedly switch clients back to another
+    profile.
+
     httponly=True: the JS reads profile from /api/profile/active JSON, never
     from document.cookie, so httponly exposure is unnecessary.
     """
     import http.cookies as _hc
     cookie = _hc.SimpleCookie()
-    cookie[PROFILE_COOKIE_NAME] = '' if name == 'default' else name
+    cookie[PROFILE_COOKIE_NAME] = name
     cookie[PROFILE_COOKIE_NAME]['path'] = '/'
     cookie[PROFILE_COOKIE_NAME]['httponly'] = True
     cookie[PROFILE_COOKIE_NAME]['samesite'] = 'Lax'
-    if name == 'default':
-        cookie[PROFILE_COOKIE_NAME]['max-age'] = '0'
     return cookie[PROFILE_COOKIE_NAME].OutputString()
