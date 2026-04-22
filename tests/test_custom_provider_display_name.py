@@ -5,7 +5,22 @@ When a custom_providers entry carries a `name` field (e.g. "Agent37"), the
 web UI model picker should show that name as the group header rather than the
 generic "Custom" label.
 """
+import pytest
 import api.config as config
+
+
+@pytest.fixture(autouse=True)
+def _isolate_models_cache():
+    """Invalidate the models TTL cache before and after every test in this file."""
+    try:
+        config.invalidate_models_cache()
+    except Exception:
+        pass
+    yield
+    try:
+        config.invalidate_models_cache()
+    except Exception:
+        pass
 
 
 def _models_with_cfg(model_cfg=None, custom_providers=None, active_provider=None):

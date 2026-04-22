@@ -3,6 +3,20 @@ import pytest
 import api.config as _cfg
 
 
+@pytest.fixture(autouse=True)
+def _isolate_models_cache():
+    """Invalidate the models TTL cache before and after every test in this file."""
+    try:
+        _cfg.invalidate_models_cache()
+    except Exception:
+        pass
+    yield
+    try:
+        _cfg.invalidate_models_cache()
+    except Exception:
+        pass
+
+
 def _available_models_with_cfg(cfg_override):
     """Helper: temporarily patch config.cfg, call get_available_models(), restore."""
     old_cfg = dict(_cfg.cfg)

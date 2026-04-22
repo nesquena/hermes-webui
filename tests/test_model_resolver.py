@@ -3,6 +3,7 @@ Tests for resolve_model_provider() model routing logic.
 Verifies that model IDs are correctly resolved to (model, provider, base_url)
 tuples for different provider configurations.
 """
+import pytest
 import api.config as config
 
 
@@ -159,6 +160,30 @@ def test_custom_provider_model_with_slash_routes_to_named_custom_provider():
 
 
 # ── get_available_models() @provider: hint behaviour ──────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _isolate_models_cache():
+    """Invalidate the models TTL cache before and after every test in this file.
+
+    Several helpers here mutate ``config.cfg`` in-memory and call
+    ``get_available_models()``.  Without this guard, a prior test that called
+    ``get_available_models()`` leaves a 60-second TTL cache entry; the next
+    test that mutates cfg and calls the function gets a cache hit instead of
+    running the function body, causing silently wrong results (e.g. the
+    ``test_custom_endpoint_uses_model_config_api_key_for_model_discovery``
+    ``KeyError: 'auth'`` on CI where ``urlopen`` is never reached).
+    """
+    try:
+        config.invalidate_models_cache()
+    except Exception:
+        pass
+    yield
+    try:
+        config.invalidate_models_cache()
+    except Exception:
+        pass
+
 
 def _available_models_with_provider(provider):
     """Helper: temporarily set active_provider in config."""
