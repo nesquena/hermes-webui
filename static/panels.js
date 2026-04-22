@@ -1128,10 +1128,10 @@ let _settingsHermesDefaultModelOnOpen = '';
 let _settingsSection = 'conversation';
 
 function switchSettingsSection(name){
-  const section=(name==='appearance'||name==='preferences'||name==='system')?name:'conversation';
+  const section=(name==='appearance'||name==='preferences'||name==='providers'||name==='system')?name:'conversation';
   _settingsSection=section;
-  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',system:'System'};
-  ['conversation','appearance','preferences','system'].forEach(key=>{
+  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',system:'System'};
+  ['conversation','appearance','preferences','providers','system'].forEach(key=>{
     const tab=$('settingsTab'+map[key]);
     const pane=$('settingsPane'+map[key]);
     const active=key===section;
@@ -1141,6 +1141,8 @@ function switchSettingsSection(name){
     }
     if(pane) pane.classList.toggle('active',active);
   });
+  // Lazy-load providers when the tab is opened
+  if(section==='providers') loadProvidersPanel();
 }
 
 function _syncHermesPanelSessionActions(){
@@ -1348,9 +1350,154 @@ async function loadSettingsPanel(){
       _setSettingsAuthButtonsVisible(!!authStatus.auth_enabled);
     }catch(e){}
     _syncHermesPanelSessionActions();
+    loadProvidersPanel(); // load provider cards in background
     switchSettingsSection(_settingsSection);
   }catch(e){
     showToast(t('settings_load_failed')+e.message);
+  }
+}
+
+// ── Providers panel ───────────────────────────────────────────────────────
+
+const _providerCardEls = new Map(); // providerId → {card, statusDot, input, saveBtn, removeBtn}
+
+async function loadProvidersPanel(){
+  const list=$('providersList');
+  const empty=$('providersEmpty');
+  if(!list) return;
+  try{
+    const data=await api('/api/providers');
+    const providers=(data.providers||[]).filter(p=>p.configurable);
+    list.innerHTML='';
+    _providerCardEls.clear();
+    if(providers.length===0){
+      list.style.display='none';
+      if(empty) empty.style.display='';
+      return;
+    }
+    if(empty) empty.style.display='none';
+    list.style.display='';
+    for(const p of providers){
+      list.appendChild(_buildProviderCard(p));
+    }
+  }catch(e){
+    list.innerHTML='<div style="color:var(--error);padding:12px;font-size:13px">Failed to load providers: '+e.message+'</div>';
+  }
+}
+
+function _buildProviderCard(p){
+  const card=document.createElement('div');
+  card.className='provider-card';
+  card.dataset.provider=p.id;
+  const isOauth=p.key_source==='oauth';
+  const statusColor=p.has_key?'var(--ok, #4ade80)':'var(--muted)';
+  const statusTitle=p.has_key?'API key configured':'No API key';
+
+  // Header row
+  const header=document.createElement('div');
+  header.className='provider-card-header';
+  const info=document.createElement('div');
+  info.className='provider-card-info';
+  info.style.cssText='display:flex;align-items:center;gap:8px;';
+  const nameEl=document.createElement('span');
+  nameEl.className='provider-card-name';
+  nameEl.style.cssText='font-weight:600;font-size:13px;';
+  nameEl.textContent=p.display_name;
+  const dot=document.createElement('span');
+  dot.className='provider-card-dot';
+  dot.title=statusTitle;
+  dot.style.cssText='width:8px;height:8px;border-radius:50%;background:'+statusColor+';display:inline-block;flex-shrink:0';
+  const sourceEl=document.createElement('span');
+  sourceEl.className='provider-card-source';
+  sourceEl.style.cssText='font-size:11px;color:var(--muted)';
+  sourceEl.textContent=isOauth?'OAuth':(p.has_key?'API key':'Not configured');
+  info.appendChild(nameEl);
+  info.appendChild(dot);
+  info.appendChild(sourceEl);
+  header.appendChild(info);
+  card.appendChild(header);
+
+  if(isOauth){
+    const hint=document.createElement('div');
+    hint.style.cssText='font-size:11px;color:var(--muted);margin-top:4px;padding-left:2px';
+    hint.textContent='Authenticated via OAuth. No API key needed.';
+    card.appendChild(hint);
+  }else{
+    const actions=document.createElement('div');
+    actions.className='provider-card-actions';
+    actions.style.cssText='margin-top:6px;display:flex;gap:6px;align-items:center';
+    const input=document.createElement('input');
+    input.type='password';
+    input.placeholder=p.has_key?'Enter new key to replace…':'sk-...';
+    input.style.cssText='flex:1;padding:6px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;font-family:monospace';
+    input.autocomplete='off';
+    const saveBtn=document.createElement('button');
+    saveBtn.className='sm-btn provider-save-btn';
+    saveBtn.style.cssText='padding:5px 12px;font-size:12px;white-space:nowrap';
+    saveBtn.textContent='Save';
+    saveBtn.onclick=()=>_saveProviderKey(p.id);
+    actions.appendChild(input);
+    actions.appendChild(saveBtn);
+    if(p.has_key){
+      const removeBtn=document.createElement('button');
+      removeBtn.className='sm-btn';
+      removeBtn.style.cssText='padding:5px 10px;font-size:12px;color:var(--error);border-color:rgba(233,69,96,.25);white-space:nowrap';
+      removeBtn.textContent='Remove';
+      removeBtn.onclick=()=>_removeProviderKey(p.id);
+      actions.appendChild(removeBtn);
+    }
+    card.appendChild(actions);
+    _providerCardEls.set(p.id,{card,input,saveBtn,hasKey:p.has_key});
+    input.addEventListener('input',()=>{saveBtn.disabled=!input.value.trim();});
+    saveBtn.disabled=true;
+  }
+  return card;
+}
+
+async function _saveProviderKey(providerId){
+  const els=_providerCardEls.get(providerId);
+  if(!els) return;
+  const key=els.input.value.trim();
+  if(!key){
+    showToast('Please enter an API key');
+    return;
+  }
+  els.saveBtn.disabled=true;
+  els.saveBtn.textContent='Saving…';
+  try{
+    const res=await api('/api/providers',{method:'POST',body:JSON.stringify({provider:providerId,api_key:key})});
+    if(res.ok){
+      showToast(res.provider+' key '+res.action);
+      els.input.value='';
+      await loadProvidersPanel(); // refresh list
+    }else{
+      showToast(res.error||'Failed to save key');
+      els.saveBtn.disabled=false;
+      els.saveBtn.textContent='Save';
+    }
+  }catch(e){
+    showToast('Error: '+e.message);
+    els.saveBtn.disabled=false;
+    els.saveBtn.textContent='Save';
+  }
+}
+
+async function _removeProviderKey(providerId){
+  const els=_providerCardEls.get(providerId);
+  if(!els) return;
+  if(els.saveBtn){els.saveBtn.disabled=true;els.saveBtn.textContent='Removing…';}
+  try{
+    const res=await api('/api/providers/delete',{method:'POST',body:JSON.stringify({provider:providerId})});
+    if(res.ok){
+      showToast(res.provider+' key removed');
+      await loadProvidersPanel(); // refresh list
+    }else{
+      showToast(res.error||'Failed to remove key');
+      if(els.saveBtn){els.saveBtn.disabled=false;els.saveBtn.textContent='Save';}
+    }
+  }catch(e){
+    showToast('Error: '+e.message);
+    if(els.saveBtn){els.saveBtn.disabled=false;els.saveBtn.textContent='Save';}
   }
 }
 

@@ -1465,6 +1465,12 @@ body.resizing{user-select:none;cursor:col-resize;}
 .settings-panel .settings-btn{background:var(--accent);color:#fff;border:none;border-radius:6px;padding:8px 16px;cursor:pointer;font-weight:600;font-size:13px;}
 .settings-panel .settings-btn:hover{opacity:.9;}
 
+/* ── Provider cards (settings panel) ── */
+.provider-card{padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--code-bg);transition:border-color .15s;}
+.provider-card:hover{border-color:var(--border2);}
+.provider-card-name{font-weight:600;font-size:13px;}
+.provider-card .sm-btn:disabled{opacity:.4;cursor:not-allowed;}
+
 /* ── Session pin indicator (inline, only when pinned) ── */
 .session-pin-indicator{flex-shrink:0;color:#f5c542;line-height:1;display:flex;align-items:center;}
 .session-pin-indicator svg{width:10px;height:10px;}
