@@ -291,6 +291,7 @@ If discovery finds everything, nothing else is required.
 export HERMES_WEBUI_AGENT_DIR=/path/to/hermes-agent
 export HERMES_WEBUI_PYTHON=/path/to/python
 export HERMES_WEBUI_PORT=9000
+export HERMES_WEBUI_AUTO_INSTALL=1  # enable auto-install of agent deps (disabled by default)
 ./start.sh
 ```
 

@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.156] — 2026-04-22
+
+### Security
+- **⚠️ Breaking change — auto-install of agent dependencies is now opt-in** — users previously relying on auto-install must now set `HERMES_WEBUI_AUTO_INSTALL=1` to restore the previous behaviour. A new `_trusted_agent_dir()` check validates ownership and permission bits before allowing pip to run. (`api/startup.py`, `README.md`) (addresses #842 by @tomaioo)
+
 ## [v0.50.155] — 2026-04-22
 
 ### Fixed
