@@ -215,7 +215,7 @@
   .new-chat-btn{width:100%;padding:9px 12px;border-radius:9px;background:var(--accent-bg);border:1px solid var(--accent-bg-strong);color:var(--accent-text);font-size:13px;cursor:pointer;display:flex;align-items:center;gap:8px;transition:all .15s;margin-bottom:8px;font-weight:500;}
   .new-chat-btn:hover{background:var(--accent-bg-strong);border-color:var(--accent);}
   .session-list{flex:1;overflow-y:auto;padding:0 8px 8px;min-height:0;}
-  .session-search{padding:4px 10px 8px;flex-shrink:0;}
+  .session-search{padding:4px 12px 8px;flex-shrink:0;}
   .session-search input{width:100%;background:var(--input-bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:10px 12px;font-size:12px;outline:none;transition:all .15s;}
   .session-search input:focus{border-color:var(--accent);background:var(--hover-bg);box-shadow:0 0 0 2px var(--accent-bg);}
   .session-search input::placeholder{color:var(--muted);opacity:.7;}
