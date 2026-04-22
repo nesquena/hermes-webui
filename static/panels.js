@@ -817,17 +817,20 @@ async function loadWorkspacesPanel(){
 function renderWorkspacesPanel(workspaces){
   const panel=$('workspacesPanel');
   panel.innerHTML='';
+  const activePath = S.session ? S.session.workspace : '';
   for(const w of workspaces){
-    const row=document.createElement('div');row.className='ws-row';
+    const row=document.createElement('div');
+    row.className='ws-row';
+    row.dataset.path = w.path;
+    const isActive = w.path === activePath;
+    const activeBadge = isActive ? `<span class="detail-badge active" style="margin-left:6px;font-size:9px;padding:1px 6px">${esc(t('profile_active'))}</span>` : '';
     row.innerHTML=`
       <div class="ws-row-info">
-        <div class="ws-row-name">${esc(w.name)}</div>
+        <div class="ws-row-name">${esc(w.name)}${activeBadge}</div>
         <div class="ws-row-path">${esc(w.path)}</div>
-      </div>
-      <div class="ws-row-actions">
-        <button class="ws-action-btn" title="${esc(t('workspace_use_title'))}" onclick="switchToWorkspace('${esc(w.path)}','${esc(w.name)}')">${li('arrow-right',12)} ${esc(t('workspace_use'))}</button>
-        <button class="ws-action-btn danger" title="${esc(t('remove'))}" onclick="removeWorkspace('${esc(w.path)}')">${li('x',12)}</button>
       </div>`;
+    row.onclick = () => openWorkspaceDetail(w.path, row);
+    if (_currentWorkspaceDetail && _currentWorkspaceDetail.path === w.path) row.classList.add('active');
     panel.appendChild(row);
   }
   const addRow=document.createElement('div');addRow.className='ws-add-row';
@@ -839,6 +842,86 @@ function renderWorkspacesPanel(workspaces){
   hint.style.cssText='font-size:11px;color:var(--muted);padding:4px 0 8px';
   hint.textContent=t('workspace_paths_validated_hint');
   panel.appendChild(hint);
+  // Re-render detail if we have one cached
+  if (_currentWorkspaceDetail) {
+    const refreshed = workspaces.find(w => w.path === _currentWorkspaceDetail.path);
+    if (refreshed) _renderWorkspaceDetail(refreshed);
+  }
+}
+
+function _renderWorkspaceDetail(ws){
+  _currentWorkspaceDetail = ws;
+  const title = $('workspaceDetailTitle');
+  const body = $('workspaceDetailBody');
+  const empty = $('workspaceDetailEmpty');
+  if (!title || !body) return;
+  title.textContent = ws.name || ws.path;
+  const activePath = S.session ? S.session.workspace : '';
+  const isActive = ws.path === activePath;
+  const isDefault = !!ws.is_default;
+  const statusBadge = isActive
+    ? `<span class="detail-badge active">${esc(t('profile_active'))}</span>`
+    : `<span class="detail-badge">Inactive</span>`;
+  const defaultBadge = isDefault ? ` <span class="detail-badge">${esc(t('profile_default_label'))}</span>` : '';
+  body.innerHTML = `
+    <div class="main-view-content">
+      <div class="detail-card">
+        <div class="detail-card-title">Space</div>
+        <div class="detail-row"><div class="detail-row-label">Name</div><div class="detail-row-value">${esc(ws.name || '')}</div></div>
+        <div class="detail-row"><div class="detail-row-label">Path</div><div class="detail-row-value"><code>${esc(ws.path)}</code></div></div>
+        <div class="detail-row"><div class="detail-row-label">Status</div><div class="detail-row-value">${statusBadge}${defaultBadge}</div></div>
+      </div>
+    </div>`;
+  body.style.display = '';
+  if (empty) empty.style.display = 'none';
+  const actBtn = $('btnActivateWorkspaceDetail');
+  const delBtn = $('btnDeleteWorkspaceDetail');
+  if (actBtn) actBtn.style.display = isActive ? 'none' : '';
+  if (delBtn) delBtn.style.display = isDefault ? 'none' : '';
+}
+
+function openWorkspaceDetail(path, el){
+  if (!_workspaceList) return;
+  const ws = _workspaceList.find(w => w.path === path);
+  if (!ws) return;
+  document.querySelectorAll('.ws-row').forEach(e => e.classList.remove('active'));
+  const target = el || document.querySelector(`.ws-row[data-path="${CSS.escape(path)}"]`);
+  if (target) target.classList.add('active');
+  _renderWorkspaceDetail(ws);
+}
+
+function _clearWorkspaceDetail(){
+  _currentWorkspaceDetail = null;
+  const title = $('workspaceDetailTitle');
+  const body = $('workspaceDetailBody');
+  const empty = $('workspaceDetailEmpty');
+  if (title) title.textContent = '';
+  if (body) { body.innerHTML = ''; body.style.display = 'none'; }
+  if (empty) empty.style.display = '';
+  ['btnActivateWorkspaceDetail','btnDeleteWorkspaceDetail'].forEach(id => {
+    const b = $(id); if (b) b.style.display = 'none';
+  });
+}
+
+async function activateCurrentWorkspace(){
+  if (!_currentWorkspaceDetail) return;
+  await switchToWorkspace(_currentWorkspaceDetail.path, _currentWorkspaceDetail.name);
+  // Re-render detail after activation so the active badge updates
+  _renderWorkspaceDetail(_currentWorkspaceDetail);
+}
+
+async function deleteCurrentWorkspace(){
+  if (!_currentWorkspaceDetail) return;
+  const path = _currentWorkspaceDetail.path;
+  const _ok = await showConfirmDialog({title:t('workspace_remove_confirm_title'),message:t('workspace_remove_confirm_message',path),confirmLabel:t('remove'),danger:true,focusCancel:true});
+  if(!_ok) return;
+  try{
+    const data=await api('/api/workspaces/remove',{method:'POST',body:JSON.stringify({path})});
+    _workspaceList=data.workspaces;
+    _clearWorkspaceDetail();
+    renderWorkspacesPanel(data.workspaces);
+    showToast(t('workspace_removed'));
+  }catch(e){setStatus(t('remove_failed')+e.message);}
 }
 
 async function addWorkspace(){
@@ -851,6 +934,9 @@ async function addWorkspace(){
     renderWorkspacesPanel(data.workspaces);
     if(input)input.value='';
     showToast(t('workspace_added'));
+    // Auto-select the newly added workspace in the main detail
+    const added = _workspaceList.find(w => w.path === path) || _workspaceList[_workspaceList.length - 1];
+    if (added) openWorkspaceDetail(added.path);
   }catch(e){setStatus(t('add_failed')+e.message);}
 }
 
