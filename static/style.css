@@ -1432,7 +1432,9 @@ main.main.showing-settings #mainSettings{display:flex;}
 
 /* Sidebar menu (lives in the left sidebar under the cog panel) */
 .panel-view#panelSettings{gap:0;padding:0;}
-.settings-menu-head{padding:10px 12px;border-bottom:1px solid var(--border);font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;}
+.panel-head{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:40px;padding:8px 12px;border-bottom:1px solid var(--border);font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;flex-shrink:0;}
+.panel-head-actions{display:flex;align-items:center;gap:4px;text-transform:none;letter-spacing:normal;}
+.panel-head-sub{padding:6px 12px 8px;font-size:11px;color:var(--muted);flex-shrink:0;}
 .settings-menu{display:flex;flex-direction:column;gap:2px;padding:8px;overflow-y:auto;}
 .settings-menu-item{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;border:none;background:transparent;color:var(--text);cursor:pointer;text-align:left;font-size:13px;font-weight:500;transition:background .15s,color .15s;width:100%;}
 .settings-menu-item:hover{background:var(--surface);}
