@@ -424,60 +424,124 @@ function filterSkills() {
   if (_skillsData) renderSkills(_skillsData);
 }
 
-async function openSkill(name, el) {
-  // Highlight active skill
-  document.querySelectorAll('.skill-item').forEach(e => e.classList.remove('active'));
-  if (el) el.classList.add('active');
-  // Ensure the workspace panel is open so the skill content is actually visible (#643)
-  if (typeof ensureWorkspacePreviewVisible === 'function') ensureWorkspacePreviewVisible();
-  try {
-    const data = await api(`/api/skills/content?name=${encodeURIComponent(name)}`);
-    // Show skill content in right panel preview
-    $('previewPathText').textContent = name + '.md';
-    $('previewBadge').textContent = 'skill';
-    $('previewBadge').className = 'preview-badge md';
-    showPreview('md');
-    let html = renderMd(data.content || '(no content)');
-    // Render linked files section if present
-    const lf = data.linked_files || {};
-    const categories = Object.entries(lf).filter(([,files]) => files && files.length > 0);
-    if (categories.length) {
-      html += `<div class="skill-linked-files"><div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">${esc(t('linked_files'))}</div>`;
-      for (const [cat, files] of categories) {
-        html += `<div class="skill-linked-section"><h4>${esc(cat)}</h4>`;
-        for (const f of files) {
-          html += `<a class="skill-linked-file" href="#" data-skill-name="${esc(name)}" data-skill-file="${esc(f)}">${esc(f)}</a>`;
-        }
-        html += '</div>';
+// Currently selected skill detail — kept across panel switches so re-entering
+// the Skills view shows the last-viewed skill.
+let _currentSkillDetail = null; // { name, category, content }
+
+function _renderSkillDetail(name, content, linkedFiles) {
+  const title = $('skillDetailTitle');
+  const body = $('skillDetailBody');
+  const empty = $('skillDetailEmpty');
+  const editBtn = $('btnEditSkillDetail');
+  const delBtn = $('btnDeleteSkillDetail');
+  if (title) title.textContent = name;
+  let html = renderMd(content || '(no content)');
+  const lf = linkedFiles || {};
+  const categories = Object.entries(lf).filter(([,files]) => files && files.length > 0);
+  if (categories.length) {
+    html += `<div class="skill-linked-files"><div style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px">${esc(t('linked_files'))}</div>`;
+    for (const [cat, files] of categories) {
+      html += `<div class="skill-linked-section"><h4>${esc(cat)}</h4>`;
+      for (const f of files) {
+        html += `<a class="skill-linked-file" href="#" data-skill-name="${esc(name)}" data-skill-file="${esc(f)}">${esc(f)}</a>`;
       }
       html += '</div>';
     }
-    $('previewMd').innerHTML = html;
-    // Wire linked-file clicks via data attributes (avoids inline JS XSS with apostrophes)
-    $('previewMd').querySelectorAll('.skill-linked-file').forEach(a=>{
-      a.addEventListener('click',e=>{e.preventDefault();openSkillFile(a.dataset.skillName,a.dataset.skillFile);});
-    });
-    $('previewArea').classList.add('visible');
-    $('fileTree').style.display = 'none';
+    html += '</div>';
+  }
+  body.innerHTML = `<div class="main-view-content skill-detail-content">${html}</div>`;
+  body.querySelectorAll('.skill-linked-file').forEach(a => {
+    a.addEventListener('click', e => { e.preventDefault(); openSkillFile(a.dataset.skillName, a.dataset.skillFile); });
+  });
+  body.style.display = '';
+  if (empty) empty.style.display = 'none';
+  if (editBtn) editBtn.style.display = '';
+  if (delBtn) delBtn.style.display = '';
+}
+
+async function openSkill(name, el) {
+  // Highlight active skill in the sidebar list
+  document.querySelectorAll('.skill-item').forEach(e => e.classList.remove('active'));
+  if (el) el.classList.add('active');
+  try {
+    const data = await api(`/api/skills/content?name=${encodeURIComponent(name)}`);
+    _currentSkillDetail = { name, content: data.content || '', linked_files: data.linked_files || {} };
+    _renderSkillDetail(name, data.content || '', data.linked_files || {});
   } catch(e) { setStatus(t('skill_load_failed') + e.message); }
 }
 
 async function openSkillFile(skillName, filePath) {
   try {
     const data = await api(`/api/skills/content?name=${encodeURIComponent(skillName)}&file=${encodeURIComponent(filePath)}`);
-    $('previewPathText').textContent = skillName + ' / ' + filePath;
-    $('previewBadge').textContent = filePath.split('.').pop() || 'file';
-    $('previewBadge').className = 'preview-badge code';
-    const ext = filePath.split('.').pop() || '';
-    if (['md','markdown'].includes(ext)) {
-      showPreview('md');
-      $('previewMd').innerHTML = renderMd(data.content || '');
+    const body = $('skillDetailBody');
+    if (!body) return;
+    const ext = (filePath.split('.').pop() || '').toLowerCase();
+    const isMd = ['md','markdown'].includes(ext);
+    const backLabel = t('skills_back_to').replace('{0}', skillName);
+    const header = `<div class="skill-file-breadcrumb"><a href="#" class="skill-file-back" data-skill-name="${esc(skillName)}">&larr; ${esc(backLabel)}</a><span class="skill-file-path">${esc(filePath)}</span></div>`;
+    let content;
+    if (isMd) {
+      content = `<div class="main-view-content">${renderMd(data.content || '')}</div>`;
     } else {
-      showPreview('code');
-      $('previewCode').textContent = data.content || '';
-      requestAnimationFrame(() => highlightCode());
+      const escaped = esc(data.content || '');
+      content = `<pre class="skill-file-code"><code>${escaped}</code></pre>`;
     }
+    body.innerHTML = header + content;
+    body.style.display = '';
+    const empty = $('skillDetailEmpty');
+    if (empty) empty.style.display = 'none';
+    body.querySelectorAll('.skill-file-back').forEach(a => {
+      a.addEventListener('click', e => {
+        e.preventDefault();
+        if (_currentSkillDetail && _currentSkillDetail.name === a.dataset.skillName) {
+          _renderSkillDetail(_currentSkillDetail.name, _currentSkillDetail.content, _currentSkillDetail.linked_files);
+        } else {
+          openSkill(a.dataset.skillName, null);
+        }
+      });
+    });
+    if (!isMd) requestAnimationFrame(() => { if (typeof highlightCode === 'function') highlightCode(); });
   } catch(e) { setStatus(t('skill_file_load_failed') + e.message); }
+}
+
+// Edit current skill in the main detail view — delegates to the existing
+// sidebar inline form (#skillCreateForm). A future phase will move editing
+// fully into #mainSkills.
+function editCurrentSkill() {
+  if (!_currentSkillDetail) return;
+  const s = _currentSkillDetail;
+  // Try to find category from the cached list
+  let category = '';
+  if (_skillsData) {
+    const match = _skillsData.find(x => x.name === s.name);
+    if (match) category = match.category || '';
+  }
+  toggleSkillForm(s.name, category, s.content);
+}
+
+async function deleteCurrentSkill() {
+  if (!_currentSkillDetail) return;
+  const name = _currentSkillDetail.name;
+  if (!confirm(t('skill_delete_confirm') ? t('skill_delete_confirm').replace('{0}', name) : `Delete skill "${name}"?`)) return;
+  try {
+    await api('/api/skills/delete', { method:'POST', body: JSON.stringify({ name }) });
+    _currentSkillDetail = null;
+    _skillsData = null;
+    _cronSkillsCache = null;
+    // Reset detail view to empty state
+    const body = $('skillDetailBody');
+    const empty = $('skillDetailEmpty');
+    const title = $('skillDetailTitle');
+    const editBtn = $('btnEditSkillDetail');
+    const delBtn = $('btnDeleteSkillDetail');
+    if (body) { body.innerHTML = ''; body.style.display = 'none'; }
+    if (empty) empty.style.display = '';
+    if (title) title.textContent = '';
+    if (editBtn) editBtn.style.display = 'none';
+    if (delBtn) delBtn.style.display = 'none';
+    await loadSkills();
+    showToast(t('skill_deleted') || 'Skill deleted');
+  } catch(e) { setStatus(t('error_prefix') + e.message); }
 }
 
 // ── Skill create/edit form ──
