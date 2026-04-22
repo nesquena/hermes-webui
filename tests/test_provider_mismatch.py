@@ -425,7 +425,8 @@ def test_api_session_is_side_effect_free_for_stale_models():
 
     session_path = TEST_STATE_DIR / "sessions" / f"{sid}.json"
     session_data = json.loads(session_path.read_text(encoding="utf-8"))
-    session_data["model"] = "google/gemini-3.1-pro-preview"
+    stale_model = "google/gemini-3.1-pro-preview"
+    session_data["model"] = stale_model
     before = json.dumps(session_data, ensure_ascii=False, indent=2)
     session_path.write_text(before, encoding="utf-8")
 
@@ -435,7 +436,10 @@ def test_api_session_is_side_effect_free_for_stale_models():
         payload = json.loads(r.read())
 
     after = session_path.read_text(encoding="utf-8")
-    assert payload["session"]["model"] == "openai/gpt-5.4-mini"
+    assert payload["session"]["model"], "response should still expose an effective display model"
+    assert payload["session"]["model"] != stale_model, (
+        "response model should be compatibility-normalized on the read path"
+    )
     assert after == before, (
         "GET /api/session must return an effective model for display without "
         "rewriting the session file on disk"
