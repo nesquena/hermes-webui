@@ -476,7 +476,7 @@ function _fmtOllamaLabel(mid){
     const tokens = s.replace(/[-_]/g, ' ').split(' ');
     return tokens.map(t => {
       const alphaOnly = t.replace(/\./g, '');
-      if (alphaOnly.length <= 3 && /^[a-zA-Z]+$/.test(alphaOnly)) return alphaOnly.toUpperCase();
+      if (t.length <= 3 && /^[a-zA-Z.]+$/.test(t)) return t.toUpperCase();
       if (/^\d/.test(alphaOnly)) return t.toUpperCase();
       return t.charAt(0).toUpperCase() + t.slice(1);
     }).join(' ');

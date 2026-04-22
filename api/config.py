@@ -1142,6 +1142,7 @@ def get_available_models() -> dict:
                 _AMBIENT_SRC = {"gh_cli", "gh auth token"}
                 for _pid in list(_pool.keys()):
                     try:
+                        _canonical_pid = _resolve_provider_alias(str(_pid))
                         _all_entries = _load_pool(_pid).entries()
                         # load_pool() does NOT suppress ambient gh-cli tokens —
                         # filter them here so Copilot doesn't reappear just because
@@ -1150,9 +1151,10 @@ def get_available_models() -> dict:
                             e for e in _all_entries
                             if str(getattr(e, "source", "") or "").strip().lower() not in _AMBIENT_SRC
                             and str(getattr(e, "label", "") or "").strip().lower() != "gh auth token"
+                            and str(getattr(e, "key_source", "") or "").strip().lower() != "gh auth token"
                         ]
                         if _explicit:
-                            detected_providers.add(str(_pid))
+                            detected_providers.add(_canonical_pid)
                     except Exception:
                         logger.debug("credential_pool.load_pool(%s) failed", _pid)
             except ImportError:

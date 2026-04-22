@@ -41,6 +41,7 @@ def _install_fake_hermes_cli(monkeypatch, *, with_load_pool: bool = False, pool_
             def __init__(self, d):
                 self.source = d.get("source", "manual")
                 self.label = d.get("label", "")
+                self.key_source = d.get("key_source", "")
                 self.id = d.get("id", "")
 
         class _FakePool:
@@ -249,6 +250,59 @@ def test_load_pool_copilot_ambient_only_remains_hidden(monkeypatch, tmp_path):
         "GitHub Copilot must be hidden when load_pool returns no usable entries; "
         f"got {list(groups)}"
     )
+
+
+def test_load_pool_copilot_ambient_key_source_only_remains_hidden(monkeypatch, tmp_path):
+    """load_pool path: key_source-only ambient markers must also be suppressed."""
+    auth_payload = {
+        "version": 1,
+        "providers": {},
+        "active_provider": "openai-codex",
+        "credential_pool": {
+            "copilot": [
+                {
+                    "id": "lp001b",
+                    "label": "copilot-token",
+                    "source": "manual",
+                    "key_source": "gh auth token",
+                    "auth_type": "api_key",
+                    "base_url": "https://api.githubcopilot.com",
+                }
+            ]
+        },
+    }
+
+    result = _call_get_available_models(monkeypatch, tmp_path, auth_payload, with_load_pool=True)
+    groups = _group_by_provider(result)
+    assert "GitHub Copilot" not in groups, (
+        "GitHub Copilot must stay hidden when load_pool entries only differ by key_source ambient markers; "
+        f"got {list(groups)}"
+    )
+
+
+def test_load_pool_alias_provider_key_is_resolved(monkeypatch, tmp_path):
+    """load_pool path: aliased pool keys should resolve to canonical provider ids."""
+    auth_payload = {
+        "version": 1,
+        "providers": {},
+        "active_provider": "openai-codex",
+        "credential_pool": {
+            "google": [
+                {
+                    "id": "gp001",
+                    "label": "explicit-gemini",
+                    "source": "manual",
+                    "auth_type": "api_key",
+                    "base_url": "https://generativelanguage.googleapis.com",
+                }
+            ]
+        },
+    }
+
+    result = _call_get_available_models(monkeypatch, tmp_path, auth_payload, with_load_pool=True)
+    groups = _group_by_provider(result)
+    assert "Gemini" in groups, f"Expected Gemini in {list(groups)}"
+    assert "Google" not in groups, f"Aliased provider key should not render under raw alias name: {list(groups)}"
 
 
 def test_load_pool_explicit_credential_shows_provider(monkeypatch, tmp_path):
