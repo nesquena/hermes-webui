@@ -333,6 +333,27 @@ class TestIssue765FollowupHardening:
             "Checkpoint stop/join must happen before the success-path session mutation block"
         )
 
+    def test_silent_failure_path_does_not_reacquire_agent_lock(self):
+        """Silent-failure path must not nest `_agent_lock` inside the success lock.
+
+        Reacquiring the same per-session lock inside the post-run_conversation block
+        deadlocks because `_get_session_agent_lock()` returns a non-reentrant Lock.
+        """
+        src = (Path(__file__).parent.parent / "api" / "streaming.py").read_text(
+            encoding="utf-8"
+        )
+        outer_lock_idx = src.find("with _agent_lock:\n                s.messages = _restore_reasoning_metadata(")
+        silent_failure_idx = src.find("if not _assistant_added and not _token_sent:")
+        inner_lock_idx = src.find("with _agent_lock:", outer_lock_idx + 1)
+        compression_idx = src.find("# ── Handle context compression side effects ──")
+
+        assert outer_lock_idx != -1, "Outer success-path _agent_lock block not found"
+        assert silent_failure_idx != -1, "Silent-failure branch not found"
+        assert compression_idx != -1, "Compression marker not found"
+        assert not (
+            inner_lock_idx != -1 and silent_failure_idx < inner_lock_idx < compression_idx
+        ), "Silent-failure path must not reacquire _agent_lock inside the outer lock"
+
     def test_checkpoint_stop_initialised_before_any_raiseable_code(self):
         """Static check: `_checkpoint_stop = None` must appear before any code
         that could raise inside _run_agent_streaming's outer try."""
@@ -345,7 +366,7 @@ class TestIssue765FollowupHardening:
             if ln.rstrip().endswith("try:")
             and any(
                 lines[j].strip().startswith("_checkpoint_stop = None")
-                for j in range(max(0, i - 3), i - 1)
+                for j in range(max(0, i - 4), i - 1)
             )
         )
         # The assignment must precede the `try:` — not sit inside the nested

@@ -827,6 +827,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
     # exception fires before the checkpoint thread is created (Issue #765).
     _checkpoint_stop = None
     _ckpt_thread = None
+    _agent_lock = None
     try:
         s = get_session(session_id)
         s.workspace = str(Path(workspace).expanduser().resolve())
@@ -1324,28 +1325,23 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                     })
                     # Clear stream/pending state so the session does not appear
                     # "agent_running" on reload after a silent failure.
-                    if _checkpoint_stop is not None:
-                        _checkpoint_stop.set()
-                    if _ckpt_thread is not None:
-                        _ckpt_thread.join(timeout=15)
                     # Persist the error so it survives page reload.
                     # _error=True ensures _sanitize_messages_for_api excludes it from
                     # subsequent API calls so the LLM never sees its own error as prior context.
-                    with _agent_lock:
-                        s.active_stream_id = None
-                        s.pending_user_message = None
-                        s.pending_attachments = []
-                        s.pending_started_at = None
-                        s.messages.append({
-                            'role': 'assistant',
-                            'content': f'**{_err_label}:** {_err_str or _err_label}\n\n*{_err_hint}*',
-                            'timestamp': int(time.time()),
-                            '_error': True,
-                        })
-                        try:
-                            s.save()
-                        except Exception:
-                            pass
+                    s.active_stream_id = None
+                    s.pending_user_message = None
+                    s.pending_attachments = []
+                    s.pending_started_at = None
+                    s.messages.append({
+                        'role': 'assistant',
+                        'content': f'**{_err_label}:** {_err_str or _err_label}\n\n*{_err_hint}*',
+                        'timestamp': int(time.time()),
+                        '_error': True,
+                    })
+                    try:
+                        s.save()
+                    except Exception:
+                        pass
                     return  # apperror already closes the stream on the client side
     
                 # ── Handle context compression side effects ──
