@@ -9,9 +9,14 @@ async function switchPanel(name) {
   document.querySelectorAll('.panel-view').forEach(p => p.classList.remove('active'));
   const panelEl = $('panel' + name.charAt(0).toUpperCase() + name.slice(1));
   if (panelEl) panelEl.classList.add('active');
-  // Toggle main content view: chat vs settings
+  // Toggle main content view. Each entry in MAIN_VIEW_PANELS gets a matching
+  // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
-  if (mainEl) mainEl.classList.toggle('showing-settings', name === 'settings');
+  if (mainEl) {
+    ['settings','skills','tasks','workspaces','profiles'].forEach(p => {
+      mainEl.classList.toggle('showing-' + p, name === p);
+    });
+  }
   // Lazy-load panel data
   if (name === 'tasks') await loadCrons();
   if (name === 'skills') await loadSkills();

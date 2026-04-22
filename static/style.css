@@ -1422,11 +1422,26 @@ body.resizing{user-select:none;cursor:col-resize;}
    outer --border; resolves cleanly in both light+dark via color-mix. */
 :root{--border-subtle:color-mix(in srgb, var(--border) 60%, transparent);}
 :root.dark{--border-subtle:color-mix(in srgb, var(--border) 60%, transparent);}
-#mainSettings{flex:1;overflow-y:auto;min-height:0;display:none;flex-direction:column;background:var(--bg);}
-main.main.showing-settings .topbar,
-main.main.showing-settings .messages,
-main.main.showing-settings .composer-wrap{display:none;}
-main.main.showing-settings #mainSettings{display:flex;}
+/* ── Generalized main-view switching ──
+   <main class="main"> holds multiple sibling #main* containers (one per view).
+   Exactly one is visible at a time; chat is the default when no showing-*
+   class is set. Adding a new view needs: a #main<Name> sibling with
+   class="main-view", inclusion in the hidden-by-default list, and a
+   main.main.showing-<name> > #main<Name> { display:flex } rule. */
+.main-view{flex:1;min-height:0;min-width:0;display:flex;flex-direction:column;background:var(--bg);}
+main.main > #mainChat,
+main.main > #mainSettings,
+main.main > #mainSkills,
+main.main > #mainTasks,
+main.main > #mainWorkspaces,
+main.main > #mainProfiles{display:none;}
+main.main:not(.showing-settings):not(.showing-skills):not(.showing-tasks):not(.showing-workspaces):not(.showing-profiles) > #mainChat{display:flex;}
+main.main.showing-settings > #mainSettings{display:flex;overflow-y:auto;}
+main.main.showing-skills > #mainSkills{display:flex;}
+main.main.showing-tasks > #mainTasks{display:flex;}
+main.main.showing-workspaces > #mainWorkspaces{display:flex;}
+main.main.showing-profiles > #mainProfiles{display:flex;}
+#mainSettings{overflow-y:auto;}
 
 /* Sidebar menu (lives in the left sidebar under the cog panel) */
 .panel-view#panelSettings{gap:0;padding:0;}
