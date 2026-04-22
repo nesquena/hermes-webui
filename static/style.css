@@ -1895,3 +1895,36 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
   .msg-row[data-role="user"] .msg-body { padding: 8px 12px; }
   .msg-row[data-error="1"] .msg-body { padding: 8px 12px; }
 }
+
+/* ── Shared main-view tokens (used by #mainSkills, #mainTasks, #mainWorkspaces, #mainProfiles) ── */
+.main-view-header{
+  display:flex;align-items:center;justify-content:space-between;gap:16px;
+  padding:18px 32px 14px;border-bottom:1px solid var(--border);
+  flex-shrink:0;background:var(--bg);
+}
+.main-view-title{font-size:18px;font-weight:600;letter-spacing:-.01em;color:var(--text);line-height:1.3;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.main-view-actions{display:flex;align-items:center;gap:4px;flex-shrink:0;}
+.main-view-body{flex:1;min-height:0;overflow-y:auto;padding:24px 32px;}
+.main-view-content{max-width:960px;margin:0 auto;width:100%;}
+.main-view-empty{
+  flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:12px;padding:40px 24px;color:var(--muted);text-align:center;
+}
+.main-view-empty-icon{color:var(--muted);opacity:.35;}
+.main-view-empty-title{font-size:18px;font-weight:600;color:var(--text);margin-top:4px;}
+.main-view-empty-sub{font-size:13px;color:var(--muted);line-height:1.55;max-width:420px;}
+
+/* Hide header title/actions entirely when empty state is active */
+main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-header:has(.main-view-title:empty){display:none;}
+
+/* Skill-file breadcrumb (shown when clicking a linked file) */
+.skill-file-breadcrumb{display:flex;align-items:center;gap:12px;margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid var(--border-subtle,var(--border));}
+.skill-file-back{font-size:12px;color:var(--accent-text);text-decoration:none;font-weight:500;}
+.skill-file-back:hover{text-decoration:underline;}
+.skill-file-path{font-size:12px;color:var(--muted);font-family:'SF Mono',ui-monospace,monospace;}
+.skill-file-code{background:var(--sidebar);border:1px solid var(--border);border-radius:8px;padding:12px 14px;font-size:12px;overflow:auto;max-width:960px;margin:0 auto;}
+
+@media(max-width:700px){
+  .main-view-header{padding:14px 16px 12px;}
+  .main-view-body{padding:16px;}
+}
