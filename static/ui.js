@@ -717,7 +717,10 @@ function renderMd(raw){
         const base=document.baseURI.replace(/\/$/,'');
         src=src.replace(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i,base);
       }
-      if(_IMAGE_EXTS.test(src.split('?')[0])){
+      // MEDIA: tokens are only emitted for tool-generated images (image_generate etc.).
+      // Render all https:// URLs as <img> — extension check would miss extensionless
+      // CDN paths like fal.media content-addressed URLs (closes #853).
+      if(_IMAGE_EXTS.test(src.split('?')[0]) || /^https?:\/\//i.test(src)){
         return `<img class="msg-media-img" src="${esc(src)}" alt="image" loading="lazy" onclick="this.classList.toggle('msg-media-img--full')">`;
       }
       return `<a href="${esc(src)}" target="_blank" rel="noopener">${esc(src)}</a>`;

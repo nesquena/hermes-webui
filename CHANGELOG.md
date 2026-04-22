@@ -1,5 +1,11 @@
 # Hermes Web UI -- Changelog
 
+## [VERSION] — 2026-04-22
+
+### Fixed
+- **Image generation renders inline** — `MEDIA:` token restore renders all `https://` URLs as `<img>`. (closes #853)
+- **Auto-title strips thinking preambles** — `_strip_thinking_markup()` strips Qwen3-style plain-text reasoning preambles. (closes #857)
+
 ## [v0.50.151] — 2026-04-22
 
 ### Added
