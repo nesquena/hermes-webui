@@ -16,17 +16,33 @@ async function send(){
     }
     return;
   }
-  // Slash command intercept -- local commands handled without agent round-trip
+  // Slash command intercept -- local commands handled without agent round-trip.
+  // We push the user message BEFORE running the handler for echo-worthy
+  // commands so chat order is correct: some handlers (e.g. cmdHelp) push
+  // their assistant response synchronously.  If we pushed AFTER, S.messages
+  // would be [assistant, user] and the chat would show the response above
+  // the user's own input — reverse chronological order (#840 ordering bug).
   if(text.startsWith('/')&&!S.pendingFiles.length){
-    const cmdResult=executeCommand(text);
-    if(cmdResult){
-      // Echo the slash command as a user message unless the command is action-only (#840).
-      if(!cmdResult.noEcho){
+    const _parsedCmd=parseCommand(text);
+    const _cmd=_parsedCmd?COMMANDS.find(c=>c.name===_parsedCmd.name):null;
+    if(_cmd){
+      let _pushedUser=false;
+      if(!_cmd.noEcho){
         if(!S.session){await newSession();await renderSessionList();}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+        _pushedUser=true;
         renderMessages();
       }
-      $('msg').value='';autoResize();hideCmdDropdown();return;
+      // Run the handler directly (we already looked it up).  If it returns
+      // false it's opting out — e.g. /reasoning <level> falls through so the
+      // agent sees the raw text.  Roll back the echo push in that case so
+      // the normal send path doesn't duplicate it.
+      if(_cmd.fn(_parsedCmd.args)===false){
+        if(_pushedUser){S.messages.pop();renderMessages();}
+        // Fall through to normal send path
+      } else {
+        $('msg').value='';autoResize();hideCmdDropdown();return;
+      }
     }
   }
   if(!S.session){await newSession();await renderSessionList();}

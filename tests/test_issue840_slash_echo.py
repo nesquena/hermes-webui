@@ -111,25 +111,52 @@ class TestSendSlashIntercept:
 
     def test_send_checks_noecho_flag(self):
         src = _read("static/messages.js")
-        assert "cmdResult.noEcho" in src, (
-            "send() must check cmdResult.noEcho before pushing user message (#840)"
+        idx = src.find("Slash command intercept")
+        block = src[idx:idx + 1400]
+        assert "_cmd.noEcho" in block or "cmd.noEcho" in block, (
+            "send() must check the command's noEcho flag before pushing user message (#840)"
         )
 
     def test_send_pushes_user_message_for_echo_commands(self):
         src = _read("static/messages.js")
-        # User bubble push must happen inside the slash intercept path
         idx = src.find("Slash command intercept")
-        block = src[idx:idx + 600]
+        block = src[idx:idx + 1400]
         assert "role:'user'" in block and "content:text" in block, (
             "send() must push {role:'user', content:text} for echo-worthy slash commands (#840)"
         )
 
-    def test_send_uses_null_check_not_truthy(self):
-        """executeCommand now returns null (not false) on no match — send() must handle this."""
+    def test_send_pushes_user_message_before_running_handler(self):
+        """Ordering fix: cmdHelp-style handlers push their assistant response
+        synchronously.  The user message must be pushed BEFORE the handler
+        runs so S.messages ends up [user, assistant] — not [assistant, user]
+        which would display in reverse chronological order."""
         src = _read("static/messages.js")
         idx = src.find("Slash command intercept")
-        block = src[idx:idx + 200]
-        # The check should be `if(cmdResult){` not `if(executeCommand(text)){`
-        assert "cmdResult" in block, (
-            "send() must store executeCommand result in a variable and check it"
+        block = src[idx:idx + 1400]
+        user_push_pos = block.find("role:'user'")
+        handler_call_pos = block.find("_cmd.fn(")
+        if handler_call_pos == -1:
+            handler_call_pos = block.find("cmd.fn(")
+        assert user_push_pos != -1, "user message push not found in intercept block"
+        assert handler_call_pos != -1, "handler invocation not found in intercept block"
+        assert user_push_pos < handler_call_pos, (
+            "User message must be pushed BEFORE the handler runs — otherwise "
+            "sync handlers like cmdHelp push the assistant response first and "
+            "the chat displays in reverse chronological order."
+        )
+
+    def test_send_rolls_back_user_push_on_handler_optout(self):
+        """If a handler returns false (opt-out — e.g. /reasoning <level>),
+        the pre-pushed user message must be popped so the normal send path
+        can add it cleanly for forwarding to the agent."""
+        src = _read("static/messages.js")
+        idx = src.find("Slash command intercept")
+        block = src[idx:idx + 1400]
+        assert "S.messages.pop()" in block, (
+            "send() must S.messages.pop() the user message on handler opt-out "
+            "to avoid duplicating the user turn when falling through to "
+            "the normal send path."
+        )
+        assert "===false" in block or "=== false" in block, (
+            "opt-out must be detected by handler returning === false"
         )

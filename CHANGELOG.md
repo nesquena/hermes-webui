@@ -10,6 +10,14 @@
   a message bubble for commands that produce a chat response. User message is pushed
   BEFORE the handler runs to ensure correct ordering in `S.messages`. Closes #840. (#841)
 
+## [v0.50.145] — 2026-04-22
+
+### Fixed
+- **Slash command dropdown scrolls to keep highlighted item visible** — pressing ↓/↑
+  to navigate the autocomplete list no longer lets the selected item move out of the
+  visible dropdown area. Added `scrollIntoView({block:'nearest'})` after updating the
+  selected class in `navigateCmdDropdown()`. Closes #838. (#839)
+
 ## [v0.50.141] — 2026-04-22
 
 ### Fixed
