@@ -1,5 +1,15 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.159] — 2026-04-23
+
+### Added
+- **Provider key management in Settings** — new "Providers" tab lets users add, update, or remove API keys for direct-API providers without editing `.env` files. Covers Anthropic, OpenAI, Google, DeepSeek, xAI, Mistral, MiniMax, Z.AI, Kimi, Ollama, Ollama Cloud, OpenCode Zen/Go. OAuth providers shown as read-only. Keys stored in `~/.hermes/.env`, take effect immediately. Fully localised (6 locales). (`api/providers.py`, `api/routes.py`, `static/panels.js`, `static/i18n.js`) (PR #867 by @bergeouss, closes #586)
+
+### Security
+- Provider write endpoints require auth or local/private-network client (matching onboarding endpoint gate)
+- `.env` created at 0600 from first byte via `os.open`; pre-existing files tightened to 0600 on every write
+- Full `_ENV_LOCK` coverage across load/modify/write — prevents TOCTOU race between concurrent POSTs
+
 ## [v0.50.158] — 2026-04-23
 
 ### Fixed
