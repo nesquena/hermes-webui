@@ -160,3 +160,43 @@ class TestSendSlashIntercept:
         assert "===false" in block or "=== false" in block, (
             "opt-out must be detected by handler returning === false"
         )
+
+
+def test_compress_has_no_echo_flag():
+    """compress is action-only — it resets S.messages internally; echo would flicker."""
+    src = _read("static/commands.js")
+    import re
+    m = re.search(r"\{name:'compress'[^}]+\}", src)
+    assert m, "compress entry not found in COMMANDS"
+    assert 'noEcho:true' in m.group(), f"compress missing noEcho:true: {m.group()}"
+
+
+def test_compact_has_no_echo_flag():
+    """compact is an alias for compress — same noEcho requirement."""
+    src = _read("static/commands.js")
+    import re
+    m = re.search(r"\{name:'compact'[^}]+\}", src)
+    assert m, "compact entry not found in COMMANDS"
+    assert 'noEcho:true' in m.group(), f"compact missing noEcho:true: {m.group()}"
+
+
+def test_title_with_args_pushes_confirmation_message():
+    """When /title <name> succeeds, cmdTitle pushes an assistant confirmation bubble."""
+    src = _read("static/commands.js")
+    # After the rename API call succeeds, an assistant message is pushed
+    idx = src.find("title_set")
+    segment = src[idx: idx + 300]
+    assert 'S.messages.push' in segment, "cmdTitle success path must push an assistant message"
+    assert "role:'assistant'" in segment, "cmdTitle confirmation must have role:assistant"
+
+
+def test_personality_with_args_pushes_confirmation_message():
+    """When /personality <name> succeeds, cmdPersonality pushes an assistant confirmation bubble."""
+    src = _read("static/commands.js")
+    # Find the set-personality success path (after the clear/none/default branch)
+    # S.messages.push comes BEFORE the personality_set toast
+    idx = src.find("personality_set')+`**${name}**`")
+    assert idx != -1, "cmdPersonality confirmation push not found in source"
+    segment = src[max(0, idx-100): idx + 200]
+    assert 'S.messages.push' in segment, "cmdPersonality success path must push an assistant message"
+    assert "role:'assistant'" in segment, "cmdPersonality confirmation must have role:assistant"

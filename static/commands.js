@@ -7,8 +7,8 @@ const COMMANDS=[
   // Commands without noEcho get a user message echoed to the chat (#840).
   {name:'help',      desc:t('cmd_help'),             fn:cmdHelp},
   {name:'clear',     desc:t('cmd_clear'),         fn:cmdClear,     noEcho:true},
-  {name:'compress',  desc:t('cmd_compress'),       fn:cmdCompress, arg:'[focus topic]'},
-  {name:'compact',   desc:t('cmd_compact_alias'),       fn:cmdCompact},
+  {name:'compress',  desc:t('cmd_compress'),       fn:cmdCompress, arg:'[focus topic]', noEcho:true},
+  {name:'compact',   desc:t('cmd_compact_alias'),       fn:cmdCompact, noEcho:true},
   {name:'model',     desc:t('cmd_model'),  fn:cmdModel,     arg:'model_name', subArgs:'models', noEcho:true},
   {name:'workspace', desc:t('cmd_workspace'),            fn:cmdWorkspace, arg:'name',           noEcho:true},
   {name:'new',       desc:t('cmd_new'),            fn:cmdNew,       noEcho:true},
@@ -517,6 +517,8 @@ async function cmdPersonality(args){
   }
   try{
     const res=await api('/api/personality/set',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,name})});
+    S.messages.push({role:'assistant',content:t('personality_set')+`**${name}**`});
+    renderMessages();
     showToast(t('personality_set')+name);
   }catch(e){showToast(t('failed_colon')+e.message);}
 }
@@ -541,6 +543,8 @@ async function cmdTitle(args){
     if(typeof syncTopbar==='function')syncTopbar();
     if(typeof renderSessionList==='function')renderSessionList();
     showToast(`${t('title_set')} "${S.session.title}"`);
+    S.messages.push({role:'assistant',content:`${t('title_set')} **${S.session.title}**`});
+    renderMessages();
   }catch(e){showToast(t('failed_colon')+e.message);}
 }
 async function cmdRetry(){
