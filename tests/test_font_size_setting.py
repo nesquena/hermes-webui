@@ -1,4 +1,4 @@
-"""Tests for font size setting (#830) — 3-toggle Small/Default/Large in Appearance."""
+"""Tests for font size setting (#833) — 3-toggle Small/Default/Large in Appearance."""
 import os
 import re
 
@@ -61,6 +61,45 @@ class TestFontSizeBootScript:
         assert 'data-font-size-val="small"' in html, "Small button must exist"
         assert 'data-font-size-val="default"' in html, "Default button must exist"
         assert 'data-font-size-val="large"' in html, "Large button must exist"
+
+    def test_font_size_picker_not_duplicated(self):
+        """Regression guard: the font size picker grid must appear exactly once
+        in index.html. Earlier versions of this PR accidentally injected the
+        block into both settingsPaneAppearance (correct) and
+        settingsPanePreferences (copy-paste duplicate), creating duplicate IDs
+        that break _syncFontSizePicker visual sync on one of the grids."""
+        html = _read("static/index.html")
+        assert html.count('id="fontSizePickerGrid"') == 1, (
+            "fontSizePickerGrid must appear exactly once — duplicate IDs "
+            "violate HTML spec and break querySelectorAll-based sync."
+        )
+        assert html.count('id="settingsFontSize"') == 1, (
+            "settingsFontSize hidden input must appear exactly once"
+        )
+
+    def test_font_size_picker_lives_in_appearance_pane(self):
+        """The font size picker must be under settingsPaneAppearance,
+        not Preferences/System/Conversation."""
+        html = _read("static/index.html")
+        appearance_start = html.find('id="settingsPaneAppearance"')
+        next_pane_markers = [
+            'id="settingsPanePreferences"',
+            'id="settingsPaneSystem"',
+            'id="settingsPaneConversation"',
+        ]
+        next_pane_starts = [
+            html.find(m, appearance_start + 1) for m in next_pane_markers
+        ]
+        after_appearance = min(
+            [p for p in next_pane_starts if p != -1] or [len(html)]
+        )
+        picker_pos = html.find('id="fontSizePickerGrid"')
+        assert appearance_start != -1, "settingsPaneAppearance not found"
+        assert picker_pos != -1, "fontSizePickerGrid not found"
+        assert appearance_start < picker_pos < after_appearance, (
+            "Font size picker must live inside settingsPaneAppearance "
+            "(same section as Theme and Skin)"
+        )
 
 
 class TestFontSizeJsFunctions:
