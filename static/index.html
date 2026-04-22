@@ -47,6 +47,9 @@
     </div>
     <!-- Chat panel -->
     <div class="panel-view active" id="panelChat">
+      <div class="panel-head">
+        <span data-i18n="tab_chat">Chat</span>
+      </div>
       <div class="sidebar-section">
         <button class="new-chat-btn" id="btnNewChat">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -58,9 +61,9 @@
     </div>
     <!-- Tasks (cron) panel -->
     <div class="panel-view" id="panelTasks">
-      <div class="sidebar-section" style="padding-bottom:4px;display:flex;align-items:center;justify-content:space-between">
-        <div style="font-size:11px;color:var(--muted)" data-i18n="scheduled_jobs">Scheduled jobs</div>
-        <div style="display:flex;gap:4px;align-items:center">
+      <div class="panel-head">
+        <span data-i18n="scheduled_jobs">Scheduled jobs</span>
+        <div class="panel-head-actions">
           <button class="cron-btn" id="cronRefreshBtn" style="padding:3px 7px;font-size:10px;line-height:1" onclick="loadCrons(true)" title="Refresh job list" aria-label="Refresh job list"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
           <button class="cron-btn run" style="padding:3px 8px;font-size:10px" onclick="toggleCronForm()">+ <span data-i18n="new_job">New job</span></button>
         </div>
@@ -90,10 +93,13 @@
     </div>
     <!-- Skills panel -->
     <div class="panel-view" id="panelSkills">
-      <div class="sidebar-section" style="padding-bottom:4px;display:flex;align-items:center;justify-content:space-between">
-        <div class="skills-search" style="flex:1;padding:0"><input id="skillsSearch" placeholder="Search skills..." data-i18n-placeholder="search_skills" oninput="filterSkills()"></div>
-        <button class="cron-btn run" style="padding:3px 8px;font-size:10px;flex-shrink:0;margin-left:6px" onclick="toggleSkillForm()">+ <span data-i18n="new_skill">New skill</span></button>
+      <div class="panel-head">
+        <span data-i18n="tab_skills">Skills</span>
+        <div class="panel-head-actions">
+          <button class="cron-btn run" style="padding:3px 8px;font-size:10px" onclick="toggleSkillForm()">+ <span data-i18n="new_skill">New skill</span></button>
+        </div>
       </div>
+      <div class="skills-search"><input id="skillsSearch" placeholder="Search skills..." data-i18n-placeholder="search_skills" oninput="filterSkills()"></div>
       <!-- Skill create/edit form (hidden by default) -->
       <div id="skillCreateForm" style="display:none;padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0">
         <input id="skillFormName" placeholder="Skill name (e.g. my-skill)" style="width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:6px;color:var(--text);padding:5px 8px;font-size:12px;outline:none;margin-bottom:6px;box-sizing:border-box">
@@ -109,9 +115,11 @@
     </div>
     <!-- Memory panel -->
     <div class="panel-view" id="panelMemory">
-      <div style="padding:8px 12px 4px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0">
-        <span style="font-size:11px;color:var(--muted)" data-i18n="personal_memory">Personal memory</span>
-        <button class="cron-btn run" id="memEditBtn" style="padding:3px 8px;font-size:10px" onclick="toggleMemoryEdit()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg> <span data-i18n="edit">Edit</span></button>
+      <div class="panel-head">
+        <span data-i18n="personal_memory">Personal memory</span>
+        <div class="panel-head-actions">
+          <button class="cron-btn run" id="memEditBtn" style="padding:3px 8px;font-size:10px" onclick="toggleMemoryEdit()"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg> <span data-i18n="edit">Edit</span></button>
+        </div>
       </div>
       <div class="memory-panel" id="memoryPanel"><div style="color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
       <!-- Memory edit form (hidden by default) -->
@@ -127,19 +135,26 @@
     </div>
     <!-- Todo panel -->
     <div class="panel-view" id="panelTodos">
-      <div style="padding:10px 12px 4px;font-size:11px;color:var(--muted);flex-shrink:0" data-i18n="current_task_list">Current task list</div>
+      <div class="panel-head">
+        <span data-i18n="current_task_list">Current task list</span>
+      </div>
       <div id="todoPanel" style="flex:1;overflow-y:auto;padding:8px 12px"></div>
     </div>
     <!-- Workspaces panel -->
     <div class="panel-view" id="panelWorkspaces">
-      <div style="padding:10px 12px 4px;font-size:11px;color:var(--muted)" data-i18n="workspace_desc">Add and switch workspaces for your sessions.</div>
+      <div class="panel-head">
+        <span data-i18n="tab_workspaces">Spaces</span>
+      </div>
+      <div class="panel-head-sub" data-i18n="workspace_desc">Add and switch workspaces for your sessions.</div>
       <div style="flex:1;overflow-y:auto;padding:0 12px 12px" id="workspacesPanel"><div style="color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
     </div>
     <!-- Profiles panel -->
     <div class="panel-view" id="panelProfiles">
-      <div class="sidebar-section" style="padding-bottom:4px;display:flex;align-items:center;justify-content:space-between">
-        <div style="font-size:11px;color:var(--muted)" data-i18n="tab_profiles">Agent profiles</div>
-        <button class="cron-btn run" style="padding:3px 8px;font-size:10px" onclick="toggleProfileForm()">+ <span data-i18n="new_profile">New profile</span></button>
+      <div class="panel-head">
+        <span data-i18n="tab_profiles">Agent profiles</span>
+        <div class="panel-head-actions">
+          <button class="cron-btn run" style="padding:3px 8px;font-size:10px" onclick="toggleProfileForm()">+ <span data-i18n="new_profile">New profile</span></button>
+        </div>
       </div>
       <!-- Profile create form (hidden by default) -->
       <div id="profileCreateForm" style="display:none;padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0">
