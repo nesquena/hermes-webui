@@ -405,8 +405,7 @@ $('importFileInput').onchange=async(e)=>{
     if(res.ok&&res.session){
       await loadSession(res.session.session_id);
       await renderSessionList();
-      const overlay=$('settingsOverlay');
-      if(overlay) overlay.style.display='none';
+      if(_currentPanel==='settings') switchPanel('chat');
       showToast(t('session_imported'));
     }
   }catch(err){
@@ -524,9 +523,8 @@ document.addEventListener('keydown',async e=>{
       if(typeof skipOnboarding==='function') skipOnboarding();
       return;
     }
-    // Close settings overlay if open
-    const settingsOverlay=$('settingsOverlay');
-    if(settingsOverlay&&settingsOverlay.style.display!=='none'){_closeSettingsPanel();return;}
+    // Close settings panel if active
+    if(_currentPanel==='settings'){_closeSettingsPanel();return;}
     // Close workspace dropdown
     closeWsDropdown();
     // Clear session search

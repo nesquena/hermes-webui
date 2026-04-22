@@ -9,6 +9,9 @@ async function switchPanel(name) {
   document.querySelectorAll('.panel-view').forEach(p => p.classList.remove('active'));
   const panelEl = $('panel' + name.charAt(0).toUpperCase() + name.slice(1));
   if (panelEl) panelEl.classList.add('active');
+  // Toggle main content view: chat vs settings
+  const mainEl = document.querySelector('main.main');
+  if (mainEl) mainEl.classList.toggle('showing-settings', name === 'settings');
   // Lazy-load panel data
   if (name === 'tasks') await loadCrons();
   if (name === 'skills') await loadSkills();
@@ -16,6 +19,10 @@ async function switchPanel(name) {
   if (name === 'workspaces') await loadWorkspacesPanel();
   if (name === 'profiles') await loadProfilesPanel();
   if (name === 'todos') loadTodos();
+  if (name === 'settings') {
+    switchSettingsSection(_currentSettingsSection);
+    loadSettingsPanel();
+  }
 }
 
 // ── Cron panel ──
@@ -1119,20 +1126,21 @@ let _settingsSkinOnOpen = null; // track skin at open time for discard revert
 let _settingsFontSizeOnOpen = null; // track font size at open time for discard revert
 let _settingsHermesDefaultModelOnOpen = '';
 let _settingsSection = 'conversation';
+let _currentSettingsSection = 'conversation';
 
 function switchSettingsSection(name){
   const section=(name==='appearance'||name==='preferences'||name==='system')?name:'conversation';
   _settingsSection=section;
+  _currentSettingsSection=section;
   const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',system:'System'};
+  // Sidebar menu items
+  document.querySelectorAll('#settingsMenu .settings-menu-item').forEach(it=>{
+    it.classList.toggle('active', it.dataset.settingsSection===section);
+  });
+  // Panes in main
   ['conversation','appearance','preferences','system'].forEach(key=>{
-    const tab=$('settingsTab'+map[key]);
     const pane=$('settingsPane'+map[key]);
-    const active=key===section;
-    if(tab){
-      tab.classList.toggle('active',active);
-      tab.setAttribute('aria-selected',active?'true':'false');
-    }
-    if(pane) pane.classList.toggle('active',active);
+    if(pane) pane.classList.toggle('active', key===section);
   });
 }
 
@@ -1157,45 +1165,37 @@ function _syncHermesPanelSessionActions(){
   setDisabled('btnClearConvModal',!hasSession||visibleMessages===0);
 }
 
+// Thin wrapper: settings now live in the main content area. External callers
+// (keyboard shortcuts, commands) keep working through this name.
 function toggleSettings(){
-  const overlay=$('settingsOverlay');
-  if(!overlay) return;
-  if(overlay.style.display==='none'){
+  if(_currentPanel==='settings'){
+    _closeSettingsPanel();
+  } else {
     _settingsDirty = false;
     _settingsThemeOnOpen = localStorage.getItem('hermes-theme') || 'dark';
     _settingsSkinOnOpen = localStorage.getItem('hermes-skin') || 'default';
     _settingsFontSizeOnOpen = localStorage.getItem('hermes-font-size') || 'default';
-    _settingsSection = 'conversation';
-    overlay.style.display='';
-    loadSettingsPanel();
-  } else {
-    _closeSettingsPanel();
+    switchPanel('settings');
   }
 }
 
 function _resetSettingsPanelState(){
-  _settingsSection = 'conversation';
-  switchSettingsSection('conversation');
   const bar=$('settingsUnsavedBar');
   if(bar) bar.style.display='none';
 }
 
 function _hideSettingsPanel(){
-  const overlay=$('settingsOverlay');
-  if(!overlay) return;
   _resetSettingsPanelState();
-  overlay.style.display='none';
+  if(_currentPanel==='settings') switchPanel('chat');
 }
 
 // Close with unsaved-changes check. If dirty, show a confirm dialog.
 function _closeSettingsPanel(){
   if(!_settingsDirty){
-    // Nothing changed -- revert any live preview and close
     _revertSettingsPreview();
     _hideSettingsPanel();
     return;
   }
-  // Dirty -- show inline confirm bar
   _showSettingsUnsavedBar();
 }
 
@@ -1228,7 +1228,7 @@ function _showSettingsUnsavedBar(){
     + `<button onclick="_discardSettings()" style="padding:5px 12px;border-radius:6px;border:1px solid var(--border2);background:rgba(255,255,255,.06);color:var(--muted);cursor:pointer;font-size:12px;font-weight:600">${esc(t('discard'))}</button>`
     + `<button onclick="saveSettings(true)" style="padding:5px 12px;border-radius:6px;border:none;background:var(--accent);color:#fff;cursor:pointer;font-size:12px;font-weight:600">${esc(t('save'))}</button>`
     + '</span>';
-  const body = document.querySelector('.settings-main') || document.querySelector('.settings-body') || document.querySelector('.settings-panel');
+  const body = document.querySelector('#mainSettings .settings-main') || document.querySelector('.settings-main');
   if(body) body.prepend(bar);
 }
 
@@ -1471,11 +1471,6 @@ async function disableAuth(){
   }
 }
 
-// Close settings on overlay click (not panel click) -- with unsaved-changes check
-document.addEventListener('click',e=>{
-  const overlay=$('settingsOverlay');
-  if(overlay&&e.target===overlay) _closeSettingsPanel();
-});
 
 // ── Cron completion alerts ────────────────────────────────────────────────────
 

@@ -113,7 +113,6 @@
   :root:not(.dark) ::-webkit-scrollbar-thumb:hover{background:rgba(0,0,0,.3);}
   :root:not(.dark) ::selection{background:var(--accent-bg-strong);}
   :root:not(.dark) *{scrollbar-color:rgba(0,0,0,.15) transparent;}
-  :root:not(.dark) .settings-overlay{background:rgba(0,0,0,.3);}
   /* ── Light mode: sidebar, roles, chips, active states ── */
   :root:not(.dark) .session-item{color:#5a544a;}
   :root:not(.dark) .session-item:hover{background:rgba(0,0,0,.06);color:#2c2825;}
@@ -454,16 +453,7 @@
   .memory-content{font-size:12px;line-height:1.7;color:var(--text);}
   .memory-content p{margin-bottom:6px;}
   .memory-empty{color:var(--muted);font-size:12px;font-style:italic;}
-  .sidebar-bottom{border-top:1px solid var(--border);padding:12px 14px;flex-shrink:0;position:relative;z-index:10;overflow:visible;}
-  .hermes-launch-btn{width:100%;display:flex;align-items:center;gap:12px;padding:11px 12px;border-radius:12px;border:1px solid var(--border2);background:linear-gradient(180deg,rgba(255,255,255,.05),rgba(255,255,255,.03));color:var(--text);cursor:pointer;transition:background .15s,border-color .15s,transform .15s;text-align:left;}
-  .hermes-launch-btn:hover{background:rgba(255,255,255,.08);border-color:var(--accent-bg);transform:translateY(-1px);}
-  .hermes-launch-icon{width:32px;height:32px;border-radius:10px;background:linear-gradient(145deg,var(--accent-bg),var(--accent-bg));border:1px solid var(--accent-bg);display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden;box-shadow:0 4px 16px var(--accent-bg);}
-  .hermes-launch-icon svg{display:block;width:22px;height:22px;flex-shrink:0;}
-  .hermes-launch-copy{display:flex;flex-direction:column;min-width:0;flex:1;}
-  .hermes-launch-title{font-size:13px;font-weight:700;letter-spacing:.01em;color:var(--text);}
-  .hermes-launch-meta{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-  .hermes-launch-chevron{color:var(--muted);flex-shrink:0;}
-  .field-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:5px;opacity:.8;}
+.field-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin-bottom:5px;opacity:.8;}
   select{width:100%;background:var(--input-bg);border:1px solid var(--border2);border-radius:8px;color:var(--text);padding:8px 28px 8px 10px;font-size:12px;outline:none;appearance:none;margin-bottom:6px;cursor:pointer;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%238888aa' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;}
   select:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-bg);}
   optgroup{color:var(--muted);font-size:11px;font-weight:700;}
@@ -731,17 +721,12 @@
       box-shadow:-4px 0 24px rgba(0,0,0,.4);}
     .rightpanel.mobile-open{right:0;}
     .rightpanel .resize-handle{display:none;}
-    /* Keep the Hermes control available at the bottom of the mobile sidebar */
-    .sidebar-bottom{display:block;padding:10px;}
     /* Topbar adjustments */
     .topbar{padding:8px 12px;gap:8px;}
     .topbar-title{font-size:14px;}
     .topbar-meta{display:none;}
     .topbar-chips{flex-wrap:nowrap;gap:4px;overflow-x:auto;-webkit-overflow-scrolling:touch;}
     .topbar-chips .chip,.topbar-chips .ws-chip,.topbar-chips button{font-size:11px!important;padding:4px 8px!important;white-space:nowrap;}
-    .settings-shell{grid-template-columns:1fr;gap:0;}
-    .settings-tabs{flex-direction:row;overflow-x:auto;padding:10px 12px;border-right:none;border-bottom:1px solid var(--border);gap:6px;}
-    .settings-tab{flex-shrink:0;}
     .settings-main{padding:18px 16px;}
     .hermes-action-grid{grid-template-columns:1fr;}
     .messages-inner{padding:12px 10px 20px;}
@@ -794,8 +779,6 @@
     .app-dialog-btn{width:100%;min-height:44px;}
     /* Tool cards */
     .tool-card{margin-left:0!important;font-size:12px;}
-    /* Settings modal */
-    .settings-panel{width:95vw;max-width:95vw;min-height:min(580px,88vh);max-height:92vh;}
     .onboarding-overlay{padding:12px;}
     .onboarding-shell{grid-template-columns:1fr;}
     .onboarding-sidebar{border-right:none;border-bottom:1px solid var(--border);padding:22px 18px;}
@@ -948,9 +931,6 @@
 /* Right panel icons: tighter */
 .panel-actions{gap:2px;}
 
-/* Workspace hint text: no intrusion */
-.sidebar-bottom > div[style*="topbar"]{pointer-events:none;}
-
 /* Topbar: border should match the subtle sidebar border */
 :root.dark .topbar{border-bottom:1px solid rgba(255,255,255,.07);}
 
@@ -974,8 +954,6 @@
   padding: 8px 10px 3px !important;
   font-size: 10px !important;
 }
-/* Sidebar bottom: tighten spacing */
-.sidebar-bottom { padding: 10px 14px 12px; }
 /* Right panel file tree: more padding for breathing room */
 
 /* Composer footer: even spacing */
@@ -1442,21 +1420,18 @@ body.resizing{user-select:none;cursor:col-resize;}
 * { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.12) transparent; }
 
 /* ── Settings overlay ── */
-.settings-overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:1000;display:flex;align-items:center;justify-content:center;}
-.settings-panel{background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:0;width:860px;max-width:92vw;height:min(700px,92vh);overflow:visible;box-shadow:0 12px 40px rgba(0,0,0,.5);display:flex;flex-direction:column;}
-.settings-header{display:flex;align-items:flex-start;justify-content:space-between;padding:18px 24px 14px;border-bottom:1px solid var(--border);gap:16px;}
-.settings-heading{display:flex;flex-direction:column;gap:3px;}
-.settings-kicker{font-size:10px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--blue);}
-.settings-subtitle{font-size:12px;color:var(--muted);line-height:1.5;}
-.settings-body{padding:0;flex:1;display:flex;min-height:0;overflow:hidden;}
-.settings-shell{display:grid;grid-template-columns:220px minmax(0,1fr);gap:0;flex:1;min-height:0;min-width:0;}
-.settings-tabs{display:flex;flex-direction:column;gap:4px;padding:18px 12px;border-right:1px solid var(--border);align-self:stretch;min-height:0;}
-.settings-tab{display:flex;flex-direction:row;gap:12px;align-items:center;padding:10px 12px;border-radius:8px;border:1px solid transparent;background:transparent;color:var(--muted);cursor:pointer;transition:background .15s,border-color .15s,color .15s;text-align:left;width:100%;}
-.settings-tab:hover{background:rgba(255,255,255,.05);color:var(--text);}
-.settings-tab.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--text);}
-.settings-tab-icon{flex-shrink:0;opacity:.9;}
-.settings-tab-title{font-size:13px;font-weight:600;letter-spacing:.01em;}
-.settings-main{overflow-y:auto;padding:22px 24px;min-width:0;}
+/* Settings panel: sidebar menu + main content area */
+#mainSettings{flex:1;overflow-y:auto;min-height:0;display:none;flex-direction:column;}
+main.main.showing-settings .topbar,
+main.main.showing-settings .messages,
+main.main.showing-settings .composer-wrap{display:none;}
+main.main.showing-settings #mainSettings{display:flex;}
+.settings-menu{display:flex;flex-direction:column;gap:2px;padding:4px 8px 8px;}
+.settings-menu-item{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:8px;border:1px solid transparent;background:transparent;color:var(--muted);cursor:pointer;text-align:left;font-size:13px;font-weight:500;transition:background .15s,border-color .15s,color .15s;width:100%;}
+.settings-menu-item:hover{background:rgba(255,255,255,.05);color:var(--text);}
+.settings-menu-item.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--text);}
+.settings-menu-item svg{flex-shrink:0;opacity:.9;}
+.settings-main{padding:22px 24px;max-width:720px;width:100%;margin:0 auto;min-width:0;}
 .settings-pane{display:none;}
 .settings-pane.active{display:block;}
 .settings-section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px;}
@@ -1473,8 +1448,8 @@ body.resizing{user-select:none;cursor:col-resize;}
 .settings-field{margin-bottom:16px;}
 .settings-field label{display:block;font-size:11px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);margin-bottom:6px;}
 /* Save button inside the settings panel */
-.settings-panel .settings-btn{background:var(--accent);color:#fff;border:none;border-radius:6px;padding:8px 16px;cursor:pointer;font-weight:600;font-size:13px;}
-.settings-panel .settings-btn:hover{opacity:.9;}
+#mainSettings .settings-btn{background:var(--accent);color:#fff;border:none;border-radius:6px;padding:8px 16px;cursor:pointer;font-weight:600;font-size:13px;}
+#mainSettings .settings-btn:hover{opacity:.9;}
 
 /* ── Session pin indicator (inline, only when pinned) ── */
 .session-pin-indicator{flex-shrink:0;color:#f5c542;line-height:1;display:flex;align-items:center;}
