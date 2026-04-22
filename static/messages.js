@@ -329,17 +329,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _wireSSE(source){
-    // Bug B fix (#631): reset text accumulators when (re)opening an SSE source.
-    // On reconnect, the closure variables (assistantText, reasoningText) held the
-    // partial content from before the drop. Server replays buffered token events
-    // into a fresh EventSource, so text accumulated again from scratch — the
-    // existing closure values caused doubled content with a stuck cursor.
-    // Only reset when the stream hasn't been finalized (i.e. not a post-done reconnect).
-    if(!_streamFinalized){
-      assistantText='';
-      reasoningText='';
-      liveReasoningText='';
-    }
+    // Note on #631 Bug B: the original PR description stated the server
+    // "replays buffered token events" on reconnect, and proposed resetting
+    // the accumulators here so the re-sent tokens wouldn't double the prefix.
+    // That is NOT how the server actually works — api/routes._handle_sse_stream
+    // reads a one-shot queue.Queue() that delivers each event to exactly one
+    // consumer; a reconnect picks up from the current queue position and gets
+    // only events produced during the outage.  Resetting the accumulators here
+    // would wipe the already-displayed content and restart the response from
+    // the first post-reconnect token — a real data-loss regression.
+    //
+    // The "doubled response" / "stuck cursor" symptom is fully explained by
+    // Bug A (trailing rAF after `done` inserting a new live-turn wrapper) —
+    // the fixes below (_streamFinalized guard + cancelAnimationFrame in the
+    // terminal handlers) address it without needing a reset here.
 
     source.addEventListener('token',e=>{
       if(!S.session||S.session.session_id!==activeSid) return;

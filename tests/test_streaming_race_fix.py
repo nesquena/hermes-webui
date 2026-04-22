@@ -92,36 +92,65 @@ class TestStreamFinalized:
         assert 'cancelAnimationFrame' in fn
 
 
-class TestReconnectAccumulatorReset:
-    """Bug B: text accumulators must be reset on reconnect."""
+class TestReconnectAccumulatorPreservation:
+    """Bug B regression guard: the accumulators must NOT be reset on reconnect.
 
-    def test_wire_sse_resets_assistant_text(self):
+    The original PR description claimed the server "replays buffered token
+    events" on SSE reconnect, and proposed resetting `assistantText` /
+    `reasoningText` inside `_wireSSE` to absorb that replay.  That is not
+    how the server actually works — `api/routes._handle_sse_stream` reads
+    a one-shot `queue.Queue()` that delivers each event to exactly one
+    consumer.  When a client reconnects with the same `stream_id`, it
+    picks up from the queue's current position; already-delivered tokens
+    are NOT re-sent.  Resetting the accumulators on reconnect would wipe
+    the already-displayed content and restart the response from the first
+    post-reconnect token — a data-loss regression.
+
+    The "doubled response" / "stuck cursor" symptom that originally
+    motivated the reset is fully explained by Bug A (trailing rAF after
+    `done` inserting a duplicate live-turn wrapper).  The Bug A fix
+    (_streamFinalized guard + cancelAnimationFrame in terminal handlers)
+    resolves both symptoms without needing a reset.
+    """
+
+    def test_wire_sse_does_not_reset_accumulators(self):
+        """Regression guard: _wireSSE must not contain a literal
+        accumulator-reset statement.  Preserves pre-reconnect content so
+        the user sees the full response across a drop+reconnect."""
         src = read('static/messages.js')
         m = re.search(r'function _wireSSE\(source\)\{.*?\n  \}', src, re.DOTALL)
         assert m, "_wireSSE not found"
         fn = m.group(0)
-        # Must reset assistantText inside _wireSSE (not just at closure scope)
-        assert "assistantText=''" in fn or 'assistantText = ""' in fn or \
-               "assistantText=''" in fn, (
-            "_wireSSE must reset assistantText='' on open to prevent doubled responses on reconnect"
+        assert "assistantText=''" not in fn and 'assistantText = ""' not in fn, (
+            "_wireSSE must NOT reset assistantText — the server does not replay "
+            "events on reconnect, so the reset would wipe valid pre-drop content"
         )
-        assert "reasoningText=''" in fn or 'reasoningText = ""' in fn, (
-            "_wireSSE must reset reasoningText='' on open"
+        assert "reasoningText=''" not in fn and 'reasoningText = ""' not in fn, (
+            "_wireSSE must NOT reset reasoningText on reconnect"
         )
 
-    def test_wire_sse_reset_guarded_by_stream_finalized(self):
-        """Reset must only happen when the stream hasn't been finalized, to avoid
-        wiping data on the post-done close path."""
+    def test_closure_initialises_accumulators_empty(self):
+        """Initial-connect safety: accumulators are initialised to empty at
+        the closure scope in attachLiveStream, not inside _wireSSE.  That
+        covers the first call; reconnects must preserve whatever was
+        accumulated before the drop."""
         src = read('static/messages.js')
-        m = re.search(r'function _wireSSE\(source\)\{.*?\n  \}', src, re.DOTALL)
-        assert m
-        fn = m.group(0)
-        # The reset should be inside an if(!_streamFinalized) guard
-        assert '_streamFinalized' in fn, (
-            "_wireSSE reset must be guarded by !_streamFinalized"
+        m = re.search(
+            r'function attachLiveStream\(.*?function _closeSource',
+            src,
+            re.DOTALL,
+        )
+        assert m, "attachLiveStream prelude not found"
+        prelude = m.group(0)
+        assert "let assistantText=''" in prelude or 'let assistantText = ""' in prelude, (
+            "assistantText must be initialised to '' at closure scope — "
+            "this is the only legitimate reset; _wireSSE must not re-reset"
         )
 
     def test_error_handler_guards_on_stream_finalized(self):
+        """`error` must still bail out when `_streamFinalized` is true —
+        otherwise a trailing network 'error' event after `done` would
+        attempt a reconnect against a stream that already completed."""
         src = read('static/messages.js')
         m = re.search(r"source\.addEventListener\('error'.*?\}\);", src, re.DOTALL)
         assert m, "'error' handler not found"
