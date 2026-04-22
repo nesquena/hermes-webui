@@ -231,6 +231,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let _reconnectAttempted=false;
   let _terminalStateReached=false;
 
+  // Bug A fix (#631): track whether the stream has been finalized so any rAF
+  // scheduled by a trailing 'token'/'reasoning' event that arrives in the same
+  // microtask batch as 'done' does not fire after renderMessages() has already
+  // settled the DOM — which was causing the thinking card to reappear below
+  // the final answer or the response to render twice.
+  let _streamFinalized=false;
+  let _pendingRafHandle=null;
+
   // rAF-throttled rendering: buffer tokens, render at most once per frame
   let _renderPending=false;
   // Extract display text from assistantText, stripping completed thinking blocks
@@ -306,8 +314,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _scheduleRender(){
     if(_renderPending) return;
+    if(_streamFinalized) return; // Bug A: don't schedule new rAF after stream finalized
     _renderPending=true;
-    requestAnimationFrame(()=>{
+    _pendingRafHandle=requestAnimationFrame(()=>{
+      _pendingRafHandle=null;
       _renderPending=false;
       const parsed=_parseStreamState();
       _renderLiveThinking(parsed);
@@ -319,6 +329,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _wireSSE(source){
+    // Bug B fix (#631): reset text accumulators when (re)opening an SSE source.
+    // On reconnect, the closure variables (assistantText, reasoningText) held the
+    // partial content from before the drop. Server replays buffered token events
+    // into a fresh EventSource, so text accumulated again from scratch — the
+    // existing closure values caused doubled content with a stuck cursor.
+    // Only reset when the stream hasn't been finalized (i.e. not a post-done reconnect).
+    if(!_streamFinalized){
+      assistantText='';
+      reasoningText='';
+      liveReasoningText='';
+    }
+
     source.addEventListener('token',e=>{
       if(!S.session||S.session.session_id!==activeSid) return;
       const d=JSON.parse(e.data);
@@ -446,6 +468,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('done',e=>{
       _terminalStateReached=true;
+      // Bug A fix: cancel any pending rAF and mark stream finalized before
+      // the DOM is settled by renderMessages, so no trailing token/reasoning rAF
+      // can reintroduce a stale thinking card or duplicate content.
+      _streamFinalized=true;
+      if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
+      if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       const d=JSON.parse(e.data);
       delete INFLIGHT[activeSid];
       clearInflight();clearInflightState(activeSid);
@@ -509,6 +537,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('apperror',e=>{
       _terminalStateReached=true;
+      _streamFinalized=true;
+      if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
+      if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       // Application-level error sent explicitly by the server (rate limit, crash, etc.)
       // This is distinct from the SSE network 'error' event below.
       source.close();
@@ -553,7 +584,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('error',async e=>{
       source.close();
-      if(_terminalStateReached){
+      if(_terminalStateReached || _streamFinalized){
         _closeSource();
         return;
       }
@@ -581,6 +612,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('cancel',e=>{
       _terminalStateReached=true;
+      _streamFinalized=true;
+      if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
+      if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       source.close();
       delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPolling();stopClarifyPolling();
       if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);

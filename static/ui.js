@@ -2417,6 +2417,16 @@ async function deleteWorkspaceFile(relPath, name){
 }
 
 async function promptNewFile(){
+  // If no active session but a default workspace is configured, auto-create
+  // a session bound to it so workspace actions work on the blank new-chat page.
+  if(!S.session){
+    const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
+    if(!ws) return;
+    try{
+      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
+      if(r&&r.session){S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+    }catch(e){setStatus(t('create_failed')+e.message);return;}
+  }
   if(!S.session)return;
   const name=await showPromptDialog({title:t('new_file_prompt'),placeholder:'filename.txt',confirmLabel:t('create')});
   if(!name||!name.trim())return;
@@ -2430,6 +2440,15 @@ async function promptNewFile(){
 }
 
 async function promptNewFolder(){
+  // Same auto-create-session logic as promptNewFile for the blank page.
+  if(!S.session){
+    const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
+    if(!ws) return;
+    try{
+      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
+      if(r&&r.session){S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+    }catch(e){setStatus(t('folder_create_failed')+e.message);return;}
+  }
   if(!S.session)return;
   const name=await showPromptDialog({title:t('new_folder_prompt'),placeholder:'folder-name',confirmLabel:t('create')});
   if(!name||!name.trim())return;

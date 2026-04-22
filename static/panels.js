@@ -537,8 +537,12 @@ function getWorkspaceFriendlyName(path){
 
 function syncWorkspaceDisplays(){
   const hasSession=!!(S.session&&S.session.workspace);
-  const ws=hasSession?S.session.workspace:'';
-  const label=hasSession?getWorkspaceFriendlyName(ws):t('no_workspace');
+  // Fall back to the profile default workspace when no session is active yet.
+  // S._profileDefaultWorkspace is set during boot and profile switches from /api/settings.
+  const defaultWs=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
+  const ws=hasSession?S.session.workspace:(defaultWs||'');
+  const hasWorkspace=!!(ws);
+  const label=hasWorkspace?getWorkspaceFriendlyName(ws):t('no_workspace');
 
   const sidebarName=$('sidebarWsName');
   const sidebarPath=$('sidebarWsPath');
@@ -553,8 +557,8 @@ function syncWorkspaceDisplays(){
   // flash of "No workspace" before the saved session finishes loading.
   if(composerLabel) composerLabel.textContent=S._bootReady?label:'';
   if(composerChip){
-    composerChip.disabled=!hasSession;
-    composerChip.title=hasSession?ws:t('no_workspace');
+    composerChip.disabled=!hasWorkspace;
+    composerChip.title=hasWorkspace?ws:t('no_workspace');
     composerChip.classList.toggle('active',!!(composerDropdown&&composerDropdown.classList.contains('open')));
   }
 }
