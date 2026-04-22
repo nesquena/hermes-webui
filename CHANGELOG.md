@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.155] — 2026-04-22
+
+### Fixed
+- **Honcho per-session memory uses stable session ID across WebUI turns** — `api/streaming.py` now passes `gateway_session_key=session_id` to `AIAgent` (defensive, same pattern as `api_mode`/`credential_pool`). Without this, Honcho's `per-session` strategy created a new Honcho session on each streaming request. (`api/streaming.py`) (closes #855)
+
 ## [v0.50.154] — 2026-04-22
 
 ### Fixed
