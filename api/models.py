@@ -20,6 +20,25 @@ from api.workspace import get_last_workspace
 logger = logging.getLogger(__name__)
 
 
+def _index_entry_exists(session_id: str, in_memory_ids=None) -> bool:
+    """Return True if an index entry still has backing state.
+
+    A session can legitimately exist either as a persisted JSON file or as an
+    in-memory Session object that has not been flushed yet.  This helper is used
+    to prune stale `_index.json` rows left behind after session-id rotation or
+    file removal.
+    """
+    if not session_id:
+        return False
+    if in_memory_ids is None:
+        with LOCK:
+            in_memory_ids = set(SESSIONS.keys())
+    if session_id in in_memory_ids:
+        return True
+    p = SESSION_DIR / f'{session_id}.json'
+    return p.exists()
+
+
 def _write_session_index(updates=None):
     """Update the session index file.
 
@@ -56,6 +75,11 @@ def _write_session_index(updates=None):
     try:
         with LOCK:
             existing = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
+            in_memory_ids = set(SESSIONS.keys())
+            existing = [
+                e for e in existing
+                if _index_entry_exists(e.get('session_id'), in_memory_ids=in_memory_ids)
+            ]
             # Build lookup of updated entries
             updated_map = {s.session_id: s.compact() for s in updates}
             existing_ids = {e.get('session_id') for e in existing}
@@ -212,6 +236,10 @@ def all_sessions():
     if SESSION_INDEX_FILE.exists():
         try:
             index = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
+            index = [
+                s for s in index
+                if _index_entry_exists(s.get('session_id'))
+            ]
             # Overlay any in-memory sessions that may be newer than the index
             index_map = {s['session_id']: s for s in index}
             with LOCK:

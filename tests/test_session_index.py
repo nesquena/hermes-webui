@@ -146,6 +146,38 @@ def test_new_session_appended_to_index():
     assert "sess_b" in ids
 
 
+def test_incremental_update_prunes_stale_entries():
+    """Ghost rows whose backing JSON file is gone must be dropped on the fast path.
+
+    This covers session-id rotation paths (e.g. compression) where the old id can
+    linger in `_index.json` after the file has been renamed.
+    """
+    index_file = models.SESSION_INDEX_FILE
+
+    stale = {
+        "session_id": "ghost_sid",
+        "title": "Ghost",
+        "updated_at": 150.0,
+        "workspace": "/tmp",
+        "model": "test",
+        "message_count": 1,
+        "created_at": 100.0,
+        "pinned": False,
+        "archived": False,
+    }
+    _write_index_file(index_file, [stale])
+
+    sA = _make_session("sess_a", "Alpha", updated_at=200.0)
+    sA.path.write_text(json.dumps(sA.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    _write_session_index(updates=[sA])
+
+    index = _read_index(index_file)
+    ids = {e["session_id"] for e in index}
+    assert "sess_a" in ids
+    assert "ghost_sid" not in ids, "stale entry with no backing file must be pruned"
+
+
 # ── 8. test_first_call_full_rebuild ──────────────────────────────────────
 
 def test_first_call_full_rebuild():
@@ -348,3 +380,33 @@ def test_deadlock_guard_on_fallback():
     # The index should still be valid after fallback
     index = _read_index(index_file)
     assert isinstance(index, list)
+
+
+def test_all_sessions_ignores_stale_index_entries():
+    """Reading via all_sessions() must not surface ghost rows from _index.json."""
+    index_file = models.SESSION_INDEX_FILE
+
+    valid_session = _make_session("sess_a", "Alpha", updated_at=200.0)
+    valid_session.path.write_text(
+        json.dumps(valid_session.__dict__, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    valid = valid_session.compact()
+    stale = {
+        "session_id": "ghost_sid",
+        "title": "Ghost",
+        "updated_at": 150.0,
+        "workspace": "/tmp",
+        "model": "test",
+        "message_count": 1,
+        "created_at": 100.0,
+        "pinned": False,
+        "archived": False,
+    }
+    _write_index_file(index_file, [stale, valid])
+
+    rows = models.all_sessions()
+    ids = {e["session_id"] for e in rows}
+    assert "sess_a" in ids
+    assert "ghost_sid" not in ids
