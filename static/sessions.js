@@ -398,8 +398,13 @@ async function probeGatewaySSEStatus(){
         _gatewaySSEWarningShown = true;
       }
     }
-  }catch(e){ /* ignore probe failures */ }
-  finally{
+  }catch(e){
+    // Network error during probe — server may be unreachable.
+    // Start fallback polling as a safe default; it will self-cancel
+    // when the SSE connection recovers and sessions_changed fires.
+    startGatewayPollFallback(_gatewayFallbackPollMs);
+    renderSessionList();
+  }finally{
     _gatewayProbeInFlight = false;
   }
 }

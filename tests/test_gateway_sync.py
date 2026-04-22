@@ -435,3 +435,85 @@ def test_cli_sessions_still_work():
         except Exception:
             pass
         post('/api/settings', {'show_cli_sessions': False})
+
+
+# ── Unit tests for _gateway_sse_probe_payload ────────────────────────────────
+# These replace the deleted repo-root test_gateway_sse_probe_unit.py and account
+# for the watcher_alive check (thread existence + is_alive()).
+
+import sys
+import threading
+sys.path.insert(0, str(REPO_ROOT))
+from api.routes import _gateway_sse_probe_payload
+
+
+def test_probe_payload_when_disabled():
+    """Probe returns 404 when show_cli_sessions is False."""
+    body, status = _gateway_sse_probe_payload({'show_cli_sessions': False}, watcher=None)
+    assert status == 404
+    assert body['ok'] is False
+    assert body['enabled'] is False
+    assert body['watcher_running'] is False
+    assert body['error'] == 'agent sessions not enabled'
+    assert body['fallback_poll_ms'] == 30000
+
+
+def test_probe_payload_when_watcher_missing():
+    """Probe returns 503 when enabled but no watcher instance."""
+    body, status = _gateway_sse_probe_payload({'show_cli_sessions': True}, watcher=None)
+    assert status == 503
+    assert body['ok'] is False
+    assert body['enabled'] is True
+    assert body['watcher_running'] is False
+    assert body['error'] == 'watcher not started'
+    assert body['fallback_poll_ms'] == 30000
+
+
+def test_probe_payload_when_watcher_instance_no_thread():
+    """Probe returns 503 when watcher exists but _thread attribute is missing/None."""
+    class _FakeWatcher:
+        _thread = None
+    body, status = _gateway_sse_probe_payload({'show_cli_sessions': True}, watcher=_FakeWatcher())
+    assert status == 503
+    assert body['watcher_running'] is False
+
+
+def test_probe_payload_when_watcher_thread_alive():
+    """Probe returns 200 when enabled and watcher thread is alive."""
+    class _FakeWatcher:
+        pass
+    w = _FakeWatcher()
+    t = threading.Thread(target=lambda: None)
+    t.daemon = True
+    t.start()
+    w._thread = t
+    # Thread may finish fast — loop-start a live daemon thread for reliability
+    import time as _time
+    done = threading.Event()
+    live = threading.Thread(target=done.wait, daemon=True)
+    live.start()
+    w._thread = live
+    try:
+        body, status = _gateway_sse_probe_payload({'show_cli_sessions': True}, watcher=w)
+        assert status == 200
+        assert body['ok'] is True
+        assert body['watcher_running'] is True
+        assert body['fallback_poll_ms'] == 30000
+    finally:
+        done.set()
+        live.join(timeout=1)
+
+
+def test_probe_payload_when_watcher_thread_dead():
+    """Probe returns 503 when watcher instance exists but thread has exited."""
+    class _FakeWatcher:
+        pass
+    w = _FakeWatcher()
+    t = threading.Thread(target=lambda: None)
+    t.start()
+    t.join()  # wait for it to finish
+    w._thread = t
+    body, status = _gateway_sse_probe_payload({'show_cli_sessions': True}, watcher=w)
+    assert status == 503
+    assert body['watcher_running'] is False
+    assert body['ok'] is False

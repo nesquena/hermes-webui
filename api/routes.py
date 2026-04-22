@@ -1706,16 +1706,21 @@ def _handle_sse_stream(handler, parsed):
 
 def _gateway_sse_probe_payload(settings, watcher):
     enabled = bool(settings.get('show_cli_sessions'))
+    watcher_alive = (
+        watcher is not None
+        and getattr(watcher, '_thread', None) is not None
+        and watcher._thread.is_alive()
+    )
     payload = {
         'enabled': enabled,
         'fallback_poll_ms': 30000,
-        'ok': enabled and watcher is not None,
-        'watcher_running': watcher is not None,
+        'ok': enabled and watcher_alive,
+        'watcher_running': watcher_alive,
     }
     if not enabled:
         payload['error'] = 'agent sessions not enabled'
         return payload, 404
-    if watcher is None:
+    if not watcher_alive:
         payload['error'] = 'watcher not started'
         return payload, 503
     return payload, 200
@@ -1740,7 +1745,12 @@ def _handle_gateway_sse_stream(handler, parsed):
     if not settings.get('show_cli_sessions'):
         return j(handler, {'error': 'agent sessions not enabled'}, status=404)
 
-    if watcher is None:
+    watcher_alive = (
+        watcher is not None
+        and getattr(watcher, '_thread', None) is not None
+        and watcher._thread.is_alive()
+    )
+    if not watcher_alive:
         return j(handler, {'error': 'watcher not started'}, status=503)
 
     handler.send_response(200)

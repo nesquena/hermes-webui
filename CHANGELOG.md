@@ -1,5 +1,18 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.140] — 2026-04-22
+
+### Fixed
+- **Gateway SSE sync failures now surface to the user** — when the gateway watcher
+  thread is not running, the browser now shows a toast notification and automatically
+  falls back to 30-second polling for session sync. Previously this failed silently
+  with no feedback. (#826, fixes #635, @cloudyun888)
+- `_gateway_sse_probe_payload` now checks `watcher._thread.is_alive()` rather than
+  just `watcher is not None`, so a watcher instance with a dead poll thread correctly
+  reports unavailable and triggers the polling fallback.
+- Probe fetch network errors now also activate the polling fallback as a safe default
+  rather than silently swallowing the failure.
+
 ## [v0.50.139] — 2026-04-22
 
 ### Fixed
