@@ -1,7 +1,18 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.143] — 2026-04-22
+
+### Fixed
+### Added
+- **Font size setting in Appearance** — users can now choose between Small (12px),
+  Default (14px), and Large (16px) text size from the Appearance settings tab. The choice
+  is stored in `localStorage` and applied via a `data-font-size` attribute on `<html>` at
+  boot time (no FOUC). Follows the same three-button visual pattern as the Theme picker.
+  Localized for all 6 supported locales. Closes #830.
+
 ## [v0.50.142] — 2026-04-22
 
+### Fixed
 ### Fixed
 - **Stale model no longer shows as "(unavailable)" in the model picker** — users with
   only `custom_providers` configured (no OpenAI key) were seeing "GPT-5.4 Mini (unavailable)"
@@ -23,6 +34,7 @@
   causing `renderSessionListFromCache()` to silently filter out all sessions (including
   newly created ones). Added `autocomplete="off"` to the search input and an explicit
   value-clear at boot before the first render. Closes #822. (#830)
+
 
 ## [v0.50.140] — 2026-04-22
 

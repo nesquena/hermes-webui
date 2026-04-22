@@ -721,6 +721,31 @@ function _syncSkinPicker(active){
   });
 }
 
+function _applyFontSize(size){
+  if(size&&size!=='default'){
+    document.documentElement.dataset.fontSize=size;
+  } else {
+    delete document.documentElement.dataset.fontSize;
+  }
+}
+
+function _pickFontSize(size){
+  localStorage.setItem('hermes-font-size',size);
+  _applyFontSize(size);
+  _syncFontSizePicker(size);
+  if(typeof _markSettingsDirty==='function') _markSettingsDirty();
+  const hidden=$('settingsFontSize');
+  if(hidden) hidden.value=size;
+}
+
+function _syncFontSizePicker(active){
+  document.querySelectorAll('#fontSizePickerGrid .font-size-pick-btn').forEach(btn=>{
+    const sel=btn.dataset.fontSizeVal===(active||'default');
+    btn.style.borderColor=sel?'var(--accent)':'var(--border2)';
+    btn.style.boxShadow=sel?'0 0 0 1px var(--accent-bg-strong)':'none';
+  });
+}
+
 function _buildSkinPicker(activeSkin){
   const grid=$('skinPickerGrid');
   if(!grid) return;

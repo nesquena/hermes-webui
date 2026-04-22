@@ -11,6 +11,9 @@
     --error:#C62828;--success:#3D8B40;--warning:#E68A00;--info:#0288A8;
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;font-size:14px;line-height:1.6;
   }
+  /* ── Font size modifiers ── */
+  :root[data-font-size="small"]{font-size:12px;}
+  :root[data-font-size="large"]{font-size:16px;}
   /* ── Dark mode — navy-black + gold accent matching Hermes terminal ── */
   :root.dark {
     --bg:#0D0D1A;--sidebar:#141425;--border:#2A2A45;--border2:rgba(255,255,255,0.14);

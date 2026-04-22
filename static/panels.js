@@ -1105,6 +1105,7 @@ document.addEventListener('drop',e=>{e.preventDefault();dragCounter=0;wrap.class
 let _settingsDirty = false;
 let _settingsThemeOnOpen = null; // track theme at open time for discard revert
 let _settingsSkinOnOpen = null; // track skin at open time for discard revert
+let _settingsFontSizeOnOpen = null; // track font size at open time for discard revert
 let _settingsHermesDefaultModelOnOpen = '';
 let _settingsSection = 'conversation';
 
@@ -1152,6 +1153,7 @@ function toggleSettings(){
     _settingsDirty = false;
     _settingsThemeOnOpen = localStorage.getItem('hermes-theme') || 'dark';
     _settingsSkinOnOpen = localStorage.getItem('hermes-skin') || 'default';
+    _settingsFontSizeOnOpen = localStorage.getItem('hermes-font-size') || 'default';
     _settingsSection = 'conversation';
     overlay.style.display='';
     loadSettingsPanel();
@@ -1195,6 +1197,10 @@ function _revertSettingsPreview(){
   if(_settingsSkinOnOpen){
     localStorage.setItem('hermes-skin', _settingsSkinOnOpen);
     if(typeof _applySkin==='function') _applySkin(_settingsSkinOnOpen);
+  }
+  if(_settingsFontSizeOnOpen){
+    localStorage.setItem('hermes-font-size', _settingsFontSizeOnOpen);
+    if(typeof _applyFontSize==='function') _applyFontSize(_settingsFontSizeOnOpen);
   }
 }
 
@@ -1243,6 +1249,10 @@ async function loadSettingsPanel(){
     const skinSel=$('settingsSkin');
     if(skinSel) skinSel.value=skinVal;
     if(typeof _buildSkinPicker==='function') _buildSkinPicker(skinVal);
+    const fontSizeVal=localStorage.getItem('hermes-font-size')||'default';
+    const fontSizeSel=$('settingsFontSize');
+    if(fontSizeSel) fontSizeSel.value=fontSizeVal;
+    if(typeof _syncFontSizePicker==='function') _syncFontSizePicker(fontSizeVal);
     const resolvedLanguage=(typeof resolvePreferredLocale==='function')
       ? resolvePreferredLocale(settings.language, localStorage.getItem('hermes-lang'))
       : (settings.language || localStorage.getItem('hermes-lang') || 'en');
