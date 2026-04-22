@@ -613,10 +613,10 @@ _PROVIDER_MODELS = {
         {"id": "deepseek-reasoner", "label": "DeepSeek Reasoner"},
     ],
     "nous": [
-        {"id": "claude-opus-4.6", "label": "Claude Opus 4.6 (via Nous)"},
-        {"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6 (via Nous)"},
-        {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini (via Nous)"},
-        {"id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro Preview (via Nous)"},
+        {"id": "anthropic/claude-opus-4.6",     "label": "Claude Opus 4.6 (via Nous)"},
+        {"id": "anthropic/claude-sonnet-4.6",   "label": "Claude Sonnet 4.6 (via Nous)"},
+        {"id": "openai/gpt-5.4-mini",           "label": "GPT-5.4 Mini (via Nous)"},
+        {"id": "google/gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro Preview (via Nous)"},
     ],
     "zai": [
         {"id": "glm-5.1", "label": "GLM-5.1"},
@@ -863,6 +863,13 @@ def resolve_model_provider(model_id: str) -> tuple:
                 return bare, config_provider, config_base_url
             # Unknown prefix (not a named provider) — pass full model_id through.
             return model_id, config_provider, config_base_url
+        # Portal providers (Nous, OpenCode) serve models from multiple upstream namespaces.
+        # When the active provider is a portal, trust it for cross-namespace models rather
+        # than rerouting to OpenRouter — the portal handles the upstream routing itself.
+        _PORTAL_PROVIDERS = {"nous", "opencode-zen", "opencode-go"}
+        if config_provider in _PORTAL_PROVIDERS:
+            return bare, config_provider, config_base_url
+
         # If prefix does NOT match config provider, the user picked a cross-provider model
         # from the OpenRouter dropdown (e.g. config=anthropic but picked openai/gpt-5.4-mini).
         # In this case always route through openrouter with the full provider/model string.
