@@ -352,6 +352,23 @@ def test_gateway_sse_stream_endpoint_exists():
         post('/api/settings', {'show_cli_sessions': False})
 
 
+def test_gateway_sse_stream_probe_reports_status():
+    """Probe mode returns JSON watcher status instead of holding open an SSE stream."""
+    post('/api/settings', {'show_cli_sessions': True})
+    try:
+        req = urllib.request.Request(BASE + '/api/sessions/gateway/stream?probe=1')
+        with urllib.request.urlopen(req, timeout=5) as r:
+            assert r.status == 200, f"Expected 200, got {r.status}"
+            ctype = r.headers.get('Content-Type', '')
+            assert 'application/json' in ctype, f"Expected application/json, got {ctype}"
+            data = json.loads(r.read().decode('utf-8'))
+            assert data['enabled'] is True
+            assert 'watcher_running' in data
+            assert data['fallback_poll_ms'] == 30000
+    finally:
+        post('/api/settings', {'show_cli_sessions': False})
+
+
 def test_gateway_webui_sessions_not_duplicated():
     """If a session_id exists both in WebUI store and state.db, it's not duplicated."""
     # Create a WebUI session with a known ID
