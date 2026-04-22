@@ -1,6 +1,6 @@
 # Hermes Web UI -- Changelog
 
-## [VERSION] — 2026-04-22
+## [v0.50.152] — 2026-04-22
 
 ### Fixed
 - **Image generation renders inline** — `MEDIA:` token restore renders all `https://` URLs as `<img>`. (closes #853)
