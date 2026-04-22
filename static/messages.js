@@ -669,6 +669,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   function _handleStreamError(){
+    // Opus review Q1: mirror done/apperror/cancel finalization so any pending rAF
+    // cannot fire after renderMessages() has settled the DOM with the error message.
+    _streamFinalized=true;
+    if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
+    if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
     delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPolling();stopClarifyPolling();
     _closeSource();
     if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);

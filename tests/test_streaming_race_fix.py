@@ -158,3 +158,18 @@ class TestReconnectAccumulatorPreservation:
         assert '_streamFinalized' in fn, (
             "'error' reconnect handler must bail if _streamFinalized is true"
         )
+
+    def test_handle_stream_error_sets_stream_finalized(self):
+        """Opus review Q1: _handleStreamError is called after the reconnect fails.
+        It calls renderMessages() which settles the DOM. Any pending rAF must be
+        cancelled before that renderMessages call — same as done/apperror/cancel."""
+        src = read('static/messages.js')
+        m = re.search(r'function _handleStreamError\(\)\{.*?\n  \}', src, re.DOTALL)
+        assert m, "_handleStreamError not found"
+        fn = m.group(0)
+        assert '_streamFinalized=true' in fn or '_streamFinalized = true' in fn, (
+            "_handleStreamError must set _streamFinalized=true (Opus Q1 fix)"
+        )
+        assert 'cancelAnimationFrame' in fn, (
+            "_handleStreamError must cancel any pending rAF before renderMessages() runs"
+        )

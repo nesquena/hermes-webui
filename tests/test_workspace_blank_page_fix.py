@@ -111,3 +111,42 @@ class TestPromptNewFileNoSession:
         assert "if(!ws) return" in fn or "if(!ws)return" in fn, (
             "promptNewFile must return early if no default workspace is configured"
         )
+
+
+class TestWorkspaceSwitcherBlankPage:
+    """Opus review Q6: workspace switcher dropdown must not silently fail on blank page."""
+
+    def test_switch_to_workspace_auto_creates_session(self):
+        src = read('static/panels.js')
+        m = re.search(r'async function switchToWorkspace\(.*?\n\}', src, re.DOTALL)
+        assert m, "switchToWorkspace not found"
+        fn = m.group(0)
+        assert '_profileDefaultWorkspace' in fn or 'session/new' in fn, (
+            "switchToWorkspace must auto-create session on blank page (Opus Q6 fix)"
+        )
+        assert 'session/new' in fn, (
+            "switchToWorkspace must call /api/session/new when S.session is null"
+        )
+
+    def test_prompt_workspace_path_auto_creates_session(self):
+        src = read('static/panels.js')
+        m = re.search(r'async function promptWorkspacePath\(\)\{.*?\n\}', src, re.DOTALL)
+        assert m, "promptWorkspacePath not found"
+        fn = m.group(0)
+        assert 'session/new' in fn, (
+            "promptWorkspacePath must call /api/session/new when S.session is null"
+        )
+
+    def test_sync_workspace_displays_dropdown_close_uses_has_workspace(self):
+        src = read('static/panels.js')
+        m = re.search(r'function syncWorkspaceDisplays\(\)\{.*?\n\}', src, re.DOTALL)
+        assert m, "syncWorkspaceDisplays not found"
+        fn = m.group(0)
+        # Line 555: dropdown force-close must use hasWorkspace, not hasSession
+        assert '!hasWorkspace && composerDropdown' in fn or '!hasWorkspace&&composerDropdown' in fn, (
+            "syncWorkspaceDisplays must use !hasWorkspace (not !hasSession) to decide "
+            "whether to force-close the dropdown (Opus Q6 fix)"
+        )
+        assert '!hasSession && composerDropdown' not in fn, (
+            "Regression guard: !hasSession for dropdown close must be removed"
+        )

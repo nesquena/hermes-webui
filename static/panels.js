@@ -552,7 +552,7 @@ function syncWorkspaceDisplays(){
   const composerChip=$('composerWorkspaceChip');
   const composerLabel=$('composerWorkspaceLabel');
   const composerDropdown=$('composerWsDropdown');
-  if(!hasSession && composerDropdown) composerDropdown.classList.remove('open');
+  if(!hasWorkspace && composerDropdown) composerDropdown.classList.remove('open');
   // Only show workspace label once boot has finished to prevent
   // flash of "No workspace" before the saved session finishes loading.
   if(composerLabel) composerLabel.textContent=S._bootReady?label:'';
@@ -742,7 +742,16 @@ async function removeWorkspace(path){
 }
 
 async function promptWorkspacePath(){
-  if(!S.session)return;
+  // Opus review Q6: if called from blank page (no session), auto-create one first.
+  if(!S.session){
+    const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
+    if(!ws)return;
+    try{
+      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
+      if(r&&r.session){S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
+    }catch(e){showToast(t('workspace_switch_failed')+e.message);return;}
+    if(!S.session)return;
+  }
   const value=await showPromptDialog({
     title:t('workspace_switch_prompt_title'),
     message:t('workspace_switch_prompt_message'),
@@ -768,7 +777,17 @@ async function promptWorkspacePath(){
 }
 
 async function switchToWorkspace(path,name){
-  if(!S.session)return;
+  // Opus review Q6: if called from blank page, auto-create a session bound to
+  // the requested workspace so the switch doesn't silently no-op.
+  if(!S.session){
+    const ws=path||(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
+    if(!ws){showToast(t('no_workspace'));return;}
+    try{
+      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
+      if(r&&r.session){S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
+    }catch(e){if(typeof setStatus==='function')setStatus(t('switch_failed')+e.message);return;}
+    if(!S.session)return;
+  }
   if(S.busy){
     showToast(t('workspace_busy_switch'));
     return;
