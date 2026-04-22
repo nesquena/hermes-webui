@@ -154,16 +154,22 @@ async function _fetchLiveModels(provider, sel){
     // Rebuild options from live data
     const existingIds=new Set([...sel.options].map(o=>o.value));
     let added=0;
-    // Apply @provider: prefix to live-fetched model IDs (mirrors _apply_provider_prefix() on server).
-    // This ensures resolve_model_provider() routes through the configured portal provider
-    // (e.g. Nous, OpenCode) rather than mis-routing slash-prefixed IDs via OpenRouter (#854).
+    // Apply @provider: prefix to live-fetched model IDs (mirrors the server-side
+    // behaviour for static lists).  Portal providers like Nous return upstream
+    // vendor IDs (e.g. "minimax/minimax-m2.7", "anthropic/claude-opus-4.7") —
+    // without a `@nous:` prefix, `resolve_model_provider()` sees the slash and
+    // mis-routes via OpenRouter → 404.  Prefixing with `@${provider}:` makes
+    // the portal hint explicit so routing honours it (#854).
+    //
+    // Scope: only apply the prefix when this fetch is for the active provider
+    // and that provider is a portal (not OpenRouter / custom, which use bare
+    // or cross-namespace IDs natively).  Skip IDs that already carry an
+    // `@prefix:` — they've already been disambiguated upstream.
     const _ap=(window._activeProvider||'').toLowerCase();
-    const _needsPrefix=_ap && _ap!=='openrouter' && _ap!=='custom' && provider===_ap;
+    const _isPortalFetch=_ap && _ap!=='openrouter' && _ap!=='custom' && provider===_ap;
     for(const m of data.models){
-      // Apply @provider: prefix to bare IDs from non-active portal providers.
-      // Skip if: already has @prefix, already has slash prefix, or IS the active provider.
       let mid=m.id;
-      if(!mid.startsWith('@') && !mid.includes('/') && !_needsPrefix){
+      if(_isPortalFetch && !mid.startsWith('@')){
         mid=`@${provider}:${mid}`;
       }
       if(existingIds.has(mid)) continue; // already shown from static list
