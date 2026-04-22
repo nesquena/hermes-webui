@@ -2,6 +2,8 @@ let _currentPanel = 'chat';
 let _skillsData = null; // cached skills list
 let _cronList = null; // cached cron jobs (array)
 let _currentCronDetail = null; // full cron job object
+let _cronMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
+let _cronPreFormDetail = null; // snapshot of prior selection when entering a form
 let _currentWorkspaceDetail = null; // { path, name, is_default }
 let _currentProfileDetail = null; // full profile object
 
@@ -65,8 +67,8 @@ async function loadCrons(animate) {
       if (_currentCronDetail && _currentCronDetail.id === job.id) item.classList.add('active');
       box.appendChild(item);
     }
-    // Re-render current detail with fresh data if we have one
-    if (_currentCronDetail) {
+    // Re-render current detail with fresh data if we have one and we're not in a form
+    if (_currentCronDetail && _cronMode !== 'create' && _cronMode !== 'edit') {
       const refreshed = _cronList.find(j => j.id === _currentCronDetail.id);
       if (refreshed) _renderCronDetail(refreshed);
     }
@@ -117,16 +119,33 @@ function _renderCronDetail(job){
     </div>`;
   body.style.display = '';
   if (empty) empty.style.display = 'none';
-  // Toggle action buttons
-  const runBtn = $('btnRunTaskDetail'); if (runBtn) runBtn.style.display = '';
-  const pauseBtn = $('btnPauseTaskDetail');
-  const resumeBtn = $('btnResumeTaskDetail');
-  if (pauseBtn) pauseBtn.style.display = job.state === 'paused' ? 'none' : '';
-  if (resumeBtn) resumeBtn.style.display = job.state === 'paused' ? '' : 'none';
-  const editBtn = $('btnEditTaskDetail'); if (editBtn) editBtn.style.display = '';
-  const delBtn = $('btnDeleteTaskDetail'); if (delBtn) delBtn.style.display = '';
+  _cronMode = 'read';
+  _setCronHeaderButtons('read', job);
   // Load runs asynchronously
   _loadCronDetailRuns(job.id);
+}
+
+function _setCronHeaderButtons(mode, job) {
+  const runBtn = $('btnRunTaskDetail');
+  const pauseBtn = $('btnPauseTaskDetail');
+  const resumeBtn = $('btnResumeTaskDetail');
+  const editBtn = $('btnEditTaskDetail');
+  const delBtn = $('btnDeleteTaskDetail');
+  const cancelBtn = $('btnCancelTaskDetail');
+  const saveBtn = $('btnSaveTaskDetail');
+  const hide = b => b && (b.style.display = 'none');
+  const show = b => b && (b.style.display = '');
+  if (mode === 'read') {
+    show(runBtn);
+    if (job && job.state === 'paused') { hide(pauseBtn); show(resumeBtn); }
+    else { show(pauseBtn); hide(resumeBtn); }
+    show(editBtn); show(delBtn); hide(cancelBtn); hide(saveBtn);
+  } else if (mode === 'create' || mode === 'edit') {
+    hide(runBtn); hide(pauseBtn); hide(resumeBtn); hide(editBtn); hide(delBtn);
+    show(cancelBtn); show(saveBtn);
+  } else {
+    [runBtn,pauseBtn,resumeBtn,editBtn,delBtn,cancelBtn,saveBtn].forEach(hide);
+  }
 }
 
 async function _loadCronDetailRuns(jobId){
@@ -158,20 +177,21 @@ function openCronDetail(id, el){
   document.querySelectorAll('.cron-item').forEach(e => e.classList.remove('active'));
   const target = el || $('cron-' + id);
   if (target) target.classList.add('active');
+  _cronPreFormDetail = null;
+  _editingCronId = null;
   _renderCronDetail(job);
 }
 
 function _clearCronDetail(){
   _currentCronDetail = null;
+  _cronMode = 'empty';
   const title = $('taskDetailTitle');
   const body = $('taskDetailBody');
   const empty = $('taskDetailEmpty');
   if (title) title.textContent = '';
   if (body) { body.innerHTML = ''; body.style.display = 'none'; }
   if (empty) empty.style.display = '';
-  ['btnRunTaskDetail','btnPauseTaskDetail','btnResumeTaskDetail','btnEditTaskDetail','btnDeleteTaskDetail'].forEach(id => {
-    const b = $(id); if (b) b.style.display = 'none';
-  });
+  _setCronHeaderButtons('empty');
 }
 
 async function runCurrentCron(){ if (_currentCronDetail) await cronRun(_currentCronDetail.id); }
@@ -179,7 +199,7 @@ async function pauseCurrentCron(){ if (_currentCronDetail) await cronPause(_curr
 async function resumeCurrentCron(){ if (_currentCronDetail) await cronResume(_currentCronDetail.id); }
 function editCurrentCron(){
   if (!_currentCronDetail) return;
-  cronEditOpenInSidebar(_currentCronDetail);
+  openCronEdit(_currentCronDetail);
 }
 async function deleteCurrentCron(){
   if (!_currentCronDetail) return;
@@ -197,26 +217,86 @@ async function deleteCurrentCron(){
 let _cronSelectedSkills=[];
 let _cronSkillsCache=null;
 
-function toggleCronForm(){
-  const form=$('cronCreateForm');
-  if(!form)return;
-  const open=form.style.display!=='none';
-  form.style.display=open?'none':'';
-  if(open){ _editingCronId = null; return; }
+function openCronCreate(){
+  if (typeof switchPanel === 'function' && _currentPanel !== 'tasks') switchPanel('tasks');
+  _cronPreFormDetail = _currentCronDetail ? { ..._currentCronDetail } : null;
   _editingCronId = null;
-  $('cronFormName').value='';
-  $('cronFormSchedule').value='';
-  $('cronFormPrompt').value='';
-  $('cronFormDeliver').value='local';
-  $('cronFormError').style.display='none';
-  _cronSelectedSkills=[];
+  _cronMode = 'create';
+  _cronSelectedSkills = [];
+  _renderCronForm({ name:'', schedule:'', prompt:'', deliver:'local', isEdit:false });
+  _cronSkillsCache = null;
+  api('/api/skills').then(d=>{_cronSkillsCache=d.skills||[]; _bindCronSkillPicker();}).catch(()=>{});
+}
+
+function openCronEdit(job){
+  if (!job) return;
+  _cronPreFormDetail = { ...job };
+  _editingCronId = job.id;
+  _cronMode = 'edit';
+  _cronSelectedSkills = Array.isArray(job.skills) ? [...job.skills] : [];
+  _renderCronForm({
+    name: job.name || '',
+    schedule: job.schedule_display || (job.schedule && job.schedule.expression) || '',
+    prompt: job.prompt || '',
+    deliver: job.deliver || 'local',
+    isEdit: true,
+  });
+  if (!_cronSkillsCache) {
+    api('/api/skills').then(d=>{_cronSkillsCache=d.skills||[]; _bindCronSkillPicker();}).catch(()=>{});
+  } else {
+    _bindCronSkillPicker();
+  }
+}
+
+function _renderCronForm({ name, schedule, prompt, deliver, isEdit }){
+  const title = $('taskDetailTitle');
+  const body = $('taskDetailBody');
+  const empty = $('taskDetailEmpty');
+  if (!body || !title) return;
+  title.textContent = isEdit ? (t('edit') + ' · ' + (name || schedule || t('scheduled_jobs'))) : t('new_job');
+  const deliverOpt = (v,l) => `<option value="${v}"${deliver===v?' selected':''}>${esc(l)}</option>`;
+  body.innerHTML = `
+    <div class="main-view-content">
+      <form class="detail-form" onsubmit="event.preventDefault(); saveCronForm();">
+        <div class="detail-form-row">
+          <label for="cronFormName">${esc(t('cron_name_label') || 'Name')}</label>
+          <input type="text" id="cronFormName" value="${esc(name || '')}" placeholder="${esc(t('cron_name_placeholder') || 'Optional')}" autocomplete="off">
+        </div>
+        <div class="detail-form-row">
+          <label for="cronFormSchedule">${esc(t('cron_schedule_label') || 'Schedule')}</label>
+          <input type="text" id="cronFormSchedule" value="${esc(schedule || '')}" placeholder="0 9 * * *  —  every 1h  —  @daily" autocomplete="off" required>
+          <div class="detail-form-hint">${esc(t('cron_schedule_hint') || "Cron expression or shorthand like 'every 1h'.")}</div>
+        </div>
+        <div class="detail-form-row">
+          <label for="cronFormPrompt">${esc(t('cron_prompt_label') || 'Prompt')}</label>
+          <textarea id="cronFormPrompt" rows="6" placeholder="${esc(t('cron_prompt_placeholder') || 'Must be self-contained')}" required>${esc(prompt || '')}</textarea>
+        </div>
+        <div class="detail-form-row">
+          <label for="cronFormDeliver">${esc(t('cron_deliver_label') || 'Deliver output to')}</label>
+          <select id="cronFormDeliver" ${isEdit ? 'disabled' : ''}>
+            ${deliverOpt('local', t('cron_deliver_local') || 'Local (save output only)')}
+            ${deliverOpt('discord','Discord')}
+            ${deliverOpt('telegram','Telegram')}
+          </select>
+        </div>
+        <div class="detail-form-row">
+          <label for="cronFormSkillSearch">${esc(t('cron_skills_label') || 'Skills')}</label>
+          <div class="skill-picker-wrap">
+            <input type="text" id="cronFormSkillSearch" placeholder="${esc(t('cron_skills_placeholder') || 'Add skills (optional)...')}" autocomplete="off" ${isEdit ? 'disabled' : ''}>
+            <div id="cronFormSkillDropdown" class="skill-picker-dropdown" style="display:none"></div>
+            <div id="cronFormSkillTags" class="skill-picker-tags"></div>
+          </div>
+          ${isEdit ? `<div class="detail-form-hint">${esc(t('cron_skills_edit_hint') || 'Skill list is not editable after creation.')}</div>` : ''}
+        </div>
+        <div id="cronFormError" class="detail-form-error" style="display:none"></div>
+      </form>
+    </div>`;
+  body.style.display = '';
+  if (empty) empty.style.display = 'none';
+  _setCronHeaderButtons(isEdit ? 'edit' : 'create');
   _renderCronSkillTags();
-  const search=$('cronFormSkillSearch');
-  if(search)search.value='';
-  // Always re-fetch skills to avoid stale cache
-  _cronSkillsCache=null;
-  api('/api/skills').then(d=>{_cronSkillsCache=d.skills||[];}).catch(()=>{});
-  $('cronFormName').focus();
+  const focusEl = $('cronFormName');
+  if (focusEl) focusEl.focus();
 }
 
 function _renderCronSkillTags(){
@@ -236,47 +316,59 @@ function _renderCronSkillTags(){
   }
 }
 
-// Skill search input handler
-(function(){
-  const setup=()=>{
-    const search=$('cronFormSkillSearch');
-    const dropdown=$('cronFormSkillDropdown');
-    if(!search||!dropdown)return;
-    search.oninput=()=>{
-      const q=search.value.trim().toLowerCase();
-      if(!q||!_cronSkillsCache){dropdown.style.display='none';return;}
-      const matches=_cronSkillsCache.filter(s=>
-        !_cronSelectedSkills.includes(s.name)&&
-        (s.name.toLowerCase().includes(q)||(s.category||'').toLowerCase().includes(q))
-      ).slice(0,8);
-      if(!matches.length){dropdown.style.display='none';return;}
-      dropdown.innerHTML='';
-      for(const s of matches){
-        const opt=document.createElement('div');
-        opt.className='skill-opt';
-        opt.textContent=s.name+(s.category?' ('+s.category+')':'');
-        opt.onclick=()=>{
-          _cronSelectedSkills.push(s.name);
-          _renderCronSkillTags();
-          search.value='';
-          dropdown.style.display='none';
-        };
-        dropdown.appendChild(opt);
-      }
-      dropdown.style.display='';
-    };
-    search.onblur=()=>setTimeout(()=>{dropdown.style.display='none';},150);
+function _bindCronSkillPicker(){
+  const search=$('cronFormSkillSearch');
+  const dropdown=$('cronFormSkillDropdown');
+  if(!search||!dropdown)return;
+  search.oninput=()=>{
+    const q=search.value.trim().toLowerCase();
+    if(!q||!_cronSkillsCache){dropdown.style.display='none';return;}
+    const matches=_cronSkillsCache.filter(s=>
+      !_cronSelectedSkills.includes(s.name)&&
+      (s.name.toLowerCase().includes(q)||(s.category||'').toLowerCase().includes(q))
+    ).slice(0,8);
+    if(!matches.length){dropdown.style.display='none';return;}
+    dropdown.innerHTML='';
+    for(const s of matches){
+      const opt=document.createElement('div');
+      opt.className='skill-opt';
+      opt.textContent=s.name+(s.category?' ('+s.category+')':'');
+      opt.onclick=()=>{
+        _cronSelectedSkills.push(s.name);
+        _renderCronSkillTags();
+        search.value='';
+        dropdown.style.display='none';
+      };
+      dropdown.appendChild(opt);
+    }
+    dropdown.style.display='';
   };
-  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',setup);
-  else setTimeout(setup,0);
-})();
+  search.onblur=()=>setTimeout(()=>{dropdown.style.display='none';},150);
+}
 
-async function submitCronCreate(){
-  const name=$('cronFormName').value.trim();
-  const schedule=$('cronFormSchedule').value.trim();
-  const prompt=$('cronFormPrompt').value.trim();
-  const deliver=$('cronFormDeliver').value;
+function cancelCronForm(){
+  _editingCronId = null;
+  if (_cronPreFormDetail) {
+    const snap = _cronPreFormDetail;
+    _cronPreFormDetail = null;
+    _renderCronDetail(snap);
+    return;
+  }
+  _cronPreFormDetail = null;
+  _clearCronDetail();
+}
+
+async function saveCronForm(){
+  const nameEl=$('cronFormName');
+  const schEl=$('cronFormSchedule');
+  const promptEl=$('cronFormPrompt');
+  const delivEl=$('cronFormDeliver');
   const errEl=$('cronFormError');
+  if(!schEl||!promptEl||!errEl) return;
+  const name=(nameEl?nameEl.value:'').trim();
+  const schedule=schEl.value.trim();
+  const prompt=promptEl.value.trim();
+  const deliver=delivEl?delivEl.value:'local';
   errEl.style.display='none';
   if(!schedule){errEl.textContent=t('cron_schedule_required_example');errEl.style.display='';return;}
   if(!prompt){errEl.textContent=t('cron_prompt_required');errEl.style.display='';return;}
@@ -286,10 +378,10 @@ async function submitCronCreate(){
       if (name) updates.name = name;
       await api('/api/crons/update', {method:'POST', body: JSON.stringify(updates)});
       const editedId = _editingCronId;
-      toggleCronForm();
+      _editingCronId = null;
+      _cronPreFormDetail = null;
       showToast(t('cron_job_updated'));
       await loadCrons();
-      // Re-select the edited job
       const job = _cronList && _cronList.find(j => j.id === editedId);
       if (job) openCronDetail(editedId);
       return;
@@ -298,10 +390,9 @@ async function submitCronCreate(){
     if(name)body.name=name;
     if(_cronSelectedSkills.length)body.skills=_cronSelectedSkills;
     const res = await api('/api/crons/create',{method:'POST',body:JSON.stringify(body)});
-    toggleCronForm();
+    _cronPreFormDetail = null;
     showToast(t('cron_job_created'));
     await loadCrons();
-    // Auto-select the newly created job if API returned it
     const newId = res && (res.id || (res.job && res.job.id));
     if (newId) openCronDetail(newId);
     else if (_cronList && _cronList.length) openCronDetail(_cronList[_cronList.length - 1].id);
@@ -309,6 +400,10 @@ async function submitCronCreate(){
     errEl.textContent=t('error_prefix')+e.message;errEl.style.display='';
   }
 }
+
+// Back-compat aliases for any stale callers
+const submitCronCreate = saveCronForm;
+function toggleCronForm(){ openCronCreate(); }
 
 function _cronOutputSnippet(content) {
   // Extract the response body from a cron output .md file
@@ -342,27 +437,7 @@ async function cronResume(id) {
   } catch(e) { showToast(t('failed_colon') + e.message, 4000); }
 }
 
-// Edit flow: repurpose the sidebar create form (#cronCreateForm) in "edit" mode
 let _editingCronId = null;
-
-function cronEditOpenInSidebar(job) {
-  const form = $('cronCreateForm');
-  if (!form) return;
-  _editingCronId = job.id;
-  form.style.display = '';
-  $('cronFormName').value = job.name || '';
-  $('cronFormSchedule').value = job.schedule_display || (job.schedule && job.schedule.expression) || '';
-  $('cronFormPrompt').value = job.prompt || '';
-  $('cronFormDeliver').value = job.deliver || 'local';
-  const errEl = $('cronFormError');
-  if (errEl) errEl.style.display = 'none';
-  _cronSelectedSkills = Array.isArray(job.skills) ? [...job.skills] : [];
-  _renderCronSkillTags();
-  const search = $('cronFormSkillSearch');
-  if (search) search.value = '';
-  if (!_cronSkillsCache) api('/api/skills').then(d=>{_cronSkillsCache=d.skills||[];}).catch(()=>{});
-  $('cronFormName').focus();
-}
 
 function loadTodos() {
   const panel = $('todoPanel');
