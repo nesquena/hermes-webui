@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.134] — 2026-04-21
+
+### Fixed
+- **Update banner: conflict/diverged recovery path + server self-restart after update** — three failure modes resolved. (1) `Update failed (agent): Repository has unresolved merge conflicts` was a dead-end with no recovery path; the error now includes an actionable `git checkout . && git pull --ff-only` command, a persistent inline display (not a fleeting toast), and a **Force update** button that executes the reset via the new `POST /api/updates/force` endpoint. (2) After a successful update, the server now self-restarts via `os.execv` (2 s delay), eliminating the stale-`sys.modules` bug that broke custom provider chat on the next request. (3) When both webui and agent updates are pending, the restart now correctly waits for the second update to complete before re-executing (`_apply_lock` coordination), preventing the mid-pull kill race. Closes #813, #814. (#816)
+
 ## [v0.50.133] — 2026-04-21
 
 ### Added
