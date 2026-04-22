@@ -3,7 +3,7 @@
 ## [v0.50.157] — 2026-04-22
 
 ### Fixed
-- **Nous portal models now route and format correctly** — two related bugs fixed: (1) the Nous static model list in `_PROVIDER_MODELS` used bare IDs (`claude-opus-4.6`) that Nous rejected; updated to slash-prefixed format (`anthropic/claude-opus-4.6`) that Nous expects. (2) `resolve_model_provider()` was rerouting cross-namespace models through OpenRouter when a portal provider (Nous, OpenCode Zen, OpenCode Go) was active; added `_PORTAL_PROVIDERS` guard so portal providers handle all their models directly. (`api/config.py`) (closes #854)
+- **Nous portal models now route and format correctly** — two bugs fixed: (1) `_PROVIDER_MODELS["nous"]` updated from bare IDs (`claude-opus-4.6`) to slash-prefixed format (`anthropic/claude-opus-4.6`) that the Nous portal API expects. (2) `resolve_model_provider()` now routes cross-namespace models through portal providers (Nous, OpenCode Zen, OpenCode Go) directly instead of mis-routing to OpenRouter. Portal guard returns the full slash-preserved model ID so Nous receives the correct format. 10 regression tests. (`api/config.py`) (closes #854)
 
 ## [v0.50.156] — 2026-04-22
 
