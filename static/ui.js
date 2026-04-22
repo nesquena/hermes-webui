@@ -498,9 +498,10 @@ function getModelLabel(modelId){
   // Strip @provider: prefix if present (e.g. @ollama-cloud:kimi-k2.6)
   if (_last.startsWith('@') && _last.includes(':')) _last = _last.split(':').slice(1).join(':');
   const looksLikeOllamaTag = /^[a-z0-9][\w.-]*:[\w.-]+$/i.test(_last);
-  if ((modelId.startsWith('ollama/') || modelId.startsWith('@ollama') || looksLikeOllamaTag) && _last.includes(':')) {
-    const ollamaLabel = _fmtOllamaLabel(_last);
-    if (ollamaLabel) return ollamaLabel;
+  const looksLikeBareOllamaId = !modelId.includes('/') && /[A-Za-z]/.test(_last);
+  const ollamaLabel = _fmtOllamaLabel(_last);
+  if ((modelId.startsWith('ollama/') || modelId.startsWith('@ollama') || looksLikeOllamaTag || looksLikeBareOllamaId) && ollamaLabel !== _last) {
+    return ollamaLabel;
   }
   return _last || 'Unknown';
 }
