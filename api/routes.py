@@ -208,7 +208,7 @@ def _resolve_compatible_session_model(model_id: str | None) -> tuple[str, bool]:
         return default_model, bool(default_model)
 
     active_provider = _normalize_provider_id(catalog.get("active_provider"))
-    if not active_provider or active_provider in {"custom", "openrouter"}:
+    if not active_provider:
         return model, False
 
     slash = model.find("/")
@@ -223,6 +223,32 @@ def _resolve_compatible_session_model(model_id: str | None) -> tuple[str, bool]:
         return model, False
 
     model_provider = _normalize_provider_id(model[:slash])
+
+    # For custom/openrouter active providers: only skip normalization when the
+    # model's namespace prefix is actually routable by a group in the catalog.
+    # A user who only has custom_providers configured (active_provider="custom")
+    # with a stale session model like "openai/gpt-5.4-mini" would otherwise
+    # never get cleaned up, causing "(unavailable)" to appear in the picker.
+    if active_provider in {"custom", "openrouter"}:
+        # These namespaces are always routable as-is — preserve them.
+        if model_provider in {"", "custom", "openrouter"}:
+            return model, False
+        # Check if any catalog group can actually route this model's prefix.
+        groups = catalog.get("groups") or []
+        routable_provider_ids = {
+            _normalize_provider_id(g.get("provider_id") or "") for g in groups
+        }
+        # openrouter group can route any provider/model namespace
+        has_openrouter_group = any(
+            (g.get("provider_id") or "") == "openrouter" for g in groups
+        )
+        if model_provider in routable_provider_ids or has_openrouter_group:
+            return model, False
+        # Model prefix is not routable — stale cross-provider reference, clear it.
+        if default_model:
+            return default_model, True
+        return model, False
+
     # Skip normalization for models on custom/openrouter namespaces — these are
     # user-controlled and should never be silently replaced.
     if model_provider and model_provider not in {"", "custom", "openrouter"} and model_provider != active_provider and default_model:

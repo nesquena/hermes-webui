@@ -1209,18 +1209,23 @@ function syncTopbar(){
     currentModel=modelOverride;
   } else {
     const applied=_applyModelToDropdown(currentModel,$('modelSelect'));
-    // If the model isn't in the current provider list, add it as a visually marked
-    // "(unavailable)" entry so the session value is preserved without misleading the user.
-    // Selecting it will still attempt to send (same as before), but the label makes
-    // clear it's a stale model from a previous session.
+    // If the model isn't in the current provider list, silently reset to the
+    // first available model so stale values don't pollute the picker (#829).
     if(!applied && currentModel){
-      const opt=document.createElement('option');
-      opt.value=currentModel;
-      opt.textContent=getModelLabel(currentModel)+t('model_unavailable');
-      opt.style.color='var(--muted, #888)';
-      opt.title=t('model_unavailable_title');
-      $('modelSelect').appendChild(opt);
-      $('modelSelect').value=currentModel;
+      // Stale session model not in the current provider catalog — reset to the
+      // first available model rather than injecting an "(unavailable)" option
+      // that visually appears under the wrong provider group (#829).
+      const first=sel.querySelector('optgroup > option, option');
+      if(first){
+        sel.value=first.value;
+        S.session.model=first.value;
+        // Persist the correction so the session doesn't re-inject on next load.
+        fetch(new URL('api/session/update',location.href).href,{
+          method:'POST',credentials:'include',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({session_id:S.session.id||S.session.session_id,model:first.value})
+        }).catch(()=>{});
+      }
     }
   }
   if(typeof syncModelChip==='function') syncModelChip();

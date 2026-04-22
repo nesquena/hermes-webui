@@ -1,5 +1,20 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.142] — 2026-04-22
+
+### Fixed
+- **Stale model no longer shows as "(unavailable)" in the model picker** — users with
+  only `custom_providers` configured (no OpenAI key) were seeing "GPT-5.4 Mini (unavailable)"
+  appear in the picker, visually grouped under their custom provider section and selected
+  as the default model. Two root causes: (1) `_resolve_compatible_session_model()` in
+  `api/routes.py` had a blanket skip for `active_provider == "custom"` that prevented
+  stale cross-provider session models (e.g. `openai/gpt-5.4-mini` from a pre-v0.50 default)
+  from ever being cleaned up. Fixed to only skip normalization when the model's prefix is
+  actually routable by a group in the catalog. (2) `renderSession()` in `static/ui.js`
+  injected a bare `<option>` for unavailable models, which visually inherited the last
+  rendered provider heading in the picker due to missing `<optgroup>` context. Fixed to
+  silently reset to the first available model instead. Closes #829. (#831)
+
 ## [v0.50.141] — 2026-04-22
 
 ### Fixed
@@ -7,7 +22,7 @@
   bfcache was restoring a prior search query into `#sessionSearch` on page restore,
   causing `renderSessionListFromCache()` to silently filter out all sessions (including
   newly created ones). Added `autocomplete="off"` to the search input and an explicit
-  value-clear at boot before the first render. Closes #822. (#829)
+  value-clear at boot before the first render. Closes #822. (#830)
 
 ## [v0.50.140] — 2026-04-22
 

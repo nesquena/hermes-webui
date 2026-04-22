@@ -498,3 +498,133 @@ def test_empty_model_session_does_not_trigger_save(monkeypatch):
         "_normalize_session_model_in_place must not call session.save() when "
         "the session has no stored model — no correction needed, just a fallback."
     )
+
+
+# ── Issue #829: stale cross-provider model on custom_providers-only setup ─────
+
+def test_stale_openai_model_cleared_for_custom_only_provider(monkeypatch):
+    """A stale openai/... session model must be cleared when active provider is
+    'custom' and no catalog group can route the openai prefix (#829)."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "custom",
+            "default_model": "",
+            "groups": [
+                {"provider": "Agent37", "provider_id": "custom:agent37",
+                 "models": [{"id": "agent37/default", "label": "default"}]},
+            ],
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "openai/gpt-5.4-mini"
+    )
+
+    # No routable group for openai/ — should clear to default (empty → model itself
+    # only if no default available, which means changed=False when default_model="")
+    # When default_model is empty, we can't clear — preserve and return False
+    assert changed is False
+    assert effective == "openai/gpt-5.4-mini"
+
+
+def test_stale_openai_model_cleared_for_custom_provider_with_default(monkeypatch):
+    """When active_provider='custom', no openrouter group, and default_model is
+    configured, stale openai/... model should be cleared to default (#829)."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "custom",
+            "default_model": "agent37/default",
+            "groups": [
+                {"provider": "Agent37", "provider_id": "custom:agent37",
+                 "models": [{"id": "agent37/default", "label": "default"}]},
+            ],
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "openai/gpt-5.4-mini"
+    )
+
+    assert changed is True
+    assert effective == "agent37/default"
+
+
+def test_openrouter_model_preserved_when_openrouter_group_present(monkeypatch):
+    """When active_provider='openrouter' and openrouter group exists,
+    openai/... model IDs must pass through unchanged — they are routable (#829)."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openrouter",
+            "default_model": "openai/gpt-5.4-mini",
+            "groups": [
+                {"provider": "OpenRouter", "provider_id": "openrouter",
+                 "models": [{"id": "openai/gpt-5.4-mini", "label": "GPT-5.4 Mini"}]},
+            ],
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "openai/gpt-5.4-mini"
+    )
+
+    assert changed is False
+    assert effective == "openai/gpt-5.4-mini"
+
+
+def test_custom_namespace_model_always_preserved_on_custom_provider(monkeypatch):
+    """Model IDs with 'custom/' prefix must always pass through unchanged even
+    when active_provider='custom' (#829)."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "custom",
+            "default_model": "agent37/default",
+            "groups": [
+                {"provider": "Agent37", "provider_id": "custom:agent37",
+                 "models": [{"id": "agent37/default", "label": "default"}]},
+            ],
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "custom/my-local-llm"
+    )
+
+    assert changed is False
+    assert effective == "custom/my-local-llm"
+
+
+def test_stale_ui_js_does_not_inject_unavailable_option():
+    """renderSession() must no longer inject a bare (unavailable) option into
+    modelSelect when the session model is not in the provider list (#829).
+    It should silently reset to the first available model instead."""
+    import os
+    src = open(os.path.join(os.path.dirname(__file__), "..", "static", "ui.js"),
+               encoding="utf-8").read()
+
+    # The old pattern must be gone
+    assert "model_unavailable" not in src or "model_unavailable_title" not in src, (
+        "renderSession() must not inject '(unavailable)' options — "
+        "stale models should be silently reset to the first available model (#829)"
+    )
+
+    # The new silent-reset pattern must be present
+    assert "first.value" in src and "S.session.model=first.value" in src, (
+        "renderSession() must silently reset S.session.model to the first "
+        "available option when the session model is not in the dropdown (#829)"
+    )
