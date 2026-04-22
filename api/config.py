@@ -1086,11 +1086,14 @@ def get_available_models() -> dict:
 
             auth_store = _j.loads(auth_store_path.read_text(encoding="utf-8"))
             if not active_provider:
-                active_provider = auth_store.get("active_provider")
+                # Re-run alias resolution: auth.json may store an aliased name
+                # (e.g. 'google', 'z.ai') that the prefixing logic compares
+                # against canonical pids.
+                active_provider = _resolve_provider_alias(auth_store.get("active_provider"))
         except Exception:
             logger.debug("Failed to load auth store from %s", auth_store_path)
 
-    # 4. Detect available providers.
+    # 3. Detect available providers.
     # Primary: ask hermes-agent's auth layer — the authoritative source. It checks
     # auth.json, credential pools, and env vars the same way the agent does at runtime,
     # so the dropdown reflects exactly what the user has configured.
@@ -1222,7 +1225,7 @@ def get_available_models() -> dict:
         if all_env.get("OPENCODE_GO_API_KEY"):
             detected_providers.add("opencode-go")
 
-    # 3. Fetch models from custom endpoint if base_url is configured
+    # 4. Fetch models from custom endpoint if base_url is configured
     auto_detected_models = []
     if cfg_base_url:
         try:
@@ -1456,16 +1459,34 @@ def get_available_models() -> dict:
                         for mid in (_provider_model_ids("ollama-cloud") or [])
                     ]
                 except Exception:
-                    logger.debug("Failed to load Ollama Cloud models from hermes_cli")
+                    logger.warning("Failed to load Ollama Cloud models from hermes_cli")
 
-                if raw_models:
-                    models = _apply_provider_prefix(raw_models, pid, active_provider)
-                    groups.append(
-                        {
-                            "provider": provider_name,
-                            "models": models,
-                        }
+                if not raw_models:
+                    # Fall back to a small static list so the user can still pick
+                    # a model — emitting nothing would silently hide a configured
+                    # provider with no UI signal.
+                    logger.warning(
+                        "Ollama Cloud catalog empty; falling back to static model list"
                     )
+                    raw_models = [
+                        {"id": mid, "label": mid}
+                        for mid in (
+                            "kimi-k2.6",
+                            "glm-5.1",
+                            "minimax-m2.7",
+                            "gemma4:31b",
+                            "nemotron-3-super",
+                        )
+                    ]
+
+                models = _apply_provider_prefix(raw_models, pid, active_provider)
+                groups.append(
+                    {
+                        "provider": provider_name,
+                        "provider_id": pid,
+                        "models": models,
+                    }
+                )
             elif pid in _PROVIDER_MODELS or pid in cfg.get("providers", {}):
                 # For non-default providers, prefix model IDs with @provider:model
                 # so resolve_model_provider() routes through that specific provider
