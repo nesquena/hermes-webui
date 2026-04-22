@@ -1424,7 +1424,9 @@ async function saveSettings(andClose){
       }
       _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,skin,language,sidebarDensity});
       showToast(t(saved.auth_just_enabled?'settings_saved_pw':'settings_saved_pw_updated'));
-      _hideSettingsPanel();
+      _settingsDirty=false;
+      _resetSettingsPanelState();
+      if(andClose) _hideSettingsPanel();
       return;
     }catch(e){showToast(t('settings_save_failed')+e.message);return;}
   }
@@ -1440,7 +1442,9 @@ async function saveSettings(andClose){
     }
     _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,skin,language,sidebarDensity});
     showToast(t('settings_saved'));
-    _hideSettingsPanel();
+    _settingsDirty=false;
+    _resetSettingsPanelState();
+    if(andClose) _hideSettingsPanel();
   }catch(e){
     showToast(t('settings_save_failed')+e.message);
   }
