@@ -1,16 +1,16 @@
 # Hermes Web UI -- Changelog
 
-## [v0.50.143] — 2026-04-22
+## [v0.50.144] — 2026-04-22
 
 ### Added
-- **Font size setting in Appearance** — users can now choose between Small (12px),
-  Default (14px), and Large (16px) text size from the Appearance settings tab. The choice
-  is stored in `localStorage` and applied via a `data-font-size` attribute on `<html>` at
-  boot time (no FOUC). Follows the same three-button visual pattern as the Theme picker.
-  Localized for all 6 supported locales. Closes #833. (#834)
+- **Refresh button in Tasks/Scheduled Jobs panel** — a ↺ button next to "+ New job"
+  reloads the job list without a full page reload. Dims while fetching and restores on
+  completion (using `finally`). Also wires a `hermes:cron_created` window event so the
+  list auto-refreshes when a job is created from chat. Closes #835. (#837)
 
-## [v0.50.142] — 2026-04-22
+## [v0.50.143] — 2026-04-22
 
+### Fixed
 ### Fixed
 - **Stale model no longer shows as "(unavailable)" in the model picker** — users with
   only `custom_providers` configured (no OpenAI key) were seeing "GPT-5.4 Mini (unavailable)"
@@ -23,6 +23,7 @@
   injected a bare `<option>` for unavailable models, which visually inherited the last
   rendered provider heading in the picker due to missing `<optgroup>` context. Fixed to
   silently reset to the first available model instead. Closes #829. (#831)
+
 
 ## [v0.50.141] — 2026-04-22
 

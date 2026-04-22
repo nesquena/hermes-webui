@@ -48,7 +48,10 @@
     <div class="panel-view" id="panelTasks">
       <div class="sidebar-section" style="padding-bottom:4px;display:flex;align-items:center;justify-content:space-between">
         <div style="font-size:11px;color:var(--muted)" data-i18n="scheduled_jobs">Scheduled jobs</div>
-        <button class="cron-btn run" style="padding:3px 8px;font-size:10px" onclick="toggleCronForm()">+ <span data-i18n="new_job">New job</span></button>
+        <div style="display:flex;gap:4px;align-items:center">
+          <button class="cron-btn" id="cronRefreshBtn" style="padding:3px 7px;font-size:10px;line-height:1" onclick="loadCrons(true)" title="Refresh job list" aria-label="Refresh job list"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
+          <button class="cron-btn run" style="padding:3px 8px;font-size:10px" onclick="toggleCronForm()">+ <span data-i18n="new_job">New job</span></button>
+        </div>
       </div>
       <!-- Create job form (hidden by default) -->
       <div id="cronCreateForm" style="display:none;padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0">

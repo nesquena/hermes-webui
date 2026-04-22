@@ -19,8 +19,13 @@ async function switchPanel(name) {
 }
 
 // ── Cron panel ──
-async function loadCrons() {
+async function loadCrons(animate) {
   const box = $('cronList');
+  const refreshBtn = $('cronRefreshBtn');
+  if (animate && refreshBtn) {
+    refreshBtn.style.opacity = '0.5';
+    refreshBtn.disabled = true;
+  }
   try {
     const data = await api('/api/crons');
     if (!data.jobs || !data.jobs.length) {
@@ -77,6 +82,12 @@ async function loadCrons() {
       loadCronOutput(job.id);
     }
   } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`; }
+  finally {
+    if (animate && refreshBtn) {
+      refreshBtn.style.opacity = '';
+      refreshBtn.disabled = false;
+    }
+  }
 }
 
 let _cronSelectedSkills=[];
@@ -1471,6 +1482,12 @@ document.addEventListener('click',e=>{
 let _cronPollSince=Date.now()/1000;  // track from page load
 let _cronPollTimer=null;
 let _cronUnreadCount=0;
+
+// Auto-refresh the cron list when a job is created from chat or any external source.
+// The chat path dispatches this event when the agent response mentions cron creation.
+window.addEventListener('hermes:cron_created', () => {
+  if ($('cronList')) loadCrons();
+});
 
 function startCronPolling(){
   if(_cronPollTimer) return;
