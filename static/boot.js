@@ -829,6 +829,8 @@ function applyBotName(){
   _initResizePanels();
   // Workspace panel restore happens AFTER loadSession so we know if
   // the session has a workspace — prevents the snap-open-then-closed flash (#576).
+  // Fix #822: clear any browser-restored value before first render (bfcache/session-restore)
+  const _srch = document.getElementById('sessionSearch'); if (_srch) _srch.value = '';
   const saved=localStorage.getItem('hermes-webui-session');
   if(saved){
     try{

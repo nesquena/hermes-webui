@@ -1,5 +1,14 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.141] — 2026-04-22
+
+### Fixed
+- **Session list appears empty after browser reload / version update** — Chrome's
+  bfcache was restoring a prior search query into `#sessionSearch` on page restore,
+  causing `renderSessionListFromCache()` to silently filter out all sessions (including
+  newly created ones). Added `autocomplete="off"` to the search input and an explicit
+  value-clear at boot before the first render. Closes #822. (#829)
+
 ## [v0.50.140] — 2026-04-22
 
 ### Fixed
