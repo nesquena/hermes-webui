@@ -36,6 +36,13 @@ def _install_fake_hermes_cli(monkeypatch, *, with_load_pool: bool = False, pool_
     if with_load_pool:
         _pool_data = pool_data or {}
 
+        class _FakeEntry:
+            """Minimal PooledCredential stand-in with attribute access (matching the real class)."""
+            def __init__(self, d):
+                self.source = d.get("source", "manual")
+                self.label = d.get("label", "")
+                self.id = d.get("id", "")
+
         class _FakePool:
             def __init__(self, entries_list):
                 self._entries = entries_list
@@ -44,16 +51,11 @@ def _install_fake_hermes_cli(monkeypatch, *, with_load_pool: bool = False, pool_
                 return self._entries
 
         def _fake_load_pool(pid):
+            # Return ALL entries without filtering — mirrors the real load_pool()
+            # which does NOT suppress ambient gh-cli tokens on its own.
+            # Ambient-source filtering is the webui's responsibility.
             raw = _pool_data.get(pid, [])
-            usable = []
-            for e in raw:
-                src = str(e.get("source", "") or "").strip().lower()
-                label = str(e.get("label", "") or "").strip().lower()
-                key_src = str(e.get("key_source", "") or "").strip().lower()
-                if src in _AMBIENT_SOURCES or label == "gh auth token" or key_src == "gh auth token":
-                    continue
-                usable.append(e)
-            return _FakePool(usable)
+            return _FakePool([_FakeEntry(e) for e in raw])
 
         fake_cp = types.ModuleType("agent.credential_pool")
         fake_cp.load_pool = _fake_load_pool

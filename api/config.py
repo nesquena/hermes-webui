@@ -724,6 +724,32 @@ _PROVIDER_MODELS = {
 }
 
 
+def _format_ollama_label(mid: str) -> str:
+    """Turn an Ollama model id (Ollama tag format) into a readable display label.
+
+    Examples: 'kimi-k2.5' → 'Kimi K2.5', 'qwen3-vl:235b-instruct' → 'Qwen3 VL (235B Instruct)'
+    """
+    name_part, _, variant = mid.partition(":")
+
+    def _fmt(s: str) -> str:
+        tokens = s.replace("-", " ").replace("_", " ").split()
+        out = []
+        for t in tokens:
+            alpha_only = t.replace(".", "")
+            if alpha_only.isalpha() and len(t) <= 3:
+                out.append(t.upper())  # short acronym: glm → GLM, vl → VL, gpt → GPT
+            elif alpha_only.isalnum() and alpha_only and alpha_only[0].isdigit():
+                out.append(t.upper())  # size param: 235b → 235B, 1t → 1T
+            else:
+                out.append(t[0].upper() + t[1:] if t else t)  # capitalize: kimi → Kimi
+        return " ".join(out)
+
+    label = _fmt(name_part)
+    if variant:
+        label += f" ({_fmt(variant)})"
+    return label
+
+
 def _apply_provider_prefix(
     raw_models: list[dict],
     provider_id: str,
@@ -1113,9 +1139,19 @@ def get_available_models() -> dict:
             try:
                 from agent.credential_pool import load_pool as _load_pool
 
+                _AMBIENT_SRC = {"gh_cli", "gh auth token"}
                 for _pid in list(_pool.keys()):
                     try:
-                        if _load_pool(_pid).entries():
+                        _all_entries = _load_pool(_pid).entries()
+                        # load_pool() does NOT suppress ambient gh-cli tokens —
+                        # filter them here so Copilot doesn't reappear just because
+                        # 'gh auth token' is seeded into the pool by the agent.
+                        _explicit = [
+                            e for e in _all_entries
+                            if str(getattr(e, "source", "") or "").strip().lower() not in _AMBIENT_SRC
+                            and str(getattr(e, "label", "") or "").strip().lower() != "gh auth token"
+                        ]
+                        if _explicit:
                             detected_providers.add(str(_pid))
                     except Exception:
                         logger.debug("credential_pool.load_pool(%s) failed", _pid)
@@ -1356,7 +1392,8 @@ def get_available_models() -> dict:
                 )
                 model_name = model.get("name", "") or model.get("model", "") or model_id
                 if model_id and model_name:
-                    auto_detected_models.append({"id": model_id, "label": model_name})
+                    label = _format_ollama_label(model_id) if provider in ("ollama", "ollama-cloud") else model_name
+                    auto_detected_models.append({"id": model_id, "label": label})
                     detected_providers.add(provider.lower())
         except Exception:
             logger.debug("Custom endpoint unreachable or misconfigured for provider: %s", provider)
@@ -1455,7 +1492,7 @@ def get_available_models() -> dict:
                     from hermes_cli.models import provider_model_ids as _provider_model_ids
 
                     raw_models = [
-                        {"id": mid, "label": mid}
+                        {"id": mid, "label": _format_ollama_label(mid)}
                         for mid in (_provider_model_ids("ollama-cloud") or [])
                     ]
                 except Exception:
@@ -1469,7 +1506,7 @@ def get_available_models() -> dict:
                         "Ollama Cloud catalog empty; falling back to static model list"
                     )
                     raw_models = [
-                        {"id": mid, "label": mid}
+                        {"id": mid, "label": _format_ollama_label(mid)}
                         for mid in (
                             "kimi-k2.6",
                             "glm-5.1",
