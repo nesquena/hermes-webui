@@ -291,6 +291,7 @@ If discovery finds everything, nothing else is required.
 export HERMES_WEBUI_AGENT_DIR=/path/to/hermes-agent
 export HERMES_WEBUI_PYTHON=/path/to/python
 export HERMES_WEBUI_PORT=9000
+export HERMES_WEBUI_AUTO_INSTALL=1  # enable auto-install of agent deps (disabled by default)
 ./start.sh
 ```
 
@@ -408,7 +409,7 @@ Or using the agent venv explicitly:
 ```
 
 Tests run against an isolated server on port 8788 with a separate state directory.
-Production data and real cron jobs are never touched. Current count: **1858 tests**
+Production data and real cron jobs are never touched. Current count: **1898 tests**
 across 53 test files.
 
 ---

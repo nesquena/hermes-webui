@@ -2167,9 +2167,15 @@ def _handle_live_models(handler, parsed):
             if not ids:
                 return j(handler, {"provider": provider, "models": [], "count": 0})
 
-        # Normalise to {id, label} — provider_model_ids() returns plain string IDs
+        # Normalise to {id, label} — provider_model_ids() returns plain string IDs.
+        # For ollama-cloud use the shared Ollama formatter (handles `:variant` suffix).
+        # For all other providers use a simpler hyphen-split capitaliser.
+        from api.config import _format_ollama_label as _fmt_ollama
+
         def _make_label(mid):
             """Best-effort human label from a model ID string."""
+            if provider in ("ollama", "ollama-cloud"):
+                return _fmt_ollama(mid)
             # Preserve slashes for router IDs like "anthropic/claude-sonnet-4.6"
             display = mid.split("/")[-1] if "/" in mid else mid
             parts = display.split("-")

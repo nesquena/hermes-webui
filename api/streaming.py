@@ -72,6 +72,15 @@ def _strip_thinking_markup(text: str) -> str:
     s = re.sub(r'<\|channel\|>thought.*?<channel\|>', ' ', s, flags=re.IGNORECASE | re.DOTALL)
     s = re.sub(r'<\|turn\|>thinking\n.*?<turn\|>', ' ', s, flags=re.IGNORECASE | re.DOTALL)  # Gemma 4
     s = re.sub(r'^\s*(the|ther)\s+user\s+is\s+asking.*$', ' ', s, flags=re.IGNORECASE | re.MULTILINE)
+    # Strip plain-text thinking preambles from models that don't use <think> tags (e.g. Qwen3).
+    # These appear as the very first sentence of the assistant response and are not useful as titles.
+    s = re.sub(
+        r"^\s*(?:here(?:'s| is) (?:a |my )?(?:thinking|thought) (?:process|trace|through)\b[^\n]*\n?"
+        r"|let me (?:think|work|reason|analyze|walk) (?:through|about|this|step)\b[^\n]*\n?"
+        r"|i(?:'ll| will) (?:think|work|reason|analyze|break this down)\b[^\n]*\n?"
+        r"|(?:okay|alright|sure|of course),?\s+let me\b[^\n]*\n?)",
+        ' ', s, flags=re.IGNORECASE
+    )
     s = re.sub(r'\s+', ' ', s).strip()
     return s
 
@@ -124,6 +133,7 @@ def _looks_invalid_generated_title(text: str) -> bool:
         or re.search(r'\b(they|user)\s+want(s)?\s+me\s+to\b', s, flags=re.IGNORECASE)
         or re.search(r'^\s*(i|we)\s+(should|need to|will|can)\b', s, flags=re.IGNORECASE)
         or re.search(r'^\s*let me\b', s, flags=re.IGNORECASE)
+        or re.search(r"^\s*here(?:'s| is) (?:a |my )?(?:thinking|thought)", s, flags=re.IGNORECASE)
         or re.search(r'用户(要求|希望|想让|让我)', s)
         or re.search(r'请只?回复', s)
         or re.search(r'^\s*(ok|okay|done|all set|complete|completed|finished)\b[\s.!?]*$', s, flags=re.IGNORECASE)
@@ -1159,6 +1169,12 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 _agent_kwargs['acp_args'] = _rt.get('args')
             if 'credential_pool' in _agent_params:
                 _agent_kwargs['credential_pool'] = _rt.get('credential_pool')
+            # Pin Honcho memory sessions to the stable WebUI session ID.
+            # Without this, 'per-session' Honcho strategy creates a new Honcho
+            # session on every streaming request because HonchoSessionManager is
+            # re-instantiated fresh each turn (#855).
+            if 'gateway_session_key' in _agent_params:
+                _agent_kwargs['gateway_session_key'] = session_id
 
             agent = _AIAgent(**_agent_kwargs)
 
