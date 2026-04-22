@@ -461,7 +461,7 @@
           </button>
           <button class="settings-tab" id="settingsTabProviders" type="button" role="tab" aria-selected="false" aria-controls="settingsPaneProviders" onclick="switchSettingsSection('providers')">
             <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
-            <span class="settings-tab-title">Providers</span>
+            <span class="settings-tab-title" data-i18n="providers_tab_title">Providers</span>
           </button>
           <button class="settings-tab" id="settingsTabSystem" type="button" role="tab" aria-selected="false" aria-controls="settingsPaneSystem" onclick="switchSettingsSection('system')">
             <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><line x1="6" y1="7" x2="6.01" y2="7"/><line x1="6" y1="17" x2="6.01" y2="17"/></svg>
@@ -629,14 +629,14 @@
           <div class="settings-pane" id="settingsPaneProviders" role="tabpanel" aria-labelledby="settingsTabProviders">
             <div class="settings-section-head">
               <div>
-                <div class="settings-section-title">Providers</div>
-                <div class="settings-section-meta">Manage API keys for AI providers. Changes take effect immediately.</div>
+                <div class="settings-section-title" data-i18n="providers_section_title">Providers</div>
+                <div class="settings-section-meta" data-i18n="providers_section_meta">Manage API keys for AI providers. Changes take effect immediately.</div>
               </div>
             </div>
             <div id="providersList" style="display:flex;flex-direction:column;gap:6px;margin-top:4px">
               <!-- Populated dynamically by loadProvidersPanel() -->
             </div>
-            <div id="providersEmpty" style="display:none;text-align:center;padding:32px 0;color:var(--muted);font-size:13px">
+            <div id="providersEmpty" style="display:none;text-align:center;padding:32px 0;color:var(--muted);font-size:13px" data-i18n="providers_empty">
               No configurable providers found.
             </div>
           </div>

@@ -144,8 +144,11 @@ class TestGetProviders:
         try:
             result = get_providers()
             for p in result["providers"]:
-                if p["id"] in ("copilot", "nous", "openai-codex", "ollama-cloud"):
+                if p["id"] in ("copilot", "nous", "openai-codex"):
                     assert p["configurable"] is False, f"{p['id']} should not be configurable"
+                # ollama-cloud is now configurable (uses OLLAMA_API_KEY)
+                if p["id"] == "ollama-cloud":
+                    assert p["configurable"] is True, "ollama-cloud should be configurable"
         finally:
             config.cfg.clear()
             config.cfg.update(old_cfg)

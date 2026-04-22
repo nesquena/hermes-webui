@@ -16,7 +16,7 @@ from api.config import (
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
     get_config,
-    reload_config,
+    invalidate_models_cache,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,7 @@ _PROVIDER_ENV_VAR: dict[str, str] = {
     "opencode-zen": "OPENCODE_ZEN_API_KEY",
     "opencode-go": "OPENCODE_GO_API_KEY",
     "ollama": "OLLAMA_API_KEY",
+    "ollama-cloud": "OLLAMA_API_KEY",
 }
 
 # Providers that use OAuth or token flows — their credentials are managed
@@ -49,7 +50,6 @@ _OAUTH_PROVIDERS = frozenset({
     "copilot",
     "openai-codex",
     "nous",
-    "ollama-cloud",
 })
 
 # SECTION: Helper functions
@@ -85,12 +85,17 @@ def _write_env_file(env_path: Path, updates: dict[str, str | None]) -> None:
     """Write key=value pairs to the .env file.
 
     Values of ``None`` cause the key to be removed.
+    Uses ``_ENV_LOCK`` from ``api.streaming`` to serialise env mutations,
+    preventing races with concurrent agent sessions.
     """
+    from api.streaming import _ENV_LOCK
+
     current = _load_env_file(env_path)
     for key, value in updates.items():
         if value is None:
             current.pop(key, None)
-            os.environ.pop(key, None)
+            with _ENV_LOCK:
+                os.environ.pop(key, None)
             continue
         clean = str(value).strip()
         if not clean:
@@ -99,7 +104,8 @@ def _write_env_file(env_path: Path, updates: dict[str, str | None]) -> None:
         if "\n" in clean or "\r" in clean:
             raise ValueError("API key must not contain newline characters.")
         current[key] = clean
-        os.environ[key] = clean
+        with _ENV_LOCK:
+            os.environ[key] = clean
 
     env_path.parent.mkdir(parents=True, exist_ok=True)
     lines = [f"{key}={current[key]}" for key in sorted(current)]
@@ -295,8 +301,10 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
         logger.exception("Failed to write env file for provider %s", provider_id)
         return {"ok": False, "error": f"Failed to save API key: {exc}"}
 
-    # Invalidate the model cache so the dropdown refreshes
-    reload_config()
+    # Invalidate the model cache so the dropdown refreshes on next request.
+    # Using invalidate_models_cache() instead of reload_config() to avoid
+    # disrupting active streaming sessions that may be reading config.cfg.
+    invalidate_models_cache()
 
     return {
         "ok": True,

@@ -1391,7 +1391,7 @@ function _buildProviderCard(p){
   card.dataset.provider=p.id;
   const isOauth=p.key_source==='oauth';
   const statusColor=p.has_key?'var(--ok, #4ade80)':'var(--muted)';
-  const statusTitle=p.has_key?'API key configured':'No API key';
+  const statusTitle=p.has_key?t('providers_status_configured'):t('providers_status_not_configured');
 
   // Header row
   const header=document.createElement('div');
@@ -1410,7 +1410,7 @@ function _buildProviderCard(p){
   const sourceEl=document.createElement('span');
   sourceEl.className='provider-card-source';
   sourceEl.style.cssText='font-size:11px;color:var(--muted)';
-  sourceEl.textContent=isOauth?'OAuth':(p.has_key?'API key':'Not configured');
+  sourceEl.textContent=isOauth?t('providers_status_oauth'):(p.has_key?t('providers_status_api_key'):t('providers_status_not_configured_label'));
   info.appendChild(nameEl);
   info.appendChild(dot);
   info.appendChild(sourceEl);
@@ -1420,7 +1420,7 @@ function _buildProviderCard(p){
   if(isOauth){
     const hint=document.createElement('div');
     hint.style.cssText='font-size:11px;color:var(--muted);margin-top:4px;padding-left:2px';
-    hint.textContent='Authenticated via OAuth. No API key needed.';
+    hint.textContent=t('providers_oauth_hint');
     card.appendChild(hint);
   }else{
     const actions=document.createElement('div');
@@ -1428,13 +1428,13 @@ function _buildProviderCard(p){
     actions.style.cssText='margin-top:6px;display:flex;gap:6px;align-items:center';
     const input=document.createElement('input');
     input.type='password';
-    input.placeholder=p.has_key?'Enter new key to replace…':'sk-...';
+    input.placeholder=p.has_key?t('providers_key_placeholder_replace'):t('providers_key_placeholder_new');
     input.style.cssText='flex:1;padding:6px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;font-family:monospace';
     input.autocomplete='off';
     const saveBtn=document.createElement('button');
     saveBtn.className='sm-btn provider-save-btn';
     saveBtn.style.cssText='padding:5px 12px;font-size:12px;white-space:nowrap';
-    saveBtn.textContent='Save';
+    saveBtn.textContent=t('providers_save');
     saveBtn.onclick=()=>_saveProviderKey(p.id);
     actions.appendChild(input);
     actions.appendChild(saveBtn);
@@ -1442,7 +1442,7 @@ function _buildProviderCard(p){
       const removeBtn=document.createElement('button');
       removeBtn.className='sm-btn';
       removeBtn.style.cssText='padding:5px 10px;font-size:12px;color:var(--error);border-color:rgba(233,69,96,.25);white-space:nowrap';
-      removeBtn.textContent='Remove';
+      removeBtn.textContent=t('providers_remove');
       removeBtn.onclick=()=>_removeProviderKey(p.id);
       actions.appendChild(removeBtn);
     }
@@ -1459,11 +1459,11 @@ async function _saveProviderKey(providerId){
   if(!els) return;
   const key=els.input.value.trim();
   if(!key){
-    showToast('Please enter an API key');
+    showToast(t('providers_enter_key'));
     return;
   }
   els.saveBtn.disabled=true;
-  els.saveBtn.textContent='Saving…';
+  els.saveBtn.textContent=t('providers_saving');
   try{
     const res=await api('/api/providers',{method:'POST',body:JSON.stringify({provider:providerId,api_key:key})});
     if(res.ok){
@@ -1473,31 +1473,31 @@ async function _saveProviderKey(providerId){
     }else{
       showToast(res.error||'Failed to save key');
       els.saveBtn.disabled=false;
-      els.saveBtn.textContent='Save';
+      els.saveBtn.textContent=t('providers_save');
     }
   }catch(e){
     showToast('Error: '+e.message);
     els.saveBtn.disabled=false;
-    els.saveBtn.textContent='Save';
+    els.saveBtn.textContent=t('providers_save');
   }
 }
 
 async function _removeProviderKey(providerId){
   const els=_providerCardEls.get(providerId);
   if(!els) return;
-  if(els.saveBtn){els.saveBtn.disabled=true;els.saveBtn.textContent='Removing…';}
+  if(els.saveBtn){els.saveBtn.disabled=true;els.saveBtn.textContent=t('providers_removing');}
   try{
     const res=await api('/api/providers/delete',{method:'POST',body:JSON.stringify({provider:providerId})});
     if(res.ok){
-      showToast(res.provider+' key removed');
+      showToast(res.provider+' key '+t('providers_key_removed').toLowerCase());
       await loadProvidersPanel(); // refresh list
     }else{
       showToast(res.error||'Failed to remove key');
-      if(els.saveBtn){els.saveBtn.disabled=false;els.saveBtn.textContent='Save';}
+      if(els.saveBtn){els.saveBtn.disabled=false;els.saveBtn.textContent=t('providers_save');}
     }
   }catch(e){
     showToast('Error: '+e.message);
-    if(els.saveBtn){els.saveBtn.disabled=false;els.saveBtn.textContent='Save';}
+    if(els.saveBtn){els.saveBtn.disabled=false;els.saveBtn.textContent=t('providers_save');}
   }
 }
 
