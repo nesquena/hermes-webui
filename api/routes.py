@@ -583,7 +583,7 @@ def handle_get(handler, parsed) -> bool:
         return _handle_sse_stream(handler, parsed)
 
     if parsed.path == '/api/sessions/gateway/stream':
-        return _handle_gateway_sse_stream(handler)
+        return _handle_gateway_sse_stream(handler, parsed)
 
     if parsed.path == "/api/media":
         return _handle_media(handler, parsed)
@@ -1416,18 +1416,42 @@ def _handle_sse_stream(handler, parsed):
     return True
 
 
-def _handle_gateway_sse_stream(handler):
+def _gateway_sse_probe_payload(settings, watcher):
+    enabled = bool(settings.get('show_cli_sessions'))
+    payload = {
+        'enabled': enabled,
+        'fallback_poll_ms': 30000,
+        'ok': enabled and watcher is not None,
+        'watcher_running': watcher is not None,
+    }
+    if not enabled:
+        payload['error'] = 'agent sessions not enabled'
+        return payload, 404
+    if watcher is None:
+        payload['error'] = 'watcher not started'
+        return payload, 503
+    return payload, 200
+
+
+def _handle_gateway_sse_stream(handler, parsed):
     """SSE endpoint for real-time gateway session updates.
     Streams change events from the gateway watcher background thread.
     Only active when show_cli_sessions (show_agent_sessions) setting is enabled.
     """
-    # Check if the feature is enabled
     settings = load_settings()
-    if not settings.get('show_cli_sessions'):
-        return j(handler, {'error': 'agent sessions not enabled'}, status=404)
 
     from api.gateway_watcher import get_watcher
     watcher = get_watcher()
+
+    probe = parse_qs(parsed.query).get('probe', [''])[0].lower() in {'1', 'true', 'yes'}
+    if probe:
+        payload, status = _gateway_sse_probe_payload(settings, watcher)
+        return j(handler, payload, status=status)
+
+    # Check if the feature is enabled
+    if not settings.get('show_cli_sessions'):
+        return j(handler, {'error': 'agent sessions not enabled'}, status=404)
+
     if watcher is None:
         return j(handler, {'error': 'watcher not started'}, status=503)
 

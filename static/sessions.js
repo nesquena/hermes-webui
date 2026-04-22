@@ -335,6 +335,48 @@ async function renderSessionList(){
 
 // ── Gateway session SSE (real-time sync for agent sessions) ──
 let _gatewaySSE = null;
+let _gatewayPollTimer = null;
+let _gatewayProbeInFlight = false;
+let _gatewaySSEWarningShown = false;
+const _gatewayFallbackPollMs = 30000;
+
+function startGatewayPollFallback(ms){
+  const intervalMs = Math.max(5000, Number(ms) || _gatewayFallbackPollMs);
+  if(_gatewayPollTimer) clearInterval(_gatewayPollTimer);
+  _gatewayPollTimer = setInterval(() => { renderSessionList(); }, intervalMs);
+}
+
+function stopGatewayPollFallback(){
+  if(_gatewayPollTimer){
+    clearInterval(_gatewayPollTimer);
+    _gatewayPollTimer = null;
+  }
+}
+
+async function probeGatewaySSEStatus(){
+  if(_gatewayProbeInFlight || !window._showCliSessions) return;
+  _gatewayProbeInFlight = true;
+  try{
+    const resp = await fetch('/api/sessions/gateway/stream?probe=1', { credentials:'same-origin' });
+    const data = await resp.json().catch(() => ({}));
+    if(resp.ok && data.watcher_running){
+      stopGatewayPollFallback();
+      _gatewaySSEWarningShown = false;
+      return;
+    }
+    if(resp.status === 503 || data.watcher_running === false){
+      startGatewayPollFallback(data.fallback_poll_ms || _gatewayFallbackPollMs);
+      renderSessionList();
+      if(!_gatewaySSEWarningShown && typeof showToast === 'function'){
+        showToast('Gateway sync unavailable — falling back to periodic refresh.', 5000);
+        _gatewaySSEWarningShown = true;
+      }
+    }
+  }catch(e){ /* ignore probe failures */ }
+  finally{
+    _gatewayProbeInFlight = false;
+  }
+}
 
 function startGatewaySSE(){
   stopGatewaySSE();
@@ -345,14 +387,18 @@ function startGatewaySSE(){
       try{
         const data = JSON.parse(ev.data);
         if(data.sessions){
+          stopGatewayPollFallback();
+          _gatewaySSEWarningShown = false;
           renderSessionList(); // re-fetch and re-render
         }
       }catch(e){ /* ignore parse errors */ }
     });
     _gatewaySSE.onerror = () => {
-      // EventSource auto-reconnects; no action needed
+      void probeGatewaySSEStatus();
     };
-  }catch(e){ /* SSE not available */ }
+  }catch(e){
+    void probeGatewaySSEStatus();
+  }
 }
 
 function stopGatewaySSE(){
@@ -360,6 +406,9 @@ function stopGatewaySSE(){
     _gatewaySSE.close();
     _gatewaySSE = null;
   }
+  stopGatewayPollFallback();
+  _gatewayProbeInFlight = false;
+  _gatewaySSEWarningShown = false;
 }
 
 let _searchDebounceTimer = null;
