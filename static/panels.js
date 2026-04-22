@@ -1045,11 +1045,11 @@ async function loadProfilesPanel() {
     for (const p of data.profiles) {
       const card = document.createElement('div');
       card.className = 'profile-card';
+      card.dataset.name = p.name;
       const meta = [];
       if (p.model) meta.push(p.model.split('/').pop());
       if (p.provider) meta.push(p.provider);
       if (p.skill_count) meta.push(t('profile_skill_count', p.skill_count));
-      if (p.has_env) meta.push(t('profile_api_keys_configured'));
       const gwDot = p.gateway_running
         ? `<span class="profile-opt-badge running" title="${esc(t('profile_gateway_running'))}"></span>`
         : `<span class="profile-opt-badge stopped" title="${esc(t('profile_gateway_stopped'))}"></span>`;
@@ -1062,16 +1062,100 @@ async function loadProfilesPanel() {
             <div class="profile-card-name${isActive ? ' is-active' : ''}">${gwDot}${esc(p.name)}${defaultBadge}${activeBadge}</div>
             ${meta.length ? `<div class="profile-card-meta">${esc(meta.join(' \u00b7 '))}</div>` : `<div class="profile-card-meta">${esc(t('profile_no_configuration'))}</div>`}
           </div>
-          <div class="profile-card-actions">
-            ${!isActive ? `<button class="ws-action-btn" onclick="switchToProfile('${esc(p.name)}')" title="${esc(t('profile_switch_title'))}">${esc(t('profile_use'))}</button>` : ''}
-            ${!p.is_default ? `<button class="ws-action-btn danger" onclick="deleteProfile('${esc(p.name)}')" title="${esc(t('profile_delete_title'))}">${li('x',12)}</button>` : ''}
-          </div>
         </div>`;
+      card.onclick = () => openProfileDetail(p.name, card);
+      if (_currentProfileDetail && _currentProfileDetail.name === p.name) card.classList.add('active');
       panel.appendChild(card);
+    }
+    // Re-render detail with fresh data if we have one
+    if (_currentProfileDetail) {
+      const refreshed = data.profiles.find(p => p.name === _currentProfileDetail.name);
+      if (refreshed) _renderProfileDetail(refreshed, data.active);
     }
   } catch (e) {
     panel.innerHTML = `<div style="color:var(--accent);font-size:12px;padding:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
   }
+}
+
+function _renderProfileDetail(p, activeName){
+  _currentProfileDetail = p;
+  const title = $('profileDetailTitle');
+  const body = $('profileDetailBody');
+  const empty = $('profileDetailEmpty');
+  if (!title || !body) return;
+  title.textContent = p.name;
+  const isActive = p.name === activeName;
+  const isDefault = !!p.is_default;
+  const statusBadge = isActive
+    ? `<span class="detail-badge active">${esc(t('profile_active'))}</span>`
+    : `<span class="detail-badge">Inactive</span>`;
+  const defaultBadge = isDefault ? ` <span class="detail-badge">${esc(t('profile_default_label'))}</span>` : '';
+  const gwBadge = p.gateway_running
+    ? `<span class="detail-badge ok">${esc(t('profile_gateway_running'))}</span>`
+    : `<span class="detail-badge">${esc(t('profile_gateway_stopped'))}</span>`;
+  const rows = [];
+  rows.push(`<div class="detail-row"><div class="detail-row-label">Status</div><div class="detail-row-value">${statusBadge}${defaultBadge}</div></div>`);
+  rows.push(`<div class="detail-row"><div class="detail-row-label">Gateway</div><div class="detail-row-value">${gwBadge}</div></div>`);
+  if (p.model) rows.push(`<div class="detail-row"><div class="detail-row-label">Model</div><div class="detail-row-value"><code>${esc(p.model)}</code></div></div>`);
+  if (p.provider) rows.push(`<div class="detail-row"><div class="detail-row-label">Provider</div><div class="detail-row-value">${esc(p.provider)}</div></div>`);
+  if (p.base_url) rows.push(`<div class="detail-row"><div class="detail-row-label">Base URL</div><div class="detail-row-value"><code>${esc(p.base_url)}</code></div></div>`);
+  rows.push(`<div class="detail-row"><div class="detail-row-label">API key</div><div class="detail-row-value">${p.has_env ? esc(t('profile_api_keys_configured')) : '<span style="color:var(--muted)">Not configured</span>'}</div></div>`);
+  if (typeof p.skill_count === 'number') rows.push(`<div class="detail-row"><div class="detail-row-label">Skills</div><div class="detail-row-value">${esc(t('profile_skill_count', p.skill_count))}</div></div>`);
+  if (p.default_workspace) rows.push(`<div class="detail-row"><div class="detail-row-label">Default space</div><div class="detail-row-value"><code>${esc(p.default_workspace)}</code></div></div>`);
+  body.innerHTML = `
+    <div class="main-view-content">
+      <div class="detail-card">
+        <div class="detail-card-title">Profile</div>
+        ${rows.join('')}
+      </div>
+    </div>`;
+  body.style.display = '';
+  if (empty) empty.style.display = 'none';
+  const actBtn = $('btnActivateProfileDetail');
+  const delBtn = $('btnDeleteProfileDetail');
+  if (actBtn) actBtn.style.display = isActive ? 'none' : '';
+  if (delBtn) delBtn.style.display = isDefault ? 'none' : '';
+}
+
+function openProfileDetail(name, el){
+  if (!_profilesCache || !_profilesCache.profiles) return;
+  const p = _profilesCache.profiles.find(x => x.name === name);
+  if (!p) return;
+  document.querySelectorAll('.profile-card').forEach(e => e.classList.remove('active'));
+  const target = el || document.querySelector(`.profile-card[data-name="${CSS.escape(name)}"]`);
+  if (target) target.classList.add('active');
+  _renderProfileDetail(p, _profilesCache.active);
+}
+
+function _clearProfileDetail(){
+  _currentProfileDetail = null;
+  const title = $('profileDetailTitle');
+  const body = $('profileDetailBody');
+  const empty = $('profileDetailEmpty');
+  if (title) title.textContent = '';
+  if (body) { body.innerHTML = ''; body.style.display = 'none'; }
+  if (empty) empty.style.display = '';
+  ['btnActivateProfileDetail','btnDeleteProfileDetail'].forEach(id => {
+    const b = $(id); if (b) b.style.display = 'none';
+  });
+}
+
+async function activateCurrentProfile(){
+  if (!_currentProfileDetail) return;
+  await switchToProfile(_currentProfileDetail.name);
+}
+
+async function deleteCurrentProfile(){
+  if (!_currentProfileDetail) return;
+  const name = _currentProfileDetail.name;
+  const _ok = await showConfirmDialog({title:t('profile_delete_confirm_title',name),message:t('profile_delete_confirm_message'),confirmLabel:t('delete_title'),danger:true,focusCancel:true});
+  if(!_ok) return;
+  try {
+    await api('/api/profile/delete', { method: 'POST', body: JSON.stringify({ name }) });
+    _clearProfileDetail();
+    await loadProfilesPanel();
+    showToast(t('profile_deleted', name));
+  } catch (e) { showToast(t('delete_failed') + e.message); }
 }
 
 function renderProfileDropdown(data) {
@@ -1258,6 +1342,7 @@ async function submitProfileCreate() {
     toggleProfileForm();
     await loadProfilesPanel();
     showToast(t('profile_created', name));
+    openProfileDetail(name);
   } catch (e) {
     errEl.textContent = e.message || t('create_failed');
     errEl.style.display = '';
