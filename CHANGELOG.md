@@ -3,7 +3,7 @@
 ## [v0.50.139] — 2026-04-22
 
 ### Fixed
-- **Default workspace persists after session delete** — the blank new-chat page now shows the configured default workspace even after creating and deleting sessions. Root cause: `newSession()` consumed `S._profileDefaultWorkspace` for a one-shot profile-switch semantic, leaving it null on all subsequent returns to blank state. Fix: introduced `S._profileSwitchWorkspace` as a dedicated one-shot flag for profile switches; `S._profileDefaultWorkspace` is now persistent from boot throughout the session lifecycle. Workspace chip, `promptNewFile`, `promptNewFolder`, and `switchToWorkspace` all continue to work correctly. Closes #823. (#825)
+- **Default workspace persists after session delete** — the blank new-chat page now shows the configured default workspace even after creating and deleting sessions. Root cause: `newSession()` consumed `S._profileDefaultWorkspace` for a one-shot profile-switch semantic, leaving it null on all subsequent returns to blank state. Fix: introduced `S._profileSwitchWorkspace` as a dedicated one-shot flag for profile switches; `S._profileDefaultWorkspace` is now persistent from boot throughout the session lifecycle. Workspace chip, `promptNewFile`, `promptNewFolder`, and `switchToWorkspace` all continue to work correctly. Closes #823. (#824)
 
 ## [v0.50.138] — 2026-04-22
 
