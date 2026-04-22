@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.153] — 2026-04-22
+
+### Fixed
+- **Live-fetched portal models route through configured provider** — `_fetchLiveModels()` applies `@provider:` prefix. (closes #854)
+
 ## [v0.50.152] — 2026-04-22
 
 ### Fixed
