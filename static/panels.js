@@ -3,8 +3,8 @@ let _skillsData = null; // cached skills list
 
 async function switchPanel(name) {
   _currentPanel = name;
-  // Update nav tabs
-  document.querySelectorAll('.nav-tab').forEach(t => t.classList.toggle('active', t.dataset.panel === name));
+  // Update nav tabs (rail + mobile sidebar-nav share data-panel)
+  document.querySelectorAll('[data-panel]').forEach(t => t.classList.toggle('active', t.dataset.panel === name));
   // Update panel views
   document.querySelectorAll('.panel-view').forEach(p => p.classList.remove('active'));
   const panelEl = $('panel' + name.charAt(0).toUpperCase() + name.slice(1));
