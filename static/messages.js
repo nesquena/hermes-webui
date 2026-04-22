@@ -17,8 +17,17 @@ async function send(){
     return;
   }
   // Slash command intercept -- local commands handled without agent round-trip
-  if(text.startsWith('/')&&!S.pendingFiles.length&&executeCommand(text)){
-    $('msg').value='';autoResize();hideCmdDropdown();return;
+  if(text.startsWith('/')&&!S.pendingFiles.length){
+    const cmdResult=executeCommand(text);
+    if(cmdResult){
+      // Echo the slash command as a user message unless the command is action-only (#840).
+      if(!cmdResult.noEcho){
+        if(!S.session){await newSession();await renderSessionList();}
+        S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+        renderMessages();
+      }
+      $('msg').value='';autoResize();hideCmdDropdown();return;
+    }
   }
   if(!S.session){await newSession();await renderSessionList();}
 
