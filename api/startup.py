@@ -41,10 +41,33 @@ def _agent_dir() -> Path | None:
             return p.resolve()
     return None
 
+
+def _trusted_agent_dir(agent_dir: Path) -> bool:
+    hermes_home = Path(os.environ.get('HERMES_HOME', str(Path.home() / '.hermes'))).expanduser()
+    try:
+        expected = (hermes_home / 'hermes-agent').resolve()
+        if agent_dir.resolve() != expected:
+            return False
+        st = agent_dir.stat()
+        if stat.S_IMODE(st.st_mode) & 0o022:
+            return False
+        if hasattr(os, 'getuid') and st.st_uid != os.getuid():
+            return False
+        return True
+    except OSError:
+        return False
+
 def auto_install_agent_deps() -> bool:
+    enabled = os.environ.get('HERMES_WEBUI_AUTO_INSTALL', '').strip().lower() in ('1', 'true', 'yes')
+    if not enabled:
+        print('[!!] Auto-install skipped: disabled by default.', flush=True)
+        return False
     agent_dir = _agent_dir()
     if agent_dir is None:
         print('[!!] Auto-install skipped: agent directory not found.', flush=True)
+        return False
+    if not _trusted_agent_dir(agent_dir):
+        print('[!!] Auto-install skipped: untrusted agent directory.', flush=True)
         return False
     req_file = agent_dir / 'requirements.txt'
     pyproject = agent_dir / 'pyproject.toml'
