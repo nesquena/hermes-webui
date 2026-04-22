@@ -11,7 +11,6 @@
 ## [v0.50.143] — 2026-04-22
 
 ### Fixed
-### Fixed
 - **Stale model no longer shows as "(unavailable)" in the model picker** — users with
   only `custom_providers` configured (no OpenAI key) were seeing "GPT-5.4 Mini (unavailable)"
   appear in the picker, visually grouped under their custom provider section and selected
