@@ -1,5 +1,15 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.147] — 2026-04-22
+
+### Fixed
+- **Font size setting now visibly changes UI text** — selecting Small or Large
+  in Appearance settings previously had no visible effect because the CSS override
+  only changed `:root{font-size}`, but the stylesheet uses 230+ hardcoded `px`
+  values that are unaffected by root font-size. Added explicit per-element overrides
+  for the key UI surfaces: chat message body, sidebar session list, composer
+  textarea, and workspace file tree. Closes #843. (#844)
+
 ## [v0.50.146] — 2026-04-22
 
 ### Fixed

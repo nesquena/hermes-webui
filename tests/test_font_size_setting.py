@@ -25,8 +25,9 @@ class TestFontSizeCssModifiers:
 
     def test_small_is_smaller_than_default(self):
         css = _read("static/style.css")
-        m_small = re.search(r':root\[data-font-size="small"\]\{font-size:(\d+)px', css)
-        m_large = re.search(r':root\[data-font-size="large"\]\{font-size:(\d+)px', css)
+        # Match both compact {font-size:12px} and spaced { font-size: 12px; } formats
+        m_small = re.search(r':root\[data-font-size="small"\][^{]*\{[^}]*font-size:\s*(\d+)px', css)
+        m_large = re.search(r':root\[data-font-size="large"\][^{]*\{[^}]*font-size:\s*(\d+)px', css)
         assert m_small and m_large, "Both small and large font-size rules must set px values"
         assert int(m_small.group(1)) < 14, "Small font size must be < 14px (default)"
         assert int(m_large.group(1)) > 14, "Large font size must be > 14px (default)"
@@ -171,3 +172,52 @@ class TestFontSizeI18nCoverage:
         src = _read("static/i18n.js")
         count = src.count("font_size_large")
         assert count >= 6, f"font_size_large must appear in all 6 locales, found {count}"
+
+
+class TestFontSizeCssTargetedOverrides:
+    """CSS must override px-unit text in key UI elements, not just :root font-size.
+
+    The original PR only set :root font-size, but the stylesheet uses hardcoded px
+    values throughout — changing :root has no effect on those. This test class locks
+    in the targeted overrides for the most visible UI surfaces.
+    """
+
+    def test_msg_body_overridden_for_small(self):
+        css = _read("static/style.css")
+        assert ':root[data-font-size="small"] .msg-body' in css, \
+            "Chat message text must be explicitly scaled for small"
+
+    def test_msg_body_overridden_for_large(self):
+        css = _read("static/style.css")
+        assert ':root[data-font-size="large"] .msg-body' in css, \
+            "Chat message text must be explicitly scaled for large"
+
+    def test_session_item_overridden_for_small(self):
+        css = _read("static/style.css")
+        assert ':root[data-font-size="small"] .session-item' in css, \
+            "Sidebar session list text must be explicitly scaled for small"
+
+    def test_session_item_overridden_for_large(self):
+        css = _read("static/style.css")
+        assert ':root[data-font-size="large"] .session-item' in css, \
+            "Sidebar session list text must be explicitly scaled for large"
+
+    def test_composer_overridden_for_small(self):
+        css = _read("static/style.css")
+        assert ':root[data-font-size="small"] #msg' in css, \
+            "Composer textarea must be explicitly scaled for small"
+
+    def test_composer_overridden_for_large(self):
+        css = _read("static/style.css")
+        assert ':root[data-font-size="large"] #msg' in css, \
+            "Composer textarea must be explicitly scaled for large"
+
+    def test_file_item_overridden_for_small(self):
+        css = _read("static/style.css")
+        assert ':root[data-font-size="small"] .file-item' in css, \
+            "Workspace file tree text must be explicitly scaled for small"
+
+    def test_file_item_overridden_for_large(self):
+        css = _read("static/style.css")
+        assert ':root[data-font-size="large"] .file-item' in css, \
+            "Workspace file tree text must be explicitly scaled for large"
