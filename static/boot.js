@@ -829,7 +829,10 @@ function applyBotName(){
   _initResizePanels();
   // Workspace panel restore happens AFTER loadSession so we know if
   // the session has a workspace — prevents the snap-open-then-closed flash (#576).
-  // Fix #822: clear any browser-restored value before first render (bfcache/session-restore)
+  // Fix #822: clear any browser-restored value before first render. This
+  // covers fresh page loads and reloads. The bfcache restore case is handled
+  // separately below by a `pageshow` listener — the async IIFE here does NOT
+  // re-run when the browser restores the page from bfcache.
   const _srch = document.getElementById('sessionSearch'); if (_srch) _srch.value = '';
   const saved=localStorage.getItem('hermes-webui-session');
   if(saved){
@@ -853,3 +856,18 @@ function applyBotName(){
   // Start real-time gateway session sync if setting is enabled
   if(typeof startGatewaySSE==='function') startGatewaySSE();
 })();
+
+// Fix #822 (bfcache path): when the browser restores the page from the
+// back-forward cache, the async boot IIFE above does NOT re-run, but the
+// DOM — including any stale value in #sessionSearch — IS restored.  A
+// prior search string would silently hide all sessions via the filter in
+// renderSessionListFromCache().  Clear the field and re-render whenever
+// the page is restored from cache (`event.persisted === true`).
+window.addEventListener('pageshow', (event) => {
+  if (!event.persisted) return;  // fresh loads are handled by the IIFE above
+  const _srch = document.getElementById('sessionSearch');
+  if (_srch) _srch.value = '';
+  if (typeof renderSessionListFromCache === 'function') {
+    try { renderSessionListFromCache(); } catch (_) {}
+  }
+});
