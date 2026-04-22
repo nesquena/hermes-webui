@@ -5,6 +5,12 @@ Two bugs fixed:
    slash-prefixed (anthropic/claude-opus-4.6), causing Nous to reject them.
 2. resolve_model_provider() routed slash-prefixed cross-namespace models
    through OpenRouter instead of the configured portal provider.
+
+Invariant: when a portal provider (Nous, OpenCode) is active, the full
+slash-prefixed model ID MUST be preserved end-to-end — portals use the
+provider/model path as the canonical name at their inference endpoint.
+Stripping the prefix to a bare name is exactly Bug 1, so the fix for Bug 2
+must not reintroduce it.
 """
 import sys
 import types
@@ -95,35 +101,55 @@ class TestPortalProviderRouting:
             config._cfg_mtime = old_mtime
 
     def test_nous_routes_anthropic_model(self):
-        """anthropic/claude-opus-4.6 with nous provider must route to nous, not openrouter."""
+        """anthropic/claude-opus-4.6 with nous provider must route to nous with
+        the full slash-prefixed ID preserved — Nous rejects bare names."""
         model, provider, _ = self._resolve("anthropic/claude-opus-4.6", "nous")
         assert provider == "nous", (
             f"Expected provider='nous', got '{provider}'. "
             f"Nous portal must handle cross-namespace models directly."
         )
-        assert model == "claude-opus-4.6", (
-            f"Expected bare model 'claude-opus-4.6', got '{model}'."
+        assert model == "anthropic/claude-opus-4.6", (
+            f"Expected full slash-prefixed 'anthropic/claude-opus-4.6', got '{model}'. "
+            f"Portals need the provider/model path to route upstream (Bug 1)."
         )
 
     def test_nous_routes_openai_model(self):
-        """openai/gpt-5.4-mini with nous provider must route to nous, not openrouter."""
+        """openai/gpt-5.4-mini with nous provider must route to nous with slash preserved."""
         model, provider, _ = self._resolve("openai/gpt-5.4-mini", "nous")
-        assert provider == "nous", (
-            f"Expected provider='nous', got '{provider}'."
+        assert provider == "nous", f"Expected provider='nous', got '{provider}'."
+        assert model == "openai/gpt-5.4-mini", (
+            f"Expected 'openai/gpt-5.4-mini', got '{model}' — portal must preserve namespace."
         )
 
     def test_nous_routes_google_model(self):
-        """google/gemini-3.1-pro-preview with nous provider must route to nous."""
+        """google/gemini-3.1-pro-preview with nous provider must route to nous with slash preserved."""
         model, provider, _ = self._resolve("google/gemini-3.1-pro-preview", "nous")
-        assert provider == "nous", (
-            f"Expected provider='nous', got '{provider}'."
+        assert provider == "nous", f"Expected provider='nous', got '{provider}'."
+        assert model == "google/gemini-3.1-pro-preview", (
+            f"Expected 'google/gemini-3.1-pro-preview', got '{model}'."
         )
 
     def test_opencode_zen_routes_cross_namespace(self):
-        """opencode-zen is also a portal — cross-namespace models must route through it."""
+        """opencode-zen is also a portal — cross-namespace models must route through it
+        with the slash-prefixed ID preserved."""
         model, provider, _ = self._resolve("anthropic/claude-sonnet-4.6", "opencode-zen")
-        assert provider == "opencode-zen", (
-            f"Expected provider='opencode-zen', got '{provider}'."
+        assert provider == "opencode-zen", f"Expected provider='opencode-zen', got '{provider}'."
+        assert model == "anthropic/claude-sonnet-4.6", (
+            f"Expected 'anthropic/claude-sonnet-4.6', got '{model}'."
+        )
+
+    def test_portal_path_matches_at_prefix_path(self):
+        """Static dropdown (bare slash) and live-fetched (@provider: prefix) paths
+        must produce identical resolver output for the same model — otherwise
+        Nous receives different forms depending on catalog source.
+        """
+        # Static dropdown form
+        m1, p1, _ = self._resolve("anthropic/claude-opus-4.6", "nous")
+        # Live-fetched form (after ui.js _fetchLiveModels prefixes with @nous:)
+        m2, p2, _ = self._resolve("@nous:anthropic/claude-opus-4.6", "nous")
+        assert (m1, p1) == (m2, p2), (
+            f"Static path {m1, p1} and live path {m2, p2} must match — "
+            f"both should send the same model ID to Nous."
         )
 
     def test_non_portal_still_routes_to_openrouter(self):

@@ -863,12 +863,20 @@ def resolve_model_provider(model_id: str) -> tuple:
                 return bare, config_provider, config_base_url
             # Unknown prefix (not a named provider) — pass full model_id through.
             return model_id, config_provider, config_base_url
-        # Portal providers (Nous, OpenCode) serve models from multiple upstream namespaces.
-        # When the active provider is a portal, trust it for cross-namespace models rather
-        # than rerouting to OpenRouter — the portal handles the upstream routing itself.
+        # Portal providers (Nous, OpenCode) serve models from multiple upstream
+        # namespaces. When the active provider is a portal, trust it for cross-
+        # namespace models rather than rerouting to OpenRouter — the portal
+        # handles the upstream routing itself.  Preserve the full slash-prefixed
+        # model ID: portals use the provider/model path as the canonical name
+        # at their /chat/completions endpoint (e.g. Nous rejects a bare
+        # "claude-opus-4.6" — it needs "anthropic/claude-opus-4.6" to route
+        # upstream). This keeps the static-dropdown path consistent with the
+        # live-fetched path (`@nous:anthropic/claude-opus-4.6`), which also
+        # preserves the slash via the split-at-first-colon in the @-prefix
+        # branch above.
         _PORTAL_PROVIDERS = {"nous", "opencode-zen", "opencode-go"}
         if config_provider in _PORTAL_PROVIDERS:
-            return bare, config_provider, config_base_url
+            return model_id, config_provider, config_base_url
 
         # If prefix does NOT match config provider, the user picked a cross-provider model
         # from the OpenRouter dropdown (e.g. config=anthropic but picked openai/gpt-5.4-mini).
