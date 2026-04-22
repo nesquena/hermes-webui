@@ -13,6 +13,12 @@
 #
 # All three share the same hermes-home volume so config, sessions,
 # skills, and memory are consistent across all surfaces.
+#
+# NOTE ON VOLUMES:
+#   This file uses named Docker volumes (hermes-home, hermes-agent-src) which
+#   work out of the box. If you prefer bind mounts (e.g. to an existing directory),
+#   see the two-container compose file for a bind-mount example.
+#   When using bind mounts, ALL containers must mount the same host path.
 
 services:
   hermes-agent:

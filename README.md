@@ -189,6 +189,13 @@ This starts both containers with shared volumes:
 - **`hermes-agent-src`** — the agent's source code, mounted into the WebUI
   container so it can install the agent's Python dependencies at startup
 
+> **Volume type:** The compose files use named Docker volumes by default.
+> If you prefer bind mounts to an existing directory (e.g. for sharing state
+> with an agent container you already run), both containers must mount the
+> same host path — the agent writes to `/root/.hermes`, the WebUI reads from
+> `/home/hermeswebui/.hermes`. See `docker-compose.two-container.yml` for
+> a bind-mount example.
+
 The WebUI's init script automatically installs hermes-agent and all its
 dependencies (openai, anthropic, etc.) into its own Python environment on
 first boot. Subsequent restarts reuse the installed packages.
