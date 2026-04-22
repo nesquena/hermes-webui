@@ -33,6 +33,12 @@ def _install_fake_hermes_cli(monkeypatch, *, with_load_pool: bool = False, pool_
     monkeypatch.setitem(sys.modules, "hermes_cli.models", fake_models)
     monkeypatch.setitem(sys.modules, "hermes_cli.auth", fake_auth)
 
+    # Always remove the real agent.credential_pool so get_available_models() takes
+    # the ImportError fallback path and reads from the monkeypatched auth store,
+    # not the live ~/.hermes/auth.json via the real venv module.
+    monkeypatch.delitem(sys.modules, "agent.credential_pool", raising=False)
+    monkeypatch.delitem(sys.modules, "agent", raising=False)
+
     if with_load_pool:
         _pool_data = pool_data or {}
 
@@ -84,12 +90,14 @@ def _call_get_available_models(monkeypatch, tmp_path, auth_payload, *, with_load
     except Exception:
         config._cfg_mtime = 0.0
 
+    config.invalidate_models_cache()
     try:
         return config.get_available_models()
     finally:
         config.cfg.clear()
         config.cfg.update(old_cfg)
         config._cfg_mtime = old_mtime
+        config.invalidate_models_cache()
 
 
 def _group_by_provider(result):

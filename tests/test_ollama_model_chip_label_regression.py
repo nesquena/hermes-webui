@@ -31,10 +31,15 @@ def test_select_model_custom_option_uses_friendly_label_helper():
 def test_get_model_label_formats_bare_ollama_ids():
     src = _read_ui()
     assert "const looksLikeOllamaTag = /^[a-z0-9][\\w.-]*:[\\w.-]+$/i.test(_last);" in src
-    assert "const looksLikeBareOllamaId = !modelId.includes('/') && /[A-Za-z]/.test(_last);" in src
+    # Tightened heuristic: only apply Ollama formatter to IDs with @ollama prefix or colon-tag format,
+    # avoiding reformatting of bare provider model IDs like claude-sonnet-4-6 or gpt-4o.
+    assert "const looksLikeBareOllamaId = modelId.startsWith('@ollama') || looksLikeOllamaTag;" in src, (
+        "looksLikeBareOllamaId must be restricted to @ollama-prefixed or colon-tagged IDs "
+        "to avoid reformatting generic bare model IDs."
+    )
     assert "const ollamaLabel = _fmtOllamaLabel(_last);" in src
     assert "if ((modelId.startsWith('ollama/') || modelId.startsWith('@ollama') || looksLikeOllamaTag || looksLikeBareOllamaId) && ollamaLabel !== _last) {" in src, (
-        "Bare Ollama ids like 'kimi-k2.6' should still pass through _fmtOllamaLabel() "
+        "Ollama-tagged ids like 'kimi-k2.6:3b' should still pass through _fmtOllamaLabel() "
         "when the formatter produces a friendlier label."
     )
 

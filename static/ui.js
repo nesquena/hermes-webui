@@ -498,7 +498,9 @@ function getModelLabel(modelId){
   // Strip @provider: prefix if present (e.g. @ollama-cloud:kimi-k2.6)
   if (_last.startsWith('@') && _last.includes(':')) _last = _last.split(':').slice(1).join(':');
   const looksLikeOllamaTag = /^[a-z0-9][\w.-]*:[\w.-]+$/i.test(_last);
-  const looksLikeBareOllamaId = !modelId.includes('/') && /[A-Za-z]/.test(_last);
+  // Narrow: only apply Ollama formatter to IDs with explicit @ollama prefix or colon-tag format.
+  // Avoids reformatting bare provider model IDs like claude-sonnet-4-6 or gpt-4o.
+  const looksLikeBareOllamaId = modelId.startsWith('@ollama') || looksLikeOllamaTag;
   const ollamaLabel = _fmtOllamaLabel(_last);
   if ((modelId.startsWith('ollama/') || modelId.startsWith('@ollama') || looksLikeOllamaTag || looksLikeBareOllamaId) && ollamaLabel !== _last) {
     return ollamaLabel;
