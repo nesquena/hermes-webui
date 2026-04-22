@@ -262,6 +262,77 @@ class TestCheckpointVariableLifecycle:
     finally's `if _checkpoint_stop is not None` branch is always safe.
     """
 
+
+class TestIssue765FollowupHardening:
+    """Regression tests for the follow-up hardening pass on Issue #765."""
+
+    def test_same_session_concurrent_saves_use_distinct_temp_files(self, monkeypatch):
+        """Two concurrent saves of the same session must not collide on one tmp path.
+
+        The key regression guard here is that each save call should reach os.replace()
+        with a distinct source tmp path. With the old shared `<sid>.tmp` scheme, both
+        threads would target the same path and the second replace would deterministically
+        fail once the first consume/remove happened.
+        """
+        s = _make_session("same_sid")
+        s.save(skip_index=True)  # seed the file on disk
+
+        original_replace = models.os.replace
+        barrier = threading.Barrier(2)
+        replace_sources = []
+        errors = []
+
+        def _replace_with_barrier(src, dst):
+            replace_sources.append(str(src))
+            barrier.wait(timeout=5)
+            return original_replace(src, dst)
+
+        monkeypatch.setattr(models.os, "replace", _replace_with_barrier)
+
+        def _save_worker():
+            try:
+                s.save(skip_index=True)
+            except Exception as e:
+                errors.append(e)
+
+        t1 = threading.Thread(target=_save_worker)
+        t2 = threading.Thread(target=_save_worker)
+        t1.start()
+        t2.start()
+        t1.join(timeout=5)
+        t2.join(timeout=5)
+
+        assert not errors, f"Concurrent same-session saves should not fail: {errors}"
+        assert len(replace_sources) == 2, f"Expected 2 replace calls, got {replace_sources}"
+        assert len(set(replace_sources)) == 2, (
+            "Concurrent same-session saves must use distinct temp files; "
+            f"got {replace_sources}"
+        )
+        data = json.loads(s.path.read_text(encoding="utf-8"))
+        assert data["session_id"] == "same_sid"
+
+    def test_success_path_joins_checkpoint_before_session_mutation(self):
+        """Static guard: success path must stop/join checkpoint thread before mutating.
+
+        This keeps the post-run_conversation session rewrite serialized relative to the
+        periodic checkpoint worker.
+        """
+        src = (Path(__file__).parent.parent / "api" / "streaming.py").read_text(
+            encoding="utf-8"
+        )
+        stop_idx = src.find("if _checkpoint_stop is not None:\n                _checkpoint_stop.set()")
+        join_idx = src.find("if _ckpt_thread is not None:\n                _ckpt_thread.join(timeout=15)")
+        lock_idx = src.find("with _agent_lock:\n                s.messages = _restore_reasoning_metadata(")
+        save_idx = src.find("s.messages = _restore_reasoning_metadata(")
+
+        assert stop_idx != -1, "Success path must stop the checkpoint thread"
+        assert join_idx != -1, "Success path must join the checkpoint thread"
+        assert lock_idx != -1, "Success path must serialize mutation with _agent_lock"
+        assert save_idx != -1, "Success path restore/mutation block not found"
+        assert stop_idx < join_idx < lock_idx <= save_idx, (
+            "Checkpoint stop/join must happen before the success-path session mutation block"
+        )
+
     def test_checkpoint_stop_initialised_before_any_raiseable_code(self):
         """Static check: `_checkpoint_stop = None` must appear before any code
         that could raise inside _run_agent_streaming's outer try."""
@@ -271,7 +342,11 @@ class TestCheckpointVariableLifecycle:
         lines = src.splitlines()
         try_line = next(
             i for i, ln in enumerate(lines, 1)
-            if ln.rstrip().endswith("try:") and lines[i - 2].strip().startswith("_checkpoint_stop")
+            if ln.rstrip().endswith("try:")
+            and any(
+                lines[j].strip().startswith("_checkpoint_stop = None")
+                for j in range(max(0, i - 3), i - 1)
+            )
         )
         # The assignment must precede the `try:` — not sit inside the nested
         # block where an earlier line could raise before it runs.
