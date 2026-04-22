@@ -269,6 +269,18 @@ def _normalize_session_model_in_place(session) -> str:
     return effective_model
 
 
+def _resolve_effective_session_model_for_display(session) -> str:
+    """Resolve the model a session should display without mutating persisted state.
+
+    `GET /api/session` should stay side-effect free. If a stale persisted model
+    needs normalization for the current provider configuration, return the
+    effective model for the response payload only and leave disk state alone.
+    """
+    original_model = getattr(session, "model", None) or ""
+    effective_model, _changed = _resolve_compatible_session_model(original_model or None)
+    return effective_model or original_model
+
+
 from api.models import (
     Session,
     get_session,
@@ -605,7 +617,7 @@ def handle_get(handler, parsed) -> bool:
             return j(handler, {"error": "session_id is required"}, status=400)
         try:
             s = get_session(sid)
-            _normalize_session_model_in_place(s)
+            effective_model = _resolve_effective_session_model_for_display(s)
             raw = s.compact() | {
                 "messages": s.messages,
                 "tool_calls": getattr(s, "tool_calls", []),
@@ -614,6 +626,8 @@ def handle_get(handler, parsed) -> bool:
                 "pending_attachments": getattr(s, "pending_attachments", []),
                 "pending_started_at": getattr(s, "pending_started_at", None),
             }
+            if effective_model:
+                raw["model"] = effective_model
             return j(handler, {"session": redact_session_data(raw)})
         except KeyError:
             # Not a WebUI session -- try CLI store

@@ -1,5 +1,37 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.150] — 2026-04-22
+
+### Fixed
+- **Profile switching: three related state fixes** — (1) `hermes_profile=default`
+  cookie is now persisted instead of being cleared with `max-age=0`, which had
+  caused the browser to fall back to the process-global profile on the next
+  request. (2) The `sessionInProgress` branch of `switchToProfile()` now calls
+  `syncTopbar()` instead of the undefined `updateWorkspaceChip()`. (3) Sidebar
+  and dropdown active-profile rendering now prefer `S.activeProfile` client
+  state when available, with a safe fallback. (#849 by @migueltavares)
+
+## [v0.50.149] — 2026-04-22
+
+### Fixed
+- **`GET /api/session` is now side-effect free for stale-model sessions** —
+  the read path previously called `_normalize_session_model_in_place()`,
+  which could write back to disk and update the session index while handling
+  a plain read. Replaced with a read-only
+  `_resolve_effective_session_model_for_display()` that returns the effective
+  display model without any write-back. Closes #845. (#848 by @franksong2702)
+
+## [v0.50.148] — 2026-04-22
+
+### Fixed
+- **Prune stale `_index.json` ghost rows after session-id rotation** — index
+  entries whose backing session file no longer exists (e.g. after context
+  compression rotates the session id) are now pruned on both incremental
+  index writes and `all_sessions()` reads. Fixes duplicate session entries
+  in the sidebar. Also pre-snapshots `in_memory_ids` under a single `LOCK`
+  acquisition in `all_sessions()` rather than one per row — small but
+  measurable contention reduction. Closes #846. (#847 by @franksong2702)
+
 ## [v0.50.147] — 2026-04-22
 
 ### Fixed
