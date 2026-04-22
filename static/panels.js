@@ -809,6 +809,9 @@ async function switchToWorkspace(path,name){
       session_id:S.session.session_id, workspace:path, model:S.session.model
     })});
     S.session.workspace=path;
+    // Explicit workspace switch = user overriding any pending profile-switch default.
+    // Clear the one-shot flag so a subsequent newSession() inherits this choice instead.
+    S._profileSwitchWorkspace=null;
     syncTopbar();
     await loadDir('.');
     showToast(t('workspace_switched_to',name||getWorkspaceFriendlyName(path)));
@@ -953,8 +956,12 @@ async function switchToProfile(name) {
     _workspaceList = null;
     await loadWorkspaceList();
     if (data.default_workspace) {
-      // Always store the profile default for new sessions
+      // Always store the persistent profile default — used for blank-page display
+      // and workspace auto-bind throughout the session lifecycle (#804, #823).
       S._profileDefaultWorkspace = data.default_workspace;
+      // Also set the one-shot flag consumed by newSession() so the first new
+      // session after a profile switch inherits this workspace (#424).
+      S._profileSwitchWorkspace = data.default_workspace;
 
       if (S.session && !sessionInProgress) {
         // Empty session (no messages yet) — safe to update it in place
