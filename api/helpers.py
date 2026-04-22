@@ -216,8 +216,9 @@ def build_profile_cookie(name: str) -> str:
     _active_profile, which can unexpectedly switch clients back to another
     profile.
 
-    httponly=True: the JS reads profile from /api/profile/active JSON, never
-    from document.cookie, so httponly exposure is unnecessary.
+    Set HttpOnly because the UI reads the active profile from
+    /api/profile/active JSON and does not need to access this cookie via
+    document.cookie.
     """
     import http.cookies as _hc
     cookie = _hc.SimpleCookie()
