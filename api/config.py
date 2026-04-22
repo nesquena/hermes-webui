@@ -1487,8 +1487,10 @@ def get_available_models() -> dict:
                     }
                 )
             elif pid == "ollama-cloud":
-                # Ollama Cloud list is dynamic; fetch via hermes_cli provider catalog
-                # (live /v1/models + models.dev + disk cache fallback).
+                # Ollama Cloud list is dynamic; fetch via hermes_cli provider catalog.
+                # When the catalog is unavailable, skip the group rather than emit a
+                # speculative static list — matches the named-custom and unknown-provider
+                # branches below.
                 raw_models = []
                 try:
                     from hermes_cli.models import provider_model_ids as _provider_model_ids
@@ -1500,32 +1502,15 @@ def get_available_models() -> dict:
                 except Exception:
                     logger.warning("Failed to load Ollama Cloud models from hermes_cli")
 
-                if not raw_models:
-                    # Fall back to a small static list so the user can still pick
-                    # a model — emitting nothing would silently hide a configured
-                    # provider with no UI signal.
-                    logger.warning(
-                        "Ollama Cloud catalog empty; falling back to static model list"
+                if raw_models:
+                    models = _apply_provider_prefix(raw_models, pid, active_provider)
+                    groups.append(
+                        {
+                            "provider": provider_name,
+                            "provider_id": pid,
+                            "models": models,
+                        }
                     )
-                    raw_models = [
-                        {"id": mid, "label": _format_ollama_label(mid)}
-                        for mid in (
-                            "kimi-k2.6",
-                            "glm-5.1",
-                            "minimax-m2.7",
-                            "gemma4:31b",
-                            "nemotron-3-super",
-                        )
-                    ]
-
-                models = _apply_provider_prefix(raw_models, pid, active_provider)
-                groups.append(
-                    {
-                        "provider": provider_name,
-                        "provider_id": pid,
-                        "models": models,
-                    }
-                )
             elif pid in _PROVIDER_MODELS or pid in cfg.get("providers", {}):
                 # For non-default providers, prefix model IDs with @provider:model
                 # so resolve_model_provider() routes through that specific provider

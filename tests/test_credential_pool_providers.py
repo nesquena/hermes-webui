@@ -439,8 +439,13 @@ def test_auth_store_active_provider_alias_is_resolved(monkeypatch, tmp_path):
     )
 
 
-def test_ollama_cloud_empty_catalog_falls_back_to_static_list(monkeypatch, tmp_path):
-    """When hermes_cli returns no models for ollama-cloud, the group still appears."""
+def test_ollama_cloud_empty_catalog_skips_group(monkeypatch, tmp_path):
+    """When hermes_cli returns no models for ollama-cloud, the group is omitted.
+
+    Matches the named-custom and unknown-provider branches: we don't invent a
+    catalog we can't enumerate. The logger.warning in the except branch keeps
+    diagnostics available for operators.
+    """
     _install_fake_hermes_cli(monkeypatch)
 
     # Override the stub to return empty for ollama-cloud.
@@ -483,7 +488,6 @@ def test_ollama_cloud_empty_catalog_falls_back_to_static_list(monkeypatch, tmp_p
         config._cfg_mtime = old_mtime
 
     groups = _group_by_provider(result)
-    assert "Ollama Cloud" in groups, f"Ollama Cloud must appear with fallback list; got {list(groups)}"
-    model_ids = [m["id"] for m in groups["Ollama Cloud"]]
-    assert model_ids, "Fallback list must not be empty"
-    assert all(mid.startswith("@ollama-cloud:") for mid in model_ids), model_ids
+    assert "Ollama Cloud" not in groups, (
+        f"Ollama Cloud group should be skipped when catalog is empty; got {list(groups)}"
+    )
