@@ -29,6 +29,12 @@
   workspace subtree) and never enumerate blocked system roots. (`api/routes.py`,
   `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
 
+## [v0.50.171] — 2026-04-23
+
+### Fixed
+- **Nous default model saves correctly and no longer freezes on Save** — two related bugs for Nous users: (1) saving an `@nous:...` default model in Settings → Preferences silently stripped the prefix, leaving the picker blank on reopen; (2) every Settings save triggered a blocking live-fetch from the provider API (~5s freeze). The prefix is now preserved verbatim in `config.yaml`; the save endpoint returns a lightweight `{ok, model}` ack instead of the full catalog. (`api/config.py`) Closes #895.
+- **Cross-namespace models (minimax/, qwen/) no longer 404 for Nous users** — `resolve_model_provider()` was checking the `config_base_url` branch before the portal-provider guard, causing known cross-namespace prefixes (`minimax/`, `qwen/`) to be stripped before sending to Nous. Portal providers are now checked first so all slash-prefixed model IDs reach Nous intact. (`api/config.py`) Closes #894.
+
 ## [v0.50.170] — 2026-04-23
 
 ### Fixed
