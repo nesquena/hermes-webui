@@ -1,3 +1,9 @@
+function _markSessionViewed(sid, messageCount) {
+  if(typeof _setSessionViewedCount!=='function' || !sid) return;
+  const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
+  _setSessionViewedCount(sid, next);
+}
+
 async function send(){
   const text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length)return;
@@ -104,9 +110,17 @@ async function send(){
     }
     streamId=startData.stream_id;
     S.activeStreamId = streamId;
+    if(S.session&&S.session.session_id===activeSid){
+      S.session.active_stream_id = streamId;
+    }
     markInflight(activeSid, streamId);
     if(typeof saveInflightState==='function'){
       saveInflightState(activeSid,{streamId,messages:INFLIGHT[activeSid].messages,uploaded,toolCalls:INFLIGHT[activeSid].toolCalls||[]});
+    }
+    // Refresh session list so background streaming indicators appear immediately for the
+    // session that was just started and any others that may already be running.
+    if(typeof renderSessionList === 'function') {
+      void renderSessionList();
     }
     // Show Cancel button
     const cancelBtn=$('btnCancel');
@@ -538,6 +552,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         S.busy=false;
         // No-reply guard (#373): if agent returned nothing, show inline error
         if(!S.messages.some(m=>m.role==='assistant'&&String(m.content||'').trim())&&!assistantText){removeThinking();S.messages.push({role:'assistant',content:'**No response received.** Check your API key and model selection.'});}
+        _markSessionViewed(activeSid, d.session.message_count ?? S.messages.length);
         syncTopbar();renderMessages();loadDir('.');
       }
       renderSessionList();setBusy(false);setStatus('');
@@ -592,6 +607,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }catch(_){
           S.messages.push({role:'assistant',content:'**Error:** An error occurred. Check server logs.'});
         }
+        _markSessionViewed(activeSid, S.messages.length);
         renderMessages();
       }else if(typeof trackBackgroundError==='function'){
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
@@ -663,6 +679,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             S.session=data.session;
             S.messages=(data.session.messages||[]).filter(m=>m&&m.role);
             clearLiveToolCards();if(!assistantText)removeThinking();
+            _markSessionViewed(activeSid, data.session.message_count ?? S.messages.length);
             renderMessages();
           }
         }catch(_){
@@ -670,6 +687,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(S.session&&S.session.session_id===activeSid){
             clearLiveToolCards();if(!assistantText)removeThinking();
             S.messages.push({role:'assistant',content:'*Task cancelled.*'});renderMessages();
+            _markSessionViewed(activeSid, S.messages.length);
           }
         }
       })();
@@ -703,6 +721,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }else{
           S.toolCalls=[];
         }
+        _markSessionViewed(activeSid, session.message_count ?? S.messages.length);
         syncTopbar();renderMessages();
       }
       renderSessionList();setBusy(false);setComposerStatus('');
@@ -726,6 +745,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       S.activeStreamId=null;const _cbe=$('btnCancel');if(_cbe)_cbe.style.display='none';
       clearLiveToolCards();if(!assistantText)removeThinking();
       S.messages.push({role:'assistant',content:'**Error:** Connection lost'});renderMessages();
+      _markSessionViewed(activeSid, S.messages.length);
     }else{
       if(typeof trackBackgroundError==='function'){
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;

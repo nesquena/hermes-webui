@@ -10,6 +10,47 @@ const ICONS={
   more:'<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" stroke="none"><circle cx="8" cy="3" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="8" cy="13" r="1.25"/></svg>',
 };
 
+const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
+let _sessionViewedCounts = null;
+
+function _getSessionViewedCounts() {
+  if (_sessionViewedCounts !== null) return _sessionViewedCounts;
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SESSION_VIEWED_COUNTS_KEY) || '{}');
+    _sessionViewedCounts = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_){
+    _sessionViewedCounts = {};
+  }
+  return _sessionViewedCounts;
+}
+
+function _saveSessionViewedCounts() {
+  try {
+    localStorage.setItem(SESSION_VIEWED_COUNTS_KEY, JSON.stringify(_getSessionViewedCounts()));
+  } catch (_){
+    // Ignore localStorage write failures.
+  }
+}
+
+function _setSessionViewedCount(sid, messageCount = 0) {
+  if (!sid) return;
+  const counts = _getSessionViewedCounts();
+  const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
+  counts[sid] = next;
+  _saveSessionViewedCounts();
+}
+
+function _hasUnreadForSession(s) {
+  if (!s || !s.session_id) return false;
+  const counts = _getSessionViewedCounts();
+  if (!Object.prototype.hasOwnProperty.call(counts, s.session_id)) {
+    _setSessionViewedCount(s.session_id, Number(s.message_count || 0));
+    return false;
+  }
+  if (!Number.isFinite(s.message_count)) return false;
+  return s.message_count > Number(counts[s.session_id] || 0);
+}
+
 async function newSession(flash){
   updateQueueBadge();
   S.toolCalls=[];
@@ -26,6 +67,7 @@ async function newSession(flash){
   S.lastUsage={...(data.session.last_usage||{})};
   if(flash)S.session._flash=true;
   localStorage.setItem('hermes-webui-session',S.session.session_id);
+  _setSessionViewedCount(S.session.session_id, S.session.message_count || 0);
   // Reset per-session visual state: a fresh chat is idle even if another
   // conversation is still streaming in the background.
   S.busy=false;
@@ -46,6 +88,7 @@ async function loadSession(sid){
   const data=await api(`/api/session?session_id=${encodeURIComponent(sid)}`);
   S.session=data.session;
   S.lastUsage={...(data.session.last_usage||{})};
+  _setSessionViewedCount(S.session.session_id, Number(data.session.message_count || 0));
   localStorage.setItem('hermes-webui-session',S.session.session_id);
   data.session.messages = (data.session.messages || []).filter(m => m && m.role);
   const hasMessageToolMetadata = (data.session.messages || []).some(m => {
@@ -355,6 +398,13 @@ async function renderSessionList(){
     ]);
     _allSessions = sessData.sessions||[];
     _allProjects = projData.projects||[];
+    const isStreaming = _allSessions.some(s => Boolean(s && s.is_streaming));
+    if (isStreaming) {
+      startStreamingPoll();
+    } else {
+      stopStreamingPoll();
+    }
+    ensureSessionTimeRefreshPoll();
     renderSessionListFromCache();  // no-ops if rename is in progress
   }catch(e){console.warn('renderSessionList',e);}
 }
@@ -365,6 +415,30 @@ let _gatewayPollTimer = null;
 let _gatewayProbeInFlight = false;
 let _gatewaySSEWarningShown = false;
 const _gatewayFallbackPollMs = 30000;
+const _streamingPollMs = 5000;
+const _sessionTimeRefreshMs = 60000;
+let _streamingPollTimer = null;
+let _sessionTimeRefreshTimer = null;
+
+function startStreamingPoll(){
+  if(_streamingPollTimer) return;
+  _streamingPollTimer = setInterval(() => {
+    void renderSessionList();
+  }, _streamingPollMs);
+}
+
+function stopStreamingPoll(){
+  if(!_streamingPollTimer) return;
+  clearInterval(_streamingPollTimer);
+  _streamingPollTimer = null;
+}
+
+function ensureSessionTimeRefreshPoll(){
+  if(_sessionTimeRefreshTimer) return;
+  _sessionTimeRefreshTimer = setInterval(() => {
+    renderSessionListFromCache();
+  }, _sessionTimeRefreshMs);
+}
 
 function startGatewayPollFallback(ms){
   const intervalMs = Math.max(5000, Number(ms) || _gatewayFallbackPollMs);
@@ -693,7 +767,9 @@ function renderSessionListFromCache(){
   function _renderOneSession(s){
     const el=document.createElement('div');
     const isActive=S.session&&s.session_id===S.session.session_id;
-    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'');
+    const isStreaming=Boolean(s.is_streaming);
+    const hasUnread=_hasUnreadForSession(s)&&!isActive;
+    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(isStreaming?' streaming':'');
     if(isActive&&S.session&&S.session._flash)delete S.session._flash;
     const rawTitle=s.title||'Untitled';
     const tags=(rawTitle.match(/#[\w-]+/g)||[]);
@@ -706,12 +782,25 @@ function renderSessionListFromCache(){
     sessionText.className='session-text';
     const titleRow=document.createElement('div');
     titleRow.className='session-title-row';
+    if(s.pinned){
+      const pinInd=document.createElement('span');
+      pinInd.className='session-pin-indicator';
+      pinInd.innerHTML=ICONS.pin;
+      titleRow.appendChild(pinInd);
+    }
+    const state=document.createElement('span');
+    state.className='session-state-indicator'+(isStreaming?' is-streaming':(hasUnread?' is-unread':''));
+    if(isStreaming||hasUnread) titleRow.appendChild(state);
     const title=document.createElement('span');
     title.className='session-title';
     title.textContent=cleanTitle||'Untitled';
     title.title='Double-click to rename';
     const tsMs=_sessionTimestampMs(s);
+    const ts=document.createElement('span');
+    ts.className='session-time';
+    ts.textContent=_formatRelativeSessionTime(tsMs);
     titleRow.appendChild(title);
+    titleRow.appendChild(ts);
     sessionText.appendChild(titleRow);
     const density=(window._sidebarDensity==='detailed'?'detailed':'compact');
     if(density==='detailed'){
@@ -781,13 +870,6 @@ function renderSessionListFromCache(){
       setTimeout(()=>{inp.focus();inp.select();},10);
     };
 
-    // Pin indicator (inline, only when pinned — no space reserved otherwise)
-    if(s.pinned){
-      const pinInd=document.createElement('span');
-      pinInd.className='session-pin-indicator';
-      pinInd.innerHTML=ICONS.pin;
-      el.appendChild(pinInd);
-    }
     // Project indicator: colored dot appended after the title
     if(s.project_id){
       const proj=_allProjects.find(p=>p.project_id===s.project_id);
