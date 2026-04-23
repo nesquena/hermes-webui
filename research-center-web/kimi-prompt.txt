@@ -1,0 +1,51 @@
+Redesign this entire React news aggregator UI to match the dark editorial magazine style of https://reporter-news.highfivethemes.com ("The Reporter" theme). 
+
+CURRENT STATE:
+- Vite + React + Tailwind project
+- Current UI is a sidebar + card grid with purple accents (looks generic)
+- Uses mock data from src/data/mockData.js with articles array (title, summary, source, region, category, severity, date, url)
+- Regions: All, Americas, Europe, Japan, China, South Korea, Russia
+- Categories: All, AI Harms, Cybersecurity, Disruption, AI/AGI Governance, AI Technology
+- Has SearchBar, FeedCard, ArticleDetail components
+
+TARGET DESIGN (The Reporter style):
+1. DARK EDITORIAL AESTHETIC - near-black background (#0a0a0a or #111), not purple
+2. CRIMSON/RED ACCENT only - #e31b23 for category tags, subscribe button, active states
+3. SERIF masthead/logo - elegant serif font for the brand name
+4. DENSE INFORMATION LAYOUT - like a digital broadsheet, not sparse cards
+5. TOP NAVIGATION - horizontal nav bar with categories + search + theme toggle
+6. HERO SECTION - large featured article with image + gradient overlay, headline in white
+7. CATEGORY SECTIONS - each category as a horizontal section with article cards
+8. SIDEBAR "LATEST POSTS" - compact list of recent articles on the right
+9. NEWSLETTER SUBSCRIPTION - dark banner with email input + subscribe button
+10. FOOTER - category columns + copyright
+11. ARTICLE CARDS - image left + title + category tag (red) + author + date
+12. MOBILE RESPONSIVE - hamburger menu, stacked layout
+
+TECHNICAL REQUIREMENTS:
+- Keep using Tailwind CSS
+- Keep the existing data model from mockData
+- Keep search, filtering, and article detail functionality
+- Use mock images from picsum.photos
+- Thai language: all UI text in Thai, mock article data stays English
+- Project name in Thai: "ศูนย์วิจัย AI กฎหมายและเทคโนโลยี"
+
+FILES TO MODIFY/CREATE:
+- src/App.jsx - main layout
+- src/index.css - custom styles, fonts
+- src/components/Header.jsx - top nav + logo + search
+- src/components/HeroSection.jsx - featured article
+- src/components/CategorySection.jsx - section for each category
+- src/components/ArticleCard.jsx - compact card
+- src/components/Sidebar.jsx - latest posts sidebar
+- src/components/Newsletter.jsx - subscription banner
+- src/components/Footer.jsx - footer
+- src/components/ArticleDetail.jsx - detail view (redesign)
+
+IMPORTANT:
+- Do NOT keep the current purple sidebar layout
+- Do NOT use glassmorphism/floating card style
+- Match the dense, high-contrast editorial feel of The Reporter
+- Red accent used sparingly
+- All text in Thai (navigation, buttons, labels, section headers)
+- Install any needed Google Fonts
