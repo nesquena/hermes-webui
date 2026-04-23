@@ -29,6 +29,11 @@
   workspace subtree) and never enumerate blocked system roots. (`api/routes.py`,
   `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
 
+## [v0.50.177] — 2026-04-23
+
+### Fixed
+- **Settings dialog and message controls unusable on mobile** — three mobile usability fixes: (1) settings tab strip replaced by a native `<select>` dropdown on narrow viewports, panel goes full-width; (2) provider card Save/Remove buttons become icon-only on mobile so the API key input fills the available width; (3) message timestamps, copy, and edit buttons are always visible on touch screens (no hover state on mobile). (`static/index.html`, `static/panels.js`, `static/style.css`) Co-authored by @bsgdigital.
+
 ## [v0.50.176] — 2026-04-23
 
 ### Fixed
