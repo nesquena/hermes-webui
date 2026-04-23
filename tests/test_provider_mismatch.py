@@ -14,6 +14,7 @@ import json
 import pathlib
 import re
 import urllib.request
+from tests.conftest import TEST_STATE_DIR
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 from tests._pytest_port import BASE
@@ -21,6 +22,15 @@ from tests._pytest_port import BASE
 
 def _read(rel_path: str) -> str:
     return (REPO_ROOT / rel_path).read_text(encoding="utf-8")
+
+
+def _post(path, body=None):
+    data = json.dumps(body or {}).encode()
+    req = urllib.request.Request(
+        BASE + path, data=data, headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read()), r.status
 
 
 # ── 1. streaming.py: auth error detection ───────────────────────────────────
@@ -348,7 +358,7 @@ def test_google_active_provider_keeps_valid_gemini_session_model(monkeypatch):
 
 
 def test_session_model_normalizer_persists_corrected_model(monkeypatch):
-    """GET /api/session should persist the corrected model back to disk/state."""
+    """Write-path normalization should still persist corrected models."""
     import api.routes as routes
 
     monkeypatch.setattr(
@@ -375,6 +385,65 @@ def test_session_model_normalizer_persists_corrected_model(monkeypatch):
     assert effective == "gpt-5.4-mini"
     assert session.model == "gpt-5.4-mini"
     assert save_calls == [False]
+
+
+def test_session_model_display_resolver_is_read_only(monkeypatch):
+    """Read-path model resolution must not mutate or save the session."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.4-mini",
+        },
+    )
+
+    save_calls = []
+
+    class DummySession:
+        def __init__(self):
+            self.model = "gemini-3.1-pro-preview"
+
+        def save(self, touch_updated_at=True):
+            save_calls.append(touch_updated_at)
+
+    session = DummySession()
+    effective = routes._resolve_effective_session_model_for_display(session)
+
+    assert effective == "gpt-5.4-mini"
+    assert session.model == "gemini-3.1-pro-preview"
+    assert save_calls == []
+
+
+def test_api_session_is_side_effect_free_for_stale_models():
+    """GET /api/session must not rewrite the session file on first open (#845)."""
+    created, status = _post("/api/session/new", {})
+    assert status == 200
+    sid = created["session"]["session_id"]
+
+    session_path = TEST_STATE_DIR / "sessions" / f"{sid}.json"
+    session_data = json.loads(session_path.read_text(encoding="utf-8"))
+    stale_model = "google/gemini-3.1-pro-preview"
+    session_data["model"] = stale_model
+    before = json.dumps(session_data, ensure_ascii=False, indent=2)
+    session_path.write_text(before, encoding="utf-8")
+
+    with urllib.request.urlopen(
+        BASE + f"/api/session?session_id={sid}", timeout=10
+    ) as r:
+        payload = json.loads(r.read())
+
+    after = session_path.read_text(encoding="utf-8")
+    assert payload["session"]["model"], "response should still expose an effective display model"
+    assert payload["session"]["model"] != stale_model, (
+        "response model should be compatibility-normalized on the read path"
+    )
+    assert after == before, (
+        "GET /api/session must return an effective model for display without "
+        "rewriting the session file on disk"
+    )
 
 
 # ── Model switch toast (#419) ─────────────────────────────────────────────────

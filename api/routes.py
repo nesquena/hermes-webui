@@ -268,6 +268,18 @@ def _normalize_session_model_in_place(session) -> str:
     return effective_model
 
 
+def _resolve_effective_session_model_for_display(session) -> str:
+    """Resolve the model a session should display without mutating persisted state.
+
+    `GET /api/session` should stay side-effect free. If a stale persisted model
+    needs normalization for the current provider configuration, return the
+    effective model for the response payload only and leave disk state alone.
+    """
+    original_model = getattr(session, "model", None) or ""
+    effective_model, _changed = _resolve_compatible_session_model(original_model or None)
+    return effective_model or original_model
+
+
 from api.models import (
     Session,
     get_session,
@@ -604,7 +616,7 @@ def handle_get(handler, parsed) -> bool:
             return j(handler, {"error": "session_id is required"}, status=400)
         try:
             s = get_session(sid)
-            _normalize_session_model_in_place(s)
+            effective_model = _resolve_effective_session_model_for_display(s)
             raw = s.compact() | {
                 "messages": s.messages,
                 "tool_calls": getattr(s, "tool_calls", []),
@@ -613,6 +625,8 @@ def handle_get(handler, parsed) -> bool:
                 "pending_attachments": getattr(s, "pending_attachments", []),
                 "pending_started_at": getattr(s, "pending_started_at", None),
             }
+            if effective_model:
+                raw["model"] = effective_model
             return j(handler, {"session": redact_session_data(raw)})
         except KeyError:
             # Not a WebUI session -- try CLI store
@@ -2138,9 +2152,15 @@ def _handle_live_models(handler, parsed):
             if not ids:
                 return j(handler, {"provider": provider, "models": [], "count": 0})
 
-        # Normalise to {id, label} — provider_model_ids() returns plain string IDs
+        # Normalise to {id, label} — provider_model_ids() returns plain string IDs.
+        # For ollama-cloud use the shared Ollama formatter (handles `:variant` suffix).
+        # For all other providers use a simpler hyphen-split capitaliser.
+        from api.config import _format_ollama_label as _fmt_ollama
+
         def _make_label(mid):
             """Best-effort human label from a model ID string."""
+            if provider in ("ollama", "ollama-cloud"):
+                return _fmt_ollama(mid)
             # Preserve slashes for router IDs like "anthropic/claude-sonnet-4.6"
             display = mid.split("/")[-1] if "/" in mid else mid
             parts = display.split("-")

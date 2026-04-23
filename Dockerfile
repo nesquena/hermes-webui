@@ -24,6 +24,7 @@ RUN apt-get update -y --fix-missing --no-install-recommends \
     sudo \
     curl \
     rsync \
+    openssh-client \
     && apt-get upgrade -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*

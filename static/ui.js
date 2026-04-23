@@ -154,14 +154,31 @@ async function _fetchLiveModels(provider, sel){
     // Rebuild options from live data
     const existingIds=new Set([...sel.options].map(o=>o.value));
     let added=0;
+    // Apply @provider: prefix to live-fetched model IDs (mirrors the server-side
+    // behaviour for static lists).  Portal providers like Nous return upstream
+    // vendor IDs (e.g. "minimax/minimax-m2.7", "anthropic/claude-opus-4.7") —
+    // without a `@nous:` prefix, `resolve_model_provider()` sees the slash and
+    // mis-routes via OpenRouter → 404.  Prefixing with `@${provider}:` makes
+    // the portal hint explicit so routing honours it (#854).
+    //
+    // Scope: only apply the prefix when this fetch is for the active provider
+    // and that provider is a portal (not OpenRouter / custom, which use bare
+    // or cross-namespace IDs natively).  Skip IDs that already carry an
+    // `@prefix:` — they've already been disambiguated upstream.
+    const _ap=(window._activeProvider||'').toLowerCase();
+    const _isPortalFetch=_ap && _ap!=='openrouter' && _ap!=='custom' && provider===_ap;
     for(const m of data.models){
-      if(existingIds.has(m.id)) continue; // already shown from static list
+      let mid=m.id;
+      if(_isPortalFetch && !mid.startsWith('@')){
+        mid=`@${provider}:${mid}`;
+      }
+      if(existingIds.has(mid)) continue; // already shown from static list
       const opt=document.createElement('option');
-      opt.value=m.id;
+      opt.value=mid;
       opt.textContent=m.label||m.id;
       opt.title='Live model — fetched from provider';
       providerGroup.appendChild(opt);
-      _dynamicModelLabels[m.id]=m.label||m.id;
+      _dynamicModelLabels[mid]=m.label||m.id;
       added++;
     }
     if(added>0){
@@ -188,6 +205,8 @@ async function _fetchLiveModels(provider, sel){
 function _checkProviderMismatch(modelId){
   const ap=(window._activeProvider||'').toLowerCase();
   if(!ap||ap==='custom'||ap==='openrouter') return null; // can't reliably check
+  // @provider: prefixed IDs came from that provider's live model list — no mismatch possible
+  if(modelId.startsWith('@')) return null;
   const slash=modelId.indexOf('/');
   if(slash<0) return null; // bare model name, no provider prefix
   const modelProvider=modelId.substring(0,slash).toLowerCase();
@@ -341,7 +360,7 @@ async function selectModelFromDropdown(value){
   if(!Array.from(sel.options).some(o=>o.value===value)){
     const opt=document.createElement('option');
     opt.value=value;
-    opt.textContent=value.split('/').pop()||value;
+    opt.textContent=getModelLabel(value);
     opt.dataset.custom='1';
     // Remove any previous custom option before adding new one
     sel.querySelectorAll('option[data-custom]').forEach(o=>o.remove());
@@ -469,6 +488,23 @@ function scrollToBottom(){
   if(btn) btn.style.display='none';
 }
 
+function _fmtOllamaLabel(mid){
+  const [namePart, ...variantParts] = mid.split(':');
+  const variant = variantParts.join(':');
+  const _fmt = (s) => {
+    const tokens = s.replace(/[-_]/g, ' ').split(' ');
+    return tokens.map(t => {
+      const alphaOnly = t.replace(/\./g, '');
+      if (t.length <= 3 && /^[a-zA-Z.]+$/.test(t)) return t.toUpperCase();
+      if (/^\d/.test(alphaOnly)) return t.toUpperCase();
+      return t.charAt(0).toUpperCase() + t.slice(1);
+    }).join(' ');
+  };
+  let label = _fmt(namePart);
+  if (variant) label += ' (' + _fmt(variant) + ')';
+  return label;
+}
+
 function getModelLabel(modelId){
   if(!modelId) return 'Unknown';
   // Check dynamic labels first, then fall back to splitting the ID
@@ -476,7 +512,19 @@ function getModelLabel(modelId){
   // Static fallback for common models
   const STATIC_LABELS={'openai/gpt-5.4-mini':'GPT-5.4 Mini','openai/gpt-4o':'GPT-4o','openai/o3':'o3','openai/o4-mini':'o4-mini','anthropic/claude-sonnet-4.6':'Sonnet 4.6','anthropic/claude-sonnet-4-5':'Sonnet 4.5','anthropic/claude-haiku-3-5':'Haiku 3.5','google/gemini-3.1-pro-preview':'Gemini 3.1 Pro','google/gemini-3-flash-preview':'Gemini 3 Flash','google/gemini-3.1-flash-lite-preview':'Gemini 3.1 Flash Lite','google/gemini-2.5-pro':'Gemini 2.5 Pro','google/gemini-2.5-flash':'Gemini 2.5 Flash','deepseek/deepseek-chat-v3-0324':'DeepSeek V3','meta-llama/llama-4-scout':'Llama 4 Scout'};
   if(STATIC_LABELS[modelId]) return STATIC_LABELS[modelId];
-  return modelId.split('/').pop()||'Unknown';
+  // Safe Ollama-tag fallback formatter before generic split('/').pop()
+  let _last = modelId.split('/').pop() || modelId;
+  // Strip @provider: prefix if present (e.g. @ollama-cloud:kimi-k2.6)
+  if (_last.startsWith('@') && _last.includes(':')) _last = _last.split(':').slice(1).join(':');
+  const looksLikeOllamaTag = /^[a-z0-9][\w.-]*:[\w.-]+$/i.test(_last);
+  // Narrow: only apply Ollama formatter to IDs with explicit @ollama prefix or colon-tag format.
+  // Avoids reformatting bare provider model IDs like claude-sonnet-4-6 or gpt-4o.
+  const looksLikeBareOllamaId = modelId.startsWith('@ollama') || looksLikeOllamaTag;
+  const ollamaLabel = _fmtOllamaLabel(_last);
+  if ((modelId.startsWith('ollama/') || modelId.startsWith('@ollama') || looksLikeOllamaTag || looksLikeBareOllamaId) && ollamaLabel !== _last) {
+    return ollamaLabel;
+  }
+  return _last || 'Unknown';
 }
 
 function _stripXmlToolCallsDisplay(s){
@@ -688,7 +736,10 @@ function renderMd(raw){
         const base=document.baseURI.replace(/\/$/,'');
         src=src.replace(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i,base);
       }
-      if(_IMAGE_EXTS.test(src.split('?')[0])){
+      // MEDIA: tokens are only emitted for tool-generated images (image_generate etc.).
+      // Render all https:// URLs as <img> — extension check would miss extensionless
+      // CDN paths like fal.media content-addressed URLs (closes #853).
+      if(_IMAGE_EXTS.test(src.split('?')[0]) || /^https?:\/\//i.test(src)){
         return `<img class="msg-media-img" src="${esc(src)}" alt="image" loading="lazy" onclick="this.classList.toggle('msg-media-img--full')">`;
       }
       return `<a href="${esc(src)}" target="_blank" rel="noopener">${esc(src)}</a>`;

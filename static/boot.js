@@ -847,6 +847,7 @@ function applyBotName(){
     $('modelSelect').value=savedModel;
     // If the value didn't take (model not in list), clear the bad pref
     if($('modelSelect').value!==savedModel) localStorage.removeItem('hermes-webui-model');
+    else if(typeof syncModelChip==='function') syncModelChip();
   }
   // Pre-load workspace list so sidebar name is correct from first render
   await loadWorkspaceList();
