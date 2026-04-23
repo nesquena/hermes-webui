@@ -51,6 +51,18 @@ class TestGeneratedTitleSanitization(unittest.TestCase):
             "Session title auto-summary test",
         )
 
+    def test_fallback_title_non_latin_input_uses_english_placeholder(self):
+        self.assertEqual(
+            _fallback_title_from_exchange("讨论一下这个问题", ""),
+            "Conversation topic",
+        )
+
+    def test_fallback_title_non_latin_quoted_topic_uses_english_placeholder(self):
+        self.assertEqual(
+            _fallback_title_from_exchange('Please review "讨论主题"', ""),
+            "Conversation topic",
+        )
+
     def test_title_generation_source_has_no_cjk_literals(self):
         src = Path("api/streaming.py").read_text(encoding="utf-8")
         self.assertNotRegex(src, r"[\u4e00-\u9fff]", "title generation code should stay English-only")

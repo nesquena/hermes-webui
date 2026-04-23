@@ -434,6 +434,9 @@ def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Option
     combined = f"{user_text} {assistant_text}".strip().lower()
     combined_raw = f"{user_text} {assistant_text}".strip()
 
+    def _contains_latin(text: str) -> bool:
+        return bool(re.search(r'[A-Za-z]', text or ''))
+
     def _extract_named_topic(text: str) -> str:
         m = re.search(r'"([^"\n]{2,24})"', text)
         if m:
@@ -445,6 +448,12 @@ def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Option
 
     topic_name = _extract_named_topic(combined_raw)
     if topic_name:
+        if not _contains_latin(topic_name):
+            if any(k in combined for k in ('time', 'schedule', 'efficiency', 'manage', 'fitness', 'singing', 'calligraphy')):
+                return 'Time management discussion'
+            if any(k in combined for k in ('hermes', 'codex', 'ai')):
+                return 'AI productivity discussion'
+            return 'Conversation topic'
         if any(k in combined for k in ('time', 'schedule', 'efficiency', 'manage', 'fitness', 'singing', 'calligraphy')):
             return f'{topic_name} time management'
         if any(k in combined for k in ('hermes', 'codex', 'ai')):
@@ -471,7 +480,7 @@ def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Option
     }
     tokens = re.findall(r'[A-Za-z0-9][A-Za-z0-9_./+-]*', head)
     if not tokens:
-        return head[:64]
+        return 'Conversation topic'
 
     picked = []
     for tok in tokens:
@@ -485,7 +494,7 @@ def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Option
 
     if picked:
         return ' '.join(picked)[:60]
-    return head[:24]
+    return 'Conversation topic'
 
 
 def _run_background_title_update(session_id: str, user_text: str, assistant_text: str, placeholder_title: str, put_event, agent=None):
