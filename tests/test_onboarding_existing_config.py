@@ -303,20 +303,27 @@ class TestOnboardingGateIntegration:
         # Write a fake API key so provider_ready (and thus chat_ready) fires
         # — but only when hermes_cli imports are available
         data, _ = _http_get("/api/onboarding/status")
-        if data["system"]["hermes_found"] and data["system"]["imports_ok"]:
-            (hermes_home / ".env").write_text(
-                "OPENROUTER_API_KEY=test-existing-key\n", encoding="utf-8"
-            )
-            data, status = _http_get("/api/onboarding/status")
-            assert status == 200
-            assert data["completed"] is True, (
-                "Existing config + chat_ready must auto-complete onboarding."
-            )
-        else:
-            # Agent not installed: chat_ready is always False, so wizard still
-            # fires — that is the correct behaviour (can't verify readiness).
-            assert data["completed"] is False
-
+        try:
+            if data["system"]["hermes_found"] and data["system"]["imports_ok"]:
+                (hermes_home / ".env").write_text(
+                    "OPENROUTER_API_KEY=test-e...\n", encoding="utf-8"
+                )
+                data, status = _http_get("/api/onboarding/status")
+                assert status == 200
+                assert data["completed"] is True, (
+                    "Existing config + chat_ready must auto-complete onboarding."
+                )
+            else:
+                # Agent not installed: chat_ready is always False, so wizard still
+                # fires — that is the correct behaviour (can't verify readiness).
+                assert data["completed"] is False
+        finally:
+            # Clean up: the auto-persist in get_onboarding_status() (#921) writes
+            # onboarding_completed=True to settings.json when config_auto_completed fires.
+            # Reset to avoid contaminating subsequent tests.
+            (hermes_home / "config.yaml").unlink(missing_ok=True)
+            (hermes_home / ".env").unlink(missing_ok=True)
+            _http_post("/api/settings", {"onboarding_completed": False})
     @_needs_yaml
     def test_setup_blocked_for_existing_config(self):
         """POST /api/onboarding/setup must return config_exists error if config.yaml exists."""
@@ -366,3 +373,7 @@ class TestOnboardingGateIntegration:
         assert data.get("error") != "config_exists", (
             "confirm_overwrite=True must bypass the guard."
         )
+        # Clean up so onboarding_completed=True left by this test's setup call
+        # does not contaminate subsequent tests (#921 test isolation).
+        (hermes_home / "config.yaml").unlink(missing_ok=True)
+        _http_post("/api/settings", {"onboarding_completed": False})
