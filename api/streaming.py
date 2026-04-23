@@ -1666,6 +1666,11 @@ def cancel_stream(stream_id: str) -> bool:
             _cs.pending_user_message = None
             _cs.pending_attachments = []
             _cs.pending_started_at = None
+            # Add cancel message to session messages so client sees consistent state
+            _cs.messages.append({
+                'role': 'assistant',
+                'content': '*Task cancelled.*'
+            })
             _cs.save()
         except Exception:
             logger.debug("Failed to clear session state on cancel for %s", _cancel_session_id)
