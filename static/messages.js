@@ -1,3 +1,9 @@
+function _markSessionViewed(sid, messageCount) {
+  if(typeof _setSessionViewedCount!=='function' || !sid) return;
+  const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
+  _setSessionViewedCount(sid, next);
+}
+
 async function send(){
   const text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length)return;
@@ -104,9 +110,17 @@ async function send(){
     }
     streamId=startData.stream_id;
     S.activeStreamId = streamId;
+    if(S.session&&S.session.session_id===activeSid){
+      S.session.active_stream_id = streamId;
+    }
     markInflight(activeSid, streamId);
     if(typeof saveInflightState==='function'){
       saveInflightState(activeSid,{streamId,messages:INFLIGHT[activeSid].messages,uploaded,toolCalls:INFLIGHT[activeSid].toolCalls||[]});
+    }
+    // Refresh session list so background streaming indicators appear immediately for the
+    // session that was just started and any others that may already be running.
+    if(typeof renderSessionList === 'function') {
+      void renderSessionList();
     }
     // Show Cancel button
     const cancelBtn=$('btnCancel');
@@ -279,7 +293,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _streamDisplay(){
     const raw=_stripXmlToolCalls(assistantText);
-    if(reasoningText) return raw;
+    // Always run think-block stripping even when reasoningText is populated.
+    // Some providers emit reasoning content via on_reasoning AND wrap it in
+    // <think> tags in the token stream — the early-return caused the thinking
+    // card and main response to show identical content (closes #852).
     for(const {open,close} of _thinkPairs){
       // Trim leading whitespace before checking for the open tag — some models
       // (e.g. MiniMax) emit newlines before <think>.
@@ -535,6 +552,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         S.busy=false;
         // No-reply guard (#373): if agent returned nothing, show inline error
         if(!S.messages.some(m=>m.role==='assistant'&&String(m.content||'').trim())&&!assistantText){removeThinking();S.messages.push({role:'assistant',content:'**No response received.** Check your API key and model selection.'});}
+        _markSessionViewed(activeSid, d.session.message_count ?? S.messages.length);
         syncTopbar();renderMessages();loadDir('.');
       }
       renderSessionList();setBusy(false);setStatus('');
@@ -589,6 +607,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }catch(_){
           S.messages.push({role:'assistant',content:'**Error:** An error occurred. Check server logs.'});
         }
+        _markSessionViewed(activeSid, S.messages.length);
         renderMessages();
       }else if(typeof trackBackgroundError==='function'){
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
@@ -596,6 +615,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         catch(_){trackBackgroundError(activeSid,_errTitle,'Error');}
       }
       if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setComposerStatus('');}
+      renderSessionList(); // clear streaming indicator immediately on apperror
     });
 
     source.addEventListener('warning',e=>{
@@ -650,10 +670,28 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;const _cbc=$('btnCancel');if(_cbc)_cbc.style.display='none';
       }
-      if(S.session&&S.session.session_id===activeSid){
-        clearLiveToolCards();if(!assistantText)removeThinking();
-        S.messages.push({role:'assistant',content:'*Task cancelled.*'});renderMessages();
-      }
+      // Fetch latest session from server to get accurate message list (includes cancel status)
+      // This ensures messages stay in sync with server, fixing race condition where local
+      // "*Task cancelled.*" message gets lost when done event overwrites S.messages
+      (async()=>{
+        try{
+          const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+          if(data&&data.session&&S.session&&S.session.session_id===activeSid){
+            S.session=data.session;
+            S.messages=(data.session.messages||[]).filter(m=>m&&m.role);
+            clearLiveToolCards();if(!assistantText)removeThinking();
+            _markSessionViewed(activeSid, data.session.message_count ?? S.messages.length);
+            renderMessages();
+          }
+        }catch(_){
+          // Fallback to local cancel message if API fails
+          if(S.session&&S.session.session_id===activeSid){
+            clearLiveToolCards();if(!assistantText)removeThinking();
+            S.messages.push({role:'assistant',content:'*Task cancelled.*'});renderMessages();
+            _markSessionViewed(activeSid, S.messages.length);
+          }
+        }
+      })();
       renderSessionList();
       if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setComposerStatus('');}
     });
@@ -684,6 +722,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }else{
           S.toolCalls=[];
         }
+        _markSessionViewed(activeSid, session.message_count ?? S.messages.length);
         syncTopbar();renderMessages();
       }
       renderSessionList();setBusy(false);setComposerStatus('');
@@ -707,6 +746,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       S.activeStreamId=null;const _cbe=$('btnCancel');if(_cbe)_cbe.style.display='none';
       clearLiveToolCards();if(!assistantText)removeThinking();
       S.messages.push({role:'assistant',content:'**Error:** Connection lost'});renderMessages();
+      _markSessionViewed(activeSid, S.messages.length);
     }else{
       if(typeof trackBackgroundError==='function'){
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;

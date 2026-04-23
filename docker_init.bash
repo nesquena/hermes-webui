@@ -294,14 +294,29 @@ else
   test -x /app/venv/bin/pip
 
   echo ""; echo "== Adding hermes-agent's pyproject.toml base dependencies to the virtual environment"
-  if [ -d "/home/hermeswebui/.hermes/hermes-agent" ] && [ -f "/home/hermeswebui/.hermes/hermes-agent/pyproject.toml" ]; then
-    uv pip install "/home/hermeswebui/.hermes/hermes-agent[honcho]" --trusted-host pypi.org --trusted-host files.pythonhosted.org || error_exit "Failed to install hermes-agent's requirements"
+  _agent_paths=(
+    "/home/hermeswebui/.hermes/hermes-agent"
+    "/opt/hermes"
+  )
+  _agent_src=""
+  for _p in "${_agent_paths[@]}"; do
+    if [ -d "$_p" ] && [ -f "$_p/pyproject.toml" ]; then
+      _agent_src="$_p"
+      break
+    fi
+  done
+  if [ -n "$_agent_src" ]; then
+    uv pip install "$_agent_src[all]" --trusted-host pypi.org --trusted-host files.pythonhosted.org || error_exit "Failed to install hermes-agent's requirements"
   else
     echo ""
-    echo "!! WARNING: hermes-agent source not found at /home/hermeswebui/.hermes/hermes-agent"
+    echo "!! WARNING: hermes-agent source not found."
+    echo "!!   Looked in: ${_agent_paths[0]}"
+    echo "!!              ${_agent_paths[1]}"
     echo "!! The WebUI will start with reduced functionality (no model auto-detection,"
     echo "!! no personality routing, no CLI session imports)."
-    echo "!! To fix: mount the agent source volume into the container. See:"
+    echo "!! To fix: mount the agent source volume into the container:"
+    echo "!!   -v /path/to/hermes-agent:/home/hermeswebui/.hermes/hermes-agent"
+    echo "!! Or see the two-container compose example:"
     echo "!!   https://github.com/nesquena/hermes-webui/blob/master/docker-compose.two-container.yml"
     echo ""
   fi

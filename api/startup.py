@@ -41,10 +41,40 @@ def _agent_dir() -> Path | None:
             return p.resolve()
     return None
 
+def _trusted_agent_dir(agent_dir: Path) -> bool:
+    """Return True if agent_dir passes ownership and permission checks.
+
+    Validates that the directory is not world- or group-writable and,
+    on POSIX systems, is owned by the current process user.
+
+    Intentionally does NOT enforce a canonical path (i.e. does not require
+    the dir to be ~/.hermes/hermes-agent), so custom HERMES_WEBUI_AGENT_DIR
+    paths work correctly when HERMES_WEBUI_AUTO_INSTALL=1 is set.
+    """
+    try:
+        st = agent_dir.stat()
+        if stat.S_IMODE(st.st_mode) & 0o022:
+            # World- or group-writable — untrusted
+            return False
+        if hasattr(os, 'getuid') and st.st_uid != os.getuid():
+            # Not owned by current user (POSIX only; Windows fallback skips)
+            return False
+        return True
+    except OSError:
+        return False
+
+
 def auto_install_agent_deps() -> bool:
+    enabled = os.environ.get('HERMES_WEBUI_AUTO_INSTALL', '').strip().lower() in ('1', 'true', 'yes')
+    if not enabled:
+        print('[!!] Auto-install disabled. Set HERMES_WEBUI_AUTO_INSTALL=1 to enable.', flush=True)
+        return False
     agent_dir = _agent_dir()
     if agent_dir is None:
         print('[!!] Auto-install skipped: agent directory not found.', flush=True)
+        return False
+    if not _trusted_agent_dir(agent_dir):
+        print('[!!] Auto-install skipped: agent directory failed trust check (check ownership/permissions).', flush=True)
         return False
     req_file = agent_dir / 'requirements.txt'
     pyproject = agent_dir / 'pyproject.toml'

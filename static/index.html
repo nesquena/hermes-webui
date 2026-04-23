@@ -157,6 +157,10 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
           <span>Preferences</span>
         </button>
+        <button type="button" class="settings-menu-item" data-settings-section="providers" onclick="switchSettingsSection('providers')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+          <span data-i18n="providers_tab_title">Providers</span>
+        </button>
         <button type="button" class="settings-menu-item" data-settings-section="system" onclick="switchSettingsSection('system')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><line x1="6" y1="7" x2="6.01" y2="7"/><line x1="6" y1="17" x2="6.01" y2="17"/></svg>
           <span>System</span>
@@ -615,6 +619,20 @@
               <input type="text" id="settingsBotName" placeholder="Hermes" maxlength="64" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
             </div>
             <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600" data-i18n="settings_save_btn">Save Settings</button>
+          </div>
+          <div class="settings-pane" id="settingsPaneProviders">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title" data-i18n="providers_section_title">Providers</div>
+                <div class="settings-section-meta" data-i18n="providers_section_meta">Manage API keys for AI providers. Changes take effect immediately.</div>
+              </div>
+            </div>
+            <div id="providersList" style="display:flex;flex-direction:column;gap:6px;margin-top:4px">
+              <!-- Populated dynamically by loadProvidersPanel() -->
+            </div>
+            <div id="providersEmpty" style="display:none;text-align:center;padding:32px 0;color:var(--muted);font-size:13px" data-i18n="providers_empty">
+              No configurable providers found.
+            </div>
           </div>
           <div class="settings-pane" id="settingsPaneSystem">
             <div class="settings-section-head">

@@ -138,14 +138,19 @@ class TestIssue495TitleStreaming(unittest.TestCase):
 
     def test_streaming_rejects_generic_completion_titles(self):
         self.assertIn(
-            "测试完成",
-            STREAMING_PY,
-            "streaming.py should reject generic completion phrases as session titles",
-        )
-        self.assertIn(
             "all set",
             STREAMING_PY,
             "streaming.py should reject generic English completion phrases as session titles",
+        )
+        self.assertIn(
+            "completed",
+            STREAMING_PY,
+            "streaming.py should reject completion-status titles as session titles",
+        )
+        self.assertNotIn(
+            "测试完成",
+            STREAMING_PY,
+            "streaming.py title generation should stay English-only",
         )
 
     def test_streaming_uses_reasoning_split_for_minimax_titles(self):

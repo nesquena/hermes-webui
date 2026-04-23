@@ -133,18 +133,24 @@ def test_concurrent_new_sessions_get_correct_profiles():
     results = {}
     errors = []
 
+    # Patch Session.save ONCE around both threads — not once per thread.
+    # Per-thread `with patch.object(...)` nested across threads has a known
+    # concurrency bug in unittest.mock where one thread's __exit__ can capture
+    # the other thread's mock as the "original" and leave the class attribute
+    # permanently pointing at a MagicMock, breaking every later test that
+    # calls Session.save (any test writing a real session file).
     def make_session(profile_name, key):
         try:
-            with patch.object(m.Session, 'save', return_value=None):
-                s = m.new_session(profile=profile_name)
+            s = m.new_session(profile=profile_name)
             results[key] = s.profile
         except Exception as exc:
             errors.append(exc)
 
-    t1 = threading.Thread(target=make_session, args=('alice', 'alice'))
-    t2 = threading.Thread(target=make_session, args=('bob', 'bob'))
-    t1.start(); t2.start()
-    t1.join(timeout=5); t2.join(timeout=5)
+    with patch.object(m.Session, 'save', return_value=None):
+        t1 = threading.Thread(target=make_session, args=('alice', 'alice'))
+        t2 = threading.Thread(target=make_session, args=('bob', 'bob'))
+        t1.start(); t2.start()
+        t1.join(timeout=5); t2.join(timeout=5)
 
     assert not errors, f"Threads raised: {errors}"
     assert results.get('alice') == 'alice', f"alice session had profile {results.get('alice')!r}"

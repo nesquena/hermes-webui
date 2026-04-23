@@ -504,6 +504,7 @@ _PROVIDER_DISPLAY = {
     "huggingface": "HuggingFace",
     "alibaba": "Alibaba",
     "ollama": "Ollama",
+    "ollama-cloud": "Ollama Cloud",
     "opencode-zen": "OpenCode Zen",
     "opencode-go": "OpenCode Go",
     "lmstudio": "LM Studio",
@@ -612,10 +613,10 @@ _PROVIDER_MODELS = {
         {"id": "deepseek-reasoner", "label": "DeepSeek Reasoner"},
     ],
     "nous": [
-        {"id": "claude-opus-4.6", "label": "Claude Opus 4.6 (via Nous)"},
-        {"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6 (via Nous)"},
-        {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini (via Nous)"},
-        {"id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro Preview (via Nous)"},
+        {"id": "@nous:anthropic/claude-opus-4.6",     "label": "Claude Opus 4.6 (via Nous)"},
+        {"id": "@nous:anthropic/claude-sonnet-4.6",   "label": "Claude Sonnet 4.6 (via Nous)"},
+        {"id": "@nous:openai/gpt-5.4-mini",           "label": "GPT-5.4 Mini (via Nous)"},
+        {"id": "@nous:google/gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro Preview (via Nous)"},
     ],
     "zai": [
         {"id": "glm-5.1", "label": "GLM-5.1"},
@@ -723,6 +724,70 @@ _PROVIDER_MODELS = {
 }
 
 
+_AMBIENT_GH_CLI_MARKERS = frozenset({"gh_cli", "gh auth token"})
+
+
+def _is_ambient_gh_cli_entry(source: str, label: str, key_source: str) -> bool:
+    """True when a credential-pool entry is a seeded gh-cli token rather than
+    one the user added explicitly. Filter these so Copilot doesn't appear in
+    the dropdown just because `gh` is installed on the system.
+    """
+    return (
+        source.strip().lower() in _AMBIENT_GH_CLI_MARKERS
+        or label.strip().lower() == "gh auth token"
+        or key_source.strip().lower() == "gh auth token"
+    )
+
+
+def _format_ollama_label(mid: str) -> str:
+    """Turn an Ollama model id (Ollama tag format) into a readable display label.
+
+    Examples: 'kimi-k2.5' → 'Kimi K2.5', 'qwen3-vl:235b-instruct' → 'Qwen3 VL (235B Instruct)'
+    """
+    name_part, _, variant = mid.partition(":")
+
+    def _fmt(s: str) -> str:
+        tokens = s.replace("-", " ").replace("_", " ").split()
+        out = []
+        for t in tokens:
+            alpha_only = t.replace(".", "")
+            if alpha_only.isalpha() and len(t) <= 3:
+                out.append(t.upper())  # short acronym: glm → GLM, vl → VL, gpt → GPT
+            elif alpha_only.isalnum() and alpha_only and alpha_only[0].isdigit():
+                out.append(t.upper())  # size param: 235b → 235B, 1t → 1T
+            else:
+                out.append(t[0].upper() + t[1:] if t else t)  # capitalize: kimi → Kimi
+        return " ".join(out)
+
+    label = _fmt(name_part)
+    if variant:
+        label += f" ({_fmt(variant)})"
+    return label
+
+
+def _apply_provider_prefix(
+    raw_models: list[dict],
+    provider_id: str,
+    active_provider: str | None,
+) -> list[dict]:
+    """Return *raw_models* with @provider: prefixes applied when needed.
+
+    Prefixing is skipped when (a) the provider is already the active one, or
+    (b) a model id already starts with '@' or contains '/' (already routable).
+    """
+    _active = (active_provider or "").lower()
+    if not _active or provider_id == _active:
+        return list(raw_models)
+    result = []
+    for m in raw_models:
+        mid = m["id"]
+        if mid.startswith("@") or "/" in mid:
+            result.append({"id": mid, "label": m["label"]})
+        else:
+            result.append({"id": f"@{provider_id}:{mid}", "label": m["label"]})
+    return result
+
+
 def resolve_model_provider(model_id: str) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
@@ -786,6 +851,14 @@ def resolve_model_provider(model_id: str) -> tuple:
         # e.g. config=anthropic, model=anthropic/claude-... → bare name to anthropic API
         if config_provider and prefix == config_provider:
             return bare, config_provider, config_base_url
+        # Portal providers (Nous, OpenCode) serve models from multiple upstream
+        # namespaces — check them BEFORE the config_base_url branch so that a
+        # Nous user whose config.yaml also has a base_url doesn't accidentally
+        # fall into the prefix-stripping path (#894: minimax/minimax-m2.7 → bare
+        # name sent to Nous → 404 because Nous requires the full namespace path).
+        _PORTAL_PROVIDERS = {"nous", "opencode-zen", "opencode-go"}
+        if config_provider in _PORTAL_PROVIDERS:
+            return model_id, config_provider, config_base_url
         # If a custom endpoint base_url is configured, don't reroute through OpenRouter
         # just because the model name contains a slash (e.g. google/gemma-4-26b-a4b).
         # The user has explicitly pointed at a base_url, so trust their routing config.
@@ -798,6 +871,7 @@ def resolve_model_provider(model_id: str) -> tuple:
                 return bare, config_provider, config_base_url
             # Unknown prefix (not a named provider) — pass full model_id through.
             return model_id, config_provider, config_base_url
+
         # If prefix does NOT match config provider, the user picked a cross-provider model
         # from the OpenRouter dropdown (e.g. config=anthropic but picked openai/gpt-5.4-mini).
         # In this case always route through openrouter with the full provider/model string.
@@ -941,6 +1015,15 @@ def set_hermes_default_model(model_id: str) -> dict:
         resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
             selected_model
         )
+        # Persist the resolved bare/slash form, NOT the `@provider:` prefix. The
+        # prefix is a WebUI-internal routing hint that the hermes-agent CLI does
+        # not understand — if we wrote `@nous:anthropic/claude-opus-4.6` to
+        # config.yaml, a user who ran `hermes` in the terminal right after
+        # saving via WebUI would have the agent send that literal string to the
+        # Nous API, which would reject it (Nous expects `anthropic/claude-opus-4.6`,
+        # not the prefixed form). The Settings picker handles the resulting
+        # CLI-shaped bare form via `_applyModelToDropdown()`'s normalising
+        # matcher — see `static/panels.js` (#895).
         persisted_model = str(resolved_model or selected_model).strip()
         persisted_provider = str(resolved_provider or previous_provider or "").strip()
 
@@ -960,11 +1043,12 @@ def set_hermes_default_model(model_id: str) -> dict:
         _save_yaml_config_file(config_path, config_data)
     # Reload outside the lock — reload_config() acquires _cfg_lock itself.
     reload_config()
-    # reload_config() resyncs _cfg_mtime to the new file mtime, so the mtime
-    # check inside get_available_models() won't trigger invalidation. Drop
-    # the TTL cache explicitly so the next call recomputes with the new model.
+    # Invalidate the TTL cache so the next /api/models call returns fresh data
+    # with the new default model. Do NOT call get_available_models() here —
+    # it triggers a live provider fetch (up to 8s) that blocks the HTTP response
+    # to the browser, causing a visible freeze on every Settings save (#895).
     invalidate_models_cache()
-    return get_available_models()
+    return {"ok": True, "model": persisted_model}
 
 
 # ── TTL cache for get_available_models() ─────────────────────────────────────
@@ -1048,24 +1132,28 @@ def get_available_models() -> dict:
     if active_provider:
         active_provider = _resolve_provider_alias(active_provider)
 
-    # 2. Try to read auth store for active provider (if hermes is installed)
-    if not active_provider:
+    # 2. Read auth store (active_provider fallback + credential_pool inspection)
+    auth_store = {}
+    try:
+        from api.profiles import get_active_hermes_home as _gah
+
+        auth_store_path = _gah() / "auth.json"
+    except ImportError:
+        auth_store_path = HOME / ".hermes" / "auth.json"
+    if auth_store_path.exists():
         try:
-            from api.profiles import get_active_hermes_home as _gah
+            import json as _j
 
-            auth_store_path = _gah() / "auth.json"
-        except ImportError:
-            auth_store_path = HOME / ".hermes" / "auth.json"
-        if auth_store_path.exists():
-            try:
-                import json as _j
+            auth_store = _j.loads(auth_store_path.read_text(encoding="utf-8"))
+            if not active_provider:
+                # Re-run alias resolution: auth.json may store an aliased name
+                # (e.g. 'google', 'z.ai') that the prefixing logic compares
+                # against canonical pids.
+                active_provider = _resolve_provider_alias(auth_store.get("active_provider"))
+        except Exception:
+            logger.debug("Failed to load auth store from %s", auth_store_path)
 
-                auth_store = _j.loads(auth_store_path.read_text(encoding="utf-8"))
-                active_provider = auth_store.get("active_provider")
-            except Exception:
-                logger.debug("Failed to load auth store from %s", auth_store_path)
-
-    # 4. Detect available providers.
+    # 3. Detect available providers.
     # Primary: ask hermes-agent's auth layer — the authoritative source. It checks
     # auth.json, credential pools, and env vars the same way the agent does at runtime,
     # so the dropdown reflects exactly what the user has configured.
@@ -1073,6 +1161,56 @@ def get_available_models() -> dict:
     detected_providers = set()
     if active_provider:
         detected_providers.add(active_provider)
+
+    # Include providers that have usable credential-pool entries even when no
+    # process env var is present (e.g. service launched without shell env).
+    # Primary: delegate to upstream credential_pool.load_pool() so suppression
+    # and seeding/pruning rules live in one place.
+    # Fallback: manual field inspection when the upstream module is unavailable.
+    try:
+        _pool = auth_store.get("credential_pool", {}) if isinstance(auth_store, dict) else {}
+        if isinstance(_pool, dict) and _pool:
+            try:
+                from agent.credential_pool import load_pool as _load_pool
+
+                # load_pool() does NOT suppress ambient gh-cli tokens — filter
+                # them here so Copilot doesn't reappear just because the agent
+                # seeded 'gh auth token' into the pool.
+                for _pid in list(_pool.keys()):
+                    try:
+                        _canonical_pid = _resolve_provider_alias(str(_pid))
+                        _all_entries = _load_pool(_pid).entries()
+                        _explicit = [
+                            e for e in _all_entries
+                            if not _is_ambient_gh_cli_entry(
+                                str(getattr(e, "source", "") or ""),
+                                str(getattr(e, "label", "") or ""),
+                                str(getattr(e, "key_source", "") or ""),
+                            )
+                        ]
+                        if _explicit:
+                            detected_providers.add(_canonical_pid)
+                    except Exception:
+                        logger.debug("credential_pool.load_pool(%s) failed", _pid)
+            except ImportError:
+                # Fallback: inspect raw entry fields for suppression signals.
+                for _pid, _entries in _pool.items():
+                    if not isinstance(_entries, list) or len(_entries) == 0:
+                        continue
+                    _has_explicit_cred = any(
+                        isinstance(_entry, dict)
+                        and not _is_ambient_gh_cli_entry(
+                            str(_entry.get("source", "") or ""),
+                            str(_entry.get("label", "") or ""),
+                            str(_entry.get("key_source", "") or ""),
+                        )
+                        for _entry in _entries
+                    )
+                    if _has_explicit_cred:
+                        detected_providers.add(_resolve_provider_alias(str(_pid)))
+    except Exception:
+        logger.debug("Failed to inspect credential_pool from auth store")
+
     all_env: dict = {}  # profile .env keys — populated below, used by custom endpoint auth
 
     _hermes_auth_used = False
@@ -1156,7 +1294,7 @@ def get_available_models() -> dict:
         if all_env.get("OPENCODE_GO_API_KEY"):
             detected_providers.add("opencode-go")
 
-    # 3. Fetch models from custom endpoint if base_url is configured
+    # 4. Fetch models from custom endpoint if base_url is configured
     auto_detected_models = []
     if cfg_base_url:
         try:
@@ -1287,7 +1425,8 @@ def get_available_models() -> dict:
                 )
                 model_name = model.get("name", "") or model.get("model", "") or model_id
                 if model_id and model_name:
-                    auto_detected_models.append({"id": model_id, "label": model_name})
+                    label = _format_ollama_label(model_id) if provider in ("ollama", "ollama-cloud") else model_name
+                    auto_detected_models.append({"id": model_id, "label": label})
                     detected_providers.add(provider.lower())
         except Exception:
             logger.debug("Custom endpoint unreachable or misconfigured for provider: %s", provider)
@@ -1378,6 +1517,31 @@ def get_available_models() -> dict:
                         ],
                     }
                 )
+            elif pid == "ollama-cloud":
+                # Ollama Cloud list is dynamic; fetch via hermes_cli provider catalog.
+                # When the catalog is unavailable, skip the group rather than emit a
+                # speculative static list — matches the named-custom and unknown-provider
+                # branches below.
+                raw_models = []
+                try:
+                    from hermes_cli.models import provider_model_ids as _provider_model_ids
+
+                    raw_models = [
+                        {"id": mid, "label": _format_ollama_label(mid)}
+                        for mid in (_provider_model_ids("ollama-cloud") or [])
+                    ]
+                except Exception:
+                    logger.warning("Failed to load Ollama Cloud models from hermes_cli")
+
+                if raw_models:
+                    models = _apply_provider_prefix(raw_models, pid, active_provider)
+                    groups.append(
+                        {
+                            "provider": provider_name,
+                            "provider_id": pid,
+                            "models": models,
+                        }
+                    )
             elif pid in _PROVIDER_MODELS or pid in cfg.get("providers", {}):
                 # For non-default providers, prefix model IDs with @provider:model
                 # so resolve_model_provider() routes through that specific provider
@@ -1394,18 +1558,7 @@ def get_available_models() -> dict:
                         raw_models = [{"id": k, "label": k} for k in cfg_models.keys()]
                     elif isinstance(cfg_models, list):
                         raw_models = [{"id": k, "label": k} for k in cfg_models]
-                _active = (active_provider or "").lower()
-                if _active and pid != _active:
-                    models = []
-                    for m in raw_models:
-                        mid = m["id"]
-                        # Don't double-prefix; use @provider: hint for bare names
-                        if mid.startswith("@") or "/" in mid:
-                            models.append({"id": mid, "label": m["label"]})
-                        else:
-                            models.append({"id": f"@{pid}:{mid}", "label": m["label"]})
-                else:
-                    models = list(raw_models)
+                models = _apply_provider_prefix(raw_models, pid, active_provider)
                 groups.append(
                     {
                         "provider": provider_name,

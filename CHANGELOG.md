@@ -1,5 +1,176 @@
 # Hermes Web UI -- Changelog
 
+## [Unreleased]
+
+### Added
+- **Session attention indicators in the sidebar** — the session list now shows a
+  spinning indicator while a session is actively streaming (even in the
+  background), an unread dot when a session has new messages the user hasn't
+  seen, and a right-aligned relative timestamp ("2m ago", "Yesterday") next to
+  every session title. Streaming state is computed server-side from the live
+  `STREAMS` registry so it's accurate across tabs and after server restart.
+  The unread count is tracked client-side in `localStorage` and cleared
+  automatically when the active session's stream settles. Pinned-star indicator
+  moved into the title row with a fixed 10×10 box for consistent alignment.
+  Includes a 5 s polling loop that activates only while sessions are streaming,
+  and a 60 s timer to keep relative timestamps fresh. (`api/models.py`,
+  `static/sessions.js`, `static/messages.js`, `static/style.css`) Closes #856.
+  Co-authored by @franksong2702.
+
+### Fixed
+- **Nous static models now use explicit `@nous:` prefix** — the four hardcoded "(via Nous)" models (`Claude Opus 4.6`, `Claude Sonnet 4.6`, `GPT-5.4 Mini`, `Gemini 3.1 Pro Preview`) now carry `@nous:` prefix IDs, matching the format of live-fetched Nous models. Previously they used slash-only IDs that relied on the portal provider guard; the explicit prefix routes them through the same bulletproof `@provider:model` branch and eliminates 404 errors on those entries. (`api/config.py`, `tests/test_nous_portal_routing.py`)
+
+### Added
+- **Workspace path autocomplete in Spaces** — the "Add workspace path" field in
+  the Spaces panel now suggests trusted directories as you type, supports
+  keyboard navigation plus `Tab` completion, and keeps hidden directories out of
+  the list unless the current path segment starts with `.`. Suggestions are
+  limited to trusted roots (home, saved workspaces, and the boot default
+  workspace subtree) and never enumerate blocked system roots. (`api/routes.py`,
+  `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
+
+## [v0.50.171] — 2026-04-23
+
+### Fixed
+- **Nous default model picker shows correct selection and saves no longer freeze** — two bugs for Nous/portal provider users: (1) Settings → Preferences → Default Model picker showed blank after saving because `set_hermes_default_model()` wrote a bare resolved form that didn't match the `@nous:...` option values in the dropdown; fixed by using `_applyModelToDropdown()`'s smart normalising matcher to find the right option without requiring an exact string match. (2) Every Settings save triggered a blocking live-fetch from the provider API (~5 s freeze) because `set_hermes_default_model()` called `get_available_models()` before returning; the function now returns a lightweight `{ok, model}` ack and invalidates the TTL cache instead. Config.yaml always stores the CLI-compatible bare/slash form (e.g. `anthropic/claude-opus-4.6`) so CLI users on the same install are unaffected. (`api/config.py`, `static/panels.js`) Closes #895.
+- **Cross-namespace models (minimax/, qwen/) no longer 404 for Nous users** — `resolve_model_provider()` checked the `config_base_url` branch before the portal-provider guard. Nous always has a `base_url` in config, so known cross-namespace prefixes were stripped before reaching the portal check. Portal providers are now checked first so all slash-prefixed model IDs reach Nous intact. (`api/config.py`) Closes #894.
+
+## [v0.50.170] — 2026-04-23
+
+### Fixed
+- **Settings default model picker shows live-fetched models** — the Settings → Preferences → Default Model dropdown previously only showed static models from `_PROVIDER_MODELS`. It now calls `_fetchLiveModels()` via the new `_addLiveModelsToSelect()` helper, consistent with the chat-header dropdown. New sessions also respect the saved default model (`window._defaultModel`) instead of always reading the chat-header value, which reflected the previous session's model. (`static/ui.js`, `static/sessions.js`, `static/panels.js`) Closes #872. Co-authored by @bergeouss.
+
+## [v0.50.163] — 2026-04-23
+
+### Fixed
+- **Message ordering after task cancellation** — cancelling a stream while the
+  agent is responding no longer causes subsequent responses to appear above the
+  "Task cancelled." marker. The cancel handler now fetches the authoritative
+  message list from the server (same as the done event), and the server persists
+  the cancel message to the session so both paths stay in sync. Falls back to
+  the previous local-push behaviour if the API call fails. (`api/streaming.py`,
+  `static/messages.js`) (@mittyok, #882)
+
+## [v0.50.161] — 2026-04-23
+
+### Fixed
+- **CI: `test_set_key_writes_to_env_file` no longer flaky in full-suite ordering** — two test files (`test_profile_env_isolation.py`, `test_profile_path_security.py`) were calling `sys.modules.pop("api.profiles")` without restoring the module reference, permanently removing `api.profiles` from the module cache and corrupting state for subsequent tests. Replaced with `monkeypatch.delitem(sys.modules, ...)` so the module reference is restored automatically after each test. (`tests/test_profile_env_isolation.py`, `tests/test_profile_path_security.py`)
+- **`api/providers.py` `_write_env_file()` lock and mode fixes** — moved file I/O (mkdir + write) inside the `_ENV_LOCK` block to prevent TOCTOU race between concurrent key-save requests; replaced `write_text()` with `os.open(..., O_CREAT, 0o600)` so new `.env` files are created owner-read/write-only from the first byte. (`api/providers.py`)
+
+## [v0.50.160] — 2026-04-23
+
+### Fixed
+- **CI: provider panel i18n keys now present in all 6 locales** — `es`, `de`, `zh`, `ru`, `zh-Hant` were missing the 19 provider panel keys added in v0.50.159, causing locale parity test failures on CI after every push to master. (`static/i18n.js`)
+
+## [v0.50.159] — 2026-04-23
+
+### Added
+- **Provider key management in Settings** — new "Providers" tab lets users add, update, or remove API keys for direct-API providers without editing `.env` files. Covers Anthropic, OpenAI, Google, DeepSeek, xAI, Mistral, MiniMax, Z.AI, Kimi, Ollama, Ollama Cloud, OpenCode Zen/Go. OAuth providers shown as read-only. Keys stored in `~/.hermes/.env`, take effect immediately. Fully localised (6 locales). (`api/providers.py`, `api/routes.py`, `static/panels.js`, `static/i18n.js`) (PR #867 by @bergeouss, closes #586)
+
+### Security
+- Provider write endpoints require auth or local/private-network client (matching onboarding endpoint gate)
+- `.env` created at 0600 from first byte via `os.open`; pre-existing files tightened to 0600 on every write
+- Full `_ENV_LOCK` coverage across load/modify/write — prevents TOCTOU race between concurrent POSTs
+
+## [v0.50.158] — 2026-04-23
+
+### Fixed
+- **Post-update page reload no longer races against server restart** — `applyUpdates()` and `forceUpdate()` now poll `/health` every 500ms (up to 15 seconds) instead of firing a blind 2500ms `setTimeout`. The existing reconnect banner shows "⏳ Restarting… please wait" during the poll window, giving users a visible status and a manual Reload button. If the server is still down after 15s, the banner message changes to prompt a manual reload. Fixes 502 errors seen when the server restart outpaces the fixed delay, especially behind reverse proxies. (`static/ui.js`) (closes #874)
+
+## [v0.50.157] — 2026-04-22
+
+### Fixed
+- **Nous portal models now route and format correctly** — two bugs fixed: (1) `_PROVIDER_MODELS["nous"]` updated from bare IDs (`claude-opus-4.6`) to slash-prefixed format (`anthropic/claude-opus-4.6`) that the Nous portal API expects. (2) `resolve_model_provider()` now routes cross-namespace models through portal providers (Nous, OpenCode Zen, OpenCode Go) directly instead of mis-routing to OpenRouter. Portal guard returns the full slash-preserved model ID so Nous receives the correct format. 10 regression tests. (`api/config.py`) (closes #854)
+
+## [v0.50.156] — 2026-04-22
+
+### Security
+- **⚠️ Breaking change — auto-install of agent dependencies is now opt-in** — users previously relying on auto-install must now set `HERMES_WEBUI_AUTO_INSTALL=1` to restore the previous behaviour. A new `_trusted_agent_dir()` check validates ownership and permission bits before allowing pip to run. (`api/startup.py`, `README.md`) (addresses #842 by @tomaioo)
+
+## [v0.50.155] — 2026-04-22
+
+### Fixed
+- **Honcho per-session memory uses stable session ID across WebUI turns** — `api/streaming.py` now passes `gateway_session_key=session_id` to `AIAgent` (defensive, same pattern as `api_mode`/`credential_pool`). Without this, Honcho's `per-session` strategy created a new Honcho session on each streaming request. (`api/streaming.py`) (closes #855)
+
+## [v0.50.154] — 2026-04-22
+
+### Fixed
+- **Thinking card no longer mirrors main response** — removed early return in `_streamDisplay()` that bypassed think-block stripping when `reasoningText` was populated. (`static/messages.js`) (closes #852)
+
+## [v0.50.153] — 2026-04-22
+
+### Fixed
+- **Live-fetched portal models route through configured provider** — `_fetchLiveModels()` applies `@provider:` prefix. (closes #854)
+
+## [v0.50.152] — 2026-04-22
+
+### Fixed
+- **Image generation renders inline** — `MEDIA:` token restore renders all `https://` URLs as `<img>`. (closes #853)
+- **Auto-title strips thinking preambles** — `_strip_thinking_markup()` strips Qwen3-style plain-text reasoning preambles. (closes #857)
+
+## [v0.50.151] — 2026-04-22
+
+### Added
+- **Ollama Cloud support** — added `ollama-cloud` display name + dynamic model-list
+  handler backed by `hermes_cli.models.provider_model_ids()`. Live-models endpoint
+  routes `ollama-cloud` through the same formatter. Server-side `_format_ollama_label()`
+  and matching client-side `_fmtOllamaLabel()` turn Ollama tag IDs into readable
+  labels (e.g. `qwen3-vl:235b-instruct` → `Qwen3 VL (235B Instruct)`). (#820 by @starship-s, #860)
+
+### Fixed
+- **`credential_pool` providers now visible in the model dropdown** —
+  `get_available_models()` previously only read `active_provider` from the auth
+  store. Providers added via `credential_pool` (e.g. an Ollama Cloud key stored by
+  the auth layer without a matching shell env var) were silently invisible. The
+  fix loads `credential_pool` entries and adds any provider with at least one
+  non-ambient credential to `detected_providers`. Ambient gh-cli tokens (source
+  `gh_cli` / label `gh auth token`) are explicitly excluded so Copilot doesn't
+  appear merely because `gh` is installed. Two-tier detection: primary via
+  `agent.credential_pool.load_pool()`, fallback via raw field inspection when
+  the upstream module isn't importable. (#820 by @starship-s, #860)
+- **`_apply_provider_prefix()` helper extracted** — removes ~15 lines of
+  duplicated inline `@provider:` prefixing logic for non-active providers.
+  Semantics unchanged; one fewer place for drift. (#860)
+- **Model chip shows friendly labels for bare Ollama IDs** —
+  `static/ui.js:getModelLabel()` now routes Ollama tag-format IDs (e.g.
+  `kimi-k2.6` or `@ollama-cloud:glm5.1`) through `_fmtOllamaLabel()`. Custom
+  `<option>` text uses the same helper. `looksLikeBareOllamaId` narrowed to
+  `@ollama*` or colon-tag patterns — does not reformat generic IDs like
+  `gpt-5.4-mini`. `syncModelChip()` is now called after localStorage restore
+  so the chip reflects the saved selection on first paint. (#860)
+
+## [v0.50.150] — 2026-04-22
+
+### Fixed
+- **Profile switching: three related state fixes** — (1) `hermes_profile=default`
+  cookie is now persisted instead of being cleared with `max-age=0`, which had
+  caused the browser to fall back to the process-global profile on the next
+  request. (2) The `sessionInProgress` branch of `switchToProfile()` now calls
+  `syncTopbar()` instead of the undefined `updateWorkspaceChip()`. (3) Sidebar
+  and dropdown active-profile rendering now prefer `S.activeProfile` client
+  state when available, with a safe fallback. (#849 by @migueltavares)
+
+## [v0.50.149] — 2026-04-22
+
+### Fixed
+- **`GET /api/session` is now side-effect free for stale-model sessions** —
+  the read path previously called `_normalize_session_model_in_place()`,
+  which could write back to disk and update the session index while handling
+  a plain read. Replaced with a read-only
+  `_resolve_effective_session_model_for_display()` that returns the effective
+  display model without any write-back. Closes #845. (#848 by @franksong2702)
+
+## [v0.50.148] — 2026-04-22
+
+### Fixed
+- **Prune stale `_index.json` ghost rows after session-id rotation** — index
+  entries whose backing session file no longer exists (e.g. after context
+  compression rotates the session id) are now pruned on both incremental
+  index writes and `all_sessions()` reads. Fixes duplicate session entries
+  in the sidebar. Also pre-snapshots `in_memory_ids` under a single `LOCK`
+  acquisition in `all_sessions()` rather than one per row — small but
+  measurable contention reduction. Closes #846. (#847 by @franksong2702)
+
 ## [v0.50.147] — 2026-04-22
 
 ### Fixed

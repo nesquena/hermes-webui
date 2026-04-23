@@ -84,6 +84,9 @@ async function populateModelDropdown(){
     if(!data.groups||!data.groups.length) return; // keep HTML defaults
     // Store active provider globally so the send path can warn on mismatch
     window._activeProvider=data.active_provider||null;
+    // Store default model so newSession() can apply it (#872).
+    // Per-page-load — not synced across browser tabs.
+    window._defaultModel=data.default_model||null;
     // Clear existing options
     sel.innerHTML='';
     _dynamicModelLabels={};
@@ -118,55 +121,61 @@ async function populateModelDropdown(){
 // Cache so we don't re-fetch on every page load
 const _liveModelCache={};
 
+function _addLiveModelsToSelect(provider, models, sel){
+  if(!provider||!models||!models.length||!sel) return 0;
+  const currentVal=sel.value;
+  let providerGroup=null;
+  for(const og of sel.querySelectorAll('optgroup')){
+    if(og.dataset.provider&&og.dataset.provider===provider){
+      providerGroup=og; break;
+    }
+    if(og.label&&og.label.toLowerCase().includes(provider.toLowerCase())){
+      providerGroup=og; break;
+    }
+  }
+  if(!providerGroup){
+    providerGroup=document.createElement('optgroup');
+    providerGroup.label=provider.charAt(0).toUpperCase()+provider.slice(1)+' (live)';
+    sel.appendChild(providerGroup);
+  }
+  const existingIds=new Set([...sel.options].map(o=>o.value));
+  let added=0;
+  const _ap=(window._activeProvider||'').toLowerCase();
+  const _isPortalFetch=_ap && _ap!=='openrouter' && _ap!=='custom' && provider===_ap;
+  for(const m of models){
+    let mid=m.id;
+    if(_isPortalFetch && !mid.startsWith('@')){
+      mid=`@${provider}:${mid}`;
+    }
+    if(existingIds.has(mid)) continue;
+    const opt=document.createElement('option');
+    opt.value=mid;
+    opt.textContent=m.label||m.id;
+    opt.title='Live model — fetched from provider';
+    providerGroup.appendChild(opt);
+    _dynamicModelLabels[mid]=m.label||m.id;
+    added++;
+  }
+  if(added>0 && currentVal) _applyModelToDropdown(currentVal, sel);
+  return added;
+}
+
 async function _fetchLiveModels(provider, sel){
   if(!provider||!sel) return;
-  // Don't fetch for providers where we know it's unsupported or unnecessary
-  // All providers now supported via agent's provider_model_ids() — no exclusions needed
-  if(_liveModelCache[provider]) return; // already fetched this session
+  // Already fetched — apply cached models to this select element (#872)
+  if(_liveModelCache[provider]){
+    const added=_addLiveModelsToSelect(provider,_liveModelCache[provider],sel);
+    if(added>0 && typeof syncModelChip==='function') syncModelChip();
+    return;
+  }
   try{
     const url=new URL('api/models/live',location.href);
     url.searchParams.set('provider',provider);
     const data=await fetch(url.href,{credentials:'include'}).then(r=>r.json());
     if(!data.models||!data.models.length) return;
     _liveModelCache[provider]=data.models;
-    // Remember current selection before rebuilding options
-    const currentVal=sel.value;
-    // Rebuild the optgroup for this provider with live models
-    // Keep other providers' optgroups intact
-    let providerGroup=null;
-    for(const og of sel.querySelectorAll('optgroup')){
-      // Prefer exact data-provider match (set from provider_id in API response)
-      // over substring label match — avoids false positives like 'zai' not matching
-      // 'Z.AI / GLM' and vice versa.
-      if(og.dataset.provider&&og.dataset.provider===provider){
-        providerGroup=og; break;
-      }
-      if(og.label&&og.label.toLowerCase().includes(provider.toLowerCase())){
-        providerGroup=og; break;
-      }
-    }
-    if(!providerGroup){
-      // No existing group — add a new one
-      providerGroup=document.createElement('optgroup');
-      providerGroup.label=provider.charAt(0).toUpperCase()+provider.slice(1)+' (live)';
-      sel.appendChild(providerGroup);
-    }
-    // Rebuild options from live data
-    const existingIds=new Set([...sel.options].map(o=>o.value));
-    let added=0;
-    for(const m of data.models){
-      if(existingIds.has(m.id)) continue; // already shown from static list
-      const opt=document.createElement('option');
-      opt.value=m.id;
-      opt.textContent=m.label||m.id;
-      opt.title='Live model — fetched from provider';
-      providerGroup.appendChild(opt);
-      _dynamicModelLabels[m.id]=m.label||m.id;
-      added++;
-    }
+    const added=_addLiveModelsToSelect(provider,data.models,sel);
     if(added>0){
-      // Restore selection
-      if(currentVal) _applyModelToDropdown(currentVal, sel);
       if(typeof syncModelChip==='function') syncModelChip();
       console.log('[hermes] Live models loaded for',provider+':',added,'new models added');
     }
@@ -188,6 +197,8 @@ async function _fetchLiveModels(provider, sel){
 function _checkProviderMismatch(modelId){
   const ap=(window._activeProvider||'').toLowerCase();
   if(!ap||ap==='custom'||ap==='openrouter') return null; // can't reliably check
+  // @provider: prefixed IDs came from that provider's live model list — no mismatch possible
+  if(modelId.startsWith('@')) return null;
   const slash=modelId.indexOf('/');
   if(slash<0) return null; // bare model name, no provider prefix
   const modelProvider=modelId.substring(0,slash).toLowerCase();
@@ -341,7 +352,7 @@ async function selectModelFromDropdown(value){
   if(!Array.from(sel.options).some(o=>o.value===value)){
     const opt=document.createElement('option');
     opt.value=value;
-    opt.textContent=value.split('/').pop()||value;
+    opt.textContent=getModelLabel(value);
     opt.dataset.custom='1';
     // Remove any previous custom option before adding new one
     sel.querySelectorAll('option[data-custom]').forEach(o=>o.remove());
@@ -469,6 +480,23 @@ function scrollToBottom(){
   if(btn) btn.style.display='none';
 }
 
+function _fmtOllamaLabel(mid){
+  const [namePart, ...variantParts] = mid.split(':');
+  const variant = variantParts.join(':');
+  const _fmt = (s) => {
+    const tokens = s.replace(/[-_]/g, ' ').split(' ');
+    return tokens.map(t => {
+      const alphaOnly = t.replace(/\./g, '');
+      if (t.length <= 3 && /^[a-zA-Z.]+$/.test(t)) return t.toUpperCase();
+      if (/^\d/.test(alphaOnly)) return t.toUpperCase();
+      return t.charAt(0).toUpperCase() + t.slice(1);
+    }).join(' ');
+  };
+  let label = _fmt(namePart);
+  if (variant) label += ' (' + _fmt(variant) + ')';
+  return label;
+}
+
 function getModelLabel(modelId){
   if(!modelId) return 'Unknown';
   // Check dynamic labels first, then fall back to splitting the ID
@@ -476,7 +504,19 @@ function getModelLabel(modelId){
   // Static fallback for common models
   const STATIC_LABELS={'openai/gpt-5.4-mini':'GPT-5.4 Mini','openai/gpt-4o':'GPT-4o','openai/o3':'o3','openai/o4-mini':'o4-mini','anthropic/claude-sonnet-4.6':'Sonnet 4.6','anthropic/claude-sonnet-4-5':'Sonnet 4.5','anthropic/claude-haiku-3-5':'Haiku 3.5','google/gemini-3.1-pro-preview':'Gemini 3.1 Pro','google/gemini-3-flash-preview':'Gemini 3 Flash','google/gemini-3.1-flash-lite-preview':'Gemini 3.1 Flash Lite','google/gemini-2.5-pro':'Gemini 2.5 Pro','google/gemini-2.5-flash':'Gemini 2.5 Flash','deepseek/deepseek-chat-v3-0324':'DeepSeek V3','meta-llama/llama-4-scout':'Llama 4 Scout'};
   if(STATIC_LABELS[modelId]) return STATIC_LABELS[modelId];
-  return modelId.split('/').pop()||'Unknown';
+  // Safe Ollama-tag fallback formatter before generic split('/').pop()
+  let _last = modelId.split('/').pop() || modelId;
+  // Strip @provider: prefix if present (e.g. @ollama-cloud:kimi-k2.6)
+  if (_last.startsWith('@') && _last.includes(':')) _last = _last.split(':').slice(1).join(':');
+  const looksLikeOllamaTag = /^[a-z0-9][\w.-]*:[\w.-]+$/i.test(_last);
+  // Narrow: only apply Ollama formatter to IDs with explicit @ollama prefix or colon-tag format.
+  // Avoids reformatting bare provider model IDs like claude-sonnet-4-6 or gpt-4o.
+  const looksLikeBareOllamaId = modelId.startsWith('@ollama') || looksLikeOllamaTag;
+  const ollamaLabel = _fmtOllamaLabel(_last);
+  if ((modelId.startsWith('ollama/') || modelId.startsWith('@ollama') || looksLikeOllamaTag || looksLikeBareOllamaId) && ollamaLabel !== _last) {
+    return ollamaLabel;
+  }
+  return _last || 'Unknown';
 }
 
 function _stripXmlToolCallsDisplay(s){
@@ -582,7 +622,7 @@ function renderMd(raw){
   // Stash <code> tags from the backtick pass above so the outer bold/italic
   // regexes don't esc() their content (e.g. **`code`** → <strong><code>code</code></strong>)
   const _ob_stash=[];
-  s=s.replace(/(<code>[^<]*<\/code>)/g,m=>{_ob_stash.push(m);return `\x00O${_ob_stash.length-1}\x00`;});
+  s=s.replace(/(<code\b[^>]*>[\s\S]*?<\/code>)/g,m=>{_ob_stash.push(m);return `\x00O${_ob_stash.length-1}\x00`;});
   s=s.replace(/\*\*\*(.+?)\*\*\*/g,(_,t)=>`<strong><em>${esc(t)}</em></strong>`);
   s=s.replace(/\*\*(.+?)\*\*/g,(_,t)=>`<strong>${esc(t)}</strong>`);
   s=s.replace(/\*([^*\n]+)\*/g,(_,t)=>`<em>${esc(t)}</em>`);
@@ -688,7 +728,10 @@ function renderMd(raw){
         const base=document.baseURI.replace(/\/$/,'');
         src=src.replace(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i,base);
       }
-      if(_IMAGE_EXTS.test(src.split('?')[0])){
+      // MEDIA: tokens are only emitted for tool-generated images (image_generate etc.).
+      // Render all https:// URLs as <img> — extension check would miss extensionless
+      // CDN paths like fal.media content-addressed URLs (closes #853).
+      if(_IMAGE_EXTS.test(src.split('?')[0]) || /^https?:\/\//i.test(src)){
         return `<img class="msg-media-img" src="${esc(src)}" alt="image" loading="lazy" onclick="this.classList.toggle('msg-media-img--full')">`;
       }
       return `<a href="${esc(src)}" target="_blank" rel="noopener">${esc(src)}</a>`;
@@ -1025,6 +1068,10 @@ function dismissReconnect() {
   clearInflight();
 }
 async function refreshSession() {
+  // When the banner is in post-update restart mode, the "Reload" button
+  // should do a full page reload — a session refresh would just 502 while
+  // the server is still restarting.
+  if (window._restartingForUpdate) { location.reload(); return; }
   dismissReconnect();
   if (!S.session) return;
   try {
@@ -1076,10 +1123,10 @@ async function applyUpdates(){
         return;
       }
     }
-    showToast('Updated! Restarting\u2026');
+    showToast('Update applied — restarting…');
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
-    setTimeout(()=>location.reload(),2500);
+    _waitForServerThenReload();
   }catch(e){
     if(errEl){errEl.textContent='Update failed: '+e.message;errEl.style.display='block';}
     else showToast('Update failed: '+e.message);
@@ -1123,14 +1170,47 @@ async function forceUpdate(btn){
       btn.disabled=false;btn.textContent='Force update';
       return;
     }
-    showToast('Force updated! Restarting\u2026');
+    showToast('Force update applied — restarting…');
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
-    setTimeout(()=>location.reload(),2500);
+    _waitForServerThenReload();
   }catch(e){
     if(errEl){errEl.textContent='Force update failed: '+e.message;errEl.style.display='block';}
     btn.disabled=false;btn.textContent='Force update';
   }
+}
+
+// Poll /health after an update-triggered restart, then reload.  Replaces the
+// blind setTimeout(reload, 2500) that race-lost against slow hardware or
+// reverse proxies that 502 immediately when the upstream socket closes (#874).
+async function _waitForServerThenReload(opts){
+  opts=opts||{};
+  const interval=opts.interval||500;
+  const maxMs=opts.maxMs||15000;
+  window._restartingForUpdate=true;
+  const msgEl=$('reconnectMsg');
+  const banner=$('reconnectBanner');
+  if(msgEl) msgEl.textContent='⏳ Restarting… please wait';
+  if(banner) banner.classList.add('visible');
+  const deadline=Date.now()+maxMs;
+  // Give the server a moment to actually begin its restart before the first
+  // probe — otherwise the old process may still respond ok on the first poll.
+  await new Promise(r=>setTimeout(r, interval));
+  while(Date.now()<deadline){
+    try{
+      const r=await fetch('/health',{cache:'no-store'});
+      if(r.ok){
+        let data={};
+        try{ data=await r.json(); }catch(_){}
+        if(data && data.status==='ok'){
+          location.reload();
+          return;
+        }
+      }
+    }catch(_){ /* socket closed during restart — retry */ }
+    await new Promise(r=>setTimeout(r, interval));
+  }
+  if(msgEl) msgEl.textContent='⚠️ Server is taking longer than expected — click Reload when ready';
 }
 
 function getPendingSessionMessage(session){

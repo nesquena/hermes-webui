@@ -12,12 +12,31 @@ from pathlib import Path
 import api.config as _cfg
 from api.config import (
     SESSION_DIR, SESSION_INDEX_FILE, SESSIONS, SESSIONS_MAX,
-    LOCK, DEFAULT_WORKSPACE, DEFAULT_MODEL, PROJECTS_FILE, HOME,
+    LOCK, STREAMS, STREAMS_LOCK, DEFAULT_WORKSPACE, DEFAULT_MODEL, PROJECTS_FILE, HOME,
     get_effective_default_model,
 )
 from api.workspace import get_last_workspace
 
 logger = logging.getLogger(__name__)
+
+
+def _index_entry_exists(session_id: str, in_memory_ids=None) -> bool:
+    """Return True if an index entry still has backing state.
+
+    A session can legitimately exist either as a persisted JSON file or as an
+    in-memory Session object that has not been flushed yet.  This helper is used
+    to prune stale `_index.json` rows left behind after session-id rotation or
+    file removal.
+    """
+    if not session_id:
+        return False
+    if in_memory_ids is None:
+        with LOCK:
+            in_memory_ids = set(SESSIONS.keys())
+    if session_id in in_memory_ids:
+        return True
+    p = SESSION_DIR / f'{session_id}.json'
+    return p.exists()
 
 
 def _write_session_index(updates=None):
@@ -56,6 +75,11 @@ def _write_session_index(updates=None):
     try:
         with LOCK:
             existing = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
+            in_memory_ids = set(SESSIONS.keys())
+            existing = [
+                e for e in existing
+                if _index_entry_exists(e.get('session_id'), in_memory_ids=in_memory_ids)
+            ]
             # Build lookup of updated entries
             updated_map = {s.session_id: s.compact() for s in updates}
             existing_ids = {e.get('session_id') for e in existing}
@@ -77,6 +101,15 @@ def _write_session_index(updates=None):
     if _fallback:
         # Corrupt or missing index — fall back to full rebuild (called outside LOCK to avoid deadlock)
         _write_session_index(updates=None)
+
+
+def _active_stream_ids():
+    with STREAMS_LOCK:
+        return set(STREAMS.keys())
+
+
+def _is_streaming_session(active_stream_id, active_stream_ids):
+    return bool(active_stream_id and active_stream_id in active_stream_ids)
 
 
 class Session:
@@ -141,7 +174,8 @@ class Session:
             return None
         return cls(**json.loads(p.read_text(encoding='utf-8')))
 
-    def compact(self) -> dict:
+    def compact(self, include_runtime=False, active_stream_ids=None) -> dict:
+        active_stream_ids = active_stream_ids if active_stream_ids is not None else set()
         return {
             'session_id': self.session_id,
             'title': self.title,
@@ -160,6 +194,10 @@ class Session:
             'personality': self.personality,
             'compression_anchor_visible_idx': self.compression_anchor_visible_idx,
             'compression_anchor_message_key': self.compression_anchor_message_key,
+            'active_stream_id': self.active_stream_id,
+            'is_streaming': _is_streaming_session(
+                self.active_stream_id, active_stream_ids
+            ) if include_runtime else False,
         }
 
 def get_session(sid):
@@ -208,15 +246,28 @@ def new_session(workspace=None, model=None, profile=None):
     return s
 
 def all_sessions():
+    active_stream_ids = _active_stream_ids()
     # Phase C: try index first for O(1) read; fall back to full scan
     if SESSION_INDEX_FILE.exists():
         try:
             index = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
+            index = [
+                s for s in index
+                if _index_entry_exists(s.get('session_id'))
+            ]
+            for s in index:
+                s['is_streaming'] = _is_streaming_session(
+                    s.get('active_stream_id'),
+                    active_stream_ids,
+                )
             # Overlay any in-memory sessions that may be newer than the index
             index_map = {s['session_id']: s for s in index}
             with LOCK:
                 for s in SESSIONS.values():
-                    index_map[s.session_id] = s.compact()
+                    index_map[s.session_id] = s.compact(
+                        include_runtime=True,
+                        active_stream_ids=active_stream_ids,
+                    )
             result = sorted(index_map.values(), key=lambda s: (s.get('pinned', False), s['updated_at']), reverse=True)
             # Hide empty Untitled sessions from the UI (created by tests, page refreshes, etc.)
             # Exempt sessions younger than 60 s so a brand-new session stays visible (#789)
@@ -247,7 +298,7 @@ def all_sessions():
         if all(s.session_id != x.session_id for x in out): out.append(s)
     out.sort(key=lambda s: (getattr(s, 'pinned', False), s.updated_at), reverse=True)
     _now = time.time()
-    result = [s.compact() for s in out if not (
+    result = [s.compact(include_runtime=True, active_stream_ids=active_stream_ids) for s in out if not (
         s.title == 'Untitled'
         and len(s.messages) == 0
         and (_now - s.updated_at) > 60

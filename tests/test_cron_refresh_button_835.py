@@ -47,7 +47,7 @@ class TestCronRefreshButtonHtml:
         button so the header layout stays tight."""
         html = _read("static/index.html")
         ref_pos = html.find('id="cronRefreshBtn"')
-        newjob_pos = html.find('toggleCronForm()')
+        newjob_pos = html.find('openCronCreate()')
         assert ref_pos != -1 and newjob_pos != -1
         # Must be close enough to be in the same header row (single SVG-inline
         # button can be around 500 chars by itself due to inline styles/attrs).

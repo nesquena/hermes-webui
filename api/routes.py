@@ -24,6 +24,27 @@ _PROVIDER_ALIASES = {
     "openai-codex": "openai",
 }
 
+# OpenAI-compatible /v1/models endpoints for live model discovery.
+# Used as fallback when hermes_cli.provider_model_ids() is unavailable or
+# returns [] for a provider (#871).  Kept at module level so the dict is
+# built once, not reconstructed per request.
+_OPENAI_COMPAT_ENDPOINTS = {
+    "zai": "https://api.z.ai/v1",
+    "minimax": "https://api.minimax.chat/v1",
+    "mistralai": "https://api.mistral.ai/v1",
+    "xai": "https://api.x.ai/v1",
+    "deepseek": "https://api.deepseek.com/v1",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
+}
+# NOTE: "openai-codex" is excluded because it maps to the same endpoint as
+# the base "openai" provider (api.openai.com/v1).  When both are configured
+# the openai provider is already wired through provider_model_ids(); codex-
+# specific model filtering happens downstream in hermes_cli.
+#
+# TODO: Add TTL-based caching (e.g. 60s) so repeated model-list requests
+# don't hit provider APIs.  The frontend already caches via _liveModelCache
+# but the backend re-fetches on every /api/models/live call.
+
 from api.config import (
     STATE_DIR,
     SESSION_DIR,
@@ -268,6 +289,18 @@ def _normalize_session_model_in_place(session) -> str:
     return effective_model
 
 
+def _resolve_effective_session_model_for_display(session) -> str:
+    """Resolve the model a session should display without mutating persisted state.
+
+    `GET /api/session` should stay side-effect free. If a stale persisted model
+    needs normalization for the current provider configuration, return the
+    effective model for the response payload only and leave disk state alone.
+    """
+    original_model = getattr(session, "model", None) or ""
+    effective_model, _changed = _resolve_compatible_session_model(original_model or None)
+    return effective_model or original_model
+
+
 from api.models import (
     Session,
     get_session,
@@ -288,12 +321,14 @@ from api.workspace import (
     get_last_workspace,
     set_last_workspace,
     list_dir,
+    list_workspace_suggestions,
     read_file_content,
     safe_resolve_ws,
     resolve_trusted_workspace,
 )
 from api.upload import handle_upload, handle_transcribe
 from api.streaming import _sse, _run_agent_streaming, cancel_stream
+from api.providers import get_providers, set_provider_key, remove_provider_key
 from api.onboarding import (
     apply_onboarding_setup,
     get_onboarding_status,
@@ -573,6 +608,10 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/models/live":
         return _handle_live_models(handler, parsed)
 
+    # ── Providers (GET) ──
+    if parsed.path == "/api/providers":
+        return j(handler, get_providers())
+
     if parsed.path == "/api/settings":
         settings = load_settings()
         # Never expose the stored password hash to clients
@@ -604,7 +643,7 @@ def handle_get(handler, parsed) -> bool:
             return j(handler, {"error": "session_id is required"}, status=400)
         try:
             s = get_session(sid)
-            _normalize_session_model_in_place(s)
+            effective_model = _resolve_effective_session_model_for_display(s)
             raw = s.compact() | {
                 "messages": s.messages,
                 "tool_calls": getattr(s, "tool_calls", []),
@@ -613,6 +652,8 @@ def handle_get(handler, parsed) -> bool:
                 "pending_attachments": getattr(s, "pending_attachments", []),
                 "pending_started_at": getattr(s, "pending_started_at", None),
             }
+            if effective_model:
+                raw["model"] = effective_model
             return j(handler, {"session": redact_session_data(raw)})
         except KeyError:
             # Not a WebUI session -- try CLI store
@@ -690,6 +731,17 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/workspaces":
         return j(
             handler, {"workspaces": load_workspaces(), "last": get_last_workspace()}
+        )
+
+    if parsed.path == "/api/workspaces/suggest":
+        qs = parse_qs(parsed.query)
+        prefix = qs.get("prefix", [""])[0]
+        return j(
+            handler,
+            {
+                "suggestions": list_workspace_suggestions(prefix),
+                "prefix": prefix,
+            },
         )
 
     if parsed.path == "/api/sessions/search":
@@ -933,6 +985,28 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         except RuntimeError as e:
             return bad(handler, str(e), 500)
+
+    # ── Providers (POST) ──
+    if parsed.path == "/api/providers":
+        provider_id = (body.get("provider") or "").strip().lower()
+        api_key = body.get("api_key")
+        if not provider_id:
+            return bad(handler, "provider is required")
+        if api_key is not None:
+            api_key = str(api_key).strip() or None
+        result = set_provider_key(provider_id, api_key)
+        if not result.get("ok"):
+            return bad(handler, result.get("error", "Unknown error"))
+        return j(handler, result)
+
+    if parsed.path == "/api/providers/delete":
+        provider_id = (body.get("provider") or "").strip().lower()
+        if not provider_id:
+            return bad(handler, "provider is required")
+        result = remove_provider_key(provider_id)
+        if not result.get("ok"):
+            return bad(handler, result.get("error", "Unknown error"))
+        return j(handler, result)
 
     if parsed.path == "/api/reasoning":
         # CLI-parity /reasoning handler — writes to the same config.yaml keys
@@ -2115,9 +2189,7 @@ def _handle_live_models(handler, parsed):
             ids = _pmi(provider)
         except Exception as _import_err:
             logger.debug("provider_model_ids import failed for %s: %s", provider, _import_err)
-            # Last resort: return the WebUI's own static catalog
-            from api.config import _PROVIDER_MODELS as _pm
-            ids = [m["id"] for m in _pm.get(provider, [])]
+            ids = []
 
         if not ids:
             # For 'custom' provider, provider_model_ids() returns [] because
@@ -2135,12 +2207,59 @@ def _handle_live_models(handler, parsed):
                         ]
                 except Exception:
                     pass
-            if not ids:
-                return j(handler, {"provider": provider, "models": [], "count": 0})
 
-        # Normalise to {id, label} — provider_model_ids() returns plain string IDs
+        # ── OpenAI-compat live fetch fallback ──────────────────────────────────
+        # When provider_model_ids() is unavailable or returns [] for a provider
+        # that exposes a standard /v1/models endpoint, fetch directly.  This
+        # eliminates the need to keep _PROVIDER_MODELS in sync for providers
+        # that have a discoverable API (#871).
+        #
+        # WARNING: This uses synchronous urllib.request which blocks the worker
+        # thread for up to 8 seconds on timeout. This is acceptable because:
+        #  (a) the server uses threading (not async), so other requests continue;
+        #  (b) the frontend shows the static list immediately and enriches in
+        #      the background via _fetchLiveModels(), so the user never waits.
+        if not ids:
+            _ep = _OPENAI_COMPAT_ENDPOINTS.get(provider)
+            if _ep:
+                try:
+                    import urllib.request
+                    _providers_cfg = cfg.get("providers", {})
+                    _prov = _providers_cfg.get(provider, {}) if isinstance(_providers_cfg, dict) else {}
+                    # Only use provider-scoped key — never fall back to a top-level
+                    # api_key which may belong to a different provider.
+                    _key = _prov.get("api_key") if isinstance(_prov, dict) else None
+                    if not _key:
+                        _key = cfg.get("model", {}).get("api_key")
+                    if _key:
+                        _req = urllib.request.Request(
+                            f"{_ep}/models",
+                            headers={"Authorization": f"Bearer {_key}"},
+                        )
+                        with urllib.request.urlopen(_req, timeout=8) as _resp:
+                            _body = json.loads(_resp.read())
+                        ids = [m.get("id", "") for m in _body.get("data", []) if m.get("id")]
+                        logger.debug("Live-fetched %d models from %s /v1/models", len(ids), provider)
+                except Exception as _fetch_err:
+                    logger.debug("Live fetch from %s failed: %s", provider, _fetch_err)
+                    # Fall through to static list below
+
+        # Static fallback — only reached when live fetch also failed.
+        if not ids:
+            from api.config import _PROVIDER_MODELS as _pm
+            ids = [m["id"] for m in _pm.get(provider, [])]
+        if not ids:
+            return j(handler, {"provider": provider, "models": [], "count": 0})
+
+        # Normalise to {id, label} — provider_model_ids() returns plain string IDs.
+        # For ollama-cloud use the shared Ollama formatter (handles `:variant` suffix).
+        # For all other providers use a simpler hyphen-split capitaliser.
+        from api.config import _format_ollama_label as _fmt_ollama
+
         def _make_label(mid):
             """Best-effort human label from a model ID string."""
+            if provider in ("ollama", "ollama-cloud"):
+                return _fmt_ollama(mid)
             # Preserve slashes for router IDs like "anthropic/claude-sonnet-4.6"
             display = mid.split("/")[-1] if "/" in mid else mid
             parts = display.split("-")
