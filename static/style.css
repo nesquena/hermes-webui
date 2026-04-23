@@ -725,7 +725,7 @@
     #btnCollapseWorkspacePanel{display:none;}
   }
 
-  @media(max-width:768px){
+  @media(max-width:640px){
     /* ── Sidebar: slide-in overlay instead of hidden ── */
     .sidebar{position:fixed;left:-300px;top:0;bottom:0;width:280px;z-index:200;
       transition:left .25s ease;box-shadow:4px 0 24px rgba(0,0,0,.4);}
@@ -1059,9 +1059,9 @@
 }
 .resize-handle:hover,.resize-handle.dragging{background:var(--accent);}
 /* Desktop-only: position:relative for sidebar/rightpanel resize handles.
-   Must be scoped to min-width:769px so it doesn't override the mobile
-   position:fixed slide-in overlay set in the max-width:768px @media block above. */
-@media(min-width:769px){
+   Must be scoped to min-width:641px so it doesn't override the mobile
+   position:fixed slide-in overlay set in the max-width:640px @media block above. */
+@media(min-width:641px){
   .sidebar{position:relative;}
   .rightpanel{position:relative;}
 }
@@ -1893,7 +1893,7 @@ body.resizing{user-select:none;cursor:col-resize;}
 }
 
 /* Mobile overrides — must live after all base rules to win the cascade without !important */
-@media(max-width:768px){
+@media(max-width:640px){
   /* Settings dialog: replace left tab strip with a dropdown, panel goes full-width */
   .settings-shell{display:flex;flex-direction:column;gap:0;}
   .settings-section-dropdown{display:block;margin:10px 14px;width:calc(100% - 28px);}
