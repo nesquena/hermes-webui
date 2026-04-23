@@ -1581,6 +1581,8 @@ body.resizing{user-select:none;cursor:col-resize;}
   --user-bubble-border: var(--accent-hover);
   --user-bubble-text: #fff;
   --user-bubble-placeholder: rgba(255,255,255,.7);
+  --user-selection-bg: rgba(0,0,0,.22);
+  --user-selection-text: #fff;
 }
 /* Dark mode: keep user bubbles dark; skin remains a tint via border/fill. */
 :root.dark {
@@ -1588,6 +1590,8 @@ body.resizing{user-select:none;cursor:col-resize;}
   --user-bubble-border: var(--accent-bg-strong);
   --user-bubble-text: var(--text);
   --user-bubble-placeholder: var(--muted);
+  --user-selection-bg: rgba(255,255,255,.18);
+  --user-selection-text: var(--text);
 }
 
 /* Inline code: stop shouting orange; inherit strong text colour instead */
@@ -1644,6 +1648,16 @@ body.resizing{user-select:none;cursor:col-resize;}
   padding-left: 14px;
   max-width: none;
   color: var(--user-bubble-text);
+}
+.msg-row[data-role="user"] .msg-body::selection,
+.msg-row[data-role="user"] .msg-body *::selection {
+  background: var(--user-selection-bg);
+  color: var(--user-selection-text);
+}
+.msg-row[data-role="user"] .msg-body::-moz-selection,
+.msg-row[data-role="user"] .msg-body *::-moz-selection {
+  background: var(--user-selection-bg);
+  color: var(--user-selection-text);
 }
 .msg-row[data-role="user"] .msg-body code { color: var(--user-bubble-text); background: rgba(0,0,0,.1); }
 .msg-row[data-role="user"] .msg-body a { color: var(--user-bubble-text); text-decoration: underline; }
