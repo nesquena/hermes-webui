@@ -1671,10 +1671,11 @@ def cancel_stream(stream_id: str) -> bool:
             _cs.pending_started_at = None
             # Persist any partial assistant text that was streamed before cancel (#893).
             # Preserving partial content means the user sees what the agent had
-            # produced rather than losing it entirely. The message is marked _partial=True
-            # so the UI can optionally render a visual indicator, and _error=True so
-            # _sanitize_messages_for_api() strips it from future conversation history
-            # (the model shouldn't see truncated partial output as a prior response).
+            # produced rather than losing it entirely.  The marker is _partial=True
+            # (for session/UI identification) — NOT _error=True — so the partial
+            # content IS kept in the history sent to the agent on the next user
+            # message, letting the model continue from where it was cut off.
+            # See the inner comment on the append call below for the rationale.
             partial_text = _cancel_partial_text.strip() if _cancel_partial_text else ''
             if partial_text:
                 import re as _re
