@@ -1,0 +1,81 @@
+# ── Hermes WebUI Default Configuration ─────────────────────────────────────────
+# This file is used as a fallback when no config.yaml exists in HERMES_HOME.
+# The docker init script copies it to HERMES_HOME/config.yaml on first start.
+# Environment variables always take precedence over this file.
+#
+# For a full configuration reference, see:
+#   https://github.com/nousresearch/hermes-agent/blob/master/cli-config.yaml.example
+
+# ── Model ──────────────────────────────────────────────────────────────────────
+model:
+  # Default model — can be overridden with HERMES_MODEL env var
+  default: "anthropic/claude-sonnet-4.6"
+
+  # Provider selection (auto, openai, anthropic, deepseek, google, etc.)
+  # Leave as "auto" to auto-detect from API keys in your .env
+  provider: "auto"
+
+  # Only needed for custom / OpenAI-compatible endpoints:
+  # base_url: "https://openrouter.ai/api/v1"
+  # api_key: "your-key-here"
+
+# ── Agent Behavior ──────────────────────────────────────────────────────────────
+agent:
+  # Maximum tool-calling iterations per conversation
+  max_turns: 60
+
+  # Reasoning effort (openrouter/nous portal): xhigh, high, medium, low, minimal, none
+  reasoning_effort: "medium"
+
+  # Verbose logging
+  verbose: false
+
+# ── Context Compression ─────────────────────────────────────────────────────────
+compression:
+  enabled: true
+  threshold: 0.50      # Trigger at 50% of context limit
+  target_ratio: 0.20   # Preserve 20% of threshold as recent tail
+  protect_last_n: 20    # Always protect last 20 messages
+
+# ── Persistent Memory ──────────────────────────────────────────────────────────
+memory:
+  memory_enabled: true
+  user_profile_enabled: true
+  memory_char_limit: 2200   # ~800 tokens
+  user_char_limit: 1375     # ~500 tokens
+  nudge_interval: 10        # Remind to save every 10 turns
+  flush_min_turns: 6        # Save on exit if 6+ turns
+
+# ── Terminal ──────────────────────────────────────────────────────────────────
+terminal:
+  backend: "local"
+  timeout: 180
+  lifetime_seconds: 300
+
+# ── Browser ───────────────────────────────────────────────────────────────────
+browser:
+  inactivity_timeout: 120   # seconds
+
+# ── Session Reset (messaging platforms) ───────────────────────────────────────
+session_reset:
+  mode: "both"          # both, idle, daily, none
+  idle_minutes: 1440     # 24 hours
+  at_hour: 4             # 4 AM daily reset
+
+# ── Skills ────────────────────────────────────────────────────────────────────
+skills:
+  creation_nudge_interval: 15
+
+# ── Display ────────────────────────────────────────────────────────────────────
+display:
+  # KawaiiSpinner face during tool execution: kawaii, cat, none
+  spinner: "kawaii"
+
+  # Busy input mode: interrupt (default), queue
+  busy_input_mode: "interrupt"
+
+  # Show tool call previews before execution
+  tool_preview: true
+
+  # Auto-show token usage after each response
+  show_token_usage: false

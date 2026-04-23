@@ -1,0 +1,58 @@
+# Complete Docker Compose: Hermes Agent + Hermes WebUI + Firecrawl
+#
+# Usage:
+#   docker compose -f docker-compose.complete.yml up -d
+#
+# First-time setup:
+#   1. cp config/.env.example ~/.hermes/.env
+#   2. Edit ~/.hermes/.env and add your API keys (FIRECRAWL_API_KEY, etc.)
+#   3. docker compose -f docker-compose.complete.yml up -d
+#   4. Open http://localhost:8787
+
+services:
+  hermes-agent:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes-agent
+    command: gateway run
+    tty: true
+    stdin_open: true
+    ports:
+      - "127.0.0.1:8642:8642"
+    volumes:
+      - ${HERMES_HOME:-~/.hermes}:/opt/data
+    environment:
+      - HERMES_HOME=/opt/data
+    user: "10000:10000"
+    restart: unless-stopped
+    networks:
+      - hermes-net
+
+  hermes-webui:
+    image: ghcr.io/nesquena/hermes-webui:latest
+    container_name: hermes-webui
+    depends_on:
+      - hermes-agent
+    ports:
+      - "8787:8787"
+    volumes:
+      - ${HERMES_HOME:-~/.hermes}:/opt/hermes
+      - hermes-agent-src:/opt/hermes/hermes-agent
+      - ${HERMES_WORKSPACE:-~/workspace}:/workspace
+    environment:
+      - HERMES_WEBUI_HOST=0.0.0.0
+      - HERMES_WEBUI_PORT=8787
+      - HERMES_WEBUI_STATE_DIR=/opt/hermes/webui
+      - HERMES_HOME=/opt/hermes
+      - WANTED_UID=${UID:-1000}
+      - WANTED_GID=${GID:-1000}
+    user: "10000:10000"
+    restart: unless-stopped
+    networks:
+      - hermes-net
+
+networks:
+  hermes-net:
+    driver: bridge
+
+volumes:
+  hermes-agent-src:

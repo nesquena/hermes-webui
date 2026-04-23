@@ -1,0 +1,139 @@
+# Docker Compose: Hermes Agent + Hermes WebUI + Firecrawl + Camofox
+#
+# Config override:
+#   Place config.yaml files in ./config/ directory to override defaults
+#   These are mounted read-only at /opt/hermes/config.d/ inside containers
+#
+# Usage:
+#   docker compose -f docker-compose.with-services.yml up -d
+#
+# Includes:
+#   - hermes-agent  : Hermes Agent gateway
+#   - hermes-webui  : Web UI frontend
+#   - firecrawl     : Self-hosted Firecrawl API server
+#   - camofox       : Camofox anti-detection browser server
+#
+# Ports:
+#   - hermes-agent  : 127.0.0.1:8642
+#   - hermes-webui  : 8787
+#   - firecrawl     : 3002
+#   - camofox       : 9377 (REST API), 9378 (VNC)
+#
+# Config:
+#   - Set FIRECRAWL_API_KEY in .env to use cloud Firecrawl, OR
+#   - Self-hosted Firecrawl runs here with USE_DB_AUTHENTICATION=false
+#   - Set CAMOFOX_API_KEY for authenticated browser sessions
+#
+# For the full Firecrawl stack (Redis, Postgres, RabbitMQ), see:
+#   https://github.com/firecrawl/firecrawl/blob/main/docker-compose.yaml
+
+services:
+  hermes-agent:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes-agent
+    command: gateway run
+    tty: true
+    stdin_open: true
+    ports:
+      - "127.0.0.1:8642:8642"
+    volumes:
+      - ${HERMES_HOME:-~/.hermes}:/opt/hermes
+      - hermes-agent-src:/opt/hermes/hermes-agent
+      - hermes-config:/opt/hermes/config.d/:ro
+    environment:
+      - HERMES_HOME=/opt/hermes
+      - FIRECRAWL_API_URL=${FIRECRAWL_API_URL:-http://firecrawl:3002}
+      - CAMOFOX_URL=http://camofox:9377
+    user: "10000:10000"
+    restart: unless-stopped
+    networks:
+      - hermes-net
+
+  hermes-webui:
+    build: ..
+    container_name: hermes-webui
+    depends_on:
+      - hermes-agent
+    ports:
+      - "8787:8787"
+    volumes:
+      - ${HERMES_HOME:-~/.hermes}:/opt/hermes
+      - hermes-agent-src:/opt/hermes/hermes-agent
+      - hermes-config:/opt/hermes/config.d/:ro
+      - ${HERMES_WORKSPACE:-~/workspace}:/workspace
+    environment:
+      - HERMES_WEBUI_HOST=0.0.0.0
+      - HERMES_WEBUI_PORT=8787
+      - HERMES_WEBUI_STATE_DIR=/opt/hermes/webui
+      - HERMES_HOME=/opt/hermes
+      - WANTED_UID=${UID:-1000}
+      - WANTED_GID=${GID:-1000}
+    user: "10000:10000"
+    restart: unless-stopped
+    networks:
+      - hermes-net
+
+  firecrawl:
+    image: firecrawl/firecrawl:latest
+    container_name: firecrawl
+    ports:
+      - "3002:3002"
+    environment:
+      - PORT=3002
+      - HOST=0.0.0.0
+      - USE_DB_AUTHENTICATION=false
+      - REDIS_URL=redis://redis:6379
+      - PLAYWRIGHT_MICROSERVICE_URL=http://playwright-service:3000/scrape
+    depends_on:
+      - redis
+      - playwright-service
+    restart: unless-stopped
+    networks:
+      - hermes-net
+
+  playwright-service:
+    image: firecrawl/playwright-service:latest
+    container_name: firecrawl-playwright
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - BLOCK_MEDIA=true
+    restart: unless-stopped
+    networks:
+      - hermes-net
+    tmpfs:
+      - /tmp/.cache:noexec,nosuid,size=1g
+
+  redis:
+    image: redis:alpine
+    container_name: firecrawl-redis
+    networks:
+      - hermes-net
+    restart: unless-stopped
+
+  camofox:
+    image: jo-inc/camofox-browser
+    container_name: camofox
+    ports:
+      - "9377:9377"
+      - "9378:9378"
+    environment:
+      - CAMOFOX_PORT=9377
+      - CAMOFOX_API_KEY=${CAMOFOX_API_KEY:-}
+    restart: unless-stopped
+    networks:
+      - hermes-net
+
+networks:
+  hermes-net:
+    driver: bridge
+
+volumes:
+  hermes-agent-src:
+  hermes-config:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/config
