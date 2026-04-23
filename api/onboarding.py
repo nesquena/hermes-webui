@@ -440,9 +440,19 @@ def get_onboarding_status() -> dict:
     # user who never ran the wizard has no onboarding_completed flag — any momentary
     # imports_ok=False during restart makes chat_ready=False, config_auto_completed=False,
     # and the wizard reappears with a broken dropdown that clobbers their config.
+    #
+    # Best-effort: if save_settings raises (read-only FS, disk full, permission error),
+    # log and continue.  The `config_auto_completed` branch of `completed=` below still
+    # returns True for this request, so the user sees the correct state — only the
+    # persistence-across-restart guarantee is degraded.  Raising here would turn every
+    # /api/onboarding/status call into a 500 until disk was writable, which is worse UX
+    # than losing the next-restart protection.
     if config_auto_completed and not settings.get("onboarding_completed"):
-        save_settings({"onboarding_completed": True})
-        settings["onboarding_completed"] = True
+        try:
+            save_settings({"onboarding_completed": True})
+            settings["onboarding_completed"] = True
+        except Exception:
+            logger.debug("Failed to persist onboarding_completed", exc_info=True)
 
     return {
         "completed": bool(settings.get("onboarding_completed")) or auto_completed or config_auto_completed,

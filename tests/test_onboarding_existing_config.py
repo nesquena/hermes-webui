@@ -116,6 +116,50 @@ class TestOnboardingGate:
         assert "config_exists" in result["system"]
         assert result["system"]["config_exists"] is True
 
+    def test_persist_failure_does_not_break_status_endpoint(self):
+        """save_settings() failure (read-only FS, disk full) must not turn the
+        status endpoint into a 500.  The persistence-across-restart guarantee
+        degrades but `completed` still reflects the live `config_auto_completed`
+        signal so the user isn't blocked from using the UI.
+        """
+        import api.onboarding as mod
+        settings = {"onboarding_completed": False}
+        runtime = {
+            "chat_ready": True,
+            "provider_configured": True,
+            "provider_ready": True,
+            "setup_state": "ready",
+            "provider_note": "test",
+            "current_provider": "openrouter",
+            "current_model": "anthropic/claude-sonnet-4.6",
+            "current_base_url": None,
+            "env_path": "/tmp/.hermes_test/.env",
+        }
+        fake_config_path = pathlib.Path("/tmp/_test_config.yaml")
+
+        with (
+            mock.patch.object(mod, "load_settings", return_value=settings),
+            mock.patch.object(mod, "get_config", return_value={}),
+            mock.patch.object(mod, "verify_hermes_imports", return_value=(True, [], {})),
+            mock.patch.object(mod, "_status_from_runtime", return_value=runtime),
+            mock.patch.object(mod, "load_workspaces", return_value=[]),
+            mock.patch.object(mod, "get_last_workspace", return_value=None),
+            mock.patch.object(mod, "get_available_models", return_value=[]),
+            mock.patch.object(mod, "_get_config_path", return_value=fake_config_path),
+            mock.patch.object(pathlib.Path, "exists", return_value=True),
+            mock.patch.object(
+                mod, "save_settings", side_effect=OSError("read-only filesystem")
+            ),
+        ):
+            # Must not raise — persistence failure is best-effort.
+            result = mod.get_onboarding_status()
+
+        # completed still reflects the live signal via config_auto_completed
+        assert result["completed"] is True, (
+            "Status endpoint must still return completed=True via the live "
+            "config_auto_completed signal when persistence fails"
+        )
+
 
 class TestApplyOnboardingSetupGuard:
     """Fix #2: apply_onboarding_setup must not silently overwrite config.yaml."""
