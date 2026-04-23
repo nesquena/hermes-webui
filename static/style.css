@@ -84,6 +84,81 @@
   /* ── Skin: Charizard (orange) ── */
   :root[data-skin="charizard"]{--accent:#EA580C;--accent-hover:#C2410C;--accent-bg:rgba(234,88,12,0.08);--accent-bg-strong:rgba(234,88,12,0.15);--accent-text:#C2410C;}
   :root.dark[data-skin="charizard"]{--accent:#FB923C;--accent-hover:#F97316;--accent-bg:rgba(251,146,60,0.08);--accent-bg-strong:rgba(251,146,60,0.15);--accent-text:#FB923C;}
+  /* ── Skin: Claude (Anthropic-inspired — warm off-white + clay accent) ──
+     Rewrites the full palette (not just --accent) so the UI reads like Claude.ai:
+     serif body type, neutral tool cards, amber focus ring, soft user bubble.
+     Also tweaks --user-bubble-* vars used by the Messages-redesign block. */
+  :root[data-skin="claude"]{
+    --bg:#FAF9F5;--sidebar:#F0EEE6;--surface:#FFFFFF;
+    --border:#E7E4DB;--border2:#D7D3C7;
+    --text:#1F1E1C;--muted:#6B6A63;--strong:#141311;--em:#3E3D39;
+    --accent:#D97757;--accent-hover:#BF6545;--accent-text:#A55237;
+    --accent-bg:rgba(217,119,87,0.09);--accent-bg-strong:rgba(217,119,87,0.18);
+    --code-bg:#F5F3EC;--code-inline-bg:rgba(20,19,17,0.06);--code-text:#8A3E1A;--pre-text:#1F1E1C;
+    --topbar-bg:rgba(250,249,245,0.96);--main-bg:rgba(250,249,245,0.55);
+    --input-bg:rgba(20,19,17,0.035);--hover-bg:rgba(20,19,17,0.05);
+    --focus-ring:rgba(217,119,87,0.3);--focus-glow:rgba(217,119,87,0.1);
+    --blue:#2E6F9E;--gold:#A55237;
+    --user-bubble-bg:#ECE9DF;--user-bubble-border:#DED9CC;
+    --user-bubble-text:#1F1E1C;--user-bubble-placeholder:#6B6A63;
+    --user-selection-bg:rgba(217,119,87,0.28);--user-selection-text:#1F1E1C;
+  }
+  :root.dark[data-skin="claude"]{
+    --bg:#1F1E1C;--sidebar:#262522;--surface:#2C2B28;
+    --border:#3A3935;--border2:#4A4843;
+    --text:#EDEBE3;--muted:#A3A197;--strong:#F7F5ED;--em:#C9C6BC;
+    --accent:#E0896D;--accent-hover:#D97757;--accent-text:#E6A88A;
+    --accent-bg:rgba(224,137,109,0.12);--accent-bg-strong:rgba(224,137,109,0.22);
+    --code-bg:#2A2926;--code-inline-bg:rgba(255,255,255,0.07);--code-text:#F0B593;--pre-text:#EDEBE3;
+    --topbar-bg:rgba(38,37,34,0.96);--main-bg:rgba(31,30,28,0.55);
+    --input-bg:rgba(255,255,255,0.045);--hover-bg:rgba(255,255,255,0.07);
+    --focus-ring:rgba(224,137,109,0.35);--focus-glow:rgba(224,137,109,0.1);
+    --blue:#8BB8D6;--gold:#E6A88A;
+    --user-bubble-bg:#34322E;--user-bubble-border:#42403B;
+    --user-bubble-text:#EDEBE3;--user-bubble-placeholder:#A3A197;
+    --user-selection-bg:rgba(224,137,109,0.3);--user-selection-text:#F7F5ED;
+  }
+  /* Typography: Inter-ish UI, serif body to evoke Claude.ai reading surface */
+  :root[data-skin="claude"]{font-family:"Inter",ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;}
+  :root[data-skin="claude"] body{font-family:inherit;}
+  :root[data-skin="claude"] .msg-body{font-family:"Tiempos Text","Source Serif Pro","Charter","Iowan Old Style",ui-serif,Georgia,"Times New Roman",serif;font-size:15px;line-height:1.72;letter-spacing:-0.003em;}
+  :root[data-skin="claude"] .msg-body code,
+  :root[data-skin="claude"] .msg-body pre,
+  :root[data-skin="claude"] .msg-body pre code,
+  :root[data-skin="claude"] .tool-card,
+  :root[data-skin="claude"] .tool-card pre{font-family:"JetBrains Mono","SF Mono","Fira Code",ui-monospace,Menlo,monospace;}
+  :root[data-skin="claude"] .topbar-title{letter-spacing:-0.015em;font-weight:600;}
+  :root[data-skin="claude"] .sidebar-header h1{letter-spacing:-0.01em;}
+  /* Softer, less decorative chrome */
+  :root[data-skin="claude"] .composer-box{border-radius:18px;}
+  :root[data-skin="claude"] .new-chat-btn{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;}
+  :root[data-skin="claude"] .new-chat-btn:hover{background:var(--accent-hover);border-color:var(--accent-hover);color:#fff;}
+  :root[data-skin="claude"] .empty-logo{background:var(--surface);border:1px solid var(--border);box-shadow:0 1px 2px rgba(20,19,17,0.04);}
+  :root.dark[data-skin="claude"] .empty-logo{box-shadow:0 1px 2px rgba(0,0,0,0.3);}
+  /* Tool / thinking cards: mute the blue-ish Hermes highlights */
+  :root[data-skin="claude"] .tool-card{background:rgba(20,19,17,0.025);border-color:var(--border);border-radius:10px;}
+  :root[data-skin="claude"] .tool-card:hover{border-color:var(--border2);}
+  :root[data-skin="claude"] .tool-card-running{background:var(--accent-bg);border-color:var(--accent-bg-strong);}
+  :root[data-skin="claude"] .tool-card-name{color:var(--muted);font-weight:500;}
+  :root[data-skin="claude"] .tool-arg-key{color:var(--accent-text);}
+  :root[data-skin="claude"] .tool-card-more{color:var(--accent-text);}
+  :root[data-skin="claude"] .tool-card-running-dot{background:var(--accent);}
+  :root.dark[data-skin="claude"] .tool-card{background:rgba(255,255,255,0.03);}
+  /* Role chrome: less bold, Claude-style flat labels */
+  :root[data-skin="claude"] .role-icon{border-radius:6px;}
+  :root[data-skin="claude"] .msg-role.user,
+  :root[data-skin="claude"] .msg-role.assistant{color:var(--muted);font-weight:600;letter-spacing:0.02em;text-transform:uppercase;font-size:10px;opacity:.75;}
+  :root[data-skin="claude"] .msg-body h1,
+  :root[data-skin="claude"] .msg-body h2,
+  :root[data-skin="claude"] .msg-body h3{font-family:"Inter",ui-sans-serif,system-ui,sans-serif;letter-spacing:-0.015em;}
+  /* User bubble: Claude uses a soft sand-colored pill, not a saturated accent fill */
+  :root[data-skin="claude"] .msg-row[data-role="user"] .msg-body{border-radius:16px;padding:12px 16px;}
+  :root[data-skin="claude"] .msg-row[data-role="user"] .msg-body code{color:var(--user-bubble-text);background:rgba(20,19,17,0.08);}
+  /* Send button pop */
+  :root[data-skin="claude"] .send-btn{box-shadow:0 1px 3px rgba(217,119,87,0.3);}
+  :root[data-skin="claude"] .send-btn:hover{box-shadow:0 2px 8px rgba(217,119,87,0.45);}
+  /* Sidebar active session: use accent tint so it matches the Claude list item look */
+  :root[data-skin="claude"] .session-item.active{border-left:2px solid var(--accent);}
   /* #594: app-dialog light mode overrides — base styles use hardcoded dark gradients */
   :root:not(.dark) .app-dialog{
     background:linear-gradient(180deg,rgba(240,237,232,.99),rgba(228,224,216,.99));

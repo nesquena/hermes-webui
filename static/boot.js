@@ -619,6 +619,7 @@ const _SKINS=[
   {name:'Poseidon', colors:['#0EA5E9','#0284C7','#0369A1']},
   {name:'Sisyphus', colors:['#A78BFA','#8B5CF6','#7C3AED']},
   {name:'Charizard',colors:['#FB923C','#F97316','#EA580C']},
+  {name:'Claude',   colors:['#D97757','#C06A49','#9A523A']},
 ];
 const _VALID_THEMES=new Set(['system','dark','light']);
 const _VALID_SKINS=new Set((_SKINS||[]).map(s=>s.name.toLowerCase()));
