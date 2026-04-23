@@ -140,6 +140,7 @@ async function send(){
     if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true);
     S.messages.push({role:'assistant',content:`**Error:** ${errMsg}`});
     renderMessages();setBusy(false);setComposerStatus(`Error: ${errMsg}`);
+    clearSidebarRunningState(activeSid, 0);
     return;
   }
 
@@ -156,6 +157,25 @@ function closeLiveStream(sessionId, streamId){
   if(streamId&&live.streamId!==streamId) return;
   try{live.source.close();}catch(_){ }
   delete LIVE_STREAMS[sessionId];
+}
+
+function clearSidebarRunningState(sessionId, delayMs=250){
+  if(!sessionId) return;
+  if(S.session&&S.session.session_id===sessionId&&S.session){
+    S.session.active_stream_id=null;
+  }
+  if(typeof _allSessions!=='undefined'&&Array.isArray(_allSessions)){
+    const row=_allSessions.find(s=>s&&s.session_id===sessionId);
+    if(row){
+      row.active_stream_id=null;
+      row.agent_running=false;
+    }
+  }
+  if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+  else if(typeof renderSessionList==='function') renderSessionList();
+  if(typeof renderSessionList==='function'){
+    setTimeout(()=>{ try{ renderSessionList(); }catch(_){ } }, Math.max(0, Number(delayMs)||0));
+  }
 }
 
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
@@ -599,6 +619,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         catch(_){trackBackgroundError(activeSid,_errTitle,'Error');}
       }
       if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setComposerStatus('');}
+      clearSidebarRunningState(activeSid);
     });
 
     source.addEventListener('warning',e=>{
@@ -717,6 +738,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     }
     if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setComposerStatus('');}
+    clearSidebarRunningState(activeSid);
   }
 
   (async()=>{

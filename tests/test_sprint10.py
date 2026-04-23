@@ -1,10 +1,10 @@
 """
 Sprint 10 Tests: server.py split, cancel endpoint, cron history, tool card polish.
 """
-import json, pathlib, urllib.error, urllib.request, urllib.parse
+import json, pathlib, urllib.error, urllib.request, urllib.parse, time, uuid
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 
-from tests._pytest_port import BASE
+from tests._pytest_port import BASE, TEST_STATE_DIR
 
 def get(path):
     with urllib.request.urlopen(BASE + path, timeout=10) as r:
@@ -29,6 +29,41 @@ def make_session(created_list):
     sid = d["session"]["session_id"]
     created_list.append(sid)
     return sid
+
+def _write_running_session(created_list):
+    sid = "streamlist_" + uuid.uuid4().hex[:8]
+    stream_id = "stream-test-" + uuid.uuid4().hex[:8]
+    created_list.append(sid)
+    now = time.time()
+    sessions_dir = TEST_STATE_DIR / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    (sessions_dir / f"{sid}.json").write_text(json.dumps({
+        "session_id": sid,
+        "title": "Running session",
+        "workspace": "/tmp",
+        "model": "openai/gpt-5.4-mini",
+        "messages": [{"role": "user", "content": "hello"}],
+        "created_at": now,
+        "updated_at": now,
+        "tool_calls": [],
+        "pinned": False,
+        "archived": False,
+        "project_id": None,
+        "profile": "default",
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "estimated_cost": None,
+        "personality": None,
+        "active_stream_id": stream_id,
+        "pending_user_message": "hello",
+        "pending_attachments": [],
+        "pending_started_at": now,
+    }), encoding="utf-8")
+    try:
+        (sessions_dir / "_index.json").unlink()
+    except FileNotFoundError:
+        pass
+    return sid, stream_id
 
 # ── server.py split: api/ modules served / importable ─────────────────────
 
@@ -137,3 +172,15 @@ def test_cancel_sse_event_handler_in_messages_js(cleanup_test_sessions):
 def test_active_stream_id_tracked(cleanup_test_sessions):
     src, _ = get_text("/static/messages.js")
     assert "S.activeStreamId" in src
+
+def test_sessions_list_exposes_active_stream_id_for_running_session(cleanup_test_sessions):
+    created = []
+    try:
+        sid, stream_id = _write_running_session(created)
+        data, status = get("/api/sessions")
+        assert status == 200
+        entry = next(sess for sess in data["sessions"] if sess["session_id"] == sid)
+        assert entry["active_stream_id"] == stream_id
+    finally:
+        for sid in created:
+            post("/api/session/delete", {"session_id": sid})

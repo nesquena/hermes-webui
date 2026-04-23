@@ -227,14 +227,23 @@
   .session-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;overflow:hidden;}
   .session-title-row{display:flex;align-items:center;gap:6px;min-width:0;}
   .session-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);}
+  .session-running-indicator{position:absolute;inset:0;display:inline-flex;align-items:center;justify-content:center;color:var(--accent-text);opacity:0;pointer-events:none;transition:opacity .15s ease;}
+  .session-running-spinner{display:block;width:11px;height:11px;border-radius:50%;border:1.5px solid currentColor;border-right-color:transparent;animation:sessionSpin .85s linear infinite;}
   .session-item.active .session-title{color:var(--accent-text);}
   .session-meta{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .session-item.active .session-meta{color:var(--accent-text);opacity:.8;}
+  .session-item.running .session-meta{padding-left:0;}
   .session-time{display:none;}
   /* ── Session action trigger + dropdown ── */
-  .session-actions{position:absolute;right:6px;top:50%;transform:translateY(-50%);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .15s ease;}
+  .session-actions{position:absolute;right:6px;top:50%;transform:translateY(-50%);width:26px;height:26px;opacity:0;pointer-events:none;transition:opacity .15s ease;}
   .session-item:hover .session-actions,.session-item:focus-within .session-actions,.session-item.menu-open .session-actions{opacity:1;pointer-events:auto;}
-  .session-actions-trigger{width:26px;height:26px;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer;padding:0;line-height:1;display:inline-flex;align-items:center;justify-content:center;transition:background .12s,color .12s,border-color .12s;}
+  .session-item.running .session-actions{opacity:1;pointer-events:none;}
+  .session-item.running:hover .session-actions,.session-item.running:focus-within .session-actions,.session-item.running.menu-open .session-actions{pointer-events:auto;}
+  .session-actions-trigger{position:absolute;inset:0;width:26px;height:26px;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer;padding:0;line-height:1;display:inline-flex;align-items:center;justify-content:center;transition:background .12s,color .12s,border-color .12s;}
+  .session-item.running .session-actions-trigger{opacity:0;pointer-events:none;}
+  .session-item.running:hover .session-actions-trigger,.session-item.running:focus-within .session-actions-trigger,.session-item.running.menu-open .session-actions-trigger{opacity:1;pointer-events:auto;}
+  .session-item.running .session-running-indicator{opacity:.9;}
+  .session-item.running:hover .session-running-indicator,.session-item.running:focus-within .session-running-indicator,.session-item.running.menu-open .session-running-indicator{opacity:0;}
   .session-actions-trigger:hover{background:var(--hover-bg);color:var(--text);}
   .session-actions-trigger.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--text);}
   .session-actions-trigger svg{display:block;}
@@ -252,6 +261,7 @@
   /* Hide overlay during inline rename */
   .session-item:has(.session-title-input) .session-actions{display:none;}
   @keyframes newflash{0%{background:var(--accent-bg-strong);color:var(--accent);}100%{background:transparent;color:var(--muted);}}
+  @keyframes sessionSpin{to{transform:rotate(360deg);}}
   .session-item.new-flash{animation:newflash 1.4s ease-out forwards;}
   /* Collapsible date group headers */
   .session-date-header{display:flex;align-items:center;gap:5px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:8px 10px 4px;cursor:pointer;user-select:none;opacity:.8;transition:opacity .15s;}

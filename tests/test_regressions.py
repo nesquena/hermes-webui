@@ -489,6 +489,34 @@ def test_newSession_resets_busy_state_for_fresh_chat(cleanup_test_sessions):
     assert "updateQueueBadge(S.session.session_id);" in new_sess_body, \
         "newSession() must refresh the badge for the new session rather than leaving the old session's queue badge visible"
 
+def test_session_sidebar_running_indicator_uses_session_scoped_inflight_state(cleanup_test_sessions):
+    """Sidebar rows should show a live running indicator for busy sessions."""
+    src = (REPO_ROOT / "static/sessions.js").read_text()
+    css = (REPO_ROOT / "static/style.css").read_text()
+    assert "function _sessionIsRunning(session)" in src, \
+        "sessions.js should centralize the sidebar running-state check"
+    assert "INFLIGHT[sid]" in src and "S.activeStreamId" in src, \
+        "_sessionIsRunning should cover background in-flight sessions and the active stream"
+    assert "actions.appendChild(running);" in src, \
+        "session rows should place the running indicator in the actions slot"
+    assert ".session-running-spinner" in css and "@keyframes sessionSpin" in css, \
+        "style.css should include spinner styling for the sidebar running indicator"
+    assert ".session-item.running .session-actions-trigger" in css and ".session-item.running:hover .session-running-indicator" in css, \
+        "running rows should swap spinner and menu trigger on hover"
+    assert ".session-actions{position:absolute;right:6px;top:50%;transform:translateY(-50%);width:26px;height:26px;" in css, \
+        "session actions should reserve a single overlay slot on the far right"
+    assert ".session-running-indicator{position:absolute;inset:0;" in css and ".session-actions-trigger{position:absolute;inset:0;" in css, \
+        "spinner and menu trigger should overlap in the same slot rather than sit side by side"
+
+def test_sidebar_running_indicator_clears_on_error_paths(cleanup_test_sessions):
+    src = (REPO_ROOT / "static/messages.js").read_text()
+    assert "function clearSidebarRunningState(sessionId, delayMs=250)" in src, \
+        "messages.js should centralize sidebar running-state cleanup"
+    assert "row.active_stream_id=null;" in src and "row.agent_running=false;" in src, \
+        "sidebar cleanup should clear stale cached running flags"
+    assert src.count("clearSidebarRunningState(activeSid") >= 3, \
+        "all terminal error paths should clear the sidebar running state"
+
 
 def test_session_scoped_message_queue_frontend_wiring(cleanup_test_sessions):
     """R15bb: queued follow-ups must stay attached to their originating session.

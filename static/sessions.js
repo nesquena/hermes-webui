@@ -191,6 +191,14 @@ let _sessionActionMenu = null;
 let _sessionActionAnchor = null;
 let _sessionActionSessionId = null;
 
+function _sessionIsRunning(session){
+  const sid=session&&session.session_id;
+  if(!sid) return false;
+  if(!!INFLIGHT[sid]) return true;
+  if(S.session&&S.session.session_id===sid&&(S.busy||S.activeStreamId)) return true;
+  return !!(session.active_stream_id||session.agent_running);
+}
+
 function closeSessionActionMenu(){
   if(_sessionActionMenu){
     _sessionActionMenu.remove();
@@ -693,7 +701,8 @@ function renderSessionListFromCache(){
   function _renderOneSession(s){
     const el=document.createElement('div');
     const isActive=S.session&&s.session_id===S.session.session_id;
-    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'');
+    const isRunning=_sessionIsRunning(s);
+    el.className='session-item'+(isActive?' active':'')+(isRunning?' running':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'');
     if(isActive&&S.session&&S.session._flash)delete S.session._flash;
     const rawTitle=s.title||'Untitled';
     const tags=(rawTitle.match(/#[\w-]+/g)||[]);
@@ -803,6 +812,14 @@ function renderSessionListFromCache(){
     // Single trigger button that opens a shared dropdown menu
     const actions=document.createElement('div');
     actions.className='session-actions';
+    if(isRunning){
+      const running=document.createElement('span');
+      running.className='session-running-indicator';
+      running.title='Conversation is running';
+      running.setAttribute('aria-label','Conversation is running');
+      running.innerHTML='<span class="session-running-spinner" aria-hidden="true"></span>';
+      actions.appendChild(running);
+    }
     const menuBtn=document.createElement('button');
     menuBtn.type='button';
     menuBtn.className='session-actions-trigger';

@@ -172,6 +172,7 @@ class Session:
             'workspace': self.workspace,
             'model': self.model,
             'message_count': len(self.messages),
+            'active_stream_id': self.active_stream_id,
             'created_at': self.created_at,
             'updated_at': self.updated_at,
             'pinned': self.pinned,
