@@ -285,8 +285,11 @@
   .app-dialog-btn.confirm.danger{border-color:var(--error);background:rgba(239,83,80,.12);color:var(--error);}
   .app-dialog-btn.confirm.danger:hover{background:rgba(239,83,80,.2);border-color:var(--error);}
   .app-dialog-btn:focus-visible,.app-dialog-close:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
-  .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--surface);backdrop-filter:blur(12px);border:1px solid var(--accent-bg-strong);color:var(--text);font-size:13px;padding:10px 20px;border-radius:12px;pointer-events:none;opacity:0;transition:opacity .2s,transform .2s;z-index:100;box-shadow:0 4px 20px rgba(0,0,0,.3);letter-spacing:.01em;}
-  .toast.show{opacity:1;transform:translateX(-50%) translateY(-2px);}
+  .toast{position:fixed;top:24px;right:24px;left:auto;bottom:auto;transform:translateY(-6px);background:color-mix(in srgb,var(--accent) 14%,var(--surface));border:1px solid color-mix(in srgb,var(--accent) 45%,var(--surface));color:var(--accent-text);font-size:13px;font-weight:500;padding:10px 16px;border-radius:10px;pointer-events:none;opacity:0;transition:opacity .2s,transform .2s;z-index:100;box-shadow:0 6px 24px rgba(0,0,0,.12);letter-spacing:.01em;max-width:min(420px,calc(100vw - 48px));}
+  .toast.show{opacity:1;transform:translateY(0);}
+  .toast.success{background:color-mix(in srgb,var(--success) 14%,var(--surface));border-color:color-mix(in srgb,var(--success) 45%,var(--surface));color:var(--success);}
+  .toast.error{background:color-mix(in srgb,var(--error) 14%,var(--surface));border-color:color-mix(in srgb,var(--error) 45%,var(--surface));color:var(--error);}
+  .toast.warning{background:color-mix(in srgb,var(--warning) 14%,var(--surface));border-color:color-mix(in srgb,var(--warning) 45%,var(--surface));color:var(--warning);}
   .onboarding-overlay{position:fixed;inset:0;z-index:1050;background:rgba(7,12,19,.78);backdrop-filter:blur(8px);display:none;align-items:center;justify-content:center;padding:24px;}
   .onboarding-card{width:min(980px,100%);max-height:min(760px,94vh);overflow:auto;border:1px solid var(--accent-bg-strong);border-radius:24px;background:linear-gradient(180deg,rgba(20,30,44,.98),rgba(11,17,27,.98));box-shadow:0 24px 80px rgba(0,0,0,.45);}
   .onboarding-shell{display:grid;grid-template-columns:minmax(240px,300px) minmax(0,1fr);}
