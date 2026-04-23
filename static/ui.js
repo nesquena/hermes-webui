@@ -84,7 +84,8 @@ async function populateModelDropdown(){
     if(!data.groups||!data.groups.length) return; // keep HTML defaults
     // Store active provider globally so the send path can warn on mismatch
     window._activeProvider=data.active_provider||null;
-    // Store default model so newSession() can apply it (#872)
+    // Store default model so newSession() can apply it (#872).
+    // Per-page-load — not synced across browser tabs.
     window._defaultModel=data.default_model||null;
     // Clear existing options
     sel.innerHTML='';
