@@ -1697,6 +1697,8 @@ function _applySavedSettingsUi(saved, body, opts){
   const bar=$('settingsUnsavedBar');
   if(bar) bar.style.display='none';
   _settingsHermesDefaultModelOnOpen=body.default_model||_settingsHermesDefaultModelOnOpen||'';
+  // Sync window._defaultModel so newSession() uses the just-saved default without a reload (#908).
+  if(body.default_model) window._defaultModel=body.default_model;
   renderMessages();
   if(typeof syncTopbar==='function') syncTopbar();
   if(typeof renderSessionList==='function') renderSessionList();

@@ -139,6 +139,18 @@ function _addLiveModelsToSelect(provider, models, sel){
     sel.appendChild(providerGroup);
   }
   const existingIds=new Set([...sel.options].map(o=>o.value));
+  // Normalized dedup: strip @provider: prefix and unify separators so
+  // 'minimax/minimax-m2.7' matches '@nous:minimax/minimax-m2.7' (#907).
+  // Strip ONLY the first colon — Ollama tag IDs are multi-colon
+  // (e.g. '@ollama-cloud:qwen3-vl:235b-instruct') and split(':',2) would
+  // truncate the tag suffix in JS (the limit arg discards extras, unlike Python).
+  const _normId=id=>{
+    let s=String(id||'');
+    if(s.startsWith('@')&&s.includes(':')) s=s.substring(s.indexOf(':')+1); // strip only @provider:
+    s=s.split('/').pop();                                                    // strip namespace prefix
+    return s.replace(/-/g,'.').toLowerCase();
+  };
+  const existingNorm=new Set([...sel.options].map(o=>_normId(o.value)));
   let added=0;
   const _ap=(window._activeProvider||'').toLowerCase();
   const _isPortalFetch=_ap && _ap!=='openrouter' && _ap!=='custom' && provider===_ap;
@@ -148,6 +160,7 @@ function _addLiveModelsToSelect(provider, models, sel){
       mid=`@${provider}:${mid}`;
     }
     if(existingIds.has(mid)) continue;
+    if(existingNorm.has(_normId(mid))) continue; // dedup cross-prefix duplicates (#907)
     const opt=document.createElement('option');
     opt.value=mid;
     opt.textContent=m.label||m.id;
