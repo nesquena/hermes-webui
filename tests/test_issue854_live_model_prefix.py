@@ -23,8 +23,11 @@ class TestLiveModelPrefix:
         `minimax/minimax-m2.7` from Nous's live catalog — excluding them
         leaves the bug unfixed."""
         js = _read("static/ui.js")
-        m = re.search(r'async function _fetchLiveModels\(.*?\n\}', js, re.DOTALL)
-        assert m, "_fetchLiveModels not found"
+        # Live model prefix logic was extracted to _addLiveModelsToSelect (#872)
+        m = re.search(r'function _addLiveModelsToSelect\(.*?\n\}', js, re.DOTALL)
+        if not m:
+            m = re.search(r'async function _fetchLiveModels\(.*?\n\}', js, re.DOTALL)
+        assert m, "_addLiveModelsToSelect or _fetchLiveModels not found"
         fn = m.group(0)
         # The prefix application block must NOT have `!mid.includes('/')`
         # as a guard — slash-prefixed IDs from portal providers also need
@@ -47,7 +50,10 @@ class TestLiveModelPrefix:
         so the prefix is ADDED when the flag is true (portal fetch), not when
         false.  Earlier revision used `!_needsPrefix` (inverted)."""
         js = _read("static/ui.js")
-        m = re.search(r'async function _fetchLiveModels\(.*?\n\}', js, re.DOTALL)
+        # Live model prefix logic was extracted to _addLiveModelsToSelect (#872)
+        m = re.search(r'function _addLiveModelsToSelect\(.*?\n\}', js, re.DOTALL)
+        if not m:
+            m = re.search(r'async function _fetchLiveModels\(.*?\n\}', js, re.DOTALL)
         assert m
         fn = m.group(0)
         # New flag: _isPortalFetch (positive semantics)
@@ -66,7 +72,10 @@ class TestLiveModelPrefix:
         """OpenRouter IDs are cross-namespace by design, and `custom` providers
         use user-defined bare names — neither should get a `@provider:` prefix."""
         js = _read("static/ui.js")
-        m = re.search(r'async function _fetchLiveModels\(.*?\n\}', js, re.DOTALL)
+        # Live model prefix logic was extracted to _addLiveModelsToSelect (#872)
+        m = re.search(r'function _addLiveModelsToSelect\(.*?\n\}', js, re.DOTALL)
+        if not m:
+            m = re.search(r'async function _fetchLiveModels\(.*?\n\}', js, re.DOTALL)
         assert m
         fn = m.group(0)
         assert "_ap!=='openrouter'" in fn or "_ap !== 'openrouter'" in fn, (
