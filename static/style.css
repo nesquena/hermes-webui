@@ -1913,7 +1913,7 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 /* ── Shared main-view tokens (used by #mainSkills, #mainTasks, #mainWorkspaces, #mainProfiles) ── */
 .main-view-header{
   display:flex;align-items:center;justify-content:space-between;gap:16px;
-  padding:18px 32px 14px;border-bottom:1px solid var(--border);
+  padding:8px 32px;border-bottom:1px solid var(--border);
   flex-shrink:0;background:var(--bg);
 }
 .main-view-title{font-size:18px;font-weight:600;letter-spacing:-.01em;color:var(--text);line-height:1.3;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
@@ -1939,7 +1939,7 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .skill-file-code{background:var(--sidebar);border:1px solid var(--border);border-radius:8px;padding:12px 14px;font-size:12px;overflow:auto;max-width:960px;margin:0 auto;}
 
 @media(max-width:700px){
-  .main-view-header{padding:14px 16px 12px;}
+  .main-view-header{padding:8px 16px;}
   .main-view-body{padding:16px;}
 }
 
