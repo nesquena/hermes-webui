@@ -2305,67 +2305,94 @@ function _buildProviderCard(p){
   card.className='provider-card';
   card.dataset.provider=p.id;
   const isOauth=p.key_source==='oauth';
-  const statusColor=p.has_key?'var(--ok, #4ade80)':'var(--muted)';
-  const statusTitle=p.has_key?t('providers_status_configured'):t('providers_status_not_configured');
+  const modelCount=Array.isArray(p.models)?p.models.length:0;
+  const sourceLabel=isOauth
+    ? t('providers_status_oauth')
+    : (p.has_key ? t('providers_status_api_key') : t('providers_status_not_configured_label'));
+  const metaParts=[];
+  if(modelCount>0) metaParts.push(modelCount+(modelCount===1?' model':' models'));
+  metaParts.push(sourceLabel);
+  const metaText=metaParts.join(' · ');
 
-  // Header row
-  const header=document.createElement('div');
+  // Clickable header (toggles body)
+  const header=document.createElement('button');
+  header.type='button';
   header.className='provider-card-header';
-  const info=document.createElement('div');
-  info.className='provider-card-info';
-  info.style.cssText='display:flex;align-items:center;gap:8px;';
-  const nameEl=document.createElement('span');
-  nameEl.className='provider-card-name';
-  nameEl.style.cssText='font-weight:600;font-size:13px;';
-  nameEl.textContent=p.display_name;
-  const dot=document.createElement('span');
-  dot.className='provider-card-dot';
-  dot.title=statusTitle;
-  dot.style.cssText='width:8px;height:8px;border-radius:50%;background:'+statusColor+';display:inline-block;flex-shrink:0';
-  const sourceEl=document.createElement('span');
-  sourceEl.className='provider-card-source';
-  sourceEl.style.cssText='font-size:11px;color:var(--muted)';
-  sourceEl.textContent=isOauth?t('providers_status_oauth'):(p.has_key?t('providers_status_api_key'):t('providers_status_not_configured_label'));
-  info.appendChild(nameEl);
-  info.appendChild(dot);
-  info.appendChild(sourceEl);
-  header.appendChild(info);
+  header.innerHTML=`
+    <div class="provider-card-info">
+      <div class="provider-card-name">${esc(p.display_name)}</div>
+      <div class="provider-card-meta">${esc(metaText)}</div>
+    </div>
+    ${p.has_key?`<span class="provider-card-badge">${esc(t('providers_status_configured'))}</span>`:''}
+    <svg class="provider-card-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16"><path d="M6 9l6 6 6-6"/></svg>
+  `;
   card.appendChild(header);
+
+  const body=document.createElement('div');
+  body.className='provider-card-body';
 
   if(isOauth){
     const hint=document.createElement('div');
-    hint.style.cssText='font-size:11px;color:var(--muted);margin-top:4px;padding-left:2px';
+    hint.className='provider-card-hint';
     hint.textContent=t('providers_oauth_hint');
-    card.appendChild(hint);
-  }else{
-    const actions=document.createElement('div');
-    actions.className='provider-card-actions';
-    actions.style.cssText='margin-top:6px;display:flex;gap:6px;align-items:center';
-    const input=document.createElement('input');
-    input.type='password';
-    input.placeholder=p.has_key?t('providers_key_placeholder_replace'):t('providers_key_placeholder_new');
-    input.style.cssText='flex:1;padding:6px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;font-family:monospace';
-    input.autocomplete='off';
-    const saveBtn=document.createElement('button');
-    saveBtn.className='sm-btn provider-save-btn';
-    saveBtn.style.cssText='padding:5px 12px;font-size:12px;white-space:nowrap';
-    saveBtn.textContent=t('providers_save');
-    saveBtn.onclick=()=>_saveProviderKey(p.id);
-    actions.appendChild(input);
-    actions.appendChild(saveBtn);
-    if(p.has_key){
-      const removeBtn=document.createElement('button');
-      removeBtn.className='sm-btn';
-      removeBtn.style.cssText='padding:5px 10px;font-size:12px;color:var(--error);border-color:rgba(233,69,96,.25);white-space:nowrap';
-      removeBtn.textContent=t('providers_remove');
-      removeBtn.onclick=()=>_removeProviderKey(p.id);
-      actions.appendChild(removeBtn);
-    }
-    card.appendChild(actions);
-    _providerCardEls.set(p.id,{card,input,saveBtn,hasKey:p.has_key});
-    input.addEventListener('input',()=>{saveBtn.disabled=!input.value.trim();});
-    saveBtn.disabled=true;
+    body.appendChild(hint);
+    card.appendChild(body);
+    header.addEventListener('click',()=>card.classList.toggle('open'));
+    return card;
   }
+
+  const field=document.createElement('div');
+  field.className='provider-card-field';
+  const label=document.createElement('label');
+  label.className='provider-card-label';
+  label.textContent=t('providers_status_api_key');
+  field.appendChild(label);
+
+  const row=document.createElement('div');
+  row.className='provider-card-row';
+  const input=document.createElement('input');
+  input.type='password';
+  input.className='provider-card-input';
+  input.placeholder=p.has_key?t('providers_key_placeholder_replace'):t('providers_key_placeholder_new');
+  input.autocomplete='off';
+  const toggleBtn=document.createElement('button');
+  toggleBtn.type='button';
+  toggleBtn.className='provider-card-btn provider-card-btn-ghost';
+  toggleBtn.textContent='Show';
+  toggleBtn.onclick=()=>{
+    const revealed=input.type==='text';
+    input.type=revealed?'password':'text';
+    toggleBtn.textContent=revealed?'Show':'Hide';
+  };
+  const saveBtn=document.createElement('button');
+  saveBtn.type='button';
+  saveBtn.className='provider-card-btn provider-card-btn-primary';
+  saveBtn.textContent=t('providers_save');
+  saveBtn.onclick=()=>_saveProviderKey(p.id);
+  saveBtn.disabled=true;
+  row.appendChild(input);
+  row.appendChild(toggleBtn);
+  row.appendChild(saveBtn);
+  if(p.has_key){
+    const removeBtn=document.createElement('button');
+    removeBtn.type='button';
+    removeBtn.className='provider-card-btn provider-card-btn-danger';
+    removeBtn.textContent=t('providers_remove');
+    removeBtn.onclick=()=>_removeProviderKey(p.id);
+    row.appendChild(removeBtn);
+  }
+  field.appendChild(row);
+  body.appendChild(field);
+  card.appendChild(body);
+
+  _providerCardEls.set(p.id,{card,input,saveBtn,hasKey:p.has_key});
+  input.addEventListener('input',()=>{saveBtn.disabled=!input.value.trim();});
+  header.addEventListener('click',e=>{
+    // Don't toggle when clicking inside body (defensive; body isn't inside header)
+    if(e.target.closest('.provider-card-body')) return;
+    card.classList.toggle('open');
+    if(card.classList.contains('open')) setTimeout(()=>input.focus(),0);
+  });
   return card;
 }
 

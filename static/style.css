@@ -1601,10 +1601,107 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 }
 
 /* ── Provider cards (settings panel) ── */
-.provider-card{padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--code-bg);transition:border-color .15s;}
-.provider-card:hover{border-color:var(--border2);}
-.provider-card-name{font-weight:600;font-size:13px;}
-.provider-card .sm-btn:disabled{opacity:.4;cursor:not-allowed;}
+/* ── Provider cards (Settings → Providers) ──
+   Matches hermes-desktop LLM Providers panel. Card uses --sidebar (surface-1),
+   hover rows use --surface (surface-2). Body divider uses a subtle tint. */
+#providersList{gap:12px;}
+.provider-card{
+  border:1px solid var(--border);
+  border-radius:12px;
+  background:var(--sidebar);
+  overflow:hidden;
+  margin-bottom:12px;
+  transition:border-color .15s ease;
+}
+.provider-card:last-child{margin-bottom:0;}
+.provider-card-header{
+  display:flex;align-items:center;gap:12px;
+  width:100%;
+  padding:12px 16px;
+  background:transparent;border:0;
+  color:var(--text);
+  text-align:left;cursor:pointer;
+  font:inherit;
+  transition:background .15s ease;
+}
+.provider-card-header:hover{background:var(--surface);}
+.provider-card-info{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;}
+.provider-card-name{font-size:13px;font-weight:500;color:var(--text);line-height:1.2;}
+.provider-card-meta{font-size:11px;color:var(--muted);line-height:1.2;opacity:.82;}
+.provider-card-badge{
+  flex-shrink:0;
+  font-size:10.5px;font-weight:500;
+  padding:2px 8px;border-radius:999px;
+  /* Literal tailwind green-500/10 + green-600 to match desktop reference */
+  background:rgba(34,197,94,.12);
+  color:#16a34a;
+  letter-spacing:.01em;
+}
+:root.dark .provider-card-badge{background:rgba(34,197,94,.16);color:#4ade80;}
+.provider-card-chevron{
+  flex-shrink:0;color:var(--muted);
+  transition:transform .2s ease;
+}
+.provider-card.open .provider-card-chevron{transform:rotate(180deg);}
+.provider-card-body{
+  display:none;
+  padding:12px 16px 16px;
+  border-top:1px solid color-mix(in srgb, var(--border) 55%, transparent);
+}
+.provider-card.open .provider-card-body{display:block;}
+.provider-card-hint{font-size:12px;color:var(--muted);line-height:1.4;}
+.provider-card-field{display:flex;flex-direction:column;gap:6px;}
+.provider-card-label{
+  font-size:11px;font-weight:500;color:var(--muted);
+  letter-spacing:.02em;
+}
+.provider-card-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.provider-card-input{
+  flex:1;min-width:160px;
+  padding:8px 10px;
+  background:var(--surface);
+  color:var(--text);
+  border:1px solid var(--border);
+  border-radius:8px;
+  font-size:12px;
+  font-family:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  outline:none;
+  transition:border-color .15s ease, box-shadow .15s ease;
+}
+.provider-card-input:focus{
+  border-color:var(--accent);
+  box-shadow:0 0 0 3px var(--focus-ring);
+}
+.provider-card-btn{
+  padding:7px 12px;
+  font-size:12px;font-weight:500;
+  border-radius:8px;
+  border:1px solid transparent;
+  background:var(--surface);
+  color:var(--text);
+  cursor:pointer;white-space:nowrap;
+  transition:background .15s ease, color .15s ease, border-color .15s ease;
+}
+.provider-card-btn:hover{background:var(--hover-bg);}
+.provider-card-btn:disabled{opacity:.45;cursor:not-allowed;}
+.provider-card-btn-ghost{background:var(--surface);}
+.provider-card-btn-primary{
+  background:var(--accent);
+  border-color:var(--accent);
+  color:#fff;
+}
+:root.dark .provider-card-btn-primary{color:#0D0D1A;}
+.provider-card-btn-primary:hover:not(:disabled){
+  background:var(--accent-hover);
+  border-color:var(--accent-hover);
+}
+.provider-card-btn-danger{
+  color:var(--error);
+  background:transparent;
+}
+.provider-card-btn-danger:hover{
+  background:color-mix(in srgb, var(--error) 10%, transparent);
+}
 
 /* ── Session pin indicator (inline, only when pinned) ── */
 .session-pin-indicator{
