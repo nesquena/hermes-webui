@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Nous static models now use explicit `@nous:` prefix** — the four hardcoded "(via Nous)" models (`Claude Opus 4.6`, `Claude Sonnet 4.6`, `GPT-5.4 Mini`, `Gemini 3.1 Pro Preview`) now carry `@nous:` prefix IDs, matching the format of live-fetched Nous models. Previously they used slash-only IDs that relied on the portal provider guard; the explicit prefix routes them through the same bulletproof `@provider:model` branch and eliminates 404 errors on those entries. (`api/config.py`, `tests/test_nous_portal_routing.py`)
+
 ### Added
 - **Workspace path autocomplete in Spaces** — the "Add workspace path" field in
   the Spaces panel now suggests trusted directories as you type, supports
