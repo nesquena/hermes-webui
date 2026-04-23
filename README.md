@@ -200,6 +200,31 @@ first boot. Subsequent restarts reuse the installed packages.
 
 See `docker-compose.two-container.yml` for the full configuration.
 
+### Bring your own config (config.yaml + .env bind-mounted from host)
+
+Instead of the onboarding wizard, you can supply your own `config.yaml` and
+`.env` by bind-mounting them from the host. Create both files in the same
+directory as `docker-compose.yml`, then add the `HERMES_WEBUI_*` env vars to
+point the container at them:
+
+```bash
+# docker-compose.yml side-car
+HERMES_WEBUI_CONFIG_YAML=/etc/hermes/config.yaml
+HERMES_WEBUI_ENV_FILE=/etc/hermes/.env
+```
+
+The Docker Compose files already have the bind-mounts pre-wired:
+
+```yaml
+# docker-compose.two-container.yml (and three-container.yml, testing)
+- ${PWD}/config.yaml:/home/hermeswebui/.hermes/config.yaml:ro
+- ${PWD}/.env:/home/hermeswebui/.hermes/.env:ro
+```
+
+To skip the onboarding wizard entirely, also set `SKIP_ONBOARDING=true` in your
+`.env` (the wizard will not run and existing config files will not be
+overwritten).
+
 ---
 
 ## What start.sh discovers automatically
@@ -244,7 +269,9 @@ Full list of environment variables:
 | `HERMES_WEBUI_DEFAULT_MODEL` | `openai/gpt-5.4-mini` | Default model |
 | `HERMES_WEBUI_PASSWORD` | *(unset)* | Set to enable password authentication |
 | `HERMES_HOME` | `~/.hermes` | Base directory for Hermes state (affects all paths) |
-| `HERMES_CONFIG_PATH` | `~/.hermes/config.yaml` | Path to Hermes config file |
+| `HERMES_CONFIG_PATH` | `~/.hermes/config.yaml` | Legacy override for config file location |
+| `HERMES_WEBUI_CONFIG_YAML` | `HERMES_CONFIG_PATH` | Explicit path to a `config.yaml` (e.g. bind-mounted from host) |
+| `HERMES_WEBUI_ENV_FILE` | `HERMES_HOME/.env` | Explicit path to a `.env` file (e.g. bind-mounted from host) |
 
 ---
 
