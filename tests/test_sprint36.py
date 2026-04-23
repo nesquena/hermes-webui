@@ -158,11 +158,13 @@ def test_sse_cancel_handler_still_present():
 def test_sse_cancel_handler_calls_set_busy():
     """The SSE cancel handler must still call setBusy(false)."""
     src = read("static/messages.js")
-    idx = src.find("addEventListener('cancel'") 
+    idx = src.find("addEventListener('cancel'")
     if idx == -1:
         idx = src.find('addEventListener("cancel"')
     assert idx != -1
-    block = src[idx:idx + 1200]
+    # Find the closing of this handler block (next top-level addEventListener)
+    next_handler = src.find("source.addEventListener(", idx + 50)
+    block = src[idx:next_handler] if next_handler != -1 else src[idx:idx + 3000]
     assert "setBusy(false)" in block, (
         "SSE cancel handler no longer calls setBusy(false)"
     )

@@ -11,6 +11,17 @@
   workspace subtree) and never enumerate blocked system roots. (`api/routes.py`,
   `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
 
+## [v0.50.163] — 2026-04-23
+
+### Fixed
+- **Message ordering after task cancellation** — cancelling a stream while the
+  agent is responding no longer causes subsequent responses to appear above the
+  "Task cancelled." marker. The cancel handler now fetches the authoritative
+  message list from the server (same as the done event), and the server persists
+  the cancel message to the session so both paths stay in sync. Falls back to
+  the previous local-push behaviour if the API call fails. (`api/streaming.py`,
+  `static/messages.js`) (@mittyok, #882)
+
 ## [v0.50.161] — 2026-04-23
 
 ### Fixed
