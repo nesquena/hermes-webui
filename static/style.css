@@ -224,13 +224,39 @@
   .session-item{padding:8px 40px 8px 8px;margin-bottom:2px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--muted);transition:background .15s,color .15s;display:flex;align-items:flex-start;gap:8px;min-width:0;position:relative;}
   .session-item:hover{background:var(--hover-bg);color:var(--text);}
   .session-item.active{background:var(--accent-bg);color:var(--accent);}
+  .session-item.streaming .session-title{color:var(--accent);}
+  .session-item.streaming .session-title-row{color:var(--text);}
   .session-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;overflow:hidden;}
   .session-title-row{display:flex;align-items:center;gap:6px;min-width:0;}
   .session-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);}
   .session-item.active .session-title{color:var(--accent-text);}
   .session-meta{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .session-item.active .session-meta{color:var(--accent-text);opacity:.8;}
-  .session-time{display:none;}
+  .session-state-indicator{display:inline-flex;align-items:center;flex-shrink:0;}
+  .session-spinner{
+    width:10px;
+    height:10px;
+    border:2px solid transparent;
+    border-top-color:var(--blue);
+    border-right-color:var(--blue);
+    border-radius:50%;
+    animation:spin 1s linear infinite;
+  }
+  .session-unread-dot{
+    width:8px;
+    height:8px;
+    border-radius:50%;
+    background:var(--blue);
+    flex-shrink:0;
+  }
+  .session-time{
+    display:inline-flex;
+    margin-left:auto;
+    color:var(--muted);
+    font-size:10px;
+    white-space:nowrap;
+    flex-shrink:0;
+  }
   /* ── Session action trigger + dropdown ── */
   .session-actions{position:absolute;right:6px;top:50%;transform:translateY(-50%);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .15s ease;}
   .session-item:hover .session-actions,.session-item:focus-within .session-actions,.session-item.menu-open .session-actions{opacity:1;pointer-events:auto;}
@@ -252,6 +278,7 @@
   /* Hide overlay during inline rename */
   .session-item:has(.session-title-input) .session-actions{display:none;}
   @keyframes newflash{0%{background:var(--accent-bg-strong);color:var(--accent);}100%{background:transparent;color:var(--muted);}}
+  @keyframes spin{to{transform:rotate(360deg);}}
   .session-item.new-flash{animation:newflash 1.4s ease-out forwards;}
   /* Collapsible date group headers */
   .session-date-header{display:flex;align-items:center;gap:5px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:8px 10px 4px;cursor:pointer;user-select:none;opacity:.8;transition:opacity .15s;}
