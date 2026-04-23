@@ -1192,6 +1192,7 @@ function syncTopbar(){
         sidebarName.textContent=t('no_workspace');
       }
     }
+    if(typeof syncAppTitlebar==='function') syncAppTitlebar();
     return;
   }
   const sessionTitle=S.session.title||t('untitled');
@@ -1199,6 +1200,7 @@ function syncTopbar(){
   document.title=sessionTitle+' \u2014 '+(window._botName||'Hermes');
   const vis=S.messages.filter(m=>m&&m.role&&m.role!=='tool');
   $('topbarMeta').textContent=t('n_messages',vis.length);
+  if(typeof syncAppTitlebar==='function') syncAppTitlebar();
   // If a profile switch just happened, apply its model rather than the session's stale value.
   // S._pendingProfileModel is set by switchToProfile() and cleared here after one application.
   const modelOverride=S._pendingProfileModel;

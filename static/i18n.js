@@ -2427,6 +2427,7 @@ function applyLocaleToDOM() {
     const val = t(key);
     if (val && val !== key) el.placeholder = val;
   });
+  if (typeof syncAppTitlebar === 'function') syncAppTitlebar();
 }
 
 // Apply saved locale immediately so there's no flash of English on reload.

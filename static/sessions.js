@@ -873,6 +873,8 @@ async function deleteSession(sid){
       $('msgInner').innerHTML='';
       $('emptyState').style.display='';
       $('fileTree').innerHTML='';
+      if(typeof S!=='undefined') S.session=null;
+      if(typeof syncAppTitlebar==='function') syncAppTitlebar();
     }
   }
   showToast('Conversation deleted');

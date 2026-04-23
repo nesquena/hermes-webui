@@ -11,6 +11,39 @@ let _currentProfileDetail = null; // full profile object
 let _profileMode = 'empty'; // 'empty' | 'read' | 'create'
 let _profilePreFormDetail = null;
 
+// Map of panel names → i18n keys for the app titlebar label.
+const APP_TITLEBAR_KEYS = {
+  chat: 'tab_chat', tasks: 'tab_tasks', skills: 'tab_skills',
+  memory: 'tab_memory', workspaces: 'tab_workspaces',
+  profiles: 'tab_profiles', todos: 'tab_todos', settings: 'tab_settings',
+};
+
+/**
+ * Update the top app titlebar to reflect the current page or selected conversation.
+ * On the chat panel, a selected session's title takes precedence over the page name.
+ */
+function syncAppTitlebar() {
+  const titleEl = document.getElementById('appTitlebarTitle');
+  const subEl = document.getElementById('appTitlebarSub');
+  if (!titleEl) return;
+  const panel = (typeof _currentPanel === 'string' && _currentPanel) ? _currentPanel : 'chat';
+  let mainText = '';
+  let subText = '';
+  if (panel === 'chat' && typeof S !== 'undefined' && S && S.session) {
+    mainText = S.session.title || (typeof t === 'function' ? t('untitled') : 'Untitled');
+    const vis = Array.isArray(S.messages) ? S.messages.filter(m => m && m.role && m.role !== 'tool') : [];
+    if (typeof t === 'function') subText = t('n_messages', vis.length);
+  } else {
+    const key = APP_TITLEBAR_KEYS[panel];
+    mainText = key && typeof t === 'function' ? t(key) : (panel.charAt(0).toUpperCase() + panel.slice(1));
+  }
+  titleEl.textContent = mainText;
+  if (subEl) {
+    if (subText) { subEl.textContent = subText; subEl.hidden = false; }
+    else { subEl.textContent = ''; subEl.hidden = true; }
+  }
+}
+
 async function switchPanel(name) {
   _currentPanel = name;
   // Update nav tabs (rail + mobile sidebar-nav share data-panel)
@@ -38,6 +71,7 @@ async function switchPanel(name) {
     switchSettingsSection(_currentSettingsSection);
     loadSettingsPanel();
   }
+  syncAppTitlebar();
 }
 
 // ── Cron panel ──

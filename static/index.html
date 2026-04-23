@@ -21,6 +21,26 @@
   <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/plugins/autoloader/prism-autoloader.min.js" integrity="sha384-Uq05+JLko69eOiPr39ta9bh7kld5PKZoU+fF7g0EXTAriEollhZ+DrN8Q/Oi8J2Q" crossorigin="anonymous" defer></script>
 </head>
 <body>
+<header class="app-titlebar" role="banner">
+  <div class="app-titlebar-inner">
+    <span class="app-titlebar-icon" aria-hidden="true">
+      <svg viewBox="0 0 64 64" width="16" height="16" aria-hidden="true">
+        <defs>
+          <linearGradient id="app-titlebar-gold" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" style="stop-color:#F5C542"/>
+            <stop offset="100%" style="stop-color:#D4961C"/>
+          </linearGradient>
+        </defs>
+        <rect x="30" y="10" width="4" height="46" rx="2" fill="url(#app-titlebar-gold)"/>
+        <path d="M30 18 C24 14, 14 14, 10 18 C14 16, 22 16, 28 20" fill="#F5C542" opacity="0.9"/>
+        <path d="M34 18 C40 14, 50 14, 54 18 C50 16, 42 16, 36 20" fill="#F5C542" opacity="0.9"/>
+        <circle cx="32" cy="10" r="4" fill="#F5C542"/>
+      </svg>
+    </span>
+    <span class="app-titlebar-title" id="appTitlebarTitle">Hermes</span>
+    <span class="app-titlebar-sub" id="appTitlebarSub" hidden></span>
+  </div>
+</header>
 <div class="layout">
   <nav class="rail" aria-label="Primary navigation">
     <button class="rail-btn nav-tab active" data-panel="chat" onclick="switchPanel('chat')" title="Chat" data-i18n-title="tab_chat" aria-label="Chat"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>
