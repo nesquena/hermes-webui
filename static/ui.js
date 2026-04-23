@@ -173,6 +173,11 @@ async function _fetchLiveModels(provider, sel){
         mid=`@${provider}:${mid}`;
       }
       if(existingIds.has(mid)) continue; // already shown from static list
+      // Dedup against bare/prefixed variants of the same model — e.g. the
+      // server injects "minimax/minimax-m2.7" as the default while the live
+      // fetch returns "@nous:minimax/minimax-m2.7".  _findModelInDropdown()
+      // normalises both to the same key so the duplicate is caught (#907).
+      if(_findModelInDropdown(mid,sel)) continue;
       const opt=document.createElement('option');
       opt.value=mid;
       opt.textContent=m.label||m.id;
