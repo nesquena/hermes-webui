@@ -10,6 +10,23 @@
 # The agent container runs the gateway (CLI, Telegram, cron, etc.).
 # The WebUI container serves the browser interface on port 8787.
 # Both share ~/.hermes for config, sessions, and state.
+#
+# NOTE ON VOLUMES:
+#   This file uses named Docker volumes (hermes-home, hermes-agent-src) which
+#   work out of the box. If you prefer bind mounts (e.g. to an existing directory),
+#   replace the named volumes at the bottom. Example for hermes-agent-src:
+#
+#     hermes-agent-src:
+#       driver: local
+#       driver_opts:
+#         type: none
+#         o: bind
+#         device: /opt/hermes-agent
+#
+#   When using bind mounts, BOTH containers must mount the same host path.
+#   The agent exposes source at /opt/hermes, the WebUI reads it from
+#   /home/hermeswebui/.hermes/hermes-agent — as long as both point to the
+#   same host directory, the paths align correctly.
 
 services:
   hermes-agent:

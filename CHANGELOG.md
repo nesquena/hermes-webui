@@ -1,5 +1,72 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.158] — 2026-04-23
+
+### Fixed
+- **Post-update page reload no longer races against server restart** — `applyUpdates()` and `forceUpdate()` now poll `/health` every 500ms (up to 15 seconds) instead of firing a blind 2500ms `setTimeout`. The existing reconnect banner shows "⏳ Restarting… please wait" during the poll window, giving users a visible status and a manual Reload button. If the server is still down after 15s, the banner message changes to prompt a manual reload. Fixes 502 errors seen when the server restart outpaces the fixed delay, especially behind reverse proxies. (`static/ui.js`) (closes #874)
+
+## [v0.50.157] — 2026-04-22
+
+### Fixed
+- **Nous portal models now route and format correctly** — two bugs fixed: (1) `_PROVIDER_MODELS["nous"]` updated from bare IDs (`claude-opus-4.6`) to slash-prefixed format (`anthropic/claude-opus-4.6`) that the Nous portal API expects. (2) `resolve_model_provider()` now routes cross-namespace models through portal providers (Nous, OpenCode Zen, OpenCode Go) directly instead of mis-routing to OpenRouter. Portal guard returns the full slash-preserved model ID so Nous receives the correct format. 10 regression tests. (`api/config.py`) (closes #854)
+
+## [v0.50.156] — 2026-04-22
+
+### Security
+- **⚠️ Breaking change — auto-install of agent dependencies is now opt-in** — users previously relying on auto-install must now set `HERMES_WEBUI_AUTO_INSTALL=1` to restore the previous behaviour. A new `_trusted_agent_dir()` check validates ownership and permission bits before allowing pip to run. (`api/startup.py`, `README.md`) (addresses #842 by @tomaioo)
+
+## [v0.50.155] — 2026-04-22
+
+### Fixed
+- **Honcho per-session memory uses stable session ID across WebUI turns** — `api/streaming.py` now passes `gateway_session_key=session_id` to `AIAgent` (defensive, same pattern as `api_mode`/`credential_pool`). Without this, Honcho's `per-session` strategy created a new Honcho session on each streaming request. (`api/streaming.py`) (closes #855)
+
+## [v0.50.154] — 2026-04-22
+
+### Fixed
+- **Thinking card no longer mirrors main response** — removed early return in `_streamDisplay()` that bypassed think-block stripping when `reasoningText` was populated. (`static/messages.js`) (closes #852)
+
+## [v0.50.153] — 2026-04-22
+
+### Fixed
+- **Live-fetched portal models route through configured provider** — `_fetchLiveModels()` applies `@provider:` prefix. (closes #854)
+
+## [v0.50.152] — 2026-04-22
+
+### Fixed
+- **Image generation renders inline** — `MEDIA:` token restore renders all `https://` URLs as `<img>`. (closes #853)
+- **Auto-title strips thinking preambles** — `_strip_thinking_markup()` strips Qwen3-style plain-text reasoning preambles. (closes #857)
+
+## [v0.50.151] — 2026-04-22
+
+### Added
+- **Ollama Cloud support** — added `ollama-cloud` display name + dynamic model-list
+  handler backed by `hermes_cli.models.provider_model_ids()`. Live-models endpoint
+  routes `ollama-cloud` through the same formatter. Server-side `_format_ollama_label()`
+  and matching client-side `_fmtOllamaLabel()` turn Ollama tag IDs into readable
+  labels (e.g. `qwen3-vl:235b-instruct` → `Qwen3 VL (235B Instruct)`). (#820 by @starship-s, #860)
+
+### Fixed
+- **`credential_pool` providers now visible in the model dropdown** —
+  `get_available_models()` previously only read `active_provider` from the auth
+  store. Providers added via `credential_pool` (e.g. an Ollama Cloud key stored by
+  the auth layer without a matching shell env var) were silently invisible. The
+  fix loads `credential_pool` entries and adds any provider with at least one
+  non-ambient credential to `detected_providers`. Ambient gh-cli tokens (source
+  `gh_cli` / label `gh auth token`) are explicitly excluded so Copilot doesn't
+  appear merely because `gh` is installed. Two-tier detection: primary via
+  `agent.credential_pool.load_pool()`, fallback via raw field inspection when
+  the upstream module isn't importable. (#820 by @starship-s, #860)
+- **`_apply_provider_prefix()` helper extracted** — removes ~15 lines of
+  duplicated inline `@provider:` prefixing logic for non-active providers.
+  Semantics unchanged; one fewer place for drift. (#860)
+- **Model chip shows friendly labels for bare Ollama IDs** —
+  `static/ui.js:getModelLabel()` now routes Ollama tag-format IDs (e.g.
+  `kimi-k2.6` or `@ollama-cloud:glm5.1`) through `_fmtOllamaLabel()`. Custom
+  `<option>` text uses the same helper. `looksLikeBareOllamaId` narrowed to
+  `@ollama*` or colon-tag patterns — does not reformat generic IDs like
+  `gpt-5.4-mini`. `syncModelChip()` is now called after localStorage restore
+  so the chip reflects the saved selection on first paint. (#860)
+
 ## [v0.50.150] — 2026-04-22
 
 ### Fixed

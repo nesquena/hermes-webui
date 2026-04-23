@@ -251,23 +251,67 @@ class TestUiJsUpdateBanner:
         m = re.search(r'function applyUpdates\b.*?\n\}', src, re.DOTALL)
         assert m, "applyUpdates() not found"
         fn = m.group(0)
-        assert 'Restarting' in fn, (
-            "success toast must say 'Restarting' (server self-restarts after update)"
+        assert 'restarting' in fn.lower(), (
+            "success toast must mention 'restarting' (server self-restarts after update)"
         )
         assert 'Reloading' not in fn, (
             "success toast must not say 'Reloading' — server restarts, page reloads after"
         )
 
-    def test_reload_timeout_at_least_2000ms(self):
-        """Reload delay must be >= 2000 ms to give the server time to restart."""
+    def test_reload_uses_health_poll_not_blind_timeout(self):
+        """applyUpdates must use _waitForServerThenReload() instead of a blind setTimeout.
+
+        A fixed setTimeout race-loses against slow hardware or reverse proxies
+        that return 502 immediately when the upstream socket is down.
+        The polling approach retries until /health responds OK.
+        """
         src = read('static/ui.js')
         m = re.search(r'function applyUpdates\b.*?\n\}', src, re.DOTALL)
         assert m, "applyUpdates() not found"
         fn = m.group(0)
-        timeouts = re.findall(r'setTimeout\(.*?(\d+)\)', fn)
-        assert timeouts, "applyUpdates must have a setTimeout for page reload"
-        assert any(int(t) >= 2000 for t in timeouts), (
-            f"reload timeout must be >= 2000 ms to survive server restart; found: {timeouts}"
+        assert '_waitForServerThenReload' in fn, (
+            "applyUpdates() must call _waitForServerThenReload() instead of a blind "
+            "setTimeout reload — blind timeouts race-lose against slow restarts and "
+            "reverse proxies that 502 immediately on restart."
+        )
+        assert 'setTimeout(()=>location.reload' not in fn, (
+            "applyUpdates() must not use a fixed setTimeout reload — use _waitForServerThenReload()."
+        )
+
+    def test_wait_for_server_then_reload_is_defined(self):
+        """_waitForServerThenReload() must actually exist — the original PR
+        referenced it from applyUpdates()/forceUpdate() without defining it,
+        which would have thrown ReferenceError on 'Update Now'."""
+        src = read('static/ui.js')
+        assert re.search(r'(async\s+)?function\s+_waitForServerThenReload\b', src), (
+            "_waitForServerThenReload() is called but not defined — this breaks "
+            "the Update Now flow entirely (ReferenceError at runtime)."
+        )
+
+    def test_wait_for_server_polls_health(self):
+        """_waitForServerThenReload() must fetch /health to determine readiness."""
+        src = read('static/ui.js')
+        m = re.search(r'function\s+_waitForServerThenReload\b.*?\n\}', src, re.DOTALL)
+        assert m, "_waitForServerThenReload() not found"
+        fn = m.group(0)
+        assert '/health' in fn, (
+            "_waitForServerThenReload must poll /health to detect server readiness"
+        )
+        assert 'location.reload' in fn, (
+            "_waitForServerThenReload must call location.reload() once the server is ready"
+        )
+
+    def test_refresh_session_handles_restart_mode(self):
+        """When _restartingForUpdate flag is set, refreshSession() must do a
+        full page reload rather than hit /api/session (which will 502 while
+        the server is down)."""
+        src = read('static/ui.js')
+        m = re.search(r'async function refreshSession\b.*?\n\}', src, re.DOTALL)
+        assert m, "refreshSession() not found"
+        fn = m.group(0)
+        assert '_restartingForUpdate' in fn and 'location.reload' in fn, (
+            "refreshSession() must check the restart flag and bypass /api/session "
+            "when the server is mid-restart."
         )
 
     def test_conflict_response_shows_force_button(self):

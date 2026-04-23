@@ -3,9 +3,8 @@
 > Goal: Full 1:1 parity with the Hermes CLI experience via a clean dark web UI.
 > Everything you can do from the CLI terminal, you can do from this UI.
 >
-> Last updated: v0.50.44 (April 16, 2026) — 1353 tests collected
-> Local delta: enabling password from Settings keeps the current browser signed in; the former Assistant Reply Language enhancement has been removed; workspace panel closed-state now preloads in `<head>` so desktop first paint no longer flashes open before boot sync; thinking cards and tool call cards now animate both their carets and disclosure bodies smoothly on expand/collapse, and thinking cards now use the same bordered rounded panel chrome as tool cards with a gold palette.
-> Tests: 1353 collected (`pytest tests/ --collect-only -q`)
+> Last updated: v0.50.156 (April 22, 2026) — 1903 tests collected
+> Tests: 1903 collected (`pytest tests/ --collect-only -q`)
 > Source: <repo>/
 
 ---
@@ -77,6 +76,16 @@
 | v0.50.37–v0.50.40 | Sprint 40 — rendering fixes + KaTeX CSP + MEDIA images | Think-tag edge cases, renderMd link double-linking fix, MEDIA: inline image rendering, KaTeX CSP font-src fix | 1117 |
 | v0.50.41–v0.50.43 | Sprint 41/42 — context ring, session polish, renderMd hardening | Context indicator live usage, session display fixes, renderMd bold+code stash, outer link pass ordering, _ob_stash, autolink double-link fixes (@multiple contributors) | 1150 |
 | v0.50.44 | Renderer formatting bug fixes (#486, #487) | CSS: inline code sizing in table cells; JS: markdown image syntax ![alt](url) → <img> in renderMd + inlineMd; _img_stash for autolink protection | 1195 |
+| v0.50.45–v0.50.100 | Upstream sync + contributor sprint | Sidebar declutter, SKIP_ONBOARDING, runtime route details, subpath mount, bug batch (light theme/panel/model cache/Docker), Docker UID/GID auto-detect, chat transcript redesign, favicon SVG+PNG+ICO, Docker UID-mismatch crash fix, auto-title markdown strip | 1777 |
+| v0.50.101–v0.50.139 | Contributor sprint wave | Custom providers, Russian locale, collapsed timestamps, IME composition fixes, model-switch toast, approval queue multi-slot, live model fetching SSRF guard, orphaned tool-message sanitization, profile polish sprint (model routing, workspace cross-profile, legacy session backfill), font-size CSS fix | 1777 |
+| v0.50.140–v0.50.147 | Bug batch + appearance | Font size setting visibly scales UI text (#843), slash command echoed as user message (#840), scroll selected item into view (#838), tasks refresh button (#835), font size toggle (#833), stale model fix (#829), session search clear on boot (#822), gateway SSE polling fallback (#635) | 1858 |
+| v0.50.148–v0.50.150 | Session index + read-path + profile | Prune stale _index.json ghost rows after session-id rotation (#847 @franksong2702), GET /api/session side-effect-free model resolution (#848 @franksong2702), profile switching cookie persist + syncTopbar fix (#849 @migueltavares) | 1858 |
+| v0.50.151 | credential_pool + Ollama Cloud | Providers added via auth store credential_pool now visible in model dropdown; Ollama Cloud support; ambient gh-cli token suppression; _apply_provider_prefix helper (#820 @starship-s) | 1898 |
+| v0.50.152 | Image rendering + auto-title | image_generate MEDIA: token renders all https:// URLs as img regardless of extension (closes #853); auto-title strips Qwen3-style plain-text thinking preambles (closes #857) | 1898 |
+| v0.50.153 | Portal model routing | Live-fetched models from portal providers (Nous, OpenCode) now get @provider: prefix so they route correctly instead of falling through to OpenRouter (closes #854) | 1898 |
+| v0.50.154 | Thinking card mirror fix | _streamDisplay() early return removed — thinking card and main response now show distinct content when provider double-emits (closes #852) | 1898 |
+| v0.50.155 | Honcho session stability | gateway_session_key=session_id passed to AIAgent so Honcho per-session strategy maintains one Honcho session per WebUI chat instead of one per turn (closes #855) | 1903 |
+| v0.50.156 | Auto-install security gate | auto_install_agent_deps() is now opt-in; set HERMES_WEBUI_AUTO_INSTALL=1 to enable; _trusted_agent_dir() checks ownership/permission bits before running pip (⚠️ breaking: default changed) | 1903 |
 
 ---
 

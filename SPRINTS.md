@@ -1,10 +1,9 @@
 # Hermes Web UI -- Forward Sprint Plan
 
-> Current state: v0.50.21 | 961 tests | Full daily driver — CLI parity achieved
+> Current state: v0.50.156 | 1903 tests | Full daily driver — CLI parity achieved
 >
-> NOTE: Most planned work in this document has now shipped. This file is preserved
-> as a historical planning record. Current sprint state and version history live
-> in CHANGELOG.md and ROADMAP.md.
+> NOTE: This file is preserved as a historical planning record. Current sprint state
+> and version history live in CHANGELOG.md and ROADMAP.md.
 >
 > Target A (CLI parity): ✅ Complete — all core tools, workspace, cron, skills,
 >           memory, sessions, profiles, model routing, streaming, voice, mobile.
