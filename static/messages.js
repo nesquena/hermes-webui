@@ -615,6 +615,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         catch(_){trackBackgroundError(activeSid,_errTitle,'Error');}
       }
       if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setComposerStatus('');}
+      renderSessionList(); // clear streaming indicator immediately on apperror
     });
 
     source.addEventListener('warning',e=>{

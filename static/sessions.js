@@ -790,7 +790,7 @@ function renderSessionListFromCache(){
     }
     const state=document.createElement('span');
     state.className='session-state-indicator'+(isStreaming?' is-streaming':(hasUnread?' is-unread':''));
-    if(isStreaming||hasUnread) titleRow.appendChild(state);
+    titleRow.appendChild(state); // always reserve slot — prevents title shift when indicator appears
     const title=document.createElement('span');
     title.className='session-title';
     title.textContent=cleanTitle||'Untitled';
