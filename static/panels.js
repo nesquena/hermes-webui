@@ -898,7 +898,7 @@ function _renderWorkspaceAction(label, meta, iconSvg, onClick){
 
 function _positionComposerWsDropdown(){
   const dd=$('composerWsDropdown');
-  const chip=$('composerWorkspaceChip');
+  const chip=$('composerWorkspaceGroup')||$('composerWorkspaceChip');
   const footer=document.querySelector('.composer-footer');
   if(!dd||!chip||!footer)return;
   const chipRect=chip.getBoundingClientRect();
