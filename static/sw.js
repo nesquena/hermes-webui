@@ -87,15 +87,18 @@ self.addEventListener('fetch', (event) => {
         }
         return response;
       }).catch(() => {
-        // Offline fallback for navigation requests
+        // Offline fallback for navigation requests.
+        // Note: caches.match() returns a Promise (always truthy in a `||` check),
+        // so we must await/then to unwrap it — otherwise the `new Response(...)`
+        // branch is dead code and the browser falls back to its default offline page.
         if (event.request.mode === 'navigate') {
-          return caches.match('./') || new Response(
+          return caches.match('./').then((cached) => cached || new Response(
             '<html><body style="font-family:sans-serif;padding:2rem;background:#1a1a1a;color:#ccc">' +
             '<h2>You are offline</h2>' +
             '<p>Hermes requires a server connection. Please check your network and try again.</p>' +
             '</body></html>',
             { headers: { 'Content-Type': 'text/html' } }
-          );
+          ));
         }
       });
     })
