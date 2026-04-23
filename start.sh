@@ -10,10 +10,6 @@ if [[ -f "${REPO_ROOT}/.env" ]]; then
   set +a
 fi
 
-if [[ -x "$HOME/.hermes/bin/hermes-system-proxy-env.py" ]]; then
-  eval "$($HOME/.hermes/bin/hermes-system-proxy-env.py)"
-fi
-
 PYTHON="${HERMES_WEBUI_PYTHON:-}"
 if [[ -z "${PYTHON}" ]]; then
   if command -v python3 >/dev/null 2>&1; then
