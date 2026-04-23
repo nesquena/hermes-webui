@@ -1,10 +1,9 @@
-"""
-Hermes Web UI -- Session model and in-memory session store.
-"""
+"""Hermes Web UI -- Session model and in-memory session store."""
 import collections
 import json
 import logging
 import os
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -18,6 +17,46 @@ from api.config import (
 from api.workspace import get_last_workspace
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Stale temp-file cleanup
+# ---------------------------------------------------------------------------
+# Both Session.save() and _write_session_index() use the atomic-write pattern:
+#   write to  <path>.tmp.<pid>.<tid>  →  os.replace() to final path
+# If the process crashes between write and replace the .tmp file is left
+# behind.  Because the name embeds pid + tid, leftover files can never be
+# reused by a different process/thread, so they are safe to remove on the
+# next startup.  _cleanup_stale_tmp_files() is called from the full-rebuild
+# path of _write_session_index (i.e. at first index access / startup) and
+# removes any *.tmp.* file whose mtime is older than one hour.
+# ---------------------------------------------------------------------------
+
+_STALE_TMP_AGE_SECONDS = 3600  # 1 hour
+
+# Serializes index writers so concurrent Session.save() calls cannot race on
+# stale baselines while still allowing LOCK to be released before disk I/O.
+_INDEX_WRITE_LOCK = threading.RLock()
+
+
+def _cleanup_stale_tmp_files() -> None:
+    """Best-effort removal of stale ``*.tmp.*`` files from SESSION_DIR.
+
+    Only files whose mtime is older than ``_STALE_TMP_AGE_SECONDS`` are
+    removed so that in-flight writes from a long-running sibling process
+    are not disturbed.  Errors are logged and swallowed — this must never
+    prevent startup.
+    """
+    cutoff = time.time() - _STALE_TMP_AGE_SECONDS
+    try:
+        for p in SESSION_DIR.glob('*.tmp.*'):
+            try:
+                if p.stat().st_mtime < cutoff:
+                    p.unlink(missing_ok=True)
+                    logger.debug("Cleaned up stale tmp file: %s", p.name)
+            except OSError:
+                pass  # best-effort
+    except Exception:
+        pass  # SESSION_DIR may not exist yet; that's fine
 
 
 def _index_entry_exists(session_id: str, in_memory_ids=None) -> bool:
@@ -46,58 +85,101 @@ def _write_session_index(updates=None):
     entries should be refreshed), this does a targeted in-place update of
     the existing index — O(1) for single-session changes.  When *updates*
     is None, a full rebuild is performed (used on startup / first call).
-    """
-    # Lazy full-rebuild path — used when index doesn't exist yet.
-    if updates is None or not SESSION_INDEX_FILE.exists():
-        entries = []
-        for p in SESSION_DIR.glob('*.json'):
-            if p.name.startswith('_'): continue
-            try:
-                s = Session.load(p.stem)
-                if s: entries.append(s.compact())
-            except Exception:
-                logger.debug("Failed to load session from %s", p)
-        with LOCK:
-            for s in SESSIONS.values():
-                if not any(e['session_id'] == s.session_id for e in entries):
-                    entries.append(s.compact())
-            entries.sort(key=lambda s: s['updated_at'], reverse=True)
-            _tmp = SESSION_INDEX_FILE.with_suffix('.tmp')
-            _tmp.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding='utf-8')
-            os.replace(_tmp, SESSION_INDEX_FILE)
-        return
 
-    # Fast path: patch existing index with updated sessions.
-    # This avoids loading every session file on every single save().
-    # LOCK covers the entire read-patch-write to prevent concurrent save() calls
-    # from both reading the same baseline and one losing its update.
-    _fallback = False
-    try:
-        with LOCK:
-            existing = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
-            in_memory_ids = set(SESSIONS.keys())
-            existing = [
-                e for e in existing
-                if _index_entry_exists(e.get('session_id'), in_memory_ids=in_memory_ids)
-            ]
-            # Build lookup of updated entries
-            updated_map = {s.session_id: s.compact() for s in updates}
-            existing_ids = {e.get('session_id') for e in existing}
-            # Add any updated entries not yet in the index
-            for sid, entry in updated_map.items():
-                if sid not in existing_ids:
-                    existing.append(entry)
-            # Replace matching entries in-place
-            for i, e in enumerate(existing):
-                sid = e.get('session_id')
-                if sid in updated_map:
-                    existing[i] = updated_map[sid]
-            existing.sort(key=lambda s: s.get('updated_at', 0), reverse=True)
-            _tmp = SESSION_INDEX_FILE.with_suffix('.tmp')
-            _tmp.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding='utf-8')
-            os.replace(_tmp, SESSION_INDEX_FILE)
-    except Exception:
-        _fallback = True
+    LOCK protects in-memory state snapshots and payload construction only;
+    disk I/O (write/flush/fsync/replace) always runs outside LOCK.
+    """
+    _tmp = SESSION_INDEX_FILE.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
+
+    with _INDEX_WRITE_LOCK:
+        # Lazy full-rebuild path — used when index doesn't exist yet.
+        if updates is None or not SESSION_INDEX_FILE.exists():
+            _cleanup_stale_tmp_files()  # best-effort sweep on startup / first call
+            entries = []
+            for p in SESSION_DIR.glob('*.json'):
+                if p.name.startswith('_'):
+                    continue
+                try:
+                    s = Session.load(p.stem)
+                    if s:
+                        entries.append(s.compact())
+                except Exception:
+                    logger.debug("Failed to load session from %s", p)
+
+            with LOCK:
+                existing_ids = {e.get('session_id') for e in entries}
+                for s in SESSIONS.values():
+                    if s.session_id not in existing_ids:
+                        entries.append(s.compact())
+                entries.sort(key=lambda s: s.get('updated_at', 0), reverse=True)
+                _payload = json.dumps(entries, ensure_ascii=False, indent=2)
+
+            try:
+                with open(_tmp, 'w', encoding='utf-8') as f:
+                    f.write(_payload)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(_tmp, SESSION_INDEX_FILE)
+            except Exception:
+                # Best-effort cleanup of stale tmp on failure
+                try:
+                    _tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise
+            return
+
+        # Fast path: patch existing index with updated sessions.
+        # This avoids loading every session file on every single save().
+        _fallback = False
+        try:
+            with LOCK:
+                existing = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
+                in_memory_ids = set(SESSIONS.keys())
+
+                # Avoid N filesystem exists() checks under LOCK by collecting
+                # on-disk IDs once.
+                on_disk_ids = {
+                    p.stem
+                    for p in SESSION_DIR.glob('*.json')
+                    if not p.name.startswith('_')
+                }
+
+                existing = [
+                    e for e in existing
+                    if (e.get('session_id') in in_memory_ids or e.get('session_id') in on_disk_ids)
+                ]
+
+                # Build lookup of updated entries
+                updated_map = {s.session_id: s.compact() for s in updates}
+                existing_ids = {e.get('session_id') for e in existing}
+                # Add any updated entries not yet in the index
+                for sid, entry in updated_map.items():
+                    if sid not in existing_ids:
+                        existing.append(entry)
+                # Replace matching entries in-place
+                for i, e in enumerate(existing):
+                    sid = e.get('session_id')
+                    if sid in updated_map:
+                        existing[i] = updated_map[sid]
+                existing.sort(key=lambda s: s.get('updated_at', 0), reverse=True)
+                _payload = json.dumps(existing, ensure_ascii=False, indent=2)
+
+            try:
+                with open(_tmp, 'w', encoding='utf-8') as f:
+                    f.write(_payload)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(_tmp, SESSION_INDEX_FILE)
+            except Exception:
+                try:
+                    _tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise
+        except Exception:
+            _fallback = True
+
     if _fallback:
         # Corrupt or missing index — fall back to full rebuild (called outside LOCK to avoid deadlock)
         _write_session_index(updates=None)
@@ -157,10 +239,20 @@ class Session:
     def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
         if touch_updated_at:
             self.updated_at = time.time()
-        self.path.write_text(
-            json.dumps(self.__dict__, ensure_ascii=False, indent=2),
-            encoding='utf-8',
-        )
+        payload = json.dumps(self.__dict__, ensure_ascii=False, indent=2)
+        tmp = self.path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
+        try:
+            with open(tmp, 'w', encoding='utf-8') as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.path)
+        except Exception:
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
         if not skip_index:
             _write_session_index(updates=[self])
 
