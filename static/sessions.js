@@ -404,6 +404,7 @@ async function renderSessionList(){
     } else {
       stopStreamingPoll();
     }
+    ensureSessionTimeRefreshPoll();
     renderSessionListFromCache();  // no-ops if rename is in progress
   }catch(e){console.warn('renderSessionList',e);}
 }
@@ -415,7 +416,9 @@ let _gatewayProbeInFlight = false;
 let _gatewaySSEWarningShown = false;
 const _gatewayFallbackPollMs = 30000;
 const _streamingPollMs = 5000;
+const _sessionTimeRefreshMs = 60000;
 let _streamingPollTimer = null;
+let _sessionTimeRefreshTimer = null;
 
 function startStreamingPoll(){
   if(_streamingPollTimer) return;
@@ -428,6 +431,13 @@ function stopStreamingPoll(){
   if(!_streamingPollTimer) return;
   clearInterval(_streamingPollTimer);
   _streamingPollTimer = null;
+}
+
+function ensureSessionTimeRefreshPoll(){
+  if(_sessionTimeRefreshTimer) return;
+  _sessionTimeRefreshTimer = setInterval(() => {
+    renderSessionListFromCache();
+  }, _sessionTimeRefreshMs);
 }
 
 function startGatewayPollFallback(ms){
@@ -773,17 +783,8 @@ function renderSessionListFromCache(){
     const titleRow=document.createElement('div');
     titleRow.className='session-title-row';
     const state=document.createElement('span');
-    state.className='session-state-indicator';
-    if(isStreaming){
-      const spinner=document.createElement('span');
-      spinner.className='session-spinner';
-      state.appendChild(spinner);
-    }else if(hasUnread){
-      const dot=document.createElement('span');
-      dot.className='session-unread-dot';
-      state.appendChild(dot);
-    }
-    if(state.childElementCount) titleRow.appendChild(state);
+    state.className='session-state-indicator'+(isStreaming?' is-streaming':(hasUnread?' is-unread':''));
+    if(isStreaming||hasUnread) titleRow.appendChild(state);
     const title=document.createElement('span');
     title.className='session-title';
     title.textContent=cleanTitle||'Untitled';

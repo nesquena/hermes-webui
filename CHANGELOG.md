@@ -6,24 +6,12 @@
 - **Nous static models now use explicit `@nous:` prefix** — the four hardcoded "(via Nous)" models (`Claude Opus 4.6`, `Claude Sonnet 4.6`, `GPT-5.4 Mini`, `Gemini 3.1 Pro Preview`) now carry `@nous:` prefix IDs, matching the format of live-fetched Nous models. Previously they used slash-only IDs that relied on the portal provider guard; the explicit prefix routes them through the same bulletproof `@provider:model` branch and eliminates 404 errors on those entries. (`api/config.py`, `tests/test_nous_portal_routing.py`)
 
 ### Added
-- **Workspace path autocomplete in Spaces** — the "Add workspace path" field in
-  the Spaces panel now suggests trusted directories as you type, supports
-  keyboard navigation plus `Tab` completion, and keeps hidden directories out of
-  the list unless the current path segment starts with `.`. Suggestions are
-  limited to trusted roots (home, saved workspaces, and the boot default
-  workspace subtree) and never enumerate blocked system roots. (`api/routes.py`,
-  `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
+- **Workspace path autocomplete in Spaces** — the "Add workspace path" field in the Spaces panel now suggests trusted directories as you type, supports keyboard navigation plus `Tab` completion, and keeps hidden directories out of the list unless the current path segment starts with `.`. Suggestions are limited to trusted roots (home, saved workspaces, and the boot default workspace subtree) and never enumerate blocked system roots. (`api/routes.py`, `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
 
 ## [v0.50.163] — 2026-04-23
 
 ### Fixed
-- **Message ordering after task cancellation** — cancelling a stream while the
-  agent is responding no longer causes subsequent responses to appear above the
-  "Task cancelled." marker. The cancel handler now fetches the authoritative
-  message list from the server (same as the done event), and the server persists
-  the cancel message to the session so both paths stay in sync. Falls back to
-  the previous local-push behaviour if the API call fails. (`api/streaming.py`,
-  `static/messages.js`) (@mittyok, #882)
+- **Message ordering after task cancellation** — cancelling a stream while the agent is responding no longer causes subsequent responses to appear above the "Task cancelled." marker. The cancel handler now fetches the authoritative message list from the server (same as the done event), and the server persists the cancel message to the session so both paths stay in sync. Falls back to the previous local-push behaviour if the API call fails. (`api/streaming.py`, `static/messages.js`) (@mittyok, #882)
 
 ## [v0.50.161] — 2026-04-23
 

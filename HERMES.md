@@ -8,6 +8,9 @@ terminal, a browser, or a messaging app — and it's the same agent with the sam
 This document explains the mental model, how Hermes compares to other tools honestly, and where
 it is and is not the right choice.
 
+For repository work, start with `AGENTS.md` at the repo root. It contains the current working
+rules for Codex and Hermes on this codebase.
+
 ---
 
 ## The real problem: most tools are excellent in the moment and weak over time

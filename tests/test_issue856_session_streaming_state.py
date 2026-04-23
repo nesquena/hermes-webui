@@ -76,3 +76,18 @@ def test_all_sessions_marks_streaming_false_when_stream_is_not_active():
 
     models.STREAMS.pop("stale-stream", None)
     assert all_sessions()[0]["is_streaming"] is False
+
+
+def test_all_sessions_does_not_report_streaming_after_restart_without_active_registry():
+    """Server restarts should not resurrect sidebar streaming state from disk alone."""
+    s = _make_session("restart_session", stream_id="old-stream")
+    s.save()
+
+    models.SESSIONS.clear()
+    reloaded = Session.load("restart_session")
+    assert reloaded is not None
+    assert reloaded.active_stream_id == "old-stream"
+
+    listed = all_sessions()
+    assert listed[0]["active_stream_id"] == "old-stream"
+    assert listed[0]["is_streaming"] is False

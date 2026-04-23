@@ -119,8 +119,8 @@
   :root:not(.dark) .session-item:hover{background:rgba(0,0,0,.06);color:#2c2825;}
   :root:not(.dark) .session-item.active{background:var(--accent-bg);color:var(--accent-text);}
   :root:not(.dark) .session-item.active .session-title{color:var(--accent-text);}
-  :root:not(.dark) .session-pin-indicator{color:#996b15;}
-  :root:not(.dark) .session-date-header.pinned{color:#996b15;}
+  :root:not(.dark) .session-pin-indicator{color:var(--accent-text);}
+  :root:not(.dark) .session-date-header.pinned{color:var(--accent-text);}
   :root:not(.dark) .session-actions-trigger.active,
   :root:not(.dark) .session-item.menu-open .session-actions-trigger{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--accent-text);}
   :root:not(.dark) .session-action-opt.is-active{background:var(--accent-bg);}
@@ -232,22 +232,22 @@
   .session-item.active .session-title{color:var(--accent-text);}
   .session-meta{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .session-item.active .session-meta{color:var(--accent-text);opacity:.8;}
-  .session-state-indicator{display:inline-flex;align-items:center;flex-shrink:0;}
-  .session-spinner{
-    width:10px;
-    height:10px;
+  .session-state-indicator{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:10px;height:10px;color:var(--accent);}
+  .session-state-indicator::before{content:"";display:block;flex-shrink:0;}
+  .session-state-indicator.is-streaming::before{
+    width:100%;
+    height:100%;
     border:2px solid transparent;
-    border-top-color:var(--blue);
-    border-right-color:var(--blue);
+    border-top-color:currentColor;
+    border-right-color:currentColor;
     border-radius:50%;
     animation:spin 1s linear infinite;
   }
-  .session-unread-dot{
+  .session-state-indicator.is-unread::before{
     width:8px;
     height:8px;
     border-radius:50%;
-    background:var(--blue);
-    flex-shrink:0;
+    background:currentColor;
   }
   .session-time{
     display:inline-flex;
@@ -283,7 +283,7 @@
   /* Collapsible date group headers */
   .session-date-header{display:flex;align-items:center;gap:5px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:8px 10px 4px;cursor:pointer;user-select:none;opacity:.8;transition:opacity .15s;}
   .session-date-header:hover{opacity:1;}
-  .session-date-header.pinned{color:#f5c542;}
+  .session-date-header.pinned{color:var(--accent);}
   .session-date-caret{font-size:9px;transition:transform .2s;flex-shrink:0;display:inline-block;}
   .session-date-caret.collapsed{transform:rotate(-90deg);}
   .app-dialog-overlay{position:fixed;inset:0;background:rgba(7,12,19,.62);backdrop-filter:blur(6px);z-index:1100;display:none;align-items:center;justify-content:center;padding:24px;}
@@ -1508,7 +1508,7 @@ body.resizing{user-select:none;cursor:col-resize;}
 .provider-card .sm-btn:disabled{opacity:.4;cursor:not-allowed;}
 
 /* ── Session pin indicator (inline, only when pinned) ── */
-.session-pin-indicator{flex-shrink:0;color:#f5c542;line-height:1;display:flex;align-items:center;}
+.session-pin-indicator{flex-shrink:0;color:var(--accent);line-height:1;display:flex;align-items:center;}
 .session-pin-indicator svg{width:10px;height:10px;}
 
 /* ── Cron alert badge ── */
