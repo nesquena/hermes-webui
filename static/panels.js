@@ -1456,7 +1456,16 @@ async function loadSettingsPanel(){
         }
       }catch(e){}
       _settingsHermesDefaultModelOnOpen=(models&&models.default_model)||'';
-      modelSel.value=_settingsHermesDefaultModelOnOpen;
+      // Use the smart matcher so a saved bare form like "anthropic/claude-opus-4.6"
+      // (what the CLI's `hermes model` command writes) still selects the matching
+      // `@nous:anthropic/claude-opus-4.6` option on a Nous setup. Without this, the
+      // picker renders blank for any user whose default was persisted without the
+      // @-prefix — CLI-first users, legacy installs, etc.
+      if(typeof _applyModelToDropdown==='function'){
+        _applyModelToDropdown(_settingsHermesDefaultModelOnOpen, modelSel);
+      }else{
+        modelSel.value=_settingsHermesDefaultModelOnOpen;
+      }
       modelSel.addEventListener('change',_markSettingsDirty,{once:false});
     }
     // Send key preference

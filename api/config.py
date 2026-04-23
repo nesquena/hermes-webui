@@ -1015,13 +1015,16 @@ def set_hermes_default_model(model_id: str) -> dict:
         resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
             selected_model
         )
-        # Preserve the original @provider:model prefix if present — resolve_model_provider()
-        # strips it for routing purposes, but the default_model preference must store the
-        # full string so the Settings picker can match it in the dropdown on reopen (#895).
-        if selected_model.startswith("@") and ":" in selected_model:
-            persisted_model = selected_model
-        else:
-            persisted_model = str(resolved_model or selected_model).strip()
+        # Persist the resolved bare/slash form, NOT the `@provider:` prefix. The
+        # prefix is a WebUI-internal routing hint that the hermes-agent CLI does
+        # not understand — if we wrote `@nous:anthropic/claude-opus-4.6` to
+        # config.yaml, a user who ran `hermes` in the terminal right after
+        # saving via WebUI would have the agent send that literal string to the
+        # Nous API, which would reject it (Nous expects `anthropic/claude-opus-4.6`,
+        # not the prefixed form). The Settings picker handles the resulting
+        # CLI-shaped bare form via `_applyModelToDropdown()`'s normalising
+        # matcher — see `static/panels.js` (#895).
+        persisted_model = str(resolved_model or selected_model).strip()
         persisted_provider = str(resolved_provider or previous_provider or "").strip()
 
         model_cfg["default"] = persisted_model
