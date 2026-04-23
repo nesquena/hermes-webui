@@ -1,5 +1,10 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.160] — 2026-04-23
+
+### Fixed
+- **CI: provider panel i18n keys now present in all 6 locales** — `es`, `de`, `zh`, `ru`, `zh-Hant` were missing the 19 provider panel keys added in v0.50.159, causing locale parity test failures on CI after every push to master. (`static/i18n.js`)
+
 ## [v0.50.159] — 2026-04-23
 
 ### Added
