@@ -824,7 +824,17 @@ function toggleSkillForm(){ openSkillCreate(); }
 async function deleteCurrentSkill() {
   if (!_currentSkillDetail) return;
   const name = _currentSkillDetail.name;
-  if (!confirm(t('skill_delete_confirm') ? t('skill_delete_confirm').replace('{0}', name) : `Delete skill "${name}"?`)) return;
+  const message = t('skill_delete_confirm')
+    ? t('skill_delete_confirm').replace('{0}', name)
+    : `Delete skill "${name}"?`;
+  const ok = await showConfirmDialog({
+    title: t('delete_title') || 'Delete',
+    message,
+    confirmLabel: t('delete_title') || 'Delete',
+    danger: true,
+    focusCancel: true,
+  });
+  if (!ok) return;
   try {
     await api('/api/skills/delete', { method:'POST', body: JSON.stringify({ name }) });
     _currentSkillDetail = null;

@@ -253,9 +253,11 @@ def test_control_center_resets_active_section_on_close():
 
 
 def test_control_center_tab_highlight_on_open():
-    """Opening the control center must use settings-tabs for section navigation."""
+    """The settings left-rail menu must have a CSS rule that highlights the active section."""
     css = open(pathlib.Path(__file__).parent.parent / 'static' / 'style.css').read()
-    assert 'settings-tabs' in css, 'settings-tabs CSS class for control center tabs missing from style.css'
+    assert 'settings-menu-item' in css, 'settings-menu-item CSS class for left-rail nav missing from style.css'
+    assert '.settings-menu-item.active' in css or 'settings-menu-item.active' in css, \
+        'No active-state style for .settings-menu-item — sidebar section highlight missing'
 
 
 # ── apply_onboarding_setup: unsupported/OAuth providers complete gracefully ──

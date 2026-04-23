@@ -106,8 +106,10 @@ def test_crons_output_limit_param(cleanup_test_sessions):
 
 def test_cron_history_button_in_panels_js(cleanup_test_sessions):
     src, _ = get_text("/static/panels.js")
-    assert "loadCronHistory" in src
-    assert "cron_all_runs" in src  # i18n key (was hardcoded 'All runs' before i18n hardening)
+    # After the main-view refactor, cron runs load inline into the detail card
+    # via _loadCronDetailRuns() instead of a separate "All runs" button.
+    assert "_loadCronDetailRuns" in src
+    assert "cron_last_output" in src  # i18n key used by the runs card
 
 def test_cron_output_snippet_helper(cleanup_test_sessions):
     src, _ = get_text("/static/panels.js")
