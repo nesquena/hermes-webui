@@ -642,12 +642,19 @@ function renderMd(raw){
     }
     return html+'</ul>';
   });
+  // Ordered lists: use value= on each <li> so the correct number is preserved
+  // even when blank lines between items cause the paragraph splitter to place
+  // each item in its own <ol> container — without value= every <ol> restarts
+  // at 1, producing "1. 1. 1." instead of "1. 2. 3." (#886).
   s=s.replace(/((?:^(?:  )?\d+\. .+\n?)+)/gm,block=>{
     const lines=block.trimEnd().split('\n');
     let html='<ol>';
     for(const l of lines){
+      const numMatch=l.match(/^\s*(\d+)\. /);
+      const num=numMatch?parseInt(numMatch[1],10):null;
       const text=l.replace(/^ {0,4}\d+\. /,'');
-      html+=`<li>${inlineMd(text)}</li>`;
+      const valAttr=num!==null?` value="${num}"`:'';
+      html+=`<li${valAttr}>${inlineMd(text)}</li>`;
     }
     return html+'</ol>';
   });

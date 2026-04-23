@@ -18,6 +18,12 @@
   Co-authored by @franksong2702.
 
 ### Fixed
+- **Ordered list items always showed "1." regardless of position** — when LLMs
+  output numbered lists with blank lines between items, the paragraph-splitter
+  in `renderMd()` placed each item in its own `<ol>` container, causing every
+  `<ol>` to restart at 1. Fixed by emitting `value="N"` on each `<li>` so the
+  correct ordinal is preserved even when items are split across multiple `<ol>`
+  wrappers. (`static/ui.js`) Closes #886.
 - **Nous static models now use explicit `@nous:` prefix** — the four hardcoded "(via Nous)" models (`Claude Opus 4.6`, `Claude Sonnet 4.6`, `GPT-5.4 Mini`, `Gemini 3.1 Pro Preview`) now carry `@nous:` prefix IDs, matching the format of live-fetched Nous models. Previously they used slash-only IDs that relied on the portal provider guard; the explicit prefix routes them through the same bulletproof `@provider:model` branch and eliminates 404 errors on those entries. (`api/config.py`, `tests/test_nous_portal_routing.py`)
 
 ### Added
