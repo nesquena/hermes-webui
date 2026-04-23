@@ -2017,16 +2017,33 @@ function appendLiveToolCard(tc){
       const replacement=buildToolCard(tc);
       replacement.dataset.liveTid=tid;
       existing.replaceWith(replacement);
+      // Keep #toolRunningRow alive — dots stay until text starts streaming
+      // or the next tool fires (which replaces them). Removing here caused
+      // a gap between tool completion and the first text token arriving.
       return;
     }
   }
   const row=buildToolCard(tc);
   if(tid) row.dataset.liveTid=tid;
-  // Insert BEFORE the live assistant segment if it exists, so tool cards stay
-  // between the current thinking block(s) and the streaming response.
-  const liveAssistant=inner.querySelector('[data-live-assistant="1"]');
-  if(liveAssistant) inner.insertBefore(row, liveAssistant);
+  // Insert after whichever comes last: the current live assistant segment or
+  // the last tool card. This handles both cases:
+  //   text → tool1 → tool2  (no text between tools: anchor is card1)
+  //   text1 → tool1 → text2 → tool2  (text between tools: anchor is text2)
+  const children=Array.from(inner.children);
+  // Include .thinking-card-row so tool cards land AFTER a finalized thinking
+  // card, not between the text segment and thinking.
+  const anchor=children.filter(el=>el.matches('[data-live-assistant="1"],.tool-card-row,.thinking-card-row')).pop();
+  if(anchor) anchor.insertAdjacentElement('afterend', row);
   else inner.appendChild(row);
+  // Add a 3-dot waiting indicator below the tool card so there's visual
+  // feedback while the tool is running. Removed when text starts streaming
+  // (ensureAssistantRow) or when tool_complete fires.
+  const oldWait=$('toolRunningRow');if(oldWait)oldWait.remove();
+  const waitRow=document.createElement('div');
+  waitRow.id='toolRunningRow';
+  waitRow.className='assistant-segment';
+  waitRow.innerHTML='<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';
+  row.insertAdjacentElement('afterend', waitRow);
   if(typeof scrollIfPinned==='function') scrollIfPinned();
 }
 
@@ -2264,6 +2281,13 @@ function _thinkingMarkup(text=''){
 function finalizeThinkingCard(){
   const row=$('thinkingRow');
   if(!row) return;
+  // If the row is still just a spinner (no thinking content rendered),
+  // remove it entirely — it's the initial waiting dots.
+  const hasContent=row.querySelector('.thinking-card') || row.classList.contains('thinking-card-row');
+  if(!hasContent && row.getAttribute('data-thinking-active')==='1'){
+    row.remove();
+    return;
+  }
   row.removeAttribute('id');
   row.removeAttribute('data-thinking-active');
 }
@@ -2282,7 +2306,17 @@ function appendThinking(text=''){
     row.className='assistant-segment';
     row.id='thinkingRow';
     row.setAttribute('data-thinking-active','1');
-    blocks.appendChild(row);
+    // Insert after whichever comes last: a live assistant segment or a tool card.
+    // This mirrors appendLiveToolCard's anchor logic so thinking always appears
+    // in the right position in the interleaved sequence.
+    // Also skip #toolRunningRow (dots) — thinking should go before dots, not after.
+    const allChildren=Array.from(blocks.children);
+    const anchor=allChildren.filter(el=>
+      el.id!=='toolRunningRow' &&
+      el.matches('[data-live-assistant="1"],.tool-card-row')
+    ).pop();
+    if(anchor) anchor.insertAdjacentElement('afterend', row);
+    else blocks.appendChild(row);
   }
   row.className=(text&&String(text).trim())?'assistant-segment thinking-card-row':'assistant-segment';
   row.innerHTML=_thinkingMarkup(text);

@@ -187,6 +187,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let liveReasoningText='';
   let assistantRow=null;
   let assistantBody=null;
+  let segmentStart=0;      // char offset in assistantText where current segment begins
+  let _freshSegment=false; // true after a tool call — forces a new DOM segment
   // Thinking tag patterns for streaming display
   const _thinkPairs=[
     {open:'<think>',close:'</think>'},
@@ -245,10 +247,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const blocks=(typeof _assistantTurnBlocks==='function')?_assistantTurnBlocks(turn):null;
     if(!blocks) return;
     if(!assistantRow){
-      const existing=blocks.querySelector('[data-live-assistant="1"]');
-      if(existing){
-        assistantRow=existing;
-        assistantBody=existing.querySelector('.msg-body');
+      // Only reuse an existing segment on the very first creation (e.g. reconnect).
+      // After a tool call _freshSegment=true, so we always create a new segment
+      // below the tool card rather than re-attaching to the old one above it.
+      if(!_freshSegment){
+        const existing=blocks.querySelector('[data-live-assistant="1"]');
+        if(existing){
+          assistantRow=existing;
+          assistantBody=existing.querySelector('.msg-body');
+        }
       }
     }
     if(assistantRow){
@@ -264,6 +271,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     assistantBody=document.createElement('div');assistantBody.className='msg-body';
     assistantRow.appendChild(assistantBody);
     blocks.appendChild(assistantRow);
+    _freshSegment=false; // consumed — next reuse check is normal again
   }
 
   // ── Shared SSE handler wiring (used for initial connection and reconnect) ──
@@ -352,7 +360,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       else appendThinking();
       return;
     }
-    removeThinking();
+    // Only remove thinking if we're not in an active reasoning phase.
+    // When reasoningText is set but liveReasoningText was just reset (post-tool),
+    // don't wipe the finalized thinking card — it has no id anymore so
+    // removeThinking() won't find it anyway, but guard explicitly.
+    if(!reasoningText) removeThinking();
   }
   function _scheduleRender(){
     if(_renderPending) return;
@@ -364,7 +376,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const parsed=_parseStreamState();
       _renderLiveThinking(parsed);
       if(assistantBody){
-        assistantBody.innerHTML=parsed.displayText?renderMd(parsed.displayText):'';
+        // Render only the text belonging to the current segment (after the last tool call).
+        // segmentStart=0 for the first segment, or assistantText.length-at-last-tool for later ones.
+        const segText = segmentStart===0
+          ? parsed.displayText                          // first segment: use full display (handles think-tag stripping)
+          : renderMd ? renderMd(assistantText.slice(segmentStart)) : assistantText.slice(segmentStart);
+        assistantBody.innerHTML = segText || '';
       }
       scrollIfPinned();
     });
@@ -403,6 +420,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       liveReasoningText += d.text || '';
       syncInflightAssistantMessage();
       if(!S.session||S.session.session_id!==activeSid) return;
+      // Render thinking card synchronously — not via rAF — so the DOM is
+      // up-to-date before a 'tool' event in the same microtask batch calls
+      // finalizeThinkingCard(). The old rAF-only path caused a race where
+      // the thinking row was still a spinner when finalized.
+      if(window._showThinking!==false){
+        if(typeof updateThinking==='function') updateThinking(liveReasoningText||'Thinking…');
+        else appendThinking(liveReasoningText);
+      }
       _scheduleRender();
     });
 
@@ -429,6 +454,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       liveReasoningText='';
       const oldRow=$('toolRunningRow');if(oldRow)oldRow.remove();
       appendLiveToolCard(tc);
+      // Reset the live assistant row reference so that any text tokens arriving
+      // after this tool call create a NEW segment appended below the tool card,
+      // rather than updating the old segment that sits above it in the DOM.
+      assistantRow=null;
+      assistantBody=null;
+      segmentStart=assistantText.length; // new segment starts at current text length
+      _freshSegment=true;                // prevent reuse of old DOM node
       scrollIfPinned();
     });
 
