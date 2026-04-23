@@ -29,6 +29,11 @@
   workspace subtree) and never enumerate blocked system roots. (`api/routes.py`,
   `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
 
+## [v0.50.174] — 2026-04-23
+
+### Fixed
+- **Interleaved streaming order (Text → Thinking → Tool → Text)** — after a tool call completes, new text tokens now create a new DOM segment below the tool card instead of updating the old segment above it. Adds `segmentStart`/`_freshSegment` flags to track segment boundaries; scopes the streaming cursor to the last live assistant segment only; adds a 3-dot waiting indicator below each tool card; fixes `appendLiveToolCard`/`appendThinking` anchor logic for multi-tool sequences. (`static/messages.js`, `static/ui.js`, `static/style.css`) Co-authored by @bsgdigital.
+
 ## [v0.50.173] — 2026-04-23
 
 ### Fixed
