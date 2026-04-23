@@ -7,6 +7,12 @@
 <link rel="icon" type="image/svg+xml" href="static/favicon.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="static/favicon-32.png">
 <link rel="shortcut icon" href="static/favicon.ico">
+<link rel="manifest" href="manifest.json">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Hermes">
+<link rel="apple-touch-icon" href="static/favicon.svg">
 <!-- base href enables subpath mount support; all static paths must stay relative (no leading slash) -->
 <script>(function(){var p=location.pathname.endsWith('/')?location.pathname:(location.pathname.replace(/\/[^\/]*$/,'/')||'/');document.write('<base href="'+location.origin+p+'">');})()</script>
 <script>(function(){var themes={light:1,dark:1,system:1},skins={default:1,ares:1,mono:1,slate:1,poseidon:1,sisyphus:1,charizard:1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark'),skin=skins[s]?s:(m?m[1]:'default');localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;})()</script>
@@ -19,6 +25,16 @@
   <link id="prism-theme" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css" integrity="sha384-wFjoQjtV1y5jVHbt0p35Ui8aV8GVpEZkyF99OXWqP/eNJDU93D3Ugxkoyh6Y2I4A" crossorigin="anonymous">
   <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-core.min.js" integrity="sha384-MXybTpajaBV0AkcBaCPT4KIvo0FzoCiWXgcihYsw4FUkEz0Pv3JGV6tk2G8vJtDc" crossorigin="anonymous" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/plugins/autoloader/prism-autoloader.min.js" integrity="sha384-Uq05+JLko69eOiPr39ta9bh7kld5PKZoU+fF7g0EXTAriEollhZ+DrN8Q/Oi8J2Q" crossorigin="anonymous" defer></script>
+  <!-- PWA service worker registration -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', function() {
+        navigator.serviceWorker.register('sw.js').catch(function(err) {
+          console.warn('[pwa] Service worker registration failed:', err);
+        });
+      });
+    }
+  </script>
 </head>
 <body>
 <div class="layout">
