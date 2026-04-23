@@ -1291,6 +1291,9 @@ function switchSettingsSection(name){
     }
     if(pane) pane.classList.toggle('active',active);
   });
+  // Sync mobile dropdown
+  const dd=$('settingsSectionDropdown');
+  if(dd && dd.value!==section) dd.value=section;
   // Lazy-load providers when the tab is opened
   if(section==='providers') loadProvidersPanel();
 }
@@ -1590,24 +1593,25 @@ function _buildProviderCard(p){
   }else{
     const actions=document.createElement('div');
     actions.className='provider-card-actions';
-    actions.style.cssText='margin-top:6px;display:flex;gap:6px;align-items:center';
     const input=document.createElement('input');
     input.type='password';
     input.placeholder=p.has_key?t('providers_key_placeholder_replace'):t('providers_key_placeholder_new');
-    input.style.cssText='flex:1;padding:6px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;font-family:monospace';
+    input.style.cssText='flex:1;min-width:0;padding:6px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;font-family:monospace';
     input.autocomplete='off';
     const saveBtn=document.createElement('button');
     saveBtn.className='sm-btn provider-save-btn';
-    saveBtn.style.cssText='padding:5px 12px;font-size:12px;white-space:nowrap';
-    saveBtn.textContent=t('providers_save');
+    saveBtn.setAttribute('aria-label',t('providers_save'));
+    saveBtn.title=t('providers_save');
+    saveBtn.innerHTML='<svg class="provider-btn-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg><span class="provider-btn-label">'+t('providers_save')+'</span>';
     saveBtn.onclick=()=>_saveProviderKey(p.id);
     actions.appendChild(input);
     actions.appendChild(saveBtn);
     if(p.has_key){
       const removeBtn=document.createElement('button');
-      removeBtn.className='sm-btn';
-      removeBtn.style.cssText='padding:5px 10px;font-size:12px;color:var(--error);border-color:rgba(233,69,96,.25);white-space:nowrap';
-      removeBtn.textContent=t('providers_remove');
+      removeBtn.className='sm-btn provider-remove-btn';
+      removeBtn.setAttribute('aria-label',t('providers_remove'));
+      removeBtn.title=t('providers_remove');
+      removeBtn.innerHTML='<svg class="provider-btn-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg><span class="provider-btn-label">'+t('providers_remove')+'</span>';
       removeBtn.onclick=()=>_removeProviderKey(p.id);
       actions.appendChild(removeBtn);
     }

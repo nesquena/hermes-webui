@@ -446,6 +446,13 @@
     </div>
     <div class="settings-body">
       <div class="settings-shell">
+        <select id="settingsSectionDropdown" class="settings-section-dropdown" aria-label="Settings section" onchange="switchSettingsSection(this.value)">
+          <option value="conversation">Conversation</option>
+          <option value="appearance">Appearance</option>
+          <option value="preferences">Preferences</option>
+          <option value="providers">Providers</option>
+          <option value="system">System</option>
+        </select>
         <div class="settings-tabs" role="tablist" aria-label="Hermes control center sections">
           <button class="settings-tab active" id="settingsTabConversation" type="button" role="tab" aria-selected="true" aria-controls="settingsPaneConversation" onclick="switchSettingsSection('conversation')">
             <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>

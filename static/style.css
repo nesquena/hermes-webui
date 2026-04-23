@@ -725,7 +725,7 @@
     #btnCollapseWorkspacePanel{display:none;}
   }
 
-  @media(max-width:640px){
+  @media(max-width:768px){
     /* ── Sidebar: slide-in overlay instead of hidden ── */
     .sidebar{position:fixed;left:-300px;top:0;bottom:0;width:280px;z-index:200;
       transition:left .25s ease;box-shadow:4px 0 24px rgba(0,0,0,.4);}
@@ -756,9 +756,6 @@
     .topbar-meta{display:none;}
     .topbar-chips{flex-wrap:nowrap;gap:4px;overflow-x:auto;-webkit-overflow-scrolling:touch;}
     .topbar-chips .chip,.topbar-chips .ws-chip,.topbar-chips button{font-size:11px!important;padding:4px 8px!important;white-space:nowrap;}
-    .settings-shell{grid-template-columns:1fr;gap:0;}
-    .settings-tabs{flex-direction:row;overflow-x:auto;padding:10px 12px;border-right:none;border-bottom:1px solid var(--border);gap:6px;}
-    .settings-tab{flex-shrink:0;}
     .settings-main{padding:18px 16px;}
     .hermes-action-grid{grid-template-columns:1fr;}
     .messages-inner{padding:12px 10px 20px;}
@@ -1062,9 +1059,9 @@
 }
 .resize-handle:hover,.resize-handle.dragging{background:var(--accent);}
 /* Desktop-only: position:relative for sidebar/rightpanel resize handles.
-   Must be scoped to min-width:641px so it doesn't override the mobile
-   position:fixed slide-in overlay set in the max-width:640px @media block above. */
-@media(min-width:641px){
+   Must be scoped to min-width:769px so it doesn't override the mobile
+   position:fixed slide-in overlay set in the max-width:768px @media block above. */
+@media(min-width:769px){
   .sidebar{position:relative;}
   .rightpanel{position:relative;}
 }
@@ -1485,6 +1482,7 @@ body.resizing{user-select:none;cursor:col-resize;}
 .settings-main{overflow-y:auto;padding:22px 24px;min-width:0;}
 .settings-pane{display:none;}
 .settings-pane.active{display:block;}
+.settings-section-dropdown{display:none;}
 .settings-section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px;}
 .settings-section-title{font-size:13px;font-weight:700;letter-spacing:.01em;color:var(--text);}
 .settings-section-meta{font-size:11px;color:var(--muted);margin-top:3px;line-height:1.5;}
@@ -1507,6 +1505,11 @@ body.resizing{user-select:none;cursor:col-resize;}
 .provider-card:hover{border-color:var(--border2);}
 .provider-card-name{font-weight:600;font-size:13px;}
 .provider-card .sm-btn:disabled{opacity:.4;cursor:not-allowed;}
+.provider-card-actions{margin-top:6px;display:flex;gap:6px;align-items:center;width:100%;}
+.provider-save-btn{padding:5px 12px;font-size:12px;white-space:nowrap;display:inline-flex;align-items:center;gap:5px;flex:none;}
+.provider-remove-btn{padding:5px 10px;font-size:12px;color:var(--error);border-color:rgba(233,69,96,.25);white-space:nowrap;display:inline-flex;align-items:center;gap:5px;flex:none;}
+.provider-btn-icon{flex-shrink:0;}
+.provider-btn-label{}
 
 /* ── Session pin indicator (inline, only when pinned) ── */
 .session-pin-indicator{
@@ -1887,4 +1890,22 @@ body.resizing{user-select:none;cursor:col-resize;}
   .msg-role { margin-bottom: 4px; }
   .msg-row[data-role="user"] .msg-body { padding: 8px 12px; }
   .msg-row[data-error="1"] .msg-body { padding: 8px 12px; }
+}
+
+/* Mobile overrides — must live after all base rules to win the cascade without !important */
+@media(max-width:768px){
+  /* Settings dialog: replace left tab strip with a dropdown, panel goes full-width */
+  .settings-shell{display:flex;flex-direction:column;gap:0;}
+  .settings-section-dropdown{display:block;margin:10px 14px;width:calc(100% - 28px);}
+  .settings-tabs{display:none;}
+  .settings-main{padding:18px 16px;width:100%;}
+  /* Provider buttons: icon-only on mobile, input fills remaining space */
+  .provider-save-btn,.provider-remove-btn{padding:7px;gap:0;flex-shrink:0;}
+  .provider-btn-label{display:none;}
+
+  /* Message controls: always visible on touch screens (no hover available) */
+  .msg-row[data-role="user"] .msg-foot,
+  .msg-row[data-role="assistant"] .msg-foot,
+  .assistant-turn .msg-foot{opacity:1;}
+  .msg-actions{opacity:1;}
 }
