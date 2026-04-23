@@ -1662,6 +1662,7 @@ STREAMS: dict = {}
 STREAMS_LOCK = threading.Lock()
 CANCEL_FLAGS: dict = {}
 AGENT_INSTANCES: dict = {}  # stream_id -> AIAgent instance for interrupt propagation
+STREAM_PARTIAL_TEXT: dict = {}  # stream_id -> partial assistant text accumulated during streaming
 SERVER_START_TIME = time.time()
 
 # ── Thread-local env context ─────────────────────────────────────────────────

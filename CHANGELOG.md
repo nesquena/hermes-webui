@@ -29,6 +29,11 @@
   workspace subtree) and never enumerate blocked system roots. (`api/routes.py`,
   `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
 
+## [v0.50.172] — 2026-04-23
+
+### Fixed
+- **Stop Generation preserves partial streamed content** — clicking Stop Generation previously discarded all text the agent had produced, showing only "*Task cancelled.*". The server now accumulates streamed tokens in a per-stream buffer and persists any partial assistant content to the session when a cancel fires. Thinking/reasoning blocks (`<think>...</think>`, including unclosed tags — the common cancel-mid-reasoning case) are stripped before saving. The partial content is flagged `_partial: true` and kept in conversation history so the model can continue from it on the next user message. (`api/config.py`, `api/streaming.py`) Closes #893.
+
 ## [v0.50.171] — 2026-04-23
 
 ### Fixed
