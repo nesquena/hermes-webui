@@ -62,12 +62,23 @@ async function newSession(flash){
   const switchWs=S._profileSwitchWorkspace;
   S._profileSwitchWorkspace=null;
   const inheritWs=switchWs||(S.session?S.session.workspace:null)||(S._profileDefaultWorkspace||null);
-  const data=await api('/api/session/new',{method:'POST',body:JSON.stringify({model:$('modelSelect').value,workspace:inheritWs,profile:S.activeProfile||'default'})});
+  // Use the saved default model for new sessions (#872). The user's saved
+  // default_model (from Settings) takes priority over the chat-header dropdown
+  // value, which reflects the *previous* session's model. Fall back to the
+  // dropdown value only when no default_model is configured.
+  const newModel=window._defaultModel||$('modelSelect').value;
+  const data=await api('/api/session/new',{method:'POST',body:JSON.stringify({model:newModel,workspace:inheritWs,profile:S.activeProfile||'default'})});
   S.session=data.session;S.messages=data.session.messages||[];
   S.lastUsage={...(data.session.last_usage||{})};
   if(flash)S.session._flash=true;
   localStorage.setItem('hermes-webui-session',S.session.session_id);
   _setSessionViewedCount(S.session.session_id, S.session.message_count || 0);
+  // Sync chat-header dropdown to the session's model so the UI reflects
+  // the default model the server actually used (#872).
+  if(S.session.model && S.session.model!==$('modelSelect').value && typeof _applyModelToDropdown==='function'){
+    _applyModelToDropdown(S.session.model,$('modelSelect'));
+    if(typeof syncModelChip==='function') syncModelChip();
+  }
   // Reset per-session visual state: a fresh chat is idle even if another
   // conversation is still streaming in the background.
   S.busy=false;

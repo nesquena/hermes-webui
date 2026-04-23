@@ -1431,7 +1431,7 @@ async function loadSettingsPanel(){
       setLocale(resolvedLanguage);
       if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
     }
-    // Populate model dropdown from /api/models
+    // Populate model dropdown from /api/models + live model fetch (#872)
     const modelSel=$('settingsModel');
     if(modelSel){
       modelSel.innerHTML='';
@@ -1441,12 +1441,18 @@ async function loadSettingsPanel(){
         for(const g of ((models||{}).groups||[])){
           const og=document.createElement('optgroup');
           og.label=g.provider;
+          if(g.provider_id) og.dataset.provider=g.provider_id;
           for(const m of g.models){
             const opt=document.createElement('option');
             opt.value=m.id;opt.textContent=m.label;
             og.appendChild(opt);
           }
           modelSel.appendChild(og);
+        }
+        // Append live-fetched models for the active provider, same as the
+        // chat-header dropdown does via _fetchLiveModels() (#872).
+        if(models.active_provider && typeof _fetchLiveModels==='function'){
+          _fetchLiveModels(models.active_provider, modelSel);
         }
       }catch(e){}
       _settingsHermesDefaultModelOnOpen=(models&&models.default_model)||'';
