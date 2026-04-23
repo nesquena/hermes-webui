@@ -182,3 +182,53 @@ def test_cancel_failed_i18n_key_exists_in_all_locales():
         f"cancel_failed key only found {count} times in i18n.js — "
         f"expected at least {locale_count} (one per locale)"
     )
+
+
+# ── 8. Server-persisted cancel marker doesn't leak into agent history ────────
+
+def test_cancel_marker_flagged_as_error_to_skip_in_api_history():
+    """The server-side cancel marker appended in cancel_stream() must carry
+    _error: True so _sanitize_messages_for_api() strips it from the
+    conversation_history sent to the agent on the next user message.
+
+    Without this flag, the LLM sees "*Task cancelled.*" as a prior assistant
+    turn and may reference it in subsequent responses ("As I mentioned, I was
+    cancelled...") — a behavioral regression introduced when this PR started
+    persisting the marker to the session.
+    """
+    src = read("api/streaming.py")
+    idx = src.find("'content': '*Task cancelled.*'")
+    if idx == -1:
+        idx = src.find('"content": "*Task cancelled.*"')
+    assert idx != -1, "cancel marker content string not found in cancel_stream()"
+
+    # Walk back to the start of the dict literal (opening brace)
+    brace_open = src.rfind("{", 0, idx)
+    brace_close = src.find("}", idx)
+    assert brace_open != -1 and brace_close != -1, "couldn't locate cancel marker dict"
+
+    marker_dict = src[brace_open:brace_close + 1]
+    assert "_error" in marker_dict and "True" in marker_dict, (
+        "cancel marker is missing _error: True — it will leak into the agent's "
+        "conversation_history via _sanitize_messages_for_api() on the next turn. "
+        "See line 591-593 of api/streaming.py for the error-marker filter."
+    )
+
+
+def test_sanitize_strips_error_flagged_assistant_messages():
+    """_sanitize_messages_for_api() must drop messages with _error: True —
+    this is the invariant the cancel marker's _error flag relies on."""
+    from api.streaming import _sanitize_messages_for_api
+    messages = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+        {"role": "assistant", "content": "*Task cancelled.*", "_error": True},
+        {"role": "user", "content": "next"},
+    ]
+    sanitized = _sanitize_messages_for_api(messages)
+    assert len(sanitized) == 3, (
+        f"expected 3 messages (cancel marker stripped), got {len(sanitized)}: {sanitized}"
+    )
+    assert all("Task cancelled" not in (m.get("content") or "") for m in sanitized), (
+        "_sanitize_messages_for_api must filter cancel markers from API history"
+    )

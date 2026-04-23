@@ -1666,10 +1666,17 @@ def cancel_stream(stream_id: str) -> bool:
             _cs.pending_user_message = None
             _cs.pending_attachments = []
             _cs.pending_started_at = None
-            # Add cancel message to session messages so client sees consistent state
+            # Add cancel message to session messages so client sees consistent state.
+            # _error=True flags this as a synthetic UI marker so
+            # _sanitize_messages_for_api() (line 591-593) strips it from the
+            # conversation_history passed to the agent on the NEXT user message —
+            # otherwise the model would see "Task cancelled." in its history as a
+            # prior assistant turn and could respond accordingly.
             _cs.messages.append({
                 'role': 'assistant',
-                'content': '*Task cancelled.*'
+                'content': '*Task cancelled.*',
+                '_error': True,
+                'timestamp': int(time.time()),
             })
             _cs.save()
         except Exception:
