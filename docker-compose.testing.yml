@@ -24,8 +24,8 @@ services:
       - /var/home/yoav/workspace:/workspace
       # Bind-mount config.yaml and .env from the host for easy editing without entering the container.
       # Create these next to your docker-compose.yml (or adjust the host paths).
-      - ${PWD}/config.yaml:/home/hermeswebui/.hermes/config.yaml:ro
-      - ${PWD}/.env:/home/hermeswebui/.hermes/.env:ro
+      - /home/yoav/.hermes/config.yaml:/home/hermeswebui/.hermes/config.yaml:ro
+      - /home/yoav/.hermes/.env:/home/hermeswebui/.hermes/.env:ro
     environment:
       - HERMES_WEBUI_HOST=0.0.0.0
       - HERMES_WEBUI_PORT=8787
