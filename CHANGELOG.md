@@ -29,6 +29,13 @@
   workspace subtree) and never enumerate blocked system roots. (`api/routes.py`,
   `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
 
+## [v0.50.176] — 2026-04-23
+
+### Fixed
+- **Duplicate model dropdown entries when CLI default matches live-fetched model** — `_addLiveModelsToSelect()` now normalises IDs before the dedup check (strips `@provider:` prefix using `indexOf`+`substring` to preserve multi-colon Ollama tag suffixes like `qwen3-vl:235b-instruct`, strips namespace prefix, unifies separators). (`static/ui.js`) Closes #907.
+- **New Chat uses stale default model after saving Preferences without reload** — `window._defaultModel` is now updated in `_applySavedSettingsUi()` so `newSession()` picks up the newly saved default immediately. (`static/panels.js`) Closes #908.
+- **Injected CLI default model shows raw lowercase label** — new `_get_label_for_model()` helper looks up the model's formatted label from existing catalog groups before falling back to title-casing the bare ID. (`api/config.py`) Closes #909.
+
 ## [v0.50.175] — 2026-04-23
 
 ### Fixed
