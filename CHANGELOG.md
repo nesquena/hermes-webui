@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+- **Session attention indicators in the sidebar** — the session list now shows a
+  spinning indicator while a session is actively streaming (even in the
+  background), an unread dot when a session has new messages the user hasn't
+  seen, and a right-aligned relative timestamp ("2m ago", "Yesterday") next to
+  every session title. Streaming state is computed server-side from the live
+  `STREAMS` registry so it's accurate across tabs and after server restart.
+  The unread count is tracked client-side in `localStorage` and cleared
+  automatically when the active session's stream settles. Pinned-star indicator
+  moved into the title row with a fixed 10×10 box for consistent alignment.
+  Includes a 5 s polling loop that activates only while sessions are streaming,
+  and a 60 s timer to keep relative timestamps fresh. (`api/models.py`,
+  `static/sessions.js`, `static/messages.js`, `static/style.css`) Closes #856.
+  Co-authored by @franksong2702.
+
 ### Fixed
 - **Nous static models now use explicit `@nous:` prefix** — the four hardcoded "(via Nous)" models (`Claude Opus 4.6`, `Claude Sonnet 4.6`, `GPT-5.4 Mini`, `Gemini 3.1 Pro Preview`) now carry `@nous:` prefix IDs, matching the format of live-fetched Nous models. Previously they used slash-only IDs that relied on the portal provider guard; the explicit prefix routes them through the same bulletproof `@provider:model` branch and eliminates 404 errors on those entries. (`api/config.py`, `tests/test_nous_portal_routing.py`)
 
