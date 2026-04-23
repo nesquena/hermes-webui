@@ -1076,6 +1076,10 @@ function dismissReconnect() {
   clearInflight();
 }
 async function refreshSession() {
+  // When the banner is in post-update restart mode, the "Reload" button
+  // should do a full page reload — a session refresh would just 502 while
+  // the server is still restarting.
+  if (window._restartingForUpdate) { location.reload(); return; }
   dismissReconnect();
   if (!S.session) return;
   try {
@@ -1182,6 +1186,39 @@ async function forceUpdate(btn){
     if(errEl){errEl.textContent='Force update failed: '+e.message;errEl.style.display='block';}
     btn.disabled=false;btn.textContent='Force update';
   }
+}
+
+// Poll /health after an update-triggered restart, then reload.  Replaces the
+// blind setTimeout(reload, 2500) that race-lost against slow hardware or
+// reverse proxies that 502 immediately when the upstream socket closes (#874).
+async function _waitForServerThenReload(opts){
+  opts=opts||{};
+  const interval=opts.interval||500;
+  const maxMs=opts.maxMs||15000;
+  window._restartingForUpdate=true;
+  const msgEl=$('reconnectMsg');
+  const banner=$('reconnectBanner');
+  if(msgEl) msgEl.textContent='⏳ Restarting… please wait';
+  if(banner) banner.classList.add('visible');
+  const deadline=Date.now()+maxMs;
+  // Give the server a moment to actually begin its restart before the first
+  // probe — otherwise the old process may still respond ok on the first poll.
+  await new Promise(r=>setTimeout(r, interval));
+  while(Date.now()<deadline){
+    try{
+      const r=await fetch('/health',{cache:'no-store'});
+      if(r.ok){
+        let data={};
+        try{ data=await r.json(); }catch(_){}
+        if(data && data.status==='ok'){
+          location.reload();
+          return;
+        }
+      }
+    }catch(_){ /* socket closed during restart — retry */ }
+    await new Promise(r=>setTimeout(r, interval));
+  }
+  if(msgEl) msgEl.textContent='⚠️ Server is taking longer than expected — click Reload when ready';
 }
 
 function getPendingSessionMessage(session){

@@ -278,6 +278,42 @@ class TestUiJsUpdateBanner:
             "applyUpdates() must not use a fixed setTimeout reload — use _waitForServerThenReload()."
         )
 
+    def test_wait_for_server_then_reload_is_defined(self):
+        """_waitForServerThenReload() must actually exist — the original PR
+        referenced it from applyUpdates()/forceUpdate() without defining it,
+        which would have thrown ReferenceError on 'Update Now'."""
+        src = read('static/ui.js')
+        assert re.search(r'(async\s+)?function\s+_waitForServerThenReload\b', src), (
+            "_waitForServerThenReload() is called but not defined — this breaks "
+            "the Update Now flow entirely (ReferenceError at runtime)."
+        )
+
+    def test_wait_for_server_polls_health(self):
+        """_waitForServerThenReload() must fetch /health to determine readiness."""
+        src = read('static/ui.js')
+        m = re.search(r'function\s+_waitForServerThenReload\b.*?\n\}', src, re.DOTALL)
+        assert m, "_waitForServerThenReload() not found"
+        fn = m.group(0)
+        assert '/health' in fn, (
+            "_waitForServerThenReload must poll /health to detect server readiness"
+        )
+        assert 'location.reload' in fn, (
+            "_waitForServerThenReload must call location.reload() once the server is ready"
+        )
+
+    def test_refresh_session_handles_restart_mode(self):
+        """When _restartingForUpdate flag is set, refreshSession() must do a
+        full page reload rather than hit /api/session (which will 502 while
+        the server is down)."""
+        src = read('static/ui.js')
+        m = re.search(r'async function refreshSession\b.*?\n\}', src, re.DOTALL)
+        assert m, "refreshSession() not found"
+        fn = m.group(0)
+        assert '_restartingForUpdate' in fn and 'location.reload' in fn, (
+            "refreshSession() must check the restart flag and bypass /api/session "
+            "when the server is mid-restart."
+        )
+
     def test_conflict_response_shows_force_button(self):
         src = read('static/ui.js')
         m = re.search(r'function _showUpdateError\b.*?\n\}', src, re.DOTALL)
