@@ -106,7 +106,7 @@ def _sanitize_generated_title(text: str) -> str:
     """Sanitize LLM-generated title text before persisting to session."""
     s = _strip_thinking_markup(text or '')
     s = re.sub(
-        r'^\s*(?:[*_`~]+\s*)?(?:session\s+title|title)\s*[:：]\s*(?:[*_`~]+\s*)?',
+        r'^\s*(?:[*_`~]+\s*)?(?:session\s+title|title)\s*:\s*(?:[*_`~]+\s*)?',
         '',
         s,
         flags=re.IGNORECASE,
@@ -132,10 +132,7 @@ def _looks_invalid_generated_title(text: str) -> bool:
         or re.search(r'^\s*(i|we)\s+(should|need to|will|can)\b', s, flags=re.IGNORECASE)
         or re.search(r'^\s*let me\b', s, flags=re.IGNORECASE)
         or re.search(r"^\s*here(?:'s| is) (?:a |my )?(?:thinking|thought)", s, flags=re.IGNORECASE)
-        or re.search(r'用户(要求|希望|想让|让我)', s)
-        or re.search(r'请只?回复', s)
         or re.search(r'^\s*(ok|okay|done|all set|complete|completed|finished)\b[\s.!?]*$', s, flags=re.IGNORECASE)
-        or re.search(r'^\s*(好的|好啦|完成了|已完成|测试完成|测试已完成|可以了|没问题)\s*[！!。\.\s]*$', s)
     )
 
 
@@ -209,10 +206,10 @@ def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]
             "Return only the title text, 3-8 words, as a topic label.\n"
             "Do not use markdown, bullets, labels, or prefixes like Session Title:.\n"
             "Do not output a full sentence.\n"
-            "Do not output acknowledgements or completion phrases like OK, done, all set, 测试完成.\n"
+            "Do not output acknowledgements or completion phrases like OK, done, or all set.\n"
             "Do not describe internal reasoning.\n"
-            "Bad: The user is asking..., OK, 好的，测试完成！\n"
-            "Good: 自动标题生成测试, Clarify Dialog Layout, GitHub Issue Triage"
+            "Bad: The user is asking..., OK, all set.\n"
+            "Good: Title Generation Test, Clarify Dialog Layout, GitHub Issue Triage"
         ),
         (
             "Rewrite this conversation start as a concise noun-phrase title.\n"
@@ -438,9 +435,6 @@ def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Option
     combined_raw = f"{user_text} {assistant_text}".strip()
 
     def _extract_named_topic(text: str) -> str:
-        m = re.search(r'《([^》]{2,24})》', text)
-        if m:
-            return (m.group(1) or '').strip()
         m = re.search(r'"([^"\n]{2,24})"', text)
         if m:
             return (m.group(1) or '').strip()
@@ -451,55 +445,45 @@ def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Option
 
     topic_name = _extract_named_topic(combined_raw)
     if topic_name:
-        if any(k in combined for k in ('时间', 'time', '安排', '效率', '怎么办', '健身', '唱歌', '写毛笔', '不够用了')):
-            return f'{topic_name}与时间管理'
+        if any(k in combined for k in ('time', 'schedule', 'efficiency', 'manage', 'fitness', 'singing', 'calligraphy')):
+            return f'{topic_name} time management'
         if any(k in combined for k in ('hermes', 'codex', 'ai')):
-            return f'{topic_name}与AI效率'
-        return f'{topic_name}讨论'
+            return f'{topic_name} AI productivity'
+        return f'{topic_name} discussion'
 
-    if any(k in combined for k in ('title', '标题')) and any(k in combined for k in ('summary', 'summar', '摘要', '短标题')):
-        if any(k in combined for k in ('test', '测试', 'ok', '回复ok')):
-            return '会话标题自动摘要测试'
-        return '会话标题自动摘要'
-    if any(k in combined for k in ('clarify', '澄清')) and any(k in combined for k in ('dialog', 'card', '对话', '卡片')):
-        return 'Clarify 对话卡片'
-    if any(k in combined for k in ('issue', 'github', 'pr')) and any(k in combined for k in ('triage', 'bug', 'review', '问题')):
+    if any(k in combined for k in ('title', 'session title')) and any(k in combined for k in ('summary', 'summar', 'short title')):
+        if any(k in combined for k in ('test', 'ok', 'reply ok')):
+            return 'Session title auto-summary test'
+        return 'Session title auto-summary'
+    if any(k in combined for k in ('clarify', 'clarification')) and any(k in combined for k in ('dialog', 'card')):
+        return 'Clarify dialog card'
+    if any(k in combined for k in ('issue', 'github', 'pr')) and any(k in combined for k in ('triage', 'bug', 'review')):
         return 'GitHub Issue Triage'
 
-    head = re.split(r'[。！？.!?\n]', user_text)[0].strip()
+    head = re.split(r'[.!?\n]', user_text)[0].strip()
     if not head:
         return None
 
-    stop_cjk = {
-        '我们', '看看', '一下', '这个', '标题', '是否', '可以', '用户', '理解', '这里', '测试', '一下',
-        '你只', '需要', '回复', '就可', '可以', '不需', '需要做', '什么', '自动', '成用户', '短标题',
-    }
     stop_en = {
         'the', 'this', 'that', 'with', 'from', 'into', 'just', 'reply', 'please',
         'need', 'needs', 'want', 'wants', 'user', 'assistant', 'could', 'would',
         'should', 'about', 'there', 'here', 'test', 'testing', 'title', 'summary',
     }
-    tokens = re.findall(r'[\u4e00-\u9fff]{2,6}|[A-Za-z0-9][A-Za-z0-9_./+-]*', head)
+    tokens = re.findall(r'[A-Za-z0-9][A-Za-z0-9_./+-]*', head)
     if not tokens:
         return head[:64]
 
     picked = []
     for tok in tokens:
         lower_tok = tok.lower()
-        if re.search(r'[\u4e00-\u9fff]', tok):
-            if tok in stop_cjk:
-                continue
-        else:
-            if lower_tok in stop_en or len(lower_tok) < 3:
-                continue
+        if lower_tok in stop_en or len(lower_tok) < 3:
+            continue
         if tok not in picked:
             picked.append(tok)
         if len(picked) >= 4:
             break
 
     if picked:
-        if any(re.search(r'[\u4e00-\u9fff]', t) for t in picked):
-            return ''.join(picked)[:20]
         return ' '.join(picked)[:60]
     return head[:24]
 

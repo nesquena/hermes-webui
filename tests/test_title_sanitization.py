@@ -1,6 +1,11 @@
 import unittest
+from pathlib import Path
 
-from api.streaming import _first_exchange_snippets, _sanitize_generated_title
+from api.streaming import (
+    _fallback_title_from_exchange,
+    _first_exchange_snippets,
+    _sanitize_generated_title,
+)
 
 
 class TestGeneratedTitleSanitization(unittest.TestCase):
@@ -33,3 +38,19 @@ class TestGeneratedTitleSanitization(unittest.TestCase):
             _first_exchange_snippets(messages),
             ("What time is it in San Francisco?", "It is 6:16 PM in San Francisco."),
         )
+
+    def test_fallback_title_uses_english_discussion_suffix(self):
+        self.assertEqual(
+            _fallback_title_from_exchange('Please review "random cancel"', ""),
+            "random cancel discussion",
+        )
+
+    def test_fallback_title_summary_label_is_english(self):
+        self.assertEqual(
+            _fallback_title_from_exchange("Generate a short title summary test", ""),
+            "Session title auto-summary test",
+        )
+
+    def test_title_generation_source_has_no_cjk_literals(self):
+        src = Path("api/streaming.py").read_text(encoding="utf-8")
+        self.assertNotRegex(src, r"[\u4e00-\u9fff]", "title generation code should stay English-only")
