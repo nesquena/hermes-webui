@@ -59,6 +59,13 @@ def _install_fake_hermes_cli(monkeypatch):
     monkeypatch.delitem(sys.modules, "agent.credential_pool", raising=False)
     monkeypatch.delitem(sys.modules, "agent", raising=False)
 
+    # Flush the 60-second TTL model cache so no prior test's result bleeds in.
+    try:
+        from api.config import invalidate_models_cache
+        invalidate_models_cache()
+    except Exception:
+        pass
+
 
 # ── Unit tests (api/providers.py functions directly) ──────────────────────
 
@@ -162,6 +169,9 @@ class TestSetProviderKey:
         """Setting a key should write the env var to ~/.hermes/.env."""
         _install_fake_hermes_cli(monkeypatch)
         monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        # Also pin HERMES_HOME so code that reads it directly gets tmp_path,
+        # not the conftest session TEST_STATE_DIR that bleeds into the main process.
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
         old_cfg = dict(config.cfg)
         old_mtime = config._cfg_mtime
@@ -181,7 +191,7 @@ class TestSetProviderKey:
 
             # Verify .env file was written
             env_path = tmp_path / ".env"
-            assert env_path.exists()
+            assert env_path.exists(), f".env not written to {env_path}; HERMES_HOME={__import__('os').environ.get('HERMES_HOME')!r}"
             content = env_path.read_text()
             assert "ANTHROPIC_API_KEY=sk-ant-test-key-12345678" in content
         finally:
