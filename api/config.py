@@ -208,6 +208,31 @@ def _get_env_path() -> Path:
         return HOME / ".hermes" / ".env"
 
 
+def _load_env_into_os() -> None:
+    """Load .env from the active profile path into os.environ.
+
+    This ensures HERMES_WEBUI_ENV_FILE, HERMES_HOME, and other .env-sourced
+    variables are visible to the rest of the app immediately after config.py
+    is imported — before any code tries to read os.environ directly.
+    """
+    env_path = _get_env_path()
+    if not env_path.exists():
+        return
+    try:
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            # Only set if not already present in os.environ (shell env vars win).
+            if key and value and key not in os.environ:
+                os.environ[key] = value
+    except Exception:
+        pass
+
+
 def get_config() -> dict:
     """Return the cached config dict, loading from disk if needed."""
     if not _cfg_cache:
@@ -238,6 +263,7 @@ def reload_config() -> None:
 
 # Initial load
 reload_config()
+_load_env_into_os()
 cfg = _cfg_cache  # alias for backward compat with existing references
 
 

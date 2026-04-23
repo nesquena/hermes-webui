@@ -22,9 +22,9 @@ services:
       # Workspace directory — browse and edit files from the WebUI.
       # Adapt the host path to your project directory.
       - /var/home/yoav/workspace:/workspace
-      # Bind-mount config.yml and .env from the host for easy editing without entering the container.
+      # Bind-mount config.yaml and .env from the host for easy editing without entering the container.
       # Create these next to your docker-compose.yml (or adjust the host paths).
-      - ${PWD}/config.yml:/home/hermeswebui/.hermes/config.yml:ro
+      - ${PWD}/config.yaml:/home/hermeswebui/.hermes/config.yaml:ro
       - ${PWD}/.env:/home/hermeswebui/.hermes/.env:ro
     environment:
       - HERMES_WEBUI_HOST=0.0.0.0
