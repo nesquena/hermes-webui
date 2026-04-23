@@ -573,6 +573,41 @@ def handle_get(handler, parsed) -> bool:
             logged_in = bool(cv and verify_session(cv))
         return j(handler, {"auth_enabled": is_auth_enabled(), "logged_in": logged_in})
 
+    if parsed.path in ("/manifest.json", "/manifest.webmanifest"):
+        static_root = Path(__file__).parent.parent / "static"
+        manifest_path = (static_root / "manifest.json").resolve()
+        if manifest_path.exists():
+            data = manifest_path.read_bytes()
+            handler.send_response(200)
+            handler.send_header("Content-Type", "application/manifest+json; charset=utf-8")
+            handler.send_header("Cache-Control", "no-store")
+            handler.send_header("Content-Length", str(len(data)))
+            handler.end_headers()
+            handler.wfile.write(data)
+            return True
+        return j(handler, {"error": "not found"}, status=404)
+
+    if parsed.path == "/sw.js":
+        static_root = Path(__file__).parent.parent / "static"
+        sw_path = (static_root / "sw.js").resolve()
+        if sw_path.exists():
+            # Inject the current git-derived version as the cache name so the
+            # service worker cache busts automatically on every new deploy.
+            from api.updates import WEBUI_VERSION
+            text = sw_path.read_text(encoding="utf-8").replace(
+                "__CACHE_VERSION__", WEBUI_VERSION
+            )
+            data = text.encode("utf-8")
+            handler.send_response(200)
+            handler.send_header("Content-Type", "application/javascript; charset=utf-8")
+            handler.send_header("Cache-Control", "no-store")
+            handler.send_header("Service-Worker-Allowed", "/")
+            handler.send_header("Content-Length", str(len(data)))
+            handler.end_headers()
+            handler.wfile.write(data)
+            return True
+        return j(handler, {"error": "not found"}, status=404)
+
     if parsed.path == "/favicon.ico":
         static_root = Path(__file__).parent.parent / "static"
         ico_path = (static_root / "favicon.ico").resolve()
