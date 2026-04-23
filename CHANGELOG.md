@@ -1,5 +1,56 @@
 # Hermes Web UI -- Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Nous static models now use explicit `@nous:` prefix** — the four hardcoded "(via Nous)" models (`Claude Opus 4.6`, `Claude Sonnet 4.6`, `GPT-5.4 Mini`, `Gemini 3.1 Pro Preview`) now carry `@nous:` prefix IDs, matching the format of live-fetched Nous models. Previously they used slash-only IDs that relied on the portal provider guard; the explicit prefix routes them through the same bulletproof `@provider:model` branch and eliminates 404 errors on those entries. (`api/config.py`, `tests/test_nous_portal_routing.py`)
+
+### Added
+- **Workspace path autocomplete in Spaces** — the "Add workspace path" field in
+  the Spaces panel now suggests trusted directories as you type, supports
+  keyboard navigation plus `Tab` completion, and keeps hidden directories out of
+  the list unless the current path segment starts with `.`. Suggestions are
+  limited to trusted roots (home, saved workspaces, and the boot default
+  workspace subtree) and never enumerate blocked system roots. (`api/routes.py`,
+  `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
+
+## [v0.50.163] — 2026-04-23
+
+### Fixed
+- **Message ordering after task cancellation** — cancelling a stream while the
+  agent is responding no longer causes subsequent responses to appear above the
+  "Task cancelled." marker. The cancel handler now fetches the authoritative
+  message list from the server (same as the done event), and the server persists
+  the cancel message to the session so both paths stay in sync. Falls back to
+  the previous local-push behaviour if the API call fails. (`api/streaming.py`,
+  `static/messages.js`) (@mittyok, #882)
+
+## [v0.50.161] — 2026-04-23
+
+### Fixed
+- **CI: `test_set_key_writes_to_env_file` no longer flaky in full-suite ordering** — two test files (`test_profile_env_isolation.py`, `test_profile_path_security.py`) were calling `sys.modules.pop("api.profiles")` without restoring the module reference, permanently removing `api.profiles` from the module cache and corrupting state for subsequent tests. Replaced with `monkeypatch.delitem(sys.modules, ...)` so the module reference is restored automatically after each test. (`tests/test_profile_env_isolation.py`, `tests/test_profile_path_security.py`)
+- **`api/providers.py` `_write_env_file()` lock and mode fixes** — moved file I/O (mkdir + write) inside the `_ENV_LOCK` block to prevent TOCTOU race between concurrent key-save requests; replaced `write_text()` with `os.open(..., O_CREAT, 0o600)` so new `.env` files are created owner-read/write-only from the first byte. (`api/providers.py`)
+
+## [v0.50.160] — 2026-04-23
+
+### Fixed
+- **CI: provider panel i18n keys now present in all 6 locales** — `es`, `de`, `zh`, `ru`, `zh-Hant` were missing the 19 provider panel keys added in v0.50.159, causing locale parity test failures on CI after every push to master. (`static/i18n.js`)
+
+## [v0.50.159] — 2026-04-23
+
+### Added
+- **Provider key management in Settings** — new "Providers" tab lets users add, update, or remove API keys for direct-API providers without editing `.env` files. Covers Anthropic, OpenAI, Google, DeepSeek, xAI, Mistral, MiniMax, Z.AI, Kimi, Ollama, Ollama Cloud, OpenCode Zen/Go. OAuth providers shown as read-only. Keys stored in `~/.hermes/.env`, take effect immediately. Fully localised (6 locales). (`api/providers.py`, `api/routes.py`, `static/panels.js`, `static/i18n.js`) (PR #867 by @bergeouss, closes #586)
+
+### Security
+- Provider write endpoints require auth or local/private-network client (matching onboarding endpoint gate)
+- `.env` created at 0600 from first byte via `os.open`; pre-existing files tightened to 0600 on every write
+- Full `_ENV_LOCK` coverage across load/modify/write — prevents TOCTOU race between concurrent POSTs
+
+## [v0.50.158] — 2026-04-23
+
+### Fixed
+- **Post-update page reload no longer races against server restart** — `applyUpdates()` and `forceUpdate()` now poll `/health` every 500ms (up to 15 seconds) instead of firing a blind 2500ms `setTimeout`. The existing reconnect banner shows "⏳ Restarting… please wait" during the poll window, giving users a visible status and a manual Reload button. If the server is still down after 15s, the banner message changes to prompt a manual reload. Fixes 502 errors seen when the server restart outpaces the fixed delay, especially behind reverse proxies. (`static/ui.js`) (closes #874)
+
 ## [v0.50.157] — 2026-04-22
 
 ### Fixed

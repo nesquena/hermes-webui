@@ -874,6 +874,15 @@
 .cmd-item-badge-skill{color:var(--accent-text);background:var(--accent-bg);border-color:var(--accent-bg-strong);}
 .ws-action-btn.danger:hover{background:rgba(239,83,80,.1);color:var(--error);border-color:var(--error);}
 .ws-add-row{display:flex;gap:8px;align-items:center;padding:10px 0 4px;}
+.ws-add-input-wrap{flex:1;min-width:0;}
+.ws-suggestions{margin:0 0 6px;background:var(--bg2);border:1px solid var(--border2);border-radius:8px;box-shadow:0 10px 24px rgba(0,0,0,.22);max-height:220px;overflow:auto;}
+.ws-suggest-item{display:flex;flex-direction:column;gap:2px;width:100%;padding:8px 10px;border:0;background:transparent;color:var(--text);text-align:left;font-size:12px;cursor:pointer;}
+.ws-suggest-item:hover{background:rgba(255,255,255,.08);}
+.ws-suggest-item.active{background:var(--accent-bg);outline:1px solid var(--accent-bg-strong);outline-offset:-1px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.04);}
+.ws-suggest-leaf{font-size:13px;font-weight:600;color:var(--text);}
+.ws-suggest-parent{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.ws-suggest-item.active .ws-suggest-leaf{color:var(--accent-text);}
+.ws-suggest-item.active .ws-suggest-parent{color:var(--text);}
 /* ── Message action buttons (copy, edit, retry) ── */
 .msg-actions{display:flex;align-items:center;gap:2px;opacity:0;transition:opacity .15s;margin-left:auto;}
 .msg-row:hover .msg-actions{opacity:1;}
@@ -1465,6 +1474,12 @@ body.resizing{user-select:none;cursor:col-resize;}
 .settings-panel .settings-btn{background:var(--accent);color:#fff;border:none;border-radius:6px;padding:8px 16px;cursor:pointer;font-weight:600;font-size:13px;}
 .settings-panel .settings-btn:hover{opacity:.9;}
 
+/* ── Provider cards (settings panel) ── */
+.provider-card{padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--code-bg);transition:border-color .15s;}
+.provider-card:hover{border-color:var(--border2);}
+.provider-card-name{font-weight:600;font-size:13px;}
+.provider-card .sm-btn:disabled{opacity:.4;cursor:not-allowed;}
+
 /* ── Session pin indicator (inline, only when pinned) ── */
 .session-pin-indicator{flex-shrink:0;color:#f5c542;line-height:1;display:flex;align-items:center;}
 .session-pin-indicator svg{width:10px;height:10px;}
@@ -1581,6 +1596,8 @@ body.resizing{user-select:none;cursor:col-resize;}
   --user-bubble-border: var(--accent-hover);
   --user-bubble-text: #fff;
   --user-bubble-placeholder: rgba(255,255,255,.7);
+  --user-selection-bg: rgba(0,0,0,.22);
+  --user-selection-text: #fff;
 }
 /* Dark mode: keep user bubbles dark; skin remains a tint via border/fill. */
 :root.dark {
@@ -1588,6 +1605,8 @@ body.resizing{user-select:none;cursor:col-resize;}
   --user-bubble-border: var(--accent-bg-strong);
   --user-bubble-text: var(--text);
   --user-bubble-placeholder: var(--muted);
+  --user-selection-bg: rgba(255,255,255,.18);
+  --user-selection-text: var(--text);
 }
 
 /* Inline code: stop shouting orange; inherit strong text colour instead */
@@ -1644,6 +1663,16 @@ body.resizing{user-select:none;cursor:col-resize;}
   padding-left: 14px;
   max-width: none;
   color: var(--user-bubble-text);
+}
+.msg-row[data-role="user"] .msg-body::selection,
+.msg-row[data-role="user"] .msg-body *::selection {
+  background: var(--user-selection-bg);
+  color: var(--user-selection-text);
+}
+.msg-row[data-role="user"] .msg-body::-moz-selection,
+.msg-row[data-role="user"] .msg-body *::-moz-selection {
+  background: var(--user-selection-bg);
+  color: var(--user-selection-text);
 }
 .msg-row[data-role="user"] .msg-body code { color: var(--user-bubble-text); background: rgba(0,0,0,.1); }
 .msg-row[data-role="user"] .msg-body a { color: var(--user-bubble-text); text-decoration: underline; }

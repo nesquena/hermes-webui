@@ -300,12 +300,14 @@ from api.workspace import (
     get_last_workspace,
     set_last_workspace,
     list_dir,
+    list_workspace_suggestions,
     read_file_content,
     safe_resolve_ws,
     resolve_trusted_workspace,
 )
 from api.upload import handle_upload, handle_transcribe
 from api.streaming import _sse, _run_agent_streaming, cancel_stream
+from api.providers import get_providers, set_provider_key, remove_provider_key
 from api.onboarding import (
     apply_onboarding_setup,
     get_onboarding_status,
@@ -585,6 +587,10 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/models/live":
         return _handle_live_models(handler, parsed)
 
+    # ── Providers (GET) ──
+    if parsed.path == "/api/providers":
+        return j(handler, get_providers())
+
     if parsed.path == "/api/settings":
         settings = load_settings()
         # Never expose the stored password hash to clients
@@ -704,6 +710,17 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/workspaces":
         return j(
             handler, {"workspaces": load_workspaces(), "last": get_last_workspace()}
+        )
+
+    if parsed.path == "/api/workspaces/suggest":
+        qs = parse_qs(parsed.query)
+        prefix = qs.get("prefix", [""])[0]
+        return j(
+            handler,
+            {
+                "suggestions": list_workspace_suggestions(prefix),
+                "prefix": prefix,
+            },
         )
 
     if parsed.path == "/api/sessions/search":
@@ -947,6 +964,28 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         except RuntimeError as e:
             return bad(handler, str(e), 500)
+
+    # ── Providers (POST) ──
+    if parsed.path == "/api/providers":
+        provider_id = (body.get("provider") or "").strip().lower()
+        api_key = body.get("api_key")
+        if not provider_id:
+            return bad(handler, "provider is required")
+        if api_key is not None:
+            api_key = str(api_key).strip() or None
+        result = set_provider_key(provider_id, api_key)
+        if not result.get("ok"):
+            return bad(handler, result.get("error", "Unknown error"))
+        return j(handler, result)
+
+    if parsed.path == "/api/providers/delete":
+        provider_id = (body.get("provider") or "").strip().lower()
+        if not provider_id:
+            return bad(handler, "provider is required")
+        result = remove_provider_key(provider_id)
+        if not result.get("ok"):
+            return bad(handler, result.get("error", "Unknown error"))
+        return j(handler, result)
 
     if parsed.path == "/api/reasoning":
         # CLI-parity /reasoning handler — writes to the same config.yaml keys
