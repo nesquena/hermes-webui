@@ -653,10 +653,26 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;const _cbc=$('btnCancel');if(_cbc)_cbc.style.display='none';
       }
-      if(S.session&&S.session.session_id===activeSid){
-        clearLiveToolCards();if(!assistantText)removeThinking();
-        S.messages.push({role:'assistant',content:'*Task cancelled.*'});renderMessages();
-      }
+      // Fetch latest session from server to get accurate message list (includes cancel status)
+      // This ensures messages stay in sync with server, fixing race condition where local
+      // "*Task cancelled.*" message gets lost when done event overwrites S.messages
+      (async()=>{
+        try{
+          const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);
+          if(data&&data.session&&S.session&&S.session.session_id===activeSid){
+            S.session=data.session;
+            S.messages=(data.session.messages||[]).filter(m=>m&&m.role);
+            clearLiveToolCards();if(!assistantText)removeThinking();
+            renderMessages();
+          }
+        }catch(_){
+          // Fallback to local cancel message if API fails
+          if(S.session&&S.session.session_id===activeSid){
+            clearLiveToolCards();if(!assistantText)removeThinking();
+            S.messages.push({role:'assistant',content:'*Task cancelled.*'});renderMessages();
+          }
+        }
+      })();
       renderSessionList();
       if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setComposerStatus('');}
     });
