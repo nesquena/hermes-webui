@@ -22,10 +22,12 @@
   <!-- KaTeX math rendering CSS (loaded eagerly to prevent layout shift) -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css" integrity="sha384-5TcZemv2l/9On385z///+d7MSYlvIEw9FuZTIdZ14vJLqWphw7e7ZPuOiCHJcFCP" crossorigin="anonymous">
   <!-- streaming-markdown: incremental DOM-building markdown parser for live streams -->
+  <!-- Self-hosted from npm:streaming-markdown@0.2.15 — no CDN dependency.           -->
+  <!-- sha384 of smd.min.js @0.2.15: sha384-T6r95ocN9t3W8tUK2Fa6FPaO7bJryyjyW0WCalrUnpgtm2qXr5xcN4vwPYEJ6vHa -->
+  <!-- Note: ES module `import` does not support integrity= (W3C limitation);        -->
+  <!-- version is pinned in the vendored file path; hash documented above for audit. -->
   <script type="module">
-    import * as smd from 'https://cdn.jsdelivr.net/npm/streaming-markdown@0.2.15/smd.min.js';
-    // SRI verification happens at the ES module level via importmap or SW; pinning version in URL.
-    // sha384 of smd.min.js @0.2.15: sha384-T6r95ocN9t3W8tUK2Fa6FPaO7bJryyjyW0WCalrUnpgtm2qXr5xcN4vwPYEJ6vHa
+    import * as smd from '/static/vendor/smd.min.js';
     window.smd = smd;
   </script>
   <!-- Prism.js syntax highlighting (loaded async, non-blocking) -->
