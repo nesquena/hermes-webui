@@ -15,11 +15,21 @@ def _reload_profiles_module(base_home: Path):
     os.environ["HERMES_BASE_HOME"] = str(base_home)
     os.environ["HERMES_HOME"] = str(base_home)
 
+    # Save the original module references so we can restore them after the test.
+    # Permanently deleting api.config / api.profiles from sys.modules breaks
+    # subsequent tests that import these modules and expect consistent state.
+    _saved = {name: sys.modules[name] for name in ["api.config", "api.profiles"]
+              if name in sys.modules}
+
     for name in ["api.config", "api.profiles"]:
         if name in sys.modules:
             del sys.modules[name]
 
     profiles = importlib.import_module("api.profiles")
+
+    # Restore original modules so the cache stays consistent for the rest of the suite.
+    sys.modules.update(_saved)
+
     return profiles
 
 

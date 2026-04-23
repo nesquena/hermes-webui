@@ -18,9 +18,10 @@ def test_profile_switch_clears_previous_profile_env_vars(monkeypatch, tmp_path):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("CUSTOM_TOKEN", raising=False)
 
-    sys.modules.pop("api.profiles", None)
+    # Use monkeypatch so sys.modules is restored after the test, preventing
+    # api.profiles from being permanently removed and poisoning subsequent tests.
+    monkeypatch.delitem(sys.modules, "api.profiles", raising=False)
     profiles = importlib.import_module("api.profiles")
-    profiles = importlib.reload(profiles)
 
     profiles.init_profile_state()
     profiles.switch_profile("p1")
@@ -52,9 +53,10 @@ def test_profile_switch_replaces_overlapping_keys(monkeypatch, tmp_path):
     monkeypatch.delenv("ONLY_P1", raising=False)
     monkeypatch.delenv("ONLY_P2", raising=False)
 
-    sys.modules.pop("api.profiles", None)
+    # Use monkeypatch so sys.modules is restored after the test, preventing
+    # api.profiles from being permanently removed and poisoning subsequent tests.
+    monkeypatch.delitem(sys.modules, "api.profiles", raising=False)
     profiles = importlib.import_module("api.profiles")
-    profiles = importlib.reload(profiles)
 
     profiles.init_profile_state()
     profiles.switch_profile("p1")
