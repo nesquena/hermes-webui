@@ -1508,7 +1508,16 @@ body.resizing{user-select:none;cursor:col-resize;}
 .provider-card .sm-btn:disabled{opacity:.4;cursor:not-allowed;}
 
 /* ── Session pin indicator (inline, only when pinned) ── */
-.session-pin-indicator{flex-shrink:0;color:var(--accent);line-height:1;display:flex;align-items:center;}
+.session-pin-indicator{
+  flex-shrink:0;
+  width:10px;
+  height:10px;
+  color:var(--accent);
+  line-height:1;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+}
 .session-pin-indicator svg{width:10px;height:10px;}
 
 /* ── Cron alert badge ── */
