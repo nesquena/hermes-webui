@@ -300,6 +300,7 @@ from api.workspace import (
     get_last_workspace,
     set_last_workspace,
     list_dir,
+    list_workspace_suggestions,
     read_file_content,
     safe_resolve_ws,
     resolve_trusted_workspace,
@@ -709,6 +710,17 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/workspaces":
         return j(
             handler, {"workspaces": load_workspaces(), "last": get_last_workspace()}
+        )
+
+    if parsed.path == "/api/workspaces/suggest":
+        qs = parse_qs(parsed.query)
+        prefix = qs.get("prefix", [""])[0]
+        return j(
+            handler,
+            {
+                "suggestions": list_workspace_suggestions(prefix),
+                "prefix": prefix,
+            },
         )
 
     if parsed.path == "/api/sessions/search":

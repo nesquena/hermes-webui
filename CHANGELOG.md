@@ -1,5 +1,16 @@
 # Hermes Web UI -- Changelog
 
+## [Unreleased]
+
+### Added
+- **Workspace path autocomplete in Spaces** — the "Add workspace path" field in
+  the Spaces panel now suggests trusted directories as you type, supports
+  keyboard navigation plus `Tab` completion, and keeps hidden directories out of
+  the list unless the current path segment starts with `.`. Suggestions are
+  limited to trusted roots (home, saved workspaces, and the boot default
+  workspace subtree) and never enumerate blocked system roots. (`api/routes.py`,
+  `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
+
 ## [v0.50.161] — 2026-04-23
 
 ### Fixed

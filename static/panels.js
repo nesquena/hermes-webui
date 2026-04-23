@@ -536,6 +536,94 @@ async function submitMemorySave() {
 
 // ── Workspace management ──
 let _workspaceList = [];  // cached from /api/workspaces
+let _wsSuggestTimer = null;
+let _wsSuggestReq = 0;
+let _wsSuggestIndex = -1;
+
+function closeWorkspacePathSuggestions(){
+  const box=$('wsAddSuggestions');
+  if(box){
+    box.innerHTML='';
+    box.style.display='none';
+  }
+  _wsSuggestIndex=-1;
+}
+
+function _applyWorkspaceSuggestion(path){
+  const input=$('wsAddInput');
+  const next=(path||'').endsWith('/')?(path||''):`${path||''}/`;
+  if(input){
+    input.value=next;
+    input.focus();
+    input.setSelectionRange(next.length, next.length);
+  }
+  scheduleWorkspacePathSuggestions();
+}
+
+function _highlightWorkspaceSuggestion(idx){
+  const box=$('wsAddSuggestions');
+  if(!box)return;
+  const items=[...box.querySelectorAll('.ws-suggest-item')];
+  items.forEach((el,i)=>{
+    const active=i===idx;
+    el.classList.toggle('active', active);
+    if(active) el.scrollIntoView({block:'nearest'});
+  });
+}
+
+function _renderWorkspacePathSuggestions(paths){
+  const box=$('wsAddSuggestions');
+  if(!box)return;
+  box.innerHTML='';
+  if(!paths || !paths.length){
+    box.style.display='none';
+    _wsSuggestIndex=-1;
+    return;
+  }
+  paths.forEach((path, idx)=>{
+    const pathParts=(path||'').split('/').filter(Boolean);
+    const leaf=pathParts[pathParts.length-1]||path;
+    const parent=pathParts.length>1?`/${pathParts.slice(0,-1).join('/')}`:'/';
+    const item=document.createElement('button');
+    item.type='button';
+    item.className='ws-suggest-item';
+    item.innerHTML=`<span class="ws-suggest-leaf">${esc(leaf)}</span><span class="ws-suggest-parent">${esc(parent)}</span>`;
+    item.dataset.path=path;
+    item.onmouseenter=()=>{_wsSuggestIndex=idx;_highlightWorkspaceSuggestion(idx);};
+    item.onmousedown=(e)=>{e.preventDefault();_applyWorkspaceSuggestion(path);};
+    box.appendChild(item);
+  });
+  box.style.display='block';
+  _wsSuggestIndex=0;
+  _highlightWorkspaceSuggestion(_wsSuggestIndex);
+}
+
+async function _loadWorkspacePathSuggestions(prefix){
+  const reqId=++_wsSuggestReq;
+  try{
+    const qs=new URLSearchParams({prefix:prefix||''}).toString();
+    const data=await api(`/api/workspaces/suggest?${qs}`);
+    if(reqId!==_wsSuggestReq)return;
+    _renderWorkspacePathSuggestions(data.suggestions||[]);
+  }catch(_){
+    if(reqId!==_wsSuggestReq)return;
+    closeWorkspacePathSuggestions();
+  }
+}
+
+function scheduleWorkspacePathSuggestions(){
+  const input=$('wsAddInput');
+  if(!input)return;
+  const prefix=input.value.trim();
+  if(!prefix){
+    closeWorkspacePathSuggestions();
+    return;
+  }
+  if(_wsSuggestTimer) clearTimeout(_wsSuggestTimer);
+  _wsSuggestTimer=setTimeout(()=>{
+    _loadWorkspacePathSuggestions(prefix);
+  }, 120);
+}
 
 function getWorkspaceFriendlyName(path){
   // Look up the friendly name from the workspace list cache, fallback to last path segment
@@ -719,13 +807,70 @@ function renderWorkspacesPanel(workspaces){
   }
   const addRow=document.createElement('div');addRow.className='ws-add-row';
   addRow.innerHTML=`
-    <input id="wsAddInput" placeholder="${esc(t('workspace_add_path_placeholder'))}" style="flex:1;background:rgba(255,255,255,.06);border:1px solid var(--border2);border-radius:7px;color:var(--text);padding:7px 10px;font-size:12px;outline:none;">
+    <div class="ws-add-input-wrap">
+      <input id="wsAddInput" placeholder="${esc(t('workspace_add_path_placeholder'))}" autocomplete="off" style="width:100%;background:rgba(255,255,255,.06);border:1px solid var(--border2);border-radius:7px;color:var(--text);padding:7px 10px;font-size:12px;outline:none;">
+    </div>
     <button class="ws-action-btn" onclick="addWorkspace()">${li('plus',12)} ${esc(t('add'))}</button>`;
   panel.appendChild(addRow);
+  const suggestBox=document.createElement('div');
+  suggestBox.id='wsAddSuggestions';
+  suggestBox.className='ws-suggestions';
+  suggestBox.style.display='none';
+  panel.appendChild(suggestBox);
   const hint=document.createElement('div');
   hint.style.cssText='font-size:11px;color:var(--muted);padding:4px 0 8px';
   hint.textContent=t('workspace_paths_validated_hint');
   panel.appendChild(hint);
+  const input=$('wsAddInput');
+  if(input){
+    input.oninput=()=>scheduleWorkspacePathSuggestions();
+    input.onfocus=()=>{
+      if(input.value.trim()) scheduleWorkspacePathSuggestions();
+      else closeWorkspacePathSuggestions();
+    };
+    input.onkeydown=(e)=>{
+      const box=$('wsAddSuggestions');
+      const items=box?[...box.querySelectorAll('.ws-suggest-item')]:[];
+      if(!items.length){
+        if(e.key==='Enter'){
+          e.preventDefault();
+          addWorkspace();
+        }
+        return;
+      }
+      if(e.key==='ArrowDown'){
+        e.preventDefault();
+        _wsSuggestIndex=Math.min(items.length-1,Math.max(-1,_wsSuggestIndex)+1);
+        _highlightWorkspaceSuggestion(_wsSuggestIndex);
+        return;
+      }
+      if(e.key==='ArrowUp'){
+        e.preventDefault();
+        _wsSuggestIndex=_wsSuggestIndex<=0?0:_wsSuggestIndex-1;
+        _highlightWorkspaceSuggestion(_wsSuggestIndex);
+        return;
+      }
+      if(e.key==='Escape'){
+        e.preventDefault();
+        closeWorkspacePathSuggestions();
+        return;
+      }
+      if(e.key==='Enter'){
+        e.preventDefault();
+        if(_wsSuggestIndex>=0 && items[_wsSuggestIndex]){
+          _applyWorkspaceSuggestion(items[_wsSuggestIndex].dataset.path||'');
+        }else{
+          addWorkspace();
+        }
+        return;
+      }
+      if(e.key==='Tab' && _wsSuggestIndex>=0 && items[_wsSuggestIndex]){
+        e.preventDefault();
+        _applyWorkspaceSuggestion(items[_wsSuggestIndex].dataset.path||'');
+        return;
+      }
+    };
+  }
 }
 
 async function addWorkspace(){
@@ -737,9 +882,14 @@ async function addWorkspace(){
     _workspaceList=data.workspaces;
     renderWorkspacesPanel(data.workspaces);
     if(input)input.value='';
+    closeWorkspacePathSuggestions();
     showToast(t('workspace_added'));
   }catch(e){setStatus(t('add_failed')+e.message);}
 }
+
+document.addEventListener('click',e=>{
+  if(!e.target.closest('.ws-add-input-wrap')) closeWorkspacePathSuggestions();
+});
 
 async function removeWorkspace(path){
   const _rmWs=await showConfirmDialog({title:t('workspace_remove_confirm_title'),message:t('workspace_remove_confirm_message',path),confirmLabel:t('remove'),danger:true,focusCancel:true});
