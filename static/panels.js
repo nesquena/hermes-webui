@@ -56,7 +56,7 @@ async function switchPanel(name) {
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
   if (mainEl) {
-    ['settings','skills','tasks','workspaces','profiles'].forEach(p => {
+    ['settings','skills','memory','tasks','workspaces','profiles'].forEach(p => {
       mainEl.classList.toggle('showing-' + p, name === p);
     });
   }
@@ -808,35 +808,123 @@ async function deleteCurrentSkill() {
   } catch(e) { setStatus(t('error_prefix') + e.message); }
 }
 
-// ── Memory inline edit ──
+// ── Memory (main view) ──
 let _memoryData = null;
+let _currentMemorySection = null; // 'memory' | 'user'
+let _memoryMode = 'empty'; // 'empty' | 'read' | 'edit'
 
-function toggleMemoryEdit() {
-  const form = $('memoryEditForm');
-  if (!form) return;
-  const open = form.style.display !== 'none';
-  if (open) { form.style.display = 'none'; return; }
-  $('memEditSection').textContent = t('memory_notes_label');
-  $('memEditContent').value = _memoryData ? (_memoryData.memory || '') : '';
-  $('memEditError').style.display = 'none';
-  form.style.display = '';
+const MEMORY_SECTIONS = [
+  { key: 'memory', labelKey: 'my_notes', emptyKey: 'no_notes_yet', iconKey: 'brain' },
+  { key: 'user',   labelKey: 'user_profile', emptyKey: 'no_profile_yet', iconKey: 'user' },
+];
+
+function _memorySectionMeta(key) {
+  return MEMORY_SECTIONS.find(s => s.key === key) || MEMORY_SECTIONS[0];
 }
 
-function closeMemoryEdit() {
-  const form = $('memoryEditForm');
-  if (form) form.style.display = 'none';
+function _memorySectionContent(key) {
+  if (!_memoryData) return '';
+  return key === 'user' ? (_memoryData.user || '') : (_memoryData.memory || '');
 }
+
+function _memorySectionMtime(key) {
+  if (!_memoryData) return 0;
+  return key === 'user' ? (_memoryData.user_mtime || 0) : (_memoryData.memory_mtime || 0);
+}
+
+function _setMemoryHeaderButtons(mode) {
+  const show = b => b && (b.style.display = '');
+  const hide = b => b && (b.style.display = 'none');
+  const editBtn = $('btnEditMemoryDetail');
+  const cancelBtn = $('btnCancelMemoryDetail');
+  const saveBtn = $('btnSaveMemoryDetail');
+  if (mode === 'read') { show(editBtn); hide(cancelBtn); hide(saveBtn); }
+  else if (mode === 'edit') { hide(editBtn); show(cancelBtn); show(saveBtn); }
+  else { hide(editBtn); hide(cancelBtn); hide(saveBtn); }
+}
+
+function _renderMemoryDetail(section) {
+  const meta = _memorySectionMeta(section);
+  const title = $('memoryDetailTitle');
+  const body = $('memoryDetailBody');
+  const empty = $('memoryDetailEmpty');
+  if (!title || !body) return;
+  title.textContent = t(meta.labelKey);
+  const content = _memorySectionContent(section);
+  const mtime = _memorySectionMtime(section);
+  const mtimeStr = mtime ? new Date(mtime * 1000).toLocaleString() : '';
+  const mtimeHtml = mtimeStr ? `<div class="memory-detail-mtime">${esc(mtimeStr)}</div>` : '';
+  const inner = content
+    ? `<div class="memory-content preview-md">${renderMd(content)}</div>`
+    : `<div class="memory-empty">${esc(t(meta.emptyKey))}</div>`;
+  body.innerHTML = `<div class="main-view-content">${mtimeHtml}${inner}</div>`;
+  body.style.display = '';
+  if (empty) empty.style.display = 'none';
+  _memoryMode = 'read';
+  _setMemoryHeaderButtons('read');
+}
+
+function _renderMemoryEdit(section) {
+  const meta = _memorySectionMeta(section);
+  const title = $('memoryDetailTitle');
+  const body = $('memoryDetailBody');
+  const empty = $('memoryDetailEmpty');
+  if (!title || !body) return;
+  title.textContent = t(meta.labelKey);
+  const content = _memorySectionContent(section);
+  body.innerHTML = `
+    <div class="main-view-content">
+      <form class="detail-form" onsubmit="event.preventDefault(); submitMemorySave();">
+        <div class="detail-form-row">
+          <label for="memEditContent">${esc(t('memory_notes_label'))}</label>
+          <textarea id="memEditContent" rows="20" spellcheck="false">${esc(content)}</textarea>
+        </div>
+        <div id="memEditError" class="detail-form-error" style="display:none"></div>
+      </form>
+    </div>`;
+  body.style.display = '';
+  if (empty) empty.style.display = 'none';
+  _memoryMode = 'edit';
+  _setMemoryHeaderButtons('edit');
+  const ta = $('memEditContent');
+  if (ta) ta.focus();
+}
+
+function openMemorySection(section, el) {
+  _currentMemorySection = section;
+  document.querySelectorAll('#memoryPanel .settings-menu-item').forEach(e => e.classList.remove('active'));
+  if (el) el.classList.add('active');
+  _renderMemoryDetail(section);
+}
+
+function editCurrentMemory() {
+  if (!_currentMemorySection) return;
+  _renderMemoryEdit(_currentMemorySection);
+}
+
+function cancelMemoryEdit() {
+  if (!_currentMemorySection) return;
+  _renderMemoryDetail(_currentMemorySection);
+}
+
+// Legacy alias (kept for any stale references)
+function toggleMemoryEdit() { editCurrentMemory(); }
+function closeMemoryEdit() { cancelMemoryEdit(); }
 
 async function submitMemorySave() {
-  const content = $('memEditContent').value;
+  if (!_currentMemorySection) return;
+  const ta = $('memEditContent');
   const errEl = $('memEditError');
-  errEl.style.display = 'none';
+  if (!ta) return;
+  if (errEl) errEl.style.display = 'none';
   try {
-    await api('/api/memory/write', {method:'POST', body: JSON.stringify({section: 'memory', content})});
+    await api('/api/memory/write', {method:'POST', body: JSON.stringify({section: _currentMemorySection, content: ta.value})});
     showToast(t('memory_saved'));
-    closeMemoryEdit();
     await loadMemory(true);
-  } catch(e) { errEl.textContent = t('error_prefix') + e.message; errEl.style.display = ''; }
+    _renderMemoryDetail(_currentMemorySection);
+  } catch(e) {
+    if (errEl) { errEl.textContent = t('error_prefix') + e.message; errEl.style.display = ''; }
+  }
 }
 
 // ── Workspace management ──
@@ -1724,28 +1812,25 @@ async function loadMemory(force) {
   const panel = $('memoryPanel');
   try {
     const data = await api('/api/memory');
-    _memoryData = data;  // cache for edit form
-    const fmtTime = ts => ts ? new Date(ts*1000).toLocaleString() : '';
-    panel.innerHTML = `
-      <div class="memory-section">
-        <div class="memory-section-title">
-          <span style="display:inline-flex;align-items:center;gap:6px">${li('brain',14)} ${esc(t('my_notes'))}</span>
-          <span class="memory-mtime">${fmtTime(data.memory_mtime)}</span>
-        </div>
-        ${data.memory
-          ? `<div class="memory-content preview-md">${renderMd(data.memory)}</div>`
-          : `<div class="memory-empty">${esc(t('no_notes_yet'))}</div>`}
-      </div>
-      <div class="memory-section">
-        <div class="memory-section-title">
-          <span style="display:inline-flex;align-items:center;gap:6px">${li('user',14)} ${esc(t('user_profile'))}</span>
-          <span class="memory-mtime">${fmtTime(data.user_mtime)}</span>
-        </div>
-        ${data.user
-          ? `<div class="memory-content preview-md">${renderMd(data.user)}</div>`
-          : `<div class="memory-empty">${esc(t('no_profile_yet'))}</div>`}
-      </div>`;
-  } catch(e) { panel.innerHTML = `<div style="color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`; }
+    _memoryData = data;
+    if (panel) {
+      panel.innerHTML = '';
+      for (const s of MEMORY_SECTIONS) {
+        const el = document.createElement('button');
+        el.type = 'button';
+        el.className = 'settings-menu-item';
+        if (_currentMemorySection === s.key) el.classList.add('active');
+        el.innerHTML = `${li(s.iconKey,16)}<span>${esc(t(s.labelKey))}</span>`;
+        el.onclick = () => openMemorySection(s.key, el);
+        panel.appendChild(el);
+      }
+    }
+    if (_currentMemorySection && _memoryMode !== 'edit') {
+      _renderMemoryDetail(_currentMemorySection);
+    }
+  } catch(e) {
+    if (panel) panel.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
+  }
 }
 
 // Drag and drop
