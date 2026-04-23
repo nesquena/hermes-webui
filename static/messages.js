@@ -189,6 +189,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let assistantBody=null;
   let segmentStart=0;      // char offset in assistantText where current segment begins
   let _freshSegment=false; // true after a tool call — forces a new DOM segment
+  // streaming-markdown state: incremental DOM-building parser per segment
+  let _smdParser=null;     // current smd parser instance (null until first content)
+  let _smdWrittenLen=0;    // how many chars of displayText have been fed to smd parser
+  // On reconnect, the assistantBody already has partial smd-rendered content.
+  // We clear it on first new token and restart the parser from the reconnect point.
+  let _smdReconnect=reconnecting;
   // Thinking tag patterns for streaming display
   const _thinkPairs=[
     {open:'<think>',close:'</think>'},
@@ -366,6 +372,31 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // removeThinking() won't find it anyway, but guard explicitly.
     if(!reasoningText) removeThinking();
   }
+  // Helper: create (or recreate) the smd parser bound to a given DOM element.
+  // Called when assistantBody is first created and after each tool-call segment reset.
+  function _smdNewParser(el){
+    _smdWrittenLen=0;
+    if(!window.smd){_smdParser=null;return;}
+    const renderer=window.smd.default_renderer(el);
+    _smdParser=window.smd.parser(renderer);
+  }
+  // Helper: end the current smd parser (flushes remaining state) and null it out.
+  function _smdEndParser(){
+    if(_smdParser&&window.smd){
+      try{window.smd.parser_end(_smdParser);}catch(_){}
+    }
+    _smdParser=null;
+    _smdWrittenLen=0;
+  }
+  // Helper: feed new displayText delta to the smd parser.
+  // Only feeds chars beyond what has already been written (_smdWrittenLen).
+  function _smdWrite(displayText){
+    if(!_smdParser||!window.smd) return;
+    const delta=displayText.slice(_smdWrittenLen);
+    if(!delta) return;
+    try{window.smd.parser_write(_smdParser,delta);}catch(_){}
+    _smdWrittenLen=displayText.length;
+  }
   function _scheduleRender(){
     if(_renderPending) return;
     if(_streamFinalized) return; // Bug A: don't schedule new rAF after stream finalized
@@ -376,12 +407,23 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const parsed=_parseStreamState();
       _renderLiveThinking(parsed);
       if(assistantBody){
-        // Render only the text belonging to the current segment (after the last tool call).
-        // segmentStart=0 for the first segment, or assistantText.length-at-last-tool for later ones.
-        const segText = segmentStart===0
-          ? parsed.displayText                          // first segment: use full display (handles think-tag stripping)
-          : renderMd ? renderMd(assistantText.slice(segmentStart)) : assistantText.slice(segmentStart);
-        assistantBody.innerHTML = segText || '';
+        const displayText = segmentStart===0
+          ? parsed.displayText                          // first segment: uses think-tag stripping
+          : _stripXmlToolCalls(assistantText.slice(segmentStart));
+        if(!_smdParser&&window.smd){
+          // On reconnect: prior content in assistantBody came from a different smd parser run.
+          // Clear it and start fresh — renderMessages() on done will restore the full content.
+          if(_smdReconnect){assistantBody.innerHTML='';_smdReconnect=false;}
+          _smdNewParser(assistantBody);
+        }
+        if(_smdParser){
+          _smdWrite(displayText);
+        } else {
+          // Fallback: smd not loaded yet, reconnect session, or smd unavailable — use renderMd
+          assistantBody.innerHTML = (segmentStart===0
+            ? parsed.displayText
+            : renderMd ? renderMd(assistantText.slice(segmentStart)) : assistantText.slice(segmentStart)) || '';
+        }
       }
       scrollIfPinned();
     });
@@ -461,6 +503,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       assistantBody=null;
       segmentStart=assistantText.length; // new segment starts at current text length
       _freshSegment=true;                // prevent reuse of old DOM node
+      _smdEndParser();                   // finalize current smd parser; new one created on next token
       scrollIfPinned();
     });
 
@@ -551,6 +594,19 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _streamFinalized=true;
       if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
+      // Finalize smd parser — flushes any remaining buffered markdown state
+      // and runs Prism + copy buttons on the live segment before the DOM is replaced
+      if(assistantBody){
+        const _finBody=assistantBody;
+        _smdEndParser();
+        requestAnimationFrame(()=>{
+          if(typeof highlightCode==='function') highlightCode(_finBody);
+          if(typeof addCopyButtons==='function') addCopyButtons(_finBody);
+          if(typeof renderKatexBlocks==='function') renderKatexBlocks();
+        });
+      } else {
+        _smdEndParser();
+      }
       const d=JSON.parse(e.data);
       delete INFLIGHT[activeSid];
       clearInflight();clearInflightState(activeSid);
@@ -617,6 +673,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _terminalStateReached=true;
       _streamFinalized=true;
       if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
+      _smdEndParser();
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       // Application-level error sent explicitly by the server (rate limit, crash, etc.)
       // This is distinct from the SSE network 'error' event below.
@@ -694,6 +751,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _terminalStateReached=true;
       _streamFinalized=true;
       if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
+      _smdEndParser();
       if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
       source.close();
       delete INFLIGHT[activeSid];clearInflight();clearInflightState(activeSid);stopApprovalPolling();stopClarifyPolling();

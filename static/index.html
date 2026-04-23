@@ -21,6 +21,11 @@
 <link rel="stylesheet" href="static/style.css">
   <!-- KaTeX math rendering CSS (loaded eagerly to prevent layout shift) -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css" integrity="sha384-5TcZemv2l/9On385z///+d7MSYlvIEw9FuZTIdZ14vJLqWphw7e7ZPuOiCHJcFCP" crossorigin="anonymous">
+  <!-- streaming-markdown: incremental DOM-building markdown parser for live streams -->
+  <script type="module">
+    import * as smd from 'https://cdn.jsdelivr.net/npm/streaming-markdown@0.2.15/smd.min.js';
+    window.smd = smd;
+  </script>
   <!-- Prism.js syntax highlighting (loaded async, non-blocking) -->
   <link id="prism-theme" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css" integrity="sha384-wFjoQjtV1y5jVHbt0p35Ui8aV8GVpEZkyF99OXWqP/eNJDU93D3Ugxkoyh6Y2I4A" crossorigin="anonymous">
   <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-core.min.js" integrity="sha384-MXybTpajaBV0AkcBaCPT4KIvo0FzoCiWXgcihYsw4FUkEz0Pv3JGV6tk2G8vJtDc" crossorigin="anonymous" defer></script>
