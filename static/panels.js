@@ -10,6 +10,7 @@ let _workspacePreFormDetail = null;
 let _currentProfileDetail = null; // full profile object
 let _profileMode = 'empty'; // 'empty' | 'read' | 'create'
 let _profilePreFormDetail = null;
+let _pendingSettingsTargetPanel = null; // destination selected while settings had unsaved changes
 
 // Map of panel names → i18n keys for the app titlebar label.
 const APP_TITLEBAR_KEYS = {
@@ -42,34 +43,69 @@ function syncAppTitlebar() {
   }
 }
 
-async function switchPanel(name) {
-  _currentPanel = name;
+function _beginSettingsPanelSession() {
+  _settingsDirty = false;
+  _settingsThemeOnOpen = localStorage.getItem('hermes-theme') || 'dark';
+  _settingsSkinOnOpen = localStorage.getItem('hermes-skin') || 'default';
+  _settingsFontSizeOnOpen = localStorage.getItem('hermes-font-size') || 'default';
+  _pendingSettingsTargetPanel = null;
+  _resetSettingsPanelState();
+}
+
+function _beforePanelSwitch(nextPanel) {
+  if (_currentPanel !== 'settings' || nextPanel === 'settings') return true;
+  if (_settingsDirty) {
+    _pendingSettingsTargetPanel = nextPanel || 'chat';
+    _showSettingsUnsavedBar();
+    return false;
+  }
+  _revertSettingsPreview();
+  _pendingSettingsTargetPanel = null;
+  _resetSettingsPanelState();
+  return true;
+}
+
+function _consumeSettingsTargetPanel(fallback = 'chat') {
+  const target = (_pendingSettingsTargetPanel && _pendingSettingsTargetPanel !== 'settings')
+    ? _pendingSettingsTargetPanel
+    : fallback;
+  _pendingSettingsTargetPanel = null;
+  return target;
+}
+
+async function switchPanel(name, opts = {}) {
+  const nextPanel = name || 'chat';
+  const prevPanel = _currentPanel;
+  if (!opts.bypassSettingsGuard && !_beforePanelSwitch(nextPanel)) return false;
+  if (prevPanel !== 'settings' && nextPanel === 'settings') _beginSettingsPanelSession();
+  _currentPanel = nextPanel;
   // Update nav tabs (rail + mobile sidebar-nav share data-panel)
-  document.querySelectorAll('[data-panel]').forEach(t => t.classList.toggle('active', t.dataset.panel === name));
+  document.querySelectorAll('[data-panel]').forEach(t => t.classList.toggle('active', t.dataset.panel === nextPanel));
   // Update panel views
   document.querySelectorAll('.panel-view').forEach(p => p.classList.remove('active'));
-  const panelEl = $('panel' + name.charAt(0).toUpperCase() + name.slice(1));
+  const panelEl = $('panel' + nextPanel.charAt(0).toUpperCase() + nextPanel.slice(1));
   if (panelEl) panelEl.classList.add('active');
   // Toggle main content view. Each entry in MAIN_VIEW_PANELS gets a matching
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
   if (mainEl) {
     ['settings','skills','memory','tasks','workspaces','profiles'].forEach(p => {
-      mainEl.classList.toggle('showing-' + p, name === p);
+      mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
   }
   // Lazy-load panel data
-  if (name === 'tasks') await loadCrons();
-  if (name === 'skills') await loadSkills();
-  if (name === 'memory') await loadMemory();
-  if (name === 'workspaces') await loadWorkspacesPanel();
-  if (name === 'profiles') await loadProfilesPanel();
-  if (name === 'todos') loadTodos();
-  if (name === 'settings') {
+  if (nextPanel === 'tasks') await loadCrons();
+  if (nextPanel === 'skills') await loadSkills();
+  if (nextPanel === 'memory') await loadMemory();
+  if (nextPanel === 'workspaces') await loadWorkspacesPanel();
+  if (nextPanel === 'profiles') await loadProfilesPanel();
+  if (nextPanel === 'todos') loadTodos();
+  if (nextPanel === 'settings') {
     switchSettingsSection(_currentSettingsSection);
     loadSettingsPanel();
   }
   syncAppTitlebar();
+  return true;
 }
 
 // ── Cron panel ──
@@ -85,6 +121,7 @@ async function loadCrons(animate) {
     _cronList = data.jobs || [];
     if (!_cronList.length) {
       box.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:12px">${esc(t('cron_no_jobs'))}</div>`;
+      if (_cronMode !== 'create' && _cronMode !== 'edit') _clearCronDetail();
       return;
     }
     box.innerHTML = '';
@@ -107,6 +144,7 @@ async function loadCrons(animate) {
     if (_currentCronDetail && _cronMode !== 'create' && _cronMode !== 'edit') {
       const refreshed = _cronList.find(j => j.id === _currentCronDetail.id);
       if (refreshed) _renderCronDetail(refreshed);
+      else _clearCronDetail();
     }
   } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`; }
   finally {
@@ -1119,6 +1157,7 @@ function renderWorkspacesPanel(workspaces){
   if (_currentWorkspaceDetail && _workspaceMode !== 'create' && _workspaceMode !== 'edit') {
     const refreshed = workspaces.find(w => w.path === _currentWorkspaceDetail.path);
     if (refreshed) _renderWorkspaceDetail(refreshed);
+    else _clearWorkspaceDetail();
   }
 }
 
@@ -1419,6 +1458,7 @@ async function loadProfilesPanel() {
     panel.innerHTML = '';
     if (!data.profiles || !data.profiles.length) {
       panel.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:12px">${esc(t('profiles_no_profiles'))}</div>`;
+      if (_profileMode !== 'create') _clearProfileDetail();
       return;
     }
     for (const p of data.profiles) {
@@ -1450,6 +1490,7 @@ async function loadProfilesPanel() {
     if (_currentProfileDetail && _profileMode !== 'create') {
       const refreshed = data.profiles.find(p => p.name === _currentProfileDetail.name);
       if (refreshed) _renderProfileDetail(refreshed, data.active);
+      else _clearProfileDetail();
     }
   } catch (e) {
     panel.innerHTML = `<div style="color:var(--accent);font-size:12px;padding:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
@@ -1891,10 +1932,6 @@ function toggleSettings(){
   if(_currentPanel==='settings'){
     _closeSettingsPanel();
   } else {
-    _settingsDirty = false;
-    _settingsThemeOnOpen = localStorage.getItem('hermes-theme') || 'dark';
-    _settingsSkinOnOpen = localStorage.getItem('hermes-skin') || 'default';
-    _settingsFontSizeOnOpen = localStorage.getItem('hermes-font-size') || 'default';
     switchPanel('settings');
   }
 }
@@ -1906,7 +1943,8 @@ function _resetSettingsPanelState(){
 
 function _hideSettingsPanel(){
   _resetSettingsPanelState();
-  if(_currentPanel==='settings') switchPanel('chat');
+  const target = _consumeSettingsTargetPanel('chat');
+  if(_currentPanel==='settings') switchPanel(target, {bypassSettingsGuard:true});
 }
 
 // Close with unsaved-changes check. If dirty, show a confirm dialog.
@@ -1916,6 +1954,7 @@ function _closeSettingsPanel(){
     _hideSettingsPanel();
     return;
   }
+  _pendingSettingsTargetPanel = _pendingSettingsTargetPanel || 'chat';
   _showSettingsUnsavedBar();
 }
 
@@ -2075,7 +2114,7 @@ function _setSettingsAuthButtonsVisible(active){
 }
 
 function _applySavedSettingsUi(saved, body, opts){
-  const {sendKey,showTokenUsage,showCliSessions,theme,skin,language,sidebarDensity}=opts;
+  const {sendKey,showTokenUsage,showCliSessions,theme,skin,language,sidebarDensity,fontSize}=opts;
   window._sendKey=sendKey||'enter';
   window._showTokenUsage=showTokenUsage;
   window._showCliSessions=showCliSessions;
@@ -2095,6 +2134,7 @@ function _applySavedSettingsUi(saved, body, opts){
   _settingsDirty=false;
   _settingsThemeOnOpen=theme;
   _settingsSkinOnOpen=skin||'default';
+  _settingsFontSizeOnOpen=fontSize||localStorage.getItem('hermes-font-size')||'default';
   const bar=$('settingsUnsavedBar');
   if(bar) bar.style.display='none';
   _settingsHermesDefaultModelOnOpen=body.default_model||_settingsHermesDefaultModelOnOpen||'';
@@ -2112,6 +2152,7 @@ async function saveSettings(andClose){
   const pw=($('settingsPassword')||{}).value;
   const theme=($('settingsTheme')||{}).value||'dark';
   const skin=($('settingsSkin')||{}).value||'default';
+  const fontSize=($('settingsFontSize')||{}).value||localStorage.getItem('hermes-font-size')||'default';
   const language=($('settingsLanguage')||{}).value||'en';
   const sidebarDensity=($('settingsSidebarDensity')||{}).value==='detailed'?'detailed':'compact';
   const body={};
@@ -2142,10 +2183,11 @@ async function saveSettings(andClose){
           if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
         }
       }
-      _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,skin,language,sidebarDensity});
+      _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
       showToast(t(saved.auth_just_enabled?'settings_saved_pw':'settings_saved_pw_updated'));
       _settingsDirty=false;
       _resetSettingsPanelState();
+      if(!andClose) _pendingSettingsTargetPanel = null;
       if(andClose) _hideSettingsPanel();
       return;
     }catch(e){showToast(t('settings_save_failed')+e.message);return;}
@@ -2160,10 +2202,11 @@ async function saveSettings(andClose){
         if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
       }
     }
-    _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,skin,language,sidebarDensity});
+    _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
     showToast(t('settings_saved'));
     _settingsDirty=false;
     _resetSettingsPanelState();
+    if(!andClose) _pendingSettingsTargetPanel = null;
     if(andClose) _hideSettingsPanel();
   }catch(e){
     showToast(t('settings_save_failed')+e.message);
