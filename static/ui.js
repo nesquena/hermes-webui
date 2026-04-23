@@ -1127,10 +1127,10 @@ async function applyUpdates(){
         return;
       }
     }
-    showToast('Updated! Restarting\u2026');
+    showToast('Update applied — restarting…');
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
-    setTimeout(()=>location.reload(),2500);
+    _waitForServerThenReload();
   }catch(e){
     if(errEl){errEl.textContent='Update failed: '+e.message;errEl.style.display='block';}
     else showToast('Update failed: '+e.message);
@@ -1174,10 +1174,10 @@ async function forceUpdate(btn){
       btn.disabled=false;btn.textContent='Force update';
       return;
     }
-    showToast('Force updated! Restarting\u2026');
+    showToast('Force update applied — restarting…');
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
-    setTimeout(()=>location.reload(),2500);
+    _waitForServerThenReload();
   }catch(e){
     if(errEl){errEl.textContent='Force update failed: '+e.message;errEl.style.display='block';}
     btn.disabled=false;btn.textContent='Force update';

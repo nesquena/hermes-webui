@@ -251,23 +251,31 @@ class TestUiJsUpdateBanner:
         m = re.search(r'function applyUpdates\b.*?\n\}', src, re.DOTALL)
         assert m, "applyUpdates() not found"
         fn = m.group(0)
-        assert 'Restarting' in fn, (
-            "success toast must say 'Restarting' (server self-restarts after update)"
+        assert 'restarting' in fn.lower(), (
+            "success toast must mention 'restarting' (server self-restarts after update)"
         )
         assert 'Reloading' not in fn, (
             "success toast must not say 'Reloading' — server restarts, page reloads after"
         )
 
-    def test_reload_timeout_at_least_2000ms(self):
-        """Reload delay must be >= 2000 ms to give the server time to restart."""
+    def test_reload_uses_health_poll_not_blind_timeout(self):
+        """applyUpdates must use _waitForServerThenReload() instead of a blind setTimeout.
+
+        A fixed setTimeout race-loses against slow hardware or reverse proxies
+        that return 502 immediately when the upstream socket is down.
+        The polling approach retries until /health responds OK.
+        """
         src = read('static/ui.js')
         m = re.search(r'function applyUpdates\b.*?\n\}', src, re.DOTALL)
         assert m, "applyUpdates() not found"
         fn = m.group(0)
-        timeouts = re.findall(r'setTimeout\(.*?(\d+)\)', fn)
-        assert timeouts, "applyUpdates must have a setTimeout for page reload"
-        assert any(int(t) >= 2000 for t in timeouts), (
-            f"reload timeout must be >= 2000 ms to survive server restart; found: {timeouts}"
+        assert '_waitForServerThenReload' in fn, (
+            "applyUpdates() must call _waitForServerThenReload() instead of a blind "
+            "setTimeout reload — blind timeouts race-lose against slow restarts and "
+            "reverse proxies that 502 immediately on restart."
+        )
+        assert 'setTimeout(()=>location.reload' not in fn, (
+            "applyUpdates() must not use a fixed setTimeout reload — use _waitForServerThenReload()."
         )
 
     def test_conflict_response_shows_force_button(self):
