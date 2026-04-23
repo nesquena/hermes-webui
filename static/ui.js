@@ -630,7 +630,7 @@ function renderMd(raw){
   // Stash <code> tags from the backtick pass above so the outer bold/italic
   // regexes don't esc() their content (e.g. **`code`** → <strong><code>code</code></strong>)
   const _ob_stash=[];
-  s=s.replace(/(<code>[^<]*<\/code>)/g,m=>{_ob_stash.push(m);return `\x00O${_ob_stash.length-1}\x00`;});
+  s=s.replace(/(<code\b[^>]*>[\s\S]*?<\/code>)/g,m=>{_ob_stash.push(m);return `\x00O${_ob_stash.length-1}\x00`;});
   s=s.replace(/\*\*\*(.+?)\*\*\*/g,(_,t)=>`<strong><em>${esc(t)}</em></strong>`);
   s=s.replace(/\*\*(.+?)\*\*/g,(_,t)=>`<strong>${esc(t)}</strong>`);
   s=s.replace(/\*([^*\n]+)\*/g,(_,t)=>`<em>${esc(t)}</em>`);
