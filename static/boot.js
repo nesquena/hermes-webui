@@ -898,3 +898,53 @@ window.addEventListener('pageshow', (event) => {
     try { renderSessionListFromCache(); } catch (_) {}
   }
 });
+
+// ── Hermes hero splash — populate stats on the blank "new conversation" screen.
+// Called from boot, and again whenever the settings panel or profile switcher
+// changes a relevant value. Failures are silent: the hero shows '—' by default,
+// which reads cleanly as "info unavailable" rather than a broken state.
+async function refreshHermesHero(){
+  const set=(id,val)=>{const el=document.getElementById(id);if(el&&val!=null&&val!=='') el.textContent=String(val);};
+  // Version: _bootSettings was captured during boot; fall back to a fresh fetch.
+  try{
+    const s=(typeof _bootSettings==='object'&&_bootSettings)||await api('/api/settings');
+    if(s&&s.webui_version) set('heroVersion','v'+s.webui_version);
+  }catch(_){ }
+  // Profile: live from the chip, or from S.activeProfile
+  try{
+    const pchip=document.getElementById('profileChipLabel');
+    const pname=(pchip&&pchip.textContent||'').trim()||(window.S&&S.activeProfile)||'default';
+    set('heroProfile',pname);
+  }catch(_){ }
+  // Model: live from the model chip (populated by populateModelDropdown)
+  try{
+    const mchip=document.getElementById('composerModelLabel');
+    const mname=(mchip&&mchip.textContent||'').trim();
+    if(mname) set('heroModel',mname);
+  }catch(_){ }
+  // Skills count — /api/skills is cheap and already used by the skills panel.
+  api('/api/skills').then(d=>{
+    const n=(d&&Array.isArray(d.skills))?d.skills.length:null;
+    if(n!=null) set('heroStatSkills',n);
+  }).catch(()=>{});
+  // Sessions count — /api/sessions returns the full list; take .length.
+  api('/api/sessions').then(d=>{
+    const arr=(d&&(d.sessions||d.items))||null;
+    if(Array.isArray(arr)) set('heroStatSessions',arr.length);
+  }).catch(()=>{});
+  // Workspaces count — /api/workspaces returns saved workspace entries.
+  api('/api/workspaces').then(d=>{
+    const arr=(d&&(d.workspaces||d.items))||null;
+    if(Array.isArray(arr)) set('heroStatWorkspaces',arr.length);
+  }).catch(()=>{});
+  // Profiles count — /api/profiles returns agent profile entries.
+  api('/api/profiles').then(d=>{
+    const arr=(d&&(d.profiles||d.items))||null;
+    if(Array.isArray(arr)) set('heroStatProfiles',arr.length);
+  }).catch(()=>{});
+}
+window.refreshHermesHero=refreshHermesHero;
+// Run once shortly after DOM is live so boot IIFE has a chance to populate chips.
+setTimeout(()=>{ try{ refreshHermesHero(); }catch(_){ } }, 400);
+// Refresh when switching back to an empty conversation
+window.addEventListener('visibilitychange',()=>{ if(!document.hidden){ try{ refreshHermesHero(); }catch(_){ } } });

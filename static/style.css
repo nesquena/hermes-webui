@@ -131,8 +131,13 @@
   :root[data-skin="claude"] .sidebar-header h1{letter-spacing:-0.01em;}
   /* Softer, less decorative chrome */
   :root[data-skin="claude"] .composer-box{border-radius:18px;}
-  :root[data-skin="claude"] .new-chat-btn{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;}
-  :root[data-skin="claude"] .new-chat-btn:hover{background:var(--accent-hover);border-color:var(--accent-hover);color:#fff;}
+  /* Specificity boosted to beat the :root:not(.dark) .new-chat-btn rule that
+     appears later in the file and would otherwise set color:var(--accent-text)
+     on top of our solid-accent background, producing clay-on-clay invisibility. */
+  :root[data-skin="claude"]:not(.dark) .new-chat-btn,
+  :root.dark[data-skin="claude"] .new-chat-btn{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;box-shadow:0 1px 2px rgba(20,19,17,0.08);}
+  :root[data-skin="claude"]:not(.dark) .new-chat-btn:hover,
+  :root.dark[data-skin="claude"] .new-chat-btn:hover{background:var(--accent-hover);border-color:var(--accent-hover);color:#fff;}
   :root[data-skin="claude"] .empty-logo{background:var(--surface);border:1px solid var(--border);box-shadow:0 1px 2px rgba(20,19,17,0.04);}
   :root.dark[data-skin="claude"] .empty-logo{box-shadow:0 1px 2px rgba(0,0,0,0.3);}
   /* Tool / thinking cards: mute the blue-ish Hermes highlights */
@@ -1915,4 +1920,53 @@ body.resizing{user-select:none;cursor:col-resize;}
   .msg-role { margin-bottom: 4px; }
   .msg-row[data-role="user"] .msg-body { padding: 8px 12px; }
   .msg-row[data-error="1"] .msg-body { padding: 8px 12px; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Hermes hero — "new conversation" splash that echoes the CLI start banner.
+   Renders inside #emptyState so it only appears on a blank conversation.
+   Layout (top→bottom): rule + HERMES · AGENT + rule, caduceus, meta chips,
+   4-up stat tiles, title/subtitle, suggestion grid.
+   Colors are variable-driven so every skin gets a coherent version.
+   ═══════════════════════════════════════════════════════════════════ */
+.empty-state { padding: 40px 28px 56px; }
+.hermes-hero { display: flex; flex-direction: column; align-items: center; gap: 18px; width: 100%; max-width: 620px; margin: 0 auto; }
+.hermes-hero-banner { display: flex; align-items: center; justify-content: center; gap: 14px; width: 100%; }
+.hermes-hero-bar { flex: 1; height: 1px; background: linear-gradient(90deg, transparent, var(--border2) 40%, var(--border2) 60%, transparent); opacity: .9; }
+.hermes-hero-title { display: inline-flex; align-items: baseline; gap: 10px; font-family: "JetBrains Mono", "SF Mono", "Fira Code", ui-monospace, Menlo, monospace; font-size: 15px; font-weight: 700; letter-spacing: 0.42em; text-transform: uppercase; color: var(--accent-text); white-space: nowrap; padding: 0 2px; }
+.hermes-hero-title > span { text-shadow: 0 1px 0 var(--accent-bg); }
+.hermes-hero-sep { opacity: .55; font-weight: 400; letter-spacing: 0; }
+.hermes-hero .empty-logo { width: 72px; height: 72px; margin-bottom: 0; border-radius: 16px; background: var(--surface); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; box-shadow: 0 1px 2px rgba(20,19,17,0.05); }
+:root.dark .hermes-hero .empty-logo { box-shadow: 0 1px 2px rgba(0,0,0,0.3); }
+.hermes-hero .empty-logo svg { width: 48px; height: 48px; }
+.hermes-hero-meta { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px 10px; font-family: "JetBrains Mono", "SF Mono", ui-monospace, monospace; font-size: 11px; color: var(--muted); max-width: 100%; }
+.hermes-hero-meta-chip { display: inline-flex; align-items: baseline; gap: 6px; white-space: nowrap; }
+.hermes-hero-meta-key { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); opacity: .7; }
+.hermes-hero-meta-val { color: var(--text); font-weight: 500; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
+.hermes-hero-meta-sep { color: var(--border2); opacity: .7; }
+.hermes-hero-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; width: 100%; margin-top: 2px; }
+.hermes-hero-stat { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; padding: 14px 8px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; transition: border-color .15s, transform .15s, box-shadow .15s; }
+.hermes-hero-stat:hover { border-color: var(--accent-bg-strong); transform: translateY(-1px); box-shadow: 0 4px 14px rgba(20,19,17,0.05); }
+:root.dark .hermes-hero-stat:hover { box-shadow: 0 4px 14px rgba(0,0,0,0.35); }
+.hermes-hero-stat-num { font-family: "JetBrains Mono", "SF Mono", ui-monospace, monospace; font-size: 20px; font-weight: 700; color: var(--accent-text); letter-spacing: -0.01em; font-variant-numeric: tabular-nums; line-height: 1; }
+.hermes-hero-stat-label { font-family: "JetBrains Mono", "SF Mono", ui-monospace, monospace; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .14em; color: var(--muted); }
+.hermes-hero-copy { display: flex; flex-direction: column; align-items: center; gap: 6px; margin-top: 6px; text-align: center; }
+.hermes-hero-copy h2 { font-size: 22px; font-weight: 600; color: var(--text); letter-spacing: -0.015em; margin: 0; }
+.hermes-hero-copy p { font-size: 14px; color: var(--muted); max-width: 420px; margin: 0; line-height: 1.55; }
+.hermes-hero .suggestion-grid { margin-top: 4px; width: 100%; max-width: 460px; }
+
+/* Claude skin: punch up the banner with the Claude clay color */
+:root[data-skin="claude"] .hermes-hero-title { font-family: "JetBrains Mono", "SF Mono", "Fira Code", ui-monospace, Menlo, monospace; color: var(--accent); letter-spacing: 0.46em; }
+:root[data-skin="claude"] .hermes-hero-stat-num { color: var(--accent); }
+:root[data-skin="claude"] .hermes-hero-copy h2 { font-family: "Tiempos Text", "Source Serif Pro", "Charter", ui-serif, Georgia, serif; font-weight: 500; font-size: 26px; letter-spacing: -0.02em; }
+:root[data-skin="claude"] .hermes-hero-copy p { font-family: "Tiempos Text", "Source Serif Pro", "Charter", ui-serif, Georgia, serif; font-size: 15px; }
+
+@media (max-width: 700px) {
+  .empty-state { padding: 24px 14px 32px; }
+  .hermes-hero { gap: 14px; }
+  .hermes-hero-title { font-size: 13px; letter-spacing: 0.32em; gap: 8px; }
+  .hermes-hero-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .hermes-hero-copy h2 { font-size: 19px; }
+  :root[data-skin="claude"] .hermes-hero-copy h2 { font-size: 22px; }
+  .hermes-hero-meta { font-size: 10px; }
 }
