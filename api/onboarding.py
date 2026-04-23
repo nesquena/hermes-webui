@@ -435,6 +435,15 @@ def get_onboarding_status() -> dict:
     config_exists = Path(_get_config_path()).exists()
     config_auto_completed = config_exists and bool(runtime.get("chat_ready"))
 
+    # Persist the flag so it survives future transient import failures (e.g. after
+    # a git branch switch in the hermes-agent repo).  Without this, a CLI-configured
+    # user who never ran the wizard has no onboarding_completed flag — any momentary
+    # imports_ok=False during restart makes chat_ready=False, config_auto_completed=False,
+    # and the wizard reappears with a broken dropdown that clobbers their config.
+    if config_auto_completed and not settings.get("onboarding_completed"):
+        save_settings({"onboarding_completed": True})
+        settings["onboarding_completed"] = True
+
     return {
         "completed": bool(settings.get("onboarding_completed")) or auto_completed or config_auto_completed,
         "settings": {
