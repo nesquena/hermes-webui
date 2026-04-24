@@ -36,8 +36,8 @@ services:
       - "8787:8787"
     volumes:
       - ${HERMES_HOME:-~/.hermes}:/opt/hermes
-      - hermes-agent-src:/opt/hermes/hermes-agent
       - ${HERMES_WORKSPACE:-~/workspace}:/workspace
+      - ./config:/opt/hermes/config.d/:ro
     environment:
       - HERMES_WEBUI_HOST=0.0.0.0
       - HERMES_WEBUI_PORT=8787
@@ -52,6 +52,3 @@ services:
 networks:
   hermes-net:
     driver: bridge
-
-volumes:
-  hermes-agent-src:
