@@ -215,6 +215,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       toolCalls:inflight.toolCalls||[],
     });
   }
+  // Throttled variant for token-by-token updates. persistInflightState()
+  // calls saveInflightState() which does JSON.parse + JSON.stringify + write
+  // on the entire inflight map every call. On a fast model at 60 tok/s with
+  // a 10KB messages array this is ~36MB of JSON churn per second — a major
+  // GC pressure source that causes the renderer to crash under load.
+  // State transitions (tool events, done, error) still call persistInflightState()
+  // directly so no more than 2s of progress is lost on a crash.
+  let _persistTimer=null;
+  function _throttledPersist(){
+    if(_persistTimer) return;
+    _persistTimer=setTimeout(()=>{_persistTimer=null;persistInflightState();},2000);
+  }
   function _closeSource(){
     closeLiveStream(activeSid, streamId);
   }
@@ -232,11 +244,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       inflight.messages[assistantIdx].content=assistantText;
       inflight.messages[assistantIdx].reasoning=reasoningText||undefined;
       inflight.messages[assistantIdx]._ts=inflight.messages[assistantIdx]._ts||ts;
-      persistInflightState();
+      _throttledPersist();
       return;
     }
     inflight.messages.push({role:'assistant',content:assistantText,reasoning:reasoningText||undefined,_live:true,_ts:ts});
-    persistInflightState();
+    _throttledPersist();
   }
   function ensureAssistantRow(force=false){
     if(!_isActiveSession()) return;
@@ -616,6 +628,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('done',e=>{
       _terminalStateReached=true;
+      if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       // Bug A fix: cancel any pending rAF and mark stream finalized before
       // the DOM is settled by renderMessages, so no trailing token/reasoning rAF
       // can reintroduce a stale thinking card or duplicate content.
@@ -699,6 +712,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('apperror',e=>{
       _terminalStateReached=true;
+      if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
       if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
       _smdEndParser();
@@ -777,6 +791,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
 
     source.addEventListener('cancel',e=>{
       _terminalStateReached=true;
+      if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
       _streamFinalized=true;
       if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
       _smdEndParser();
@@ -853,6 +868,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _handleStreamError(){
     // Opus review Q1: mirror done/apperror/cancel finalization so any pending rAF
     // cannot fire after renderMessages() has settled the DOM with the error message.
+    if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}
     _streamFinalized=true;
     if(_pendingRafHandle!==null){cancelAnimationFrame(_pendingRafHandle);_pendingRafHandle=null;_renderPending=false;}
     if(typeof finalizeThinkingCard==='function') finalizeThinkingCard();
