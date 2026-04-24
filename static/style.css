@@ -1687,6 +1687,24 @@ body.resizing{user-select:none;cursor:col-resize;}
   padding-top: 12px;
 }
 
+/* ── Route badge: shows CLASS • Model on assistant messages ── */
+.route-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--muted);
+  background: var(--surface2, rgba(255,255,255,0.06));
+  border: 1px solid var(--border, rgba(255,255,255,0.1));
+  border-radius: 4px;
+  padding: 2px 7px;
+  margin: 6px 0 2px 0;
+  letter-spacing: 0.03em;
+  opacity: 0.75;
+  width: fit-content;
+}
+
 /* ── Message footer: actions (and user timestamp) sit below the bubble ── */
 .msg-foot {
   display: flex;

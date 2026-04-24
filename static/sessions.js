@@ -21,7 +21,9 @@ async function newSession(flash){
   const switchWs=S._profileSwitchWorkspace;
   S._profileSwitchWorkspace=null;
   const inheritWs=switchWs||(S.session?S.session.workspace:null)||(S._profileDefaultWorkspace||null);
-  const data=await api('/api/session/new',{method:'POST',body:JSON.stringify({model:$('modelSelect').value,workspace:inheritWs,profile:S.activeProfile||'default'})});
+  const _selVal=$('modelSelect').value;
+  const _modelForNew=_selVal==='__auto__'?'auto':_selVal;
+  const data=await api('/api/session/new',{method:'POST',body:JSON.stringify({model:_modelForNew,workspace:inheritWs,profile:S.activeProfile||'default'})});
   S.session=data.session;S.messages=data.session.messages||[];
   S.lastUsage={...(data.session.last_usage||{})};
   if(flash)S.session._flash=true;

@@ -93,14 +93,18 @@ async function send(){
   try{
     const startData=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
       session_id:activeSid,message:msgText,
-      model:S.session.model||$('modelSelect').value,workspace:S.session.workspace,
+      model:(S.session.model==='auto'||S.session.model==='__auto__')?'__auto__':(S.session.model||$('modelSelect').value),workspace:S.session.workspace,
       attachments:uploaded.length?uploaded:undefined
     })});
     if(startData.effective_model && S.session){
-      S.session.model=startData.effective_model;
-      localStorage.setItem('hermes-webui-model', startData.effective_model);
-      if($('modelSelect')) _applyModelToDropdown(startData.effective_model, $('modelSelect'));
-      if(typeof syncTopbar==='function') syncTopbar();
+      // If user selected Auto (__auto__), keep Auto selected — don't overwrite with routed model
+      const _currentModel = S.session.model || ($('modelSelect') && $('modelSelect').value);
+      if(_currentModel !== '__auto__'){
+        S.session.model=startData.effective_model;
+        localStorage.setItem('hermes-webui-model', startData.effective_model);
+        if($('modelSelect')) _applyModelToDropdown(startData.effective_model, $('modelSelect'));
+        if(typeof syncTopbar==='function') syncTopbar();
+      }
     }
     streamId=startData.stream_id;
     S.activeStreamId = streamId;
@@ -495,6 +499,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           session_id:String(d.session_id||activeSid)
         });
       }catch(_){}
+    });
+
+    source.addEventListener('model_routed',e=>{
+      const d=JSON.parse(e.data);
+      // Update chip to show CLASS • Model (e.g. "COMPLEX • Sonnet 4.6")
+      const chip=$('composerModelChip');
+      const label=document.getElementById('composerModelLabel');
+      const cls=d.class_label||'';
+      const modelName=getModelLabel(d.routed_model||d.model);
+      const display=cls ? cls+' • '+modelName : modelName;
+      if(label) label.textContent=display;
+      if(chip) chip.title='Routed: '+(d.routed_model||d.model)+' ('+cls+')';
     });
 
     source.addEventListener('done',e=>{

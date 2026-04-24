@@ -1637,7 +1637,9 @@ def get_available_models() -> dict:
 
     result = {
         "active_provider": active_provider,
-        "default_model": default_model,
+        # Always advertise "auto" as the default so the UI boots with ⚡ Auto selected.
+        # The actual fallback model is resolved per-query by the smart router.
+        "default_model": "auto",
         "groups": groups,
     }
     # Cache the result for TTL seconds

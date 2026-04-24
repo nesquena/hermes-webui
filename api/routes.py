@@ -2364,7 +2364,30 @@ def _handle_chat_start(handler, body):
         workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
     except ValueError as e:
         return bad(handler, str(e))
-    requested_model = body.get("model") or s.model
+    # Determine requested model:
+    # - explicit model in body always wins (unless it's the "auto" sentinel)
+    # - "auto" / "__auto__" / no model means smart router decides per query
+    _raw_model = body.get("model")
+    explicit_model = None if (_raw_model in (None, "", "auto", "__auto__")) else _raw_model
+    session_is_auto = (not explicit_model) and (not s.model or s.model in ("auto", "__auto__"))
+    requested_model = explicit_model or (None if session_is_auto else s.model)
+
+    from api.smart_router import smart_route
+    routed_model = None
+    class_label = None
+    if not explicit_model:
+        # Always re-route in auto mode; also route if session model is unset
+        routing = smart_route(msg, attachments=attachments)
+        if routing:
+            routed_model = routing.get("model")
+            class_label = routing.get("class_label")
+            requested_model = routed_model
+        elif not requested_model:
+            # smart router returned nothing (no rules file) — fall back to config default
+            from api.config import get_effective_default_model
+            requested_model = get_effective_default_model()
+            routed_model = requested_model
+
     model, normalized_model = _resolve_compatible_session_model(requested_model)
     # Prevent duplicate runs in the same session while a stream is still active.
     # This commonly happens after page refresh/reconnect races and can produce
@@ -2386,7 +2409,22 @@ def _handle_chat_start(handler, body):
         s.active_stream_id = None
     stream_id = uuid.uuid4().hex
     s.workspace = workspace
-    s.model = model
+    # Preserve "auto" on the session so next query is re-routed.
+    # Only pin the model if the user explicitly chose one.
+    if explicit_model:
+        s.model = model
+    # else: leave s.model as "auto" — streaming.py will revert to "auto" on completion anyway
+
+    # ── Write routing decision to audit log ──
+    try:
+        import datetime as _dt
+        _log_path = os.path.join(os.path.expanduser("~/.hermes"), "routing.log")
+        _mode = "routed" if routed_model else "explicit"
+        _entry = f"{_dt.datetime.now().isoformat()} | session={s.session_id} | mode={_mode} | class={class_label or 'n/a'} | model={model} | query={msg[:80]}\n"
+        with open(_log_path, "a") as _lf:
+            _lf.write(_entry)
+    except Exception:
+        pass
     s.active_stream_id = stream_id
     s.pending_user_message = msg
     s.pending_attachments = attachments
@@ -2399,6 +2437,7 @@ def _handle_chat_start(handler, body):
     thr = threading.Thread(
         target=_run_agent_streaming,
         args=(s.session_id, msg, model, workspace, stream_id, attachments),
+        kwargs={"routed_model": routed_model, "class_label": class_label},
         daemon=True,
     )
     thr.start()

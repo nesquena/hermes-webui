@@ -796,7 +796,7 @@ def _sse(handler, event, data):
     handler.wfile.flush()
 
 
-def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, attachments=None):
+def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, attachments=None, routed_model=None, class_label=None):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id]."""
     q = STREAMS.get(stream_id)
     if q is None:
@@ -839,7 +839,10 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
     try:
         s = get_session(session_id)
         s.workspace = str(Path(workspace).expanduser().resolve())
-        s.model = model
+        # Only pin the model on the session if it wasn't in auto mode.
+        # Auto sessions revert back to "auto" on completion (see finally block below).
+        if s.model not in ("auto", "__auto__", None, ""):
+            s.model = model
 
         _agent_lock = _get_session_agent_lock(session_id)
         # TD1: set thread-local env context so concurrent sessions don't clobber globals
@@ -1063,7 +1066,14 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 _session_db = SessionDB()
             except Exception as _db_err:
                 print(f"[webui] WARNING: SessionDB init failed — session_search will be unavailable: {_db_err}", flush=True)
+            # Routing already done in routes.py — model param is the resolved model.
+            # routed_model kwarg carries the original routing decision for tagging.
             resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(model)
+
+            # ── Notify UI of routing decision so chip can update ──
+            # Only emit when in auto mode (routed_model is set by routes.py smart router).
+            if routed_model:
+                put('model_routed', {'model': resolved_model, 'routed_model': routed_model, 'class_label': class_label or 'MEDIUM'})
 
             # Resolve API key via Hermes runtime provider (matches gateway behaviour).
             # Pass the resolved provider so non-default providers get their own credentials.
@@ -1274,6 +1284,25 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                             if isinstance(_part, dict) and isinstance(_part.get('text'), str):
                                 _part['text'] = _strip_xml_tool_calls(_part['text'])
 
+            # ── Tag only the NEW assistant message(s) from this turn ──
+            # routed_model is the smart-router decision passed from routes.py.
+            # Fall back to model (already resolved) if routing was explicit.
+            _tag_model = routed_model or model
+            # Only tag messages added during this turn (no model field yet).
+            # Iterate in reverse and stop at the first already-tagged message
+            # or user message — those belong to previous turns.
+            for _m in reversed(s.messages):
+                if not isinstance(_m, dict):
+                    continue
+                if _m.get('role') == 'user':
+                    break  # hit the user message that triggered this turn — stop
+                if _m.get('model'):
+                    break  # already tagged from a prior turn — stop
+                if _m.get('role') == 'assistant':
+                    _m['model'] = _tag_model
+                    if class_label:
+                        _m['class_label'] = class_label
+
             # ── Detect silent agent failure (no assistant reply produced) ──
             # When the agent catches an auth/network error internally it may return
             # an empty final_response without raising — the stream would end with
@@ -1333,6 +1362,8 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 s.pending_user_message = None
                 s.pending_attachments = []
                 s.pending_started_at = None
+                # Revert to auto mode so next query is re-routed by smart router
+                s.model = "auto"
                 # Persist the error so it survives page reload.
                 # _error=True ensures _sanitize_messages_for_api excludes it from
                 # subsequent API calls so the LLM never sees its own error as prior context.
@@ -1419,6 +1450,8 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             s.pending_user_message = None
             s.pending_attachments = []
             s.pending_started_at = None
+            # Revert to auto mode so next query is re-routed by smart router
+            s.model = "auto"
             # Tag the matching user message with attachment filenames for display on reload
             # Only tag a user message whose content relates to this turn's text
             # (msg_text is the full message including the [Attached files: ...] suffix)
@@ -1557,6 +1590,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 'role': 'assistant',
                 'content': f'**{_exc_label}:** {err_str}' + (f'\n\n*{_exc_hint}*' if _exc_hint else ''),
                 'timestamp': int(time.time()),
+                'model': model,
                 '_error': True,
             })
             try:

@@ -217,7 +217,9 @@ def new_session(workspace=None, model=None, profile=None):
             profile = get_active_profile_name()
         except ImportError:
             profile = None
-    effective_model = model or get_effective_default_model()
+    # Start every session in "auto" mode — smart router picks the model per query.
+    # Only use an explicit model if the caller passed one (e.g. user manually selected).
+    effective_model = model if model else "auto"
     s = Session(
         workspace=workspace or get_last_workspace(),
         model=effective_model,
