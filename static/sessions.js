@@ -306,8 +306,8 @@ function _openSessionActionMenu(session, anchorEl){
   const menu=document.createElement('div');
   menu.className='session-action-menu open';
   menu.appendChild(_buildSessionAction(
-    session.pinned?'Unpin conversation':'Pin conversation',
-    session.pinned?'Remove from pinned':'Keep this conversation at the top',
+    session.pinned?t('session_unpin'):t('session_pin'),
+    session.pinned?t('session_unpin_desc'):t('session_pin_desc'),
     session.pinned?ICONS.pin:ICONS.unpin,
     async()=>{
       closeSessionActionMenu();
@@ -317,13 +317,13 @@ function _openSessionActionMenu(session, anchorEl){
         session.pinned=newPinned;
         if(S.session&&S.session.session_id===session.session_id) S.session.pinned=newPinned;
         renderSessionList();
-      }catch(err){showToast('Pin failed: '+err.message);}
+      }catch(err){showToast(t('session_pin_failed')+err.message);}
     },
     session.pinned?'is-active':''
   ));
   menu.appendChild(_buildSessionAction(
-    'Move to project',
-    session.project_id?'Change the project for this conversation':'Assign a project to this conversation',
+    t('session_move_project'),
+    session.project_id?t('session_move_project_desc_has'):t('session_move_project_desc_none'),
     ICONS.folder,
     async()=>{
       closeSessionActionMenu();
@@ -331,8 +331,8 @@ function _openSessionActionMenu(session, anchorEl){
     }
   ));
   menu.appendChild(_buildSessionAction(
-    session.archived?'Restore conversation':'Archive conversation',
-    session.archived?'Bring this conversation back into the main list':'Hide this conversation until archived is shown',
+    session.archived?t('session_restore'):t('session_archive'),
+    session.archived?t('session_restore_desc'):t('session_archive_desc'),
     session.archived?ICONS.unarchive:ICONS.archive,
     async()=>{
       closeSessionActionMenu();
@@ -341,13 +341,13 @@ function _openSessionActionMenu(session, anchorEl){
         session.archived=!session.archived;
         if(S.session&&S.session.session_id===session.session_id) S.session.archived=session.archived;
         await renderSessionList();
-        showToast(session.archived?'Session archived':'Session restored');
-      }catch(err){showToast('Archive failed: '+err.message);}
+        showToast(session.archived?t('session_archived'):t('session_restored'));
+      }catch(err){showToast(t('session_archive_failed')+err.message);}
     }
   ));
   menu.appendChild(_buildSessionAction(
-    'Duplicate conversation',
-    'Create a copy with the same workspace and model',
+    t('session_duplicate'),
+    t('session_duplicate_desc'),
     ICONS.dup,
     async()=>{
       closeSessionActionMenu();
@@ -357,14 +357,14 @@ function _openSessionActionMenu(session, anchorEl){
           await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:res.session.session_id,title:(session.title||'Untitled')+' (copy)'})});
           await loadSession(res.session.session_id);
           await renderSessionList();
-          showToast('Session duplicated');
+          showToast(t('session_duplicated'));
         }
-      }catch(err){showToast('Duplicate failed: '+err.message);}
+      }catch(err){showToast(t('session_duplicate_failed')+err.message);}
     }
   ));
   menu.appendChild(_buildSessionAction(
-    'Delete conversation',
-    'Permanently remove this conversation',
+    t('session_delete'),
+    t('session_delete_desc'),
     ICONS.trash,
     async()=>{
       closeSessionActionMenu();

@@ -482,32 +482,32 @@
     <div class="settings-header">
       <div class="settings-heading">
         <div class="settings-kicker">Hermes WebUI</div>
-        <h3 style="margin:0;font-size:18px">Control Center</h3>
-        <div class="settings-subtitle">Preferences, conversation tools, and system controls.</div>
+        <h3 style="margin:0;font-size:18px" data-i18n="settings_heading_title">Control Center</h3>
+        <div class="settings-subtitle" data-i18n="settings_heading_subtitle">Preferences, conversation tools, and system controls.</div>
       </div>
       <button class="panel-icon-btn" onclick="_closeSettingsPanel()" title="Close"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
     </div>
     <div class="settings-body">
       <div class="settings-shell">
         <select id="settingsSectionDropdown" class="settings-section-dropdown" aria-label="Settings section" onchange="switchSettingsSection(this.value)">
-          <option value="conversation">Conversation</option>
-          <option value="appearance">Appearance</option>
-          <option value="preferences">Preferences</option>
-          <option value="providers">Providers</option>
-          <option value="system">System</option>
+          <option value="conversation" data-i18n="settings_dropdown_conversation">Conversation</option>
+          <option value="appearance" data-i18n="settings_dropdown_appearance">Appearance</option>
+          <option value="preferences" data-i18n="settings_dropdown_preferences">Preferences</option>
+          <option value="providers" data-i18n="settings_dropdown_providers">Providers</option>
+          <option value="system" data-i18n="settings_dropdown_system">System</option>
         </select>
         <div class="settings-tabs" role="tablist" aria-label="Hermes control center sections">
           <button class="settings-tab active" id="settingsTabConversation" type="button" role="tab" aria-selected="true" aria-controls="settingsPaneConversation" onclick="switchSettingsSection('conversation')">
             <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-            <span class="settings-tab-title">Conversation</span>
+            <span class="settings-tab-title" data-i18n="settings_tab_conversation">Conversation</span>
           </button>
           <button class="settings-tab" id="settingsTabAppearance" type="button" role="tab" aria-selected="false" aria-controls="settingsPaneAppearance" onclick="switchSettingsSection('appearance')">
             <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
-            <span class="settings-tab-title">Appearance</span>
+            <span class="settings-tab-title" data-i18n="settings_tab_appearance">Appearance</span>
           </button>
           <button class="settings-tab" id="settingsTabPreferences" type="button" role="tab" aria-selected="false" aria-controls="settingsPanePreferences" onclick="switchSettingsSection('preferences')">
-            <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
-            <span class="settings-tab-title">Preferences</span>
+            <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="10" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+            <span class="settings-tab-title" data-i18n="settings_tab_preferences">Preferences</span>
           </button>
           <button class="settings-tab" id="settingsTabProviders" type="button" role="tab" aria-selected="false" aria-controls="settingsPaneProviders" onclick="switchSettingsSection('providers')">
             <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
@@ -515,15 +515,15 @@
           </button>
           <button class="settings-tab" id="settingsTabSystem" type="button" role="tab" aria-selected="false" aria-controls="settingsPaneSystem" onclick="switchSettingsSection('system')">
             <svg class="settings-tab-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><line x1="6" y1="7" x2="6.01" y2="7"/><line x1="6" y1="17" x2="6.01" y2="17"/></svg>
-            <span class="settings-tab-title">System</span>
+            <span class="settings-tab-title" data-i18n="settings_tab_system">System</span>
           </button>
         </div>
         <div class="settings-main">
           <div class="settings-pane active" id="settingsPaneConversation" role="tabpanel" aria-labelledby="settingsTabConversation">
             <div class="settings-section-head">
               <div>
-                <div class="settings-section-title">Conversation</div>
-                <div class="settings-section-meta" id="hermesSessionMeta">No active conversation selected.</div>
+                <div class="settings-section-title" data-i18n="settings_section_conversation_title">Conversation</div>
+                <div class="settings-section-meta" id="hermesSessionMeta" data-i18n="active_conversation_none">No active conversation selected.</div>
               </div>
             </div>
             <div class="hermes-action-grid">
@@ -537,8 +537,8 @@
           <div class="settings-pane" id="settingsPaneAppearance" role="tabpanel" aria-labelledby="settingsTabAppearance">
             <div class="settings-section-head">
               <div>
-                <div class="settings-section-title">Appearance</div>
-                <div class="settings-section-meta">Theme, accent colors, and visual style.</div>
+                <div class="settings-section-title" data-i18n="settings_section_appearance_title">Appearance</div>
+                <div class="settings-section-meta" data-i18n="settings_section_appearance_meta">Theme, accent colors, and visual style.</div>
               </div>
             </div>
             <div class="settings-field">
@@ -600,8 +600,8 @@
           <div class="settings-pane" id="settingsPanePreferences" role="tabpanel" aria-labelledby="settingsTabPreferences">
             <div class="settings-section-head">
               <div>
-                <div class="settings-section-title">Preferences</div>
-                <div class="settings-section-meta">Defaults and UI behavior for Hermes Web UI.</div>
+                <div class="settings-section-title" data-i18n="settings_section_preferences_title">Preferences</div>
+                <div class="settings-section-meta" data-i18n="settings_section_preferences_meta">Defaults and UI behavior for Hermes Web UI.</div>
               </div>
             </div>
             <div class="settings-field">
@@ -693,8 +693,8 @@
           <div class="settings-pane" id="settingsPaneSystem" role="tabpanel" aria-labelledby="settingsTabSystem">
             <div class="settings-section-head">
               <div>
-                <div class="settings-section-title">System</div>
-                <div class="settings-section-meta">Instance version and access controls.</div>
+                <div class="settings-section-title" data-i18n="settings_section_system_title">System</div>
+                <div class="settings-section-meta" data-i18n="settings_section_system_meta">Instance version and access controls.</div>
               </div>
               <span class="settings-version-badge">—</span>
             </div>
