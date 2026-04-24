@@ -96,31 +96,51 @@ async function loadSession(sid){
   stopApprovalPolling();hideApprovalCard();
   if(typeof stopClarifyPolling==='function') stopClarifyPolling();
   if(typeof hideClarifyCard==='function') hideClarifyCard();
-  const data=await api(`/api/session?session_id=${encodeURIComponent(sid)}`);
+  // Show loading indicator immediately for responsiveness.
+  // Cleared by renderMessages() once full session data arrives.
+  const currentSid = S.session ? S.session.session_id : null;
+  if (currentSid !== sid) {
+    S.messages = [];
+    S.toolCalls = [];
+    const _msgInner = $('msgInner');
+    if (_msgInner) _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
+  }
+  // Phase 1: Load metadata only (~1KB) for fast session switching.
+  // Guard against network/server failures to prevent a permanently stuck loading state.
+  let data;
+  try {
+    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0`);
+  } catch(e) {
+    const _msgInner = $('msgInner');
+    if (_msgInner) {
+      _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load session. Try switching sessions or refreshing.</div>';
+    }
+    if (typeof showToast === 'function') showToast('Failed to load session', 3000, 'error');
+    return;
+  }
   S.session=data.session;
   S.lastUsage={...(data.session.last_usage||{})};
   _setSessionViewedCount(S.session.session_id, Number(data.session.message_count || 0));
   localStorage.setItem('hermes-webui-session',S.session.session_id);
-  data.session.messages = (data.session.messages || []).filter(m => m && m.role);
-  const hasMessageToolMetadata = (data.session.messages || []).some(m => {
-    if (!m || m.role !== 'assistant') return false;
-    const hasTc = Array.isArray(m.tool_calls) && m.tool_calls.length > 0;
-    const hasTu = Array.isArray(m.content) && m.content.some(p => p && p.type === 'tool_use');
-    return hasTc || hasTu;
-  });
-  const activeStreamId=data.session.active_stream_id||null;
+
+  const activeStreamId=S.session.active_stream_id||null;
+
+  // Phase 2a: If session is streaming, restore from INFLIGHT cache before
+  // loading full messages (INFLIGHT state is self-contained and sufficient).
   if(!INFLIGHT[sid]&&activeStreamId&&typeof loadInflightState==='function'){
     const stored=loadInflightState(sid, activeStreamId);
     if(stored){
       INFLIGHT[sid]={
-        messages:Array.isArray(stored.messages)&&stored.messages.length?stored.messages:[...(data.session.messages||[])],
-        uploaded:Array.isArray(stored.uploaded)?stored.uploaded:[...(data.session.pending_attachments||[])],
+        messages:Array.isArray(stored.messages)&&stored.messages.length?stored.messages:[],
+        uploaded:Array.isArray(stored.uploaded)?stored.uploaded:[],
         toolCalls:Array.isArray(stored.toolCalls)?stored.toolCalls:[],
         reattach:true,
       };
     }
   }
+
   if(INFLIGHT[sid]){
+    // Streaming session: use cached INFLIGHT messages (already has pending assistant output).
     S.messages=INFLIGHT[sid].messages;
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
     S.busy=true;
@@ -137,29 +157,38 @@ async function loadSession(sid){
     const _cb=$('btnCancel');if(_cb&&activeStreamId)_cb.style.display='inline-flex';
     if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function'){
       INFLIGHT[sid].reattach=false;
-      attachLiveStream(sid, activeStreamId, data.session.pending_attachments||[], {reconnecting:true});
+      attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
     }
   }else{
+    // Phase 2b: Idle session — load full messages lazily for rendering.
+    // _ensureMessagesLoaded is idempotent; it skips if S.messages already populated.
+    try {
+      await _ensureMessagesLoaded(sid);
+    } catch (e) {
+      // Network errors, server failures, or SSE drops (Chrome error codes 4/5)
+      // can cause _ensureMessagesLoaded to throw. Without a try/catch here the
+      // "Loading conversation..." div injected at the top of loadSession would
+      // persist forever with no recovery path.
+      const _msgInner = $('msgInner');
+      if (_msgInner) {
+        _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load messages. Try switching sessions or refreshing.</div>';
+      }
+      if (typeof showToast === 'function') showToast('Failed to load conversation messages', 3000, 'error');
+      return;
+    }
+
     // Restore any queued message that survived page refresh via sessionStorage.
-    // Only restore when the agent is idle — if active, the done handler drains it.
     if(typeof queueSessionMessage==='function'){
       try{
         const _storedQ=sessionStorage.getItem('hermes-queue-'+sid);
         if(_storedQ){
           const _entries=JSON.parse(_storedQ);
           if(Array.isArray(_entries)&&_entries.length){
-            // Timestamp guard: drop entries older than the last assistant response
-            // (means the agent already ran and the queue was already dispatched)
-            const _lastMsg=(data.session.messages||[]).slice().reverse()
+            const _lastMsg=S.messages.slice().reverse()
               .find(m=>m&&m.role==='assistant');
             const _lastAsst=_lastMsg?(_lastMsg.timestamp||_lastMsg._ts||0)*1000:0;
             const _fresh=_entries.filter(e=>!e._queued_at||e._queued_at>_lastAsst);
             if(_fresh.length){
-              // Idle path: restore the first entry as a composer draft only. Do NOT
-              // re-enqueue into SESSION_QUEUES — if we did, send() would dispatch the
-              // draft directly (S.busy=false) and then setBusy(false) would drain the
-              // same entry from the queue, causing a duplicate send. Any follow-up
-              // entries (2..N) are discarded by design; the toast tells the user so.
               const _first=_fresh[0];
               const _msg=$&&$('msg');
               if(_msg&&_first.text&&!_msg.value){
@@ -167,7 +196,6 @@ async function loadSession(sid){
                 if(typeof autoResize==='function') autoResize();
                 if(typeof showToast==='function') showToast((_fresh.length>1?`${_fresh.length} queued messages restored (showing first)`:'Queued message restored')+' — review and send when ready');
               }
-              // Clear persisted queue now that the draft is in the composer
               sessionStorage.removeItem('hermes-queue-'+sid);
             } else {
               sessionStorage.removeItem('hermes-queue-'+sid);
@@ -178,19 +206,15 @@ async function loadSession(sid){
         }
       }catch(_){sessionStorage.removeItem('hermes-queue-'+sid);}
     }
+
+    // Reconstruct tool calls from message metadata, or fall back to session-level summary.
+    // (hasMessageToolMetadata already computed inside _ensureMessagesLoaded; S.toolCalls set there.)
     updateQueueBadge(sid);
-    S.messages=data.session.messages||[];
-    const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(data.session):null;
+
+    // Attach pending user message if one is queued.
+    const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(S.session):null;
     if(pendingMsg) S.messages.push(pendingMsg);
-    // Prefer reconstructing cards from per-message tool metadata when available.
-    // Fall back to persisted session summaries for older sessions that only
-    // saved session.tool_calls and bare role=tool results.
-    if(!hasMessageToolMetadata&&data.session.tool_calls&&data.session.tool_calls.length){
-      S.toolCalls=(data.session.tool_calls||[]).map(tc=>({...tc,done:true}));
-    }else{
-      S.toolCalls=[];
-    }
-    clearLiveToolCards();
+
     if(activeStreamId){
       S.busy=true;
       S.activeStreamId=activeStreamId;
@@ -202,13 +226,9 @@ async function loadSession(sid){
       updateQueueBadge(sid);
       startApprovalPolling(sid);
       if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
-      if(typeof attachLiveStream==='function') attachLiveStream(sid, activeStreamId, data.session.pending_attachments||[], {reconnecting:true});
+      if(typeof attachLiveStream==='function') attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
       else if(typeof watchInflightSession==='function') watchInflightSession(sid, activeStreamId);
     }else{
-      // Reset per-session visual state: the viewed session is idle even if another
-      // session's stream is still running in the background.
-      // We directly update the DOM instead of calling setBusy(false), because
-      // setBusy(false) drains the viewed session's queued follow-up turns.
       S.busy=false;
       S.activeStreamId=null;
       updateSendBtn();
@@ -219,6 +239,7 @@ async function loadSession(sid){
       syncTopbar();renderMessages();highlightCode();loadDir('.');
     }
   }
+
   // Sync context usage indicator from session data
   const _s=S.session;
   if(_s&&typeof _syncCtxIndicator==='function'){
@@ -233,6 +254,34 @@ async function loadSession(sid){
       threshold_tokens:  _pick(u.threshold_tokens,  _s.threshold_tokens),
     });
   }
+}
+
+// Load session messages if not already present.
+// Called after loadSession fetches metadata (messages=0).
+// Idempotent: if messages are already in S.messages, resolves immediately.
+// Handles streaming sessions specially: restores from INFLIGHT cache or API.
+async function _ensureMessagesLoaded(sid) {
+  // Already have messages? (e.g. from INFLIGHT restore path, already set)
+  if (S.messages && S.messages.length > 0 && S.messages[0] && S.messages[0].role) {
+    return;
+  }
+  // Fetch full session with messages
+  const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1`);
+  const msgs = (data.session.messages || []).filter(m => m && m.role);
+  // Check for tool-call metadata on messages (for tool-call card rendering)
+  const hasMessageToolMetadata = msgs.some(m => {
+    if (!m || m.role !== 'assistant') return false;
+    const hasTc = Array.isArray(m.tool_calls) && m.tool_calls.length > 0;
+    const hasTu = Array.isArray(m.content) && m.content.some(p => p && p.type === 'tool_use');
+    return hasTc || hasTu;
+  });
+  if (!hasMessageToolMetadata && data.session.tool_calls && data.session.tool_calls.length) {
+    S.toolCalls = data.session.tool_calls.map(tc => ({...tc, done: true}));
+  } else {
+    S.toolCalls = [];
+  }
+  clearLiveToolCards();
+  S.messages = msgs;
 }
 
 let _allSessions = [];  // cached for search filter

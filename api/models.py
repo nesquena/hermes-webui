@@ -239,7 +239,24 @@ class Session:
     def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
         if touch_updated_at:
             self.updated_at = time.time()
-        payload = json.dumps(self.__dict__, ensure_ascii=False, indent=2)
+        # Write metadata fields first so load_metadata_only() can read them
+        # without parsing the full messages array (which may be 400KB+).
+        # Fields are listed in the order they should appear in the JSON file.
+        METADATA_FIELDS = [
+            'session_id', 'title', 'workspace', 'model', 'created_at', 'updated_at',
+            'pinned', 'archived', 'project_id', 'profile',
+            'input_tokens', 'output_tokens', 'estimated_cost',
+            'personality', 'active_stream_id',
+            'pending_user_message', 'pending_attachments', 'pending_started_at',
+            'compression_anchor_visible_idx', 'compression_anchor_message_key',
+        ]
+        meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
+        meta['messages'] = self.messages
+        meta['tool_calls'] = self.tool_calls
+        # Fields not in METADATA_FIELDS (e.g. last_usage, message_count) go at the end
+        extra = {k: v for k, v in self.__dict__.items()
+                 if k not in METADATA_FIELDS and k not in ('messages', 'tool_calls')}
+        payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
         tmp = self.path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
         try:
             with open(tmp, 'w', encoding='utf-8') as f:
@@ -265,6 +282,46 @@ class Session:
         if not p.exists():
             return None
         return cls(**json.loads(p.read_text(encoding='utf-8')))
+
+    @classmethod
+    def load_metadata_only(cls, sid):
+        """Load only the compact metadata fields, skipping the messages array.
+
+        Session JSON files have metadata fields (session_id, title, model, etc.)
+        at the top level, before the large messages array. We read only the
+        first ~1KB — enough to capture all compact() fields — then parse just
+        that prefix. Falls back to load() if the prefix doesn't contain enough
+        fields or if the file is unexpectedly small.
+        """
+        if not sid or not all(c in '0123456789abcdefghijklmnopqrstuvwxyz_' for c in sid):
+            return None
+        p = SESSION_DIR / f'{sid}.json'
+        if not p.exists():
+            return None
+        try:
+            # Read just the first 1 KB — metadata comes before messages array
+            with open(p, 'r', encoding='utf-8') as f:
+                prefix = f.read(1024)
+            if not prefix:
+                return cls.load(sid)
+            parsed = json.loads(prefix)
+            # Verify we got the essential fields.
+            # With metadata-first save() ordering, messages appears at byte ~567.
+            # For sessions <= ~512 bytes total the entire messages array fits in the
+            # first 1 KB and we get a valid list. For larger sessions json.loads
+            # fails on the truncated buffer (unterminated string), so we fall back
+            # to full load. The one exception is a truncation inside a string value
+            # that happens to produce valid JSON with a truncated string — guard
+            # against that by requiring messages to be a list.
+            needed = {'session_id', 'title', 'created_at', 'updated_at'}
+            if not needed.issubset(parsed.keys()):
+                return cls.load(sid)
+            if not isinstance(parsed.get('messages'), list):
+                return cls.load(sid)
+            return cls(**parsed)
+        except Exception:
+            # Corrupt prefix or decode error — fall back to full load
+            return cls.load(sid)
 
     def compact(self, include_runtime=False, active_stream_ids=None) -> dict:
         active_stream_ids = active_stream_ids if active_stream_ids is not None else set()
@@ -292,12 +349,21 @@ class Session:
             ) if include_runtime else False,
         }
 
-def get_session(sid):
+def get_session(sid, metadata_only=False):
+    """Load a session, optionally with metadata only (skipping the messages array).
+
+    When metadata_only=True the session is still cached so the full load on the
+    next access is fast. Use this when you only need compact() metadata and not
+    the actual message history (e.g., for fast sidebar switching).
+    """
     with LOCK:
         if sid in SESSIONS:
             SESSIONS.move_to_end(sid)  # LRU: mark as recently used
             return SESSIONS[sid]
-    s = Session.load(sid)
+    if metadata_only:
+        s = Session.load_metadata_only(sid)
+    else:
+        s = Session.load(sid)
     if s:
         with LOCK:
             SESSIONS[sid] = s

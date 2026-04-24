@@ -1327,6 +1327,11 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                         logger.debug("Periodic checkpoint save failed: %s", e)
 
             _checkpoint_stop = threading.Event()
+            # Persist the user message BEFORE streaming starts so it's durable even if
+            # the server crashes before the first checkpoint fires (every 15s).
+            with _agent_lock:
+                s.save(touch_updated_at=True, skip_index=False)
+
             _ckpt_thread = threading.Thread(
                 target=_periodic_checkpoint, daemon=True,
                 name=f"ckpt-{session_id[:8]}",
