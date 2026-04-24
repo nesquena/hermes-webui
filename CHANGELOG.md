@@ -5,6 +5,11 @@
 ### Fixed
 - **Reasoning chip now appears after the model chip** in the composer toolbar — model is a more fundamental choice and should be stable in position regardless of whether reasoning is active. Order: Profile → Workspace → Model → Reasoning. (`static/index.html`)
 
+## v0.50.205 — 2026-04-24
+
+### Fixed
+- **Workspace add: allow external paths not under home directory** — adding a workspace path such as `/mnt/d/Projects` (WSL) or any directory outside `$HOME` was blocked by a circular dependency: `resolve_trusted_workspace()` required the path to already be in the saved workspace list, but saving it required passing the same check. A new `validate_workspace_to_add()` function is now used by `/api/workspaces/add` — it only rejects non-existent paths, non-directories, and known system roots. The stricter `resolve_trusted_workspace()` continues to gate actual file read/write operations within a workspace. (`api/workspace.py`, `api/routes.py`) Closes #953. [#991]
+
 ## v0.50.204 — 2026-04-24
 
 ### Fixed
