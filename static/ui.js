@@ -10,14 +10,23 @@ function _getSessionQueue(sid, create=false){
 function queueSessionMessage(sid, payload){
   if(!sid||!payload) return 0;
   const q=_getSessionQueue(sid,true);
-  q.push(payload);
+  // Stamp created_at so the restore path can detect stale entries (agent already responded)
+  const entry={...payload, _queued_at: Date.now()};
+  q.push(entry);
+  // Persist to sessionStorage so the queue survives page refresh
+  try{ sessionStorage.setItem('hermes-queue-'+sid, JSON.stringify(q)); }catch(_){}
   return q.length;
 }
 function shiftQueuedSessionMessage(sid){
   const q=_getSessionQueue(sid,false);
   if(!q.length) return null;
   const next=q.shift();
-  if(!q.length) delete SESSION_QUEUES[sid];
+  if(!q.length){
+    delete SESSION_QUEUES[sid];
+    try{ sessionStorage.removeItem('hermes-queue-'+sid); }catch(_){}
+  } else {
+    try{ sessionStorage.setItem('hermes-queue-'+sid, JSON.stringify(q)); }catch(_){}
+  }
   return next;
 }
 function getQueuedSessionCount(sid){
@@ -75,12 +84,16 @@ async function populateModelDropdown(){
     if(!data.groups||!data.groups.length) return; // keep HTML defaults
     // Store active provider globally so the send path can warn on mismatch
     window._activeProvider=data.active_provider||null;
+    // Store default model so newSession() can apply it (#872).
+    // Per-page-load — not synced across browser tabs.
+    window._defaultModel=data.default_model||null;
     // Clear existing options
     sel.innerHTML='';
     _dynamicModelLabels={};
     for(const g of data.groups){
       const og=document.createElement('optgroup');
       og.label=g.provider;
+      if(g.provider_id) og.dataset.provider=g.provider_id;
       for(const m of g.models){
         const opt=document.createElement('option');
         opt.value=m.id;
@@ -108,49 +121,74 @@ async function populateModelDropdown(){
 // Cache so we don't re-fetch on every page load
 const _liveModelCache={};
 
+function _addLiveModelsToSelect(provider, models, sel){
+  if(!provider||!models||!models.length||!sel) return 0;
+  const currentVal=sel.value;
+  let providerGroup=null;
+  for(const og of sel.querySelectorAll('optgroup')){
+    if(og.dataset.provider&&og.dataset.provider===provider){
+      providerGroup=og; break;
+    }
+    if(og.label&&og.label.toLowerCase().includes(provider.toLowerCase())){
+      providerGroup=og; break;
+    }
+  }
+  if(!providerGroup){
+    providerGroup=document.createElement('optgroup');
+    providerGroup.label=provider.charAt(0).toUpperCase()+provider.slice(1)+' (live)';
+    sel.appendChild(providerGroup);
+  }
+  const existingIds=new Set([...sel.options].map(o=>o.value));
+  // Normalized dedup: strip @provider: prefix and unify separators so
+  // 'minimax/minimax-m2.7' matches '@nous:minimax/minimax-m2.7' (#907).
+  // Strip ONLY the first colon — Ollama tag IDs are multi-colon
+  // (e.g. '@ollama-cloud:qwen3-vl:235b-instruct') and split(':',2) would
+  // truncate the tag suffix in JS (the limit arg discards extras, unlike Python).
+  const _normId=id=>{
+    let s=String(id||'');
+    if(s.startsWith('@')&&s.includes(':')) s=s.substring(s.indexOf(':')+1); // strip only @provider:
+    s=s.split('/').pop();                                                    // strip namespace prefix
+    return s.replace(/-/g,'.').toLowerCase();
+  };
+  const existingNorm=new Set([...sel.options].map(o=>_normId(o.value)));
+  let added=0;
+  const _ap=(window._activeProvider||'').toLowerCase();
+  const _isPortalFetch=_ap && _ap!=='openrouter' && _ap!=='custom' && provider===_ap;
+  for(const m of models){
+    let mid=m.id;
+    if(_isPortalFetch && !mid.startsWith('@')){
+      mid=`@${provider}:${mid}`;
+    }
+    if(existingIds.has(mid)) continue;
+    if(existingNorm.has(_normId(mid))) continue; // dedup cross-prefix duplicates (#907)
+    const opt=document.createElement('option');
+    opt.value=mid;
+    opt.textContent=m.label||m.id;
+    opt.title='Live model — fetched from provider';
+    providerGroup.appendChild(opt);
+    _dynamicModelLabels[mid]=m.label||m.id;
+    added++;
+  }
+  if(added>0 && currentVal) _applyModelToDropdown(currentVal, sel);
+  return added;
+}
+
 async function _fetchLiveModels(provider, sel){
   if(!provider||!sel) return;
-  // Don't fetch for providers where we know it's unsupported or unnecessary
-  // All providers now supported via agent's provider_model_ids() — no exclusions needed
-  if(_liveModelCache[provider]) return; // already fetched this session
+  // Already fetched — apply cached models to this select element (#872)
+  if(_liveModelCache[provider]){
+    const added=_addLiveModelsToSelect(provider,_liveModelCache[provider],sel);
+    if(added>0 && typeof syncModelChip==='function') syncModelChip();
+    return;
+  }
   try{
     const url=new URL('api/models/live',location.href);
     url.searchParams.set('provider',provider);
     const data=await fetch(url.href,{credentials:'include'}).then(r=>r.json());
     if(!data.models||!data.models.length) return;
     _liveModelCache[provider]=data.models;
-    // Remember current selection before rebuilding options
-    const currentVal=sel.value;
-    // Rebuild the optgroup for this provider with live models
-    // Keep other providers' optgroups intact
-    let providerGroup=null;
-    for(const og of sel.querySelectorAll('optgroup')){
-      if(og.label&&og.label.toLowerCase().includes(provider.toLowerCase())){
-        providerGroup=og; break;
-      }
-    }
-    if(!providerGroup){
-      // No existing group — add a new one
-      providerGroup=document.createElement('optgroup');
-      providerGroup.label=provider.charAt(0).toUpperCase()+provider.slice(1)+' (live)';
-      sel.appendChild(providerGroup);
-    }
-    // Rebuild options from live data
-    const existingIds=new Set([...sel.options].map(o=>o.value));
-    let added=0;
-    for(const m of data.models){
-      if(existingIds.has(m.id)) continue; // already shown from static list
-      const opt=document.createElement('option');
-      opt.value=m.id;
-      opt.textContent=m.label||m.id;
-      opt.title='Live model — fetched from provider';
-      providerGroup.appendChild(opt);
-      _dynamicModelLabels[m.id]=m.label||m.id;
-      added++;
-    }
+    const added=_addLiveModelsToSelect(provider,data.models,sel);
     if(added>0){
-      // Restore selection
-      if(currentVal) _applyModelToDropdown(currentVal, sel);
       if(typeof syncModelChip==='function') syncModelChip();
       console.log('[hermes] Live models loaded for',provider+':',added,'new models added');
     }
@@ -172,6 +210,8 @@ async function _fetchLiveModels(provider, sel){
 function _checkProviderMismatch(modelId){
   const ap=(window._activeProvider||'').toLowerCase();
   if(!ap||ap==='custom'||ap==='openrouter') return null; // can't reliably check
+  // @provider: prefixed IDs came from that provider's live model list — no mismatch possible
+  if(modelId.startsWith('@')) return null;
   const slash=modelId.indexOf('/');
   if(slash<0) return null; // bare model name, no provider prefix
   const modelProvider=modelId.substring(0,slash).toLowerCase();
@@ -222,45 +262,99 @@ function renderModelDropdown(){
   const dd=$('composerModelDropdown');
   const sel=$('modelSelect');
   if(!dd||!sel) return;
-  dd.innerHTML='';
+  // Store model data for filtering
+  const _modelData=[];
   for(const child of Array.from(sel.children)){
     if(child.tagName==='OPTGROUP'){
-      const heading=document.createElement('div');
-      heading.className='model-group';
-      heading.textContent=child.label||'Models';
-      dd.appendChild(heading);
       for(const opt of Array.from(child.children)){
-        const row=document.createElement('div');
-        row.className='model-opt'+(opt.value===sel.value?' active':'');
-        row.innerHTML=`<span class="model-opt-name">${esc(opt.textContent||getModelLabel(opt.value))}</span><span class="model-opt-id">${esc(opt.value)}</span>`;
-        row.onclick=()=>selectModelFromDropdown(opt.value);
-        dd.appendChild(row);
+        _modelData.push({value:opt.value,name:esc(opt.textContent||getModelLabel(opt.value)),id:esc(opt.value),group:child.label||''});
       }
-      continue;
     }
     if(child.tagName==='OPTION'){
-      const row=document.createElement('div');
-      row.className='model-opt'+(child.value===sel.value?' active':'');
-      row.innerHTML=`<span class="model-opt-name">${esc(child.textContent||getModelLabel(child.value))}</span><span class="model-opt-id">${esc(child.value)}</span>`;
-      row.onclick=()=>selectModelFromDropdown(child.value);
-      dd.appendChild(row);
+      _modelData.push({value:child.value,name:esc(child.textContent||getModelLabel(child.value)),id:esc(child.value),group:''});
     }
   }
-  // Custom model ID input — lets users type any model not in the curated list
+  // Create search input FIRST before filterModels definition
+  const _searchRow=document.createElement('div');
+  _searchRow.className='model-search-row';
+  _searchRow.innerHTML=`<input class="model-search-input" type="text" placeholder="${esc(t('model_search_placeholder')||'Search models…')}" spellcheck="false" autocomplete="off"><button class="model-search-clear" title="Clear search">${li('x',10)}</button>`;
+  const _si=_searchRow.querySelector('.model-search-input');
+  const _sc=_searchRow.querySelector('.model-search-clear');
+  // Create custom model section elements
   const _custSep=document.createElement('div');
   _custSep.className='model-group model-custom-sep';
   _custSep.textContent=t('model_custom_label')||'Custom model ID';
-  dd.appendChild(_custSep);
   const _custRow=document.createElement('div');
   _custRow.className='model-custom-row';
   _custRow.innerHTML=`<input class="model-custom-input" type="text" placeholder="${esc(t('model_custom_placeholder')||'e.g. openai/gpt-5.4')}" spellcheck="false" autocomplete="off"><button class="model-custom-btn" title="Use this model">${li('plus',12)}</button>`;
   const _ci=_custRow.querySelector('.model-custom-input');
   const _cb=_custRow.querySelector('.model-custom-btn');
+  // Filter function (defined AFTER _searchRow and _cust* are created)
+  const _filterModels=(term)=>{
+    term=term.trim().toLowerCase();
+    const found=new Set();
+    for(const m of _modelData){
+      const name=m.name.toLowerCase();
+      const id=m.id.toLowerCase();
+      if(name.includes(term)||id.includes(term)){
+        found.add(m.value);
+      }
+    }
+    // Clear and rebuild
+    dd.innerHTML='';
+    // Add search and custom elements first (CRITICAL: must be before models)
+    dd.appendChild(_searchRow);
+    dd.appendChild(_custSep);
+    dd.appendChild(_custRow);
+    // Add models matching filter
+    let _lastGroup=null;
+    for(const m of _modelData){
+      if(!term||found.has(m.value)){
+        if(m.group&&m.group!==_lastGroup){
+          const heading=document.createElement('div');
+          heading.className='model-group';
+          heading.textContent=m.group;
+          dd.appendChild(heading);
+          _lastGroup=m.group;
+        }
+        const row=document.createElement('div');
+        row.className='model-opt'+(m.value===sel.value?' active':'');
+        row.innerHTML=`<span class="model-opt-name">${m.name}</span><span class="model-opt-id">${m.id}</span>`;
+        row.onclick=()=>selectModelFromDropdown(m.value);
+        dd.appendChild(row);
+      }
+    }
+    // Show "No results" if filtered and nothing matched
+    if(term&&found.size===0){
+      const noResult=document.createElement('div');
+      noResult.className='model-search-no-results';
+      noResult.textContent=t('model_search_no_results')||'No models found';
+      noResult.style.padding='12px 14px';
+      noResult.style.color='var(--muted)';
+      noResult.style.textAlign='center';
+      dd.appendChild(noResult);
+    }
+    // Restore focus to search input
+    _si.focus();
+  };
+  // Event handlers for search input
+  _si.addEventListener('input',()=>_filterModels(_si.value));
+  _si.addEventListener('keydown',e=>{if(e.key==='Enter') {e.preventDefault();}if(e.key==='Escape') {closeModelDropdown();}});
+  _si.addEventListener('click',e=>e.stopPropagation());
+  // Event handlers for clear button
+  _sc.onclick=()=>{ _si.value=''; _filterModels(''); _si.focus(); };
+  _sc.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){ _si.value=''; _filterModels(''); _si.focus(); e.preventDefault(); }});
+  // Event handlers for custom input
   const _applyCustom=()=>{const v=_ci.value.trim();if(!v)return;selectModelFromDropdown(v);_ci.value='';};
   _cb.onclick=_applyCustom;
   _ci.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();_applyCustom();}if(e.key==='Escape'){closeModelDropdown();}});
   _ci.addEventListener('click',e=>e.stopPropagation());
+  // Add search and custom elements to dropdown (initial render)
+  dd.appendChild(_searchRow);
+  dd.appendChild(_custSep);
   dd.appendChild(_custRow);
+  // Apply initial filter (empty shows all)
+  _filterModels('');
 }
 
 async function selectModelFromDropdown(value){
@@ -271,7 +365,7 @@ async function selectModelFromDropdown(value){
   if(!Array.from(sel.options).some(o=>o.value===value)){
     const opt=document.createElement('option');
     opt.value=value;
-    opt.textContent=value.split('/').pop()||value;
+    opt.textContent=getModelLabel(value);
     opt.dataset.custom='1';
     // Remove any previous custom option before adding new one
     sel.querySelectorAll('option[data-custom]').forEach(o=>o.remove());
@@ -292,6 +386,7 @@ function toggleModelDropdown(){
   if(open){closeModelDropdown(); return;}
   if(typeof closeProfileDropdown==='function') closeProfileDropdown();
   if(typeof closeWsDropdown==='function') closeWsDropdown();
+  if(typeof closeReasoningDropdown==='function') closeReasoningDropdown();
   renderModelDropdown();
   dd.classList.add('open');
   _positionModelDropdown();
@@ -311,18 +406,111 @@ document.addEventListener('click',e=>{
 window.addEventListener('resize',()=>{
   const dd=$('composerModelDropdown');
   if(dd&&dd.classList.contains('open')) _positionModelDropdown();
+  // Keep the reasoning dropdown aligned under its chip when the window
+  // resizes while open — same pattern as the model dropdown above.
+  const rdd=$('composerReasoningDropdown');
+  if(rdd&&rdd.classList.contains('open')&&typeof _positionReasoningDropdown==='function'){
+    _positionReasoningDropdown();
+  }
+});
+
+// ── Reasoning effort chip ────────────────────────────────────────────────────
+let _currentReasoningEffort=null;
+
+function _applyReasoningChip(eff){
+  _currentReasoningEffort=eff;
+  const wrap=$('composerReasoningWrap');
+  const label=$('composerReasoningLabel');
+  if(!wrap||!label) return;
+  if(!eff||eff==='none'){wrap.style.display='none';return;}
+  wrap.style.display='';
+  label.textContent=eff;
+  _highlightReasoningOption(eff);
+}
+
+function fetchReasoningChip(){
+  api('/api/reasoning').then(function(st){
+    _applyReasoningChip((st&&st.reasoning_effort)||'');
+  }).catch(function(){_applyReasoningChip('');});
+}
+
+function syncReasoningChip(){
+  if(_currentReasoningEffort===null){fetchReasoningChip();return;}
+  _applyReasoningChip(_currentReasoningEffort);
+}
+
+function _highlightReasoningOption(effort){
+  const dd=$('composerReasoningDropdown');
+  if(!dd) return;
+  dd.querySelectorAll('.reasoning-option').forEach(function(opt){
+    opt.classList.toggle('selected',opt.dataset.effort===effort);
+  });
+}
+
+function toggleReasoningDropdown(){
+  const dd=$('composerReasoningDropdown');
+  const chip=$('composerReasoningChip');
+  if(!dd||!chip) return;
+  const open=dd.classList.contains('open');
+  if(open){closeReasoningDropdown();return;}
+  if(typeof closeProfileDropdown==='function') closeProfileDropdown();
+  if(typeof closeWsDropdown==='function') closeWsDropdown();
+  closeModelDropdown();
+  _highlightReasoningOption(_currentReasoningEffort);
+  dd.classList.add('open');
+  _positionReasoningDropdown();
+  chip.classList.add('active');
+}
+
+function _positionReasoningDropdown(){
+  const dd=$('composerReasoningDropdown');
+  const chip=$('composerReasoningChip');
+  const footer=document.querySelector('.composer-footer');
+  if(!dd||!chip||!footer) return;
+  const chipRect=chip.getBoundingClientRect();
+  const footerRect=footer.getBoundingClientRect();
+  let left=chipRect.left-footerRect.left;
+  const maxLeft=Math.max(0,footer.clientWidth-dd.offsetWidth);
+  left=Math.max(0,Math.min(left,maxLeft));
+  dd.style.left=`${left}px`;
+}
+
+function closeReasoningDropdown(){
+  const dd=$('composerReasoningDropdown');
+  const chip=$('composerReasoningChip');
+  if(dd) dd.classList.remove('open');
+  if(chip) chip.classList.remove('active');
+}
+
+document.addEventListener('click',function(e){
+  if(!e.target.closest('#composerReasoningChip')&&!e.target.closest('#composerReasoningDropdown')) closeReasoningDropdown();
+  if(e.target.closest('.reasoning-option')){
+    const opt=e.target.closest('.reasoning-option');
+    const effort=opt&&opt.dataset.effort;
+    if(effort){
+      api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:effort})})
+        .then(function(st){
+          _applyReasoningChip((st&&st.reasoning_effort)||effort);
+          showToast('🧠 Reasoning effort set to '+((st&&st.reasoning_effort)||effort));
+        })
+        .catch(function(){showToast('🧠 Failed to set effort');});
+      closeReasoningDropdown();
+    }
+  }
 });
 
 // ── Scroll pinning ──────────────────────────────────────────────────────────
 // When streaming, auto-scroll only if the user hasn't manually scrolled up.
-// Once the user scrolls back to within 80px of the bottom, re-pin.
+// Once the user scrolls back to within 150px of the bottom, re-pin.
 let _scrollPinned=true;
 (function(){
   const el=document.getElementById('messages');
   if(!el) return;
   el.addEventListener('scroll',()=>{
-    const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<80;
+    const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<150;
     _scrollPinned=nearBottom;
+    const btn=$('scrollToBottomBtn');
+    if(btn) btn.style.display=_scrollPinned?'none':'flex';
   });
 })();
 function _fmtTokens(n){if(!n||n<0)return'0';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'k';return String(n);}
@@ -393,6 +581,25 @@ function scrollToBottom(){
   _scrollPinned=true;
   const el=$('messages');
   if(el) el.scrollTop=el.scrollHeight;
+  const btn=$('scrollToBottomBtn');
+  if(btn) btn.style.display='none';
+}
+
+function _fmtOllamaLabel(mid){
+  const [namePart, ...variantParts] = mid.split(':');
+  const variant = variantParts.join(':');
+  const _fmt = (s) => {
+    const tokens = s.replace(/[-_]/g, ' ').split(' ');
+    return tokens.map(t => {
+      const alphaOnly = t.replace(/\./g, '');
+      if (t.length <= 3 && /^[a-zA-Z.]+$/.test(t)) return t.toUpperCase();
+      if (/^\d/.test(alphaOnly)) return t.toUpperCase();
+      return t.charAt(0).toUpperCase() + t.slice(1);
+    }).join(' ');
+  };
+  let label = _fmt(namePart);
+  if (variant) label += ' (' + _fmt(variant) + ')';
+  return label;
 }
 
 function getModelLabel(modelId){
@@ -400,9 +607,32 @@ function getModelLabel(modelId){
   // Check dynamic labels first, then fall back to splitting the ID
   if(_dynamicModelLabels[modelId]) return _dynamicModelLabels[modelId];
   // Static fallback for common models
-  const STATIC_LABELS={'openai/gpt-5.4-mini':'GPT-5.4 Mini','openai/gpt-4o':'GPT-4o','openai/o3':'o3','openai/o4-mini':'o4-mini','anthropic/claude-sonnet-4.6':'Sonnet 4.6','anthropic/claude-sonnet-4-5':'Sonnet 4.5','anthropic/claude-haiku-3-5':'Haiku 3.5','google/gemini-2.5-pro':'Gemini 2.5 Pro','deepseek/deepseek-chat-v3-0324':'DeepSeek V3','meta-llama/llama-4-scout':'Llama 4 Scout'};
+  const STATIC_LABELS={'openai/gpt-5.4-mini':'GPT-5.4 Mini','openai/gpt-4o':'GPT-4o','openai/o3':'o3','openai/o4-mini':'o4-mini','anthropic/claude-sonnet-4.6':'Sonnet 4.6','anthropic/claude-sonnet-4-5':'Sonnet 4.5','anthropic/claude-haiku-3-5':'Haiku 3.5','google/gemini-3.1-pro-preview':'Gemini 3.1 Pro','google/gemini-3-flash-preview':'Gemini 3 Flash','google/gemini-3.1-flash-lite-preview':'Gemini 3.1 Flash Lite','google/gemini-2.5-pro':'Gemini 2.5 Pro','google/gemini-2.5-flash':'Gemini 2.5 Flash','deepseek/deepseek-chat-v3-0324':'DeepSeek V3','meta-llama/llama-4-scout':'Llama 4 Scout'};
   if(STATIC_LABELS[modelId]) return STATIC_LABELS[modelId];
-  return modelId.split('/').pop()||'Unknown';
+  // Safe Ollama-tag fallback formatter before generic split('/').pop()
+  let _last = modelId.split('/').pop() || modelId;
+  // Strip @provider: prefix if present (e.g. @ollama-cloud:kimi-k2.6)
+  if (_last.startsWith('@') && _last.includes(':')) _last = _last.split(':').slice(1).join(':');
+  const looksLikeOllamaTag = /^[a-z0-9][\w.-]*:[\w.-]+$/i.test(_last);
+  // Narrow: only apply Ollama formatter to IDs with explicit @ollama prefix or colon-tag format.
+  // Avoids reformatting bare provider model IDs like claude-sonnet-4-6 or gpt-4o.
+  const looksLikeBareOllamaId = modelId.startsWith('@ollama') || looksLikeOllamaTag;
+  const ollamaLabel = _fmtOllamaLabel(_last);
+  if ((modelId.startsWith('ollama/') || modelId.startsWith('@ollama') || looksLikeOllamaTag || looksLikeBareOllamaId) && ollamaLabel !== _last) {
+    return ollamaLabel;
+  }
+  return _last || 'Unknown';
+}
+
+function _stripXmlToolCallsDisplay(s){
+  // Strip <function_calls>...</function_calls> blocks emitted by DeepSeek and
+  // similar models in their raw response text.  These are processed separately
+  // as tool calls; leaving them in the content causes them to render visibly
+  // in the settled chat bubble.  (#702)
+  if(!s||s.toLowerCase().indexOf('<function_calls>')===-1) return s;
+  s=s.replace(/<function_calls>[\s\S]*?<\/function_calls>/gi,'');
+  s=s.replace(/<function_calls>[\s\S]*$/i,'');
+  return s.trim();
 }
 
 function renderMd(raw){
@@ -497,7 +727,7 @@ function renderMd(raw){
   // Stash <code> tags from the backtick pass above so the outer bold/italic
   // regexes don't esc() their content (e.g. **`code`** → <strong><code>code</code></strong>)
   const _ob_stash=[];
-  s=s.replace(/(<code>[^<]*<\/code>)/g,m=>{_ob_stash.push(m);return `\x00O${_ob_stash.length-1}\x00`;});
+  s=s.replace(/(<code\b[^>]*>[\s\S]*?<\/code>)/g,m=>{_ob_stash.push(m);return `\x00O${_ob_stash.length-1}\x00`;});
   s=s.replace(/\*\*\*(.+?)\*\*\*/g,(_,t)=>`<strong><em>${esc(t)}</em></strong>`);
   s=s.replace(/\*\*(.+?)\*\*/g,(_,t)=>`<strong>${esc(t)}</strong>`);
   s=s.replace(/\*([^*\n]+)\*/g,(_,t)=>`<em>${esc(t)}</em>`);
@@ -517,12 +747,19 @@ function renderMd(raw){
     }
     return html+'</ul>';
   });
+  // Ordered lists: use value= on each <li> so the correct number is preserved
+  // even when blank lines between items cause the paragraph splitter to place
+  // each item in its own <ol> container — without value= every <ol> restarts
+  // at 1, producing "1. 1. 1." instead of "1. 2. 3." (#886).
   s=s.replace(/((?:^(?:  )?\d+\. .+\n?)+)/gm,block=>{
     const lines=block.trimEnd().split('\n');
     let html='<ol>';
     for(const l of lines){
+      const numMatch=l.match(/^\s*(\d+)\. /);
+      const num=numMatch?parseInt(numMatch[1],10):null;
       const text=l.replace(/^ {0,4}\d+\. /,'');
-      html+=`<li>${inlineMd(text)}</li>`;
+      const valAttr=num!==null?` value="${num}"`:'';
+      html+=`<li${valAttr}>${inlineMd(text)}</li>`;
     }
     return html+'</ol>';
   });
@@ -558,9 +795,9 @@ function renderMd(raw){
   const SAFE_TAGS=/^<\/?(strong|em|code|pre|h[1-6]|ul|ol|li|table|thead|tbody|tr|th|td|hr|blockquote|p|br|a|img|div|span)([\s>]|$)/i;
   s=s.replace(/<\/?[a-z][^>]*>/gi,tag=>SAFE_TAGS.test(tag)?tag:esc(tag));
   // Autolink: convert plain URLs to clickable links.
-  // Stash existing <a> tags first so we never re-link a URL already inside href="...".
+  // Stash <a>, <img> and <pre> blocks so autolink never runs inside them.
   const _al_stash=[];
-  s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>)/g,m=>{_al_stash.push(m);return `\x00B${_al_stash.length-1}\x00`;});
+  s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>|<pre\b[^>]*>[\s\S]*?<\/pre>)/g,m=>{_al_stash.push(m);return `\x00B${_al_stash.length-1}\x00`;});
   s=s.replace(/(https?:\/\/[^\s<>"'\)\]]+)/g,(url)=>{
     // Strip trailing punctuation that was likely not part of the URL
     const trail=url.match(/[.,;:!?)]$/)?url.slice(-1):'';
@@ -577,17 +814,39 @@ function renderMd(raw){
     }
     return `<span class="katex-inline" data-katex="inline">${esc(item.src)}</span>`;
   });
+  // Stash rendered <pre> blocks (with optional pre-header div) and mermaid/katex
+  // divs before paragraph splitting so \n inside code blocks is never replaced
+  // with <br>. Token \x00E (next free after B D F G L M C O A).
+  // Fixes #745: code blocks collapse to single line when not preceded by blank line.
+  const _pre_stash=[];
+  s=s.replace(/(<div class="pre-header">[\s\S]*?<\/div>)?<pre>[\s\S]*?<\/pre>|<div class="(mermaid-block|katex-block)"[\s\S]*?<\/div>/g,m=>{
+    _pre_stash.push(m);
+    return '\x00E'+(_pre_stash.length-1)+'\x00';
+  });
   const parts=s.split(/\n{2,}/);
-  s=parts.map(p=>{p=p.trim();if(!p)return '';if(/^<(h[1-6]|ul|ol|pre|hr|blockquote)/.test(p))return p;return `<p>${p.replace(/\n/g,'<br>')}</p>`;}).join('\n');
+  s=parts.map(p=>{p=p.trim();if(!p)return '';if(/^<(h[1-6]|ul|ol|pre|hr|blockquote)|^\x00E/.test(p))return p;return `<p>${p.replace(/\n/g,'<br>')}</p>`;}).join('\n');
+  s=s.replace(/\x00E(\d+)\x00/g,(_,i)=>_pre_stash[+i]);
   // ── Restore MEDIA stash → inline images or download links ─────────────────
   s=s.replace(/\x00D(\d+)\x00/g,(_,i)=>{
     const ref=media_stash[+i];
     // HTTP(S) URL
     if(/^https?:\/\//i.test(ref)){
-      if(_IMAGE_EXTS.test(ref.split('?')[0])){
-        return `<img class="msg-media-img" src="${esc(ref)}" alt="image" loading="lazy" onclick="this.classList.toggle('msg-media-img--full')">`;
+      // Rewrite localhost/127.0.0.1 to the actual server base URL so remote
+      // users (VPN, Docker, deployed) can load agent-generated images (#642).
+      // Strip the trailing slash from document.baseURI so the URL's own path
+      // joins cleanly — this preserves any subpath mount (e.g. /hermes/).
+      let src=ref;
+      if(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(src)){
+        const base=document.baseURI.replace(/\/$/,'');
+        src=src.replace(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i,base);
       }
-      return `<a href="${esc(ref)}" target="_blank" rel="noopener">${esc(ref)}</a>`;
+      // MEDIA: tokens are only emitted for tool-generated images (image_generate etc.).
+      // Render all https:// URLs as <img> — extension check would miss extensionless
+      // CDN paths like fal.media content-addressed URLs (closes #853).
+      if(_IMAGE_EXTS.test(src.split('?')[0]) || /^https?:\/\//i.test(src)){
+        return `<img class="msg-media-img" src="${esc(src)}" alt="image" loading="lazy" onclick="this.classList.toggle('msg-media-img--full')">`;
+      }
+      return `<a href="${esc(src)}" target="_blank" rel="noopener">${esc(src)}</a>`;
     }
     // Local file path
     const apiUrl='api/media?path='+encodeURIComponent(ref);
@@ -921,6 +1180,10 @@ function dismissReconnect() {
   clearInflight();
 }
 async function refreshSession() {
+  // When the banner is in post-update restart mode, the "Reload" button
+  // should do a full page reload — a session refresh would just 502 while
+  // the server is still restarting.
+  if (window._restartingForUpdate) { location.reload(); return; }
   dismissReconnect();
   if (!S.session) return;
   try {
@@ -954,6 +1217,12 @@ function dismissUpdate(){
 async function applyUpdates(){
   const btn=$('btnApplyUpdate');
   if(btn){btn.disabled=true;btn.textContent='Updating\u2026';}
+  const errEl=$('updateError');
+  if(errEl){errEl.style.display='none';errEl.textContent='';}
+  // Hide any leftover force-update button from a prior conflict so a fresh
+  // retry starts clean (otherwise stale state points at the wrong target).
+  const forceBtnReset=$('btnForceUpdate');
+  if(forceBtnReset){forceBtnReset.style.display='none';forceBtnReset.dataset.target='';}
   const targets=[];
   if(window._updateData?.webui?.behind>0) targets.push('webui');
   if(window._updateData?.agent?.behind>0) targets.push('agent');
@@ -961,19 +1230,99 @@ async function applyUpdates(){
     for(const target of targets){
       const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify({target})});
       if(!res.ok){
-        showToast('Update failed ('+target+'): '+(res.message||'unknown error'));
+        _showUpdateError(target,res);
         if(btn){btn.disabled=false;btn.textContent='Update Now';}
         return;
       }
     }
-    showToast('Updated! Reloading\u2026');
+    showToast('Update applied — restarting…');
     sessionStorage.removeItem('hermes-update-checked');
     sessionStorage.removeItem('hermes-update-dismissed');
-    setTimeout(()=>location.reload(),1500);
+    _waitForServerThenReload();
   }catch(e){
-    showToast('Update failed: '+e.message);
+    if(errEl){errEl.textContent='Update failed: '+e.message;errEl.style.display='block';}
+    else showToast('Update failed: '+e.message);
     if(btn){btn.disabled=false;btn.textContent='Update Now';}
   }
+}
+function _showUpdateError(target,res){
+  const errEl=$('updateError');
+  const forceBtn=$('btnForceUpdate');
+  const msg='Update failed ('+target+'): '+(res.message||'unknown error');
+  if(errEl){
+    errEl.textContent=msg;
+    errEl.style.display='block';
+  } else {
+    showToast(msg);
+  }
+  // Show "Force update" button when the error is recoverable by a hard reset
+  if(forceBtn&&(res.conflict||res.diverged)){
+    forceBtn.dataset.target=target;
+    forceBtn.style.display='inline-block';
+  }
+}
+async function forceUpdate(btn){
+  const target=btn&&btn.dataset.target;
+  if(!target) return;
+  const confirmed=await showConfirmDialog({
+    title:'Force update '+target+'?',
+    message:'This will discard all local changes in the '+target+' repo and reset to the latest remote version. This cannot be undone.',
+    confirmLabel:'Force update',
+    danger:true,
+    focusCancel:true,
+  });
+  if(!confirmed) return;
+  btn.disabled=true;btn.textContent='Force updating\u2026';
+  const errEl=$('updateError');
+  if(errEl){errEl.style.display='none';}
+  try{
+    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify({target})});
+    if(!res.ok){
+      if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
+      btn.disabled=false;btn.textContent='Force update';
+      return;
+    }
+    showToast('Force update applied — restarting…');
+    sessionStorage.removeItem('hermes-update-checked');
+    sessionStorage.removeItem('hermes-update-dismissed');
+    _waitForServerThenReload();
+  }catch(e){
+    if(errEl){errEl.textContent='Force update failed: '+e.message;errEl.style.display='block';}
+    btn.disabled=false;btn.textContent='Force update';
+  }
+}
+
+// Poll /health after an update-triggered restart, then reload.  Replaces the
+// blind setTimeout(reload, 2500) that race-lost against slow hardware or
+// reverse proxies that 502 immediately when the upstream socket closes (#874).
+async function _waitForServerThenReload(opts){
+  opts=opts||{};
+  const interval=opts.interval||500;
+  const maxMs=opts.maxMs||15000;
+  window._restartingForUpdate=true;
+  const msgEl=$('reconnectMsg');
+  const banner=$('reconnectBanner');
+  if(msgEl) msgEl.textContent='⏳ Restarting… please wait';
+  if(banner) banner.classList.add('visible');
+  const deadline=Date.now()+maxMs;
+  // Give the server a moment to actually begin its restart before the first
+  // probe — otherwise the old process may still respond ok on the first poll.
+  await new Promise(r=>setTimeout(r, interval));
+  while(Date.now()<deadline){
+    try{
+      const r=await fetch('/health',{cache:'no-store'});
+      if(r.ok){
+        let data={};
+        try{ data=await r.json(); }catch(_){}
+        if(data && data.status==='ok'){
+          location.reload();
+          return;
+        }
+      }
+    }catch(_){ /* socket closed during restart — retry */ }
+    await new Promise(r=>setTimeout(r, interval));
+  }
+  if(msgEl) msgEl.textContent='⚠️ Server is taking longer than expected — click Reload when ready';
 }
 
 function getPendingSessionMessage(session){
@@ -1052,21 +1401,28 @@ function syncTopbar(){
     currentModel=modelOverride;
   } else {
     const applied=_applyModelToDropdown(currentModel,$('modelSelect'));
-    // If the model isn't in the current provider list, add it as a visually marked
-    // "(unavailable)" entry so the session value is preserved without misleading the user.
-    // Selecting it will still attempt to send (same as before), but the label makes
-    // clear it's a stale model from a previous session.
+    // If the model isn't in the current provider list, silently reset to the
+    // first available model so stale values don't pollute the picker (#829).
     if(!applied && currentModel){
-      const opt=document.createElement('option');
-      opt.value=currentModel;
-      opt.textContent=getModelLabel(currentModel)+t('model_unavailable');
-      opt.style.color='var(--muted, #888)';
-      opt.title=t('model_unavailable_title');
-      $('modelSelect').appendChild(opt);
-      $('modelSelect').value=currentModel;
+      // Stale session model not in the current provider catalog — reset to the
+      // first available model rather than injecting an "(unavailable)" option
+      // that visually appears under the wrong provider group (#829).
+      const modelSel=$('modelSelect');
+      const first=modelSel&&modelSel.querySelector('optgroup > option, option');
+      if(first){
+        modelSel.value=first.value;
+        S.session.model=first.value;
+        // Persist the correction so the session doesn't re-inject on next load.
+        fetch(new URL('api/session/update',location.href).href,{
+          method:'POST',credentials:'include',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({session_id:S.session.id||S.session.session_id,model:first.value})
+        }).catch(()=>{});
+      }
     }
   }
   if(typeof syncModelChip==='function') syncModelChip();
+  if(typeof syncReasoningChip==='function') syncReasoningChip();
   // Show Clear button only when session has messages
   const clearBtn=$('btnClearConv');
   if(clearBtn) clearBtn.style.display=(S.messages&&S.messages.filter(msg=>msg.role!=='tool').length>0)?'':'none';
@@ -1269,6 +1625,25 @@ function _compressionReferenceCardHtml(text, open=false){
       
     </div>`;
 }
+function _isSameLocalDay(dateA, dateB){
+  return dateA.getFullYear()===dateB.getFullYear()
+    && dateA.getMonth()===dateB.getMonth()
+    && dateA.getDate()===dateB.getDate();
+}
+function _formatMessageFooterTimestamp(tsVal){
+  if(!tsVal) return '';
+  const date=new Date(tsVal*1000);
+  const now=new Date();
+  if(_isSameLocalDay(date, now)){
+    return date.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  }
+  return date.toLocaleString([], {
+    month:'short',
+    day:'numeric',
+    hour:'numeric',
+    minute:'2-digit',
+  });
+}
 function _compressionStatusCardHtml({
   statusLabel,
   previewText,
@@ -1340,6 +1715,13 @@ function renderMessages(){
     if(msgContent(m)||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)))) visWithIdx.push({m,rawIdx});
     rawIdx++;
   }
+  let lastUserRawIdx=-1;
+  for(let i=visWithIdx.length-1;i>=0;i--){
+    if(visWithIdx[i].m&&visWithIdx[i].m.role==='user'){
+      lastUserRawIdx=visWithIdx[i].rawIdx;
+      break;
+    }
+  }
   const insertionAnchor=_compressionAnchorIndex(
     visWithIdx,
     compressionState ? compressionState.anchorMessageKey : sessionCompressionAnchorKey,
@@ -1401,15 +1783,17 @@ function renderMessages(){
     if(m.attachments&&m.attachments.length){
       filesHtml=`<div class="msg-files">${m.attachments.map(f=>`<div class="msg-file-badge">${li('paperclip',12)} ${esc(f)}</div>`).join('')}</div>`;
     }
-    const bodyHtml = isUser ? esc(String(content)).replace(/\n/g,'<br>') : renderMd(String(content));
-    const editBtn  = isUser  ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
+    const bodyHtml = isUser ? esc(String(content)).replace(/\n/g,'<br>') : renderMd(_stripXmlToolCallsDisplay(String(content)));
+    const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
+    const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
+    const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo-2',13)}</button>` : '';
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
     const tsVal=m._ts||m.timestamp;
     const tsTitle=tsVal?new Date(tsVal*1000).toLocaleString():'';
-    const tsTime=tsVal?new Date(tsVal*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'';
-    const userTimeHtml = (isUser && tsTime) ? `<span class="msg-time" title="${esc(tsTitle)}">${tsTime}</span>` : '';
-    const footHtml = `<div class="msg-foot">${userTimeHtml}<span class="msg-actions">${editBtn}${copyBtn}${retryBtn}</span></div>`;
+    const tsTime=_formatMessageFooterTimestamp(tsVal);
+    const timeHtml = tsTime ? `<span class="msg-time" title="${esc(tsTitle)}">${tsTime}</span>` : '';
+    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${copyBtn}${retryBtn}</span></div>`;
 
     if(isUser){
       currentAssistantTurn=null;
@@ -1449,7 +1833,7 @@ function renderMessages(){
       seg.setAttribute('data-live-assistant','1');
     }
     if(_ERR_MSG_RE.test(String(content||'').trim())) seg.dataset.error='1';
-    if(thinkingText) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
+    if(thinkingText&&window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
     const hasVisibleBody=!!(String(content||'').trim()||filesHtml);
     if(hasVisibleBody){
       seg.insertAdjacentHTML('beforeend', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
@@ -1608,24 +1992,36 @@ function renderMessages(){
       if(anchorRow&&lastInsertedNode) anchorInsertAfter.set(anchorRow, lastInsertedNode);
     }
   }
-  // Render usage badge on the last assistant turn (if enabled and usage data exists)
+  // Render cumulative usage on the last assistant footer row (if enabled).
   if(window._showTokenUsage&&S.session&&(S.session.input_tokens||S.session.output_tokens)){
     const rows=inner.querySelectorAll('.assistant-turn');
     let lastAssist=null;
     for(let i=rows.length-1;i>=0;i--){lastAssist=rows[i];break;}
-    if(lastAssist&&!lastAssist.querySelector('.msg-usage')){
-      const usage=document.createElement('div');
-      usage.className='msg-usage';
-      const inTok=S.session.input_tokens||0;
-      const outTok=S.session.output_tokens||0;
-      const cost=S.session.estimated_cost;
-      let text=`${_fmtTokens(inTok)} in · ${_fmtTokens(outTok)} out`;
-      if(cost) text+=` · ~$${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
-      usage.textContent=text;
-      _assistantTurnBlocks(lastAssist).appendChild(usage);
+    if(lastAssist){
+      const footerRows=lastAssist.querySelectorAll('.msg-foot');
+      const targetFoot=footerRows.length?footerRows[footerRows.length-1]:null;
+      if(targetFoot&&!targetFoot.querySelector('.msg-usage-inline')){
+        const usage=document.createElement('span');
+        usage.className='msg-usage-inline';
+        const inTok=S.session.input_tokens||0;
+        const outTok=S.session.output_tokens||0;
+        const cost=S.session.estimated_cost;
+        let text=`${_fmtTokens(inTok)} in · ${_fmtTokens(outTok)} out`;
+        if(cost) text+=` · ~$${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
+        usage.textContent=text;
+        targetFoot.classList.add('msg-foot-with-usage');
+        targetFoot.insertBefore(usage, targetFoot.firstChild);
+      }
     }
   }
-  scrollToBottom();
+  // Only force-scroll when not actively streaming — mid-stream re-renders
+  // (tool completion, session switch) must not override the user's scroll position.
+  // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
+  if(S.activeStreamId){
+    scrollIfPinned();
+  } else {
+    scrollToBottom();
+  }
   // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>{highlightCode();addCopyButtons();renderMermaidBlocks();renderKatexBlocks();});
   // Refresh todo panel if it's currently open
@@ -1728,16 +2124,33 @@ function appendLiveToolCard(tc){
       const replacement=buildToolCard(tc);
       replacement.dataset.liveTid=tid;
       existing.replaceWith(replacement);
+      // Keep #toolRunningRow alive — dots stay until text starts streaming
+      // or the next tool fires (which replaces them). Removing here caused
+      // a gap between tool completion and the first text token arriving.
       return;
     }
   }
   const row=buildToolCard(tc);
   if(tid) row.dataset.liveTid=tid;
-  // Insert BEFORE the live assistant segment if it exists, so tool cards stay
-  // between the current thinking block(s) and the streaming response.
-  const liveAssistant=inner.querySelector('[data-live-assistant="1"]');
-  if(liveAssistant) inner.insertBefore(row, liveAssistant);
+  // Insert after whichever comes last: the current live assistant segment or
+  // the last tool card. This handles both cases:
+  //   text → tool1 → tool2  (no text between tools: anchor is card1)
+  //   text1 → tool1 → text2 → tool2  (text between tools: anchor is text2)
+  const children=Array.from(inner.children);
+  // Include .thinking-card-row so tool cards land AFTER a finalized thinking
+  // card, not between the text segment and thinking.
+  const anchor=children.filter(el=>el.matches('[data-live-assistant="1"],.tool-card-row,.thinking-card-row')).pop();
+  if(anchor) anchor.insertAdjacentElement('afterend', row);
   else inner.appendChild(row);
+  // Add a 3-dot waiting indicator below the tool card so there's visual
+  // feedback while the tool is running. Removed when text starts streaming
+  // (ensureAssistantRow) or when tool_complete fires.
+  const oldWait=$('toolRunningRow');if(oldWait)oldWait.remove();
+  const waitRow=document.createElement('div');
+  waitRow.id='toolRunningRow';
+  waitRow.className='assistant-segment';
+  waitRow.innerHTML='<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';
+  row.insertAdjacentElement('afterend', waitRow);
   if(typeof scrollIfPinned==='function') scrollIfPinned();
 }
 
@@ -1969,12 +2382,19 @@ function renderKatexBlocks(){
 
 function _thinkingMarkup(text=''){
   return (text&&String(text).trim())
-    ? `<div class="thinking-card open"><div class="thinking-card-header"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span></div><div class="thinking-card-body"><pre>${esc(String(text).trim())}</pre></div></div>`
+    ? `<div class="thinking-card open"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(text).trim())}</pre></div></div>`
     : `<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
 }
 function finalizeThinkingCard(){
   const row=$('thinkingRow');
   if(!row) return;
+  // If the row is still just a spinner (no thinking content rendered),
+  // remove it entirely — it's the initial waiting dots.
+  const hasContent=row.querySelector('.thinking-card') || row.classList.contains('thinking-card-row');
+  if(!hasContent && row.getAttribute('data-thinking-active')==='1'){
+    row.remove();
+    return;
+  }
   row.removeAttribute('id');
   row.removeAttribute('data-thinking-active');
 }
@@ -1993,11 +2413,21 @@ function appendThinking(text=''){
     row.className='assistant-segment';
     row.id='thinkingRow';
     row.setAttribute('data-thinking-active','1');
-    blocks.appendChild(row);
+    // Insert after whichever comes last: a live assistant segment or a tool card.
+    // This mirrors appendLiveToolCard's anchor logic so thinking always appears
+    // in the right position in the interleaved sequence.
+    // Also skip #toolRunningRow (dots) — thinking should go before dots, not after.
+    const allChildren=Array.from(blocks.children);
+    const anchor=allChildren.filter(el=>
+      el.id!=='toolRunningRow' &&
+      el.matches('[data-live-assistant="1"],.tool-card-row')
+    ).pop();
+    if(anchor) anchor.insertAdjacentElement('afterend', row);
+    else blocks.appendChild(row);
   }
   row.className=(text&&String(text).trim())?'assistant-segment thinking-card-row':'assistant-segment';
   row.innerHTML=_thinkingMarkup(text);
-  scrollToBottom();
+  scrollIfPinned();
 }
 function updateThinking(text=''){appendThinking(text);}
 function removeThinking(){
@@ -2070,6 +2500,20 @@ function renderFileTree(){
   const box=$('fileTree');box.innerHTML='';
   // Cache current dir entries
   S._dirCache[S.currentDir||'.']=S.entries;
+  // Show empty-state when no workspace is set or the directory is empty (#703)
+  const emptyEl=$('wsEmptyState');
+  const hasWorkspace=!!(S.session&&S.session.workspace);
+  if(!hasWorkspace){
+    if(emptyEl){emptyEl.textContent=t('workspace_empty_no_path');emptyEl.style.display='flex';}
+    box.style.display='none';
+    return;
+  }
+  if(emptyEl) emptyEl.style.display='none';
+  box.style.display='';
+  if(!S.entries||!S.entries.length){
+    if(emptyEl){emptyEl.textContent=t('workspace_empty_dir');emptyEl.style.display='flex';}
+    return;
+  }
   _renderTreeItems(box, S.entries, 0);
 }
 
@@ -2207,6 +2651,16 @@ async function deleteWorkspaceFile(relPath, name){
 }
 
 async function promptNewFile(){
+  // If no active session but a default workspace is configured, auto-create
+  // a session bound to it so workspace actions work on the blank new-chat page.
+  if(!S.session){
+    const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
+    if(!ws) return;
+    try{
+      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
+      if(r&&r.session){S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+    }catch(e){setStatus(t('create_failed')+e.message);return;}
+  }
   if(!S.session)return;
   const name=await showPromptDialog({title:t('new_file_prompt'),placeholder:'filename.txt',confirmLabel:t('create')});
   if(!name||!name.trim())return;
@@ -2220,6 +2674,15 @@ async function promptNewFile(){
 }
 
 async function promptNewFolder(){
+  // Same auto-create-session logic as promptNewFile for the blank page.
+  if(!S.session){
+    const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
+    if(!ws) return;
+    try{
+      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
+      if(r&&r.session){S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+    }catch(e){setStatus(t('folder_create_failed')+e.message);return;}
+  }
   if(!S.session)return;
   const name=await showPromptDialog({title:t('new_folder_prompt'),placeholder:'folder-name',confirmLabel:t('create')});
   if(!name||!name.trim())return;

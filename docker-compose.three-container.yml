@@ -1,0 +1,121 @@
+# Three-container Docker Compose: Hermes Agent + Dashboard + WebUI
+#
+# This extends the two-container setup with the Hermes Dashboard for
+# monitoring agent activity, sessions, and resource usage.
+#
+# Usage:
+#   docker compose -f docker-compose.three-container.yml up -d
+#
+# Services:
+#   hermes-agent   — gateway API on port 8642 (CLI, Telegram, cron, tools)
+#   hermes-dashboard — monitoring dashboard on port 9119
+#   hermes-webui   — browser chat interface on port 8787
+#
+# All three share the same hermes-home volume so config, sessions,
+# skills, and memory are consistent across all surfaces.
+#
+# NOTE ON VOLUMES:
+#   This file uses named Docker volumes (hermes-home, hermes-agent-src) which
+#   work out of the box. If you prefer bind mounts (e.g. to an existing directory),
+#   see the two-container compose file for a bind-mount example.
+#   When using bind mounts, ALL containers must mount the same host path.
+
+services:
+  hermes-agent:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes-agent
+    command: gateway run
+    ports:
+      - "127.0.0.1:8642:8642"
+    volumes:
+      # Persist config, state, sessions, skills, memory across restarts
+      - hermes-home:/root/.hermes
+      # Expose agent source so the WebUI can install dependencies from it
+      - hermes-agent-src:/opt/hermes
+    environment:
+      - HERMES_HOME=/root/.hermes
+      - HERMES_UID=${HERMES_UID:-10000}
+      - HERMES_GID=${HERMES_GID:-10000}
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "2.0"
+    networks:
+      - hermes-net
+
+  hermes-dashboard:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes-dashboard
+    command: dashboard --host 0.0.0.0 --insecure
+    ports:
+      - "127.0.0.1:9119:9119"
+    volumes:
+      - hermes-home:/root/.hermes
+    environment:
+      - HERMES_HOME=/root/.hermes
+      - HERMES_UID=${HERMES_UID:-10000}
+      - HERMES_GID=${HERMES_GID:-10000}
+      # Dashboard connects to the gateway for health/session data
+      - GATEWAY_HEALTH_URL=http://hermes-agent:8642
+    depends_on:
+      - hermes-agent
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "0.5"
+    networks:
+      - hermes-net
+
+  hermes-webui:
+    image: ghcr.io/nesquena/hermes-webui:latest
+    container_name: hermes-webui
+    depends_on:
+      - hermes-agent
+    ports:
+      # Expose on localhost only. Remove 127.0.0.1: to expose on all interfaces
+      # (set HERMES_WEBUI_PASSWORD if doing so).
+      - "127.0.0.1:8787:8787"
+    volumes:
+      # Same hermes home as the agent — shares config, sessions, state
+      - hermes-home:/home/hermeswebui/.hermes
+      # Agent source mounted where docker_init.bash expects it.
+      # At startup the init script runs:
+      #   uv pip install /home/hermeswebui/.hermes/hermes-agent
+      # which installs the agent and all its Python dependencies.
+      - hermes-agent-src:/home/hermeswebui/.hermes/hermes-agent
+      # Workspace directory — browse and edit files from the WebUI.
+      # Adapt the host path to your project directory.
+      - ${HERMES_WORKSPACE:-~/workspace}:/workspace
+    environment:
+      - HERMES_WEBUI_HOST=0.0.0.0
+      - HERMES_WEBUI_PORT=8787
+      - HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui
+      # Match your host user's UID/GID for correct file permissions.
+      # Run `id -u` and `id -g` to find your values.
+      # On macOS, UIDs start at 501 (not 1000) — set these in a .env file:
+      #   echo "UID=$(id -u)" >> .env && echo "GID=$(id -g)" >> .env
+      - WANTED_UID=${UID:-1000}
+      - WANTED_GID=${GID:-1000}
+      # NOTE: When using bind-mount volumes shared across containers, ALL containers
+      # that write to the same host directory must run as the same UID/GID.
+      # If hermes-agent initialises the state dir as root (UID 0), hermes-webui
+      # will get a PermissionError accessing those paths — including a crash on every
+      # HTTP request if the auth signing-key file is unreadable. Either set WANTED_UID
+      # to match the agent container's UID, or use a named Docker volume (preferred).
+      # Optional: set a password for remote access
+      # - HERMES_WEBUI_PASSWORD=your-secret-password
+    restart: unless-stopped
+    networks:
+      - hermes-net
+
+networks:
+  hermes-net:
+    driver: bridge
+
+volumes:
+  hermes-home:
+  hermes-agent-src:

@@ -77,7 +77,14 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/b
 
 USER hermeswebuitoo
 
-COPY . /apptoo
+COPY --chown=hermeswebuitoo:hermeswebuitoo . /apptoo
+
+# Bake the git version tag into the image so the settings badge works even
+# when .git is not present (it is excluded by .dockerignore).
+# CI passes: --build-arg HERMES_VERSION=$(git describe --tags --always)
+# Local builds that omit the arg get "unknown" as the fallback.
+ARG HERMES_VERSION=unknown
+RUN echo "__version__ = '${HERMES_VERSION}'" > /apptoo/api/_version.py
 
 # Default to binding all interfaces (required for container networking)
 ENV HERMES_WEBUI_HOST=0.0.0.0

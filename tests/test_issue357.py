@@ -49,10 +49,13 @@ class TestDockerfileUvPreinstall:
 
     def test_dockerfile_uv_installed_before_copy(self):
         """uv installation must happen before COPY . /apptoo so it's in the image."""
+        import re
         uv_pos = DOCKERFILE.find("uv/install.sh")
-        copy_pos = DOCKERFILE.find("COPY . /apptoo")
+        # Match COPY regardless of flags (e.g. --chown=...) — only the destination matters.
+        m = re.search(r"^COPY\b.*\s/apptoo\b", DOCKERFILE, re.MULTILINE)
         assert uv_pos != -1, "uv install not found in Dockerfile"
-        assert copy_pos != -1, "COPY . /apptoo not found in Dockerfile"
+        assert m is not None, "COPY ... /apptoo not found in Dockerfile"
+        copy_pos = m.start()
         assert uv_pos < copy_pos, "uv must be installed before COPY . /apptoo"
 
     def test_dockerfile_uv_installed_as_root_or_before_user_switch(self):
@@ -147,20 +150,21 @@ class TestWorkspacePermissions:
         )
 
     def test_workspace_uses_sudo_chown(self):
-        """docker_init.bash must chown the workspace to hermeswebui after mkdir."""
-        ws_section = INIT_SCRIPT[
-            INIT_SCRIPT.find("HERMES_WEBUI_DEFAULT_WORKSPACE"):
-            INIT_SCRIPT.find("HERMES_WEBUI_DEFAULT_WORKSPACE") + 800
-        ]
-        assert "sudo chown" in ws_section and "hermeswebui" in ws_section, (
+        """docker_init.bash must chown the workspace to hermeswebui when writable.
+
+        The chown is now conditional on the workspace being writable, to allow
+        read-only (:ro) workspace mounts without crashing (#670). The sudo chown
+        must still be present in the script (just guarded by [ -w ]).
+        """
+        assert 'sudo chown hermeswebui:hermeswebui "$HERMES_WEBUI_DEFAULT_WORKSPACE"' in INIT_SCRIPT, (
             "docker_init.bash must 'sudo chown hermeswebui:hermeswebui' the workspace "
-            "directory after creating it, so the app user can write to it (#357)"
+            "when it is writable, so the app user can write to it (#357)"
         )
 
     def test_workspace_mkdir_before_chown(self):
         """sudo mkdir must come before sudo chown in docker_init.bash."""
-        mkdir_pos = INIT_SCRIPT.find("sudo mkdir -p \"$HERMES_WEBUI_DEFAULT_WORKSPACE\"")
-        chown_pos = INIT_SCRIPT.find("sudo chown hermeswebui:hermeswebui \"$HERMES_WEBUI_DEFAULT_WORKSPACE\"")
+        mkdir_pos = INIT_SCRIPT.find('sudo mkdir -p "$HERMES_WEBUI_DEFAULT_WORKSPACE"')
+        chown_pos = INIT_SCRIPT.find('sudo chown hermeswebui:hermeswebui "$HERMES_WEBUI_DEFAULT_WORKSPACE"')
         assert mkdir_pos != -1, "sudo mkdir for workspace not found"
         assert chown_pos != -1, "sudo chown for workspace not found"
         assert mkdir_pos < chown_pos, "sudo mkdir must come before sudo chown"
@@ -171,10 +175,19 @@ class TestWorkspacePermissions:
             "sudo mkdir for workspace must call error_exit on failure"
         )
 
-    def test_workspace_error_exit_on_chown_failure(self):
-        """sudo chown must call error_exit on failure."""
-        assert 'sudo chown hermeswebui:hermeswebui "$HERMES_WEBUI_DEFAULT_WORKSPACE" || error_exit' in INIT_SCRIPT, (
-            "sudo chown for workspace must call error_exit on failure"
+    def test_workspace_chown_is_conditional_on_writable(self):
+        """chown and write-test must be skipped for read-only workspace mounts (#670).
+
+        The script must check [ -w "$HERMES_WEBUI_DEFAULT_WORKSPACE" ] before
+        attempting chown or a write test, so :ro bind-mounts don't crash startup.
+        """
+        assert '[ -w "$HERMES_WEBUI_DEFAULT_WORKSPACE" ]' in INIT_SCRIPT, (
+            "docker_init.bash must guard chown with [ -w ] to support read-only "
+            "workspace mounts (:ro) without crashing (#670)"
+        )
+        # Read-only path must log a clear message rather than calling error_exit
+        assert "read-only workspace is supported" in INIT_SCRIPT, (
+            "docker_init.bash must print a clear message when workspace is read-only (#670)"
         )
 
     def test_init_script_syntax_valid(self):

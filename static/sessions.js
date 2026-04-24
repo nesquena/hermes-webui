@@ -10,19 +10,75 @@ const ICONS={
   more:'<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" stroke="none"><circle cx="8" cy="3" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="8" cy="13" r="1.25"/></svg>',
 };
 
+const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
+let _sessionViewedCounts = null;
+
+function _getSessionViewedCounts() {
+  if (_sessionViewedCounts !== null) return _sessionViewedCounts;
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SESSION_VIEWED_COUNTS_KEY) || '{}');
+    _sessionViewedCounts = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_){
+    _sessionViewedCounts = {};
+  }
+  return _sessionViewedCounts;
+}
+
+function _saveSessionViewedCounts() {
+  try {
+    localStorage.setItem(SESSION_VIEWED_COUNTS_KEY, JSON.stringify(_getSessionViewedCounts()));
+  } catch (_){
+    // Ignore localStorage write failures.
+  }
+}
+
+function _setSessionViewedCount(sid, messageCount = 0) {
+  if (!sid) return;
+  const counts = _getSessionViewedCounts();
+  const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
+  counts[sid] = next;
+  _saveSessionViewedCounts();
+}
+
+function _hasUnreadForSession(s) {
+  if (!s || !s.session_id) return false;
+  const counts = _getSessionViewedCounts();
+  if (!Object.prototype.hasOwnProperty.call(counts, s.session_id)) {
+    _setSessionViewedCount(s.session_id, Number(s.message_count || 0));
+    return false;
+  }
+  if (!Number.isFinite(s.message_count)) return false;
+  return s.message_count > Number(counts[s.session_id] || 0);
+}
+
 async function newSession(flash){
   updateQueueBadge();
   S.toolCalls=[];
   clearLiveToolCards();
-  // Use profile default workspace for new sessions after a profile switch (one-shot),
-  // otherwise inherit from the current session (or let server pick the default)
-  const inheritWs=S._profileDefaultWorkspace||(S.session?S.session.workspace:null);
-  S._profileDefaultWorkspace=null; // consume — only applies to the first new session after switch
-  const data=await api('/api/session/new',{method:'POST',body:JSON.stringify({model:$('modelSelect').value,workspace:inheritWs})});
+  // One-shot profile-switch workspace: applied to the first new session after a profile
+  // switch, then cleared.  Use a dedicated flag so S._profileDefaultWorkspace (the
+  // persistent boot/settings default) is not consumed and remains available for the
+  // blank-page display on all subsequent returns to the empty state (#823).
+  const switchWs=S._profileSwitchWorkspace;
+  S._profileSwitchWorkspace=null;
+  const inheritWs=switchWs||(S.session?S.session.workspace:null)||(S._profileDefaultWorkspace||null);
+  // Use the saved default model for new sessions (#872). The user's saved
+  // default_model (from Settings) takes priority over the chat-header dropdown
+  // value, which reflects the *previous* session's model. Fall back to the
+  // dropdown value only when no default_model is configured.
+  const newModel=window._defaultModel||$('modelSelect').value;
+  const data=await api('/api/session/new',{method:'POST',body:JSON.stringify({model:newModel,workspace:inheritWs,profile:S.activeProfile||'default'})});
   S.session=data.session;S.messages=data.session.messages||[];
   S.lastUsage={...(data.session.last_usage||{})};
   if(flash)S.session._flash=true;
   localStorage.setItem('hermes-webui-session',S.session.session_id);
+  _setSessionViewedCount(S.session.session_id, S.session.message_count || 0);
+  // Sync chat-header dropdown to the session's model so the UI reflects
+  // the default model the server actually used (#872).
+  if(S.session.model && S.session.model!==$('modelSelect').value && typeof _applyModelToDropdown==='function'){
+    _applyModelToDropdown(S.session.model,$('modelSelect'));
+    if(typeof syncModelChip==='function') syncModelChip();
+  }
   // Reset per-session visual state: a fresh chat is idle even if another
   // conversation is still streaming in the background.
   S.busy=false;
@@ -43,6 +99,7 @@ async function loadSession(sid){
   const data=await api(`/api/session?session_id=${encodeURIComponent(sid)}`);
   S.session=data.session;
   S.lastUsage={...(data.session.last_usage||{})};
+  _setSessionViewedCount(S.session.session_id, Number(data.session.message_count || 0));
   localStorage.setItem('hermes-webui-session',S.session.session_id);
   data.session.messages = (data.session.messages || []).filter(m => m && m.role);
   const hasMessageToolMetadata = (data.session.messages || []).some(m => {
@@ -83,6 +140,44 @@ async function loadSession(sid){
       attachLiveStream(sid, activeStreamId, data.session.pending_attachments||[], {reconnecting:true});
     }
   }else{
+    // Restore any queued message that survived page refresh via sessionStorage.
+    // Only restore when the agent is idle — if active, the done handler drains it.
+    if(typeof queueSessionMessage==='function'){
+      try{
+        const _storedQ=sessionStorage.getItem('hermes-queue-'+sid);
+        if(_storedQ){
+          const _entries=JSON.parse(_storedQ);
+          if(Array.isArray(_entries)&&_entries.length){
+            // Timestamp guard: drop entries older than the last assistant response
+            // (means the agent already ran and the queue was already dispatched)
+            const _lastMsg=(data.session.messages||[]).slice().reverse()
+              .find(m=>m&&m.role==='assistant');
+            const _lastAsst=_lastMsg?(_lastMsg.timestamp||_lastMsg._ts||0)*1000:0;
+            const _fresh=_entries.filter(e=>!e._queued_at||e._queued_at>_lastAsst);
+            if(_fresh.length){
+              // Idle path: restore the first entry as a composer draft only. Do NOT
+              // re-enqueue into SESSION_QUEUES — if we did, send() would dispatch the
+              // draft directly (S.busy=false) and then setBusy(false) would drain the
+              // same entry from the queue, causing a duplicate send. Any follow-up
+              // entries (2..N) are discarded by design; the toast tells the user so.
+              const _first=_fresh[0];
+              const _msg=$&&$('msg');
+              if(_msg&&_first.text&&!_msg.value){
+                _msg.value=_first.text||'';
+                if(typeof autoResize==='function') autoResize();
+                if(typeof showToast==='function') showToast((_fresh.length>1?`${_fresh.length} queued messages restored (showing first)`:'Queued message restored')+' — review and send when ready');
+              }
+              // Clear persisted queue now that the draft is in the composer
+              sessionStorage.removeItem('hermes-queue-'+sid);
+            } else {
+              sessionStorage.removeItem('hermes-queue-'+sid);
+            }
+          } else {
+            sessionStorage.removeItem('hermes-queue-'+sid);
+          }
+        }
+      }catch(_){sessionStorage.removeItem('hermes-queue-'+sid);}
+    }
     updateQueueBadge(sid);
     S.messages=data.session.messages||[];
     const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(data.session):null;
@@ -212,7 +307,7 @@ function _openSessionActionMenu(session, anchorEl){
   menu.className='session-action-menu open';
   menu.appendChild(_buildSessionAction(
     session.pinned?'Unpin conversation':'Pin conversation',
-    session.pinned?'Remove from the pinned section':'Keep this conversation at the top',
+    session.pinned?'Remove from pinned':'Keep this conversation at the top',
     session.pinned?ICONS.pin:ICONS.unpin,
     async()=>{
       closeSessionActionMenu();
@@ -228,7 +323,7 @@ function _openSessionActionMenu(session, anchorEl){
   ));
   menu.appendChild(_buildSessionAction(
     'Move to project',
-    session.project_id?'Change which project this conversation belongs to':'Assign this conversation to a project',
+    session.project_id?'Change the project for this conversation':'Assign a project to this conversation',
     ICONS.folder,
     async()=>{
       closeSessionActionMenu();
@@ -314,12 +409,90 @@ async function renderSessionList(){
     ]);
     _allSessions = sessData.sessions||[];
     _allProjects = projData.projects||[];
+    const isStreaming = _allSessions.some(s => Boolean(s && s.is_streaming));
+    if (isStreaming) {
+      startStreamingPoll();
+    } else {
+      stopStreamingPoll();
+    }
+    ensureSessionTimeRefreshPoll();
     renderSessionListFromCache();  // no-ops if rename is in progress
   }catch(e){console.warn('renderSessionList',e);}
 }
 
 // ── Gateway session SSE (real-time sync for agent sessions) ──
 let _gatewaySSE = null;
+let _gatewayPollTimer = null;
+let _gatewayProbeInFlight = false;
+let _gatewaySSEWarningShown = false;
+const _gatewayFallbackPollMs = 30000;
+const _streamingPollMs = 5000;
+const _sessionTimeRefreshMs = 60000;
+let _streamingPollTimer = null;
+let _sessionTimeRefreshTimer = null;
+
+function startStreamingPoll(){
+  if(_streamingPollTimer) return;
+  _streamingPollTimer = setInterval(() => {
+    void renderSessionList();
+  }, _streamingPollMs);
+}
+
+function stopStreamingPoll(){
+  if(!_streamingPollTimer) return;
+  clearInterval(_streamingPollTimer);
+  _streamingPollTimer = null;
+}
+
+function ensureSessionTimeRefreshPoll(){
+  if(_sessionTimeRefreshTimer) return;
+  _sessionTimeRefreshTimer = setInterval(() => {
+    renderSessionListFromCache();
+  }, _sessionTimeRefreshMs);
+}
+
+function startGatewayPollFallback(ms){
+  const intervalMs = Math.max(5000, Number(ms) || _gatewayFallbackPollMs);
+  if(_gatewayPollTimer) clearInterval(_gatewayPollTimer);
+  _gatewayPollTimer = setInterval(() => { renderSessionList(); }, intervalMs);
+}
+
+function stopGatewayPollFallback(){
+  if(_gatewayPollTimer){
+    clearInterval(_gatewayPollTimer);
+    _gatewayPollTimer = null;
+  }
+}
+
+async function probeGatewaySSEStatus(){
+  if(_gatewayProbeInFlight || !window._showCliSessions) return;
+  _gatewayProbeInFlight = true;
+  try{
+    const resp = await fetch('/api/sessions/gateway/stream?probe=1', { credentials:'same-origin' });
+    const data = await resp.json().catch(() => ({}));
+    if(resp.ok && data.watcher_running){
+      stopGatewayPollFallback();
+      _gatewaySSEWarningShown = false;
+      return;
+    }
+    if(resp.status === 503 || data.watcher_running === false){
+      startGatewayPollFallback(data.fallback_poll_ms || _gatewayFallbackPollMs);
+      renderSessionList();
+      if(!_gatewaySSEWarningShown && typeof showToast === 'function'){
+        showToast('Gateway sync unavailable — falling back to periodic refresh.', 5000);
+        _gatewaySSEWarningShown = true;
+      }
+    }
+  }catch(e){
+    // Network error during probe — server may be unreachable.
+    // Start fallback polling as a safe default; it will self-cancel
+    // when the SSE connection recovers and sessions_changed fires.
+    startGatewayPollFallback(_gatewayFallbackPollMs);
+    renderSessionList();
+  }finally{
+    _gatewayProbeInFlight = false;
+  }
+}
 
 function startGatewaySSE(){
   stopGatewaySSE();
@@ -330,14 +503,42 @@ function startGatewaySSE(){
       try{
         const data = JSON.parse(ev.data);
         if(data.sessions){
+          stopGatewayPollFallback();
+          _gatewaySSEWarningShown = false;
           renderSessionList(); // re-fetch and re-render
+          // If the active session received new gateway messages, refresh the conversation view.
+          // S.busy check prevents stomping on an in-progress WebUI response.
+          // is_cli_session check ensures we only poll import_cli for CLI-originated sessions.
+          if(S.session && !S.busy && S.session.is_cli_session){
+            const changedIds = new Set((data.sessions||[]).map(s=>s.session_id));
+            if(changedIds.has(S.session.session_id)){
+              // Capture active session ID before async fetch — race guard.
+              // If the user switches sessions while the fetch is in-flight, discard the result.
+              const activeSid = S.session.session_id;
+              api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:activeSid})})
+                .then(res=>{
+                  if(!S.session || S.session.session_id !== activeSid) return;
+                  if(res && res.session && Array.isArray(res.session.messages)){
+                    const prev = S.messages.length;
+                    S.messages = res.session.messages.filter(m=>m&&m.role);
+                    if(S.messages.length !== prev){
+                      renderMessages();
+                      if(typeof highlightCode==='function') highlightCode();
+                    }
+                  }
+                })
+                .catch(()=>{ /* ignore — next poll will retry */ });
+            }
+          }
         }
       }catch(e){ /* ignore parse errors */ }
     });
     _gatewaySSE.onerror = () => {
-      // EventSource auto-reconnects; no action needed
+      void probeGatewaySSEStatus();
     };
-  }catch(e){ /* SSE not available */ }
+  }catch(e){
+    void probeGatewaySSEStatus();
+  }
 }
 
 function stopGatewaySSE(){
@@ -345,6 +546,9 @@ function stopGatewaySSE(){
     _gatewaySSE.close();
     _gatewaySSE = null;
   }
+  stopGatewayPollFallback();
+  _gatewayProbeInFlight = false;
+  _gatewaySSEWarningShown = false;
 }
 
 let _searchDebounceTimer = null;
@@ -574,7 +778,9 @@ function renderSessionListFromCache(){
   function _renderOneSession(s){
     const el=document.createElement('div');
     const isActive=S.session&&s.session_id===S.session.session_id;
-    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'');
+    const isStreaming=Boolean(s.is_streaming);
+    const hasUnread=_hasUnreadForSession(s)&&!isActive;
+    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(isStreaming?' streaming':'');
     if(isActive&&S.session&&S.session._flash)delete S.session._flash;
     const rawTitle=s.title||'Untitled';
     const tags=(rawTitle.match(/#[\w-]+/g)||[]);
@@ -587,13 +793,41 @@ function renderSessionListFromCache(){
     sessionText.className='session-text';
     const titleRow=document.createElement('div');
     titleRow.className='session-title-row';
+    if(s.pinned){
+      const pinInd=document.createElement('span');
+      pinInd.className='session-pin-indicator';
+      pinInd.innerHTML=ICONS.pin;
+      titleRow.appendChild(pinInd);
+    }
+    const state=document.createElement('span');
+    state.className='session-state-indicator'+(isStreaming?' is-streaming':(hasUnread?' is-unread':''));
+    titleRow.appendChild(state); // always reserve slot — prevents title shift when indicator appears
     const title=document.createElement('span');
     title.className='session-title';
     title.textContent=cleanTitle||'Untitled';
     title.title='Double-click to rename';
     const tsMs=_sessionTimestampMs(s);
+    const ts=document.createElement('span');
+    ts.className='session-time';
+    ts.textContent=_formatRelativeSessionTime(tsMs);
     titleRow.appendChild(title);
+    titleRow.appendChild(ts);
     sessionText.appendChild(titleRow);
+    const density=(window._sidebarDensity==='detailed'?'detailed':'compact');
+    if(density==='detailed'){
+      const metaBits=[];
+      const msgCount=typeof s.message_count==='number'?s.message_count:0;
+      const msgLabel=(typeof t==='function')
+        ? t('session_meta_messages', msgCount)
+        : `${msgCount} msg${msgCount===1?'':'s'}`;
+      metaBits.push(msgLabel);
+      if(s.model) metaBits.push(s.model);
+      if(_showAllProfiles&&s.profile) metaBits.push(s.profile);
+      const meta=document.createElement('div');
+      meta.className='session-meta';
+      meta.textContent=metaBits.join(' · ');
+      sessionText.appendChild(meta);
+    }
     // Append tag chips after the title text
     for(const tag of tags){
       const chip=document.createElement('span');
@@ -647,13 +881,6 @@ function renderSessionListFromCache(){
       setTimeout(()=>{inp.focus();inp.select();},10);
     };
 
-    // Pin indicator (inline, only when pinned — no space reserved otherwise)
-    if(s.pinned){
-      const pinInd=document.createElement('span');
-      pinInd.className='session-pin-indicator';
-      pinInd.innerHTML=ICONS.pin;
-      el.appendChild(pinInd);
-    }
     // Project indicator: colored dot appended after the title
     if(s.project_id){
       const proj=_allProjects.find(p=>p.project_id===s.project_id);

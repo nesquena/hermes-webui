@@ -5,22 +5,52 @@ When a custom_providers entry carries a `name` field (e.g. "Agent37"), the
 web UI model picker should show that name as the group header rather than the
 generic "Custom" label.
 """
+import pytest
 import api.config as config
 
 
+@pytest.fixture(autouse=True)
+def _isolate_models_cache():
+    """Invalidate the models TTL cache before and after every test in this file."""
+    try:
+        config.invalidate_models_cache()
+    except Exception:
+        pass
+    yield
+    try:
+        config.invalidate_models_cache()
+    except Exception:
+        pass
+
+
 def _models_with_cfg(model_cfg=None, custom_providers=None, active_provider=None):
-    """Temporarily patch config.cfg, call get_available_models(), restore."""
+    """Temporarily patch config.cfg, call get_available_models(), restore.
+
+    Also pins _cfg_mtime to the current config.yaml mtime before calling
+    get_available_models().  Without this, if a prior test wrote config.yaml
+    (changing its mtime), the mtime-guard inside get_available_models() fires
+    reload_config() which overwrites config.cfg with the real on-disk values,
+    silently discarding the patch and causing ordering-dependent failures.
+    This matches the pattern used in test_model_resolver.py.
+    """
     old_cfg = dict(config.cfg)
+    old_mtime = config._cfg_mtime
     config.cfg.clear()
     if model_cfg:
         config.cfg["model"] = model_cfg
     if custom_providers is not None:
         config.cfg["custom_providers"] = custom_providers
+    # Pin mtime so get_available_models() skips its reload_config() guard.
+    try:
+        config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
+    except Exception:
+        config._cfg_mtime = 0.0  # no config.yaml present; reload guard is a no-op
     try:
         return config.get_available_models()
     finally:
         config.cfg.clear()
         config.cfg.update(old_cfg)
+        config._cfg_mtime = old_mtime
 
 
 # ── Named provider shows its name in the dropdown ─────────────────────────────

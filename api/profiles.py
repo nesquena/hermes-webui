@@ -31,6 +31,12 @@ _active_profile = 'default'
 _profile_lock = threading.Lock()
 _loaded_profile_env_keys: set[str] = set()
 
+# Thread-local profile context: set per-request by server.py, cleared after.
+# Enables per-client profile isolation (issue #798) — each HTTP request thread
+# reads its own profile from the hermes_profile cookie instead of the
+# process-global _active_profile.
+_tls = threading.local()
+
 def _resolve_base_hermes_home() -> Path:
     """Return the BASE ~/.hermes directory — the root that contains profiles/.
 
@@ -75,7 +81,7 @@ def _read_active_profile_file() -> str:
     ap_file = _DEFAULT_HERMES_HOME / 'active_profile'
     if ap_file.exists():
         try:
-            name = ap_file.read_text().strip()
+            name = ap_file.read_text(encoding="utf-8").strip()
             if name:
                 return name
         except Exception:
@@ -86,15 +92,67 @@ def _read_active_profile_file() -> str:
 # ── Public API ──────────────────────────────────────────────────────────────
 
 def get_active_profile_name() -> str:
-    """Return the currently active profile name."""
+    """Return the currently active profile name.
+
+    Priority:
+      1. Thread-local (set per-request from hermes_profile cookie) — issue #798
+      2. Process-level default (_active_profile)
+    """
+    tls_name = getattr(_tls, 'profile', None)
+    if tls_name is not None:
+        return tls_name
     return _active_profile
 
 
+def set_request_profile(name: str) -> None:
+    """Set the per-request profile context for this thread.
+
+    Called by server.py at the start of each request when a hermes_profile
+    cookie is present.  Always paired with clear_request_profile() in a
+    finally block so the thread-local is released after the request.
+    """
+    _tls.profile = name
+
+
+def clear_request_profile() -> None:
+    """Clear the per-request profile context for this thread.
+
+    Called by server.py in the finally block of do_GET / do_POST.
+    Safe to call even if set_request_profile() was never called.
+    """
+    _tls.profile = None
+
+
 def get_active_hermes_home() -> Path:
-    """Return the HERMES_HOME path for the currently active profile."""
-    if _active_profile == 'default':
+    """Return the HERMES_HOME path for the currently active profile.
+
+    Uses get_active_profile_name() so per-request TLS context (issue #798)
+    is respected, not just the process-level global.
+    """
+    name = get_active_profile_name()
+    if name == 'default':
         return _DEFAULT_HERMES_HOME
-    profile_dir = _DEFAULT_HERMES_HOME / 'profiles' / _active_profile
+    profile_dir = _DEFAULT_HERMES_HOME / 'profiles' / name
+    if profile_dir.is_dir():
+        return profile_dir
+    return _DEFAULT_HERMES_HOME
+
+
+
+def get_hermes_home_for_profile(name: str) -> Path:
+    """Return the HERMES_HOME Path for *name* without mutating any process state.
+
+    Safe to call from per-request context (streaming, session creation) because
+    it reads only the filesystem — it never touches os.environ, module-level
+    cached paths, or the process-level _active_profile global.
+
+    Falls back to _DEFAULT_HERMES_HOME (same as 'default') when *name* is None,
+    empty, 'default', or does not match the profile-name format (rejects path
+    traversal such as '../../etc').
+    """
+    if not name or name == 'default' or not _PROFILE_ID_RE.match(name):
+        return _DEFAULT_HERMES_HOME
+    profile_dir = _DEFAULT_HERMES_HOME / 'profiles' / name
     if profile_dir.is_dir():
         return profile_dir
     return _DEFAULT_HERMES_HOME
@@ -142,7 +200,7 @@ def _reload_dotenv(home: Path):
         return
     try:
         loaded_keys: set[str] = set()
-        for line in env_path.read_text().splitlines():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line and not line.startswith('#') and '=' in line:
                 k, v = line.split('=', 1)
@@ -170,11 +228,17 @@ def init_profile_state() -> None:
     _reload_dotenv(home)
 
 
-def switch_profile(name: str) -> dict:
+def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     """Switch the active profile.
 
     Validates the profile exists, updates process state, patches module caches,
     reloads .env, and reloads config.yaml.
+
+    Args:
+        name: Profile name to switch to.
+        process_wide: If True (default), updates the process-global
+            _active_profile.  Set to False for per-client switches from the
+            WebUI where the profile is managed via cookie + thread-local (#798).
 
     Returns: {'profiles': [...], 'active': name}
     Raises ValueError if profile doesn't exist or agent is busy.
@@ -201,24 +265,41 @@ def switch_profile(name: str) -> dict:
             raise ValueError(f"Profile '{name}' does not exist.")
 
     with _profile_lock:
-        _active_profile = name
-        _set_hermes_home(home)
-        _reload_dotenv(home)
+        if process_wide:
+            global _active_profile
+            _active_profile = name
+            _set_hermes_home(home)
+            _reload_dotenv(home)
 
-    # Write sticky default for CLI consistency
-    try:
-        ap_file = _DEFAULT_HERMES_HOME / 'active_profile'
-        ap_file.write_text(name if name != 'default' else '')
-    except Exception:
-        logger.debug("Failed to write active profile file")
+    if process_wide:
+        # Write sticky default for CLI consistency
+        try:
+            ap_file = _DEFAULT_HERMES_HOME / 'active_profile'
+            ap_file.write_text(name if name != 'default' else '', encoding='utf-8')
+        except Exception:
+            logger.debug("Failed to write active profile file")
 
-    # Reload config.yaml from the new profile
-    reload_config()
+        # Reload config.yaml from the new profile
+        reload_config()
 
-    # Return profile-specific defaults so frontend can apply them
+    # Return profile-specific defaults so frontend can apply them.
+    # For process_wide=False (per-client switch), read the target profile's
+    # config.yaml directly from disk rather than from _cfg_cache (process-global),
+    # since reload_config() was intentionally skipped.
     from api.workspace import get_last_workspace
-    from api.config import get_config
-    cfg = get_config()
+    if process_wide:
+        from api.config import get_config
+        cfg = get_config()
+    else:
+        # Direct disk read — does not touch _cfg_cache
+        try:
+            import yaml as _yaml
+            cfg_path = home / 'config.yaml'
+            cfg = _yaml.safe_load(cfg_path.read_text(encoding='utf-8')) if cfg_path.exists() else {}
+            if not isinstance(cfg, dict):
+                cfg = {}
+        except Exception:
+            cfg = {}
     model_cfg = cfg.get('model', {})
     default_model = None
     if isinstance(model_cfg, str):
@@ -243,7 +324,7 @@ def list_profiles_api() -> list:
         # hermes_cli not available -- return just the default
         return [_default_profile_dict()]
 
-    active = _active_profile
+    active = get_active_profile_name()
     result = []
     for p in infos:
         result.append({
@@ -344,7 +425,7 @@ def _write_endpoint_to_config(profile_dir: Path, base_url: str = None, api_key: 
     cfg = {}
     if config_path.exists():
         try:
-            loaded = _yaml.safe_load(config_path.read_text())
+            loaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
                 cfg = loaded
         except Exception:
@@ -357,7 +438,7 @@ def _write_endpoint_to_config(profile_dir: Path, base_url: str = None, api_key: 
     if api_key:
         model_section['api_key'] = api_key
     cfg['model'] = model_section
-    config_path.write_text(_yaml.dump(cfg, default_flow_style=False, allow_unicode=True))
+    config_path.write_text(_yaml.dump(cfg, default_flow_style=False, allow_unicode=True), encoding='utf-8')
 
 
 def create_profile_api(name: str, clone_from: str = None,

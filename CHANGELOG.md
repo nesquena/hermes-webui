@@ -1,5 +1,602 @@
 # Hermes Web UI -- Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Reasoning chip now appears after the model chip** in the composer toolbar — model is a more fundamental choice and should be stable in position regardless of whether reasoning is active. Order: Profile → Workspace → Model → Reasoning. (`static/index.html`)
+
+## v0.50.185 — 2026-04-24
+
+### Fixed
+- **`/btw` stream handler hardened** — `_streamDone=true` now set *before* `src.close()` in `done` and `apperror` handlers (defensive ordering); `_ensureBtwRow()` in `done` gated on session match (`S.session.session_id === parentSid`) to prevent btw bubble leaking into a different session if the user switches mid-stream; `stream_end` handler also sets `_streamDone=true` for defense-in-depth. 14 new regression tests added. (`static/messages.js`, `tests/test_reasoning_chip_btw_fixes.py`) [#935]
+- **`/reasoning` toast aligned with BRAIN prefix** — success toast now reads `🧠 Reasoning effort: <level>` consistent with the command's other toasts. (`static/commands.js`) [#939]
+- **Bootstrap Python discovery finds `.venv/` layout** — `discover_launcher_python` now checks both `venv/` and `.venv/` inside the agent directory, covering installations that use a leading-dot venv layout. (`bootstrap.py`) [#941]
+
+## v0.50.184 — 2026-04-24
+
+### Fixed
+- **Reasoning chip dropdown now opens correctly** — the dropdown was placed inside `.composer-left` which has `overflow-y: hidden`, clipping the upward-opening menu entirely. Moved `#composerReasoningDropdown` outside to sit alongside the model/profile/workspace dropdowns and added `_positionReasoningDropdown()` for consistent chip-aligned positioning. Z-index raised to 200 to match other composer dropdowns. (`static/index.html`, `static/style.css`, `static/ui.js`)
+- **Reasoning chip icon is now a monochrome SVG** — replaced the `🧠` emoji in the label with a `stroke="currentColor"` brain-outline SVG matching the style of all other composer chips. (`static/index.html`, `static/ui.js`)
+- **`/reasoning <level>` now immediately updates the chip** — previously called `syncReasoningChip()` which re-applied the stale cached value. Now calls `_applyReasoningChip(eff)` directly with the server-confirmed effort level. (`static/commands.js`)
+- **`/btw` answer no longer vanishes after rendering** — `onerror` was firing when the server cleanly closed the SSE connection after `stream_end`, removing the just-rendered answer bubble. A `_streamDone` flag now prevents `onerror` from wiping the row after a successful stream. Also added `_ensureBtwRow()` call in `done` handler so the bubble renders even if no `token` events arrived. (`static/messages.js`) Closes #933.
+
+### Added
+- **Session attention indicators in the sidebar** — the session list now shows a
+  spinning indicator while a session is actively streaming (even in the
+  background), an unread dot when a session has new messages the user hasn't
+  seen, and a right-aligned relative timestamp ("2m ago", "Yesterday") next to
+  every session title. Streaming state is computed server-side from the live
+  `STREAMS` registry so it's accurate across tabs and after server restart.
+  The unread count is tracked client-side in `localStorage` and cleared
+  automatically when the active session's stream settles. Pinned-star indicator
+  moved into the title row with a fixed 10×10 box for consistent alignment.
+  Includes a 5 s polling loop that activates only while sessions are streaming,
+  and a 60 s timer to keep relative timestamps fresh. (`api/models.py`,
+  `static/sessions.js`, `static/messages.js`, `static/style.css`) Closes #856.
+  Co-authored by @franksong2702.
+
+### Fixed
+- **Nous static models now use explicit `@nous:` prefix** — the four hardcoded "(via Nous)" models (`Claude Opus 4.6`, `Claude Sonnet 4.6`, `GPT-5.4 Mini`, `Gemini 3.1 Pro Preview`) now carry `@nous:` prefix IDs, matching the format of live-fetched Nous models. Previously they used slash-only IDs that relied on the portal provider guard; the explicit prefix routes them through the same bulletproof `@provider:model` branch and eliminates 404 errors on those entries. (`api/config.py`, `tests/test_nous_portal_routing.py`)
+
+### Added
+- **Workspace path autocomplete in Spaces** — the "Add workspace path" field in
+  the Spaces panel now suggests trusted directories as you type, supports
+  keyboard navigation plus `Tab` completion, and keeps hidden directories out of
+  the list unless the current path segment starts with `.`. Suggestions are
+  limited to trusted roots (home, saved workspaces, and the boot default
+  workspace subtree) and never enumerate blocked system roots. (`api/routes.py`,
+  `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
+
+## [v0.50.183] — 2026-04-24
+
+### Added
+- **`/btw` slash command** — ask an ephemeral side question using current session context without adding to history. Creates a hidden session, streams the answer in a visually distinct bubble, then discards the session. Includes `attachBtwStream()` SSE consumer and `POST /api/btw` route. (`api/routes.py`, `api/background.py`, `static/commands.js`, `static/messages.js`, `static/style.css`)
+- **`/background` slash command** — run a prompt in a parallel background agent without blocking the active conversation. Frontend polls `GET /api/background/status` for results and displays completed answers inline. Includes badge indicator in composer footer. (`api/routes.py`, `api/background.py`, `static/commands.js`, `static/messages.js`, `static/index.html`)
+- **Undo button on last assistant message** — surfaced as an ↩ icon on the last assistant message, calling the existing `/undo` command for discoverability. (`static/ui.js`)
+- **Reasoning effort chip in composer** — visual chip to set reasoning effort level from the composer footer without typing a command. (`static/ui.js`, `static/index.html`, `static/style.css`)
+
+### Fixed
+- **Background task completion hook wired** — `complete_background()` was never called after a background agent finished, so tasks stayed in `status="running"` forever and polling always returned `[]`. Fixed by wrapping `_run_agent_streaming` in `_run_bg_and_notify` which extracts the last assistant message and signals the tracker. Also fixed `get_results()` to retain in-flight tasks during polls so concurrent tasks are not dropped. (`api/background.py`, `api/routes.py`, `tests/test_background_tasks.py`)
+- **Ephemeral sessions correctly skip persistence** — added `return` after the ephemeral `done` event in `_run_agent_streaming()`, preventing ephemeral session state from being written to disk after stream completion. (`api/streaming.py`)
+
+Co-authored by @bergeouss.
+
+## [v0.50.181] — 2026-04-24
+
+### Changed
+- **Vendor streaming-markdown@0.2.15** — self-hosts the incremental markdown parser instead of loading it from jsDelivr CDN. The library (12.6 KB) is committed to `static/vendor/smd.min.js` so the app works fully offline / air-gapped, and the exact bytes are pinned in version control. SHA-384 hash preserved in an HTML comment for manual audit. (`static/vendor/smd.min.js`, `static/index.html`) Co-authored by @bsgdigital.
+
+## [v0.50.180] — 2026-04-23
+
+### Added
+- **Incremental streaming markdown via `streaming-markdown`** — replaces the per-animation-frame full `innerHTML` re-render with an incremental DOM-building parser. During streaming, only new character deltas are fed to the parser per frame (`_smdWrite()`), eliminating DOM thrashing and improving rendering smoothness. Prism.js / KaTeX state no longer gets reset mid-stream. Falls back to the existing `renderMd()` path when the library is unavailable. (`static/messages.js`, `static/index.html`) Co-authored by @bsgdigital.
+
+## [v0.50.179] — 2026-04-23
+
+### Fixed
+- **Onboarding wizard clobbering CLI users' config after server restart** — CLI-configured users (who set up via `hermes model` / `hermes auth`) had no `onboarding_completed` flag in `settings.json`. After a git branch switch or server restart, `verify_hermes_imports()` could momentarily return `imports_ok=False`, making `chat_ready=False` and causing the wizard to reappear with a destructive dropdown default (openrouter). Fixed by writing `onboarding_completed: True` to `settings.json` the first time `config_auto_completed` evaluates to `True`, so the flag survives future transient import failures. (`api/onboarding.py`) Co-authored by @bsgdigital.
+
+## [v0.50.177] — 2026-04-23
+
+### Fixed
+- **Settings dialog and message controls unusable on mobile** — three mobile usability fixes: (1) settings tab strip replaced by a native `<select>` dropdown on narrow viewports, panel goes full-width; (2) provider card Save/Remove buttons become icon-only on mobile so the API key input fills the available width; (3) message timestamps, copy, and edit buttons are always visible on touch screens (no hover state on mobile). (`static/index.html`, `static/panels.js`, `static/style.css`) Co-authored by @bsgdigital.
+## [v0.50.178] — 2026-04-23
+
+### Added
+- **PWA support — installable as a standalone app** — adds a Web App Manifest (`manifest.json`) and a minimal service worker (`sw.js`) with cache-first strategy for app shell assets and network-bypass for all `/api/*` and `/stream` endpoints. Cache name auto-busts on every deploy via git-derived version injection. Enables "Add to Home Screen" on Android, iOS, and desktop Chrome without any offline API response caching (live backend always required). (`static/manifest.json`, `static/sw.js`, `static/index.html`, `api/routes.py`) Closes #685. Co-authored by @bsgdigital.
+
+## [v0.50.176] — 2026-04-23
+
+### Fixed
+- **Duplicate model dropdown entries when CLI default matches live-fetched model** — `_addLiveModelsToSelect()` now normalises IDs before the dedup check (strips `@provider:` prefix using `indexOf`+`substring` to preserve multi-colon Ollama tag suffixes like `qwen3-vl:235b-instruct`, strips namespace prefix, unifies separators). (`static/ui.js`) Closes #907.
+- **New Chat uses stale default model after saving Preferences without reload** — `window._defaultModel` is now updated in `_applySavedSettingsUi()` so `newSession()` picks up the newly saved default immediately. (`static/panels.js`) Closes #908.
+- **Injected CLI default model shows raw lowercase label** — new `_get_label_for_model()` helper looks up the model's formatted label from existing catalog groups before falling back to title-casing the bare ID. (`api/config.py`) Closes #909.
+
+## [v0.50.175] — 2026-04-23
+
+### Fixed
+- **Session persistence hardened against concurrent write races** — all session-mutation paths (streaming success/error/cancel, periodic checkpoint, HTTP endpoints for title/personality/workspace/clear/pin/archive/project) now hold a per-session `_agent_lock` during in-memory mutation and `Session.save()`. The checkpoint thread is stopped and joined before the final save, preventing stale object clobbers. `Session.save()` uses fsync + atomic rename with a pid+thread_id tmp suffix. `_write_session_index()` gets a dedicated `_INDEX_WRITE_LOCK` so disk I/O runs outside the global `LOCK`, reducing head-of-line blocking. Context compression now runs the LLM call outside the lock with a stale-edit check (409) on write-back. (`api/streaming.py`, `api/models.py`, `api/routes.py`, `api/session_ops.py`, `api/config.py`) Closes #765. Co-authored by @starship-s.
+
+## [v0.50.174] — 2026-04-23
+
+### Fixed
+- **Interleaved streaming order (Text → Thinking → Tool → Text)** — after a tool call completes, new text tokens now create a new DOM segment below the tool card instead of updating the old segment above it. Adds `segmentStart`/`_freshSegment` flags to track segment boundaries; scopes the streaming cursor to the last live assistant segment only; adds a 3-dot waiting indicator below each tool card; fixes `appendLiveToolCard`/`appendThinking` anchor logic for multi-tool sequences. (`static/messages.js`, `static/ui.js`, `static/style.css`) Co-authored by @bsgdigital.
+
+## [v0.50.173] — 2026-04-23
+
+### Fixed
+- **Ordered list items always showed "1." regardless of position** — when LLMs
+  output numbered lists with blank lines between items, the paragraph-splitter
+  in `renderMd()` placed each item in its own `<ol>` container, causing every
+  `<ol>` to restart at 1. Fixed by emitting `value="N"` on each `<li>` so the
+  correct ordinal is preserved even when items are split across multiple `<ol>`
+  wrappers. (`static/ui.js`) Closes #886. Co-authored by @bsgdigital.
+
+## [v0.50.172] — 2026-04-23
+
+### Fixed
+- **Stop Generation preserves partial streamed content** — clicking Stop Generation previously discarded all text the agent had produced, showing only "*Task cancelled.*". The server now accumulates streamed tokens in a per-stream buffer and persists any partial assistant content to the session when a cancel fires. Thinking/reasoning blocks (`<think>...</think>`, including unclosed tags — the common cancel-mid-reasoning case) are stripped before saving. The partial content is flagged `_partial: true` and kept in conversation history so the model can continue from it on the next user message. (`api/config.py`, `api/streaming.py`) Closes #893.
+
+## [v0.50.171] — 2026-04-23
+
+### Fixed
+- **Nous default model picker shows correct selection and saves no longer freeze** — two bugs for Nous/portal provider users: (1) Settings → Preferences → Default Model picker showed blank after saving because `set_hermes_default_model()` wrote a bare resolved form that didn't match the `@nous:...` option values in the dropdown; fixed by using `_applyModelToDropdown()`'s smart normalising matcher to find the right option without requiring an exact string match. (2) Every Settings save triggered a blocking live-fetch from the provider API (~5 s freeze) because `set_hermes_default_model()` called `get_available_models()` before returning; the function now returns a lightweight `{ok, model}` ack and invalidates the TTL cache instead. Config.yaml always stores the CLI-compatible bare/slash form (e.g. `anthropic/claude-opus-4.6`) so CLI users on the same install are unaffected. (`api/config.py`, `static/panels.js`) Closes #895.
+- **Cross-namespace models (minimax/, qwen/) no longer 404 for Nous users** — `resolve_model_provider()` checked the `config_base_url` branch before the portal-provider guard. Nous always has a `base_url` in config, so known cross-namespace prefixes were stripped before reaching the portal check. Portal providers are now checked first so all slash-prefixed model IDs reach Nous intact. (`api/config.py`) Closes #894.
+
+## [v0.50.170] — 2026-04-23
+
+### Fixed
+- **Settings default model picker shows live-fetched models** — the Settings → Preferences → Default Model dropdown previously only showed static models from `_PROVIDER_MODELS`. It now calls `_fetchLiveModels()` via the new `_addLiveModelsToSelect()` helper, consistent with the chat-header dropdown. New sessions also respect the saved default model (`window._defaultModel`) instead of always reading the chat-header value, which reflected the previous session's model. (`static/ui.js`, `static/sessions.js`, `static/panels.js`) Closes #872. Co-authored by @bergeouss.
+
+## [v0.50.163] — 2026-04-23
+
+### Fixed
+- **Message ordering after task cancellation** — cancelling a stream while the
+  agent is responding no longer causes subsequent responses to appear above the
+  "Task cancelled." marker. The cancel handler now fetches the authoritative
+  message list from the server (same as the done event), and the server persists
+  the cancel message to the session so both paths stay in sync. Falls back to
+  the previous local-push behaviour if the API call fails. (`api/streaming.py`,
+  `static/messages.js`) (@mittyok, #882)
+
+## [v0.50.161] — 2026-04-23
+
+### Fixed
+- **CI: `test_set_key_writes_to_env_file` no longer flaky in full-suite ordering** — two test files (`test_profile_env_isolation.py`, `test_profile_path_security.py`) were calling `sys.modules.pop("api.profiles")` without restoring the module reference, permanently removing `api.profiles` from the module cache and corrupting state for subsequent tests. Replaced with `monkeypatch.delitem(sys.modules, ...)` so the module reference is restored automatically after each test. (`tests/test_profile_env_isolation.py`, `tests/test_profile_path_security.py`)
+- **`api/providers.py` `_write_env_file()` lock and mode fixes** — moved file I/O (mkdir + write) inside the `_ENV_LOCK` block to prevent TOCTOU race between concurrent key-save requests; replaced `write_text()` with `os.open(..., O_CREAT, 0o600)` so new `.env` files are created owner-read/write-only from the first byte. (`api/providers.py`)
+
+## [v0.50.160] — 2026-04-23
+
+### Fixed
+- **CI: provider panel i18n keys now present in all 6 locales** — `es`, `de`, `zh`, `ru`, `zh-Hant` were missing the 19 provider panel keys added in v0.50.159, causing locale parity test failures on CI after every push to master. (`static/i18n.js`)
+
+## [v0.50.159] — 2026-04-23
+
+### Added
+- **Provider key management in Settings** — new "Providers" tab lets users add, update, or remove API keys for direct-API providers without editing `.env` files. Covers Anthropic, OpenAI, Google, DeepSeek, xAI, Mistral, MiniMax, Z.AI, Kimi, Ollama, Ollama Cloud, OpenCode Zen/Go. OAuth providers shown as read-only. Keys stored in `~/.hermes/.env`, take effect immediately. Fully localised (6 locales). (`api/providers.py`, `api/routes.py`, `static/panels.js`, `static/i18n.js`) (PR #867 by @bergeouss, closes #586)
+
+### Security
+- Provider write endpoints require auth or local/private-network client (matching onboarding endpoint gate)
+- `.env` created at 0600 from first byte via `os.open`; pre-existing files tightened to 0600 on every write
+- Full `_ENV_LOCK` coverage across load/modify/write — prevents TOCTOU race between concurrent POSTs
+
+## [v0.50.158] — 2026-04-23
+
+### Fixed
+- **Post-update page reload no longer races against server restart** — `applyUpdates()` and `forceUpdate()` now poll `/health` every 500ms (up to 15 seconds) instead of firing a blind 2500ms `setTimeout`. The existing reconnect banner shows "⏳ Restarting… please wait" during the poll window, giving users a visible status and a manual Reload button. If the server is still down after 15s, the banner message changes to prompt a manual reload. Fixes 502 errors seen when the server restart outpaces the fixed delay, especially behind reverse proxies. (`static/ui.js`) (closes #874)
+
+## [v0.50.157] — 2026-04-22
+
+### Fixed
+- **Nous portal models now route and format correctly** — two bugs fixed: (1) `_PROVIDER_MODELS["nous"]` updated from bare IDs (`claude-opus-4.6`) to slash-prefixed format (`anthropic/claude-opus-4.6`) that the Nous portal API expects. (2) `resolve_model_provider()` now routes cross-namespace models through portal providers (Nous, OpenCode Zen, OpenCode Go) directly instead of mis-routing to OpenRouter. Portal guard returns the full slash-preserved model ID so Nous receives the correct format. 10 regression tests. (`api/config.py`) (closes #854)
+
+## [v0.50.156] — 2026-04-22
+
+### Security
+- **⚠️ Breaking change — auto-install of agent dependencies is now opt-in** — users previously relying on auto-install must now set `HERMES_WEBUI_AUTO_INSTALL=1` to restore the previous behaviour. A new `_trusted_agent_dir()` check validates ownership and permission bits before allowing pip to run. (`api/startup.py`, `README.md`) (addresses #842 by @tomaioo)
+
+## [v0.50.155] — 2026-04-22
+
+### Fixed
+- **Honcho per-session memory uses stable session ID across WebUI turns** — `api/streaming.py` now passes `gateway_session_key=session_id` to `AIAgent` (defensive, same pattern as `api_mode`/`credential_pool`). Without this, Honcho's `per-session` strategy created a new Honcho session on each streaming request. (`api/streaming.py`) (closes #855)
+
+## [v0.50.154] — 2026-04-22
+
+### Fixed
+- **Thinking card no longer mirrors main response** — removed early return in `_streamDisplay()` that bypassed think-block stripping when `reasoningText` was populated. (`static/messages.js`) (closes #852)
+
+## [v0.50.153] — 2026-04-22
+
+### Fixed
+- **Live-fetched portal models route through configured provider** — `_fetchLiveModels()` applies `@provider:` prefix. (closes #854)
+
+## [v0.50.152] — 2026-04-22
+
+### Fixed
+- **Image generation renders inline** — `MEDIA:` token restore renders all `https://` URLs as `<img>`. (closes #853)
+- **Auto-title strips thinking preambles** — `_strip_thinking_markup()` strips Qwen3-style plain-text reasoning preambles. (closes #857)
+
+## [v0.50.151] — 2026-04-22
+
+### Added
+- **Ollama Cloud support** — added `ollama-cloud` display name + dynamic model-list
+  handler backed by `hermes_cli.models.provider_model_ids()`. Live-models endpoint
+  routes `ollama-cloud` through the same formatter. Server-side `_format_ollama_label()`
+  and matching client-side `_fmtOllamaLabel()` turn Ollama tag IDs into readable
+  labels (e.g. `qwen3-vl:235b-instruct` → `Qwen3 VL (235B Instruct)`). (#820 by @starship-s, #860)
+
+### Fixed
+- **`credential_pool` providers now visible in the model dropdown** —
+  `get_available_models()` previously only read `active_provider` from the auth
+  store. Providers added via `credential_pool` (e.g. an Ollama Cloud key stored by
+  the auth layer without a matching shell env var) were silently invisible. The
+  fix loads `credential_pool` entries and adds any provider with at least one
+  non-ambient credential to `detected_providers`. Ambient gh-cli tokens (source
+  `gh_cli` / label `gh auth token`) are explicitly excluded so Copilot doesn't
+  appear merely because `gh` is installed. Two-tier detection: primary via
+  `agent.credential_pool.load_pool()`, fallback via raw field inspection when
+  the upstream module isn't importable. (#820 by @starship-s, #860)
+- **`_apply_provider_prefix()` helper extracted** — removes ~15 lines of
+  duplicated inline `@provider:` prefixing logic for non-active providers.
+  Semantics unchanged; one fewer place for drift. (#860)
+- **Model chip shows friendly labels for bare Ollama IDs** —
+  `static/ui.js:getModelLabel()` now routes Ollama tag-format IDs (e.g.
+  `kimi-k2.6` or `@ollama-cloud:glm5.1`) through `_fmtOllamaLabel()`. Custom
+  `<option>` text uses the same helper. `looksLikeBareOllamaId` narrowed to
+  `@ollama*` or colon-tag patterns — does not reformat generic IDs like
+  `gpt-5.4-mini`. `syncModelChip()` is now called after localStorage restore
+  so the chip reflects the saved selection on first paint. (#860)
+
+## [v0.50.150] — 2026-04-22
+
+### Fixed
+- **Profile switching: three related state fixes** — (1) `hermes_profile=default`
+  cookie is now persisted instead of being cleared with `max-age=0`, which had
+  caused the browser to fall back to the process-global profile on the next
+  request. (2) The `sessionInProgress` branch of `switchToProfile()` now calls
+  `syncTopbar()` instead of the undefined `updateWorkspaceChip()`. (3) Sidebar
+  and dropdown active-profile rendering now prefer `S.activeProfile` client
+  state when available, with a safe fallback. (#849 by @migueltavares)
+
+## [v0.50.149] — 2026-04-22
+
+### Fixed
+- **`GET /api/session` is now side-effect free for stale-model sessions** —
+  the read path previously called `_normalize_session_model_in_place()`,
+  which could write back to disk and update the session index while handling
+  a plain read. Replaced with a read-only
+  `_resolve_effective_session_model_for_display()` that returns the effective
+  display model without any write-back. Closes #845. (#848 by @franksong2702)
+
+## [v0.50.148] — 2026-04-22
+
+### Fixed
+- **Prune stale `_index.json` ghost rows after session-id rotation** — index
+  entries whose backing session file no longer exists (e.g. after context
+  compression rotates the session id) are now pruned on both incremental
+  index writes and `all_sessions()` reads. Fixes duplicate session entries
+  in the sidebar. Also pre-snapshots `in_memory_ids` under a single `LOCK`
+  acquisition in `all_sessions()` rather than one per row — small but
+  measurable contention reduction. Closes #846. (#847 by @franksong2702)
+
+## [v0.50.147] — 2026-04-22
+
+### Fixed
+- **Font size setting now visibly changes UI text** — selecting Small or Large
+  in Appearance settings previously had no visible effect because the CSS override
+  only changed `:root{font-size}`, but the stylesheet uses 230+ hardcoded `px`
+  values that are unaffected by root font-size. Added explicit per-element overrides
+  for the key UI surfaces: chat message body, sidebar session list, composer
+  textarea, and workspace file tree. Closes #843. (#844)
+
+## [v0.50.146] — 2026-04-22
+
+### Fixed
+- **Slash command input now shown as user message in chat** — commands like `/help`,
+  `/skills`, `/status` previously produced a response with no visible user input above
+  it, making the conversation appear to start from nowhere. Added a `noEcho` flag to
+  action-only commands (`/clear`, `/new`, `/stop`, etc.) and echo the user's input as
+  a message bubble for commands that produce a chat response. User message is pushed
+  BEFORE the handler runs to ensure correct ordering in `S.messages`. Closes #840. (#841)
+
+## [v0.50.145] — 2026-04-22
+
+### Fixed
+- **Slash command dropdown scrolls to keep highlighted item visible** — pressing ↓/↑
+  to navigate the autocomplete list no longer lets the selected item move out of the
+  visible dropdown area. Added `scrollIntoView({block:'nearest'})` after updating the
+  selected class in `navigateCmdDropdown()`. Closes #838. (#839)
+
+## [v0.50.141] — 2026-04-22
+
+### Fixed
+- **Session list appears empty after browser reload / version update** — Chrome's
+  bfcache was restoring a prior search query into `#sessionSearch` on page restore,
+  causing `renderSessionListFromCache()` to silently filter out all sessions (including
+  newly created ones). Added `autocomplete="off"` to the search input and an explicit
+  value-clear at boot before the first render. Closes #822. (#830)
+
+
+## [v0.50.140] — 2026-04-22
+
+### Fixed
+- **Gateway SSE sync failures now surface to the user** — when the gateway watcher
+  thread is not running, the browser now shows a toast notification and automatically
+  falls back to 30-second polling for session sync. Previously this failed silently
+  with no feedback. (#828, absorbs PR #826 by @cloudyun888, fixes #635)
+- `_gateway_sse_probe_payload` now checks `watcher._thread.is_alive()` rather than
+  just `watcher is not None`, so a watcher instance with a dead poll thread correctly
+  reports unavailable and triggers the polling fallback.
+- Probe fetch network errors now also activate the polling fallback as a safe default
+  rather than silently swallowing the failure.
+
+## [v0.50.139] — 2026-04-22
+
+### Fixed
+- **Default workspace persists after session delete** — the blank new-chat page now shows the configured default workspace even after creating and deleting sessions. Root cause: `newSession()` consumed `S._profileDefaultWorkspace` for a one-shot profile-switch semantic, leaving it null on all subsequent returns to blank state. Fix: introduced `S._profileSwitchWorkspace` as a dedicated one-shot flag for profile switches; `S._profileDefaultWorkspace` is now persistent from boot throughout the session lifecycle. Workspace chip, `promptNewFile`, `promptNewFolder`, and `switchToWorkspace` all continue to work correctly. Closes #823. (#824)
+
+## [v0.50.138] — 2026-04-22
+
+### Fixed
+- **Streaming: response no longer renders twice or leaves thinking block below the answer** — two race conditions in `attachLiveStream` fixed. (A) A trailing `token`/`reasoning` event could queue a `requestAnimationFrame` that fired after `done` had already called `renderMessages()`, inserting a duplicate live-turn wrapper below the settled response. Fixed via `_streamFinalized` flag + `cancelAnimationFrame` in all terminal handlers (`done`, `apperror`, `cancel`, `_handleStreamError`). (B) A proposed accumulator-reset on SSE reconnect was reverted — the server uses a one-shot queue and does not replay events; the reset would have wiped pre-drop response content. Bug A's fix alone resolves all three reported symptoms (double render, thinking card below answer, stuck cursor). (#821, closes #631)
+- **Blank new-chat page now shows default workspace and allows workspace actions** — `syncWorkspaceDisplays()` uses `S._profileDefaultWorkspace` as fallback when no session is active; the workspace chip is now enabled on the blank page; `promptNewFile`, `promptNewFolder`, `switchToWorkspace`, and `promptWorkspacePath` all auto-create a session bound to the default workspace when called on the blank page, rather than silently returning. Boot.js hydrates `S._profileDefaultWorkspace` from `/api/settings.default_workspace` before any session is created. (#821, closes #804)
+
+## [v0.50.135] — 2026-04-22
+
+### Fixed
+- **BYOK/custom provider models now appear in the WebUI model dropdown** — three root causes fixed. (1) Provider aliases like `z.ai`, `x.ai`, `google`, `grok`, `claude`, `aws-bedrock`, `dashscope`, and ~25 others were not normalized to their internal catalog slugs, causing the provider to miss `_PROVIDER_MODELS` lookup and show an empty dropdown while the TUI worked. (2) The fix works even without `hermes-agent` on `sys.path` (CI, minimal installs) via an inlined `_PROVIDER_ALIASES` table in `api/config.py` — the previous `try/except ImportError` was silently swallowing the failure. (3) `custom_providers` entries now appear in the live model enrichment path. `provider_id` on every group makes optgroup matching deterministic. Closes #815. (#817)
+
+## [v0.50.134] — 2026-04-21
+
+### Fixed
+- **Update banner: conflict/diverged recovery path + server self-restart after update** — three failure modes resolved. (1) `Update failed (agent): Repository has unresolved merge conflicts` was a dead-end with no recovery path; the error now includes an actionable `git checkout . && git pull --ff-only` command, a persistent inline display (not a fleeting toast), and a **Force update** button that executes the reset via the new `POST /api/updates/force` endpoint. (2) After a successful update, the server now self-restarts via `os.execv` (2 s delay), eliminating the stale-`sys.modules` bug that broke custom provider chat on the next request. (3) When both webui and agent updates are pending, the restart now correctly waits for the second update to complete before re-executing (`_apply_lock` coordination), preventing the mid-pull kill race. Closes #813, #814. (#816)
+
+## [v0.50.133] — 2026-04-21
+
+### Added
+- **`/reasoning show` and `/reasoning hide` slash commands** — toggle thinking/reasoning block visibility directly from the chat composer, matching the Hermes CLI/TUI parity. `/reasoning show` reveals all thinking cards (live and historical) and persists the preference; `/reasoning hide` collapses them. `/reasoning` with no args shows current state. The `show|hide` options now appear in autocomplete alongside the existing `low|medium|high` effort levels. The `show_thinking` setting is persisted via `/api/settings` so the preference survives page reloads. Closes #461 (partial — effort level routing to agent is a follow-up). (#812)
+
+## [v0.50.132] — 2026-04-21
+
+### Fixed
+- **Periodic session checkpoint during long-running agent tasks** — messages accumulated during multi-step research or coding tasks were silently lost if the server restarted mid-run. The root cause: `Session.save()` was only called after `agent.run_conversation()` completed. The fix adds a daemon thread that saves the session every 15 seconds whenever the `on_tool` callback signals a completed tool call — the first reliable mid-run signal that real progress has been made (the agent works on an internal copy of `s.messages`, so watching message-count would never trigger). `Session.save()` gains a `skip_index=True` flag so checkpoints skip the expensive index rebuild; the final `s.save()` at task completion still rebuilds it. On a server restart the user's message and turn bookkeeping remain on disk — worst case: up to 15 seconds of tool-call progress lost rather than the entire conversation turn. Closes #765. Absorbed and corrected from PR #809 by @bergeouss. (#810)
+
+## [v0.50.131] — 2026-04-21
+
+### Fixed
+- **Workspace pane now respects the app theme** — seven hardcoded dark-mode `rgba(255,255,255,...)` colors in the workspace panel CSS have been replaced with theme-aware CSS variables (`--hover-bg`, `--border2`, `--code-inline-bg`). The file list hover, panel icon buttons, preview table rows, and the preview edit textarea now all update correctly when switching between light and dark themes. Reported in #786. (#807)
+
+## [v0.50.130] — 2026-04-21
+
+### Fixed
+- **New sessions now appear immediately in the sidebar** — the zero-message Untitled filter now exempts sessions younger than 60 seconds, so clicking New Chat shows the session right away instead of waiting for the first message. Sessions older than 60 seconds that are still Untitled with 0 messages continue to be suppressed (ghost sessions from test runs / accidental page reloads). Addresses Bug A only of #789; Bug B (SSE refetch resetting sidebar mid-interaction) is a separate fix. (#806)
+
+## [v0.50.129] — 2026-04-21
+
+### Fixed
+- **Profile isolation: complete fix via cookie + thread-local context** — PR #800 (v0.50.127) only fixed `POST /api/session/new`. `GET /api/profile/active` still read the process-level `_active_profile` global, so a page refresh while another client had a different profile active would corrupt `S.activeProfile` in JS, defeating the session-creation fix on the next new chat. This release completes the isolation: profile switches now set a `hermes_profile` cookie (HttpOnly, SameSite=Lax) and never mutate the process global. Every request handler reads the cookie into a thread-local; all server functions (`get_active_profile_name()`, `get_active_hermes_home()`, `list_profiles_api()`, memory endpoints, model loading) automatically see the per-client profile. `switch_profile()` gains a `process_wide` kwarg — the HTTP route passes `False`, keeping the global clean; CLI callers default to `True` (unchanged behaviour). Absorbed from PR #803 by @bergeouss with correctness fixes reviewed by Opus. (#805)
+
+## [v0.50.128] — 2026-04-21
+
+### Fixed
+- **`"` no longer mangles to `&amp;quot;` inside code blocks** — the autolink pass in `renderMd()` was operating inside `<pre><code>` blocks because they weren't stashed before the pass ran. When a code block contained a URL adjacent to `&quot;` (the HTML-escaped form of `"`), the autolink regex captured the entity suffix and `esc()` double-encoded it, producing `&amp;quot;` in the rendered HTML and copy buffer. Fixed by adding `<pre>` blocks to `_al_stash` so the autolink regex never touches code-block content. Reported and fixed by @starship-s. (#801)
+
+## [v0.50.127] — 2026-04-21
+
+### Fixed
+- **Profile isolation: switching profiles in one browser client no longer affects concurrent clients** — `api/profiles.py` stored `_active_profile` as a process-level global; `switch_profile()` mutated it for the whole server, so a second user switching profiles would clobber new-session creation for all other active tabs. The fix: (1) `get_hermes_home_for_profile(name)` — a pure path resolver that reads only the filesystem, validates the profile name against the existing `_PROFILE_ID_RE` pattern (rejects path traversal), and never mutates `os.environ` or module state; (2) `new_session()` now accepts an explicit `profile` param passed from the client's `S.activeProfile` in the POST body, short-circuiting the process global; (3) the streaming handler resolves `HERMES_HOME` from the per-session `s.profile` instead of the shared global. Reported in #798. (#800)
+
+## [v0.50.126] — 2026-04-21
+
+### Fixed
+- **Onboarding now recognizes `credential_pool` OAuth auth for openai-codex** — the readiness check in `api/onboarding.py` only looked at the legacy `providers[provider]` key in `auth.json`. Hermes runtime resolves OAuth tokens from `credential_pool[provider]` (device-code / OAuth flows), so WebUI could report "not ready" while the runtime chatted successfully. The check now covers both storage locations with a fail-closed helper. Adds three regression tests. Reported in #796, fixed by @davidsben. (#797)
+
+## [v0.50.125] — 2026-04-21
+
+### Fixed
+- **`python3 bootstrap.py` now honours `.env` settings** — running bootstrap.py directly (the primary documented entry point) previously ignored `HERMES_WEBUI_HOST`, `HERMES_WEBUI_PORT`, and other repo `.env` settings because `start.sh`'s `source .env` step was skipped. bootstrap.py now loads `REPO_ROOT/.env` itself before reading any env-var defaults, making the two launch paths identical. Reported in #730 by @leap233. (#791)
+
+## [v0.50.124] — 2026-04-21
+
+### Fixed
+- **Settings version badge now shows the real running version** — the badge in the Settings → System panel was hardcoded to `v0.50.87` (36 releases behind) and the HTTP `Server:` header said `HermesWebUI/0.50.38` (85 behind). Both are now resolved dynamically at server startup from `git describe --tags --always --dirty`. Docker images (where `.git` is excluded) receive the correct tag via a build-time `ARG HERMES_VERSION` written to `api/_version.py`. `COPY` now uses `--chown=hermeswebuitoo:hermeswebuitoo` so the write succeeds under the unprivileged container user. No manual "update the badge" step is needed going forward — tagging is sufficient. Version file parsing uses regex instead of `exec()` for supply-chain safety. (#790, #793)
+
+## [v0.50.123] — 2026-04-21
+
+### Fixed
+- **Default model change surfaced stale value after model-list TTL cache landed** — `set_hermes_default_model()` now explicitly invalidates `_available_models_cache` after `reload_config()`. The 60s TTL cache introduced in v0.50.121 (#780) only invalidates on config-file mtime change, but `reload_config()` resyncs `_cfg_mtime` before `get_available_models()` runs — so the mtime check never fires and the POST response (plus downstream reads within the TTL window) returned the previous model until the cache expired. Root cause of the `test_default_model_updates_hermes_config` CI flake as well. (#788)
+- **Test teardown restores conftest default deterministically** — `test_default_model_updates_hermes_config` now restores to the conftest-injected `TEST_DEFAULT_MODEL` (via `tests/_pytest_port.py`) instead of reading the pre-test value from `/api/models`, so teardown is stable regardless of ordering. Also updates `TESTING.md` automated-test count to 1578. (#788)
+
+## [v0.50.122] — 2026-04-21
+
+### Fixed
+- **Duplicate X button in workspace panel header on mobile** — at viewport widths ≤900px the desktop close-preview button (`.close-preview` / `btnClearPreview`) is now hidden via CSS, leaving only the mobile close button (`.mobile-close-btn`) visible. Previously both buttons appeared side-by-side when the window was resized below the 900px breakpoint. (#781)
+
+## [v0.50.121] — 2026-04-20
+
+### Performance
+- **Model list no longer re-scans on every session load** — `get_available_models()` now caches its result for 60 seconds (configurable via `_AVAILABLE_MODELS_CACHE_TTL`). Config file changes (mtime) invalidate the cache immediately. This eliminates the ~4s AWS IMDS timeout that blocked the model dropdown on every page load for users on EC2 without an IAM role. Thread-safe via a dedicated lock; callers receive a `copy.deepcopy()` so mutations don't pollute the cache. (credit: @starship-s)
+- **Session saves no longer trigger a full O(n) index rebuild** — `_write_session_index()` now does an incremental read-patch-write of the existing index JSON when called from `Session.save()`, rather than re-scanning every session file on disk. Falls back to a full rebuild when the index is missing or corrupt. Atomic write via `.tmp` + `os.replace()`. At 100+ sessions this is a meaningful speedup. (credit: @starship-s)
+
+## [v0.50.120] — 2026-04-20
+
+### Fixed
+- **Cancelled sessions no longer get stuck** — `cancel_stream()` now eagerly pops stream state (`STREAMS`, `CANCEL_FLAGS`, `AGENT_INSTANCES`) and clears `session.active_stream_id` immediately after signalling cancel. Previously, the 409 "session already has an active stream" guard would block all new chat requests until the agent thread's `finally` block ran — which never happens when the thread is blocked in a C-level syscall on a bad tool call. Session cleanup runs outside `STREAMS_LOCK` to preserve lock ordering and avoid deadlock. (Fixes #653, credit: @bergeouss)
+
+## [v0.50.119] — 2026-04-20
+
+### Fixed
+- **Older hermes-agent builds no longer crash on startup** — the WebUI now checks which params `AIAgent.__init__` actually accepts (via `inspect.signature`) before constructing the agent. The four params added in newer builds (`api_mode`, `acp_command`, `acp_args`, `credential_pool`) are passed only when present, so older installs degrade gracefully instead of throwing `TypeError`. (#772)
+
+## [v0.50.118] — 2026-04-20
+
+### Fixed
+- **CLI sessions: silent failure now logged** — `get_cli_sessions()` no longer swallows DB errors silently. If `state.db` is missing the `source` column (older hermes-agent) or has any other schema/lock issue, a warning is now logged with the DB path and a hint to upgrade hermes-agent. This makes "Show CLI sessions in sidebar has no effect" diagnosable from the server log instead of requiring code archaeology. (#634)
+
+## [v0.50.117] — 2026-04-20
+
+### Fixed
+- **Queued messages survive page refresh** — when a follow-up message is submitted while the agent is busy, the queue is now persisted to `sessionStorage`. On reload, if the agent is still running the queue is silently restored and will drain normally. If the agent has finished, the first queued message is restored into the composer as a draft with a toast notification ("Queued message restored — review and send when ready"), preventing accidental auto-send. Stale entries (created before the last assistant response) are automatically discarded. (#660)
+
+## [v0.50.116] — 2026-04-20
+
+### Fixed
+- **Session errors survive page reload** — provider quota exhaustion, rate limit, auth, and agent errors are now persisted to the session file as a special error message. Reloading the page after an error no longer shows a blank conversation. Error messages are excluded from the next API call's conversation history so the LLM never sees its own error as prior context. (#739)
+- **Quota/credit exhaustion shows a distinct error** — "Out of credits" now appears instead of the generic "No response received" message when a Codex or other provider account runs out of credits. Both the silent-failure path and the exception path now classify `insufficient_credits` / `quota_exceeded` separately from rate limits, with a targeted hint to top up the balance or switch providers. (#739)
+- **Context compaction no longer hangs the session** — when `run_conversation()` rotates the session_id during context compaction, `stream_end` now uses the original session_id (captured before the run), matching what the client captured in `activeSid`. Previously the mismatch caused the EventSource to stay open, trigger a reconnect loop, and show "Connection lost." The same fix also corrects the `title` SSE event. (#652, #653)
+
+## [v0.50.115] — 2026-04-20
+
+### Removed
+- **Chat bubble layout setting removed** — the opt-in `bubble_layout` toggle (issue #336) is removed end-to-end: the Settings checkbox, all related CSS (`.bubble-layout` selectors), the config.py default/bool-key entries, the boot.js/panels.js class toggles, and all locale strings across 6 languages. Stale `bubble_layout` values in existing `settings.json` files are silently dropped on load via the legacy-drop-keys migration path. (Fixes #760, credit: @aronprins)
+
+## [v0.50.114] — 2026-04-20
+
+### Fixed
+- **Default model now reads from Hermes config.yaml** — removes the split-brain state where WebUI Settings and the Hermes runtime/CLI/gateway could have different default models. `default_model` is no longer persisted in `settings.json`; it is read from and written to `config.yaml` via a new `POST /api/default-model` endpoint. Existing saved `default_model` values in `settings.json` are silently migrated away on first load. Saving Settings now calls `/api/default-model` when the model changed, with error handling so a config.yaml write failure doesn't leave the UI in a broken state. (#761, credit: @aronprins)
+
+## [v0.50.113] — 2026-04-20
+
+### Fixed
+- **Slash autocomplete now keeps command completion flowing into sub-arguments** — sub-argument-only commands like `/reasoning` now appear in the first suggestion list, the current dropdown selection is visibly highlighted while navigating with arrow keys, and accepting a top-level command like `/reasoning` immediately opens the second-level suggestions instead of requiring an extra space press. (Fixes #632, credit: @franksong2702)
+
+## [v0.50.112] — 2026-04-20
+
+### Added
+- **Sidebar density mode for the session list** — new Settings option toggles the left session list between a compact default and a detailed view that shows message count and model. Profile names only appear in detailed mode when "Show active profile only" is disabled. (#673)
+
+## [v0.50.111] — 2026-04-20
+
+### Fixed
+- **Dark-mode user bubbles no longer use a glaring bright accent fill** — `:root.dark` now overrides `--user-bubble-bg`/`--user-bubble-border` to `var(--accent-bg-strong)` (a 15% tint), keeping the bubble visually subdued in dark skins. The 6 per-skin `--user-bubble-text` hacks are removed; text color falls back to `var(--text)`. Edit-area box-shadow now uses the shared `--focus-ring` token. (credit: @aronprins)
+- **Thinking card header is now collapsible** — the main `_thinkingMarkup()` function now includes `onclick` toggle and the chevron affordance, matching the compression reference card pattern. The header has `display:flex` for proper icon/label/chevron alignment.
+
+## [v0.50.110] — 2026-04-20
+
+### Fixed
+- **Message footer metadata is now consistent across user and assistant turns** — timestamps are available on both sides, but footer chrome stays hidden until hover instead of being always visible on assistant messages. The last assistant turn keeps cumulative `in/out/cost` usage visible, then reveals timestamp and actions inline on hover. Existing timestamps for unchanged historical messages are also preserved during transcript rebuilds, so older turns no longer get re-stamped to the newest reply time. (Fixes #680, credit: @franksong2702)
+
+## [v0.50.109] — 2026-04-20
+
+### Fixed
+- **Named custom provider test isolation** — `_models_with_cfg()` in `tests/test_custom_provider_display_name.py` now pins `_cfg_mtime` before calling `get_available_models()`, preventing the mtime-guard inside that function from firing `reload_config()` and silently discarding the patched `config.cfg`. This fixes an ordering-dependent test failure where any test that wrote `config.yaml` before this test ran would cause `get_available_models()` to return the real OpenRouter model list instead of the patched Agent37 group. (Fixes #754)
+
+## [v0.50.108] — 2026-04-20
+
+### Fixed
+- **Kimi K2.5 added to Kimi/Moonshot provider model list** — `kimi-k2.5` was present in `hermes_cli` but missing from the WebUI's `api/config.py` kimi-coding provider, making it unavailable in the model selector. (Fixes #740)
+
+## [v0.50.107] — 2026-04-20
+
+### Added
+- **Three-container UID/GID alignment guide in README** — new subsection explains why UIDs must match across containers sharing a bind-mounted volume, documents the variable name asymmetry (`HERMES_UID`/`HERMES_GID` for the agent image vs `WANTED_UID`/`WANTED_GID` for the WebUI image), gives the recommended `.env` setup for standard Linux and NAS/Unraid deployments, provides the one-time `chown` fix for existing installs, and notes that the dashboard volume must be read-write. (Fixes #645)
+
+### Fixed
+- **`HERMES_UID`/`HERMES_GID` forwarded to agent and dashboard containers** — `docker-compose.three-container.yml` now declares `HERMES_UID=${HERMES_UID:-10000}` and `HERMES_GID=${HERMES_GID:-10000}` in the environment blocks for `hermes-agent` and `hermes-dashboard`, making the documented `.env` recipe functional.
+
+## [v0.50.106] — 2026-04-20
+
+### Fixed
+- **`PermissionError` in auth signing key no longer crashes every HTTP request** — `key_file.exists()` in `api/auth.py`'s `_signing_key()` was called outside the try/except block. In three-container bind-mount setups where the agent container initialises the state directory under a different UID, `pathlib.Path.exists()` raises `PermissionError`, which escaped up through `is_auth_enabled()` → `check_auth()` and crashed every HTTP request with HTTP 500. The `exists()` call is now inside the try block so `PermissionError` is caught and falls back to an in-memory key. (PR #625)
+
+## [v0.50.105] — 2026-04-20
+
+### Fixed
+- **Profile deletion warning now leads with destructive impact** — the confirmation dialog now reads: "All sessions, config, skills, and memory for this profile will be permanently deleted. This cannot be undone." Updated across all 6 supported locales. (Fixes #637)
+
+## [v0.50.104] — 2026-04-20
+
+### Fixed
+- **Agent image URLs rewritten to actual server base** — when an agent emits a `MEDIA:http://localhost:8787/...` URL, the WebUI now rewrites the `localhost`/`127.0.0.1` host to the page's `document.baseURI` before inserting it as an `<img src>`. Fixes broken images for remote users (VPN, Docker, deployed servers) and preserves subpath mounts (e.g. `/hermes/`). (Fixes #642)
+
+## [v0.50.103] — 2026-04-20
+
+### Fixed
+- **Windows `.env` encoding fix** — `write_text()` calls in `api/profiles.py` were missing `encoding='utf-8'`, causing failures on Windows systems with non-UTF-8 locale encodings. All file I/O in `api/` now explicitly specifies `encoding='utf-8'`. (Fixes #741)
+
+## [v0.50.102] — 2026-04-20
+
+### Fixed
+- **Code blocks no longer lose newlines when not preceded by a blank line** — `renderMd()` now stashes `<pre>` blocks (including language-labelled wrappers), mermaid diagrams, and katex blocks before the paragraph-splitting pass, then restores them. Previously, if a fenced code block was not separated from surrounding text by a blank line, all `\n` inside it were replaced with `<br>`, collapsing the entire block to one line. (Fixes #745)
+
+## [v0.50.101] — 2026-04-20
+
+### Fixed
+- **Session model normalization: null/empty model no longer triggers index rebuild** — sessions with no stored model (`model: null` or missing) now return the provider default without writing to disk. Previously a spurious `session.save()` (and full session index rebuild) could fire for any such session. (#751 follow-up)
+
+## [v0.50.100] — 2026-04-20
+
+### Fixed
+- **Session model normalization: unknown provider prefixes now pass through** — custom/unlisted model prefixes (e.g. `custom-provider/my-model`) are no longer incorrectly stripped when switching providers. Only well-known provider prefixes (`gpt-`, `claude-`, `gemini-`, etc.) are normalized. Regression introduced in v0.50.99. (#751)
+
+## [v0.50.99] — 2026-04-20
+
+### Fixed
+- **Stale session models normalized after provider switch** — sessions that still reference a model from a previous provider (e.g. a `gemini-*` model after switching to OpenAI Codex) are silently corrected to the current provider's default on load, preventing startup failures. (Closes #748, credit: @likawa3b)
+
+## [v0.50.98] — 2026-04-20
+
+### Fixed
+- **Slash command autocomplete constrained to composer width** — the `/` command dropdown is now positioned inside the composer box, so suggestions stay visually anchored to the input area rather than expanding across the full chat panel. (Closes #633, credit: @franksong2702)
+
+## [v0.50.97] — 2026-04-20
+
+### Fixed
+- **Only the latest user message can be edited** — older user turns no longer show the pencil/edit affordance. This avoids implying that historical turns can be lightly edited when the actual action truncates the session and restarts the conversation from that point. (Closes #744)
+- **Message footer metadata is now consistent across user and assistant turns** — timestamps are available on both sides using the existing `_ts` / `timestamp` fields, but footer chrome now stays hidden until hover instead of being always visible on assistant messages. The last assistant turn keeps cumulative `in/out/cost` usage visible, then reveals timestamp and actions inline on hover so the footer does not grow an extra row. Existing timestamps for unchanged historical messages are also preserved during transcript rebuilds, so older turns no longer get re-stamped to the newest reply time.
+
+## [v0.50.96] — 2026-04-19
+
+### Added
+- **Three-container Docker Compose reference config** — new `docker-compose.three-container.yml` adds an agent + dashboard + WebUI configuration on a shared `hermes-net` bridge, with memory/CPU limits and localhost-only port bindings by default.
+
+### Fixed
+- **Two-container compose: gateway port now exposed** — `127.0.0.1:8642:8642` added so the gateway is reachable from the host for debugging. Explicit `command: gateway run` replaces entrypoint defaults.
+- **Workspace path expansion** — `${HERMES_WORKSPACE:-~/workspace}` uses tilde in the default value, which Docker Compose correctly expands. `docker-compose.yml` also fixed to use `${HERMES_WORKSPACE:-${HOME}/workspace}` instead of nesting workspace inside the hermes home dir.
+- **`HERMES_WEBUI_STATE_DIR` default corrected** — `webui-mvp` → `webui`, matching the current default in `config.py`. Prevents silent state directory split for new deployments.
+(PR #708)
+
+## [v0.50.95] — 2026-04-19
+
+### Added
+- **Full Russian (ru-RU) localization** — 389/389 English keys covered, Slavic plural forms correctly implemented, native Cyrillic characters throughout. Login page Russian added. Russian locale now leads all non-English locales on key coverage. (PR #713, credit: @DrMaks22 and @renheqiang)
+
+## [v0.50.92] — 2026-04-19
+
+### Fixed
+- **XML tool-call syntax no longer leaks into chat bubbles** — `<function_calls>` blocks stripped server-side in the streaming pipeline and client-side in both the live stream and history render. Fixes the default DeepSeek profile showing raw XML on starter prompts. (#702)
+- **Workspace file panel shows an empty-state message** instead of a blank pane when no workspace is configured or the directory is empty. (#703)
+- **Notification settings description uses "app" instead of "tab"** — more accurate for native Mac app users. (#704)
+(PR #712)
+## [v0.50.95] — 2026-04-19
+
+### Fixed
+- **Assistant messages now show footer timestamps, and older messages show a fuller date+time** — assistant response segments now render the same footer timestamp affordance as user messages, using the existing message `_ts` / `timestamp` fields already stamped by the WebUI. Messages from today still show a compact time-only label, while older messages now show a fuller date+time string directly in the footer for better readability when reviewing past sessions.
+
+## [v0.50.94] — 2026-04-19
+
+### Fixed
+- **Mic toggle is now race-safe and works over Tailscale** — rapid click/toggle no longer leaves recording in inconsistent state (`_isRecording` flag with proper reset in all paths). `recognition.start()` is now correctly called (was previously only present in a comment string, so SpeechRecognition never started and the Tailscale fallback never fired). Falls back to `MediaRecorder` when `speech.googleapis.com` is unreachable. Browser capability preference persisted in `localStorage` across reloads. (PR #683 by @MatzAgent)
+
+## [v0.50.93] — 2026-04-19
+
+### Fixed
+- **Gateway message sync no longer corrupts the active session on slow networks** — the `sessions_changed` SSE handler now captures the active session ID before the async `import_cli` fetch and validates it in `.then()`, preventing session-switch races from overwriting the wrong conversation. Added `is_cli_session` guard so the handler only fires for CLI-originated sessions. The backend import path now also verifies that existing messages are a strict prefix of the fresh CLI messages before overwriting, preventing silent data loss on hybrid WebUI+CLI sessions. (PR #676 by @yunyunyunyun-yun)
+
+## [v0.50.91] — 2026-04-19
+
+### Added
+- **Slash command parity with hermes-agent** — `/retry`, `/undo`, `/stop`, `/title`, `/status`, `/voice` commands now work in the Web UI, matching gateway behaviour. New `GET /api/commands` endpoint and `api/session_ops.py` backend. (PR #618 by @renheqiang)
+- **Skills appear in `/` autocomplete** — the composer slash-command dropdown now surfaces Hermes skills from `/api/skills`. Skill entries show a `Skill` badge and are ranked below built-ins on collisions. (PR #701 by @franksong2702)
+
+## [v0.50.87] — 2026-04-18
+
+### Fixed
+- **Streaming scroll override (#677)** — auto-scroll no longer hijacks your position while the AI is responding. `renderMessages()` and `appendThinking()` now call `scrollIfPinned()` during an active stream instead of `scrollToBottom()`, so scrolling up to read earlier content works correctly. Scroll re-pin threshold widened from 80px to 150px to avoid hair-trigger re-pinning on fast mouse wheels. A floating **↓ button** appears at the bottom-right of the message area when you scroll up, giving a one-click way to jump back to live output.
+- **Gemini 3.x model IDs updated (#669)** — all provider model lists (`gemini`, `google`, OpenRouter fallback, GitHub Copilot, OpenCode Zen, Nous) now include the correct Gemini 3.1 Pro Preview, Gemini 3 Flash Preview, and Gemini 3.1 Flash Lite Preview model IDs alongside stable Gemini 2.5 models. The missing `gemini-3.1-flash-lite-preview` (which caused `API_KEY_INVALID` errors) is now present. `GEMINI_API_KEY` env var now also triggers native gemini provider detection.
+- **Read-only workspace mount no longer crashes Docker startup (#670)** — `docker_init.bash` now checks `[ -w "$HERMES_WEBUI_DEFAULT_WORKSPACE" ]` before attempting `chown` or write-test on the workspace directory. `:ro` bind-mounts are silently accepted with a log message instead of calling `error_exit`.
+- **UID/GID auto-detection now works in two-container setups (#668)** — `docker_init.bash` now probes `/home/hermeswebui/.hermes` and `$HERMES_HOME` (shared hermes-home volume) before falling back to `/workspace`. In Zeabur and Docker Compose two-container deployments where the hermes-agent container initializes the shared volume first, the WebUI now correctly inherits its UID/GID without manual `WANTED_UID` configuration.
+
+## [v0.50.86] — 2026-04-18
+
+### Added
+- **Searchable model picker** — the model dropdown now has a live search input at the top. Type any part of a model name or ID to filter the list instantly; provider group headers (Anthropic, OpenAI, OpenRouter, etc.) remain visible in filtered results. Includes a clear button, Escape-to-close support, and a "No models found" empty state. i18n strings added for English, Spanish, and zh-CN. (PR #659 by @mmartial)
+
+## [v0.50.90] — 2026-04-19
+
+### Fixed
+- **`/compress` reference card now shows full handoff immediately after compression** — the context compaction card no longer shows only the short 3-line API summary right after `/compress` completes. The UI now prefers the persisted compaction message (full handoff) over the raw API response, matching what is shown after a page reload. (PR #699 by @franksong2702)
+
+## [v0.50.89] — 2026-04-19
+
+### Fixed
+- **Explicit UTF-8 encoding on all config/profile reads** — `Path.read_text()` calls in `api/config.py` and `api/profiles.py` now always specify `encoding="utf-8"`. On Windows systems with a non-UTF-8 default locale (e.g. GBK on Chinese Windows, Shift_JIS on Japanese Windows), omitting the encoding argument caused silent config loading failures. (PR #700 by @woaijiadanoo)
+
+## [v0.50.88] — 2026-04-19
+
+### Fixed
+- **System Preferences model dropdown no longer misattributes the default model to unrelated providers** — the `/api/models` builder no longer injects the global `default_model` into unknown provider groups such as `Alibaba` or `Minimax-Cn`. When a provider has no real model catalog of its own, it is now omitted from the dropdown instead of showing a misleading placeholder like `gpt-5.4-mini`. If the active provider still needs a default fallback, it is shown in a separate `Default` group rather than being mixed into another provider's models.
+
 ## [v0.50.85] — 2026-04-18
 
 ### Fixed
@@ -1628,4 +2225,3 @@ Critical regressions introduced during the server.py split, caught by users and 
 - **Regression test file added** (`tests/test_regressions.py`): 10 tests, one per introduced bug. These form a permanent regression gate so each class of error can never silently return.
 
 ---
-

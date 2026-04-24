@@ -96,17 +96,21 @@ class TestRuntimeRouteInjection(unittest.TestCase):
     """Verify WebUI forwards the resolved runtime route into AIAgent."""
 
     def test_runtime_provider_keys_are_forwarded_to_agent(self):
-        """WebUI must pass the runtime route fields that CLI already uses."""
+        """WebUI must pass the runtime route fields that CLI already uses.
+
+        Since issue #772 these are passed defensively via inspect-guarded kwargs
+        so the WebUI degrades gracefully against older hermes-agent builds.
+        """
         for snippet in (
-            "api_mode=_rt.get('api_mode')",
-            "acp_command=_rt.get('command')",
-            "acp_args=_rt.get('args')",
-            "credential_pool=_rt.get('credential_pool')",
+            "_agent_kwargs['api_mode'] = _rt.get('api_mode')",
+            "_agent_kwargs['acp_command'] = _rt.get('command')",
+            "_agent_kwargs['acp_args'] = _rt.get('args')",
+            "_agent_kwargs['credential_pool'] = _rt.get('credential_pool')",
         ):
             self.assertIn(
                 snippet,
                 STREAMING_PY,
-                f"Missing runtime route forwarding in AIAgent constructor: {snippet}",
+                f"Missing defensive runtime route forwarding in streaming.py: {snippet}",
             )
 
     def test_runtime_route_is_forwarded_from_resolver_into_agent_init(self):
@@ -166,9 +170,26 @@ class TestRuntimeRouteInjection(unittest.TestCase):
                 }
 
         class CapturingAgent:
-            def __init__(self, **kwargs):
-                captured["init_kwargs"] = kwargs
-                self.session_id = kwargs["session_id"]
+            def __init__(self, model=None, provider=None, base_url=None, api_key=None,
+                         api_mode=None, acp_command=None, acp_args=None,
+                         credential_pool=None, platform=None, quiet_mode=False,
+                         enabled_toolsets=None, fallback_model=None, session_id=None,
+                         session_db=None, stream_delta_callback=None,
+                         reasoning_callback=None, tool_progress_callback=None,
+                         clarify_callback=None, **kwargs):
+                captured["init_kwargs"] = dict(
+                    model=model, provider=provider, base_url=base_url,
+                    api_key=api_key, api_mode=api_mode, acp_command=acp_command,
+                    acp_args=acp_args, credential_pool=credential_pool,
+                    platform=platform, quiet_mode=quiet_mode,
+                    enabled_toolsets=enabled_toolsets, fallback_model=fallback_model,
+                    session_id=session_id, session_db=session_db,
+                    stream_delta_callback=stream_delta_callback,
+                    reasoning_callback=reasoning_callback,
+                    tool_progress_callback=tool_progress_callback,
+                    clarify_callback=clarify_callback,
+                )
+                self.session_id = session_id
                 self.context_compressor = None
                 self.session_prompt_tokens = 0
                 self.session_completion_tokens = 0
@@ -454,3 +475,109 @@ def test_routes_restores_prior_reasoning_metadata_after_followup():
         "routes.py must import reasoning metadata restoration helper"
     assert 's.messages = _restore_reasoning_metadata(' in src, \
         "routes.py must merge prior reasoning metadata back after run_conversation()"
+
+
+class TestCredentialPoolBackwardCompat(unittest.TestCase):
+    """Verify credential_pool and other newer kwargs are skipped gracefully
+    when running against an older hermes-agent that lacks them (issue #772)."""
+
+    def test_older_agent_without_credential_pool_does_not_crash(self):
+        """WebUI must not crash with TypeError when AIAgent lacks credential_pool."""
+        import api.streaming as streaming
+
+        captured = {}
+
+        class OlderAgent:
+            """Simulates a hermes-agent build that predates credential_pool."""
+            def __init__(self, model=None, provider=None, base_url=None, api_key=None,
+                         platform=None, quiet_mode=False, enabled_toolsets=None,
+                         fallback_model=None, session_id=None, session_db=None,
+                         stream_delta_callback=None, reasoning_callback=None,
+                         tool_progress_callback=None, clarify_callback=None):
+                # No api_mode / acp_command / acp_args / credential_pool params
+                captured["init_kwargs"] = {"session_id": session_id, "model": model}
+                self.session_id = session_id
+                self.context_compressor = None
+                self.session_prompt_tokens = 0
+                self.session_completion_tokens = 0
+                self.session_estimated_cost_usd = None
+                self.reasoning_config = None
+                self.ephemeral_system_prompt = None
+                self._last_error = None
+
+            def run_conversation(self, **kwargs):
+                return {
+                    "messages": [
+                        {"role": "user", "content": kwargs.get("persist_user_message", "")},
+                        {"role": "assistant", "content": "ok"},
+                    ]
+                }
+
+            def interrupt(self, _message):
+                pass
+
+        class FakeSession:
+            session_id = "sess-compat-test"
+            title = "Test"
+            workspace = "/tmp"
+            model = "gpt-4o"
+            messages = []
+            personality = None
+            input_tokens = 0
+            output_tokens = 0
+            estimated_cost = None
+            tool_calls = []
+            active_stream_id = None
+            pending_user_message = None
+            pending_attachments = []
+            pending_started_at = None
+
+            def save(self, touch_updated_at=True):
+                pass
+
+            def compact(self):
+                return {
+                    "session_id": self.session_id, "title": self.title,
+                    "workspace": self.workspace, "model": self.model,
+                    "created_at": 0, "updated_at": 0, "pinned": False,
+                    "archived": False, "project_id": None, "profile": None,
+                    "input_tokens": 0, "output_tokens": 0,
+                    "estimated_cost": None, "personality": None,
+                }
+
+        fake_stream_id = "stream-compat-test"
+        fake_queue = queue.Queue()
+        fake_rt_module = types.ModuleType("hermes_cli.runtime_provider")
+        fake_rt_module.resolve_runtime_provider = mock.Mock(return_value={
+            "provider": "openai", "base_url": None, "api_key": "sk-test",
+            "api_mode": "chat_completions", "command": None, "args": [],
+            "credential_pool": object(),
+        })
+        fake_hermes_cli = types.ModuleType("hermes_cli")
+        fake_hermes_cli.runtime_provider = fake_rt_module
+        fake_hermes_state = types.ModuleType("hermes_state")
+        fake_hermes_state.SessionDB = mock.Mock(return_value=None)
+
+        with mock.patch.object(streaming, "get_session", return_value=FakeSession()), \
+             mock.patch.object(streaming, "_get_ai_agent", return_value=OlderAgent), \
+             mock.patch.object(streaming, "resolve_model_provider", return_value=("gpt-4o", "openai", None)), \
+             mock.patch("api.config.get_config", return_value={}), \
+             mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
+             mock.patch.dict(sys.modules, {
+                 "hermes_cli": fake_hermes_cli,
+                 "hermes_cli.runtime_provider": fake_rt_module,
+                 "hermes_state": fake_hermes_state,
+             }):
+            streaming.STREAMS[fake_stream_id] = fake_queue
+            # Must not raise TypeError
+            streaming._run_agent_streaming(
+                session_id="sess-compat-test",
+                msg_text="hello",
+                model="gpt-4o",
+                workspace="/tmp",
+                stream_id=fake_stream_id,
+            )
+
+        # Agent was constructed successfully
+        self.assertIn("session_id", captured["init_kwargs"])
+        self.assertEqual(captured["init_kwargs"]["session_id"], "sess-compat-test")

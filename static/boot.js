@@ -185,18 +185,23 @@ $('btnAttach').onclick=()=>$('fileInput').click();
   const _canRecordAudio=!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia&&window.MediaRecorder);
   if(!SpeechRecognition&&!_canRecordAudio) return; // Browser unsupported — mic button stays hidden
 
+  // Persist SR failure across reloads (e.g. Tailscale/network error)
+  const _micForceMediaRecorderKey='mic_force_mediarecorder';
+  let _forceMediaRecorder=!SpeechRecognition||localStorage.getItem(_micForceMediaRecorderKey)==='1';
+
   const btn=$('btnMic');
   const status=$('micStatus');
   const ta=$('msg');
   const statusText=status?status.querySelector('.status-text'):null;
   btn.style.display=''; // Show button — browser supports speech recognition or recording fallback
 
-  let recognition=SpeechRecognition?new SpeechRecognition():null;
+  let recognition=(!_forceMediaRecorder&&SpeechRecognition)?new SpeechRecognition():null;
   let mediaRecorder=null;
   let mediaStream=null;
   let audioChunks=[];
   let _finalText='';
   let _prefix='';
+  let _isRecording=false;
 
   function _setRecording(on){
     window._micActive=on;
@@ -261,7 +266,7 @@ $('btnAttach').onclick=()=>$('fileInput').click();
   }
   window._stopMic=_stopMic; // expose for send-guard above
 
-  if(recognition){
+  if(recognition && !_forceMediaRecorder){
     recognition.continuous=false;
     recognition.interimResults=true;
     recognition.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
@@ -298,6 +303,13 @@ $('btnAttach').onclick=()=>$('fileInput').click();
     recognition.onerror=(event)=>{
       _setRecording(false);
       window._micPendingSend=false;
+      _isRecording=false;
+      if(event.error==='network'||event.error==='not-allowed'){
+        // Persist SR failure: next reload will skip SpeechRecognition
+        localStorage.setItem(_micForceMediaRecorderKey,'1');
+        _forceMediaRecorder=true;
+        recognition=null;
+      }
       const msgs={
         'not-allowed':t('mic_denied'),
         'no-speech':t('mic_no_speech'),
@@ -308,18 +320,26 @@ $('btnAttach').onclick=()=>$('fileInput').click();
   }
 
   btn.onclick=async()=>{
+    // Race-condition guard: ignore rapid double-clicks
+    if(_isRecording){
+      _stopMic();
+      _isRecording=false;
+      return;
+    }
     if(window._micActive){
       _stopMic();
       return;
     }
+    _isRecording=true;
     _finalText='';
     _prefix=ta.value;
-    if(recognition){
+    if(recognition && !_forceMediaRecorder){
       recognition.start();
       _setRecording(true);
       return;
     }
     if(!_canRecordAudio){
+      _isRecording=false;
       showToast(t('mic_network'));
       return;
     }
@@ -331,12 +351,14 @@ $('btnAttach').onclick=()=>$('fileInput').click();
       audioChunks=[];
       mediaRecorder.ondataavailable=e=>{if(e.data&&e.data.size)audioChunks.push(e.data);};
       mediaRecorder.onerror=()=>{
+        _isRecording=false;
         _setRecording(false);
         window._micPendingSend=false;
         _stopTracks();
         showToast(t('mic_network'));
       };
       mediaRecorder.onstop=async()=>{
+        _isRecording=false;
         const blob=new Blob(audioChunks,{type:mediaRecorder.mimeType||mimeType||'audio/webm'});
         _setRecording(false);
         _stopTracks();
@@ -348,6 +370,7 @@ $('btnAttach').onclick=()=>$('fileInput').click();
       mediaRecorder.start();
       _setRecording(true);
     }catch(err){
+      _isRecording=false;
       window._micPendingSend=false;
       _stopTracks();
       showToast(t('mic_denied'));
@@ -431,9 +454,17 @@ $('msg').addEventListener('input',()=>{
   updateSendBtn();
   const text=$('msg').value;
   if(text.startsWith('/')&&text.indexOf('\n')===-1){
-    const prefix=text.slice(1);
-    const matches=getMatchingCommands(prefix);
-    if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
+    if(typeof getSlashAutocompleteMatches==='function'){
+      getSlashAutocompleteMatches(text).then(matches=>{
+        if(($('msg').value||'')!==text) return;
+        if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
+      });
+    }else{
+      const prefix=text.slice(1);
+      const matches=getMatchingCommands(prefix);
+      if(matches.length)showCmdDropdown(matches); else hideCmdDropdown();
+    }
+    if(typeof ensureSkillCommandsLoadedForAutocomplete==='function') ensureSkillCommandsLoadedForAutocomplete();
   } else {
     hideCmdDropdown();
   }
@@ -690,6 +721,31 @@ function _syncSkinPicker(active){
   });
 }
 
+function _applyFontSize(size){
+  if(size&&size!=='default'){
+    document.documentElement.dataset.fontSize=size;
+  } else {
+    delete document.documentElement.dataset.fontSize;
+  }
+}
+
+function _pickFontSize(size){
+  localStorage.setItem('hermes-font-size',size);
+  _applyFontSize(size);
+  _syncFontSizePicker(size);
+  if(typeof _markSettingsDirty==='function') _markSettingsDirty();
+  const hidden=$('settingsFontSize');
+  if(hidden) hidden.value=size;
+}
+
+function _syncFontSizePicker(active){
+  document.querySelectorAll('#fontSizePickerGrid .font-size-pick-btn').forEach(btn=>{
+    const sel=btn.dataset.fontSizeVal===(active||'default');
+    btn.style.borderColor=sel?'var(--accent)':'var(--border2)';
+    btn.style.boxShadow=sel?'0 0 0 1px var(--accent-bg-strong)':'none';
+  });
+}
+
 function _buildSkinPicker(activeSkin){
   const grid=$('skinPickerGrid');
   if(!grid) return;
@@ -733,13 +789,17 @@ function applyBotName(){
     window._showCliSessions=!!s.show_cli_sessions;
     window._soundEnabled=!!s.sound_enabled;
     window._notificationsEnabled=!!s.notifications_enabled;
+    window._showThinking=s.show_thinking!==false;
+    window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
     window._botName=s.bot_name||'Hermes';
+    // Persist default workspace so the blank new-chat page can show it
+    // and workspace actions (New file/folder) work before the first session (#804).
+    if(s.default_workspace) S._profileDefaultWorkspace=s.default_workspace;
     const appearance=_normalizeAppearance(s.theme,s.skin);
     localStorage.setItem('hermes-theme',appearance.theme);
     _applyTheme(appearance.theme);
     localStorage.setItem('hermes-skin',appearance.skin);
     _applySkin(appearance.skin);
-    document.body.classList.toggle('bubble-layout',!!s.bubble_layout);
     if(typeof setLocale==='function'){
       const _lang=typeof resolvePreferredLocale==='function'
         ? resolvePreferredLocale(s.language, localStorage.getItem('hermes-lang'))
@@ -754,9 +814,10 @@ function applyBotName(){
     window._showCliSessions=false;
     window._soundEnabled=false;
     window._notificationsEnabled=false;
+    window._showThinking=true;
+    window._sidebarDensity='compact';
     window._botName='Hermes';
     _bootSettings={check_for_updates:false};
-    document.body.classList.remove('bubble-layout');
     if(typeof setLocale==='function'){
       const _lang=typeof resolvePreferredLocale==='function'
         ? resolvePreferredLocale(null, localStorage.getItem('hermes-lang'))
@@ -786,6 +847,7 @@ function applyBotName(){
     $('modelSelect').value=savedModel;
     // If the value didn't take (model not in list), clear the bad pref
     if($('modelSelect').value!==savedModel) localStorage.removeItem('hermes-webui-model');
+    else if(typeof syncModelChip==='function') syncModelChip();
   }
   // Pre-load workspace list so sidebar name is correct from first render
   await loadWorkspaceList();
@@ -793,6 +855,11 @@ function applyBotName(){
   _initResizePanels();
   // Workspace panel restore happens AFTER loadSession so we know if
   // the session has a workspace — prevents the snap-open-then-closed flash (#576).
+  // Fix #822: clear any browser-restored value before first render. This
+  // covers fresh page loads and reloads. The bfcache restore case is handled
+  // separately below by a `pageshow` listener — the async IIFE here does NOT
+  // re-run when the browser restores the page from bfcache.
+  const _srch = document.getElementById('sessionSearch'); if (_srch) _srch.value = '';
   const saved=localStorage.getItem('hermes-webui-session');
   if(saved){
     try{
@@ -815,3 +882,18 @@ function applyBotName(){
   // Start real-time gateway session sync if setting is enabled
   if(typeof startGatewaySSE==='function') startGatewaySSE();
 })();
+
+// Fix #822 (bfcache path): when the browser restores the page from the
+// back-forward cache, the async boot IIFE above does NOT re-run, but the
+// DOM — including any stale value in #sessionSearch — IS restored.  A
+// prior search string would silently hide all sessions via the filter in
+// renderSessionListFromCache().  Clear the field and re-render whenever
+// the page is restored from cache (`event.persisted === true`).
+window.addEventListener('pageshow', (event) => {
+  if (!event.persisted) return;  // fresh loads are handled by the IIFE above
+  const _srch = document.getElementById('sessionSearch');
+  if (_srch) _srch.value = '';
+  if (typeof renderSessionListFromCache === 'function') {
+    try { renderSessionListFromCache(); } catch (_) {}
+  }
+});

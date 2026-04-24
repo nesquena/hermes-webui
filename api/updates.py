@@ -53,6 +53,48 @@ def _run_git(args, cwd, timeout=10):
         return f'git failed to start: {exc}', False
 
 
+def _detect_webui_version() -> str:
+    """Detect the running WebUI version from git or a baked-in fallback file.
+
+    Resolution order:
+      1. ``git describe --tags --always --dirty`` — works in any git checkout.
+         Returns the exact tag on tagged commits (e.g. ``v0.50.124``), a
+         post-tag descriptor between releases (e.g. ``v0.50.124-1-ge91325d``),
+         or a bare SHA when no tags exist (shallow clones, fresh forks).
+      2. ``api/_version.py`` — a fallback written by the Docker / CI release
+         workflow when ``.git`` is not present in the image.  Expected to define
+         ``__version__ = 'vX.Y.Z'``.
+      3. ``'unknown'`` — last resort; displayed as-is in the settings badge.
+    """
+    # Timeout capped at 3s: git describe on a healthy local repo is <50ms;
+    # a 10s stall on import (NFS-mounted .git, broken git binary) is unacceptable.
+    out, ok = _run_git(['describe', '--tags', '--always', '--dirty'], REPO_ROOT, timeout=3)
+    if ok and out:
+        return out
+
+    # Docker / baked-image fallback: api/_version.py written by CI at build time.
+    # Parse with regex rather than exec() — the file holds exactly one assignment
+    # and regex is sufficient; exec() on a build artifact is an unnecessary surface.
+    version_file = REPO_ROOT / 'api' / '_version.py'
+    if version_file.exists():
+        try:
+            import re as _re
+            m = _re.search(
+                r"""__version__\s*=\s*['"]([^'"]+)['"]""",
+                version_file.read_text(encoding='utf-8'),
+            )
+            if m:
+                return m.group(1)
+        except Exception:
+            pass
+
+    return 'unknown'
+
+
+# Resolved once at import time — tags cannot change without a process restart.
+WEBUI_VERSION: str = _detect_webui_version()
+
+
 def _split_remote_ref(ref):
     """Split 'origin/branch-name' into ('origin', 'branch-name').
 
@@ -141,6 +183,111 @@ def check_for_updates(force=False):
         _check_in_progress = False
 
 
+def _schedule_restart(delay: float = 2.0) -> None:
+    """Re-exec this process after *delay* seconds.
+
+    Called after a successful update so that the freshly-pulled code is
+    loaded on the next request, rather than running with a mix of old and
+    new Python modules in sys.modules.
+
+    os.execv() replaces the current process image with a fresh interpreter
+    running the same argv — sessions are preserved on disk, the HTTP port
+    is reclaimed within the delay window, and the client's own
+    ``setTimeout(() => location.reload(), 2500)`` lands after the restart.
+
+    Coordinates with ``_apply_lock``: when the user updates both webui
+    and agent, the client POSTs them sequentially.  Without coordination
+    the restart timer scheduled by the first update's success would fire
+    while the second update's git-pull is still running, killing it mid-
+    stream and leaving the second repo in an unknown partial state.
+    Blocking on ``_apply_lock`` before ``os.execv`` means a pending
+    second update always completes before the restart happens.
+    """
+    import os
+    import sys
+
+    def _do():
+        import time
+        time.sleep(delay)
+        # Hold _apply_lock through os.execv so no new update can start between
+        # the lock-release and the process replacement.  Any in-flight update
+        # finishes first (since it holds the lock), and then the process is
+        # replaced while still holding the lock — meaning no new update can
+        # sneak in during the brief TOCTOU window that existed with the
+        # original acquire-release-execv sequence.
+        # Threads die when execv replaces the process image, so the lock is
+        # released atomically by the kernel.
+        with _apply_lock:
+            try:
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+            except Exception:
+                # Last-resort: if execv fails (e.g. frozen binary), just exit
+                # so the process supervisor (start.sh / Docker) restarts us.
+                os._exit(0)
+
+    threading.Thread(target=_do, daemon=True).start()
+
+
+def apply_force_update(target: str) -> dict:
+    """Force-reset the target repo to the latest remote HEAD.
+
+    Unlike apply_update() which requires a clean working tree and refuses
+    merge conflicts, this discards all local modifications (checkout .) and
+    resets to origin/<branch> — equivalent to what the diverged/conflict
+    error messages ask the user to run manually.
+
+    Should only be called when apply_update() has already returned a
+    response with ``conflict: True`` or ``diverged: True`` and the user
+    has confirmed they want to discard local changes.
+    """
+    if not _apply_lock.acquire(blocking=False):
+        return {'ok': False, 'message': 'Update already in progress'}
+    try:
+        if target == 'webui':
+            path = REPO_ROOT
+        elif target == 'agent':
+            path = _AGENT_DIR
+        else:
+            return {'ok': False, 'message': f'Unknown target: {target}'}
+
+        if path is None or not (path / '.git').exists():
+            return {'ok': False, 'message': 'Not a git repository'}
+
+        _, fetch_ok = _run_git(['fetch', 'origin', '--quiet'], path, timeout=15)
+        if not fetch_ok:
+            return {
+                'ok': False,
+                'message': 'Could not reach the remote repository. Check your connection.',
+            }
+
+        upstream, ok = _run_git(['rev-parse', '--abbrev-ref', '@{upstream}'], path)
+        if ok and upstream:
+            compare_ref = upstream
+        else:
+            branch = _detect_default_branch(path)
+            compare_ref = f'origin/{branch}'
+
+        # Discard local modifications then reset to remote HEAD
+        _run_git(['checkout', '.'], path)
+        _, ok = _run_git(['reset', '--hard', compare_ref], path)
+        if not ok:
+            return {'ok': False, 'message': f'Force reset to {compare_ref} failed'}
+
+        with _cache_lock:
+            _update_cache['checked_at'] = 0
+
+        _schedule_restart()
+
+        return {
+            'ok': True,
+            'message': f'{target} force-updated to {compare_ref}',
+            'target': target,
+            'restart_scheduled': True,
+        }
+    finally:
+        _apply_lock.release()
+
+
 def apply_update(target):
     """Stash, pull --ff-only, pop for the given target repo."""
     if not _apply_lock.acquire(blocking=False):
@@ -193,7 +340,16 @@ def _apply_update_inner(target):
     # Fail early on unresolved merge conflicts
     if any(line[:2] in {'DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU'}
            for line in status_out.splitlines()):
-        return {'ok': False, 'message': 'Repository has unresolved merge conflicts'}
+        return {
+            'ok': False,
+            'message': (
+                f'The local {target} repo has unresolved merge conflicts. '
+                'To reset to the latest remote version run: '
+                'git -C ' + str(path) + ' checkout . && '
+                'git -C ' + str(path) + ' pull --ff-only'
+            ),
+            'conflict': True,
+        }
     stashed = False
     if status_out:
         _, ok = _run_git(['stash'], path)
@@ -254,4 +410,22 @@ def _apply_update_inner(target):
     with _cache_lock:
         _update_cache['checked_at'] = 0
 
-    return {'ok': True, 'message': f'{target} updated successfully', 'target': target}
+    # Schedule a self-restart so the updated code is loaded fresh.  A plain
+    # git pull leaves stale Python modules in sys.modules — agent imports that
+    # reference new symbols (functions, classes) added in the update will fail
+    # on the next request with AttributeError / ImportError.  os.execv() re-
+    # execs the same interpreter with the same argv, picking up the new code
+    # cleanly without requiring the user to restart manually.
+    #
+    # The 2 s delay gives the HTTP response time to flush to the client before
+    # the process replaces itself.  The client already does
+    # setTimeout(() => location.reload(), 1500) on success, so the page reload
+    # and the restart land at roughly the same time.
+    _schedule_restart()
+
+    return {
+        'ok': True,
+        'message': f'{target} updated successfully',
+        'target': target,
+        'restart_scheduled': True,
+    }

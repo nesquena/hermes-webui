@@ -138,14 +138,19 @@ class TestIssue495TitleStreaming(unittest.TestCase):
 
     def test_streaming_rejects_generic_completion_titles(self):
         self.assertIn(
-            "测试完成",
-            STREAMING_PY,
-            "streaming.py should reject generic completion phrases as session titles",
-        )
-        self.assertIn(
             "all set",
             STREAMING_PY,
             "streaming.py should reject generic English completion phrases as session titles",
+        )
+        self.assertIn(
+            "completed",
+            STREAMING_PY,
+            "streaming.py should reject completion-status titles as session titles",
+        )
+        self.assertNotIn(
+            "测试完成",
+            STREAMING_PY,
+            "streaming.py title generation should stay English-only",
         )
 
     def test_streaming_uses_reasoning_split_for_minimax_titles(self):
@@ -156,8 +161,10 @@ class TestIssue495TitleStreaming(unittest.TestCase):
         )
 
     def test_streaming_emits_title_sse_event(self):
+        # After the stream_end fix, title uses original session_id param (not s.session_id
+        # which can be rotated during context compression — see #652 fix)
         self.assertIn(
-            "put_event('title', {'session_id': s.session_id, 'title': s.title})",
+            "put_event('title', {'session_id': session_id, 'title': effective_title})",
             STREAMING_PY,
             "streaming.py should emit a title SSE event when title is updated",
         )

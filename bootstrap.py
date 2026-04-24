@@ -19,6 +19,50 @@ from pathlib import Path
 
 INSTALLER_URL = "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh"
 REPO_ROOT = Path(__file__).resolve().parent
+
+
+def _load_repo_dotenv() -> None:
+    """Load REPO_ROOT/.env into os.environ.
+
+    Mirrors what start.sh does via ``set -a; source .env`` so that running
+    ``python3 bootstrap.py`` directly behaves identically to ``./start.sh``.
+    Variables are set unconditionally (matching shell source semantics), so a
+    value in .env overrides one already present in the shell environment.
+    To keep a CLI-supplied value, unset it from .env or launch via start.sh
+    and override there.
+
+    Only loads the webui repo .env — not ~/.hermes/.env, which the server
+    loads independently at startup for provider credentials.
+
+    Note: does not handle the ``export FOO=bar`` prefix — strip ``export``
+    from .env values if copy-pasting from a shell rc file.
+    """
+    env_path = REPO_ROOT / ".env"
+    if not env_path.exists():
+        return
+    try:
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip()
+            # Strip optional 'export' prefix (common in copy-pasted shell snippets)
+            if k.startswith("export "):
+                k = k[7:].strip()
+            v = v.strip().strip('"').strip("'")
+            if k:
+                os.environ[k] = v
+    except Exception as exc:
+        import sys as _sys
+        print(f"[bootstrap] Warning: could not load .env — {exc}", file=_sys.stderr)
+
+
+# Side effect: loads REPO_ROOT/.env into os.environ on import.
+# Must run before DEFAULT_HOST / DEFAULT_PORT so os.getenv() picks up
+# values from .env even when bootstrap.py is invoked directly (not via start.sh).
+_load_repo_dotenv()
+
 DEFAULT_HOST = os.getenv("HERMES_WEBUI_HOST", "127.0.0.1")
 DEFAULT_PORT = int(os.getenv("HERMES_WEBUI_PORT", "8787"))
 # Set HERMES_WEBUI_SKIP_ONBOARDING=1 to bypass the first-run wizard when
@@ -69,7 +113,7 @@ def discover_launcher_python(agent_dir: Path | None) -> str:
     if env_python:
         return env_python
     if agent_dir:
-        for rel in ("venv/bin/python", "venv/Scripts/python.exe"):
+        for rel in ("venv/bin/python", "venv/Scripts/python.exe", ".venv/bin/python", ".venv/Scripts/python.exe"):
             candidate = agent_dir / rel
             if candidate.exists():
                 return str(candidate)

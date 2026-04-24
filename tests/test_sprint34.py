@@ -35,6 +35,20 @@ def _make_auth_json(provider_id: str, tokens: dict, tmp_dir: pathlib.Path) -> pa
     return auth_path
 
 
+def _make_auth_json_with_credential_pool(
+    provider_id: str, pool_entries: list[dict], tmp_dir: pathlib.Path
+) -> pathlib.Path:
+    """Write an auth.json with only credential_pool entries for provider_id.
+
+    This reproduces setups where Hermes runtime resolves OAuth credentials from
+    credential_pool while providers[provider_id] is absent or stale.
+    """
+    store = {"providers": {}, "credential_pool": {provider_id: pool_entries}}
+    auth_path = tmp_dir / "auth.json"
+    auth_path.write_text(json.dumps(store), encoding="utf-8")
+    return auth_path
+
+
 # ── 1–3. _provider_oauth_authenticated unit tests ────────────────────────────
 
 class TestProviderOAuthAuthenticated:
@@ -62,7 +76,7 @@ class TestProviderOAuthAuthenticated:
         """openai-codex with only a refresh_token -> still authenticated."""
         _make_auth_json(
             "openai-codex",
-            {"access_token": "", "refresh_token": "ref_only_token"},
+            {"access_token": "", "refresh_token": "***"},
             tmp_path,
         )
         assert self._call("openai-codex", tmp_path) is True
@@ -141,7 +155,7 @@ class TestStatusFromRuntimeOAuth:
         """openai-codex configured + access_token -> provider_ready True."""
         _make_auth_json(
             "openai-codex",
-            {"access_token": "ey.test", "refresh_token": "ref"},
+            {"access_token": "***", "refresh_token": "***"},
             tmp_path,
         )
         result = self._call("openai-codex", "codex-mini-latest", tmp_path)

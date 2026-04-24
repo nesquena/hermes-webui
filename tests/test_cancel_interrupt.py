@@ -43,7 +43,10 @@ class TestCancelInterrupt:
         # Assert
         assert result is True
         mock_agent.interrupt.assert_called_once_with("Cancelled by user")
-        assert CANCEL_FLAGS[stream_id].is_set()
+        # CANCEL_FLAGS is eagerly popped after cancel (#776 fix) so the flag
+        # is no longer in the dict — verify the pop happened instead
+        assert stream_id not in CANCEL_FLAGS, \
+            "cancel_stream() should eagerly pop CANCEL_FLAGS after signalling"
 
     def test_cancel_handles_interrupt_exception(self):
         """Verify that cancel_stream() handles interrupt() exceptions gracefully"""
@@ -61,7 +64,8 @@ class TestCancelInterrupt:
         # Assert
         assert result is True
         mock_agent.interrupt.assert_called_once()
-        assert CANCEL_FLAGS[stream_id].is_set()
+        assert stream_id not in CANCEL_FLAGS, \
+            "cancel_stream() should eagerly pop CANCEL_FLAGS even on interrupt exception"
 
     def test_cancel_before_agent_ready(self):
         """Test cancel when agent not yet stored in AGENT_INSTANCES (race condition)"""
@@ -76,8 +80,11 @@ class TestCancelInterrupt:
 
         # Assert
         assert result is True
-        assert CANCEL_FLAGS[stream_id].is_set()
-        # Agent will check this flag when it starts
+        # CANCEL_FLAGS is eagerly popped; the agent thread checks the event
+        # object it already has a reference to — pop doesn't clear the event
+        assert stream_id not in CANCEL_FLAGS, \
+            "cancel_stream() should eagerly pop CANCEL_FLAGS even without an agent"
+        # Agent will check this flag (it holds a reference to the event object)
 
     def test_cancel_nonexistent_stream(self):
         """Test cancel for a stream that doesn't exist"""

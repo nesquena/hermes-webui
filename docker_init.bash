@@ -59,12 +59,26 @@ it=$itdir/hermeswebui_user_uid
 if [ -z "${WANTED_UID+x}" ]; then
   if [ -f $it ]; then WANTED_UID=$(cat $it); fi
 fi
-# Auto-detect from mounted workspace if still unset (#569).
+# Auto-detect from mounted volumes if still unset (#569, #668).
 # On macOS, host UIDs start at 501. Using the wrong UID means the container
 # user cannot read the bind-mounted files, making the workspace appear empty.
-# Prefer the workspace mount UID over the hardcoded default of 1024.
+# In two-container setups (hermes-agent + hermes-webui), the shared hermes-home
+# volume may be owned by the agent container's UID — detect from there first.
 if [ -z "${WANTED_UID+x}" ] || [ "${WANTED_UID}" = "1024" ]; then
-  # Use /workspace — the standard bind-mount point — to read the host UID.
+  # Priority 1: hermes-home shared volume — covers two-container Zeabur/Compose setups (#668)
+  for _probe_dir in "/home/hermeswebui/.hermes" "$HERMES_HOME" "/opt/data"; do
+    if [ -d "$_probe_dir" ]; then
+      _detected_uid=$(stat -c '%u' "$_probe_dir" 2>/dev/null || echo "")
+      if [ -n "$_detected_uid" ] && [ "$_detected_uid" != "0" ]; then
+        echo "-- Auto-detected UID: $_detected_uid (from $_probe_dir)"
+        WANTED_UID=$_detected_uid
+        break
+      fi
+    fi
+  done
+fi
+if [ -z "${WANTED_UID+x}" ] || [ "${WANTED_UID}" = "1024" ]; then
+  # Priority 2: /workspace bind-mount — the standard single-container mount point
   if [ -d "/workspace" ]; then
     _detected_uid=$(stat -c '%u' "/workspace" 2>/dev/null || echo "")
     if [ -n "$_detected_uid" ] && [ "$_detected_uid" != "0" ]; then
@@ -81,8 +95,22 @@ it=$itdir/hermeswebui_user_gid
 if [ -z "${WANTED_GID+x}" ]; then
   if [ -f $it ]; then WANTED_GID=$(cat $it); fi
 fi
-# Auto-detect GID from mounted workspace to match (#569)
+# Auto-detect GID from mounted volumes to match (#569, #668)
 if [ -z "${WANTED_GID+x}" ] || [ "${WANTED_GID}" = "1024" ]; then
+  # Priority 1: hermes-home shared volume
+  for _probe_dir in "/home/hermeswebui/.hermes" "$HERMES_HOME" "/opt/data"; do
+    if [ -d "$_probe_dir" ]; then
+      _detected_gid=$(stat -c '%g' "$_probe_dir" 2>/dev/null || echo "")
+      if [ -n "$_detected_gid" ] && [ "$_detected_gid" != "0" ]; then
+        echo "-- Auto-detected GID: $_detected_gid (from $_probe_dir)"
+        WANTED_GID=$_detected_gid
+        break
+      fi
+    fi
+  done
+fi
+if [ -z "${WANTED_GID+x}" ] || [ "${WANTED_GID}" = "1024" ]; then
+  # Priority 2: /workspace bind-mount
   if [ -d "/workspace" ]; then
     _detected_gid=$(stat -c '%g' "/workspace" 2>/dev/null || echo "")
     if [ -n "$_detected_gid" ] && [ "$_detected_gid" != "0" ]; then
@@ -212,13 +240,20 @@ rm -f $it || error_exit "Failed to delete test file in $HERMES_WEBUI_STATE_DIR"
 echo ""; echo "-- HERMES_WEBUI_DEFAULT_WORKSPACE: Default workspace directory shown on first launch"
 if [ -z "${HERMES_WEBUI_DEFAULT_WORKSPACE+x}" ]; then echo "HERMES_WEBUI_DEFAULT_WORKSPACE not set, setting to /workspace"; export HERMES_WEBUI_DEFAULT_WORKSPACE="/workspace"; fi;
 echo "-- HERMES_WEBUI_DEFAULT_WORKSPACE: $HERMES_WEBUI_DEFAULT_WORKSPACE"
-# Use sudo for mkdir/chown — Docker may auto-create bind-mount directories as root,
-# leaving them unwritable by the hermeswebui user (#357).
-sudo mkdir -p "$HERMES_WEBUI_DEFAULT_WORKSPACE" || error_exit "Failed to create default workspace at $HERMES_WEBUI_DEFAULT_WORKSPACE"
-sudo chown hermeswebui:hermeswebui "$HERMES_WEBUI_DEFAULT_WORKSPACE" || error_exit "Failed to set owner of $HERMES_WEBUI_DEFAULT_WORKSPACE"
+# Use sudo for mkdir — Docker may auto-create bind-mount directories as root (#357).
+# Skip mkdir if the directory already exists (e.g. a read-only mount — #670).
+if [ ! -d "$HERMES_WEBUI_DEFAULT_WORKSPACE" ]; then
+  sudo mkdir -p "$HERMES_WEBUI_DEFAULT_WORKSPACE" || error_exit "Failed to create default workspace at $HERMES_WEBUI_DEFAULT_WORKSPACE"
+fi
 if [ ! -d "$HERMES_WEBUI_DEFAULT_WORKSPACE" ]; then error_exit "HERMES_WEBUI_DEFAULT_WORKSPACE directory does not exist at $HERMES_WEBUI_DEFAULT_WORKSPACE"; fi
-it="$HERMES_WEBUI_DEFAULT_WORKSPACE/.testfile"; touch $it || error_exit "Failed to verify default workspace at $HERMES_WEBUI_DEFAULT_WORKSPACE"
-rm -f $it || error_exit "Failed to delete test file in $HERMES_WEBUI_DEFAULT_WORKSPACE"
+# Only chown and write-test if the workspace is writable. Read-only bind-mounts
+# (:ro) are valid — the workspace is used for browsing, not writing by the server.
+if [ -w "$HERMES_WEBUI_DEFAULT_WORKSPACE" ]; then
+  sudo chown hermeswebui:hermeswebui "$HERMES_WEBUI_DEFAULT_WORKSPACE" || echo "!! WARNING: Could not chown $HERMES_WEBUI_DEFAULT_WORKSPACE (continuing)"
+  it="$HERMES_WEBUI_DEFAULT_WORKSPACE/.testfile"; touch $it && rm -f $it || echo "!! WARNING: Could not write to $HERMES_WEBUI_DEFAULT_WORKSPACE (continuing)"
+else
+  echo "-- HERMES_WEBUI_DEFAULT_WORKSPACE is read-only — skipping chown/write check (read-only workspace is supported)"
+fi
 
 echo ""; echo "==================="
 echo ""; echo "== Installing uv and creating a new virtual environment for hermes-webui"
@@ -260,21 +295,35 @@ else
   test -x /app/venv/bin/pip
 
   echo ""; echo "== Adding hermes-agent's pyproject.toml base dependencies to the virtual environment"
-  
-  if [ ! -d "/home/hermeswebui/.hermes/hermes-agent" ]; then
-  echo "== Downloading hermes-agent (The Brain) ..."
-  mkdir -p /home/hermeswebui/.hermes
-  git clone https://github.com/NousResearch/hermes-agent.git /home/hermeswebui/.hermes/hermes-agent
-fi
+if [ ! -d "/home/hermeswebui/.hermes/hermes-agent" ]; then
+    echo "== Downloading hermes-agent (The Brain) ..."
+    mkdir -p /home/hermeswebui/.hermes
+    git clone https://github.com/NousResearch/hermes-agent.git /home/hermeswebui/.hermes/hermes-agent
+  fi
 
-  if [ -d "/home/hermeswebui/.hermes/hermes-agent" ] && [ -f "/home/hermeswebui/.hermes/hermes-agent/pyproject.toml" ]; then
-    uv pip install "/home/hermeswebui/.hermes/hermes-agent[honcho]" --trusted-host pypi.org --trusted-host files.pythonhosted.org || error_exit "Failed to install hermes-agent's requirements"
+  _agent_paths=(
+    "/home/hermeswebui/.hermes/hermes-agent"
+    "/opt/hermes"
+  )
+  _agent_src=""
+  for _p in "${_agent_paths[@]}"; do
+    if [ -d "$_p" ] && [ -f "$_p/pyproject.toml" ]; then
+      _agent_src="$_p"
+      break
+    fi
+  done
+  if [ -n "$_agent_src" ]; then
+    uv pip install "$_agent_src[all]" --trusted-host pypi.org --trusted-host files.pythonhosted.org || error_exit "Failed to install hermes-agent's requirements"
   else
     echo ""
-    echo "!! WARNING: hermes-agent source not found at /home/hermeswebui/.hermes/hermes-agent"
+    echo "!! WARNING: hermes-agent source not found."
+    echo "!!   Looked in: ${_agent_paths[0]}"
+    echo "!!              ${_agent_paths[1]}"
     echo "!! The WebUI will start with reduced functionality (no model auto-detection,"
     echo "!! no personality routing, no CLI session imports)."
-    echo "!! To fix: mount the agent source volume into the container. See:"
+    echo "!! To fix: mount the agent source volume into the container:"
+    echo "!!   -v /path/to/hermes-agent:/home/hermeswebui/.hermes/hermes-agent"
+    echo "!! Or see the two-container compose example:"
     echo "!!   https://github.com/nesquena/hermes-webui/blob/master/docker-compose.two-container.yml"
     echo ""
   fi

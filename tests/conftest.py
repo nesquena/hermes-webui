@@ -342,6 +342,33 @@ def base_url():
     return TEST_BASE
 
 
+# ── Per-test model cache invalidation ────────────────────────────────────────
+# The TTL cache for get_available_models() persists across tests within the
+# same process. Tests that modify cfg in-memory won't trigger the mtime path,
+# so the cache must be explicitly invalidated after each test that exercises
+# provider/model detection.
+
+@pytest.fixture(autouse=True)
+def _invalidate_models_cache_after_test():
+    """Force the TTL cache to be cleared before and after every test.
+
+    This prevents state bleed where a test that calls get_available_models()
+    populates the cache with a particular config, and the next test sees stale
+    results even though it has mutated _cfg_cache in-memory.
+    """
+    try:
+        from api.config import invalidate_models_cache
+        invalidate_models_cache()
+    except Exception:
+        pass
+    yield
+    try:
+        from api.config import invalidate_models_cache
+        invalidate_models_cache()
+    except Exception:
+        pass
+
+
 # ── Per-test session cleanup ──────────────────────────────────────────────────
 
 @pytest.fixture(autouse=True)

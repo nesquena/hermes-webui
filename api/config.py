@@ -10,6 +10,7 @@ Discovery order for all paths:
 """
 
 import collections
+import copy
 import json
 import logging
 import os
@@ -198,7 +199,7 @@ def reload_config() -> None:
             import yaml as _yaml
 
             if config_path.exists():
-                loaded = _yaml.safe_load(config_path.read_text())
+                loaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
                 if isinstance(loaded, dict):
                     _cfg_cache.update(loaded)
                     try:
@@ -207,6 +208,35 @@ def reload_config() -> None:
                         _cfg_mtime = 0.0
         except Exception:
             logger.debug("Failed to load yaml config from %s", config_path)
+
+
+def _load_yaml_config_file(config_path: Path) -> dict:
+    try:
+        import yaml as _yaml
+    except ImportError:
+        return {}
+
+    if not config_path.exists():
+        return {}
+    try:
+        loaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        return loaded if isinstance(loaded, dict) else {}
+    except Exception:
+        logger.debug("Failed to parse yaml config from %s", config_path)
+        return {}
+
+
+def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
+    try:
+        import yaml as _yaml
+    except ImportError as exc:
+        raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        _yaml.safe_dump(config_data, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
 
 
 # Initial load
@@ -436,9 +466,12 @@ _FALLBACK_MODELS = [
     {"provider": "Anthropic", "id": "anthropic/claude-sonnet-4.6",        "label": "Claude Sonnet 4.6"},
     {"provider": "Anthropic", "id": "anthropic/claude-sonnet-4-5",        "label": "Claude Sonnet 4.5"},
     {"provider": "Anthropic", "id": "anthropic/claude-haiku-4-5",         "label": "Claude Haiku 4.5"},
-    # Google
-    {"provider": "Google",    "id": "google/gemini-3.1-pro-preview",              "label": "Gemini 3.1 Pro Preview"},
-    {"provider": "Google",    "id": "google/gemini-3-flash-preview",              "label": "Gemini 3 Flash Preview"},
+    # Google — 3.x (latest preview) + 2.5 (stable GA)
+    {"provider": "Google",    "id": "google/gemini-3.1-pro-preview",            "label": "Gemini 3.1 Pro Preview"},
+    {"provider": "Google",    "id": "google/gemini-3-flash-preview",            "label": "Gemini 3 Flash Preview"},
+    {"provider": "Google",    "id": "google/gemini-3.1-flash-lite-preview",     "label": "Gemini 3.1 Flash Lite Preview"},
+    {"provider": "Google",    "id": "google/gemini-2.5-pro",                    "label": "Gemini 2.5 Pro"},
+    {"provider": "Google",    "id": "google/gemini-2.5-flash",                  "label": "Gemini 2.5 Flash"},
     # DeepSeek
     {"provider": "DeepSeek",  "id": "deepseek/deepseek-chat-v3-0324",     "label": "DeepSeek V3"},
     {"provider": "DeepSeek",  "id": "deepseek/deepseek-r1",               "label": "DeepSeek R1"},
@@ -471,6 +504,7 @@ _PROVIDER_DISPLAY = {
     "huggingface": "HuggingFace",
     "alibaba": "Alibaba",
     "ollama": "Ollama",
+    "ollama-cloud": "Ollama Cloud",
     "opencode-zen": "OpenCode Zen",
     "opencode-go": "OpenCode Go",
     "lmstudio": "LM Studio",
@@ -478,6 +512,73 @@ _PROVIDER_DISPLAY = {
     "qwen": "Qwen",
     "x-ai": "xAI",
 }
+
+# Provider alias → canonical slug.  Users configure providers using the
+# dotted/hyphenated form they see on the provider website (``z.ai``,
+# ``x.ai``, ``google``) but the internal catalog (``_PROVIDER_MODELS``)
+# uses slugs without punctuation (``zai``, ``xai``, ``gemini``).  Without
+# normalisation the provider lands in the ``else`` branch of the group
+# builder and no models are returned — the bug behind #815.
+#
+# This table is authoritative for the WebUI.  When ``hermes_cli.models``
+# is importable we also merge its ``_PROVIDER_ALIASES`` on top so any
+# new aliases added to the agent automatically apply.  Keeping the local
+# copy means the fix works even in environments where the agent tree is
+# not on ``sys.path`` (CI, installs without hermes-agent cloned
+# alongside the WebUI).
+_PROVIDER_ALIASES = {
+    "glm": "zai",
+    "z-ai": "zai",
+    "z.ai": "zai",
+    "zhipu": "zai",
+    "github": "copilot",
+    "github-copilot": "copilot",
+    "github-models": "copilot",
+    "github-model": "copilot",
+    "google": "gemini",
+    "google-gemini": "gemini",
+    "google-ai-studio": "gemini",
+    "kimi": "kimi-coding",
+    "moonshot": "kimi-coding",
+    "claude": "anthropic",
+    "claude-code": "anthropic",
+    "deep-seek": "deepseek",
+    "opencode": "opencode-zen",
+    "grok": "xai",
+    "x-ai": "xai",
+    "x.ai": "xai",
+    "aws": "bedrock",
+    "aws-bedrock": "bedrock",
+    "amazon": "bedrock",
+    "amazon-bedrock": "bedrock",
+    "qwen": "alibaba",
+    "aliyun": "alibaba",
+    "dashscope": "alibaba",
+    "alibaba-cloud": "alibaba",
+}
+
+
+def _resolve_provider_alias(name: str) -> str:
+    """Return the canonical provider slug for *name*.
+
+    Applies the WebUI's local alias table first, then merges any
+    additional aliases the agent provides (when hermes_cli is on
+    sys.path). Lookup is case-insensitive and whitespace-trimmed.
+    Unknown names pass through unchanged.
+    """
+    if not name:
+        return name
+    raw = str(name).strip().lower()
+    # Prefer the agent's table when available so new aliases added there
+    # work automatically; otherwise fall through to our local copy.
+    try:
+        from hermes_cli.models import _PROVIDER_ALIASES as _agent_aliases
+        if raw in _agent_aliases:
+            return _agent_aliases[raw]
+    except Exception:
+        pass
+    return _PROVIDER_ALIASES.get(raw, name)
+
 
 # Well-known models per provider (used to populate dropdown for direct API providers)
 _PROVIDER_MODELS = {
@@ -501,18 +602,21 @@ _PROVIDER_MODELS = {
         {"id": "codex-mini-latest", "label": "Codex Mini (latest)"},
     ],
     "google": [
-        {"id": "gemini-3.1-pro-preview",   "label": "Gemini 3.1 Pro Preview"},
-        {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash Preview"},
+        {"id": "gemini-3.1-pro-preview",            "label": "Gemini 3.1 Pro Preview"},
+        {"id": "gemini-3-flash-preview",            "label": "Gemini 3 Flash Preview"},
+        {"id": "gemini-3.1-flash-lite-preview",     "label": "Gemini 3.1 Flash Lite Preview"},
+        {"id": "gemini-2.5-pro",                    "label": "Gemini 2.5 Pro"},
+        {"id": "gemini-2.5-flash",                  "label": "Gemini 2.5 Flash"},
     ],
     "deepseek": [
         {"id": "deepseek-chat-v3-0324", "label": "DeepSeek V3"},
         {"id": "deepseek-reasoner", "label": "DeepSeek Reasoner"},
     ],
     "nous": [
-        {"id": "claude-opus-4.6", "label": "Claude Opus 4.6 (via Nous)"},
-        {"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6 (via Nous)"},
-        {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini (via Nous)"},
-        {"id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro Preview (via Nous)"},
+        {"id": "@nous:anthropic/claude-opus-4.6",     "label": "Claude Opus 4.6 (via Nous)"},
+        {"id": "@nous:anthropic/claude-sonnet-4.6",   "label": "Claude Sonnet 4.6 (via Nous)"},
+        {"id": "@nous:openai/gpt-5.4-mini",           "label": "GPT-5.4 Mini (via Nous)"},
+        {"id": "@nous:google/gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro Preview (via Nous)"},
     ],
     "zai": [
         {"id": "glm-5.1", "label": "GLM-5.1"},
@@ -527,6 +631,7 @@ _PROVIDER_MODELS = {
         {"id": "moonshot-v1-32k", "label": "Moonshot v1 32k"},
         {"id": "moonshot-v1-128k", "label": "Moonshot v1 128k"},
         {"id": "kimi-latest", "label": "Kimi Latest"},
+        {"id": "kimi-k2.5", "label": "Kimi K2.5"},
     ],
     "minimax": [
         {"id": "MiniMax-M2.7", "label": "MiniMax M2.7"},
@@ -542,7 +647,7 @@ _PROVIDER_MODELS = {
         {"id": "gpt-4o", "label": "GPT-4o"},
         {"id": "claude-opus-4.6", "label": "Claude Opus 4.6"},
         {"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6"},
-        {"id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro Preview"},
+        {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash Preview"},
     ],
     # OpenCode Zen — curated models via opencode.ai/zen (pay-as-you-go credits)
     "opencode-zen": [
@@ -571,6 +676,9 @@ _PROVIDER_MODELS = {
         {"id": "claude-3-5-haiku", "label": "Claude 3.5 Haiku"},
         {"id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro Preview"},
         {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash Preview"},
+        {"id": "gemini-3.1-flash-lite-preview", "label": "Gemini 3.1 Flash Lite Preview"},
+        {"id": "gemini-2.5-pro", "label": "Gemini 2.5 Pro"},
+        {"id": "gemini-2.5-flash", "label": "Gemini 2.5 Flash"},
         {"id": "glm-5.1", "label": "GLM-5.1"},
         {"id": "glm-5", "label": "GLM-5"},
         {"id": "kimi-k2.5", "label": "Kimi K2.5"},
@@ -590,9 +698,14 @@ _PROVIDER_MODELS = {
         {"id": "minimax-m2.5", "label": "MiniMax M2.5"},
     ],
     # 'gemini' is the hermes_cli provider ID for Google AI Studio
+    # Model IDs are bare — sent directly to:
+    #   https://generativelanguage.googleapis.com/v1beta/openai/chat/completions
     "gemini": [
-        {"id": "gemini-3.1-pro-preview", "label": "Gemini 3.1 Pro Preview"},
-        {"id": "gemini-3-flash-preview", "label": "Gemini 3 Flash Preview"},
+        {"id": "gemini-3.1-pro-preview",            "label": "Gemini 3.1 Pro Preview"},
+        {"id": "gemini-3-flash-preview",            "label": "Gemini 3 Flash Preview"},
+        {"id": "gemini-3.1-flash-lite-preview",     "label": "Gemini 3.1 Flash Lite Preview"},
+        {"id": "gemini-2.5-pro",                    "label": "Gemini 2.5 Pro"},
+        {"id": "gemini-2.5-flash",                  "label": "Gemini 2.5 Flash"},
     ],
     # Mistral — prefix used in OpenRouter model IDs (mistralai/mistral-large-latest)
     "mistralai": [
@@ -609,6 +722,70 @@ _PROVIDER_MODELS = {
         {"id": "grok-4.20", "label": "Grok 4.20"},
     ],
 }
+
+
+_AMBIENT_GH_CLI_MARKERS = frozenset({"gh_cli", "gh auth token"})
+
+
+def _is_ambient_gh_cli_entry(source: str, label: str, key_source: str) -> bool:
+    """True when a credential-pool entry is a seeded gh-cli token rather than
+    one the user added explicitly. Filter these so Copilot doesn't appear in
+    the dropdown just because `gh` is installed on the system.
+    """
+    return (
+        source.strip().lower() in _AMBIENT_GH_CLI_MARKERS
+        or label.strip().lower() == "gh auth token"
+        or key_source.strip().lower() == "gh auth token"
+    )
+
+
+def _format_ollama_label(mid: str) -> str:
+    """Turn an Ollama model id (Ollama tag format) into a readable display label.
+
+    Examples: 'kimi-k2.5' → 'Kimi K2.5', 'qwen3-vl:235b-instruct' → 'Qwen3 VL (235B Instruct)'
+    """
+    name_part, _, variant = mid.partition(":")
+
+    def _fmt(s: str) -> str:
+        tokens = s.replace("-", " ").replace("_", " ").split()
+        out = []
+        for t in tokens:
+            alpha_only = t.replace(".", "")
+            if alpha_only.isalpha() and len(t) <= 3:
+                out.append(t.upper())  # short acronym: glm → GLM, vl → VL, gpt → GPT
+            elif alpha_only.isalnum() and alpha_only and alpha_only[0].isdigit():
+                out.append(t.upper())  # size param: 235b → 235B, 1t → 1T
+            else:
+                out.append(t[0].upper() + t[1:] if t else t)  # capitalize: kimi → Kimi
+        return " ".join(out)
+
+    label = _fmt(name_part)
+    if variant:
+        label += f" ({_fmt(variant)})"
+    return label
+
+
+def _apply_provider_prefix(
+    raw_models: list[dict],
+    provider_id: str,
+    active_provider: str | None,
+) -> list[dict]:
+    """Return *raw_models* with @provider: prefixes applied when needed.
+
+    Prefixing is skipped when (a) the provider is already the active one, or
+    (b) a model id already starts with '@' or contains '/' (already routable).
+    """
+    _active = (active_provider or "").lower()
+    if not _active or provider_id == _active:
+        return list(raw_models)
+    result = []
+    for m in raw_models:
+        mid = m["id"]
+        if mid.startswith("@") or "/" in mid:
+            result.append({"id": mid, "label": m["label"]})
+        else:
+            result.append({"id": f"@{provider_id}:{mid}", "label": m["label"]})
+    return result
 
 
 def resolve_model_provider(model_id: str) -> tuple:
@@ -674,6 +851,14 @@ def resolve_model_provider(model_id: str) -> tuple:
         # e.g. config=anthropic, model=anthropic/claude-... → bare name to anthropic API
         if config_provider and prefix == config_provider:
             return bare, config_provider, config_base_url
+        # Portal providers (Nous, OpenCode) serve models from multiple upstream
+        # namespaces — check them BEFORE the config_base_url branch so that a
+        # Nous user whose config.yaml also has a base_url doesn't accidentally
+        # fall into the prefix-stripping path (#894: minimax/minimax-m2.7 → bare
+        # name sent to Nous → 404 because Nous requires the full namespace path).
+        _PORTAL_PROVIDERS = {"nous", "opencode-zen", "opencode-go"}
+        if config_provider in _PORTAL_PROVIDERS:
+            return model_id, config_provider, config_base_url
         # If a custom endpoint base_url is configured, don't reroute through OpenRouter
         # just because the model name contains a slash (e.g. google/gemma-4-26b-a4b).
         # The user has explicitly pointed at a base_url, so trust their routing config.
@@ -686,6 +871,7 @@ def resolve_model_provider(model_id: str) -> tuple:
                 return bare, config_provider, config_base_url
             # Unknown prefix (not a named provider) — pass full model_id through.
             return model_id, config_provider, config_base_url
+
         # If prefix does NOT match config provider, the user picked a cross-provider model
         # from the OpenRouter dropdown (e.g. config=anthropic but picked openai/gpt-5.4-mini).
         # In this case always route through openrouter with the full provider/model string.
@@ -693,6 +879,229 @@ def resolve_model_provider(model_id: str) -> tuple:
             return model_id, "openrouter", None
 
     return model_id, config_provider, config_base_url
+
+
+def get_effective_default_model(config_data: dict | None = None) -> str:
+    """Resolve the effective Hermes default model from config, then env overrides."""
+    active_cfg = config_data if config_data is not None else cfg
+    default_model = DEFAULT_MODEL
+
+    model_cfg = active_cfg.get("model", {})
+    if isinstance(model_cfg, str):
+        default_model = model_cfg.strip()
+    elif isinstance(model_cfg, dict):
+        cfg_default = str(model_cfg.get("default") or "").strip()
+        if cfg_default:
+            default_model = cfg_default
+
+    env_model = (
+        os.getenv("HERMES_MODEL") or os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL")
+    )
+    if env_model:
+        default_model = env_model.strip()
+    return default_model
+
+
+# ── Reasoning config (CLI parity for /reasoning) ─────────────────────────────
+# Mirrors hermes_constants.parse_reasoning_effort so WebUI can validate without
+# importing from the agent tree (which may not be installed).  Any drift here
+# will show up in the shared test suite since both sides accept the same set.
+VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
+
+
+def parse_reasoning_effort(effort):
+    """Parse an effort level into the dict the agent expects.
+
+    Returns None when *effort* is empty or unrecognised (caller interprets as
+    "use default"), ``{"enabled": False}`` for ``"none"``, and
+    ``{"enabled": True, "effort": <level>}`` for any of
+    ``VALID_REASONING_EFFORTS``.
+    """
+    if not effort or not str(effort).strip():
+        return None
+    eff = str(effort).strip().lower()
+    if eff == "none":
+        return {"enabled": False}
+    if eff in VALID_REASONING_EFFORTS:
+        return {"enabled": True, "effort": eff}
+    return None
+
+
+def get_reasoning_status() -> dict:
+    """Return current reasoning configuration from the active profile's
+    config.yaml — the same source of truth the CLI reads from.
+
+    Keys:
+      - show_reasoning: bool — from ``display.show_reasoning`` (default True)
+      - reasoning_effort: str — from ``agent.reasoning_effort`` ('' = default)
+    """
+    config_data = _load_yaml_config_file(_get_config_path())
+    display_cfg = config_data.get("display") or {}
+    agent_cfg = config_data.get("agent") or {}
+    show_raw = display_cfg.get("show_reasoning") if isinstance(display_cfg, dict) else None
+    effort_raw = agent_cfg.get("reasoning_effort") if isinstance(agent_cfg, dict) else None
+    return {
+        # Match CLI default (True if unset in config.yaml)
+        "show_reasoning": bool(show_raw) if isinstance(show_raw, bool) else True,
+        "reasoning_effort": str(effort_raw or "").strip().lower(),
+    }
+
+
+def set_reasoning_display(show: bool) -> dict:
+    """Persist ``display.show_reasoning`` to the active profile's config.yaml.
+
+    Mirrors CLI ``/reasoning show|hide``: writes the same key that the CLI
+    writes, so the preference is shared across the WebUI and the terminal
+    REPL for the same profile.
+    """
+    config_path = _get_config_path()
+    with _cfg_lock:
+        config_data = _load_yaml_config_file(config_path)
+        display_cfg = config_data.get("display")
+        if not isinstance(display_cfg, dict):
+            display_cfg = {}
+        display_cfg["show_reasoning"] = bool(show)
+        config_data["display"] = display_cfg
+        _save_yaml_config_file(config_path, config_data)
+    reload_config()
+    return get_reasoning_status()
+
+
+def set_reasoning_effort(effort: str) -> dict:
+    """Persist ``agent.reasoning_effort`` to the active profile's config.yaml.
+
+    Mirrors CLI ``/reasoning <level>``: same key, same valid values
+    (``none`` | ``minimal`` | ``low`` | ``medium`` | ``high`` | ``xhigh``).
+    Raises ``ValueError`` on an unrecognised level so callers can return 400.
+    """
+    raw = str(effort or "").strip().lower()
+    if not raw:
+        raise ValueError("effort is required")
+    if raw != "none" and raw not in VALID_REASONING_EFFORTS:
+        raise ValueError(
+            f"Unknown reasoning effort '{effort}'. "
+            f"Valid: none, {', '.join(VALID_REASONING_EFFORTS)}."
+        )
+    config_path = _get_config_path()
+    with _cfg_lock:
+        config_data = _load_yaml_config_file(config_path)
+        agent_cfg = config_data.get("agent")
+        if not isinstance(agent_cfg, dict):
+            agent_cfg = {}
+        agent_cfg["reasoning_effort"] = raw
+        config_data["agent"] = agent_cfg
+        _save_yaml_config_file(config_path, config_data)
+    reload_config()
+    return get_reasoning_status()
+
+
+def set_hermes_default_model(model_id: str) -> dict:
+    """Persist the Hermes default model in config.yaml and reload runtime config."""
+    selected_model = str(model_id or "").strip()
+    if not selected_model:
+        raise ValueError("model is required")
+
+    config_path = _get_config_path()
+    # Hold _cfg_lock only around the read-modify-write of the YAML file.
+    # reload_config() acquires _cfg_lock internally (it's not reentrant) so
+    # it must be called AFTER releasing the lock to avoid deadlock.
+    with _cfg_lock:
+        config_data = _load_yaml_config_file(config_path)
+        model_cfg = config_data.get("model", {})
+        if not isinstance(model_cfg, dict):
+            model_cfg = {}
+
+        previous_provider = str(model_cfg.get("provider") or "").strip()
+        resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
+            selected_model
+        )
+        # Persist the resolved bare/slash form, NOT the `@provider:` prefix. The
+        # prefix is a WebUI-internal routing hint that the hermes-agent CLI does
+        # not understand — if we wrote `@nous:anthropic/claude-opus-4.6` to
+        # config.yaml, a user who ran `hermes` in the terminal right after
+        # saving via WebUI would have the agent send that literal string to the
+        # Nous API, which would reject it (Nous expects `anthropic/claude-opus-4.6`,
+        # not the prefixed form). The Settings picker handles the resulting
+        # CLI-shaped bare form via `_applyModelToDropdown()`'s normalising
+        # matcher — see `static/panels.js` (#895).
+        persisted_model = str(resolved_model or selected_model).strip()
+        persisted_provider = str(resolved_provider or previous_provider or "").strip()
+
+        model_cfg["default"] = persisted_model
+        if persisted_provider:
+            model_cfg["provider"] = persisted_provider
+
+        if resolved_base_url:
+            model_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
+        elif persisted_provider != previous_provider:
+            if persisted_provider == "openai":
+                model_cfg["base_url"] = "https://api.openai.com/v1"
+            elif not persisted_provider.startswith("custom:"):
+                model_cfg.pop("base_url", None)
+
+        config_data["model"] = model_cfg
+        _save_yaml_config_file(config_path, config_data)
+    # Reload outside the lock — reload_config() acquires _cfg_lock itself.
+    reload_config()
+    # Invalidate the TTL cache so the next /api/models call returns fresh data
+    # with the new default model. Do NOT call get_available_models() here —
+    # it triggers a live provider fetch (up to 8s) that blocks the HTTP response
+    # to the browser, causing a visible freeze on every Settings save (#895).
+    invalidate_models_cache()
+    return {"ok": True, "model": persisted_model}
+
+
+# ── TTL cache for get_available_models() ─────────────────────────────────────
+_available_models_cache: dict | None = None
+_available_models_cache_ts: float = 0.0
+_AVAILABLE_MODELS_CACHE_TTL: float = 60.0  # seconds — refresh at most once per minute
+_available_models_cache_lock = threading.Lock()
+
+
+def invalidate_models_cache():
+    """Force the TTL cache for get_available_models() to be cleared.
+
+    Call this after modifying config.cfg in-memory (e.g. in tests) so
+    the next call to get_available_models() picks up the changes rather
+    than returning a stale cached result.
+    """
+    global _available_models_cache, _available_models_cache_ts
+    with _available_models_cache_lock:
+        _available_models_cache = None
+        _available_models_cache_ts = 0.0
+
+
+def _get_label_for_model(model_id: str, existing_groups: list) -> str:
+    """Return a human-friendly label for *model_id*.
+
+    Resolution order:
+    1. If the model already appears in *existing_groups* with a label, use it.
+    2. Strip @provider: prefix and namespace prefix, then title-case.
+
+    This ensures the injected default model entry in the dropdown always shows
+    the same label as the live-fetched or static-catalog version, rather than
+    the raw lowercase ID string (#909).
+    """
+    # Strip @provider: prefix for lookup
+    lookup_id = model_id
+    if lookup_id.startswith("@") and ":" in lookup_id:
+        lookup_id = lookup_id.split(":", 1)[1]
+
+    # Check existing groups for a matching label
+    _norm = lambda s: (s.split("/", 1)[-1] if "/" in s else s).replace("-", ".").lower()
+    norm_lookup = _norm(lookup_id)
+    for g in existing_groups:
+        for m in g.get("models", []):
+            if m.get("label") and _norm(str(m.get("id", ""))) == norm_lookup:
+                return m["label"]
+
+    # Fall back: capitalize each hyphen-separated word, preserve dots in version numbers.
+    # The catalog lookup above handles well-known models; this only fires for unlisted IDs.
+    bare = lookup_id.split("/")[-1] if "/" in lookup_id else lookup_id
+    return " ".join(
+        w.upper() if (len(w) <= 3 and w.replace(".", "").isalnum() and not w.isdigit()) else w.capitalize()
+        for w in bare.replace("_", "-").split("-")
+    )
 
 
 def get_available_models() -> dict:
@@ -714,14 +1123,26 @@ def get_available_models() -> dict:
     # Reload config from disk if config.yaml has changed since last load.
     # This ensures CLI model changes are picked up on page refresh without
     # a server restart, while avoiding clearing in-memory mocks during tests. (#585)
-    try:
-        _current_mtime = Path(_get_config_path()).stat().st_mtime
-    except OSError:
-        _current_mtime = 0.0
-    if _current_mtime != _cfg_mtime:
-        reload_config()
+    # Must run BEFORE the TTL check so config edits within the 60s window are visible.
+    global _available_models_cache, _available_models_cache_ts
+    with _available_models_cache_lock:
+        try:
+            _current_mtime = Path(_get_config_path()).stat().st_mtime
+        except OSError:
+            _current_mtime = 0.0
+        # Note: env-var changes (e.g. API key rotation) are not detected by mtime;
+        # cache will be stale for up to TTL seconds in that case.
+        if _current_mtime != _cfg_mtime:
+            reload_config()
+            # Config changed — force cache invalidation
+            _available_models_cache = None
+            _available_models_cache_ts = 0.0
+        # Serve from TTL cache if fresh.
+        now = time.monotonic()
+        if _available_models_cache is not None and (now - _available_models_cache_ts) < _AVAILABLE_MODELS_CACHE_TTL:
+            return copy.deepcopy(_available_models_cache)
     active_provider = None
-    default_model = DEFAULT_MODEL
+    default_model = get_effective_default_model(cfg)
     groups = []
 
     # 1. Read config.yaml model section
@@ -729,7 +1150,7 @@ def get_available_models() -> dict:
     model_cfg = cfg.get("model", {})
     cfg_base_url = ""
     if isinstance(model_cfg, str):
-        default_model = model_cfg
+        pass  # default_model already set by get_effective_default_model
     elif isinstance(model_cfg, dict):
         active_provider = model_cfg.get("provider")
         cfg_default = model_cfg.get("default", "")
@@ -737,31 +1158,35 @@ def get_available_models() -> dict:
         if cfg_default:
             default_model = cfg_default
 
-    # 2. Also check env vars for model override
-    env_model = (
-        os.getenv("HERMES_MODEL") or os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL")
-    )
-    if env_model:
-        default_model = env_model.strip()
+    # Normalize active_provider to its canonical key so it matches the
+    # _PROVIDER_MODELS lookup below (e.g. 'z.ai' -> 'zai', 'x.ai' -> 'xai',
+    # 'google' -> 'gemini').  Works even when hermes_cli is not on sys.path
+    # because the WebUI ships its own _PROVIDER_ALIASES table.
+    if active_provider:
+        active_provider = _resolve_provider_alias(active_provider)
 
-    # 3. Try to read auth store for active provider (if hermes is installed)
-    if not active_provider:
+    # 2. Read auth store (active_provider fallback + credential_pool inspection)
+    auth_store = {}
+    try:
+        from api.profiles import get_active_hermes_home as _gah
+
+        auth_store_path = _gah() / "auth.json"
+    except ImportError:
+        auth_store_path = HOME / ".hermes" / "auth.json"
+    if auth_store_path.exists():
         try:
-            from api.profiles import get_active_hermes_home as _gah
+            import json as _j
 
-            auth_store_path = _gah() / "auth.json"
-        except ImportError:
-            auth_store_path = HOME / ".hermes" / "auth.json"
-        if auth_store_path.exists():
-            try:
-                import json as _j
+            auth_store = _j.loads(auth_store_path.read_text(encoding="utf-8"))
+            if not active_provider:
+                # Re-run alias resolution: auth.json may store an aliased name
+                # (e.g. 'google', 'z.ai') that the prefixing logic compares
+                # against canonical pids.
+                active_provider = _resolve_provider_alias(auth_store.get("active_provider"))
+        except Exception:
+            logger.debug("Failed to load auth store from %s", auth_store_path)
 
-                auth_store = _j.loads(auth_store_path.read_text())
-                active_provider = auth_store.get("active_provider")
-            except Exception:
-                logger.debug("Failed to load auth store from %s", auth_store_path)
-
-    # 4. Detect available providers.
+    # 3. Detect available providers.
     # Primary: ask hermes-agent's auth layer — the authoritative source. It checks
     # auth.json, credential pools, and env vars the same way the agent does at runtime,
     # so the dropdown reflects exactly what the user has configured.
@@ -769,6 +1194,56 @@ def get_available_models() -> dict:
     detected_providers = set()
     if active_provider:
         detected_providers.add(active_provider)
+
+    # Include providers that have usable credential-pool entries even when no
+    # process env var is present (e.g. service launched without shell env).
+    # Primary: delegate to upstream credential_pool.load_pool() so suppression
+    # and seeding/pruning rules live in one place.
+    # Fallback: manual field inspection when the upstream module is unavailable.
+    try:
+        _pool = auth_store.get("credential_pool", {}) if isinstance(auth_store, dict) else {}
+        if isinstance(_pool, dict) and _pool:
+            try:
+                from agent.credential_pool import load_pool as _load_pool
+
+                # load_pool() does NOT suppress ambient gh-cli tokens — filter
+                # them here so Copilot doesn't reappear just because the agent
+                # seeded 'gh auth token' into the pool.
+                for _pid in list(_pool.keys()):
+                    try:
+                        _canonical_pid = _resolve_provider_alias(str(_pid))
+                        _all_entries = _load_pool(_pid).entries()
+                        _explicit = [
+                            e for e in _all_entries
+                            if not _is_ambient_gh_cli_entry(
+                                str(getattr(e, "source", "") or ""),
+                                str(getattr(e, "label", "") or ""),
+                                str(getattr(e, "key_source", "") or ""),
+                            )
+                        ]
+                        if _explicit:
+                            detected_providers.add(_canonical_pid)
+                    except Exception:
+                        logger.debug("credential_pool.load_pool(%s) failed", _pid)
+            except ImportError:
+                # Fallback: inspect raw entry fields for suppression signals.
+                for _pid, _entries in _pool.items():
+                    if not isinstance(_entries, list) or len(_entries) == 0:
+                        continue
+                    _has_explicit_cred = any(
+                        isinstance(_entry, dict)
+                        and not _is_ambient_gh_cli_entry(
+                            str(_entry.get("source", "") or ""),
+                            str(_entry.get("label", "") or ""),
+                            str(_entry.get("key_source", "") or ""),
+                        )
+                        for _entry in _entries
+                    )
+                    if _has_explicit_cred:
+                        detected_providers.add(_resolve_provider_alias(str(_pid)))
+    except Exception:
+        logger.debug("Failed to inspect credential_pool from auth store")
+
     all_env: dict = {}  # profile .env keys — populated below, used by custom endpoint auth
 
     _hermes_auth_used = False
@@ -804,7 +1279,7 @@ def get_available_models() -> dict:
         env_keys = {}
         if hermes_env_path.exists():
             try:
-                for line in hermes_env_path.read_text().splitlines():
+                for line in hermes_env_path.read_text(encoding="utf-8").splitlines():
                     line = line.strip()
                     if line and not line.startswith("#") and "=" in line:
                         k, v = line.split("=", 1)
@@ -817,6 +1292,7 @@ def get_available_models() -> dict:
             "OPENAI_API_KEY",
             "OPENROUTER_API_KEY",
             "GOOGLE_API_KEY",
+            "GEMINI_API_KEY",
             "GLM_API_KEY",
             "KIMI_API_KEY",
             "DEEPSEEK_API_KEY",
@@ -836,6 +1312,8 @@ def get_available_models() -> dict:
             detected_providers.add("openrouter")
         if all_env.get("GOOGLE_API_KEY"):
             detected_providers.add("google")
+        if all_env.get("GEMINI_API_KEY"):
+            detected_providers.add("gemini")
         if all_env.get("GLM_API_KEY"):
             detected_providers.add("zai")
         if all_env.get("KIMI_API_KEY"):
@@ -849,7 +1327,7 @@ def get_available_models() -> dict:
         if all_env.get("OPENCODE_GO_API_KEY"):
             detected_providers.add("opencode-go")
 
-    # 3. Fetch models from custom endpoint if base_url is configured
+    # 4. Fetch models from custom endpoint if base_url is configured
     auto_detected_models = []
     if cfg_base_url:
         try:
@@ -980,7 +1458,8 @@ def get_available_models() -> dict:
                 )
                 model_name = model.get("name", "") or model.get("model", "") or model_id
                 if model_id and model_name:
-                    auto_detected_models.append({"id": model_id, "label": model_name})
+                    label = _format_ollama_label(model_id) if provider in ("ollama", "ollama-cloud") else model_name
+                    auto_detected_models.append({"id": model_id, "label": label})
                     detected_providers.add(provider.lower())
         except Exception:
             logger.debug("Custom endpoint unreachable or misconfigured for provider: %s", provider)
@@ -1004,7 +1483,7 @@ def get_available_models() -> dict:
             _cp_model = _cp.get("model", "")
             _cp_name = (_cp.get("name") or "").strip()
             if _cp_model and _cp_model not in _seen_custom_ids:
-                _cp_label = _cp_model.split("/")[-1] if "/" in _cp_model else _cp_model
+                _cp_label = _get_label_for_model(_cp_model, [])
                 _seen_custom_ids.add(_cp_model)
                 if _cp_name:
                     # Named custom provider — own group keyed by slug
@@ -1056,7 +1535,7 @@ def get_available_models() -> dict:
                 # Named custom provider — use the stored display name and its own model list
                 _nc_display, _nc_models = _named_custom_groups[pid]
                 if _nc_models:
-                    groups.append({"provider": _nc_display, "models": _nc_models})
+                    groups.append({"provider": _nc_display, "provider_id": pid, "models": _nc_models})
                 continue
             provider_name = _PROVIDER_DISPLAY.get(pid, pid.title())
             if pid == "openrouter":
@@ -1064,12 +1543,38 @@ def get_available_models() -> dict:
                 groups.append(
                     {
                         "provider": "OpenRouter",
+                        "provider_id": "openrouter",
                         "models": [
                             {"id": m["id"], "label": m["label"]}
                             for m in _FALLBACK_MODELS
                         ],
                     }
                 )
+            elif pid == "ollama-cloud":
+                # Ollama Cloud list is dynamic; fetch via hermes_cli provider catalog.
+                # When the catalog is unavailable, skip the group rather than emit a
+                # speculative static list — matches the named-custom and unknown-provider
+                # branches below.
+                raw_models = []
+                try:
+                    from hermes_cli.models import provider_model_ids as _provider_model_ids
+
+                    raw_models = [
+                        {"id": mid, "label": _format_ollama_label(mid)}
+                        for mid in (_provider_model_ids("ollama-cloud") or [])
+                    ]
+                except Exception:
+                    logger.warning("Failed to load Ollama Cloud models from hermes_cli")
+
+                if raw_models:
+                    models = _apply_provider_prefix(raw_models, pid, active_provider)
+                    groups.append(
+                        {
+                            "provider": provider_name,
+                            "provider_id": pid,
+                            "models": models,
+                        }
+                    )
             elif pid in _PROVIDER_MODELS or pid in cfg.get("providers", {}):
                 # For non-default providers, prefix model IDs with @provider:model
                 # so resolve_model_provider() routes through that specific provider
@@ -1086,55 +1591,35 @@ def get_available_models() -> dict:
                         raw_models = [{"id": k, "label": k} for k in cfg_models.keys()]
                     elif isinstance(cfg_models, list):
                         raw_models = [{"id": k, "label": k} for k in cfg_models]
-                _active = (active_provider or "").lower()
-                if _active and pid != _active:
-                    models = []
-                    for m in raw_models:
-                        mid = m["id"]
-                        # Don't double-prefix; use @provider: hint for bare names
-                        if mid.startswith("@") or "/" in mid:
-                            models.append({"id": mid, "label": m["label"]})
-                        else:
-                            models.append({"id": f"@{pid}:{mid}", "label": m["label"]})
-                else:
-                    models = list(raw_models)
+                models = _apply_provider_prefix(raw_models, pid, active_provider)
                 groups.append(
                     {
                         "provider": provider_name,
+                        "provider_id": pid,
                         "models": models,
                     }
                 )
             else:
                 # Unknown provider -- use auto-detected models if available,
-                # otherwise fall back to default model placeholder
+                # otherwise skip it for the model dropdown. Do NOT inject the
+                # global default_model here: that would incorrectly imply the
+                # provider can serve the default model (e.g. Alibaba -> gpt-5.4-mini).
                 if auto_detected_models:
                     groups.append(
                         {
                             "provider": provider_name,
+                            "provider_id": pid,
                             "models": auto_detected_models,
                         }
                     )
-                else:
-                    if default_model:
-                        groups.append(
-                            {
-                                "provider": provider_name,
-                                "models": [
-                                    {
-                                        "id": default_model,
-                                        "label": default_model.split("/")[-1],
-                                    }
-                                ],
-                            }
-                        )
     else:
         # No providers detected. Show only the configured default model so the user
         # can at least send messages with their current setting. Avoid showing a
         # generic multi-provider list — those models wouldn't be routable anyway.
         if default_model:
-            label = default_model.split("/")[-1] if "/" in default_model else default_model
+            label = _get_label_for_model(default_model, groups)
             groups.append(
-                {"provider": "Default", "models": [{"id": default_model, "label": label}]}
+                {"provider": "Default", "provider_id": "default", "models": [{"id": default_model, "label": label}]}
             )
 
     # Ensure the user's configured default_model always appears in the dropdown.
@@ -1154,9 +1639,7 @@ def get_available_models() -> dict:
             # vs display name 'OpenAI Codex' (hyphen vs. space), which
             # silently falls through to groups[0] and lands the model in
             # the wrong group.
-            label = (
-                default_model.split("/")[-1] if "/" in default_model else default_model
-            )
+            label = _get_label_for_model(default_model, groups)
             target_display = (
                 _PROVIDER_DISPLAY.get(active_provider, active_provider or "").lower()
                 if active_provider
@@ -1169,20 +1652,34 @@ def get_available_models() -> dict:
                     injected = True
                     break
             if not injected and groups:
-                groups[0]["models"].insert(0, {"id": default_model, "label": label})
+                # Keep the default isolated rather than polluting the first
+                # detected provider group.
+                groups.append(
+                    {
+                        "provider": "Default",
+                        "provider_id": "default",
+                        "models": [{"id": default_model, "label": label}],
+                    }
+                )
             elif not groups:
                 groups.append(
                     {
                         "provider": active_provider or "Default",
+                        "provider_id": active_provider or "default",
                         "models": [{"id": default_model, "label": label}],
                     }
                 )
 
-    return {
+    result = {
         "active_provider": active_provider,
         "default_model": default_model,
         "groups": groups,
     }
+    # Cache the result for TTL seconds
+    with _available_models_cache_lock:
+        _available_models_cache = result
+        _available_models_cache_ts = time.monotonic()
+    return copy.deepcopy(result)
 
 
 # ── Static file path ─────────────────────────────────────────────────────────
@@ -1196,6 +1693,7 @@ STREAMS: dict = {}
 STREAMS_LOCK = threading.Lock()
 CANCEL_FLAGS: dict = {}
 AGENT_INSTANCES: dict = {}  # stream_id -> AIAgent instance for interrupt propagation
+STREAM_PARTIAL_TEXT: dict = {}  # stream_id -> partial assistant text accumulated during streaming
 SERVER_START_TIME = time.time()
 
 # ── Thread-local env context ─────────────────────────────────────────────────
@@ -1216,6 +1714,25 @@ SESSION_AGENT_LOCKS_LOCK = threading.Lock()
 
 
 def _get_session_agent_lock(session_id: str) -> threading.Lock:
+    """Return the per-session Lock used to serialize all Session mutations.
+
+    Lock lifecycle invariant:
+      - A Lock is created lazily on first access and lives in SESSION_AGENT_LOCKS
+        for the lifetime of the session.
+      - The entry is pruned in /api/session/delete (under SESSION_AGENT_LOCKS_LOCK)
+        so deleted sessions don't leak a Lock forever.
+      - During context compression the agent may rotate session_id.  The
+        streaming thread migrates the lock entry atomically under
+        SESSION_AGENT_LOCKS_LOCK: it aliases the new session_id to the *same*
+        Lock object and pops the old-id entry (see streaming.py compression
+        block).  This ensures that subsequent callers using the new ID still
+        acquire the same Lock, while the old-id entry is removed to prevent a
+        leak.  The streaming thread already holds the Lock during this
+        migration, so the reference stays alive even after the dict entry is
+        removed.
+      - Lock contract: hold for the in-memory mutation + s.save() only; never
+        across network I/O (LLM calls, HTTP requests).
+    """
     with SESSION_AGENT_LOCKS_LOCK:
         if session_id not in SESSION_AGENT_LOCKS:
             SESSION_AGENT_LOCKS[session_id] = threading.Lock()
@@ -1225,7 +1742,6 @@ def _get_session_agent_lock(session_id: str) -> threading.Lock:
 # ── Settings persistence ─────────────────────────────────────────────────────
 
 _SETTINGS_DEFAULTS = {
-    "default_model": DEFAULT_MODEL,
     "default_workspace": str(DEFAULT_WORKSPACE),
     "onboarding_completed": False,
     "send_key": "enter",  # 'enter' or 'ctrl+enter'
@@ -1241,10 +1757,11 @@ _SETTINGS_DEFAULTS = {
     ),  # display name for the assistant
     "sound_enabled": False,  # play notification sound when assistant finishes
     "notifications_enabled": False,  # browser notification when tab is in background
-    "bubble_layout": False,  # right-aligned user / left-aligned assistant chat bubbles
+    "show_thinking": True,  # show/hide thinking/reasoning blocks in chat view
+    "sidebar_density": "compact",  # compact | detailed
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
 }
-_SETTINGS_LEGACY_DROP_KEYS = {"assistant_language"}
+_SETTINGS_LEGACY_DROP_KEYS = {"assistant_language", "bubble_layout", "default_model"}
 _SETTINGS_THEME_VALUES = {"light", "dark", "system"}
 _SETTINGS_SKIN_VALUES = {
     "default",
@@ -1331,12 +1848,17 @@ def load_settings() -> dict:
         stored.get("theme") if isinstance(stored, dict) else settings.get("theme"),
         stored.get("skin") if isinstance(stored, dict) else settings.get("skin"),
     )
+    settings["default_model"] = get_effective_default_model()
     return settings
 
 
-_SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {"password_hash"}
+_SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {
+    "password_hash",
+    "default_model",
+}
 _SETTINGS_ENUM_VALUES = {
     "send_key": {"enter", "ctrl+enter"},
+    "sidebar_density": {"compact", "detailed"},
 }
 _SETTINGS_BOOL_KEYS = {
     "onboarding_completed",
@@ -1346,7 +1868,7 @@ _SETTINGS_BOOL_KEYS = {
     "check_for_updates",
     "sound_enabled",
     "notifications_enabled",
-    "bubble_layout",
+    "show_thinking",
 }
 # Language codes are validated as short alphanumeric BCP-47-like tags (e.g. 'en', 'zh', 'fr')
 _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8})?$")
@@ -1404,16 +1926,16 @@ def save_settings(settings: dict) -> dict:
     current["default_workspace"] = str(
         resolve_default_workspace(current.get("default_workspace"))
     )
+    persisted = {k: v for k, v in current.items() if k != "default_model"}
     SETTINGS_FILE.write_text(
-        json.dumps(current, ensure_ascii=False, indent=2),
+        json.dumps(persisted, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     # Update runtime defaults so new sessions use them immediately
-    global DEFAULT_MODEL, DEFAULT_WORKSPACE
-    if "default_model" in current:
-        DEFAULT_MODEL = current["default_model"]
+    global DEFAULT_WORKSPACE
     if "default_workspace" in current:
         DEFAULT_WORKSPACE = resolve_default_workspace(current["default_workspace"])
+    current["default_model"] = get_effective_default_model()
     return current
 
 
@@ -1428,12 +1950,11 @@ try:
 except OSError:
     _settings_file_exists = False
 if _settings_file_exists:
-    if _startup_settings.get("default_model"):
-        DEFAULT_MODEL = _startup_settings["default_model"]
     if not os.getenv("HERMES_WEBUI_DEFAULT_WORKSPACE"):
         DEFAULT_WORKSPACE = resolve_default_workspace(
             _startup_settings.get("default_workspace")
         )
+    _startup_settings.pop("default_model", None)  # always drop stale value; model comes from config.yaml
     if _startup_settings.get("default_workspace") != str(DEFAULT_WORKSPACE):
         _startup_settings["default_workspace"] = str(DEFAULT_WORKSPACE)
         try:

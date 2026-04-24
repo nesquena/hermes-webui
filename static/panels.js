@@ -19,8 +19,13 @@ async function switchPanel(name) {
 }
 
 // ── Cron panel ──
-async function loadCrons() {
+async function loadCrons(animate) {
   const box = $('cronList');
+  const refreshBtn = $('cronRefreshBtn');
+  if (animate && refreshBtn) {
+    refreshBtn.style.opacity = '0.5';
+    refreshBtn.disabled = true;
+  }
   try {
     const data = await api('/api/crons');
     if (!data.jobs || !data.jobs.length) {
@@ -77,6 +82,12 @@ async function loadCrons() {
       loadCronOutput(job.id);
     }
   } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`; }
+  finally {
+    if (animate && refreshBtn) {
+      refreshBtn.style.opacity = '';
+      refreshBtn.disabled = false;
+    }
+  }
 }
 
 let _cronSelectedSkills=[];
@@ -525,6 +536,94 @@ async function submitMemorySave() {
 
 // ── Workspace management ──
 let _workspaceList = [];  // cached from /api/workspaces
+let _wsSuggestTimer = null;
+let _wsSuggestReq = 0;
+let _wsSuggestIndex = -1;
+
+function closeWorkspacePathSuggestions(){
+  const box=$('wsAddSuggestions');
+  if(box){
+    box.innerHTML='';
+    box.style.display='none';
+  }
+  _wsSuggestIndex=-1;
+}
+
+function _applyWorkspaceSuggestion(path){
+  const input=$('wsAddInput');
+  const next=(path||'').endsWith('/')?(path||''):`${path||''}/`;
+  if(input){
+    input.value=next;
+    input.focus();
+    input.setSelectionRange(next.length, next.length);
+  }
+  scheduleWorkspacePathSuggestions();
+}
+
+function _highlightWorkspaceSuggestion(idx){
+  const box=$('wsAddSuggestions');
+  if(!box)return;
+  const items=[...box.querySelectorAll('.ws-suggest-item')];
+  items.forEach((el,i)=>{
+    const active=i===idx;
+    el.classList.toggle('active', active);
+    if(active) el.scrollIntoView({block:'nearest'});
+  });
+}
+
+function _renderWorkspacePathSuggestions(paths){
+  const box=$('wsAddSuggestions');
+  if(!box)return;
+  box.innerHTML='';
+  if(!paths || !paths.length){
+    box.style.display='none';
+    _wsSuggestIndex=-1;
+    return;
+  }
+  paths.forEach((path, idx)=>{
+    const pathParts=(path||'').split('/').filter(Boolean);
+    const leaf=pathParts[pathParts.length-1]||path;
+    const parent=pathParts.length>1?`/${pathParts.slice(0,-1).join('/')}`:'/';
+    const item=document.createElement('button');
+    item.type='button';
+    item.className='ws-suggest-item';
+    item.innerHTML=`<span class="ws-suggest-leaf">${esc(leaf)}</span><span class="ws-suggest-parent">${esc(parent)}</span>`;
+    item.dataset.path=path;
+    item.onmouseenter=()=>{_wsSuggestIndex=idx;_highlightWorkspaceSuggestion(idx);};
+    item.onmousedown=(e)=>{e.preventDefault();_applyWorkspaceSuggestion(path);};
+    box.appendChild(item);
+  });
+  box.style.display='block';
+  _wsSuggestIndex=0;
+  _highlightWorkspaceSuggestion(_wsSuggestIndex);
+}
+
+async function _loadWorkspacePathSuggestions(prefix){
+  const reqId=++_wsSuggestReq;
+  try{
+    const qs=new URLSearchParams({prefix:prefix||''}).toString();
+    const data=await api(`/api/workspaces/suggest?${qs}`);
+    if(reqId!==_wsSuggestReq)return;
+    _renderWorkspacePathSuggestions(data.suggestions||[]);
+  }catch(_){
+    if(reqId!==_wsSuggestReq)return;
+    closeWorkspacePathSuggestions();
+  }
+}
+
+function scheduleWorkspacePathSuggestions(){
+  const input=$('wsAddInput');
+  if(!input)return;
+  const prefix=input.value.trim();
+  if(!prefix){
+    closeWorkspacePathSuggestions();
+    return;
+  }
+  if(_wsSuggestTimer) clearTimeout(_wsSuggestTimer);
+  _wsSuggestTimer=setTimeout(()=>{
+    _loadWorkspacePathSuggestions(prefix);
+  }, 120);
+}
 
 function getWorkspaceFriendlyName(path){
   // Look up the friendly name from the workspace list cache, fallback to last path segment
@@ -537,8 +636,12 @@ function getWorkspaceFriendlyName(path){
 
 function syncWorkspaceDisplays(){
   const hasSession=!!(S.session&&S.session.workspace);
-  const ws=hasSession?S.session.workspace:'';
-  const label=hasSession?getWorkspaceFriendlyName(ws):t('no_workspace');
+  // Fall back to the profile default workspace when no session is active yet.
+  // S._profileDefaultWorkspace is set during boot and profile switches from /api/settings.
+  const defaultWs=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
+  const ws=hasSession?S.session.workspace:(defaultWs||'');
+  const hasWorkspace=!!(ws);
+  const label=hasWorkspace?getWorkspaceFriendlyName(ws):t('no_workspace');
 
   const sidebarName=$('sidebarWsName');
   const sidebarPath=$('sidebarWsPath');
@@ -548,13 +651,13 @@ function syncWorkspaceDisplays(){
   const composerChip=$('composerWorkspaceChip');
   const composerLabel=$('composerWorkspaceLabel');
   const composerDropdown=$('composerWsDropdown');
-  if(!hasSession && composerDropdown) composerDropdown.classList.remove('open');
+  if(!hasWorkspace && composerDropdown) composerDropdown.classList.remove('open');
   // Only show workspace label once boot has finished to prevent
   // flash of "No workspace" before the saved session finishes loading.
   if(composerLabel) composerLabel.textContent=S._bootReady?label:'';
   if(composerChip){
-    composerChip.disabled=!hasSession;
-    composerChip.title=hasSession?ws:t('no_workspace');
+    composerChip.disabled=!hasWorkspace;
+    composerChip.title=hasWorkspace?ws:t('no_workspace');
     composerChip.classList.toggle('active',!!(composerDropdown&&composerDropdown.classList.contains('open')));
   }
 }
@@ -704,13 +807,70 @@ function renderWorkspacesPanel(workspaces){
   }
   const addRow=document.createElement('div');addRow.className='ws-add-row';
   addRow.innerHTML=`
-    <input id="wsAddInput" placeholder="${esc(t('workspace_add_path_placeholder'))}" style="flex:1;background:rgba(255,255,255,.06);border:1px solid var(--border2);border-radius:7px;color:var(--text);padding:7px 10px;font-size:12px;outline:none;">
+    <div class="ws-add-input-wrap">
+      <input id="wsAddInput" placeholder="${esc(t('workspace_add_path_placeholder'))}" autocomplete="off" style="width:100%;background:rgba(255,255,255,.06);border:1px solid var(--border2);border-radius:7px;color:var(--text);padding:7px 10px;font-size:12px;outline:none;">
+    </div>
     <button class="ws-action-btn" onclick="addWorkspace()">${li('plus',12)} ${esc(t('add'))}</button>`;
   panel.appendChild(addRow);
+  const suggestBox=document.createElement('div');
+  suggestBox.id='wsAddSuggestions';
+  suggestBox.className='ws-suggestions';
+  suggestBox.style.display='none';
+  panel.appendChild(suggestBox);
   const hint=document.createElement('div');
   hint.style.cssText='font-size:11px;color:var(--muted);padding:4px 0 8px';
   hint.textContent=t('workspace_paths_validated_hint');
   panel.appendChild(hint);
+  const input=$('wsAddInput');
+  if(input){
+    input.oninput=()=>scheduleWorkspacePathSuggestions();
+    input.onfocus=()=>{
+      if(input.value.trim()) scheduleWorkspacePathSuggestions();
+      else closeWorkspacePathSuggestions();
+    };
+    input.onkeydown=(e)=>{
+      const box=$('wsAddSuggestions');
+      const items=box?[...box.querySelectorAll('.ws-suggest-item')]:[];
+      if(!items.length){
+        if(e.key==='Enter'){
+          e.preventDefault();
+          addWorkspace();
+        }
+        return;
+      }
+      if(e.key==='ArrowDown'){
+        e.preventDefault();
+        _wsSuggestIndex=Math.min(items.length-1,Math.max(-1,_wsSuggestIndex)+1);
+        _highlightWorkspaceSuggestion(_wsSuggestIndex);
+        return;
+      }
+      if(e.key==='ArrowUp'){
+        e.preventDefault();
+        _wsSuggestIndex=_wsSuggestIndex<=0?0:_wsSuggestIndex-1;
+        _highlightWorkspaceSuggestion(_wsSuggestIndex);
+        return;
+      }
+      if(e.key==='Escape'){
+        e.preventDefault();
+        closeWorkspacePathSuggestions();
+        return;
+      }
+      if(e.key==='Enter'){
+        e.preventDefault();
+        if(_wsSuggestIndex>=0 && items[_wsSuggestIndex]){
+          _applyWorkspaceSuggestion(items[_wsSuggestIndex].dataset.path||'');
+        }else{
+          addWorkspace();
+        }
+        return;
+      }
+      if(e.key==='Tab' && _wsSuggestIndex>=0 && items[_wsSuggestIndex]){
+        e.preventDefault();
+        _applyWorkspaceSuggestion(items[_wsSuggestIndex].dataset.path||'');
+        return;
+      }
+    };
+  }
 }
 
 async function addWorkspace(){
@@ -722,9 +882,14 @@ async function addWorkspace(){
     _workspaceList=data.workspaces;
     renderWorkspacesPanel(data.workspaces);
     if(input)input.value='';
+    closeWorkspacePathSuggestions();
     showToast(t('workspace_added'));
   }catch(e){setStatus(t('add_failed')+e.message);}
 }
+
+document.addEventListener('click',e=>{
+  if(!e.target.closest('.ws-add-input-wrap')) closeWorkspacePathSuggestions();
+});
 
 async function removeWorkspace(path){
   const _rmWs=await showConfirmDialog({title:t('workspace_remove_confirm_title'),message:t('workspace_remove_confirm_message',path),confirmLabel:t('remove'),danger:true,focusCancel:true});
@@ -738,7 +903,16 @@ async function removeWorkspace(path){
 }
 
 async function promptWorkspacePath(){
-  if(!S.session)return;
+  // Opus review Q6: if called from blank page (no session), auto-create one first.
+  if(!S.session){
+    const ws=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
+    if(!ws)return;
+    try{
+      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
+      if(r&&r.session){S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
+    }catch(e){showToast(t('workspace_switch_failed')+e.message);return;}
+    if(!S.session)return;
+  }
   const value=await showPromptDialog({
     title:t('workspace_switch_prompt_title'),
     message:t('workspace_switch_prompt_message'),
@@ -764,7 +938,17 @@ async function promptWorkspacePath(){
 }
 
 async function switchToWorkspace(path,name){
-  if(!S.session)return;
+  // Opus review Q6: if called from blank page, auto-create a session bound to
+  // the requested workspace so the switch doesn't silently no-op.
+  if(!S.session){
+    const ws=path||(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
+    if(!ws){showToast(t('no_workspace'));return;}
+    try{
+      const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws})});
+      if(r&&r.session){S.session=r.session;S.messages=[];if(typeof syncTopbar==='function')syncTopbar();if(typeof renderMessages==='function')renderMessages();if(typeof renderSessionList==='function')await renderSessionList();}
+    }catch(e){if(typeof setStatus==='function')setStatus(t('switch_failed')+e.message);return;}
+    if(!S.session)return;
+  }
   if(S.busy){
     showToast(t('workspace_busy_switch'));
     return;
@@ -786,6 +970,9 @@ async function switchToWorkspace(path,name){
       session_id:S.session.session_id, workspace:path, model:S.session.model
     })});
     S.session.workspace=path;
+    // Explicit workspace switch = user overriding any pending profile-switch default.
+    // Clear the one-shot flag so a subsequent newSession() inherits this choice instead.
+    S._profileSwitchWorkspace=null;
     syncTopbar();
     await loadDir('.');
     showToast(t('workspace_switched_to',name||getWorkspaceFriendlyName(path)));
@@ -806,6 +993,9 @@ async function loadProfilesPanel() {
       panel.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:12px">${esc(t('profiles_no_profiles'))}</div>`;
       return;
     }
+    const activeName = (S.activeProfile && data.profiles.some(p => p.name === S.activeProfile))
+      ? S.activeProfile
+      : (data.active || 'default');
     for (const p of data.profiles) {
       const card = document.createElement('div');
       card.className = 'profile-card';
@@ -817,12 +1007,13 @@ async function loadProfilesPanel() {
       const gwDot = p.gateway_running
         ? `<span class="profile-opt-badge running" title="${esc(t('profile_gateway_running'))}"></span>`
         : `<span class="profile-opt-badge stopped" title="${esc(t('profile_gateway_stopped'))}"></span>`;
-      const isActive = p.name === data.active;
+      const isActive = p.name === activeName;
       const activeBadge = isActive ? `<span style="color:var(--link);font-size:10px;font-weight:600;margin-left:6px">${esc(t('profile_active'))}</span>` : '';
+      const defaultBadge = p.is_default ? ` <span style="opacity:.5">${esc(t('profile_default_label'))}</span>` : '';
       card.innerHTML = `
         <div class="profile-card-header">
           <div style="min-width:0;flex:1">
-            <div class="profile-card-name${isActive ? ' is-active' : ''}">${gwDot}${esc(p.name)}${p.is_default ? ' <span style="opacity:.5">(default)</span>' : ''}${activeBadge}</div>
+            <div class="profile-card-name${isActive ? ' is-active' : ''}">${gwDot}${esc(p.name)}${defaultBadge}${activeBadge}</div>
             ${meta.length ? `<div class="profile-card-meta">${esc(meta.join(' \u00b7 '))}</div>` : `<div class="profile-card-meta">${esc(t('profile_no_configuration'))}</div>`}
           </div>
           <div class="profile-card-actions">
@@ -833,7 +1024,7 @@ async function loadProfilesPanel() {
       panel.appendChild(card);
     }
   } catch (e) {
-    panel.innerHTML = `<div style="color:var(--accent);font-size:12px;padding:12px">Error: ${esc(e.message)}</div>`;
+    panel.innerHTML = `<div style="color:var(--accent);font-size:12px;padding:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
   }
 }
 
@@ -842,7 +1033,9 @@ function renderProfileDropdown(data) {
   if (!dd) return;
   dd.innerHTML = '';
   const profiles = data.profiles || [];
-  const active = data.active || 'default';
+  const active = (S.activeProfile && profiles.some(p => p.name === S.activeProfile))
+    ? S.activeProfile
+    : (data.active || 'default');
   for (const p of profiles) {
     const opt = document.createElement('div');
     opt.className = 'profile-opt' + (p.name === active ? ' active' : '');
@@ -851,7 +1044,8 @@ function renderProfileDropdown(data) {
     if (p.skill_count) meta.push(t('profile_skill_count', p.skill_count));
     const gwDot = `<span class="profile-opt-badge ${p.gateway_running ? 'running' : 'stopped'}"></span>`;
     const checkmark = p.name === active ? ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--link)" stroke-width="3" style="vertical-align:-1px"><polyline points="20 6 9 17 4 12"/></svg>' : '';
-    opt.innerHTML = `<div class="profile-opt-name">${gwDot}${esc(p.name)}${p.is_default ? ' <span style="opacity:.5;font-weight:400">(default)</span>' : ''}${checkmark}</div>` +
+    const defaultBadge = p.is_default ? ` <span style="opacity:.5;font-weight:400">${esc(t('profile_default_label'))}</span>` : '';
+    opt.innerHTML = `<div class="profile-opt-name">${gwDot}${esc(p.name)}${defaultBadge}${checkmark}</div>` +
       (meta.length ? `<div class="profile-opt-meta">${esc(meta.join(' \u00b7 '))}</div>` : '');
     opt.onclick = async () => {
       closeProfileDropdown();
@@ -928,8 +1122,12 @@ async function switchToProfile(name) {
     _workspaceList = null;
     await loadWorkspaceList();
     if (data.default_workspace) {
-      // Always store the profile default for new sessions
+      // Always store the persistent profile default — used for blank-page display
+      // and workspace auto-bind throughout the session lifecycle (#804, #823).
       S._profileDefaultWorkspace = data.default_workspace;
+      // Also set the one-shot flag consumed by newSession() so the first new
+      // session after a profile switch inherits this workspace (#424).
+      S._profileSwitchWorkspace = data.default_workspace;
 
       if (S.session && !sessionInProgress) {
         // Empty session (no messages yet) — safe to update it in place
@@ -962,7 +1160,9 @@ async function switchToProfile(name) {
           S.session.workspace = S._profileDefaultWorkspace;
         } catch (_) {}
       }
-      updateWorkspaceChip();
+      // Keep topbar chips (workspace/profile) in sync after creating the
+      // new profile-scoped session.
+      syncTopbar();
       await renderSessionList();
       showToast(t('profile_switched_new_conversation', name));
     } else {
@@ -1073,13 +1273,15 @@ document.addEventListener('drop',e=>{e.preventDefault();dragCounter=0;wrap.class
 let _settingsDirty = false;
 let _settingsThemeOnOpen = null; // track theme at open time for discard revert
 let _settingsSkinOnOpen = null; // track skin at open time for discard revert
+let _settingsFontSizeOnOpen = null; // track font size at open time for discard revert
+let _settingsHermesDefaultModelOnOpen = '';
 let _settingsSection = 'conversation';
 
 function switchSettingsSection(name){
-  const section=(name==='appearance'||name==='preferences'||name==='system')?name:'conversation';
+  const section=(name==='appearance'||name==='preferences'||name==='providers'||name==='system')?name:'conversation';
   _settingsSection=section;
-  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',system:'System'};
-  ['conversation','appearance','preferences','system'].forEach(key=>{
+  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',system:'System'};
+  ['conversation','appearance','preferences','providers','system'].forEach(key=>{
     const tab=$('settingsTab'+map[key]);
     const pane=$('settingsPane'+map[key]);
     const active=key===section;
@@ -1089,6 +1291,11 @@ function switchSettingsSection(name){
     }
     if(pane) pane.classList.toggle('active',active);
   });
+  // Sync mobile dropdown
+  const dd=$('settingsSectionDropdown');
+  if(dd && dd.value!==section) dd.value=section;
+  // Lazy-load providers when the tab is opened
+  if(section==='providers') loadProvidersPanel();
 }
 
 function _syncHermesPanelSessionActions(){
@@ -1119,6 +1326,7 @@ function toggleSettings(){
     _settingsDirty = false;
     _settingsThemeOnOpen = localStorage.getItem('hermes-theme') || 'dark';
     _settingsSkinOnOpen = localStorage.getItem('hermes-skin') || 'default';
+    _settingsFontSizeOnOpen = localStorage.getItem('hermes-font-size') || 'default';
     _settingsSection = 'conversation';
     overlay.style.display='';
     loadSettingsPanel();
@@ -1163,6 +1371,10 @@ function _revertSettingsPreview(){
     localStorage.setItem('hermes-skin', _settingsSkinOnOpen);
     if(typeof _applySkin==='function') _applySkin(_settingsSkinOnOpen);
   }
+  if(_settingsFontSizeOnOpen){
+    localStorage.setItem('hermes-font-size', _settingsFontSizeOnOpen);
+    if(typeof _applyFontSize==='function') _applyFontSize(_settingsFontSizeOnOpen);
+  }
 }
 
 // Show the "Unsaved changes" bar inside the settings panel
@@ -1196,6 +1408,10 @@ function _markSettingsDirty(){
 async function loadSettingsPanel(){
   try{
     const settings=await api('/api/settings');
+    // Populate the version badge from the server — keeps it in sync with git
+    // tags automatically without any manual release step.
+    const vbadge=document.querySelector('.settings-version-badge');
+    if(vbadge && settings.webui_version) vbadge.textContent=settings.webui_version;
     // Hydrate appearance controls first so a slow /api/models request
     // cannot overwrite an in-progress theme/skin selection.
     const themeSel=$('settingsTheme');
@@ -1206,6 +1422,10 @@ async function loadSettingsPanel(){
     const skinSel=$('settingsSkin');
     if(skinSel) skinSel.value=skinVal;
     if(typeof _buildSkinPicker==='function') _buildSkinPicker(skinVal);
+    const fontSizeVal=localStorage.getItem('hermes-font-size')||'default';
+    const fontSizeSel=$('settingsFontSize');
+    if(fontSizeSel) fontSizeSel.value=fontSizeVal;
+    if(typeof _syncFontSizePicker==='function') _syncFontSizePicker(fontSizeVal);
     const resolvedLanguage=(typeof resolvePreferredLocale==='function')
       ? resolvePreferredLocale(settings.language, localStorage.getItem('hermes-lang'))
       : (settings.language || localStorage.getItem('hermes-lang') || 'en');
@@ -1214,15 +1434,17 @@ async function loadSettingsPanel(){
       setLocale(resolvedLanguage);
       if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
     }
-    // Populate model dropdown from /api/models
+    // Populate model dropdown from /api/models + live model fetch (#872)
     const modelSel=$('settingsModel');
     if(modelSel){
       modelSel.innerHTML='';
+      let models=null;
       try{
-        const models=await api('/api/models');
-        for(const g of (models.groups||[])){
+        models=await api('/api/models');
+        for(const g of ((models||{}).groups||[])){
           const og=document.createElement('optgroup');
           og.label=g.provider;
+          if(g.provider_id) og.dataset.provider=g.provider_id;
           for(const m of g.models){
             const opt=document.createElement('option');
             opt.value=m.id;opt.textContent=m.label;
@@ -1230,8 +1452,23 @@ async function loadSettingsPanel(){
           }
           modelSel.appendChild(og);
         }
+        // Append live-fetched models for the active provider, same as the
+        // chat-header dropdown does via _fetchLiveModels() (#872).
+        if(models.active_provider && typeof _fetchLiveModels==='function'){
+          _fetchLiveModels(models.active_provider, modelSel);
+        }
       }catch(e){}
-      modelSel.value=settings.default_model||'';
+      _settingsHermesDefaultModelOnOpen=(models&&models.default_model)||'';
+      // Use the smart matcher so a saved bare form like "anthropic/claude-opus-4.6"
+      // (what the CLI's `hermes model` command writes) still selects the matching
+      // `@nous:anthropic/claude-opus-4.6` option on a Nous setup. Without this, the
+      // picker renders blank for any user whose default was persisted without the
+      // @-prefix — CLI-first users, legacy installs, etc.
+      if(typeof _applyModelToDropdown==='function'){
+        _applyModelToDropdown(_settingsHermesDefaultModelOnOpen, modelSel);
+      }else{
+        modelSel.value=_settingsHermesDefaultModelOnOpen;
+      }
       modelSel.addEventListener('change',_markSettingsDirty,{once:false});
     }
     // Send key preference
@@ -1263,8 +1500,12 @@ async function loadSettingsPanel(){
     if(soundCb){soundCb.checked=!!settings.sound_enabled;soundCb.addEventListener('change',_markSettingsDirty,{once:false});}
     const notifCb=$('settingsNotificationsEnabled');
     if(notifCb){notifCb.checked=!!settings.notifications_enabled;notifCb.addEventListener('change',_markSettingsDirty,{once:false});}
-    const bubbleCb=$('settingsBubbleLayout');
-    if(bubbleCb){bubbleCb.checked=!!settings.bubble_layout;bubbleCb.addEventListener('change',_markSettingsDirty,{once:false});}
+    // show_thinking has no settings panel checkbox — controlled via /reasoning show|hide
+    const sidebarDensitySel=$('settingsSidebarDensity');
+    if(sidebarDensitySel){
+      sidebarDensitySel.value=settings.sidebar_density==='detailed'?'detailed':'compact';
+      sidebarDensitySel.addEventListener('change',_markSettingsDirty,{once:false});
+    }
     // Bot name
     const botNameField=$('settingsBotName');
     if(botNameField){botNameField.value=settings.bot_name||'Hermes';botNameField.addEventListener('input',_markSettingsDirty,{once:false});}
@@ -1277,9 +1518,155 @@ async function loadSettingsPanel(){
       _setSettingsAuthButtonsVisible(!!authStatus.auth_enabled);
     }catch(e){}
     _syncHermesPanelSessionActions();
+    loadProvidersPanel(); // load provider cards in background
     switchSettingsSection(_settingsSection);
   }catch(e){
     showToast(t('settings_load_failed')+e.message);
+  }
+}
+
+// ── Providers panel ───────────────────────────────────────────────────────
+
+const _providerCardEls = new Map(); // providerId → {card, statusDot, input, saveBtn, removeBtn}
+
+async function loadProvidersPanel(){
+  const list=$('providersList');
+  const empty=$('providersEmpty');
+  if(!list) return;
+  try{
+    const data=await api('/api/providers');
+    const providers=(data.providers||[]).filter(p=>p.configurable);
+    list.innerHTML='';
+    _providerCardEls.clear();
+    if(providers.length===0){
+      list.style.display='none';
+      if(empty) empty.style.display='';
+      return;
+    }
+    if(empty) empty.style.display='none';
+    list.style.display='';
+    for(const p of providers){
+      list.appendChild(_buildProviderCard(p));
+    }
+  }catch(e){
+    list.innerHTML='<div style="color:var(--error);padding:12px;font-size:13px">Failed to load providers: '+e.message+'</div>';
+  }
+}
+
+function _buildProviderCard(p){
+  const card=document.createElement('div');
+  card.className='provider-card';
+  card.dataset.provider=p.id;
+  const isOauth=p.key_source==='oauth';
+  const statusColor=p.has_key?'var(--ok, #4ade80)':'var(--muted)';
+  const statusTitle=p.has_key?t('providers_status_configured'):t('providers_status_not_configured');
+
+  // Header row
+  const header=document.createElement('div');
+  header.className='provider-card-header';
+  const info=document.createElement('div');
+  info.className='provider-card-info';
+  info.style.cssText='display:flex;align-items:center;gap:8px;';
+  const nameEl=document.createElement('span');
+  nameEl.className='provider-card-name';
+  nameEl.style.cssText='font-weight:600;font-size:13px;';
+  nameEl.textContent=p.display_name;
+  const dot=document.createElement('span');
+  dot.className='provider-card-dot';
+  dot.title=statusTitle;
+  dot.style.cssText='width:8px;height:8px;border-radius:50%;background:'+statusColor+';display:inline-block;flex-shrink:0';
+  const sourceEl=document.createElement('span');
+  sourceEl.className='provider-card-source';
+  sourceEl.style.cssText='font-size:11px;color:var(--muted)';
+  sourceEl.textContent=isOauth?t('providers_status_oauth'):(p.has_key?t('providers_status_api_key'):t('providers_status_not_configured_label'));
+  info.appendChild(nameEl);
+  info.appendChild(dot);
+  info.appendChild(sourceEl);
+  header.appendChild(info);
+  card.appendChild(header);
+
+  if(isOauth){
+    const hint=document.createElement('div');
+    hint.style.cssText='font-size:11px;color:var(--muted);margin-top:4px;padding-left:2px';
+    hint.textContent=t('providers_oauth_hint');
+    card.appendChild(hint);
+  }else{
+    const actions=document.createElement('div');
+    actions.className='provider-card-actions';
+    const input=document.createElement('input');
+    input.type='password';
+    input.placeholder=p.has_key?t('providers_key_placeholder_replace'):t('providers_key_placeholder_new');
+    input.style.cssText='flex:1;min-width:0;padding:6px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;font-family:monospace';
+    input.autocomplete='off';
+    const saveBtn=document.createElement('button');
+    saveBtn.className='sm-btn provider-save-btn';
+    saveBtn.setAttribute('aria-label',t('providers_save'));
+    saveBtn.title=t('providers_save');
+    saveBtn.innerHTML='<svg class="provider-btn-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg><span class="provider-btn-label">'+t('providers_save')+'</span>';
+    saveBtn.onclick=()=>_saveProviderKey(p.id);
+    actions.appendChild(input);
+    actions.appendChild(saveBtn);
+    if(p.has_key){
+      const removeBtn=document.createElement('button');
+      removeBtn.className='sm-btn provider-remove-btn';
+      removeBtn.setAttribute('aria-label',t('providers_remove'));
+      removeBtn.title=t('providers_remove');
+      removeBtn.innerHTML='<svg class="provider-btn-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg><span class="provider-btn-label">'+t('providers_remove')+'</span>';
+      removeBtn.onclick=()=>_removeProviderKey(p.id);
+      actions.appendChild(removeBtn);
+    }
+    card.appendChild(actions);
+    _providerCardEls.set(p.id,{card,input,saveBtn,hasKey:p.has_key});
+    input.addEventListener('input',()=>{saveBtn.disabled=!input.value.trim();});
+    saveBtn.disabled=true;
+  }
+  return card;
+}
+
+async function _saveProviderKey(providerId){
+  const els=_providerCardEls.get(providerId);
+  if(!els) return;
+  const key=els.input.value.trim();
+  if(!key){
+    showToast(t('providers_enter_key'));
+    return;
+  }
+  els.saveBtn.disabled=true;
+  els.saveBtn.textContent=t('providers_saving');
+  try{
+    const res=await api('/api/providers',{method:'POST',body:JSON.stringify({provider:providerId,api_key:key})});
+    if(res.ok){
+      showToast(res.provider+' key '+res.action);
+      els.input.value='';
+      await loadProvidersPanel(); // refresh list
+    }else{
+      showToast(res.error||'Failed to save key');
+      els.saveBtn.disabled=false;
+      els.saveBtn.textContent=t('providers_save');
+    }
+  }catch(e){
+    showToast('Error: '+e.message);
+    els.saveBtn.disabled=false;
+    els.saveBtn.textContent=t('providers_save');
+  }
+}
+
+async function _removeProviderKey(providerId){
+  const els=_providerCardEls.get(providerId);
+  if(!els) return;
+  if(els.saveBtn){els.saveBtn.disabled=true;els.saveBtn.textContent=t('providers_removing');}
+  try{
+    const res=await api('/api/providers/delete',{method:'POST',body:JSON.stringify({provider:providerId})});
+    if(res.ok){
+      showToast(res.provider+' key '+t('providers_key_removed').toLowerCase());
+      await loadProvidersPanel(); // refresh list
+    }else{
+      showToast(res.error||'Failed to remove key');
+      if(els.saveBtn){els.saveBtn.disabled=false;els.saveBtn.textContent=t('providers_save');}
+    }
+  }catch(e){
+    showToast('Error: '+e.message);
+    if(els.saveBtn){els.saveBtn.disabled=false;els.saveBtn.textContent=t('providers_save');}
   }
 }
 
@@ -1291,14 +1678,15 @@ function _setSettingsAuthButtonsVisible(active){
 }
 
 function _applySavedSettingsUi(saved, body, opts){
-  const {sendKey,showTokenUsage,showCliSessions,theme,skin,language}=opts;
+  const {sendKey,showTokenUsage,showCliSessions,theme,skin,language,sidebarDensity}=opts;
   window._sendKey=sendKey||'enter';
   window._showTokenUsage=showTokenUsage;
   window._showCliSessions=showCliSessions;
   window._soundEnabled=body.sound_enabled;
   window._notificationsEnabled=body.notifications_enabled;
+  window._showThinking=body.show_thinking!==false;
+  window._sidebarDensity=sidebarDensity==='detailed'?'detailed':'compact';
   window._botName=body.bot_name||'Hermes';
-  document.body.classList.toggle('bubble-layout', !!body.bubble_layout);
   if(typeof applyBotName==='function') applyBotName();
   if(typeof setLocale==='function') setLocale(language);
   if(typeof applyLocaleToDOM==='function') applyLocaleToDOM();
@@ -1312,6 +1700,9 @@ function _applySavedSettingsUi(saved, body, opts){
   _settingsSkinOnOpen=skin||'default';
   const bar=$('settingsUnsavedBar');
   if(bar) bar.style.display='none';
+  _settingsHermesDefaultModelOnOpen=body.default_model||_settingsHermesDefaultModelOnOpen||'';
+  // Sync window._defaultModel so newSession() uses the just-saved default without a reload (#908).
+  if(body.default_model) window._defaultModel=body.default_model;
   renderMessages();
   if(typeof syncTopbar==='function') syncTopbar();
   if(typeof renderSessionList==='function') renderSessionList();
@@ -1319,6 +1710,7 @@ function _applySavedSettingsUi(saved, body, opts){
 
 async function saveSettings(andClose){
   const model=($('settingsModel')||{}).value;
+  const modelChanged=(model||'')!==(_settingsHermesDefaultModelOnOpen||'');
   const sendKey=($('settingsSendKey')||{}).value;
   const showTokenUsage=!!($('settingsShowTokenUsage')||{}).checked;
   const showCliSessions=!!($('settingsShowCliSessions')||{}).checked;
@@ -1326,8 +1718,8 @@ async function saveSettings(andClose){
   const theme=($('settingsTheme')||{}).value||'dark';
   const skin=($('settingsSkin')||{}).value||'default';
   const language=($('settingsLanguage')||{}).value||'en';
+  const sidebarDensity=($('settingsSidebarDensity')||{}).value==='detailed'?'detailed':'compact';
   const body={};
-  if(model) body.default_model=model;
 
   if(sendKey) body.send_key=sendKey;
   body.theme=theme;
@@ -1339,15 +1731,23 @@ async function saveSettings(andClose){
   body.check_for_updates=!!($('settingsCheckUpdates')||{}).checked;
   body.sound_enabled=!!($('settingsSoundEnabled')||{}).checked;
   body.notifications_enabled=!!($('settingsNotificationsEnabled')||{}).checked;
-  body.bubble_layout=!!($('settingsBubbleLayout')||{}).checked;
-  document.body.classList.toggle('bubble-layout', body.bubble_layout);
+  body.show_thinking=window._showThinking!==false;
+  body.sidebar_density=sidebarDensity;
   const botName=(($('settingsBotName')||{}).value||'').trim();
   body.bot_name=botName||'Hermes';
   // Password: only act if the field has content; blank = leave auth unchanged
   if(pw && pw.trim()){
     try{
       const saved=await api('/api/settings',{method:'POST',body:JSON.stringify({...body,_set_password:pw.trim()})});
-      _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,skin,language});
+      if(modelChanged && model){
+        try{
+          await api('/api/default-model',{method:'POST',body:JSON.stringify({model})});
+          body.default_model=model;
+        }catch(_modelErr){
+          if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
+        }
+      }
+      _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,skin,language,sidebarDensity});
       showToast(t(saved.auth_just_enabled?'settings_saved_pw':'settings_saved_pw_updated'));
       _hideSettingsPanel();
       return;
@@ -1355,7 +1755,15 @@ async function saveSettings(andClose){
   }
   try{
     const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(body)});
-    _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,skin,language});
+    if(modelChanged && model){
+      try{
+        await api('/api/default-model',{method:'POST',body:JSON.stringify({model})});
+        body.default_model=model;
+      }catch(_modelErr){
+        if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
+      }
+    }
+    _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showCliSessions,theme,skin,language,sidebarDensity});
     showToast(t('settings_saved'));
     _hideSettingsPanel();
   }catch(e){
@@ -1399,6 +1807,12 @@ document.addEventListener('click',e=>{
 let _cronPollSince=Date.now()/1000;  // track from page load
 let _cronPollTimer=null;
 let _cronUnreadCount=0;
+
+// Auto-refresh the cron list when a job is created from chat or any external source.
+// The chat path dispatches this event when the agent response mentions cron creation.
+window.addEventListener('hermes:cron_created', () => {
+  if ($('cronList')) loadCrons();
+});
 
 function startCronPolling(){
   if(_cronPollTimer) return;

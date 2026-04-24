@@ -1,9 +1,9 @@
-"""
-Hermes Web UI -- Session model and in-memory session store.
-"""
+"""Hermes Web UI -- Session model and in-memory session store."""
 import collections
 import json
 import logging
+import os
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -11,29 +11,187 @@ from pathlib import Path
 import api.config as _cfg
 from api.config import (
     SESSION_DIR, SESSION_INDEX_FILE, SESSIONS, SESSIONS_MAX,
-    LOCK, DEFAULT_WORKSPACE, DEFAULT_MODEL, PROJECTS_FILE, HOME
+    LOCK, STREAMS, STREAMS_LOCK, DEFAULT_WORKSPACE, DEFAULT_MODEL, PROJECTS_FILE, HOME,
+    get_effective_default_model,
 )
 from api.workspace import get_last_workspace
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Stale temp-file cleanup
+# ---------------------------------------------------------------------------
+# Both Session.save() and _write_session_index() use the atomic-write pattern:
+#   write to  <path>.tmp.<pid>.<tid>  →  os.replace() to final path
+# If the process crashes between write and replace the .tmp file is left
+# behind.  Because the name embeds pid + tid, leftover files can never be
+# reused by a different process/thread, so they are safe to remove on the
+# next startup.  _cleanup_stale_tmp_files() is called from the full-rebuild
+# path of _write_session_index (i.e. at first index access / startup) and
+# removes any *.tmp.* file whose mtime is older than one hour.
+# ---------------------------------------------------------------------------
 
-def _write_session_index():
-    """Rebuild the session index file for O(1) future reads."""
-    entries = []
-    for p in SESSION_DIR.glob('*.json'):
-        if p.name.startswith('_'): continue
+_STALE_TMP_AGE_SECONDS = 3600  # 1 hour
+
+# Serializes index writers so concurrent Session.save() calls cannot race on
+# stale baselines while still allowing LOCK to be released before disk I/O.
+_INDEX_WRITE_LOCK = threading.RLock()
+
+
+def _cleanup_stale_tmp_files() -> None:
+    """Best-effort removal of stale ``*.tmp.*`` files from SESSION_DIR.
+
+    Only files whose mtime is older than ``_STALE_TMP_AGE_SECONDS`` are
+    removed so that in-flight writes from a long-running sibling process
+    are not disturbed.  Errors are logged and swallowed — this must never
+    prevent startup.
+    """
+    cutoff = time.time() - _STALE_TMP_AGE_SECONDS
+    try:
+        for p in SESSION_DIR.glob('*.tmp.*'):
+            try:
+                if p.stat().st_mtime < cutoff:
+                    p.unlink(missing_ok=True)
+                    logger.debug("Cleaned up stale tmp file: %s", p.name)
+            except OSError:
+                pass  # best-effort
+    except Exception:
+        pass  # SESSION_DIR may not exist yet; that's fine
+
+
+def _index_entry_exists(session_id: str, in_memory_ids=None) -> bool:
+    """Return True if an index entry still has backing state.
+
+    A session can legitimately exist either as a persisted JSON file or as an
+    in-memory Session object that has not been flushed yet.  This helper is used
+    to prune stale `_index.json` rows left behind after session-id rotation or
+    file removal.
+    """
+    if not session_id:
+        return False
+    if in_memory_ids is None:
+        with LOCK:
+            in_memory_ids = set(SESSIONS.keys())
+    if session_id in in_memory_ids:
+        return True
+    p = SESSION_DIR / f'{session_id}.json'
+    return p.exists()
+
+
+def _write_session_index(updates=None):
+    """Update the session index file.
+
+    When *updates* is provided (a list of Session objects whose compact
+    entries should be refreshed), this does a targeted in-place update of
+    the existing index — O(1) for single-session changes.  When *updates*
+    is None, a full rebuild is performed (used on startup / first call).
+
+    LOCK protects in-memory state snapshots and payload construction only;
+    disk I/O (write/flush/fsync/replace) always runs outside LOCK.
+    """
+    _tmp = SESSION_INDEX_FILE.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
+
+    with _INDEX_WRITE_LOCK:
+        # Lazy full-rebuild path — used when index doesn't exist yet.
+        if updates is None or not SESSION_INDEX_FILE.exists():
+            _cleanup_stale_tmp_files()  # best-effort sweep on startup / first call
+            entries = []
+            for p in SESSION_DIR.glob('*.json'):
+                if p.name.startswith('_'):
+                    continue
+                try:
+                    s = Session.load(p.stem)
+                    if s:
+                        entries.append(s.compact())
+                except Exception:
+                    logger.debug("Failed to load session from %s", p)
+
+            with LOCK:
+                existing_ids = {e.get('session_id') for e in entries}
+                for s in SESSIONS.values():
+                    if s.session_id not in existing_ids:
+                        entries.append(s.compact())
+                entries.sort(key=lambda s: s.get('updated_at', 0), reverse=True)
+                _payload = json.dumps(entries, ensure_ascii=False, indent=2)
+
+            try:
+                with open(_tmp, 'w', encoding='utf-8') as f:
+                    f.write(_payload)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(_tmp, SESSION_INDEX_FILE)
+            except Exception:
+                # Best-effort cleanup of stale tmp on failure
+                try:
+                    _tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise
+            return
+
+        # Fast path: patch existing index with updated sessions.
+        # This avoids loading every session file on every single save().
+        _fallback = False
         try:
-            s = Session.load(p.stem)
-            if s: entries.append(s.compact())
+            with LOCK:
+                existing = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
+                in_memory_ids = set(SESSIONS.keys())
+
+                # Avoid N filesystem exists() checks under LOCK by collecting
+                # on-disk IDs once.
+                on_disk_ids = {
+                    p.stem
+                    for p in SESSION_DIR.glob('*.json')
+                    if not p.name.startswith('_')
+                }
+
+                existing = [
+                    e for e in existing
+                    if (e.get('session_id') in in_memory_ids or e.get('session_id') in on_disk_ids)
+                ]
+
+                # Build lookup of updated entries
+                updated_map = {s.session_id: s.compact() for s in updates}
+                existing_ids = {e.get('session_id') for e in existing}
+                # Add any updated entries not yet in the index
+                for sid, entry in updated_map.items():
+                    if sid not in existing_ids:
+                        existing.append(entry)
+                # Replace matching entries in-place
+                for i, e in enumerate(existing):
+                    sid = e.get('session_id')
+                    if sid in updated_map:
+                        existing[i] = updated_map[sid]
+                existing.sort(key=lambda s: s.get('updated_at', 0), reverse=True)
+                _payload = json.dumps(existing, ensure_ascii=False, indent=2)
+
+            try:
+                with open(_tmp, 'w', encoding='utf-8') as f:
+                    f.write(_payload)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(_tmp, SESSION_INDEX_FILE)
+            except Exception:
+                try:
+                    _tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                raise
         except Exception:
-            logger.debug("Failed to load session from %s", p)
-    with LOCK:
-        for s in SESSIONS.values():
-            if not any(e['session_id'] == s.session_id for e in entries):
-                entries.append(s.compact())
-    entries.sort(key=lambda s: s['updated_at'], reverse=True)
-    SESSION_INDEX_FILE.write_text(json.dumps(entries, ensure_ascii=False, indent=2), encoding='utf-8')
+            _fallback = True
+
+    if _fallback:
+        # Corrupt or missing index — fall back to full rebuild (called outside LOCK to avoid deadlock)
+        _write_session_index(updates=None)
+
+
+def _active_stream_ids():
+    with STREAMS_LOCK:
+        return set(STREAMS.keys())
+
+
+def _is_streaming_session(active_stream_id, active_stream_ids):
+    return bool(active_stream_id and active_stream_id in active_stream_ids)
 
 
 class Session:
@@ -78,14 +236,25 @@ class Session:
     def path(self):
         return SESSION_DIR / f'{self.session_id}.json'
 
-    def save(self, touch_updated_at: bool = True) -> None:
+    def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
         if touch_updated_at:
             self.updated_at = time.time()
-        self.path.write_text(
-            json.dumps(self.__dict__, ensure_ascii=False, indent=2),
-            encoding='utf-8',
-        )
-        _write_session_index()
+        payload = json.dumps(self.__dict__, ensure_ascii=False, indent=2)
+        tmp = self.path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
+        try:
+            with open(tmp, 'w', encoding='utf-8') as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.path)
+        except Exception:
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise
+        if not skip_index:
+            _write_session_index(updates=[self])
 
     @classmethod
     def load(cls, sid):
@@ -97,7 +266,8 @@ class Session:
             return None
         return cls(**json.loads(p.read_text(encoding='utf-8')))
 
-    def compact(self) -> dict:
+    def compact(self, include_runtime=False, active_stream_ids=None) -> dict:
+        active_stream_ids = active_stream_ids if active_stream_ids is not None else set()
         return {
             'session_id': self.session_id,
             'title': self.title,
@@ -116,6 +286,10 @@ class Session:
             'personality': self.personality,
             'compression_anchor_visible_idx': self.compression_anchor_visible_idx,
             'compression_anchor_message_key': self.compression_anchor_message_key,
+            'active_stream_id': self.active_stream_id,
+            'is_streaming': _is_streaming_session(
+                self.active_stream_id, active_stream_ids
+            ) if include_runtime else False,
         }
 
 def get_session(sid):
@@ -133,14 +307,28 @@ def get_session(sid):
         return s
     raise KeyError(sid)
 
-def new_session(workspace=None, model=None):
-    # Use _cfg.DEFAULT_MODEL (not the import-time snapshot) so save_settings() changes take effect
-    try:
-        from api.profiles import get_active_profile_name
-        _profile = get_active_profile_name()
-    except ImportError:
-        _profile = None
-    s = Session(workspace=workspace or get_last_workspace(), model=model or _cfg.DEFAULT_MODEL, profile=_profile)
+def new_session(workspace=None, model=None, profile=None):
+    """Create a new in-memory session and persist it.
+
+    *profile* — when supplied by the caller (e.g. from the request body sent
+    by the active browser tab), it is used directly so that concurrent clients
+    on different profiles don't fight over a shared process-global.  If not
+    supplied, we fall back to the process-level active profile (the pre-#798
+    behaviour, preserved for calls that originate outside a request context).
+    """
+    if profile is None:
+        # Fallback: read process-level global (single-client or startup path)
+        try:
+            from api.profiles import get_active_profile_name
+            profile = get_active_profile_name()
+        except ImportError:
+            profile = None
+    effective_model = model or get_effective_default_model()
+    s = Session(
+        workspace=workspace or get_last_workspace(),
+        model=effective_model,
+        profile=profile,
+    )
     with LOCK:
         SESSIONS[s.session_id] = s
         SESSIONS.move_to_end(s.session_id)
@@ -150,18 +338,37 @@ def new_session(workspace=None, model=None):
     return s
 
 def all_sessions():
+    active_stream_ids = _active_stream_ids()
     # Phase C: try index first for O(1) read; fall back to full scan
     if SESSION_INDEX_FILE.exists():
         try:
             index = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
+            index = [
+                s for s in index
+                if _index_entry_exists(s.get('session_id'))
+            ]
+            for s in index:
+                s['is_streaming'] = _is_streaming_session(
+                    s.get('active_stream_id'),
+                    active_stream_ids,
+                )
             # Overlay any in-memory sessions that may be newer than the index
             index_map = {s['session_id']: s for s in index}
             with LOCK:
                 for s in SESSIONS.values():
-                    index_map[s.session_id] = s.compact()
+                    index_map[s.session_id] = s.compact(
+                        include_runtime=True,
+                        active_stream_ids=active_stream_ids,
+                    )
             result = sorted(index_map.values(), key=lambda s: (s.get('pinned', False), s['updated_at']), reverse=True)
             # Hide empty Untitled sessions from the UI (created by tests, page refreshes, etc.)
-            result = [s for s in result if not (s.get('title','Untitled')=='Untitled' and s.get('message_count',0)==0)]
+            # Exempt sessions younger than 60 s so a brand-new session stays visible (#789)
+            _now = time.time()
+            result = [s for s in result if not (
+                s.get('title', 'Untitled') == 'Untitled'
+                and s.get('message_count', 0) == 0
+                and (_now - s.get('updated_at', _now)) > 60
+            )]
             # Backfill: sessions created before Sprint 22 have no profile tag.
             # Attribute them to 'default' so the client profile filter works correctly.
             for s in result:
@@ -182,7 +389,12 @@ def all_sessions():
     for s in SESSIONS.values():
         if all(s.session_id != x.session_id for x in out): out.append(s)
     out.sort(key=lambda s: (getattr(s, 'pinned', False), s.updated_at), reverse=True)
-    result = [s.compact() for s in out if not (s.title=='Untitled' and len(s.messages)==0)]
+    _now = time.time()
+    result = [s.compact(include_runtime=True, active_stream_ids=active_stream_ids) for s in out if not (
+        s.title == 'Untitled'
+        and len(s.messages) == 0
+        and (_now - s.updated_at) > 60
+    )]
     for s in result:
         if not s.get('profile'):
             s['profile'] = 'default'
@@ -291,6 +503,21 @@ def get_cli_sessions() -> list:
         with sqlite3.connect(str(db_path)) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
+            # Introspect schema to handle older hermes-agent versions that
+            # may not have a 'source' column. Without this check the query raises
+            # OperationalError which is silently swallowed, causing the empty-list bug.
+            cur.execute("PRAGMA table_info(sessions)")
+            _session_cols = {row[1] for row in cur.fetchall()}
+            if 'source' not in _session_cols:
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "get_cli_sessions(): state.db at %s has no 'source' column "
+                    "(older hermes-agent?). CLI sessions unavailable. "
+                    "Upgrade hermes-agent to fix this.",
+                    db_path,
+                )
+                return cli_sessions
+
             cur.execute("""
                 SELECT s.id, s.title, s.model, s.message_count,
                        s.started_at, s.source,
@@ -326,8 +553,14 @@ def get_cli_sessions() -> list:
                     'source_tag': _source,
                     'is_cli_session': True,
                 })
-    except Exception:
-        # DB schema changed, locked, or corrupted -- silently degrade
+    except Exception as _cli_err:
+        # DB schema changed, locked, or corrupted -- log warning so admins can diagnose.
+        # Still degrade gracefully (don't crash the WebUI).
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "get_cli_sessions() failed — check state.db schema or path (%s): %s",
+            db_path, _cli_err,
+        )
         return []
 
     return cli_sessions

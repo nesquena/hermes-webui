@@ -1,5 +1,5 @@
 """Sprint 5 tests: workspace CRUD, file save, session index, JS serving."""
-import json, pathlib, uuid, urllib.request, urllib.error
+import json, pathlib, uuid, urllib.request, urllib.error, urllib.parse
 import os
 
 from tests._pytest_port import BASE
@@ -79,6 +79,34 @@ def test_workspace_add_no_duplicate(cleanup_test_sessions):
 def test_workspace_add_requires_path():
     result, status = post("/api/workspaces/add", {})
     assert status == 400
+
+def test_workspace_suggest_returns_trusted_directories(cleanup_test_sessions):
+    _, ws = make_session_tracked(cleanup_test_sessions)
+    child = make_workspace_child(ws, f"workspace-suggest-{uuid.uuid4().hex[:6]}")
+    nested = make_workspace_child(child, "nested")
+    prefix = str(child.parent / child.name[:12])
+    data, status = get(f"/api/workspaces/suggest?prefix={urllib.parse.quote(prefix)}")
+    assert status == 200
+    assert str(child) in data["suggestions"]
+    assert all(not pathlib.Path(p).name.startswith('.') for p in data["suggestions"])
+
+def test_workspace_suggest_hides_untrusted_system_prefix():
+    data, status = get("/api/workspaces/suggest?prefix=/etc")
+    assert status == 200
+    assert data["suggestions"] == []
+
+def test_workspace_suggest_hidden_dirs_only_when_requested(cleanup_test_sessions):
+    _, ws = make_session_tracked(cleanup_test_sessions)
+    hidden = make_workspace_child(ws, ".workspace-hidden")
+    visible = make_workspace_child(ws, "workspace-visible")
+    base = str(ws) + "/"
+    data, status = get(f"/api/workspaces/suggest?prefix={urllib.parse.quote(base)}")
+    assert status == 200
+    assert str(visible) in data["suggestions"]
+    assert str(hidden) not in data["suggestions"]
+    data2, status2 = get(f"/api/workspaces/suggest?prefix={urllib.parse.quote(base + '.w')}")
+    assert status2 == 200
+    assert str(hidden) in data2["suggestions"]
 
 def test_workspace_remove(cleanup_test_sessions):
     _, ws = make_session_tracked(cleanup_test_sessions)

@@ -40,3 +40,7 @@ TEST_STATE_DIR = pathlib.Path(os.environ.get(
     'HERMES_WEBUI_TEST_STATE_DIR',
     str(_HERMES_HOME / _auto_state_dir_name(_REPO_ROOT))
 ))
+
+# Default model injected by conftest — tests that mutate the default model
+# must restore to this value so later tests see a consistent baseline.
+TEST_DEFAULT_MODEL = os.environ.get('HERMES_WEBUI_DEFAULT_MODEL', 'openai/gpt-5.4-mini')

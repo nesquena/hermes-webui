@@ -16,11 +16,20 @@ archive/
 .env
 .env.*
 !.env.example
-.claude/*
+.claude/
+CLAUDE.md
+AGENTS.md
+.cursorrules
+.windsurfrules
+.aider*
+copilot-instructions.md
 
 # Generated screenshots and transient artifacts
 screenshot-*.png
 full-UI.png
+
+# Version file written by Docker/CI build — generated, never committed
+api/_version.py
 
 # OS files
 .DS_Store

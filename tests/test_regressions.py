@@ -41,6 +41,16 @@ def make_session(created_list):
     return sid
 
 
+def _make_auth_json_with_credential_pool(
+    provider_id: str, pool_entries: list[dict], tmp_dir: pathlib.Path
+) -> pathlib.Path:
+    """Write an auth.json with only credential_pool entries for provider_id."""
+    store = {"providers": {}, "credential_pool": {provider_id: pool_entries}}
+    auth_path = tmp_dir / "auth.json"
+    auth_path.write_text(json.dumps(store), encoding="utf-8")
+    return auth_path
+
+
 # ── R1: uuid not imported in server.py (Sprint 10 split regression) ──────────
 
 def test_chat_start_returns_stream_id(cleanup_test_sessions):
@@ -423,7 +433,7 @@ def test_done_handler_sets_busy_false_before_renderMessages(cleanup_test_session
     if done_idx < 0:
         done_idx = src.find("es.addEventListener('done'")
     assert done_idx >= 0
-    done_block = src[done_idx:done_idx+2500]
+    done_block = src[done_idx:done_idx+3300]
     # S.busy=false must appear before renderMessages() within the done handler
     busy_pos = done_block.find("S.busy=false;")
     render_pos = done_block.find("renderMessages()")
@@ -725,22 +735,24 @@ def test_upload_error_has_no_trace_field():
 # ── #248: /skills slash command ───────────────────────────────────────────────
 
 def test_skills_slash_command_defined():
-    """#248: /skills command must be registered in COMMANDS and implemented.
-    Verifies the command entry, function definition, and i18n key are all present.
+    """#248: /skills slash command must be wired up.
+
+    Pre-Task 2 (slash-command-parity batch 1) this checked for the
+    hardcoded ``name:'skills'`` entry in the COMMANDS array. The COMMANDS
+    array is now sourced from hermes-agent's ``COMMAND_REGISTRY`` at boot
+    via ``GET /api/commands``, so the literal string is gone. The handler
+    must still exist and be registered, otherwise ``/skills`` would fall
+    through to \"not yet supported\".
     """
     src = (REPO_ROOT / "static/commands.js").read_text()
 
-    # 1. 'skills' must appear in the COMMANDS array definition
-    assert "name:'skills'" in src or 'name:"skills"' in src, \
-        "COMMANDS array must include an entry with name:'skills'"
+    # 1. cmdSkills function must be defined
+    assert "async function cmdSkills" in src or "function cmdSkills" in src, \
+        "cmdSkills function missing from commands.js"
 
-    # 2. cmdSkills function must be defined
-    assert "function cmdSkills" in src, \
-        "cmdSkills function must be defined in commands.js"
-
-    # 3. i18n key cmd_skills must be referenced (wired to COMMANDS entry)
-    assert "cmd_skills" in src, \
-        "cmd_skills i18n key must be referenced in commands.js"
+    # 2. HANDLERS.skills must be registered to dispatch /skills to cmdSkills
+    assert "HANDLERS.skills" in src, \
+        "HANDLERS.skills registration missing from commands.js"
 
 
 def test_reload_recovery_persists_durable_inflight_state(cleanup_test_sessions):
@@ -762,3 +774,100 @@ def test_reload_recovery_persists_durable_inflight_state(cleanup_test_sessions):
         "messages.js must clear durable inflight snapshots when the run ends/errors/cancels"
     assert "const stored=loadInflightState(sid, activeStreamId);" in sessions_src, \
         "loadSession() must hydrate in-flight state from durable browser storage on reload"
+
+
+# ── R18: OAuth onboarding must recognize credential_pool-only auth ───────────
+
+def test_provider_oauth_authenticated_accepts_credential_pool_entries(
+    cleanup_test_sessions, tmp_path
+):
+    """R18a: pool-only OAuth auth.json should count as authenticated.
+
+    Hermes runtime resolves Codex credentials from credential_pool; onboarding
+    must not insist on stale or duplicated providers[provider_id] entries.
+    """
+    _make_auth_json_with_credential_pool(
+        "openai-codex",
+        [
+            {
+                "id": "pool1",
+                "label": "device_code",
+                "source": "device_code",
+                "auth_type": "oauth",
+                "access_token": "***",
+                "refresh_token": "***",
+                "base_url": "https://chatgpt.com/backend-api/codex",
+            }
+        ],
+        tmp_path,
+    )
+
+    from api.onboarding import _provider_oauth_authenticated
+
+    assert _provider_oauth_authenticated("openai-codex", tmp_path) is True
+
+
+def test_provider_oauth_authenticated_rejects_flag_only_credential_pool_entries(
+    cleanup_test_sessions, tmp_path
+):
+    """R18a2: metadata flags alone must not count as usable OAuth auth."""
+    _make_auth_json_with_credential_pool(
+        "openai-codex",
+        [
+            {
+                "id": "pool1",
+                "label": "device_code",
+                "source": "device_code",
+                "auth_type": "oauth",
+                "has_access_token": True,
+                "has_refresh_token": True,
+                "base_url": "https://chatgpt.com/backend-api/codex",
+            }
+        ],
+        tmp_path,
+    )
+
+    from api.onboarding import _provider_oauth_authenticated
+
+    assert _provider_oauth_authenticated("openai-codex", tmp_path) is False
+
+
+def test_status_from_runtime_marks_openai_codex_ready_from_credential_pool(
+    cleanup_test_sessions, tmp_path
+):
+    """R18b: provider_ready should be true when auth lives only in credential_pool."""
+    _make_auth_json_with_credential_pool(
+        "openai-codex",
+        [
+            {
+                "id": "pool1",
+                "label": "device_code",
+                "source": "device_code",
+                "auth_type": "oauth",
+                "access_token": "***",
+                "refresh_token": "***",
+                "base_url": "https://chatgpt.com/backend-api/codex",
+            }
+        ],
+        tmp_path,
+    )
+
+    from api.onboarding import _status_from_runtime
+    import api.onboarding as _ob
+
+    orig_home = _ob._get_active_hermes_home
+    orig_found = _ob._HERMES_FOUND
+    _ob._get_active_hermes_home = lambda: tmp_path
+    _ob._HERMES_FOUND = True
+    try:
+        result = _status_from_runtime(
+            {"model": {"provider": "openai-codex", "default": "codex-mini-latest"}},
+            True,
+        )
+    finally:
+        _ob._get_active_hermes_home = orig_home
+        _ob._HERMES_FOUND = orig_found
+
+    assert result["provider_configured"] is True
+    assert result["provider_ready"] is True
+    assert result["setup_state"] == "ready"

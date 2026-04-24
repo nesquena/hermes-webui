@@ -155,3 +155,13 @@ def test_static_commands_js_registers_compress_alias(cleanup_test_sessions):
     assert "/api/session/compress" in src
     assert "cmdCompress" in src
     assert "cmdCompact" in src
+
+
+def test_static_commands_js_prefers_persisted_reference_message(cleanup_test_sessions):
+    from pathlib import Path
+
+    with open(Path(__file__).resolve().parents[1] / "static" / "commands.js", encoding="utf-8") as f:
+        src = f.read()
+
+    assert "const messageRef=referenceMsg?msgContent(referenceMsg)||String(referenceMsg.content||''):'';" in src
+    assert "const referenceText=messageRef || summaryRef;" in src

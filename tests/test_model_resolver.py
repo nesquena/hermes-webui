@@ -3,6 +3,7 @@ Tests for resolve_model_provider() model routing logic.
 Verifies that model IDs are correctly resolved to (model, provider, base_url)
 tuples for different provider configurations.
 """
+import pytest
 import api.config as config
 
 
@@ -160,6 +161,30 @@ def test_custom_provider_model_with_slash_routes_to_named_custom_provider():
 
 # ── get_available_models() @provider: hint behaviour ──────────────────────
 
+
+@pytest.fixture(autouse=True)
+def _isolate_models_cache():
+    """Invalidate the models TTL cache before and after every test in this file.
+
+    Several helpers here mutate ``config.cfg`` in-memory and call
+    ``get_available_models()``.  Without this guard, a prior test that called
+    ``get_available_models()`` leaves a 60-second TTL cache entry; the next
+    test that mutates cfg and calls the function gets a cache hit instead of
+    running the function body, causing silently wrong results (e.g. the
+    ``test_custom_endpoint_uses_model_config_api_key_for_model_discovery``
+    ``KeyError: 'auth'`` on CI where ``urlopen`` is never reached).
+    """
+    try:
+        config.invalidate_models_cache()
+    except Exception:
+        pass
+    yield
+    try:
+        config.invalidate_models_cache()
+    except Exception:
+        pass
+
+
 def _available_models_with_provider(provider):
     """Helper: temporarily set active_provider in config."""
     old_cfg = dict(config.cfg)
@@ -245,6 +270,13 @@ def _available_models_with_full_cfg(provider, default, base_url):
         'default': default,
         'base_url': base_url,
     }
+    try:
+        _cfg._cfg_mtime = _cfg.Path(_cfg._get_config_path()).stat().st_mtime
+    except Exception:
+        # No config.yaml on this machine (e.g. CI); pin to 0.0 so the mtime check
+        # inside get_available_models() sees 0.0 == 0.0 and doesn't call reload_config(),
+        # which would overwrite the in-memory cfg we just set up.
+        _cfg._cfg_mtime = 0.0
     # Clear model-override env vars to prevent the real profile from leaking in
     _model_env_keys = ('HERMES_MODEL', 'OPENAI_MODEL', 'LLM_MODEL')
     _saved_env = {k: os.environ.pop(k, None) for k in _model_env_keys}
@@ -318,13 +350,56 @@ def test_default_model_lands_under_active_provider_group(monkeypatch):
     )
     groups = {g['provider']: [m['id'] for m in g['models']] for g in result['groups']}
     assert 'OpenAI Codex' in groups, f"OpenAI Codex group missing: {list(groups)}"
-    assert 'gpt-5.4' in groups['OpenAI Codex'], (
+    norm = lambda mid: mid.split('/', 1)[-1].split(':', 1)[-1]
+    assert 'gpt-5.4' in {norm(mid) for mid in groups['OpenAI Codex']}, (
         f"gpt-5.4 not in OpenAI Codex group; contents: {groups['OpenAI Codex']}"
     )
     # And crucially, it must NOT have landed in the alphabetically-first
     # group (Anthropic) via the fallback path.
-    assert 'gpt-5.4' not in groups.get('Anthropic', []), (
+    assert 'gpt-5.4' not in {norm(mid) for mid in groups.get('Anthropic', [])}, (
         f"gpt-5.4 leaked into Anthropic group via fallback: {groups.get('Anthropic')}"
+    )
+
+
+def test_unknown_providers_do_not_inherit_default_model(monkeypatch):
+    """Detected providers without their own model catalog must not be filled
+    with the global default_model placeholder.
+
+    Regression guard for the bug where Alibaba / Minimax-Cn ended up showing
+    gpt-5.4-mini even though those providers do not serve it.
+    """
+    import sys, types
+
+    fake_mod = types.ModuleType('hermes_cli.models')
+    fake_mod.list_available_providers = lambda: [
+        {'id': 'openai-codex', 'authenticated': True},
+        {'id': 'alibaba',      'authenticated': True},
+        {'id': 'minimax-cn',   'authenticated': True},
+    ]
+    fake_auth = types.ModuleType('hermes_cli.auth')
+    fake_auth.get_auth_status = lambda pid: {'key_source': 'env'}
+    monkeypatch.setitem(sys.modules, 'hermes_cli.models', fake_mod)
+    monkeypatch.setitem(sys.modules, 'hermes_cli.auth', fake_auth)
+
+    result = _available_models_with_full_cfg(
+        provider='openai-codex',
+        default='gpt-5.4-mini',
+        base_url='',
+    )
+    groups = {g['provider']: [m['id'] for m in g['models']] for g in result['groups']}
+    norm = lambda mid: mid.split('/', 1)[-1].split(':', 1)[-1]
+
+    assert 'Alibaba' not in groups, (
+        f"Alibaba should not inherit the default model placeholder: {groups}"
+    )
+    assert 'Minimax-Cn' not in groups, (
+        f"Minimax-Cn should not inherit the default model placeholder: {groups}"
+    )
+    assert not any(
+        norm(mid) == 'gpt-5.4-mini'
+        for mid in groups.get('Alibaba', []) + groups.get('Minimax-Cn', [])
+    ), (
+        f"Unknown provider groups still inherited the default model: {groups}"
     )
 
 
@@ -342,6 +417,12 @@ def test_custom_endpoint_uses_model_config_api_key_for_model_discovery(monkeypat
         'base_url': 'https://example.test/v1',
         'api_key': 'sk-test-model-key',
     }
+    try:
+        _cfg._cfg_mtime = _cfg.Path(_cfg._get_config_path()).stat().st_mtime
+    except Exception:
+        # No config.yaml on this machine (e.g. CI); pin to 0.0 so the mtime check
+        # inside get_available_models() sees 0.0 == 0.0 and skips reload_config().
+        _cfg._cfg_mtime = 0.0
     _cfg.cfg.pop('providers', None)
 
     captured = {}
