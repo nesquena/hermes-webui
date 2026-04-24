@@ -113,7 +113,7 @@ def discover_launcher_python(agent_dir: Path | None) -> str:
     if env_python:
         return env_python
     if agent_dir:
-        for rel in ("venv/bin/python", "venv/Scripts/python.exe"):
+        for rel in ("venv/bin/python", "venv/Scripts/python.exe", ".venv/bin/python", ".venv/Scripts/python.exe"):
             candidate = agent_dir / rel
             if candidate.exists():
                 return str(candidate)

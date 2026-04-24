@@ -3,8 +3,8 @@
 > Goal: Full 1:1 parity with the Hermes CLI experience via a clean dark web UI.
 > Everything you can do from the CLI terminal, you can do from this UI.
 >
-> Last updated: v0.50.156 (April 22, 2026) — 1903 tests collected
-> Tests: 1903 collected (`pytest tests/ --collect-only -q`)
+> Last updated: v0.50.185 (April 24, 2026) — 2107 tests collected
+> Tests: 2107 collected (`pytest tests/ --collect-only -q`)
 > Source: <repo>/
 
 ---
