@@ -425,13 +425,26 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!_SMD_SAFE_URL_RE.test(v)){n.removeAttribute('src');n.setAttribute('data-blocked-scheme','1');}
     }
   }
+  let _lastRenderMs=0;
   function _scheduleRender(){
     if(_renderPending) return;
     if(_streamFinalized) return; // Bug A: don't schedule new rAF after stream finalized
     _renderPending=true;
-    _pendingRafHandle=requestAnimationFrame(()=>{
+    // Cap render rate to ~15fps. The browser's rAF fires at 60fps, but each DOM
+    // update takes 50-150ms on large sessions. During GC pauses, rAF callbacks
+    // accumulate and then execute all at once, blocking the main thread for
+    // multi-second stretches and crashing the renderer (Chrome error code 4/5).
+    // Throttling to 66ms intervals prevents this pileup without noticeable
+    // visual degradation — streaming text updates still feel immediate.
+    // performance.now() is monotonic so tab suspend/resume and NTP adjustments
+    // can't produce negative or enormous deltas.
+    const sinceLastMs=performance.now()-_lastRenderMs;
+    const _doRender=()=>{
       _pendingRafHandle=null;
       _renderPending=false;
+      // Guard: a pending setTimeout+rAF can outlive stream finalization.
+      if(_streamFinalized) return;
+      _lastRenderMs=performance.now();
       const parsed=_parseStreamState();
       _renderLiveThinking(parsed);
       if(assistantBody){
@@ -454,7 +467,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
       }
       scrollIfPinned();
-    });
+    };
+    if(sinceLastMs>=66){
+      _pendingRafHandle=requestAnimationFrame(_doRender);
+    } else {
+      _pendingRafHandle=setTimeout(()=>requestAnimationFrame(_doRender), 66-sinceLastMs);
+    }
   }
 
   function _wireSSE(source){
