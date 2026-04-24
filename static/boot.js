@@ -646,7 +646,10 @@ function _setResolvedTheme(isDark){
   const want=isDark
     ?'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css'
     :'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css';
-  if(link.href!==want){ link.href=want; }
+  const wantIntegrity=isDark
+    ?'sha384-wFjoQjtV1y5jVHbt0p35Ui8aV8GVpEZkyF99OXWqP/eNJDU93D3Ugxkoyh6Y2I4A'
+    :'sha384-rCCjoCPCsizaAAYVoz1Q0CmCTvnctK0JkfCSjx7IIxexTBg+uCKtFYycedUjMyA2';
+  if(link.href!==want){ link.integrity=wantIntegrity; link.href=want; }
 }
 
 function _applyTheme(name){
