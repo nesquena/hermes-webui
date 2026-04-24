@@ -115,9 +115,17 @@ def _discover_python(agent_dir: Path) -> str:
         venv_py = agent_dir / "venv" / "bin" / "python"
         if venv_py.exists():
             return str(venv_py)
+        
+        venv_py = agent_dir / ".venv" / "bin" / "python"
+        if venv_py.exists():
+            return str(venv_py)
 
         # Windows layout
         venv_py_win = agent_dir / "venv" / "Scripts" / "python.exe"
+        if venv_py_win.exists():
+            return str(venv_py_win)
+        
+        venv_py_win = agent_dir / ".venv" / "Scripts" / "python.exe"
         if venv_py_win.exists():
             return str(venv_py_win)
 
