@@ -1188,6 +1188,7 @@ function _renderQueueChips(sid){
 function _updateQueuePill(sid,count){
   const pill=document.getElementById('queuePill');
   if(!pill) return;
+  const pillOuter=pill.parentElement;  // .queue-pill-outer — same wrapper as .queue-card
   const card=document.getElementById('queueCard');
   const flyoutVisible=card&&card.classList.contains('visible');
   if(count>0&&!flyoutVisible){
@@ -1196,9 +1197,9 @@ function _updateQueuePill(sid,count){
       `<span class="queue-pill-count">${label}</span>`+
       `<span class="queue-pill-chevron">`+(typeof li==='function'?li('chevron-up',12):'▲')+`</span>`;
     pill.title='Show queued messages';
-    pill.classList.add('show');
+    if(pillOuter) pillOuter.classList.add('show');
     pill.onclick=()=>{
-      delete _queueCollapsed[sid];  // user explicitly expanding — clear collapsed flag
+      delete _queueCollapsed[sid];
       const c=document.getElementById('queueCard');
       if(c){
         c.classList.add('visible');
@@ -1207,11 +1208,11 @@ function _updateQueuePill(sid,count){
           if(firstFocusable) firstFocusable.focus();
         }, 360);
       }
-      pill.classList.remove('show');
+      if(pillOuter) pillOuter.classList.remove('show');
       if(typeof scrollToBottom==='function') scrollToBottom();
     };
   } else {
-    pill.classList.remove('show');
+    if(pillOuter) pillOuter.classList.remove('show');
     pill.onclick=null;
   }
 }
@@ -1260,9 +1261,9 @@ function updateQueueBadge(sessionId){
   const count=sid?getQueuedSessionCount(sid):0;
   if(count>0&&S.session&&sid===S.session.session_id){
     _renderQueueChips(sid);
-    // Only hide pill if card is actually visible — if user collapsed it, keep pill showing
+    // If card is visible, hide pill. If card is collapsed, update pill count.
     const _cardEl=document.getElementById('queueCard');
-    if(_cardEl&&_cardEl.classList.contains('visible')) _updateQueuePill(sid,0);
+    _updateQueuePill(sid,(_cardEl&&_cardEl.classList.contains('visible'))?0:count);
   } else {
     // Always clean up per-session data
     if(sid){delete _queueRenderKeys[sid];delete _queueCollapsed[sid];}

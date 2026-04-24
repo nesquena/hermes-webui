@@ -301,8 +301,10 @@
         </div>
       </div>
       </div>
-      <!-- Queue pill: closed state — sits between flyout and composer, same width as queue card inner -->
-      <button id="queuePill" class="queue-pill" aria-label="Show queued messages" type="button"></button>
+      <!-- Queue pill outer: same positioning wrapper as .queue-card (max-width + padding) -->
+      <div class="queue-pill-outer">
+        <button id="queuePill" class="queue-pill" aria-label="Show queued messages" type="button"></button>
+      </div>
       <div class="composer-box" id="composerBox">
         <div class="cmd-dropdown" id="cmdDropdown"></div>
         <div class="drop-hint" id="dropHint">

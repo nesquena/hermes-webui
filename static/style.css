@@ -2258,10 +2258,12 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
   font-weight: 600;
 }
 
-  /* Queue pill: collapsed queue card — same width as queue-card-inner, same border/radius */
-  .queue-pill{display:none;width:100%;max-width:calc(var(--msg-max) - 40px);margin:0 auto;box-sizing:border-box;align-items:center;gap:8px;padding:9px 14px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);cursor:pointer;background:var(--surface);border:1px solid var(--border);border-bottom:none;border-radius:14px 14px 0 0;text-align:left;}
-  .queue-pill:hover{background:color-mix(in srgb,var(--hover-bg) 60%,var(--surface));}
-  .queue-pill.show{display:flex;animation:queuePillIn .18s ease;}
+  /* Queue pill outer: identical wrapper to .queue-card — max-width+padding positions the pill at card-inner width */
+  .queue-pill-outer{display:none;max-width:var(--msg-max);margin:0 auto;padding:0 20px;box-sizing:border-box;width:100%;}
+  .queue-pill-outer.show{display:block;animation:queuePillIn .18s ease;}
   @keyframes queuePillIn{from{opacity:0;transform:translateY(4px);}to{opacity:1;transform:translateY(0);}}
+  /* Queue pill button: fills the outer slot, styled like queue-card-inner */
+  .queue-pill{display:flex;width:100%;box-sizing:border-box;align-items:center;gap:8px;padding:9px 14px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);cursor:pointer;background:var(--surface);border:1px solid var(--border);border-bottom:none;border-radius:14px 14px 0 0;text-align:left;}
+  .queue-pill:hover{background:color-mix(in srgb,var(--hover-bg) 60%,var(--surface));}
   .queue-pill-count{color:var(--text);}
   .queue-pill-chevron{margin-left:auto;opacity:.5;}
