@@ -40,11 +40,11 @@ services:
       - "127.0.0.1:8642:8642"
     volumes:
       # Persist config, state, sessions, skills, memory across restarts
-      - hermes-home:/root/.hermes
+      - hermes-home:/home/hermes/.hermes
       # Expose agent source so the WebUI can install dependencies from it
       - hermes-agent-src:/opt/hermes
     environment:
-      - HERMES_HOME=/root/.hermes
+      - HERMES_HOME=/home/hermes/.hermes
     restart: unless-stopped
     networks:
       - hermes-net

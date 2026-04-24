@@ -29,11 +29,11 @@ services:
       - "127.0.0.1:8642:8642"
     volumes:
       # Persist config, state, sessions, skills, memory across restarts
-      - hermes-home:/root/.hermes
+      - hermes-home:/home/hermes/.hermes
       # Expose agent source so the WebUI can install dependencies from it
       - hermes-agent-src:/opt/hermes
     environment:
-      - HERMES_HOME=/root/.hermes
+      - HERMES_HOME=/home/hermes/.hermes
       - HERMES_UID=${HERMES_UID:-10000}
       - HERMES_GID=${HERMES_GID:-10000}
     restart: unless-stopped
@@ -52,9 +52,9 @@ services:
     ports:
       - "127.0.0.1:9119:9119"
     volumes:
-      - hermes-home:/root/.hermes
+      - hermes-home:/home/hermes/.hermes
     environment:
-      - HERMES_HOME=/root/.hermes
+      - HERMES_HOME=/home/hermes/.hermes
       - HERMES_UID=${HERMES_UID:-10000}
       - HERMES_GID=${HERMES_GID:-10000}
       # Dashboard connects to the gateway for health/session data
