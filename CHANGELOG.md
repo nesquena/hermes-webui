@@ -5,6 +5,12 @@
 ### Fixed
 - **Reasoning chip now appears after the model chip** in the composer toolbar — model is a more fundamental choice and should be stable in position regardless of whether reasoning is active. Order: Profile → Workspace → Model → Reasoning. (`static/index.html`)
 
+## v0.50.198 — 2026-04-24
+
+### Fixed
+- **`_accepts_gzip()` hardened for test harness** — `handler.headers.get()` now uses `getattr(handler, 'headers', None)` so any synthetic handler without a `headers` attribute (including the `_FakeHandler` used in session-compress tests) no longer throws `AttributeError`. (`api/helpers.py`)
+- **Stale test assertions updated post-#959** — two static-analysis assertions in `test_issue401.py` and `test_regressions.py` referenced minified JS string patterns that PR #959 reformatted; updated to accept either form. (`tests/test_issue401.py`, `tests/test_regressions.py`) [#981]
+
 ## v0.50.197 — 2026-04-24
 
 ### Changed
