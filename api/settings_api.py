@@ -17,7 +17,7 @@ import threading
 from pathlib import Path
 
 # Re-use the same YAML loader and config path logic from config.py
-from api.config import _get_config_path, get_config, reload_config
+from api.config import _get_env_path, _get_config_path, get_config, reload_config
 
 _yaml_lock = threading.Lock()
 
@@ -56,16 +56,16 @@ def _save_yaml_config(cfg: dict) -> None:
 # ---------------------------------------------------------------------------
 
 _HERMES_HOME = Path.home() / ".hermes"
-_ENV_FILE = _HERMES_HOME / ".env"
 
 
 def _load_env_file() -> dict[str, str]:
-    """Read ~/.hermes/.env as a flat key→value dict."""
+    """Read .env from the active profile path as a flat key→value dict."""
+    env_path = _get_env_path()
     values: dict[str, str] = {}
-    if not _ENV_FILE.exists():
+    if not env_path.exists():
         return values
     try:
-        for raw in _ENV_FILE.read_text(encoding="utf-8").splitlines():
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
             line = raw.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
@@ -77,7 +77,8 @@ def _load_env_file() -> dict[str, str]:
 
 
 def _write_env_file(updates: dict[str, str | None]) -> None:
-    """Merge updates into ~/.hermes/.env, removing keys where value is None."""
+    """Merge updates into the active profile's .env, removing keys where value is None."""
+    env_path = _get_env_path()
     current = _load_env_file()
     for key, value in updates.items():
         if value is None:
@@ -91,8 +92,8 @@ def _write_env_file(updates: dict[str, str | None]) -> None:
                 current[key] = clean
                 os.environ[key] = clean
     lines = [f"{key}={current[key]}" for key in sorted(current)]
-    _ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _ENV_FILE.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    env_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------

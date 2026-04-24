@@ -553,7 +553,9 @@ function syncWorkspaceDisplays(){
   // flash of "No workspace" before the saved session finishes loading.
   if(composerLabel) composerLabel.textContent=S._bootReady?label:'';
   if(composerChip){
-    composerChip.disabled=!hasSession;
+    // Always enable the chip — without a session the dropdown lets the user
+    // pick/create a workspace first (the dropdown itself handles the empty state).
+    composerChip.disabled=false;
     composerChip.title=hasSession?ws:t('no_workspace');
     composerChip.classList.toggle('active',!!(composerDropdown&&composerDropdown.classList.contains('open')));
   }
@@ -645,7 +647,7 @@ function toggleWsDropdown(){
 function toggleComposerWsDropdown(){
   const dd=$('composerWsDropdown');
   const chip=$('composerWorkspaceChip');
-  if(!dd||!chip||chip.disabled)return;
+  if(!dd||!chip)return;
   const open=dd.classList.contains('open');
   if(open){closeWsDropdown();}
   else{
@@ -738,7 +740,9 @@ async function removeWorkspace(path){
 }
 
 async function promptWorkspacePath(){
-  if(!S.session)return;
+  // Auto-create a session if none exists so the user can add a workspace path
+  // even from a fresh / no-session state.
+  if(!S.session){await newSession(false);}
   const value=await showPromptDialog({
     title:t('workspace_switch_prompt_title'),
     message:t('workspace_switch_prompt_message'),
@@ -764,7 +768,9 @@ async function promptWorkspacePath(){
 }
 
 async function switchToWorkspace(path,name){
-  if(!S.session)return;
+  // Auto-create a session if none exists so the user can select a workspace
+  // even from a fresh / no-session state.
+  if(!S.session){await newSession(false);}
   if(S.busy){
     showToast(t('workspace_busy_switch'));
     return;

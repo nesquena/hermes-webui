@@ -67,7 +67,12 @@ function syncWorkspacePanelState(){
 }
 
 function openWorkspacePanel(mode='browse'){
-  if(mode==='browse'&&!S.session&&!_hasWorkspacePreviewVisible())return;
+  // When opening in browse mode without a session, allow it so the user can
+  // select a workspace even from a fresh state (a session will be created).
+  if(mode==='browse'&&!S.session&&!_hasWorkspacePreviewVisible()){
+    _setWorkspacePanelMode('browse');
+    return;
+  }
   if(mode==='preview'&&_workspacePanelMode==='browse'){
     syncWorkspacePanelUI();
     return;

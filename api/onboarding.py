@@ -16,6 +16,8 @@ from api.config import (
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
     _get_config_path,
+    _get_env_path,
+    _load_env_into_os,
     get_available_models,
     get_config,
     load_settings,
@@ -23,6 +25,7 @@ from api.config import (
     save_settings,
     verify_hermes_imports,
 )
+from api.settings_api import _load_env_file, _write_env_file
 from api.workspace import get_last_workspace, load_workspaces
 
 logger = logging.getLogger(__name__)
@@ -292,53 +295,8 @@ _UNSUPPORTED_PROVIDER_NOTE = (
 
 
 def _get_active_hermes_home() -> Path:
-    try:
-        from api.profiles import get_active_hermes_home
-
-        return get_active_hermes_home()
-    except ImportError:
-        # Fallback: respect HERMES_HOME env var like profiles.py does
-        hermes_home = os.getenv("HERMES_HOME", "").strip()
-        if hermes_home:
-            return Path(hermes_home).expanduser()
-        return Path.home() / ".hermes"
-
-
-def _load_env_file(env_path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    if not env_path.exists():
-        return values
-    try:
-        for raw in env_path.read_text(encoding="utf-8").splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            values[key.strip()] = value.strip().strip('"').strip("'")
-    except Exception:
-        return {}
-    return values
-
-
-def _write_env_file(env_path: Path, updates: dict[str, str]) -> None:
-    current = _load_env_file(env_path)
-    for key, value in updates.items():
-        if value is None:
-            current.pop(key, None)
-            os.environ.pop(key, None)
-            continue
-        clean = str(value).strip()
-        if not clean:
-            continue
-        # Reject embedded newlines/carriage returns to prevent .env injection
-        if "\n" in clean or "\r" in clean:
-            raise ValueError("API key must not contain newline characters.")
-        current[key] = clean
-        os.environ[key] = clean
-
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [f"{key}={current[key]}" for key in sorted(current)]
-    env_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    """Return the active profile's HERMES_HOME using the centralized path resolver."""
+    return _get_env_path().parent
 
 
 def _load_yaml_config(config_path: Path) -> dict:
@@ -517,7 +475,7 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
     provider = _extract_current_provider(cfg)
     model = _extract_current_model(cfg)
     base_url = _extract_current_base_url(cfg)
-    env_values = _load_env_file(_get_active_hermes_home() / ".env")
+    env_values = _load_env_file()
 
     provider_configured = bool(provider and model)
     provider_ready = False
@@ -585,7 +543,7 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
         "current_provider": provider or None,
         "current_model": model or None,
         "current_base_url": base_url or None,
-        "env_path": str(_get_active_hermes_home() / ".env"),
+        "env_path": str(_get_env_path()),
     }
 
 
@@ -735,8 +693,7 @@ def apply_onboarding_setup(body: dict) -> dict:
         }
 
     cfg = _load_yaml_config(config_path)
-    env_path = _get_active_hermes_home() / ".env"
-    env_values = _load_env_file(env_path)
+    env_values = _load_env_file()
 
     if not api_key and not _provider_api_key_present(provider, cfg, env_values):
         raise ValueError(f"{provider_meta['env_var']} is required")
@@ -761,7 +718,7 @@ def apply_onboarding_setup(body: dict) -> dict:
     _save_yaml_config(config_path, cfg)
 
     if api_key:
-        _write_env_file(env_path, {provider_meta["env_var"]: api_key})
+        _write_env_file({provider_meta["env_var"]: api_key})
 
     # Reload the hermes_cli provider/config cache so the next streaming call
     # picks up the new key without requiring a server restart.
@@ -809,7 +766,6 @@ def import_config_file(config_content: str | None, env_content: str | None) -> d
     """
     hermes_home = _get_active_hermes_home()
     config_path = _get_config_path()
-    env_path = hermes_home / ".env"
 
     if config_content:
         try:
@@ -844,7 +800,7 @@ def import_config_file(config_content: str | None, env_content: str | None) -> d
                 if key:
                     updates[key] = val
             if updates:
-                _write_env_file(env_path, updates)
+                _write_env_file(updates)
         except Exception as exc:
             raise ValueError(f"Invalid .env content: {exc}") from exc
 

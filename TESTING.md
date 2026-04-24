@@ -358,6 +358,16 @@ EXPECT:
   - Next message sent uses the new workspace
 FAIL: Dialog does not appear, path not saved, error on invalid path.
 
+### T6.2: Workspace Chip Is Clickable With No Active Session
+SETUP: Open the app fresh with no active session (clear localStorage or incognito). Verify no session is highlighted in the sidebar.
+STEPS:
+  1. Click the workspace chip (folder icon) in the composer footer area
+EXPECT:
+  - The workspace dropdown opens (does NOT remain greyed/disabled)
+  - It shows saved workspaces and the "Add workspace path" option
+  - Clicking a workspace auto-creates a session and switches to it
+FAIL: Chip is greyed out and unclickable with no session.
+
 ---
 
 ## Section 7: Tool Approval
