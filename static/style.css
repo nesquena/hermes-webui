@@ -396,7 +396,7 @@
   .queue-card.visible{pointer-events:auto;}
   /* When queue is visible, add bottom padding to messages so last bubble isn't covered */
   .messages.queue-open{padding-bottom:var(--queue-card-height,280px);}
-  .queue-card-inner{background:var(--surface);border:1px solid var(--border);border-bottom:none;border-radius:14px 14px 0 0;transform:translateY(100%);opacity:0;transition:transform .35s cubic-bezier(.32,.72,.16,1),opacity .2s ease;overflow:hidden;max-height:240px;overflow-y:auto;padding-bottom:4px;}
+  .queue-card-inner{background:var(--surface);border:1px solid var(--border);border-bottom:none;border-radius:14px 14px 0 0;contain:paint;transform:translateY(100%);opacity:0;transition:transform .35s cubic-bezier(.32,.72,.16,1),opacity .2s ease;overflow:hidden;max-height:240px;overflow-y:auto;padding-bottom:4px;}
   .queue-card.visible .queue-card-inner{transform:translateY(0);opacity:1;}
   .queue-card-header{display:flex;align-items:center;gap:8px;padding:9px 14px 8px;border-bottom:1px solid var(--border);font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);}
   .queue-card-header-actions{display:flex;align-items:center;gap:4px;margin-left:auto;}
@@ -2261,5 +2261,6 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
   /* Compact queue pill inside .composer-box when flyout is hidden */
   .queue-pill{display:none;align-items:center;gap:6px;padding:5px 10px 5px 12px;font-size:12px;color:var(--muted);cursor:pointer;background:transparent;border:none;border-bottom:1px solid var(--border);width:100%;text-align:left;}
   .queue-pill:hover{background:var(--hover-bg);}
-  .queue-pill.show{display:flex;}
+  .queue-pill.show{display:flex;animation:queuePillIn .18s ease;}
+  @keyframes queuePillIn{from{opacity:0;transform:translateY(-4px);}to{opacity:1;transform:translateY(0);}}
   .queue-pill-count{font-weight:600;color:var(--text);}
