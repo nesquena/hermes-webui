@@ -984,6 +984,7 @@ function setBusy(v){
 // while pending. When the session fires the queued message it becomes a
 // normal user bubble in the chat — the chip is removed at drain time.
 const _queueRenderKeys={};  // per-session fingerprint to avoid redundant rebuilds
+const _queueCollapsed={};   // per-session: true when user explicitly collapsed the card
 
 function _renderQueueChips(sid){
   const card=document.getElementById('queueCard');
@@ -1002,10 +1003,17 @@ function _renderQueueChips(sid){
     if(_msgs) _msgs.classList.remove('queue-open');
     return;
   }
-  card.classList.add('visible');
+  // Respect user-collapsed state — don't reopen if user explicitly hid the card
+  if(_queueCollapsed[sid]){
+    // Update chips content without showing card (so data is fresh if user re-expands)
+    inner.innerHTML='';
+    // fall through to render rows into inner but skip making card visible
+  } else {
+    card.classList.add('visible');
+  }
   // Push messages area up so content isn't hidden behind the flyout
   const _msgs=document.getElementById('messages');
-  if(_msgs){
+  if(_msgs&&!_queueCollapsed[sid]){
     _msgs.classList.add('queue-open');
     // Measure after 350ms transition completes (not mid-animation — height would be wrong)
     setTimeout(()=>{
@@ -1070,6 +1078,7 @@ function _renderQueueChips(sid){
     hideBtn.setAttribute('aria-label','Hide queue panel');
     hideBtn.innerHTML=li('chevron-down',14);
     hideBtn.onclick=()=>{
+      _queueCollapsed[sid]=true;
       card.classList.remove('visible');
       // Read live count at click time (not stale closure q)
       _updateQueuePill(sid,_getSessionQueue(sid,false).length);
@@ -1189,6 +1198,7 @@ function _updateQueuePill(sid,count){
     pill.title='Show queued messages';
     pill.classList.add('show');
     pill.onclick=()=>{
+      delete _queueCollapsed[sid];  // user explicitly expanding — clear collapsed flag
       const c=document.getElementById('queueCard');
       if(c){
         c.classList.add('visible');
@@ -1254,17 +1264,23 @@ function updateQueueBadge(sessionId){
     const _cardEl=document.getElementById('queueCard');
     if(_cardEl&&_cardEl.classList.contains('visible')) _updateQueuePill(sid,0);
   } else {
-    const card=document.getElementById('queueCard');
-    const chips=document.getElementById('queueChips');
-    if(card) card.classList.remove('visible');
-    // Defer clear until after slide-out transition (.35s) so content doesn't vanish mid-animation
-    if(chips){const _chips=chips;const _card=card;setTimeout(()=>{if(!_card||!_card.classList.contains('visible'))_chips.innerHTML='';},360);}
-    if(sid) delete _queueRenderKeys[sid];
-    const _msgsEl=document.getElementById('messages');
-    if(_msgsEl) _msgsEl.classList.remove('queue-open');
-    _updateQueuePill(sid,0);  // clear pill when queue is empty
+    // Always clean up per-session data
+    if(sid){delete _queueRenderKeys[sid];delete _queueCollapsed[sid];}
+    // Only wipe global DOM if this is the currently active session
+    const isActive=S.session&&sid===S.session.session_id;
+    if(isActive){
+      const card=document.getElementById('queueCard');
+      const chips=document.getElementById('queueChips');
+      if(card) card.classList.remove('visible');
+      // Defer clear until after slide-out transition so content doesn't vanish mid-animation
+      if(chips){const _chips=chips;const _card=card;setTimeout(()=>{if(!_card||!_card.classList.contains('visible'))_chips.innerHTML='';},360);}
+      const _msgsEl=document.getElementById('messages');
+      if(_msgsEl) _msgsEl.classList.remove('queue-open');
+      _updateQueuePill(sid,0);
+    }
   }
-  _syncQueueTitlebar(sid,count);
+  // Only update titlebar if this is the active session
+  if(!S.session||sid===S.session.session_id) _syncQueueTitlebar(sid,count);
 }
 function showToast(msg,ms,type){const el=$('toast');if(!el)return;const s=String(msg==null?'':msg);let t=type;if(!t){const low=s.toLowerCase();if(/fail|error|denied|invalid|unavailable|no active|no workspace match|no model match|no personalities/.test(low))t='error';else if(/warn|queued|takes effect|skipped|fallback/.test(low))t='warning';else if(/saved|created|imported|restored|switched|set to|updated|duplicated|moved to|renamed|deleted|complete|pinned|archived|cleared|stopped/.test(low))t='success';else t='info';}el.textContent=s;el.className='toast show '+t;clearTimeout(el._t);el._t=setTimeout(()=>{el.classList.remove('show');},ms||2800);}
 
