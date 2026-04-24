@@ -5,6 +5,13 @@
 ### Fixed
 - **Reasoning chip now appears after the model chip** in the composer toolbar — model is a more fundamental choice and should be stable in position regardless of whether reasoning is active. Order: Profile → Workspace → Model → Reasoning. (`static/index.html`)
 
+## v0.50.185 — 2026-04-24
+
+### Fixed
+- **`/btw` stream handler hardened** — `_streamDone=true` now set *before* `src.close()` in `done` and `apperror` handlers (defensive ordering); `_ensureBtwRow()` in `done` gated on session match (`S.session.session_id === parentSid`) to prevent btw bubble leaking into a different session if the user switches mid-stream; `stream_end` handler also sets `_streamDone=true` for defense-in-depth. 14 new regression tests added. (`static/messages.js`, `tests/test_reasoning_chip_btw_fixes.py`) [#935]
+- **`/reasoning` toast aligned with BRAIN prefix** — success toast now reads `🧠 Reasoning effort: <level>` consistent with the command's other toasts. (`static/commands.js`) [#939]
+- **Bootstrap Python discovery finds `.venv/` layout** — `discover_launcher_python` now checks both `venv/` and `.venv/` inside the agent directory, covering installations that use a leading-dot venv layout. (`bootstrap.py`) [#941]
+
 ## v0.50.184 — 2026-04-24
 
 ### Fixed
