@@ -6,9 +6,11 @@ or configuring a password in the Settings panel.
 import hashlib
 import hmac
 import http.cookies
+import json
 import logging
 import os
 import secrets
+import tempfile
 import time
 
 from api.config import STATE_DIR, load_settings
@@ -24,8 +26,54 @@ PUBLIC_PATHS = frozenset({
 COOKIE_NAME = 'hermes_session'
 SESSION_TTL = 86400  # 24 hours
 
-# Active sessions: token -> expiry timestamp
-_sessions = {}
+_SESSIONS_FILE = STATE_DIR / '.sessions.json'
+
+
+def _load_sessions() -> dict[str, float]:
+    """Load persisted sessions from STATE_DIR, pruning expired entries.
+
+    Returns an empty dict on any read or parse error so startup is never
+    blocked by a corrupt or missing sessions file.
+    """
+    try:
+        if _SESSIONS_FILE.exists():
+            data = json.loads(_SESSIONS_FILE.read_text(encoding='utf-8'))
+            if not isinstance(data, dict):
+                raise ValueError('malformed sessions file — expected dict')
+            now = time.time()
+            return {t: exp for t, exp in data.items()
+                    if isinstance(t, str) and isinstance(exp, (int, float)) and exp > now}
+    except Exception as e:
+        logger.debug("Failed to load sessions file, starting fresh: %s", e)
+    return {}
+
+
+def _save_sessions(sessions: dict[str, float]) -> None:
+    """Atomically persist sessions to STATE_DIR/.sessions.json (0600).
+
+    Uses a temp file + os.replace() so a crash mid-write never leaves a
+    truncated file.  Mirrors the same pattern as .signing_key persistence.
+    """
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=STATE_DIR, suffix='.sessions.tmp')
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump(sessions, f)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, _SESSIONS_FILE)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except Exception as e:
+        logger.debug("Failed to persist sessions: %s", e)
+
+
+# Active sessions: token -> expiry timestamp (persisted across restarts via STATE_DIR)
+_sessions = _load_sessions()
 
 # ── Login rate limiter ──────────────────────────────────────────────────────
 _login_attempts = {}  # ip -> [timestamp, ...]
@@ -107,6 +155,7 @@ def create_session() -> str:
     """Create a new auth session. Returns signed cookie value."""
     token = secrets.token_hex(32)
     _sessions[token] = time.time() + SESSION_TTL
+    _save_sessions(_sessions)
     sig = hmac.new(_signing_key(), token.encode(), hashlib.sha256).hexdigest()[:32]
     return f"{token}.{sig}"
 
@@ -114,8 +163,11 @@ def create_session() -> str:
 def _prune_expired_sessions():
     """Remove all expired session entries to prevent unbounded memory growth."""
     now = time.time()
-    for token in [t for t, exp in _sessions.items() if now > exp]:
-        _sessions.pop(token, None)
+    expired = [t for t, exp in _sessions.items() if now > exp]
+    if expired:
+        for token in expired:
+            _sessions.pop(token, None)
+        _save_sessions(_sessions)
 
 
 def verify_session(cookie_value) -> bool:
@@ -138,7 +190,9 @@ def invalidate_session(cookie_value) -> None:
     """Remove a session token."""
     if cookie_value and '.' in cookie_value:
         token = cookie_value.rsplit('.', 1)[0]
-        _sessions.pop(token, None)
+        if token in _sessions:
+            _sessions.pop(token, None)
+            _save_sessions(_sessions)
 
 
 def parse_cookie(handler) -> str | None:
