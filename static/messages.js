@@ -1184,4 +1184,111 @@ function sendBrowserNotification(title,body){
   }
 }
 
+// ── /btw ephemeral stream ────────────────────────────────────────────────────
+// Connects to the ephemeral SSE stream from /api/btw and renders the answer
+// in a visually distinct bubble that is NOT persisted to session history.
+
+function attachBtwStream(parentSid, streamId, question){
+  if(!parentSid||!streamId) return;
+  const src=new EventSource('/api/stream?stream_id='+encodeURIComponent(streamId));
+  let answer='';
+  let btwRow=null;
+  function _ensureBtwRow(){
+    if(btwRow&&btwRow.isConnected) return;
+    const inner=$('msgInner');
+    if(!inner) return;
+    btwRow=document.createElement('div');
+    btwRow.className='msg-row msg-row-btw';
+    btwRow.dataset.role='assistant';
+    btwRow.dataset.btw='1';
+    const labelEl=document.createElement('div');
+    labelEl.className='msg-btw-label';
+    labelEl.textContent=t('btw_label');
+    const qEl=document.createElement('div');
+    qEl.className='msg-body';
+    qEl.textContent=question;
+    const ansEl=document.createElement('div');
+    ansEl.className='msg-body msg-btw-answer';
+    ansEl.textContent='...';
+    btwRow.appendChild(labelEl);
+    btwRow.appendChild(qEl);
+    btwRow.appendChild(ansEl);
+    inner.appendChild(btwRow);
+    btwRow.scrollIntoView({behavior:'smooth',block:'end'});
+  }
+  src.addEventListener('token',e=>{
+    try{answer+=JSON.parse(e.data).text||'';}catch(_){}
+    _ensureBtwRow();
+    const ansEl=btwRow&&btwRow.querySelector('.msg-btw-answer');
+    if(ansEl) ansEl.innerHTML=renderMd(answer);
+  });
+  src.addEventListener('done',e=>{
+    src.close();
+    try{
+      const d=JSON.parse(e.data);
+      if(d.answer&&!answer) answer=d.answer;
+    }catch(_){}
+    if(btwRow&&btwRow.isConnected){
+      const ansEl=btwRow.querySelector('.msg-btw-answer');
+      if(ansEl) ansEl.innerHTML=renderMd(answer||t('btw_no_answer'));
+    }
+    showToast(t('btw_done'));
+  });
+  src.addEventListener('apperror',e=>{
+    src.close();
+    try{
+      const d=JSON.parse(e.data);
+      showToast(t('btw_failed')+(d.message||''));
+    }catch(_){showToast(t('btw_failed'));}
+    if(btwRow&&btwRow.isConnected) btwRow.remove();
+  });
+  src.addEventListener('stream_end',()=>{src.close();});
+  src.onerror=()=>{src.close();if(btwRow&&btwRow.isConnected) btwRow.remove();};
+}
+
+// ── /background task tracking ────────────────────────────────────────────────
+
+let _bgPollTimers={};
+let _bgActiveTasks=new Set();
+
+function showBackgroundBadge(taskId){
+  _bgActiveTasks.add(taskId);
+  const badge=$('bgBadge');
+  if(badge){
+    badge.textContent=String(_bgActiveTasks.size);
+    badge.style.display=_bgActiveTasks.size?'':'none';
+  }
+}
+function hideBackgroundBadge(taskId){
+  _bgActiveTasks.delete(taskId);
+  const badge=$('bgBadge');
+  if(badge){
+    badge.textContent=String(_bgActiveTasks.size);
+    badge.style.display=_bgActiveTasks.size?'':'none';
+  }
+}
+function startBackgroundPolling(parentSid, taskId, prompt){
+  if(_bgPollTimers[taskId]) return;
+  async function _poll(){
+    try{
+      const r=await api('/api/background/status?session_id='+encodeURIComponent(parentSid));
+      if(r&&r.results){
+        for(const res of r.results){
+          if(res.task_id===taskId){
+            hideBackgroundBadge(taskId);
+            delete _bgPollTimers[taskId];
+            const msg={role:'assistant',content:`**${t('bg_label')}** ${prompt.slice(0,80)}\n\n${res.answer||t('bg_no_answer')}`,'_background':true,_ts:Date.now()/1000};
+            S.messages.push(msg);
+            renderMessages();
+            showToast(t('bg_complete'));
+            return;
+          }
+        }
+      }
+    }catch(_){}
+    _bgPollTimers[taskId]=setTimeout(_poll,3000);
+  }
+  _poll();
+}
+
 // ── Panel navigation (Chat / Tasks / Skills / Memory) ──

@@ -682,6 +682,13 @@ def handle_get(handler, parsed) -> bool:
         except KeyError:
             return bad(handler, "Session not found", 404)
 
+    if parsed.path == "/api/background/status":
+        sid = parse_qs(parsed.query).get("session_id", [""])[0]
+        if not sid:
+            return bad(handler, "Missing session_id")
+        from api.background import get_results
+        return j(handler, {"results": get_results(sid)})
+
     if parsed.path == "/api/sessions":
         webui_sessions = all_sessions()
         settings = load_settings()
@@ -1189,6 +1196,12 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         except ValueError as e:
             return j(handler, {"error": str(e)})
+
+    if parsed.path == "/api/btw":
+        return _handle_btw(handler, body)
+
+    if parsed.path == "/api/background":
+        return _handle_background(handler, body)
 
     if parsed.path == "/api/chat/start":
         return _handle_chat_start(handler, body)
@@ -2345,6 +2358,96 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
     if SESSION_INDEX_FILE.exists():
         SESSION_INDEX_FILE.unlink(missing_ok=True)
     return j(handler, {"ok": True, "cleaned": cleaned})
+
+
+def _handle_btw(handler, body):
+    """POST /api/btw — ephemeral side question using session context.
+
+    Creates a temporary hidden session, streams the answer via SSE, then
+    discards the session. The parent session is not modified.
+    """
+    try:
+        require(body, "session_id")
+        require(body, "question")
+    except ValueError as e:
+        return bad(handler, str(e))
+    try:
+        s = get_session(body["session_id"])
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    question = str(body["question"]).strip()
+    if not question:
+        return bad(handler, "question is required")
+    # Duplicate-stream guard (same pattern as chat/start)
+    current_stream_id = getattr(s, "active_stream_id", None)
+    if current_stream_id:
+        with STREAMS_LOCK:
+            if current_stream_id in STREAMS:
+                return j(handler, {"error": "session already has an active stream"}, status=409)
+        s.active_stream_id = None
+    # Create ephemeral hidden session inheriting context
+    from api.models import new_session as _new_session
+    ephemeral = _new_session(workspace=s.workspace, model=s.model, profile=getattr(s, 'profile', None))
+    # Copy conversation history for context (agent reads from messages)
+    ephemeral.messages = list(s.messages or [])
+    ephemeral.title = f"btw: {question[:60]}"
+    ephemeral.save()
+    stream_id = uuid.uuid4().hex
+    ephemeral.active_stream_id = stream_id
+    ephemeral.save()
+    q = queue.Queue()
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = q
+    from api.background import track_btw
+    track_btw(body["session_id"], ephemeral.session_id, stream_id, question)
+    thr = threading.Thread(
+        target=_run_agent_streaming,
+        args=(ephemeral.session_id, question, s.model, s.workspace, stream_id, None),
+        kwargs={"ephemeral": True},
+        daemon=True,
+    )
+    thr.start()
+    return j(handler, {"stream_id": stream_id, "session_id": ephemeral.session_id, "parent_session_id": body["session_id"]})
+
+
+def _handle_background(handler, body):
+    """POST /api/background — run prompt in parallel background agent.
+
+    Creates a hidden session, starts streaming in a daemon thread.
+    Frontend polls /api/background/status for completed results.
+    """
+    try:
+        require(body, "session_id")
+        require(body, "prompt")
+    except ValueError as e:
+        return bad(handler, str(e))
+    try:
+        s = get_session(body["session_id"])
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    prompt = str(body["prompt"]).strip()
+    if not prompt:
+        return bad(handler, "prompt is required")
+    from api.models import new_session as _new_session
+    bg = _new_session(workspace=s.workspace, model=s.model, profile=getattr(s, 'profile', None))
+    bg.title = f"bg: {prompt[:60]}"
+    bg.save()
+    stream_id = uuid.uuid4().hex
+    bg.active_stream_id = stream_id
+    bg.save()
+    q = queue.Queue()
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = q
+    task_id = uuid.uuid4().hex[:8]
+    from api.background import track_background
+    track_background(body["session_id"], bg.session_id, stream_id, task_id, prompt)
+    thr = threading.Thread(
+        target=_run_agent_streaming,
+        args=(bg.session_id, prompt, s.model, s.workspace, stream_id, None),
+        daemon=True,
+    )
+    thr.start()
+    return j(handler, {"task_id": task_id, "stream_id": stream_id, "session_id": bg.session_id})
 
 
 def _handle_chat_start(handler, body):

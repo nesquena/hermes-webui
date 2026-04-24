@@ -796,8 +796,12 @@ def _sse(handler, event, data):
     handler.wfile.flush()
 
 
-def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, attachments=None):
-    """Run agent in background thread, writing SSE events to STREAMS[stream_id]."""
+def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, attachments=None, *, ephemeral=False):
+    """Run agent in background thread, writing SSE events to STREAMS[stream_id].
+
+    When ephemeral=True, session mutations are skipped — used by /btw to get
+    a streaming answer without persisting to the parent session.
+    """
     q = STREAMS.get(stream_id)
     if q is None:
         return
@@ -1254,6 +1258,25 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 task_id=session_id,
                 persist_user_message=msg_text,
             )
+            # ── Ephemeral mode (/btw): deliver answer, skip persistence, cleanup ──
+            if ephemeral:
+                _answer = ''
+                for _m in reversed(result.get('messages') or []):
+                    if isinstance(_m, dict) and _m.get('role') == 'assistant':
+                        _answer = str(_m.get('content', ''))
+                        break
+                put('done', {
+                    'session': {'session_id': session_id, 'messages': result.get('messages', [])},
+                    'usage': {'input_tokens': 0, 'output_tokens': 0},
+                    'ephemeral': True,
+                    'answer': _answer,
+                })
+                _checkpoint_stop.set()
+                try:
+                    import pathlib
+                    pathlib.Path(s.path).unlink(missing_ok=True)
+                except Exception:
+                    pass
             s.messages = _restore_reasoning_metadata(
                 _previous_messages,
                 result.get('messages') or s.messages,

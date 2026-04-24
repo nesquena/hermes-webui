@@ -386,6 +386,7 @@ function toggleModelDropdown(){
   if(open){closeModelDropdown(); return;}
   if(typeof closeProfileDropdown==='function') closeProfileDropdown();
   if(typeof closeWsDropdown==='function') closeWsDropdown();
+  if(typeof closeReasoningDropdown==='function') closeReasoningDropdown();
   renderModelDropdown();
   dd.classList.add('open');
   _positionModelDropdown();
@@ -405,6 +406,77 @@ document.addEventListener('click',e=>{
 window.addEventListener('resize',()=>{
   const dd=$('composerModelDropdown');
   if(dd&&dd.classList.contains('open')) _positionModelDropdown();
+});
+
+// ── Reasoning effort chip ────────────────────────────────────────────────────
+let _currentReasoningEffort=null;
+
+function _applyReasoningChip(eff){
+  _currentReasoningEffort=eff;
+  const wrap=$('composerReasoningWrap');
+  const label=$('composerReasoningLabel');
+  if(!wrap||!label) return;
+  if(!eff||eff==='none'){wrap.style.display='none';return;}
+  wrap.style.display='';
+  label.textContent='🧠 '+eff;
+  _highlightReasoningOption(eff);
+}
+
+function fetchReasoningChip(){
+  api('/api/reasoning').then(function(st){
+    _applyReasoningChip((st&&st.reasoning_effort)||'');
+  }).catch(function(){_applyReasoningChip('');});
+}
+
+function syncReasoningChip(){
+  if(_currentReasoningEffort===null){fetchReasoningChip();return;}
+  _applyReasoningChip(_currentReasoningEffort);
+}
+
+function _highlightReasoningOption(effort){
+  const dd=$('composerReasoningDropdown');
+  if(!dd) return;
+  dd.querySelectorAll('.reasoning-option').forEach(function(opt){
+    opt.classList.toggle('selected',opt.dataset.effort===effort);
+  });
+}
+
+function toggleReasoningDropdown(){
+  const dd=$('composerReasoningDropdown');
+  const chip=$('composerReasoningChip');
+  if(!dd||!chip) return;
+  const open=dd.classList.contains('open');
+  if(open){closeReasoningDropdown();return;}
+  if(typeof closeProfileDropdown==='function') closeProfileDropdown();
+  if(typeof closeWsDropdown==='function') closeWsDropdown();
+  closeModelDropdown();
+  _highlightReasoningOption(_currentReasoningEffort);
+  dd.classList.add('open');
+  chip.classList.add('active');
+}
+
+function closeReasoningDropdown(){
+  const dd=$('composerReasoningDropdown');
+  const chip=$('composerReasoningChip');
+  if(dd) dd.classList.remove('open');
+  if(chip) chip.classList.remove('active');
+}
+
+document.addEventListener('click',function(e){
+  if(!e.target.closest('#composerReasoningChip')&&!e.target.closest('#composerReasoningDropdown')) closeReasoningDropdown();
+  if(e.target.closest('.reasoning-option')){
+    const opt=e.target.closest('.reasoning-option');
+    const effort=opt&&opt.dataset.effort;
+    if(effort){
+      api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:effort})})
+        .then(function(st){
+          _applyReasoningChip((st&&st.reasoning_effort)||effort);
+          showToast('🧠 Reasoning effort set to '+((st&&st.reasoning_effort)||effort));
+        })
+        .catch(function(){showToast('🧠 Failed to set effort');});
+      closeReasoningDropdown();
+    }
+  }
 });
 
 // ── Scroll pinning ──────────────────────────────────────────────────────────
@@ -1323,6 +1395,7 @@ function syncTopbar(){
     }
   }
   if(typeof syncModelChip==='function') syncModelChip();
+  if(typeof syncReasoningChip==='function') syncReasoningChip();
   // Show Clear button only when session has messages
   const clearBtn=$('btnClearConv');
   if(clearBtn) clearBtn.style.display=(S.messages&&S.messages.filter(msg=>msg.role!=='tool').length>0)?'':'none';
@@ -1686,13 +1759,14 @@ function renderMessages(){
     const bodyHtml = isUser ? esc(String(content)).replace(/\n/g,'<br>') : renderMd(_stripXmlToolCallsDisplay(String(content)));
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
+    const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo-2',13)}</button>` : '';
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
     const tsVal=m._ts||m.timestamp;
     const tsTitle=tsVal?new Date(tsVal*1000).toLocaleString():'';
     const tsTime=_formatMessageFooterTimestamp(tsVal);
     const timeHtml = tsTime ? `<span class="msg-time" title="${esc(tsTitle)}">${tsTime}</span>` : '';
-    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${copyBtn}${retryBtn}</span></div>`;
+    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${undoBtn}${copyBtn}${retryBtn}</span></div>`;
 
     if(isUser){
       currentAssistantTurn=null;
