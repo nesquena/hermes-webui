@@ -1231,13 +1231,47 @@ def handle_post(handler, parsed) -> bool:
             require(body, "session_id", "title")
         except ValueError as e:
             return bad(handler, str(e))
+        new_title = str(body["title"]).strip()[:80] or "Untitled"
+        sid = body["session_id"]
         try:
-            s = get_session(body["session_id"])
+            s = get_session(sid)
         except KeyError:
-            return bad(handler, "Session not found", 404)
+            # Not a WebUI-owned session — try CLI/agent sessions in state.db.
+            # This keeps double-click rename in the sidebar working uniformly
+            # across WebUI sessions and CLI/gateway sessions.
+            try:
+                from api.state_sync import rename_cli_session
+            except Exception:
+                return bad(handler, "Session not found", 404)
+            try:
+                ok = rename_cli_session(sid, new_title)
+            except ValueError as e:
+                # Title uniqueness conflict from SessionDB.set_session_title
+                return bad(handler, str(e), 409)
+            if not ok:
+                return bad(handler, "Session not found", 404)
+            return j(handler, {"session": {
+                "session_id": sid,
+                "title": new_title,
+                "is_cli_session": True,
+            }})
         with _get_session_agent_lock(body["session_id"]):
-            s.title = str(body["title"]).strip()[:80] or "Untitled"
+            s.title = new_title
             s.save()
+        # Mirror to state.db so /insights and CLI sidebar listings stay in sync
+        try:
+            from api.state_sync import sync_session_usage
+            sync_session_usage(
+                session_id=sid,
+                input_tokens=int(getattr(s, "input_tokens", 0) or 0),
+                output_tokens=int(getattr(s, "output_tokens", 0) or 0),
+                estimated_cost=getattr(s, "estimated_cost", None),
+                model=getattr(s, "model", None),
+                title=new_title,
+                message_count=len(s.messages),
+            )
+        except Exception:
+            pass  # state.db sync is best-effort
         return j(handler, {"session": s.compact()})
 
     if parsed.path == "/api/personality/set":

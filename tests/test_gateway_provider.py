@@ -471,6 +471,65 @@ class TestResolveGatewayModel(unittest.TestCase):
         finally:
             server.shutdown()
 
+    def test_resolve_uses_gw_prefix_to_disable_responses_api(self):
+        """Regression for commit e8d89a7c (#2): the resolved model name must be
+        prefixed with 'gw:' so AIAgent's responses-api auto-detection (which
+        triggers on any model starting with 'gpt-5') does NOT fire — the
+        gateway proxies everything as plain chat completions.
+        """
+        server, url = _start_mock_server()
+        try:
+            with patch("api.gateway_provider._load_gateway_configs",
+                        return_value=[{"label": "local", "url": url}]):
+                result = resolve_gateway_model("@gateway-local:claude-4.6-opus-high/test")
+                self.assertIsNotNone(result)
+                self.assertTrue(
+                    result["model"].startswith("gw:"),
+                    f"expected gw: prefix, got {result['model']!r}",
+                )
+        finally:
+            server.shutdown()
+
+    def test_resolve_sets_x_instance_keyword_header(self):
+        """Regression for commit e8d89a7c (#2): keyword is conveyed via the
+        x-instance-keyword HTTP header so the gateway can route to the right
+        instance. base_url must NOT embed the keyword (that was the rolled-back
+        commit 49a2be4f approach)."""
+        server, url = _start_mock_server()
+        try:
+            with patch("api.gateway_provider._load_gateway_configs",
+                        return_value=[{"label": "local", "url": url}]):
+                result = resolve_gateway_model("@gateway-local:claude-4.6-opus-high/test")
+                self.assertEqual(result["extra_headers"]["x-instance-keyword"], "test")
+                # And we should NOT have switched back to the path-routing layout
+                self.assertNotIn("/k/", result["base_url"])
+                self.assertNotIn("/v1/k/", result["base_url"])
+        finally:
+            server.shutdown()
+
+    def test_resolve_unknown_keyword_falls_back_to_cursor_route(self):
+        """When the requested (model, keyword) pair is not in the discovered
+        instance list, ``resolve_gateway_model`` should still produce a usable
+        config rather than returning None: cli_route defaults to 'cursor' so a
+        stale dropdown selection still routes somewhere instead of silently
+        failing.
+        """
+        server, url = _start_mock_server()
+        try:
+            with patch("api.gateway_provider._load_gateway_configs",
+                        return_value=[{"label": "local", "url": url}]):
+                result = resolve_gateway_model(
+                    "@gateway-local:never-registered-model/never-registered-kw"
+                )
+                self.assertIsNotNone(result)
+                self.assertEqual(result["base_url"], f"{url}/cursor/v1")
+                self.assertEqual(
+                    result["extra_headers"]["x-instance-keyword"],
+                    "never-registered-kw",
+                )
+        finally:
+            server.shutdown()
+
 
 # ---------------------------------------------------------------------------
 # Test: Thread safety
