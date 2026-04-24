@@ -5,6 +5,11 @@
 ### Fixed
 - **Reasoning chip now appears after the model chip** in the composer toolbar — model is a more fundamental choice and should be stable in position regardless of whether reasoning is active. Order: Profile → Workspace → Model → Reasoning. (`static/index.html`)
 
+## v0.50.204 — 2026-04-24
+
+### Fixed
+- **Docker: HERMES_HOME corrected from `/root/.hermes` to `/home/hermes/.hermes`** — `docker-compose.two-container.yml` and `docker-compose.three-container.yml` both set `HERMES_HOME=/root/.hermes` and mounted the shared `hermes-home` volume to `/root/.hermes`. The `nousresearch/hermes-agent` image drops privileges to a `hermes` user (uid=10000) via `gosu`, after which `/root` is mode `700` and inaccessible — causing `mkdir: cannot create directory '/root': Permission denied` on every startup. Fixed to use `/home/hermes/.hermes` throughout. (`docker-compose.two-container.yml`, `docker-compose.three-container.yml`) Closes #967. [#989]
+
 ## v0.50.203 — 2026-04-24
 
 ### Fixed
