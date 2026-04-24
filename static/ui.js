@@ -406,6 +406,12 @@ document.addEventListener('click',e=>{
 window.addEventListener('resize',()=>{
   const dd=$('composerModelDropdown');
   if(dd&&dd.classList.contains('open')) _positionModelDropdown();
+  // Keep the reasoning dropdown aligned under its chip when the window
+  // resizes while open — same pattern as the model dropdown above.
+  const rdd=$('composerReasoningDropdown');
+  if(rdd&&rdd.classList.contains('open')&&typeof _positionReasoningDropdown==='function'){
+    _positionReasoningDropdown();
+  }
 });
 
 // ── Reasoning effort chip ────────────────────────────────────────────────────
