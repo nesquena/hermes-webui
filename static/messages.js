@@ -1363,8 +1363,8 @@ function attachBtwStream(parentSid, streamId, question){
     if(ansEl) ansEl.innerHTML=renderMd(answer);
   });
   src.addEventListener('done',e=>{
-    src.close();
     _streamDone=true;
+    src.close();
     try{
       const d=JSON.parse(e.data);
       if(d.answer&&!answer) answer=d.answer;
@@ -1377,8 +1377,8 @@ function attachBtwStream(parentSid, streamId, question){
     showToast(t('btw_done'));
   });
   src.addEventListener('apperror',e=>{
-    src.close();
     _streamDone=true;
+    src.close();
     try{
       const d=JSON.parse(e.data);
       showToast(t('btw_failed')+(d.message||''));
