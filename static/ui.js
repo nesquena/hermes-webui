@@ -1182,18 +1182,16 @@ function _updateQueuePill(sid,count){
   const card=document.getElementById('queueCard');
   const flyoutVisible=card&&card.classList.contains('visible');
   if(count>0&&!flyoutVisible){
-    // Show compact pill with count + expand icon
-    const countLabel=typeof t==='function'?t('queued_count',count):(count===1?'1 queued':`${count} queued`);
+    const label=typeof t==='function'?t('queued_count',count):(count===1?'1 queued':`${count} queued`);
     pill.innerHTML=(typeof li==='function'?li('list-todo',12):'')+
-      `<span class="queue-pill-count">${count}</span><span>${count===1?'queued message':'queued messages'}</span>`+
-      (typeof li==='function'?li('chevron-up',12):'▲');
+      `<span class="queue-pill-count">${label}</span>`+
+      `<span class="queue-pill-chevron">`+(typeof li==='function'?li('chevron-up',12):'▲')+`</span>`;
     pill.title='Show queued messages';
     pill.classList.add('show');
     pill.onclick=()=>{
       const c=document.getElementById('queueCard');
       if(c){
         c.classList.add('visible');
-        // Move focus into queue after transition completes (350ms)
         setTimeout(()=>{
           const firstFocusable=c.querySelector('.queue-card-text, .queue-card-icon-btn');
           if(firstFocusable) firstFocusable.focus();
@@ -1252,7 +1250,9 @@ function updateQueueBadge(sessionId){
   const count=sid?getQueuedSessionCount(sid):0;
   if(count>0&&S.session&&sid===S.session.session_id){
     _renderQueueChips(sid);
-    _updateQueuePill(sid,0);  // hide pill when flyout is showing
+    // Only hide pill if card is actually visible — if user collapsed it, keep pill showing
+    const _cardEl=document.getElementById('queueCard');
+    if(_cardEl&&_cardEl.classList.contains('visible')) _updateQueuePill(sid,0);
   } else {
     const card=document.getElementById('queueCard');
     const chips=document.getElementById('queueChips');

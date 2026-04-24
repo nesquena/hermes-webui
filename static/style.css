@@ -2258,9 +2258,10 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
   font-weight: 600;
 }
 
-  /* Compact queue pill inside .composer-box when flyout is hidden */
-  .queue-pill{display:none;align-items:center;gap:6px;padding:5px 10px 5px 12px;font-size:12px;color:var(--muted);cursor:pointer;background:transparent;border:none;border-bottom:1px solid var(--border);width:100%;text-align:left;}
-  .queue-pill:hover{background:var(--hover-bg);}
+  /* Queue pill: collapsed queue card — same width as queue-card-inner, same border/radius */
+  .queue-pill{display:none;width:100%;max-width:calc(var(--msg-max) - 40px);margin:0 auto;box-sizing:border-box;align-items:center;gap:8px;padding:9px 14px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);cursor:pointer;background:var(--surface);border:1px solid var(--border);border-bottom:none;border-radius:14px 14px 0 0;text-align:left;}
+  .queue-pill:hover{background:color-mix(in srgb,var(--hover-bg) 60%,var(--surface));}
   .queue-pill.show{display:flex;animation:queuePillIn .18s ease;}
-  @keyframes queuePillIn{from{opacity:0;transform:translateY(-4px);}to{opacity:1;transform:translateY(0);}}
-  .queue-pill-count{font-weight:600;color:var(--text);}
+  @keyframes queuePillIn{from{opacity:0;transform:translateY(4px);}to{opacity:1;transform:translateY(0);}}
+  .queue-pill-count{color:var(--text);}
+  .queue-pill-chevron{margin-left:auto;opacity:.5;}
