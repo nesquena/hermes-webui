@@ -1363,13 +1363,13 @@ function attachBtwStream(parentSid, streamId, question){
     if(ansEl) ansEl.innerHTML=renderMd(answer);
   });
   src.addEventListener('done',e=>{
-    src.close();
     _streamDone=true;
+    src.close();
     try{
       const d=JSON.parse(e.data);
       if(d.answer&&!answer) answer=d.answer;
     }catch(_){}
-    _ensureBtwRow();
+    if(S.session&&S.session.session_id===parentSid) _ensureBtwRow();
     if(btwRow&&btwRow.isConnected){
       const ansEl=btwRow.querySelector('.msg-btw-answer');
       if(ansEl) ansEl.innerHTML=renderMd(answer||t('btw_no_answer'));
@@ -1377,15 +1377,15 @@ function attachBtwStream(parentSid, streamId, question){
     showToast(t('btw_done'));
   });
   src.addEventListener('apperror',e=>{
-    src.close();
     _streamDone=true;
+    src.close();
     try{
       const d=JSON.parse(e.data);
       showToast(t('btw_failed')+(d.message||''));
     }catch(_){showToast(t('btw_failed'));}
     if(btwRow&&btwRow.isConnected) btwRow.remove();
   });
-  src.addEventListener('stream_end',()=>{src.close();});
+  src.addEventListener('stream_end',()=>{_streamDone=true;src.close();});
   src.onerror=()=>{src.close();if(!_streamDone&&btwRow&&btwRow.isConnected) btwRow.remove();};
 }
 
