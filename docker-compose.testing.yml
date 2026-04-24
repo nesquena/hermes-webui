@@ -18,9 +18,9 @@ services:
     ports:
       - "127.0.0.1:8642:8642"
     volumes:
-      - ${HERMES_HOME:-~/.hermes}:/opt/hermes
+      - ${HERMES_HOME:-~/.hermes}:/opt/data
     environment:
-      - HERMES_HOME=/opt/hermes
+      - HERMES_HOME=/opt/data
     user: "10000:10000"
     restart: unless-stopped
     networks:
