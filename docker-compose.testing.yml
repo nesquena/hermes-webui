@@ -35,7 +35,7 @@ services:
     ports:
       - "8787:8787"
     volumes:
-      - ./config:/opt/hermes/config.d/:ro
+      - ./config:/opt/hermes/config.d/
       - hermes-webui-state:/home/hermeswebui/.hermes
       - hermes-webui-workspace:/workspace
     environment:
