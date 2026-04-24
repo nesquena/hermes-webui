@@ -35,8 +35,8 @@ services:
     ports:
       - "8787:8787"
     volumes:
-      - ./config:/opt/hermes/config.d/:ro
-      - ./config/config.yaml.default:/opt/hermes/config.yaml:ro
+      - ./config:/opt/hermes/config.d/
+      - ./config/config.yaml.default:/opt/hermes/config.yaml
       - hermes-webui-state:/home/hermeswebui/.hermes
       - hermes-webui-workspace:/workspace
     environment:
