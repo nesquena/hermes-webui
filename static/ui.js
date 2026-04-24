@@ -139,6 +139,18 @@ function _addLiveModelsToSelect(provider, models, sel){
     sel.appendChild(providerGroup);
   }
   const existingIds=new Set([...sel.options].map(o=>o.value));
+  // Normalized dedup: strip @provider: prefix and unify separators so
+  // 'minimax/minimax-m2.7' matches '@nous:minimax/minimax-m2.7' (#907).
+  // Strip ONLY the first colon — Ollama tag IDs are multi-colon
+  // (e.g. '@ollama-cloud:qwen3-vl:235b-instruct') and split(':',2) would
+  // truncate the tag suffix in JS (the limit arg discards extras, unlike Python).
+  const _normId=id=>{
+    let s=String(id||'');
+    if(s.startsWith('@')&&s.includes(':')) s=s.substring(s.indexOf(':')+1); // strip only @provider:
+    s=s.split('/').pop();                                                    // strip namespace prefix
+    return s.replace(/-/g,'.').toLowerCase();
+  };
+  const existingNorm=new Set([...sel.options].map(o=>_normId(o.value)));
   let added=0;
   const _ap=(window._activeProvider||'').toLowerCase();
   const _isPortalFetch=_ap && _ap!=='openrouter' && _ap!=='custom' && provider===_ap;
@@ -148,6 +160,7 @@ function _addLiveModelsToSelect(provider, models, sel){
       mid=`@${provider}:${mid}`;
     }
     if(existingIds.has(mid)) continue;
+    if(existingNorm.has(_normId(mid))) continue; // dedup cross-prefix duplicates (#907)
     const opt=document.createElement('option');
     opt.value=mid;
     opt.textContent=m.label||m.id;
@@ -373,6 +386,7 @@ function toggleModelDropdown(){
   if(open){closeModelDropdown(); return;}
   if(typeof closeProfileDropdown==='function') closeProfileDropdown();
   if(typeof closeWsDropdown==='function') closeWsDropdown();
+  if(typeof closeReasoningDropdown==='function') closeReasoningDropdown();
   renderModelDropdown();
   dd.classList.add('open');
   _positionModelDropdown();
@@ -392,6 +406,97 @@ document.addEventListener('click',e=>{
 window.addEventListener('resize',()=>{
   const dd=$('composerModelDropdown');
   if(dd&&dd.classList.contains('open')) _positionModelDropdown();
+  // Keep the reasoning dropdown aligned under its chip when the window
+  // resizes while open — same pattern as the model dropdown above.
+  const rdd=$('composerReasoningDropdown');
+  if(rdd&&rdd.classList.contains('open')&&typeof _positionReasoningDropdown==='function'){
+    _positionReasoningDropdown();
+  }
+});
+
+// ── Reasoning effort chip ────────────────────────────────────────────────────
+let _currentReasoningEffort=null;
+
+function _applyReasoningChip(eff){
+  _currentReasoningEffort=eff;
+  const wrap=$('composerReasoningWrap');
+  const label=$('composerReasoningLabel');
+  if(!wrap||!label) return;
+  if(!eff||eff==='none'){wrap.style.display='none';return;}
+  wrap.style.display='';
+  label.textContent=eff;
+  _highlightReasoningOption(eff);
+}
+
+function fetchReasoningChip(){
+  api('/api/reasoning').then(function(st){
+    _applyReasoningChip((st&&st.reasoning_effort)||'');
+  }).catch(function(){_applyReasoningChip('');});
+}
+
+function syncReasoningChip(){
+  if(_currentReasoningEffort===null){fetchReasoningChip();return;}
+  _applyReasoningChip(_currentReasoningEffort);
+}
+
+function _highlightReasoningOption(effort){
+  const dd=$('composerReasoningDropdown');
+  if(!dd) return;
+  dd.querySelectorAll('.reasoning-option').forEach(function(opt){
+    opt.classList.toggle('selected',opt.dataset.effort===effort);
+  });
+}
+
+function toggleReasoningDropdown(){
+  const dd=$('composerReasoningDropdown');
+  const chip=$('composerReasoningChip');
+  if(!dd||!chip) return;
+  const open=dd.classList.contains('open');
+  if(open){closeReasoningDropdown();return;}
+  if(typeof closeProfileDropdown==='function') closeProfileDropdown();
+  if(typeof closeWsDropdown==='function') closeWsDropdown();
+  closeModelDropdown();
+  _highlightReasoningOption(_currentReasoningEffort);
+  dd.classList.add('open');
+  _positionReasoningDropdown();
+  chip.classList.add('active');
+}
+
+function _positionReasoningDropdown(){
+  const dd=$('composerReasoningDropdown');
+  const chip=$('composerReasoningChip');
+  const footer=document.querySelector('.composer-footer');
+  if(!dd||!chip||!footer) return;
+  const chipRect=chip.getBoundingClientRect();
+  const footerRect=footer.getBoundingClientRect();
+  let left=chipRect.left-footerRect.left;
+  const maxLeft=Math.max(0,footer.clientWidth-dd.offsetWidth);
+  left=Math.max(0,Math.min(left,maxLeft));
+  dd.style.left=`${left}px`;
+}
+
+function closeReasoningDropdown(){
+  const dd=$('composerReasoningDropdown');
+  const chip=$('composerReasoningChip');
+  if(dd) dd.classList.remove('open');
+  if(chip) chip.classList.remove('active');
+}
+
+document.addEventListener('click',function(e){
+  if(!e.target.closest('#composerReasoningChip')&&!e.target.closest('#composerReasoningDropdown')) closeReasoningDropdown();
+  if(e.target.closest('.reasoning-option')){
+    const opt=e.target.closest('.reasoning-option');
+    const effort=opt&&opt.dataset.effort;
+    if(effort){
+      api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:effort})})
+        .then(function(st){
+          _applyReasoningChip((st&&st.reasoning_effort)||effort);
+          showToast('🧠 Reasoning effort set to '+((st&&st.reasoning_effort)||effort));
+        })
+        .catch(function(){showToast('🧠 Failed to set effort');});
+      closeReasoningDropdown();
+    }
+  }
 });
 
 // ── Scroll pinning ──────────────────────────────────────────────────────────
@@ -642,12 +747,19 @@ function renderMd(raw){
     }
     return html+'</ul>';
   });
+  // Ordered lists: use value= on each <li> so the correct number is preserved
+  // even when blank lines between items cause the paragraph splitter to place
+  // each item in its own <ol> container — without value= every <ol> restarts
+  // at 1, producing "1. 1. 1." instead of "1. 2. 3." (#886).
   s=s.replace(/((?:^(?:  )?\d+\. .+\n?)+)/gm,block=>{
     const lines=block.trimEnd().split('\n');
     let html='<ol>';
     for(const l of lines){
+      const numMatch=l.match(/^\s*(\d+)\. /);
+      const num=numMatch?parseInt(numMatch[1],10):null;
       const text=l.replace(/^ {0,4}\d+\. /,'');
-      html+=`<li>${inlineMd(text)}</li>`;
+      const valAttr=num!==null?` value="${num}"`:'';
+      html+=`<li${valAttr}>${inlineMd(text)}</li>`;
     }
     return html+'</ol>';
   });
@@ -1312,6 +1424,7 @@ function syncTopbar(){
     }
   }
   if(typeof syncModelChip==='function') syncModelChip();
+  if(typeof syncReasoningChip==='function') syncReasoningChip();
   // Show Clear button only when session has messages
   const clearBtn=$('btnClearConv');
   if(clearBtn) clearBtn.style.display=(S.messages&&S.messages.filter(msg=>msg.role!=='tool').length>0)?'':'none';
@@ -1675,6 +1788,7 @@ function renderMessages(){
     const bodyHtml = isUser ? esc(String(content)).replace(/\n/g,'<br>') : renderMd(_stripXmlToolCallsDisplay(String(content)));
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
+    const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo-2',13)}</button>` : '';
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
     const tsVal=m._ts||m.timestamp;
@@ -2012,16 +2126,33 @@ function appendLiveToolCard(tc){
       const replacement=buildToolCard(tc);
       replacement.dataset.liveTid=tid;
       existing.replaceWith(replacement);
+      // Keep #toolRunningRow alive — dots stay until text starts streaming
+      // or the next tool fires (which replaces them). Removing here caused
+      // a gap between tool completion and the first text token arriving.
       return;
     }
   }
   const row=buildToolCard(tc);
   if(tid) row.dataset.liveTid=tid;
-  // Insert BEFORE the live assistant segment if it exists, so tool cards stay
-  // between the current thinking block(s) and the streaming response.
-  const liveAssistant=inner.querySelector('[data-live-assistant="1"]');
-  if(liveAssistant) inner.insertBefore(row, liveAssistant);
+  // Insert after whichever comes last: the current live assistant segment or
+  // the last tool card. This handles both cases:
+  //   text → tool1 → tool2  (no text between tools: anchor is card1)
+  //   text1 → tool1 → text2 → tool2  (text between tools: anchor is text2)
+  const children=Array.from(inner.children);
+  // Include .thinking-card-row so tool cards land AFTER a finalized thinking
+  // card, not between the text segment and thinking.
+  const anchor=children.filter(el=>el.matches('[data-live-assistant="1"],.tool-card-row,.thinking-card-row')).pop();
+  if(anchor) anchor.insertAdjacentElement('afterend', row);
   else inner.appendChild(row);
+  // Add a 3-dot waiting indicator below the tool card so there's visual
+  // feedback while the tool is running. Removed when text starts streaming
+  // (ensureAssistantRow) or when tool_complete fires.
+  const oldWait=$('toolRunningRow');if(oldWait)oldWait.remove();
+  const waitRow=document.createElement('div');
+  waitRow.id='toolRunningRow';
+  waitRow.className='assistant-segment';
+  waitRow.innerHTML='<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';
+  row.insertAdjacentElement('afterend', waitRow);
   if(typeof scrollIfPinned==='function') scrollIfPinned();
 }
 
@@ -2259,6 +2390,13 @@ function _thinkingMarkup(text=''){
 function finalizeThinkingCard(){
   const row=$('thinkingRow');
   if(!row) return;
+  // If the row is still just a spinner (no thinking content rendered),
+  // remove it entirely — it's the initial waiting dots.
+  const hasContent=row.querySelector('.thinking-card') || row.classList.contains('thinking-card-row');
+  if(!hasContent && row.getAttribute('data-thinking-active')==='1'){
+    row.remove();
+    return;
+  }
   row.removeAttribute('id');
   row.removeAttribute('data-thinking-active');
 }
@@ -2277,7 +2415,17 @@ function appendThinking(text=''){
     row.className='assistant-segment';
     row.id='thinkingRow';
     row.setAttribute('data-thinking-active','1');
-    blocks.appendChild(row);
+    // Insert after whichever comes last: a live assistant segment or a tool card.
+    // This mirrors appendLiveToolCard's anchor logic so thinking always appears
+    // in the right position in the interleaved sequence.
+    // Also skip #toolRunningRow (dots) — thinking should go before dots, not after.
+    const allChildren=Array.from(blocks.children);
+    const anchor=allChildren.filter(el=>
+      el.id!=='toolRunningRow' &&
+      el.matches('[data-live-assistant="1"],.tool-card-row')
+    ).pop();
+    if(anchor) anchor.insertAdjacentElement('afterend', row);
+    else blocks.appendChild(row);
   }
   row.className=(text&&String(text).trim())?'assistant-segment thinking-card-row':'assistant-segment';
   row.innerHTML=_thinkingMarkup(text);

@@ -66,6 +66,9 @@ from api.config import (
     MAX_FILE_BYTES,
     MAX_UPLOAD_BYTES,
     CHAT_LOCK,
+    _get_session_agent_lock,
+    SESSION_AGENT_LOCKS,
+    SESSION_AGENT_LOCKS_LOCK,
     load_settings,
     save_settings,
     set_hermes_default_model,
@@ -573,6 +576,41 @@ def handle_get(handler, parsed) -> bool:
             logged_in = bool(cv and verify_session(cv))
         return j(handler, {"auth_enabled": is_auth_enabled(), "logged_in": logged_in})
 
+    if parsed.path in ("/manifest.json", "/manifest.webmanifest"):
+        static_root = Path(__file__).parent.parent / "static"
+        manifest_path = (static_root / "manifest.json").resolve()
+        if manifest_path.exists():
+            data = manifest_path.read_bytes()
+            handler.send_response(200)
+            handler.send_header("Content-Type", "application/manifest+json; charset=utf-8")
+            handler.send_header("Cache-Control", "no-store")
+            handler.send_header("Content-Length", str(len(data)))
+            handler.end_headers()
+            handler.wfile.write(data)
+            return True
+        return j(handler, {"error": "not found"}, status=404)
+
+    if parsed.path == "/sw.js":
+        static_root = Path(__file__).parent.parent / "static"
+        sw_path = (static_root / "sw.js").resolve()
+        if sw_path.exists():
+            # Inject the current git-derived version as the cache name so the
+            # service worker cache busts automatically on every new deploy.
+            from api.updates import WEBUI_VERSION
+            text = sw_path.read_text(encoding="utf-8").replace(
+                "__CACHE_VERSION__", WEBUI_VERSION
+            )
+            data = text.encode("utf-8")
+            handler.send_response(200)
+            handler.send_header("Content-Type", "application/javascript; charset=utf-8")
+            handler.send_header("Cache-Control", "no-store")
+            handler.send_header("Service-Worker-Allowed", "/")
+            handler.send_header("Content-Length", str(len(data)))
+            handler.end_headers()
+            handler.wfile.write(data)
+            return True
+        return j(handler, {"error": "not found"}, status=404)
+
     if parsed.path == "/favicon.ico":
         static_root = Path(__file__).parent.parent / "static"
         ico_path = (static_root / "favicon.ico").resolve()
@@ -702,6 +740,13 @@ def handle_get(handler, parsed) -> bool:
             return j(handler, session_usage(sid))
         except KeyError:
             return bad(handler, "Session not found", 404)
+
+    if parsed.path == "/api/background/status":
+        sid = parse_qs(parsed.query).get("session_id", [""])[0]
+        if not sid:
+            return bad(handler, "Missing session_id")
+        from api.background import get_results
+        return j(handler, {"results": get_results(sid)})
 
     if parsed.path == "/api/sessions":
         webui_sessions = all_sessions()
@@ -1049,8 +1094,9 @@ def handle_post(handler, parsed) -> bool:
             s = get_session(body["session_id"])
         except KeyError:
             return bad(handler, "Session not found", 404)
-        s.title = str(body["title"]).strip()[:80] or "Untitled"
-        s.save()
+        with _get_session_agent_lock(body["session_id"]):
+            s.title = str(body["title"]).strip()[:80] or "Untitled"
+            s.save()
         return j(handler, {"session": s.compact()})
 
     if parsed.path == "/api/personality/set":
@@ -1093,8 +1139,9 @@ def handle_post(handler, parsed) -> bool:
                 prompt = "\n".join(p for p in parts if p)
             else:
                 prompt = str(value)
-        s.personality = name if name else None
-        s.save()
+        with _get_session_agent_lock(sid):
+            s.personality = name if name else None
+            s.save()
         return j(handler, {"ok": True, "personality": s.personality, "prompt": prompt})
 
     if parsed.path == "/api/session/update":
@@ -1110,9 +1157,10 @@ def handle_post(handler, parsed) -> bool:
             new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace)))
         except ValueError as e:
             return bad(handler, str(e))
-        s.workspace = new_ws
-        s.model = body.get("model", s.model)
-        s.save()
+        with _get_session_agent_lock(body["session_id"]):
+            s.workspace = new_ws
+            s.model = body.get("model", s.model)
+            s.save()
         set_last_workspace(new_ws)
         return j(handler, {"session": s.compact() | {"messages": s.messages}})
 
@@ -1134,6 +1182,10 @@ def handle_post(handler, parsed) -> bool:
             p.unlink(missing_ok=True)
         except Exception:
             logger.debug("Failed to unlink session file %s", p)
+        # Prune the per-session agent lock so deleted sessions don't leak
+        # Lock entries in SESSION_AGENT_LOCKS forever.
+        with SESSION_AGENT_LOCKS_LOCK:
+            SESSION_AGENT_LOCKS.pop(sid, None)
         try:
             SESSION_INDEX_FILE.unlink(missing_ok=True)
         except Exception:
@@ -1156,10 +1208,11 @@ def handle_post(handler, parsed) -> bool:
             s = get_session(body["session_id"])
         except KeyError:
             return bad(handler, "Session not found", 404)
-        s.messages = []
-        s.tool_calls = []
-        s.title = "Untitled"
-        s.save()
+        with _get_session_agent_lock(body["session_id"]):
+            s.messages = []
+            s.tool_calls = []
+            s.title = "Untitled"
+            s.save()
         return j(handler, {"ok": True, "session": s.compact()})
 
     if parsed.path == "/api/session/truncate":
@@ -1174,8 +1227,9 @@ def handle_post(handler, parsed) -> bool:
         except KeyError:
             return bad(handler, "Session not found", 404)
         keep = int(body["keep_count"])
-        s.messages = s.messages[:keep]
-        s.save()
+        with _get_session_agent_lock(body["session_id"]):
+            s.messages = s.messages[:keep]
+            s.save()
         return j(
             handler, {"ok": True, "session": s.compact() | {"messages": s.messages}}
         )
@@ -1210,6 +1264,12 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         except ValueError as e:
             return j(handler, {"error": str(e)})
+
+    if parsed.path == "/api/btw":
+        return _handle_btw(handler, body)
+
+    if parsed.path == "/api/background":
+        return _handle_background(handler, body)
 
     if parsed.path == "/api/chat/start":
         return _handle_chat_start(handler, body)
@@ -1448,8 +1508,9 @@ def handle_post(handler, parsed) -> bool:
             s = get_session(body["session_id"])
         except KeyError:
             return bad(handler, "Session not found", 404)
-        s.pinned = bool(body.get("pinned", True))
-        s.save()
+        with _get_session_agent_lock(body["session_id"]):
+            s.pinned = bool(body.get("pinned", True))
+            s.save()
         return j(handler, {"ok": True, "session": s.compact()})
 
     # ── Session archive (POST) ──
@@ -1462,8 +1523,9 @@ def handle_post(handler, parsed) -> bool:
             s = get_session(body["session_id"])
         except KeyError:
             return bad(handler, "Session not found", 404)
-        s.archived = bool(body.get("archived", True))
-        s.save()
+        with _get_session_agent_lock(body["session_id"]):
+            s.archived = bool(body.get("archived", True))
+            s.save()
         return j(handler, {"ok": True, "session": s.compact()})
 
     # ── Session move to project (POST) ──
@@ -1476,8 +1538,9 @@ def handle_post(handler, parsed) -> bool:
             s = get_session(body["session_id"])
         except KeyError:
             return bad(handler, "Session not found", 404)
-        s.project_id = body.get("project_id") or None
-        s.save()
+        with _get_session_agent_lock(body["session_id"]):
+            s.project_id = body.get("project_id") or None
+            s.save()
         return j(handler, {"ok": True, "session": s.compact()})
 
     # ── Project CRUD (POST) ──
@@ -2407,6 +2470,133 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
     return j(handler, {"ok": True, "cleaned": cleaned})
 
 
+def _handle_btw(handler, body):
+    """POST /api/btw — ephemeral side question using session context.
+
+    Creates a temporary hidden session, streams the answer via SSE, then
+    discards the session. The parent session is not modified.
+    """
+    try:
+        require(body, "session_id")
+        require(body, "question")
+    except ValueError as e:
+        return bad(handler, str(e))
+    try:
+        s = get_session(body["session_id"])
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    question = str(body["question"]).strip()
+    if not question:
+        return bad(handler, "question is required")
+    # Duplicate-stream guard (same pattern as chat/start)
+    current_stream_id = getattr(s, "active_stream_id", None)
+    if current_stream_id:
+        with STREAMS_LOCK:
+            if current_stream_id in STREAMS:
+                return j(handler, {"error": "session already has an active stream"}, status=409)
+        s.active_stream_id = None
+    # Create ephemeral hidden session inheriting context
+    from api.models import new_session as _new_session
+    ephemeral = _new_session(workspace=s.workspace, model=s.model, profile=getattr(s, 'profile', None))
+    # Copy conversation history for context (agent reads from messages)
+    ephemeral.messages = list(s.messages or [])
+    ephemeral.title = f"btw: {question[:60]}"
+    ephemeral.save()
+    stream_id = uuid.uuid4().hex
+    ephemeral.active_stream_id = stream_id
+    ephemeral.save()
+    q = queue.Queue()
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = q
+    from api.background import track_btw
+    track_btw(body["session_id"], ephemeral.session_id, stream_id, question)
+    thr = threading.Thread(
+        target=_run_agent_streaming,
+        args=(ephemeral.session_id, question, s.model, s.workspace, stream_id, None),
+        kwargs={"ephemeral": True},
+        daemon=True,
+    )
+    thr.start()
+    return j(handler, {"stream_id": stream_id, "session_id": ephemeral.session_id, "parent_session_id": body["session_id"]})
+
+
+def _handle_background(handler, body):
+    """POST /api/background — run prompt in parallel background agent.
+
+    Creates a hidden session, starts streaming in a daemon thread.
+    Frontend polls /api/background/status for completed results.
+    """
+    try:
+        require(body, "session_id")
+        require(body, "prompt")
+    except ValueError as e:
+        return bad(handler, str(e))
+    try:
+        s = get_session(body["session_id"])
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    prompt = str(body["prompt"]).strip()
+    if not prompt:
+        return bad(handler, "prompt is required")
+    from api.models import new_session as _new_session
+    bg = _new_session(workspace=s.workspace, model=s.model, profile=getattr(s, 'profile', None))
+    bg.title = f"bg: {prompt[:60]}"
+    bg.save()
+    stream_id = uuid.uuid4().hex
+    bg.active_stream_id = stream_id
+    bg.save()
+    q = queue.Queue()
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = q
+    task_id = uuid.uuid4().hex[:8]
+    from api.background import track_background, complete_background
+    parent_sid = body["session_id"]
+    bg_sid = bg.session_id
+    track_background(parent_sid, bg_sid, stream_id, task_id, prompt)
+
+    def _run_bg_and_notify():
+        """Run the background agent, then mark the tracked task `done` with the
+        last assistant reply so `/api/background/status` can surface it.  Without
+        this, `complete_background()` is never called and the result is lost —
+        `get_results()` would see a forever-`running` task and return nothing.
+        """
+        try:
+            _run_agent_streaming(bg_sid, prompt, s.model, s.workspace, stream_id, None)
+            # Reload the bg session from disk and extract the final assistant reply.
+            try:
+                from api.models import Session as _Session
+                reloaded = _Session.load(bg_sid)
+                _answer = ""
+                for _m in reversed((reloaded.messages if reloaded else None) or []):
+                    if not isinstance(_m, dict) or _m.get("role") != "assistant":
+                        continue
+                    if _m.get("_error"):
+                        continue
+                    _content = str(_m.get("content") or "").strip()
+                    if _content:
+                        _answer = _content
+                        break
+                complete_background(parent_sid, task_id, _answer or "(no answer produced)")
+            except Exception:
+                complete_background(parent_sid, task_id, "(background task failed)")
+            # Best-effort cleanup of the hidden bg session file so it doesn't
+            # clutter the sidebar or SESSION_DIR. The index is pruned on the
+            # next rebuild via _index_entry_exists().
+            try:
+                (SESSION_DIR / f"{bg_sid}.json").unlink(missing_ok=True)
+            except Exception:
+                pass
+        except Exception:
+            try:
+                complete_background(parent_sid, task_id, "(background task failed)")
+            except Exception:
+                pass
+
+    thr = threading.Thread(target=_run_bg_and_notify, daemon=True)
+    thr.start()
+    return j(handler, {"task_id": task_id, "stream_id": stream_id, "session_id": bg.session_id})
+
+
 def _handle_chat_start(handler, body):
     try:
         require(body, "session_id")
@@ -2445,13 +2635,14 @@ def _handle_chat_start(handler, body):
         # Stale stream id from a previous run; clear and continue.
         s.active_stream_id = None
     stream_id = uuid.uuid4().hex
-    s.workspace = workspace
-    s.model = model
-    s.active_stream_id = stream_id
-    s.pending_user_message = msg
-    s.pending_attachments = attachments
-    s.pending_started_at = time.time()
-    s.save()
+    with _get_session_agent_lock(s.session_id):
+        s.workspace = workspace
+        s.model = model
+        s.active_stream_id = stream_id
+        s.pending_user_message = msg
+        s.pending_attachments = attachments
+        s.pending_started_at = time.time()
+        s.save()
     set_last_workspace(workspace)
     q = queue.Queue()
     with STREAMS_LOCK:
@@ -2470,15 +2661,14 @@ def _handle_chat_start(handler, body):
 
 def _handle_chat_sync(handler, body):
     """Fallback synchronous chat endpoint (POST /api/chat). Not used by frontend."""
-    from api.config import _get_session_agent_lock
-
     s = get_session(body["session_id"])
     msg = str(body.get("message", "")).strip()
     if not msg:
         return j(handler, {"error": "empty message"}, status=400)
     workspace = Path(body.get("workspace") or s.workspace).expanduser().resolve()
-    s.workspace = str(workspace)
-    s.model = body.get("model") or s.model
+    with _get_session_agent_lock(s.session_id):
+        s.workspace = str(workspace)
+        s.model = body.get("model") or s.model
     from api.streaming import _ENV_LOCK
 
     with _ENV_LOCK:
@@ -2559,14 +2749,15 @@ def _handle_chat_sync(handler, body):
                 os.environ.pop("HERMES_SESSION_KEY", None)
             else:
                 os.environ["HERMES_SESSION_KEY"] = old_session_key
-    s.messages = _restore_reasoning_metadata(
-        _previous_messages,
-        result.get("messages") or s.messages,
-    )
-    # Only auto-generate title when still default; preserves user renames
-    if s.title == "Untitled":
-        s.title = title_from(s.messages, s.title)
-    s.save()
+    with _get_session_agent_lock(s.session_id):
+        s.messages = _restore_reasoning_metadata(
+            _previous_messages,
+            result.get("messages") or s.messages,
+        )
+        # Only auto-generate title when still default; preserves user renames
+        if s.title == "Untitled":
+            s.title = title_from(s.messages, s.title)
+        s.save()
     # Sync to state.db for /insights (opt-in setting)
     try:
         if load_settings().get("sync_to_insights"):
@@ -3094,33 +3285,42 @@ def _handle_session_compress(handler, body):
         if not resolved_api_key:
             return bad(handler, "No provider configured -- cannot compress.")
 
-        with _cfg._get_session_agent_lock(sid):
-            original_messages = list(messages)
-            approx_tokens = _estimate_messages_tokens_rough(original_messages)
+        # Compute compression *outside* the lock — the LLM round-trip can take
+        # many seconds and we must not block cancel_stream or other writers.
+        # Lock contract: hold for the in-memory mutation only, never across
+        # network I/O.
+        original_messages = list(messages)
+        approx_tokens = _estimate_messages_tokens_rough(original_messages)
 
-            agent = _run_agent.AIAgent(
-                model=resolved_model,
-                provider=resolved_provider,
-                base_url=resolved_base_url,
-                api_key=resolved_api_key,
-                platform="cli",
-                quiet_mode=True,
-                enabled_toolsets=_resolve_cli_toolsets(),
-                session_id=sid,
-            )
-            compressed = agent.context_compressor.compress(
-                original_messages,
-                current_tokens=approx_tokens,
-                focus_topic=focus_topic,
-            )
-            new_tokens = _estimate_messages_tokens_rough(compressed)
-            summary = _summarize_manual_compression(
-                original_messages,
-                compressed,
-                approx_tokens,
-                new_tokens,
-                focus_topic=focus_topic,
-            )
+        agent = _run_agent.AIAgent(
+            model=resolved_model,
+            provider=resolved_provider,
+            base_url=resolved_base_url,
+            api_key=resolved_api_key,
+            platform="cli",
+            quiet_mode=True,
+            enabled_toolsets=_resolve_cli_toolsets(),
+            session_id=sid,
+        )
+        compressed = agent.context_compressor.compress(
+            original_messages,
+            current_tokens=approx_tokens,
+            focus_topic=focus_topic,
+        )
+        new_tokens = _estimate_messages_tokens_rough(compressed)
+        summary = _summarize_manual_compression(
+            original_messages,
+            compressed,
+            approx_tokens,
+            new_tokens,
+            focus_topic=focus_topic,
+        )
+
+        with _cfg._get_session_agent_lock(sid):
+            # Re-read messages to detect concurrent edits during the LLM call.
+            # If the history changed, the compression result is stale — abort.
+            if _sanitize_messages_for_api(s.messages) != original_messages:
+                return bad(handler, "Session was modified during compression; please retry.", 409)
 
             s.messages = compressed
             s.tool_calls = []

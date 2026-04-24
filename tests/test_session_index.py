@@ -382,6 +382,56 @@ def test_deadlock_guard_on_fallback():
     assert isinstance(index, list)
 
 
+def test_incremental_index_disk_io_runs_outside_lock(monkeypatch):
+    """Fast-path disk I/O (fsync/replace) must run after releasing LOCK."""
+    index_file = models.SESSION_INDEX_FILE
+
+    sA = _make_session("sess_a", "Alpha", updated_at=100.0)
+    sA.path.write_text(json.dumps(sA.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_session_index(updates=None)  # seed index
+
+    sA.title = "Alpha V2"
+    sA.updated_at = 200.0
+
+    fsync_lock_states = []
+    original_fsync = models.os.fsync
+
+    def _observing_fsync(fd):
+        fsync_lock_states.append(models.LOCK.locked())
+        return original_fsync(fd)
+
+    monkeypatch.setattr(models.os, "fsync", _observing_fsync)
+
+    _write_session_index(updates=[sA])
+
+    assert fsync_lock_states, "Expected at least one fsync call during index write"
+    assert not any(fsync_lock_states), (
+        "_write_session_index fast path must not hold LOCK during fsync/disk I/O"
+    )
+
+
+def test_full_rebuild_index_disk_io_runs_outside_lock(monkeypatch):
+    """Full-rebuild disk I/O (fsync/replace) must run after releasing LOCK."""
+    sA = _make_session("sess_a", "Alpha", updated_at=100.0)
+    sA.path.write_text(json.dumps(sA.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    fsync_lock_states = []
+    original_fsync = models.os.fsync
+
+    def _observing_fsync(fd):
+        fsync_lock_states.append(models.LOCK.locked())
+        return original_fsync(fd)
+
+    monkeypatch.setattr(models.os, "fsync", _observing_fsync)
+
+    _write_session_index(updates=None)
+
+    assert fsync_lock_states, "Expected at least one fsync call during index write"
+    assert not any(fsync_lock_states), (
+        "_write_session_index full rebuild must not hold LOCK during fsync/disk I/O"
+    )
+
+
 def test_all_sessions_ignores_stale_index_entries():
     """Reading via all_sessions() must not surface ghost rows from _index.json."""
     index_file = models.SESSION_INDEX_FILE

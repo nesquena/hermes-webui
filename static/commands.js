@@ -20,6 +20,8 @@ const COMMANDS=[
   {name:'title',     desc:t('cmd_title'),    fn:cmdTitle,    arg:'[title]'},
   {name:'retry',     desc:t('cmd_retry'),    fn:cmdRetry,     noEcho:true},
   {name:'undo',      desc:t('cmd_undo'),     fn:cmdUndo,      noEcho:true},
+  {name:'btw',       desc:t('cmd_btw'),      fn:cmdBtw,       arg:'question', noEcho:true},
+  {name:'background',desc:t('cmd_background'),fn:cmdBackground,arg:'prompt',  noEcho:true},
   {name:'status',    desc:t('cmd_status'),   fn:cmdStatus},
   {name:'voice',     desc:t('cmd_voice'),    fn:cmdVoice,     noEcho:true},
   {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|none|minimal|low|medium|high|xhigh', subArgs:['show','hide','none','minimal','low','medium','high','xhigh'], noEcho:true},
@@ -573,6 +575,36 @@ async function cmdUndo(){
     showToast(`↩ ${t('undid_n_messages')} ${r.removed_count} ${t('undid_messages_suffix')}`);
   }catch(e){showToast(t('undo_failed')+e.message);}
 }
+async function undoLastExchange(){await cmdUndo();}
+async function cmdBtw(args){
+  if(!S.session){showToast(t('no_active_session'));return;}
+  const question=(args||'').trim();
+  if(!question){showToast(t('cmd_btw_usage'));return;}
+  showToast(t('btw_asking'));
+  const activeSid=S.session.session_id;
+  try{
+    const r=await api('/api/btw',{method:'POST',body:JSON.stringify({session_id:activeSid,question})});
+    if(r&&r.error){showToast(r.error);return;}
+    // Connect to the ephemeral SSE stream
+    const streamId=r.stream_id;
+    const parentSid=r.parent_session_id;
+    if(typeof attachBtwStream==='function') attachBtwStream(parentSid,streamId,question);
+  }catch(e){showToast(t('btw_failed')+e.message);}
+}
+async function cmdBackground(args){
+  if(!S.session){showToast(t('no_active_session'));return;}
+  const prompt=(args||'').trim();
+  if(!prompt){showToast(t('cmd_background_usage'));return;}
+  showToast(t('bg_running'));
+  const activeSid=S.session.session_id;
+  try{
+    const r=await api('/api/background',{method:'POST',body:JSON.stringify({session_id:activeSid,prompt})});
+    if(r&&r.error){showToast(r.error);return;}
+    // Show background badge and start polling
+    if(typeof showBackgroundBadge==='function') showBackgroundBadge(r.task_id);
+    if(typeof startBackgroundPolling==='function') startBackgroundPolling(activeSid,r.task_id,prompt);
+  }catch(e){showToast(t('bg_failed')+e.message);}
+}
 async function cmdStatus(){
   if(!S.session){showToast(t('no_active_session'));return;}
   try{
@@ -622,7 +654,8 @@ function cmdReasoning(args){
     api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:arg})})
       .then(function(st){
         const eff=(st && st.reasoning_effort)||arg;
-        showToast(BRAIN+' Reasoning effort set to '+eff+' (saved; applies to next turn)');
+        showToast(BRAIN+' Reasoning effort: '+eff+' (saved; applies to next turn)');
+        if(typeof _applyReasoningChip==='function') _applyReasoningChip(eff);
       })
       .catch(function(e){
         showToast(BRAIN+' Failed to set effort: '+(e && e.message ? e.message : arg));

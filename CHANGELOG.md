@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Reasoning chip now appears after the model chip** in the composer toolbar — model is a more fundamental choice and should be stable in position regardless of whether reasoning is active. Order: Profile → Workspace → Model → Reasoning. (`static/index.html`)
+
+## v0.50.185 — 2026-04-24
+
+### Fixed
+- **`/btw` stream handler hardened** — `_streamDone=true` now set *before* `src.close()` in `done` and `apperror` handlers (defensive ordering); `_ensureBtwRow()` in `done` gated on session match (`S.session.session_id === parentSid`) to prevent btw bubble leaking into a different session if the user switches mid-stream; `stream_end` handler also sets `_streamDone=true` for defense-in-depth. 14 new regression tests added. (`static/messages.js`, `tests/test_reasoning_chip_btw_fixes.py`) [#935]
+- **`/reasoning` toast aligned with BRAIN prefix** — success toast now reads `🧠 Reasoning effort: <level>` consistent with the command's other toasts. (`static/commands.js`) [#939]
+- **Bootstrap Python discovery finds `.venv/` layout** — `discover_launcher_python` now checks both `venv/` and `.venv/` inside the agent directory, covering installations that use a leading-dot venv layout. (`bootstrap.py`) [#941]
+
+## v0.50.184 — 2026-04-24
+
+### Fixed
+- **Reasoning chip dropdown now opens correctly** — the dropdown was placed inside `.composer-left` which has `overflow-y: hidden`, clipping the upward-opening menu entirely. Moved `#composerReasoningDropdown` outside to sit alongside the model/profile/workspace dropdowns and added `_positionReasoningDropdown()` for consistent chip-aligned positioning. Z-index raised to 200 to match other composer dropdowns. (`static/index.html`, `static/style.css`, `static/ui.js`)
+- **Reasoning chip icon is now a monochrome SVG** — replaced the `🧠` emoji in the label with a `stroke="currentColor"` brain-outline SVG matching the style of all other composer chips. (`static/index.html`, `static/ui.js`)
+- **`/reasoning <level>` now immediately updates the chip** — previously called `syncReasoningChip()` which re-applied the stale cached value. Now calls `_applyReasoningChip(eff)` directly with the server-confirmed effort level. (`static/commands.js`)
+- **`/btw` answer no longer vanishes after rendering** — `onerror` was firing when the server cleanly closed the SSE connection after `stream_end`, removing the just-rendered answer bubble. A `_streamDone` flag now prevents `onerror` from wiping the row after a successful stream. Also added `_ensureBtwRow()` call in `done` handler so the bubble renders even if no `token` events arrived. (`static/messages.js`) Closes #933.
+
 ### Added
 - **Session attention indicators in the sidebar** — the session list now shows a
   spinning indicator while a session is actively streaming (even in the
@@ -28,6 +46,76 @@
   limited to trusted roots (home, saved workspaces, and the boot default
   workspace subtree) and never enumerate blocked system roots. (`api/routes.py`,
   `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
+
+## [v0.50.183] — 2026-04-24
+
+### Added
+- **`/btw` slash command** — ask an ephemeral side question using current session context without adding to history. Creates a hidden session, streams the answer in a visually distinct bubble, then discards the session. Includes `attachBtwStream()` SSE consumer and `POST /api/btw` route. (`api/routes.py`, `api/background.py`, `static/commands.js`, `static/messages.js`, `static/style.css`)
+- **`/background` slash command** — run a prompt in a parallel background agent without blocking the active conversation. Frontend polls `GET /api/background/status` for results and displays completed answers inline. Includes badge indicator in composer footer. (`api/routes.py`, `api/background.py`, `static/commands.js`, `static/messages.js`, `static/index.html`)
+- **Undo button on last assistant message** — surfaced as an ↩ icon on the last assistant message, calling the existing `/undo` command for discoverability. (`static/ui.js`)
+- **Reasoning effort chip in composer** — visual chip to set reasoning effort level from the composer footer without typing a command. (`static/ui.js`, `static/index.html`, `static/style.css`)
+
+### Fixed
+- **Background task completion hook wired** — `complete_background()` was never called after a background agent finished, so tasks stayed in `status="running"` forever and polling always returned `[]`. Fixed by wrapping `_run_agent_streaming` in `_run_bg_and_notify` which extracts the last assistant message and signals the tracker. Also fixed `get_results()` to retain in-flight tasks during polls so concurrent tasks are not dropped. (`api/background.py`, `api/routes.py`, `tests/test_background_tasks.py`)
+- **Ephemeral sessions correctly skip persistence** — added `return` after the ephemeral `done` event in `_run_agent_streaming()`, preventing ephemeral session state from being written to disk after stream completion. (`api/streaming.py`)
+
+Co-authored by @bergeouss.
+
+## [v0.50.181] — 2026-04-24
+
+### Changed
+- **Vendor streaming-markdown@0.2.15** — self-hosts the incremental markdown parser instead of loading it from jsDelivr CDN. The library (12.6 KB) is committed to `static/vendor/smd.min.js` so the app works fully offline / air-gapped, and the exact bytes are pinned in version control. SHA-384 hash preserved in an HTML comment for manual audit. (`static/vendor/smd.min.js`, `static/index.html`) Co-authored by @bsgdigital.
+
+## [v0.50.180] — 2026-04-23
+
+### Added
+- **Incremental streaming markdown via `streaming-markdown`** — replaces the per-animation-frame full `innerHTML` re-render with an incremental DOM-building parser. During streaming, only new character deltas are fed to the parser per frame (`_smdWrite()`), eliminating DOM thrashing and improving rendering smoothness. Prism.js / KaTeX state no longer gets reset mid-stream. Falls back to the existing `renderMd()` path when the library is unavailable. (`static/messages.js`, `static/index.html`) Co-authored by @bsgdigital.
+
+## [v0.50.179] — 2026-04-23
+
+### Fixed
+- **Onboarding wizard clobbering CLI users' config after server restart** — CLI-configured users (who set up via `hermes model` / `hermes auth`) had no `onboarding_completed` flag in `settings.json`. After a git branch switch or server restart, `verify_hermes_imports()` could momentarily return `imports_ok=False`, making `chat_ready=False` and causing the wizard to reappear with a destructive dropdown default (openrouter). Fixed by writing `onboarding_completed: True` to `settings.json` the first time `config_auto_completed` evaluates to `True`, so the flag survives future transient import failures. (`api/onboarding.py`) Co-authored by @bsgdigital.
+
+## [v0.50.177] — 2026-04-23
+
+### Fixed
+- **Settings dialog and message controls unusable on mobile** — three mobile usability fixes: (1) settings tab strip replaced by a native `<select>` dropdown on narrow viewports, panel goes full-width; (2) provider card Save/Remove buttons become icon-only on mobile so the API key input fills the available width; (3) message timestamps, copy, and edit buttons are always visible on touch screens (no hover state on mobile). (`static/index.html`, `static/panels.js`, `static/style.css`) Co-authored by @bsgdigital.
+## [v0.50.178] — 2026-04-23
+
+### Added
+- **PWA support — installable as a standalone app** — adds a Web App Manifest (`manifest.json`) and a minimal service worker (`sw.js`) with cache-first strategy for app shell assets and network-bypass for all `/api/*` and `/stream` endpoints. Cache name auto-busts on every deploy via git-derived version injection. Enables "Add to Home Screen" on Android, iOS, and desktop Chrome without any offline API response caching (live backend always required). (`static/manifest.json`, `static/sw.js`, `static/index.html`, `api/routes.py`) Closes #685. Co-authored by @bsgdigital.
+
+## [v0.50.176] — 2026-04-23
+
+### Fixed
+- **Duplicate model dropdown entries when CLI default matches live-fetched model** — `_addLiveModelsToSelect()` now normalises IDs before the dedup check (strips `@provider:` prefix using `indexOf`+`substring` to preserve multi-colon Ollama tag suffixes like `qwen3-vl:235b-instruct`, strips namespace prefix, unifies separators). (`static/ui.js`) Closes #907.
+- **New Chat uses stale default model after saving Preferences without reload** — `window._defaultModel` is now updated in `_applySavedSettingsUi()` so `newSession()` picks up the newly saved default immediately. (`static/panels.js`) Closes #908.
+- **Injected CLI default model shows raw lowercase label** — new `_get_label_for_model()` helper looks up the model's formatted label from existing catalog groups before falling back to title-casing the bare ID. (`api/config.py`) Closes #909.
+
+## [v0.50.175] — 2026-04-23
+
+### Fixed
+- **Session persistence hardened against concurrent write races** — all session-mutation paths (streaming success/error/cancel, periodic checkpoint, HTTP endpoints for title/personality/workspace/clear/pin/archive/project) now hold a per-session `_agent_lock` during in-memory mutation and `Session.save()`. The checkpoint thread is stopped and joined before the final save, preventing stale object clobbers. `Session.save()` uses fsync + atomic rename with a pid+thread_id tmp suffix. `_write_session_index()` gets a dedicated `_INDEX_WRITE_LOCK` so disk I/O runs outside the global `LOCK`, reducing head-of-line blocking. Context compression now runs the LLM call outside the lock with a stale-edit check (409) on write-back. (`api/streaming.py`, `api/models.py`, `api/routes.py`, `api/session_ops.py`, `api/config.py`) Closes #765. Co-authored by @starship-s.
+
+## [v0.50.174] — 2026-04-23
+
+### Fixed
+- **Interleaved streaming order (Text → Thinking → Tool → Text)** — after a tool call completes, new text tokens now create a new DOM segment below the tool card instead of updating the old segment above it. Adds `segmentStart`/`_freshSegment` flags to track segment boundaries; scopes the streaming cursor to the last live assistant segment only; adds a 3-dot waiting indicator below each tool card; fixes `appendLiveToolCard`/`appendThinking` anchor logic for multi-tool sequences. (`static/messages.js`, `static/ui.js`, `static/style.css`) Co-authored by @bsgdigital.
+
+## [v0.50.173] — 2026-04-23
+
+### Fixed
+- **Ordered list items always showed "1." regardless of position** — when LLMs
+  output numbered lists with blank lines between items, the paragraph-splitter
+  in `renderMd()` placed each item in its own `<ol>` container, causing every
+  `<ol>` to restart at 1. Fixed by emitting `value="N"` on each `<li>` so the
+  correct ordinal is preserved even when items are split across multiple `<ol>`
+  wrappers. (`static/ui.js`) Closes #886. Co-authored by @bsgdigital.
+
+## [v0.50.172] — 2026-04-23
+
+### Fixed
+- **Stop Generation preserves partial streamed content** — clicking Stop Generation previously discarded all text the agent had produced, showing only "*Task cancelled.*". The server now accumulates streamed tokens in a per-stream buffer and persists any partial assistant content to the session when a cancel fires. Thinking/reasoning blocks (`<think>...</think>`, including unclosed tags — the common cancel-mid-reasoning case) are stripped before saving. The partial content is flagged `_partial: true` and kept in conversation history so the model can continue from it on the next user message. (`api/config.py`, `api/streaming.py`) Closes #893.
 
 ## [v0.50.171] — 2026-04-23
 
