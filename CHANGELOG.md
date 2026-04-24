@@ -5,6 +5,11 @@
 ### Fixed
 - **Reasoning chip now appears after the model chip** in the composer toolbar — model is a more fundamental choice and should be stable in position regardless of whether reasoning is active. Order: Profile → Workspace → Model → Reasoning. (`static/index.html`)
 
+## v0.50.196 — 2026-04-24
+
+### Fixed
+- **Fast conversation switching with metadata-first session load** — switching between conversations in the sidebar now does a two-phase load: phase 1 fetches only metadata (title, model, timestamps) instantly, then phase 2 lazily loads the full message history. Backend `Session.save()` reorders JSON fields so metadata appears before the messages array, enabling a 1KB prefix-read path for small sessions. JSON responses over 1KB are gzip-compressed (4x smaller for large histories). Includes `try/catch` in `_ensureMessagesLoaded` so network errors show "Failed to load" rather than a stuck "Loading conversation…" state. (`api/models.py`, `api/helpers.py`, `api/routes.py`, `static/sessions.js`) By @JKJameson. [#959]
+
 ## v0.50.195 — 2026-04-24
 
 ### Fixed
