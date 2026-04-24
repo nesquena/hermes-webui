@@ -112,10 +112,14 @@ async function loadSession(sid){
     data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0`);
   } catch(e) {
     const _msgInner = $('msgInner');
-    if (_msgInner) {
-      _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load session. Try switching sessions or refreshing.</div>';
+    if(_msgInner){
+      if(e.status===404){
+        _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Session not available in web UI.</div>';
+      } else {
+        _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load session. Try switching sessions or refreshing.</div>';
+        if(typeof showToast==='function') showToast('Failed to load session',3000,'error');
+      }
     }
-    if (typeof showToast === 'function') showToast('Failed to load session', 3000, 'error');
     return;
   }
   S.session=data.session;

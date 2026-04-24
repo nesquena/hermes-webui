@@ -391,6 +391,27 @@
   .approval-btn:hover{background:rgba(255,255,255,0.12);transform:translateY(-1px);box-shadow:0 2px 8px rgba(0,0,0,0.2);}
   .approval-btn:active{transform:translateY(0);box-shadow:none;}
   .approval-btn:disabled{opacity:.5;cursor:not-allowed;transform:none;}
+  /* ── Queue flyout (same slide-up pattern as approval-card) ── */
+  .queue-card{position:absolute;left:0;right:0;bottom:0;max-width:var(--msg-max);margin:0 auto;padding:0 20px;box-sizing:border-box;width:100%;overflow:hidden;pointer-events:none;z-index:2;}
+  .queue-card.visible{pointer-events:auto;}
+  /* When queue is visible, add bottom padding to messages so last bubble isn't covered */
+  .messages.queue-open{padding-bottom:var(--queue-card-height,280px);}
+  .queue-card-inner{background:var(--surface);border:1px solid var(--border);border-bottom:none;border-radius:14px 14px 0 0;transform:translateY(100%);opacity:0;transition:transform .35s cubic-bezier(.32,.72,.16,1),opacity .2s ease;overflow:hidden;max-height:240px;overflow-y:auto;padding-bottom:4px;}
+  .queue-card.visible .queue-card-inner{transform:translateY(0);opacity:1;}
+  .queue-card-header{display:flex;align-items:center;gap:8px;padding:9px 14px 8px;border-bottom:1px solid var(--border);font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);}
+  .queue-card-header-actions{display:flex;align-items:center;gap:4px;margin-left:auto;}
+  .queue-card-btn{display:inline-flex;align-items:center;gap:4px;padding:3px 8px;border-radius:6px;border:1px solid var(--border);background:none;color:var(--muted);font-size:11px;font-weight:500;cursor:pointer;transition:background .12s,color .12s;white-space:nowrap;}
+  .queue-card-btn:hover{background:var(--hover-bg);color:var(--text);}
+  .queue-card-icon-btn{display:inline-flex;align-items:center;padding:3px;border-radius:5px;border:none;background:none;color:var(--muted);cursor:pointer;opacity:.5;transition:opacity .12s,background .12s;}
+  .queue-card-icon-btn:hover{opacity:1;background:var(--hover-bg);}
+  .queue-card-row{display:flex;align-items:center;gap:8px;padding:8px 14px;border-bottom:1px solid var(--border);cursor:grab;}
+  .queue-card-row:last-child{border-bottom:none;}
+  .queue-card-row:hover{background:color-mix(in srgb,var(--hover-bg) 50%,transparent);}
+  .queue-card-drag{color:var(--muted);opacity:.3;flex-shrink:0;line-height:0;}
+  .queue-card-text{flex:1;font-size:13px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;outline:none;cursor:text;min-width:0;}
+  .queue-card-text:focus{white-space:pre-wrap;overflow:auto;text-overflow:clip;}
+  .queue-card-badges{display:flex;align-items:center;gap:5px;flex-shrink:0;font-size:10px;color:var(--muted);opacity:.6;}
+  .queue-card-file-badge{display:flex;align-items:center;gap:2px;}
   .approval-btn-icon{font-size:13px;line-height:1;}
   .approval-btn-label{line-height:1;}
   .approval-kbd{display:inline-flex;align-items:center;justify-content:center;padding:1px 5px;border-radius:4px;font-size:10px;font-family:inherit;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);color:var(--muted);line-height:1.4;margin-left:2px;}
@@ -2236,3 +2257,9 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
   font-size: 10px;
   font-weight: 600;
 }
+
+  /* Compact queue pill inside .composer-box when flyout is hidden */
+  .queue-pill{display:none;align-items:center;gap:6px;padding:5px 10px 5px 12px;font-size:12px;color:var(--muted);cursor:pointer;background:transparent;border:none;border-bottom:1px solid var(--border);width:100%;text-align:left;}
+  .queue-pill:hover{background:var(--hover-bg);}
+  .queue-pill.show{display:flex;}
+  .queue-pill-count{font-weight:600;color:var(--text);}
