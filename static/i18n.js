@@ -484,6 +484,7 @@ const LOCALES = {
     workspace_add_path_placeholder: 'Add workspace path (e.g. /home/user/my-project)',
     workspace_paths_validated_hint: 'Paths are validated as existing directories before saving.',
     workspace_added: 'Workspace added',
+    workspace_renamed: 'Workspace renamed',
     workspace_remove_confirm_title: 'Remove workspace',
     workspace_remove_confirm_message: (path) => `Remove "${path}"?`,
     workspace_removed: 'Workspace removed',
@@ -543,6 +544,7 @@ const LOCALES = {
     skill_metadata: 'Metadata',
     // cron form
     cron_name_label: 'Name',
+    cron_name_placeholder: 'Optional',
     cron_schedule_label: 'Schedule',
     cron_schedule_hint: "Cron expression or shorthand like 'every 1h'.",
     cron_prompt_label: 'Prompt',
@@ -983,6 +985,7 @@ const LOCALES = {
     workspace_add_path_placeholder: 'Добавьте путь к рабочему пространству (например, /Users/you/project)',
     workspace_paths_validated_hint: 'Перед сохранением пути проверяются на существование.',
     workspace_added: 'Рабочее пространство добавлено',
+    workspace_renamed: 'Рабочее пространство переименовано',
     workspace_remove_confirm_title: 'Удалить рабочее пространство',
     workspace_remove_confirm_message: (path) => `Удалить «${path}»?`,
     workspace_removed: 'Рабочее пространство удалено',
@@ -1073,6 +1076,7 @@ const LOCALES = {
     skill_metadata: 'Метаданные',
     // cron form
     cron_name_label: 'Имя',
+    cron_name_placeholder: 'Необязательно',
     cron_schedule_label: 'Расписание',
     cron_schedule_hint: "Cron-выражение или сокращение, например 'every 1h'.",
     cron_prompt_label: 'Запрос',
@@ -1510,6 +1514,7 @@ const LOCALES = {
     workspace_add_path_placeholder: 'Add workspace path (e.g. /home/user/my-project)',
     workspace_paths_validated_hint: 'Paths are validated as existing directories before saving.',
     workspace_added: 'Workspace added',
+    workspace_renamed: 'Espacio renombrado',
     workspace_remove_confirm_title: 'Remove workspace',
     workspace_remove_confirm_message: (path) => `Remove "${path}"?`,
     workspace_removed: 'Workspace removed',
@@ -1569,6 +1574,7 @@ const LOCALES = {
     skill_metadata: 'Metadatos',
     // cron form
     cron_name_label: 'Nombre',
+    cron_name_placeholder: 'Opcional',
     cron_schedule_label: 'Programación',
     cron_schedule_hint: "Expresión cron o abreviatura como 'every 1h'.",
     cron_prompt_label: 'Prompt',
@@ -1851,6 +1857,7 @@ const LOCALES = {
     skill_metadata: 'Metadaten',
     // cron form
     cron_name_label: 'Name',
+    cron_name_placeholder: 'Optional',
     cron_schedule_label: 'Zeitplan',
     cron_schedule_hint: "Cron-Ausdruck oder Kurzform wie 'every 1h'.",
     cron_prompt_label: 'Prompt',
@@ -2273,6 +2280,7 @@ const LOCALES = {
     workspace_add_path_placeholder: '添加工作区路径（例如 /home/user/my-project）',
     workspace_paths_validated_hint: '保存前会校验路径是否为已存在目录。',
     workspace_added: '工作区已添加',
+    workspace_renamed: '工作区已重命名',
     workspace_remove_confirm_title: '移除工作区',
     workspace_remove_confirm_message: (path) => `要移除"${path}"吗？`,
     workspace_removed: '工作区已移除',
@@ -2345,6 +2353,7 @@ const LOCALES = {
     skill_metadata: '元数据',
     // cron form
     cron_name_label: '名称',
+    cron_name_placeholder: '可选',
     cron_schedule_label: '计划',
     cron_schedule_hint: "Cron 表达式或简写，例如 'every 1h'。",
     cron_prompt_label: '提示词',
@@ -2627,6 +2636,8 @@ const LOCALES = {
     tab_profiles: '\u914d\u7f6e',
     tab_settings: '\u8a2d\u5b9a',
     profile_delete_confirm_message: '\u6b64\u914d\u7f6e\u6a94\u7684\u6240\u6709\u6703\u8a71\u3001\u8a2d\u5b9a\u3001\u6280\u80fd\u548c\u8a18\u61b6\u5c07\u88ab\u6c38\u4e45\u522a\u9664\u3002\u6b64\u64cd\u4f5c\u7121\u6cd5\u64a4\u92b7\u3002',
+    workspace_renamed: '\u5de5\u4f5c\u5340\u5df2\u91cd\u65b0\u547d\u540d',
+    cron_name_placeholder: '\u9078\u586b',
   },
 };
 
