@@ -617,6 +617,13 @@ let _skillMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _skillPreFormDetail = null; // snapshot of previously-viewed skill when entering a form
 let _editingSkillName = null;
 
+function _stripYamlFrontmatter(content) {
+  if (!content) return { frontmatter: null, body: '' };
+  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(content);
+  if (!m) return { frontmatter: null, body: content };
+  return { frontmatter: m[1], body: content.slice(m[0].length) };
+}
+
 function _renderSkillDetail(name, content, linkedFiles) {
   const title = $('skillDetailTitle');
   const body = $('skillDetailBody');
@@ -624,7 +631,12 @@ function _renderSkillDetail(name, content, linkedFiles) {
   const editBtn = $('btnEditSkillDetail');
   const delBtn = $('btnDeleteSkillDetail');
   if (title) title.textContent = name;
-  let html = renderMd(content || '(no content)');
+  const { frontmatter, body: markdownBody } = _stripYamlFrontmatter(content);
+  let html = '';
+  if (frontmatter) {
+    html += `<details class="skill-frontmatter"><summary>${esc(t('skill_metadata'))}</summary><pre><code>${esc(frontmatter)}</code></pre></details>`;
+  }
+  html += renderMd(markdownBody || '(no content)');
   const lf = linkedFiles || {};
   const categories = Object.entries(lf).filter(([,files]) => files && files.length > 0);
   if (categories.length) {
@@ -938,7 +950,7 @@ function _renderMemoryEdit(section) {
 
 function openMemorySection(section, el) {
   _currentMemorySection = section;
-  document.querySelectorAll('#memoryPanel .settings-menu-item').forEach(e => e.classList.remove('active'));
+  document.querySelectorAll('#memoryPanel .side-menu-item').forEach(e => e.classList.remove('active'));
   if (el) el.classList.add('active');
   _renderMemoryDetail(section);
 }
@@ -2015,7 +2027,7 @@ async function loadMemory(force) {
       for (const s of MEMORY_SECTIONS) {
         const el = document.createElement('button');
         el.type = 'button';
-        el.className = 'settings-menu-item';
+        el.className = 'side-menu-item';
         if (_currentMemorySection === s.key) el.classList.add('active');
         el.innerHTML = `${li(s.iconKey,16)}<span>${esc(t(s.labelKey))}</span>`;
         el.onclick = () => openMemorySection(s.key, el);
@@ -2053,7 +2065,7 @@ function switchSettingsSection(name){
   _currentSettingsSection=section;
   const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',system:'System'};
   // Sidebar menu items
-  document.querySelectorAll('#settingsMenu .settings-menu-item').forEach(it=>{
+  document.querySelectorAll('#settingsMenu .side-menu-item').forEach(it=>{
     it.classList.toggle('active', it.dataset.settingsSection===section);
   });
   // Panes in main
