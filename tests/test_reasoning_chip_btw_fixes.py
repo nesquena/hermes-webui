@@ -201,6 +201,85 @@ class TestBtwStreamDoneGuard:
             "even if no token events arrived before done"
         )
 
+    def test_ensure_btw_row_gated_on_session_match(self):
+        """Regression for PR #935: _ensureBtwRow reads $('msgInner') — the
+        CURRENTLY-viewed session's container.  If the user switched sessions
+        during the /btw stream, creating a bubble here would put it in the
+        wrong session.  The done handler must guard on S.session.session_id
+        matching the parent sid before creating a new bubble.
+        """
+        fn = self.get_attach_btw()
+        done_block_m = re.search(
+            r"addEventListener\('done'[\s\S]*?(?=addEventListener\(')",
+            fn,
+        )
+        assert done_block_m
+        block = done_block_m.group(0)
+        # The _ensureBtwRow call must be guarded by a session-match check
+        assert ("S.session" in block and "parentSid" in block), (
+            "_ensureBtwRow() in the done handler must be gated on "
+            "S.session.session_id === parentSid — otherwise a user who "
+            "switched sessions during the /btw stream gets the answer "
+            "bubble injected into the wrong session's container"
+        )
+
+    def test_stream_done_set_before_close_in_done(self):
+        """Regression for PR #935 defensive ordering: _streamDone=true must be
+        set BEFORE src.close() in the done handler.  Setting it after works
+        today because EventSource.close() is synchronous per spec and doesn't
+        dispatch events, but the defensive-correct ordering is flag-first so
+        no future browser quirk or event-queue race can bypass the guard.
+        """
+        fn = self.get_attach_btw()
+        done_block_m = re.search(
+            r"addEventListener\('done'[\s\S]*?(?=addEventListener\(')",
+            fn,
+        )
+        assert done_block_m
+        block = done_block_m.group(0)
+        flag_pos = block.find("_streamDone=true")
+        close_pos = block.find("src.close()")
+        assert flag_pos > -1 and close_pos > -1
+        assert flag_pos < close_pos, (
+            "_streamDone=true must be set BEFORE src.close() in the done handler "
+            "so any event the browser fires during close() sees the flag already set"
+        )
+
+    def test_stream_done_set_before_close_in_apperror(self):
+        """Same defensive ordering as test_stream_done_set_before_close_in_done,
+        applied to the apperror handler."""
+        fn = self.get_attach_btw()
+        apperror_m = re.search(
+            r"addEventListener\('apperror'[\s\S]*?(?=addEventListener\(')",
+            fn,
+        )
+        assert apperror_m
+        block = apperror_m.group(0)
+        flag_pos = block.find("_streamDone=true")
+        close_pos = block.find("src.close()")
+        assert flag_pos > -1 and close_pos > -1, (
+            "apperror handler must both set _streamDone=true and call src.close()"
+        )
+        assert flag_pos < close_pos, (
+            "_streamDone=true must be set BEFORE src.close() in the apperror handler"
+        )
+
+    def test_stream_end_sets_stream_done(self):
+        """Regression for PR #935/#939/#942: stream_end handler must also set
+        _streamDone=true.  Today the ephemeral /btw path returns before emitting
+        stream_end so this is moot, but if the server emits stream_end as a
+        standalone terminator (e.g. for a non-ephemeral /btw variant), the
+        subsequent browser-fired onerror would wipe the bubble without the flag.
+        """
+        fn = self.get_attach_btw()
+        m = re.search(r"addEventListener\('stream_end'[\s\S]*?\}\s*\)", fn)
+        assert m, "stream_end handler not found"
+        block = m.group(0)
+        assert "_streamDone=true" in block or "_streamDone = true" in block, (
+            "stream_end handler must set _streamDone=true before closing the "
+            "connection — consistent with the done/apperror handlers"
+        )
+
 
 # ── #5 resize handler symmetry (non-blocking polish) ─────────────────────────
 
