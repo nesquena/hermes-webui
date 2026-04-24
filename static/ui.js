@@ -629,10 +629,23 @@ function _stripXmlToolCallsDisplay(s){
   // similar models in their raw response text.  These are processed separately
   // as tool calls; leaving them in the content causes them to render visibly
   // in the settled chat bubble.  (#702)
-  if(!s||s.toLowerCase().indexOf('<function_calls>')===-1) return s;
-  s=s.replace(/<function_calls>[\s\S]*?<\/function_calls>/gi,'');
-  s=s.replace(/<function_calls>[\s\S]*$/i,'');
+  // Also handles DSML-prefixed variants from DeepSeek/Bedrock, including
+  // spacing variants like "<｜DSML |function_calls" and truncated prefixes.
+  if(!s) return s;
+  const lo=String(s).toLowerCase();
+  if(lo.indexOf('function_calls')===-1 && lo.indexOf('dsml')===-1) return s;
+  // Support both plain <function_calls> and DSML-prefixed variants.
+  s=s.replace(/<(?:\s*｜\s*DSML\s*[｜|]\s*)?function_calls>[\s\S]*?<\/(?:\s*｜\s*DSML\s*[｜|]\s*)?function_calls>/gi,'');
+  // Also remove truncated opening tags (missing closing ">" at stream tail).
+  s=s.replace(/<(?:\s*｜\s*DSML\s*[｜|]\s*)?function_calls(?:>|$)[\s\S]*$/i,'');
+  // Remove malformed DSML tag fragments like "<｜DSML |" that can leak in tokens.
+  s=s.replace(/<\s*｜\s*DSML\s*[｜|]\s*/gi,'');
   return s.trim();
+}
+
+function _sanitizeThinkingDisplayText(text){
+  const stripped=_stripXmlToolCallsDisplay(String(text||''));
+  return stripped.trim();
 }
 
 function renderMd(raw){
@@ -1476,7 +1489,8 @@ function _assistantTurnBlocks(turn){
   return turn?turn.querySelector('.assistant-turn-blocks'):null;
 }
 function _thinkingCardHtml(text){
-  return `<div class="thinking-card"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(text)}</pre></div></div>`;
+  const clean=_sanitizeThinkingDisplayText(text);
+  return `<div class="thinking-card"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
 }
 function _compressionStateForCurrentSession(){
   const state=window._compressionUi;
@@ -2383,8 +2397,9 @@ function renderKatexBlocks(){
 }
 
 function _thinkingMarkup(text=''){
-  return (text&&String(text).trim())
-    ? `<div class="thinking-card open"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(text).trim())}</pre></div></div>`
+  const clean=_sanitizeThinkingDisplayText(text);
+  return (clean&&String(clean).trim())
+    ? `<div class="thinking-card open"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(clean).trim())}</pre></div></div>`
     : `<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
 }
 function finalizeThinkingCard(){

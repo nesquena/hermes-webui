@@ -300,9 +300,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     // Strip <function_calls>...</function_calls> blocks (DeepSeek XML tool syntax).
     // These are processed as tool calls server-side; showing them raw in the bubble
     // looks broken. Also handles orphaned opening tags mid-stream. (#702)
-    if(!s||s.toLowerCase().indexOf('<function_calls>')===-1) return s;
-    s=s.replace(/<function_calls>[\s\S]*?<\/function_calls>/gi,'');
-    s=s.replace(/<function_calls>[\s\S]*$/i,'');
+    // Also handles DSML-prefixed variants from DeepSeek/Bedrock, including
+    // spacing variants like "<｜DSML |function_calls" and truncated prefixes.
+    if(!s) return s;
+    const lo=String(s).toLowerCase();
+    if(lo.indexOf('function_calls')===-1 && lo.indexOf('dsml')===-1) return s;
+    // Support both plain <function_calls> and DSML-prefixed variants.
+    s=s.replace(/<(?:\s*｜\s*DSML\s*[｜|]\s*)?function_calls>[\s\S]*?<\/(?:\s*｜\s*DSML\s*[｜|]\s*)?function_calls>/gi,'');
+    // Also remove truncated opening tags (missing closing ">" at stream tail).
+    s=s.replace(/<(?:\s*｜\s*DSML\s*[｜|]\s*)?function_calls(?:>|$)[\s\S]*$/i,'');
+    // Remove malformed DSML tag fragments like "<｜DSML |" that can leak in tokens.
+    s=s.replace(/<\s*｜\s*DSML\s*[｜|]\s*/gi,'');
     return s.trim();
   }
   function _streamDisplay(){
