@@ -18,7 +18,7 @@ services:
     ports:
       - "127.0.0.1:8642:8642"
     volumes:
-      - ${HERMES_HOME:-~/.hermes}:/opt/data
+      - /opt/data
     environment:
       - HERMES_HOME=/opt/data
     restart: unless-stopped
@@ -35,13 +35,14 @@ services:
     ports:
       - "8787:8787"
     volumes:
-      - ${HERMES_HOME:-~/.hermes}:/opt/hermes
-      - ${HERMES_WORKSPACE:-~/workspace}:/workspace
       - ./config:/opt/hermes/config.d/:ro
+      - hermes-webui-state:/home/hermeswebui/.hermes
+      - hermes-webui-workspace:/workspace
     environment:
       - HERMES_WEBUI_HOST=0.0.0.0
       - HERMES_WEBUI_PORT=8787
       - HERMES_WEBUI_STATE_DIR=/opt/hermes/webui
+      - HERMES_WEBUI_DEFAULT_WORKSPACE=/workspace
       - HERMES_HOME=/opt/hermes
       - WANTED_UID=${UID:-1000}
       - WANTED_GID=${GID:-1000}
@@ -52,3 +53,7 @@ services:
 networks:
   hermes-net:
     driver: bridge
+
+volumes:
+  hermes-webui-state:
+  hermes-webui-workspace:
