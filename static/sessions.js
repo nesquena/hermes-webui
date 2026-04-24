@@ -987,11 +987,21 @@ function renderSessionListFromCache(){
         _renamingSid = null;
         if(save){
           const newTitle=inp.value.trim()||'Untitled';
+          const oldTitle=s.title;
+          // Optimistic UI update
           title.textContent=newTitle;
           s.title=newTitle;
           if(S.session&&S.session.session_id===s.session_id){S.session.title=newTitle;syncTopbar();}
-          try{await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:s.session_id,title:newTitle})});}
-          catch(err){setStatus('Rename failed: '+err.message);}
+          try{
+            await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:s.session_id,title:newTitle})});
+          }
+          catch(err){
+            // Roll back optimistic update so the UI doesn't lie about persistence
+            s.title=oldTitle;
+            title.textContent=oldTitle||'Untitled';
+            if(S.session&&S.session.session_id===s.session_id){S.session.title=oldTitle;syncTopbar();}
+            setStatus('Rename failed: '+err.message);
+          }
         }
         inp.replaceWith(title);
         // Allow list re-renders again after a short delay
