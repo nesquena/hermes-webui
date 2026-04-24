@@ -9,31 +9,51 @@
 #   docker compose -f docker-compose.testing.yml up --build
 
 services:
+  hermes-agent:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes-agent
+    command: gateway run
+    tty: true
+    stdin_open: true
+    ports:
+      - "127.0.0.1:8642:8642"
+    volumes:
+      - ${HERMES_HOME:-~/.hermes}:/opt/hermes
+    environment:
+      - HERMES_HOME=/opt/hermes
+    user: "10000:10000"
+    restart: unless-stopped
+    networks:
+      - hermes-net
+
   hermes-webui:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: hermes-webui
+    depends_on:
+      - hermes-agent
     ports:
       - "8787:8787"
     volumes:
-      # Mount hermes-agent source (read-only) for AIAgent imports.
-      - /var/home/yoav/hermes-agent:/opt/hermes-agent:ro
-      # Workspace directory — browse and edit files from the WebUI.
-      # Adapt the host path to your project directory.
-      - /var/home/yoav/workspace:/workspace
-      # Bind-mount config.yml and .env from the host for easy editing without entering the container.
-      # Create these next to your docker-compose.yml (or adjust the host paths).
-      - ${PWD}/config.yml:/home/hermeswebui/.hermes/config.yml:ro
-      - ${PWD}/.env:/home/hermeswebui/.hermes/.env:ro
+      - ${HERMES_HOME:-~/.hermes}:/opt/hermes
+      - hermes-agent-src:/opt/hermes/hermes-agent
+      - ${HERMES_WORKSPACE:-~/workspace}:/workspace
     environment:
       - HERMES_WEBUI_HOST=0.0.0.0
       - HERMES_WEBUI_PORT=8787
-      - HERMES_WEBUI_STATE_DIR=/opt/hermes/webui-mvp
-      - HERMES_WEBUI_AGENT_DIR=/opt/hermes-agent
-      # Match your host user's UID/GID for correct file permissions.
+      - HERMES_WEBUI_STATE_DIR=/opt/hermes/webui
+      - HERMES_HOME=/opt/hermes
       - WANTED_UID=${UID:-1000}
       - WANTED_GID=${GID:-1000}
-      # Optional: set a password for remote access
-      # - HERMES_WEBUI_PASSWORD=your-s...word
+    user: "10000:10000"
     restart: unless-stopped
+    networks:
+      - hermes-net
+
+networks:
+  hermes-net:
+    driver: bridge
+
+volumes:
+  hermes-agent-src:
