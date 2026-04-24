@@ -135,6 +135,12 @@ class TestClosureVariables:
             "_smdReconnect must be declared in the attachLiveStream closure scope"
         )
 
+    def test_smd_written_text_declared(self):
+        prelude = self.get_prelude()
+        assert prelude and "_smdWrittenText" in prelude, (
+            "_smdWrittenText must be declared in the attachLiveStream closure scope"
+        )
+
     def test_smd_parser_initialised_null(self):
         prelude = self.get_prelude()
         assert prelude and (
@@ -223,6 +229,12 @@ class TestSmdHelpers:
         fn = extract_fn(MESSAGES_JS, "_smdWrite")
         assert fn and "displayText.length" in fn, (
             "_smdWrite must advance _smdWrittenLen to displayText.length after writing"
+        )
+
+    def test_smd_write_has_prefix_desync_guard(self):
+        fn = extract_fn(MESSAGES_JS, "_smdWrite")
+        assert fn and "startsWith(_smdWrittenText)" in fn, (
+            "_smdWrite must detect prefix desyncs and rebuild parser to avoid dropped chars"
         )
 
     def test_smd_write_guards_on_parser(self):

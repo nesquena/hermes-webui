@@ -192,6 +192,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // streaming-markdown state: incremental DOM-building parser per segment
   let _smdParser=null;     // current smd parser instance (null until first content)
   let _smdWrittenLen=0;    // how many chars of displayText have been fed to smd parser
+  let _smdWrittenText='';  // exact displayText snapshot used for prefix-alignment checks
   // On reconnect, the assistantBody already has partial smd-rendered content.
   // We clear it on first new token and restart the parser from the reconnect point.
   let _smdReconnect=reconnecting;
@@ -376,6 +377,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // Called when assistantBody is first created and after each tool-call segment reset.
   function _smdNewParser(el){
     _smdWrittenLen=0;
+    _smdWrittenText='';
     if(!window.smd){_smdParser=null;return;}
     const renderer=window.smd.default_renderer(el);
     _smdParser=window.smd.parser(renderer);
@@ -390,15 +392,29 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     _smdParser=null;
     _smdWrittenLen=0;
+    _smdWrittenText='';
   }
   // Helper: feed new displayText delta to the smd parser.
   // Only feeds chars beyond what has already been written (_smdWrittenLen).
   function _smdWrite(displayText){
     if(!_smdParser||!window.smd) return;
-    const delta=displayText.slice(_smdWrittenLen);
+    displayText=String(displayText||'');
+    // Self-heal desyncs: if displayText no longer starts with what we've already
+    // written (e.g. due to stream sanitization/tag stripping), incremental slicing
+    // can skip characters. Rebuild parser from the full current displayText.
+    if(_smdWrittenText && !displayText.startsWith(_smdWrittenText)){
+      _smdParser=null;
+      _smdWrittenLen=0;
+      _smdWrittenText='';
+      if(assistantBody) assistantBody.innerHTML='';
+      _smdNewParser(assistantBody);
+      if(!_smdParser) return;
+    }
+    const delta=displayText.slice(_smdWrittenText.length);
     if(!delta) return;
     try{window.smd.parser_write(_smdParser,delta);}catch(_){}
     _smdWrittenLen=displayText.length;
+    _smdWrittenText=displayText;
     // streaming-markdown does NOT sanitize URL schemes — `[click](javascript:...)`
     // and `![alt](javascript:...)` survive as href/src.  Strip any unsafe schemes
     // from anchors/images that were just added to the live DOM.  The existing
