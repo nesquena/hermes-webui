@@ -1007,12 +1007,13 @@ function _renderQueueChips(sid){
   const _msgs=document.getElementById('messages');
   if(_msgs){
     _msgs.classList.add('queue-open');
-    // Measure card height and set CSS custom property for accurate padding
-    requestAnimationFrame(()=>{
-      const h=card.getBoundingClientRect().height||280;
-      _msgs.style.setProperty('--queue-card-height', h+'px');
+    // Measure after 350ms transition completes (not mid-animation — height would be wrong)
+    setTimeout(()=>{
+      if(!card.classList.contains('visible')) return;
+      const h=card.getBoundingClientRect().height;
+      if(h>0) _msgs.style.setProperty('--queue-card-height', h+'px');
       if(typeof scrollToBottom==='function') scrollToBottom();
-    });
+    }, 360);
   }
 
   function _saveAndRefresh(){
@@ -1052,7 +1053,7 @@ function _renderQueueChips(sid){
         if(typeof showToast==='function') showToast('Attachments on queued items will be removed',2600,'warning');
       }
       // Merge from current live queue (no delay — snapshot + defer caused data-loss races)
-      _doMerge([...q]);
+      _doMerge([..._getSessionQueue(sid,false)]);
     };
     const clearBtn=document.createElement('button');
     clearBtn.className='queue-card-icon-btn';
@@ -1190,7 +1191,14 @@ function _updateQueuePill(sid,count){
     pill.classList.add('show');
     pill.onclick=()=>{
       const c=document.getElementById('queueCard');
-      if(c){c.classList.add('visible');}
+      if(c){
+        c.classList.add('visible');
+        // Move focus into queue after transition completes (350ms)
+        setTimeout(()=>{
+          const firstFocusable=c.querySelector('.queue-card-text, .queue-card-icon-btn');
+          if(firstFocusable) firstFocusable.focus();
+        }, 360);
+      }
       pill.classList.remove('show');
       if(typeof scrollToBottom==='function') scrollToBottom();
     };
@@ -1212,15 +1220,20 @@ function _syncQueueTitlebar(sid,count){
     sub.setAttribute('aria-label',label);
     sub.style.cursor='pointer';sub.style.color='var(--muted)';sub.style.fontWeight='600';sub.style.fontSize='11px';sub.style.background='var(--hover-bg)';sub.style.padding='2px 6px';sub.style.borderRadius='6px';sub.style.border='1px solid var(--border)';
     const toggleQueue=()=>{
+      const activeSid=S.session&&S.session.session_id;
+      if(!activeSid) return;
       const qCard=document.getElementById('queueCard');
-      if(qCard){
-        if(qCard.classList.contains('visible')){
-          qCard.classList.remove('visible');
-        } else {
-          qCard.classList.add('visible');
-          // Scroll to bottom so queue is visible above
-          if(typeof scrollToBottom==='function') scrollToBottom();
-        }
+      if(!qCard) return;
+      if(qCard.classList.contains('visible')){
+        qCard.classList.remove('visible');
+        // Show pill since flyout is now hidden
+        const liveCount=_getSessionQueue(activeSid,false).length;
+        _updateQueuePill(activeSid,liveCount);
+      } else {
+        qCard.classList.add('visible');
+        // Hide pill since flyout is now showing
+        _updateQueuePill(activeSid,0);
+        if(typeof scrollToBottom==='function') scrollToBottom();
       }
     };
     sub.onclick=toggleQueue;
@@ -1244,7 +1257,8 @@ function updateQueueBadge(sessionId){
     const card=document.getElementById('queueCard');
     const chips=document.getElementById('queueChips');
     if(card) card.classList.remove('visible');
-    if(chips) chips.innerHTML='';
+    // Defer clear until after slide-out transition (.35s) so content doesn't vanish mid-animation
+    if(chips){const _chips=chips;const _card=card;setTimeout(()=>{if(!_card||!_card.classList.contains('visible'))_chips.innerHTML='';},360);}
     if(sid) delete _queueRenderKeys[sid];
     const _msgsEl=document.getElementById('messages');
     if(_msgsEl) _msgsEl.classList.remove('queue-open');
