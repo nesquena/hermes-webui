@@ -1681,8 +1681,40 @@ function renderCompressionUi(){
   el.innerHTML='';
   el.style.display='none';
 }
+// Session render cache: avoids full markdown+DOM rebuild when switching back
+// to a session that was already rendered with the same message count.
+// Keyed by session_id. Only used on cross-session navigation, never for
+// in-session updates (new messages, edits, stream events).
+//
+// Known limitation: cache key is session_id + message count. Edits and retries
+// that mutate message content without changing the count will serve stale HTML
+// on back-navigation until the user triggers an in-session update. Acceptable
+// for the common read-only back-navigation case; not suitable as a general cache.
+const _sessionHtmlCache=new Map();
+let _sessionHtmlCacheSid=null; // session_id currently rendered in the DOM
+
 function renderMessages(){
   const inner=$('msgInner');
+  const sid=S.session?S.session.session_id:null;
+  const msgCount=S.messages.length;
+
+  // Fast path: switching back to a previously rendered session with same count.
+  // Guard: sid !== _sessionHtmlCacheSid ensures in-session updates (edits,
+  // new messages, tool_complete) always get a fresh rebuild.
+  // Skip cache if this session is still streaming — the live smd parser writes
+  // into a DOM node inside the cached subtree; serving cached HTML detaches it.
+  if(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]){
+    const cached=_sessionHtmlCache.get(sid);
+    if(cached&&cached.msgCount===msgCount){
+      inner.innerHTML=cached.html;
+      _sessionHtmlCacheSid=sid;
+      if(S.activeStreamId){scrollIfPinned();}else{scrollToBottom();}
+      requestAnimationFrame(()=>{highlightCode();addCopyButtons();renderMermaidBlocks();renderKatexBlocks();});
+      if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
+      return;
+    }
+  }
+
   const compressionState=_compressionStateForCurrentSession();
   if(window._compressionUi && !compressionState) clearCompressionUi();
   const sessionCompressionAnchor=(
@@ -2029,6 +2061,16 @@ function renderMessages(){
   // Refresh todo panel if it's currently open
   if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){
     loadTodos();
+  }
+  // Populate session cache so switching back here skips a full rebuild.
+  _sessionHtmlCacheSid=sid;
+  if(sid){
+    const _html=inner.innerHTML;
+    // Only cache sessions with <300KB rendered HTML; evict oldest beyond 8 sessions.
+    if(_html.length<300_000){
+      _sessionHtmlCache.set(sid,{html:_html,msgCount});
+      if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
+    }
   }
 }
 
