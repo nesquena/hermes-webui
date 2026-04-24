@@ -318,7 +318,12 @@ class Session:
                 return cls.load(sid)
             if not isinstance(parsed.get('messages'), list):
                 return cls.load(sid)
-            return cls(**parsed)
+            s = cls(**parsed)
+            # compact() uses _message_count when messages=None (loaded via load_metadata_only).
+            # Persist the real count from the parsed JSON so sidebar / ?messages=0 gets
+            # an accurate message_count without needing to parse the messages array.
+            s._message_count = parsed.get('message_count', len(parsed.get('messages', [])))
+            return s
         except Exception:
             # Corrupt prefix or decode error — fall back to full load
             return cls.load(sid)
@@ -330,7 +335,7 @@ class Session:
             'title': self.title,
             'workspace': self.workspace,
             'model': self.model,
-            'message_count': len(self.messages),
+            'message_count': getattr(self, '_message_count', None) or (len(self.messages) if self.messages else 0),
             'created_at': self.created_at,
             'updated_at': self.updated_at,
             'pinned': self.pinned,
@@ -356,21 +361,44 @@ def get_session(sid, metadata_only=False):
     next access is fast. Use this when you only need compact() metadata and not
     the actual message history (e.g., for fast sidebar switching).
     """
+    if metadata_only:
+        # Return a lightweight metadata-only view of the session, without
+        # loading the messages array. Two paths:
+        # 1. Session on disk: evict from cache, call load_metadata_only (1KB fast path).
+        #    Next ?messages=1 call will re-cache the full session.
+        # 2. Session only in memory (no disk file): return a stripped copy of the
+        #    cached object with messages=[], preserving the cached full session for
+        #    the next ?messages=1 call.
+        p = SESSION_DIR / f'{sid}.json'
+        with LOCK:
+            cached = SESSIONS.get(sid)
+        if cached and not p.exists():
+            # Memory-only session: return stripped copy without evicting.
+            stripped = cached.__class__(**{
+                k: v for k, v in cached.__dict__.items()
+                if k not in ('messages', 'tool_calls')
+            })
+            stripped.messages = []
+            stripped.tool_calls = []
+            stripped._message_count = len(cached.messages) if cached.messages else 0
+            return stripped
+        # Session has a file on disk — evict cache and use the 1KB fast path.
+        with LOCK:
+            if sid in SESSIONS:
+                del SESSIONS[sid]
+        return Session.load_metadata_only(sid)
     with LOCK:
         if sid in SESSIONS:
-            SESSIONS.move_to_end(sid)  # LRU: mark as recently used
+            SESSIONS.move_to_end(sid)
             return SESSIONS[sid]
-    if metadata_only:
-        s = Session.load_metadata_only(sid)
-    else:
-        s = Session.load(sid)
+    s = Session.load(sid)
     if s:
         with LOCK:
             SESSIONS[sid] = s
             SESSIONS.move_to_end(sid)
             while len(SESSIONS) > SESSIONS_MAX:
-                SESSIONS.popitem(last=False)  # evict least recently used
-        return s
+                SESSIONS.popitem(last=False)
+    return s
     raise KeyError(sid)
 
 def new_session(workspace=None, model=None, profile=None):
