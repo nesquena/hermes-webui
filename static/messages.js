@@ -1385,7 +1385,7 @@ function attachBtwStream(parentSid, streamId, question){
     }catch(_){showToast(t('btw_failed'));}
     if(btwRow&&btwRow.isConnected) btwRow.remove();
   });
-  src.addEventListener('stream_end',()=>{src.close();});
+  src.addEventListener('stream_end',()=>{_streamDone=true;src.close();});
   src.onerror=()=>{src.close();if(!_streamDone&&btwRow&&btwRow.isConnected) btwRow.remove();};
 }
 
