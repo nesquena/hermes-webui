@@ -153,7 +153,7 @@ async function send(){
     if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);removeThinking();
     if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true);
     S.messages.push({role:'assistant',content:`**Error:** ${errMsg}`});
-    renderMessages();setBusy(false);setComposerStatus(`Error: ${errMsg}`);
+    _queueDrainSid=activeSid;renderMessages();setBusy(false);setComposerStatus(`Error: ${errMsg}`);
     return;
   }
 
@@ -671,7 +671,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _markSessionViewed(activeSid, d.session.message_count ?? S.messages.length);
         syncTopbar();renderMessages();loadDir('.');
       }
-      renderSessionList();setBusy(false);setStatus('');
+      _queueDrainSid=activeSid;renderSessionList();setBusy(false);setStatus('');
       setComposerStatus('');
       playNotificationSound();
       sendBrowserNotification('Response complete',assistantText?assistantText.slice(0,100):'Task finished');
@@ -843,7 +843,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _markSessionViewed(activeSid, session.message_count ?? S.messages.length);
         syncTopbar();renderMessages();
       }
-      renderSessionList();setBusy(false);setComposerStatus('');
+      _queueDrainSid=activeSid;renderSessionList();setBusy(false);setComposerStatus('');
       return true;
     }catch(_){
       return false;
@@ -893,7 +893,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             const _cbe=$('btnCancel');if(_cbe)_cbe.style.display='none';
             clearLiveToolCards();
             removeThinking();
-            setBusy(false);
+            _queueDrainSid=activeSid;setBusy(false);
             setComposerStatus('');
             renderMessages();
             renderSessionList();

@@ -501,8 +501,9 @@ def test_session_scoped_message_queue_frontend_wiring(cleanup_test_sessions):
     assert "const SESSION_QUEUES" in ui_src
     assert "function queueSessionMessage" in ui_src
     assert "function shiftQueuedSessionMessage" in ui_src
-    assert "const sid=S.session&&S.session.session_id;" in ui_src
-    assert "const next=sid?shiftQueuedSessionMessage(sid):null;" in ui_src
+    # _queueDrainSid tracks which session's queue to drain even after session switches
+    assert "_queueDrainSid" in ui_src
+    assert "shiftQueuedSessionMessage(sid)" in ui_src
     assert "queueSessionMessage(S.session.session_id" in messages_src
     assert "updateQueueBadge(S.session.session_id);" in messages_src
     assert "updateQueueBadge(sid);" in sessions_src

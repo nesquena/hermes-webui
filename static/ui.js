@@ -1,6 +1,13 @@
 const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default'};
 const INFLIGHT={};  // keyed by session_id while request in-flight
 const SESSION_QUEUES={};  // keyed by session_id for queued follow-up turns
+// Tracks which session's queue to drain in setBusy(false).
+// Set to activeSid just before setBusy(false) in done/error handlers so the
+// queue drains the session that *finished*, not the one currently viewed.
+// Single-shot: setBusy() reads and clears this on every call. Concurrent
+// back-to-back stream completions would overwrite it, but HTTPServer is
+// single-threaded so only one done event fires at a time in practice.
+let _queueDrainSid=null;
 const $=id=>document.getElementById(id);
 function _getSessionQueue(sid, create=false){
   if(!sid) return [];
@@ -933,10 +940,12 @@ function setBusy(v){
     setComposerStatus('');
     // Always hide Cancel button when not busy
     const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
-    const sid=S.session&&S.session.session_id;
+    const sid=_queueDrainSid||(S.session&&S.session.session_id);
+    _queueDrainSid=null;
     updateQueueBadge(sid);
-    // Drain one queued message for the currently viewed session after UI settles
-    const next=sid?shiftQueuedSessionMessage(sid):null;
+    // Drain one queued message for the finished session after UI settles
+    const _isViewedSid=!S.session||sid===S.session.session_id;
+    const next=sid&&_isViewedSid?shiftQueuedSessionMessage(sid):null;
     if(next){
       updateQueueBadge(sid);
       setTimeout(()=>{
