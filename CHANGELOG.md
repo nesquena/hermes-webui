@@ -5,6 +5,11 @@
 ### Fixed
 - **Reasoning chip now appears after the model chip** in the composer toolbar — model is a more fundamental choice and should be stable in position regardless of whether reasoning is active. Order: Profile → Workspace → Model → Reasoning. (`static/index.html`)
 
+## v0.50.192 — 2026-04-24
+
+### Changed
+- **`defer` attribute added to all local script tags** — scripts already sit at the end of `<body>` so this is largely a belt-and-suspenders improvement, but `defer` makes the intent explicit and allows browsers to start parsing before the DOM is fully ready without blocking. Execution order preserved (defer is order-preserving per spec). (`static/index.html`) By @ruxme. [#951]
+
 ## v0.50.191 — 2026-04-24
 
 ### Fixed
