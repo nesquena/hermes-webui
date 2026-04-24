@@ -1212,6 +1212,8 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 provider=resolved_provider,
                 base_url=resolved_base_url,
                 api_key=resolved_api_key,
+                # Identify browser-originated sessions as WebUI so Hermes Agent
+                # does not inject CLI-specific terminal/output guidance.
                 platform='webui',
                 quiet_mode=True,
                 enabled_toolsets=_toolsets,
