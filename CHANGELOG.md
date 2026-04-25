@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- **Mermaid CSP font fix** — added `fontFamily: 'inherit'` and `fontSize: '14px'` to the mermaid `themeVariables` block so Mermaid no longer requests the Manrope font from `fonts.googleapis.com` at render time. Eliminates CSP `style-src` violations on every diagram render; diagram text now uses the page's own font stack. (`static/ui.js`) [#1044]
 
 ## v0.50.209 — 2026-04-25
 
