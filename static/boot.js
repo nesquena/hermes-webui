@@ -916,7 +916,6 @@ window.addEventListener('pageshow', (event) => {
   // doesn't re-run. Each call is guarded so missing helpers degrade silently.
   if (typeof syncTopbar === 'function') try { syncTopbar(); } catch (_) {}
   if (typeof syncWorkspacePanelState === 'function') try { syncWorkspacePanelState(); } catch (_) {}
-  if (typeof _initResizePanels === 'function') try { _initResizePanels(); } catch (_) {}
   if (typeof renderSessionListFromCache === 'function') {
     try { renderSessionListFromCache(); } catch (_) {}
   }
