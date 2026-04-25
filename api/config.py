@@ -1074,6 +1074,8 @@ _available_models_cache: dict | None = None
 _available_models_cache_ts: float = 0.0
 _AVAILABLE_MODELS_CACHE_TTL: float = 86400.0  # 24 hours
 _available_models_cache_lock = threading.RLock()  # must be RLock: cold path refactoring moved slow work inside this lock, requiring re-entry
+_cache_build_cv = threading.Condition()  # signaled when _available_models_cache is set from a cold path
+_cache_build_in_progress = False  # True while a cold path is actively building
 
 # Cache for credential pool results -- calling load_pool() per-provider per-server
 # session is expensive (~10s for zai due to endpoint probing).  The credential pool
@@ -1130,10 +1132,12 @@ def invalidate_models_cache():
     the next call to get_available_models() picks up the changes rather
     than returning a stale cached result.
     """
-    global _available_models_cache, _available_models_cache_ts
+    global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts, _cache_build_cv
     with _available_models_cache_lock:
         _available_models_cache = None
         _available_models_cache_ts = 0.0
+        _cache_build_in_progress = False
+        _cache_build_cv.notify_all()
 
 
 def invalidate_provider_models_cache(provider_id: str):
@@ -1205,6 +1209,7 @@ def get_available_models() -> dict:
         'groups': [{'provider': str, 'models': [{'id': str, 'label': str}]}]
     }
     """
+    global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts, _cache_build_cv
     # ── COLD PATH helper ─────────────────────────────────────────────────────
     # Extracted so it runs inside _available_models_cache_lock (RLock) to
     # prevent thundering-herd: only one thread rebuilds while others wait.
@@ -1649,6 +1654,11 @@ def get_available_models() -> dict:
         }
 
     # ── FAST PATH ─────────────────────────────────────────────────────────────
+    # Mark that a build may be in progress BEFORE acquiring the lock.
+    # If another thread has already started the cold path, we will wait for
+    # its result rather than running the cold path concurrently.
+    should_wait = _cache_build_in_progress
+
     # Disk load BEFORE lock: ~0.1ms, lets concurrent requests skip entirely.
     # Then acquire lock and check memory cache.  Cold path runs inside the lock
     # so only one thread rebuilds while others wait.
@@ -1657,6 +1667,16 @@ def get_available_models() -> dict:
         disk_groups = _load_models_cache_from_disk()
 
     with _available_models_cache_lock:
+        # If another thread is already building, wait for its result instead
+        # of re-entering the cold path (avoids duplicate 10s zai load_pool calls).
+        if should_wait:
+            _cache_build_cv.wait_for(
+                lambda: not _cache_build_in_progress and _available_models_cache is not None,
+                timeout=60
+            )
+            if _available_models_cache is not None and (time.monotonic() - _available_models_cache_ts) < _AVAILABLE_MODELS_CACHE_TTL:
+                return copy.deepcopy(_available_models_cache)
+
         # Reload config if changed
         try:
             _current_mtime = Path(_get_config_path()).stat().st_mtime
@@ -1680,9 +1700,14 @@ def get_available_models() -> dict:
             return copy.deepcopy(disk_groups)
 
         # Cold path: full rebuild — only one thread reaches here at a time
+        with _cache_build_cv:
+            _cache_build_in_progress = True
         result = _build_available_models_uncached()
-        _available_models_cache = result
-        _available_models_cache_ts = now
+        with _cache_build_cv:
+            _available_models_cache = result
+            _available_models_cache_ts = time.monotonic()
+            _cache_build_in_progress = False
+            _cache_build_cv.notify_all()
         _save_models_cache_to_disk(result)
         return copy.deepcopy(result)
 
