@@ -7,6 +7,19 @@
 - **bfcache layout restore** — extended the `pageshow` handler in `boot.js` to re-run `syncTopbar`, `syncWorkspacePanelState`, `_initResizePanels`, and `startGatewaySSE` when `event.persisted === true`. Fixes the broken layout (oversized search icon, stale rail) that appeared on tab restore / browser session restore without a hard refresh. (#822 session-search fix preserved.) (`static/boot.js`) [#1045]
 - **iOS PWA auth redirect** — when an auth session expires, all API calls now detect the 401 and redirect to `/login` client-side instead of relying on a server-side 302. This fixes the iOS home-screen PWA getting permanently stuck on "Authentication required" with no way to re-authenticate without deleting and re-adding the PWA. (`static/workspace.js`, `static/ui.js`) [#1038]
 
+## v0.50.210 — 2026-04-25
+
+### Added
+- **gpt-5.5 and gpt-5.5-mini in model picker** — available for openai, openai-codex, and copilot providers. (`api/config.py`) [#1052 @aliceisjustplaying]
+- **Login redirects back to original URL after re-login** — the iOS PWA auth redirect now passes `?next=` with the current path; `login.js` honors it via a `_safeNextPath()` helper that guards against open-redirect (rejects `//`, backslash, and non-path-absolute inputs). (`static/login.js`, `static/ui.js`, `static/workspace.js`) [#1053]
+
+### Fixed
+- **Non-standard provider first-run experience** — agent dir discovery now searches XDG_DATA_HOME, `/opt`, `/usr/local` paths; onboarding wizard auto-completes for non-wizard providers (ollama-cloud, deepseek, xai, kimi-k2.6) with `provider_configured=True`; wizard model field no longer hardcodes `gpt-5.4-mini` literal; session model resolver correctly handles unlisted active providers. (`api/config.py`, `api/onboarding.py`, `api/routes.py`) Closes #1019–#1023 [#1049]
+- **Cron session titles in sidebar** — cron-launched sessions now display the human-friendly job name (from `~/.hermes/cron/jobs.json`) instead of a generic "Cron Session" label. (`api/models.py`, `api/routes.py`) [#1050 @waldmanz]
+- **AIAgent reused per session — fixes Honcho first-turn injection** — `AIAgent` is now cached per `session_id` so the agent's turn counter increments correctly across messages. Cache is evicted on session delete/clear. (`api/config.py`, `api/routes.py`, `api/streaming.py`) Closes #1039 [#1051 @qxxaa]
+- **Mermaid Google Fonts CSP violation suppressed** — `fontFamily:'inherit'` in Mermaid themeVariables prevents `@import url('fonts.googleapis.com')` from being injected into diagram SVGs. (`static/ui.js`) Closes #1044 [#1054]
+- **bfcache layout and dropdown restore** — `pageshow+event.persisted` handler re-syncs topbar, workspace panel, session list, and gateway SSE; also closes open composer dropdowns frozen by bfcache. `_initResizePanels()` removed from pageshow (bfcache preserves listeners). (`static/boot.js`) Closes #1045 [#1055]
+
 ## v0.50.209 — 2026-04-25
 
 ### Added
