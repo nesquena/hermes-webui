@@ -2176,6 +2176,9 @@ function buildToolCard(tc){
 // message column eliminates the visible "jump" users saw when renderMessages
 // fired on the done event.
 function appendLiveToolCard(tc){
+  // Guard: ignore if session was switched. Prevents stale tool events from
+  // a previous session's SSE stream from manipulating the new session's DOM.
+  if(!S.session||!S.activeStreamId) return;
   let turn=$('liveAssistantTurn');
   if(!turn){
     appendThinking();
@@ -2463,10 +2466,22 @@ function finalizeThinkingCard(){
     row.remove();
     return;
   }
+  // If the user was watching (scroll pinned = at bottom), scroll the thinking
+  // card back to the top so the completed response is visible underneath without
+  // the thinking content blocking it. If they scrolled up to read history,
+  // leave their scroll position intact.
+  if(_scrollPinned){
+    const body=row&&row.querySelector('.thinking-card-body');
+    if(body) body.scrollTop=0;
+  }
   row.removeAttribute('id');
   row.removeAttribute('data-thinking-active');
 }
 function appendThinking(text=''){
+  // Guard: ignore if session was switched during an async SSE stream.
+  // The old stream's reasoning events can still fire after switch;
+  // without this check they would pollute the new session's DOM.
+  if(!S.session||!S.activeStreamId) return;
   $('emptyState').style.display='none';
   let turn=$('liveAssistantTurn');
   if(!turn){
@@ -2496,6 +2511,12 @@ function appendThinking(text=''){
   row.className=(text&&String(text).trim())?'assistant-segment thinking-card-row':'assistant-segment';
   row.innerHTML=_thinkingMarkup(text);
   scrollIfPinned();
+  // Auto-scroll the thinking card body to bottom if the user is watching
+  // (scroll pinned). If the user scrolled up to read history, leave it alone.
+  if(_scrollPinned){
+    const body=row&&row.querySelector('.thinking-card-body');
+    if(body) body.scrollTop=body.scrollHeight;
+  }
 }
 function updateThinking(text=''){appendThinking(text);}
 function removeThinking(){
