@@ -691,7 +691,25 @@ def get_cli_sessions() -> list:
             profile = _cli_profile  # CLI DB has no profile column; use active profile
 
             _source = row['source'] or 'cli'
-            _display_title = row['title'] or f'{_source.title()} Session'
+            _title = row['title']
+            if not _title and _source == 'cron' and sid.startswith('cron_'):
+                # Extract job_id from session ID (cron_{job_id}_{timestamp})
+                # and look up the human-friendly job name from jobs.json
+                parts = sid.split('_')
+                if len(parts) >= 3:
+                    _job_id = parts[1]
+                    try:
+                        _jobs_path = hermes_home / 'cron' / 'jobs.json'
+                        if _jobs_path.exists():
+                            import json as _json
+                            _jobs_data = _json.loads(_jobs_path.read_text())
+                            for _j in _jobs_data.get('jobs', []):
+                                if _j.get('id') == _job_id:
+                                    _title = _j.get('name') or _title
+                                    break
+                    except Exception:
+                        pass  # degrade gracefully
+            _display_title = _title or f'{_source.title()} Session'
             cli_sessions.append({
                 'session_id': sid,
                 'title': _display_title,
@@ -707,75 +725,6 @@ def get_cli_sessions() -> list:
                 'source_tag': _source,
                 'is_cli_session': True,
             })
-        with sqlite3.connect(str(db_path)) as conn:
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
-            # Introspect schema to handle older hermes-agent versions that
-            # may not have a 'source' column. Without this check the query raises
-            # OperationalError which is silently swallowed, causing the empty-list bug.
-            cur.execute("PRAGMA table_info(sessions)")
-            _session_cols = {row[1] for row in cur.fetchall()}
-            if 'source' not in _session_cols:
-                import logging as _logging
-                _logging.getLogger(__name__).warning(
-                    "get_cli_sessions(): state.db at %s has no 'source' column "
-                    "(older hermes-agent?). CLI sessions unavailable. "
-                    "Upgrade hermes-agent to fix this.",
-                    db_path,
-                )
-                return cli_sessions
-            cur.execute("""
-                SELECT s.id, s.title, s.model, s.message_count,
-                       s.started_at, s.source,
-                       MAX(m.timestamp) AS last_activity
-                FROM sessions s
-                LEFT JOIN messages m ON m.session_id = s.id
-                WHERE s.source IS NOT NULL AND s.source != 'webui'
-                GROUP BY s.id
-                ORDER BY COALESCE(MAX(m.timestamp), s.started_at) DESC
-                LIMIT 200
-            """)
-            for row in cur.fetchall():
-                sid = row['id']
-                raw_ts = row['last_activity'] or row['started_at']
-                # Prefer the CLI session's own profile from the DB; fall back to
-                # the active CLI profile so sidebar filtering works either way.
-                profile = _cli_profile  # CLI DB has no profile column; use active profile
-                _source = row['source'] or 'cli'
-                _title = row['title']
-                if not _title and _source == 'cron' and sid.startswith('cron_'):
-                    # Extract job_id from session ID (cron_{job_id}_{timestamp})
-                    # and look up the human-friendly job name from jobs.json
-                    parts = sid.split('_')
-                    if len(parts) >= 3:
-                        _job_id = parts[1]
-                        try:
-                            _jobs_path = hermes_home / 'cron' / 'jobs.json'
-                            if _jobs_path.exists():
-                                import json as _json
-                                _jobs_data = _json.loads(_jobs_path.read_text())
-                                for _j in _jobs_data.get('jobs', []):
-                                    if _j.get('id') == _job_id:
-                                        _title = _j.get('name') or _title
-                                        break
-                        except Exception:
-                            pass  # degrade gracefully
-                _display_title = _title or f'{_source.title()} Session'
-                cli_sessions.append({
-                    'session_id': sid,
-                    'title': _display_title,
-                    'workspace': str(get_last_workspace()),
-                    'model': row['model'] or None,
-                    'message_count': row['message_count'] or 0,
-                    'created_at': row['started_at'],
-                    'updated_at': raw_ts,
-                    'pinned': False,
-                    'archived': False,
-                    'project_id': None,
-                    'profile': profile,
-                    'source_tag': _source,
-                    'is_cli_session': True,
-                })
     except Exception as _cli_err:
         # DB schema changed, locked, or corrupted -- log warning so admins can diagnose.
         # Still degrade gracefully (don't crash the WebUI).
