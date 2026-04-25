@@ -2535,7 +2535,9 @@ async function checkUpdatesNow(){
       }
     }
   } catch(e){
-    if(status){status.textContent=t('failed_colon')+e.message;status.style.color='var(--error)';}
+    // Sanitize error — avoid exposing internal paths/stack traces
+    const errMsg=(e&&e.message)?e.message.replace(/\/[^\s]*/g,'[path]').substring(0,120):t('settings_up_to_date');
+    if(status){status.textContent=t('failed_colon')+errMsg;status.style.color='var(--error)';}
   } finally {
     btn.disabled=false;
     if(spinner) spinner.style.display='none';
