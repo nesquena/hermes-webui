@@ -681,19 +681,26 @@ def handle_get(handler, parsed) -> bool:
         import time as _time
         _t0 = _time.monotonic()
         _debug_slow = os.environ.get("HERMES_DEBUG_SLOW", "")
-        sid = parse_qs(parsed.query).get("session_id", [""])[0]
+        query = parse_qs(parsed.query)
+        sid = query.get("session_id", [""])[0]
         if not sid:
             return j(handler, {"error": "session_id is required"}, status=400)
         # ?messages=0 skips the message payload for fast session switching.
         # The frontend uses this when switching conversations in the sidebar
         # (only needs metadata). The full message array is loaded lazily
         # via ?messages=1 when the message panel opens.
-        load_messages = parse_qs(parsed.query).get("messages", ["1"])[0] != "0"
+        load_messages = query.get("messages", ["1"])[0] != "0"
+        resolve_model_default = "1" if load_messages else "0"
+        resolve_model = query.get("resolve_model", [resolve_model_default])[0] != "0"
         try:
             _t1 = _time.monotonic()
             s = get_session(sid, metadata_only=(not load_messages))
             _t2 = _time.monotonic()
-            effective_model = _resolve_effective_session_model_for_display(s)
+            effective_model = (
+                _resolve_effective_session_model_for_display(s)
+                if resolve_model
+                else None
+            )
             _t3 = _time.monotonic()
             raw = s.compact() | {
                 "messages": s.messages if load_messages else [],

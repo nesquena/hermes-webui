@@ -109,7 +109,7 @@ async function loadSession(sid){
   // Guard against network/server failures to prevent a permanently stuck loading state.
   let data;
   try {
-    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0`);
+    data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
   } catch(e) {
     const _msgInner = $('msgInner');
     if (_msgInner) {
@@ -119,6 +119,7 @@ async function loadSession(sid){
     return;
   }
   S.session=data.session;
+  S.session._modelResolutionDeferred=true;
   S.lastUsage={...(data.session.last_usage||{})};
   _setSessionViewedCount(S.session.session_id, Number(data.session.message_count || 0));
   localStorage.setItem('hermes-webui-session',S.session.session_id);
@@ -254,6 +255,23 @@ async function loadSession(sid){
       threshold_tokens:  _pick(u.threshold_tokens,  _s.threshold_tokens),
     });
   }
+  _resolveSessionModelForDisplaySoon(sid);
+}
+
+function _resolveSessionModelForDisplaySoon(sid){
+  if(!sid) return;
+  setTimeout(async()=>{
+    try{
+      const data=await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=1`);
+      const model=data&&data.session&&data.session.model;
+      if(!model||!S.session||S.session.session_id!==sid) return;
+      S.session.model=model;
+      S.session._modelResolutionDeferred=false;
+      syncTopbar();
+    }catch(_){
+      // Keep session switching non-blocking; the next load can try again.
+    }
+  },0);
 }
 
 // Load session messages if not already present.
@@ -266,7 +284,7 @@ async function _ensureMessagesLoaded(sid) {
     return;
   }
   // Fetch full session with messages
-  const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1`);
+  const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`);
   const msgs = (data.session.messages || []).filter(m => m && m.role);
   // Check for tool-call metadata on messages (for tool-call card rendering)
   const hasMessageToolMetadata = msgs.some(m => {
@@ -282,6 +300,11 @@ async function _ensureMessagesLoaded(sid) {
   }
   clearLiveToolCards();
   S.messages = msgs;
+  if(S.session&&S.session.session_id===sid){
+    S.session.message_count=Number(data.session.message_count || msgs.length);
+    S.lastUsage={...(data.session.last_usage||S.lastUsage||{})};
+    _setSessionViewedCount(sid, Number(S.session.message_count || msgs.length));
+  }
 }
 
 let _allSessions = [];  // cached for search filter

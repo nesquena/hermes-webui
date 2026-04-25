@@ -195,6 +195,87 @@ def _is_streaming_session(active_stream_id, active_stream_ids):
     return bool(active_stream_id and active_stream_id in active_stream_ids)
 
 
+def _find_top_level_json_key(text, key):
+    """Return the byte offset of a top-level JSON object key, if present."""
+    depth = 0
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch == '"':
+            start = i
+            i += 1
+            escaped = False
+            chars = []
+            while i < n:
+                c = text[i]
+                if escaped:
+                    chars.append(c)
+                    escaped = False
+                elif c == '\\':
+                    escaped = True
+                elif c == '"':
+                    break
+                else:
+                    chars.append(c)
+                i += 1
+            if i >= n:
+                return None
+            if depth == 1 and ''.join(chars) == key:
+                j = i + 1
+                while j < n and text[j] in ' \t\r\n':
+                    j += 1
+                if j < n and text[j] == ':':
+                    return start
+        elif ch in '{[':
+            depth += 1
+        elif ch in '}]':
+            depth -= 1
+        i += 1
+    return None
+
+
+def _read_metadata_json_prefix(path, max_prefix_bytes=65536):
+    """Read only the metadata portion before the top-level messages array."""
+    buf = ''
+    with open(path, 'r', encoding='utf-8') as f:
+        while len(buf.encode('utf-8')) < max_prefix_bytes:
+            chunk = f.read(4096)
+            if not chunk:
+                return None
+            buf += chunk
+            messages_pos = _find_top_level_json_key(buf, 'messages')
+            if messages_pos is None:
+                continue
+            prefix = buf[:messages_pos].rstrip()
+            if prefix.endswith(','):
+                prefix = prefix[:-1].rstrip()
+            return f'{prefix}\n}}'
+    return None
+
+
+def _lookup_index_message_count(session_id):
+    """Return the indexed message count without loading the full session file."""
+    try:
+        entries = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
+    except Exception:
+        return None
+    if not isinstance(entries, list):
+        return None
+    for entry in entries:
+        if entry.get('session_id') != session_id:
+            continue
+        count = entry.get('message_count')
+        if isinstance(count, int) and count >= 0:
+            return count
+        try:
+            count = int(count)
+        except (TypeError, ValueError):
+            return None
+        return count if count >= 0 else None
+    return None
+
+
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), model=DEFAULT_MODEL,
@@ -232,6 +313,7 @@ class Session:
         self.pending_started_at = pending_started_at
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
+        self._metadata_message_count = None
 
     @property
     def path(self):
@@ -256,7 +338,8 @@ class Session:
         meta['tool_calls'] = self.tool_calls
         # Fields not in METADATA_FIELDS (e.g. last_usage, message_count) go at the end
         extra = {k: v for k, v in self.__dict__.items()
-                 if k not in METADATA_FIELDS and k not in ('messages', 'tool_calls')}
+                 if k not in METADATA_FIELDS and k not in ('messages', 'tool_calls')
+                 and not k.startswith('_')}
         payload = json.dumps({**meta, **extra}, ensure_ascii=False, indent=2)
         tmp = self.path.with_suffix(f'.tmp.{os.getpid()}.{threading.current_thread().ident}')
         try:
@@ -289,10 +372,9 @@ class Session:
         """Load only the compact metadata fields, skipping the messages array.
 
         Session JSON files have metadata fields (session_id, title, model, etc.)
-        at the top level, before the large messages array. We read only the
-        first ~1KB — enough to capture all compact() fields — then parse just
-        that prefix. Falls back to load() if the prefix doesn't contain enough
-        fields or if the file is unexpectedly small.
+        at the top level, before the large messages array. Read only up to the
+        top-level "messages" field and synthesize a small metadata-only object.
+        Falls back to load() for legacy or unexpected file layouts.
         """
         if not sid or not all(c in '0123456789abcdefghijklmnopqrstuvwxyz_' for c in sid):
             return None
@@ -300,26 +382,18 @@ class Session:
         if not p.exists():
             return None
         try:
-            # Read just the first 1 KB — metadata comes before messages array
-            with open(p, 'r', encoding='utf-8') as f:
-                prefix = f.read(1024)
+            prefix = _read_metadata_json_prefix(p)
             if not prefix:
                 return cls.load(sid)
             parsed = json.loads(prefix)
-            # Verify we got the essential fields.
-            # With metadata-first save() ordering, messages appears at byte ~567.
-            # For sessions <= ~512 bytes total the entire messages array fits in the
-            # first 1 KB and we get a valid list. For larger sessions json.loads
-            # fails on the truncated buffer (unterminated string), so we fall back
-            # to full load. The one exception is a truncation inside a string value
-            # that happens to produce valid JSON with a truncated string — guard
-            # against that by requiring messages to be a list.
             needed = {'session_id', 'title', 'created_at', 'updated_at'}
             if not needed.issubset(parsed.keys()):
                 return cls.load(sid)
-            if not isinstance(parsed.get('messages'), list):
-                return cls.load(sid)
-            return cls(**parsed)
+            parsed['messages'] = []
+            parsed['tool_calls'] = []
+            session = cls(**parsed)
+            session._metadata_message_count = _lookup_index_message_count(sid)
+            return session
         except Exception:
             # Corrupt prefix or decode error — fall back to full load
             return cls.load(sid)
@@ -331,7 +405,11 @@ class Session:
             'title': self.title,
             'workspace': self.workspace,
             'model': self.model,
-            'message_count': len(self.messages),
+            'message_count': (
+                self._metadata_message_count
+                if self._metadata_message_count is not None
+                else len(self.messages)
+            ),
             'created_at': self.created_at,
             'updated_at': self.updated_at,
             'pinned': self.pinned,
@@ -353,9 +431,10 @@ class Session:
 def get_session(sid, metadata_only=False):
     """Load a session, optionally with metadata only (skipping the messages array).
 
-    When metadata_only=True the session is still cached so the full load on the
-    next access is fast. Use this when you only need compact() metadata and not
-    the actual message history (e.g., for fast sidebar switching).
+    Metadata-only loads intentionally do not populate the full-session cache.
+    Otherwise a later full load could return a compact object with an empty
+    messages list. Use this when you only need compact() metadata and not the
+    actual message history (e.g., for fast sidebar switching).
     """
     with LOCK:
         if sid in SESSIONS:
@@ -363,6 +442,8 @@ def get_session(sid, metadata_only=False):
             return SESSIONS[sid]
     if metadata_only:
         s = Session.load_metadata_only(sid)
+        if s:
+            return s
     else:
         s = Session.load(sid)
     if s:
