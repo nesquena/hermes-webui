@@ -2583,9 +2583,17 @@ async function checkUpdatesNow(){
       }
     }
   } catch(e){
-    // Sanitize error — avoid exposing internal paths/stack traces
-    const errMsg=(e&&e.message)?e.message.replace(/\/[^\s]*/g,'[path]').substring(0,120):t('settings_up_to_date');
-    if(status){status.textContent=t('failed_colon')+errMsg;status.style.color='var(--error)';}
+    // Never expose raw e.message in UI — log to console for debugging only
+    console.warn('[checkUpdatesNow]', e);
+    // Show a generic user-facing error; if the API returned a message body use it
+    let userMsg=t('settings_update_check_failed');
+    if(e&&e.response){
+      try{
+        const body=JSON.parse(e.response);
+        if(body.error) userMsg=String(body.error).substring(0,120);
+      }catch(_){}
+    }
+    if(status){status.textContent=userMsg;status.style.color='var(--error)';}
   } finally {
     btn.disabled=false;
     if(spinner) spinner.style.display='none';
