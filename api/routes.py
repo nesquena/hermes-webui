@@ -641,6 +641,20 @@ def handle_get(handler, parsed) -> bool:
             },
         )
 
+    if parsed.path == "/api/health":
+        with STREAMS_LOCK:
+            n_streams = len(STREAMS)
+        return j(
+            handler,
+            {
+                "status": "ok",
+                "webui": "external",
+                "sessions": len(SESSIONS),
+                "active_streams": n_streams,
+                "uptime_seconds": round(time.time() - SERVER_START_TIME, 1),
+            },
+        )
+
     if parsed.path == "/api/models":
         return j(handler, get_available_models())
 
@@ -675,6 +689,16 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path.startswith("/static/"):
         return _serve_static(handler, parsed)
+
+    if (
+        not parsed.path.startswith("/api/")
+        and "." not in parsed.path.rsplit("/", 1)[-1]
+    ):
+        return t(
+            handler,
+            _INDEX_HTML_PATH.read_text(encoding="utf-8"),
+            content_type="text/html; charset=utf-8",
+        )
 
     if parsed.path == "/api/session":
         import time as _time
