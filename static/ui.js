@@ -2682,6 +2682,7 @@ function renderMermaidBlocks(){
       script.onload=()=>{
         if(typeof mermaid!=='undefined'){
           mermaid.initialize({startOnLoad:false,theme:document.documentElement.classList.contains('dark')?'dark':'default',themeVariables:{
+            fontFamily:'inherit',fontSize:'14px',
             primaryColor:'#4a6fa5',primaryTextColor:'#e2e8f0',lineColor:'#718096',
             secondaryColor:'#2d3748',tertiaryColor:'#1a202c',primaryBorderColor:'#4a5568',
           }});
