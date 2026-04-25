@@ -1,0 +1,58 @@
+name: Hermes Deploy Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      extra_tag:
+        description: "Optional extra GHCR tag to publish alongside stable"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build tag list
+        id: tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="ghcr.io/ashneil12/hermes-webui"
+          {
+            echo "tags<<EOF"
+            echo "${image}:stable"
+            echo "${image}:sha-${GITHUB_SHA::12}"
+            if [ -n "${{ inputs.extra_tag }}" ]; then
+              echo "${image}:${{ inputs.extra_tag }}"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: HERMES_VERSION=hermesdeploy-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
