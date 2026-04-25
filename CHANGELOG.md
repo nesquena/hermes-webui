@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Fixed
+- **Session attention indicators now reuse the right-side actions slot** — streaming spinners and unread dots no longer sit before the session title. Running and unread rows hide the timestamp and show the attention indicator at the same right-side position as the three-dot actions button, which appears on hover/focus. This preserves the last-activity timestamp for idle/read sessions while avoiding title shifts and saving horizontal title space. (`static/sessions.js`, `static/style.css`)
+- **Session sidebar polish** — idle/read timestamps now align to the far right and hide on hover when the actions menu appears; date group carets now point down when expanded and right when collapsed; sessions inside the Pinned group no longer repeat the pinned-star icon on each row. (`static/sessions.js`, `static/style.css`)
+- **Session running indicators now appear immediately after send** — the sidebar now treats the active local busy session and local in-flight sessions as streaming while `/api/sessions` catches up, so the spinner no longer waits for the next 5-second streaming poll. (`static/messages.js`, `static/sessions.js`)
+- **Session sidebar dates now use the last message time** — sidebar sorting, grouping, and relative timestamps now prefer a derived `last_message_at` value instead of metadata-only `updated_at`, so changing session settings does not make an old conversation appear under Today. (`api/models.py`, `api/routes.py`, `static/sessions.js`)
 - **Reasoning chip now appears after the model chip** in the composer toolbar — model is a more fundamental choice and should be stable in position regardless of whether reasoning is active. Order: Profile → Workspace → Model → Reasoning. (`static/index.html`)
 
 ## v0.50.205 — 2026-04-24

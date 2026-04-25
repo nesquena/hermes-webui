@@ -735,6 +735,8 @@ def handle_get(handler, parsed) -> bool:
                     "message_count": len(msgs),
                     "created_at": (cli_meta or {}).get("created_at", 0),
                     "updated_at": (cli_meta or {}).get("updated_at", 0),
+                    "last_message_at": (cli_meta or {}).get("last_message_at")
+                    or (cli_meta or {}).get("updated_at", 0),
                     "pinned": False,
                     "archived": False,
                     "project_id": None,
@@ -783,7 +785,10 @@ def handle_get(handler, parsed) -> bool:
         else:
             deduped_cli = []
         merged = webui_sessions + deduped_cli
-        merged.sort(key=lambda s: s.get("updated_at", 0) or 0, reverse=True)
+        merged.sort(
+            key=lambda s: s.get("last_message_at") or s.get("updated_at", 0) or 0,
+            reverse=True,
+        )
         safe_merged = []
         for s in merged:
             item = dict(s)

@@ -621,7 +621,7 @@ function filterSessions(){
 }
 
 function _sessionTimestampMs(session) {
-  const raw = Number(session && (session.updated_at || session.created_at || 0));
+  const raw = Number(session && (session.last_message_at || session.updated_at || session.created_at || 0));
   return Number.isFinite(raw) ? raw * 1000 : 0;
 }
 
@@ -803,7 +803,7 @@ function renderSessionListFromCache(){
     hdr.className='session-date-header'+(g.isPinned?' pinned':'');
     const caret=document.createElement('span');
     caret.className='session-date-caret';
-    caret.textContent='\u25B8'; // right-pointing triangle
+    caret.textContent='\u25BE'; // down when expanded; rotated right when collapsed
     const label=document.createElement('span');
     label.textContent=g.label;
     hdr.appendChild(caret);hdr.appendChild(label);
@@ -818,18 +818,25 @@ function renderSessionListFromCache(){
       _saveCollapsed();
     };
     wrapper.appendChild(hdr);
-    for(const s of g.items){ body.appendChild(_renderOneSession(s)); }
+    for(const s of g.items){ body.appendChild(_renderOneSession(s, Boolean(g.isPinned))); }
     wrapper.appendChild(body);
     list.appendChild(wrapper);
   }
   // ── Render session items (extracted for group body use) ──
   // Note: declared after the groups loop but available via function hoisting.
-  function _renderOneSession(s){
+  function _renderOneSession(s, isPinnedGroup=false){
     const el=document.createElement('div');
     const isActive=S.session&&s.session_id===S.session.session_id;
-    const isStreaming=Boolean(s.is_streaming);
+    const isLocalStreaming=Boolean(
+      s.session_id
+      && (
+        (isActive&&S.busy)
+        || (typeof INFLIGHT==='object'&&INFLIGHT&&INFLIGHT[s.session_id])
+      )
+    );
+    const isStreaming=Boolean(s.is_streaming||isLocalStreaming);
     const hasUnread=_hasUnreadForSession(s)&&!isActive;
-    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(isStreaming?' streaming':'');
+    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(isStreaming?' streaming':'')+(hasUnread?' unread':'');
     if(isActive&&S.session&&S.session._flash)delete S.session._flash;
     const rawTitle=s.title||'Untitled';
     const tags=(rawTitle.match(/#[\w-]+/g)||[]);
@@ -842,23 +849,21 @@ function renderSessionListFromCache(){
     sessionText.className='session-text';
     const titleRow=document.createElement('div');
     titleRow.className='session-title-row';
-    if(s.pinned){
+    if(s.pinned&&!isPinnedGroup){
       const pinInd=document.createElement('span');
       pinInd.className='session-pin-indicator';
       pinInd.innerHTML=ICONS.pin;
       titleRow.appendChild(pinInd);
     }
-    const state=document.createElement('span');
-    state.className='session-state-indicator'+(isStreaming?' is-streaming':(hasUnread?' is-unread':''));
-    titleRow.appendChild(state); // always reserve slot — prevents title shift when indicator appears
     const title=document.createElement('span');
     title.className='session-title';
     title.textContent=cleanTitle||'Untitled';
     title.title='Double-click to rename';
     const tsMs=_sessionTimestampMs(s);
     const ts=document.createElement('span');
-    ts.className='session-time';
-    ts.textContent=_formatRelativeSessionTime(tsMs);
+    const hasAttentionState=isStreaming||hasUnread;
+    ts.className='session-time'+(hasAttentionState?' is-hidden':'');
+    ts.textContent=hasAttentionState?'':_formatRelativeSessionTime(tsMs);
     titleRow.appendChild(title);
     titleRow.appendChild(ts);
     sessionText.appendChild(titleRow);
@@ -942,6 +947,10 @@ function renderSessionListFromCache(){
       }
     }
     el.appendChild(sessionText);
+    const state=document.createElement('span');
+    state.className='session-attention-indicator session-state-indicator'+(isStreaming?' is-streaming':(hasUnread?' is-unread':''));
+    state.setAttribute('aria-hidden','true');
+    el.appendChild(state);
     // Single trigger button that opens a shared dropdown menu
     const actions=document.createElement('div');
     actions.className='session-actions';
