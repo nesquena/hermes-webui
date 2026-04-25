@@ -207,7 +207,11 @@
   body{background:var(--bg);color:var(--text);height:100vh;height:100dvh;overflow:hidden;display:flex;flex-direction:column;}
   .layout{display:flex;width:100%;flex:1 1 auto;min-height:0;}
   .app-titlebar{display:flex;align-items:center;justify-content:space-between;height:38px;flex-shrink:0;background:var(--sidebar);border-bottom:1px solid var(--border);padding:0 12px;padding-top:env(safe-area-inset-top,0);padding-left:max(12px,env(safe-area-inset-left,0));padding-right:max(12px,env(safe-area-inset-right,0));box-sizing:content-box;font-size:12px;color:var(--muted);user-select:none;-webkit-app-region:drag;position:relative;z-index:20;}
-  .app-titlebar-inner{display:flex;align-items:center;gap:8px;min-width:0;max-width:100%;flex:1 1 auto;justify-content:center;}
+  .app-titlebar-inner{display:flex;align-items:center;gap:8px;min-width:0;max-width:100%;flex:1 1 auto;justify-content:space-between;}
+  .tps-chip{
+    font-size:11px;font-family:ui-monospace,'SF Mono',monospace;color:var(--muted);
+    white-space:nowrap;letter-spacing:.02em;flex-shrink:0;
+  }
   .app-titlebar-icon{display:inline-flex;align-items:center;color:var(--accent);}
   .app-titlebar-title{font-size:12px;font-weight:600;color:var(--text);letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:60vw;}
   .app-titlebar-sub{font-size:10px;color:var(--muted);background:var(--hover-bg);padding:2px 7px;border-radius:4px;font-family:'SF Mono',ui-monospace,monospace;white-space:nowrap;flex-shrink:0;}
@@ -597,7 +601,7 @@
   .composer-profile-chip.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);}
   .composer-profile-icon,.composer-profile-chevron{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;line-height:1;}
   .composer-profile-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-  .composer-ws-wrap{position:relative;flex:0 1 auto;min-width:0;}
+  .composer-ws-wrap{position:relative;flex:0 1 auto;min-width:0;display:flex;align-items:center;gap:4px;}
   .composer-workspace-group{display:inline-flex;align-items:stretch;max-width:240px;border-radius:999px;overflow:hidden;background-color:transparent;transition:background-color .15s;}
   .composer-workspace-group:hover{background-color:var(--hover-bg);}
   .composer-workspace-group:hover .composer-workspace-files-btn,
