@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- **Auto title generation is more robust for reasoning models** — title generation now uses a reasoning-safe completion budget, retries empty-content/length responses once with a larger budget, and preserves the underlying LLM failure reason in `title_status` when falling back to a local summary. This keeps the existing `auxiliary.title_generation` cheaper-model path intact while preventing reasoning-heavy models from silently falling back to first-message titles. (`api/streaming.py`, `tests/test_title_aux_routing.py`) Refs #869.
 - **Reasoning chip now appears after the model chip** in the composer toolbar — model is a more fundamental choice and should be stable in position regardless of whether reasoning is active. Order: Profile → Workspace → Model → Reasoning. (`static/index.html`)
 
 ## v0.50.206 — 2026-04-25

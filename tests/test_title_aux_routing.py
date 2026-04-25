@@ -72,9 +72,14 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
     def _run_with_config(self, tg_config, expected_timeout):
         from api.streaming import generate_title_raw_via_aux
 
-        mock_resp = MagicMock()
-        mock_resp.choices = [MagicMock()]
-        mock_resp.choices[0].message.content = 'Test Title'
+        mock_resp = types.SimpleNamespace(
+            choices=[
+                types.SimpleNamespace(
+                    message=types.SimpleNamespace(content='Test Title'),
+                    finish_reason='stop',
+                )
+            ]
+        )
 
         captured = {}
 
@@ -116,6 +121,153 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
             {'provider': '', 'model': 'gpt-4o', 'base_url': '', 'timeout': None},
             15.0,
         )
+
+
+class TestReasoningModelTitleGeneration(unittest.TestCase):
+    """Regression coverage for reasoning models that spend output budget on reasoning."""
+
+    def test_title_budget_defaults_to_reasoning_safe_value(self):
+        """Title generation should not use a tiny output cap that starves final content."""
+        from api.streaming import _title_completion_budget, _title_retry_completion_budget
+
+        self.assertEqual(_title_completion_budget(), 512)
+        self.assertEqual(_title_retry_completion_budget(), 1024)
+
+    def test_aux_retries_empty_reasoning_length_response_with_larger_budget(self):
+        """If a reasoning model returns empty content at finish_reason=length, retry once."""
+        from api.streaming import generate_title_raw_via_aux
+
+        responses = [
+            {
+                'choices': [
+                    {
+                        'message': {'content': '', 'reasoning': 'long hidden reasoning'},
+                        'finish_reason': 'length',
+                    }
+                ]
+            },
+            {'choices': [{'message': {'content': 'Useful Session Title'}, 'finish_reason': 'stop'}]},
+        ]
+        captured_budgets = []
+
+        def fake_call_llm(**kwargs):
+            captured_budgets.append(kwargs.get('max_tokens'))
+            return responses.pop(0)
+
+        with _patch_tg_config({'provider': 'ollama', 'model': 'kimi-k2.6', 'base_url': 'https://ollama.com/v1'}):
+            with patch('agent.auxiliary_client.call_llm', side_effect=fake_call_llm, create=True):
+                result, status = generate_title_raw_via_aux(
+                    user_text='Hey nur ein kurzer Test',
+                    assistant_text='Alles klar, ich helfe dir dabei.',
+                )
+
+        self.assertEqual(result, 'Useful Session Title')
+        self.assertEqual(status, 'llm_aux_retry')
+        self.assertEqual(captured_budgets, [512, 1024])
+
+    def test_aux_returns_specific_status_when_reasoning_retry_still_empty(self):
+        """Diagnostics should expose the provider failure mode instead of generic llm_error_aux."""
+        from api.streaming import generate_title_raw_via_aux
+
+        def empty_length_response(**kwargs):
+            return {
+                'choices': [
+                    {
+                        'message': {'content': '', 'reasoning': 'still reasoning'},
+                        'finish_reason': 'length',
+                    }
+                ]
+            }
+
+        with _patch_tg_config({'provider': 'ollama', 'model': 'kimi-k2.6', 'base_url': 'https://ollama.com/v1'}):
+            with patch('agent.auxiliary_client.call_llm', side_effect=empty_length_response, create=True):
+                result, status = generate_title_raw_via_aux(
+                    user_text='Hey nur ein kurzer Test',
+                    assistant_text='Alles klar, ich helfe dir dabei.',
+                )
+
+        self.assertIsNone(result)
+        self.assertEqual(status, 'llm_length_aux')
+
+    def test_agent_route_retries_empty_reasoning_length_response(self):
+        """The active-agent route should get the same reasoning-model retry path as aux."""
+        from api.streaming import generate_title_raw_via_agent
+
+        responses = [
+            {
+                'choices': [
+                    {
+                        'message': {'content': '', 'reasoning': 'long hidden reasoning'},
+                        'finish_reason': 'length',
+                    }
+                ]
+            },
+            {'choices': [{'message': {'content': 'Agent Session Title'}, 'finish_reason': 'stop'}]},
+        ]
+        captured_budgets = []
+
+        def fake_create(**kwargs):
+            captured_budgets.append(kwargs.get('max_tokens') or kwargs.get('max_completion_tokens'))
+            return responses.pop(0)
+
+        client = types.SimpleNamespace(
+            chat=types.SimpleNamespace(
+                completions=types.SimpleNamespace(create=fake_create)
+            )
+        )
+        agent = MagicMock()
+        agent.api_mode = 'openai'
+        agent.provider = 'ollama'
+        agent.model = 'kimi-k2.6'
+        agent.base_url = 'https://ollama.com/v1'
+        agent.reasoning_config = None
+        agent._build_api_kwargs.return_value = {}
+        agent._ensure_primary_openai_client.return_value = client
+
+        result, status = generate_title_raw_via_agent(
+            agent,
+            user_text='Hey nur ein kurzer Test',
+            assistant_text='Alles klar, ich helfe dir dabei.',
+        )
+
+        self.assertEqual(result, 'Agent Session Title')
+        self.assertEqual(status, 'llm_retry')
+        self.assertEqual(captured_budgets, [512, 1024])
+        self.assertIsNone(agent.reasoning_config)
+
+    @patch('api.streaming._aux_title_configured', return_value=True)
+    @patch('api.streaming._generate_llm_session_title_via_aux')
+    @patch('api.streaming.get_session')
+    def test_fallback_title_status_keeps_underlying_llm_reason(
+        self, mock_get_session, mock_aux_title, mock_configured,
+    ):
+        """Local fallback should not hide that the LLM failed because it hit length."""
+        from api.streaming import _run_background_title_update
+
+        mock_session = MagicMock()
+        mock_session.title = 'Untitled'
+        mock_session.llm_title_generated = False
+        mock_session.messages = [
+            {'role': 'user', 'content': 'Hey nur ein kurzer Test'},
+            {'role': 'assistant', 'content': 'Alles klar, ich helfe dir dabei.'},
+        ]
+        mock_get_session.return_value = mock_session
+        mock_aux_title.return_value = (None, 'llm_length_aux', '')
+        events = []
+
+        _run_background_title_update(
+            session_id='reasoning-title-session',
+            user_text='Hey nur ein kurzer Test',
+            assistant_text='Alles klar, ich helfe dir dabei.',
+            placeholder_title='Untitled',
+            put_event=lambda event_type, data: events.append((event_type, data)),
+            agent=None,
+        )
+
+        title_status = [data for event_type, data in events if event_type == 'title_status']
+        self.assertTrue(title_status)
+        self.assertEqual(title_status[0]['status'], 'fallback')
+        self.assertEqual(title_status[0]['reason'], 'local_summary:llm_length_aux')
 
 
 class TestAuxTitleTimeoutEdgeCases(unittest.TestCase):
