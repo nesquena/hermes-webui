@@ -257,6 +257,7 @@ function openCronDetail(id, el){
 }
 
 function _clearCronDetail(){
+  if (_cronRunningPoll) { clearInterval(_cronRunningPoll); _cronRunningPoll = null; }
   _currentCronDetail = null;
   _cronMode = 'empty';
   const title = $('taskDetailTitle');
@@ -520,10 +521,18 @@ function _startCronRunningPoll(jobId) {
     if (!_currentCronDetail || _currentCronDetail.id !== jobId || attempts > maxAttempts) {
       clearInterval(_cronRunningPoll);
       _cronRunningPoll = null;
+      // Re-render detail with real status when poll ends (fallback from "running" indicator)
+      if (_currentCronDetail && _currentCronDetail.id === jobId) {
+        const refreshed = _cronList ? _cronList.find(j => j.id === jobId) : null;
+        if (refreshed) _renderCronDetail(refreshed);
+      }
       return;
     }
     try {
       await loadCrons();
+      // loadCrons() re-renders the detail which overwrites our "running" badge.
+      // Re-apply the running indicator if poll is still active.
+      if (_cronRunningPoll) _setCronDetailStatus('running');
     } catch(e) { /* ignore */ }
   }, 3000);
 }
