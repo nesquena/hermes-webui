@@ -793,6 +793,7 @@ function applyBotName(){
     window._showThinking=s.show_thinking!==false;
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
     window._botName=s.bot_name||'Hermes';
+    if(s.default_model) window._defaultModel=s.default_model;
     // Persist default workspace so the blank new-chat page can show it
     // and workspace actions (New file/folder) work before the first session (#804).
     if(s.default_workspace) S._profileDefaultWorkspace=s.default_workspace;
@@ -840,16 +841,20 @@ function applyBotName(){
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
-  // Fetch available models from server and populate dropdown dynamically
-  await populateModelDropdown();
-  // Restore last-used model preference
-  const savedModel=localStorage.getItem('hermes-webui-model');
-  if(savedModel && $('modelSelect')){
-    $('modelSelect').value=savedModel;
-    // If the value didn't take (model not in list), clear the bad pref
-    if($('modelSelect').value!==savedModel) localStorage.removeItem('hermes-webui-model');
-    else if(typeof syncModelChip==='function') syncModelChip();
-  }
+  // Fetch available models without blocking session restore. The static HTML
+  // options are enough for first paint; the dynamic provider list can settle
+  // after the saved session is visible.
+  const _modelDropdownReady=populateModelDropdown().then(()=>{
+    const savedModel=localStorage.getItem('hermes-webui-model');
+    if(savedModel && $('modelSelect')){
+      $('modelSelect').value=savedModel;
+      // If the value didn't take (model not in list), clear the bad pref
+      if($('modelSelect').value!==savedModel) localStorage.removeItem('hermes-webui-model');
+      else if(typeof syncModelChip==='function') syncModelChip();
+    }
+    if(S.session) syncTopbar();
+  }).catch(()=>{});
+  window._modelDropdownReady=_modelDropdownReady;
   // Pre-load workspace list so sidebar name is correct from first render
   await loadWorkspaceList();
   await loadOnboardingWizard();

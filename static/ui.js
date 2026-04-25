@@ -1428,6 +1428,7 @@ function syncTopbar(){
     // If the model isn't in the current provider list, silently reset to the
     // first available model so stale values don't pollute the picker (#829).
     if(!applied && currentModel){
+      const deferModelCorrection=Boolean(S.session._modelResolutionDeferred);
       // Stale session model not in the current provider catalog — reset to the
       // first available model rather than injecting an "(unavailable)" option
       // that visually appears under the wrong provider group (#829).
@@ -1435,13 +1436,15 @@ function syncTopbar(){
       const first=modelSel&&modelSel.querySelector('optgroup > option, option');
       if(first){
         modelSel.value=first.value;
-        S.session.model=first.value;
-        // Persist the correction so the session doesn't re-inject on next load.
-        fetch(new URL('api/session/update',location.href).href,{
-          method:'POST',credentials:'include',
-          headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({session_id:S.session.id||S.session.session_id,model:first.value})
-        }).catch(()=>{});
+        if(!deferModelCorrection){
+          S.session.model=first.value;
+          // Persist the correction so the session doesn't re-inject on next load.
+          fetch(new URL('api/session/update',location.href).href,{
+            method:'POST',credentials:'include',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({session_id:S.session.id||S.session.session_id,model:first.value})
+          }).catch(()=>{});
+        }
       }
     }
   }
