@@ -605,9 +605,6 @@ const LOCALES = {
     profile_api_key_label: 'API key',
   },
 
-    cmd_status: '\u986f\u793a\u6703\u8a71\u8cc7\u8a0a',
-    memory_saved: '\u8a18\u61b6\u5df2\u5132\u5b58',
-    profile_delete_title: '\u522a\u9664\u6b64\u8a2d\u5b9a\u6a94',
   ru: {
     _lang: 'ru',
     _label: 'Русский',

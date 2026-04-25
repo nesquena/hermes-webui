@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- **Language dropdown no longer shows invalid i18n key entries** — three Traditional Chinese translation keys (`cmd_status`, `memory_saved`, `profile_delete_title`) were placed outside any locale block in `static/i18n.js`, between the closing `}` of the `en` block and the opening `ru: {`. Since `panels.js` iterates `Object.entries(LOCALES)` to populate the language `<select>`, these orphaned keys appeared as invalid language options. Fixed by removing the duplicate orphaned entries — the correct translations already exist inside the `zh-Hant` locale block. (`static/i18n.js`) Closes #1008.
 - **Reasoning chip now appears after the model chip** in the composer toolbar — model is a more fundamental choice and should be stable in position regardless of whether reasoning is active. Order: Profile → Workspace → Model → Reasoning. (`static/index.html`)
 
 ## v0.50.206 — 2026-04-25
