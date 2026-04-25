@@ -308,11 +308,10 @@ const LOCALES = {
     new_conversation: 'New conversation',
     filter_conversations: 'Filter conversations...',
     session_time_unknown: 'Unknown',
-    session_time_just_now: 'just now',
-    session_time_minutes_ago: (n) => `${n} minute${n === 1 ? '' : 's'} ago`,
-    session_time_hours_ago: (n) => `${n} hour${n === 1 ? '' : 's'} ago`,
-    session_time_days_ago: (n) => `${n} day${n === 1 ? '' : 's'} ago`,
-    session_time_last_week: 'last week',
+    session_time_minutes_ago: (n) => `${n}m`,
+    session_time_hours_ago: (n) => `${n}h`,
+    session_time_days_ago: (n) => `${n}d`,
+    session_time_last_week: '1w',
     session_time_bucket_today: 'Today',
     session_time_bucket_yesterday: 'Yesterday',
     session_time_bucket_this_week: 'This week',
@@ -811,38 +810,10 @@ const LOCALES = {
     new_conversation: 'Новая беседа',
     filter_conversations: 'Фильтр бесед...',
     session_time_unknown: 'Неизвестно',
-    session_time_just_now: 'только что',
-    session_time_minutes_ago: (n) => {
-    const mod10 = n % 10;
-    const mod100 = n % 100;
-    const word = mod10 === 1 && mod100 !== 11
-      ? 'минута'
-      : (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)
-        ? 'минуты'
-        : 'минут');
-    return `${n} ${word} назад`;
-  },
-    session_time_hours_ago: (n) => {
-    const mod10 = n % 10;
-    const mod100 = n % 100;
-    const word = mod10 === 1 && mod100 !== 11
-      ? 'час'
-      : (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)
-        ? 'часа'
-        : 'часов');
-    return `${n} ${word} назад`;
-  },
-    session_time_days_ago: (n) => {
-    const mod10 = n % 10;
-    const mod100 = n % 100;
-    const word = mod10 === 1 && mod100 !== 11
-      ? 'день'
-      : (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)
-        ? 'дня'
-        : 'дней');
-    return `${n} ${word} назад`;
-  },
-    session_time_last_week: 'на прошлой неделе',
+    session_time_minutes_ago: (n) => `${n}м`,
+    session_time_hours_ago: (n) => `${n}ч`,
+    session_time_days_ago: (n) => `${n}д`,
+    session_time_last_week: '1н',
     session_time_bucket_today: 'Сегодня',
     session_time_bucket_yesterday: 'Вчера',
     session_time_bucket_this_week: 'На этой неделе',
@@ -1412,11 +1383,10 @@ const LOCALES = {
     new_conversation: 'Nueva conversación',
     filter_conversations: 'Filtrar conversaciones...',
     session_time_unknown: 'Desconocido',
-    session_time_just_now: 'justo ahora',
-    session_time_minutes_ago: (n) => `hace ${n} minuto${n === 1 ? '' : 's'}`,
-    session_time_hours_ago: (n) => `hace ${n} hora${n === 1 ? '' : 's'}`,
-    session_time_days_ago: (n) => `hace ${n} día${n === 1 ? '' : 's'}`,
-    session_time_last_week: 'la semana pasada',
+    session_time_minutes_ago: (n) => `${n}m`,
+    session_time_hours_ago: (n) => `${n}h`,
+    session_time_days_ago: (n) => `${n}d`,
+    session_time_last_week: '1sem',
     session_time_bucket_today: 'Hoy',
     session_time_bucket_yesterday: 'Ayer',
     session_time_bucket_this_week: 'Esta semana',
@@ -2314,11 +2284,10 @@ const LOCALES = {
     new_conversation: '新建对话',
     filter_conversations: '筛选对话…',
     session_time_unknown: '未知',
-    session_time_just_now: '刚刚',
-    session_time_minutes_ago: (n) => `${n} 分钟前`,
-    session_time_hours_ago: (n) => `${n} 小时前`,
-    session_time_days_ago: (n) => `${n} 天前`,
-    session_time_last_week: '上周',
+    session_time_minutes_ago: (n) => `${n}分`,
+    session_time_hours_ago: (n) => `${n}小时`,
+    session_time_days_ago: (n) => `${n}天`,
+    session_time_last_week: '1周',
     session_time_bucket_today: '今天',
     session_time_bucket_yesterday: '昨天',
     session_time_bucket_this_week: '本周',
@@ -3151,11 +3120,10 @@ const LOCALES = {
     session_time_bucket_this_week: '\u672c\u9031',
     session_time_bucket_today: '\u4eca\u5929',
     session_time_bucket_yesterday: '\u6628\u5929',
-    session_time_days_ago: (d) => `${d} 天前`,
-    session_time_hours_ago: (h) => `${h} 小時前`,
-    session_time_just_now: '\u525b\u525b',
-    session_time_last_week: '\u4e0a\u9031',
-    session_time_minutes_ago: (m) => `${m} 分鐘前`,
+    session_time_days_ago: (d) => `${d}\u5929`,
+    session_time_hours_ago: (h) => `${h}\u5c0f\u6642`,
+    session_time_last_week: '1\u9031',
+    session_time_minutes_ago: (m) => `${m}\u5206`,
     session_time_unknown: '\u672a\u77e5',
     settings_unsaved_changes: '\u60a8\u6709\u672a\u5132\u5b58\u7684\u8b8a\u66f4\u3002',
     sign_out_failed: '\u767b\u51fa\u5931\u6557\uff1a',

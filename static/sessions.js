@@ -689,7 +689,7 @@ function _formatRelativeSessionTime(timestampMs, nowMs = Date.now()) {
   const {startOfToday, startOfYesterday, startOfWeek, startOfLastWeek} = _sessionCalendarBoundaries(nowMs);
   const dayDiff = Math.max(0, _localDayOrdinal(nowMs) - _localDayOrdinal(timestampMs));
   if (timestampMs >= startOfToday) {
-    if (diffMs < minute) return t('session_time_just_now');
+    if (diffMs < minute) return t('session_time_minutes_ago', 1);
     if (diffMs < hour) {
       const minutes = Math.floor(diffMs / minute);
       return t('session_time_minutes_ago', minutes);
@@ -697,7 +697,7 @@ function _formatRelativeSessionTime(timestampMs, nowMs = Date.now()) {
     const hours = Math.floor(diffMs / hour);
     return t('session_time_hours_ago', hours);
   }
-  if (timestampMs >= startOfYesterday) return t('session_time_bucket_yesterday');
+  if (timestampMs >= startOfYesterday) return t('session_time_days_ago', 1);
   if (timestampMs >= startOfWeek) return t('session_time_days_ago', dayDiff);
   if (timestampMs >= startOfLastWeek) return t('session_time_last_week');
   return _formatSessionDate(timestampMs, nowMs);
