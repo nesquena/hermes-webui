@@ -2108,7 +2108,7 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 .main-view-header{
   display:flex;align-items:center;justify-content:space-between;gap:16px;
   min-height:41px;padding:8px 32px;border-bottom:1px solid var(--border);
-  flex-shrink:0;background:var(--bg);
+  flex-shrink:0;background:var(--bg);position:relative;z-index:10;
 }
 .main-view-title{font-size:18px;font-weight:600;letter-spacing:-.01em;color:var(--text);line-height:1.3;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .main-view-actions{display:flex;align-items:center;gap:4px;flex-shrink:0;}
@@ -2150,6 +2150,9 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 .detail-badge.ok{background:rgba(100,200,100,.12);color:rgba(100,200,100,.95);border-color:rgba(100,200,100,.3);}
 .detail-badge.warn{background:rgba(220,140,60,.12);color:rgba(220,140,60,.95);border-color:rgba(220,140,60,.3);}
 .detail-badge.err{background:rgba(220,80,80,.12);color:rgba(220,80,80,.95);border-color:rgba(220,80,80,.3);}
+.detail-badge.running{background:rgba(59,130,246,.12);color:rgba(96,165,250,.95);border-color:rgba(96,165,250,.3);}
+.detail-badge.running::before{content:'';display:inline-block;width:10px;height:10px;border:2px solid rgba(96,165,250,.4);border-top-color:rgba(96,165,250,.95);border-radius:50%;margin-right:6px;vertical-align:middle;animation:cron-spinner .6s linear infinite;}
+@keyframes cron-spinner{to{transform:rotate(360deg);}}
 .detail-prompt{background:var(--sidebar);border:1px solid var(--border);border-radius:8px;padding:10px 12px;font-size:12px;white-space:pre-wrap;line-height:1.55;color:var(--text);font-family:'SF Mono',ui-monospace,monospace;max-height:240px;overflow-y:auto;}
 .detail-run-item{border-top:1px solid var(--border);padding:8px 0;}
 .detail-run-item:first-child{border-top:none;}

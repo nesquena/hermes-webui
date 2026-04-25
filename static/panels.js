@@ -487,12 +487,45 @@ function _cronOutputSnippet(content) {
   return body.slice(0, 600) || '(empty)';
 }
 
+let _cronRunningPoll = null; // timer for polling job status after trigger
+
 async function cronRun(id) {
   try {
     await api('/api/crons/run', {method:'POST', body: JSON.stringify({job_id: id})});
     showToast(t('cron_job_triggered'));
-    setTimeout(() => { if (_currentCronDetail && _currentCronDetail.id === id) _loadCronDetailRuns(id); }, 5000);
+    // Immediately show "running" state in detail if this job is selected
+    if (_currentCronDetail && _currentCronDetail.id === id) {
+      _setCronDetailStatus('running');
+      _startCronRunningPoll(id);
+    }
   } catch(e) { showToast(t('failed_colon') + e.message, 4000); }
+}
+
+function _setCronDetailStatus(status) {
+  const badge = document.querySelector('#taskDetailBody .detail-badge');
+  if (!badge) return;
+  if (status === 'running') {
+    badge.className = 'detail-badge running';
+    badge.textContent = t('cron_status_running');
+  }
+}
+
+function _startCronRunningPoll(jobId) {
+  // Clear any existing poll
+  if (_cronRunningPoll) { clearInterval(_cronRunningPoll); _cronRunningPoll = null; }
+  let attempts = 0;
+  const maxAttempts = 10; // 10 * 3s = 30s max
+  _cronRunningPoll = setInterval(async () => {
+    attempts++;
+    if (!_currentCronDetail || _currentCronDetail.id !== jobId || attempts > maxAttempts) {
+      clearInterval(_cronRunningPoll);
+      _cronRunningPoll = null;
+      return;
+    }
+    try {
+      await loadCrons();
+    } catch(e) { /* ignore */ }
+  }, 3000);
 }
 
 async function cronPause(id) {
