@@ -41,14 +41,6 @@ class TestBfcacheLayoutRestore:
             "pageshow handler must call syncWorkspacePanelState() on bfcache restore"
         )
 
-    def test_pageshow_calls_init_resize_panels(self):
-        """pageshow handler must call _initResizePanels()."""
-        src = _boot_js()
-        ps_idx = src.find("window.addEventListener('pageshow'")
-        handler_body = src[ps_idx:ps_idx + 1600]
-        assert "_initResizePanels" in handler_body, (
-            "pageshow handler must call _initResizePanels() to restore panel resize state"
-        )
 
     def test_pageshow_calls_start_gateway_sse(self):
         """pageshow handler must call startGatewaySSE() to reconnect the dead SSE connection."""
@@ -77,13 +69,24 @@ class TestBfcacheLayoutRestore:
             "pageshow handler must still call renderSessionListFromCache() (regression: #822 fix)"
         )
 
+    def test_pageshow_does_not_call_init_resize_panels(self):
+        """pageshow handler must NOT call _initResizePanels() — bfcache
+        preserves event listeners so re-attaching them stacks duplicates."""
+        src = _boot_js()
+        ps_idx = src.find("window.addEventListener('pageshow'")
+        handler_body = src[ps_idx:ps_idx + 1600]
+        assert "_initResizePanels" not in handler_body, (
+            "pageshow handler must not call _initResizePanels() — it stacks "
+            "duplicate mousedown listeners on every bfcache restore"
+        )
+
     def test_new_calls_are_guarded_with_typeof(self):
         """New calls in the pageshow handler must be typeof-guarded for safe degradation."""
         src = _boot_js()
         ps_idx = src.find("window.addEventListener('pageshow'")
         handler_body = src[ps_idx:ps_idx + 1600]
         # Each of the new calls must be guarded
-        for fn in ("syncTopbar", "syncWorkspacePanelState", "_initResizePanels", "startGatewaySSE",
+        for fn in ("syncTopbar", "syncWorkspacePanelState", "startGatewaySSE",
                    "closeModelDropdown", "closeReasoningDropdown", "closeWsDropdown", "closeProfileDropdown"):
             assert f"typeof {fn} === 'function'" in handler_body, (
                 f"{fn}() call in pageshow handler must be guarded with typeof === 'function'"
