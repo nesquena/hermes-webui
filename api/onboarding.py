@@ -518,11 +518,33 @@ def get_onboarding_status() -> dict:
     auto_completed = skip_requested  # unconditional: operator says skip, we skip
 
     # Auto-complete for existing Hermes users: if config.yaml already exists
-    # AND the system is chat_ready, treat onboarding as done.  These users
-    # configured Hermes via the CLI before the Web UI existed; they must never
-    # be shown the first-run wizard — it would silently overwrite their config.
+    # AND the provider is configured (or the system is chat_ready), treat onboarding
+    # as done.  These users configured Hermes via the CLI before the Web UI existed;
+    # they must never be shown the first-run wizard — it would silently overwrite their
+    # config.  We use provider_configured (not chat_ready) so that users with
+    # non-wizard providers (ollama-cloud, deepseek, xai, kimi, etc.) are not forced
+    # through the wizard just because their provider doesn't have a detectable API key
+    # — the wizard cannot represent their provider and would overwrite their config
+    # with whichever wizard-supported provider they accidentally select.
     config_exists = Path(_get_config_path()).exists()
-    config_auto_completed = config_exists and bool(runtime.get("chat_ready"))
+
+    # For providers not in the wizard's quick-setup list (e.g. ollama-cloud, deepseek,
+    # xai, kimi-k2.6), the wizard can never help — it only knows how to configure
+    # openrouter/anthropic/openai/google/custom.  If such a user has a configured
+    # provider + model in config.yaml, showing the wizard would only confuse them
+    # (or worse, let them accidentally overwrite their config with gpt-5.4-mini).
+    _current_provider = str(
+        (cfg.get("model", {}) or {}).get("provider", "") if isinstance(cfg.get("model"), dict)
+        else ""
+    ).strip().lower()
+    _is_non_wizard_provider = bool(
+        _current_provider and _current_provider not in _SUPPORTED_PROVIDER_SETUPS
+    )
+
+    config_auto_completed = config_exists and (
+        bool(runtime.get("chat_ready"))
+        or (_is_non_wizard_provider and bool(runtime.get("provider_configured")))
+    )
 
     # Persist the flag so it survives future transient import failures (e.g. after
     # a git branch switch in the hermes-agent repo).  Without this, a CLI-configured
