@@ -710,17 +710,17 @@ function _pickSkin(name){
 
 function _syncThemePicker(active){
   document.querySelectorAll('#themePickerGrid .theme-pick-btn').forEach(btn=>{
-    const sel=btn.dataset.themeVal===active;
-    btn.style.borderColor=sel?'var(--accent)':'var(--border2)';
-    btn.style.boxShadow=sel?'0 0 0 1px var(--accent-bg-strong)':'none';
+    btn.classList.toggle('active',btn.dataset.themeVal===active);
+    btn.style.borderColor='';
+    btn.style.boxShadow='';
   });
 }
 
 function _syncSkinPicker(active){
   document.querySelectorAll('#skinPickerGrid .skin-pick-btn').forEach(btn=>{
-    const sel=btn.dataset.skinVal===active;
-    btn.style.borderColor=sel?'var(--accent)':'var(--border2)';
-    btn.style.boxShadow=sel?'0 0 0 1px var(--accent-bg-strong)':'none';
+    btn.classList.toggle('active',btn.dataset.skinVal===active);
+    btn.style.borderColor='';
+    btn.style.boxShadow='';
   });
 }
 
@@ -743,9 +743,9 @@ function _pickFontSize(size){
 
 function _syncFontSizePicker(active){
   document.querySelectorAll('#fontSizePickerGrid .font-size-pick-btn').forEach(btn=>{
-    const sel=btn.dataset.fontSizeVal===(active||'default');
-    btn.style.borderColor=sel?'var(--accent)':'var(--border2)';
-    btn.style.boxShadow=sel?'0 0 0 1px var(--accent-bg-strong)':'none';
+    btn.classList.toggle('active',btn.dataset.fontSizeVal===(active||'default'));
+    btn.style.borderColor='';
+    btn.style.boxShadow='';
   });
 }
 
