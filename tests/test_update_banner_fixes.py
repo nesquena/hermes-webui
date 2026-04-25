@@ -471,3 +471,42 @@ class TestForceButtonResetOnRetry:
         assert "display='none'" in setup or "display = 'none'" in setup, (
             "applyUpdates setup must hide btnForceUpdate via display:none"
         )
+
+
+# ── #785: Manual 'Check for Updates' button ───────────────────────────────────
+
+class TestCheckForUpdatesButton:
+    """#785: Ensure the 'Check for Updates' button is wired up correctly."""
+
+    def test_checkUpdatesNow_defined_in_panels(self):
+        """checkUpdatesNow() function must exist in panels.js."""
+        src = read('static/panels.js')
+        assert 'function checkUpdatesNow' in src or 'async function checkUpdatesNow' in src, (
+            "checkUpdatesNow() not found in panels.js"
+        )
+
+    def test_btnCheckUpdatesNow_in_html(self):
+        """Button element with id='btnCheckUpdatesNow' must exist in index.html."""
+        src = read('static/index.html')
+        assert 'id="btnCheckUpdatesNow"' in src, (
+            "btnCheckUpdatesNow element not found in index.html"
+        )
+
+    def test_checkUpdatesBlock_css_exists(self):
+        """CSS rules for #checkUpdatesBlock and .btn-tiny must exist in style.css."""
+        src = read('static/style.css')
+        assert '#checkUpdatesBlock' in src, (
+            "#checkUpdatesBlock CSS selector not found in style.css"
+        )
+        assert '.btn-tiny' in src, (
+            ".btn-tiny CSS selector not found in style.css"
+        )
+
+    def test_check_now_i18n_key_exists(self):
+        """settings_check_now i18n key must exist in all locale blocks."""
+        src = read('static/i18n.js')
+        count = src.count('settings_check_now')
+        assert count >= 5, (
+            f"settings_check_now found in only {count} locale blocks (expected ≥5: en, ru, es, zh, zh-Hant)"
+        )
+
