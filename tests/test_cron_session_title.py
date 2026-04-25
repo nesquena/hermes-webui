@@ -32,6 +32,7 @@ def _make_state_db(path, sessions):
     """)
     conn.execute("""
         CREATE TABLE messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id TEXT,
             timestamp REAL
         )
