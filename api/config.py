@@ -91,6 +91,14 @@ def _discover_agent_dir() -> Path:
     # 6. ~/hermes-agent
     candidates.append(HOME / "hermes-agent")
 
+    # 7. XDG_DATA_HOME / hermes-agent  (e.g. ~/.local/share/hermes-agent)
+    xdg_data = Path(os.getenv("XDG_DATA_HOME", str(HOME / ".local" / "share")))
+    candidates.append(xdg_data.expanduser() / "hermes-agent")
+
+    # 8. System-wide install paths (e.g. /opt/hermes-agent, /usr/local/hermes-agent)
+    for sys_prefix in ("/opt", "/usr/local", "/usr/local/share"):
+        candidates.append(Path(sys_prefix) / "hermes-agent")
+
     for path in candidates:
         if path.exists() and (path / "run_agent.py").exists():
             return path.resolve()
