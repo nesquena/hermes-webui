@@ -86,6 +86,14 @@ def _ensure_state_db():
             timestamp REAL NOT NULL
         );
     """)
+    for column, ddl in (
+        ('parent_session_id', 'ALTER TABLE sessions ADD COLUMN parent_session_id TEXT'),
+        ('ended_at', 'ALTER TABLE sessions ADD COLUMN ended_at REAL'),
+        ('end_reason', 'ALTER TABLE sessions ADD COLUMN end_reason TEXT'),
+    ):
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        if column not in existing:
+            conn.execute(ddl)
     conn.commit()
     return conn
 
@@ -110,6 +118,50 @@ def _insert_gateway_session(conn, session_id='20260401_120000_abcdefgh', source=
         "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, 'assistant', ?, ?)",
         (session_id, 'Hi there!', (started_at or time.time()) + 1)
     )
+    conn.commit()
+
+
+def _insert_agent_session_row(
+    conn,
+    session_id,
+    source='weixin',
+    title='Agent Session',
+    model='openai/gpt-5',
+    started_at=None,
+    parent_session_id=None,
+    ended_at=None,
+    end_reason=None,
+    messages=1,
+):
+    """Insert an agent session row with optional compression lineage."""
+    started_at = started_at or time.time()
+    conn.execute(
+        "INSERT OR REPLACE INTO sessions "
+        "(id, source, title, model, started_at, message_count, parent_session_id, ended_at, end_reason) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            session_id,
+            source,
+            title,
+            model,
+            started_at,
+            messages,
+            parent_session_id,
+            ended_at,
+            end_reason,
+        ),
+    )
+    conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+    for i in range(messages):
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+            (
+                session_id,
+                'user' if i % 2 == 0 else 'assistant',
+                f'{title} message {i + 1}',
+                started_at + i,
+            ),
+        )
     conn.commit()
 
 
@@ -224,6 +276,241 @@ def test_gateway_watcher_hides_sessions_without_messages(monkeypatch):
     finally:
         try:
             _remove_test_sessions(conn, empty_sid, live_sid)
+            conn.close()
+        except Exception:
+            pass
+
+
+def test_compression_chain_collapses_to_latest_tip_in_sidebar():
+    """Show one logical agent conversation for a compression continuation chain."""
+    conn = _ensure_state_db()
+    ids_to_remove = ('chain_root_001', 'chain_empty_mid_001', 'chain_tip_001')
+    t0 = time.time() - 600
+    try:
+        _insert_agent_session_row(
+            conn,
+            'chain_root_001',
+            title='Magazine Style PPT Skill',
+            started_at=t0,
+            ended_at=t0 + 100,
+            end_reason='compression',
+            messages=3,
+        )
+        _insert_agent_session_row(
+            conn,
+            'chain_empty_mid_001',
+            title='Magazine Style PPT Skill #2',
+            started_at=t0 + 101,
+            parent_session_id='chain_root_001',
+            ended_at=t0 + 200,
+            end_reason='compression',
+            messages=0,
+        )
+        _insert_agent_session_row(
+            conn,
+            'chain_tip_001',
+            title='Magazine Style PPT Skill #3',
+            started_at=t0 + 201,
+            parent_session_id='chain_empty_mid_001',
+            messages=2,
+        )
+
+        post('/api/settings', {'show_cli_sessions': True})
+        data, status = get('/api/sessions')
+        assert status == 200
+        ids = {s.get('session_id') for s in data.get('sessions', [])}
+        tip = next((s for s in data.get('sessions', []) if s.get('session_id') == 'chain_tip_001'), None)
+
+        assert 'chain_tip_001' in ids
+        assert 'chain_root_001' not in ids
+        assert 'chain_empty_mid_001' not in ids
+        assert tip is not None
+        assert tip.get('title') == 'Magazine Style PPT Skill'
+        assert tip.get('message_count') == 2
+        assert abs(tip.get('created_at') - t0) < 0.01
+        assert abs(tip.get('updated_at') - (t0 + 2)) < 0.01
+
+        from api.agent_sessions import read_importable_agent_session_rows
+
+        rows = read_importable_agent_session_rows(_get_state_db_path(), limit=None)
+        projected_tip = next((row for row in rows if row.get('id') == 'chain_tip_001'), None)
+        assert projected_tip is not None
+        assert projected_tip.get('title') == 'Magazine Style PPT Skill'
+        assert projected_tip.get('_lineage_root_id') == 'chain_root_001'
+        assert projected_tip.get('_lineage_tip_id') == 'chain_tip_001'
+        assert projected_tip.get('_compression_segment_count') == 3
+    finally:
+        try:
+            _remove_test_sessions(conn, *ids_to_remove)
+            conn.close()
+        except Exception:
+            pass
+        post('/api/settings', {'show_cli_sessions': False})
+
+
+def test_compression_chain_with_empty_latest_tip_falls_back_to_latest_importable_segment():
+    """Empty latest tips should not make the whole conversation disappear."""
+    conn = _ensure_state_db()
+    ids_to_remove = ('empty_tip_root_001', 'empty_tip_001')
+    t0 = time.time() - 500
+    try:
+        _insert_agent_session_row(
+            conn,
+            'empty_tip_root_001',
+            title='Long Conversation',
+            started_at=t0,
+            ended_at=t0 + 100,
+            end_reason='compression',
+            messages=2,
+        )
+        _insert_agent_session_row(
+            conn,
+            'empty_tip_001',
+            title='Long Conversation #2',
+            started_at=t0 + 101,
+            parent_session_id='empty_tip_root_001',
+            messages=0,
+        )
+
+        post('/api/settings', {'show_cli_sessions': True})
+        data, status = get('/api/sessions')
+        assert status == 200
+        ids = {s.get('session_id') for s in data.get('sessions', [])}
+
+        assert 'empty_tip_root_001' in ids
+        assert 'empty_tip_001' not in ids
+        root = next((s for s in data.get('sessions', []) if s.get('session_id') == 'empty_tip_root_001'), None)
+        assert root and root.get('title') == 'Long Conversation'
+    finally:
+        try:
+            _remove_test_sessions(conn, *ids_to_remove)
+            conn.close()
+        except Exception:
+            pass
+        post('/api/settings', {'show_cli_sessions': False})
+
+
+def test_compression_chain_with_all_empty_segments_is_hidden():
+    """A compression chain with no importable segment should not appear."""
+    conn = _ensure_state_db()
+    ids_to_remove = ('all_empty_root_001', 'all_empty_tip_001')
+    t0 = time.time() - 450
+    try:
+        _insert_agent_session_row(
+            conn,
+            'all_empty_root_001',
+            title='Empty Long Conversation',
+            started_at=t0,
+            ended_at=t0 + 100,
+            end_reason='compression',
+            messages=0,
+        )
+        _insert_agent_session_row(
+            conn,
+            'all_empty_tip_001',
+            title='Empty Long Conversation #2',
+            started_at=t0 + 101,
+            parent_session_id='all_empty_root_001',
+            messages=0,
+        )
+
+        post('/api/settings', {'show_cli_sessions': True})
+        data, status = get('/api/sessions')
+        assert status == 200
+        ids = {s.get('session_id') for s in data.get('sessions', [])}
+
+        assert 'all_empty_root_001' not in ids
+        assert 'all_empty_tip_001' not in ids
+    finally:
+        try:
+            _remove_test_sessions(conn, *ids_to_remove)
+            conn.close()
+        except Exception:
+            pass
+        post('/api/settings', {'show_cli_sessions': False})
+
+
+def test_non_compression_child_is_not_collapsed_into_parent():
+    """Parent/child relationships that are not compression continuations stay flat."""
+    conn = _ensure_state_db()
+    ids_to_remove = ('branch_parent_001', 'branch_child_001')
+    t0 = time.time() - 400
+    try:
+        _insert_agent_session_row(
+            conn,
+            'branch_parent_001',
+            title='Branch Parent',
+            started_at=t0,
+            ended_at=t0 + 100,
+            end_reason='branched',
+            messages=2,
+        )
+        _insert_agent_session_row(
+            conn,
+            'branch_child_001',
+            title='Branch Child',
+            started_at=t0 + 101,
+            parent_session_id='branch_parent_001',
+            messages=2,
+        )
+
+        from api.agent_sessions import read_importable_agent_session_rows
+
+        rows = read_importable_agent_session_rows(_get_state_db_path(), limit=None)
+        ids = {row.get('id') for row in rows}
+
+        assert 'branch_parent_001' in ids
+        assert 'branch_child_001' in ids
+    finally:
+        try:
+            _remove_test_sessions(conn, *ids_to_remove)
+            conn.close()
+        except Exception:
+            pass
+
+
+def test_agent_session_limit_applies_after_compression_projection():
+    """A long raw chain should count as one logical sidebar row before limiting."""
+    conn = _ensure_state_db()
+    chain_ids = [f'limit_chain_{i:03d}' for i in range(8)]
+    standalone_id = 'limit_standalone_001'
+    t0 = time.time() - 300
+    try:
+        for i, sid in enumerate(chain_ids):
+            _insert_agent_session_row(
+                conn,
+                sid,
+                title=f'Limit Chain #{i + 1}',
+                started_at=t0 + i,
+                parent_session_id=chain_ids[i - 1] if i else None,
+                ended_at=t0 + i + 0.5 if i < len(chain_ids) - 1 else None,
+                end_reason='compression' if i < len(chain_ids) - 1 else None,
+                messages=1,
+            )
+        _insert_agent_session_row(
+            conn,
+            standalone_id,
+            title='Limit Standalone',
+            started_at=t0 + 20,
+            messages=1,
+        )
+
+        from api.agent_sessions import read_importable_agent_session_rows
+
+        rows = read_importable_agent_session_rows(_get_state_db_path(), limit=2)
+        ids = [row.get('id') for row in rows]
+
+        assert len(rows) == 2
+        assert chain_ids[-1] in ids
+        assert standalone_id in ids
+        assert not any(sid in ids for sid in chain_ids[:-1])
+        chain = next(row for row in rows if row.get('id') == chain_ids[-1])
+        assert chain.get('title') == 'Limit Chain #1'
+        assert chain.get('_lineage_root_id') == chain_ids[0]
+        assert chain.get('_compression_segment_count') == len(chain_ids)
+    finally:
+        try:
+            _remove_test_sessions(conn, *(chain_ids + [standalone_id]))
             conn.close()
         except Exception:
             pass
