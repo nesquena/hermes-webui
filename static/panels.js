@@ -2198,21 +2198,27 @@ async function loadSettingsPanel(){
     const fontSizeSel=$('settingsFontSize');
     if(fontSizeSel) fontSizeSel.value=fontSizeVal;
     if(typeof _syncFontSizePicker==='function') _syncFontSizePicker(fontSizeVal);
-    // Workspace panel default-open toggle (localStorage-backed)
+    // Workspace panel default-open toggle (localStorage-backed + server-persisted)
     // Uses a separate key (hermes-webui-workspace-panel-pref) so that
     // closing the panel via toolbar X does not clear the user's preference.
     const wsPanelCb=$('settingsWorkspacePanelOpen');
-    if(wsPanelCb){
-      wsPanelCb.checked=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open';
-      wsPanelCb.addEventListener('change',function(){
+    if(wsPanelCb && !wsPanelCb._wsPanelChangeHandler){
+      // Initialize from server setting if localStorage is empty, otherwise use localStorage
+      const serverPref=settings.workspace_panel_open;
+      const localPref=localStorage.getItem('hermes-webui-workspace-panel-pref');
+      wsPanelCb.checked=localPref?localPref==='open':serverPref;
+      wsPanelCb._wsPanelChangeHandler=async function(){
         const open=this.checked;
         localStorage.setItem('hermes-webui-workspace-panel-pref',open?'open':'closed');
+        // Persist to server (best-effort, don't block UI)
+        try{await api('/api/settings',{method:'POST',body:JSON.stringify({workspace_panel_open:open})});}catch(e){}
         // Also sync the runtime key so the current session reflects the change
         localStorage.setItem('hermes-webui-workspace-panel',open?'open':'closed');
         document.documentElement.dataset.workspacePanel=open?'open':'closed';
         if(open&&_workspacePanelMode==='closed') openWorkspacePanel('browse');
         else if(!open&&_workspacePanelMode!=='closed') toggleWorkspacePanel(false);
-      });
+      };
+      wsPanelCb.addEventListener('change',wsPanelCb._wsPanelChangeHandler);
     }
     const resolvedLanguage=(typeof resolvePreferredLocale==='function')
       ? resolvePreferredLocale(settings.language, localStorage.getItem('hermes-lang'))
