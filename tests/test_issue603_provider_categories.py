@@ -280,3 +280,50 @@ class TestI18nCategoryKeys:
         with open("static/i18n.js", encoding="utf-8") as f:
             content = f.read()
         assert "\\u5feb\\u901f\\u958b\\u59cb" in content  # zh-Hant easy_start
+
+
+class TestApplyBaseURLSpecialized:
+    """Verify apply_onboarding_setup sets base_url for specialized providers."""
+
+    def _run_setup(self, monkeypatch, provider, api_key="test-key"):
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as tmp:
+            home = pathlib.Path(tmp)
+            (home / "config.yaml").write_text("")
+            env_calls = []
+            monkeypatch.setattr("api.onboarding._get_active_hermes_home", lambda: str(home))
+            monkeypatch.setattr("api.onboarding._get_config_path", lambda: home / "config.yaml")
+            monkeypatch.setattr("api.onboarding._load_yaml_config", lambda p: {})
+            monkeypatch.setattr("api.onboarding._normalize_model_for_provider", lambda m, p: m)
+            monkeypatch.setattr("api.onboarding._write_env_file", lambda h, k, v: env_calls.append((k, v)))
+            monkeypatch.setattr("api.onboarding._provider_api_key_present", lambda p, h: False)
+            saved = {}
+            monkeypatch.setattr("api.onboarding._save_yaml_config", lambda p, c: saved.update(c))
+            monkeypatch.setattr("api.onboarding.reload_config", lambda: None)
+            from api.onboarding import apply_onboarding_setup
+            apply_onboarding_setup(provider, api_key, None, home_dir=str(home))
+            return saved
+
+    def test_gemini_gets_default_base_url(self, monkeypatch):
+        saved = self._run_setup(monkeypatch, "gemini")
+        assert "generativelanguage.googleapis.com" in saved.get("base_url", ""), (
+            "gemini setup must write the Gemini base_url to config"
+        )
+
+    def test_deepseek_gets_default_base_url(self, monkeypatch):
+        saved = self._run_setup(monkeypatch, "deepseek")
+        assert "deepseek.com" in saved.get("base_url", ""), (
+            "deepseek setup must write the DeepSeek base_url to config"
+        )
+
+    def test_mistral_gets_default_base_url(self, monkeypatch):
+        saved = self._run_setup(monkeypatch, "mistral")
+        assert "mistral.ai" in saved.get("base_url", ""), (
+            "mistral setup must write the Mistral base_url to config"
+        )
+
+    def test_x_ai_gets_default_base_url(self, monkeypatch):
+        saved = self._run_setup(monkeypatch, "x-ai")
+        assert "x.ai" in saved.get("base_url", ""), (
+            "x-ai setup must write the xAI base_url to config"
+        )
