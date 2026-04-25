@@ -2125,6 +2125,7 @@ def _handle_file_raw(handler, parsed):
         return bad(handler, "Session not found", 404)
     rel = qs.get("path", [""])[0]
     force_download = qs.get("download", [""])[0] == "1"
+    force_inline = qs.get("inline", [""])[0] == "1"  # allow inline for sandboxed iframes
     target = safe_resolve(Path(s.workspace), rel)
     if not target.exists() or not target.is_file():
         return j(handler, {"error": "not found"}, status=404)
@@ -2136,8 +2137,9 @@ def _handle_file_raw(handler, parsed):
     handler.send_header("Content-Length", str(len(raw_bytes)))
     handler.send_header("Cache-Control", "no-store")
     # Security: force download for dangerous MIME types to prevent XSS
+    # UNLESS force_inline is set (for sandboxed iframe previews)
     dangerous_types = {"text/html", "application/xhtml+xml", "image/svg+xml"}
-    if force_download or mime in dangerous_types:
+    if force_download or (mime in dangerous_types and not force_inline):
         handler.send_header(
             "Content-Disposition",
             _content_disposition_value("attachment", target.name),
