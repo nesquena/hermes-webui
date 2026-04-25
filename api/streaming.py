@@ -1398,7 +1398,56 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             if 'gateway_session_key' in _agent_params:
                 _agent_kwargs['gateway_session_key'] = session_id
 
-            agent = _AIAgent(**_agent_kwargs)
+            # ── Agent cache: reuse across messages in the same session ──
+            # Mirrors gateway _agent_cache.  Keeps _user_turn_count alive so
+            # injectionFrequency: "first-turn" actually suppresses after turn 1.
+            if ephemeral:
+                agent = _AIAgent(**_agent_kwargs)
+                logger.debug('[webui] Created ephemeral agent for session %s', session_id)
+            else:
+                import hashlib as _hashlib
+                import json as _json
+                from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
+                _sig_blob = _json.dumps([
+                    resolved_model or '',
+                    _hashlib.sha256((resolved_api_key or '').encode()).hexdigest()[:16],
+                    resolved_base_url or '',
+                    resolved_provider or '',
+                    sorted(_toolsets) if _toolsets else [],
+                ], sort_keys=True)
+                _agent_sig = _hashlib.sha256(_sig_blob.encode()).hexdigest()[:16]
+
+                agent = None
+                with SESSION_AGENT_CACHE_LOCK:
+                    _cached = SESSION_AGENT_CACHE.get(session_id)
+                    if _cached and _cached[1] == _agent_sig:
+                        agent = _cached[0]
+                        logger.debug('[webui] Reusing cached agent for session %s', session_id)
+
+                if agent is not None:
+                    # Refresh per-turn callbacks — these close over request-scoped
+                    # objects (put queue, cancel_event) that are new each request.
+                    agent.stream_delta_callback = _agent_kwargs.get('stream_delta_callback')
+                    agent.tool_progress_callback = _agent_kwargs.get('tool_progress_callback')
+                    if hasattr(agent, 'reasoning_callback'):
+                        agent.reasoning_callback = _agent_kwargs.get('reasoning_callback')
+                    if hasattr(agent, 'clarify_callback'):
+                        agent.clarify_callback = _agent_kwargs.get('clarify_callback')
+                    if _session_db is not None:
+                        agent._session_db = _session_db
+                    if hasattr(agent, '_api_call_count'):
+                        agent._api_call_count = 0
+                    # Reset interrupt state from a prior cancel so the reused
+                    # agent does not think it is still interrupted.
+                    if hasattr(agent, '_interrupted'):
+                        agent._interrupted = False
+                    if hasattr(agent, '_interrupt_message'):
+                        agent._interrupt_message = None
+                else:
+                    agent = _AIAgent(**_agent_kwargs)
+                    with SESSION_AGENT_CACHE_LOCK:
+                        SESSION_AGENT_CACHE[session_id] = (agent, _agent_sig)
+                    logger.debug('[webui] Created new agent for session %s', session_id)
 
             # Store agent instance for cancel/interrupt propagation
             with STREAMS_LOCK:
@@ -1648,6 +1697,13 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                     with SESSION_AGENT_LOCKS_LOCK:
                         SESSION_AGENT_LOCKS[new_sid] = _agent_lock
                         SESSION_AGENT_LOCKS.pop(old_sid, None)
+                    # Migrate cached agent to the new session ID so the turn
+                    # count survives context compression.
+                    from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
+                    with SESSION_AGENT_CACHE_LOCK:
+                        _cached_entry = SESSION_AGENT_CACHE.pop(old_sid, None)
+                        if _cached_entry:
+                            SESSION_AGENT_CACHE[new_sid] = _cached_entry
                     if old_path.exists() and not new_path.exists():
                         try:
                             old_path.rename(new_path)
