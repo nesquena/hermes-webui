@@ -56,3 +56,34 @@ def test_bootstrap_script_contains_official_installer_and_windows_guard():
         in src
     )
     assert "Native Windows is not supported" in src
+
+
+def test_specialized_providers_have_valid_default_models():
+    """Verify specialized providers use stable model IDs, not preview versions."""
+    # Read the onboarding file content to check defaults
+    onboarding = read("api/onboarding.py")
+    
+    # gemini should use a stable model (gemini-2.5-pro, not gemini-3.1-pro-preview)
+    assert '"default_model": "gemini-2.5-pro"' in onboarding
+    assert '"default_model": "gemini-3.1-pro-preview"' not in onboarding
+    
+    # x-ai should use grok-3 (not grok-4.20)
+    assert '"default_model": "grok-3"' in onboarding
+    assert '"default_model": "grok-4.20"' not in onboarding
+
+
+def test_specialized_providers_have_base_urls():
+    """Verify specialized providers have correct default_base_url."""
+    onboarding = read("api/onboarding.py")
+    
+    # gemini
+    assert "generativelanguage.googleapis.com" in onboarding
+    
+    # deepseek
+    assert "deepseek.com" in onboarding
+    
+    # mistralai
+    assert "mistral.ai" in onboarding
+    
+    # x-ai
+    assert "api.x.ai" in onboarding

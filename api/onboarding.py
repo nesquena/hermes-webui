@@ -89,7 +89,7 @@ _SUPPORTED_PROVIDER_SETUPS = {
     "gemini": {
         "label": "Google Gemini",
         "env_var": "GOOGLE_API_KEY",
-        "default_model": "gemini-3.1-pro-preview",
+        "default_model": "gemini-2.5-pro",
         "default_base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
         "requires_base_url": False,
         "models": list(_PROVIDER_MODELS.get("gemini", [])),
@@ -116,7 +116,7 @@ _SUPPORTED_PROVIDER_SETUPS = {
     "x-ai": {
         "label": "xAI (Grok)",
         "env_var": "XAI_API_KEY",
-        "default_model": "grok-4.20",
+        "default_model": "grok-3",
         "default_base_url": "https://api.x.ai/v1",
         "requires_base_url": False,
         "models": list(_PROVIDER_MODELS.get("x-ai", [])),
