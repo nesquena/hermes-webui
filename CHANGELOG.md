@@ -3,8 +3,24 @@
 ## [Unreleased]
 
 ### Fixed
-- **Show agent sessions now hides empty/unimportable agent rows** — `state.db` can contain cron/gateway/agent session rows before any messages are written. The sidebar previously showed those rows when "Show agent sessions" was enabled, but clicking them failed because there were no messages to import. The regular session list and gateway SSE watcher now share the same importable-agent-session filter. (`api/agent_sessions.py`, `api/models.py`, `api/gateway_watcher.py`, `tests/test_gateway_sync.py`)
-- **Reasoning chip now appears after the model chip** in the composer toolbar — model is a more fundamental choice and should be stable in position regardless of whether reasoning is active. Order: Profile → Workspace → Model → Reasoning. (`static/index.html`)
+
+## v0.50.207 — 2026-04-25
+
+### Added
+- **Live TPS stat in header** — a monospace chip in the titlebar shows tokens per second during streaming, with HIGH watermark from the past hour. Emitted via SSE at 1 Hz during active streams; hidden when idle. (`api/metering.py`, `api/streaming.py`, `static/messages.js`, `static/style.css`) [#1005 @JKJameson]
+
+### Fixed
+- **Stale SSE events no longer pollute the new session's DOM on session switch** — `appendThinking()` and `appendLiveToolCard()` now guard against events from a prior session's stream arriving after the user has switched sessions. Thinking card also auto-scrolls to top on completion so the response is immediately visible. (`static/ui.js`) [#1006 @JKJameson]
+- **Show agent sessions no longer shows empty/unimportable rows** — `state.db` can contain agent session rows before any messages are written. The sidebar now filters those out consistently across both the regular `/api/sessions` path and the gateway SSE watcher. (`api/agent_sessions.py`, `api/gateway_watcher.py`, `api/models.py`) [#1009 @franksong2702]
+- **Three orphaned i18n keys removed from language dropdown** — `cmd_status`, `memory_saved`, and `profile_delete_title` were placed outside any locale block in `static/i18n.js`, causing them to appear as invalid language options. (`static/i18n.js`) [#1010 @bergeouss]
+- **Cron panel UX polish** — Resume button SVG now uses a ▶| icon to distinguish it from Run; toast overlap fixed with `z-index` on the header; running-state badge with spinner shows during active jobs; `_cronRunningPoll` clears correctly on panel close. (`static/panels.js`, `static/index.html`, `static/style.css`, `static/i18n.js`) [#1011 @bergeouss]
+- **Create Folder and Add as Space from the browser** — users can now create directories and immediately register them as workspace spaces without SSH access; server validates paths against blocked roots before `mkdir`. (`api/routes.py`, `static/ui.js`, `static/panels.js`, `static/i18n.js`) [#1018 @bergeouss]
+- **Model-not-found errors now show a helpful message** — when a provider returns a 404 (e.g. Qwen model not available), the error is classified and a user-friendly hint appears instead of a raw HTML page. All 6 locales covered. (`api/streaming.py`, `static/messages.js`, `static/i18n.js`) [#1022 @bergeouss]
+- **Session attention indicators moved to right-side actions slot** — streaming spinners and unread dots no longer sit before the session title, avoiding title shifts. Running/unread rows hide the timestamp; idle/read rows keep right-aligned timestamps. Date group carets now point down/right correctly. Pinned group no longer repeats the star icon per row. (`static/sessions.js`, `static/style.css`) [#1024 @franksong2702]
+- **Session sidebar dates now use the last real message time** — sorting, grouping, and relative timestamps prefer `last_message_at` derived from the last non-tool message instead of metadata-only `updated_at`, so changing session settings doesn't move old conversations to Today. (`api/models.py`, `api/routes.py`) [#1024 @franksong2702]
+- **Running indicators appear immediately after send** — the sidebar now treats the active local busy session and local in-flight sessions as streaming while `/api/sessions` catches up. (`static/messages.js`, `static/sessions.js`) [#1024 @franksong2702]
+- **Large session switching and reload no longer block on cold model-catalog resolution** — `GET /api/session?messages=0` now parses only the JSON metadata prefix; metadata-only loads skip the full-session LRU cache; the frontend lazy fetch passes `resolve_model=0`; hard reload no longer waits for `populateModelDropdown()`. (`api/models.py`, `api/routes.py`, `static/boot.js`, `static/sessions.js`, `static/ui.js`) [#1025 @franksong2702]
+- **Auto title generation hardened for reasoning models** — title generation now uses a 512-token reasoning-safe budget, retries once with 1024 tokens on empty content or `finish_reason: length`, and preserves the underlying failure reason in `title_status` when falling back to a local summary. (`api/streaming.py`) [#1026 @franksong2702]
 
 ## v0.50.206 — 2026-04-25
 
