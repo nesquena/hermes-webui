@@ -3563,21 +3563,22 @@ def _handle_session_import_cli(handler, body):
     if not msgs:
         return bad(handler, "Session not found in CLI store", 404)
 
-    # Derive title from first user message
-    title = title_from(msgs, "CLI Session")
-    model = "unknown"
-
-    # Get profile, model, and timestamps from CLI session metadata
+    # Get profile, model, timestamps, and title from CLI session metadata
     profile = None
     created_at = None
     updated_at = None
+    cli_title = None
     for cs in get_cli_sessions():
         if cs["session_id"] == sid:
             profile = cs.get("profile")
             model = cs.get("model", "unknown")
             created_at = cs.get("created_at")
             updated_at = cs.get("updated_at")
+            cli_title = cs.get("title")
             break
+
+    # Use the CLI session title if available (e.g., cron job name), otherwise derive from messages
+    title = cli_title or title_from(msgs, "CLI Session")
 
     s = import_cli_session(
         sid,
