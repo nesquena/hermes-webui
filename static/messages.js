@@ -752,6 +752,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }catch(err){}
     });
 
+    source.addEventListener('metering',e=>{
+      // TPS + HIGH/LOW stats for the header chip — emitted at 1 Hz during a stream,
+      // silenced entirely when no sessions are active (ticker exits when idle).
+      try{
+        const d=JSON.parse(e.data||'{}');
+        const el=$('tpsStat');
+        if(!el) return;
+        const tps=typeof d.tps==='number'?d.tps.toFixed(1):'0.0';
+        const high=typeof d.high==='number' && d.high>=0?d.high.toFixed(1)+' high':'—';
+        const low=typeof d.low==='number' && d.low>=0?d.low.toFixed(1)+' low':'';
+        el.textContent=`${tps} t/s · ${high}${low?' · '+low:''}`;
+      }catch(_){}
+    });
+
     source.addEventListener('apperror',e=>{
       _terminalStateReached=true;
       if(_persistTimer){clearTimeout(_persistTimer);_persistTimer=null;}

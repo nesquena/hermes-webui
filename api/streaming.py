@@ -25,6 +25,7 @@ from api.config import (
     resolve_model_provider,
 )
 from api.helpers import redact_session_data
+from api.metering import meter
 
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
 # concurrent runs of the SAME session, but two DIFFERENT sessions can still
@@ -919,6 +920,28 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
         CANCEL_FLAGS[stream_id] = cancel_event
         STREAM_PARTIAL_TEXT[stream_id] = ''  # start accumulating partial text (#893)
 
+    # Register this stream with the global streaming meter
+    meter().begin_session(stream_id)
+
+    # Metering ticker — emits a metering event at 1 Hz while sessions are active.
+    # When get_interval() returns >= 10.0 (no active sessions), the ticker exits
+    # so no idle readings are emitted and the SSE consumer sees nothing.
+    _metering_stop = threading.Event()
+
+    def _metering_ticker():
+        while True:
+            interval = meter().get_interval()
+            if interval >= 10.0:
+                break  # nothing active — stop the ticker
+            if _metering_stop.wait(interval):
+                break  # stream was cancelled or ended — exit
+            stats = meter().get_stats()
+            stats['session_id'] = stream_id
+            put('metering', stats)
+
+    _metering_thread = threading.Thread(target=_metering_ticker, daemon=True)
+    _metering_thread.start()
+
     def put(event, data):
         # If cancelled, drop all further events except the cancel event itself
         if cancel_event.is_set() and event not in ('cancel', 'error'):
@@ -1061,6 +1084,19 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             _reasoning_text = ''  # accumulates reasoning/thinking trace for persistence
             _live_tool_calls = []  # tool progress fallback when final messages omit tool IDs
 
+            # Throttle: emit metering events at most every 100 ms so the TPS label
+            # feels live during fast token streams without flooding the SSE channel.
+            _metering_last_emit = [time.monotonic() - 1]  # fire immediately on first token
+
+            def _emit_metering():
+                now = time.monotonic()
+                if now - _metering_last_emit[0] < 0.1:
+                    return
+                _metering_last_emit[0] = now
+                stats = meter().get_stats()
+                stats['session_id'] = stream_id
+                put('metering', stats)
+
             def on_token(text):
                 nonlocal _token_sent
                 if text is None:
@@ -1070,6 +1106,9 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 if stream_id in STREAM_PARTIAL_TEXT:
                     STREAM_PARTIAL_TEXT[stream_id] += str(text)
                 put('token', {'text': text})
+                # Update global throughput meter
+                meter().record_token(stream_id, len(STREAM_PARTIAL_TEXT[stream_id]))
+                _emit_metering()
 
             def on_reasoning(text):
                 nonlocal _reasoning_text
@@ -1077,6 +1116,9 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                     return
                 _reasoning_text += str(text)
                 put('reasoning', {'text': str(text)})
+                # Track reasoning tokens in the meter so TPS reflects all AI output
+                meter().record_reasoning(stream_id, len(_reasoning_text))
+                _emit_metering()
 
             # Pre-initialise the activity counter here so on_tool (which
             # closes over it) never captures an unbound name even if this
@@ -1084,6 +1126,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             _checkpoint_activity = [0]
 
             def on_tool(*cb_args, **cb_kwargs):
+                nonlocal _reasoning_text
                 event_type = None
                 name = None
                 preview = None
@@ -1103,7 +1146,10 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 if event_type in ('reasoning.available', '_thinking'):
                     reason_text = preview if event_type == 'reasoning.available' else name
                     if reason_text:
+                        _reasoning_text += str(reason_text)
                         put('reasoning', {'text': str(reason_text)})
+                        meter().record_reasoning(stream_id, len(_reasoning_text))
+                        _emit_metering()
                     return
 
                 args_snap = {}
@@ -1623,6 +1669,10 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             # (reasoning trace already attached + saved above, before s.save())
             raw_session = s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}
             put('done', {'session': redact_session_data(raw_session), 'usage': usage})
+            # Emit metering stats for the header TPS label
+            meter_stats = meter().get_stats()
+            meter_stats['session_id'] = session_id
+            put('metering', meter_stats)
             if _should_bg_title and _u0 and _a0:
                 threading.Thread(
                     target=_run_background_title_update,
@@ -1635,6 +1685,8 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 # activeSid = original session_id so they must match for stream_end to close.
                 put('stream_end', {'session_id': session_id})
         finally:
+            # Stop the live metering ticker
+            _metering_stop.set()
             # Unregister the gateway approval callback and unblock any threads
             # still waiting on approval (e.g. stream cancelled mid-approval).
             if _approval_registered and _unreg_notify is not None:
