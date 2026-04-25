@@ -211,6 +211,9 @@ def reload_config() -> None:
     with _cfg_lock:
         _cfg_cache.clear()
         config_path = _get_config_path()
+        # Remember the old mtime so we can tell whether config actually changed
+        # vs. first-ever load (mtime == 0.0, e.g. server start or profile switch).
+        _old_cfg_mtime = _cfg_mtime
         try:
             import yaml as _yaml
 
@@ -224,6 +227,13 @@ def reload_config() -> None:
                         _cfg_mtime = 0.0
         except Exception:
             logger.debug("Failed to load yaml config from %s", config_path)
+        # Bust the models cache so the next request sees fresh config values.
+        # Only delete the disk cache when config has actually changed -- not on
+        # first-ever load (when _old_cfg_mtime == 0.0, i.e. server start or
+        # profile switch) -- preserving the disk cache so the next restart
+        # still hits the fast path without a cold run.
+        if _old_cfg_mtime != 0.0:
+            _delete_models_cache_on_disk()
 
 
 def _load_yaml_config_file(config_path: Path) -> dict:
@@ -1076,8 +1086,55 @@ def set_hermes_default_model(model_id: str) -> dict:
 # ── TTL cache for get_available_models() ─────────────────────────────────────
 _available_models_cache: dict | None = None
 _available_models_cache_ts: float = 0.0
-_AVAILABLE_MODELS_CACHE_TTL: float = 60.0  # seconds — refresh at most once per minute
-_available_models_cache_lock = threading.Lock()
+_AVAILABLE_MODELS_CACHE_TTL: float = 86400.0  # 24 hours
+_available_models_cache_lock = threading.RLock()  # must be RLock: cold path refactoring moved slow work inside this lock, requiring re-entry
+
+# Cache for credential pool results -- calling load_pool() per-provider per-server
+# session is expensive (~10s for zai due to endpoint probing).  The credential pool
+# only changes when the user adds/removes credentials, which is rare; a 24h TTL
+# is plenty safe and ensures get_available_models() cold paths are fast.
+_CREDENTIAL_POOL_CACHE: dict[str, tuple[float, "CredentialPool"]] = {}  # pid -> (ts, pool)
+_provider_models_invalidated_ts: dict[str, float] = {}  # provider_id -> timestamp of last invalidation
+
+# Disk-backed in-memory cache for get_available_models().
+# Written to disk on every cache population so the cache survives server restarts.
+# Invalidated (file deleted) whenever a provider is added/changed/removed or
+# config.yaml changes.  A TTL is still used as a fallback in case the invalidation
+# signal is somehow missed, but the cache will always be warm after the first
+# page load following a server start.
+_models_cache_path = Path("/dev/shm") / "hermes_webui_models_cache.json"
+
+
+def _delete_models_cache_on_disk() -> None:
+    try:
+        os.unlink(str(_models_cache_path))
+    except OSError:
+        pass  # already absent
+
+
+def _load_models_cache_from_disk() -> dict | None:
+    """Load groups dict from disk cache if it exists and is valid."""
+    try:
+        import json as _j
+        if not _models_cache_path.exists():
+            return None
+        with open(_models_cache_path, encoding="utf-8") as f:
+            cache = _j.load(f)
+        return cache if isinstance(cache, dict) and "groups" in cache else None
+    except Exception:
+        return None
+
+
+def _save_models_cache_to_disk(cache: dict) -> None:
+    """Save cache to disk so it survives server restarts."""
+    try:
+        import time as _cache_time
+        tmp = str(_models_cache_path) + f".{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"groups": cache.get("groups", [])}, f, indent=2)
+        os.rename(tmp, str(_models_cache_path))
+    except Exception:
+        pass  # Non-fatal -- cache will rebuild on next call
 
 
 def invalidate_models_cache():
@@ -1091,6 +1148,26 @@ def invalidate_models_cache():
     with _available_models_cache_lock:
         _available_models_cache = None
         _available_models_cache_ts = 0.0
+
+
+def invalidate_provider_models_cache(provider_id: str):
+    """Invalidate cached models for a single provider.
+
+    Also invalidates the full cache so that the next get_available_models()
+    call rebuilds all groups cleanly (the rebuilt provider is merged with any
+    other cached groups from the 24h TTL window).  After the next
+    get_available_models() call, _provider_models_invalidated_ts[provider_id]
+    is cleared so the provider's fresh models are used.
+
+    Args:
+        provider_id: canonical provider id (e.g. 'openai', 'anthropic', 'custom:my-key')
+    """
+    global _available_models_cache, _available_models_cache_ts
+    with _available_models_cache_lock:
+        _available_models_cache = None
+        _available_models_cache_ts = 0.0
+        _provider_models_invalidated_ts[provider_id] = time.time()
+    _delete_models_cache_on_disk()
 
 
 def _get_label_for_model(model_id: str, existing_groups: list) -> str:
@@ -1142,453 +1219,394 @@ def get_available_models() -> dict:
         'groups': [{'provider': str, 'models': [{'id': str, 'label': str}]}]
     }
     """
-    # Reload config from disk if config.yaml has changed since last load.
-    # This ensures CLI model changes are picked up on page refresh without
-    # a server restart, while avoiding clearing in-memory mocks during tests. (#585)
-    # Must run BEFORE the TTL check so config edits within the 60s window are visible.
-    global _available_models_cache, _available_models_cache_ts
-    with _available_models_cache_lock:
+    # ── COLD PATH helper ─────────────────────────────────────────────────────
+    # Extracted so it runs inside _available_models_cache_lock (RLock) to
+    # prevent thundering-herd: only one thread rebuilds while others wait.
+    def _build_available_models_uncached() -> dict:
+        active_provider = None
+        default_model = get_effective_default_model(cfg)
+        groups = []
+
+        # 1. Read config.yaml model section
+        cfg_base_url = ""  # must be defined before conditional blocks (#117)
+        model_cfg = cfg.get("model", {})
+        cfg_base_url = ""
+        if isinstance(model_cfg, str):
+            pass  # default_model already set by get_effective_default_model
+        elif isinstance(model_cfg, dict):
+            active_provider = model_cfg.get("provider")
+            cfg_default = model_cfg.get("default", "")
+            cfg_base_url = model_cfg.get("base_url", "")
+            if cfg_default:
+                default_model = cfg_default
+
+        # Normalize active_provider to its canonical key
+        if active_provider:
+            active_provider = _resolve_provider_alias(active_provider)
+
+        # 2. Read auth store (active_provider fallback + credential_pool inspection)
+        auth_store = {}
         try:
-            _current_mtime = Path(_get_config_path()).stat().st_mtime
-        except OSError:
-            _current_mtime = 0.0
-        # Note: env-var changes (e.g. API key rotation) are not detected by mtime;
-        # cache will be stale for up to TTL seconds in that case.
-        if _current_mtime != _cfg_mtime:
-            reload_config()
-            # Config changed — force cache invalidation
-            _available_models_cache = None
-            _available_models_cache_ts = 0.0
-        # Serve from TTL cache if fresh.
-        now = time.monotonic()
-        if _available_models_cache is not None and (now - _available_models_cache_ts) < _AVAILABLE_MODELS_CACHE_TTL:
-            return copy.deepcopy(_available_models_cache)
-    active_provider = None
-    default_model = get_effective_default_model(cfg)
-    groups = []
+            from api.profiles import get_active_hermes_home as _gah
 
-    # 1. Read config.yaml model section
-    cfg_base_url = ""  # must be defined before conditional blocks (#117)
-    model_cfg = cfg.get("model", {})
-    cfg_base_url = ""
-    if isinstance(model_cfg, str):
-        pass  # default_model already set by get_effective_default_model
-    elif isinstance(model_cfg, dict):
-        active_provider = model_cfg.get("provider")
-        cfg_default = model_cfg.get("default", "")
-        cfg_base_url = model_cfg.get("base_url", "")
-        if cfg_default:
-            default_model = cfg_default
-
-    # Normalize active_provider to its canonical key so it matches the
-    # _PROVIDER_MODELS lookup below (e.g. 'z.ai' -> 'zai', 'x.ai' -> 'xai',
-    # 'google' -> 'gemini').  Works even when hermes_cli is not on sys.path
-    # because the WebUI ships its own _PROVIDER_ALIASES table.
-    if active_provider:
-        active_provider = _resolve_provider_alias(active_provider)
-
-    # 2. Read auth store (active_provider fallback + credential_pool inspection)
-    auth_store = {}
-    try:
-        from api.profiles import get_active_hermes_home as _gah
-
-        auth_store_path = _gah() / "auth.json"
-    except ImportError:
-        auth_store_path = HOME / ".hermes" / "auth.json"
-    if auth_store_path.exists():
-        try:
-            import json as _j
-
-            auth_store = _j.loads(auth_store_path.read_text(encoding="utf-8"))
-            if not active_provider:
-                # Re-run alias resolution: auth.json may store an aliased name
-                # (e.g. 'google', 'z.ai') that the prefixing logic compares
-                # against canonical pids.
-                active_provider = _resolve_provider_alias(auth_store.get("active_provider"))
-        except Exception:
-            logger.debug("Failed to load auth store from %s", auth_store_path)
-
-    # 3. Detect available providers.
-    # Primary: ask hermes-agent's auth layer — the authoritative source. It checks
-    # auth.json, credential pools, and env vars the same way the agent does at runtime,
-    # so the dropdown reflects exactly what the user has configured.
-    # Fallback: scan raw API key env vars (matches old behaviour if hermes not available).
-    detected_providers = set()
-    if active_provider:
-        detected_providers.add(active_provider)
-
-    # Include providers that have usable credential-pool entries even when no
-    # process env var is present (e.g. service launched without shell env).
-    # Primary: delegate to upstream credential_pool.load_pool() so suppression
-    # and seeding/pruning rules live in one place.
-    # Fallback: manual field inspection when the upstream module is unavailable.
-    try:
-        _pool = auth_store.get("credential_pool", {}) if isinstance(auth_store, dict) else {}
-        if isinstance(_pool, dict) and _pool:
-            try:
-                from agent.credential_pool import load_pool as _load_pool
-
-                # load_pool() does NOT suppress ambient gh-cli tokens — filter
-                # them here so Copilot doesn't reappear just because the agent
-                # seeded 'gh auth token' into the pool.
-                for _pid in list(_pool.keys()):
-                    try:
-                        _canonical_pid = _resolve_provider_alias(str(_pid))
-                        _all_entries = _load_pool(_pid).entries()
-                        _explicit = [
-                            e for e in _all_entries
-                            if not _is_ambient_gh_cli_entry(
-                                str(getattr(e, "source", "") or ""),
-                                str(getattr(e, "label", "") or ""),
-                                str(getattr(e, "key_source", "") or ""),
-                            )
-                        ]
-                        if _explicit:
-                            detected_providers.add(_canonical_pid)
-                    except Exception:
-                        logger.debug("credential_pool.load_pool(%s) failed", _pid)
-            except ImportError:
-                # Fallback: inspect raw entry fields for suppression signals.
-                for _pid, _entries in _pool.items():
-                    if not isinstance(_entries, list) or len(_entries) == 0:
-                        continue
-                    _has_explicit_cred = any(
-                        isinstance(_entry, dict)
-                        and not _is_ambient_gh_cli_entry(
-                            str(_entry.get("source", "") or ""),
-                            str(_entry.get("label", "") or ""),
-                            str(_entry.get("key_source", "") or ""),
-                        )
-                        for _entry in _entries
-                    )
-                    if _has_explicit_cred:
-                        detected_providers.add(_resolve_provider_alias(str(_pid)))
-    except Exception:
-        logger.debug("Failed to inspect credential_pool from auth store")
-
-    all_env: dict = {}  # profile .env keys — populated below, used by custom endpoint auth
-
-    _hermes_auth_used = False
-    try:
-        from hermes_cli.models import list_available_providers as _lap
-        from hermes_cli.auth import get_auth_status as _gas
-
-        for _p in _lap():
-            if not _p.get("authenticated"):
-                continue
-            # Exclude providers whose credential came from an ambient token
-            # (e.g. 'gh auth token' for Copilot on a machine with gh CLI auth).
-            # Only include providers with an explicit, dedicated credential.
-            try:
-                _src = _gas(_p["id"]).get("key_source", "")
-                if _src == "gh auth token":
-                    continue
-            except Exception:
-                logger.debug("Failed to get key source for provider %s", _p.get("id", "unknown"))
-            detected_providers.add(_p["id"])
-        _hermes_auth_used = True
-    except Exception:
-        logger.debug("Failed to detect auth providers from hermes")
-
-    if not _hermes_auth_used:
-        # Fallback: scan .env and os.environ for known API key variables
-        try:
-            from api.profiles import get_active_hermes_home as _gah2
-
-            hermes_env_path = _gah2() / ".env"
+            auth_store_path = _gah() / "auth.json"
         except ImportError:
-            hermes_env_path = HOME / ".hermes" / ".env"
-        env_keys = {}
-        if hermes_env_path.exists():
+            auth_store_path = HOME / ".hermes" / "auth.json"
+        if auth_store_path.exists():
             try:
-                for line in hermes_env_path.read_text(encoding="utf-8").splitlines():
-                    line = line.strip()
-                    if line and not line.startswith("#") and "=" in line:
-                        k, v = line.split("=", 1)
-                        env_keys[k.strip()] = v.strip().strip('"').strip("'")
+                import json as _j
+
+                auth_store = _j.loads(auth_store_path.read_text(encoding="utf-8"))
+                if not active_provider:
+                    active_provider = _resolve_provider_alias(auth_store.get("active_provider"))
             except Exception:
-                logger.debug("Failed to parse hermes env file")
-        all_env = {**env_keys}
-        for k in (
-            "ANTHROPIC_API_KEY",
-            "OPENAI_API_KEY",
-            "OPENROUTER_API_KEY",
-            "GOOGLE_API_KEY",
-            "GEMINI_API_KEY",
-            "GLM_API_KEY",
-            "KIMI_API_KEY",
-            "DEEPSEEK_API_KEY",
-            "OPENCODE_ZEN_API_KEY",
-            "OPENCODE_GO_API_KEY",
-            "MINIMAX_API_KEY",
-            "MINIMAX_CN_API_KEY",
-        ):
-            val = os.getenv(k)
-            if val:
-                all_env[k] = val
-        if all_env.get("ANTHROPIC_API_KEY"):
-            detected_providers.add("anthropic")
-        if all_env.get("OPENAI_API_KEY"):
-            detected_providers.add("openai")
-        if all_env.get("OPENROUTER_API_KEY"):
-            detected_providers.add("openrouter")
-        if all_env.get("GOOGLE_API_KEY"):
-            detected_providers.add("google")
-        if all_env.get("GEMINI_API_KEY"):
-            detected_providers.add("gemini")
-        if all_env.get("GLM_API_KEY"):
-            detected_providers.add("zai")
-        if all_env.get("KIMI_API_KEY"):
-            detected_providers.add("kimi-coding")
-        if all_env.get("MINIMAX_API_KEY") or all_env.get("MINIMAX_CN_API_KEY"):
-            detected_providers.add("minimax")
-        if all_env.get("DEEPSEEK_API_KEY"):
-            detected_providers.add("deepseek")
-        if all_env.get("OPENCODE_ZEN_API_KEY"):
-            detected_providers.add("opencode-zen")
-        if all_env.get("OPENCODE_GO_API_KEY"):
-            detected_providers.add("opencode-go")
+                logger.debug("Failed to load auth store from %s", auth_store_path)
 
-    # 4. Fetch models from custom endpoint if base_url is configured
-    auto_detected_models = []
-    if cfg_base_url:
+        # 3. Detect available providers.
+        detected_providers = set()
+        if active_provider:
+            detected_providers.add(active_provider)
+
         try:
-            import ipaddress
-            import urllib.request
-
-            # Normalize the base_url and build models endpoint
-            base_url = cfg_base_url.strip()
-            if base_url.endswith("/v1"):
-                endpoint_url = base_url + "/models"  # /v1/models
-            else:
-                endpoint_url = base_url.rstrip("/") + "/v1/models"
-
-            # Detect provider from base_url
-            provider = "custom"
-            parsed = urlparse(base_url if "://" in base_url else f"http://{base_url}")
-            host = (parsed.netloc or parsed.path).lower()
-
-            if parsed.hostname:
+            _pool = auth_store.get("credential_pool", {}) if isinstance(auth_store, dict) else {}
+            if isinstance(_pool, dict) and _pool:
                 try:
-                    addr = ipaddress.ip_address(parsed.hostname)
-                    if addr.is_private or addr.is_loopback or addr.is_link_local:
-                        if (
-                            "ollama" in host
-                            or "127.0.0.1" in host
-                            or "localhost" in host
-                        ):
-                            provider = "ollama"
-                        elif "lmstudio" in host or "lm-studio" in host:
-                            provider = "lmstudio"
-                        else:
-                            provider = "local"
-                except ValueError:
-                    pass
+                    from agent.credential_pool import load_pool as _load_pool
 
-            # Resolve API key for the custom / OpenAI-compatible endpoint.
-            # Priority:
-            #   1. model.api_key in config.yaml
-            #   2. provider-specific providers.<active>.api_key / providers.custom.api_key
-            #   3. env/.env fallbacks
-            headers = {}
-            api_key = ""
-            if isinstance(model_cfg, dict):
-                api_key = (model_cfg.get("api_key") or "").strip()
-            if not api_key:
-                providers_cfg = cfg.get("providers", {})
-                if isinstance(providers_cfg, dict):
-                    for provider_key in filter(None, [active_provider, "custom"]):
-                        provider_cfg = providers_cfg.get(provider_key, {})
-                        if isinstance(provider_cfg, dict):
-                            api_key = (provider_cfg.get("api_key") or "").strip()
-                            if api_key:
-                                break
-            if not api_key:
-                api_key_vars = (
-                    "HERMES_API_KEY",
-                    "HERMES_OPENAI_API_KEY",
-                    "OPENAI_API_KEY",
-                    "LOCAL_API_KEY",
-                    "OPENROUTER_API_KEY",
-                    "API_KEY",
-                )
-                for key in api_key_vars:
-                    api_key = (all_env.get(key) or os.getenv(key) or "").strip()
-                    if api_key:
-                        break
-            if api_key:
-                headers["Authorization"] = f"Bearer {api_key}"
-
-            # Fetch model list from endpoint (with SSRF protection)
-            import socket
-
-            # Resolve hostname and check against private IPs after DNS lookup
-            parsed_url = urlparse(
-                endpoint_url if "://" in endpoint_url else f"http://{endpoint_url}"
-            )
-            # Validate URL scheme to prevent file:// and other dangerous schemes
-            if parsed_url.scheme not in ("", "http", "https"):
-                raise ValueError(f"Invalid URL scheme: {parsed_url.scheme}")
-            if parsed_url.hostname:
-                try:
-                    resolved_ips = socket.getaddrinfo(parsed_url.hostname, None)
-                    for _, _, _, _, addr in resolved_ips:
-                        addr_obj = ipaddress.ip_address(addr[0])
-                        if (
-                            addr_obj.is_private
-                            or addr_obj.is_loopback
-                            or addr_obj.is_link_local
-                        ):
-                            # Allow known local providers (ollama, lmstudio)
-                            is_known_local = any(
-                                k in (parsed_url.hostname or "").lower()
-                                for k in (
-                                    "ollama",
-                                    "localhost",
-                                    "127.0.0.1",
-                                    "lmstudio",
-                                    "lm-studio",
+                    for _pid in list(_pool.keys()):
+                        try:
+                            _canonical_pid = _resolve_provider_alias(str(_pid))
+                            # Check credential pool cache first
+                            _cached = _CREDENTIAL_POOL_CACHE.get(_pid)
+                            if _cached is not None:
+                                _cp_ts, _cp_pool = _cached
+                                if (time.time() - _cp_ts) < 86400.0:
+                                    _all_entries = _cp_pool.entries()
+                                else:
+                                    _lp_t0 = time.monotonic()
+                                    _cp_pool = _load_pool(_pid)
+                                    _CREDENTIAL_POOL_CACHE[_pid] = (time.time(), _cp_pool)
+                                    _all_entries = _cp_pool.entries()
+                            else:
+                                _lp_t0 = time.monotonic()
+                                _cp_pool = _load_pool(_pid)
+                                _CREDENTIAL_POOL_CACHE[_pid] = (time.time(), _cp_pool)
+                                _all_entries = _cp_pool.entries()
+                            _explicit = [
+                                e for e in _all_entries
+                                if not _is_ambient_gh_cli_entry(
+                                    str(getattr(e, "source", "") or ""),
+                                    str(getattr(e, "label", "") or ""),
+                                    str(getattr(e, "key_source", "") or ""),
                                 )
+                            ]
+                            if _explicit:
+                                detected_providers.add(_canonical_pid)
+                        except Exception:
+                            logger.debug("credential_pool.load_pool(%s) failed", _pid)
+                except ImportError:
+                    for _pid, _entries in _pool.items():
+                        if not isinstance(_entries, list) or len(_entries) == 0:
+                            continue
+                        _has_explicit_cred = any(
+                            isinstance(_entry, dict)
+                            and not _is_ambient_gh_cli_entry(
+                                str(_entry.get("source", "") or ""),
+                                str(_entry.get("label", "") or ""),
+                                str(_entry.get("key_source", "") or ""),
                             )
-                            if not is_known_local:
-                                raise ValueError(
-                                    f"SSRF: resolved hostname to private IP {addr[0]}"
-                                )
-                except socket.gaierror:
-                    pass  # DNS resolution failed -- let urllib handle it
-            req = urllib.request.Request(endpoint_url, method="GET")
-            req.add_header("User-Agent", "OpenAI/Python 1.0")
-            for k, v in headers.items():
-                req.add_header(k, v)
-            with urllib.request.urlopen(req, timeout=10) as response:  # nosec B310
-                data = json.loads(response.read().decode("utf-8"))
-
-            # Handle both OpenAI-compatible and llama.cpp response formats
-            models_list = []
-            if "data" in data and isinstance(data["data"], list):
-                models_list = data["data"]
-            elif "models" in data and isinstance(data["models"], list):
-                models_list = data["models"]
-
-            for model in models_list:
-                if not isinstance(model, dict):
-                    continue
-                model_id = (
-                    model.get("id", "")
-                    or model.get("name", "")
-                    or model.get("model", "")
-                )
-                model_name = model.get("name", "") or model.get("model", "") or model_id
-                if model_id and model_name:
-                    label = _format_ollama_label(model_id) if provider in ("ollama", "ollama-cloud") else model_name
-                    auto_detected_models.append({"id": model_id, "label": label})
-                    detected_providers.add(provider.lower())
+                            for _entry in _entries
+                        )
+                        if _has_explicit_cred:
+                            detected_providers.add(_resolve_provider_alias(str(_pid)))
         except Exception:
-            logger.debug("Custom endpoint unreachable or misconfigured for provider: %s", provider)
+            logger.debug("Failed to inspect credential_pool from auth store")
 
-    # 3b. Include models from custom_providers config entries.
-    # These are explicitly configured and should always appear even when the
-    # /v1/models endpoint is unreachable or returns a subset.
-    #
-    # Each entry may carry a `name` field (e.g. "Agent37").  When present we
-    # use it as the dropdown section header instead of the generic "Custom"
-    # label.  Internally we key these providers as "custom:<slug>" so that
-    # multiple named custom providers can coexist as separate groups.
-    _custom_providers_cfg = cfg.get("custom_providers", [])
-    # Maps "custom:<slug>" -> (display_name, [model_dicts])
-    _named_custom_groups: dict = {}
-    if isinstance(_custom_providers_cfg, list):
-        _seen_custom_ids = {m["id"] for m in auto_detected_models}
-        for _cp in _custom_providers_cfg:
-            if not isinstance(_cp, dict):
-                continue
-            _cp_model = _cp.get("model", "")
-            _cp_name = (_cp.get("name") or "").strip()
-            if _cp_model and _cp_model not in _seen_custom_ids:
-                _cp_label = _get_label_for_model(_cp_model, [])
-                _seen_custom_ids.add(_cp_model)
-                if _cp_name:
-                    # Named custom provider — own group keyed by slug
-                    _slug = "custom:" + _cp_name.lower().replace(" ", "-")
-                    if _slug not in _named_custom_groups:
-                        _named_custom_groups[_slug] = (_cp_name, [])
-                        detected_providers.add(_slug)
-                    _named_custom_groups[_slug][1].append(
-                        {"id": _cp_model, "label": _cp_label}
-                    )
-                else:
-                    # Unnamed — falls into the generic "Custom" bucket
-                    auto_detected_models.append({"id": _cp_model, "label": _cp_label})
-                    detected_providers.add("custom")
+        all_env: dict = {}
 
-    # If the user configured a real model.provider, the base_url belongs to
-    # THAT provider, not to a separate "Custom" group. hermes_cli reports
-    # 'custom' as authenticated whenever base_url is set, which would otherwise
-    # build a phantom "Custom" bucket next to the real provider's group. Drop
-    # it unless (a) the user explicitly chose 'custom' as their active provider,
-    # or (b) the user has custom_providers entries in config.yaml (those models
-    # were already added above and should still be shown).
-    _has_custom_providers = isinstance(_custom_providers_cfg, list) and len(_custom_providers_cfg) > 0
-    if active_provider and active_provider != "custom" and not _has_custom_providers:
-        detected_providers.discard("custom")
-        # Also drop named custom slugs when active provider is a real named one
-        # and there are no custom_providers entries to show.
-        for _slug in list(detected_providers):
-            if _slug.startswith("custom:") and not _has_custom_providers:
-                detected_providers.discard(_slug)
-    elif active_provider == "custom" and _has_custom_providers:
-        # When the active provider is 'custom' and all custom_providers entries
-        # are named (i.e. every entry produced a "custom:<slug>" key), the bare
-        # "custom" bucket is empty noise — discard it so the dropdown only shows
-        # the named groups.  We keep "custom" if there are unnamed entries (they
-        # were added to auto_detected_models and will render under the generic
-        # "Custom" header via the else branch in the group builder).
-        _has_unnamed = any(
-            isinstance(_cp, dict) and not (_cp.get("name") or "").strip()
-            for _cp in _custom_providers_cfg
-        )
-        if not _has_unnamed:
-            detected_providers.discard("custom")
+        _hermes_auth_used = False
+        try:
+            from hermes_cli.models import list_available_providers as _lap
+            from hermes_cli.auth import get_auth_status as _gas
 
-    # 5. Build model groups
-    if detected_providers:
-        for pid in sorted(detected_providers):
-            if pid.startswith("custom:") and pid in _named_custom_groups:
-                # Named custom provider — use the stored display name and its own model list
-                _nc_display, _nc_models = _named_custom_groups[pid]
-                if _nc_models:
-                    groups.append({"provider": _nc_display, "provider_id": pid, "models": _nc_models})
-                continue
-            provider_name = _PROVIDER_DISPLAY.get(pid, pid.title())
-            if pid == "openrouter":
-                # OpenRouter uses provider/model format -- show the fallback list
-                groups.append(
-                    {
-                        "provider": "OpenRouter",
-                        "provider_id": "openrouter",
-                        "models": [
-                            {"id": m["id"], "label": m["label"]}
-                            for m in _FALLBACK_MODELS
-                        ],
-                    }
-                )
-            elif pid == "ollama-cloud":
-                # Ollama Cloud list is dynamic; fetch via hermes_cli provider catalog.
-                # When the catalog is unavailable, skip the group rather than emit a
-                # speculative static list — matches the named-custom and unknown-provider
-                # branches below.
-                raw_models = []
+            for _p in _lap():
+                if not _p.get("authenticated"):
+                    continue
                 try:
-                    from hermes_cli.models import provider_model_ids as _provider_model_ids
-
-                    raw_models = [
-                        {"id": mid, "label": _format_ollama_label(mid)}
-                        for mid in (_provider_model_ids("ollama-cloud") or [])
-                    ]
+                    _src = _gas(_p["id"]).get("key_source", "")
+                    if _src == "gh auth token":
+                        continue
                 except Exception:
-                    logger.warning("Failed to load Ollama Cloud models from hermes_cli")
+                    logger.debug("Failed to get key source for provider %s", _p.get("id", "unknown"))
+                detected_providers.add(_p["id"])
+            _hermes_auth_used = True
+        except Exception:
+            logger.debug("Failed to detect auth providers from hermes")
 
-                if raw_models:
+        if not _hermes_auth_used:
+            try:
+                from api.profiles import get_active_hermes_home as _gah2
+
+                hermes_env_path = _gah2() / ".env"
+            except ImportError:
+                hermes_env_path = HOME / ".hermes" / ".env"
+            env_keys = {}
+            if hermes_env_path.exists():
+                try:
+                    for line in hermes_env_path.read_text(encoding="utf-8").splitlines():
+                        line = line.strip()
+                        if line and not line.startswith("#") and "=" in line:
+                            k, v = line.split("=", 1)
+                            env_keys[k.strip()] = v.strip().strip('"').strip("'")
+                except Exception:
+                    logger.debug("Failed to parse hermes env file")
+            all_env = {**env_keys}
+            for k in (
+                "ANTHROPIC_API_KEY",
+                "OPENAI_API_KEY",
+                "OPENROUTER_API_KEY",
+                "GOOGLE_API_KEY",
+                "GEMINI_API_KEY",
+                "GLM_API_KEY",
+                "KIMI_API_KEY",
+                "DEEPSEEK_API_KEY",
+                "OPENCODE_ZEN_API_KEY",
+                "OPENCODE_GO_API_KEY",
+                "MINIMAX_API_KEY",
+                "MINIMAX_CN_API_KEY",
+            ):
+                val = os.getenv(k)
+                if val:
+                    all_env[k] = val
+            if all_env.get("ANTHROPIC_API_KEY"):
+                detected_providers.add("anthropic")
+            if all_env.get("OPENAI_API_KEY"):
+                detected_providers.add("openai")
+            if all_env.get("OPENROUTER_API_KEY"):
+                detected_providers.add("openrouter")
+            if all_env.get("GOOGLE_API_KEY"):
+                detected_providers.add("google")
+            if all_env.get("GEMINI_API_KEY"):
+                detected_providers.add("gemini")
+            if all_env.get("GLM_API_KEY"):
+                detected_providers.add("zai")
+            if all_env.get("KIMI_API_KEY"):
+                detected_providers.add("kimi-coding")
+            if all_env.get("MINIMAX_API_KEY") or all_env.get("MINIMAX_CN_API_KEY"):
+                detected_providers.add("minimax")
+            if all_env.get("DEEPSEEK_API_KEY"):
+                detected_providers.add("deepseek")
+            if all_env.get("OPENCODE_ZEN_API_KEY"):
+                detected_providers.add("opencode-zen")
+            if all_env.get("OPENCODE_GO_API_KEY"):
+                detected_providers.add("opencode-go")
+
+        # 4. Fetch models from custom endpoint if base_url is configured
+        auto_detected_models = []
+        if cfg_base_url:
+            try:
+                import ipaddress
+                import urllib.request
+
+                base_url = cfg_base_url.strip()
+                if base_url.endswith("/v1"):
+                    endpoint_url = base_url + "/models"
+                else:
+                    endpoint_url = base_url.rstrip("/") + "/v1/models"
+
+                provider = "custom"
+                parsed = urlparse(base_url if "://" in base_url else f"http://{base_url}")
+                host = (parsed.netloc or parsed.path).lower()
+
+                if parsed.hostname:
+                    try:
+                        addr = ipaddress.ip_address(parsed.hostname)
+                        if addr.is_private or addr.is_loopback or addr.is_link_local:
+                            if "ollama" in host or "127.0.0.1" in host or "localhost" in host:
+                                provider = "ollama"
+                            elif "lmstudio" in host or "lm-studio" in host:
+                                provider = "lmstudio"
+                            else:
+                                provider = "local"
+                    except ValueError:
+                        pass
+
+                headers = {}
+                api_key = ""
+                if isinstance(model_cfg, dict):
+                    api_key = (model_cfg.get("api_key") or "").strip()
+                if not api_key:
+                    providers_cfg = cfg.get("providers", {})
+                    if isinstance(providers_cfg, dict):
+                        for provider_key in filter(None, [active_provider, "custom"]):
+                            provider_cfg = providers_cfg.get(provider_key, {})
+                            if isinstance(provider_cfg, dict):
+                                api_key = (provider_cfg.get("api_key") or "").strip()
+                                if api_key:
+                                    break
+                if not api_key:
+                    api_key_vars = (
+                        "HERMES_API_KEY",
+                        "HERMES_OPENAI_API_KEY",
+                        "OPENAI_API_KEY",
+                        "LOCAL_API_KEY",
+                        "OPENROUTER_API_KEY",
+                        "API_KEY",
+                    )
+                    for key in api_key_vars:
+                        api_key = (all_env.get(key) or os.getenv(key) or "").strip()
+                        if api_key:
+                            break
+                if api_key:
+                    headers["Authorization"] = f"Bearer {api_key}"
+
+                import socket
+
+                parsed_url = urlparse(
+                    endpoint_url if "://" in endpoint_url else f"http://{endpoint_url}"
+                )
+                if parsed_url.scheme not in ("", "http", "https"):
+                    raise ValueError(f"Invalid URL scheme: {parsed_url.scheme}")
+                if parsed_url.hostname:
+                    try:
+                        resolved_ips = socket.getaddrinfo(parsed_url.hostname, None)
+                        for _, _, _, _, addr in resolved_ips:
+                            addr_obj = ipaddress.ip_address(addr[0])
+                            if addr_obj.is_private or addr_obj.is_loopback or addr_obj.is_link_local:
+                                is_known_local = any(
+                                    k in (parsed_url.hostname or "").lower()
+                                    for k in (
+                                        "ollama",
+                                        "localhost",
+                                        "127.0.0.1",
+                                        "lmstudio",
+                                        "lm-studio",
+                                    )
+                                )
+                                if not is_known_local:
+                                    raise ValueError(
+                                        f"SSRF: resolved hostname to private IP {addr[0]}"
+                                    )
+                    except socket.gaierror:
+                        pass
+                req = urllib.request.Request(endpoint_url, method="GET")
+                req.add_header("User-Agent", "OpenAI/Python 1.0")
+                for k, v in headers.items():
+                    req.add_header(k, v)
+                with urllib.request.urlopen(req, timeout=10) as response:  # nosec B310
+                    data = json.loads(response.read().decode("utf-8"))
+
+                models_list = []
+                if "data" in data and isinstance(data["data"], list):
+                    models_list = data["data"]
+                elif "models" in data and isinstance(data["models"], list):
+                    models_list = data["models"]
+
+                for model in models_list:
+                    if not isinstance(model, dict):
+                        continue
+                    model_id = (
+                        model.get("id", "")
+                        or model.get("name", "")
+                        or model.get("model", "")
+                    )
+                    model_name = model.get("name", "") or model.get("model", "") or model_id
+                    if model_id and model_name:
+                        label = _format_ollama_label(model_id) if provider in ("ollama", "ollama-cloud") else model_name
+                        auto_detected_models.append({"id": model_id, "label": label})
+                        detected_providers.add(provider.lower())
+            except Exception:
+                logger.debug("Custom endpoint unreachable or misconfigured for provider: %s", provider)
+
+        _custom_providers_cfg = cfg.get("custom_providers", [])
+        _named_custom_groups: dict = {}
+        if isinstance(_custom_providers_cfg, list):
+            _seen_custom_ids = {m["id"] for m in auto_detected_models}
+            for _cp in _custom_providers_cfg:
+                if not isinstance(_cp, dict):
+                    continue
+                _cp_model = _cp.get("model", "")
+                _cp_name = (_cp.get("name") or "").strip()
+                if _cp_model and _cp_model not in _seen_custom_ids:
+                    _cp_label = _get_label_for_model(_cp_model, [])
+                    _seen_custom_ids.add(_cp_model)
+                    if _cp_name:
+                        _slug = "custom:" + _cp_name.lower().replace(" ", "-")
+                        if _slug not in _named_custom_groups:
+                            _named_custom_groups[_slug] = (_cp_name, [])
+                            detected_providers.add(_slug)
+                        _named_custom_groups[_slug][1].append(
+                            {"id": _cp_model, "label": _cp_label}
+                        )
+                    else:
+                        auto_detected_models.append({"id": _cp_model, "label": _cp_label})
+                        detected_providers.add("custom")
+
+        _has_custom_providers = isinstance(_custom_providers_cfg, list) and len(_custom_providers_cfg) > 0
+        if active_provider and active_provider != "custom" and not _has_custom_providers:
+            detected_providers.discard("custom")
+            for _slug in list(detected_providers):
+                if _slug.startswith("custom:") and not _has_custom_providers:
+                    detected_providers.discard(_slug)
+        elif active_provider == "custom" and _has_custom_providers:
+            _has_unnamed = any(
+                isinstance(_cp, dict) and not (_cp.get("name") or "").strip()
+                for _cp in _custom_providers_cfg
+            )
+            if not _has_unnamed:
+                detected_providers.discard("custom")
+
+        # 5. Build model groups
+        if detected_providers:
+            for pid in sorted(detected_providers):
+                if pid.startswith("custom:") and pid in _named_custom_groups:
+                    _nc_display, _nc_models = _named_custom_groups[pid]
+                    if _nc_models:
+                        groups.append({"provider": _nc_display, "provider_id": pid, "models": _nc_models})
+                    continue
+                provider_name = _PROVIDER_DISPLAY.get(pid, pid.title())
+                if pid == "openrouter":
+                    groups.append(
+                        {
+                            "provider": "OpenRouter",
+                            "provider_id": "openrouter",
+                            "models": [
+                                {"id": m["id"], "label": m["label"]}
+                                for m in _FALLBACK_MODELS
+                            ],
+                        }
+                    )
+                elif pid == "ollama-cloud":
+                    raw_models = []
+                    try:
+                        from hermes_cli.models import provider_model_ids as _provider_model_ids
+
+                        raw_models = [
+                            {"id": mid, "label": _format_ollama_label(mid)}
+                            for mid in (_provider_model_ids("ollama-cloud") or [])
+                        ]
+                    except Exception:
+                        logger.warning("Failed to load Ollama Cloud models from hermes_cli")
+
+                    if raw_models:
+                        models = _apply_provider_prefix(raw_models, pid, active_provider)
+                        groups.append(
+                            {
+                                "provider": provider_name,
+                                "provider_id": pid,
+                                "models": models,
+                            }
+                        )
+                elif pid in _PROVIDER_MODELS or pid in cfg.get("providers", {}):
+                    raw_models = _PROVIDER_MODELS.get(pid, [])
+
+                    provider_cfg = cfg.get("providers", {}).get(pid, {})
+                    if isinstance(provider_cfg, dict) and "models" in provider_cfg:
+                        cfg_models = provider_cfg["models"]
+                        if isinstance(cfg_models, dict):
+                            raw_models = [{"id": k, "label": k} for k in cfg_models.keys()]
+                        elif isinstance(cfg_models, list):
+                            raw_models = [{"id": k, "label": k} for k in cfg_models]
                     models = _apply_provider_prefix(raw_models, pid, active_provider)
                     groups.append(
                         {
@@ -1597,111 +1615,90 @@ def get_available_models() -> dict:
                             "models": models,
                         }
                     )
-            elif pid in _PROVIDER_MODELS or pid in cfg.get("providers", {}):
-                # For non-default providers, prefix model IDs with @provider:model
-                # so resolve_model_provider() routes through that specific provider
-                # via resolve_runtime_provider(requested=provider).
-                # The default provider's models keep bare names for direct API routing.
-                raw_models = _PROVIDER_MODELS.get(pid, [])
-                
-                # Override or merge from config.yaml if user specified explicit models
-                provider_cfg = cfg.get("providers", {}).get(pid, {})
-                if isinstance(provider_cfg, dict) and "models" in provider_cfg:
-                    cfg_models = provider_cfg["models"]
-                    if isinstance(cfg_models, dict):
-                        # config format is usually models: { "gpt-5.4": { context_length: ... } }
-                        raw_models = [{"id": k, "label": k} for k in cfg_models.keys()]
-                    elif isinstance(cfg_models, list):
-                        raw_models = [{"id": k, "label": k} for k in cfg_models]
-                models = _apply_provider_prefix(raw_models, pid, active_provider)
+                else:
+                    if auto_detected_models:
+                        groups.append(
+                            {
+                                "provider": provider_name,
+                                "provider_id": pid,
+                                "models": auto_detected_models,
+                            }
+                        )
+        else:
+            if default_model:
+                label = _get_label_for_model(default_model, groups)
                 groups.append(
-                    {
-                        "provider": provider_name,
-                        "provider_id": pid,
-                        "models": models,
-                    }
+                    {"provider": "Default", "provider_id": "default", "models": [{"id": default_model, "label": label}]}
                 )
-            else:
-                # Unknown provider -- use auto-detected models if available,
-                # otherwise skip it for the model dropdown. Do NOT inject the
-                # global default_model here: that would incorrectly imply the
-                # provider can serve the default model (e.g. Alibaba -> gpt-5.4-mini).
-                if auto_detected_models:
+
+        if default_model:
+            _norm = lambda mid: (mid.split("/", 1)[-1] if "/" in mid else mid).replace("-", ".")
+            all_ids_norm = {_norm(m["id"]) for g in groups for m in g.get("models", [])}
+            if _norm(default_model) not in all_ids_norm:
+                label = _get_label_for_model(default_model, groups)
+                target_display = (
+                    _PROVIDER_DISPLAY.get(active_provider, active_provider or "").lower()
+                    if active_provider
+                    else ""
+                )
+                injected = False
+                for g in groups:
+                    if target_display and g.get("provider", "").lower() == target_display:
+                        g["models"].insert(0, {"id": default_model, "label": label})
+                        injected = True
+                        break
+                if not injected and groups:
                     groups.append(
                         {
-                            "provider": provider_name,
-                            "provider_id": pid,
-                            "models": auto_detected_models,
+                            "provider": "Default",
+                            "provider_id": active_provider or "default",
+                            "models": [{"id": default_model, "label": label}],
                         }
                     )
-    else:
-        # No providers detected. Show only the configured default model so the user
-        # can at least send messages with their current setting. Avoid showing a
-        # generic multi-provider list — those models wouldn't be routable anyway.
-        if default_model:
-            label = _get_label_for_model(default_model, groups)
-            groups.append(
-                {"provider": "Default", "provider_id": "default", "models": [{"id": default_model, "label": label}]}
-            )
 
-    # Ensure the user's configured default_model always appears in the dropdown.
-    # It may be missing if the model isn't in any hardcoded list (e.g. openrouter/free,
-    # a custom local model, or any model.default not in _FALLBACK_MODELS).
-    # Normalize before comparing: strip provider prefix and unify separators so
-    # 'anthropic/claude-opus-4.6' matches 'claude-opus-4.6' and 'claude-sonnet-4-6'
-    # matches 'claude-sonnet-4.6' (hermes-agent uses hyphens, webui uses dots).
-    if default_model:
-        _norm = lambda mid: (mid.split("/", 1)[-1] if "/" in mid else mid).replace("-", ".")
-        all_ids_norm = {_norm(m["id"]) for g in groups for m in g.get("models", [])}
-        if _norm(default_model) not in all_ids_norm:
-            # Determine which group to inject into. Compare against the
-            # provider's display name from _PROVIDER_DISPLAY rather than
-            # doing a substring match on active_provider — substring
-            # matching breaks on hyphenated provider IDs like 'openai-codex'
-            # vs display name 'OpenAI Codex' (hyphen vs. space), which
-            # silently falls through to groups[0] and lands the model in
-            # the wrong group.
-            label = _get_label_for_model(default_model, groups)
-            target_display = (
-                _PROVIDER_DISPLAY.get(active_provider, active_provider or "").lower()
-                if active_provider
-                else ""
-            )
-            injected = False
-            for g in groups:
-                if target_display and g.get("provider", "").lower() == target_display:
-                    g["models"].insert(0, {"id": default_model, "label": label})
-                    injected = True
-                    break
-            if not injected and groups:
-                # Keep the default isolated rather than polluting the first
-                # detected provider group.
-                groups.append(
-                    {
-                        "provider": "Default",
-                        "provider_id": "default",
-                        "models": [{"id": default_model, "label": label}],
-                    }
-                )
-            elif not groups:
-                groups.append(
-                    {
-                        "provider": active_provider or "Default",
-                        "provider_id": active_provider or "default",
-                        "models": [{"id": default_model, "label": label}],
-                    }
-                )
+        return {
+            "active_provider": active_provider,
+            "default_model": default_model,
+            "groups": groups,
+        }
 
-    result = {
-        "active_provider": active_provider,
-        "default_model": default_model,
-        "groups": groups,
-    }
-    # Cache the result for TTL seconds
+    # ── FAST PATH ─────────────────────────────────────────────────────────────
+    # Disk load BEFORE lock: ~0.1ms, lets concurrent requests skip entirely.
+    # Then acquire lock and check memory cache.  Cold path runs inside the lock
+    # so only one thread rebuilds while others wait.
+    disk_groups = None
+    if _available_models_cache is None:
+        disk_groups = _load_models_cache_from_disk()
+
     with _available_models_cache_lock:
+        # Reload config if changed
+        try:
+            _current_mtime = Path(_get_config_path()).stat().st_mtime
+        except OSError:
+            _current_mtime = 0.0
+        if _current_mtime != _cfg_mtime:
+            reload_config()
+            _available_models_cache = None
+            _available_models_cache_ts = 0.0
+
+        # Serve from memory cache if fresh
+        now = time.monotonic()
+        if _available_models_cache is not None and (now - _available_models_cache_ts) < _AVAILABLE_MODELS_CACHE_TTL:
+            return copy.deepcopy(_available_models_cache)
+
+        # Cold path: disk cache hit — use it (fast, no lock contention)
+        if disk_groups is not None:
+            _available_models_cache = disk_groups
+            _available_models_cache_ts = now
+            _save_models_cache_to_disk(disk_groups)
+            return copy.deepcopy(disk_groups)
+
+        # Cold path: full rebuild — only one thread reaches here at a time
+        result = _build_available_models_uncached()
         _available_models_cache = result
-        _available_models_cache_ts = time.monotonic()
-    return copy.deepcopy(result)
+        _available_models_cache_ts = now
+        _save_models_cache_to_disk(result)
+        return copy.deepcopy(result)
 
 
 # ── Static file path ─────────────────────────────────────────────────────────
