@@ -6,7 +6,7 @@ the CSS rule used !important on border-color:var(--border) which overrode the in
 style that _syncThemePicker/etc. set. Fixed by moving to .active CSS class + !important
 override on the active state.
 
-Issue: #1057
+Issue: #1059 (settings picker active state)
 """
 from pathlib import Path
 
