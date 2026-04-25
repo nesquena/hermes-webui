@@ -898,13 +898,22 @@ function applyBotName(){
 // back-forward cache, the async boot IIFE above does NOT re-run, but the
 // DOM — including any stale value in #sessionSearch — IS restored.  A
 // prior search string would silently hide all sessions via the filter in
-// renderSessionListFromCache().  Clear the field and re-render whenever
-// the page is restored from cache (`event.persisted === true`).
+// renderSessionListFromCache().  Clear the field and re-run the full layout
+// sync whenever the page is restored from cache (`event.persisted === true`).
+// Fix #1045: also re-run topbar/workspace/panel state so the rail and layout
+// chrome aren't left in the stale bfcache snapshot.
 window.addEventListener('pageshow', (event) => {
   if (!event.persisted) return;  // fresh loads are handled by the IIFE above
   const _srch = document.getElementById('sessionSearch');
   if (_srch) _srch.value = '';
+  // Re-synchronise layout chrome that the boot IIFE sets up but bfcache
+  // doesn't re-run. Each call is guarded so missing helpers degrade silently.
+  if (typeof syncTopbar === 'function') try { syncTopbar(); } catch (_) {}
+  if (typeof syncWorkspacePanelState === 'function') try { syncWorkspacePanelState(); } catch (_) {}
+  if (typeof _initResizePanels === 'function') try { _initResizePanels(); } catch (_) {}
   if (typeof renderSessionListFromCache === 'function') {
     try { renderSessionListFromCache(); } catch (_) {}
   }
+  // Restart the gateway SSE watcher — the persisted connection is dead after bfcache
+  if (typeof startGatewaySSE === 'function') try { startGatewaySSE(); } catch (_) {}
 });
