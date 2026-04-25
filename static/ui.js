@@ -2759,6 +2759,24 @@ async function promptNewFolder(){
     await api('/api/file/create-dir',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath})});
     showToast(t('folder_created')+name.trim());
     await loadDir(S.currentDir);
+    // Offer to add the new folder as a space (#782)
+    const absPath=S.session.workspace?((S.currentDir==='.'?S.session.workspace:S.session.workspace+'/'+S.currentDir)+'/'+name.trim()):null;
+    if(absPath){
+      const addAsSpace=await showConfirmDialog({
+        title:t('folder_add_as_space_title'),
+        message:t('folder_add_as_space_msg'),
+        confirmLabel:t('folder_add_as_space_btn'),
+        focusCancel:true
+      });
+      if(addAsSpace){
+        try{
+          const data=await api('/api/workspaces/add',{method:'POST',body:JSON.stringify({path:absPath})});
+          if(typeof _workspaceList!=='undefined')_workspaceList=data.workspaces||_workspaceList||[];
+          if(typeof renderWorkspacesPanel==='function')renderWorkspacesPanel(_workspaceList);
+          showToast(t('workspace_added'));
+        }catch(e2){setStatus((t('error_prefix')||'Error: ')+e2.message);}
+      }
+    }
   }catch(e){setStatus(t('folder_create_failed')+e.message);}
 }
 
