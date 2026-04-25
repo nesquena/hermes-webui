@@ -1,4 +1,5 @@
 let _currentPanel = 'chat';
+let _renamingAppTitlebar = false;  // guard against re-entrant rename
 let _skillsData = null; // cached skills list
 let _cronList = null; // cached cron jobs (array)
 let _currentCronDetail = null; // full cron job object
@@ -36,10 +37,77 @@ function syncAppTitlebar() {
     const key = APP_TITLEBAR_KEYS[panel];
     mainText = key && typeof t === 'function' ? t(key) : (panel.charAt(0).toUpperCase() + panel.slice(1));
   }
+
+  // Don't touch the element while an inline rename is in progress — replacing
+  // the span with an input would fire a MutationObserver that calls
+  // syncAppTitlebar again, destroying the input before the user finishes.
+  if (_renamingAppTitlebar) return;
+
   titleEl.textContent = mainText;
   if (subEl) {
     if (subText) { subEl.textContent = subText; subEl.hidden = false; }
     else { subEl.textContent = ''; subEl.hidden = true; }
+  }
+
+  // Double-click on the titlebar title → rename the active session (same behaviour
+  // as double-clicking a session title in the sidebar).  Only active on the chat
+  // panel when a session is open.
+  titleEl.ondblclick = null;  // remove any previous handler before adding a fresh one
+  if (panel === 'chat' && typeof S !== 'undefined' && S && S.session) {
+    titleEl.ondblclick = (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      if (_renamingAppTitlebar) return;
+      _renamingAppTitlebar = true;
+
+      const inp = document.createElement('input');
+      inp.type = 'text';
+      inp.className = 'app-titlebar-rename-input';
+      inp.value = S.session.title || (typeof t === 'function' ? t('untitled') : 'Untitled');
+
+      // Prevent click/dblclick on the input from bubbling — we don't want
+      // panel switches, session switches, or any other handler firing.
+      ['click', 'mousedown', 'dblclick', 'pointerdown'].forEach(ev =>
+        inp.addEventListener(ev, e2 => e2.stopPropagation())
+      );
+
+      const finish = async (save) => {
+        _renamingAppTitlebar = false;
+        if (save) {
+          const newTitle = inp.value.trim() || (typeof t === 'function' ? t('untitled') : 'Untitled');
+          S.session.title = newTitle;
+          syncTopbar();   // update #topbarTitle in the chat header
+          syncAppTitlebar();
+          // Update the sidebar list so the renamed title appears immediately.
+          // _renderOneSession reads from _allSessions cache, so patch it there too.
+          try {
+            const _cached = typeof _allSessions !== 'undefined' && _allSessions.find(s => s && s.session_id === S.session.session_id);
+            if (_cached) _cached.title = newTitle;
+          } catch (_) {}
+          if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
+          try {
+            await api('/api/session/rename', {
+              method: 'POST',
+              body: JSON.stringify({ session_id: S.session.session_id, title: newTitle })
+            });
+          } catch (err) {
+            if (typeof setStatus === 'function') setStatus('Rename failed: ' + err.message);
+          }
+        }
+        inp.replaceWith(titleEl);
+        syncAppTitlebar();
+      };
+
+      inp.onkeydown = e2 => {
+        if (e2.key === 'Enter') { e2.preventDefault(); e2.stopPropagation(); finish(true); }
+        if (e2.key === 'Escape') { e2.preventDefault(); e2.stopPropagation(); finish(false); }
+      };
+      inp.onblur = () => finish(false);
+
+      titleEl.replaceWith(inp);
+      inp.focus();
+      inp.select();
+    };
   }
 }
 
@@ -257,7 +325,6 @@ function openCronDetail(id, el){
 }
 
 function _clearCronDetail(){
-  if (_cronRunningPoll) { clearInterval(_cronRunningPoll); _cronRunningPoll = null; }
   _currentCronDetail = null;
   _cronMode = 'empty';
   const title = $('taskDetailTitle');
@@ -488,53 +555,12 @@ function _cronOutputSnippet(content) {
   return body.slice(0, 600) || '(empty)';
 }
 
-let _cronRunningPoll = null; // timer for polling job status after trigger
-
 async function cronRun(id) {
   try {
     await api('/api/crons/run', {method:'POST', body: JSON.stringify({job_id: id})});
     showToast(t('cron_job_triggered'));
-    // Immediately show "running" state in detail if this job is selected
-    if (_currentCronDetail && _currentCronDetail.id === id) {
-      _setCronDetailStatus('running');
-      _startCronRunningPoll(id);
-    }
+    setTimeout(() => { if (_currentCronDetail && _currentCronDetail.id === id) _loadCronDetailRuns(id); }, 5000);
   } catch(e) { showToast(t('failed_colon') + e.message, 4000); }
-}
-
-function _setCronDetailStatus(status) {
-  const badge = document.querySelector('#taskDetailBody .detail-badge');
-  if (!badge) return;
-  if (status === 'running') {
-    badge.className = 'detail-badge running';
-    badge.textContent = t('cron_status_running');
-  }
-}
-
-function _startCronRunningPoll(jobId) {
-  // Clear any existing poll
-  if (_cronRunningPoll) { clearInterval(_cronRunningPoll); _cronRunningPoll = null; }
-  let attempts = 0;
-  const maxAttempts = 10; // 10 * 3s = 30s max
-  _cronRunningPoll = setInterval(async () => {
-    attempts++;
-    if (!_currentCronDetail || _currentCronDetail.id !== jobId || attempts > maxAttempts) {
-      clearInterval(_cronRunningPoll);
-      _cronRunningPoll = null;
-      // Re-render detail with real status when poll ends (fallback from "running" indicator)
-      if (_currentCronDetail && _currentCronDetail.id === jobId) {
-        const refreshed = _cronList ? _cronList.find(j => j.id === jobId) : null;
-        if (refreshed) _renderCronDetail(refreshed);
-      }
-      return;
-    }
-    try {
-      await loadCrons();
-      // loadCrons() re-renders the detail which overwrites our "running" badge.
-      // Re-apply the running indicator if poll is still active.
-      if (_cronRunningPoll) _setCronDetailStatus('running');
-    } catch(e) { /* ignore */ }
-  }, 3000);
 }
 
 async function cronPause(id) {
@@ -1448,12 +1474,6 @@ function _renderWorkspaceForm({ name, path, isEdit }){
           </div>
           ${pathHint}
         </div>
-        ${!isEdit?`<div class="detail-form-row">
-          <label class="detail-form-check">
-            <input type="checkbox" id="workspaceFormAutoCreate">
-            ${esc(t('workspace_auto_create_folder')||'Create folder if it doesn\'t exist')}
-          </label>
-        </div>`:''}
         <div id="workspaceFormError" class="detail-form-error" style="display:none"></div>
       </form>
     </div>`;
@@ -1499,7 +1519,7 @@ async function saveWorkspaceForm(){
       openWorkspaceDetail(targetPath);
       return;
     }
-    const data = await api('/api/workspaces/add', { method:'POST', body: JSON.stringify({ path, name, create: ($('workspaceFormAutoCreate')&&$('workspaceFormAutoCreate').checked)||false }) });
+    const data = await api('/api/workspaces/add', { method:'POST', body: JSON.stringify({ path }) });
     _workspaceList = data.workspaces || [];
     _workspacePreFormDetail = null;
     // Apply rename if a friendly name was supplied
@@ -2456,6 +2476,21 @@ function _buildProviderCard(p){
   }
   field.appendChild(row);
   body.appendChild(field);
+
+  // Refresh models for this provider
+  const refreshRow=document.createElement('div');
+  refreshRow.className='provider-card-row';
+  refreshRow.style.marginTop='6px';
+  const refreshBtn=document.createElement('button');
+  refreshBtn.type='button';
+  refreshBtn.className='provider-card-btn provider-card-btn-ghost';
+  refreshBtn.style.display='flex';
+  refreshBtn.style.alignItems='center';
+  refreshBtn.style.gap='5px';
+  refreshBtn.innerHTML=`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg> ${t('providers_refresh_models')||'Refresh Models'}`;
+  refreshBtn.onclick=()=>_refreshProviderModels(p.id, refreshBtn);
+  refreshRow.appendChild(refreshBtn);
+  body.appendChild(refreshRow);
   card.appendChild(body);
 
   _providerCardEls.set(p.id,{card,input,saveBtn,hasKey:p.has_key});
@@ -2513,6 +2548,25 @@ async function _removeProviderKey(providerId){
   }catch(e){
     showToast('Error: '+e.message);
     if(els.saveBtn){els.saveBtn.disabled=false;els.saveBtn.textContent=t('providers_save');}
+  }
+}
+
+async function _refreshProviderModels(providerId, btn){
+  btn.disabled=true;
+  const orig=btn.innerHTML;
+  btn.innerHTML=`<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M3 21v-5h5"/></svg> ${t('providers_refreshing')||'Refreshing...'}`;
+  try{
+    const res=await api('/api/models/refresh',{method:'POST',body:JSON.stringify({provider:providerId})});
+    if(res.ok){
+      showToast(t('providers_models_refreshed')||('Models refreshed for '+res.provider));
+    }else{
+      showToast(res.error||'Failed to refresh models');
+    }
+  }catch(e){
+    showToast('Error: '+e.message);
+  }finally{
+    btn.disabled=false;
+    btn.innerHTML=orig;
   }
 }
 
