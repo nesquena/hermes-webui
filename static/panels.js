@@ -2342,6 +2342,12 @@ async function loadSettingsPanel(){
       sidebarDensitySel.value=settings.sidebar_density==='detailed'?'detailed':'compact';
       sidebarDensitySel.addEventListener('change',_markSettingsDirty,{once:false});
     }
+    const autoTitleRefreshSel=$('settingsAutoTitleRefresh');
+    if(autoTitleRefreshSel){
+      const val=String(settings.auto_title_refresh_every||'0');
+      autoTitleRefreshSel.value=['0','5','10','20'].includes(val)?val:'0';
+      autoTitleRefreshSel.addEventListener('change',_markSettingsDirty,{once:false});
+    }
     // Bot name
     const botNameField=$('settingsBotName');
     if(botNameField){botNameField.value=settings.bot_name||'Hermes';botNameField.addEventListener('input',_markSettingsDirty,{once:false});}
@@ -2643,6 +2649,7 @@ async function saveSettings(andClose){
   body.notifications_enabled=!!($('settingsNotificationsEnabled')||{}).checked;
   body.show_thinking=window._showThinking!==false;
   body.sidebar_density=sidebarDensity;
+  body.auto_title_refresh_every=(($('settingsAutoTitleRefresh')||{}).value||'0');
   const botName=(($('settingsBotName')||{}).value||'').trim();
   body.bot_name=botName||'Hermes';
   // Password: only act if the field has content; blank = leave auth unchanged
