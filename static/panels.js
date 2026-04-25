@@ -1448,6 +1448,12 @@ function _renderWorkspaceForm({ name, path, isEdit }){
           </div>
           ${pathHint}
         </div>
+        ${!isEdit?`<div class="detail-form-row">
+          <label class="detail-form-check">
+            <input type="checkbox" id="workspaceFormAutoCreate">
+            ${esc(t('workspace_auto_create_folder')||'Create folder if it doesn\'t exist')}
+          </label>
+        </div>`:''}
         <div id="workspaceFormError" class="detail-form-error" style="display:none"></div>
       </form>
     </div>`;
@@ -1493,7 +1499,7 @@ async function saveWorkspaceForm(){
       openWorkspaceDetail(targetPath);
       return;
     }
-    const data = await api('/api/workspaces/add', { method:'POST', body: JSON.stringify({ path }) });
+    const data = await api('/api/workspaces/add', { method:'POST', body: JSON.stringify({ path, name, create: ($('workspaceFormAutoCreate')&&$('workspaceFormAutoCreate').checked)||false }) });
     _workspaceList = data.workspaces || [];
     _workspacePreFormDetail = null;
     // Apply rename if a friendly name was supplied

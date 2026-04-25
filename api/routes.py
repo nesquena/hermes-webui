@@ -3027,8 +3027,16 @@ def _handle_create_dir(handler, body):
 def _handle_workspace_add(handler, body):
     path_str = body.get("path", "").strip()
     name = body.get("name", "").strip()
+    auto_create = body.get("create", False)
     if not path_str:
         return bad(handler, "path is required")
+    # If auto_create is requested, create the directory first (#782)
+    if auto_create:
+        try:
+            p_candidate = Path(path_str).expanduser().resolve()
+            p_candidate.mkdir(parents=True, exist_ok=True)
+        except (OSError, PermissionError) as e:
+            return bad(handler, f"Could not create directory: {_sanitize_error(e)}")
     try:
         p = validate_workspace_to_add(path_str)
     except ValueError as e:
