@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- **Show agent sessions now hides empty/unimportable agent rows** — `state.db` can contain cron/gateway/agent session rows before any messages are written. The sidebar previously showed those rows when "Show agent sessions" was enabled, but clicking them failed because there were no messages to import. The regular session list and gateway SSE watcher now share the same importable-agent-session filter. (`api/agent_sessions.py`, `api/models.py`, `api/gateway_watcher.py`, `tests/test_gateway_sync.py`)
 - **Reasoning chip now appears after the model chip** in the composer toolbar — model is a more fundamental choice and should be stable in position regardless of whether reasoning is active. Order: Profile → Workspace → Model → Reasoning. (`static/index.html`)
 
 ## v0.50.206 — 2026-04-25
