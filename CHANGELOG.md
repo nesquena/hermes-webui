@@ -4,6 +4,16 @@
 
 ### Fixed
 
+## v0.50.209 — 2026-04-25
+
+### Added
+- **Inline HTML preview in workspace panel** — `.html` and `.htm` files now render as live sandboxed iframes (`sandbox="allow-scripts"`, no `allow-same-origin`) in the workspace file browser. A `?inline=1` parameter on `/api/file/raw` bypasses the usual attachment disposition; the server adds `Content-Security-Policy: sandbox allow-scripts` on inline HTML responses to prevent XSS when the URL is opened directly in a browser tab. (`static/workspace.js`, `api/routes.py`, `static/index.html`) Closes #779 [#1035 @bergeouss]
+- **Provider categories in setup wizard** — the onboarding provider dropdown groups 10 providers into Easy Start / Open & Self-hosted / Specialized with `<optgroup>` sections. Includes Google Gemini, DeepSeek, Mistral, and xAI/Grok with correct current model defaults. (`api/onboarding.py`, `static/onboarding.js`) Closes #603 [#1036 @bergeouss]
+
+### Fixed
+- **Manual "Check for Updates" button in System settings** — users can now trigger an update check immediately instead of waiting for the periodic background fetch. Error messages are sanitized before display. (`static/panels.js`, `static/index.html`, `static/style.css`) Closes #785 [#1033 @bergeouss]
+- **"Keep workspace panel open" toggle in Appearance settings** — adds a persistent preference so the workspace panel opens automatically on each session if preferred. The toolbar X no longer clears the preference. (`static/panels.js`, `static/boot.js`) Closes #999 [#1034 @bergeouss]
+
 ## v0.50.207 — 2026-04-25
 
 ### Added
