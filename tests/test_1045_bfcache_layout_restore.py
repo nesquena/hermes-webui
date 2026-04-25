@@ -27,7 +27,7 @@ class TestBfcacheLayoutRestore:
         # Find the pageshow listener block
         ps_idx = src.find("window.addEventListener('pageshow'")
         assert ps_idx != -1, "pageshow listener not found in boot.js"
-        handler_body = src[ps_idx:ps_idx + 1200]
+        handler_body = src[ps_idx:ps_idx + 1600]
         assert "syncTopbar" in handler_body, (
             "pageshow handler must call syncTopbar() to restore topbar state after bfcache"
         )
@@ -36,7 +36,7 @@ class TestBfcacheLayoutRestore:
         """pageshow handler must call syncWorkspacePanelState()."""
         src = _boot_js()
         ps_idx = src.find("window.addEventListener('pageshow'")
-        handler_body = src[ps_idx:ps_idx + 1200]
+        handler_body = src[ps_idx:ps_idx + 1600]
         assert "syncWorkspacePanelState" in handler_body, (
             "pageshow handler must call syncWorkspacePanelState() on bfcache restore"
         )
@@ -45,7 +45,7 @@ class TestBfcacheLayoutRestore:
         """pageshow handler must call _initResizePanels()."""
         src = _boot_js()
         ps_idx = src.find("window.addEventListener('pageshow'")
-        handler_body = src[ps_idx:ps_idx + 1200]
+        handler_body = src[ps_idx:ps_idx + 1600]
         assert "_initResizePanels" in handler_body, (
             "pageshow handler must call _initResizePanels() to restore panel resize state"
         )
@@ -54,7 +54,7 @@ class TestBfcacheLayoutRestore:
         """pageshow handler must call startGatewaySSE() to reconnect the dead SSE connection."""
         src = _boot_js()
         ps_idx = src.find("window.addEventListener('pageshow'")
-        handler_body = src[ps_idx:ps_idx + 1200]
+        handler_body = src[ps_idx:ps_idx + 1600]
         assert "startGatewaySSE" in handler_body, (
             "pageshow handler must restart gateway SSE (bfcache-persisted connections are dead)"
         )
@@ -63,7 +63,7 @@ class TestBfcacheLayoutRestore:
         """pageshow handler must still clear #sessionSearch (original #822 fix preserved)."""
         src = _boot_js()
         ps_idx = src.find("window.addEventListener('pageshow'")
-        handler_body = src[ps_idx:ps_idx + 1200]
+        handler_body = src[ps_idx:ps_idx + 1600]
         assert "sessionSearch" in handler_body, (
             "pageshow handler must still clear #sessionSearch (regression: #822 fix must be preserved)"
         )
@@ -72,7 +72,7 @@ class TestBfcacheLayoutRestore:
         """pageshow handler must still call renderSessionListFromCache()."""
         src = _boot_js()
         ps_idx = src.find("window.addEventListener('pageshow'")
-        handler_body = src[ps_idx:ps_idx + 1200]
+        handler_body = src[ps_idx:ps_idx + 1600]
         assert "renderSessionListFromCache" in handler_body, (
             "pageshow handler must still call renderSessionListFromCache() (regression: #822 fix)"
         )
@@ -81,9 +81,33 @@ class TestBfcacheLayoutRestore:
         """New calls in the pageshow handler must be typeof-guarded for safe degradation."""
         src = _boot_js()
         ps_idx = src.find("window.addEventListener('pageshow'")
-        handler_body = src[ps_idx:ps_idx + 1200]
-        # Each of the three new calls must be guarded
-        for fn in ("syncTopbar", "syncWorkspacePanelState", "_initResizePanels", "startGatewaySSE"):
+        handler_body = src[ps_idx:ps_idx + 1600]
+        # Each of the new calls must be guarded
+        for fn in ("syncTopbar", "syncWorkspacePanelState", "_initResizePanels", "startGatewaySSE",
+                   "closeModelDropdown", "closeReasoningDropdown", "closeWsDropdown", "closeProfileDropdown"):
             assert f"typeof {fn} === 'function'" in handler_body, (
                 f"{fn}() call in pageshow handler must be guarded with typeof === 'function'"
             )
+
+    def test_pageshow_closes_all_dropdowns(self):
+        """pageshow handler must close all known dropdowns to reset frozen bfcache popover state."""
+        src = _boot_js()
+        ps_idx = src.find("window.addEventListener('pageshow'")
+        handler_body = src[ps_idx:ps_idx + 1600]
+        for fn in ("closeModelDropdown", "closeReasoningDropdown", "closeWsDropdown", "closeProfileDropdown"):
+            assert fn in handler_body, (
+                f"pageshow handler must call {fn}() to dismiss any dropdown left open by bfcache"
+            )
+
+    def test_dropdowns_closed_before_layout_sync(self):
+        """Dropdown closes must come before layout sync calls (clean state first)."""
+        src = _boot_js()
+        ps_idx = src.find("window.addEventListener('pageshow'")
+        handler_body = src[ps_idx:ps_idx + 1600]
+        close_idx = handler_body.find("closeModelDropdown")
+        sync_idx = handler_body.find("syncTopbar")
+        assert close_idx != -1 and sync_idx != -1, "Both close and sync calls must be present"
+        assert close_idx < sync_idx, (
+            "Dropdown close calls must appear before layout sync calls in the pageshow handler"
+        )
+

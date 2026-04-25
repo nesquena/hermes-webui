@@ -906,6 +906,12 @@ window.addEventListener('pageshow', (event) => {
   if (!event.persisted) return;  // fresh loads are handled by the IIFE above
   const _srch = document.getElementById('sessionSearch');
   if (_srch) _srch.value = '';
+  // Close any dropdowns/popovers that were open when the user navigated away.
+  // bfcache freezes DOM state, so a dropdown left open remains open on restore.
+  if (typeof closeModelDropdown === 'function') try { closeModelDropdown(); } catch (_) {}
+  if (typeof closeReasoningDropdown === 'function') try { closeReasoningDropdown(); } catch (_) {}
+  if (typeof closeWsDropdown === 'function') try { closeWsDropdown(); } catch (_) {}
+  if (typeof closeProfileDropdown === 'function') try { closeProfileDropdown(); } catch (_) {}
   // Re-synchronise layout chrome that the boot IIFE sets up but bfcache
   // doesn't re-run. Each call is guarded so missing helpers degrade silently.
   if (typeof syncTopbar === 'function') try { syncTopbar(); } catch (_) {}
