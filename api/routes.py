@@ -2148,9 +2148,14 @@ def _handle_file_raw(handler, parsed):
     handler.send_header("Content-Type", mime)
     handler.send_header("Content-Length", str(len(raw_bytes)))
     handler.send_header("Cache-Control", "no-store")
-    # Security: force download for dangerous MIME types to prevent XSS
+    # Security: force download for dangerous MIME types to prevent XSS.
+    # Exception: ?inline=1 permits text/html to be served inline for the
+    # sandboxed workspace HTML preview iframe (sandbox="allow-scripts" with no
+    # allow-same-origin, so the iframe cannot access parent cookies/storage).
+    inline_preview = qs.get("inline", [""])[0] == "1"
     dangerous_types = {"text/html", "application/xhtml+xml", "image/svg+xml"}
-    if force_download or mime in dangerous_types:
+    html_inline_ok = inline_preview and mime == "text/html"
+    if force_download or (mime in dangerous_types and not html_inline_ok):
         handler.send_header(
             "Content-Disposition",
             _content_disposition_value("attachment", target.name),
