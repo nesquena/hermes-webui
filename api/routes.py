@@ -2165,6 +2165,18 @@ def _handle_file_raw(handler, parsed):
             "Content-Disposition",
             _content_disposition_value("inline", target.name),
         )
+    # Defense-in-depth for ?inline=1 HTML: even though the workspace.js iframe
+    # sets sandbox="allow-scripts", a user could be tricked into opening the
+    # ?inline=1 URL directly in a top-level tab (e.g. via a chat link), which
+    # would render the HTML in the WebUI's origin without iframe sandbox. The
+    # CSP sandbox directive applies the same isolation server-side: without
+    # allow-same-origin, the document is treated as a unique opaque origin and
+    # cannot read WebUI cookies, localStorage, or postMessage to the parent.
+    if html_inline_ok:
+        # Match the iframe sandbox="allow-scripts" exactly: scripts allowed,
+        # but no allow-same-origin → unique opaque origin (no cookie/storage
+        # access even when accessed via direct URL outside the iframe).
+        handler.send_header("Content-Security-Policy", "sandbox allow-scripts")
     handler.end_headers()
     handler.wfile.write(raw_bytes)
     return True
