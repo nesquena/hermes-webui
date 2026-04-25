@@ -29,6 +29,7 @@ def _run_session_time_case(script_body: str) -> dict:
     functions = "\n\n".join(
         _extract_function(SESSIONS_JS, name)
         for name in (
+            "_sessionTimestampMs",
             "_localDayOrdinal",
             "_sessionCalendarBoundaries",
             "_formatSessionDate",
@@ -65,6 +66,7 @@ def _run_session_time_case(script_body: str) -> dict:
 
 
 def test_session_sidebar_js_has_dynamic_relative_time_helpers():
+    assert "function _sessionTimestampMs" in SESSIONS_JS
     assert "function _sessionCalendarBoundaries" in SESSIONS_JS
     assert "function _formatRelativeSessionTime" in SESSIONS_JS
     assert "function _sessionTimeBucketLabel" in SESSIONS_JS
@@ -84,6 +86,22 @@ def test_session_sidebar_renders_relative_time_and_meta_rows():
     assert ".session-item.active .session-title" in STYLE_CSS
     assert "|| _sessionTimeBucketLabel" not in SESSIONS_JS
     assert "const ONE_DAY=86400000;" not in SESSIONS_JS
+
+
+def test_session_timestamp_prefers_last_message_at_over_metadata_updated_at():
+    result = _run_session_time_case(
+        """
+        const session = {
+          created_at: 1776441348,
+          updated_at: 1777086443,
+          last_message_at: 1776441972,
+        };
+        process.stdout.write(JSON.stringify({
+          timestampMs: _sessionTimestampMs(session),
+        }));
+        """
+    )
+    assert result["timestampMs"] == 1776441972 * 1000
 
 
 def test_relative_time_uses_calendar_boundaries_and_year_for_old_sessions():

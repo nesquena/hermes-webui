@@ -194,6 +194,33 @@ def _active_stream_ids():
 def _is_streaming_session(active_stream_id, active_stream_ids):
     return bool(active_stream_id and active_stream_id in active_stream_ids)
 
+def _session_sort_timestamp(session):
+    if isinstance(session, dict):
+        return session.get('last_message_at') or session.get('updated_at') or 0
+    return _last_message_timestamp(getattr(session, 'messages', None)) or getattr(session, 'updated_at', 0) or 0
+
+
+def _message_timestamp(message):
+    if not isinstance(message, dict):
+        return None
+    raw = message.get('_ts') or message.get('timestamp')
+    try:
+        return float(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _last_message_timestamp(messages):
+    if not isinstance(messages, list):
+        return None
+    for message in reversed(messages):
+        if isinstance(message, dict) and message.get('role') == 'tool':
+            continue
+        ts = _message_timestamp(message)
+        if ts:
+            return ts
+    return None
+
 
 def _find_top_level_json_key(text, key):
     """Return the byte offset of a top-level JSON object key, if present."""
@@ -412,6 +439,7 @@ class Session:
             ),
             'created_at': self.created_at,
             'updated_at': self.updated_at,
+            'last_message_at': _last_message_timestamp(self.messages) or self.updated_at,
             'pinned': self.pinned,
             'archived': self.archived,
             'project_id': self.project_id,
@@ -495,6 +523,18 @@ def all_sessions():
                 s for s in index
                 if _index_entry_exists(s.get('session_id'))
             ]
+            backfilled = []
+            for i, s in enumerate(index):
+                if 'last_message_at' not in s:
+                    full = Session.load(s.get('session_id'))
+                    if full:
+                        index[i] = full.compact()
+                        backfilled.append(full)
+            if backfilled:
+                try:
+                    _write_session_index(updates=backfilled)
+                except Exception:
+                    logger.debug("Failed to persist last_message_at backfill")
             for s in index:
                 s['is_streaming'] = _is_streaming_session(
                     s.get('active_stream_id'),
@@ -508,7 +548,7 @@ def all_sessions():
                         include_runtime=True,
                         active_stream_ids=active_stream_ids,
                     )
-            result = sorted(index_map.values(), key=lambda s: (s.get('pinned', False), s['updated_at']), reverse=True)
+            result = sorted(index_map.values(), key=lambda s: (s.get('pinned', False), _session_sort_timestamp(s)), reverse=True)
             # Hide empty Untitled sessions from the UI (created by tests, page refreshes, etc.)
             # Exempt sessions younger than 60 s so a brand-new session stays visible (#789)
             _now = time.time()
@@ -536,7 +576,7 @@ def all_sessions():
             logger.debug("Failed to load session from %s", p)
     for s in SESSIONS.values():
         if all(s.session_id != x.session_id for x in out): out.append(s)
-    out.sort(key=lambda s: (getattr(s, 'pinned', False), s.updated_at), reverse=True)
+    out.sort(key=lambda s: (getattr(s, 'pinned', False), _session_sort_timestamp(s)), reverse=True)
     _now = time.time()
     result = [s.compact(include_runtime=True, active_stream_ids=active_stream_ids) for s in out if not (
         s.title == 'Untitled'

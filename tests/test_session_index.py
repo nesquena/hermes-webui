@@ -65,6 +65,64 @@ def _read_index(index_file):
     return json.loads(index_file.read_text(encoding="utf-8"))
 
 
+def test_compact_exposes_last_message_at_from_message_timestamp():
+    s = Session(
+        session_id="sess_time",
+        title="Time",
+        updated_at=300.0,
+        messages=[
+            {"role": "user", "content": "old", "_ts": 100.0},
+            {"role": "tool", "content": "ignore", "timestamp": 400.0},
+            {"role": "assistant", "content": "latest", "timestamp": 200.0},
+        ],
+    )
+
+    compact = s.compact()
+
+    assert compact["updated_at"] == 300.0
+    assert compact["last_message_at"] == 200.0
+
+
+def test_all_sessions_backfills_last_message_at_for_legacy_index_rows():
+    index_file = models.SESSION_INDEX_FILE
+    s = Session(
+        session_id="sess_legacy_index",
+        title="Legacy Index",
+        updated_at=300.0,
+        messages=[{"role": "assistant", "content": "reply", "_ts": 100.0}],
+    )
+    s.path.write_text(json.dumps(s.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_index_file(
+        index_file,
+        [
+            {
+                "session_id": s.session_id,
+                "title": s.title,
+                "updated_at": s.updated_at,
+                "workspace": s.workspace,
+                "model": s.model,
+                "message_count": 1,
+                "created_at": s.created_at,
+                "pinned": False,
+                "archived": False,
+            }
+        ],
+    )
+
+    rows = models.all_sessions()
+
+    assert rows[0]["session_id"] == s.session_id
+    assert rows[0]["last_message_at"] == 100.0
+
+    # Backfill must also be persisted to the index so subsequent /api/sessions
+    # polls don't re-read every legacy session file.  Without this, a 5-second
+    # poll cycle re-loads every legacy session JSON on every tick until each
+    # session is independently saved.
+    persisted = _read_index(index_file)
+    assert persisted[0]["session_id"] == s.session_id
+    assert persisted[0].get("last_message_at") == 100.0
+
+
 # ── 6. test_incremental_patch_correctness ─────────────────────────────────
 
 def test_incremental_patch_correctness():

@@ -77,6 +77,7 @@ async function send(){
   if(typeof saveInflightState==='function'){
     saveInflightState(activeSid,{streamId:null,messages:INFLIGHT[activeSid].messages,uploaded:uploadedNames,toolCalls:[]});
   }
+  if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
   startApprovalPolling(activeSid);
   startClarifyPolling(activeSid);
   S.activeStreamId = null;  // will be set after stream starts
