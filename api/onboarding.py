@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 _SUPPORTED_PROVIDER_SETUPS = {
+    # ── Easy start ──────────────────────────────────────────────────────
     "openrouter": {
         "label": "OpenRouter",
         "env_var": "OPENROUTER_API_KEY",
@@ -37,6 +38,8 @@ _SUPPORTED_PROVIDER_SETUPS = {
         "models": [
             {"id": model["id"], "label": model["label"]} for model in _FALLBACK_MODELS
         ],
+        "category": "easy_start",
+        "quick": True,
     },
     "anthropic": {
         "label": "Anthropic",
@@ -44,6 +47,7 @@ _SUPPORTED_PROVIDER_SETUPS = {
         "default_model": "claude-sonnet-4.6",
         "requires_base_url": False,
         "models": list(_PROVIDER_MODELS.get("anthropic", [])),
+        "category": "easy_start",
     },
     "openai": {
         "label": "OpenAI",
@@ -52,6 +56,26 @@ _SUPPORTED_PROVIDER_SETUPS = {
         "default_base_url": "https://api.openai.com/v1",
         "requires_base_url": False,
         "models": list(_PROVIDER_MODELS.get("openai", [])),
+        "category": "easy_start",
+    },
+    # ── Open / self-hosted ─────────────────────────────────────────────
+    "ollama": {
+        "label": "Ollama",
+        "env_var": "OLLAMA_API_KEY",
+        "default_model": "qwen3:32b",
+        "default_base_url": "http://localhost:11434/v1",
+        "requires_base_url": True,
+        "models": [],
+        "category": "self_hosted",
+    },
+    "lmstudio": {
+        "label": "LM Studio",
+        "env_var": "LMSTUDIO_API_KEY",
+        "default_model": "gpt-4o-mini",
+        "default_base_url": "http://localhost:1234/v1",
+        "requires_base_url": True,
+        "models": [],
+        "category": "self_hosted",
     },
     "custom": {
         "label": "Custom OpenAI-compatible",
@@ -59,8 +83,52 @@ _SUPPORTED_PROVIDER_SETUPS = {
         "default_model": "gpt-4o-mini",
         "requires_base_url": True,
         "models": [],
+        "category": "self_hosted",
+    },
+    # ── Specialized / extended ──────────────────────────────────────────
+    "gemini": {
+        "label": "Google Gemini",
+        "env_var": "GOOGLE_API_KEY",
+        "default_model": "gemini-3.1-pro-preview",
+        "default_base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "requires_base_url": False,
+        "models": list(_PROVIDER_MODELS.get("gemini", [])),
+        "category": "specialized",
+    },
+    "deepseek": {
+        "label": "DeepSeek",
+        "env_var": "DEEPSEEK_API_KEY",
+        "default_model": "deepseek-chat-v3-0324",
+        "default_base_url": "https://api.deepseek.com/v1",
+        "requires_base_url": False,
+        "models": list(_PROVIDER_MODELS.get("deepseek", [])),
+        "category": "specialized",
+    },
+    "mistralai": {
+        "label": "Mistral",
+        "env_var": "MISTRAL_API_KEY",
+        "default_model": "mistral-large-latest",
+        "default_base_url": "https://api.mistral.ai/v1",
+        "requires_base_url": False,
+        "models": list(_PROVIDER_MODELS.get("mistralai", [])),
+        "category": "specialized",
+    },
+    "x-ai": {
+        "label": "xAI (Grok)",
+        "env_var": "XAI_API_KEY",
+        "default_model": "grok-4.20",
+        "default_base_url": "https://api.x.ai/v1",
+        "requires_base_url": False,
+        "models": list(_PROVIDER_MODELS.get("x-ai", [])),
+        "category": "specialized",
     },
 }
+
+_PROVIDER_CATEGORIES = [
+    {"id": "easy_start", "label": "Easy start", "order": 0},
+    {"id": "self_hosted", "label": "Open / self-hosted", "order": 1},
+    {"id": "specialized", "label": "Specialized", "order": 2},
+]
 
 _UNSUPPORTED_PROVIDER_NOTE = (
     "OAuth and advanced provider flows such as Nous Portal, OpenAI Codex, and GitHub "
@@ -384,9 +452,23 @@ def _build_setup_catalog(cfg: dict) -> dict:
                 "default_base_url": meta.get("default_base_url") or "",
                 "requires_base_url": bool(meta.get("requires_base_url")),
                 "models": list(meta.get("models", [])),
-                "quick": provider_id == "openrouter",
+                "category": meta.get("category", "easy_start"),
+                "quick": meta.get("quick", False),
             }
         )
+
+    # Sort providers by category order, then alphabetically within each category.
+    cat_order = {c["id"]: c["order"] for c in _PROVIDER_CATEGORIES}
+    providers.sort(key=lambda p: (cat_order.get(p["category"], 99), p["label"]))
+
+    # Group providers by category for the frontend.
+    categories = []
+    for cat in sorted(_PROVIDER_CATEGORIES, key=lambda c: c["order"]):
+        categories.append({
+            "id": cat["id"],
+            "label": cat["label"],
+            "providers": [p["id"] for p in providers if p["category"] == cat["id"]],
+        })
 
     # Flag whether the currently-configured provider is OAuth-based (not in the
     # API-key flow).  The frontend uses this to show a confirmation card instead
@@ -397,6 +479,7 @@ def _build_setup_catalog(cfg: dict) -> dict:
 
     return {
         "providers": providers,
+        "categories": categories,
         "unsupported_note": _UNSUPPORTED_PROVIDER_NOTE,
         "current_is_oauth": current_is_oauth,
         "current": {
@@ -542,12 +625,10 @@ def apply_onboarding_setup(body: dict) -> dict:
     model_cfg["provider"] = provider
     model_cfg["default"] = _normalize_model_for_provider(provider, model)
 
-    if provider == "custom":
+    if provider_meta.get("requires_base_url"):
         model_cfg["base_url"] = base_url
-    elif provider == "openai":
-        model_cfg["base_url"] = (
-            provider_meta.get("default_base_url") or "https://api.openai.com/v1"
-        )
+    elif provider_meta.get("default_base_url"):
+        model_cfg["base_url"] = provider_meta["default_base_url"]
     else:
         model_cfg.pop("base_url", None)
 

@@ -8,6 +8,30 @@ function _getOnboardingSetupProvider(id){
   return _getOnboardingSetupProviders().find(p=>p.id===id)||null;
 }
 
+function _getOnboardingSetupCategories(){
+  return (((ONBOARDING.status||{}).setup||{}).categories)||[];
+}
+
+/** Render the provider <select> with <optgroup> per category. */
+function _renderProviderSelectOptions(selectedId){
+  const providers=_getOnboardingSetupProviders();
+  const categories=_getOnboardingSetupCategories();
+  const provMap={};
+  providers.forEach(p=>{provMap[p.id]=p;});
+  if(!categories.length){
+    // Fallback: flat list when no categories are available.
+    return providers.map(p=>`<option value="${esc(p.id)}">${esc(p.label)}${p.quick?' — '+esc(t('onboarding_quick_setup_badge')):''}</option>`).join('');
+  }
+  return categories.map(cat=>{
+    const opts=cat.providers.map(pid=>{
+      const p=provMap[pid];
+      if(!p)return '';
+      return `<option value="${esc(p.id)}"${p.id===selectedId?' selected':''}>${esc(p.label)}${p.quick?' — '+esc(t('onboarding_quick_setup_badge')):''}</option>`;
+    }).join('');
+    return `<optgroup label="${esc(t('provider_category_'+cat.id)||cat.label)}">${opts}</optgroup>`;
+  }).join('');
+}
+
 function _getOnboardingCurrentSetup(){
   return (((ONBOARDING.status||{}).setup||{}).current)||{};
 }
@@ -107,9 +131,9 @@ function _renderOnboardingBody(){
   }
 
   if(key==='setup'){
-    const providers=_getOnboardingSetupProviders();
-    const options=providers.map(p=>`<option value="${esc(p.id)}">${esc(p.label)}${p.quick?' — '+esc(t('onboarding_quick_setup_badge')):''}</option>`).join('');
-    const provider=_getOnboardingSetupProvider(ONBOARDING.form.provider)||providers[0]||null;
+    const selectedId=ONBOARDING.form.provider;
+    const groupedOptions=_renderProviderSelectOptions(selectedId);
+    const provider=_getOnboardingSetupProvider(selectedId)||_getOnboardingSetupProviders()[0]||null;
     const showBaseUrl=provider&&provider.requires_base_url;
     const keyHelp=provider?`${t('onboarding_api_key_help_prefix')} ${esc(provider.env_var)}.`:'';
 
@@ -132,7 +156,7 @@ function _renderOnboardingBody(){
           <p class="onboarding-copy" style="margin-top:20px">${t('onboarding_oauth_switch_hint')}</p>
           <label class="onboarding-field">
             <span>${t('onboarding_provider_label')}</span>
-            <select id="onboardingProviderSelect" onchange="syncOnboardingProvider(this.value)">${options}</select>
+            <select id="onboardingProviderSelect" onchange="syncOnboardingProvider(this.value)">${groupedOptions}</select>
           </label>
           <label class="onboarding-field" id="onboardingApiKeyField">
             <span>${t('onboarding_api_key_label')}</span>
@@ -153,7 +177,7 @@ function _renderOnboardingBody(){
           <p class="onboarding-copy" style="margin-top:20px">${t('onboarding_oauth_switch_hint')}</p>
           <label class="onboarding-field">
             <span>${t('onboarding_provider_label')}</span>
-            <select id="onboardingProviderSelect" onchange="syncOnboardingProvider(this.value)">${options}</select>
+            <select id="onboardingProviderSelect" onchange="syncOnboardingProvider(this.value)">${groupedOptions}</select>
           </label>
           <label class="onboarding-field" id="onboardingApiKeyField">
             <span>${t('onboarding_api_key_label')}</span>
@@ -162,8 +186,6 @@ function _renderOnboardingBody(){
           ${showBaseUrl?`<label class="onboarding-field"><span>${t('onboarding_base_url_label')}</span><input id="onboardingBaseUrlInput" value="${esc(ONBOARDING.form.baseUrl||'')}" placeholder="${t('onboarding_base_url_placeholder')}" oninput="ONBOARDING.form.baseUrl=this.value"></label>`:''}
           <p class="onboarding-copy">${keyHelp}</p>`;
       }
-      const providerSel=$('onboardingProviderSelect');
-      if(providerSel) providerSel.value=ONBOARDING.form.provider;
       return;
     }
 
@@ -171,7 +193,7 @@ function _renderOnboardingBody(){
     body.innerHTML=`
       <label class="onboarding-field">
         <span>${t('onboarding_provider_label')}</span>
-        <select id="onboardingProviderSelect" onchange="syncOnboardingProvider(this.value)">${options}</select>
+        <select id="onboardingProviderSelect" onchange="syncOnboardingProvider(this.value)">${groupedOptions}</select>
       </label>
       <label class="onboarding-field">
         <span>${t('onboarding_api_key_label')}</span>
@@ -181,8 +203,6 @@ function _renderOnboardingBody(){
       <p class="onboarding-copy">${keyHelp}</p>
       ${showBaseUrl?`<p class="onboarding-copy">${t('onboarding_base_url_help')}</p>`:''}
       <p class="onboarding-copy">${esc(setup.unsupported_note||'')||''}</p>`;
-    const providerSel=$('onboardingProviderSelect');
-    if(providerSel) providerSel.value=ONBOARDING.form.provider;
     return;
   }
 
