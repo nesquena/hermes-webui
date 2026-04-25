@@ -42,6 +42,8 @@ function _setWorkspacePanelMode(mode){
   const open=_workspacePanelMode!=='closed';
   document.documentElement.dataset.workspacePanel=open?'open':'closed';
   // Persist open/closed across refreshes (browse/preview → open; closed → closed)
+  // Do NOT overwrite the user's "keep open" preference — only track runtime state
+  // so that toggleWorkspacePanel(false) from the toolbar doesn't clear the setting.
   localStorage.setItem('hermes-webui-workspace-panel', open ? 'open' : 'closed');
   layout.classList.toggle('workspace-panel-collapsed',!open);
   if(_isCompactWorkspaceViewport()){
@@ -865,9 +867,12 @@ function applyBotName(){
   if(saved){
     try{
       await loadSession(saved);
-      // Only restore the panel from localStorage when the session actually has a workspace.
-      // Without this guard, sessions without a workspace snap open then immediately closed.
-      if(S.session&&S.session.workspace&&localStorage.getItem('hermes-webui-workspace-panel')==='open'){
+      // Restore the panel from localStorage when the session has a workspace.
+      // Preference key takes priority over runtime state so that closing
+      // the panel via toolbar X doesn't suppress the "keep open" setting.
+      const panelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
+        || localStorage.getItem('hermes-webui-workspace-panel')==='open';
+      if(S.session&&S.session.workspace&&panelPref){
         _workspacePanelMode='browse';
       }
       S._bootReady=true;

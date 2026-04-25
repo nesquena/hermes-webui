@@ -2199,11 +2199,15 @@ async function loadSettingsPanel(){
     if(fontSizeSel) fontSizeSel.value=fontSizeVal;
     if(typeof _syncFontSizePicker==='function') _syncFontSizePicker(fontSizeVal);
     // Workspace panel default-open toggle (localStorage-backed)
+    // Uses a separate key (hermes-webui-workspace-panel-pref) so that
+    // closing the panel via toolbar X does not clear the user's preference.
     const wsPanelCb=$('settingsWorkspacePanelOpen');
     if(wsPanelCb){
-      wsPanelCb.checked=localStorage.getItem('hermes-webui-workspace-panel')==='open';
+      wsPanelCb.checked=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open';
       wsPanelCb.addEventListener('change',function(){
         const open=this.checked;
+        localStorage.setItem('hermes-webui-workspace-panel-pref',open?'open':'closed');
+        // Also sync the runtime key so the current session reflects the change
         localStorage.setItem('hermes-webui-workspace-panel',open?'open':'closed');
         document.documentElement.dataset.workspacePanel=open?'open':'closed';
         if(open&&_workspacePanelMode==='closed') openWorkspacePanel('browse');
