@@ -2507,6 +2507,42 @@ function _applySavedSettingsUi(saved, body, opts){
   if(typeof renderSessionList==='function') renderSessionList();
 }
 
+async function checkUpdatesNow(){
+  const btn=$('btnCheckUpdatesNow');
+  const label=$('checkUpdatesLabel');
+  const spinner=$('checkUpdatesSpinner');
+  const status=$('checkUpdatesStatus');
+  if(!btn||!label) return;
+  // Disable button, show spinner
+  btn.disabled=true;
+  if(spinner) spinner.style.display='';
+  if(label) label.textContent=t('settings_checking');
+  if(status) status.textContent='';
+  try {
+    const data=await api('/api/updates/check?force=1');
+    if(data.disabled){
+      if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
+    } else {
+      const parts=[];
+      if(data.webui&&data.webui.behind>0) parts.push('WebUI: '+data.webui.behind);
+      if(data.agent&&data.agent.behind>0) parts.push('Agent: '+data.agent.behind);
+      if(parts.length){
+        if(status){status.textContent=t('settings_updates_available').replace('{count}',parts.join(', '));status.style.color='var(--accent)';}
+        // Also trigger the update banner
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
+      } else {
+        if(status){status.textContent=t('settings_up_to_date');status.style.color='var(--success)';}
+      }
+    }
+  } catch(e){
+    if(status){status.textContent=t('failed_colon')+e.message;status.style.color='var(--error)';}
+  } finally {
+    btn.disabled=false;
+    if(spinner) spinner.style.display='none';
+    if(label) label.textContent=t('settings_check_now');
+  }
+}
+
 async function saveSettings(andClose){
   const model=($('settingsModel')||{}).value;
   const modelChanged=(model||'')!==(_settingsHermesDefaultModelOnOpen||'');
