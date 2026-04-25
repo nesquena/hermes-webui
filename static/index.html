@@ -719,12 +719,16 @@
       <div class="preview-path" id="previewPath">
         <span id="previewPathText"></span>
         <span class="preview-badge" id="previewBadge"></span>
+        <button id="btnOpenInBrowser" class="panel-icon-btn" style="margin-left:auto;font-size:12px;width:auto;padding:2px 8px;display:none;align-items:center;gap:4px" onclick="openInBrowser()" title="Open in new browser tab"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg> <span data-i18n="open_in_browser">Open in browser</span></button>
         <button id="btnDownloadFile" class="panel-icon-btn" style="margin-left:auto;font-size:12px;width:auto;padding:2px 8px;display:inline-flex;align-items:center;gap:4px" onclick="downloadFile(_previewCurrentPath)" title="Download file to your computer"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Download</button>
         <button id="btnEditFile" class="panel-icon-btn" style="font-size:12px;width:auto;padding:2px 8px;display:none;align-items:center;gap:4px" onclick="toggleEditMode()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg> Edit</button>
       </div>
       <pre class="preview-code" id="previewCode"></pre>
       <div class="preview-img-wrap" id="previewImgWrap" style="display:none"><img class="preview-img" id="previewImg" src="" alt=""></div>
       <div class="preview-md" id="previewMd" style="display:none"></div>
+      <div class="preview-html-wrap" id="previewHtmlWrap" style="display:none;flex:1;border-radius:8px;overflow:hidden;border:1px solid var(--border2)">
+        <iframe id="previewHtmlIframe" style="width:100%;height:100%;border:none;background:#fff" sandbox="allow-scripts" title="HTML preview"></iframe>
+      </div>
       <textarea id="previewEditArea" style="display:none;flex:1;width:100%;background:var(--code-bg);color:var(--pre-text);border:1px solid var(--border2);border-radius:8px;padding:12px;font-family:'SF Mono',ui-monospace,monospace;font-size:12px;line-height:1.6;resize:none;outline:none" oninput="_previewDirty=true;updateEditBtn()"></textarea>
     </div>
   </aside>
