@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- **iOS PWA auth redirect** — when an auth session expires, all API calls now detect the 401 and redirect to `/login` client-side instead of relying on a server-side 302. This fixes the iOS home-screen PWA getting permanently stuck on "Authentication required" with no way to re-authenticate without deleting and re-adding the PWA. (`static/workspace.js`, `static/ui.js`) [#1038]
 
 ## v0.50.209 — 2026-04-25
 
