@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- **Large session switching and reload keep the API path lightweight** — `GET /api/session?messages=0` now parses only the JSON metadata before the `messages` array and skips cold model-catalog resolution while preserving the compact `message_count` from the session index. The frontend's lazy full-message fetch also passes `resolve_model=0`, avoiding a second cold model-catalog lookup on session switch, then refreshes display-model normalization asynchronously so provider-mismatch handling remains intact without blocking the switch. Hard reload no longer waits for the dynamic model catalog before restoring the saved session. Metadata-only loads no longer populate the full-session cache, preventing a compact session object from hiding the real message history on the next full load. (`api/models.py`, `api/routes.py`, `static/boot.js`, `static/sessions.js`, `static/ui.js`, `tests/test_session_index.py`, `tests/test_session_metadata_fast_path.py`)
 - **Reasoning chip now appears after the model chip** in the composer toolbar — model is a more fundamental choice and should be stable in position regardless of whether reasoning is active. Order: Profile → Workspace → Model → Reasoning. (`static/index.html`)
 
 ## v0.50.205 — 2026-04-24

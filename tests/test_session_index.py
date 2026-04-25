@@ -178,6 +178,61 @@ def test_incremental_update_prunes_stale_entries():
     assert "ghost_sid" not in ids, "stale entry with no backing file must be pruned"
 
 
+def test_load_metadata_only_does_not_parse_large_message_body():
+    """Large sessions must keep the metadata-only path cheap."""
+    s = Session(
+        session_id="sess_large",
+        title="Large Session",
+        messages=[{"role": "assistant", "content": "x" * 200_000}],
+        tool_calls=[{"id": "tool_1", "name": "read_file", "result": "y" * 10_000}],
+        input_tokens=123,
+        output_tokens=45,
+    )
+    s.save()
+
+    with patch.object(Session, "load", side_effect=AssertionError("full load should not run")):
+        meta = Session.load_metadata_only("sess_large")
+
+    assert meta is not None
+    assert meta.session_id == "sess_large"
+    assert meta.title == "Large Session"
+    assert meta.input_tokens == 123
+    assert meta.output_tokens == 45
+    assert meta.messages == []
+    assert meta.tool_calls == []
+    assert meta.compact()["message_count"] == 1
+
+
+def test_metadata_only_get_session_does_not_poison_full_session_cache():
+    s = Session(
+        session_id="sess_cache",
+        title="Cache Guard",
+        messages=[{"role": "user", "content": "hi"}],
+    )
+    s.save(skip_index=True)
+
+    meta = models.get_session("sess_cache", metadata_only=True)
+    assert meta.messages == []
+    assert "sess_cache" not in models.SESSIONS
+
+    full = models.get_session("sess_cache")
+    assert full.messages == [{"role": "user", "content": "hi"}]
+    assert models.SESSIONS["sess_cache"] is full
+
+
+def test_session_save_does_not_persist_metadata_message_count_hint():
+    s = Session(
+        session_id="sess_private_hint",
+        title="Private Hint",
+        messages=[{"role": "user", "content": "hi"}],
+    )
+    s._metadata_message_count = 10
+    s.save(skip_index=True)
+
+    payload = json.loads(s.path.read_text(encoding="utf-8"))
+    assert "_metadata_message_count" not in payload
+
+
 # ── 8. test_first_call_full_rebuild ──────────────────────────────────────
 
 def test_first_call_full_rebuild():
