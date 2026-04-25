@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Show agent sessions now collapses compression continuation chains** — long Hermes Agent conversations can rotate through many `parent_session_id` segments during context compression, which made one Weixin/Cron/CLI conversation appear as many sidebar rows. Agent-session listing now projects compression chains to a single logical sidebar entry, preserves the chain head as the visible representative, points import/current state at the latest importable segment, keeps non-compression parent/child relationships unchanged, filters empty chains, and applies the sidebar limit after projection. (`api/agent_sessions.py`, `tests/test_gateway_sync.py`)
+
 ## v0.50.215 — 2026-04-26
 
 ### Added
@@ -54,51 +57,6 @@
 
 ### Fixed
 - **Settings picker active state** — theme, skin, and font-size picker cards in Settings → Appearance now correctly highlight the selected option. Root cause: the base CSS rule used `!important` on `border-color`, overriding the inline style set by `_syncThemePicker()` and siblings. Fix moves to an `.active` class with its own `!important` rule. (`static/style.css`, `static/boot.js`) [#1059]
-
-## v0.50.210 — 2026-04-25
-
-### Added
-- **gpt-5.5 and gpt-5.5-mini in model picker** — available for openai, openai-codex, and copilot providers. (`api/config.py`) [#1052 @aliceisjustplaying]
-- **Login redirects back to original URL after re-login** — the iOS PWA auth redirect now passes `?next=` with the current path; `login.js` honors it via a `_safeNextPath()` helper that guards against open-redirect (rejects `//`, backslash, and non-path-absolute inputs). (`static/login.js`, `static/ui.js`, `static/workspace.js`) [#1053]
-
-### Fixed
-- **Non-standard provider first-run experience** — agent dir discovery now searches XDG_DATA_HOME, `/opt`, `/usr/local` paths; onboarding wizard auto-completes for non-wizard providers (ollama-cloud, deepseek, xai, kimi-k2.6) with `provider_configured=True`; wizard model field no longer hardcodes `gpt-5.4-mini` literal; session model resolver correctly handles unlisted active providers. (`api/config.py`, `api/onboarding.py`, `api/routes.py`) Closes #1019–#1023 [#1049]
-- **Cron session titles in sidebar** — cron-launched sessions now display the human-friendly job name (from `~/.hermes/cron/jobs.json`) instead of a generic "Cron Session" label. (`api/models.py`, `api/routes.py`) [#1050 @waldmanz]
-- **AIAgent reused per session — fixes Honcho first-turn injection** — `AIAgent` is now cached per `session_id` so the agent's turn counter increments correctly across messages. Cache is evicted on session delete/clear. (`api/config.py`, `api/routes.py`, `api/streaming.py`) Closes #1039 [#1051 @qxxaa]
-- **Mermaid Google Fonts CSP violation suppressed** — `fontFamily:'inherit'` in Mermaid themeVariables prevents `@import url('fonts.googleapis.com')` from being injected into diagram SVGs. (`static/ui.js`) Closes #1044 [#1054]
-- **bfcache layout and dropdown restore** — `pageshow+event.persisted` handler re-syncs topbar, workspace panel, session list, and gateway SSE; also closes open composer dropdowns frozen by bfcache. `_initResizePanels()` removed from pageshow (bfcache preserves listeners). (`static/boot.js`) Closes #1045 [#1055]
-
-## v0.50.209 — 2026-04-25
-
-### Added
-- **Codex-style message queue flyout** — messages typed while a stream is running now appear as a flyout card above the composer (same pattern as approval/clarify cards). Supports drag-to-reorder, inline edit, per-item model badge, Combine/Clear actions, and a collapsed pill outside the composer. Per-session DOM isolation via `_queueRenderKeys[sid]`/`_queueCollapsed[sid]` prevents cross-session bleed. Titlebar `#appTitlebarSub` chip shows live queue count. (`static/ui.js`, `static/messages.js`, `static/style.css`, `static/i18n.js`, `static/index.html`) Closes #965 [#1040 @24601]
-- **Inline HTML preview in workspace panel** — `.html` and `.htm` files now render as live sandboxed iframes (`sandbox="allow-scripts"`, no `allow-same-origin`) in the workspace file browser. A `?inline=1` parameter on `/api/file/raw` bypasses the usual attachment disposition; the server adds `Content-Security-Policy: sandbox allow-scripts` on inline HTML responses to prevent XSS when the URL is opened directly in a browser tab. (`static/workspace.js`, `api/routes.py`, `static/index.html`) Closes #779 [#1035 @bergeouss]
-- **Provider categories in setup wizard** — the onboarding provider dropdown groups 10 providers into Easy Start / Open & Self-hosted / Specialized with `<optgroup>` sections. Includes Google Gemini, DeepSeek, Mistral, and xAI/Grok with correct current model defaults. (`api/onboarding.py`, `static/onboarding.js`) Closes #603 [#1036 @bergeouss]
-
-### Fixed
-- **Manual "Check for Updates" button in System settings** — users can now trigger an update check immediately instead of waiting for the periodic background fetch. Error messages are sanitized before display. (`static/panels.js`, `static/index.html`, `static/style.css`) Closes #785 [#1033 @bergeouss]
-- **"Keep workspace panel open" toggle in Appearance settings** — adds a persistent preference so the workspace panel opens automatically on each session if preferred. The toolbar X no longer clears the preference. (`static/panels.js`, `static/boot.js`) Closes #999 [#1034 @bergeouss]
-
-### Changed
-- **CSP allowlist for Cloudflare Access deployments** — `default-src` and `manifest-src` now include `https://*.cloudflareaccess.com`, and `script-src` now includes `https://static.cloudflareinsights.com`. This unblocks Agent37-style deployments running behind Cloudflare Access without affecting vanilla self-hosters (the new origins are unreachable in non-Cloudflare environments). (`api/helpers.py`) [#1040 follow-up]
-
-## v0.50.207 — 2026-04-25
-
-### Added
-- **Live TPS stat in header** — a monospace chip in the titlebar shows tokens per second during streaming, with HIGH watermark from the past hour. Emitted via SSE at 1 Hz during active streams; hidden when idle. (`api/metering.py`, `api/streaming.py`, `static/messages.js`, `static/style.css`) [#1005 @JKJameson]
-
-### Fixed
-- **Stale SSE events no longer pollute the new session's DOM on session switch** — `appendThinking()` and `appendLiveToolCard()` now guard against events from a prior session's stream arriving after the user has switched sessions. Thinking card also auto-scrolls to top on completion so the response is immediately visible. (`static/ui.js`) [#1006 @JKJameson]
-- **Show agent sessions no longer shows empty/unimportable rows** — `state.db` can contain agent session rows before any messages are written. The sidebar now filters those out consistently across both the regular `/api/sessions` path and the gateway SSE watcher. (`api/agent_sessions.py`, `api/gateway_watcher.py`, `api/models.py`) [#1009 @franksong2702]
-- **Three orphaned i18n keys removed from language dropdown** — `cmd_status`, `memory_saved`, and `profile_delete_title` were placed outside any locale block in `static/i18n.js`, causing them to appear as invalid language options. (`static/i18n.js`) [#1010 @bergeouss]
-- **Cron panel UX polish** — Resume button SVG now uses a ▶| icon to distinguish it from Run; toast overlap fixed with `z-index` on the header; running-state badge with spinner shows during active jobs; `_cronRunningPoll` clears correctly on panel close. (`static/panels.js`, `static/index.html`, `static/style.css`, `static/i18n.js`) [#1011 @bergeouss]
-- **Create Folder and Add as Space from the browser** — users can now create directories and immediately register them as workspace spaces without SSH access; server validates paths against blocked roots before `mkdir`. (`api/routes.py`, `static/ui.js`, `static/panels.js`, `static/i18n.js`) [#1018 @bergeouss]
-- **Model-not-found errors now show a helpful message** — when a provider returns a 404 (e.g. Qwen model not available), the error is classified and a user-friendly hint appears instead of a raw HTML page. All 6 locales covered. (`api/streaming.py`, `static/messages.js`, `static/i18n.js`) [#1022 @bergeouss]
-- **Session attention indicators moved to right-side actions slot** — streaming spinners and unread dots no longer sit before the session title, avoiding title shifts. Running/unread rows hide the timestamp; idle/read rows keep right-aligned timestamps. Date group carets now point down/right correctly. Pinned group no longer repeats the star icon per row. (`static/sessions.js`, `static/style.css`) [#1024 @franksong2702]
-- **Session sidebar dates now use the last real message time** — sorting, grouping, and relative timestamps prefer `last_message_at` derived from the last non-tool message instead of metadata-only `updated_at`, so changing session settings doesn't move old conversations to Today. (`api/models.py`, `api/routes.py`) [#1024 @franksong2702]
-- **Running indicators appear immediately after send** — the sidebar now treats the active local busy session and local in-flight sessions as streaming while `/api/sessions` catches up. (`static/messages.js`, `static/sessions.js`) [#1024 @franksong2702]
-- **Large session switching and reload no longer block on cold model-catalog resolution** — `GET /api/session?messages=0` now parses only the JSON metadata prefix; metadata-only loads skip the full-session LRU cache; the frontend lazy fetch passes `resolve_model=0`; hard reload no longer waits for `populateModelDropdown()`. (`api/models.py`, `api/routes.py`, `static/boot.js`, `static/sessions.js`, `static/ui.js`) [#1025 @franksong2702]
-- **Auto title generation hardened for reasoning models** — title generation now uses a 512-token reasoning-safe budget, retries once with 1024 tokens on empty content or `finish_reason: length`, and preserves the underlying failure reason in `title_status` when falling back to a local summary. (`api/streaming.py`) [#1026 @franksong2702]
 
 ## v0.50.206 — 2026-04-25
 
