@@ -5,6 +5,11 @@
 ### Fixed
 - **Reasoning chip now appears after the model chip** in the composer toolbar — model is a more fundamental choice and should be stable in position regardless of whether reasoning is active. Order: Profile → Workspace → Model → Reasoning. (`static/index.html`)
 
+## v0.50.206 — 2026-04-25
+
+### Fixed
+- **Uploaded files now resolve to their full workspace path in agent context** — drag-and-drop and paperclip file uploads were correctly saved to the workspace, but the agent received only the bare filename (e.g. `photo.jpg`) in the message context rather than an absolute path. The agent could not call `read_file` or `vision_analyze` without a full path. `uploadPendingFiles()` now returns `{name, path}` objects from the `/api/upload` response (`data.path` was always returned but never threaded through). The agent message uses the full path; all display surfaces (badges, session history, INFLIGHT state, POST body) continue showing only the bare filename. (`static/ui.js`, `static/messages.js`) Closes #996. [#997]
+
 ## v0.50.205 — 2026-04-24
 
 ### Fixed

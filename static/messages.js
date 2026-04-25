@@ -117,7 +117,7 @@ async function send(){
     }
     markInflight(activeSid, streamId);
     if(typeof saveInflightState==='function'){
-      saveInflightState(activeSid,{streamId,messages:INFLIGHT[activeSid].messages,uploaded,toolCalls:INFLIGHT[activeSid].toolCalls||[]});
+      saveInflightState(activeSid,{streamId,messages:INFLIGHT[activeSid].messages,uploaded:uploadedNames,toolCalls:INFLIGHT[activeSid].toolCalls||[]});
     }
     // Refresh session list so background streaming indicators appear immediately for the
     // session that was just started and any others that may already be running.
@@ -160,7 +160,7 @@ async function send(){
   }
 
   // Open SSE stream and render tokens live
-  attachLiveStream(activeSid, streamId, uploaded);
+  attachLiveStream(activeSid, streamId, uploadedNames);
 
 }
 
@@ -719,7 +719,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         if(uploaded.length){
           const lastUser=[...S.messages].reverse().find(m=>m.role==='user');
-          if(lastUser)lastUser.attachments=uploadedNames;
+          if(lastUser)lastUser.attachments=uploaded;
         }
         clearLiveToolCards();
         S.busy=false;
