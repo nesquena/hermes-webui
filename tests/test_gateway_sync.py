@@ -156,6 +156,79 @@ def test_gateway_sessions_appear_when_enabled():
         post('/api/settings', {'show_cli_sessions': False})
 
 
+def test_gateway_sessions_without_messages_are_hidden_from_sidebar():
+    """Regression: empty agent session rows must not appear as broken sidebar entries."""
+    conn = _ensure_state_db()
+    empty_sid = 'gw_empty_no_messages_001'
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO sessions (id, source, title, model, started_at, message_count) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (empty_sid, 'cron', 'Cron Session', 'openai/gpt-5', time.time(), 0),
+        )
+        conn.execute("DELETE FROM messages WHERE session_id = ?", (empty_sid,))
+        conn.commit()
+
+        post('/api/settings', {'show_cli_sessions': True})
+
+        data, status = get('/api/sessions')
+        assert status == 200
+        sessions = data.get('sessions', [])
+        assert empty_sid not in {s.get('session_id') for s in sessions}, (
+            "Agent sessions with no readable message rows should be filtered before "
+            "they reach the sidebar; otherwise clicking them fails during import."
+        )
+    finally:
+        try:
+            _remove_test_sessions(conn, empty_sid)
+            conn.close()
+        except Exception:
+            pass
+        post('/api/settings', {'show_cli_sessions': False})
+
+
+def test_gateway_watcher_hides_sessions_without_messages(monkeypatch):
+    """Regression: SSE watcher must use the same importable-agent filter."""
+    conn = _ensure_state_db()
+    empty_sid = 'gw_empty_watcher_001'
+    live_sid = 'gw_live_watcher_001'
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO sessions (id, source, title, model, started_at, message_count) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (empty_sid, 'cron', 'Empty Cron Session', 'openai/gpt-5', time.time(), 0),
+        )
+        conn.execute("DELETE FROM messages WHERE session_id = ?", (empty_sid,))
+        _insert_gateway_session(
+            conn,
+            session_id=live_sid,
+            source='cron',
+            title='Live Cron Session',
+            message_count=0,
+        )
+
+        import api.gateway_watcher as gateway_watcher
+
+        monkeypatch.setattr(gateway_watcher, '_get_state_db_path', _get_state_db_path)
+
+        sessions = gateway_watcher._get_agent_sessions_from_db()
+        ids = {s.get('session_id') for s in sessions}
+        live = next((s for s in sessions if s.get('session_id') == live_sid), None)
+
+        assert empty_sid not in ids
+        assert live is not None
+        assert live.get('message_count') == 2, (
+            "Watcher should fall back to actual message rows when stored "
+            "message_count is zero, matching the sidebar route."
+        )
+    finally:
+        try:
+            _remove_test_sessions(conn, empty_sid, live_sid)
+            conn.close()
+        except Exception:
+            pass
+
+
 def test_gateway_sessions_excluded_when_disabled():
     """Gateway sessions are NOT returned when show_cli_sessions is off."""
     conn = _ensure_state_db()

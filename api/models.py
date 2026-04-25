@@ -15,6 +15,7 @@ from api.config import (
     get_effective_default_model,
 )
 from api.workspace import get_last_workspace
+from api.agent_sessions import read_importable_agent_session_rows
 
 logger = logging.getLogger(__name__)
 
@@ -528,16 +529,11 @@ def get_cli_sessions() -> list:
     """Read CLI sessions from the agent's SQLite store and return them as
     dicts in a format the WebUI sidebar can render alongside local sessions.
 
-    Returns empty list if the SQLite DB is missing, the sqlite3 module is
-    unavailable, or any error occurs -- the bridge is purely additive and never
-    crashes the WebUI.
+    Returns empty list if the SQLite DB is missing or any error occurs -- the
+    bridge is purely additive and never crashes the WebUI.
     """
     import os
     cli_sessions = []
-    try:
-        import sqlite3
-    except ImportError:
-        return cli_sessions
 
     # Use the active WebUI profile's HERMES_HOME to find state.db.
     # The active profile is determined by what the user has selected in the UI
@@ -566,59 +562,30 @@ def get_cli_sessions() -> list:
         _cli_profile = None  # older agent -- fall back to no profile
 
     try:
-        with sqlite3.connect(str(db_path)) as conn:
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
-            # Introspect schema to handle older hermes-agent versions that
-            # may not have a 'source' column. Without this check the query raises
-            # OperationalError which is silently swallowed, causing the empty-list bug.
-            cur.execute("PRAGMA table_info(sessions)")
-            _session_cols = {row[1] for row in cur.fetchall()}
-            if 'source' not in _session_cols:
-                import logging as _logging
-                _logging.getLogger(__name__).warning(
-                    "get_cli_sessions(): state.db at %s has no 'source' column "
-                    "(older hermes-agent?). CLI sessions unavailable. "
-                    "Upgrade hermes-agent to fix this.",
-                    db_path,
-                )
-                return cli_sessions
+        for row in read_importable_agent_session_rows(db_path, limit=200, log=logger):
+            sid = row['id']
+            raw_ts = row['last_activity'] or row['started_at']
+            # Prefer the CLI session's own profile from the DB; fall back to
+            # the active CLI profile so sidebar filtering works either way.
+            profile = _cli_profile  # CLI DB has no profile column; use active profile
 
-            cur.execute("""
-                SELECT s.id, s.title, s.model, s.message_count,
-                       s.started_at, s.source,
-                       MAX(m.timestamp) AS last_activity
-                FROM sessions s
-                LEFT JOIN messages m ON m.session_id = s.id
-                WHERE s.source IS NOT NULL AND s.source != 'webui'
-                GROUP BY s.id
-                ORDER BY COALESCE(MAX(m.timestamp), s.started_at) DESC
-                LIMIT 200
-            """)
-            for row in cur.fetchall():
-                sid = row['id']
-                raw_ts = row['last_activity'] or row['started_at']
-                # Prefer the CLI session's own profile from the DB; fall back to
-                # the active CLI profile so sidebar filtering works either way.
-                profile = _cli_profile  # CLI DB has no profile column; use active profile
-
-                _source = row['source'] or 'cli'
-                _display_title = row['title'] or f'{_source.title()} Session'
-                cli_sessions.append({
-                    'session_id': sid,
-                    'title': _display_title,
-                    'workspace': str(get_last_workspace()),
-                    'model': row['model'] or None,
-                    'message_count': row['message_count'] or 0,
-                    'created_at': row['started_at'],
-                    'updated_at': raw_ts,
-                    'pinned': False,
-                    'archived': False,
-                    'project_id': None,
-                    'profile': profile,
-                    'source_tag': _source,
-                    'is_cli_session': True,
-                })
+            _source = row['source'] or 'cli'
+            _display_title = row['title'] or f'{_source.title()} Session'
+            cli_sessions.append({
+                'session_id': sid,
+                'title': _display_title,
+                'workspace': str(get_last_workspace()),
+                'model': row['model'] or None,
+                'message_count': row['message_count'] or row['actual_message_count'] or 0,
+                'created_at': row['started_at'],
+                'updated_at': raw_ts,
+                'pinned': False,
+                'archived': False,
+                'project_id': None,
+                'profile': profile,
+                'source_tag': _source,
+                'is_cli_session': True,
+            })
     except Exception as _cli_err:
         # DB schema changed, locked, or corrupted -- log warning so admins can diagnose.
         # Still degrade gracefully (don't crash the WebUI).

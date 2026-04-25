@@ -13,12 +13,12 @@ import json
 import logging
 import os
 import queue
-import sqlite3
 import threading
 import time
 from pathlib import Path
 
 from api.config import HOME
+from api.agent_sessions import read_importable_agent_session_rows
 
 logger = logging.getLogger(__name__)
 
@@ -55,33 +55,18 @@ def _get_agent_sessions_from_db() -> list:
         return []
 
     try:
-        with sqlite3.connect(str(db_path)) as conn:
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT s.id, s.title, s.model, s.message_count,
-                       s.started_at, s.source,
-                       MAX(m.timestamp) AS last_activity
-                FROM sessions s
-                LEFT JOIN messages m ON m.session_id = s.id
-                WHERE s.source IS NOT NULL AND s.source != 'webui'
-                GROUP BY s.id
-                HAVING COUNT(m.id) > 0
-                ORDER BY COALESCE(MAX(m.timestamp), s.started_at) DESC
-                LIMIT 200
-            """)
-            sessions = []
-            for row in cur.fetchall():
-                sessions.append({
-                    'session_id': row['id'],
-                    'title': row['title'] or 'Agent Session',
-                    'model': row['model'] or None,
-                    'message_count': row['message_count'] or 0,
-                    'created_at': row['started_at'],
-                    'updated_at': row['last_activity'] or row['started_at'],
-                    'source': row['source'] or 'cli',
-                })
-            return sessions
+        sessions = []
+        for row in read_importable_agent_session_rows(db_path, limit=200, log=logger):
+            sessions.append({
+                'session_id': row['id'],
+                'title': row['title'] or 'Agent Session',
+                'model': row['model'] or None,
+                'message_count': row['message_count'] or row['actual_message_count'] or 0,
+                'created_at': row['started_at'],
+                'updated_at': row['last_activity'] or row['started_at'],
+                'source': row['source'] or 'cli',
+            })
+        return sessions
     except Exception:
         return []
 
