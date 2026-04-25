@@ -1660,6 +1660,13 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
     except Exception as e:
         print('[webui] stream error:\n' + traceback.format_exc(), flush=True)
         err_str = str(e)
+        # Sanitize HTML from provider error responses — some providers return
+        # full HTML pages (e.g. nginx "404 page not found") instead of JSON errors.
+        # Strip HTML tags to avoid rendering raw markup in the chat message.
+        _stripped = re.sub(r'<[^>]+>', ' ', err_str)
+        _stripped = re.sub(r'\s+', ' ', _stripped).strip()
+        if _stripped != err_str:
+            err_str = _stripped
         _exc_lower = err_str.lower()
         # Classify before saving so the error message can be persisted to the session.
         # Check quota exhaustion first — OpenAI billing 429s use insufficient_quota which
@@ -1683,6 +1690,16 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             or 'invalid api key' in _exc_lower
             or 'no cookie auth credentials' in _exc_lower
         )
+        _exc_is_not_found = (
+            '404' in err_str
+            or 'not found' in _exc_lower
+            or 'does not exist' in _exc_lower
+            or 'model not found' in _exc_lower
+            or 'model_not_found' in _exc_lower
+            or 'invalid model' in _exc_lower
+            or 'does not match any known model' in _exc_lower
+            or 'unknown model' in _exc_lower
+        )
         if _exc_is_quota:
             _exc_label, _exc_type, _exc_hint = (
                 'Out of credits', 'quota_exhausted',
@@ -1698,6 +1715,12 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 'Authentication error', 'auth_mismatch',
                 'The selected model may not be supported by your configured provider. '
                 'Run `hermes model` in your terminal to switch providers, then restart the WebUI.',
+            )
+        elif _exc_is_not_found:
+            _exc_label, _exc_type, _exc_hint = (
+                'Model not found', 'model_not_found',
+                'The selected model was not found by the provider. '
+                'Check the model ID in Settings or run `hermes model` to verify it exists for your provider.',
             )
         else:
             _exc_label, _exc_type, _exc_hint = 'Error', 'error', ''
