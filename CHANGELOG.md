@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- **bfcache layout restore** — extended the `pageshow` handler in `boot.js` to re-run `syncTopbar`, `syncWorkspacePanelState`, `_initResizePanels`, and `startGatewaySSE` when `event.persisted === true`. Fixes the broken layout (oversized search icon, stale rail) that appeared on tab restore / browser session restore without a hard refresh. (#822 session-search fix preserved.) (`static/boot.js`) [#1045]
 
 ## v0.50.209 — 2026-04-25
 
