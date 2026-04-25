@@ -7,12 +7,16 @@
 ## v0.50.209 — 2026-04-25
 
 ### Added
+- **Codex-style message queue flyout** — messages typed while a stream is running now appear as a flyout card above the composer (same pattern as approval/clarify cards). Supports drag-to-reorder, inline edit, per-item model badge, Combine/Clear actions, and a collapsed pill outside the composer. Per-session DOM isolation via `_queueRenderKeys[sid]`/`_queueCollapsed[sid]` prevents cross-session bleed. Titlebar `#appTitlebarSub` chip shows live queue count. (`static/ui.js`, `static/messages.js`, `static/style.css`, `static/i18n.js`, `static/index.html`) Closes #965 [#1040 @24601]
 - **Inline HTML preview in workspace panel** — `.html` and `.htm` files now render as live sandboxed iframes (`sandbox="allow-scripts"`, no `allow-same-origin`) in the workspace file browser. A `?inline=1` parameter on `/api/file/raw` bypasses the usual attachment disposition; the server adds `Content-Security-Policy: sandbox allow-scripts` on inline HTML responses to prevent XSS when the URL is opened directly in a browser tab. (`static/workspace.js`, `api/routes.py`, `static/index.html`) Closes #779 [#1035 @bergeouss]
 - **Provider categories in setup wizard** — the onboarding provider dropdown groups 10 providers into Easy Start / Open & Self-hosted / Specialized with `<optgroup>` sections. Includes Google Gemini, DeepSeek, Mistral, and xAI/Grok with correct current model defaults. (`api/onboarding.py`, `static/onboarding.js`) Closes #603 [#1036 @bergeouss]
 
 ### Fixed
 - **Manual "Check for Updates" button in System settings** — users can now trigger an update check immediately instead of waiting for the periodic background fetch. Error messages are sanitized before display. (`static/panels.js`, `static/index.html`, `static/style.css`) Closes #785 [#1033 @bergeouss]
 - **"Keep workspace panel open" toggle in Appearance settings** — adds a persistent preference so the workspace panel opens automatically on each session if preferred. The toolbar X no longer clears the preference. (`static/panels.js`, `static/boot.js`) Closes #999 [#1034 @bergeouss]
+
+### Changed
+- **CSP allowlist for Cloudflare Access deployments** — `default-src` and `manifest-src` now include `https://*.cloudflareaccess.com`, and `script-src` now includes `https://static.cloudflareinsights.com`. This unblocks Agent37-style deployments running behind Cloudflare Access without affecting vanilla self-hosters (the new origins are unreachable in non-Cloudflare environments). (`api/helpers.py`) [#1040 follow-up]
 
 ## v0.50.207 — 2026-04-25
 
