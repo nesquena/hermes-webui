@@ -329,6 +329,7 @@ from api.workspace import (
     safe_resolve_ws,
     resolve_trusted_workspace,
     validate_workspace_to_add,
+    _workspace_blocked_roots,
 )
 from api.upload import handle_upload, handle_transcribe
 from api.streaming import _sse, _run_agent_streaming, cancel_stream
@@ -3030,13 +3031,22 @@ def _handle_workspace_add(handler, body):
     auto_create = body.get("create", False)
     if not path_str:
         return bad(handler, "path is required")
-    # If auto_create is requested, create the directory first (#782)
+    # Validate the path is NOT a blocked system root BEFORE any filesystem mutation.
+    # This prevents creating orphan directories on rejected paths (#782 review).
+    candidate = Path(path_str).expanduser().resolve()
+    for blocked in _workspace_blocked_roots():
+        try:
+            candidate.relative_to(blocked)
+            return bad(handler, f"Path points to a system directory: {candidate}")
+        except ValueError:
+            pass
+    # Now safe to create the directory if requested
     if auto_create:
         try:
-            p_candidate = Path(path_str).expanduser().resolve()
-            p_candidate.mkdir(parents=True, exist_ok=True)
+            candidate.mkdir(parents=True, exist_ok=True)
         except (OSError, PermissionError) as e:
             return bad(handler, f"Could not create directory: {_sanitize_error(e)}")
+    # Full validation (exists, is_dir) — should pass now that dir exists
     try:
         p = validate_workspace_to_add(path_str)
     except ValueError as e:
