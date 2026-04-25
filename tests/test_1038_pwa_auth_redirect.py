@@ -32,8 +32,7 @@ class TestPWAAuthRedirect:
         # Guard must appear inside the !res.ok block, before throwing
         assert "res.status===401" in src, \
             "workspace.js api() must check res.status===401"
-        assert "window.location.href='/login'" in src or \
-               'window.location.href="/login"' in src, \
+        assert "window.location.href='/login" in src or 'window.location.href="/login' in src, \
             "workspace.js api() must redirect to /login on 401"
 
     def test_workspace_js_401_before_throw(self):
