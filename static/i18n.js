@@ -56,6 +56,7 @@ const LOCALES = {
     model_unavailable_title: 'This model is no longer in your current provider list',
     provider_mismatch_warning: (m,p)=>`"${m}" may not work with your configured provider (${p}). Send anyway, or run \`hermes model\` in your terminal to switch.`,
     provider_mismatch_label: 'Provider mismatch',
+    model_not_found_label: 'Model not found',
     model_custom_label: 'Custom model ID',
     model_custom_placeholder: 'e.g. openai/gpt-5.4',
     model_search_placeholder: 'Search models…',
@@ -654,6 +655,7 @@ const LOCALES = {
     provider_mismatch_warning: (m, p) =>
     `"${m}" может не работать с вашим настроенным провайдером (${p}). Всё равно отправить или запустите \`hermes model\` в терминале, чтобы переключиться.`,
     provider_mismatch_label: 'Несовпадение провайдера',
+    model_not_found_label: 'Модель не найдена',
     model_custom_label: 'Пользовательский ID модели',
     model_custom_placeholder: 'например, openai/gpt-5.4',
     cmd_help: 'Показать доступные команды',
@@ -1240,6 +1242,7 @@ const LOCALES = {
     model_unavailable_title: 'Este modelo ya no está en tu lista actual de proveedores',
     provider_mismatch_warning: (m,p)=>`"${m}" puede no funcionar con tu proveedor configurado (${p}). Envía de todas formas, o ejecuta \`hermes model\` en la terminal para cambiar.`,
     provider_mismatch_label: 'Proveedor incompatible',
+    model_not_found_label: 'Modelo no encontrado',
     model_custom_label: 'ID de modelo personalizado',
     model_custom_placeholder: 'p. ej. openai/gpt-5.4',
     model_search_placeholder: 'Buscar modelos…',
@@ -1785,6 +1788,7 @@ const LOCALES = {
     model_unavailable_title: 'Dieses Modell ist nicht mehr in Ihrer aktuellen Provider-Liste',
     provider_mismatch_warning: (m,p)=>`"${m}" funktioniert möglicherweise nicht mit Ihrem konfigurierten Provider (${p}). Trotzdem senden, oder \`hermes model\` im Terminal ausführen.`,
     provider_mismatch_label: 'Provider-Konflikt',
+    model_not_found_label: 'Modell nicht gefunden',
     // commands.js
     cmd_help: 'Verfügbare Befehle auflisten',
     cmd_clear: 'Konversationsverlauf löschen',
@@ -2113,6 +2117,7 @@ const LOCALES = {
     model_unavailable_title: '\u8fd9\u4e2a\u6a21\u578b\u5df2\u7ecf\u4e0d\u5728\u5f53\u524d provider \u5217\u8868\u4e2d',
     provider_mismatch_warning: (m,p)=>`\"${m}\" \u53ef\u80fd\u65e0\u6cd5\u5728\u5f53\u524d\u914d\u7f6e\u7684\u63d0\u4f9b\u5546 (${p}) \u4e0b\u5de5\u4f5c\u3002\u76f4\u63a5\u53d1\u9001\uff0c\u6216\u5728\u7ec8\u7aef\u8fd0\u884c \`hermes model\` \u5207\u6362\u3002`,
     provider_mismatch_label: '\u63d0\u4f9b\u5546\u4e0d\u5339\u914d',
+    model_not_found_label: '\u672a\u627e\u5230\u6a21\u578b',
     model_custom_label: '\u81ea\u5b9a\u4e49\u6a21\u578b ID',
     model_custom_placeholder: '\u4f8b\u5982 openai/gpt-5.4',
     model_search_placeholder: '\u641c\u7d22\u6a21\u578b\u2026',
@@ -2656,6 +2661,7 @@ const LOCALES = {
     model_unavailable_title: '\u6b64\u6a21\u578b\u5df2\u7d93\u4e0d\u5728\u7576\u524d provider \u5217\u8868\u4e2d',
     provider_mismatch_warning: (m,p)=>`\"${m}\" \u53ef\u80fd\u7121\u6cd5\u5728\u7576\u524d\u914d\u7f6e\u7684\u63d0\u4f9b\u8005 (${p}) \u4e0b\u904b\u4f5c\u3002\u5c1a\u9001\uff0c\u6216\u5728\u7d42\u7aef\u57f7\u884c \`hermes model\` \u5207\u63db\u3002`,
     provider_mismatch_label: '\u63d0\u4f9b\u8005\u4e0d\u76f8\u7b26',
+    model_not_found_label: '\u672a\u627e\u5230\u6a21\u578b',
     // commands.js
     cmd_help: '\u67e5\u770b\u53ef\u7528\u547d\u4ee4',
     cmd_clear: '\u6e05\u7a7a\u7576\u524d\u5c0d\u8a71\u8a0a\u606f',
