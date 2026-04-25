@@ -1704,6 +1704,18 @@ AGENT_INSTANCES: dict = {}  # stream_id -> AIAgent instance for interrupt propag
 STREAM_PARTIAL_TEXT: dict = {}  # stream_id -> partial assistant text accumulated during streaming
 SERVER_START_TIME = time.time()
 
+# Agent cache: reuse AIAgent across messages in the same WebUI session so that
+# _user_turn_count survives between turns.  This mirrors the gateway's
+# _agent_cache pattern and is required for injectionFrequency: "first-turn".
+SESSION_AGENT_CACHE: dict = {}   # session_id -> (AIAgent, config_sig)
+SESSION_AGENT_CACHE_LOCK = threading.Lock()
+
+
+def _evict_session_agent(session_id: str) -> None:
+    """Remove a cached agent for a session (on delete, clear, or model switch)."""
+    with SESSION_AGENT_CACHE_LOCK:
+        SESSION_AGENT_CACHE.pop(session_id, None)
+
 # ── Thread-local env context ─────────────────────────────────────────────────
 _thread_ctx = threading.local()
 
