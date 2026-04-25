@@ -9,6 +9,10 @@ const SESSION_QUEUES={};  // keyed by session_id for queued follow-up turns
 // single-threaded so only one done event fires at a time in practice.
 let _queueDrainSid=null;
 const $=id=>document.getElementById(id);
+// Redirect to /login when the server responds with 401 (auth session expired).
+// Handles iOS PWA standalone mode where a server-side 302→/login would break
+// out of the PWA shell into Safari instead of navigating within it.
+function _redirectIfUnauth(res){if(res&&res.status===401){window.location.href='/login';return true;}return false;}
 function _getSessionQueue(sid, create=false){
   if(!sid) return [];
   if(!SESSION_QUEUES[sid]&&create) SESSION_QUEUES[sid]=[];
@@ -87,7 +91,9 @@ async function populateModelDropdown(){
   const sel=$('modelSelect');
   if(!sel) return;
   try{
-    const data=await fetch(new URL('api/models',location.href).href,{credentials:'include'}).then(r=>r.json());
+    const _modelsRes=await fetch(new URL('api/models',location.href).href,{credentials:'include'});
+    if(_redirectIfUnauth(_modelsRes)) return;
+    const data=await _modelsRes.json();
     if(!data.groups||!data.groups.length) return; // keep HTML defaults
     // Store active provider globally so the send path can warn on mismatch
     window._activeProvider=data.active_provider||null;
@@ -191,7 +197,9 @@ async function _fetchLiveModels(provider, sel){
   try{
     const url=new URL('api/models/live',location.href);
     url.searchParams.set('provider',provider);
-    const data=await fetch(url.href,{credentials:'include'}).then(r=>r.json());
+    const _liveRes=await fetch(url.href,{credentials:'include'});
+    if(_redirectIfUnauth(_liveRes)) return;
+    const data=await _liveRes.json();
     if(!data.models||!data.models.length) return;
     _liveModelCache[provider]=data.models;
     const added=_addLiveModelsToSelect(provider,data.models,sel);
@@ -3126,6 +3134,7 @@ async function uploadPendingFiles(){
     fd.append('session_id',S.session.session_id);fd.append('file',f,f.name);
     try{
       const res=await fetch(new URL('api/upload',location.href).href,{method:'POST',credentials:'include',body:fd});
+      if(_redirectIfUnauth(res)) return;
       if(!res.ok){const err=await res.text();throw new Error(err);}
       const data=await res.json();
       if(data.error)throw new Error(data.error);

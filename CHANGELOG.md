@@ -5,6 +5,7 @@
 ### Fixed
 - **Mermaid CSP font fix** — added `fontFamily: 'inherit'` and `fontSize: '14px'` to the mermaid `themeVariables` block so Mermaid no longer requests the Manrope font from `fonts.googleapis.com` at render time. Eliminates CSP `style-src` violations on every diagram render; diagram text now uses the page's own font stack. (`static/ui.js`) [#1044]
 - **bfcache layout restore** — extended the `pageshow` handler in `boot.js` to re-run `syncTopbar`, `syncWorkspacePanelState`, `_initResizePanels`, and `startGatewaySSE` when `event.persisted === true`. Fixes the broken layout (oversized search icon, stale rail) that appeared on tab restore / browser session restore without a hard refresh. (#822 session-search fix preserved.) (`static/boot.js`) [#1045]
+- **iOS PWA auth redirect** — when an auth session expires, all API calls now detect the 401 and redirect to `/login` client-side instead of relying on a server-side 302. This fixes the iOS home-screen PWA getting permanently stuck on "Authentication required" with no way to re-authenticate without deleting and re-adding the PWA. (`static/workspace.js`, `static/ui.js`) [#1038]
 
 ## v0.50.209 — 2026-04-25
 
