@@ -12,7 +12,7 @@ const $=id=>document.getElementById(id);
 // Redirect to /login when the server responds with 401 (auth session expired).
 // Handles iOS PWA standalone mode where a server-side 302→/login would break
 // out of the PWA shell into Safari instead of navigating within it.
-function _redirectIfUnauth(res){if(res&&res.status===401){window.location.href='/login';return true;}return false;}
+function _redirectIfUnauth(res){if(res&&res.status===401){window.location.href='/login?next='+encodeURIComponent(window.location.pathname+window.location.search);return true;}return false;}
 function _getSessionQueue(sid, create=false){
   if(!sid) return [];
   if(!SESSION_QUEUES[sid]&&create) SESSION_QUEUES[sid]=[];

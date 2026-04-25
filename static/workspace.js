@@ -7,7 +7,7 @@ async function api(path,opts={}){
     // 401 means the auth session expired. Redirect to /login so the user can
     // re-authenticate. This is especially important for iOS PWA (standalone mode)
     // where a server-side 302 → /login opens in Safari instead of within the PWA.
-    if(res.status===401){window.location.href='/login';return;}
+    if(res.status===401){window.location.href='/login?next='+encodeURIComponent(window.location.pathname+window.location.search);return;}
     const text=await res.text();
     // Parse JSON error body and surface the human-readable message,
     // rather than showing raw JSON like {"error":"Profile 'x' does not exist."}
