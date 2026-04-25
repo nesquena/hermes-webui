@@ -209,6 +209,58 @@ def _first_exchange_snippets(messages):
     return user_text[:500], asst_text[:500]
 
 
+def _latest_exchange_snippets(messages):
+    """Return (last_user_text, last_assistant_text) snippets for title refresh.
+
+    Walks the message list backwards to find the last user+assistant pair,
+    skipping empty or tool-call-only assistant messages.
+    """
+    user_text = ''
+    asst_text = ''
+    for m in reversed(messages or []):
+        if not isinstance(m, dict):
+            continue
+        role = m.get('role')
+        if role == 'assistant' and not asst_text:
+            candidate = _message_text(m.get('content'))
+            # Skip tool-call-only preambles
+            if m.get('tool_calls') and (not candidate or _looks_invalid_generated_title(candidate)):
+                continue
+            if candidate:
+                asst_text = candidate
+        elif role == 'user' and not user_text:
+            candidate = _message_text(m.get('content'))
+            if candidate:
+                user_text = candidate
+        if user_text and asst_text:
+            break
+    return user_text[:500], asst_text[:500]
+
+
+def _count_exchanges(messages):
+    """Count the number of user messages (rough exchange count)."""
+    count = 0
+    for m in messages or []:
+        if isinstance(m, dict) and m.get('role') == 'user':
+            content = m.get('content', '')
+            if isinstance(content, list):
+                content = ' '.join(p.get('text', '') for p in content if isinstance(p, dict) and p.get('type') == 'text')
+            if str(content).strip():
+                count += 1
+    return count
+
+
+def _get_title_refresh_interval() -> int:
+    """Read the auto_title_refresh_every setting (0 = disabled)."""
+    try:
+        from api.config import load_settings
+        settings = load_settings()
+        val = settings.get('auto_title_refresh_every', '0')
+        return int(val) if str(val).strip().isdigit() and int(val) > 0 else 0
+    except Exception:
+        return 0
+
+
 def _is_provisional_title(current_title: str, messages) -> bool:
     """Heuristic: title equals first-message substring placeholder."""
     derived = title_from(messages, '') or ''
@@ -729,6 +781,85 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
             _put_title_status(put_event, session_id, 'skipped', source or 'unchanged', effective_title, raw_preview)
     finally:
         put_event('stream_end', {'session_id': session_id})
+
+
+def _run_background_title_refresh(session_id: str, user_text: str, assistant_text: str, current_title: str, put_event, agent=None):
+    """Refresh an existing LLM-generated title using the latest exchange text.
+
+    Unlike _run_background_title_update, this does NOT guard on
+    llm_title_generated — it assumes the title was already LLM-generated
+    and the session has progressed enough to warrant a refresh.
+    It does NOT emit stream_end (the caller already did).
+    """
+    try:
+        try:
+            s = get_session(session_id)
+        except KeyError:
+            return
+        # Safety: skip if user manually renamed since the check
+        effective = str(s.title or '').strip()
+        if effective != current_title:
+            _put_title_status(put_event, session_id, 'skipped', 'manual_title', effective)
+            return
+        if not effective or effective in ('Untitled', 'New Chat'):
+            return
+        aux_title_configured = _aux_title_configured()
+        if agent and not aux_title_configured:
+            next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
+            if not next_title and llm_status in ('llm_error', 'llm_invalid'):
+                next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True)
+        else:
+            next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text)
+            if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
+                next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
+        if not next_title:
+            _put_title_status(put_event, session_id, 'refresh_skipped', llm_status or 'empty', effective, raw_preview)
+            return
+        # Skip if the new title is essentially the same (after normalization)
+        normalized_current = re.sub(r'\s+', ' ', effective).strip().lower()
+        normalized_new = re.sub(r'\s+', ' ', next_title).strip().lower()
+        if normalized_current == normalized_new:
+            _put_title_status(put_event, session_id, 'refresh_skipped', 'same_title', effective, raw_preview)
+            return
+        with _get_session_agent_lock(session_id):
+            with LOCK:
+                s = SESSIONS.get(session_id, s)
+                # Re-check: user may have renamed while we were generating
+                if str(s.title or '').strip() != current_title:
+                    _put_title_status(put_event, session_id, 'skipped', 'manual_title', str(s.title or '').strip())
+                    return
+                s.title = next_title
+                s.llm_title_generated = True
+                s.save(touch_updated_at=False)
+                effective_title = s.title
+        _put_title_status(put_event, session_id, 'refreshed', llm_status, effective_title, raw_preview)
+        put_event('title', {'session_id': session_id, 'title': effective_title})
+        logger.info("Adaptive title refresh: session=%s new_title=%r", session_id, effective_title)
+    except Exception:
+        logger.debug("Background title refresh failed for session %s", session_id, exc_info=True)
+
+
+def _maybe_schedule_title_refresh(session, put_event, agent):
+    """Check if the session is due for an adaptive title refresh and schedule it."""
+    refresh_interval = _get_title_refresh_interval()
+    if refresh_interval <= 0:
+        return
+    current_title = str(session.title or '').strip()
+    if not current_title or current_title in ('Untitled', 'New Chat'):
+        return
+    if not getattr(session, 'llm_title_generated', False):
+        return
+    exchange_count = _count_exchanges(session.messages)
+    if exchange_count <= 0 or exchange_count % refresh_interval != 0:
+        return
+    last_u, last_a = _latest_exchange_snippets(session.messages)
+    if not last_u and not last_a:
+        return
+    threading.Thread(
+        target=_run_background_title_refresh,
+        args=(session.session_id, last_u, last_a, current_title, put_event, agent),
+        daemon=True,
+    ).start()
 
 
 def _sanitize_messages_for_api(messages):
@@ -1822,6 +1953,10 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 # which may be rotated during context compression. The client captured
                 # activeSid = original session_id so they must match for stream_end to close.
                 put('stream_end', {'session_id': session_id})
+                # Adaptive title refresh: re-generate title from latest exchange
+                # every N exchanges (when enabled in settings). Runs after stream_end
+                # so it doesn't block the stream.
+                _maybe_schedule_title_refresh(s, put, agent)
         finally:
             # Stop the live metering ticker
             _metering_stop.set()
