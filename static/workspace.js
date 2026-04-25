@@ -225,7 +225,14 @@ async function openFile(path){
       requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();});
     }catch(e){setStatus(t('file_open_failed'));}
   } else if(HTML_EXTS.has(ext)){
-    // HTML: render in sandboxed iframe via raw endpoint
+    // HTML: render in sandboxed iframe via raw endpoint.
+    // SECURITY TRADEOFF: We use sandbox="allow-scripts" which lets inline JS run
+    // but prevents access to the parent frame (origin isolation). This is a
+    // deliberate choice — the user is previewing their own workspace files, so
+    // blocking scripts entirely would break most HTML documents. The sandbox
+    // still prevents the preview from navigating the parent, accessing cookies,
+    // or reading other origin data. If a stricter mode is needed, remove
+    // allow-scripts (or add sandbox="") to disable all JS execution.
     showPreview('html');
     const url=`api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}`;
     const iframe=$('previewHtmlIframe');
