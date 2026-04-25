@@ -60,20 +60,22 @@ async function send(){
   try{uploaded=await uploadPendingFiles();}
   catch(e){if(!text){setComposerStatus(`Upload error: ${e.message}`);return;}}
 
+  const uploadedNames=uploaded.map(u=>u.name||u);
+  const uploadedPaths=uploaded.map(u=>u.path||u.name||u);
   let msgText=text;
-  if(uploaded.length&&!msgText)msgText=`I've uploaded ${uploaded.length} file(s): ${uploaded.join(', ')}`;
-  else if(uploaded.length)msgText=`${text}\n\n[Attached files: ${uploaded.join(', ')}]`;
+  if(uploaded.length&&!msgText)msgText=`I've uploaded ${uploaded.length} file(s): ${uploadedPaths.join(', ')}`;
+  else if(uploaded.length)msgText=`${text}\n\n[Attached files: ${uploadedPaths.join(', ')}]`;
   if(!msgText){setComposerStatus('Nothing to send');return;}
 
   $('msg').value='';autoResize();
-  const displayText=text||(uploaded.length?`Uploaded: ${uploaded.join(', ')}`:'(file upload)');
-  const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploaded:undefined,_ts:Date.now()/1000};
+  const displayText=text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
+  const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000};
   S.toolCalls=[];  // clear tool calls from previous turn
   clearLiveToolCards();  // clear any leftover live cards from last turn
   S.messages.push(userMsg);renderMessages();appendThinking();setBusy(true);
-  INFLIGHT[activeSid]={messages:[...S.messages],uploaded,toolCalls:[]};
+  INFLIGHT[activeSid]={messages:[...S.messages],uploaded:uploadedNames,toolCalls:[]};
   if(typeof saveInflightState==='function'){
-    saveInflightState(activeSid,{streamId:null,messages:INFLIGHT[activeSid].messages,uploaded,toolCalls:[]});
+    saveInflightState(activeSid,{streamId:null,messages:INFLIGHT[activeSid].messages,uploaded:uploadedNames,toolCalls:[]});
   }
   startApprovalPolling(activeSid);
   startClarifyPolling(activeSid);
@@ -100,7 +102,7 @@ async function send(){
     const startData=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
       session_id:activeSid,message:msgText,
       model:S.session.model||$('modelSelect').value,workspace:S.session.workspace,
-      attachments:uploaded.length?uploaded:undefined
+      attachments:uploaded.length?uploadedNames:undefined
     })});
     if(startData.effective_model && S.session){
       S.session.model=startData.effective_model;
@@ -717,7 +719,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         if(uploaded.length){
           const lastUser=[...S.messages].reverse().find(m=>m.role==='user');
-          if(lastUser)lastUser.attachments=uploaded;
+          if(lastUser)lastUser.attachments=uploadedNames;
         }
         clearLiveToolCards();
         S.busy=false;

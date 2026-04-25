@@ -2790,7 +2790,7 @@ async function uploadPendingFiles(){
       if(!res.ok){const err=await res.text();throw new Error(err);}
       const data=await res.json();
       if(data.error)throw new Error(data.error);
-      names.push(data.filename);
+      names.push({name: data.filename, path: data.path});
     }catch(e){failures++;setStatus(`\u274c ${t('upload_failed')}${f.name} \u2014 ${e.message}`);}
     bar.style.width=`${Math.round((i+1)/total*100)}%`;
   }
