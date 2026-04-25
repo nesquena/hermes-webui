@@ -94,6 +94,43 @@ class TestProviderCatalog:
         assert "gemini" in _SUPPORTED_PROVIDER_SETUPS
         assert "google" not in _SUPPORTED_PROVIDER_SETUPS
 
+    def test_gemini_model_list_is_populated(self):
+        """The gemini provider's `models` list must be non-empty.
+
+        Regression: api/config.py:_PROVIDER_MODELS uses key "google" (not
+        "gemini") for the model catalog. If the wizard does
+        _PROVIDER_MODELS.get("gemini", []) it gets an empty list and the
+        provider dropdown has no model options. The provider catalog must
+        look up the right key.
+        """
+        gemini = _SUPPORTED_PROVIDER_SETUPS["gemini"]
+        assert len(gemini["models"]) > 0, (
+            "gemini provider must surface a non-empty model list — check the "
+            "_PROVIDER_MODELS lookup key (catalog uses 'google', not 'gemini')"
+        )
+
+    def test_specialized_default_models_match_catalog(self):
+        """default_model values for specialized providers must reference real
+        models in the agent's catalog (or be the latest known version).
+
+        Regression: previously had `gemini-2.5-pro-preview` (agent catalog has
+        3.1) and `grok-3` (agent catalog has 4.20). Stale defaults landed users
+        on non-existent models that produced 404s on first chat.
+        """
+        gemini_default = _SUPPORTED_PROVIDER_SETUPS["gemini"]["default_model"]
+        assert gemini_default.startswith("gemini-3."), (
+            f"gemini default_model={gemini_default!r} is stale — agent catalog has 3.1 family"
+        )
+        xai_default = _SUPPORTED_PROVIDER_SETUPS["x-ai"]["default_model"]
+        assert xai_default.startswith("grok-4"), (
+            f"x-ai default_model={xai_default!r} is stale — agent catalog has 4.20 family"
+        )
+        deepseek_default = _SUPPORTED_PROVIDER_SETUPS["deepseek"]["default_model"]
+        # deepseek-chat (rolling) or deepseek-chat-v3-0324 (pinned) both valid
+        assert deepseek_default.startswith("deepseek-"), (
+            f"deepseek default_model={deepseek_default!r} must start with 'deepseek-'"
+        )
+
 
 class TestProviderCategoryOrder:
     """Verify category ordering."""

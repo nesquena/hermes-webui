@@ -89,16 +89,19 @@ _SUPPORTED_PROVIDER_SETUPS = {
     "gemini": {
         "label": "Google Gemini",
         "env_var": "GOOGLE_API_KEY",
-        "default_model": "gemini-2.5-pro-preview",
+        "default_model": "gemini-3.1-pro-preview",
         "default_base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
         "requires_base_url": False,
-        "models": list(_PROVIDER_MODELS.get("gemini", [])),
+        # _PROVIDER_MODELS in api/config.py is keyed under "google" even though
+        # the agent's alias map normalizes "google" → "gemini".  Use the catalog
+        # key here so the wizard surfaces the actual model list.
+        "models": list(_PROVIDER_MODELS.get("google", [])),
         "category": "specialized",
     },
     "deepseek": {
         "label": "DeepSeek",
         "env_var": "DEEPSEEK_API_KEY",
-        "default_model": "deepseek-chat",
+        "default_model": "deepseek-chat-v3-0324",
         "default_base_url": "https://api.deepseek.com/v1",
         "requires_base_url": False,
         "models": list(_PROVIDER_MODELS.get("deepseek", [])),
@@ -110,16 +113,19 @@ _SUPPORTED_PROVIDER_SETUPS = {
         "default_model": "mistral-large-latest",
         "default_base_url": "https://api.mistral.ai/v1",
         "requires_base_url": False,
+        # No catalog entry for mistralai today — wizard shows a free-text input.
         "models": list(_PROVIDER_MODELS.get("mistralai", [])),
         "category": "specialized",
     },
     "x-ai": {
         "label": "xAI (Grok)",
         "env_var": "XAI_API_KEY",
-        "default_model": "grok-3",
+        "default_model": "grok-4.20",
         "default_base_url": "https://api.x.ai/v1",
         "requires_base_url": False,
-        "models": list(_PROVIDER_MODELS.get("x-ai", [])),
+        # Agent normalizes "x-ai" → "xai"; _PROVIDER_MODELS is also keyed "xai"
+        # when populated, so check both keys for forward-compatibility.
+        "models": list(_PROVIDER_MODELS.get("xai", []) or _PROVIDER_MODELS.get("x-ai", [])),
         "category": "specialized",
     },
 }
