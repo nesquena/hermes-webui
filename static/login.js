@@ -21,6 +21,20 @@ document.addEventListener('DOMContentLoaded', function () {
     if (err) { err.style.display = 'none'; }
   }
 
+  // Return the ?next= redirect path if present and safe, otherwise './'
+  // Guards against open-redirect: rejects protocol-relative (//evil.com),
+  // absolute URLs, backslash variants, and control characters.
+  function _safeNextPath() {
+    try {
+      var raw = new URL(window.location.href).searchParams.get('next');
+      if (!raw) return './';
+      if (raw.charAt(0) !== '/') return './';             // must be path-absolute
+      if (raw.charAt(1) === '/' || raw.charAt(1) === '\\') return './'; // reject // and \\
+      if (/[\x00-\x1f\x7f\s]/.test(raw)) return './';  // reject control chars / whitespace
+      return raw;
+    } catch (_) { return './'; }
+  }
+
   async function doLogin(e) {
     e.preventDefault();
     var pw = input.value;
@@ -35,7 +49,7 @@ document.addEventListener('DOMContentLoaded', function () {
       var data = {};
       try { data = await res.json(); } catch (_) {}
       if (res.ok && data.ok) {
-        window.location.href = './';
+        window.location.href = _safeNextPath();
       } else {
         showErr(data.error || invalidPw);
       }

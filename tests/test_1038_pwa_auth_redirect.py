@@ -69,3 +69,38 @@ class TestPWAAuthRedirect:
         src = _ui_js()
         assert "_redirectIfUnauth(res)" in src, \
             "upload fetch must call _redirectIfUnauth"
+
+
+class TestLoginJsSafeNextPath:
+    """login.js _safeNextPath() must honor ?next= but reject open-redirect payloads."""
+
+    @staticmethod
+    def _login_js():
+        return (Path(__file__).parent.parent / "static" / "login.js").read_text(encoding="utf-8")
+
+    def test_safe_next_path_function_exists(self):
+        """login.js must define _safeNextPath() to honor the ?next= redirect."""
+        assert "_safeNextPath" in self._login_js(), (
+            "login.js must define _safeNextPath() to use the ?next= redirect after login"
+        )
+
+    def test_login_uses_safe_next_path(self):
+        """doLogin success handler must redirect to _safeNextPath(), not hardcoded './'."""
+        src = self._login_js()
+        assert "_safeNextPath()" in src, (
+            "doLogin must call _safeNextPath() instead of hardcoding './'"
+        )
+
+    def test_safe_next_path_rejects_protocol_relative(self):
+        """_safeNextPath guard must reject '//' prefix (protocol-relative open-redirect)."""
+        src = self._login_js()
+        assert "charAt(1) === '/'" in src or "startsWith('//')" in src, (
+            "_safeNextPath must reject protocol-relative paths like //evil.com"
+        )
+
+    def test_safe_next_path_rejects_non_path_absolute(self):
+        """_safeNextPath guard must require path starts with '/'."""
+        src = self._login_js()
+        assert "charAt(0) !== '/'" in src or "startsWith('/')" in src, (
+            "_safeNextPath must reject non-path-absolute inputs (e.g. 'http://...')"
+        )
