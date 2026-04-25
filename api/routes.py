@@ -1224,6 +1224,9 @@ def handle_post(handler, parsed) -> bool:
         # Delete from WebUI session store
         with LOCK:
             SESSIONS.pop(sid, None)
+        # Evict cached agent so turn count doesn't leak into a recycled session
+        from api.config import _evict_session_agent
+        _evict_session_agent(sid)
         try:
             p = (SESSION_DIR / f"{sid}.json").resolve()
             p.relative_to(SESSION_DIR.resolve())
@@ -1264,6 +1267,9 @@ def handle_post(handler, parsed) -> bool:
             s.tool_calls = []
             s.title = "Untitled"
             s.save()
+            # Evict cached agent — cleared session is a fresh conversation
+            from api.config import _evict_session_agent
+            _evict_session_agent(body["session_id"])
         return j(handler, {"ok": True, "session": s.compact()})
 
     if parsed.path == "/api/session/truncate":
