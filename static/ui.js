@@ -681,6 +681,64 @@ function _sanitizeThinkingDisplayText(text){
 
 function renderMd(raw){
   let s=(raw||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+  // ── Blockquote pre-pass (must run BEFORE every other markdown pass) ────────
+  // Group consecutive >-prefixed lines, strip the > prefix from each line,
+  // recursively render the stripped content with the full pipeline, and
+  // replace the group with a stash token. This is the only way fenced code,
+  // headings, hr, and ordered lists inside a blockquote can render correctly:
+  // the per-line passes downstream don't know about > prefixes, and by the
+  // time the blockquote handler used to run those passes had already mangled
+  // the >-prefixed lines.
+  //
+  // Walks lines (instead of using a single regex) so >-prefixed lines that
+  // sit inside a non-blockquote fenced block (e.g. a shell prompt in a
+  // ```bash``` example) are not miscaptured as a blockquote.
+  const _bq_stash=[];
+  s=(function _applyBlockquotes(input){
+    const lines=input.split('\n');
+    const out=[];
+    let inFence=false;     // inside a non-blockquote ```...``` fence
+    let bqStart=-1;
+    const flush=(end)=>{
+      if(bqStart<0) return;
+      // Strip "> " prefix (and bare ">" → empty) from each line
+      const stripped=lines.slice(bqStart,end).map(l=>l.replace(/^> ?/,'')).join('\n');
+      // Recursive call: full pipeline on stripped content. Handles fenced
+      // code, headings, hr, ordered/unordered lists, nested blockquotes
+      // (>>) — anything that renderMd handles at the top level.
+      const rendered=renderMd(stripped);
+      _bq_stash.push('<blockquote>'+rendered+'</blockquote>');
+      // Surround the token with blank lines so the paragraph splitter
+      // isolates it as its own chunk (otherwise the token gets wrapped
+      // in <p>...<br> with adjacent text, producing invalid HTML).
+      out.push('');
+      out.push('\x00Q'+(_bq_stash.length-1)+'\x00');
+      out.push('');
+      bqStart=-1;
+    };
+    for(let i=0;i<lines.length;i++){
+      const line=lines[i];
+      if(inFence){
+        out.push(line);
+        if(/^```/.test(line)) inFence=false;
+        continue;
+      }
+      if(/^```/.test(line)){
+        flush(i);
+        out.push(line);
+        inFence=true;
+        continue;
+      }
+      if(/^>/.test(line)){
+        if(bqStart<0) bqStart=i;
+      } else {
+        flush(i);
+        out.push(line);
+      }
+    }
+    flush(lines.length);
+    return out.join('\n');
+  })(s);
   // ── MEDIA: token stash (must run first, before any other processing) ───────
   // Detect MEDIA:<path-or-url> tokens emitted by the agent (e.g. screenshots,
   // generated images) and replace them with inline <img> or download links.
@@ -781,43 +839,8 @@ function renderMd(raw){
   s=s.replace(/\x00O(\d+)\x00/g,(_,i)=>_ob_stash[+i]);
   s=s.replace(/^### (.+)$/gm,(_,t)=>`<h3>${inlineMd(t)}</h3>`).replace(/^## (.+)$/gm,(_,t)=>`<h2>${inlineMd(t)}</h2>`).replace(/^# (.+)$/gm,(_,t)=>`<h1>${inlineMd(t)}</h1>`);
   s=s.replace(/^---+$/gm,'<hr>');
-  // Group consecutive > lines into one <blockquote>.
-  // Handles: blank continuation lines (> alone), nested blockquotes (>>),
-  // lists inside blockquotes (> - item), and inline markdown in quoted text.
-  function _applyBlockquotes(src){
-    return src.replace(/((?:^>[^\n]*(?:\n|$))+)/gm,block=>{
-      const lines=block.split('\n');
-      // Drop trailing bare '>' artifact
-      while(lines.length&&(lines[lines.length-1].trim()==='>'||lines[lines.length-1]===''))
-        {if(lines[lines.length-1].trim()==='>'){lines.pop();break;}lines.pop();}
-      const stripped=lines.map(l=>l.replace(/^>[ \t]?/,''));
-      const innerRaw=stripped.join('\n');
-      let inner;
-      if(/^>/m.test(innerRaw)){
-        // Nested blockquote: recurse so >> → <blockquote><blockquote>
-        inner=_applyBlockquotes(innerRaw);
-      } else if(/(^(?:  )?[-*+] .+)/m.test(innerRaw)){
-        // List inside blockquote: run list pass on stripped inner content
-        inner=innerRaw.replace(/((?:^(?:  )?[-*+] .+\n?)+)/gm,lb=>{
-          const ll=lb.trimEnd().split('\n');let h='<ul>';
-          for(const li of ll){
-            const txt=li.replace(/^ {0,4}[-*+] /,'');
-            let ih;
-            if(/^\[x\] /i.test(txt)) ih='<span class="task-done">✅</span> '+inlineMd(txt.slice(4));
-            else if(/^\[ \] /.test(txt)) ih='<span class="task-todo">☐</span> '+inlineMd(txt.slice(4));
-            else ih=inlineMd(txt);
-            h+=`<li>${ih}</li>`;
-          }
-          return h+'</ul>';
-        });
-      } else {
-        // Plain lines: blank line → <br>, text → inlineMd
-        inner=stripped.map(l=>l.trim()===''?'<br>':inlineMd(l)).join('\n');
-      }
-      return `<blockquote>${inner}</blockquote>`;
-    });
-  }
-  s=_applyBlockquotes(s);
+  // (Blockquotes are handled by the pre-pass at the top of renderMd, before
+  // fence_stash. The per-line passes below never see > prefixes.)
   // B8: improved list handling supporting up to 2 levels of indentation
   s=s.replace(/((?:^(?:  )?[-*+] .+\n?)+)/gm,block=>{
     const lines=block.trimEnd().split('\n');
@@ -911,7 +934,7 @@ function renderMd(raw){
     return '\x00E'+(_pre_stash.length-1)+'\x00';
   });
   const parts=s.split(/\n{2,}/);
-  s=parts.map(p=>{p=p.trim();if(!p)return '';if(/^<(h[1-6]|ul|ol|pre|hr|blockquote)|^\x00E/.test(p))return p;return `<p>${p.replace(/\n/g,'<br>')}</p>`;}).join('\n');
+  s=parts.map(p=>{p=p.trim();if(!p)return '';if(/^<(h[1-6]|ul|ol|pre|hr|blockquote)|^\x00[EQ]/.test(p))return p;return `<p>${p.replace(/\n/g,'<br>')}</p>`;}).join('\n');
   s=s.replace(/\x00E(\d+)\x00/g,(_,i)=>_pre_stash[+i]);
   // ── Restore MEDIA stash → inline images or download links ─────────────────
   s=s.replace(/\x00D(\d+)\x00/g,(_,i)=>{
@@ -945,6 +968,10 @@ function renderMd(raw){
     return `<a class="msg-media-link" href="${esc(apiUrl+'&download=1')}" download="${fname}">📎 ${fname}</a>`;
   });
   // ── End MEDIA restore ──────────────────────────────────────────────────────
+  // Restore blockquote stash. Done last so the inner HTML (already produced
+  // by the recursive renderMd in the pre-pass) is dropped into the final
+  // string verbatim — no further passes can mangle it.
+  s=s.replace(/\x00Q(\d+)\x00/g,(_,i)=>_bq_stash[+i]);
   return s;
 }
 
