@@ -208,10 +208,6 @@
   .layout{display:flex;width:100%;flex:1 1 auto;min-height:0;}
   .app-titlebar{display:flex;align-items:center;justify-content:space-between;height:38px;flex-shrink:0;background:var(--sidebar);border-bottom:1px solid var(--border);padding:0 12px;padding-top:env(safe-area-inset-top,0);padding-left:max(12px,env(safe-area-inset-left,0));padding-right:max(12px,env(safe-area-inset-right,0));box-sizing:content-box;font-size:12px;color:var(--muted);user-select:none;-webkit-app-region:drag;position:relative;z-index:20;}
   .app-titlebar-inner{display:flex;align-items:center;gap:8px;min-width:0;max-width:100%;flex:1 1 auto;justify-content:space-between;}
-  .tps-chip{
-    font-size:11px;font-family:ui-monospace,'SF Mono',monospace;color:var(--muted);
-    white-space:nowrap;letter-spacing:.02em;flex-shrink:0;
-  }
   .app-titlebar-icon{display:inline-flex;align-items:center;color:var(--accent);}
   .app-titlebar-title{font-size:12px;font-weight:600;color:var(--text);letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:60vw;}
   .app-titlebar-sub{font-size:10px;color:var(--muted);background:var(--hover-bg);padding:2px 7px;border-radius:4px;font-family:'SF Mono',ui-monospace,monospace;white-space:nowrap;flex-shrink:0;}
@@ -255,47 +251,42 @@
   .session-meta{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .session-item.active .session-meta{color:var(--accent-text);opacity:.8;}
   .session-state-indicator{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:10px;height:10px;color:var(--accent);visibility:hidden;}
-  .session-attention-indicator{position:absolute;right:6px;top:50%;transform:translateY(-50%);width:26px;height:26px;z-index:1;pointer-events:none;transition:opacity .15s ease,visibility .15s ease;}
-  .session-item:hover .session-attention-indicator,.session-item:focus-within .session-attention-indicator,.session-item.menu-open .session-attention-indicator{opacity:0;visibility:hidden;}
+  .session-attention-indicator{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:auto;height:auto;pointer-events:none;}
   .session-state-indicator.is-streaming,.session-state-indicator.is-unread{visibility:visible;}
   .session-state-indicator::before{content:"";display:block;flex-shrink:0;}
+  .session-state-indicator.is-streaming{
+    width:28px;height:28px;
+    font-size:10px;font-family:ui-monospace,'SF Mono',monospace;
+    color:var(--accent);letter-spacing:-.02em;line-height:1;white-space:nowrap;
+    justify-content:center;align-items:center;
+  }
   .session-state-indicator.is-streaming::before{
-    width:100%;
-    height:100%;
-    border:2px solid transparent;
-    border-top-color:currentColor;
-    border-right-color:currentColor;
+    content:"";display:block;position:absolute;
+    width:100%;height:100%;
     border-radius:50%;
+    border:2px solid rgba(96,165,250,.35);
+    border-top-color:rgba(96,165,250,.95);
+    border-right-color:rgba(96,165,250,.6);
     animation:spin 1s linear infinite;
   }
-  .session-state-indicator.is-unread::before{
-    width:8px;
-    height:8px;
-    border-radius:50%;
-    background:currentColor;
-  }
-  .session-attention-indicator.is-streaming::before{
-    width:10px;
-    height:10px;
-  }
-  .session-attention-indicator.is-unread::before{
-    width:8px;
-    height:8px;
+  .session-attention-indicator.is-streaming::before{width:inherit;height:inherit;}
+  .session-time.is-unread::before{
+    content:"";display:inline-block;flex-shrink:0;
+    width:6px;height:6px;border-radius:50%;background:var(--accent);
+    vertical-align:middle;
   }
   /* Timestamp lives in the flex flow of .session-title-row (not absolute) so
      the title's flex:1 bound stops at the timestamp's left edge and stops
      running underneath it. margin-left:auto pushes it to the row's right
      edge, keeping the visual position the user already expects. */
-  .session-time{
-    display:inline-flex;
-    margin-left:auto;
-    color:var(--muted);
-    font-size:10px;
-    white-space:nowrap;
-    flex-shrink:0;
-  }
+  .session-time-wrapper{position:absolute;right:6px;top:50%;transform:translateY(-50%);display:inline-flex;align-items:center;flex-shrink:0;gap:4px;z-index:2;}
+  .session-time{display:inline-flex;color:var(--muted);font-size:10px;white-space:nowrap;flex-shrink:0;}
   .session-time.is-hidden{display:none;}
   .session-item:hover .session-time,.session-item:focus-within .session-time,.session-item.menu-open .session-time{display:none;}
+  .session-time-wrapper.is-unread::before{
+    content:"";display:inline-block;flex-shrink:0;
+    width:6px;height:6px;border-radius:50%;background:var(--accent);margin-right:4px;
+  }
   /* ── Session action trigger + dropdown ── */
   .session-actions{position:absolute;right:6px;top:50%;transform:translateY(-50%);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .15s ease;}
   .session-item:hover .session-actions,.session-item:focus-within .session-actions,.session-item.menu-open .session-actions{opacity:1;pointer-events:auto;}
