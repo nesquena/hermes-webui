@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## v0.50.214 — 2026-04-26
+
+### Added
+- **Busy input mode setting** — new `Settings → Preferences → Busy input mode` dropdown with three options: `Queue` (default, preserves existing behavior), `Interrupt` (cancel the current stream and re-send immediately), `Steer` (placeholder for future mid-stream injection, currently falls back to Interrupt with a toast). (`api/config.py`, `static/messages.js`, `static/boot.js`, `static/panels.js`, `static/index.html`, `static/i18n.js`) Closes #720 [#1062 @bergeouss]
+- **`/queue`, `/interrupt`, `/steer` slash commands** — per-message overrides for the busy mode regardless of the current setting. `/queue <msg>` enqueues explicitly; `/interrupt <msg>` cancels the current turn and re-sends; `/steer <msg>` same today with a future-upgrade toast. (`static/commands.js`) [#1062 @bergeouss]
+
+### Fixed
+- **`/queue` command double-bubble** — missing `noEcho:true` caused the raw slash text to be echoed as a user bubble, then the drained message appeared again as a second bubble. (`static/commands.js`)
+- **Staged-file duplication via slash commands** — `cmdQueue`, `cmdInterrupt`, and `cmdSteer` captured `S.pendingFiles` but never cleared the tray, so staged files were re-attached on the next send. Added `S.pendingFiles=[];renderTray()` after enqueue in all three handlers. (`static/commands.js`)
+
 ## v0.50.213 — 2026-04-26
 
 ### Fixed
