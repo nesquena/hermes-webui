@@ -17,9 +17,14 @@ const COMMANDS=[
   {name:'personality', desc:t('cmd_personality'), fn:cmdPersonality, arg:'name', subArgs:'personalities'},
   {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'query'},
   {name:'stop',      desc:t('cmd_stop'),     fn:cmdStop,      noEcho:true},
+  {name:'queue',     desc:t('cmd_queue'),    fn:cmdQueue,     arg:'message', noEcho:true},
+  {name:'interrupt', desc:t('cmd_interrupt'), fn:cmdInterrupt, arg:'message', noEcho:true},
+  {name:'steer',     desc:t('cmd_steer'),    fn:cmdSteer,     arg:'message', noEcho:true},
   {name:'title',     desc:t('cmd_title'),    fn:cmdTitle,    arg:'[title]'},
   {name:'retry',     desc:t('cmd_retry'),    fn:cmdRetry,     noEcho:true},
   {name:'undo',      desc:t('cmd_undo'),     fn:cmdUndo,      noEcho:true},
+  {name:'btw',       desc:t('cmd_btw'),      fn:cmdBtw,       arg:'question', noEcho:true},
+  {name:'background',desc:t('cmd_background'),fn:cmdBackground,arg:'prompt',  noEcho:true},
   {name:'status',    desc:t('cmd_status'),   fn:cmdStatus},
   {name:'voice',     desc:t('cmd_voice'),    fn:cmdVoice,     noEcho:true},
   {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|none|minimal|low|medium|high|xhigh', subArgs:['show','hide','none','minimal','low','medium','high','xhigh'], noEcho:true},
@@ -529,6 +534,127 @@ async function cmdStop(){
   if(typeof cancelStream==='function'){await cancelStream();showToast(t('stream_stopped'));}
   else showToast(t('cancel_unavailable'));
 }
+
+// ── Busy-input mode commands ──────────────────────────────────────────────
+// These commands let users override the default busy_input_mode setting for a
+// specific message.  They are only meaningful while the agent is running.
+
+/**
+ * /queue <message> — Explicitly queue a message for the next turn.
+ * Works regardless of the busy_input_mode setting.
+ */
+async function cmdQueue(args){
+  const msg=(args||'').trim();
+  if(!msg){showToast(t('cmd_queue_no_msg'));return;}
+  // If nothing is running, /queue <msg> just sends like a normal message
+  if(!S.busy){
+    const inp=$('msg');
+    if(inp){inp.value=msg;}
+    if(typeof send==='function'){await send();}
+    return;
+  }
+  if(!S.session){showToast(t('no_active_session'));return;}
+  queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
+  updateQueueBadge(S.session.session_id);
+  S.pendingFiles=[];renderTray();
+  showToast(t('cmd_queue_confirm'),2000);
+}
+
+/**
+ * /interrupt <message> — Cancel the current turn and send a new message.
+ * Calls cancelStream() then queues the message so the drain picks it up.
+ */
+async function cmdInterrupt(args){
+  const msg=(args||'').trim();
+  if(!msg){showToast(t('cmd_interrupt_no_msg'));return;}
+  // If nothing is running, /interrupt <msg> just sends like a normal message
+  if(!S.busy||!S.activeStreamId){
+    const inp=$('msg');
+    if(inp){inp.value=msg;}
+    if(typeof send==='function'){await send();}
+    return;
+  }
+  if(!S.session){showToast(t('no_active_session'));return;}
+  // Queue the message first (before cancel sets busy=false and drains)
+  queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
+  updateQueueBadge(S.session.session_id);
+  S.pendingFiles=[];renderTray();
+  // Cancel the active stream; setBusy(false) will drain the queue
+  if(typeof cancelStream==='function'){await cancelStream();}
+  showToast(t('cmd_interrupt_confirm'),2000);
+}
+
+/**
+ * /steer <message> — Inject a steering hint mid-task without interrupting.
+ *
+ * Calls POST /api/chat/steer which looks up the cached AIAgent for this
+ * session and calls agent.steer(text). The agent's run loop appends the
+ * steer text to the next tool-result message so the model sees it on its
+ * next iteration — same pathway as the CLI's /steer command.
+ *
+ * Falls back to interrupt mode when the agent isn't running, isn't cached,
+ * or doesn't support steer (older hermes-agent versions).
+ */
+async function cmdSteer(args){
+  const msg=(args||'').trim();
+  if(!msg){showToast(t('cmd_steer_no_msg'));return;}
+  // If nothing is running, /steer <msg> just sends like a normal message
+  if(!S.busy||!S.activeStreamId){
+    const inp=$('msg');
+    if(inp){inp.value=msg;}
+    if(typeof send==='function'){await send();}
+    return;
+  }
+  if(!S.session){showToast(t('no_active_session'));return;}
+  await _trySteer(msg, /*explicitSteer=*/true);
+}
+
+/**
+ * Shared implementation for /steer and the busy_input_mode='steer' path.
+ *
+ * Tries the real steer endpoint first. On any non-accept response (no cached
+ * agent, agent lacks steer, stream dead, etc.) falls back to interrupt+queue:
+ * queues the message and cancels the stream so the drain re-sends it.
+ *
+ * @param {string} msg - The steer text.
+ * @param {boolean} explicitSteer - True if the user explicitly invoked /steer
+ *   (vs the busy-mode auto-fallback). Affects toast wording only.
+ */
+async function _trySteer(msg, explicitSteer){
+  let result=null;
+  try{
+    result=await api('/api/chat/steer',{
+      method:'POST',
+      body:JSON.stringify({session_id:S.session.session_id,text:msg}),
+    });
+  }catch(e){
+    // Network or server error — fall back to interrupt
+    result={accepted:false, fallback:'network_error'};
+  }
+  if(result&&result.accepted){
+    showToast(t('cmd_steer_delivered'),2500);
+    return;
+  }
+  // Fall back to interrupt: queue the message + cancel the stream so the
+  // drain in setBusy(false) re-sends it as a fresh turn.
+  queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
+  updateQueueBadge(S.session.session_id);
+  S.pendingFiles=[];renderTray();
+  if(typeof cancelStream==='function'){await cancelStream();}
+  // Toast wording differs based on why we're falling back so the user
+  // understands what just happened.
+  const reason=(result&&result.fallback)||'unknown';
+  if(explicitSteer){
+    showToast(t('cmd_steer_fallback'),2500);
+  } else if(reason==='no_cached_agent'||reason==='not_running'||reason==='stream_dead'){
+    // Busy mode hit the steer path before the agent was ready —
+    // interrupt is the natural fallback, no need to call out steer.
+    showToast(t('busy_interrupt_confirm'),2000);
+  } else {
+    showToast(t('busy_steer_fallback'),2500);
+  }
+}
+
 async function cmdTitle(args){
   if(!S.session){showToast(t('no_active_session'));return;}
   const name=(args||'').trim();
@@ -572,6 +698,36 @@ async function cmdUndo(){
     if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();renderMessages();}
     showToast(`↩ ${t('undid_n_messages')} ${r.removed_count} ${t('undid_messages_suffix')}`);
   }catch(e){showToast(t('undo_failed')+e.message);}
+}
+async function undoLastExchange(){await cmdUndo();}
+async function cmdBtw(args){
+  if(!S.session){showToast(t('no_active_session'));return;}
+  const question=(args||'').trim();
+  if(!question){showToast(t('cmd_btw_usage'));return;}
+  showToast(t('btw_asking'));
+  const activeSid=S.session.session_id;
+  try{
+    const r=await api('/api/btw',{method:'POST',body:JSON.stringify({session_id:activeSid,question})});
+    if(r&&r.error){showToast(r.error);return;}
+    // Connect to the ephemeral SSE stream
+    const streamId=r.stream_id;
+    const parentSid=r.parent_session_id;
+    if(typeof attachBtwStream==='function') attachBtwStream(parentSid,streamId,question);
+  }catch(e){showToast(t('btw_failed')+e.message);}
+}
+async function cmdBackground(args){
+  if(!S.session){showToast(t('no_active_session'));return;}
+  const prompt=(args||'').trim();
+  if(!prompt){showToast(t('cmd_background_usage'));return;}
+  showToast(t('bg_running'));
+  const activeSid=S.session.session_id;
+  try{
+    const r=await api('/api/background',{method:'POST',body:JSON.stringify({session_id:activeSid,prompt})});
+    if(r&&r.error){showToast(r.error);return;}
+    // Show background badge and start polling
+    if(typeof showBackgroundBadge==='function') showBackgroundBadge(r.task_id);
+    if(typeof startBackgroundPolling==='function') startBackgroundPolling(activeSid,r.task_id,prompt);
+  }catch(e){showToast(t('bg_failed')+e.message);}
 }
 async function cmdStatus(){
   if(!S.session){showToast(t('no_active_session'));return;}
@@ -622,7 +778,8 @@ function cmdReasoning(args){
     api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:arg})})
       .then(function(st){
         const eff=(st && st.reasoning_effort)||arg;
-        showToast(BRAIN+' Reasoning effort set to '+eff+' (saved; applies to next turn)');
+        showToast(BRAIN+' Reasoning effort: '+eff+' (saved; applies to next turn)');
+        if(typeof _applyReasoningChip==='function') _applyReasoningChip(eff);
       })
       .catch(function(e){
         showToast(BRAIN+' Failed to set effort: '+(e && e.message ? e.message : arg));

@@ -433,7 +433,7 @@ def test_done_handler_sets_busy_false_before_renderMessages(cleanup_test_session
     if done_idx < 0:
         done_idx = src.find("es.addEventListener('done'")
     assert done_idx >= 0
-    done_block = src[done_idx:done_idx+2900]
+    done_block = src[done_idx:done_idx+3300]
     # S.busy=false must appear before renderMessages() within the done handler
     busy_pos = done_block.find("S.busy=false;")
     render_pos = done_block.find("renderMessages()")
@@ -501,8 +501,9 @@ def test_session_scoped_message_queue_frontend_wiring(cleanup_test_sessions):
     assert "const SESSION_QUEUES" in ui_src
     assert "function queueSessionMessage" in ui_src
     assert "function shiftQueuedSessionMessage" in ui_src
-    assert "const sid=S.session&&S.session.session_id;" in ui_src
-    assert "const next=sid?shiftQueuedSessionMessage(sid):null;" in ui_src
+    # _queueDrainSid tracks which session's queue to drain even after session switches
+    assert "_queueDrainSid" in ui_src
+    assert "shiftQueuedSessionMessage(sid)" in ui_src
     assert "queueSessionMessage(S.session.session_id" in messages_src
     assert "updateQueueBadge(S.session.session_id);" in messages_src
     assert "updateQueueBadge(sid);" in sessions_src
@@ -531,7 +532,8 @@ def test_reload_path_restores_pending_message_and_reattaches_live_stream(cleanup
     assert 'pending_user_message' in ui_src
     assert 'function attachLiveStream' in messages_src
     assert 'const pendingMsg=typeof getPendingSessionMessage' in sessions_src
-    assert 'const activeStreamId=data.session.active_stream_id||null;' in sessions_src
+    assert ('const activeStreamId=data.session.active_stream_id||null;' in sessions_src or
+            'const activeStreamId=S.session.active_stream_id||null;' in sessions_src)
     assert 'attachLiveStream(sid, activeStreamId' in sessions_src
     assert 'if (S.activeStreamId && S.activeStreamId === streamId) return;' in ui_src
 

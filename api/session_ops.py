@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from api.config import LOCK
+from api.config import LOCK, _get_session_agent_lock
 from api.models import get_session, SESSIONS
 
 logger = logging.getLogger(__name__)
@@ -27,38 +27,43 @@ def retry_last(session_id: str) -> dict[str, Any]:
         KeyError: session not found
         ValueError: no user message in transcript
     """
-    # get_session() and Session.save() both acquire the module-level LOCK
-    # internally (the latter via _write_session_index()), and LOCK is a
-    # non-reentrant threading.Lock — so they MUST be called outside our
-    # own `with LOCK:` block to avoid self-deadlocking.
-    #
-    # The race we close is the read-modify-write of s.messages: two
-    # concurrent /api/session/retry calls could otherwise both compute the
-    # same last_user_idx from the same history and double-truncate. We
-    # serialize just the in-memory mutation; persistence happens outside
-    # the lock and is naturally last-write-wins on a consistent state.
-    #
-    # Stale-object guard: on a cache miss, two concurrent get_session()
-    # calls can each load and cache a *different* Session instance for the
-    # same session_id (the second store_clobbers the first). Re-bind to
-    # the canonical cached instance inside the lock so the mutation lands
-    # on the object the next reader will see, not a stale parallel copy.
-    s = get_session(session_id)  # raises KeyError if missing
-    with LOCK:
-        s = SESSIONS.get(session_id, s)
-        history = s.messages or []
-        last_user_idx = None
-        for i in range(len(history) - 1, -1, -1):
-            if history[i].get('role') == 'user':
-                last_user_idx = i
-                break
-        if last_user_idx is None:
-            raise ValueError('No previous message to retry.')
+    # Acquire the per-session agent lock as the outermost lock so that the
+    # read-modify-write of s.messages is serialised with the periodic
+    # checkpoint thread, cancel_stream, and all other session writers.
+    # Lock ordering: _agent_lock → LOCK → _write_session_index (LOCK).
+    with _get_session_agent_lock(session_id):
+        # get_session() and Session.save() both acquire the module-level LOCK
+        # internally (the latter via _write_session_index()), and LOCK is a
+        # non-reentrant threading.Lock — so they MUST be called outside our
+        # own `with LOCK:` block to avoid self-deadlocking.
+        #
+        # The race we close is the read-modify-write of s.messages: two
+        # concurrent /api/session/retry calls could otherwise both compute the
+        # same last_user_idx from the same history and double-truncate. We
+        # serialize just the in-memory mutation; persistence happens inside
+        # the per-session lock so the checkpoint thread cannot race us.
+        #
+        # Stale-object guard: on a cache miss, two concurrent get_session()
+        # calls can each load and cache a *different* Session instance for the
+        # same session_id (the second store clobbers the first). Re-bind to
+        # the canonical cached instance inside the lock so the mutation lands
+        # on the object the next reader will see, not a stale parallel copy.
+        s = get_session(session_id)  # raises KeyError if missing
+        with LOCK:
+            s = SESSIONS.get(session_id, s)
+            history = s.messages or []
+            last_user_idx = None
+            for i in range(len(history) - 1, -1, -1):
+                if history[i].get('role') == 'user':
+                    last_user_idx = i
+                    break
+            if last_user_idx is None:
+                raise ValueError('No previous message to retry.')
 
-        last_user_text = _extract_text(history[last_user_idx].get('content', ''))
-        removed_count = len(history) - last_user_idx
-        s.messages = history[:last_user_idx]
-    s.save()
+            last_user_text = _extract_text(history[last_user_idx].get('content', ''))
+            removed_count = len(history) - last_user_idx
+            s.messages = history[:last_user_idx]
+        s.save()
     return {'last_user_text': last_user_text, 'removed_count': removed_count}
 
 
@@ -72,23 +77,28 @@ def undo_last(session_id: str) -> dict[str, Any]:
         KeyError: session not found
         ValueError: no user message in transcript
     """
-    s = get_session(session_id)  # acquires LOCK transiently
-    with LOCK:
-        # Stale-object guard — see retry_last for the rationale.
-        s = SESSIONS.get(session_id, s)
-        history = s.messages or []
-        last_user_idx = None
-        for i in range(len(history) - 1, -1, -1):
-            if history[i].get('role') == 'user':
-                last_user_idx = i
-                break
-        if last_user_idx is None:
-            raise ValueError('Nothing to undo.')
+    # Acquire the per-session agent lock as the outermost lock so that the
+    # read-modify-write of s.messages is serialised with the periodic
+    # checkpoint thread, cancel_stream, and all other session writers.
+    # Lock ordering: _agent_lock → LOCK → _write_session_index (LOCK).
+    with _get_session_agent_lock(session_id):
+        s = get_session(session_id)  # acquires LOCK transiently
+        with LOCK:
+            # Stale-object guard — see retry_last for the rationale.
+            s = SESSIONS.get(session_id, s)
+            history = s.messages or []
+            last_user_idx = None
+            for i in range(len(history) - 1, -1, -1):
+                if history[i].get('role') == 'user':
+                    last_user_idx = i
+                    break
+            if last_user_idx is None:
+                raise ValueError('Nothing to undo.')
 
-        removed_text = _extract_text(history[last_user_idx].get('content', ''))
-        removed_count = len(history) - last_user_idx
-        s.messages = history[:last_user_idx]
-    s.save()  # outside LOCK -- save() re-acquires LOCK via _write_session_index()
+            removed_text = _extract_text(history[last_user_idx].get('content', ''))
+            removed_count = len(history) - last_user_idx
+            s.messages = history[:last_user_idx]
+        s.save()  # outside LOCK -- save() re-acquires LOCK via _write_session_index()
     preview = (removed_text[:40] + '...') if len(removed_text) > 40 else removed_text
     return {
         'removed_count': removed_count,

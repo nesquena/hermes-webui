@@ -309,11 +309,14 @@ class TestProviderIdInGroupResponse:
 
     def test_fetch_live_models_prefers_data_provider_match(self):
         src = read("static/ui.js")
-        m = re.search(r'function _fetchLiveModels\b.*?\n\}', src, re.DOTALL)
-        assert m, "_fetchLiveModels not found"
+        # Live model optgroup matching was extracted to _addLiveModelsToSelect (#872)
+        m = re.search(r'function _addLiveModelsToSelect\b.*?\n\}', src, re.DOTALL)
+        if not m:
+            m = re.search(r'function _fetchLiveModels\b.*?\n\}', src, re.DOTALL)
+        assert m, "_addLiveModelsToSelect or _fetchLiveModels not found"
         fn = m.group(0)
         assert 'og.dataset.provider' in fn, (
-            "_fetchLiveModels must check og.dataset.provider===provider before "
+            "_addLiveModelsToSelect must check og.dataset.provider===provider before "
             "falling back to label substring match"
         )
         # The data-provider check must come before the label.includes check

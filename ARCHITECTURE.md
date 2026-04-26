@@ -1629,3 +1629,19 @@ and #rightpanelResize. On mousemove: computes delta and clamps to min/max. On mo
 saves width to localStorage. Widths restored at boot via localStorage.getItem().
 CSS: .resize-handle with position:absolute, width:5px, cursor:col-resize.
 body.resizing added during drag to suppress text selection.
+
+
+## Workspace path trust levels
+
+`api/workspace.py` has two distinct trust functions — do not collapse them:
+
+**`validate_workspace_to_add(path)`** — used by `/api/workspaces/add` (explicit user registration).
+Permissive: blocks only non-existent, non-directory, and system root paths. The user is
+consciously registering an external path (e.g. `/mnt/d/Projects` in WSL), so we trust intent.
+
+**`resolve_trusted_workspace(path)`** — used for actual file read/write operations inside
+an existing workspace. Strict: path must be under home, in the saved workspace list, or under
+`BOOT_DEFAULT_WORKSPACE`. Prevents path traversal and unauthorized file access.
+
+The distinction matters because add uses permissive validation to avoid the circular
+dependency: you cannot get a path into the saved list if you need the saved list to add it.

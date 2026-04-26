@@ -42,6 +42,8 @@ function _setWorkspacePanelMode(mode){
   const open=_workspacePanelMode!=='closed';
   document.documentElement.dataset.workspacePanel=open?'open':'closed';
   // Persist open/closed across refreshes (browse/preview → open; closed → closed)
+  // Do NOT overwrite the user's "keep open" preference — only track runtime state
+  // so that toggleWorkspacePanel(false) from the toolbar doesn't clear the setting.
   localStorage.setItem('hermes-webui-workspace-panel', open ? 'open' : 'closed');
   layout.classList.toggle('workspace-panel-collapsed',!open);
   if(_isCompactWorkspaceViewport()){
@@ -405,8 +407,7 @@ $('importFileInput').onchange=async(e)=>{
     if(res.ok&&res.session){
       await loadSession(res.session.session_id);
       await renderSessionList();
-      const overlay=$('settingsOverlay');
-      if(overlay) overlay.style.display='none';
+      if(_currentPanel==='settings') switchPanel('chat');
       showToast(t('session_imported'));
     }
   }catch(err){
@@ -524,9 +525,8 @@ document.addEventListener('keydown',async e=>{
       if(typeof skipOnboarding==='function') skipOnboarding();
       return;
     }
-    // Close settings overlay if open
-    const settingsOverlay=$('settingsOverlay');
-    if(settingsOverlay&&settingsOverlay.style.display!=='none'){_closeSettingsPanel();return;}
+    // Close settings panel if active
+    if(_currentPanel==='settings'){_closeSettingsPanel();return;}
     // Close workspace dropdown
     closeWsDropdown();
     // Clear session search
@@ -649,7 +649,10 @@ function _setResolvedTheme(isDark){
   const want=isDark
     ?'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css'
     :'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css';
-  if(link.href!==want){ link.href=want; }
+  const wantIntegrity=isDark
+    ?'sha384-wFjoQjtV1y5jVHbt0p35Ui8aV8GVpEZkyF99OXWqP/eNJDU93D3Ugxkoyh6Y2I4A'
+    :'sha384-rCCjoCPCsizaAAYVoz1Q0CmCTvnctK0JkfCSjx7IIxexTBg+uCKtFYycedUjMyA2';
+  if(link.href!==want){ link.integrity=wantIntegrity; link.href=want; }
 }
 
 function _applyTheme(name){
@@ -708,17 +711,17 @@ function _pickSkin(name){
 
 function _syncThemePicker(active){
   document.querySelectorAll('#themePickerGrid .theme-pick-btn').forEach(btn=>{
-    const sel=btn.dataset.themeVal===active;
-    btn.style.borderColor=sel?'var(--accent)':'var(--border2)';
-    btn.style.boxShadow=sel?'0 0 0 1px var(--accent-bg-strong)':'none';
+    btn.classList.toggle('active',btn.dataset.themeVal===active);
+    btn.style.borderColor='';
+    btn.style.boxShadow='';
   });
 }
 
 function _syncSkinPicker(active){
   document.querySelectorAll('#skinPickerGrid .skin-pick-btn').forEach(btn=>{
-    const sel=btn.dataset.skinVal===active;
-    btn.style.borderColor=sel?'var(--accent)':'var(--border2)';
-    btn.style.boxShadow=sel?'0 0 0 1px var(--accent-bg-strong)':'none';
+    btn.classList.toggle('active',btn.dataset.skinVal===active);
+    btn.style.borderColor='';
+    btn.style.boxShadow='';
   });
 }
 
@@ -741,9 +744,9 @@ function _pickFontSize(size){
 
 function _syncFontSizePicker(active){
   document.querySelectorAll('#fontSizePickerGrid .font-size-pick-btn').forEach(btn=>{
-    const sel=btn.dataset.fontSizeVal===(active||'default');
-    btn.style.borderColor=sel?'var(--accent)':'var(--border2)';
-    btn.style.boxShadow=sel?'0 0 0 1px var(--accent-bg-strong)':'none';
+    btn.classList.toggle('active',btn.dataset.fontSizeVal===(active||'default'));
+    btn.style.borderColor='';
+    btn.style.boxShadow='';
   });
 }
 
@@ -792,7 +795,9 @@ function applyBotName(){
     window._notificationsEnabled=!!s.notifications_enabled;
     window._showThinking=s.show_thinking!==false;
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
+    window._busyInputMode=(s.busy_input_mode||'queue');
     window._botName=s.bot_name||'Hermes';
+    if(s.default_model) window._defaultModel=s.default_model;
     // Persist default workspace so the blank new-chat page can show it
     // and workspace actions (New file/folder) work before the first session (#804).
     if(s.default_workspace) S._profileDefaultWorkspace=s.default_workspace;
@@ -817,6 +822,7 @@ function applyBotName(){
     window._notificationsEnabled=false;
     window._showThinking=true;
     window._sidebarDensity='compact';
+    window._busyInputMode='queue';
     window._botName='Hermes';
     _bootSettings={check_for_updates:false};
     if(typeof setLocale==='function'){
@@ -840,16 +846,20 @@ function applyBotName(){
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
-  // Fetch available models from server and populate dropdown dynamically
-  await populateModelDropdown();
-  // Restore last-used model preference
-  const savedModel=localStorage.getItem('hermes-webui-model');
-  if(savedModel && $('modelSelect')){
-    $('modelSelect').value=savedModel;
-    // If the value didn't take (model not in list), clear the bad pref
-    if($('modelSelect').value!==savedModel) localStorage.removeItem('hermes-webui-model');
-    else if(typeof syncModelChip==='function') syncModelChip();
-  }
+  // Fetch available models without blocking session restore. The static HTML
+  // options are enough for first paint; the dynamic provider list can settle
+  // after the saved session is visible.
+  const _modelDropdownReady=populateModelDropdown().then(()=>{
+    const savedModel=localStorage.getItem('hermes-webui-model');
+    if(savedModel && $('modelSelect')){
+      $('modelSelect').value=savedModel;
+      // If the value didn't take (model not in list), clear the bad pref
+      if($('modelSelect').value!==savedModel) localStorage.removeItem('hermes-webui-model');
+      else if(typeof syncModelChip==='function') syncModelChip();
+    }
+    if(S.session) syncTopbar();
+  }).catch(()=>{});
+  window._modelDropdownReady=_modelDropdownReady;
   // Pre-load workspace list so sidebar name is correct from first render
   await loadWorkspaceList();
   await loadOnboardingWizard();
@@ -865,9 +875,12 @@ function applyBotName(){
   if(saved){
     try{
       await loadSession(saved);
-      // Only restore the panel from localStorage when the session actually has a workspace.
-      // Without this guard, sessions without a workspace snap open then immediately closed.
-      if(S.session&&S.session.workspace&&localStorage.getItem('hermes-webui-workspace-panel')==='open'){
+      // Restore the panel from localStorage when the session has a workspace.
+      // Preference key takes priority over runtime state so that closing
+      // the panel via toolbar X doesn't suppress the "keep open" setting.
+      const panelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
+        || localStorage.getItem('hermes-webui-workspace-panel')==='open';
+      if(S.session&&S.session.workspace&&panelPref){
         _workspacePanelMode='browse';
       }
       S._bootReady=true;
@@ -888,15 +901,29 @@ function applyBotName(){
 // back-forward cache, the async boot IIFE above does NOT re-run, but the
 // DOM — including any stale value in #sessionSearch — IS restored.  A
 // prior search string would silently hide all sessions via the filter in
-// renderSessionListFromCache().  Clear the field and re-render whenever
-// the page is restored from cache (`event.persisted === true`).
+// renderSessionListFromCache().  Clear the field and re-run the full layout
+// sync whenever the page is restored from cache (`event.persisted === true`).
+// Fix #1045: also re-run topbar/workspace/panel state so the rail and layout
+// chrome aren't left in the stale bfcache snapshot.
 window.addEventListener('pageshow', (event) => {
   if (!event.persisted) return;  // fresh loads are handled by the IIFE above
   const _srch = document.getElementById('sessionSearch');
   if (_srch) _srch.value = '';
+  // Close any dropdowns/popovers that were open when the user navigated away.
+  // bfcache freezes DOM state, so a dropdown left open remains open on restore.
+  if (typeof closeModelDropdown === 'function') try { closeModelDropdown(); } catch (_) {}
+  if (typeof closeReasoningDropdown === 'function') try { closeReasoningDropdown(); } catch (_) {}
+  if (typeof closeWsDropdown === 'function') try { closeWsDropdown(); } catch (_) {}
+  if (typeof closeProfileDropdown === 'function') try { closeProfileDropdown(); } catch (_) {}
+  // Re-synchronise layout chrome that the boot IIFE sets up but bfcache
+  // doesn't re-run. Each call is guarded so missing helpers degrade silently.
+  if (typeof syncTopbar === 'function') try { syncTopbar(); } catch (_) {}
+  if (typeof syncWorkspacePanelState === 'function') try { syncWorkspacePanelState(); } catch (_) {}
   if (typeof renderSessionListFromCache === 'function') {
     try { renderSessionListFromCache(); } catch (_) {}
   }
+  // Restart the gateway SSE watcher — the persisted connection is dead after bfcache
+  if (typeof startGatewaySSE === 'function') try { startGatewaySSE(); } catch (_) {}
 });
 
 // ── Hermes hero splash — populate stats on the blank "new conversation" screen.

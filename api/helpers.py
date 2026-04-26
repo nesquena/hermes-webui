@@ -42,16 +42,26 @@ def _security_headers(handler):
     handler.send_header('Referrer-Policy', 'same-origin')
     handler.send_header(
         'Content-Security-Policy',
-        "default-src 'self'; "
-        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "default-src 'self' https://*.cloudflareaccess.com; "
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com; "
         "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
         "img-src 'self' data: https: blob:; font-src 'self' data: https://cdn.jsdelivr.net; connect-src 'self'; "
+        "manifest-src 'self' https://*.cloudflareaccess.com; "
         "base-uri 'self'; form-action 'self'"
     )
     handler.send_header(
         'Permissions-Policy',
         'camera=(), microphone=(self), geolocation=()'
     )
+
+
+def _accepts_gzip(handler) -> bool:
+    """Check if the client accepts gzip encoding."""
+    headers = getattr(handler, 'headers', None)
+    if not headers:
+        return False
+    ae = headers.get('Accept-Encoding', '')
+    return 'gzip' in ae
 
 
 def j(handler, payload, status: int=200, extra_headers: dict=None) -> None:
@@ -63,6 +73,15 @@ def j(handler, payload, status: int=200, extra_headers: dict=None) -> None:
     body = _json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
     handler.send_response(status)
     handler.send_header('Content-Type', 'application/json; charset=utf-8')
+
+    # Gzip-compress responses over 1KB when the client accepts it.
+    # Typical JSON API responses compress 70-80%, giving a big speedup
+    # for large payloads (session history, message lists).
+    if _accepts_gzip(handler) and len(body) > 1024:
+        import gzip
+        body = gzip.compress(body, compresslevel=4)
+        handler.send_header('Content-Encoding', 'gzip')
+
     handler.send_header('Content-Length', str(len(body)))
     handler.send_header('Cache-Control', 'no-store')
     _security_headers(handler)

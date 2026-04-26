@@ -1,7 +1,18 @@
 const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default'};
 const INFLIGHT={};  // keyed by session_id while request in-flight
 const SESSION_QUEUES={};  // keyed by session_id for queued follow-up turns
+// Tracks which session's queue to drain in setBusy(false).
+// Set to activeSid just before setBusy(false) in done/error handlers so the
+// queue drains the session that *finished*, not the one currently viewed.
+// Single-shot: setBusy() reads and clears this on every call. Concurrent
+// back-to-back stream completions would overwrite it, but HTTPServer is
+// single-threaded so only one done event fires at a time in practice.
+let _queueDrainSid=null;
 const $=id=>document.getElementById(id);
+// Redirect to /login when the server responds with 401 (auth session expired).
+// Handles iOS PWA standalone mode where a server-side 302→/login would break
+// out of the PWA shell into Safari instead of navigating within it.
+function _redirectIfUnauth(res){if(res&&res.status===401){window.location.href='/login?next='+encodeURIComponent(window.location.pathname+window.location.search);return true;}return false;}
 function _getSessionQueue(sid, create=false){
   if(!sid) return [];
   if(!SESSION_QUEUES[sid]&&create) SESSION_QUEUES[sid]=[];
@@ -80,10 +91,15 @@ async function populateModelDropdown(){
   const sel=$('modelSelect');
   if(!sel) return;
   try{
-    const data=await fetch(new URL('api/models',location.href).href,{credentials:'include'}).then(r=>r.json());
+    const _modelsRes=await fetch(new URL('api/models',location.href).href,{credentials:'include'});
+    if(_redirectIfUnauth(_modelsRes)) return;
+    const data=await _modelsRes.json();
     if(!data.groups||!data.groups.length) return; // keep HTML defaults
     // Store active provider globally so the send path can warn on mismatch
     window._activeProvider=data.active_provider||null;
+    // Store default model so newSession() can apply it (#872).
+    // Per-page-load — not synced across browser tabs.
+    window._defaultModel=data.default_model||null;
     // Clear existing options
     sel.innerHTML='';
     _dynamicModelLabels={};
@@ -118,72 +134,76 @@ async function populateModelDropdown(){
 // Cache so we don't re-fetch on every page load
 const _liveModelCache={};
 
+function _addLiveModelsToSelect(provider, models, sel){
+  if(!provider||!models||!models.length||!sel) return 0;
+  const currentVal=sel.value;
+  let providerGroup=null;
+  for(const og of sel.querySelectorAll('optgroup')){
+    if(og.dataset.provider&&og.dataset.provider===provider){
+      providerGroup=og; break;
+    }
+    if(og.label&&og.label.toLowerCase().includes(provider.toLowerCase())){
+      providerGroup=og; break;
+    }
+  }
+  if(!providerGroup){
+    providerGroup=document.createElement('optgroup');
+    providerGroup.label=provider.charAt(0).toUpperCase()+provider.slice(1)+' (live)';
+    sel.appendChild(providerGroup);
+  }
+  const existingIds=new Set([...sel.options].map(o=>o.value));
+  // Normalized dedup: strip @provider: prefix and unify separators so
+  // 'minimax/minimax-m2.7' matches '@nous:minimax/minimax-m2.7' (#907).
+  // Strip ONLY the first colon — Ollama tag IDs are multi-colon
+  // (e.g. '@ollama-cloud:qwen3-vl:235b-instruct') and split(':',2) would
+  // truncate the tag suffix in JS (the limit arg discards extras, unlike Python).
+  const _normId=id=>{
+    let s=String(id||'');
+    if(s.startsWith('@')&&s.includes(':')) s=s.substring(s.indexOf(':')+1); // strip only @provider:
+    s=s.split('/').pop();                                                    // strip namespace prefix
+    return s.replace(/-/g,'.').toLowerCase();
+  };
+  const existingNorm=new Set([...sel.options].map(o=>_normId(o.value)));
+  let added=0;
+  const _ap=(window._activeProvider||'').toLowerCase();
+  const _isPortalFetch=_ap && _ap!=='openrouter' && _ap!=='custom' && provider===_ap;
+  for(const m of models){
+    let mid=m.id;
+    if(_isPortalFetch && !mid.startsWith('@')){
+      mid=`@${provider}:${mid}`;
+    }
+    if(existingIds.has(mid)) continue;
+    if(existingNorm.has(_normId(mid))) continue; // dedup cross-prefix duplicates (#907)
+    const opt=document.createElement('option');
+    opt.value=mid;
+    opt.textContent=m.label||m.id;
+    opt.title='Live model — fetched from provider';
+    providerGroup.appendChild(opt);
+    _dynamicModelLabels[mid]=m.label||m.id;
+    added++;
+  }
+  if(added>0 && currentVal) _applyModelToDropdown(currentVal, sel);
+  return added;
+}
+
 async function _fetchLiveModels(provider, sel){
   if(!provider||!sel) return;
-  // Don't fetch for providers where we know it's unsupported or unnecessary
-  // All providers now supported via agent's provider_model_ids() — no exclusions needed
-  if(_liveModelCache[provider]) return; // already fetched this session
+  // Already fetched — apply cached models to this select element (#872)
+  if(_liveModelCache[provider]){
+    const added=_addLiveModelsToSelect(provider,_liveModelCache[provider],sel);
+    if(added>0 && typeof syncModelChip==='function') syncModelChip();
+    return;
+  }
   try{
     const url=new URL('api/models/live',location.href);
     url.searchParams.set('provider',provider);
-    const data=await fetch(url.href,{credentials:'include'}).then(r=>r.json());
+    const _liveRes=await fetch(url.href,{credentials:'include'});
+    if(_redirectIfUnauth(_liveRes)) return;
+    const data=await _liveRes.json();
     if(!data.models||!data.models.length) return;
     _liveModelCache[provider]=data.models;
-    // Remember current selection before rebuilding options
-    const currentVal=sel.value;
-    // Rebuild the optgroup for this provider with live models
-    // Keep other providers' optgroups intact
-    let providerGroup=null;
-    for(const og of sel.querySelectorAll('optgroup')){
-      // Prefer exact data-provider match (set from provider_id in API response)
-      // over substring label match — avoids false positives like 'zai' not matching
-      // 'Z.AI / GLM' and vice versa.
-      if(og.dataset.provider&&og.dataset.provider===provider){
-        providerGroup=og; break;
-      }
-      if(og.label&&og.label.toLowerCase().includes(provider.toLowerCase())){
-        providerGroup=og; break;
-      }
-    }
-    if(!providerGroup){
-      // No existing group — add a new one
-      providerGroup=document.createElement('optgroup');
-      providerGroup.label=provider.charAt(0).toUpperCase()+provider.slice(1)+' (live)';
-      sel.appendChild(providerGroup);
-    }
-    // Rebuild options from live data
-    const existingIds=new Set([...sel.options].map(o=>o.value));
-    let added=0;
-    // Apply @provider: prefix to live-fetched model IDs (mirrors the server-side
-    // behaviour for static lists).  Portal providers like Nous return upstream
-    // vendor IDs (e.g. "minimax/minimax-m2.7", "anthropic/claude-opus-4.7") —
-    // without a `@nous:` prefix, `resolve_model_provider()` sees the slash and
-    // mis-routes via OpenRouter → 404.  Prefixing with `@${provider}:` makes
-    // the portal hint explicit so routing honours it (#854).
-    //
-    // Scope: only apply the prefix when this fetch is for the active provider
-    // and that provider is a portal (not OpenRouter / custom, which use bare
-    // or cross-namespace IDs natively).  Skip IDs that already carry an
-    // `@prefix:` — they've already been disambiguated upstream.
-    const _ap=(window._activeProvider||'').toLowerCase();
-    const _isPortalFetch=_ap && _ap!=='openrouter' && _ap!=='custom' && provider===_ap;
-    for(const m of data.models){
-      let mid=m.id;
-      if(_isPortalFetch && !mid.startsWith('@')){
-        mid=`@${provider}:${mid}`;
-      }
-      if(existingIds.has(mid)) continue; // already shown from static list
-      const opt=document.createElement('option');
-      opt.value=mid;
-      opt.textContent=m.label||m.id;
-      opt.title='Live model — fetched from provider';
-      providerGroup.appendChild(opt);
-      _dynamicModelLabels[mid]=m.label||m.id;
-      added++;
-    }
+    const added=_addLiveModelsToSelect(provider,data.models,sel);
     if(added>0){
-      // Restore selection
-      if(currentVal) _applyModelToDropdown(currentVal, sel);
       if(typeof syncModelChip==='function') syncModelChip();
       console.log('[hermes] Live models loaded for',provider+':',added,'new models added');
     }
@@ -381,6 +401,7 @@ function toggleModelDropdown(){
   if(open){closeModelDropdown(); return;}
   if(typeof closeProfileDropdown==='function') closeProfileDropdown();
   if(typeof closeWsDropdown==='function') closeWsDropdown();
+  if(typeof closeReasoningDropdown==='function') closeReasoningDropdown();
   renderModelDropdown();
   dd.classList.add('open');
   _positionModelDropdown();
@@ -400,6 +421,113 @@ document.addEventListener('click',e=>{
 window.addEventListener('resize',()=>{
   const dd=$('composerModelDropdown');
   if(dd&&dd.classList.contains('open')) _positionModelDropdown();
+  // Keep the reasoning dropdown aligned under its chip when the window
+  // resizes while open — same pattern as the model dropdown above.
+  const rdd=$('composerReasoningDropdown');
+  if(rdd&&rdd.classList.contains('open')&&typeof _positionReasoningDropdown==='function'){
+    _positionReasoningDropdown();
+  }
+});
+
+// ── Reasoning effort chip ────────────────────────────────────────────────────
+let _currentReasoningEffort=null;
+
+function _normalizeReasoningEffort(eff){
+  return String(eff||'').trim().toLowerCase();
+}
+
+function _formatReasoningEffortLabel(effort){
+  if(effort==='none') return 'None';
+  if(!effort) return 'Default';
+  return effort;
+}
+
+function _applyReasoningChip(eff){
+  const effort=_normalizeReasoningEffort(eff);
+  _currentReasoningEffort=effort;
+  const wrap=$('composerReasoningWrap');
+  const label=$('composerReasoningLabel');
+  const chip=$('composerReasoningChip');
+  if(!wrap||!label) return;
+  wrap.style.display='';
+  label.textContent=_formatReasoningEffortLabel(effort);
+  if(chip){
+    const inactive=!effort||effort==='none';
+    chip.classList.toggle('inactive',inactive);
+    chip.title='Reasoning effort: '+_formatReasoningEffortLabel(effort);
+  }
+  _highlightReasoningOption(effort);
+}
+
+function fetchReasoningChip(){
+  api('/api/reasoning').then(function(st){
+    _applyReasoningChip((st&&st.reasoning_effort)||'');
+  }).catch(function(){_applyReasoningChip('');});
+}
+
+function syncReasoningChip(){
+  if(_currentReasoningEffort===null){fetchReasoningChip();return;}
+  _applyReasoningChip(_currentReasoningEffort);
+}
+
+function _highlightReasoningOption(effort){
+  const dd=$('composerReasoningDropdown');
+  if(!dd) return;
+  dd.querySelectorAll('.reasoning-option').forEach(function(opt){
+    opt.classList.toggle('selected',opt.dataset.effort===effort);
+  });
+}
+
+function toggleReasoningDropdown(){
+  const dd=$('composerReasoningDropdown');
+  const chip=$('composerReasoningChip');
+  if(!dd||!chip) return;
+  const open=dd.classList.contains('open');
+  if(open){closeReasoningDropdown();return;}
+  if(typeof closeProfileDropdown==='function') closeProfileDropdown();
+  if(typeof closeWsDropdown==='function') closeWsDropdown();
+  closeModelDropdown();
+  _highlightReasoningOption(_currentReasoningEffort);
+  dd.classList.add('open');
+  _positionReasoningDropdown();
+  chip.classList.add('active');
+}
+
+function _positionReasoningDropdown(){
+  const dd=$('composerReasoningDropdown');
+  const chip=$('composerReasoningChip');
+  const footer=document.querySelector('.composer-footer');
+  if(!dd||!chip||!footer) return;
+  const chipRect=chip.getBoundingClientRect();
+  const footerRect=footer.getBoundingClientRect();
+  let left=chipRect.left-footerRect.left;
+  const maxLeft=Math.max(0,footer.clientWidth-dd.offsetWidth);
+  left=Math.max(0,Math.min(left,maxLeft));
+  dd.style.left=`${left}px`;
+}
+
+function closeReasoningDropdown(){
+  const dd=$('composerReasoningDropdown');
+  const chip=$('composerReasoningChip');
+  if(dd) dd.classList.remove('open');
+  if(chip) chip.classList.remove('active');
+}
+
+document.addEventListener('click',function(e){
+  if(!e.target.closest('#composerReasoningChip')&&!e.target.closest('#composerReasoningDropdown')) closeReasoningDropdown();
+  if(e.target.closest('.reasoning-option')){
+    const opt=e.target.closest('.reasoning-option');
+    const effort=opt&&opt.dataset.effort;
+    if(effort){
+      api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:effort})})
+        .then(function(st){
+          _applyReasoningChip((st&&st.reasoning_effort)||effort);
+          showToast('🧠 Reasoning effort set to '+((st&&st.reasoning_effort)||effort));
+        })
+        .catch(function(){showToast('🧠 Failed to set effort');});
+      closeReasoningDropdown();
+    }
+  }
 });
 
 // ── Scroll pinning ──────────────────────────────────────────────────────────
@@ -532,14 +660,27 @@ function _stripXmlToolCallsDisplay(s){
   // similar models in their raw response text.  These are processed separately
   // as tool calls; leaving them in the content causes them to render visibly
   // in the settled chat bubble.  (#702)
-  if(!s||s.toLowerCase().indexOf('<function_calls>')===-1) return s;
-  s=s.replace(/<function_calls>[\s\S]*?<\/function_calls>/gi,'');
-  s=s.replace(/<function_calls>[\s\S]*$/i,'');
+  // Also handles DSML-prefixed variants from DeepSeek/Bedrock, including
+  // spacing variants like "<｜DSML |function_calls" and truncated prefixes.
+  if(!s) return s;
+  const lo=String(s).toLowerCase();
+  if(lo.indexOf('function_calls')===-1 && lo.indexOf('dsml')===-1) return s;
+  // Support both plain <function_calls> and DSML-prefixed variants.
+  s=s.replace(/<(?:\s*｜\s*DSML\s*[｜|]\s*)?function_calls>[\s\S]*?<\/(?:\s*｜\s*DSML\s*[｜|]\s*)?function_calls>/gi,'');
+  // Also remove truncated opening tags (missing closing ">" at stream tail).
+  s=s.replace(/<(?:\s*｜\s*DSML\s*[｜|]\s*)?function_calls(?:>|$)[\s\S]*$/i,'');
+  // Remove malformed DSML tag fragments like "<｜DSML |" that can leak in tokens.
+  s=s.replace(/<\s*｜\s*DSML\s*[｜|]\s*/gi,'');
   return s.trim();
 }
 
+function _sanitizeThinkingDisplayText(text){
+  const stripped=_stripXmlToolCallsDisplay(String(text||''));
+  return stripped.trim();
+}
+
 function renderMd(raw){
-  let s=raw||'';
+  let s=(raw||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
   // ── MEDIA: token stash (must run first, before any other processing) ───────
   // Detect MEDIA:<path-or-url> tokens emitted by the agent (e.g. screenshots,
   // generated images) and replace them with inline <img> or download links.
@@ -606,6 +747,8 @@ function renderMd(raw){
     t=t.replace(/\*\*\*(.+?)\*\*\*/g,(_,x)=>`<strong><em>${esc(x)}</em></strong>`);
     t=t.replace(/\*\*(.+?)\*\*/g,(_,x)=>`<strong>${esc(x)}</strong>`);
     t=t.replace(/\*([^*\n]+)\*/g,(_,x)=>`<em>${esc(x)}</em>`);
+    // Strikethrough: ~~text~~ → <del>text</del>
+    t=t.replace(/~~(.+?)~~/g,(_,x)=>`<del>${esc(x)}</del>`);
     // #487: Image pass — runs while code stash is active so ![x](url) inside
     // backticks stays protected as a \x00C token and is never rendered as <img>.
     // Must run before _code_stash restore and before _link_stash so the image
@@ -623,21 +766,58 @@ function renderMd(raw){
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
     // Escape any plain text that isn't already wrapped in a tag we produced
     // by escaping bare < > that are not part of our own tags
-    const SAFE_INLINE=/^<\/?(strong|em|code|a|img)([\s>]|$)/i;
+    const SAFE_INLINE=/^<\/?(strong|em|del|code|a|img)([\s>]|$)/i;
     t=t.replace(/<\/?[a-z][^>]*>/gi,tag=>SAFE_INLINE.test(tag)?tag:esc(tag));
     return t;
   }
   // Stash <code> tags from the backtick pass above so the outer bold/italic
   // regexes don't esc() their content (e.g. **`code`** → <strong><code>code</code></strong>)
   const _ob_stash=[];
-  s=s.replace(/(<code>[^<]*<\/code>)/g,m=>{_ob_stash.push(m);return `\x00O${_ob_stash.length-1}\x00`;});
+  s=s.replace(/(<code\b[^>]*>[\s\S]*?<\/code>)/g,m=>{_ob_stash.push(m);return `\x00O${_ob_stash.length-1}\x00`;});
   s=s.replace(/\*\*\*(.+?)\*\*\*/g,(_,t)=>`<strong><em>${esc(t)}</em></strong>`);
   s=s.replace(/\*\*(.+?)\*\*/g,(_,t)=>`<strong>${esc(t)}</strong>`);
   s=s.replace(/\*([^*\n]+)\*/g,(_,t)=>`<em>${esc(t)}</em>`);
+  s=s.replace(/~~(.+?)~~/g,(_,t)=>`<del>${esc(t)}</del>`);
   s=s.replace(/\x00O(\d+)\x00/g,(_,i)=>_ob_stash[+i]);
   s=s.replace(/^### (.+)$/gm,(_,t)=>`<h3>${inlineMd(t)}</h3>`).replace(/^## (.+)$/gm,(_,t)=>`<h2>${inlineMd(t)}</h2>`).replace(/^# (.+)$/gm,(_,t)=>`<h1>${inlineMd(t)}</h1>`);
   s=s.replace(/^---+$/gm,'<hr>');
-  s=s.replace(/^> (.+)$/gm,(_,t)=>`<blockquote>${inlineMd(t)}</blockquote>`);
+  // Group consecutive > lines into one <blockquote>.
+  // Handles: blank continuation lines (> alone), nested blockquotes (>>),
+  // lists inside blockquotes (> - item), and inline markdown in quoted text.
+  function _applyBlockquotes(src){
+    return src.replace(/((?:^>[^\n]*(?:\n|$))+)/gm,block=>{
+      const lines=block.split('\n');
+      // Drop trailing bare '>' artifact
+      while(lines.length&&(lines[lines.length-1].trim()==='>'||lines[lines.length-1]===''))
+        {if(lines[lines.length-1].trim()==='>'){lines.pop();break;}lines.pop();}
+      const stripped=lines.map(l=>l.replace(/^>[ \t]?/,''));
+      const innerRaw=stripped.join('\n');
+      let inner;
+      if(/^>/m.test(innerRaw)){
+        // Nested blockquote: recurse so >> → <blockquote><blockquote>
+        inner=_applyBlockquotes(innerRaw);
+      } else if(/(^(?:  )?[-*+] .+)/m.test(innerRaw)){
+        // List inside blockquote: run list pass on stripped inner content
+        inner=innerRaw.replace(/((?:^(?:  )?[-*+] .+\n?)+)/gm,lb=>{
+          const ll=lb.trimEnd().split('\n');let h='<ul>';
+          for(const li of ll){
+            const txt=li.replace(/^ {0,4}[-*+] /,'');
+            let ih;
+            if(/^\[x\] /i.test(txt)) ih='<span class="task-done">✅</span> '+inlineMd(txt.slice(4));
+            else if(/^\[ \] /.test(txt)) ih='<span class="task-todo">☐</span> '+inlineMd(txt.slice(4));
+            else ih=inlineMd(txt);
+            h+=`<li>${ih}</li>`;
+          }
+          return h+'</ul>';
+        });
+      } else {
+        // Plain lines: blank line → <br>, text → inlineMd
+        inner=stripped.map(l=>l.trim()===''?'<br>':inlineMd(l)).join('\n');
+      }
+      return `<blockquote>${inner}</blockquote>`;
+    });
+  }
+  s=_applyBlockquotes(s);
   // B8: improved list handling supporting up to 2 levels of indentation
   s=s.replace(/((?:^(?:  )?[-*+] .+\n?)+)/gm,block=>{
     const lines=block.trimEnd().split('\n');
@@ -645,17 +825,28 @@ function renderMd(raw){
     for(const l of lines){
       const indent=/^ {2,}/.test(l);
       const text=l.replace(/^ {0,4}[-*+] /,'');
-      if(indent) html+=`<li style="margin-left:16px">${inlineMd(text)}</li>`;
-      else html+=`<li>${inlineMd(text)}</li>`;
+      let _ih;
+      if(/^\[x\] /i.test(text)) _ih='<span class="task-done">✅</span> '+inlineMd(text.slice(4));
+      else if(/^\[ \] /.test(text)) _ih='<span class="task-todo">☐</span> '+inlineMd(text.slice(4));
+      else _ih=inlineMd(text);
+      if(indent) html+=`<li style="margin-left:16px">${_ih}</li>`;
+      else html+=`<li>${_ih}</li>`;
     }
     return html+'</ul>';
   });
+  // Ordered lists: use value= on each <li> so the correct number is preserved
+  // even when blank lines between items cause the paragraph splitter to place
+  // each item in its own <ol> container — without value= every <ol> restarts
+  // at 1, producing "1. 1. 1." instead of "1. 2. 3." (#886).
   s=s.replace(/((?:^(?:  )?\d+\. .+\n?)+)/gm,block=>{
     const lines=block.trimEnd().split('\n');
     let html='<ol>';
     for(const l of lines){
+      const numMatch=l.match(/^\s*(\d+)\. /);
+      const num=numMatch?parseInt(numMatch[1],10):null;
       const text=l.replace(/^ {0,4}\d+\. /,'');
-      html+=`<li>${inlineMd(text)}</li>`;
+      const valAttr=num!==null?` value="${num}"`:'';
+      html+=`<li${valAttr}>${inlineMd(text)}</li>`;
     }
     return html+'</ol>';
   });
@@ -688,7 +879,7 @@ function renderMd(raw){
   // Our pipeline only emits: <strong>,<em>,<code>,<pre>,<h1-6>,<ul>,<ol>,<li>,
   // <table>,<thead>,<tbody>,<tr>,<th>,<td>,<hr>,<blockquote>,<p>,<br>,<a>,
   // <div class="..."> (mermaid/pre-header). Everything else is untrusted input.
-  const SAFE_TAGS=/^<\/?(strong|em|code|pre|h[1-6]|ul|ol|li|table|thead|tbody|tr|th|td|hr|blockquote|p|br|a|img|div|span)([\s>]|$)/i;
+  const SAFE_TAGS=/^<\/?(strong|em|del|code|pre|h[1-6]|ul|ol|li|table|thead|tbody|tr|th|td|hr|blockquote|p|br|a|img|div|span)([\s>]|$)/i;
   s=s.replace(/<\/?[a-z][^>]*>/gi,tag=>SAFE_TAGS.test(tag)?tag:esc(tag));
   // Autolink: convert plain URLs to clickable links.
   // Stash <a>, <img> and <pre> blocks so autolink never runs inside them.
@@ -829,15 +1020,24 @@ function setBusy(v){
     setComposerStatus('');
     // Always hide Cancel button when not busy
     const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
-    const sid=S.session&&S.session.session_id;
+    const sid=_queueDrainSid||(S.session&&S.session.session_id);
+    _queueDrainSid=null;
     updateQueueBadge(sid);
-    // Drain one queued message for the currently viewed session after UI settles
-    const next=sid?shiftQueuedSessionMessage(sid):null;
+    // Drain one queued message for the finished session after UI settles
+    const _isViewedSid=!S.session||sid===S.session.session_id;
+    const next=sid&&_isViewedSid?shiftQueuedSessionMessage(sid):null;
     if(next){
       updateQueueBadge(sid);
       setTimeout(()=>{
         $('msg').value=next.text||'';
         S.pendingFiles=Array.isArray(next.files)?[...next.files]:[];
+        // Restore model from queued item (sent in /api/chat/start payload)
+        // Note: profile is NOT restored — full profile switch requires server interaction
+        if(next.model&&S.session&&next.model!==S.session.model){
+          S.session.model=next.model;
+          if(typeof _applyModelToDropdown==='function'&&$('modelSelect')) _applyModelToDropdown(next.model,$('modelSelect'));
+          if(typeof syncModelChip==='function') syncModelChip();
+        }
         autoResize();
         renderTray();
         send();
@@ -846,23 +1046,311 @@ function setBusy(v){
   }
 }
 
+// ── Queue chip display (Codex Desktop pattern) ─────────────────────────────
+// Queued messages appear as chips inside #queueChips (above the textarea)
+// while pending. When the session fires the queued message it becomes a
+// normal user bubble in the chat — the chip is removed at drain time.
+const _queueRenderKeys={};  // per-session fingerprint to avoid redundant rebuilds
+const _queueCollapsed={};   // per-session: true when user explicitly collapsed the card
+
+function _renderQueueChips(sid){
+  const card=document.getElementById('queueCard');
+  const inner=document.getElementById('queueChips');
+  if(!card||!inner) return;
+  const q=_getSessionQueue(sid,false);
+  const key=q.map(e=>{const t=e&&(e.text||e.message||e.content||'');return(e&&e._queued_at||0)+':'+t.length+':'+t.slice(0,20);}).join('|');
+  if(key===(_queueRenderKeys[sid]||'')&&key!='') return;
+  // Skip re-render if user is actively editing inside the queue panel
+  if(inner.contains(document.activeElement)&&document.activeElement!==inner) return;
+  _queueRenderKeys[sid]=key;
+  inner.innerHTML='';
+  if(!q.length){
+    card.classList.remove('visible');
+    const _msgs=document.getElementById('messages');
+    if(_msgs) _msgs.classList.remove('queue-open');
+    return;
+  }
+  // Respect user-collapsed state — don't reopen if user explicitly hid the card
+  if(_queueCollapsed[sid]){
+    // Update chips content without showing card (so data is fresh if user re-expands)
+    inner.innerHTML='';
+    // fall through to render rows into inner but skip making card visible
+  } else {
+    card.classList.add('visible');
+  }
+  // Push messages area up so content isn't hidden behind the flyout
+  const _msgs=document.getElementById('messages');
+  if(_msgs&&!_queueCollapsed[sid]){
+    _msgs.classList.add('queue-open');
+    // Measure after 350ms transition completes (not mid-animation — height would be wrong)
+    setTimeout(()=>{
+      if(!card.classList.contains('visible')) return;
+      const h=card.getBoundingClientRect().height;
+      if(h>0) _msgs.style.setProperty('--queue-card-height', h+'px');
+      if(typeof scrollToBottom==='function') scrollToBottom();
+    }, 360);
+  }
+
+  function _saveAndRefresh(){
+    const liveQ=_getSessionQueue(sid,false);
+    if(!liveQ.length){delete SESSION_QUEUES[sid];try{sessionStorage.removeItem('hermes-queue-'+sid);}catch(_){}}
+    else{SESSION_QUEUES[sid]=[...liveQ];try{sessionStorage.setItem('hermes-queue-'+sid,JSON.stringify(liveQ));}catch(_){}}
+    delete _queueRenderKeys[sid];
+    updateQueueBadge(sid);
+  }
+
+  // Header (2+ items)
+  if(q.length>1){
+    const header=document.createElement('div');
+    header.className='queue-card-header';
+    const lbl=document.createElement('span');
+    lbl.textContent=typeof t==='function'?t('queued_count',q.length):(q.length===1?'1 queued':`${q.length} queued`);
+    lbl.title='Sends automatically after the current response completes';
+    const actions=document.createElement('span');
+    actions.className='queue-card-header-actions';
+    const hasFiles=q.some(e=>e&&Array.isArray(e.files)&&e.files.length>0);
+    const mergeBtn=document.createElement('button');
+    mergeBtn.className='queue-card-btn';
+    mergeBtn.title='Combine all into one message'+(hasFiles?' — attachments will be removed':'');
+    mergeBtn.innerHTML=li('layers',12)+'Combine';
+    mergeBtn.onclick=()=>{
+      const _doMerge=(snapshot)=>{
+        const combined=snapshot.map(e=>e&&(e.text||e.message||e.content||'')).filter(Boolean).join('\n\n');
+        const liveQ=_getSessionQueue(sid,false);
+        const firstFiles=(snapshot.find(e=>e&&Array.isArray(e.files)&&e.files.length)||{files:[]}).files;
+        liveQ.length=0;liveQ.push({text:combined,files:firstFiles,_queued_at:Date.now()});
+        SESSION_QUEUES[sid]=liveQ;
+        try{sessionStorage.setItem('hermes-queue-'+sid,JSON.stringify(liveQ));}catch(_){}
+        delete _queueRenderKeys[sid];
+        updateQueueBadge(sid);
+      };
+      if(hasFiles){
+        if(typeof showToast==='function') showToast('Attachments on queued items will be removed',2600,'warning');
+      }
+      // Merge from current live queue (no delay — snapshot + defer caused data-loss races)
+      _doMerge([..._getSessionQueue(sid,false)]);
+    };
+    const clearBtn=document.createElement('button');
+    clearBtn.className='queue-card-icon-btn';
+    clearBtn.title='Clear all queued messages';
+    clearBtn.setAttribute('aria-label','Clear all queued messages');
+    clearBtn.innerHTML=li('x',13);
+    clearBtn.onclick=()=>{q.length=0;_saveAndRefresh();};
+    actions.appendChild(mergeBtn);
+    actions.appendChild(clearBtn);
+    // Hide button — collapses flyout entirely; titlebar "N queued" re-shows it
+    const hideBtn=document.createElement('button');
+    hideBtn.className='queue-card-icon-btn';
+    hideBtn.title='Hide queue (click the titlebar badge to show again)';
+    hideBtn.setAttribute('aria-label','Hide queue panel');
+    hideBtn.innerHTML=li('chevron-down',14);
+    hideBtn.onclick=()=>{
+      _queueCollapsed[sid]=true;
+      card.classList.remove('visible');
+      // Read live count at click time (not stale closure q)
+      _updateQueuePill(sid,_getSessionQueue(sid,false).length);
+    };
+    actions.appendChild(hideBtn);
+    header.appendChild(lbl);
+    header.appendChild(actions);
+    inner.appendChild(header);
+  }
+
+  let _dragTs=null;  // use _queued_at timestamp — survives re-renders, not an index
+  q.forEach((entry,i)=>{
+    const _entryTs=entry&&entry._queued_at;
+    const entryText=entry&&(entry.text||entry.message||entry.content||'');
+    const _files=entry&&Array.isArray(entry.files)?entry.files.filter(Boolean):[];
+    const row=document.createElement('div');
+    row.className='queue-card-row';
+    row.setAttribute('role','listitem');
+    row.setAttribute('draggable','true');
+    row.ondragstart=(e)=>{if(_entryTs==null) return;_dragTs=_entryTs;row.style.opacity='.4';e.dataTransfer.effectAllowed='move';};
+    row.ondragend=()=>{row.style.opacity='';};
+    row.ondragover=(e)=>{e.preventDefault();row.style.background='var(--hover-bg)';};
+    row.ondragleave=()=>{row.style.background='';};
+    row.ondrop=(e)=>{
+      e.preventDefault();row.style.background='';
+      if(_dragTs!=null&&_dragTs!==_entryTs){
+        const fromIdx=q.findIndex(e=>e&&e._queued_at===_dragTs);
+        if(fromIdx!==-1&&fromIdx!==i){const moved=q.splice(fromIdx,1)[0];q.splice(i,0,moved);}
+        _dragTs=null;_saveAndRefresh();
+      }
+    };
+    // Drag handle
+    const drag=document.createElement('span');
+    drag.className='queue-card-drag';
+    drag.setAttribute('aria-hidden','true');
+    drag.innerHTML=typeof li==='function'?li('list-todo',13):'≡';
+    // Inline-editable text
+    const msgSpan=document.createElement('span');
+    msgSpan.className='queue-card-text';
+    msgSpan.setAttribute('contenteditable','true');
+    msgSpan.setAttribute('role','textbox');
+    msgSpan.setAttribute('aria-label','Queued message — edit in place');
+    msgSpan.textContent=entryText||(_files.length?'':'—');
+    msgSpan.setAttribute('draggable','false');
+    msgSpan.onfocus=()=>{msgSpan.style.overflow='auto';msgSpan.style.whiteSpace='pre-wrap';msgSpan.style.textOverflow='clip';};
+    msgSpan.onblur=()=>{
+      msgSpan.style.overflow='';msgSpan.style.whiteSpace='';msgSpan.style.textOverflow='';
+      const newText=msgSpan.textContent.trim();
+      if(newText===''&&!_files.length){ msgSpan.textContent=entryText||'—'; return; }
+      if(newText!==entryText){
+        const liveQ=_getSessionQueue(sid,false);
+        const idx=_entryTs!=null?liveQ.findIndex(e=>e&&e._queued_at===_entryTs):i;
+        if(idx!==-1){
+          liveQ[idx]={...liveQ[idx],text:newText};
+          try{sessionStorage.setItem('hermes-queue-'+sid,JSON.stringify(liveQ));}catch(_){}
+          delete _queueRenderKeys[sid];
+          updateQueueBadge(sid);
+        }
+      }
+    };
+    msgSpan.onkeydown=(e)=>{if(e.key==='Enter'){e.preventDefault();msgSpan.blur();}if(e.key==='Escape'){msgSpan.textContent=entryText||'—';msgSpan.blur();}};
+    // Compact badges (files, model, profile)
+    const badges=document.createElement('span');
+    badges.className='queue-card-badges';
+    if(_files.length>0){
+      const fb=document.createElement('span');
+      fb.className='queue-card-file-badge';
+      fb.title=_files.map(f=>f&&f.name||'file').join(', ');
+      fb.innerHTML=li('paperclip',11)+_files.length;
+      badges.appendChild(fb);
+    }
+    const _model=entry&&entry.model;
+    if(_model){
+      const mb=document.createElement('span');
+      mb.title='Model: '+_model;
+      // Use the app's friendly label system if available
+      const _modelLabel=(typeof _dynamicModelLabels!=='undefined'&&_dynamicModelLabels[_model])
+        ||_model.split('/').pop().replace(/^(gpt-|claude-3\.?5?-|claude-|gemini-)/,'').replace(/-\d{4}-\d{2}-\d{2}$/,'').slice(0,12);
+      mb.textContent=_modelLabel;
+      badges.appendChild(mb);
+    }
+    // Profile badge removed — drain cannot server-switch profiles so badge was misleading
+    // Delete button
+    const delBtn=document.createElement('button');
+    delBtn.className='queue-card-icon-btn';
+    delBtn.setAttribute('aria-label',typeof t==='function'?t('queued_cancel'):'Remove queued message');
+    delBtn.setAttribute('draggable','false');
+    delBtn.title='Remove from queue';
+    delBtn.innerHTML=li('x',13);
+    delBtn.onclick=()=>{
+      const liveQ=_getSessionQueue(sid,false);
+      const idx=_entryTs!=null?liveQ.findIndex(e=>e&&e._queued_at===_entryTs):i;
+      if(idx!==-1) liveQ.splice(idx,1);
+      if(!liveQ.length){delete SESSION_QUEUES[sid];try{sessionStorage.removeItem('hermes-queue-'+sid);}catch(_){}}
+      else{SESSION_QUEUES[sid]=[...liveQ];try{sessionStorage.setItem('hermes-queue-'+sid,JSON.stringify(liveQ));}catch(_){}}
+      delete _queueRenderKeys[sid];
+      updateQueueBadge(sid);
+    };
+    row.appendChild(drag);
+    row.appendChild(msgSpan);
+    if(badges.childNodes.length) row.appendChild(badges);
+    row.appendChild(delBtn);
+    inner.appendChild(row);
+  });
+}
+
+function _updateQueuePill(sid,count){
+  const pill=document.getElementById('queuePill');
+  if(!pill) return;
+  const pillOuter=pill.parentElement;  // .queue-pill-outer — same wrapper as .queue-card
+  const card=document.getElementById('queueCard');
+  const flyoutVisible=card&&card.classList.contains('visible');
+  if(count>0&&!flyoutVisible){
+    const label=typeof t==='function'?t('queued_count',count):(count===1?'1 queued':`${count} queued`);
+    pill.innerHTML=(typeof li==='function'?li('list-todo',12):'')+
+      `<span class="queue-pill-count">${label}</span>`+
+      `<span class="queue-pill-chevron">`+(typeof li==='function'?li('chevron-up',12):'▲')+`</span>`;
+    pill.title='Show queued messages';
+    if(pillOuter) pillOuter.classList.add('show');
+    pill.onclick=()=>{
+      delete _queueCollapsed[sid];
+      const c=document.getElementById('queueCard');
+      if(c){
+        c.classList.add('visible');
+        setTimeout(()=>{
+          const firstFocusable=c.querySelector('.queue-card-text, .queue-card-icon-btn');
+          if(firstFocusable) firstFocusable.focus();
+        }, 360);
+      }
+      if(pillOuter) pillOuter.classList.remove('show');
+      if(typeof scrollToBottom==='function') scrollToBottom();
+    };
+  } else {
+    if(pillOuter) pillOuter.classList.remove('show');
+    pill.onclick=null;
+  }
+}
+
+function _syncQueueTitlebar(sid,count){
+  const sub=document.getElementById('appTitlebarSub');
+  if(!sub) return;
+  if(count>0){
+    const label=typeof t==='function'?t('queued_count',count):(count===1?'1 queued':`${count} queued`);
+    sub.textContent=label;
+    sub.hidden=false;
+    sub.setAttribute('role','button');
+    sub.setAttribute('tabindex','0');
+    sub.setAttribute('aria-label',label);
+    sub.style.cursor='pointer';sub.style.color='var(--muted)';sub.style.fontWeight='600';sub.style.fontSize='11px';sub.style.background='var(--hover-bg)';sub.style.padding='2px 6px';sub.style.borderRadius='6px';sub.style.border='1px solid var(--border)';
+    const toggleQueue=()=>{
+      const activeSid=S.session&&S.session.session_id;
+      if(!activeSid) return;
+      const qCard=document.getElementById('queueCard');
+      if(!qCard) return;
+      if(qCard.classList.contains('visible')){
+        qCard.classList.remove('visible');
+        // Show pill since flyout is now hidden
+        const liveCount=_getSessionQueue(activeSid,false).length;
+        _updateQueuePill(activeSid,liveCount);
+      } else {
+        qCard.classList.add('visible');
+        // Hide pill since flyout is now showing
+        _updateQueuePill(activeSid,0);
+        if(typeof scrollToBottom==='function') scrollToBottom();
+      }
+    };
+    sub.onclick=toggleQueue;
+    sub.onkeydown=(e)=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();toggleQueue();}};
+    sub.title='Click to show/hide queue panel';
+  } else {
+    sub.textContent='';sub.hidden=true;
+    sub.removeAttribute('role');sub.removeAttribute('tabindex');sub.removeAttribute('aria-label');
+    sub.style.cssText='';
+    sub.onclick=null;sub.onkeydown=null;
+  }
+}
+
 function updateQueueBadge(sessionId){
   const sid=sessionId||(S.session&&S.session.session_id);
   const count=sid?getQueuedSessionCount(sid):0;
-  let badge=$('queueBadge');
-  if(count>0){
-    if(!badge){
-      badge=document.createElement('div');
-      badge.id='queueBadge';
-      badge.style.cssText='position:fixed;bottom:80px;right:24px;background:rgba(124,185,255,.18);border:1px solid rgba(124,185,255,.4);color:var(--blue);font-size:12px;font-weight:600;padding:6px 14px;border-radius:20px;z-index:50;pointer-events:none;backdrop-filter:blur(8px);';
-      document.body.appendChild(badge);
+  if(count>0&&S.session&&sid===S.session.session_id){
+    _renderQueueChips(sid);
+    // If card is visible, hide pill. If card is collapsed, update pill count.
+    const _cardEl=document.getElementById('queueCard');
+    _updateQueuePill(sid,(_cardEl&&_cardEl.classList.contains('visible'))?0:count);
+  } else {
+    // Always clean up per-session data
+    if(sid){delete _queueRenderKeys[sid];delete _queueCollapsed[sid];}
+    // Only wipe global DOM if this is the currently active session
+    const isActive=S.session&&sid===S.session.session_id;
+    if(isActive){
+      const card=document.getElementById('queueCard');
+      const chips=document.getElementById('queueChips');
+      if(card) card.classList.remove('visible');
+      // Defer clear until after slide-out transition so content doesn't vanish mid-animation
+      if(chips){const _chips=chips;const _card=card;setTimeout(()=>{if(!_card||!_card.classList.contains('visible'))_chips.innerHTML='';},360);}
+      const _msgsEl=document.getElementById('messages');
+      if(_msgsEl) _msgsEl.classList.remove('queue-open');
+      _updateQueuePill(sid,0);
     }
-    badge.textContent=count===1?'1 message queued':`${count} messages queued`;
-  } else if(badge) {
-    badge.remove();
   }
+  // Only update titlebar if this is the active session
+  if(!S.session||sid===S.session.session_id) _syncQueueTitlebar(sid,count);
 }
-function showToast(msg,ms){const el=$('toast');el.textContent=msg;el.classList.add('show');clearTimeout(el._t);el._t=setTimeout(()=>el.classList.remove('show'),ms||2800);}
+function showToast(msg,ms,type){const el=$('toast');if(!el)return;const s=String(msg==null?'':msg);let t=type;if(!t){const low=s.toLowerCase();if(/fail|error|denied|invalid|unavailable|no active|no workspace match|no model match|no personalities/.test(low))t='error';else if(/warn|queued|takes effect|skipped|fallback/.test(low))t='warning';else if(/saved|created|imported|restored|switched|set to|updated|duplicated|moved to|renamed|deleted|complete|pinned|archived|cleared|stopped/.test(low))t='success';else t='info';}el.textContent=s;el.className='toast show '+t;clearTimeout(el._t);el._t=setTimeout(()=>{el.classList.remove('show');},ms||2800);}
 
 // ── Shared app dialogs ───────────────────────────────────────────────────────
 // showConfirmDialog(opts) and showPromptDialog(opts) replace browser-native dialog calls
@@ -1280,13 +1768,16 @@ function syncTopbar(){
         sidebarName.textContent=t('no_workspace');
       }
     }
+    if(typeof syncAppTitlebar==='function') syncAppTitlebar();
     return;
   }
   const sessionTitle=S.session.title||t('untitled');
-  $('topbarTitle').textContent=sessionTitle;
+  const _topbarTitle=$('topbarTitle');if(_topbarTitle)_topbarTitle.textContent=sessionTitle;
   document.title=sessionTitle+' \u2014 '+(window._botName||'Hermes');
   const vis=S.messages.filter(m=>m&&m.role&&m.role!=='tool');
-  $('topbarMeta').textContent=t('n_messages',vis.length);
+  const _topbarMeta=$('topbarMeta');if(_topbarMeta)_topbarMeta.textContent=t('n_messages',vis.length);
+  if(typeof syncAppTitlebar==='function') syncAppTitlebar();
+  if(typeof _syncQueueTitlebar==='function'){const _qs=S.session&&S.session.session_id;_syncQueueTitlebar(_qs,_qs?getQueuedSessionCount(_qs):0);}
   // If a profile switch just happened, apply its model rather than the session's stale value.
   // S._pendingProfileModel is set by switchToProfile() and cleared here after one application.
   const modelOverride=S._pendingProfileModel;
@@ -1300,6 +1791,7 @@ function syncTopbar(){
     // If the model isn't in the current provider list, silently reset to the
     // first available model so stale values don't pollute the picker (#829).
     if(!applied && currentModel){
+      const deferModelCorrection=Boolean(S.session._modelResolutionDeferred);
       // Stale session model not in the current provider catalog — reset to the
       // first available model rather than injecting an "(unavailable)" option
       // that visually appears under the wrong provider group (#829).
@@ -1307,17 +1799,20 @@ function syncTopbar(){
       const first=modelSel&&modelSel.querySelector('optgroup > option, option');
       if(first){
         modelSel.value=first.value;
-        S.session.model=first.value;
-        // Persist the correction so the session doesn't re-inject on next load.
-        fetch(new URL('api/session/update',location.href).href,{
-          method:'POST',credentials:'include',
-          headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({session_id:S.session.id||S.session.session_id,model:first.value})
-        }).catch(()=>{});
+        if(!deferModelCorrection){
+          S.session.model=first.value;
+          // Persist the correction so the session doesn't re-inject on next load.
+          fetch(new URL('api/session/update',location.href).href,{
+            method:'POST',credentials:'include',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({session_id:S.session.id||S.session.session_id,model:first.value})
+          }).catch(()=>{});
+        }
       }
     }
   }
   if(typeof syncModelChip==='function') syncModelChip();
+  if(typeof syncReasoningChip==='function') syncReasoningChip();
   // Show Clear button only when session has messages
   const clearBtn=$('btnClearConv');
   if(clearBtn) clearBtn.style.display=(S.messages&&S.messages.filter(msg=>msg.role!=='tool').length>0)?'':'none';
@@ -1369,7 +1864,8 @@ function _assistantTurnBlocks(turn){
   return turn?turn.querySelector('.assistant-turn-blocks'):null;
 }
 function _thinkingCardHtml(text){
-  return `<div class="thinking-card"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(text)}</pre></div></div>`;
+  const clean=_sanitizeThinkingDisplayText(text);
+  return `<div class="thinking-card"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
 }
 function _compressionStateForCurrentSession(){
   const state=window._compressionUi;
@@ -1574,8 +2070,40 @@ function renderCompressionUi(){
   el.innerHTML='';
   el.style.display='none';
 }
+// Session render cache: avoids full markdown+DOM rebuild when switching back
+// to a session that was already rendered with the same message count.
+// Keyed by session_id. Only used on cross-session navigation, never for
+// in-session updates (new messages, edits, stream events).
+//
+// Known limitation: cache key is session_id + message count. Edits and retries
+// that mutate message content without changing the count will serve stale HTML
+// on back-navigation until the user triggers an in-session update. Acceptable
+// for the common read-only back-navigation case; not suitable as a general cache.
+const _sessionHtmlCache=new Map();
+let _sessionHtmlCacheSid=null; // session_id currently rendered in the DOM
+
 function renderMessages(){
   const inner=$('msgInner');
+  const sid=S.session?S.session.session_id:null;
+  const msgCount=S.messages.length;
+
+  // Fast path: switching back to a previously rendered session with same count.
+  // Guard: sid !== _sessionHtmlCacheSid ensures in-session updates (edits,
+  // new messages, tool_complete) always get a fresh rebuild.
+  // Skip cache if this session is still streaming — the live smd parser writes
+  // into a DOM node inside the cached subtree; serving cached HTML detaches it.
+  if(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]){
+    const cached=_sessionHtmlCache.get(sid);
+    if(cached&&cached.msgCount===msgCount){
+      inner.innerHTML=cached.html;
+      _sessionHtmlCacheSid=sid;
+      if(S.activeStreamId){scrollIfPinned();}else{scrollToBottom();}
+      requestAnimationFrame(()=>{highlightCode();addCopyButtons();renderMermaidBlocks();renderKatexBlocks();});
+      if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
+      return;
+    }
+  }
+
   const compressionState=_compressionStateForCurrentSession();
   if(window._compressionUi && !compressionState) clearCompressionUi();
   const sessionCompressionAnchor=(
@@ -1681,6 +2209,7 @@ function renderMessages(){
     const bodyHtml = isUser ? esc(String(content)).replace(/\n/g,'<br>') : renderMd(_stripXmlToolCallsDisplay(String(content)));
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
+    const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
     const tsVal=m._ts||m.timestamp;
@@ -1922,6 +2451,16 @@ function renderMessages(){
   if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){
     loadTodos();
   }
+  // Populate session cache so switching back here skips a full rebuild.
+  _sessionHtmlCacheSid=sid;
+  if(sid){
+    const _html=inner.innerHTML;
+    // Only cache sessions with <300KB rendered HTML; evict oldest beyond 8 sessions.
+    if(_html.length<300_000){
+      _sessionHtmlCache.set(sid,{html:_html,msgCount});
+      if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
+    }
+  }
 }
 
 function toolIcon(name){
@@ -2003,6 +2542,9 @@ function buildToolCard(tc){
 // message column eliminates the visible "jump" users saw when renderMessages
 // fired on the done event.
 function appendLiveToolCard(tc){
+  // Guard: ignore if session was switched. Prevents stale tool events from
+  // a previous session's SSE stream from manipulating the new session's DOM.
+  if(!S.session||!S.activeStreamId) return;
   let turn=$('liveAssistantTurn');
   if(!turn){
     appendThinking();
@@ -2018,16 +2560,33 @@ function appendLiveToolCard(tc){
       const replacement=buildToolCard(tc);
       replacement.dataset.liveTid=tid;
       existing.replaceWith(replacement);
+      // Keep #toolRunningRow alive — dots stay until text starts streaming
+      // or the next tool fires (which replaces them). Removing here caused
+      // a gap between tool completion and the first text token arriving.
       return;
     }
   }
   const row=buildToolCard(tc);
   if(tid) row.dataset.liveTid=tid;
-  // Insert BEFORE the live assistant segment if it exists, so tool cards stay
-  // between the current thinking block(s) and the streaming response.
-  const liveAssistant=inner.querySelector('[data-live-assistant="1"]');
-  if(liveAssistant) inner.insertBefore(row, liveAssistant);
+  // Insert after whichever comes last: the current live assistant segment or
+  // the last tool card. This handles both cases:
+  //   text → tool1 → tool2  (no text between tools: anchor is card1)
+  //   text1 → tool1 → text2 → tool2  (text between tools: anchor is text2)
+  const children=Array.from(inner.children);
+  // Include .thinking-card-row so tool cards land AFTER a finalized thinking
+  // card, not between the text segment and thinking.
+  const anchor=children.filter(el=>el.matches('[data-live-assistant="1"],.tool-card-row,.thinking-card-row')).pop();
+  if(anchor) anchor.insertAdjacentElement('afterend', row);
   else inner.appendChild(row);
+  // Add a 3-dot waiting indicator below the tool card so there's visual
+  // feedback while the tool is running. Removed when text starts streaming
+  // (ensureAssistantRow) or when tool_complete fires.
+  const oldWait=$('toolRunningRow');if(oldWait)oldWait.remove();
+  const waitRow=document.createElement('div');
+  waitRow.id='toolRunningRow';
+  waitRow.className='assistant-segment';
+  waitRow.innerHTML='<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';
+  row.insertAdjacentElement('afterend', waitRow);
   if(typeof scrollIfPinned==='function') scrollIfPinned();
 }
 
@@ -2190,6 +2749,7 @@ function renderMermaidBlocks(){
       script.onload=()=>{
         if(typeof mermaid!=='undefined'){
           mermaid.initialize({startOnLoad:false,theme:document.documentElement.classList.contains('dark')?'dark':'default',themeVariables:{
+            fontFamily:'inherit',fontSize:'14px',
             primaryColor:'#4a6fa5',primaryTextColor:'#e2e8f0',lineColor:'#718096',
             secondaryColor:'#2d3748',tertiaryColor:'#1a202c',primaryBorderColor:'#4a5568',
           }});
@@ -2258,17 +2818,37 @@ function renderKatexBlocks(){
 }
 
 function _thinkingMarkup(text=''){
-  return (text&&String(text).trim())
-    ? `<div class="thinking-card open"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(text).trim())}</pre></div></div>`
+  const clean=_sanitizeThinkingDisplayText(text);
+  return (clean&&String(clean).trim())
+    ? `<div class="thinking-card open"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(clean).trim())}</pre></div></div>`
     : `<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
 }
 function finalizeThinkingCard(){
   const row=$('thinkingRow');
   if(!row) return;
+  // If the row is still just a spinner (no thinking content rendered),
+  // remove it entirely — it's the initial waiting dots.
+  const hasContent=row.querySelector('.thinking-card') || row.classList.contains('thinking-card-row');
+  if(!hasContent && row.getAttribute('data-thinking-active')==='1'){
+    row.remove();
+    return;
+  }
+  // If the user was watching (scroll pinned = at bottom), scroll the thinking
+  // card back to the top so the completed response is visible underneath without
+  // the thinking content blocking it. If they scrolled up to read history,
+  // leave their scroll position intact.
+  if(_scrollPinned){
+    const body=row&&row.querySelector('.thinking-card-body');
+    if(body) body.scrollTop=0;
+  }
   row.removeAttribute('id');
   row.removeAttribute('data-thinking-active');
 }
 function appendThinking(text=''){
+  // Guard: ignore if session was switched during an async SSE stream.
+  // The old stream's reasoning events can still fire after switch;
+  // without this check they would pollute the new session's DOM.
+  if(!S.session||!S.activeStreamId) return;
   $('emptyState').style.display='none';
   let turn=$('liveAssistantTurn');
   if(!turn){
@@ -2283,11 +2863,27 @@ function appendThinking(text=''){
     row.className='assistant-segment';
     row.id='thinkingRow';
     row.setAttribute('data-thinking-active','1');
-    blocks.appendChild(row);
+    // Insert after whichever comes last: a live assistant segment or a tool card.
+    // This mirrors appendLiveToolCard's anchor logic so thinking always appears
+    // in the right position in the interleaved sequence.
+    // Also skip #toolRunningRow (dots) — thinking should go before dots, not after.
+    const allChildren=Array.from(blocks.children);
+    const anchor=allChildren.filter(el=>
+      el.id!=='toolRunningRow' &&
+      el.matches('[data-live-assistant="1"],.tool-card-row')
+    ).pop();
+    if(anchor) anchor.insertAdjacentElement('afterend', row);
+    else blocks.appendChild(row);
   }
   row.className=(text&&String(text).trim())?'assistant-segment thinking-card-row':'assistant-segment';
   row.innerHTML=_thinkingMarkup(text);
   scrollIfPinned();
+  // Auto-scroll the thinking card body to bottom if the user is watching
+  // (scroll pinned). If the user scrolled up to read history, leave it alone.
+  if(_scrollPinned){
+    const body=row&&row.querySelector('.thinking-card-body');
+    if(body) body.scrollTop=body.scrollHeight;
+  }
 }
 function updateThinking(text=''){appendThinking(text);}
 function removeThinking(){
@@ -2551,6 +3147,24 @@ async function promptNewFolder(){
     await api('/api/file/create-dir',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath})});
     showToast(t('folder_created')+name.trim());
     await loadDir(S.currentDir);
+    // Offer to add the new folder as a space (#782)
+    const absPath=S.session.workspace?((S.currentDir==='.'?S.session.workspace:S.session.workspace+'/'+S.currentDir)+'/'+name.trim()):null;
+    if(absPath){
+      const addAsSpace=await showConfirmDialog({
+        title:t('folder_add_as_space_title'),
+        message:t('folder_add_as_space_msg'),
+        confirmLabel:t('folder_add_as_space_btn'),
+        focusCancel:true
+      });
+      if(addAsSpace){
+        try{
+          const data=await api('/api/workspaces/add',{method:'POST',body:JSON.stringify({path:absPath})});
+          if(typeof _workspaceList!=='undefined')_workspaceList=data.workspaces||_workspaceList||[];
+          if(typeof renderWorkspacesPanel==='function')renderWorkspacesPanel(_workspaceList);
+          showToast(t('workspace_added'));
+        }catch(e2){setStatus((t('error_prefix')||'Error: ')+e2.message);}
+      }
+    }
   }catch(e){setStatus(t('folder_create_failed')+e.message);}
 }
 
@@ -2579,10 +3193,11 @@ async function uploadPendingFiles(){
     fd.append('session_id',S.session.session_id);fd.append('file',f,f.name);
     try{
       const res=await fetch(new URL('api/upload',location.href).href,{method:'POST',credentials:'include',body:fd});
+      if(_redirectIfUnauth(res)) return;
       if(!res.ok){const err=await res.text();throw new Error(err);}
       const data=await res.json();
       if(data.error)throw new Error(data.error);
-      names.push(data.filename);
+      names.push({name: data.filename, path: data.path});
     }catch(e){failures++;setStatus(`\u274c ${t('upload_failed')}${f.name} \u2014 ${e.message}`);}
     bar.style.width=`${Math.round((i+1)/total*100)}%`;
   }

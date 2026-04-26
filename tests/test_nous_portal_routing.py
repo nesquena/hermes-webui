@@ -36,45 +36,54 @@ def _models_with_provider(provider, monkeypatch):
 
 
 class TestNousModelIds:
-    """Nous static model IDs must be slash-prefixed for Nous API compatibility."""
+    """Nous static model IDs must use @nous: prefix for explicit portal routing."""
 
-    def test_nous_models_use_slash_prefixed_ids(self):
-        """All Nous static models must carry a provider/model slash prefix."""
+    def test_nous_models_use_at_prefix(self):
+        """All Nous static models must carry the @nous: explicit provider prefix.
+
+        This ensures they route through the @provider:model branch of
+        resolve_model_provider() — identical to the live-fetched path — rather
+        than relying on the slash-only portal provider guard.
+        """
         from api.config import _PROVIDER_MODELS
         nous_models = _PROVIDER_MODELS.get("nous", [])
         assert nous_models, "Nous must have at least one static model"
         for m in nous_models:
             mid = m["id"]
-            assert "/" in mid, (
-                f"Nous model '{mid}' must be in provider/model format "
-                f"(e.g. anthropic/claude-opus-4.6) so Nous routes it correctly. "
-                f"Bare names cause Nous to reject the request."
+            assert mid.startswith("@nous:"), (
+                f"Nous model '{mid}' must start with '@nous:' "
+                f"(e.g. @nous:anthropic/claude-opus-4.6) so it routes through "
+                f"the explicit provider hint branch, not the weaker portal guard."
             )
 
     def test_nous_known_models_present(self):
-        """Key Nous models must be present with correct slash-prefixed IDs."""
+        """Key Nous models must be present with correct @nous:-prefixed IDs."""
         from api.config import _PROVIDER_MODELS
         nous_ids = {m["id"] for m in _PROVIDER_MODELS.get("nous", [])}
-        assert "anthropic/claude-opus-4.6" in nous_ids, (
-            "anthropic/claude-opus-4.6 must be in Nous model list"
+        assert "@nous:anthropic/claude-opus-4.6" in nous_ids, (
+            "@nous:anthropic/claude-opus-4.6 must be in Nous model list"
         )
-        assert "anthropic/claude-sonnet-4.6" in nous_ids, (
-            "anthropic/claude-sonnet-4.6 must be in Nous model list"
+        assert "@nous:anthropic/claude-sonnet-4.6" in nous_ids, (
+            "@nous:anthropic/claude-sonnet-4.6 must be in Nous model list"
         )
-        assert "openai/gpt-5.4-mini" in nous_ids, (
-            "openai/gpt-5.4-mini must be in Nous model list"
+        assert "@nous:openai/gpt-5.4-mini" in nous_ids, (
+            "@nous:openai/gpt-5.4-mini must be in Nous model list"
         )
 
-    def test_nous_models_no_bare_names(self):
-        """No Nous model should use a bare name without a slash prefix."""
+    def test_nous_models_no_bare_or_slash_only(self):
+        """No Nous static model should be bare or slash-only without @nous: prefix."""
         from api.config import _PROVIDER_MODELS
-        bare_names = {"claude-opus-4.6", "claude-sonnet-4.6", "gpt-5.4-mini",
-                      "gemini-3.1-pro-preview"}
+        bad_ids = {
+            "claude-opus-4.6", "claude-sonnet-4.6", "gpt-5.4-mini",
+            "gemini-3.1-pro-preview",
+            "anthropic/claude-opus-4.6", "anthropic/claude-sonnet-4.6",
+            "openai/gpt-5.4-mini", "google/gemini-3.1-pro-preview",
+        }
         nous_ids = {m["id"] for m in _PROVIDER_MODELS.get("nous", [])}
-        for bare in bare_names:
-            assert bare not in nous_ids, (
-                f"Bare model ID '{bare}' found in Nous model list. "
-                f"Must be slash-prefixed (e.g. anthropic/{bare})."
+        for bad in bad_ids:
+            assert bad not in nous_ids, (
+                f"Model ID '{bad}' found in Nous static list without @nous: prefix. "
+                f"Use '@nous:{bad}' so routing matches the live-fetched path."
             )
 
 

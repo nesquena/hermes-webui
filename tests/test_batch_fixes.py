@@ -77,32 +77,40 @@ class TestCronSkillCacheInvalidation:
     def test_cache_busted_on_form_open(self):
         src = self._panels_src()
         # toggleCronForm should set cache to null unconditionally
+        # openCronCreate() opens the task create form (renamed from toggleCronForm
+        # in the main-view refactor). It must null the skills cache before fetching.
         m = re.search(
-            r'function toggleCronForm\(\)\{.*?_cronSkillsCache=null',
+            r'function openCronCreate\(\)\{.*?_cronSkillsCache\s*=\s*null',
             src, re.DOTALL
         )
         assert m, (
-            "toggleCronForm must unconditionally null _cronSkillsCache "
+            "openCronCreate must unconditionally null _cronSkillsCache "
             "before fetching skills"
         )
 
     def test_cache_not_guarded_by_if_on_open(self):
         src = self._panels_src()
-        # The old guard should be gone
-        assert "if(!_cronSkillsCache)" not in src, (
-            "toggleCronForm should not use 'if(!_cronSkillsCache)' guard — "
+        # openCronCreate must not gate the fetch behind an if(!_cronSkillsCache) guard.
+        m = re.search(
+            r'function openCronCreate\(\)\{.*?\}',
+            src, re.DOTALL
+        )
+        assert m, "openCronCreate definition not found"
+        assert "if(!_cronSkillsCache)" not in m.group(0), (
+            "openCronCreate should not use 'if(!_cronSkillsCache)' guard — "
             "cache must always be busted on open"
         )
 
     def test_cache_busted_on_skill_save(self):
         src = self._panels_src()
-        # After submitSkillSave's api() call, _cronSkillsCache must be nulled
+        # saveSkillForm() is the handler invoked on skill save (renamed from
+        # submitSkillSave in the main-view refactor; the old name still aliases it).
         m = re.search(
-            r'async function submitSkillSave\(\).*?_skillsData\s*=\s*null.*?_cronSkillsCache\s*=\s*null',
+            r'async function saveSkillForm\(\).*?_skillsData\s*=\s*null.*?_cronSkillsCache\s*=\s*null',
             src, re.DOTALL
         )
         assert m, (
-            "_cronSkillsCache must be set to null in submitSkillSave() "
+            "_cronSkillsCache must be set to null in saveSkillForm() "
             "right after _skillsData = null"
         )
 

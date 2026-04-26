@@ -219,6 +219,141 @@ def set_last_workspace(path: str) -> None:
         logger.debug("Failed to set last workspace")
 
 
+def _workspace_blocked_roots() -> tuple[Path, ...]:
+    return (
+        # Linux / macOS
+        Path('/etc'),
+        Path('/usr'),
+        Path('/var'),
+        Path('/bin'),
+        Path('/sbin'),
+        Path('/boot'),
+        Path('/proc'),
+        Path('/sys'),
+        Path('/dev'),
+        Path('/lib'),
+        Path('/lib64'),
+        Path('/opt/homebrew'),
+    )
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _trusted_workspace_roots() -> list[Path]:
+    roots: list[Path] = []
+
+    def add(candidate: str | Path | None) -> None:
+        if candidate in (None, ""):
+            return
+        try:
+            p = Path(candidate).expanduser().resolve()
+        except Exception:
+            return
+        if not p.exists() or not p.is_dir():
+            return
+        if any(_is_within(p, blocked) for blocked in _workspace_blocked_roots()):
+            return
+        if p not in roots:
+            roots.append(p)
+
+    add(Path.home())
+    add(_BOOT_DEFAULT_WORKSPACE)
+    for w in load_workspaces():
+        add(w.get("path"))
+    roots.sort(key=lambda p: len(str(p)))
+    return roots
+
+
+def list_workspace_suggestions(prefix: str = "", limit: int = 12) -> list[str]:
+    """Return workspace path suggestions under trusted roots only.
+
+    Suggestions are limited to directories under one of:
+      - Path.home()
+      - the boot default workspace
+      - already-saved workspace roots
+
+    Arbitrary system prefixes return an empty list rather than an error so the
+    UI can safely autocomplete while the user types.
+    """
+    roots = _trusted_workspace_roots()
+    if not roots:
+        return []
+
+    raw = (prefix or "").strip()
+    if not raw:
+        return [str(p) for p in roots[:limit]]
+
+    if raw.startswith("~"):
+        target = Path(raw).expanduser()
+    elif Path(raw).is_absolute():
+        target = Path(raw)
+    else:
+        target = Path.home() / raw
+
+    normalized = str(target)
+    normalized_lower = normalized.lower()
+    suggestions: list[str] = []
+
+    def add(path: Path) -> None:
+        value = str(path)
+        if value not in suggestions:
+            suggestions.append(value)
+
+    # If the user is typing a partial trusted root like /Users/xuef..., suggest
+    # the matching trusted roots without scanning arbitrary system parents.
+    for root in roots:
+        if str(root).lower().startswith(normalized_lower):
+            add(root)
+
+    in_root = [
+        root
+        for root in roots
+        if normalized == str(root) or normalized.startswith(str(root) + os.sep)
+    ]
+    if not in_root:
+        return suggestions[:limit]
+
+    anchor_root = max(in_root, key=lambda p: len(str(p)))
+    ends_with_sep = raw.endswith(os.sep) or raw.endswith('/')
+    parent = target if ends_with_sep else target.parent
+    leaf = '' if ends_with_sep else target.name
+    show_hidden = leaf.startswith('.')
+
+    try:
+        parent_resolved = parent.expanduser().resolve()
+    except Exception:
+        return suggestions[:limit]
+
+    if not parent_resolved.exists() or not parent_resolved.is_dir():
+        return suggestions[:limit]
+    if not _is_within(parent_resolved, anchor_root):
+        return suggestions[:limit]
+
+    leaf_lower = leaf.lower()
+    try:
+        children = sorted(parent_resolved.iterdir(), key=lambda p: p.name.lower())
+    except OSError:
+        return suggestions[:limit]
+
+    for child in children:
+        if not child.is_dir():
+            continue
+        if child.name.startswith('.') and not show_hidden:
+            continue
+        if leaf_lower and not child.name.lower().startswith(leaf_lower):
+            continue
+        add(child.resolve())
+        if len(suggestions) >= limit:
+            break
+    return suggestions[:limit]
+
+
 def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
     """Resolve and validate a workspace path.
 
@@ -240,13 +375,6 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
     None/empty path falls back to the boot-time DEFAULT_WORKSPACE, which is always
     trusted (it was validated at server startup).
     """
-    _BLOCKED_SYSTEM_ROOTS = {
-        # Linux / macOS
-        Path('/etc'), Path('/usr'), Path('/var'), Path('/bin'), Path('/sbin'),
-        Path('/boot'), Path('/proc'), Path('/sys'), Path('/dev'),
-        Path('/lib'), Path('/lib64'), Path('/opt/homebrew'),
-    }
-
     if path in (None, ""):
         return Path(_BOOT_DEFAULT_WORKSPACE).expanduser().resolve()
 
@@ -258,7 +386,7 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
         raise ValueError(f"Path is not a directory: {candidate}")
 
     # Block known system roots and their children
-    for blocked in _BLOCKED_SYSTEM_ROOTS:
+    for blocked in _workspace_blocked_roots():
         try:
             candidate.relative_to(blocked)
             raise ValueError(f"Path points to a system directory: {candidate}")
@@ -301,6 +429,36 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
         f"Add it via Settings → Workspaces first."
     )
 
+
+
+
+def validate_workspace_to_add(path: str) -> Path:
+    """Validate a path for *adding* to the workspace list (less restrictive than resolve_trusted_workspace).
+
+    When a user explicitly adds a new workspace path, we trust their intent — they
+    have console or filesystem access to that path and are consciously registering it.
+    We only block: non-existent paths, non-directories, and known system roots.
+
+    The stricter ``resolve_trusted_workspace`` is used when *using* an existing workspace
+    (file reads/writes) to prevent path traversal after the list is built.
+    """
+    candidate = Path(path).expanduser().resolve()
+
+    if not candidate.exists():
+        raise ValueError(f"Path does not exist: {candidate}")
+    if not candidate.is_dir():
+        raise ValueError(f"Path is not a directory: {candidate}")
+
+    # Block known system roots and their immediate children
+    for blocked in _workspace_blocked_roots():
+        try:
+            candidate.relative_to(blocked)
+            raise ValueError(f"Path points to a system directory: {candidate}")
+        except ValueError as e:
+            if "system directory" in str(e):
+                raise
+
+    return candidate
 
 def safe_resolve_ws(root: Path, requested: str) -> Path:
     """Resolve a relative path inside a workspace root, raising ValueError on traversal."""

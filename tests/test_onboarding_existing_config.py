@@ -116,6 +116,50 @@ class TestOnboardingGate:
         assert "config_exists" in result["system"]
         assert result["system"]["config_exists"] is True
 
+    def test_persist_failure_does_not_break_status_endpoint(self):
+        """save_settings() failure (read-only FS, disk full) must not turn the
+        status endpoint into a 500.  The persistence-across-restart guarantee
+        degrades but `completed` still reflects the live `config_auto_completed`
+        signal so the user isn't blocked from using the UI.
+        """
+        import api.onboarding as mod
+        settings = {"onboarding_completed": False}
+        runtime = {
+            "chat_ready": True,
+            "provider_configured": True,
+            "provider_ready": True,
+            "setup_state": "ready",
+            "provider_note": "test",
+            "current_provider": "openrouter",
+            "current_model": "anthropic/claude-sonnet-4.6",
+            "current_base_url": None,
+            "env_path": "/tmp/.hermes_test/.env",
+        }
+        fake_config_path = pathlib.Path("/tmp/_test_config.yaml")
+
+        with (
+            mock.patch.object(mod, "load_settings", return_value=settings),
+            mock.patch.object(mod, "get_config", return_value={}),
+            mock.patch.object(mod, "verify_hermes_imports", return_value=(True, [], {})),
+            mock.patch.object(mod, "_status_from_runtime", return_value=runtime),
+            mock.patch.object(mod, "load_workspaces", return_value=[]),
+            mock.patch.object(mod, "get_last_workspace", return_value=None),
+            mock.patch.object(mod, "get_available_models", return_value=[]),
+            mock.patch.object(mod, "_get_config_path", return_value=fake_config_path),
+            mock.patch.object(pathlib.Path, "exists", return_value=True),
+            mock.patch.object(
+                mod, "save_settings", side_effect=OSError("read-only filesystem")
+            ),
+        ):
+            # Must not raise — persistence failure is best-effort.
+            result = mod.get_onboarding_status()
+
+        # completed still reflects the live signal via config_auto_completed
+        assert result["completed"] is True, (
+            "Status endpoint must still return completed=True via the live "
+            "config_auto_completed signal when persistence fails"
+        )
+
 
 class TestApplyOnboardingSetupGuard:
     """Fix #2: apply_onboarding_setup must not silently overwrite config.yaml."""
@@ -303,20 +347,27 @@ class TestOnboardingGateIntegration:
         # Write a fake API key so provider_ready (and thus chat_ready) fires
         # — but only when hermes_cli imports are available
         data, _ = _http_get("/api/onboarding/status")
-        if data["system"]["hermes_found"] and data["system"]["imports_ok"]:
-            (hermes_home / ".env").write_text(
-                "OPENROUTER_API_KEY=test-existing-key\n", encoding="utf-8"
-            )
-            data, status = _http_get("/api/onboarding/status")
-            assert status == 200
-            assert data["completed"] is True, (
-                "Existing config + chat_ready must auto-complete onboarding."
-            )
-        else:
-            # Agent not installed: chat_ready is always False, so wizard still
-            # fires — that is the correct behaviour (can't verify readiness).
-            assert data["completed"] is False
-
+        try:
+            if data["system"]["hermes_found"] and data["system"]["imports_ok"]:
+                (hermes_home / ".env").write_text(
+                    "OPENROUTER_API_KEY=test-e...\n", encoding="utf-8"
+                )
+                data, status = _http_get("/api/onboarding/status")
+                assert status == 200
+                assert data["completed"] is True, (
+                    "Existing config + chat_ready must auto-complete onboarding."
+                )
+            else:
+                # Agent not installed: chat_ready is always False, so wizard still
+                # fires — that is the correct behaviour (can't verify readiness).
+                assert data["completed"] is False
+        finally:
+            # Clean up: the auto-persist in get_onboarding_status() (#921) writes
+            # onboarding_completed=True to settings.json when config_auto_completed fires.
+            # Reset to avoid contaminating subsequent tests.
+            (hermes_home / "config.yaml").unlink(missing_ok=True)
+            (hermes_home / ".env").unlink(missing_ok=True)
+            _http_post("/api/settings", {"onboarding_completed": False})
     @_needs_yaml
     def test_setup_blocked_for_existing_config(self):
         """POST /api/onboarding/setup must return config_exists error if config.yaml exists."""
@@ -366,3 +417,7 @@ class TestOnboardingGateIntegration:
         assert data.get("error") != "config_exists", (
             "confirm_overwrite=True must bypass the guard."
         )
+        # Clean up so onboarding_completed=True left by this test's setup call
+        # does not contaminate subsequent tests (#921 test isolation).
+        (hermes_home / "config.yaml").unlink(missing_ok=True)
+        _http_post("/api/settings", {"onboarding_completed": False})

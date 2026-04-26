@@ -2,6 +2,7 @@
 Hermes Web UI -- SSE streaming engine and agent thread runner.
 Includes Sprint 10 cancel support via CANCEL_FLAGS.
 """
+import contextlib
 import json
 import logging
 import os
@@ -17,12 +18,14 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 from api.config import (
-    STREAMS, STREAMS_LOCK, CANCEL_FLAGS, AGENT_INSTANCES,
+    STREAMS, STREAMS_LOCK, CANCEL_FLAGS, AGENT_INSTANCES, STREAM_PARTIAL_TEXT,
     LOCK, SESSIONS, SESSION_DIR,
     _get_session_agent_lock, _set_thread_env, _clear_thread_env,
+    SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK,
     resolve_model_provider,
 )
 from api.helpers import redact_session_data
+from api.metering import meter
 
 # Global lock for os.environ writes. Per-session locks (_agent_lock) prevent
 # concurrent runs of the SAME session, but two DIFFERENT sessions can still
@@ -91,14 +94,35 @@ def _strip_xml_tool_calls(text: str) -> str:
 
     Handles both complete blocks (<function_calls>…</function_calls>) and
     partial/orphaned opening tags that may appear at the tail of a stream.
+    Also handles variants like <｜DSML｜function_calls> from DeepSeek on Bedrock.
     """
-    if not text or '<function_calls>' not in text.lower():
+    if not text:
         return text
     s = str(text)
-    # Strip complete blocks (possibly multiple)
-    s = re.sub(r'<function_calls>.*?</function_calls>', '', s, flags=re.IGNORECASE | re.DOTALL)
-    # Strip orphaned opening tags (stream cut off before closing tag)
-    s = re.sub(r'<function_calls>.*$', '', s, flags=re.IGNORECASE | re.DOTALL)
+    # Check if contains any function_calls/DSML marker (case-insensitive)
+    _lo = s.lower()
+    if 'function_calls' not in _lo and 'dsml' not in _lo:
+        return text
+    
+    _dsml_prefix = r'(?:\s*｜\s*DSML\s*[｜|]\s*)?'
+    open_tag = rf'<{_dsml_prefix}function_calls'
+    close_tag = rf'</{_dsml_prefix}function_calls>'
+    # Strip complete blocks for both <function_calls> and <｜DSML｜function_calls>.
+    s = re.sub(
+        rf'{open_tag}>.*?{close_tag}',
+        '',
+        s,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+    # Strip orphaned/truncated opening tags, including missing ">" at stream tail.
+    s = re.sub(
+        rf'{open_tag}(?:>|$).*$',
+        '',
+        s,
+        flags=re.IGNORECASE | re.DOTALL
+    )
+    # Remove malformed DSML fragments like "<｜DSML |" that can leak in tokens.
+    s = re.sub(r'<\s*｜\s*DSML\s*[｜|]\s*', '', s, flags=re.IGNORECASE)
     return s.strip()
 
 
@@ -106,7 +130,7 @@ def _sanitize_generated_title(text: str) -> str:
     """Sanitize LLM-generated title text before persisting to session."""
     s = _strip_thinking_markup(text or '')
     s = re.sub(
-        r'^\s*(?:[*_`~]+\s*)?(?:session\s+title|title)\s*[:：]\s*(?:[*_`~]+\s*)?',
+        r'^\s*(?:[*_`~]+\s*)?(?:session\s+title|title)\s*:\s*(?:[*_`~]+\s*)?',
         '',
         s,
         flags=re.IGNORECASE,
@@ -132,10 +156,7 @@ def _looks_invalid_generated_title(text: str) -> bool:
         or re.search(r'^\s*(i|we)\s+(should|need to|will|can)\b', s, flags=re.IGNORECASE)
         or re.search(r'^\s*let me\b', s, flags=re.IGNORECASE)
         or re.search(r"^\s*here(?:'s| is) (?:a |my )?(?:thinking|thought)", s, flags=re.IGNORECASE)
-        or re.search(r'用户(要求|希望|想让|让我)', s)
-        or re.search(r'请只?回复', s)
         or re.search(r'^\s*(ok|okay|done|all set|complete|completed|finished)\b[\s.!?]*$', s, flags=re.IGNORECASE)
-        or re.search(r'^\s*(好的|好啦|完成了|已完成|测试完成|测试已完成|可以了|没问题)\s*[！!。\.\s]*$', s)
     )
 
 
@@ -188,6 +209,58 @@ def _first_exchange_snippets(messages):
     return user_text[:500], asst_text[:500]
 
 
+def _latest_exchange_snippets(messages):
+    """Return (last_user_text, last_assistant_text) snippets for title refresh.
+
+    Walks the message list backwards to find the last user+assistant pair,
+    skipping empty or tool-call-only assistant messages.
+    """
+    user_text = ''
+    asst_text = ''
+    for m in reversed(messages or []):
+        if not isinstance(m, dict):
+            continue
+        role = m.get('role')
+        if role == 'assistant' and not asst_text:
+            candidate = _message_text(m.get('content'))
+            # Skip tool-call-only preambles
+            if m.get('tool_calls') and (not candidate or _looks_invalid_generated_title(candidate)):
+                continue
+            if candidate:
+                asst_text = candidate
+        elif role == 'user' and not user_text:
+            candidate = _message_text(m.get('content'))
+            if candidate:
+                user_text = candidate
+        if user_text and asst_text:
+            break
+    return user_text[:500], asst_text[:500]
+
+
+def _count_exchanges(messages):
+    """Count the number of user messages (rough exchange count)."""
+    count = 0
+    for m in messages or []:
+        if isinstance(m, dict) and m.get('role') == 'user':
+            content = m.get('content', '')
+            if isinstance(content, list):
+                content = ' '.join(p.get('text', '') for p in content if isinstance(p, dict) and p.get('type') == 'text')
+            if str(content).strip():
+                count += 1
+    return count
+
+
+def _get_title_refresh_interval() -> int:
+    """Read the auto_title_refresh_every setting (0 = disabled)."""
+    try:
+        from api.config import load_settings
+        settings = load_settings()
+        val = settings.get('auto_title_refresh_every', '0')
+        return int(val) if str(val).strip().isdigit() and int(val) > 0 else 0
+    except Exception:
+        return 0
+
+
 def _is_provisional_title(current_title: str, messages) -> bool:
     """Heuristic: title equals first-message substring placeholder."""
     derived = title_from(messages, '') or ''
@@ -209,10 +282,10 @@ def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]
             "Return only the title text, 3-8 words, as a topic label.\n"
             "Do not use markdown, bullets, labels, or prefixes like Session Title:.\n"
             "Do not output a full sentence.\n"
-            "Do not output acknowledgements or completion phrases like OK, done, all set, 测试完成.\n"
+            "Do not output acknowledgements or completion phrases like OK, done, or all set.\n"
             "Do not describe internal reasoning.\n"
-            "Bad: The user is asking..., OK, 好的，测试完成！\n"
-            "Good: 自动标题生成测试, Clarify Dialog Layout, GitHub Issue Triage"
+            "Bad: The user is asking..., OK, all set.\n"
+            "Good: Title Generation Test, Clarify Dialog Layout, GitHub Issue Triage"
         ),
         (
             "Rewrite this conversation start as a concise noun-phrase title.\n"
@@ -234,10 +307,109 @@ def _is_minimax_route(provider: str = '', model: str = '', base_url: str = '') -
     return 'minimax' in text or 'minimaxi.com' in text
 
 
+def _aux_title_configured() -> bool:
+    """Return True when any auxiliary title_generation config field is meaningfully set."""
+    try:
+        from agent.auxiliary_client import _get_auxiliary_task_config
+        tg = _get_auxiliary_task_config('title_generation')
+        provider = tg.get('provider', '') or ''
+        model = tg.get('model', '') or ''
+        base_url = tg.get('base_url', '') or ''
+        return bool(model or base_url or (provider and provider.lower() != 'auto'))
+    except Exception:
+        return False
+
+def _aux_title_timeout(default: float = 15.0) -> float:
+    """Return the configured timeout (seconds) for auxiliary title generation.
+
+    Only accepts positive numeric values.  Falls back to *default* when the
+    value is ``None``, non-numeric, zero, or negative, and emits a debug log
+    so mis-configurations are visible in server output.
+    """
+    try:
+        from agent.auxiliary_client import _get_auxiliary_task_config
+        tg = _get_auxiliary_task_config('title_generation')
+        raw = tg.get('timeout')
+        if raw is None:
+            return default
+        try:
+            value = float(raw)
+        except (ValueError, TypeError):
+            logger.debug("aux title timeout: non-numeric value %r, falling back to %s", raw, default)
+            return default
+        if value > 0:
+            return value
+        logger.debug("aux title timeout: non-positive value %s, falling back to %s", value, default)
+        return default
+    except Exception:
+        return default
+
 def _title_completion_budget(provider: str = '', model: str = '', base_url: str = '') -> int:
-    if _is_minimax_route(provider, model, base_url):
-        return 384
-    return 160
+    # Title generation is a small auxiliary task, but reasoning models may
+    # spend a surprising amount of the completion budget before emitting final
+    # content.  Keep the budget high enough for MiniMax/Kimi-style reasoning
+    # responses without making title generation depend on provider-specific
+    # one-off branches.
+    return 512
+
+
+def _title_retry_completion_budget(provider: str = '', model: str = '', base_url: str = '') -> int:
+    return max(1024, _title_completion_budget(provider, model, base_url) * 2)
+
+
+def _title_retry_status(status: str) -> bool:
+    return status in {
+        'llm_length',
+        'llm_length_aux',
+        'llm_empty_reasoning',
+        'llm_empty_reasoning_aux',
+    }
+
+
+def _safe_obj_value(obj, key: str):
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj.get(key)
+    value = getattr(obj, key, None)
+    # Missing MagicMock attrs stringify as mock reprs and look truthy.  Treat
+    # them as absent so tests model real provider objects accurately.
+    if value.__class__.__module__.startswith('unittest.mock'):
+        return None
+    return value
+
+
+def _safe_text_value(value) -> str:
+    if value is None:
+        return ''
+    if value.__class__.__module__.startswith('unittest.mock'):
+        return ''
+    return str(value or '').strip()
+
+
+def _extract_title_response(resp, *, aux: bool = False) -> tuple[str, str]:
+    """Return (content, empty_status) from an OpenAI-compatible response."""
+    suffix = '_aux' if aux else ''
+    try:
+        choices = _safe_obj_value(resp, 'choices') or []
+        choice = choices[0] if choices else None
+        message = _safe_obj_value(choice, 'message')
+        content = _safe_text_value(_safe_obj_value(message, 'content'))
+        if content:
+            return content, ''
+        finish_reason = _safe_text_value(_safe_obj_value(choice, 'finish_reason')).lower()
+        reasoning = (
+            _safe_text_value(_safe_obj_value(message, 'reasoning'))
+            or _safe_text_value(_safe_obj_value(message, 'reasoning_content'))
+            or _safe_text_value(_safe_obj_value(message, 'thinking'))
+        )
+        if finish_reason == 'length':
+            return '', f'llm_length{suffix}'
+        if reasoning:
+            return '', f'llm_empty_reasoning{suffix}'
+        return '', f'llm_empty{suffix}'
+    except Exception:
+        return '', f'llm_empty{suffix}'
 
 
 def generate_title_raw_via_aux(
@@ -251,40 +423,43 @@ def generate_title_raw_via_aux(
     if not user_text or not assistant_text:
         return None, 'missing_exchange'
     qa, prompts = _title_prompts(user_text, assistant_text)
-    max_tokens = _title_completion_budget(provider, model, base_url)
+    base_max_tokens = _title_completion_budget(provider, model, base_url)
     reasoning_extra = {"reasoning": {"enabled": False}}
     if _is_minimax_route(provider, model, base_url):
         reasoning_extra["reasoning_split"] = True
     try:
+        _timeout = _aux_title_timeout()
         from agent.auxiliary_client import call_llm
+        last_status = 'llm_error_aux'
         for idx, prompt in enumerate(prompts):
             messages = [
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": qa},
             ]
+            budgets = [base_max_tokens]
             try:
-                resp = call_llm(
-                    task='title_generation',
-                    provider=provider or None,
-                    model=model or None,
-                    base_url=base_url or None,
-                    messages=messages,
-                    max_tokens=max_tokens,
-                    temperature=0.2,
-                    timeout=15.0,
-                    extra_body=reasoning_extra,
-                )
-                raw = ''
-                try:
-                    raw = resp.choices[0].message.content or ''
-                except Exception:
-                    raw = ''
-                raw = str(raw or '').strip()
-                if raw:
-                    return raw, ('llm_aux' if idx == 0 else 'llm_aux_retry')
+                for budget_idx, max_tokens in enumerate(budgets):
+                    resp = call_llm(
+                        task='title_generation',
+                        provider=provider or None,
+                        model=model or None,
+                        base_url=base_url or None,
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=0.2,
+                        timeout=_timeout,
+                        extra_body=reasoning_extra,
+                    )
+                    raw, empty_status = _extract_title_response(resp, aux=True)
+                    if raw:
+                        return raw, ('llm_aux' if idx == 0 and budget_idx == 0 else 'llm_aux_retry')
+                    last_status = empty_status or 'llm_empty_aux'
+                    if budget_idx == 0 and _title_retry_status(last_status):
+                        budgets.append(_title_retry_completion_budget(provider, model, base_url))
             except Exception as e:
+                last_status = 'llm_error_aux'
                 logger.debug("Aux title generation attempt %s failed: %s", idx + 1, e)
-        return None, 'llm_error_aux'
+        return None, last_status
     except Exception as e:
         logger.debug("Aux title generation failed: %s", e)
         return None, 'llm_error_aux'
@@ -298,7 +473,7 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
         return None, 'missing_agent'
 
     qa, prompts = _title_prompts(user_text, assistant_text)
-    max_tokens = _title_completion_budget(
+    base_max_tokens = _title_completion_budget(
         getattr(agent, 'provider', ''),
         getattr(agent, 'model', ''),
         getattr(agent, 'base_url', ''),
@@ -312,57 +487,70 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": qa},
             ]
+            budgets = [base_max_tokens]
             try:
-                raw = ""
-                if getattr(agent, 'api_mode', '') == 'codex_responses':
-                    codex_kwargs = agent._build_api_kwargs(api_messages)
-                    codex_kwargs.pop('tools', None)
-                    if 'max_output_tokens' in codex_kwargs:
-                        codex_kwargs['max_output_tokens'] = max_tokens
-                    resp = agent._run_codex_stream(codex_kwargs)
-                    assistant_message, _ = agent._normalize_codex_response(resp)
-                    raw = (assistant_message.content or '') if assistant_message else ''
-                elif getattr(agent, 'api_mode', '') == 'anthropic_messages':
-                    from agent.anthropic_adapter import build_anthropic_kwargs, normalize_anthropic_response
-                    ant_kwargs = build_anthropic_kwargs(
-                        model=agent.model,
-                        messages=api_messages,
-                        tools=None,
-                        max_tokens=max_tokens,
-                        reasoning_config=disabled_reasoning,
-                        is_oauth=getattr(agent, '_is_anthropic_oauth', False),
-                        preserve_dots=agent._anthropic_preserve_dots(),
-                        base_url=getattr(agent, '_anthropic_base_url', None),
-                    )
-                    resp = agent._anthropic_messages_create(ant_kwargs)
-                    assistant_message, _ = normalize_anthropic_response(
-                        resp, strip_tool_prefix=getattr(agent, '_is_anthropic_oauth', False)
-                    )
-                    raw = (assistant_message.content or '') if assistant_message else ''
-                else:
-                    api_kwargs = agent._build_api_kwargs(api_messages)
-                    api_kwargs.pop('tools', None)
-                    api_kwargs['temperature'] = 0.1
-                    api_kwargs['timeout'] = 15.0
-                    if _is_minimax_route(getattr(agent, 'provider', ''), getattr(agent, 'model', ''), getattr(agent, 'base_url', '')):
-                        extra_body = dict(api_kwargs.get('extra_body') or {})
-                        extra_body['reasoning_split'] = True
-                        api_kwargs['extra_body'] = extra_body
-                    if 'max_completion_tokens' in api_kwargs:
-                        api_kwargs['max_completion_tokens'] = max_tokens
+                last_status = 'llm_empty'
+                for budget_idx, max_tokens in enumerate(budgets):
+                    raw = ""
+                    empty_status = ''
+                    if getattr(agent, 'api_mode', '') == 'codex_responses':
+                        codex_kwargs = agent._build_api_kwargs(api_messages)
+                        codex_kwargs.pop('tools', None)
+                        if 'max_output_tokens' in codex_kwargs:
+                            codex_kwargs['max_output_tokens'] = max_tokens
+                        resp = agent._run_codex_stream(codex_kwargs)
+                        assistant_message, _ = agent._normalize_codex_response(resp)
+                        raw = (assistant_message.content or '') if assistant_message else ''
+                        if not raw:
+                            empty_status = 'llm_empty'
+                    elif getattr(agent, 'api_mode', '') == 'anthropic_messages':
+                        from agent.anthropic_adapter import build_anthropic_kwargs, normalize_anthropic_response
+                        ant_kwargs = build_anthropic_kwargs(
+                            model=agent.model,
+                            messages=api_messages,
+                            tools=None,
+                            max_tokens=max_tokens,
+                            reasoning_config=disabled_reasoning,
+                            is_oauth=getattr(agent, '_is_anthropic_oauth', False),
+                            preserve_dots=agent._anthropic_preserve_dots(),
+                            base_url=getattr(agent, '_anthropic_base_url', None),
+                        )
+                        resp = agent._anthropic_messages_create(ant_kwargs)
+                        assistant_message, _ = normalize_anthropic_response(
+                            resp, strip_tool_prefix=getattr(agent, '_is_anthropic_oauth', False)
+                        )
+                        raw = (assistant_message.content or '') if assistant_message else ''
+                        if not raw:
+                            empty_status = 'llm_empty'
                     else:
-                        api_kwargs['max_tokens'] = max_tokens
-                    resp = agent._ensure_primary_openai_client(reason='title_generation').chat.completions.create(
-                        **api_kwargs,
-                    )
-                    try:
-                        raw = resp.choices[0].message.content or ""
-                    except Exception:
-                        raw = ""
-                raw = str(raw or '').strip()
-                if raw:
-                    return raw, ('llm' if idx == 0 else 'llm_retry')
+                        api_kwargs = agent._build_api_kwargs(api_messages)
+                        api_kwargs.pop('tools', None)
+                        api_kwargs['temperature'] = 0.1
+                        api_kwargs['timeout'] = 15.0
+                        if _is_minimax_route(getattr(agent, 'provider', ''), getattr(agent, 'model', ''), getattr(agent, 'base_url', '')):
+                            extra_body = dict(api_kwargs.get('extra_body') or {})
+                            extra_body['reasoning_split'] = True
+                            api_kwargs['extra_body'] = extra_body
+                        if 'max_completion_tokens' in api_kwargs:
+                            api_kwargs['max_completion_tokens'] = max_tokens
+                        else:
+                            api_kwargs['max_tokens'] = max_tokens
+                        resp = agent._ensure_primary_openai_client(reason='title_generation').chat.completions.create(
+                            **api_kwargs,
+                        )
+                        raw, empty_status = _extract_title_response(resp)
+                    raw = str(raw or '').strip()
+                    if raw:
+                        return raw, ('llm' if idx == 0 and budget_idx == 0 else 'llm_retry')
+                    last_status = empty_status or 'llm_empty'
+                    if budget_idx == 0 and _title_retry_status(last_status):
+                        budgets.append(_title_retry_completion_budget(
+                            getattr(agent, 'provider', ''),
+                            getattr(agent, 'model', ''),
+                            getattr(agent, 'base_url', ''),
+                        ))
             except Exception as e:
+                last_status = 'llm_error'
                 logger.debug(
                     "Agent title generation attempt %s failed: provider=%s model=%s error=%s",
                     idx + 1,
@@ -370,7 +558,7 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str) -> 
                     getattr(agent, 'model', None),
                     e,
                 )
-        return None, 'llm_error'
+        return None, last_status
     except Exception as e:
         logger.debug("Agent title generation failed: %s", e)
         return None, 'llm_error'
@@ -389,14 +577,29 @@ def _generate_llm_session_title_for_agent(agent, user_text: str, assistant_text:
     return None, 'llm_invalid', str(raw)[:120]
 
 
-def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, agent=None) -> tuple[Optional[str], str, str]:
-    """Generate a title via dedicated auxiliary LLM route, then sanitize/validate result."""
+def _generate_llm_session_title_via_aux(user_text: str, assistant_text: str, agent=None, *, use_agent_model: bool = False) -> tuple[Optional[str], str, str]:
+    """Generate a title via dedicated auxiliary LLM route, then sanitize/validate result.
+
+    When use_agent_model is False (default), the auxiliary client resolves
+    provider/model/base_url from config.yaml auxiliary.title_generation, which
+    prevents the session's chat model (e.g. a Chinese model) from overriding
+    the dedicated title model.  When True, the agent's attrs are passed through
+    (legacy fallback behaviour).
+    """
+    if use_agent_model and agent:
+        provider = getattr(agent, 'provider', '')
+        model = getattr(agent, 'model', '')
+        base_url = getattr(agent, 'base_url', '')
+    else:
+        provider = ''
+        model = ''
+        base_url = ''
     raw, status = generate_title_raw_via_aux(
         user_text,
         assistant_text,
-        provider=getattr(agent, 'provider', '') if agent else '',
-        model=getattr(agent, 'model', '') if agent else '',
-        base_url=getattr(agent, 'base_url', '') if agent else '',
+        provider=provider,
+        model=model,
+        base_url=base_url,
     )
     if not raw:
         return None, status, ''
@@ -437,10 +640,10 @@ def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Option
     combined = f"{user_text} {assistant_text}".strip().lower()
     combined_raw = f"{user_text} {assistant_text}".strip()
 
+    def _contains_latin(text: str) -> bool:
+        return bool(re.search(r'[A-Za-z]', text or ''))
+
     def _extract_named_topic(text: str) -> str:
-        m = re.search(r'《([^》]{2,24})》', text)
-        if m:
-            return (m.group(1) or '').strip()
         m = re.search(r'"([^"\n]{2,24})"', text)
         if m:
             return (m.group(1) or '').strip()
@@ -451,57 +654,53 @@ def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Option
 
     topic_name = _extract_named_topic(combined_raw)
     if topic_name:
-        if any(k in combined for k in ('时间', 'time', '安排', '效率', '怎么办', '健身', '唱歌', '写毛笔', '不够用了')):
-            return f'{topic_name}与时间管理'
+        if not _contains_latin(topic_name):
+            if any(k in combined for k in ('time', 'schedule', 'efficiency', 'manage', 'fitness', 'singing', 'calligraphy')):
+                return 'Time management discussion'
+            if any(k in combined for k in ('hermes', 'codex', 'ai')):
+                return 'AI productivity discussion'
+            return 'Conversation topic'
+        if any(k in combined for k in ('time', 'schedule', 'efficiency', 'manage', 'fitness', 'singing', 'calligraphy')):
+            return f'{topic_name} time management'
         if any(k in combined for k in ('hermes', 'codex', 'ai')):
-            return f'{topic_name}与AI效率'
-        return f'{topic_name}讨论'
+            return f'{topic_name} AI productivity'
+        return f'{topic_name} discussion'
 
-    if any(k in combined for k in ('title', '标题')) and any(k in combined for k in ('summary', 'summar', '摘要', '短标题')):
-        if any(k in combined for k in ('test', '测试', 'ok', '回复ok')):
-            return '会话标题自动摘要测试'
-        return '会话标题自动摘要'
-    if any(k in combined for k in ('clarify', '澄清')) and any(k in combined for k in ('dialog', 'card', '对话', '卡片')):
-        return 'Clarify 对话卡片'
-    if any(k in combined for k in ('issue', 'github', 'pr')) and any(k in combined for k in ('triage', 'bug', 'review', '问题')):
+    if any(k in combined for k in ('title', 'session title')) and any(k in combined for k in ('summary', 'summar', 'short title')):
+        if any(k in combined for k in ('test', 'ok', 'reply ok')):
+            return 'Session title auto-summary test'
+        return 'Session title auto-summary'
+    if any(k in combined for k in ('clarify', 'clarification')) and any(k in combined for k in ('dialog', 'card')):
+        return 'Clarify dialog card'
+    if any(k in combined for k in ('issue', 'github', 'pr')) and any(k in combined for k in ('triage', 'bug', 'review')):
         return 'GitHub Issue Triage'
 
-    head = re.split(r'[。！？.!?\n]', user_text)[0].strip()
+    head = re.split(r'[.!?\n]', user_text)[0].strip()
     if not head:
         return None
 
-    stop_cjk = {
-        '我们', '看看', '一下', '这个', '标题', '是否', '可以', '用户', '理解', '这里', '测试', '一下',
-        '你只', '需要', '回复', '就可', '可以', '不需', '需要做', '什么', '自动', '成用户', '短标题',
-    }
     stop_en = {
         'the', 'this', 'that', 'with', 'from', 'into', 'just', 'reply', 'please',
         'need', 'needs', 'want', 'wants', 'user', 'assistant', 'could', 'would',
         'should', 'about', 'there', 'here', 'test', 'testing', 'title', 'summary',
     }
-    tokens = re.findall(r'[\u4e00-\u9fff]{2,6}|[A-Za-z0-9][A-Za-z0-9_./+-]*', head)
+    tokens = re.findall(r'[A-Za-z0-9][A-Za-z0-9_./+-]*', head)
     if not tokens:
-        return head[:64]
+        return 'Conversation topic'
 
     picked = []
     for tok in tokens:
         lower_tok = tok.lower()
-        if re.search(r'[\u4e00-\u9fff]', tok):
-            if tok in stop_cjk:
-                continue
-        else:
-            if lower_tok in stop_en or len(lower_tok) < 3:
-                continue
+        if lower_tok in stop_en or len(lower_tok) < 3:
+            continue
         if tok not in picked:
             picked.append(tok)
         if len(picked) >= 4:
             break
 
     if picked:
-        if any(re.search(r'[\u4e00-\u9fff]', t) for t in picked):
-            return ''.join(picked)[:20]
         return ' '.join(picked)[:60]
-    return head[:24]
+    return 'Conversation topic'
 
 
 def _run_background_title_update(session_id: str, user_text: str, assistant_text: str, placeholder_title: str, put_event, agent=None):
@@ -527,34 +726,140 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
         if not still_auto:
             _put_title_status(put_event, session_id, 'skipped', 'manual_title', current)
             return
-        # Prefer the active session model when available so title generation
-        # matches the user's chosen runtime and can use provider-specific fixes.
-        if agent:
+        aux_title_configured = _aux_title_configured()
+        if agent and not aux_title_configured:
             next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
             if not next_title and llm_status in ('llm_error', 'llm_invalid'):
-                next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent)
+                next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True)
         else:
-            next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent)
+            next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text)
+            if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
+                next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
         source = llm_status
         if not next_title:
             next_title = _fallback_title_from_exchange(user_text, assistant_text)
             if next_title:
                 logger.debug("Using local fallback for session title generation")
                 source = 'fallback'
-        if next_title and next_title != current:
-            s.title = next_title
-            s.llm_title_generated = True
-            # Keep chronological ordering stable in the sidebar.
-            s.save(touch_updated_at=False)
+        fallback_reason = (
+            f'local_summary:{llm_status}'
+            if source == 'fallback' and llm_status
+            else 'local_summary'
+        )
+        wrote_title = False
+        effective_title = current
+        if next_title:
+            with _get_session_agent_lock(session_id):
+                with LOCK:
+                    s = SESSIONS.get(session_id, s)
+                    effective_title = str(s.title or '').strip()
+                    invalid_existing_now = _looks_invalid_generated_title(s.title)
+                    still_auto = (
+                        effective_title == placeholder_title
+                        or effective_title in ('Untitled', 'New Chat', '')
+                        or _is_provisional_title(effective_title, s.messages)
+                        or invalid_existing_now
+                    )
+                if not still_auto:
+                    _put_title_status(put_event, session_id, 'skipped', 'manual_title', effective_title)
+                    return
+                if next_title != effective_title:
+                    s.title = next_title
+                    s.llm_title_generated = True
+                    # Keep chronological ordering stable in the sidebar.
+                    s.save(touch_updated_at=False)
+                    effective_title = s.title
+                    wrote_title = True
+
+        if wrote_title:
             if source == 'fallback':
-                _put_title_status(put_event, session_id, source, 'local_summary', s.title, raw_preview)
+                _put_title_status(put_event, session_id, source, fallback_reason, effective_title, raw_preview)
             else:
-                _put_title_status(put_event, session_id, source, llm_status, s.title, raw_preview)
-            put_event('title', {'session_id': session_id, 'title': s.title})
+                _put_title_status(put_event, session_id, source, llm_status, effective_title, raw_preview)
+            put_event('title', {'session_id': session_id, 'title': effective_title})
         else:
-            _put_title_status(put_event, session_id, 'skipped', source or 'unchanged', current, raw_preview)
+            _put_title_status(put_event, session_id, 'skipped', source or 'unchanged', effective_title, raw_preview)
     finally:
         put_event('stream_end', {'session_id': session_id})
+
+
+def _run_background_title_refresh(session_id: str, user_text: str, assistant_text: str, current_title: str, put_event, agent=None):
+    """Refresh an existing LLM-generated title using the latest exchange text.
+
+    Unlike _run_background_title_update, this does NOT guard on
+    llm_title_generated — it assumes the title was already LLM-generated
+    and the session has progressed enough to warrant a refresh.
+    It does NOT emit stream_end (the caller already did).
+    """
+    try:
+        try:
+            s = get_session(session_id)
+        except KeyError:
+            return
+        # Safety: skip if user manually renamed since the check
+        effective = str(s.title or '').strip()
+        if effective != current_title:
+            _put_title_status(put_event, session_id, 'skipped', 'manual_title', effective)
+            return
+        if not effective or effective in ('Untitled', 'New Chat'):
+            return
+        aux_title_configured = _aux_title_configured()
+        if agent and not aux_title_configured:
+            next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
+            if not next_title and llm_status in ('llm_error', 'llm_invalid'):
+                next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True)
+        else:
+            next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text)
+            if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
+                next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
+        if not next_title:
+            _put_title_status(put_event, session_id, 'refresh_skipped', llm_status or 'empty', effective, raw_preview)
+            return
+        # Skip if the new title is essentially the same (after normalization)
+        normalized_current = re.sub(r'\s+', ' ', effective).strip().lower()
+        normalized_new = re.sub(r'\s+', ' ', next_title).strip().lower()
+        if normalized_current == normalized_new:
+            _put_title_status(put_event, session_id, 'refresh_skipped', 'same_title', effective, raw_preview)
+            return
+        with _get_session_agent_lock(session_id):
+            with LOCK:
+                s = SESSIONS.get(session_id, s)
+                # Re-check: user may have renamed while we were generating
+                if str(s.title or '').strip() != current_title:
+                    _put_title_status(put_event, session_id, 'skipped', 'manual_title', str(s.title or '').strip())
+                    return
+                s.title = next_title
+                s.llm_title_generated = True
+                s.save(touch_updated_at=False)
+                effective_title = s.title
+        _put_title_status(put_event, session_id, 'refreshed', llm_status, effective_title, raw_preview)
+        put_event('title', {'session_id': session_id, 'title': effective_title})
+        logger.info("Adaptive title refresh: session=%s new_title=%r", session_id, effective_title)
+    except Exception:
+        logger.debug("Background title refresh failed for session %s", session_id, exc_info=True)
+
+
+def _maybe_schedule_title_refresh(session, put_event, agent):
+    """Check if the session is due for an adaptive title refresh and schedule it."""
+    refresh_interval = _get_title_refresh_interval()
+    if refresh_interval <= 0:
+        return
+    current_title = str(session.title or '').strip()
+    if not current_title or current_title in ('Untitled', 'New Chat'):
+        return
+    if not getattr(session, 'llm_title_generated', False):
+        return
+    exchange_count = _count_exchanges(session.messages)
+    if exchange_count <= 0 or exchange_count % refresh_interval != 0:
+        return
+    last_u, last_a = _latest_exchange_snippets(session.messages)
+    if not last_u and not last_a:
+        return
+    threading.Thread(
+        target=_run_background_title_refresh,
+        args=(session.session_id, last_u, last_a, current_title, put_event, agent),
+        daemon=True,
+    ).start()
 
 
 def _sanitize_messages_for_api(messages):
@@ -796,8 +1101,12 @@ def _sse(handler, event, data):
     handler.wfile.flush()
 
 
-def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, attachments=None):
-    """Run agent in background thread, writing SSE events to STREAMS[stream_id]."""
+def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, attachments=None, *, ephemeral=False):
+    """Run agent in background thread, writing SSE events to STREAMS[stream_id].
+
+    When ephemeral=True, session mutations are skipped — used by /btw to get
+    a streaming answer without persisting to the parent session.
+    """
     q = STREAMS.get(stream_id)
     if q is None:
         return
@@ -822,6 +1131,29 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
     cancel_event = threading.Event()
     with STREAMS_LOCK:
         CANCEL_FLAGS[stream_id] = cancel_event
+        STREAM_PARTIAL_TEXT[stream_id] = ''  # start accumulating partial text (#893)
+
+    # Register this stream with the global streaming meter
+    meter().begin_session(stream_id)
+
+    # Metering ticker — emits a metering event at 1 Hz while sessions are active.
+    # When get_interval() returns >= 10.0 (no active sessions), the ticker exits
+    # so no idle readings are emitted and the SSE consumer sees nothing.
+    _metering_stop = threading.Event()
+
+    def _metering_ticker():
+        while True:
+            interval = meter().get_interval()
+            if interval >= 10.0:
+                break  # nothing active — stop the ticker
+            if _metering_stop.wait(interval):
+                break  # stream was cancelled or ended — exit
+            stats = meter().get_stats()
+            stats['session_id'] = stream_id
+            put('metering', stats)
+
+    _metering_thread = threading.Thread(target=_metering_ticker, daemon=True)
+    _metering_thread.start()
 
     def put(event, data):
         # If cancelled, drop all further events except the cancel event itself
@@ -836,6 +1168,8 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
     # block can safely check `if _checkpoint_stop is not None` even when an
     # exception fires before the checkpoint thread is created (Issue #765).
     _checkpoint_stop = None
+    _ckpt_thread = None
+    _agent_lock = None
     try:
         s = get_session(session_id)
         s.workspace = str(Path(workspace).expanduser().resolve())
@@ -963,12 +1297,31 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             _reasoning_text = ''  # accumulates reasoning/thinking trace for persistence
             _live_tool_calls = []  # tool progress fallback when final messages omit tool IDs
 
+            # Throttle: emit metering events at most every 100 ms so the TPS label
+            # feels live during fast token streams without flooding the SSE channel.
+            _metering_last_emit = [time.monotonic() - 1]  # fire immediately on first token
+
+            def _emit_metering():
+                now = time.monotonic()
+                if now - _metering_last_emit[0] < 0.1:
+                    return
+                _metering_last_emit[0] = now
+                stats = meter().get_stats()
+                stats['session_id'] = stream_id
+                put('metering', stats)
+
             def on_token(text):
                 nonlocal _token_sent
                 if text is None:
                     return  # end-of-stream sentinel
                 _token_sent = True
+                # Accumulate partial text so cancel_stream() can persist it (#893)
+                if stream_id in STREAM_PARTIAL_TEXT:
+                    STREAM_PARTIAL_TEXT[stream_id] += str(text)
                 put('token', {'text': text})
+                # Update global throughput meter
+                meter().record_token(stream_id, len(STREAM_PARTIAL_TEXT[stream_id]))
+                _emit_metering()
 
             def on_reasoning(text):
                 nonlocal _reasoning_text
@@ -976,8 +1329,17 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                     return
                 _reasoning_text += str(text)
                 put('reasoning', {'text': str(text)})
+                # Track reasoning tokens in the meter so TPS reflects all AI output
+                meter().record_reasoning(stream_id, len(_reasoning_text))
+                _emit_metering()
+
+            # Pre-initialise the activity counter here so on_tool (which
+            # closes over it) never captures an unbound name even if this
+            # block is reordered later (Issue #765).
+            _checkpoint_activity = [0]
 
             def on_tool(*cb_args, **cb_kwargs):
+                nonlocal _reasoning_text
                 event_type = None
                 name = None
                 preview = None
@@ -997,7 +1359,10 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 if event_type in ('reasoning.available', '_thinking'):
                     reason_text = preview if event_type == 'reasoning.available' else name
                     if reason_text:
+                        _reasoning_text += str(reason_text)
                         put('reasoning', {'text': str(reason_text)})
+                        meter().record_reasoning(stream_id, len(_reasoning_text))
+                        _emit_metering()
                     return
 
                 args_snap = {}
@@ -1127,7 +1492,9 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 provider=resolved_provider,
                 base_url=resolved_base_url,
                 api_key=resolved_api_key,
-                platform='cli',
+                # Identify browser-originated sessions as WebUI so Hermes Agent
+                # does not inject CLI-specific terminal/output guidance.
+                platform='webui',
                 quiet_mode=True,
                 enabled_toolsets=_toolsets,
                 fallback_model=_fallback_resolved,
@@ -1162,7 +1529,56 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             if 'gateway_session_key' in _agent_params:
                 _agent_kwargs['gateway_session_key'] = session_id
 
-            agent = _AIAgent(**_agent_kwargs)
+            # ── Agent cache: reuse across messages in the same session ──
+            # Mirrors gateway _agent_cache.  Keeps _user_turn_count alive so
+            # injectionFrequency: "first-turn" actually suppresses after turn 1.
+            if ephemeral:
+                agent = _AIAgent(**_agent_kwargs)
+                logger.debug('[webui] Created ephemeral agent for session %s', session_id)
+            else:
+                import hashlib as _hashlib
+                import json as _json
+                from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
+                _sig_blob = _json.dumps([
+                    resolved_model or '',
+                    _hashlib.sha256((resolved_api_key or '').encode()).hexdigest()[:16],
+                    resolved_base_url or '',
+                    resolved_provider or '',
+                    sorted(_toolsets) if _toolsets else [],
+                ], sort_keys=True)
+                _agent_sig = _hashlib.sha256(_sig_blob.encode()).hexdigest()[:16]
+
+                agent = None
+                with SESSION_AGENT_CACHE_LOCK:
+                    _cached = SESSION_AGENT_CACHE.get(session_id)
+                    if _cached and _cached[1] == _agent_sig:
+                        agent = _cached[0]
+                        logger.debug('[webui] Reusing cached agent for session %s', session_id)
+
+                if agent is not None:
+                    # Refresh per-turn callbacks — these close over request-scoped
+                    # objects (put queue, cancel_event) that are new each request.
+                    agent.stream_delta_callback = _agent_kwargs.get('stream_delta_callback')
+                    agent.tool_progress_callback = _agent_kwargs.get('tool_progress_callback')
+                    if hasattr(agent, 'reasoning_callback'):
+                        agent.reasoning_callback = _agent_kwargs.get('reasoning_callback')
+                    if hasattr(agent, 'clarify_callback'):
+                        agent.clarify_callback = _agent_kwargs.get('clarify_callback')
+                    if _session_db is not None:
+                        agent._session_db = _session_db
+                    if hasattr(agent, '_api_call_count'):
+                        agent._api_call_count = 0
+                    # Reset interrupt state from a prior cancel so the reused
+                    # agent does not think it is still interrupted.
+                    if hasattr(agent, '_interrupted'):
+                        agent._interrupted = False
+                    if hasattr(agent, '_interrupt_message'):
+                        agent._interrupt_message = None
+                else:
+                    agent = _AIAgent(**_agent_kwargs)
+                    with SESSION_AGENT_CACHE_LOCK:
+                        SESSION_AGENT_CACHE[session_id] = (agent, _agent_sig)
+                    logger.debug('[webui] Created new agent for session %s', session_id)
 
             # Store agent instance for cancel/interrupt propagation
             with STREAMS_LOCK:
@@ -1227,7 +1643,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             # response — better than a silent loss of the entire conversation turn.
             # The final s.save() at task completion handles the full session update + index.
             # (_checkpoint_stop is pre-initialised at the top of the outer try.)
-            _checkpoint_activity = [0]
+            # (_checkpoint_activity is already initialised before on_tool().)
 
             def _periodic_checkpoint():
                 last_saved_activity = 0
@@ -1235,12 +1651,18 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                     try:
                         cur = _checkpoint_activity[0]
                         if cur > last_saved_activity:
-                            s.save(skip_index=True)
+                            with _agent_lock:
+                                s.save(skip_index=True)
                             last_saved_activity = cur
                     except Exception as e:
                         logger.debug("Periodic checkpoint save failed: %s", e)
 
             _checkpoint_stop = threading.Event()
+            # Persist the user message BEFORE streaming starts so it's durable even if
+            # the server crashes before the first checkpoint fires (every 15s).
+            with _agent_lock:
+                s.save(touch_updated_at=True, skip_index=False)
+
             _ckpt_thread = threading.Thread(
                 target=_periodic_checkpoint, daemon=True,
                 name=f"ckpt-{session_id[:8]}",
@@ -1254,193 +1676,242 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 task_id=session_id,
                 persist_user_message=msg_text,
             )
-            s.messages = _restore_reasoning_metadata(
-                _previous_messages,
-                result.get('messages') or s.messages,
-            )
-            # Strip XML tool-call blocks from assistant message content.
-            # DeepSeek and some other providers emit <function_calls>...</function_calls>
-            # in the raw response text; this must be removed before the content is
-            # saved to the session and displayed in the chat bubble. (#702)
-            for _m in s.messages:
-                if isinstance(_m, dict) and _m.get('role') == 'assistant':
-                    _raw_content = _m.get('content')
-                    if isinstance(_raw_content, str):
-                        _cleaned = _strip_xml_tool_calls(_raw_content)
-                        if _cleaned != _raw_content:
-                            _m['content'] = _cleaned
-                    elif isinstance(_raw_content, list):
-                        for _part in _raw_content:
-                            if isinstance(_part, dict) and isinstance(_part.get('text'), str):
-                                _part['text'] = _strip_xml_tool_calls(_part['text'])
-
-            # ── Detect silent agent failure (no assistant reply produced) ──
-            # When the agent catches an auth/network error internally it may return
-            # an empty final_response without raising — the stream would end with
-            # a done event containing zero assistant messages, leaving the user with
-            # no feedback. Emit an apperror so the client shows an inline error.
-            _assistant_added = any(
-                m.get('role') == 'assistant' and str(m.get('content') or '').strip()
-                for m in (result.get('messages') or [])
-            )
-            # _token_sent tracks whether on_token() was called (any streamed text)
-            if not _assistant_added and not _token_sent:
-                _last_err = getattr(agent, '_last_error', None) or result.get('error') or ''
-                _err_str = str(_last_err) if _last_err else ''
-                _err_lower = _err_str.lower()
-                _is_quota = (
-                    'insufficient credit' in _err_lower
-                    or 'credit balance' in _err_lower
-                    or 'credits exhausted' in _err_lower
-                    or 'quota_exceeded' in _err_lower
-                    or 'quota exceeded' in _err_lower
-                    or 'exceeded your current quota' in _err_lower
-                )
-                _is_auth = (
-                    not _is_quota and (
-                        '401' in _err_str
-                        or (_last_err and 'AuthenticationError' in type(_last_err).__name__)
-                        or 'authentication' in _err_lower
-                        or 'unauthorized' in _err_lower
-                        or 'invalid api key' in _err_lower
-                        or 'invalid_api_key' in _err_lower
-                    )
-                )
-                if _is_quota:
-                    _err_label = 'Out of credits'
-                    _err_type = 'quota_exhausted'
-                    _err_hint = 'Your provider account is out of credits. Top up your balance or switch providers via `hermes model`.'
-                elif _is_auth:
-                    _err_label = 'Authentication failed'
-                    _err_type = 'auth_mismatch'
-                    _err_hint = (
-                        'The selected model may not be supported by your configured provider or '
-                        'your API key is invalid. Run `hermes model` in your terminal to '
-                        'update credentials, then restart the WebUI.'
-                    )
-                else:
-                    _err_label = 'No response received'
-                    _err_type = 'no_response'
-                    _err_hint = 'Verify your API key is valid and the selected model is available for your account.'
-                put('apperror', {
-                    'message': _err_str or f'{_err_label}.',
-                    'type': _err_type,
-                    'hint': _err_hint,
+            # ── Ephemeral mode (/btw): deliver answer, skip persistence, cleanup ──
+            if ephemeral:
+                _answer = ''
+                for _m in reversed(result.get('messages') or []):
+                    if isinstance(_m, dict) and _m.get('role') == 'assistant':
+                        _answer = str(_m.get('content', ''))
+                        break
+                put('done', {
+                    'session': {'session_id': session_id, 'messages': result.get('messages', [])},
+                    'usage': {'input_tokens': 0, 'output_tokens': 0},
+                    'ephemeral': True,
+                    'answer': _answer,
                 })
-                # Clear stream/pending state so the session does not appear
-                # "agent_running" on reload after a silent failure.
+                if _checkpoint_stop is not None:
+                    _checkpoint_stop.set()
+                try:
+                    import pathlib
+                    pathlib.Path(s.path).unlink(missing_ok=True)
+                except Exception:
+                    pass
+                return  # skip all normal persistence for ephemeral sessions
+            if _checkpoint_stop is not None:
+                _checkpoint_stop.set()
+            if _ckpt_thread is not None:
+                _ckpt_thread.join(timeout=15)
+            with _agent_lock:
+                s.messages = _restore_reasoning_metadata(
+                    _previous_messages,
+                    result.get('messages') or s.messages,
+                )
+                # Strip XML tool-call blocks from assistant message content.
+                # DeepSeek and some other providers emit <function_calls>...</function_calls>
+                # in the raw response text; this must be removed before the content is
+                # saved to the session and displayed in the chat bubble. (#702)
+                for _m in s.messages:
+                    if isinstance(_m, dict) and _m.get('role') == 'assistant':
+                        _raw_content = _m.get('content')
+                        if isinstance(_raw_content, str):
+                            _cleaned = _strip_xml_tool_calls(_raw_content)
+                            if _cleaned != _raw_content:
+                                _m['content'] = _cleaned
+                        elif isinstance(_raw_content, list):
+                            for _part in _raw_content:
+                                if isinstance(_part, dict) and isinstance(_part.get('text'), str):
+                                    _part['text'] = _strip_xml_tool_calls(_part['text'])
+
+                # ── Detect silent agent failure (no assistant reply produced) ──
+                # When the agent catches an auth/network error internally it may return
+                # an empty final_response without raising — the stream would end with
+                # a done event containing zero assistant messages, leaving the user with
+                # no feedback. Emit an apperror so the client shows an inline error.
+                _assistant_added = any(
+                    m.get('role') == 'assistant' and str(m.get('content') or '').strip()
+                    for m in (result.get('messages') or [])
+                )
+                # _token_sent tracks whether on_token() was called (any streamed text)
+                if not _assistant_added and not _token_sent:
+                    _last_err = getattr(agent, '_last_error', None) or result.get('error') or ''
+                    _err_str = str(_last_err) if _last_err else ''
+                    _err_lower = _err_str.lower()
+                    _is_quota = (
+                        'insufficient credit' in _err_lower
+                        or 'credit balance' in _err_lower
+                        or 'credits exhausted' in _err_lower
+                        or 'quota_exceeded' in _err_lower
+                        or 'quota exceeded' in _err_lower
+                        or 'exceeded your current quota' in _err_lower
+                    )
+                    _is_auth = (
+                        not _is_quota and (
+                            '401' in _err_str
+                            or (_last_err and 'AuthenticationError' in type(_last_err).__name__)
+                            or 'authentication' in _err_lower
+                            or 'unauthorized' in _err_lower
+                            or 'invalid api key' in _err_lower
+                            or 'invalid_api_key' in _err_lower
+                        )
+                    )
+                    if _is_quota:
+                        _err_label = 'Out of credits'
+                        _err_type = 'quota_exhausted'
+                        _err_hint = 'Your provider account is out of credits. Top up your balance or switch providers via `hermes model`.'
+                    elif _is_auth:
+                        _err_label = 'Authentication failed'
+                        _err_type = 'auth_mismatch'
+                        _err_hint = (
+                            'The selected model may not be supported by your configured provider or '
+                            'your API key is invalid. Run `hermes model` in your terminal to '
+                            'update credentials, then restart the WebUI.'
+                        )
+                    else:
+                        _err_label = 'No response received'
+                        _err_type = 'no_response'
+                        _err_hint = 'Verify your API key is valid and the selected model is available for your account.'
+                    put('apperror', {
+                        'message': _err_str or f'{_err_label}.',
+                        'type': _err_type,
+                        'hint': _err_hint,
+                    })
+                    # Clear stream/pending state so the session does not appear
+                    # "agent_running" on reload after a silent failure.
+                    # Persist the error so it survives page reload.
+                    # _error=True ensures _sanitize_messages_for_api excludes it from
+                    # subsequent API calls so the LLM never sees its own error as prior context.
+                    s.active_stream_id = None
+                    s.pending_user_message = None
+                    s.pending_attachments = []
+                    s.pending_started_at = None
+                    s.messages.append({
+                        'role': 'assistant',
+                        'content': f'**{_err_label}:** {_err_str or _err_label}\n\n*{_err_hint}*',
+                        'timestamp': int(time.time()),
+                        '_error': True,
+                    })
+                    try:
+                        s.save()
+                    except Exception:
+                        pass
+                    return  # apperror already closes the stream on the client side
+
+                # ── Handle context compression side effects ──
+                # If compression fired inside run_conversation, the agent may have
+                # rotated its session_id. Detect and fix the mismatch so the WebUI
+                # continues writing to the correct session file.
+                #
+                # Lock migration: when session_id rotates, we alias the new ID to
+                # the *same* Lock object under SESSION_AGENT_LOCKS so that
+                # subsequent callers using _get_session_agent_lock(new_sid) get the
+                # same Lock the streaming thread is already holding.  We then pop
+                # the old-id entry to prevent a leak.  This is safe because we
+                # already hold _agent_lock (the Lock object itself), so the
+                # reference stays alive even after the dict entry is removed.
+                # Concurrent readers that already looked up the old ID will still
+                # see the same Lock object until they release it.
+                _agent_sid = getattr(agent, 'session_id', None)
+                _compressed = False
+                if _agent_sid and _agent_sid != session_id:
+                    old_sid = session_id
+                    new_sid = _agent_sid
+                    # Rename the session file
+                    old_path = SESSION_DIR / f'{old_sid}.json'
+                    new_path = SESSION_DIR / f'{new_sid}.json'
+                    s.session_id = new_sid
+                    with LOCK:
+                        if old_sid in SESSIONS:
+                            SESSIONS[new_sid] = SESSIONS.pop(old_sid)
+                    # Migrate the per-session lock: alias new_sid to the held
+                    # _agent_lock reference directly (not via old_sid lookup),
+                    # then remove the old_sid entry to prevent a leak.
+                    with SESSION_AGENT_LOCKS_LOCK:
+                        SESSION_AGENT_LOCKS[new_sid] = _agent_lock
+                        SESSION_AGENT_LOCKS.pop(old_sid, None)
+                    # Migrate cached agent to the new session ID so the turn
+                    # count survives context compression.
+                    from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
+                    with SESSION_AGENT_CACHE_LOCK:
+                        _cached_entry = SESSION_AGENT_CACHE.pop(old_sid, None)
+                        if _cached_entry:
+                            SESSION_AGENT_CACHE[new_sid] = _cached_entry
+                    if old_path.exists() and not new_path.exists():
+                        try:
+                            old_path.rename(new_path)
+                        except OSError:
+                            logger.debug("Failed to rename session file during compression")
+                    _compressed = True
+                # Also detect compression via the result dict or compressor state
+                if not _compressed:
+                    _compressor = getattr(agent, 'context_compressor', None)
+                    if _compressor and getattr(_compressor, 'compression_count', 0) > 0:
+                        _compressed = True
+                # Notify the frontend that compression happened
+                if _compressed:
+                    put('compressed', {
+                        'message': 'Context auto-compressed to continue the conversation',
+                    })
+
+                # Stamp 'timestamp' on any messages that don't have one yet
+                _now = time.time()
+                for _m in s.messages:
+                    if isinstance(_m, dict) and not _m.get('timestamp') and not _m.get('_ts'):
+                        _m['timestamp'] = int(_now)
+                # Only auto-generate title when still default; preserves user renames
+                if s.title == 'Untitled' or s.title == 'New Chat' or not s.title:
+                    s.title = title_from(s.messages, s.title)
+                _looks_default = (s.title == 'Untitled' or s.title == 'New Chat' or not s.title)
+                _looks_provisional = _is_provisional_title(s.title, s.messages)
+                _invalid_existing_title = _looks_invalid_generated_title(s.title)
+                _should_bg_title = (
+                    (_looks_default or _looks_provisional or _invalid_existing_title)
+                    and (not getattr(s, 'llm_title_generated', False) or _invalid_existing_title)
+                )
+                _u0 = ''
+                _a0 = ''
+                if _should_bg_title:
+                    _u0, _a0 = _first_exchange_snippets(s.messages)
+                # Read token/cost usage from the agent object (if available)
+                input_tokens = getattr(agent, 'session_prompt_tokens', 0) or 0
+                output_tokens = getattr(agent, 'session_completion_tokens', 0) or 0
+                estimated_cost = getattr(agent, 'session_estimated_cost_usd', None)
+                s.input_tokens = (s.input_tokens or 0) + input_tokens
+                s.output_tokens = (s.output_tokens or 0) + output_tokens
+                if estimated_cost:
+                    s.estimated_cost = (s.estimated_cost or 0) + estimated_cost
+                # Persist tool-call summaries even when the final message history only
+                # kept bare tool rows and omitted explicit assistant tool_call IDs.
+                tool_calls = _extract_tool_calls_from_messages(
+                    s.messages,
+                    live_tool_calls=_live_tool_calls,
+                )
+                s.tool_calls = tool_calls
                 s.active_stream_id = None
                 s.pending_user_message = None
                 s.pending_attachments = []
                 s.pending_started_at = None
-                # Persist the error so it survives page reload.
-                # _error=True ensures _sanitize_messages_for_api excludes it from
-                # subsequent API calls so the LLM never sees its own error as prior context.
-                s.messages.append({
-                    'role': 'assistant',
-                    'content': f'**{_err_label}:** {_err_str or _err_label}\n\n*{_err_hint}*',
-                    'timestamp': int(time.time()),
-                    '_error': True,
-                })
-                try:
-                    s.save()
-                except Exception:
-                    pass
-                return  # apperror already closes the stream on the client side
-
-            # ── Handle context compression side effects ──
-            # If compression fired inside run_conversation, the agent may have
-            # rotated its session_id. Detect and fix the mismatch so the WebUI
-            # continues writing to the correct session file.
-            _agent_sid = getattr(agent, 'session_id', None)
-            _compressed = False
-            if _agent_sid and _agent_sid != session_id:
-                old_sid = session_id
-                new_sid = _agent_sid
-                # Rename the session file
-                old_path = SESSION_DIR / f'{old_sid}.json'
-                new_path = SESSION_DIR / f'{new_sid}.json'
-                s.session_id = new_sid
-                with LOCK:
-                    if old_sid in SESSIONS:
-                        SESSIONS[new_sid] = SESSIONS.pop(old_sid)
-                if old_path.exists() and not new_path.exists():
-                    try:
-                        old_path.rename(new_path)
-                    except OSError:
-                        logger.debug("Failed to rename session file during compression")
-                _compressed = True
-            # Also detect compression via the result dict or compressor state
-            if not _compressed:
-                _compressor = getattr(agent, 'context_compressor', None)
-                if _compressor and getattr(_compressor, 'compression_count', 0) > 0:
-                    _compressed = True
-            # Notify the frontend that compression happened
-            if _compressed:
-                put('compressed', {
-                    'message': 'Context auto-compressed to continue the conversation',
-                })
-
-            # Stamp 'timestamp' on any messages that don't have one yet
-            _now = time.time()
-            for _m in s.messages:
-                if isinstance(_m, dict) and not _m.get('timestamp') and not _m.get('_ts'):
-                    _m['timestamp'] = int(_now)
-            # Only auto-generate title when still default; preserves user renames
-            if s.title == 'Untitled' or s.title == 'New Chat' or not s.title:
-                s.title = title_from(s.messages, s.title)
-            _looks_default = (s.title == 'Untitled' or s.title == 'New Chat' or not s.title)
-            _looks_provisional = _is_provisional_title(s.title, s.messages)
-            _invalid_existing_title = _looks_invalid_generated_title(s.title)
-            _should_bg_title = (
-                (_looks_default or _looks_provisional or _invalid_existing_title)
-                and (not getattr(s, 'llm_title_generated', False) or _invalid_existing_title)
-            )
-            _u0 = ''
-            _a0 = ''
-            if _should_bg_title:
-                _u0, _a0 = _first_exchange_snippets(s.messages)
-            # Read token/cost usage from the agent object (if available)
-            input_tokens = getattr(agent, 'session_prompt_tokens', 0) or 0
-            output_tokens = getattr(agent, 'session_completion_tokens', 0) or 0
-            estimated_cost = getattr(agent, 'session_estimated_cost_usd', None)
-            s.input_tokens = (s.input_tokens or 0) + input_tokens
-            s.output_tokens = (s.output_tokens or 0) + output_tokens
-            if estimated_cost:
-                s.estimated_cost = (s.estimated_cost or 0) + estimated_cost
-            # Persist tool-call summaries even when the final message history only
-            # kept bare tool rows and omitted explicit assistant tool_call IDs.
-            tool_calls = _extract_tool_calls_from_messages(
-                s.messages,
-                live_tool_calls=_live_tool_calls,
-            )
-            s.tool_calls = tool_calls
-            s.active_stream_id = None
-            s.pending_user_message = None
-            s.pending_attachments = []
-            s.pending_started_at = None
-            # Tag the matching user message with attachment filenames for display on reload
-            # Only tag a user message whose content relates to this turn's text
-            # (msg_text is the full message including the [Attached files: ...] suffix)
-            if attachments:
-                for m in reversed(s.messages):
-                    if m.get('role') == 'user':
-                        content = str(m.get('content', ''))
-                        # Match if content is part of the sent message or vice-versa
-                        base_text = msg_text.split('\n\n[Attached files:')[0].strip() if '\n\n[Attached files:' in msg_text else msg_text
-                        if base_text[:60] in content or content[:60] in msg_text:
-                            m['attachments'] = attachments
+                # Tag the matching user message with attachment filenames for display on reload
+                # Only tag a user message whose content relates to this turn's text
+                # (msg_text is the full message including the [Attached files: ...] suffix)
+                if attachments:
+                    for m in reversed(s.messages):
+                        if m.get('role') == 'user':
+                            content = str(m.get('content', ''))
+                            # Match if content is part of the sent message or vice-versa
+                            base_text = msg_text.split('\n\n[Attached files:')[0].strip() if '\n\n[Attached files:' in msg_text else msg_text
+                            if base_text[:60] in content or content[:60] in msg_text:
+                                m['attachments'] = attachments
+                                break
+                # Persist reasoning trace in the session so it survives reload.
+                # Must run BEFORE s.save() — otherwise the mutation lives only in
+                # memory until the next turn's save, and the last-turn thinking card
+                # is lost when the user reloads immediately after a response.
+                if _reasoning_text and s.messages:
+                    for _rm in reversed(s.messages):
+                        if isinstance(_rm, dict) and _rm.get('role') == 'assistant':
+                            _rm['reasoning'] = _reasoning_text
                             break
-            # Persist reasoning trace in the session so it survives reload.
-            # Must run BEFORE s.save() — otherwise the mutation lives only in
-            # memory until the next turn's save, and the last-turn thinking card
-            # is lost when the user reloads immediately after a response.
-            if _reasoning_text and s.messages:
-                for _rm in reversed(s.messages):
-                    if isinstance(_rm, dict) and _rm.get('role') == 'assistant':
-                        _rm['reasoning'] = _reasoning_text
-                        break
-            s.save()
+                s.save()
             # Sync to state.db for /insights (opt-in setting)
             try:
                 from api.config import load_settings as _load_settings
@@ -1465,8 +1936,29 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 usage['threshold_tokens'] = getattr(_cc, 'threshold_tokens', 0) or 0
                 usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
             # (reasoning trace already attached + saved above, before s.save())
+            # Leftover-steer delivery: if a /steer was queued (via
+            # api/chat/steer) but the agent finished its turn before
+            # reaching a tool-result boundary that would consume it,
+            # the text is still stashed in agent._pending_steer. Drain
+            # it now and emit a pending_steer_leftover SSE event so the
+            # frontend can queue it for the next turn — same fallback
+            # path as the CLI in cli.py:8788-8794.
+            try:
+                _drain_pending_steer = getattr(agent, '_drain_pending_steer', None)
+                _leftover = _drain_pending_steer() if _drain_pending_steer else None
+                if _leftover:
+                    put('pending_steer_leftover', {
+                        'session_id': session_id,
+                        'text': str(_leftover),
+                    })
+            except Exception:
+                logger.debug("Failed to drain pending steer for session %s", session_id)
             raw_session = s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}
             put('done', {'session': redact_session_data(raw_session), 'usage': usage})
+            # Emit metering stats for the header TPS label
+            meter_stats = meter().get_stats()
+            meter_stats['session_id'] = session_id
+            put('metering', meter_stats)
             if _should_bg_title and _u0 and _a0:
                 threading.Thread(
                     target=_run_background_title_update,
@@ -1478,7 +1970,13 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 # which may be rotated during context compression. The client captured
                 # activeSid = original session_id so they must match for stream_end to close.
                 put('stream_end', {'session_id': session_id})
+                # Adaptive title refresh: re-generate title from latest exchange
+                # every N exchanges (when enabled in settings). Runs after stream_end
+                # so it doesn't block the stream.
+                _maybe_schedule_title_refresh(s, put, agent)
         finally:
+            # Stop the live metering ticker
+            _metering_stop.set()
             # Unregister the gateway approval callback and unblock any threads
             # still waiting on approval (e.g. stream cancelled mid-approval).
             if _approval_registered and _unreg_notify is not None:
@@ -1504,6 +2002,13 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
     except Exception as e:
         print('[webui] stream error:\n' + traceback.format_exc(), flush=True)
         err_str = str(e)
+        # Sanitize HTML from provider error responses — some providers return
+        # full HTML pages (e.g. nginx "404 page not found") instead of JSON errors.
+        # Strip HTML tags to avoid rendering raw markup in the chat message.
+        _stripped = re.sub(r'<[^>]+>', ' ', err_str)
+        _stripped = re.sub(r'\s+', ' ', _stripped).strip()
+        if _stripped != err_str:
+            err_str = _stripped
         _exc_lower = err_str.lower()
         # Classify before saving so the error message can be persisted to the session.
         # Check quota exhaustion first — OpenAI billing 429s use insufficient_quota which
@@ -1527,6 +2032,16 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             or 'invalid api key' in _exc_lower
             or 'no cookie auth credentials' in _exc_lower
         )
+        _exc_is_not_found = (
+            '404' in err_str
+            or 'not found' in _exc_lower
+            or 'does not exist' in _exc_lower
+            or 'model not found' in _exc_lower
+            or 'model_not_found' in _exc_lower
+            or 'invalid model' in _exc_lower
+            or 'does not match any known model' in _exc_lower
+            or 'unknown model' in _exc_lower
+        )
         if _exc_is_quota:
             _exc_label, _exc_type, _exc_hint = (
                 'Out of credits', 'quota_exhausted',
@@ -1543,26 +2058,38 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 'The selected model may not be supported by your configured provider. '
                 'Run `hermes model` in your terminal to switch providers, then restart the WebUI.',
             )
+        elif _exc_is_not_found:
+            _exc_label, _exc_type, _exc_hint = (
+                'Model not found', 'model_not_found',
+                'The selected model was not found by the provider. '
+                'Check the model ID in Settings or run `hermes model` to verify it exists for your provider.',
+            )
         else:
             _exc_label, _exc_type, _exc_hint = 'Error', 'error', ''
         if s is not None:
-            s.active_stream_id = None
-            s.pending_user_message = None
-            s.pending_attachments = []
-            s.pending_started_at = None
+            if _checkpoint_stop is not None:
+                _checkpoint_stop.set()
+            if _ckpt_thread is not None:
+                _ckpt_thread.join(timeout=15)
             # Persist the error so it survives page reload.
             # _error=True ensures _sanitize_messages_for_api excludes it from subsequent
             # API calls so the LLM never sees its own error as prior context on the next turn.
-            s.messages.append({
-                'role': 'assistant',
-                'content': f'**{_exc_label}:** {err_str}' + (f'\n\n*{_exc_hint}*' if _exc_hint else ''),
-                'timestamp': int(time.time()),
-                '_error': True,
-            })
-            try:
-                s.save()
-            except Exception:
-                pass
+            _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
+            with _lock_ctx:
+                s.active_stream_id = None
+                s.pending_user_message = None
+                s.pending_attachments = []
+                s.pending_started_at = None
+                s.messages.append({
+                    'role': 'assistant',
+                    'content': f'**{_exc_label}:** {err_str}' + (f'\n\n*{_exc_hint}*' if _exc_hint else ''),
+                    'timestamp': int(time.time()),
+                    '_error': True,
+                })
+                try:
+                    s.save()
+                except Exception:
+                    pass
         _apperror_payload: dict = {'message': err_str, 'type': _exc_type}
         if _exc_hint:
             _apperror_payload['hint'] = _exc_hint
@@ -1571,11 +2098,14 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
         # Stop periodic checkpoint thread if it was started (Issue #765)
         if _checkpoint_stop is not None:
             _checkpoint_stop.set()
+        if _ckpt_thread is not None:
+            _ckpt_thread.join(timeout=15)
         _clear_thread_env()  # TD1: always clear thread-local context
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
             CANCEL_FLAGS.pop(stream_id, None)
             AGENT_INSTANCES.pop(stream_id, None)  # Clean up agent instance reference
+            STREAM_PARTIAL_TEXT.pop(stream_id, None)  # Clean up partial text buffer (#893)
 
 # ============================================================
 # SECTION: HTTP Request Handler
@@ -1583,6 +2113,82 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
 # do_POST: mutating endpoints (session CRUD, chat, upload, approval)
 # Routing is a flat if/elif chain. See ARCHITECTURE.md section 4.1.
 # ============================================================
+
+
+def _handle_chat_steer(handler, body: dict) -> bool:
+    """Inject a /steer payload into the active agent for a session.
+
+    Mirrors the CLI's `/steer <text>` command (cli.py:6140-6155):
+      - Look up the cached AIAgent for the session (PR #1051's
+        SESSION_AGENT_CACHE).
+      - Verify a stream is currently active for this session.
+      - Call agent.steer(text) — thread-safe, stashes text in
+        _pending_steer for application at the next tool-result boundary.
+
+    The agent's loop calls _apply_pending_steer_to_tool_results() at the
+    end of every tool batch and appends the steer text to the last tool
+    result's content with a marker, so the model sees the steer as part
+    of the tool output on its next iteration. The user's stream is NOT
+    interrupted.
+
+    If no agent is cached, the agent is too old to support steer, or no
+    stream is active, return {"accepted": False, "fallback": "<reason>"}
+    so the frontend can fall back to interrupt or queue mode. The
+    fallback path is the existing behaviour from PR #1062.
+
+    Returns 200 with {"accepted": bool, "fallback": str|None,
+    "stream_id": str|None}.
+    """
+    from api.helpers import j, bad
+    from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
+
+    sid = str((body or {}).get("session_id", "") or "").strip()
+    text = str((body or {}).get("text", "") or "").strip()
+    if not sid:
+        return bad(handler, "session_id required")
+    if not text:
+        return bad(handler, "text required")
+
+    with SESSION_AGENT_CACHE_LOCK:
+        cached = SESSION_AGENT_CACHE.get(sid)
+    if not cached:
+        # No active agent for this session — caller falls back to interrupt
+        return j(handler, {"accepted": False, "fallback": "no_cached_agent",
+                           "stream_id": None})
+    agent = cached[0]
+    if not hasattr(agent, "steer"):
+        # Older hermes-agent that pre-dates the steer() method
+        return j(handler, {"accepted": False, "fallback": "agent_lacks_steer",
+                           "stream_id": None})
+
+    # Verify the agent is currently running. Use the session's
+    # active_stream_id rather than calling load_session_locked() which
+    # would block on the streaming thread's lock.
+    try:
+        s = get_session(sid)
+    except KeyError:
+        return j(handler, {"accepted": False, "fallback": "session_not_found",
+                           "stream_id": None})
+    active_stream_id = getattr(s, "active_stream_id", None) or None
+    if not active_stream_id:
+        return j(handler, {"accepted": False, "fallback": "not_running",
+                           "stream_id": None})
+    with STREAMS_LOCK:
+        stream_alive = active_stream_id in STREAMS
+    if not stream_alive:
+        # Active stream id is stale — stream has ended; caller falls back
+        return j(handler, {"accepted": False, "fallback": "stream_dead",
+                           "stream_id": None})
+
+    try:
+        accepted = bool(agent.steer(text))
+    except Exception as exc:
+        logger.debug("agent.steer() raised for session=%s: %s", sid, exc)
+        return j(handler, {"accepted": False, "fallback": "steer_error",
+                           "stream_id": active_stream_id})
+
+    return j(handler, {"accepted": accepted, "fallback": None,
+                       "stream_id": active_stream_id})
 
 
 def cancel_stream(stream_id: str) -> bool:
@@ -1650,24 +2256,74 @@ def cancel_stream(stream_id: str) -> bool:
         STREAMS.pop(stream_id, None)
         CANCEL_FLAGS.pop(stream_id, None)
         AGENT_INSTANCES.pop(stream_id, None)
+        # STREAM_PARTIAL_TEXT is intentionally NOT popped here — the agent thread may
+        # still be appending tokens. We capture the snapshot two lines below; the
+        # streaming finally block handles the cleanup when the thread exits.
 
-        # Capture session_id while holding STREAMS_LOCK (avoids a race where
-        # the agent thread deallocates the agent object after we release).
+        # Capture partial text and session_id while holding STREAMS_LOCK (avoids a
+        # race where the agent thread deallocates the agent object or clears the
+        # partial text after we release).
         # Session cleanup (get_session + save) must happen OUTSIDE the lock —
         # get_session() acquires LOCK, and the streaming thread does LOCK first
         # then STREAMS_LOCK, so inverting the order here would cause deadlock.
         _cancel_session_id = getattr(agent, 'session_id', None) if agent else None
+        _cancel_partial_text = STREAM_PARTIAL_TEXT.get(stream_id, '')
 
     # Session cleanup outside STREAMS_LOCK to preserve lock ordering.
+    # Acquire the per-session _agent_lock too, mirroring every other session
+    # writer (streaming success/error paths, periodic checkpoint, POST endpoints)
+    # so the cancel-path mutation races neither the checkpoint thread nor
+    # concurrent undo/retry calls.
     if _cancel_session_id:
-        try:
-            _cs = get_session(_cancel_session_id)
-            _cs.active_stream_id = None
-            _cs.pending_user_message = None
-            _cs.pending_attachments = []
-            _cs.pending_started_at = None
-            _cs.save()
-        except Exception:
-            logger.debug("Failed to clear session state on cancel for %s", _cancel_session_id)
+        with _get_session_agent_lock(_cancel_session_id):
+            try:
+                _cs = get_session(_cancel_session_id)
+                _cs.active_stream_id = None
+                _cs.pending_user_message = None
+                _cs.pending_attachments = []
+                _cs.pending_started_at = None
+                # Persist any partial assistant text that was streamed before cancel (#893).
+                # Preserving partial content means the user sees what the agent had
+                # produced rather than losing it entirely.  The marker is _partial=True
+                # (for session/UI identification only) — NOT _error=True — so the partial
+                # content IS kept in the history sent to the agent on the next user
+                # message, letting the model continue from where it was cut off.
+                # See the inner comment on the append call below for the rationale.
+                partial_text = _cancel_partial_text.strip() if _cancel_partial_text else ''
+                if partial_text:
+                    import re as _re
+                    # Strip thinking/reasoning markup from partial content before saving.
+                    # First pass: remove complete <thinking>...</thinking> blocks.
+                    _stripped = _re.sub(r'<think(?:ing)?\b[^>]*>.*?</think(?:ing)?>',
+                                        '', partial_text,
+                                        flags=_re.DOTALL | _re.IGNORECASE).strip()
+                    # Second pass: strip trailing UNCLOSED think/thinking block (the common
+                    # cancel case — user stops mid-reasoning before the close tag appears).
+                    _stripped = _re.sub(r'<think(?:ing)?\b[^>]*>.*',
+                                        '', _stripped,
+                                        flags=_re.DOTALL | _re.IGNORECASE).strip()
+                    if _stripped:
+                        # Mark _partial=True for session/UI identification only.
+                        # Deliberately NOT _error=True — the partial content is real model
+                        # output and should be visible in conversation history so the model
+                        # can continue from it on the next turn (#893).
+                        _cs.messages.append({
+                            'role': 'assistant',
+                            'content': _stripped,
+                            '_partial': True,
+                            'timestamp': int(time.time()),
+                        })
+                # Cancel marker — flagged _error=True so it is stripped from conversation
+                # history on the next turn (prevents model from seeing "Task cancelled."
+                # as a prior assistant reply).
+                _cs.messages.append({
+                    'role': 'assistant',
+                    'content': '*Task cancelled.*',
+                    '_error': True,
+                    'timestamp': int(time.time()),
+                })
+                _cs.save()
+            except Exception:
+                logger.debug("Failed to clear session state on cancel for %s", _cancel_session_id)
 
     return True

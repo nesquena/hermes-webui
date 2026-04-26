@@ -192,10 +192,22 @@ class TestOnboardingStatusUnsupportedProvider:
             "config.yaml + chat_ready=True must auto-complete onboarding regardless of provider."
         )
 
-    def test_minimax_cn_not_ready_shows_wizard(self):
-        """minimax-cn + chat_ready=False → wizard fires so user can fix it."""
+    def test_minimax_cn_not_ready_skips_wizard(self):
+        """minimax-cn + chat_ready=False → wizard still skipped for non-wizard providers.
+
+        The onboarding wizard has no minimax-cn option — showing it would only confuse
+        the user or let them accidentally overwrite their config with an OpenAI/Anthropic
+        provider.  For any provider not in _SUPPORTED_PROVIDER_SETUPS, onboarding is
+        auto-completed as long as provider_configured is True, regardless of chat_ready.
+        Users on non-wizard providers with no API key should fix credentials via
+        Settings → Providers, not via the first-run wizard.  (#1020)
+        """
         result = self._make_status(chat_ready=False)
-        assert result["completed"] is False
+        assert result["completed"] is True, (
+            "Wizard fired for minimax-cn user with provider_configured=True! "
+            "Non-wizard providers must auto-complete onboarding because the wizard "
+            "cannot configure them and would silently overwrite their config."
+        )
 
     def test_current_is_oauth_set_for_unsupported_provider(self):
         """setup.current_is_oauth must be True for minimax-cn (not in quick-setup list)."""
