@@ -165,20 +165,8 @@ async function send(){
   else if(uploaded.length)msgText=`${text}\n\n[Attached files: ${uploadedPaths.join(', ')}]`;
   if(!msgText){setComposerStatus('Nothing to send');return;}
 
-  // Save the raw (un-trimmed) draft before clearing, so it can be restored
-  // after streaming finishes if no queued message fires to take its place.
-  // Key by session so switching between sessions doesn't corrupt drafts.
-  const _draftSid=S.session&&S.session.session_id;
-  if(_draftSid){
-    if(!S._drafts) S._drafts={};
-    S._drafts[_draftSid]=$('msg').value;
-  }
   $('msg').value='';autoResize();
   const displayText=text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
-  if(_draftSid&&S._drafts){
-    // Consumer already took the draft for this send; clear it.
-    delete S._drafts[_draftSid];
-  }
   const userMsg={role:'user',content:displayText,attachments:uploaded.length?uploadedNames:undefined,_ts:Date.now()/1000};
   S.toolCalls=[];  // clear tool calls from previous turn
   clearLiveToolCards();  // clear any leftover live cards from last turn
