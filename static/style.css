@@ -234,8 +234,16 @@
   .sidebar-search-icon{position:absolute;left:22px;top:50%;transform:translateY(-50%);width:14px;height:14px;color:var(--muted);opacity:.7;pointer-events:none;}
   /* Inline session title edit */
   .session-title-input{flex:1;background:var(--surface);border:1px solid var(--accent);border-radius:6px;color:var(--text);padding:3px 8px;font-size:13px;outline:none;min-width:0;box-shadow:0 0 0 2px var(--accent-bg-strong);font-family:inherit;}
-  .session-item{padding:8px 86px 8px 8px;margin-bottom:2px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--muted);transition:background .15s,color .15s;display:flex;align-items:flex-start;gap:8px;min-width:0;position:relative;}
-  .session-item.streaming,.session-item.unread{padding-right:40px;}
+  /* padding-right was 86px to reserve space for the absolute-positioned
+     timestamp + action button (which appears on hover). Now that .session-time
+     lives in the flex flow of .session-title-row, the timestamp sits at the
+     row's right edge naturally, so no reservation is needed at rest. The
+     action button (.session-actions, position:absolute, 26x26 at right:6px)
+     and attention indicator (26x26 at right:6px) still need 40px reserved
+     when they're visible — covered by the hover / streaming / unread /
+     menu-open / focus-within rule below. */
+  .session-item{padding:8px 8px;margin-bottom:2px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--muted);transition:background .15s,color .15s;display:flex;align-items:flex-start;gap:8px;min-width:0;position:relative;}
+  .session-item.streaming,.session-item.unread,.session-item:hover,.session-item:focus-within,.session-item.menu-open{padding-right:40px;}
   .session-item:hover{background:var(--hover-bg);color:var(--text);}
   .session-item.active{background:var(--accent-bg);color:var(--accent);}
   .session-item.streaming .session-title{color:var(--accent);}
@@ -274,12 +282,13 @@
     width:8px;
     height:8px;
   }
+  /* Timestamp lives in the flex flow of .session-title-row (not absolute) so
+     the title's flex:1 bound stops at the timestamp's left edge and stops
+     running underneath it. margin-left:auto pushes it to the row's right
+     edge, keeping the visual position the user already expects. */
   .session-time{
     display:inline-flex;
-    position:absolute;
-    right:10px;
-    top:50%;
-    transform:translateY(-50%);
+    margin-left:auto;
     color:var(--muted);
     font-size:10px;
     white-space:nowrap;
@@ -713,11 +722,26 @@
   .upload-bar-wrap{display:none;height:3px;background:var(--hover-bg);border-radius:0 0 16px 16px;overflow:hidden;}
   .upload-bar-wrap.active{display:block;}
   .upload-bar{height:100%;background:linear-gradient(90deg,var(--accent),var(--accent-hover));width:0%;transition:width .3s ease;}
-  .rightpanel{width:300px;background:var(--sidebar);border-left:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;flex-shrink:0;min-width:0;opacity:1;transform:translateX(0);transform-origin:right center;transition:width .24s cubic-bezier(.22,1,.36,1),opacity .18s ease,transform .24s cubic-bezier(.22,1,.36,1),border-color .24s ease;}
-  .panel-header{padding:12px 16px;border-bottom:1px solid var(--border);font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;display:flex;align-items:center;justify-content:space-between;}
-  .git-badge{font-size:9px;font-weight:600;color:var(--muted);background:var(--hover-bg);padding:2px 7px;border-radius:4px;letter-spacing:.02em;margin-left:auto;margin-right:4px;white-space:nowrap;font-family:'SF Mono',ui-monospace,monospace;}
+  /* container-type/name lets descendants run @container queries against the
+     panel's width so the header can collapse less-essential elements as the
+     user resizes the panel narrower. */
+  .rightpanel{width:300px;background:var(--sidebar);border-left:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;flex-shrink:0;min-width:0;opacity:1;transform:translateX(0);transform-origin:right center;transition:width .24s cubic-bezier(.22,1,.36,1),opacity .18s ease,transform .24s cubic-bezier(.22,1,.36,1),border-color .24s ease;container-type:inline-size;container-name:rightpanel;}
+  /* Collapse priority as the panel narrows: git-badge first, then "Workspace"
+     label, never the icon buttons. flex-shrink ratios give graceful ellipsis;
+     @container queries below cut to display:none at hard breakpoints. */
+  .panel-header{padding:12px 16px;border-bottom:1px solid var(--border);font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;display:flex;align-items:center;gap:6px;overflow:hidden;}
+  .panel-header > span:first-child{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex-shrink:2;}
+  .git-badge{font-size:9px;font-weight:600;color:var(--muted);background:var(--hover-bg);padding:2px 7px;border-radius:4px;letter-spacing:.02em;margin-left:auto;margin-right:4px;white-space:nowrap;font-family:'SF Mono',ui-monospace,monospace;flex-shrink:3;overflow:hidden;min-width:0;}
   .git-badge.dirty{color:var(--accent-text);background:var(--accent-bg);}
-  .panel-actions{display:flex;gap:4px;}
+  .panel-actions{display:flex;gap:4px;flex-shrink:0;margin-left:auto;}
+  /* Crisp display:none at narrow widths so the header doesn't show a sliver
+     of an ellipsised label or git badge — icons survive longest. */
+  @container rightpanel (max-width: 220px){
+    .git-badge{display:none !important;}
+  }
+  @container rightpanel (max-width: 160px){
+    .panel-header > span:first-child{display:none;}
+  }
   .mobile-close-btn{display:none;}
   .panel-icon-btn{width:24px;height:24px;background:none;border:none;color:var(--muted);cursor:pointer;border-radius:5px;font-size:13px;display:flex;align-items:center;justify-content:center;transition:all .15s;}
   .panel-icon-btn:hover{background:var(--hover-bg);color:var(--text);}
@@ -1831,7 +1855,9 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 .project-picker-item.active{color:var(--blue);}
 .project-picker-create{color:var(--blue);opacity:.7;border-top:1px solid var(--border2);margin-top:2px;padding-top:6px;}
 .project-picker-create:hover{opacity:1;background:var(--accent-bg);}
-.session-project-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;display:inline-block;margin-left:4px;vertical-align:middle;}
+/* Lives as a flex sibling in .session-title-row (between title and time);
+   the row's gap:6px handles spacing, no margin/vertical-align needed. */
+.session-project-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;display:inline-block;}
 
 /* ── Code copy button ── */
 .code-copy-btn{background:var(--hover-bg);border:1px solid var(--border2);border-radius:4px;color:var(--muted);font-size:11px;cursor:pointer;padding:2px 6px;transition:all .15s;line-height:1.3;}

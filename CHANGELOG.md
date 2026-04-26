@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- **Workspace panel header collapse priority** — as the right panel narrows, the git badge now disappears first, the "Workspace" label second, and the icon buttons survive the longest. Previously `.panel-header` used `justify-content:space-between` with no flex-shrink ratios, so all three children compressed simultaneously and the icon buttons (the actual primary controls) could disappear before the git badge (least-essential metadata). Fix: declare `.rightpanel` as a `container-type:inline-size` container, replace `space-between` with `gap` + `margin-left:auto` on `.panel-actions` (`flex-shrink:0`), and add `@container rightpanel` queries that crisply hide the git badge below 220px and the label below 160px. (`static/style.css`)
+- **Project color dot truncated** — the colored project marker on a session item used to be appended inside `.session-title`, which is `overflow:hidden;text-overflow:ellipsis`. Long titles clipped the dot off, hiding the project marker exactly when it was most needed. Fix: append the dot as a flex sibling of the title in `.session-title-row`, and move `.session-time` from `position:absolute` into the same flex flow with `margin-left:auto`. The dot now sits next to the timestamp and stays visible regardless of title length. The desktop `.session-item` padding-right at rest dropped from 86px (no longer needed for an absolute timestamp) to 8px; hover/streaming/unread/menu-open/focus-within keep 40px reserved for the absolute action button + attention indicator. (`static/sessions.js`, `static/style.css`)
+
 ## v0.50.219 — 2026-04-26
 
 ### Fixed
