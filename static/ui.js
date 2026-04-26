@@ -432,15 +432,31 @@ window.addEventListener('resize',()=>{
 // ── Reasoning effort chip ────────────────────────────────────────────────────
 let _currentReasoningEffort=null;
 
+function _normalizeReasoningEffort(eff){
+  return String(eff||'').trim().toLowerCase();
+}
+
+function _formatReasoningEffortLabel(effort){
+  if(effort==='none') return 'None';
+  if(!effort) return 'Default';
+  return effort;
+}
+
 function _applyReasoningChip(eff){
-  _currentReasoningEffort=eff;
+  const effort=_normalizeReasoningEffort(eff);
+  _currentReasoningEffort=effort;
   const wrap=$('composerReasoningWrap');
   const label=$('composerReasoningLabel');
+  const chip=$('composerReasoningChip');
   if(!wrap||!label) return;
-  if(!eff||eff==='none'){wrap.style.display='none';return;}
   wrap.style.display='';
-  label.textContent=eff;
-  _highlightReasoningOption(eff);
+  label.textContent=_formatReasoningEffortLabel(effort);
+  if(chip){
+    const inactive=!effort||effort==='none';
+    chip.classList.toggle('inactive',inactive);
+    chip.title='Reasoning effort: '+_formatReasoningEffortLabel(effort);
+  }
+  _highlightReasoningOption(effort);
 }
 
 function fetchReasoningChip(){
