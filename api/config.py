@@ -442,6 +442,8 @@ MIME_MAP = {
     ".bmp": "image/bmp",
     ".pdf": "application/pdf",
     ".json": "application/json",
+    ".html": "text/html",
+    ".htm": "text/html",
     ".xls": "application/vnd.ms-excel",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".doc": "application/msword",
