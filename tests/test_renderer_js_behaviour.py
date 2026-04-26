@@ -436,3 +436,28 @@ class TestBlockquoteRegressionsDontTouchOutsideContent:
         assert out.count("<blockquote>") == 2, (
             f"Expected 2 <blockquote>: {out!r}"
         )
+
+
+class TestBlockquoteEntityEncodedInput:
+    """Blockquotes sent as HTML-entity-encoded text must still render correctly.
+    LLMs sometimes emit &gt; instead of > — the entity-decode pass must run
+    BEFORE the blockquote pre-pass, not after it."""
+
+    def test_amp_gt_prefix_becomes_blockquote(self, driver_path):
+        src = "&gt; Hello quote"
+        out = _render(driver_path, src)
+        assert "<blockquote>" in out, (
+            f"&gt;-prefixed line must render as <blockquote>: {out!r}"
+        )
+        text_only = re.sub(r"<[^>]+>", "", out)
+        assert "Hello quote" in text_only
+        # Should not see a literal > or &gt; in the rendered text
+        assert "&gt;" not in out, f"&gt; should have been decoded: {out!r}"
+
+    def test_amp_gt_fenced_code_in_blockquote(self, driver_path):
+        src = "&gt; ```python\n&gt; x = 1\n&gt; ```"
+        out = _render(driver_path, src)
+        assert "<blockquote>" in out, (
+            f"Entity-encoded blockquote with fenced code must render: {out!r}"
+        )
+        assert "<pre>" in out, f"Fenced code inside entity-encoded blockquote must render: {out!r}"

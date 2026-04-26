@@ -231,3 +231,25 @@ class TestBlockquoteFollowedByParagraph:
         # Normal paragraph must be outside the blockquote
         after_bq = out[out.index("</blockquote>"):]
         assert "Normal paragraph" in after_bq
+
+
+class TestBlockquotePrePassOrdering:
+    """Structural checks that lock the ordering of the blockquote pre-pass
+    relative to the entity-decode and MEDIA-stash passes in renderMd()."""
+
+    def test_entity_decode_runs_before_blockquote_pre_pass(self):
+        """The entity decode must appear BEFORE the blockquote pre-pass in
+        renderMd() so &gt;-prefixed lines are recognised as blockquotes."""
+        # The entity decode is represented by '&gt;' replacement or the
+        # inline decode line, whichever appears first.
+        decode_idx = min(
+            UI_JS.find("replace(/&gt;/g"),
+            UI_JS.find("replace(/&lt;/g"),
+        )
+        bq_stash_idx = UI_JS.find("_bq_stash")
+        assert decode_idx != -1, "Entity decode (&gt; or &lt;) not found in renderMd"
+        assert bq_stash_idx != -1, "_bq_stash not found"
+        assert decode_idx < bq_stash_idx, (
+            "Entity decode must appear before the blockquote pre-pass (_bq_stash). "
+            f"decode at {decode_idx}, _bq_stash at {bq_stash_idx}"
+        )

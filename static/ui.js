@@ -681,6 +681,10 @@ function _sanitizeThinkingDisplayText(text){
 
 function renderMd(raw){
   let s=(raw||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+  // ── Entity decode: must run FIRST so &gt; lines become > for the blockquote
+  // pre-pass below. LLMs sometimes emit HTML-entity-encoded output; without this
+  // a blockquote sent as "&gt; text" would never be recognised as a blockquote.
+  s=s.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;/g,"'");
   // ── Blockquote pre-pass (must run BEFORE every other markdown pass) ────────
   // Group consecutive >-prefixed lines, strip the > prefix from each line,
   // recursively render the stripped content with the full pipeline, and

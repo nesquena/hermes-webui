@@ -583,6 +583,7 @@
   .pre-header::before{content:'';width:8px;height:8px;border-radius:50%;background:var(--muted);opacity:.4;}
   .pre-header+pre{border-radius:0 0 10px 10px;border-top:none;margin-top:0;}
   .msg-body blockquote{border-left:3px solid var(--blue);padding-left:14px;color:var(--muted);font-style:italic;margin:10px 0;}
+  .msg-body blockquote p{margin:0;}
   .msg-body a{color:var(--blue);text-decoration:underline;}
   .msg-body hr{border:none;border-top:1px solid var(--border);margin:14px 0;}
   .msg-body table{border-collapse:collapse;width:100%;margin:8px 0;font-size:12px;}
@@ -761,6 +762,7 @@
   /* Keep original theme background — prevent prism-tomorrow from overriding --code-bg */
   .preview-md pre[class*="language-"],.preview-md pre code[class*="language-"]{background:var(--code-bg) !important;}
   .preview-md blockquote{border-left:3px solid var(--blue);padding-left:12px;color:var(--muted);font-style:italic;margin:8px 0;}
+  .preview-md blockquote p{margin:0;}
   .preview-md strong{color:var(--strong);font-weight:600;}.preview-md em{color:var(--em);}
   .preview-md a{color:var(--blue);text-decoration:underline;}
   .preview-md hr{border:none;border-top:1px solid var(--border);margin:12px 0;}
