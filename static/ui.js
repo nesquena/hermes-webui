@@ -1526,14 +1526,27 @@ function showPromptDialog(opts={}){
 }
 
 
+function _copyText(text){
+  if(navigator.clipboard && window.isSecureContext){
+    return navigator.clipboard.writeText(text);
+  }
+  return new Promise((resolve,reject)=>{
+    const ta=document.createElement('textarea');
+    ta.value=text;ta.style.cssText='position:fixed;left:-9999px;top:-9999px;opacity:0';
+    document.body.appendChild(ta);ta.select();
+    try{document.execCommand('copy');resolve();}
+    catch(e){reject(e);}
+    finally{document.body.removeChild(ta);}
+  });
+}
 function copyMsg(btn){
   const row=btn.closest('[data-raw-text]');
   const text=row?row.dataset.rawText:'';
   if(!text)return;
-  navigator.clipboard.writeText(text).then(()=>{
+  _copyText(text).then(()=>{
     const orig=btn.innerHTML;btn.innerHTML=li('check',13);btn.style.color='var(--blue)';
     setTimeout(()=>{btn.innerHTML=orig;btn.style.color='';},1500);
-  }).catch(()=>showToast('Copy failed'));
+  }).catch(()=>showToast(t('copy_failed')));
 }
 
 // ── Reconnect banner (B4/B5: reload resilience) ──
@@ -2745,10 +2758,10 @@ function addCopyButtons(container){
     btn.textContent=t('copy');
     btn.onclick=(e)=>{
       e.stopPropagation();
-      navigator.clipboard.writeText(codeEl.textContent).then(()=>{
+      _copyText(codeEl.textContent).then(()=>{
         btn.textContent=t('copied');
         setTimeout(()=>{btn.textContent=t('copy');},1500);
-      });
+      }).catch(()=>{btn.textContent=t('copy_failed');setTimeout(()=>{btn.textContent=t('copy');},1500);});
     };
     const header=pre.previousElementSibling;
     if(header&&header.classList.contains('pre-header')){
