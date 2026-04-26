@@ -762,7 +762,20 @@ function renderMd(raw){
   s=s.replace(/\x00O(\d+)\x00/g,(_,i)=>_ob_stash[+i]);
   s=s.replace(/^### (.+)$/gm,(_,t)=>`<h3>${inlineMd(t)}</h3>`).replace(/^## (.+)$/gm,(_,t)=>`<h2>${inlineMd(t)}</h2>`).replace(/^# (.+)$/gm,(_,t)=>`<h1>${inlineMd(t)}</h1>`);
   s=s.replace(/^---+$/gm,'<hr>');
-  s=s.replace(/^> (.+)$/gm,(_,t)=>`<blockquote>${inlineMd(t)}</blockquote>`);
+  // Group consecutive > lines (including bare >) into one <blockquote>.
+  // The old single-line rule (^> (.+)$) had three bugs:
+  //   1. .+ skipped bare "> " lines — they passed through as literal >
+  //   2. Each line became its own <blockquote> — no visual grouping
+  //   3. After the fenced-code pass, lines of > preceding/following code
+  //      blocks were left as literals because .+ didn't match empty lines
+  s=s.replace(/((?:^>[^\n]*(?:\n|$))+)/gm,block=>{
+    const inner=block.split('\n')
+      .filter((_,i,a)=>i<a.length-1||_.trim()!='>')  // drop lone trailing '>' artifact
+      .map(l=>l.replace(/^>[ \t]?/,''))               // strip "> " or ">"
+      .map(l=>l.trim()===''?'<br>':inlineMd(l))        // blank lines → <br>, text → inlineMd
+      .join('\n');
+    return `<blockquote>${inner}</blockquote>`;
+  });
   // B8: improved list handling supporting up to 2 levels of indentation
   s=s.replace(/((?:^(?:  )?[-*+] .+\n?)+)/gm,block=>{
     const lines=block.trimEnd().split('\n');
