@@ -664,7 +664,7 @@ function _sanitizeThinkingDisplayText(text){
 }
 
 function renderMd(raw){
-  let s=raw||'';
+  let s=(raw||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
   // ── MEDIA: token stash (must run first, before any other processing) ───────
   // Detect MEDIA:<path-or-url> tokens emitted by the agent (e.g. screenshots,
   // generated images) and replace them with inline <img> or download links.
@@ -731,6 +731,8 @@ function renderMd(raw){
     t=t.replace(/\*\*\*(.+?)\*\*\*/g,(_,x)=>`<strong><em>${esc(x)}</em></strong>`);
     t=t.replace(/\*\*(.+?)\*\*/g,(_,x)=>`<strong>${esc(x)}</strong>`);
     t=t.replace(/\*([^*\n]+)\*/g,(_,x)=>`<em>${esc(x)}</em>`);
+    // Strikethrough: ~~text~~ → <del>text</del>
+    t=t.replace(/~~(.+?)~~/g,(_,x)=>`<del>${esc(x)}</del>`);
     // #487: Image pass — runs while code stash is active so ![x](url) inside
     // backticks stays protected as a \x00C token and is never rendered as <img>.
     // Must run before _code_stash restore and before _link_stash so the image
@@ -748,7 +750,7 @@ function renderMd(raw){
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
     // Escape any plain text that isn't already wrapped in a tag we produced
     // by escaping bare < > that are not part of our own tags
-    const SAFE_INLINE=/^<\/?(strong|em|code|a|img)([\s>]|$)/i;
+    const SAFE_INLINE=/^<\/?(strong|em|del|code|a|img)([\s>]|$)/i;
     t=t.replace(/<\/?[a-z][^>]*>/gi,tag=>SAFE_INLINE.test(tag)?tag:esc(tag));
     return t;
   }
@@ -759,31 +761,47 @@ function renderMd(raw){
   s=s.replace(/\*\*\*(.+?)\*\*\*/g,(_,t)=>`<strong><em>${esc(t)}</em></strong>`);
   s=s.replace(/\*\*(.+?)\*\*/g,(_,t)=>`<strong>${esc(t)}</strong>`);
   s=s.replace(/\*([^*\n]+)\*/g,(_,t)=>`<em>${esc(t)}</em>`);
+  s=s.replace(/~~(.+?)~~/g,(_,t)=>`<del>${esc(t)}</del>`);
   s=s.replace(/\x00O(\d+)\x00/g,(_,i)=>_ob_stash[+i]);
   s=s.replace(/^### (.+)$/gm,(_,t)=>`<h3>${inlineMd(t)}</h3>`).replace(/^## (.+)$/gm,(_,t)=>`<h2>${inlineMd(t)}</h2>`).replace(/^# (.+)$/gm,(_,t)=>`<h1>${inlineMd(t)}</h1>`);
   s=s.replace(/^---+$/gm,'<hr>');
-  // Group consecutive > lines (including bare >) into one <blockquote>.
-  // The old single-line rule (^> (.+)$) had three bugs:
-  //   1. .+ skipped bare "> " lines — they passed through as literal >
-  //   2. Each line became its own <blockquote> — no visual grouping
-  //   3. After the fenced-code pass, lines of > preceding/following code
-  //      blocks were left as literals because .+ didn't match empty lines
-  s=s.replace(/((?:^>[^\n]*(?:\n|$))+)/gm,block=>{
-    const lines=block.split('\n');
-    // Drop trailing artifacts: empty string from a trailing \n in the match
-    // (split adds '' after the final \n) and lone bare '>' lines that
-    // weren't intended as content. Without this, a blockquote whose source
-    // ends with \n (the common case — anything followed by another block)
-    // renders with a phantom <br> before </blockquote>.
-    while(lines.length&&(lines[lines.length-1].trim()===''||lines[lines.length-1].trim()==='>')){
-      lines.pop();
-    }
-    const inner=lines
-      .map(l=>l.replace(/^>[ \t]?/,''))               // strip "> " or ">"
-      .map(l=>l.trim()===''?'<br>':inlineMd(l))        // blank lines → <br>, text → inlineMd
-      .join('\n');
-    return `<blockquote>${inner}</blockquote>`;
-  });
+  // Group consecutive > lines into one <blockquote>.
+  // Handles: blank continuation lines (> alone), nested blockquotes (>>),
+  // lists inside blockquotes (> - item), and inline markdown in quoted text.
+  function _applyBlockquotes(src){
+    return src.replace(/((?:^>[^\n]*(?:\n|$))+)/gm,block=>{
+      const lines=block.split('\n');
+      // Drop trailing bare '>' artifact
+      while(lines.length&&(lines[lines.length-1].trim()==='>'||lines[lines.length-1]===''))
+        {if(lines[lines.length-1].trim()==='>'){lines.pop();break;}lines.pop();}
+      const stripped=lines.map(l=>l.replace(/^>[\t]?/,''));
+      const innerRaw=stripped.join('\n');
+      let inner;
+      if(/^>/m.test(innerRaw)){
+        // Nested blockquote: recurse so >> → <blockquote><blockquote>
+        inner=_applyBlockquotes(innerRaw);
+      } else if(/(^(?:  )?[-*+] .+)/m.test(innerRaw)){
+        // List inside blockquote: run list pass on stripped inner content
+        inner=innerRaw.replace(/((?:^(?:  )?[-*+] .+\n?)+)/gm,lb=>{
+          const ll=lb.trimEnd().split('\n');let h='<ul>';
+          for(const li of ll){
+            const txt=li.replace(/^ {0,4}[-*+] /,'');
+            let ih;
+            if(/^\[x\] /i.test(txt)) ih='<span class="task-done">✅</span> '+inlineMd(txt.slice(4));
+            else if(/^\[ \] /.test(txt)) ih='<span class="task-todo">☐</span> '+inlineMd(txt.slice(4));
+            else ih=inlineMd(txt);
+            h+=`<li>${ih}</li>`;
+          }
+          return h+'</ul>';
+        });
+      } else {
+        // Plain lines: blank line → <br>, text → inlineMd
+        inner=stripped.map(l=>l.trim()===''?'<br>':inlineMd(l)).join('\n');
+      }
+      return `<blockquote>${inner}</blockquote>`;
+    });
+  }
+  s=_applyBlockquotes(s);
   // B8: improved list handling supporting up to 2 levels of indentation
   s=s.replace(/((?:^(?:  )?[-*+] .+\n?)+)/gm,block=>{
     const lines=block.trimEnd().split('\n');
@@ -791,8 +809,12 @@ function renderMd(raw){
     for(const l of lines){
       const indent=/^ {2,}/.test(l);
       const text=l.replace(/^ {0,4}[-*+] /,'');
-      if(indent) html+=`<li style="margin-left:16px">${inlineMd(text)}</li>`;
-      else html+=`<li>${inlineMd(text)}</li>`;
+      let _ih;
+      if(/^\[x\] /i.test(text)) _ih='<span class="task-done">✅</span> '+inlineMd(text.slice(4));
+      else if(/^\[ \] /.test(text)) _ih='<span class="task-todo">☐</span> '+inlineMd(text.slice(4));
+      else _ih=inlineMd(text);
+      if(indent) html+=`<li style="margin-left:16px">${_ih}</li>`;
+      else html+=`<li>${_ih}</li>`;
     }
     return html+'</ul>';
   });
@@ -841,7 +863,7 @@ function renderMd(raw){
   // Our pipeline only emits: <strong>,<em>,<code>,<pre>,<h1-6>,<ul>,<ol>,<li>,
   // <table>,<thead>,<tbody>,<tr>,<th>,<td>,<hr>,<blockquote>,<p>,<br>,<a>,
   // <div class="..."> (mermaid/pre-header). Everything else is untrusted input.
-  const SAFE_TAGS=/^<\/?(strong|em|code|pre|h[1-6]|ul|ol|li|table|thead|tbody|tr|th|td|hr|blockquote|p|br|a|img|div|span)([\s>]|$)/i;
+  const SAFE_TAGS=/^<\/?(strong|em|del|code|pre|h[1-6]|ul|ol|li|table|thead|tbody|tr|th|td|hr|blockquote|p|br|a|img|div|span)([\s>]|$)/i;
   s=s.replace(/<\/?[a-z][^>]*>/gi,tag=>SAFE_TAGS.test(tag)?tag:esc(tag));
   // Autolink: convert plain URLs to clickable links.
   // Stash <a>, <img> and <pre> blocks so autolink never runs inside them.
