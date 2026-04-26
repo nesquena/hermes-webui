@@ -76,12 +76,14 @@ class TestSlashCommandRegistration:
 class TestSlashCommandHandlers:
     """The three handler functions must guard properly and call cancelStream where appropriate."""
 
-    def test_cmd_queue_requires_busy(self):
-        """/queue while not busy is a usage error — user should send normally."""
+    def test_cmd_queue_handles_idle_state(self):
+        """/queue when idle now sends the message normally instead of showing an
+        error toast.  The if(!S.busy) guard must still exist — it routes to the
+        idle-send path rather than the queue path."""
         idx = COMMANDS_JS.find("async function cmdQueue(")
         assert idx >= 0
         body = COMMANDS_JS[idx:idx + 600]
-        assert "if(!S.busy)" in body, "/queue must check S.busy and reject if idle"
+        assert "if(!S.busy)" in body, "/queue must have an if(!S.busy) guard that routes to send()"
 
     def test_cmd_interrupt_calls_cancel_stream(self):
         idx = COMMANDS_JS.find("async function cmdInterrupt(")
