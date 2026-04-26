@@ -88,12 +88,17 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
             continue
 
         merged = dict(row)
-        # Keep the chain head's visible metadata, but point the row at the
-        # latest importable segment. That avoids rewriting history in the
-        # sidebar while still continuing from the compressed current state.
+        # Keep the chain head's visible identity (title, started_at), but
+        # point the row at the latest importable segment for navigation AND
+        # surface the tip's recency so an actively-used chain bubbles to the
+        # top of the sidebar by its true last activity. Without overriding
+        # last_activity, a long-lived chain whose tip is being edited NOW
+        # would sort by the root's old timestamp and fall below recently
+        # touched standalone sessions — exactly the inverse of what a user
+        # expects from "Show agent sessions" sorted by activity.
         for key in (
             'id', 'model', 'message_count', 'actual_message_count',
-            'ended_at', 'end_reason',
+            'ended_at', 'end_reason', 'last_activity',
         ):
             if key in tip:
                 merged[key] = tip[key]
