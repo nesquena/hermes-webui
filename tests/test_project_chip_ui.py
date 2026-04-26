@@ -121,13 +121,17 @@ class TestResizeProjectInputHelper:
 
     def test_resize_helper_uses_hidden_span(self):
         """The standard pattern is to measure with a hidden absolute span
-        sharing the same font/padding as the input."""
+        sharing the same font/padding as the input. Font and family are read
+        via getComputedStyle so the sizer stays calibrated if CSS changes."""
         idx = SESSIONS_JS.find("function _resizeProjectInput(")
         assert idx >= 0
-        body = SESSIONS_JS[idx: idx + 800]
+        body = SESSIONS_JS[idx: idx + 900]
         assert "position:absolute" in body and "visibility:hidden" in body, (
             "_resizeProjectInput should use a hidden absolute span to "
             "measure the value's rendered width."
+        )
+        assert "getComputedStyle(inp)" in body, (
+            "_resizeProjectInput should use getComputedStyle to read font "            "properties so the sizer stays calibrated if CSS changes."
         )
         assert "Math.min(180" in body, (
             "max bound (180) not applied in _resizeProjectInput"

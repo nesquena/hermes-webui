@@ -1188,7 +1188,13 @@ function _showProjectPicker(session, anchorEl){
 // Uses a hidden span sized with the same font/padding to measure text width.
 function _resizeProjectInput(inp){
   const sizer=document.createElement('span');
-  sizer.style.cssText='position:absolute;visibility:hidden;white-space:pre;font-size:10px;padding:0 8px;font-family:inherit;';
+  const cs=getComputedStyle(inp);
+  // Read font from the live element so the sizer stays calibrated if CSS changes.
+  // Horizontal padding only (0 vertical) — we're measuring width, not height.
+  sizer.style.cssText='position:absolute;visibility:hidden;white-space:pre;';
+  sizer.style.fontSize=cs.fontSize;
+  sizer.style.fontFamily=cs.fontFamily;
+  sizer.style.padding='0 '+cs.paddingRight;
   sizer.textContent=inp.value||inp.placeholder||' ';
   document.body.appendChild(sizer);
   const w=Math.min(180,Math.max(40,sizer.offsetWidth+2));
