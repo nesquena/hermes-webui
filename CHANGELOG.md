@@ -4,6 +4,18 @@
 
 ### Fixed
 
+## v0.50.223 — 2026-04-26
+
+### Added
+- **Drag & drop workspace files into composer** — files and folders in the workspace file tree are now draggable; dropping them into the chat composer inserts an `@path` reference at the cursor with smart spacing. OS file drag-and-drop (attach files) still works as before. (`static/ui.js`, `static/panels.js`) [#1123 @bergeouss] Closes #1097
+- **Composer placeholder reflects active profile** — when a named profile is active (not `default`), the composer placeholder and title bar show the profile name (capitalised) instead of the global `bot_name`; falls back to `bot_name`/Hermes for the default profile. (`static/boot.js`, `static/panels.js`) [#1122 @bergeouss] Closes #1116
+
+### Fixed
+- **Copy buttons — clipboard-write Permissions-Policy** — added `clipboard-write=(self)` to the `Permissions-Policy` header so Firefox allows `navigator.clipboard.writeText()`. Extracted `_fallbackCopy()` with explicit `focus()` before `select()` and correct visible-but-hidden positioning (no more `-9999px` offscreen failure). (`api/helpers.py`, `static/ui.js`) [#1125 @bergeouss] Closes #1096
+- **Model picker shows all configured providers** — `XAI_API_KEY` and `MISTRAL_API_KEY` env vars now map to `x-ai` and `mistralai` respectively. Providers configured in `config.yaml` under `providers:` are also detected and shown in the model picker. (`api/config.py`) [#1126 @bergeouss] Partially closes #604
+- **api() retries on stale keep-alive after idle** — after a long idle period, `fetch()` throws a `TypeError` when the TCP connection has been dropped by a NAT or proxy timeout. `api()` in `workspace.js` now retries up to 3 times on `TypeError` only; 4xx/5xx HTTP errors and 401 redirects are not retried. (`static/workspace.js`) [#1121 @bergeouss] Closes #1118
+- **Google Fonts allowed in CSP** — Mermaid themes inject `@import url(fonts.googleapis.com)` at render time; the CSP `style-src` and `font-src` directives now include `fonts.googleapis.com` and `fonts.gstatic.com`. (`api/helpers.py`) [#1121 @bergeouss] Closes #1112
+
 ## v0.50.221 — 2026-04-26
 
 ### Fixed
