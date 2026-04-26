@@ -691,7 +691,25 @@ def get_cli_sessions() -> list:
             profile = _cli_profile  # CLI DB has no profile column; use active profile
 
             _source = row['source'] or 'cli'
-            _display_title = row['title'] or f'{_source.title()} Session'
+            _title = row['title']
+            if not _title and _source == 'cron' and sid.startswith('cron_'):
+                # Extract job_id from session ID (cron_{job_id}_{timestamp})
+                # and look up the human-friendly job name from jobs.json
+                parts = sid.split('_')
+                if len(parts) >= 3:
+                    _job_id = parts[1]
+                    try:
+                        _jobs_path = hermes_home / 'cron' / 'jobs.json'
+                        if _jobs_path.exists():
+                            import json as _json
+                            _jobs_data = _json.loads(_jobs_path.read_text())
+                            for _j in _jobs_data.get('jobs', []):
+                                if _j.get('id') == _job_id:
+                                    _title = _j.get('name') or _title
+                                    break
+                    except Exception:
+                        pass  # degrade gracefully
+            _display_title = _title or f'{_source.title()} Session'
             cli_sessions.append({
                 'session_id': sid,
                 'title': _display_title,

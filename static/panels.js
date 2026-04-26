@@ -2266,6 +2266,22 @@ async function loadSettingsPanel(){
     const fontSizeSel=$('settingsFontSize');
     if(fontSizeSel) fontSizeSel.value=fontSizeVal;
     if(typeof _syncFontSizePicker==='function') _syncFontSizePicker(fontSizeVal);
+    // Workspace panel default-open toggle (localStorage-backed)
+    // Uses a separate key (hermes-webui-workspace-panel-pref) so that
+    // closing the panel via toolbar X does not clear the user's preference.
+    const wsPanelCb=$('settingsWorkspacePanelOpen');
+    if(wsPanelCb){
+      wsPanelCb.checked=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open';
+      wsPanelCb.onchange=function(){
+        const open=this.checked;
+        localStorage.setItem('hermes-webui-workspace-panel-pref',open?'open':'closed');
+        // Also sync the runtime key so the current session reflects the change
+        localStorage.setItem('hermes-webui-workspace-panel',open?'open':'closed');
+        document.documentElement.dataset.workspacePanel=open?'open':'closed';
+        if(open&&_workspacePanelMode==='closed') openWorkspacePanel('browse');
+        else if(!open&&_workspacePanelMode!=='closed') toggleWorkspacePanel(false);
+      };
+    }
     const resolvedLanguage=(typeof resolvePreferredLocale==='function')
       ? resolvePreferredLocale(settings.language, localStorage.getItem('hermes-lang'))
       : (settings.language || localStorage.getItem('hermes-lang') || 'en');
@@ -2345,6 +2361,12 @@ async function loadSettingsPanel(){
     if(sidebarDensitySel){
       sidebarDensitySel.value=settings.sidebar_density==='detailed'?'detailed':'compact';
       sidebarDensitySel.addEventListener('change',_markSettingsDirty,{once:false});
+    }
+    const autoTitleRefreshSel=$('settingsAutoTitleRefresh');
+    if(autoTitleRefreshSel){
+      const val=String(settings.auto_title_refresh_every||'0');
+      autoTitleRefreshSel.value=['0','5','10','20'].includes(val)?val:'0';
+      autoTitleRefreshSel.addEventListener('change',_markSettingsDirty,{once:false});
     }
     // Bot name
     const botNameField=$('settingsBotName');
@@ -2609,6 +2631,52 @@ function _applySavedSettingsUi(saved, body, opts){
   if(typeof renderSessionList==='function') renderSessionList();
 }
 
+async function checkUpdatesNow(){
+  const btn=$('btnCheckUpdatesNow');
+  const label=$('checkUpdatesLabel');
+  const spinner=$('checkUpdatesSpinner');
+  const status=$('checkUpdatesStatus');
+  if(!btn||!label) return;
+  // Disable button, show spinner
+  btn.disabled=true;
+  if(spinner) spinner.style.display='';
+  if(label) label.textContent=t('settings_checking');
+  if(status) status.textContent='';
+  try {
+    const data=await api('/api/updates/check?force=1');
+    if(data.disabled){
+      if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
+    } else {
+      const parts=[];
+      if(data.webui&&data.webui.behind>0) parts.push('WebUI: '+data.webui.behind);
+      if(data.agent&&data.agent.behind>0) parts.push('Agent: '+data.agent.behind);
+      if(parts.length){
+        if(status){status.textContent=t('settings_updates_available').replace('{count}',parts.join(', '));status.style.color='var(--accent)';}
+        // Also trigger the update banner
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
+      } else {
+        if(status){status.textContent=t('settings_up_to_date');status.style.color='var(--success)';}
+      }
+    }
+  } catch(e){
+    // Never expose raw e.message in UI — log to console for debugging only
+    console.warn('[checkUpdatesNow]', e);
+    // Show a generic user-facing error; if the API returned a message body use it
+    let userMsg=t('settings_update_check_failed');
+    if(e&&e.response){
+      try{
+        const body=JSON.parse(e.response);
+        if(body.error) userMsg=String(body.error).substring(0,120);
+      }catch(_){}
+    }
+    if(status){status.textContent=userMsg;status.style.color='var(--error)';}
+  } finally {
+    btn.disabled=false;
+    if(spinner) spinner.style.display='none';
+    if(label) label.textContent=t('settings_check_now');
+  }
+}
+
 async function saveSettings(andClose){
   const model=($('settingsModel')||{}).value;
   const modelChanged=(model||'')!==(_settingsHermesDefaultModelOnOpen||'');
@@ -2635,6 +2703,7 @@ async function saveSettings(andClose){
   body.notifications_enabled=!!($('settingsNotificationsEnabled')||{}).checked;
   body.show_thinking=window._showThinking!==false;
   body.sidebar_density=sidebarDensity;
+  body.auto_title_refresh_every=(($('settingsAutoTitleRefresh')||{}).value||'0');
   const botName=(($('settingsBotName')||{}).value||'').trim();
   body.bot_name=botName||'Hermes';
   // Password: only act if the field has content; blank = leave auth unchanged

@@ -42,6 +42,8 @@ function _setWorkspacePanelMode(mode){
   const open=_workspacePanelMode!=='closed';
   document.documentElement.dataset.workspacePanel=open?'open':'closed';
   // Persist open/closed across refreshes (browse/preview → open; closed → closed)
+  // Do NOT overwrite the user's "keep open" preference — only track runtime state
+  // so that toggleWorkspacePanel(false) from the toolbar doesn't clear the setting.
   localStorage.setItem('hermes-webui-workspace-panel', open ? 'open' : 'closed');
   layout.classList.toggle('workspace-panel-collapsed',!open);
   if(_isCompactWorkspaceViewport()){
@@ -708,17 +710,17 @@ function _pickSkin(name){
 
 function _syncThemePicker(active){
   document.querySelectorAll('#themePickerGrid .theme-pick-btn').forEach(btn=>{
-    const sel=btn.dataset.themeVal===active;
-    btn.style.borderColor=sel?'var(--accent)':'var(--border2)';
-    btn.style.boxShadow=sel?'0 0 0 1px var(--accent-bg-strong)':'none';
+    btn.classList.toggle('active',btn.dataset.themeVal===active);
+    btn.style.borderColor='';
+    btn.style.boxShadow='';
   });
 }
 
 function _syncSkinPicker(active){
   document.querySelectorAll('#skinPickerGrid .skin-pick-btn').forEach(btn=>{
-    const sel=btn.dataset.skinVal===active;
-    btn.style.borderColor=sel?'var(--accent)':'var(--border2)';
-    btn.style.boxShadow=sel?'0 0 0 1px var(--accent-bg-strong)':'none';
+    btn.classList.toggle('active',btn.dataset.skinVal===active);
+    btn.style.borderColor='';
+    btn.style.boxShadow='';
   });
 }
 
@@ -741,9 +743,9 @@ function _pickFontSize(size){
 
 function _syncFontSizePicker(active){
   document.querySelectorAll('#fontSizePickerGrid .font-size-pick-btn').forEach(btn=>{
-    const sel=btn.dataset.fontSizeVal===(active||'default');
-    btn.style.borderColor=sel?'var(--accent)':'var(--border2)';
-    btn.style.boxShadow=sel?'0 0 0 1px var(--accent-bg-strong)':'none';
+    btn.classList.toggle('active',btn.dataset.fontSizeVal===(active||'default'));
+    btn.style.borderColor='';
+    btn.style.boxShadow='';
   });
 }
 
@@ -870,9 +872,12 @@ function applyBotName(){
   if(saved){
     try{
       await loadSession(saved);
-      // Only restore the panel from localStorage when the session actually has a workspace.
-      // Without this guard, sessions without a workspace snap open then immediately closed.
-      if(S.session&&S.session.workspace&&localStorage.getItem('hermes-webui-workspace-panel')==='open'){
+      // Restore the panel from localStorage when the session has a workspace.
+      // Preference key takes priority over runtime state so that closing
+      // the panel via toolbar X doesn't suppress the "keep open" setting.
+      const panelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
+        || localStorage.getItem('hermes-webui-workspace-panel')==='open';
+      if(S.session&&S.session.workspace&&panelPref){
         _workspacePanelMode='browse';
       }
       S._bootReady=true;
@@ -893,13 +898,27 @@ function applyBotName(){
 // back-forward cache, the async boot IIFE above does NOT re-run, but the
 // DOM — including any stale value in #sessionSearch — IS restored.  A
 // prior search string would silently hide all sessions via the filter in
-// renderSessionListFromCache().  Clear the field and re-render whenever
-// the page is restored from cache (`event.persisted === true`).
+// renderSessionListFromCache().  Clear the field and re-run the full layout
+// sync whenever the page is restored from cache (`event.persisted === true`).
+// Fix #1045: also re-run topbar/workspace/panel state so the rail and layout
+// chrome aren't left in the stale bfcache snapshot.
 window.addEventListener('pageshow', (event) => {
   if (!event.persisted) return;  // fresh loads are handled by the IIFE above
   const _srch = document.getElementById('sessionSearch');
   if (_srch) _srch.value = '';
+  // Close any dropdowns/popovers that were open when the user navigated away.
+  // bfcache freezes DOM state, so a dropdown left open remains open on restore.
+  if (typeof closeModelDropdown === 'function') try { closeModelDropdown(); } catch (_) {}
+  if (typeof closeReasoningDropdown === 'function') try { closeReasoningDropdown(); } catch (_) {}
+  if (typeof closeWsDropdown === 'function') try { closeWsDropdown(); } catch (_) {}
+  if (typeof closeProfileDropdown === 'function') try { closeProfileDropdown(); } catch (_) {}
+  // Re-synchronise layout chrome that the boot IIFE sets up but bfcache
+  // doesn't re-run. Each call is guarded so missing helpers degrade silently.
+  if (typeof syncTopbar === 'function') try { syncTopbar(); } catch (_) {}
+  if (typeof syncWorkspacePanelState === 'function') try { syncWorkspacePanelState(); } catch (_) {}
   if (typeof renderSessionListFromCache === 'function') {
     try { renderSessionListFromCache(); } catch (_) {}
   }
+  // Restart the gateway SSE watcher — the persisted connection is dead after bfcache
+  if (typeof startGatewaySSE === 'function') try { startGatewaySSE(); } catch (_) {}
 });

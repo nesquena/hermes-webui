@@ -33,8 +33,21 @@ class TestSessionPersistence(unittest.TestCase):
             sessions_file.unlink()
 
     def _simulate_restart(self) -> None:
-        """Reload auth module to simulate a fresh process start."""
-        importlib.reload(auth)
+        """Reload auth module to simulate a fresh process start.
+
+        api.auth does `from api.config import STATE_DIR` at module level, so
+        `_SESSIONS_FILE` is computed from api.config.STATE_DIR at reload time.
+        We temporarily override api.config.STATE_DIR so the reload uses the
+        test state dir without reloading api.config itself (which would
+        invalidate imported references like STREAM_PARTIAL_TEXT in other tests).
+        """
+        import api.config as _config
+        _saved = _config.STATE_DIR
+        _config.STATE_DIR = _TEST_STATE
+        try:
+            importlib.reload(auth)
+        finally:
+            _config.STATE_DIR = _saved
 
     def test_session_survives_restart(self) -> None:
         """A session created before restart should still verify after reload."""

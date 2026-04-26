@@ -4,6 +4,10 @@ async function api(path,opts={}){
   const url=new URL(rel,location.href);
   const res=await fetch(url.href,{credentials:'include',headers:{'Content-Type':'application/json'},...opts});
   if(!res.ok){
+    // 401 means the auth session expired. Redirect to /login so the user can
+    // re-authenticate. This is especially important for iOS PWA (standalone mode)
+    // where a server-side 302 → /login opens in Safari instead of within the PWA.
+    if(res.status===401){window.location.href='/login?next='+encodeURIComponent(window.location.pathname+window.location.search);return;}
     const text=await res.text();
     // Parse JSON error body and surface the human-readable message,
     // rather than showing raw JSON like {"error":"Profile 'x' does not exist."}
@@ -97,6 +101,7 @@ function navigateUp(){
 // File extension sets for preview routing (must match server-side sets)
 const IMAGE_EXTS  = new Set(['.png','.jpg','.jpeg','.gif','.svg','.webp','.ico','.bmp']);
 const MD_EXTS     = new Set(['.md','.markdown','.mdown']);
+const HTML_EXTS   = new Set(['.html','.htm']);
 // Binary formats that should download rather than preview
 const DOWNLOAD_EXTS = new Set([
   '.docx','.doc','.xlsx','.xls','.pptx','.ppt','.odt','.ods','.odp',
@@ -110,21 +115,25 @@ const DOWNLOAD_EXTS = new Set([
 function fileExt(p){ const i=p.lastIndexOf('.'); return i>=0?p.slice(i).toLowerCase():''; }
 
 let _previewCurrentPath = '';  // relative path of currently previewed file
-let _previewCurrentMode = '';  // 'code' | 'md' | 'image'
+let _previewCurrentMode = '';  // 'code' | 'md' | 'image' | 'html'
 let _previewDirty = false;     // true when edits are unsaved
 
 function showPreview(mode){
-  // mode: 'code' | 'image' | 'md'
+  // mode: 'code' | 'image' | 'md' | 'html'
   $('previewCode').style.display     = mode==='code'  ? '' : 'none';
   $('previewImgWrap').style.display  = mode==='image' ? '' : 'none';
   $('previewMd').style.display       = mode==='md'    ? '' : 'none';
+  $('previewHtmlWrap').style.display = mode==='html'  ? '' : 'none';
   $('previewEditArea').style.display = 'none';  // start in read-only
   const badge=$('previewBadge');
   badge.className='preview-badge '+mode;
-  badge.textContent = mode==='image'?'image':mode==='md'?'md':fileExt($('previewPathText').textContent)||'text';
+  badge.textContent = mode==='image'?'image':mode==='md'?'md':mode==='html'?'html':fileExt($('previewPathText').textContent)||'text';
   _previewCurrentMode = mode;
   _previewDirty = false;
   updateEditBtn();
+  // Show "Open in browser" button only for HTML mode
+  const openBtn=$('btnOpenInBrowser');
+  if(openBtn) openBtn.style.display = mode==='html'?'inline-flex':'none';
 }
 
 function updateEditBtn(){
@@ -219,6 +228,22 @@ async function openFile(path){
       $('previewMd').innerHTML=renderMd(data.content);
       requestAnimationFrame(()=>{if(typeof renderKatexBlocks==='function')renderKatexBlocks();});
     }catch(e){setStatus(t('file_open_failed'));}
+  } else if(HTML_EXTS.has(ext)){
+    // HTML: render in sandboxed iframe via raw endpoint.
+    // SECURITY TRADEOFF: We use sandbox="allow-scripts" which lets inline JS run
+    // but prevents access to the parent frame (origin isolation). This is a
+    // deliberate choice — the user is previewing their own workspace files, so
+    // blocking scripts entirely would break most HTML documents. The sandbox
+    // still prevents the preview from navigating the parent, accessing cookies,
+    // or reading other origin data. If a stricter mode is needed, remove
+    // allow-scripts (or add sandbox="") to disable all JS execution.
+    showPreview('html');
+    const url=`api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}&inline=1`;
+    const iframe=$('previewHtmlIframe');
+    if(iframe){
+      iframe.src=''; // clear first to avoid stale content
+      iframe.src=url;
+    }
   } else {
     // Plain code / text -- but fall back to download if server signals binary
     try{
@@ -286,4 +311,10 @@ function renderFileBreadcrumb(filePath) {
     }
     bar.appendChild(seg);
   }
+}
+
+function openInBrowser(){
+  if(!_previewCurrentPath||!S.session) return;
+  const url=`api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(_previewCurrentPath)}`;
+  window.open(url,'_blank');
 }

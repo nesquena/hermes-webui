@@ -91,6 +91,14 @@ def _discover_agent_dir() -> Path:
     # 6. ~/hermes-agent
     candidates.append(HOME / "hermes-agent")
 
+    # 7. XDG_DATA_HOME / hermes-agent  (e.g. ~/.local/share/hermes-agent)
+    xdg_data = Path(os.getenv("XDG_DATA_HOME", str(HOME / ".local" / "share")))
+    candidates.append(xdg_data.expanduser() / "hermes-agent")
+
+    # 8. System-wide install paths (e.g. /opt/hermes-agent, /usr/local/hermes-agent)
+    for sys_prefix in ("/opt", "/usr/local", "/usr/local/share"):
+        candidates.append(Path(sys_prefix) / "hermes-agent")
+
     for path in candidates:
         if path.exists() and (path / "run_agent.py").exists():
             return path.resolve()
@@ -607,10 +615,14 @@ _PROVIDER_MODELS = {
         {"id": "claude-haiku-4-5", "label": "Claude Haiku 4.5"},
     ],
     "openai": [
+        {"id": "gpt-5.5",      "label": "GPT-5.5"},
+        {"id": "gpt-5.5-mini", "label": "GPT-5.5 Mini"},
         {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
         {"id": "gpt-5.4",      "label": "GPT-5.4"},
     ],
     "openai-codex": [
+        {"id": "gpt-5.5", "label": "GPT-5.5"},
+        {"id": "gpt-5.5-mini", "label": "GPT-5.5 Mini"},
         {"id": "gpt-5.4", "label": "GPT-5.4"},
         {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
         {"id": "gpt-5.3-codex", "label": "GPT-5.3 Codex"},
@@ -660,6 +672,8 @@ _PROVIDER_MODELS = {
     ],
     # GitHub Copilot — model IDs served via the Copilot API
     "copilot": [
+        {"id": "gpt-5.5", "label": "GPT-5.5"},
+        {"id": "gpt-5.5-mini", "label": "GPT-5.5 Mini"},
         {"id": "gpt-5.4", "label": "GPT-5.4"},
         {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
         {"id": "gpt-4o", "label": "GPT-4o"},
@@ -1738,6 +1752,18 @@ AGENT_INSTANCES: dict = {}  # stream_id -> AIAgent instance for interrupt propag
 STREAM_PARTIAL_TEXT: dict = {}  # stream_id -> partial assistant text accumulated during streaming
 SERVER_START_TIME = time.time()
 
+# Agent cache: reuse AIAgent across messages in the same WebUI session so that
+# _user_turn_count survives between turns.  This mirrors the gateway's
+# _agent_cache pattern and is required for injectionFrequency: "first-turn".
+SESSION_AGENT_CACHE: dict = {}   # session_id -> (AIAgent, config_sig)
+SESSION_AGENT_CACHE_LOCK = threading.Lock()
+
+
+def _evict_session_agent(session_id: str) -> None:
+    """Remove a cached agent for a session (on delete, clear, or model switch)."""
+    with SESSION_AGENT_CACHE_LOCK:
+        SESSION_AGENT_CACHE.pop(session_id, None)
+
 # ── Thread-local env context ─────────────────────────────────────────────────
 _thread_ctx = threading.local()
 
@@ -1801,6 +1827,7 @@ _SETTINGS_DEFAULTS = {
     "notifications_enabled": False,  # browser notification when tab is in background
     "show_thinking": True,  # show/hide thinking/reasoning blocks in chat view
     "sidebar_density": "compact",  # compact | detailed
+    "auto_title_refresh_every": "0",  # adaptive title refresh: 0=off, 5/10/20=every N exchanges
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
 }
 _SETTINGS_LEGACY_DROP_KEYS = {"assistant_language", "bubble_layout", "default_model"}
@@ -1901,6 +1928,7 @@ _SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {
 _SETTINGS_ENUM_VALUES = {
     "send_key": {"enter", "ctrl+enter"},
     "sidebar_density": {"compact", "detailed"},
+    "auto_title_refresh_every": {"0", "5", "10", "20"},
 }
 _SETTINGS_BOOL_KEYS = {
     "onboarding_completed",
@@ -1969,6 +1997,7 @@ def save_settings(settings: dict) -> dict:
         resolve_default_workspace(current.get("default_workspace"))
     )
     persisted = {k: v for k, v in current.items() if k != "default_model"}
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
     SETTINGS_FILE.write_text(
         json.dumps(persisted, ensure_ascii=False, indent=2),
         encoding="utf-8",

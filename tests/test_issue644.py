@@ -18,15 +18,29 @@ def _isolate_models_cache():
 
 
 def _available_models_with_cfg(cfg_override):
-    """Helper: temporarily patch config.cfg, call get_available_models(), restore."""
+    """Helper: temporarily patch config.cfg, call get_available_models(), restore.
+
+    We also freeze _cfg_mtime to the *current* config file mtime so that
+    get_available_models() does not call reload_config() from disk (which
+    would overwrite the in-memory mock with the on-disk config.yaml).
+    See #644 — this race exists in CI where config.yaml is present.
+    """
     old_cfg = dict(_cfg.cfg)
     _cfg.cfg.clear()
     _cfg.cfg.update(cfg_override)
+    # Freeze mtime so reload_config() is not triggered inside get_available_models()
+    old_mtime = _cfg._cfg_mtime
+    try:
+        from pathlib import Path
+        _cfg._cfg_mtime = Path(_cfg._get_config_path()).stat().st_mtime
+    except OSError:
+        _cfg._cfg_mtime = 0.0
     try:
         return _cfg.get_available_models()
     finally:
         _cfg.cfg.clear()
         _cfg.cfg.update(old_cfg)
+        _cfg._cfg_mtime = old_mtime
 
 
 class TestConfigYamlModelsLoading:

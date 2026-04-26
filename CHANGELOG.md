@@ -2,7 +2,43 @@
 
 ## [Unreleased]
 
+## v0.50.211 — 2026-04-25
+
+### Changed
+- **Compact sidebar timestamps** — session timestamps in the left sidebar now show short labels (`1m`, `6m`, `1h`, `1d`, `1w`) instead of verbose strings like "6 minutes ago". Keeps all existing i18n paths; bucket headers (Today, Yesterday, This week) unchanged. (`static/sessions.js`, `static/i18n.js`) [#1057 @pavolbiely]
+
+### Added
+- **Adaptive session title refresh** — new opt-in setting (`Settings → Preferences → Adaptive title refresh`) re-generates the session title from the latest exchange every N turns (5, 10, or 20). Off by default. Runs in a daemon thread after stream end, never blocks the stream. Manual title renames are preserved (double-checked before and after LLM call). (`api/streaming.py`, `api/config.py`, `static/panels.js`, `static/i18n.js`, `static/index.html`) [#1058 @bergeouss]
+
 ### Fixed
+- **Settings picker active state** — theme, skin, and font-size picker cards in Settings → Appearance now correctly highlight the selected option. Root cause: the base CSS rule used `!important` on `border-color`, overriding the inline style set by `_syncThemePicker()` and siblings. Fix moves to an `.active` class with its own `!important` rule. (`static/style.css`, `static/boot.js`) [#1059]
+
+## v0.50.210 — 2026-04-25
+
+### Added
+- **gpt-5.5 and gpt-5.5-mini in model picker** — available for openai, openai-codex, and copilot providers. (`api/config.py`) [#1052 @aliceisjustplaying]
+- **Login redirects back to original URL after re-login** — the iOS PWA auth redirect now passes `?next=` with the current path; `login.js` honors it via a `_safeNextPath()` helper that guards against open-redirect (rejects `//`, backslash, and non-path-absolute inputs). (`static/login.js`, `static/ui.js`, `static/workspace.js`) [#1053]
+
+### Fixed
+- **Non-standard provider first-run experience** — agent dir discovery now searches XDG_DATA_HOME, `/opt`, `/usr/local` paths; onboarding wizard auto-completes for non-wizard providers (ollama-cloud, deepseek, xai, kimi-k2.6) with `provider_configured=True`; wizard model field no longer hardcodes `gpt-5.4-mini` literal; session model resolver correctly handles unlisted active providers. (`api/config.py`, `api/onboarding.py`, `api/routes.py`) Closes #1019–#1023 [#1049]
+- **Cron session titles in sidebar** — cron-launched sessions now display the human-friendly job name (from `~/.hermes/cron/jobs.json`) instead of a generic "Cron Session" label. (`api/models.py`, `api/routes.py`) [#1050 @waldmanz]
+- **AIAgent reused per session — fixes Honcho first-turn injection** — `AIAgent` is now cached per `session_id` so the agent's turn counter increments correctly across messages. Cache is evicted on session delete/clear. (`api/config.py`, `api/routes.py`, `api/streaming.py`) Closes #1039 [#1051 @qxxaa]
+- **Mermaid Google Fonts CSP violation suppressed** — `fontFamily:'inherit'` in Mermaid themeVariables prevents `@import url('fonts.googleapis.com')` from being injected into diagram SVGs. (`static/ui.js`) Closes #1044 [#1054]
+- **bfcache layout and dropdown restore** — `pageshow+event.persisted` handler re-syncs topbar, workspace panel, session list, and gateway SSE; also closes open composer dropdowns frozen by bfcache. `_initResizePanels()` removed from pageshow (bfcache preserves listeners). (`static/boot.js`) Closes #1045 [#1055]
+
+## v0.50.209 — 2026-04-25
+
+### Added
+- **Codex-style message queue flyout** — messages typed while a stream is running now appear as a flyout card above the composer (same pattern as approval/clarify cards). Supports drag-to-reorder, inline edit, per-item model badge, Combine/Clear actions, and a collapsed pill outside the composer. Per-session DOM isolation via `_queueRenderKeys[sid]`/`_queueCollapsed[sid]` prevents cross-session bleed. Titlebar `#appTitlebarSub` chip shows live queue count. (`static/ui.js`, `static/messages.js`, `static/style.css`, `static/i18n.js`, `static/index.html`) Closes #965 [#1040 @24601]
+- **Inline HTML preview in workspace panel** — `.html` and `.htm` files now render as live sandboxed iframes (`sandbox="allow-scripts"`, no `allow-same-origin`) in the workspace file browser. A `?inline=1` parameter on `/api/file/raw` bypasses the usual attachment disposition; the server adds `Content-Security-Policy: sandbox allow-scripts` on inline HTML responses to prevent XSS when the URL is opened directly in a browser tab. (`static/workspace.js`, `api/routes.py`, `static/index.html`) Closes #779 [#1035 @bergeouss]
+- **Provider categories in setup wizard** — the onboarding provider dropdown groups 10 providers into Easy Start / Open & Self-hosted / Specialized with `<optgroup>` sections. Includes Google Gemini, DeepSeek, Mistral, and xAI/Grok with correct current model defaults. (`api/onboarding.py`, `static/onboarding.js`) Closes #603 [#1036 @bergeouss]
+
+### Fixed
+- **Manual "Check for Updates" button in System settings** — users can now trigger an update check immediately instead of waiting for the periodic background fetch. Error messages are sanitized before display. (`static/panels.js`, `static/index.html`, `static/style.css`) Closes #785 [#1033 @bergeouss]
+- **"Keep workspace panel open" toggle in Appearance settings** — adds a persistent preference so the workspace panel opens automatically on each session if preferred. The toolbar X no longer clears the preference. (`static/panels.js`, `static/boot.js`) Closes #999 [#1034 @bergeouss]
+
+### Changed
+- **CSP allowlist for Cloudflare Access deployments** — `default-src` and `manifest-src` now include `https://*.cloudflareaccess.com`, and `script-src` now includes `https://static.cloudflareinsights.com`. This unblocks Agent37-style deployments running behind Cloudflare Access without affecting vanilla self-hosters (the new origins are unreachable in non-Cloudflare environments). (`api/helpers.py`) [#1040 follow-up]
 
 ## v0.50.207 — 2026-04-25
 

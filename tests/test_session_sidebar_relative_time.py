@@ -42,11 +42,10 @@ def _run_session_time_case(script_body: str) -> dict:
         process.env.TZ = 'UTC';
         const translations = {{
           session_time_unknown: 'Unknown',
-          session_time_just_now: 'just now',
-          session_time_minutes_ago: (n) => `${{n}} minute${{n === 1 ? '' : 's'}} ago`,
-          session_time_hours_ago: (n) => `${{n}} hour${{n === 1 ? '' : 's'}} ago`,
-          session_time_days_ago: (n) => `${{n}} day${{n === 1 ? '' : 's'}} ago`,
-          session_time_last_week: 'last week',
+          session_time_minutes_ago: (n) => `${{n}}m`,
+          session_time_hours_ago: (n) => `${{n}}h`,
+          session_time_days_ago: (n) => `${{n}}d`,
+          session_time_last_week: '1w',
           session_time_bucket_today: 'Today',
           session_time_bucket_yesterday: 'Yesterday',
           session_time_bucket_this_week: 'This week',
@@ -117,7 +116,7 @@ def test_relative_time_uses_calendar_boundaries_and_year_for_old_sessions():
         }));
         """
     )
-    assert result["relative"] == "2 days ago"
+    assert result["relative"] == "2d"
     assert result["bucket"] == "This week"
     assert "2024" in result["oldDate"]
 
@@ -134,7 +133,7 @@ def test_relative_time_today_bucket():
         }));
         """
     )
-    assert result["relative"] == "2 hours ago"
+    assert result["relative"] == "2h"
     assert result["bucket"] == "Today"
 
 
@@ -151,15 +150,14 @@ def test_relative_time_handles_just_now_and_dst_safe_yesterday_boundary():
         }));
         """
     )
-    assert result["justNow"] == "just now"
-    assert result["yesterday"] == "Yesterday"
+    assert result["justNow"] == "1m"
+    assert result["yesterday"] == "1d"
     assert result["yesterdayBucket"] == "Yesterday"
 
 
 def test_relative_time_strings_are_localized_in_english_and_spanish_bundles():
     for key in (
         "session_time_unknown",
-        "session_time_just_now",
         "session_time_minutes_ago",
         "session_time_hours_ago",
         "session_time_days_ago",
