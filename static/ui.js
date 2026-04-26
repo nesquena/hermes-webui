@@ -774,7 +774,7 @@ function renderMd(raw){
       // Drop trailing bare '>' artifact
       while(lines.length&&(lines[lines.length-1].trim()==='>'||lines[lines.length-1]===''))
         {if(lines[lines.length-1].trim()==='>'){lines.pop();break;}lines.pop();}
-      const stripped=lines.map(l=>l.replace(/^>[\t]?/,''));
+      const stripped=lines.map(l=>l.replace(/^>[ \t]?/,''));
       const innerRaw=stripped.join('\n');
       let inner;
       if(/^>/m.test(innerRaw)){
