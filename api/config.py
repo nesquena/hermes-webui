@@ -1152,6 +1152,11 @@ def invalidate_models_cache():
         _available_models_cache_ts = 0.0
         _cache_build_in_progress = False
         _cache_build_cv.notify_all()
+        # Clear the credential pool cache too. The cache key is provider_id
+        # only, so without this, tests (and live provider key edits) see a
+        # stale CredentialPool from a prior auth_store payload — the test_
+        # credential_pool_providers suite was hitting this directly.
+        _CREDENTIAL_POOL_CACHE.clear()
 
 
 def invalidate_provider_models_cache(provider_id: str):
