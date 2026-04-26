@@ -55,3 +55,20 @@ def test_prism_js_still_has_integrity():
     # prism-autoloader.min.js
     assert re.search(r'prism-autoloader\.min\.js[^>]*integrity=', src), \
         "prism-autoloader.min.js should still have integrity attribute"
+
+
+def test_boot_js_set_resolved_theme_no_integrity():
+    """_setResolvedTheme in boot.js must not re-apply integrity on theme switch."""
+    with open("static/boot.js") as f:
+        src = f.read()
+    # _setResolvedTheme function must exist
+    assert "_setResolvedTheme" in src, "_setResolvedTheme function must exist"
+    # Must NOT assign link.integrity with a hash value
+    assert not re.search(r'link\.integrity\s*=\s*["\']sha', src), \
+        "_setResolvedTheme must not set link.integrity to an SRI hash"
+    # Must NOT have a wantIntegrity variable
+    assert "wantIntegrity" not in src, \
+        "wantIntegrity variable should be removed from _setResolvedTheme"
+    # Should clear integrity (set to empty) when switching theme
+    assert re.search(r"link\.integrity\s*=\s*['\"]", src), \
+        "_setResolvedTheme should clear link.integrity on theme switch"
