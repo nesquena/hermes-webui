@@ -47,15 +47,19 @@ class TestCodeBlockNewlinePreservation:
             "_pre_stash must be restored after the paragraph split/join"
 
     def test_paragraph_split_bypasses_stash_tokens(self):
-        """The paragraph map must bypass lines that start with \\x00E."""
+        """The paragraph map must bypass lines that start with \\x00E (pre stash).
+        Also accepts a character class like \\x00[EQ] when other stash tokens
+        share the same bypass (e.g. \\x00Q for blockquote stash)."""
         src = get_ui_js()
         # The map line must check for \x00E in its bypass condition
         map_line = next(
             l for l in src.splitlines()
             if 'parts.map' in l and '<br>' in l
         )
-        assert r'\x00E' in map_line, \
-            r"paragraph map must bypass \x00E stash tokens"
+        assert r'\x00E' in map_line or r'\x00[E' in map_line, (
+            r"paragraph map must bypass \x00E stash tokens (literally or as "
+            r"part of a character class like \x00[EQ])"
+        )
 
     def test_pre_regex_covers_pre_header_div(self):
         """The stash regex must match <div class=\"pre-header\"> before <pre>."""

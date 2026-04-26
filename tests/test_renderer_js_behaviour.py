@@ -13,6 +13,7 @@ Add a case here whenever the renderer fix targets a class of input the
 Python mirror cannot exercise faithfully.
 """
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -94,17 +95,18 @@ class TestBlockquotePrefixStrip:
 
     def test_single_line_blockquote_no_leading_space(self, driver_path):
         out = _render(driver_path, "> Hello world").strip()
-        assert "<blockquote>Hello world</blockquote>" in out, (
-            f"`> Hello world` must render as <blockquote>Hello world</blockquote> "
-            f"with no leading space.  Got: {out!r}.  Likely cause: prefix-strip "
-            f"regex consumes only \\t, not space."
+        # New shape: recursive renderMd wraps content in <p> (CommonMark-correct).
+        assert "<blockquote><p>Hello world</p></blockquote>" in out, (
+            f"`> Hello world` must render as <blockquote><p>Hello world</p></blockquote> "
+            f"with no leading space.  Got: {out!r}."
         )
 
     def test_multiline_blockquote_no_leading_space(self, driver_path):
         out = _render(driver_path, "> Line one\n> Line two").strip()
-        assert ">Line one\nLine two<" in out, (
-            f"Multi-line blockquote must strip the space after each `>`.  "
-            f"Got: {out!r}"
+        # New shape: single paragraph with <br> between soft-wrapped lines.
+        assert "<blockquote><p>Line one<br>Line two</p></blockquote>" in out, (
+            f"Multi-line blockquote must strip the space after each `>` and "
+            f"render as a single paragraph.  Got: {out!r}"
         )
         # Belt-and-braces: there must be no space-after-newline-in-content
         assert "\n " not in out.replace("</blockquote>", ""), (
@@ -164,7 +166,7 @@ class TestCommonLLMShapes:
 
     def test_quote_then_heading(self, driver_path):
         out = _render(driver_path, "> Note this.\n\n## Heading")
-        assert "<blockquote>Note this.</blockquote>" in out
+        assert "<blockquote><p>Note this.</p></blockquote>" in out
         assert "<h2>Heading</h2>" in out
 
     def test_crlf_does_not_leak_carriage_return(self, driver_path):
@@ -189,3 +191,248 @@ class TestCommonLLMShapes:
         assert "And a closing remark." in out
         # No leading-space artifacts in the quoted text
         assert "\n " not in out.replace("</blockquote>", "")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Block-level constructs INSIDE blockquotes — the six bugs documented in
+# blockquote-rendering-bugs.md. Each test feeds the exact input from the
+# bug report and asserts the rendered HTML structure.
+#
+# Root cause of all six: every block-level pass (fenced code, headings, hr,
+# ordered lists) used to run BEFORE the blockquote handler, on > -prefixed
+# lines those passes don't recognise. The fix moved blockquote handling to a
+# pre-pass that strips > prefixes and recursively renders the inner content.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestBugFencedCodeInBlockquote:
+    """Bug 1: fenced code blocks inside blockquotes leaked > prefixes inside
+    the rendered <pre>, broke the <blockquote> wrapper, and sometimes left
+    raw <pre>/<div class="pre-header"> as visible text."""
+
+    def test_fenced_code_inside_blockquote_renders_pre(self, driver_path):
+        src = (
+            "> Here is some code:\n"
+            ">\n"
+            "> ```python\n"
+            "> x = 1\n"
+            "> y = 2\n"
+            "> ```\n"
+            ">\n"
+            "> That was the code."
+        )
+        out = _render(driver_path, src)
+        assert "<pre>" in out and "</pre>" in out, (
+            f"Fenced code inside blockquote must render as <pre>: {out!r}"
+        )
+        # The > prefixes must be stripped from the code content, not preserved
+        # inside the <pre>.
+        assert "&gt; x = 1" not in out, (
+            f"Code content inside <pre> must not contain &gt; prefixes: {out!r}"
+        )
+        # Raw <pre> or pre-header tags must NOT appear as visible text
+        assert "&lt;pre&gt;" not in out
+        assert "&lt;div class=&quot;pre-header" not in out
+        # Single <blockquote> wrapping everything (not split by the <pre>)
+        assert out.count("<blockquote>") == 1, (
+            f"Expected ONE <blockquote>, got {out.count('<blockquote>')}: {out!r}"
+        )
+
+    def test_fenced_code_with_lang_class(self, driver_path):
+        src = "> ```python\n> x = 1\n> ```"
+        out = _render(driver_path, src)
+        assert 'class="language-python"' in out
+        assert "x = 1" in out
+
+
+class TestBugBlankContinuationInBlockquote:
+    """Bug 2: blank > lines between paragraphs fragmented the blockquote into
+    separate elements with literal > characters between them."""
+
+    def test_three_paragraphs_one_blockquote(self, driver_path):
+        src = (
+            "> First paragraph of the quote.\n"
+            ">\n"
+            "> Second paragraph of the quote.\n"
+            ">\n"
+            "> Third paragraph of the quote."
+        )
+        out = _render(driver_path, src)
+        # All three paragraphs in ONE <blockquote>
+        assert out.count("<blockquote>") == 1, (
+            f"Expected ONE <blockquote>, got {out.count('<blockquote>')}: {out!r}"
+        )
+        assert "First paragraph" in out
+        assert "Second paragraph" in out
+        assert "Third paragraph" in out
+        # No literal > between paragraphs (would indicate fragmented blockquote)
+        text_only = re.sub(r"<[^>]+>", "", out)
+        assert ">" not in text_only, (
+            f"Literal > in rendered text indicates fragmented blockquote: {text_only!r}"
+        )
+
+
+class TestBugHeadingsInsideBlockquote:
+    """Bug 3: # headings inside blockquotes rendered as literal '##' text
+    because the heading pass ran before the blockquote pass."""
+
+    def test_h2_inside_blockquote(self, driver_path):
+        src = (
+            "> ## Bug description\n"
+            ">\n"
+            "> The widget is broken.\n"
+            ">\n"
+            "> ## Steps to reproduce\n"
+            ">\n"
+            "> Click the button."
+        )
+        out = _render(driver_path, src)
+        assert "<h2>Bug description</h2>" in out, (
+            f"## inside blockquote must render as <h2>: {out!r}"
+        )
+        assert "<h2>Steps to reproduce</h2>" in out
+        # No literal '##' as visible text
+        text_only = re.sub(r"<[^>]+>", "", out)
+        assert "##" not in text_only, (
+            f"Literal ## in rendered text — heading pass missed it: {text_only!r}"
+        )
+
+    def test_h1_h2_h3_all_render(self, driver_path):
+        src = "> # H1\n> ## H2\n> ### H3"
+        out = _render(driver_path, src)
+        assert "<h1>H1</h1>" in out
+        assert "<h2>H2</h2>" in out
+        assert "<h3>H3</h3>" in out
+
+
+class TestBugOrderedListInsideBlockquote:
+    """Bug 4: ordered (numbered) lists inside blockquotes rendered as plain
+    text — the OL pass had no equivalent of the UL branch in the old
+    blockquote handler."""
+
+    def test_ordered_list_renders_as_ol(self, driver_path):
+        src = (
+            "> Steps to reproduce:\n"
+            ">\n"
+            "> 1. Open the app\n"
+            "> 2. Click the button\n"
+            "> 3. Observe the crash"
+        )
+        out = _render(driver_path, src)
+        assert "<ol>" in out and "</ol>" in out, (
+            f"Numbered list inside blockquote must render as <ol>: {out!r}"
+        )
+        # All three list items present
+        for item in ["Open the app", "Click the button", "Observe the crash"]:
+            assert f">{item}</li>" in out, (
+                f"Missing <li>{item}</li> in {out!r}"
+            )
+
+
+class TestBugHorizontalRuleInsideBlockquote:
+    """Bug 6: --- inside a blockquote rendered as literal text instead of <hr>."""
+
+    def test_hr_renders_inside_blockquote(self, driver_path):
+        src = "> Above the rule\n>\n> ---\n>\n> Below the rule"
+        out = _render(driver_path, src)
+        assert "<hr>" in out, (
+            f"--- inside blockquote must render as <hr>: {out!r}"
+        )
+        assert "Above the rule" in out
+        assert "Below the rule" in out
+        # No literal '---' as text
+        text_only = re.sub(r"<[^>]+>", "", out)
+        assert "---" not in text_only, (
+            f"Literal --- in rendered text: {text_only!r}"
+        )
+
+
+class TestBugComplexBlockquoteAllFeatures:
+    """Bug 5 (worst-case): a blockquote with headings, paragraphs, inline code,
+    fenced code, and an ordered list. Old behaviour collapsed the entire thing
+    into a monospace blob with raw markdown syntax leaking everywhere."""
+
+    def test_complex_blockquote_renders_all_constructs(self, driver_path):
+        src = (
+            "> ## Description\n"
+            ">\n"
+            "> The widget is broken when X happens.\n"
+            ">\n"
+            "> ## Root cause\n"
+            ">\n"
+            "> The `MIME_MAP` in `api/config.py` is missing entries.\n"
+            ">\n"
+            "> ## Fix\n"
+            ">\n"
+            "> Add two entries:\n"
+            ">\n"
+            "> ```python\n"
+            '> ".html": "text/html",\n'
+            '> ".htm": "text/html",\n'
+            "> ```\n"
+            ">\n"
+            "> ## Workflow rules\n"
+            ">\n"
+            "> 1. Never edit the file directly\n"
+            "> 2. Create a worktree\n"
+            "> 3. Run the tests\n"
+            ">\n"
+            "> Target branch is `master`."
+        )
+        out = _render(driver_path, src)
+        # Multiple <h2> headings
+        assert out.count("<h2>") >= 4, (
+            f"Expected at least 4 <h2> headings, got {out.count('<h2>')}: {out!r}"
+        )
+        # Fenced code block
+        assert "<pre>" in out
+        assert 'class="language-python"' in out
+        # Ordered list
+        assert "<ol>" in out
+        # Inline code
+        assert "<code>MIME_MAP</code>" in out
+        assert "<code>api/config.py</code>" in out
+        assert "<code>master</code>" in out
+        # No literal markdown syntax leaking
+        text_only = re.sub(r"<[^>]+>", "", out)
+        assert "##" not in text_only, f"Literal ## in {text_only!r}"
+        # Single <blockquote> wraps everything
+        assert out.count("<blockquote>") == 1, (
+            f"Expected ONE <blockquote>, got {out.count('<blockquote>')}: {out!r}"
+        )
+        # No raw <pre>/<div class="pre-header"> as escaped text
+        assert "&lt;pre&gt;" not in out
+        assert "&lt;div class=&quot;pre-header" not in out
+
+
+class TestBlockquoteRegressionsDontTouchOutsideContent:
+    """Make sure the blockquote pre-pass doesn't grab > -prefixed lines that
+    sit inside a non-blockquote fenced code block (e.g. shell prompts in
+    ```bash``` examples)."""
+
+    def test_shell_prompt_in_bash_fence_not_treated_as_blockquote(self, driver_path):
+        src = "```bash\n> echo hello\n```"
+        out = _render(driver_path, src)
+        # The > line is part of the bash code, not a blockquote
+        assert "<blockquote>" not in out, (
+            f"> line inside ```bash``` must NOT become a blockquote: {out!r}"
+        )
+        assert "<pre>" in out
+        # Escaped > preserved as code content
+        assert "&gt; echo hello" in out
+
+    def test_two_separate_blockquotes_stay_separate(self, driver_path):
+        src = "> First quote\n\nSome plain text.\n\n> Second quote"
+        out = _render(driver_path, src)
+        assert out.count("<blockquote>") == 2, (
+            f"Two separated blockquotes must stay separate: {out!r}"
+        )
+        assert "Some plain text." in out
+
+    def test_nested_double_blockquote(self, driver_path):
+        src = "> outer line\n> > inner line"
+        out = _render(driver_path, src)
+        # Should produce nested <blockquote><blockquote>
+        assert out.count("<blockquote>") == 2, (
+            f"Expected 2 <blockquote>: {out!r}"
+        )

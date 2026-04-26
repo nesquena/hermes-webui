@@ -73,16 +73,34 @@ class TestBlockquoteSourceStructure:
             " lines and creates one <blockquote> per line"
         )
 
-    def test_new_group_rule_present(self):
-        """The new grouping regex must be present."""
-        assert "(?:^>[^\\n]*(?:\\n|$))+" in UI_JS, (
-            "New group-based blockquote rule not found in ui.js"
+    def test_blockquote_pre_pass_present(self):
+        """The blockquote pre-pass (line walker + recursive render + stash)
+        must be present in ui.js."""
+        assert "_bq_stash" in UI_JS, (
+            "Blockquote stash array (_bq_stash) not found — pre-pass missing"
+        )
+        assert "_applyBlockquotes" in UI_JS, (
+            "_applyBlockquotes line-walker function not found"
         )
 
     def test_prefix_strip_present(self):
         """The fix must strip the '> ' prefix from each line."""
-        assert "replace(/^>[" in UI_JS or "replace(/^>[ " in UI_JS, (
-            "Expected prefix-strip pattern not found in the blockquote block"
+        assert "replace(/^> ?/" in UI_JS, (
+            "Expected prefix-strip pattern `^> ?` not found in the blockquote block"
+        )
+
+    def test_bq_stash_token_in_paragraph_bypass(self):
+        """\\x00Q must be in the paragraph-splitter bypass so blockquote
+        stash tokens are not wrapped in <p>."""
+        assert r"\x00[EQ]" in UI_JS, (
+            "Paragraph-splitter bypass must accept \\x00Q (blockquote token) "
+            "alongside \\x00E (pre stash token)"
+        )
+
+    def test_bq_stash_restore_present(self):
+        """The stash restore must run at the end of renderMd."""
+        assert r"\x00Q(\d+)\x00" in UI_JS, (
+            "Blockquote stash restore regex not found in ui.js"
         )
 
 

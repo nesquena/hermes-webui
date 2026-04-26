@@ -8,6 +8,7 @@
 
 ### Added
 - **Project color picker** — right-clicking a project chip now shows a context menu with Rename, a row of color swatches (the 8 `PROJECT_COLORS`), and Delete. Selecting a swatch updates the project color via the existing `/api/projects/rename` endpoint (which already supports an optional `color` field). (`static/sessions.js`) Closes #1078
+- **Block-level constructs inside blockquotes** — fenced code blocks, headings, horizontal rules, and ordered lists inside blockquotes now render correctly. Root cause: the per-line passes for fenced code, `## heading`, `---` hr, and `1. list` ran before the blockquote handler and could not match lines that started with `>`, so by the time blockquote stripping ran those constructs had already been mishandled (in the worst case the blockquote collapsed into a monospace blob with raw `>`/`##` syntax leaking everywhere). Fix: a new blockquote pre-pass walks lines fence-aware, strips the `>` prefix, and recursively renders the stripped content with the full pipeline before the rest of `renderMd()` runs. The rendered blockquote HTML is stashed and restored verbatim at the end so no later pass can mangle it. (`static/ui.js`)
 
 
 ## v0.50.217 — 2026-04-26
