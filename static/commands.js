@@ -595,8 +595,8 @@ async function cmdSteer(args){
  * Shared implementation for /steer and the busy_input_mode='steer' path.
  *
  * Tries the real steer endpoint first. On any non-accept response (no cached
- * agent, agent lacks steer, stream dead, etc.) falls back to interrupt mode:
- * queue the message + cancel the stream so the existing drain re-sends.
+ * agent, agent lacks steer, stream dead, etc.) falls back to interrupt+queue:
+ * queues the message and cancels the stream so the drain re-sends it.
  *
  * @param {string} msg - The steer text.
  * @param {boolean} explicitSteer - True if the user explicitly invoked /steer
