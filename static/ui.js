@@ -1528,12 +1528,19 @@ function showPromptDialog(opts={}){
 
 function _copyText(text){
   if(navigator.clipboard && window.isSecureContext){
-    return navigator.clipboard.writeText(text);
+    return navigator.clipboard.writeText(text).catch(()=>{
+      // Fallback if clipboard API fails (e.g. permissions)
+      return _fallbackCopy(text);
+    });
   }
+  return _fallbackCopy(text);
+}
+function _fallbackCopy(text){
   return new Promise((resolve,reject)=>{
     const ta=document.createElement('textarea');
-    ta.value=text;ta.style.cssText='position:fixed;left:-9999px;top:-9999px;opacity:0';
-    document.body.appendChild(ta);ta.select();
+    ta.value=text;ta.style.cssText='position:fixed;left:0;top:0;width:2em;height:2em;padding:0;border:none;outline:none;box-shadow:none;background:transparent;z-index:-1';
+    document.body.appendChild(ta);
+    ta.focus();ta.select();
     try{document.execCommand('copy');resolve();}
     catch(e){reject(e);}
     finally{document.body.removeChild(ta);}
