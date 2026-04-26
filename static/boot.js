@@ -142,6 +142,27 @@ function closeMobileSidebar(){
   if(sidebar)sidebar.classList.remove('mobile-open');
   if(overlay)overlay.classList.remove('visible');
 }
+
+// ── Desktop sidebar collapse ──
+const SIDEBAR_COLLAPSED_KEY='hermes-sidebar-collapsed';
+function toggleSidebar(force){
+  const layout=document.querySelector('.layout');
+  if(!layout)return;
+  const collapsed=layout.getAttribute('data-sidebar-collapsed')==='true';
+  const next=typeof force==='boolean'?force:!collapsed;
+  layout.setAttribute('data-sidebar-collapsed',next?'true':'false');
+  try{localStorage.setItem(SIDEBAR_COLLAPSED_KEY,next?'1':'0');}catch(e){}
+  // If uncollapsing and no panel is active, switch to chat
+  if(!next && !document.querySelector('.panel-view.active')) switchPanel('chat');
+}
+function initSidebarCollapsed(){
+  try{
+    if(localStorage.getItem(SIDEBAR_COLLAPSED_KEY)==='1'){
+      const layout=document.querySelector('.layout');
+      if(layout)layout.setAttribute('data-sidebar-collapsed','true');
+    }
+  }catch(e){}
+}
 function toggleMobileFiles(){
   toggleWorkspacePanel();
 }
@@ -518,6 +539,10 @@ document.addEventListener('keydown',async e=>{
     e.preventDefault();
     if(!S.busy){await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();}
   }
+  if((e.metaKey||e.ctrlKey)&&e.key==='b'){
+    e.preventDefault();
+    toggleSidebar();
+  }
   if(e.key==='Escape'){
     // Close onboarding overlay if open (skip/dismiss the wizard)
     const onboardingOverlay=$('onboardingOverlay');
@@ -863,6 +888,7 @@ function applyBotName(){
   await loadWorkspaceList();
   await loadOnboardingWizard();
   _initResizePanels();
+  initSidebarCollapsed();
   // Workspace panel restore happens AFTER loadSession so we know if
   // the session has a workspace — prevents the snap-open-then-closed flash (#576).
   // Fix #822: clear any browser-restored value before first render. This
