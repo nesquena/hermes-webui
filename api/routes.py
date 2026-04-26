@@ -1345,6 +1345,10 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/chat":
         return _handle_chat_sync(handler, body)
 
+    if parsed.path == "/api/chat/steer":
+        from api.streaming import _handle_chat_steer
+        return _handle_chat_steer(handler, body)
+
     # ── Cron API (POST) ──
     if parsed.path == "/api/crons/create":
         return _handle_cron_create(handler, body)

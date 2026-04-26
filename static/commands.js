@@ -573,23 +573,68 @@ async function cmdInterrupt(args){
 }
 
 /**
- * /steer <message> — Inject a steering hint mid-task.
- * Currently falls back to interrupt behaviour because the WebUI cannot
- * inject messages into an in-flight agent thread.  Shows a toast to
- * inform the user that true steering is not yet available.
+ * /steer <message> — Inject a steering hint mid-task without interrupting.
+ *
+ * Calls POST /api/chat/steer which looks up the cached AIAgent for this
+ * session and calls agent.steer(text). The agent's run loop appends the
+ * steer text to the next tool-result message so the model sees it on its
+ * next iteration — same pathway as the CLI's /steer command.
+ *
+ * Falls back to interrupt mode when the agent isn't running, isn't cached,
+ * or doesn't support steer (older hermes-agent versions).
  */
 async function cmdSteer(args){
   const msg=(args||'').trim();
   if(!msg){showToast(t('cmd_steer_no_msg'));return;}
   if(!S.busy||!S.activeStreamId){showToast(t('no_active_task'));return;}
   if(!S.session){showToast(t('no_active_session'));return;}
-  // True steer (inject without cancelling) requires agent-side support
-  // that is not yet available in the WebUI.  Fall back to interrupt.
+  await _trySteer(msg, /*explicitSteer=*/true);
+}
+
+/**
+ * Shared implementation for /steer and the busy_input_mode='steer' path.
+ *
+ * Tries the real steer endpoint first. On any non-accept response (no cached
+ * agent, agent lacks steer, stream dead, etc.) falls back to interrupt mode:
+ * queue the message + cancel the stream so the existing drain re-sends.
+ *
+ * @param {string} msg - The steer text.
+ * @param {boolean} explicitSteer - True if the user explicitly invoked /steer
+ *   (vs the busy-mode auto-fallback). Affects toast wording only.
+ */
+async function _trySteer(msg, explicitSteer){
+  let result=null;
+  try{
+    result=await api('/api/chat/steer',{
+      method:'POST',
+      body:JSON.stringify({session_id:S.session.session_id,text:msg}),
+    });
+  }catch(e){
+    // Network or server error — fall back to interrupt
+    result={accepted:false, fallback:'network_error'};
+  }
+  if(result&&result.accepted){
+    showToast(t('cmd_steer_delivered'),2500);
+    return;
+  }
+  // Fall back to interrupt: queue the message + cancel the stream so the
+  // drain in setBusy(false) re-sends it as a fresh turn.
   queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
   updateQueueBadge(S.session.session_id);
   S.pendingFiles=[];renderTray();
   if(typeof cancelStream==='function'){await cancelStream();}
-  showToast(t('cmd_steer_fallback'),2500);
+  // Toast wording differs based on why we're falling back so the user
+  // understands what just happened.
+  const reason=(result&&result.fallback)||'unknown';
+  if(explicitSteer){
+    showToast(t('cmd_steer_fallback'),2500);
+  } else if(reason==='no_cached_agent'||reason==='not_running'||reason==='stream_dead'){
+    // Busy mode hit the steer path before the agent was ready —
+    // interrupt is the natural fallback, no need to call out steer.
+    showToast(t('busy_interrupt_confirm'),2000);
+  } else {
+    showToast(t('busy_steer_fallback'),2500);
+  }
 }
 
 async function cmdTitle(args){

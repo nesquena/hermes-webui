@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+## v0.50.215 — 2026-04-26
+
+### Added
+- **Real `/steer` command** — wires `/steer <text>` through the agent's thread-safe `agent.steer()` method rather than falling back to interrupt. Steer text is stashed in `_pending_steer` and injected into the next tool-result boundary without interrupting the current run, giving the agent a mid-turn course correction. New `/api/chat/steer` POST endpoint with five graceful fallback reasons (`no_cached_agent`, `agent_lacks_steer`, `session_not_found`, `not_running`, `stream_dead`) — any fallback transparently falls back to the existing interrupt+queue mechanism. (`api/routes.py`, `api/streaming.py`, `static/commands.js`, `static/messages.js`, `static/i18n.js`) Closes #720 follow-up [#1066 @nesquena]
+- **Steer leftover delivery** — if the agent finishes its turn before hitting a tool boundary, the stashed steer text is drained and emitted as a `pending_steer_leftover` SSE event; the frontend queues it as a next-turn message, mirroring the CLI's existing leftover path. (`api/streaming.py`, `static/messages.js`) [#1066]
+
+### Fixed
+- **Pending files preserved on steer→interrupt fallback** — the busy-mode steer path in `send()` now defers `S.pendingFiles=[]` until after `_trySteer()` returns, so staged file attachments are not lost when the steer endpoint falls back to interrupt+queue. (`static/messages.js`)
+
 ## v0.50.214 — 2026-04-26
 
 ### Added

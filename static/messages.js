@@ -15,24 +15,34 @@ async function send(){
     if(text){
       if(!S.session){await newSession();await renderSessionList();}
       const busyMode=window._busyInputMode||'queue';
-      if(busyMode==='interrupt'||busyMode==='steer'){
-        // Cancel the current stream, then queue so drain sends it after cleanup
+      if(busyMode==='steer'&&S.activeStreamId&&typeof _trySteer==='function'){
+        // Real steer: clear the input first so the user gets immediate
+        // feedback, then ship the steer payload via /api/chat/steer.
+        // _trySteer falls back to queue+cancel internally if the agent
+        // isn't running / cached / steer-capable.
+        $('msg').value='';autoResize();
+        // Do NOT clear pendingFiles yet — _trySteer may fall back to
+        // interrupt+queue and needs the files for queueSessionMessage.
+        // _trySteer clears pendingFiles itself in the fallback path, and
+        // the server returns accepted:true (no files sent) on success.
+        await _trySteer(text, /*explicitSteer=*/false);
+        // After _trySteer: clear any remaining files (success path).
+        S.pendingFiles=[];renderTray();
+      } else if(busyMode==='interrupt'){
+        // Queue the message, then cancel so drain re-sends it.
         queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
         updateQueueBadge(S.session.session_id);
         $('msg').value='';autoResize();
         S.pendingFiles=[];renderTray();
         if(S.activeStreamId&&typeof cancelStream==='function'){
-          if(busyMode==='steer'){
-            showToast(t('busy_steer_fallback'),2500);
-          } else {
-            showToast(t('busy_interrupt_confirm'),2000);
-          }
+          showToast(t('busy_interrupt_confirm'),2000);
           await cancelStream();
         } else {
           showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
         }
       } else {
-        // Default: queue mode (current behavior)
+        // Default: queue mode (current behavior). Also the fallback for
+        // 'steer' mode when no stream is active or _trySteer is unavailable.
         queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
         $('msg').value='';autoResize();
         S.pendingFiles=[];renderTray();
@@ -762,6 +772,28 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if((d.session_id||activeSid)!==activeSid) return;
       }catch(_){}
       source.close();
+    });
+
+    source.addEventListener('pending_steer_leftover',e=>{
+      // The agent finished its turn with steer text still stashed (no
+      // tool-result boundary fired). Match the CLI's leftover-delivery
+      // behaviour: queue the leftover text as a next-turn user message
+      // so the existing drain in setBusy(false) ships it.
+      try{
+        const d=JSON.parse(e.data||'{}');
+        const sid=d.session_id||activeSid;
+        const txt=String(d.text||'').trim();
+        if(!txt||sid!==activeSid) return;
+        if(typeof queueSessionMessage==='function'){
+          queueSessionMessage(sid,{
+            text:txt,files:[],
+            model:S.session&&S.session.model||'',
+            profile:S.activeProfile||'default',
+          });
+          if(typeof updateQueueBadge==='function') updateQueueBadge(sid);
+          showToast(t('steer_leftover_queued'),3000);
+        }
+      }catch(_){}
     });
 
     source.addEventListener('compressed',e=>{

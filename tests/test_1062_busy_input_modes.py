@@ -90,35 +90,60 @@ class TestSlashCommandHandlers:
         assert "queueSessionMessage" in body, "/interrupt must queue the new message before cancelling"
         assert "cancelStream" in body, "/interrupt must call cancelStream() so the drain re-sends"
 
-    def test_cmd_steer_falls_back_to_interrupt(self):
-        """Steer is a placeholder — currently uses interrupt semantics with a different toast."""
+    def test_cmd_steer_delegates_to_try_steer(self):
+        """/steer delegates to _trySteer which calls /api/chat/steer with
+        a queue+cancel fallback. The fallback path is exercised by tests
+        in test_real_steer.py — this test just pins the delegation."""
         idx = COMMANDS_JS.find("async function cmdSteer(")
         assert idx >= 0
         body = COMMANDS_JS[idx:idx + 800]
-        assert "queueSessionMessage" in body
-        assert "cancelStream" in body
-        # Toast should differ from interrupt to signal the placeholder
-        assert "cmd_steer_fallback" in body or "steer_fallback" in body
+        # cmdSteer now delegates to _trySteer; the fallback (queueSessionMessage
+        # + cancelStream) lives inside _trySteer.
+        assert "_trySteer" in body, "cmdSteer must call _trySteer to use the real /api/chat/steer endpoint"
+        # The shared helper must contain the fallback path
+        helper_idx = COMMANDS_JS.find("async function _trySteer(")
+        assert helper_idx >= 0, "_trySteer helper must exist"
+        helper_body = COMMANDS_JS[helper_idx:helper_idx + 1500]
+        assert "queueSessionMessage" in helper_body
+        assert "cancelStream" in helper_body
+        # Toast should differ from interrupt to signal it's the steer path
+        assert "cmd_steer_fallback" in helper_body or "steer_fallback" in helper_body
 
 
 # ── send() busy branch ───────────────────────────────────────────────────
 
     def test_slash_commands_clear_pending_files(self):
-        """All three slash command handlers must clear S.pendingFiles and call
-        renderTray() after enqueuing, so staged files are not duplicated when
-        the next send() fires.
+        """All three busy command handlers must clear S.pendingFiles (directly
+        or via _trySteer) after enqueuing, so staged files are not duplicated.
+
+        cmdQueue and cmdInterrupt call queueSessionMessage themselves and clear
+        S.pendingFiles directly.  cmdSteer delegates to _trySteer.  The fallback/interrupt path clears
+        S.pendingFiles inside _trySteer; the success path returns early and
+        send() handles the post-await clear.  Either way files are not
+        duplicated — we verify by checking _trySteer body for the clearing.
         """
-        for fn_name in ("cmdQueue", "cmdInterrupt", "cmdSteer"):
+        # cmdQueue and cmdInterrupt clear pendingFiles directly
+        for fn_name in ("cmdQueue", "cmdInterrupt"):
             idx = COMMANDS_JS.find(f"function {fn_name}(")
             assert idx >= 0, f"{fn_name} not found"
             body = COMMANDS_JS[idx:idx + 800]
             assert "S.pendingFiles=[]" in body, (
-                f"{fn_name} must clear S.pendingFiles after queueSessionMessage — "
-                "otherwise staged files are re-attached on the next send()"
+                f"{fn_name} must clear S.pendingFiles after queueSessionMessage"
             )
             assert "renderTray()" in body, (
                 f"{fn_name} must call renderTray() after clearing pendingFiles"
             )
+        # cmdSteer delegates to _trySteer; that helper clears pendingFiles
+        idx_try = COMMANDS_JS.find("function _trySteer(")
+        assert idx_try >= 0, "_trySteer not found"
+        try_body = COMMANDS_JS[idx_try:idx_try + 1200]
+        assert "S.pendingFiles=[]" in try_body, (
+            "_trySteer must clear S.pendingFiles in its fallback path — "
+            "without this, files are lost on steer→interrupt fallback"
+        )
+        assert "renderTray()" in try_body, (
+            "_trySteer must call renderTray() after clearing pendingFiles"
+        )
 
 
 class TestSendBusyBranchDispatch:

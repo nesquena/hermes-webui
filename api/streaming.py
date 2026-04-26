@@ -1936,6 +1936,23 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 usage['threshold_tokens'] = getattr(_cc, 'threshold_tokens', 0) or 0
                 usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
             # (reasoning trace already attached + saved above, before s.save())
+            # Leftover-steer delivery: if a /steer was queued (via
+            # api/chat/steer) but the agent finished its turn before
+            # reaching a tool-result boundary that would consume it,
+            # the text is still stashed in agent._pending_steer. Drain
+            # it now and emit a pending_steer_leftover SSE event so the
+            # frontend can queue it for the next turn — same fallback
+            # path as the CLI in cli.py:8788-8794.
+            try:
+                _drain_pending_steer = getattr(agent, '_drain_pending_steer', None)
+                _leftover = _drain_pending_steer() if _drain_pending_steer else None
+                if _leftover:
+                    put('pending_steer_leftover', {
+                        'session_id': session_id,
+                        'text': str(_leftover),
+                    })
+            except Exception:
+                logger.debug("Failed to drain pending steer for session %s", session_id)
             raw_session = s.compact() | {'messages': s.messages, 'tool_calls': tool_calls}
             put('done', {'session': redact_session_data(raw_session), 'usage': usage})
             # Emit metering stats for the header TPS label
@@ -2096,6 +2113,82 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
 # do_POST: mutating endpoints (session CRUD, chat, upload, approval)
 # Routing is a flat if/elif chain. See ARCHITECTURE.md section 4.1.
 # ============================================================
+
+
+def _handle_chat_steer(handler, body: dict) -> bool:
+    """Inject a /steer payload into the active agent for a session.
+
+    Mirrors the CLI's `/steer <text>` command (cli.py:6140-6155):
+      - Look up the cached AIAgent for the session (PR #1051's
+        SESSION_AGENT_CACHE).
+      - Verify a stream is currently active for this session.
+      - Call agent.steer(text) — thread-safe, stashes text in
+        _pending_steer for application at the next tool-result boundary.
+
+    The agent's loop calls _apply_pending_steer_to_tool_results() at the
+    end of every tool batch and appends the steer text to the last tool
+    result's content with a marker, so the model sees the steer as part
+    of the tool output on its next iteration. The user's stream is NOT
+    interrupted.
+
+    If no agent is cached, the agent is too old to support steer, or no
+    stream is active, return {"accepted": False, "fallback": "<reason>"}
+    so the frontend can fall back to interrupt or queue mode. The
+    fallback path is the existing behaviour from PR #1062.
+
+    Returns 200 with {"accepted": bool, "fallback": str|None,
+    "stream_id": str|None}.
+    """
+    from api.helpers import j, bad
+    from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
+
+    sid = str((body or {}).get("session_id", "") or "").strip()
+    text = str((body or {}).get("text", "") or "").strip()
+    if not sid:
+        return bad(handler, "session_id required")
+    if not text:
+        return bad(handler, "text required")
+
+    with SESSION_AGENT_CACHE_LOCK:
+        cached = SESSION_AGENT_CACHE.get(sid)
+    if not cached:
+        # No active agent for this session — caller falls back to interrupt
+        return j(handler, {"accepted": False, "fallback": "no_cached_agent",
+                           "stream_id": None})
+    agent = cached[0]
+    if not hasattr(agent, "steer"):
+        # Older hermes-agent that pre-dates the steer() method
+        return j(handler, {"accepted": False, "fallback": "agent_lacks_steer",
+                           "stream_id": None})
+
+    # Verify the agent is currently running. Use the session's
+    # active_stream_id rather than calling load_session_locked() which
+    # would block on the streaming thread's lock.
+    try:
+        s = get_session(sid)
+    except KeyError:
+        return j(handler, {"accepted": False, "fallback": "session_not_found",
+                           "stream_id": None})
+    active_stream_id = getattr(s, "active_stream_id", None) or None
+    if not active_stream_id:
+        return j(handler, {"accepted": False, "fallback": "not_running",
+                           "stream_id": None})
+    with STREAMS_LOCK:
+        stream_alive = active_stream_id in STREAMS
+    if not stream_alive:
+        # Active stream id is stale — stream has ended; caller falls back
+        return j(handler, {"accepted": False, "fallback": "stream_dead",
+                           "stream_id": None})
+
+    try:
+        accepted = bool(agent.steer(text))
+    except Exception as exc:
+        logger.debug("agent.steer() raised for session=%s: %s", sid, exc)
+        return j(handler, {"accepted": False, "fallback": "steer_error",
+                           "stream_id": active_stream_id})
+
+    return j(handler, {"accepted": accepted, "fallback": None,
+                       "stream_id": active_stream_id})
 
 
 def cancel_stream(stream_id: str) -> bool:
