@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 
+## v0.50.217 — 2026-04-26
+
+### Fixed
+- **`/queue`, `/interrupt`, `/steer` send normally when agent is idle** — typing any of these commands while nothing is running now sends the message as a normal turn instead of showing an error toast. Matches CLI behaviour: commands are mode-sensitive (queue/interrupt/steer when busy, plain send when idle). `/stop` when idle still shows the error — stopping nothing is always an error. (`static/commands.js`) [#1076]
+
 ## v0.50.216 — 2026-04-26
 
 ### Added
