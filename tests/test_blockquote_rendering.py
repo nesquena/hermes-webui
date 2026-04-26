@@ -162,6 +162,46 @@ class TestInlineMarkdownInsideBlockquote:
         assert "<blockquote>" in out
 
 
+class TestNoPhantomTrailingBr:
+    """The fix must drop both empty trailing lines (from a trailing \\n in the
+    match) and bare '>' artifacts. Without this, the common case — a blockquote
+    followed by another paragraph — renders with a phantom <br> right before
+    </blockquote>, leaving a visible blank line at the bottom of the quote.
+    """
+
+    def test_input_ending_with_newline_no_trailing_br(self):
+        """`> Hello\\n` must NOT produce `<blockquote>Hello\\n<br></blockquote>`."""
+        out = _apply_blockquote("> Hello\n")
+        assert "<br></blockquote>" not in out, (
+            f"Trailing <br> leaked inside the blockquote (phantom blank line): {out!r}"
+        )
+
+    def test_blockquote_followed_by_paragraph_no_trailing_br(self):
+        """The common real-world shape: quote + blank line + paragraph."""
+        src = "> Quoted text\n\nNormal paragraph"
+        out = _apply_blockquote(src)
+        assert "<br></blockquote>" not in out, (
+            f"Trailing <br> leaked inside blockquote when followed by paragraph: {out!r}"
+        )
+
+    def test_multiline_quote_ending_with_newline_no_trailing_br(self):
+        out = _apply_blockquote("> Line one\n> Line two\n")
+        assert "<br></blockquote>" not in out, (
+            f"Multi-line quote ending with \\n must not leave a trailing <br>: {out!r}"
+        )
+
+    def test_quote_with_blank_continuation_then_newline(self):
+        """`> A\\n>\\n> B\\n` — the internal `<br>` for the blank line stays,
+        but the trailing newline must not add a second `<br>` at the end."""
+        out = _apply_blockquote("> A\n>\n> B\n")
+        # Internal <br> for the blank-line continuation is intentional
+        assert "<br>" in out
+        # But there must not be a <br> immediately before the closing tag
+        assert "<br></blockquote>" not in out, (
+            f"Trailing <br> leaked at end of blockquote: {out!r}"
+        )
+
+
 class TestBlockquoteFollowedByParagraph:
     """A blockquote followed by a normal paragraph must not bleed into each other."""
 
