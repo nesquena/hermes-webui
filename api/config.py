@@ -1104,7 +1104,11 @@ _provider_models_invalidated_ts: dict[str, float] = {}  # provider_id -> timesta
 # config.yaml changes.  A TTL is still used as a fallback in case the invalidation
 # signal is somehow missed, but the cache will always be warm after the first
 # page load following a server start.
-_models_cache_path = Path("/dev/shm") / "hermes_webui_models_cache.json"
+# Cache file lives inside STATE_DIR so each server instance (different
+# HERMES_WEBUI_STATE_DIR / port) has its own file and test runs never
+# pollute the production server's cache. Also works on macOS and Windows
+# where /dev/shm does not exist.
+_models_cache_path = STATE_DIR / "models_cache.json"
 
 
 def _delete_models_cache_on_disk() -> None:
@@ -1150,7 +1154,7 @@ def invalidate_models_cache():
     not immediately reload a stale disk snapshot and skip the fresh build.
     This is essential for test isolation: without the disk delete, tests
     that call invalidate_models_cache() still get back the previous test's
-    result from /dev/shm because the disk hit is checked before the memory
+    result from the disk cache because the disk hit is checked before the memory
     cache rebuild runs.
     """
     global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts, _cache_build_cv
