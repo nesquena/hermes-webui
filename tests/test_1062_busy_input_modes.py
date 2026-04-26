@@ -57,16 +57,20 @@ class TestSlashCommandRegistration:
     def test_steer_command_registered(self):
         assert "name:'steer'" in COMMANDS_JS and "fn:cmdSteer" in COMMANDS_JS
 
-    def test_interrupt_and_steer_are_no_echo(self):
-        """Interrupt/steer should not echo the command itself as a user message —
-        the queued payload becomes the visible turn."""
-        # Find the registration tuples; both must include noEcho:true
-        for name in ("interrupt", "steer"):
+    def test_all_three_busy_commands_are_no_echo(self):
+        """All three busy commands must set noEcho:true so the slash invocation
+        is not echoed as a visible user bubble.  Without noEcho, /queue causes a
+        double-bubble: the raw slash text appears, then the queued message appears
+        again when the drain fires.
+        """
+        for name in ("queue", "interrupt", "steer"):
             idx = COMMANDS_JS.find(f"name:'{name}'")
             assert idx >= 0, f"{name} not registered"
-            # The next 200 chars should contain noEcho:true on the same registration
             block = COMMANDS_JS[idx:idx + 250]
-            assert "noEcho:true" in block, f"/{name} registration must set noEcho:true"
+            assert "noEcho:true" in block, (
+                f"/{name} registration must set noEcho:true — "
+                "without it the command text is echoed as a user bubble, causing duplicates"
+            )
 
 
 class TestSlashCommandHandlers:
@@ -98,6 +102,24 @@ class TestSlashCommandHandlers:
 
 
 # ── send() busy branch ───────────────────────────────────────────────────
+
+    def test_slash_commands_clear_pending_files(self):
+        """All three slash command handlers must clear S.pendingFiles and call
+        renderTray() after enqueuing, so staged files are not duplicated when
+        the next send() fires.
+        """
+        for fn_name in ("cmdQueue", "cmdInterrupt", "cmdSteer"):
+            idx = COMMANDS_JS.find(f"function {fn_name}(")
+            assert idx >= 0, f"{fn_name} not found"
+            body = COMMANDS_JS[idx:idx + 800]
+            assert "S.pendingFiles=[]" in body, (
+                f"{fn_name} must clear S.pendingFiles after queueSessionMessage — "
+                "otherwise staged files are re-attached on the next send()"
+            )
+            assert "renderTray()" in body, (
+                f"{fn_name} must call renderTray() after clearing pendingFiles"
+            )
+
 
 class TestSendBusyBranchDispatch:
     """send()'s busy block must read window._busyInputMode and branch accordingly."""

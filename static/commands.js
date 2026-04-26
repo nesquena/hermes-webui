@@ -17,7 +17,7 @@ const COMMANDS=[
   {name:'personality', desc:t('cmd_personality'), fn:cmdPersonality, arg:'name', subArgs:'personalities'},
   {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'query'},
   {name:'stop',      desc:t('cmd_stop'),     fn:cmdStop,      noEcho:true},
-  {name:'queue',     desc:t('cmd_queue'),    fn:cmdQueue,     arg:'message'},
+  {name:'queue',     desc:t('cmd_queue'),    fn:cmdQueue,     arg:'message', noEcho:true},
   {name:'interrupt', desc:t('cmd_interrupt'), fn:cmdInterrupt, arg:'message', noEcho:true},
   {name:'steer',     desc:t('cmd_steer'),    fn:cmdSteer,     arg:'message', noEcho:true},
   {name:'title',     desc:t('cmd_title'),    fn:cmdTitle,    arg:'[title]'},
@@ -550,6 +550,7 @@ async function cmdQueue(args){
   if(!S.session){showToast(t('no_active_session'));return;}
   queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
   updateQueueBadge(S.session.session_id);
+  S.pendingFiles=[];renderTray();
   showToast(t('cmd_queue_confirm'),2000);
 }
 
@@ -565,6 +566,7 @@ async function cmdInterrupt(args){
   // Queue the message first (before cancel sets busy=false and drains)
   queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
   updateQueueBadge(S.session.session_id);
+  S.pendingFiles=[];renderTray();
   // Cancel the active stream; setBusy(false) will drain the queue
   if(typeof cancelStream==='function'){await cancelStream();}
   showToast(t('cmd_interrupt_confirm'),2000);
@@ -585,6 +587,7 @@ async function cmdSteer(args){
   // that is not yet available in the WebUI.  Fall back to interrupt.
   queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
   updateQueueBadge(S.session.session_id);
+  S.pendingFiles=[];renderTray();
   if(typeof cancelStream==='function'){await cancelStream();}
   showToast(t('cmd_steer_fallback'),2500);
 }
