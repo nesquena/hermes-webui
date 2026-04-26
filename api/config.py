@@ -1963,6 +1963,7 @@ def save_settings(settings: dict) -> dict:
         resolve_default_workspace(current.get("default_workspace"))
     )
     persisted = {k: v for k, v in current.items() if k != "default_model"}
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
     SETTINGS_FILE.write_text(
         json.dumps(persisted, ensure_ascii=False, indent=2),
         encoding="utf-8",
