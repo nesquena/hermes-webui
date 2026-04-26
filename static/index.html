@@ -667,7 +667,7 @@
               <select id="settingsBusyInputMode" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
                 <option value="queue" data-i18n="settings_busy_input_mode_queue">Queue follow-up</option>
                 <option value="interrupt" data-i18n="settings_busy_input_mode_interrupt">Interrupt current turn</option>
-                <option value="steer" data-i18n="settings_busy_input_mode_steer">Steer (interrupt + send)</option>
+                <option value="steer" data-i18n="settings_busy_input_mode_steer">Steer (mid-turn correction)</option>
               </select>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_busy_input_mode">Controls what happens when you send a message while the agent is running. Queue waits for the current task; Interrupt cancels and starts fresh; Steer injects a mid-turn correction without interrupting (falls back to interrupt when the agent is not yet cached or the stream has ended).</div>
             </div>
