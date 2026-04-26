@@ -1014,6 +1014,8 @@ let _sessionTimeRefreshTimer = null;
 function startStreamingPoll(){
   if(_streamingPollTimer) return;
   _streamingPollTimer = setInterval(() => {
+    // Skip refresh while a chat menu is open to avoid closing it
+    if(_sessionActionMenu) return;
     void renderSessionList();
   }, _streamingPollMs);
 }
@@ -1027,6 +1029,8 @@ function stopStreamingPoll(){
 function ensureSessionTimeRefreshPoll(){
   if(_sessionTimeRefreshTimer) return;
   _sessionTimeRefreshTimer = setInterval(() => {
+    // Skip refresh while a chat menu is open to avoid closing it
+    if(_sessionActionMenu) return;
     renderSessionListFromCache();
   }, _sessionTimeRefreshMs);
 }
@@ -1034,7 +1038,7 @@ function ensureSessionTimeRefreshPoll(){
 function startGatewayPollFallback(ms){
   const intervalMs = Math.max(5000, Number(ms) || _gatewayFallbackPollMs);
   if(_gatewayPollTimer) clearInterval(_gatewayPollTimer);
-  _gatewayPollTimer = setInterval(() => { renderSessionList(); }, intervalMs);
+  _gatewayPollTimer = setInterval(() => { if(!_sessionActionMenu) renderSessionList(); }, intervalMs);
 }
 
 function stopGatewayPollFallback(){
@@ -1085,7 +1089,8 @@ function startGatewaySSE(){
         if(data.sessions){
           stopGatewayPollFallback();
           _gatewaySSEWarningShown = false;
-          renderSessionList(); // re-fetch and re-render
+          // Skip refresh while a chat menu is open to avoid closing it
+          if(!_sessionActionMenu) renderSessionList(); // re-fetch and re-render
           // If the active session received new gateway messages, refresh the conversation view.
           // S.busy check prevents stomping on an in-progress WebUI response.
           // is_cli_session check ensures we only poll import_cli for CLI-originated sessions.
