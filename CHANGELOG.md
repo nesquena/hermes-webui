@@ -4,6 +4,16 @@
 
 ### Fixed
 
+## v0.50.221 — 2026-04-26
+
+### Fixed
+- **Custom providers model dropdown** — models dict keys in `custom_providers[].models` now all appear in the dropdown; previously only the singular `model` field was read. (`api/config.py`) [#1111 @bergeouss] Closes #1106
+- **Custom providers SSRF false positive** — hostnames from user-configured `custom_providers[].base_url` are now trusted through the SSRF check; local inference servers (llama.cpp, vLLM, TabbyAPI) no longer blocked. (`api/config.py`) [#1113 @bergeouss] Closes #1105
+- **Mobile/iPad session navigation** — tap no longer fails on first touch; replaced hover-triggered layout-shift pattern with `onpointerup` + right/middle-click filter + `touch-action:manipulation`. Desktop hover padding restored via `@media (hover:hover)` so mouse users are unaffected. (`static/sessions.js`, `static/style.css`) [#1110 @sheng-di]
+- **Pasted/dragged images render inline** — image attachments now show as `<img>` with click-to-fullscreen instead of a paperclip badge. Hoisted `_IMAGE_EXTS` to module scope (was causing `ReferenceError` in `renderMessages`); added `avif` support. (`static/ui.js`) [#1109 @bergeouss] Closes #1095
+- **Copy buttons on HTTP** — `_copyText()` helper checks `isSecureContext` and falls back to `execCommand('copy')` for plain-HTTP self-hosted installs. Silent failure in `addCopyButtons` fixed with error feedback. All 6 locales get `copy_failed` key. (`static/ui.js`, `static/i18n.js`) [#1107 @bergeouss] Closes #1096
+
+
 ## v0.50.220 — 2026-04-26
 
 ### Fixed
