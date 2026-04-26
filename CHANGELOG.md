@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Long URL / unbreakable string overflow** — chat bubble boundaries no longer overflow when a message contains very long URLs, file paths, or base64 data. `overflow-wrap: anywhere` added to `.msg-body` and the user-bubble variant so continuous non-whitespace text wraps at the column edge instead of bleeding into adjacent layout areas. (`static/style.css`) Closes #1080
+
 
 ## v0.50.217 — 2026-04-26
 
