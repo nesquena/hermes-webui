@@ -779,9 +779,13 @@ function renderSessionListFromCache(){
       const nameSpan=document.createElement('span');
       nameSpan.textContent=p.name;
       chip.appendChild(nameSpan);
-      chip.onclick=()=>{_activeProject=p.project_id;renderSessionListFromCache();};
-      chip.ondblclick=(e)=>{e.stopPropagation();_startProjectRename(p,chip);};
-      chip.oncontextmenu=(e)=>{e.preventDefault();_confirmDeleteProject(p);};
+      let _pClickTimer=null;
+      chip.onclick=(e)=>{
+        clearTimeout(_pClickTimer);
+        _pClickTimer=setTimeout(()=>{_pClickTimer=null;_activeProject=p.project_id;renderSessionListFromCache();},220);
+      };
+      chip.ondblclick=(e)=>{e.stopPropagation();clearTimeout(_pClickTimer);_pClickTimer=null;_startProjectRename(p,chip);};
+      chip.oncontextmenu=(e)=>{e.preventDefault();_showProjectContextMenu(e,p,chip);};
       bar.appendChild(chip);
     }
     // Create button
@@ -1230,6 +1234,57 @@ function _startProjectRename(proj, chip){
   inp.onclick=(e)=>e.stopPropagation();
   chip.replaceWith(inp);
   setTimeout(()=>{inp.focus();inp.select();},10);
+}
+
+function _showProjectContextMenu(e, proj, chip){
+  document.querySelectorAll('.project-ctx-menu').forEach(el=>el.remove());
+  const menu=document.createElement('div');
+  menu.className='project-ctx-menu';
+  menu.style.cssText='position:fixed;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:6px 0;z-index:9999;min-width:140px;box-shadow:0 4px 16px rgba(0,0,0,.35);';
+  menu.style.left=e.clientX+'px';
+  menu.style.top=e.clientY+'px';
+
+  // Rename option
+  const renameItem=document.createElement('div');
+  renameItem.textContent='Rename';
+  renameItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+  renameItem.onmouseenter=()=>renameItem.style.background='var(--hover)';
+  renameItem.onmouseleave=()=>renameItem.style.background='';
+  renameItem.onclick=()=>{menu.remove();_startProjectRename(proj,chip);};
+  menu.appendChild(renameItem);
+
+  // Color picker row
+  const colorRow=document.createElement('div');
+  colorRow.style.cssText='display:flex;gap:5px;padding:7px 14px;align-items:center;';
+  PROJECT_COLORS.forEach(hex=>{
+    const dot=document.createElement('span');
+    dot.style.cssText=`width:16px;height:16px;border-radius:50%;background:${hex};cursor:pointer;display:inline-block;flex-shrink:0;`;
+    if(hex===(proj.color||'')) dot.style.outline='2px solid var(--text)';
+    dot.onclick=async()=>{
+      menu.remove();
+      await api('/api/projects/rename',{method:'POST',body:JSON.stringify({project_id:proj.project_id,name:proj.name,color:hex})});
+      await renderSessionList();
+      showToast('Color updated');
+    };
+    colorRow.appendChild(dot);
+  });
+  menu.appendChild(colorRow);
+
+  // Divider + Delete
+  const sep=document.createElement('hr');
+  sep.style.cssText='border:none;border-top:1px solid var(--border);margin:4px 0;';
+  menu.appendChild(sep);
+  const delItem=document.createElement('div');
+  delItem.textContent='Delete';
+  delItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--error,#e94560);';
+  delItem.onmouseenter=()=>delItem.style.background='var(--hover)';
+  delItem.onmouseleave=()=>delItem.style.background='';
+  delItem.onclick=()=>{menu.remove();_confirmDeleteProject(proj);};
+  menu.appendChild(delItem);
+
+  document.body.appendChild(menu);
+  const dismiss=()=>{menu.remove();document.removeEventListener('click',dismiss);};
+  setTimeout(()=>document.addEventListener('click',dismiss),0);
 }
 
 async function _confirmDeleteProject(proj){

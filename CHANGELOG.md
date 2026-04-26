@@ -4,6 +4,10 @@
 
 ### Fixed
 - **Long URL / unbreakable string overflow** — chat bubble boundaries no longer overflow when a message contains very long URLs, file paths, or base64 data. `overflow-wrap: anywhere` added to `.msg-body` and the user-bubble variant so continuous non-whitespace text wraps at the column edge instead of bleeding into adjacent layout areas. (`static/style.css`) Closes #1080
+- **Project chip rename now works** — double-clicking a project chip now reliably triggers the rename input. Root cause: `onclick` was calling `renderSessionListFromCache()` which destroyed the chip DOM node before `ondblclick` could fire. Fixed with a 220ms `_clickTimer` delay on `onclick` (same pattern used by session items), so a double-click cancels the single-click and invokes rename instead. (`static/sessions.js`) Closes #1078
+
+### Added
+- **Project color picker** — right-clicking a project chip now shows a context menu with Rename, a row of color swatches (the 8 `PROJECT_COLORS`), and Delete. Selecting a swatch updates the project color via the existing `/api/projects/rename` endpoint (which already supports an optional `color` field). (`static/sessions.js`) Closes #1078
 
 
 ## v0.50.217 — 2026-04-26
