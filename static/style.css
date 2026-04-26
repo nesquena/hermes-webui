@@ -283,6 +283,10 @@
   .session-time{display:inline-flex;color:var(--muted);font-size:10px;white-space:nowrap;flex-shrink:0;}
   .session-time.is-hidden{display:none;}
   .session-item:hover .session-time,.session-item:focus-within .session-time,.session-item.menu-open .session-time{display:none;}
+  /* Also hide unread dot indicator on hover/menu-open */
+  .session-item:hover .session-time-wrapper.is-unread::before,
+  .session-item:focus-within .session-time-wrapper.is-unread::before,
+  .session-item.menu-open .session-time-wrapper.is-unread::before{display:none;}
   /* Hide spinner/TPS on hover so the menu button is easier to click */
   .session-item:has(.session-actions-trigger:hover) .session-state-indicator.is-streaming,
   .session-item.menu-open .session-state-indicator.is-streaming{display:none;}
