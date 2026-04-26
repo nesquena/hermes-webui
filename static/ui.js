@@ -50,6 +50,7 @@ function _setCompressionSessionLock(sid){
   window._compressionLockSid=sid||null;
 }
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
@@ -747,7 +748,6 @@ function renderMd(raw){
   // Detect MEDIA:<path-or-url> tokens emitted by the agent (e.g. screenshots,
   // generated images) and replace them with inline <img> or download links.
   // Stashed so the path/URL is never processed as markdown.
-  const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico)$/i;
   const media_stash=[];
   s=s.replace(/MEDIA:([^\s\)\]]+)/g,(_,raw_ref)=>{
     media_stash.push(raw_ref);
