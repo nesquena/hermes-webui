@@ -626,6 +626,19 @@
   .dot{width:6px;height:6px;border-radius:50%;background:var(--blue);opacity:.3;animation:pulse 1.4s ease-in-out infinite;}
   .dot:nth-child(2){animation-delay:.22s;}.dot:nth-child(3){animation-delay:.44s;}
   @keyframes pulse{0%,80%,100%{opacity:.2;transform:scale(.8)}40%{opacity:.8;transform:scale(1)}}
+  /* Status indicator dots (gateway health, session activity) */
+  .status-dot{display:inline-block;width:7px;height:7px;border-radius:50%;flex-shrink:0;background:rgba(255,255,255,.15);}
+  .status-dot.running{background:#4ade80;animation:status-pulse 2s ease-in-out infinite;}
+  .status-dot.recent{background:#818cf8;}
+  .status-dot.error,.status-dot.dead,.status-dot.offline{background:#f87171;}
+  .status-dot.ready{background:#4ade80;}
+  .status-dot.initializing{background:#facc15;animation:status-pulse 2s ease-in-out infinite;}
+  @keyframes status-pulse{0%,100%{opacity:1;}50%{opacity:.35;}}
+  /* Streaming cursor (blinking caret during token streaming) */
+  .stream-cursor{display:inline-block;width:2px;height:1em;background:var(--blue);margin-left:1px;vertical-align:text-bottom;animation:blink-cursor 1s step-end infinite;}
+  @keyframes blink-cursor{0%,100%{opacity:1;}50%{opacity:0;}}
+  /* Per-conversation accent (PR #6) */
+  .session-item[style*="--conv-accent"]{border-left:3px solid color-mix(in srgb, var(--conv-accent) 70%, transparent);}
   .empty-state{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:40px;color:var(--muted);}
   .empty-logo{width:64px;height:64px;border-radius:20px;background:linear-gradient(145deg,var(--accent-bg),var(--accent-bg));border:1px solid var(--accent-bg);display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:700;color:var(--accent-text);margin-bottom:4px;box-shadow:0 4px 20px var(--accent-bg);}
   .empty-state h2{font-size:20px;color:var(--text);font-weight:700;letter-spacing:-.02em;}
