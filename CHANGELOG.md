@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- **Project context menu transparent background** — the right-click menu on project chips no longer bleeds the session list through it. Root cause: `_showProjectContextMenu` set `background: var(--panel)`, but `--panel` is not defined as a CSS custom property in this codebase, so the menu fell back to `transparent`. Fix: use `var(--surface)` (the same opaque variable used by `.session-action-menu` and other floating popovers). (`static/sessions.js`)
+- **Project rename input width** — the rename / new-project text field is no longer fixed at 100px regardless of content. Replaced the hard-coded `width:100px` on `.project-create-input` with `min-width:40px; max-width:180px; width:auto`, and added a `_resizeProjectInput()` helper that measures the current value with a hidden span and grows the field as the user types. Wired into both the rename flow (`_startProjectRename`) and the new-project flow (`_startProjectCreate`). (`static/style.css`, `static/sessions.js`)
+
 ## v0.50.218 — 2026-04-26
 
 ### Fixed
