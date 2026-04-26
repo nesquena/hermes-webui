@@ -2113,9 +2113,29 @@ async function loadMemory(force) {
 // Drag and drop
 const wrap=$('composerWrap');let dragCounter=0;
 document.addEventListener('dragover',e=>e.preventDefault());
-document.addEventListener('dragenter',e=>{e.preventDefault();if(e.dataTransfer.types.includes('Files')){dragCounter++;wrap.classList.add('drag-over');}});
+document.addEventListener('dragenter',e=>{e.preventDefault();if(e.dataTransfer.types.includes('Files')||e.dataTransfer.types.includes('application/ws-path')){dragCounter++;wrap.classList.add('drag-over');}});
 document.addEventListener('dragleave',e=>{dragCounter--;if(dragCounter<=0){dragCounter=0;wrap.classList.remove('drag-over');}});
-document.addEventListener('drop',e=>{e.preventDefault();dragCounter=0;wrap.classList.remove('drag-over');const files=Array.from(e.dataTransfer.files);if(files.length){addFiles(files);$('msg').focus();}});
+document.addEventListener('drop',e=>{
+  e.preventDefault();dragCounter=0;wrap.classList.remove('drag-over');
+  // Workspace file/folder drag → insert @path reference into composer
+  const wsPath=e.dataTransfer.getData('application/ws-path');
+  if(wsPath){
+    const msgEl=$('msg');
+    if(msgEl){
+      const start=msgEl.selectionStart;const end=msgEl.selectionEnd;
+      const val=msgEl.value;
+      const prefix=start>0&&!val[start-1].match(/\s/)?' ':'';
+      const insert=prefix+'@'+wsPath+' ';
+      msgEl.value=val.slice(0,start)+insert+val.slice(end);
+      msgEl.selectionStart=msgEl.selectionEnd=start+insert.length;
+      msgEl.focus();
+    }
+    return;
+  }
+  // OS file drag → attach files
+  const files=Array.from(e.dataTransfer.files);
+  if(files.length){addFiles(files);$('msg').focus();}
+});
 
 // ── Settings panel ───────────────────────────────────────────────────────────
 
