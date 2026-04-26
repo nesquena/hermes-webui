@@ -1045,9 +1045,17 @@ function renderSessionListFromCache(){
     actions.appendChild(menuBtn);
     el.appendChild(actions);
 
-    // For active sessions: left click navigates, double click renames.
-    // No 220ms poll needed — the user's intent is clear from click count.
+    // Left click (primary mouse button) navigates. Right/middle click must not
+    // navigate — onpointerup fires for all mouse buttons so we filter here.
+    // pointerType==='mouse' scopes to mouse only; touch/stylus always report
+    // button===0 and are unaffected.
+    el.onpointerup=(e)=>{
+      if(e.pointerType==='mouse' && e.button!==0) return;
+      if(_renamingSid) return; // ignore while any rename is active
+      if(actions.contains(e.target)) return;
+    };
     el.onclick=async(e)=>{
+      if(e.pointerType==='mouse' && e.button!==0) return;
       if(_renamingSid) return; // ignore while any rename is active
       if(actions.contains(e.target)) return;
       // For CLI sessions, import into WebUI store first (idempotent)
