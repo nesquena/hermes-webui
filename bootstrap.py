@@ -237,6 +237,10 @@ def main() -> int:
     env.setdefault("HERMES_WEBUI_STATE_DIR", str(state_dir))
     if agent_dir:
         env["HERMES_WEBUI_AGENT_DIR"] = str(agent_dir)
+    # Always pass through these common vars if set in the calling environment
+    for key in ("HERMES_WEBUI_PASSWORD",):
+        if key in os.environ:
+            env[key] = os.environ[key]
 
     info(f"Starting Hermes Web UI on http://{args.host}:{args.port}")
     with log_path.open("ab") as log_file:
