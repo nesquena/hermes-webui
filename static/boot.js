@@ -769,7 +769,15 @@ function _buildSkinPicker(activeSkin){
 }
 
 function applyBotName(){
-  const name=window._botName||'Hermes';
+  // Prefer profile name over global bot_name for personalised placeholder.
+  // If activeProfile is set and not 'default', use it (capitalised).
+  // Falls back to window._botName (global bot_name setting) or 'Hermes'.
+  let name;
+  if(S.activeProfile && S.activeProfile!=='default'){
+    name=S.activeProfile.charAt(0).toUpperCase()+S.activeProfile.slice(1);
+  }else{
+    name=window._botName||'Hermes';
+  }
   document.title=name;
   const sidebarH1=document.querySelector('.sidebar-header h1');
   if(sidebarH1) sidebarH1.textContent=name;
