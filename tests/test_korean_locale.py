@@ -70,6 +70,13 @@ def extract_locale_block(src: str, locale_key: str) -> str:
     raise AssertionError(f"{locale_key} locale block braces are not balanced")
 
 
+def locale_keys(src: str, locale_key: str) -> list[str]:
+    # Locale objects are flat. Match every key regardless of indentation so
+    # accidental 2-space lines cannot hide from duplicate-key checks.
+    key_pattern = re.compile(r"^\s*([a-zA-Z0-9_]+)\s*:", re.MULTILINE)
+    return key_pattern.findall(extract_locale_block(src, locale_key))
+
+
 def test_korean_locale_block_exists():
     src = read(REPO / "static" / "i18n.js")
     assert "\n  ko: {" in src
@@ -95,9 +102,27 @@ def test_korean_locale_includes_representative_translations():
         assert entry in src
 
 
+def test_korean_locale_matches_english_key_coverage():
+    src = read(REPO / "static" / "i18n.js")
+    en_keys = set(locale_keys(src, "en"))
+    ko_keys = set(locale_keys(src, "ko"))
+    assert sorted(en_keys - ko_keys) == []
+    assert sorted(ko_keys - en_keys) == []
+
+
 def test_korean_locale_has_no_duplicate_keys():
     src = read(REPO / "static" / "i18n.js")
-    key_pattern = re.compile(r"^\s{4}([a-zA-Z0-9_]+):", re.MULTILINE)
-    keys = key_pattern.findall(extract_locale_block(src, "ko"))
+    keys = locale_keys(src, "ko")
     duplicates = sorted(k for k, count in Counter(keys).items() if count > 1)
     assert not duplicates, f"Korean locale has duplicate keys: {duplicates}"
+
+
+def test_korean_locale_keys_use_standard_indentation():
+    src = read(REPO / "static" / "i18n.js")
+    ko_block = extract_locale_block(src, "ko")
+    badly_indented = [
+        line.strip()
+        for line in ko_block.splitlines()
+        if re.match(r"^\s{1,3}[a-zA-Z0-9_]+\s*:", line)
+    ]
+    assert badly_indented == []
