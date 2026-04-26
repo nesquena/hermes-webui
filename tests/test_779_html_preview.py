@@ -62,6 +62,19 @@ def test_sandbox_allows_scripts_only():
         )
 
 
+def test_mime_map_includes_html_and_htm():
+    """MIME_MAP must map .html/.htm to text/html — without this, _handle_file_raw
+    falls back to application/octet-stream and browsers refuse to render the
+    response inside the preview iframe (issue #779 follow-up: PR #1070)."""
+    from api.config import MIME_MAP
+    assert MIME_MAP.get(".html") == "text/html", (
+        "MIME_MAP['.html'] must be 'text/html' for the workspace HTML preview iframe"
+    )
+    assert MIME_MAP.get(".htm") == "text/html", (
+        "MIME_MAP['.htm'] must be 'text/html' for the workspace HTML preview iframe"
+    )
+
+
 def test_inline_html_response_sets_csp_sandbox():
     """Defense-in-depth: ?inline=1 HTML responses must set Content-Security-Policy:
     sandbox so the same origin isolation applies even when the URL is opened
