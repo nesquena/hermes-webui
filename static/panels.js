@@ -1981,6 +1981,9 @@ async function switchToProfile(name) {
     if (_currentPanel === 'profiles') await loadProfilesPanel();
     if (_currentPanel === 'workspaces') await loadWorkspacesPanel();
 
+    // Update composer placeholder and title bar to reflect profile name
+    if (typeof applyBotName === 'function') applyBotName();
+
   } catch (e) { showToast(t('switch_failed') + e.message); }
 }
 
