@@ -284,6 +284,21 @@ async function loadSession(sid){
   _resolveSessionModelForDisplaySoon(sid);
   // Clear the in-flight session marker now that this load has completed (#1060).
   if (_loadingSessionId === sid) _loadingSessionId = null;
+
+  // Restore draft for this session if one was saved when we switched away.
+  const _draft=S.composerDrafts&&S.composerDrafts[sid];
+  if(_draft){
+    S.pendingFiles=Array.isArray(_draft.files)?_draft.files:[];
+    if(_draft.text){
+      const _ta=$('msg');
+      if(_ta){ _ta.value=_draft.text; autoResize(); }
+    }
+    renderTray();
+    delete S.composerDrafts[sid];
+  }
+  // Always focus the textarea after switching so the user can continue typing.
+  const _ta=$('msg');
+  if(_ta) _ta.focus();
 }
 
 function _resolveSessionModelForDisplaySoon(sid){
@@ -1030,33 +1045,19 @@ function renderSessionListFromCache(){
     actions.appendChild(menuBtn);
     el.appendChild(actions);
 
-    // Use a click timer to distinguish single-click (navigate) from double-click (rename).
-    // This prevents loadSession from firing on the first click of a double-click,
-    // which would re-render the list and destroy the dblclick target before it fires.
-    let _clickTimer=null;
+    // For active sessions: left click navigates, double click renames.
+    // No 220ms poll needed — the user's intent is clear from click count.
     el.onclick=async(e)=>{
       if(_renamingSid) return; // ignore while any rename is active
       if(actions.contains(e.target)) return;
-      clearTimeout(_clickTimer);
-      _clickTimer=setTimeout(async()=>{
-        _clickTimer=null;
-        if(_renamingSid) return;
-        // For CLI sessions, import into WebUI store first (idempotent)
-        if(s.is_cli_session){
-          try{
-            await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:s.session_id})});
-          }catch(e){ /* import failed -- fall through to read-only view */ }
-        }
-        await loadSession(s.session_id);renderSessionListFromCache();
-        if(typeof closeMobileSidebar==='function')closeMobileSidebar();
-      }, 220);
-    };
-    el.ondblclick=async(e)=>{
-      e.stopPropagation();
-      e.preventDefault();
-      clearTimeout(_clickTimer); // cancel the pending single-click navigation
-      _clickTimer=null;
-      startRename();
+      // For CLI sessions, import into WebUI store first (idempotent)
+      if(s.is_cli_session){
+        try{
+          await api('/api/session/import_cli',{method:'POST',body:JSON.stringify({session_id:s.session_id})});
+        }catch(e){ /* import failed -- fall through to read-only view */ }
+      }
+      await loadSession(s.session_id);renderSessionListFromCache();
+      if(typeof closeMobileSidebar==='function')closeMobileSidebar();
     };
     return el;
   }
