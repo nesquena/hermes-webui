@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## v0.50.212 — 2026-04-26
+
+### Performance
+- **Model list ~1ms on restart** — `get_available_models()` now writes to a disk cache at `/dev/shm` on every cold rebuild and reads it back on restart, eliminating the ~30s Z.AI endpoint-probe delay on every server start. TTL raised from 60s to 24h. (`api/config.py`) [#1060 @JKJameson]
+- **Thundering-herd prevention** — RLock + `_cache_build_in_progress` flag ensures only one thread runs the cold rebuild while others wait on a Condition variable instead of triggering duplicate 10s provider calls. (`api/config.py`) [#1060 @JKJameson]
+- **Credential pool cache** — `load_pool()` results cached per provider (24h TTL) to avoid repeated expensive auth-store reads on every model list refresh. (`api/config.py`) [#1060 @JKJameson]
+
+### Fixed
+- **Stale SSE blocking** — switching sessions now discards in-flight SSE tokens from the previous session before attaching the new one; no cross-session token bleed. (`static/sessions.js`) [#1060 @JKJameson]
+- **Pending files cleared after send** — ghost attachments no longer appear in the composer tray after sending. (`static/sessions.js`) [#1060 @JKJameson]
+- **Textarea focus on session switch** — message input automatically focused after switching sessions. (`static/sessions.js`) [#1060 @JKJameson]
+- **Instant click for inactive sessions** — no loading spinner blocking fast repeated session switches. (`static/sessions.js`) [#1060 @JKJameson]
+- **Double-click titlebar to rename** — session title can be renamed by double-clicking the active session in the sidebar. (`static/sessions.js`) [#1060 @JKJameson]
+- **Draft persistence across switches** — composer draft saved/restored when switching sessions. (`static/panels.js`) [#1060 @JKJameson]
+- **user-select:none on session titles** — prevents accidental text selection on double-click. (`static/style.css`) [#1060 @JKJameson]
+- **Cache disk-delete in invalidate_models_cache()** — `invalidate_models_cache()` now also removes the on-disk snapshot so test isolation is preserved and stale cached data is never served after invalidation. (`api/config.py`)
+- **_cache_build_in_progress reset on exception** — rebuild exceptions no longer leave the flag stuck, which would block waiting threads for 60s. (`api/config.py`)
+
 ## v0.50.211 — 2026-04-25
 
 ### Changed
