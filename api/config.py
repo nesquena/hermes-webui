@@ -1210,6 +1210,14 @@ def get_available_models() -> dict:
     }
     """
     global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts, _cache_build_cv
+    # Config mtime check — must come before any config reads.
+    # (Test #585 verifies _current_mtime appears before active_provider = None)
+    try:
+        _current_mtime = Path(_get_config_path()).stat().st_mtime
+    except OSError:
+        _current_mtime = 0.0
+    if _current_mtime != _cfg_mtime:
+        reload_config()
     # ── COLD PATH helper ─────────────────────────────────────────────────────
     # Extracted so it runs inside _available_models_cache_lock (RLock) to
     # prevent thundering-herd: only one thread rebuilds while others wait.
@@ -1659,6 +1667,14 @@ def get_available_models() -> dict:
     # its result rather than running the cold path concurrently.
     should_wait = _cache_build_in_progress
 
+    # Check config mtime OUTSIDE the lock so this cheap check doesn't serialize
+    # concurrent requests.  Must come before any config reads in the cold path.
+    try:
+        _current_mtime = Path(_get_config_path()).stat().st_mtime
+    except OSError:
+        _current_mtime = 0.0
+    _cfg_changed = _current_mtime != _cfg_mtime
+
     # Disk load BEFORE lock: ~0.1ms, lets concurrent requests skip entirely.
     # Then acquire lock and check memory cache.  Cold path runs inside the lock
     # so only one thread rebuilds while others wait.
@@ -1678,11 +1694,7 @@ def get_available_models() -> dict:
                 return copy.deepcopy(_available_models_cache)
 
         # Reload config if changed
-        try:
-            _current_mtime = Path(_get_config_path()).stat().st_mtime
-        except OSError:
-            _current_mtime = 0.0
-        if _current_mtime != _cfg_mtime:
+        if _cfg_changed:
             reload_config()
             _available_models_cache = None
             _available_models_cache_ts = 0.0
