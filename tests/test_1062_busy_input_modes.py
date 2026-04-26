@@ -1,0 +1,198 @@
+"""Regression tests for busy_input_mode (PR #1062, closes #720).
+
+Pins the wiring for the three modes (queue / interrupt / steer):
+- The setting key + default + enum validation in api/config.py
+- Three slash commands registered in static/commands.js
+- send()'s busy branch reads window._busyInputMode and dispatches
+- Boot initializes window._busyInputMode from settings
+- 17 new i18n keys present in all 6 locale blocks
+
+Issue: #720 (configurable busy-input behaviour)
+"""
+from pathlib import Path
+
+ROOT = Path(__file__).parent.parent
+CONFIG_PY = (ROOT / "api" / "config.py").read_text(encoding="utf-8")
+COMMANDS_JS = (ROOT / "static" / "commands.js").read_text(encoding="utf-8")
+MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
+PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+
+
+# ── Backend: setting registration + enum validation ─────────────────────
+
+class TestBusyInputModeSetting:
+    """The new setting key must be registered with a default and enum validator."""
+
+    def test_default_is_queue(self):
+        """Default value preserves existing queue behaviour for users who don't touch the setting."""
+        assert '"busy_input_mode": "queue"' in CONFIG_PY, (
+            "_DEFAULT_SETTINGS must include busy_input_mode='queue' so existing users see no change"
+        )
+
+    def test_enum_validator_present(self):
+        """_SETTINGS_ENUM_KEYS must validate busy_input_mode against {queue, interrupt, steer}."""
+        # Find the entry inside the enum dict (a set literal as the value)
+        idx = CONFIG_PY.find('"busy_input_mode": {')
+        assert idx >= 0, "busy_input_mode entry missing from _SETTINGS_ENUM_KEYS"
+        block = CONFIG_PY[idx:idx + 200]
+        assert '"queue"' in block and '"interrupt"' in block and '"steer"' in block, (
+            "busy_input_mode enum must contain {queue, interrupt, steer}"
+        )
+
+
+# ── Frontend: slash commands ─────────────────────────────────────────────
+
+class TestSlashCommandRegistration:
+    """The three new slash commands must be registered in COMMANDS array."""
+
+    def test_queue_command_registered(self):
+        assert "name:'queue'" in COMMANDS_JS and "fn:cmdQueue" in COMMANDS_JS
+
+    def test_interrupt_command_registered(self):
+        assert "name:'interrupt'" in COMMANDS_JS and "fn:cmdInterrupt" in COMMANDS_JS
+
+    def test_steer_command_registered(self):
+        assert "name:'steer'" in COMMANDS_JS and "fn:cmdSteer" in COMMANDS_JS
+
+    def test_interrupt_and_steer_are_no_echo(self):
+        """Interrupt/steer should not echo the command itself as a user message —
+        the queued payload becomes the visible turn."""
+        # Find the registration tuples; both must include noEcho:true
+        for name in ("interrupt", "steer"):
+            idx = COMMANDS_JS.find(f"name:'{name}'")
+            assert idx >= 0, f"{name} not registered"
+            # The next 200 chars should contain noEcho:true on the same registration
+            block = COMMANDS_JS[idx:idx + 250]
+            assert "noEcho:true" in block, f"/{name} registration must set noEcho:true"
+
+
+class TestSlashCommandHandlers:
+    """The three handler functions must guard properly and call cancelStream where appropriate."""
+
+    def test_cmd_queue_requires_busy(self):
+        """/queue while not busy is a usage error — user should send normally."""
+        idx = COMMANDS_JS.find("async function cmdQueue(")
+        assert idx >= 0
+        body = COMMANDS_JS[idx:idx + 600]
+        assert "if(!S.busy)" in body, "/queue must check S.busy and reject if idle"
+
+    def test_cmd_interrupt_calls_cancel_stream(self):
+        idx = COMMANDS_JS.find("async function cmdInterrupt(")
+        assert idx >= 0
+        body = COMMANDS_JS[idx:idx + 800]
+        assert "queueSessionMessage" in body, "/interrupt must queue the new message before cancelling"
+        assert "cancelStream" in body, "/interrupt must call cancelStream() so the drain re-sends"
+
+    def test_cmd_steer_falls_back_to_interrupt(self):
+        """Steer is a placeholder — currently uses interrupt semantics with a different toast."""
+        idx = COMMANDS_JS.find("async function cmdSteer(")
+        assert idx >= 0
+        body = COMMANDS_JS[idx:idx + 800]
+        assert "queueSessionMessage" in body
+        assert "cancelStream" in body
+        # Toast should differ from interrupt to signal the placeholder
+        assert "cmd_steer_fallback" in body or "steer_fallback" in body
+
+
+# ── send() busy branch ───────────────────────────────────────────────────
+
+class TestSendBusyBranchDispatch:
+    """send()'s busy block must read window._busyInputMode and branch accordingly."""
+
+    def test_send_reads_busy_input_mode(self):
+        # The send() function should read window._busyInputMode in the busy block
+        send_idx = MESSAGES_JS.find("async function send(")
+        assert send_idx >= 0
+        # Look in the first ~3000 chars of send() for the busy mode read
+        send_body = MESSAGES_JS[send_idx:send_idx + 3000]
+        assert "_busyInputMode" in send_body, (
+            "send() must read window._busyInputMode in the S.busy branch"
+        )
+
+    def test_send_calls_cancel_stream_on_interrupt(self):
+        send_idx = MESSAGES_JS.find("async function send(")
+        send_body = MESSAGES_JS[send_idx:send_idx + 3000]
+        # The interrupt branch must call cancelStream
+        assert "cancelStream" in send_body
+        # And queue before cancel (otherwise the drain has nothing to pick up)
+        # Verify the order textually: queueSessionMessage appears before cancelStream
+        # within the busy block's interrupt branch
+        cancel_idx = send_body.find("cancelStream")
+        queue_idx = send_body.find("queueSessionMessage")
+        assert queue_idx >= 0 and cancel_idx >= 0
+        assert queue_idx < cancel_idx, (
+            "queueSessionMessage must run before cancelStream so the drain "
+            "after setBusy(false) picks up the queued message"
+        )
+
+
+# ── Boot init + settings panel wiring ───────────────────────────────────
+
+class TestBootAndPanelsWiring:
+    def test_boot_init_default_path(self):
+        """Boot success path initialises window._busyInputMode from settings."""
+        assert "window._busyInputMode=(s.busy_input_mode||'queue')" in BOOT_JS
+
+    def test_boot_init_fallback_path(self):
+        """Boot fallback path (settings load failed) initialises to safe default."""
+        # The fallback should set window._busyInputMode='queue'
+        assert "window._busyInputMode='queue'" in BOOT_JS
+
+    def test_panels_load_save_apply(self):
+        assert "settingsBusyInputMode" in PANELS_JS, "panels.js must load the setting"
+        assert "body.busy_input_mode" in PANELS_JS, "saveSettings must include busy_input_mode in body"
+        assert "window._busyInputMode=body.busy_input_mode" in PANELS_JS, (
+            "_applySavedSettingsUi must propagate busy_input_mode to the global"
+        )
+
+    def test_index_html_dropdown_has_three_options(self):
+        idx = INDEX_HTML.find('id="settingsBusyInputMode"')
+        assert idx >= 0
+        block = INDEX_HTML[idx:idx + 800]
+        assert 'value="queue"' in block
+        assert 'value="interrupt"' in block
+        assert 'value="steer"' in block
+
+
+# ── i18n locale coverage ─────────────────────────────────────────────────
+
+class TestI18nKeys:
+    """All 17 new keys must appear in each of the 6 locale blocks."""
+
+    REQUIRED_KEYS = [
+        "cmd_queue",
+        "cmd_interrupt",
+        "cmd_steer",
+        "cmd_queue_no_msg",
+        "cmd_queue_not_busy",
+        "cmd_queue_confirm",
+        "cmd_interrupt_no_msg",
+        "cmd_interrupt_confirm",
+        "cmd_steer_no_msg",
+        "cmd_steer_fallback",
+        "busy_steer_fallback",
+        "busy_interrupt_confirm",
+        "settings_label_busy_input_mode",
+        "settings_desc_busy_input_mode",
+        "settings_busy_input_mode_queue",
+        "settings_busy_input_mode_interrupt",
+        "settings_busy_input_mode_steer",
+    ]
+
+    def test_each_key_appears_at_least_six_times(self):
+        """Each key should appear once per locale (en, ru, es, de, zh, zh-Hant) = 6 occurrences minimum."""
+        for key in self.REQUIRED_KEYS:
+            count = I18N_JS.count(f"{key}:")
+            assert count >= 6, (
+                f"i18n key {key!r} appears {count} times; expected ≥6 (one per locale block)"
+            )
+
+    def test_key_count_total(self):
+        """17 keys × 6 locales = 102 minimum occurrences across the file."""
+        total = sum(I18N_JS.count(f"{key}:") for key in self.REQUIRED_KEYS)
+        assert total >= 17 * 6, (
+            f"Total i18n occurrences = {total}; expected ≥ {17*6}"
+        )
