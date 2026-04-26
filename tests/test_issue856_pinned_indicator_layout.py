@@ -91,7 +91,7 @@ def test_timestamp_hidden_when_attention_state_is_present():
     # button + attention indicator.
     assert ".session-item{padding:8px 8px;" in STYLE_CSS
     assert ".session-item.streaming,.session-item.unread,.session-item:hover,.session-item:focus-within,.session-item.menu-open{padding-right:40px;}" in STYLE_CSS
-    assert ".session-item{min-height:44px;padding:10px 86px 10px 12px;}" in STYLE_CSS
+    assert ".session-item{min-height:44px;padding:10px 40px 10px 12px;}" in STYLE_CSS
     # Timestamp now uses margin-left:auto inside the flex row instead of
     # absolute positioning. This stops the title's flex:1 bound from running
     # underneath the timestamp and lets the project dot sit beside it.

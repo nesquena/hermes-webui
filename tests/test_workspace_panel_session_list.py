@@ -214,9 +214,10 @@ class TestProjectDotPlacement:
         assert "padding:8px 8px" in rule, (
             f"Expected 'padding:8px 8px' for at-rest session items, got: {rule!r}"
         )
-        # The 86px reservation should still appear in the mobile override
-        # because mobile always shows the action button.
-        assert ".session-item{min-height:44px;padding:10px 86px 10px 12px;}" in STYLE_CSS
+        # Mobile also drops from 86px to 40px — the absolute timestamp is
+        # gone (now flex-flow), so only the always-visible action button's
+        # footprint (26px + 6px gap ≈ 32px, rounded to 40px) needs reservation.
+        assert ".session-item{min-height:44px;padding:10px 40px 10px 12px;}" in STYLE_CSS
 
     def test_session_item_expands_padding_on_hover_and_attention(self):
         """When hover/focus/menu-open/streaming/unread shows the action
