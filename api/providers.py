@@ -362,7 +362,7 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
     Writes back to config.yaml only if something was actually removed.
     Uses ``_cfg_lock`` to prevent TOCTOU races.
     """
-    from api.config import _cfg_cache, _cfg_lock
+    from api.config import _cfg_lock
 
     try:
         config_path = _get_config_path()

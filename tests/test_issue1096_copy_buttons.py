@@ -94,7 +94,7 @@ class TestCodeBlockCopyUsesHelper:
 class TestCopyFailedI18n:
 
     def test_copy_failed_in_all_locales(self):
-        """copy_failed key must exist in all 6 locale blocks."""
+        """copy_failed key must exist in all locale blocks (currently 7 with Korean)."""
         i18n = _read_i18n()
         count = i18n.count('copy_failed')
         assert count >= 6, f'Expected copy_failed in at least 6 locale blocks, found {count}'
