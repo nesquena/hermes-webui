@@ -2,20 +2,35 @@ async function api(path,opts={}){
   // Strip leading slash so URL resolves relative to location.href (supports subpath mounts)
   const rel = path.startsWith('/') ? path.slice(1) : path;
   const url=new URL(rel,location.href);
-  const res=await fetch(url.href,{credentials:'include',headers:{'Content-Type':'application/json'},...opts});
-  if(!res.ok){
-    // 401 means the auth session expired. Redirect to /login so the user can
-    // re-authenticate. This is especially important for iOS PWA (standalone mode)
-    // where a server-side 302 → /login opens in Safari instead of within the PWA.
-    if(res.status===401){window.location.href='/login?next='+encodeURIComponent(window.location.pathname+window.location.search);return;}
-    const text=await res.text();
-    // Parse JSON error body and surface the human-readable message,
-    // rather than showing raw JSON like {"error":"Profile 'x' does not exist."}
-    try{const j=JSON.parse(text);throw new Error(j.error||j.message||text);}
-    catch(e){if(e instanceof SyntaxError)throw new Error(text);throw e;}
+  // Retry up to 2 times on network errors (e.g. stale keep-alive after long idle).
+  // Server errors (4xx/5xx) are NOT retried — only connection failures.
+  let lastErr;
+  for(let attempt=0;attempt<3;attempt++){
+    try{
+      const res=await fetch(url.href,{credentials:'include',headers:{'Content-Type':'application/json'},...opts});
+      if(!res.ok){
+        // 401 means the auth session expired. Redirect to /login so the user can
+        // re-authenticate. This is especially important for iOS PWA (standalone mode)
+        // where a server-side 302 → /login opens in Safari instead of within the PWA.
+        if(res.status===401){window.location.href='/login?next='+encodeURIComponent(window.location.pathname+window.location.search);return;}
+        const text=await res.text();
+        // Parse JSON error body and surface the human-readable message,
+        // rather than showing raw JSON like {"error":"Profile 'x' does not exist."}
+        try{const j=JSON.parse(text);throw new Error(j.error||j.message||text);}
+        catch(e){if(e instanceof SyntaxError)throw new Error(text);throw e;}
+      }
+      const ct=res.headers.get('content-type')||'';
+      return ct.includes('application/json')?res.json():res.text();
+    }catch(e){
+      lastErr=e;
+      // Only retry on network errors (TypeError from fetch), not on HTTP errors
+      // that were already thrown above. Re-throw 401 redirects immediately.
+      if(e.message&&/401/.test(e.message)) throw e;
+      if(attempt<2 && e instanceof TypeError) continue;
+      throw e;
+    }
   }
-  const ct=res.headers.get('content-type')||'';
-  return ct.includes('application/json')?res.json():res.text();
+  throw lastErr;
 }
 
 // Persist/restore expanded directory state per workspace in localStorage
