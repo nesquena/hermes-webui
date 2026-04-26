@@ -1,0 +1,96 @@
+import os
+import pathlib
+
+
+REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
+
+
+def _read(path: str) -> str:
+    return (REPO_ROOT / path).read_text(encoding="utf-8")
+
+
+def test_composer_has_workspace_terminal_entrypoint():
+    html = _read("static/index.html")
+    sw = _read("static/sw.js")
+    assert 'id="btnTerminalToggle"' in html
+    assert 'id="terminalViewport"' in html
+    assert 'id="terminalSurface"' in html
+    assert 'onclick="toggleComposerTerminal()"' in html
+    assert 'static/terminal.js' in html
+    assert './static/terminal.js' in sw
+    assert "xterm@5.3.0" in html
+
+
+def test_terminal_v1_does_not_expose_send_to_chat_action():
+    html = _read("static/index.html")
+    terminal_js = _read("static/terminal.js")
+    combined = html + terminal_js
+    assert "Send latest result to chat" not in combined
+    assert "send latest result" not in combined.lower()
+    assert "Send to chat" not in combined
+
+
+def test_terminal_ui_handles_shell_close_commands():
+    terminal_js = _read("static/terminal.js")
+
+    assert "function _isTerminalCloseCommand" in terminal_js
+    for command in ("exit", "quit", "logout", "close"):
+        assert f"'{command}'" in terminal_js
+    assert "closeComposerTerminal();" in terminal_js
+
+
+def test_terminal_restart_ignores_stale_sse_events():
+    terminal_js = _read("static/terminal.js")
+
+    assert "if(TERMINAL_UI.source!==source)return;" in terminal_js
+    assert "async function restartComposerTerminal" in terminal_js
+    restart_block = terminal_js.split("async function restartComposerTerminal", 1)[1].split("function clearComposerTerminal", 1)[0]
+    assert "TERMINAL_UI.source.close()" in restart_block
+    assert "TERMINAL_UI.source=null" in restart_block
+
+
+def test_terminal_routes_are_registered():
+    routes = _read("api/routes.py")
+    for path in (
+        "/api/terminal/start",
+        "/api/terminal/input",
+        "/api/terminal/output",
+        "/api/terminal/resize",
+        "/api/terminal/close",
+    ):
+        assert path in routes
+
+
+def test_terminal_process_does_not_mutate_global_terminal_cwd(tmp_path, monkeypatch):
+    from api.terminal import close_terminal, start_terminal
+
+    monkeypatch.delenv("TERMINAL_CWD", raising=False)
+    sid = "test-terminal-env"
+    term = start_terminal(sid, tmp_path, rows=8, cols=40, restart=True)
+    try:
+        assert term.workspace == str(tmp_path.resolve())
+        assert os.environ.get("TERMINAL_CWD") is None
+    finally:
+        close_terminal(sid)
+
+
+def test_terminal_output_preserves_control_sequences_for_xterm():
+    import codecs
+    from api.terminal import _decode_terminal_output
+
+    raw = "\x1b[?2004h$ \x1b[32mhello\x1b[0m\n"
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    assert _decode_terminal_output(decoder, raw.encode()) == raw
+
+
+def test_terminal_xterm_theme_follows_appearance_tokens():
+    terminal_js = _read("static/terminal.js")
+    style_css = _read("static/style.css")
+
+    assert "function _terminalTheme" in terminal_js
+    assert "_terminalCssVar('--code-bg'" in terminal_js
+    assert "_terminalCssVar('--pre-text'" in terminal_js
+    assert "syncComposerTerminalTheme" in terminal_js
+    assert "attributeFilter:['class','data-skin']" in terminal_js
+    assert "background:var(--code-bg)" in style_css
+    assert "color:var(--pre-text)" in style_css

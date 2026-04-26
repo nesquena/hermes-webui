@@ -1072,6 +1072,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/chat/stream":
         return _handle_sse_stream(handler, parsed)
 
+    if parsed.path == "/api/terminal/output":
+        return _handle_terminal_output(handler, parsed)
+
     if parsed.path == '/api/sessions/gateway/stream':
         return _handle_gateway_sse_stream(handler, parsed)
 
@@ -1354,6 +1357,7 @@ def handle_post(handler, parsed) -> bool:
             s = get_session(body["session_id"])
         except KeyError:
             return bad(handler, "Session not found", 404)
+        old_ws = getattr(s, "workspace", "")
         try:
             new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace)))
         except ValueError as e:
@@ -1362,6 +1366,12 @@ def handle_post(handler, parsed) -> bool:
             s.workspace = new_ws
             s.model = body.get("model", s.model)
             s.save()
+        if str(old_ws or "") != str(new_ws or ""):
+            try:
+                from api.terminal import close_terminal
+                close_terminal(body["session_id"])
+            except Exception:
+                logger.debug("Failed to close workspace terminal after workspace update")
         set_last_workspace(new_ws)
         return j(handler, {"session": s.compact() | {"messages": s.messages}})
 
@@ -1394,6 +1404,11 @@ def handle_post(handler, parsed) -> bool:
             SESSION_INDEX_FILE.unlink(missing_ok=True)
         except Exception:
             logger.debug("Failed to unlink session index")
+        try:
+            from api.terminal import close_terminal
+            close_terminal(sid)
+        except Exception:
+            logger.debug("Failed to close workspace terminal for deleted session %s", sid)
         # Also delete from CLI state.db (for CLI sessions shown in sidebar)
         try:
             from api.models import delete_cli_session
@@ -1517,6 +1532,18 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/chat/steer":
         from api.streaming import _handle_chat_steer
         return _handle_chat_steer(handler, body)
+
+    if parsed.path == "/api/terminal/start":
+        return _handle_terminal_start(handler, body)
+
+    if parsed.path == "/api/terminal/input":
+        return _handle_terminal_input(handler, body)
+
+    if parsed.path == "/api/terminal/resize":
+        return _handle_terminal_resize(handler, body)
+
+    if parsed.path == "/api/terminal/close":
+        return _handle_terminal_close(handler, body)
 
     # ── Cron API (POST) ──
     if parsed.path == "/api/crons/create":
@@ -2109,6 +2136,126 @@ def _handle_sse_stream(handler, parsed):
             if event in ("stream_end", "error", "cancel"):
                 break
     except (BrokenPipeError, ConnectionResetError):
+        pass
+    return True
+
+
+def _terminal_session_and_workspace(body_or_query):
+    sid = str(body_or_query.get("session_id", "")).strip()
+    if not sid:
+        raise ValueError("session_id required")
+    try:
+        s = get_session(sid)
+    except KeyError:
+        raise KeyError("Session not found")
+    workspace = resolve_trusted_workspace(getattr(s, "workspace", "") or "")
+    return sid, workspace
+
+
+def _handle_terminal_start(handler, body):
+    try:
+        sid, workspace = _terminal_session_and_workspace(body)
+        from api.terminal import start_terminal
+        term = start_terminal(
+            sid,
+            workspace,
+            rows=int(body.get("rows") or 24),
+            cols=int(body.get("cols") or 80),
+            restart=bool(body.get("restart")),
+        )
+        return j(
+            handler,
+            {
+                "ok": True,
+                "session_id": sid,
+                "workspace": term.workspace,
+                "running": term.is_alive(),
+            },
+        )
+    except KeyError as e:
+        return bad(handler, str(e), 404)
+    except ValueError as e:
+        return bad(handler, str(e), 400)
+    except Exception as e:
+        return bad(handler, _sanitize_error(e), 500)
+
+
+def _handle_terminal_input(handler, body):
+    try:
+        require(body, "session_id")
+        data = str(body.get("data", ""))
+        if len(data) > 8192:
+            return bad(handler, "input too large", 413)
+        from api.terminal import write_terminal
+        write_terminal(body["session_id"], data)
+        return j(handler, {"ok": True})
+    except KeyError as e:
+        return bad(handler, str(e), 404)
+    except ValueError as e:
+        return bad(handler, str(e), 400)
+    except Exception as e:
+        return bad(handler, _sanitize_error(e), 500)
+
+
+def _handle_terminal_resize(handler, body):
+    try:
+        require(body, "session_id")
+        from api.terminal import resize_terminal
+        resize_terminal(
+            body["session_id"],
+            rows=int(body.get("rows") or 24),
+            cols=int(body.get("cols") or 80),
+        )
+        return j(handler, {"ok": True})
+    except KeyError as e:
+        return bad(handler, str(e), 404)
+    except ValueError as e:
+        return bad(handler, str(e), 400)
+    except Exception as e:
+        return bad(handler, _sanitize_error(e), 500)
+
+
+def _handle_terminal_close(handler, body):
+    try:
+        require(body, "session_id")
+        from api.terminal import close_terminal
+        closed = close_terminal(body["session_id"])
+        return j(handler, {"ok": True, "closed": closed})
+    except ValueError as e:
+        return bad(handler, str(e), 400)
+
+
+def _handle_terminal_output(handler, parsed):
+    qs = parse_qs(parsed.query)
+    sid = qs.get("session_id", [""])[0]
+    if not sid:
+        return bad(handler, "session_id required")
+    from api.terminal import get_terminal
+    term = get_terminal(sid)
+    if term is None:
+        return j(handler, {"error": "terminal not running"}, status=404)
+
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+    handler.send_header("Cache-Control", "no-cache")
+    handler.send_header("X-Accel-Buffering", "no")
+    handler.send_header("Connection", "keep-alive")
+    handler.end_headers()
+    try:
+        while True:
+            try:
+                event, data = term.output.get(timeout=25)
+            except queue.Empty:
+                handler.wfile.write(b": terminal heartbeat\n\n")
+                handler.wfile.flush()
+                if term.closed.is_set() and term.output.empty():
+                    _sse(handler, "terminal_closed", {"exit_code": term.proc.poll()})
+                    break
+                continue
+            _sse(handler, event, data)
+            if event in ("terminal_closed", "terminal_error"):
+                break
+    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
         pass
     return True
 

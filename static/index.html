@@ -19,6 +19,7 @@
 <script>(function(){var fs=localStorage.getItem('hermes-font-size');if(fs&&fs!=='default')document.documentElement.dataset.fontSize=fs;})()</script>
 <script>(function(){try{document.documentElement.dataset.workspacePanel=localStorage.getItem('hermes-webui-workspace-panel')==='open'?'open':'closed';}catch(e){document.documentElement.dataset.workspacePanel='closed';}})()</script>
 <link rel="stylesheet" href="static/style.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" integrity="sha384-LJcOxlx9IMbNXDqJ2axpfEQKkAYbFjJfhXexLfiRJhjDU81mzgkiQq8rkV0j6dVh" crossorigin="anonymous">
   <!-- KaTeX math rendering CSS (loaded eagerly to prevent layout shift) -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css" integrity="sha384-5TcZemv2l/9On385z///+d7MSYlvIEw9FuZTIdZ14vJLqWphw7e7ZPuOiCHJcFCP" crossorigin="anonymous">
   <!-- streaming-markdown: incremental DOM-building markdown parser for live streams -->
@@ -39,6 +40,9 @@
   <link id="prism-theme" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css" crossorigin="anonymous">
   <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-core.min.js" integrity="sha384-MXybTpajaBV0AkcBaCPT4KIvo0FzoCiWXgcihYsw4FUkEz0Pv3JGV6tk2G8vJtDc" crossorigin="anonymous" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/plugins/autoloader/prism-autoloader.min.js" integrity="sha384-Uq05+JLko69eOiPr39ta9bh7kld5PKZoU+fF7g0EXTAriEollhZ+DrN8Q/Oi8J2Q" crossorigin="anonymous" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js" integrity="sha384-/nfmYPUzWMS6v2atn8hbljz7NE0EI1iGx34lJaNzyVjWGDzMv+ciUZUeJpKA3Glc" crossorigin="anonymous" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js" integrity="sha384-AQLWHRKAgdTxkolJcLOELg4E9rE89CPE2xMy3tIRFn08NcGKPTsELdvKomqji+DL" crossorigin="anonymous" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js" integrity="sha384-U4fBROT3kCM582gaYiNaOSQiJbXPzd9SfR1598Y7yeGSYVBzikXrNg0XyuU+mOnl" crossorigin="anonymous" defer></script>
   <!-- PWA service worker registration -->
   <script>
     if ('serviceWorker' in navigator) {
@@ -349,6 +353,9 @@
             </div>
             <div class="composer-ws-wrap">
               <div class="composer-workspace-group ws-chip" id="composerWorkspaceGroup" role="group" aria-label="Workspace controls">
+                <button class="composer-workspace-terminal-btn" id="btnTerminalToggle" type="button" onclick="toggleComposerTerminal()" title="Open workspace terminal" data-i18n-title="terminal_open_title" aria-pressed="false" aria-label="Open workspace terminal">
+                  <span class="composer-workspace-icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></span>
+                </button>
                 <button class="composer-workspace-files-btn" id="btnWorkspacePanelToggle" type="button" onclick="toggleWorkspacePanel()" title="Show workspace panel" aria-pressed="false" aria-label="Toggle workspace files panel">
                   <span class="composer-workspace-icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span>
                 </button>
@@ -433,6 +440,24 @@
           <div class="model-dropdown" id="composerModelDropdown"></div>
         </div>
         <div class="upload-bar-wrap" id="uploadBarWrap"><div class="upload-bar" id="uploadBar"></div></div>
+      </div>
+      <div class="composer-terminal-panel" id="composerTerminalPanel" hidden>
+        <div class="composer-terminal-header">
+          <div class="composer-terminal-title">
+            <span data-i18n="terminal_title">Terminal</span>
+            <span class="composer-terminal-dot" aria-hidden="true">·</span>
+            <span id="terminalWorkspaceLabel"></span>
+          </div>
+          <div class="composer-terminal-actions">
+            <button type="button" class="composer-terminal-action" id="btnTerminalClear" onclick="clearComposerTerminal()" data-i18n="terminal_clear">Clear</button>
+            <button type="button" class="composer-terminal-action" id="btnTerminalCopy" onclick="copyComposerTerminalOutput()" data-i18n="terminal_copy_output">Copy output</button>
+            <button type="button" class="composer-terminal-action" id="btnTerminalRestart" onclick="restartComposerTerminal()" data-i18n="terminal_restart">Restart</button>
+            <button type="button" class="composer-terminal-action" id="btnTerminalClose" onclick="closeComposerTerminal()" data-i18n="terminal_close">Close</button>
+          </div>
+        </div>
+        <div class="composer-terminal-viewport" id="terminalViewport" onclick="focusComposerTerminalInput()">
+          <div class="composer-terminal-surface" id="terminalSurface" aria-label="Workspace terminal"></div>
+        </div>
       </div>
     </div>
     </div><!-- /#mainChat -->
@@ -826,6 +851,7 @@
 <script src="static/icons.js" defer></script>
 <script src="static/ui.js" defer></script>
 <script src="static/workspace.js" defer></script>
+<script src="static/terminal.js" defer></script>
 <script src="static/sessions.js" defer></script>
 <script src="static/commands.js" defer></script>
 <script src="static/messages.js" defer></script>
