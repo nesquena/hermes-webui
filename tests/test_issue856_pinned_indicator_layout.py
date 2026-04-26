@@ -56,12 +56,13 @@ def test_state_indicator_uses_right_actions_slot_to_prevent_title_shift():
     assert append_to_wrapper_idx != -1, "state indicator should be appended to .session-time-wrapper"
 
     assert ".session-attention-indicator{" in STYLE_CSS, "attention indicator CSS rule missing"
-    css_block = STYLE_CSS[
-        STYLE_CSS.find(".session-attention-indicator{"):
-        STYLE_CSS.find(".session-attention-indicator.is-streaming")
-    ]
-    assert "position:absolute;" in css_block, "attention indicator should be positioned in the row action slot"
-    assert "right:6px;" in css_block, "attention indicator should align with the actions trigger"
+    # The indicator itself has no position:absolute; it is inside .session-time-wrapper
+    # which is the right-side absolute-positioned slot. Check positioning on the wrapper.
+    assert ".session-time-wrapper{" in STYLE_CSS, ".session-time-wrapper should exist"
+    wrapper_block = STYLE_CSS[STYLE_CSS.find(".session-time-wrapper{"):]
+    wrapper_block = wrapper_block[:wrapper_block.find("}")]
+    assert "position:absolute;" in wrapper_block, ".session-time-wrapper should be position:absolute"
+    assert "right:6px;" in wrapper_block, ".session-time-wrapper should align with right:6px"
 
 
 def test_timestamp_hidden_when_attention_state_is_present():
