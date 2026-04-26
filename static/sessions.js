@@ -1037,6 +1037,7 @@ function renderSessionListFromCache(){
     let _lastTapTime=0;
     let _tapTimer=null;
     el.onpointerup=(e)=>{
+      if(e.pointerType==='mouse' && e.button!==0) return;  // ignore right/middle click
       if(_renamingSid) return;
       if(actions.contains(e.target)) return;
       const now=Date.now();

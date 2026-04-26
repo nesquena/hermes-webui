@@ -149,3 +149,14 @@ def test_apperror_path_calls_render_session_list():
         "apperror handler must call renderSessionList() so the streaming indicator "
         "clears immediately on server errors, not after a 5s poll delay"
     )
+
+
+def test_pointerup_ignores_non_primary_mouse_buttons():
+    """Right-click and middle-click must not trigger session navigation.
+    onpointerup fires for all mouse buttons; we filter to button===0
+    (primary). pointerType==='mouse' scopes the check to mouse only —
+    touch/stylus always report button===0 so they're unaffected."""
+    assert "e.pointerType==='mouse' && e.button!==0" in SESSIONS_JS, (
+        "pointerup handler must filter out non-primary mouse buttons "
+        "(right-click / middle-click must not navigate)"
+    )
