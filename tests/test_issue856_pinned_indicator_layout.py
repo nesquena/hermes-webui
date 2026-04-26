@@ -90,7 +90,15 @@ def test_timestamp_hidden_when_attention_state_is_present():
     # focus-within all expand to 40px to make room for the absolute action
     # button + attention indicator.
     assert ".session-item{padding:8px 8px;" in STYLE_CSS
-    assert ".session-item.streaming,.session-item.unread,.session-item:hover,.session-item:focus-within,.session-item.menu-open{padding-right:40px;}" in STYLE_CSS
+    # PR #1110: :hover intentionally removed from padding-right rule to prevent
+    # layout shift on iPad (hover expands padding, reflows during tap, causing
+    # the actions button to intercept the navigation tap). The action button is
+    # position:absolute — desktop hover overlap is acceptable; the fix is
+    # critical for touch reliability.
+    assert ".session-item.streaming,.session-item.unread,.session-item:focus-within,.session-item.menu-open{padding-right:40px;}" in STYLE_CSS
+    assert ".session-item:hover" not in STYLE_CSS.split(".session-item.streaming")[1].split("}")[0], (
+        "hover must not be in the padding-right expansion rule (touch layout-shift fix)"
+    )
     assert ".session-item{min-height:44px;padding:10px 40px 10px 12px;}" in STYLE_CSS
     # Timestamp now uses margin-left:auto inside the flex row instead of
     # absolute positioning. This stops the title's flex:1 bound from running

@@ -219,19 +219,25 @@ class TestProjectDotPlacement:
         # footprint (26px + 6px gap ≈ 32px, rounded to 40px) needs reservation.
         assert ".session-item{min-height:44px;padding:10px 40px 10px 12px;}" in STYLE_CSS
 
-    def test_session_item_expands_padding_on_hover_and_attention(self):
-        """When hover/focus/menu-open/streaming/unread shows the action
-        button or attention indicator, padding-right expands to 40px to
-        reserve space for them (they're position:absolute at right:6px,
-        26px wide → 32px footprint, 40px gives 8px breathing)."""
+    def test_session_item_expands_padding_on_attention_states_not_hover(self):
+        """PR #1110: :hover intentionally excluded from the padding-right
+        expansion rule. Adding it caused iPad layout-shift during tap —
+        hover activated during touch, padding-right expanded, the session-
+        actions overlay appeared under the finger, stopPropagation swallowed
+        the navigation click. The action button is position:absolute; desktop
+        text overlap on hover is an acceptable tradeoff for touch reliability.
+        streaming/unread/focus-within/menu-open still expand to 40px."""
+        # Without :hover
         sel = (
             ".session-item.streaming,.session-item.unread,"
-            ".session-item:hover,.session-item:focus-within,"
+            ".session-item:focus-within,"
             ".session-item.menu-open"
         )
         idx = STYLE_CSS.find(sel)
         assert idx >= 0, (
-            f"Combined hover/streaming/unread padding rule not found"
+            "Combined streaming/unread/focus-within/menu-open padding rule not found"
         )
         rule = STYLE_CSS[idx: STYLE_CSS.find("}", idx)]
         assert "padding-right:40px" in rule
+        # Confirm :hover is NOT in this combined selector (intentional)
+        assert ":hover" not in sel
