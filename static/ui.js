@@ -1889,6 +1889,19 @@ function setBusy(v){
         renderTray();
         send();
       },120);
+    } else {
+      // No queued message — restore the draft the user was typing before send(),
+      // but only for the session currently being viewed (sid must match the
+      // viewed session, otherwise the user switched sessions mid-stream).
+      const _draftSid=sid;
+      const _isCurrentView=S.session&&S.session.session_id===_draftSid;
+      const _draft=_isCurrentView&&S._drafts&&S._drafts[_draftSid];
+      if(_draft){
+        $('msg').value=_draft;
+        delete S._drafts[_draftSid];
+        autoResize();
+        renderTray();
+      }
     }
   }
 }
