@@ -1088,7 +1088,7 @@ _available_models_cache: dict | None = None
 _available_models_cache_ts: float = 0.0
 _AVAILABLE_MODELS_CACHE_TTL: float = 86400.0  # 24 hours
 _available_models_cache_lock = threading.RLock()  # must be RLock: cold path refactoring moved slow work inside this lock, requiring re-entry
-_cache_build_cv = threading.Condition()  # signaled when _available_models_cache is set from a cold path
+_cache_build_cv = threading.Condition(_available_models_cache_lock)  # shares underlying RLock so notify_all() is safe inside with _available_models_cache_lock
 _cache_build_in_progress = False  # True while a cold path is actively building
 
 # Cache for credential pool results -- calling load_pool() per-provider per-server
