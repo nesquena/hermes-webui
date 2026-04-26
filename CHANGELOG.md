@@ -3,14 +3,16 @@
 ## [Unreleased]
 
 ### Fixed
-- **Long URL / unbreakable string overflow** — chat bubble boundaries no longer overflow when a message contains very long URLs, file paths, or base64 data. `overflow-wrap: anywhere` added to `.msg-body` and the user-bubble variant so continuous non-whitespace text wraps at the column edge instead of bleeding into adjacent layout areas. (`static/style.css`) Closes #1080
-- **Project chip rename now works** — double-clicking a project chip now reliably triggers the rename input. Root cause: `onclick` was calling `renderSessionListFromCache()` which destroyed the chip DOM node before `ondblclick` could fire. Fixed with a 220ms `_clickTimer` delay on `onclick` (same pattern used by session items), so a double-click cancels the single-click and invokes rename instead. (`static/sessions.js`) Closes #1078
+
+## v0.50.218 — 2026-04-26
+
+### Fixed
+- **Long URL / unbreakable string overflow** — chat bubble boundaries no longer overflow when a message contains very long URLs, file paths, or base64 data. `overflow-wrap: anywhere` added to `.msg-body` and the user-bubble variant so continuous non-whitespace text wraps at the column edge instead of bleeding into adjacent layout areas. (`static/style.css`) Closes #1080 [#1081]
+- **Project chip rename now works** — double-clicking a project chip now reliably triggers the rename input. Root cause: `onclick` was calling `renderSessionListFromCache()` which destroyed the chip DOM node before `ondblclick` could fire. Fixed with a 220ms `_clickTimer` delay on `onclick` (same pattern used by session items), so a double-click cancels the single-click and invokes rename instead. (`static/sessions.js`) Closes #1078 [#1082]
+- **Block-level constructs inside blockquotes** — fenced code blocks, headings, horizontal rules, and ordered lists inside blockquotes now render correctly; `&gt;`-entity-encoded blockquotes from LLM output also render correctly (entity decode moved before the blockquote pre-pass). New pre-pass walks lines fence-aware, strips `>` prefix, recursively renders stripped content with the full pipeline, stashes rendered HTML with `\x00Q` token. (`static/ui.js`, `static/style.css`) [#1083]
 
 ### Added
-- **Project color picker** — right-clicking a project chip now shows a context menu with Rename, a row of color swatches (the 8 `PROJECT_COLORS`), and Delete. Selecting a swatch updates the project color via the existing `/api/projects/rename` endpoint (which already supports an optional `color` field). (`static/sessions.js`) Closes #1078
-- **Block-level constructs inside blockquotes** — fenced code blocks, headings, horizontal rules, and ordered lists inside blockquotes now render correctly. Root cause: the per-line passes for fenced code, `## heading`, `---` hr, and `1. list` ran before the blockquote handler and could not match lines that started with `>`, so by the time blockquote stripping ran those constructs had already been mishandled (in the worst case the blockquote collapsed into a monospace blob with raw `>`/`##` syntax leaking everywhere). Fix: a new blockquote pre-pass walks lines fence-aware, strips the `>` prefix, and recursively renders the stripped content with the full pipeline before the rest of `renderMd()` runs. The rendered blockquote HTML is stashed and restored verbatim at the end so no later pass can mangle it. (`static/ui.js`)
-
-
+- **Project color picker** — right-clicking a project chip now shows a context menu with Rename, a row of color swatches, and Delete. Selecting a swatch updates the project color via `/api/projects/rename`. (`static/sessions.js`) Closes #1078 [#1082]
 ## v0.50.217 — 2026-04-26
 
 ### Fixed
