@@ -28,6 +28,7 @@ INDEX = (REPO / "static" / "index.html").read_text(encoding="utf-8")
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 COMMANDS_JS = (REPO / "static" / "commands.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
+STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 
 
 # ── #1 dropdown escapes composer-left ─────────────────────────────────────────
@@ -112,6 +113,57 @@ class TestReasoningChipIcon:
         assert "🧠" not in fn, (
             "_applyReasoningChip should not concatenate a 🧠 emoji into the label — "
             "the chip already has a monochrome SVG icon next to the label"
+        )
+
+
+# ── #1068 None/default reasoning chip stays visible ──────────────────────────
+
+
+class TestReasoningChipNoneState:
+    """Reasoning effort is a current setting like model selection.  Setting it
+    to None disables reasoning, but the chip must remain visible so users can
+    see and change the current level."""
+
+    def get_apply_reasoning_chip(self):
+        m = re.search(
+            r"function\s+_applyReasoningChip\b[\s\S]*?^}",
+            UI_JS,
+            re.MULTILINE,
+        )
+        assert m, "_applyReasoningChip not found in ui.js"
+        return m.group(0)
+
+    def test_none_and_default_do_not_hide_reasoning_chip(self):
+        fn = self.get_apply_reasoning_chip()
+        assert "wrap.style.display='';" in fn, (
+            "_applyReasoningChip must show the reasoning chip even for empty/"
+            "default or 'none' effort values"
+        )
+        assert "if(!eff" not in fn and "wrap.style.display='none'" not in fn, (
+            "_applyReasoningChip must not use a truthy guard that hides the "
+            "chip for the valid 'none' state"
+        )
+        assert "wrap.style.display='none'" not in fn, (
+            "the None/default reasoning state should be visible, not hidden"
+        )
+
+    def test_none_and_default_have_visible_labels(self):
+        assert "if(effort==='none') return 'None';" in UI_JS, (
+            "the disabled reasoning state must render a visible 'None' label"
+        )
+        assert "if(!effort) return 'Default';" in UI_JS, (
+            "the unset reasoning state must render a visible 'Default' label"
+        )
+
+    def test_none_and_default_are_visually_inactive_not_missing(self):
+        fn = self.get_apply_reasoning_chip()
+        assert "chip.classList.toggle('inactive',inactive)" in fn, (
+            "None/default should be shown with an inactive visual treatment "
+            "instead of removing the chip"
+        )
+        assert ".composer-reasoning-chip.inactive" in STYLE_CSS, (
+            "the inactive chip state needs a CSS rule so the visible None/"
+            "default state is intentionally muted"
         )
 
 

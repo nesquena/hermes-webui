@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Reasoning None chip visibility** — the composer reasoning chip now remains visible when reasoning effort is unset/default or explicitly set to `none`, showing `Default` or `None` instead of disappearing. (`static/ui.js`, `static/style.css`) Closes #1068
+
 ## v0.50.215 — 2026-04-26
 
 ### Added
