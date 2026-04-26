@@ -804,6 +804,13 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
         if not effective or effective in ('Untitled', 'New Chat'):
             return
         aux_title_configured = _aux_title_configured()
+        if not aux_title_configured:
+            logger.warning(
+                "Adaptive title refresh: no auxiliary title_generation model configured for session %s — "
+                "will fall back to the conversation model (may incur higher costs on paid providers). "
+                "Configure auxiliary.title_generation in config.yaml to use a dedicated, cheaper model.",
+                session_id,
+            )
         if agent and not aux_title_configured:
             next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
             if not next_title and llm_status in ('llm_error', 'llm_invalid'):
