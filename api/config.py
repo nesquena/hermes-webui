@@ -1501,6 +1501,20 @@ def get_available_models() -> dict:
 
                 import socket
 
+                # Build set of hostnames from custom_providers config — these are
+                # user-explicitly configured endpoints and should not be blocked by SSRF.
+                _ssrf_trusted_hosts: set[str] = set()
+                _custom_providers_cfg = cfg.get("custom_providers", [])
+                if isinstance(_custom_providers_cfg, list):
+                    for _cp in _custom_providers_cfg:
+                        if not isinstance(_cp, dict):
+                            continue
+                        _cp_base = (_cp.get("base_url") or "").strip()
+                        if _cp_base:
+                            _cp_parsed = urlparse(_cp_base if "://" in _cp_base else f"http://{_cp_base}")
+                            if _cp_parsed.hostname:
+                                _ssrf_trusted_hosts.add(_cp_parsed.hostname.lower())
+
                 parsed_url = urlparse(
                     endpoint_url if "://" in endpoint_url else f"http://{endpoint_url}"
                 )
@@ -1521,7 +1535,7 @@ def get_available_models() -> dict:
                                         "lmstudio",
                                         "lm-studio",
                                     )
-                                )
+                                ) or (parsed_url.hostname or "").lower() in _ssrf_trusted_hosts
                                 if not is_known_local:
                                     raise ValueError(
                                         f"SSRF: resolved hostname to private IP {addr[0]}"
