@@ -168,20 +168,23 @@ class TestProjectDotPlacement:
         )
 
     def test_session_time_uses_flex_flow_not_absolute(self):
-        """`.session-time` must use margin-left:auto in flex flow, not
-        position:absolute. Without this the title's flex:1 runs underneath
-        the absolute-positioned timestamp and the dot has no anchor."""
+        """.session-time lives inside .session-time-wrapper which handles the
+        absolute positioning on the right side. The .session-time element itself
+        should not be position:absolute."""
         # Get the bare .session-time rule (not .session-time.is-hidden, not
         # .session-item:hover .session-time)
         idx = STYLE_CSS.find(".session-time{")
         rule = STYLE_CSS[idx: STYLE_CSS.find("}", idx)]
         assert "position:absolute" not in rule, (
-            ".session-time must not be position:absolute — bug 2 requires "
-            "it to live in the flex flow of .session-title-row."
+            ".session-time itself must not be position:absolute; "
+            "positioning is handled by .session-time-wrapper"
         )
-        assert "margin-left:auto" in rule, (
-            ".session-time must use margin-left:auto to push to the right "
-            "edge of the flex row."
+        # .session-time-wrapper is what has the absolute positioning
+        assert ".session-time-wrapper{" in STYLE_CSS, ".session-time-wrapper should exist"
+        wrapper_block = STYLE_CSS[STYLE_CSS.find(".session-time-wrapper{"):]
+        wrapper_block = wrapper_block[:wrapper_block.find("}")]
+        assert "position:absolute" in wrapper_block, (
+            ".session-time-wrapper should be position:absolute to handle the right-side slot"
         )
 
     def test_session_project_dot_no_inline_block_baggage(self):

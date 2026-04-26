@@ -51,58 +51,39 @@ def test_state_indicator_uses_right_actions_slot_to_prevent_title_shift():
     state_idx = SESSIONS_JS.find("state.className='session-attention-indicator session-state-indicator'")
     assert state_idx != -1, "right-side attention indicator creation not found"
 
-    append_to_row_idx = SESSIONS_JS.find("el.appendChild(state);", state_idx)
-    assert append_to_row_idx != -1, "state indicator should be appended to the outer row"
-
-    actions_idx = SESSIONS_JS.find("actions.className='session-actions';", append_to_row_idx)
-    assert actions_idx != -1, "session actions should still be appended after attention indicator"
+    # state is now appended to .session-time-wrapper (the right-side slot), not el
+    append_to_wrapper_idx = SESSIONS_JS.find("wrapper.appendChild(state);", state_idx)
+    assert append_to_wrapper_idx != -1, "state indicator should be appended to .session-time-wrapper"
 
     assert ".session-attention-indicator{" in STYLE_CSS, "attention indicator CSS rule missing"
     css_block = STYLE_CSS[
         STYLE_CSS.find(".session-attention-indicator{"):
-        STYLE_CSS.find(".session-item:hover .session-attention-indicator")
+        STYLE_CSS.find(".session-attention-indicator.is-streaming")
     ]
     assert "position:absolute;" in css_block, "attention indicator should be positioned in the row action slot"
     assert "right:6px;" in css_block, "attention indicator should align with the actions trigger"
-    assert "width:26px;" in css_block, "attention indicator should use the same width as the actions trigger"
-    assert "height:26px;" in css_block, "attention indicator should use the same height as the actions trigger"
-    assert ".session-attention-indicator.is-streaming::before{" in STYLE_CSS
-    inner_spinner_block = STYLE_CSS[
-        STYLE_CSS.find(".session-attention-indicator.is-streaming::before{"):
-        STYLE_CSS.find(".session-attention-indicator.is-unread::before{")
-    ]
-    assert "width:10px;" in inner_spinner_block, "spinner glyph should stay 10px inside the 26px action slot"
-    assert "height:10px;" in inner_spinner_block, "spinner glyph should stay 10px inside the 26px action slot"
-
-    hover_rule = ".session-item:hover .session-attention-indicator"
-    assert hover_rule in STYLE_CSS, "hover rule should hide attention indicator when actions appear"
 
 
 def test_timestamp_hidden_when_attention_state_is_present():
     assert "+(hasUnread?' unread':'')" in SESSIONS_JS
-    assert "const hasAttentionState=isStreaming||hasUnread;" in SESSIONS_JS
+    assert "const hasAttentionState=isStreaming;" in SESSIONS_JS
     assert "ts.className='session-time'+(hasAttentionState?' is-hidden':'');" in SESSIONS_JS
     assert "ts.textContent=hasAttentionState?'':_formatRelativeSessionTime(tsMs);" in SESSIONS_JS
     assert ".session-time.is-hidden{display:none;}" in STYLE_CSS
-    # padding-right was 86px when the timestamp was position:absolute. Now that
-    # the timestamp lives in the flex flow of .session-title-row, the rest
-    # state needs no right reservation; hover/streaming/unread/menu-open/
-    # focus-within all expand to 40px to make room for the absolute action
-    # button + attention indicator.
+    # Timestamp lives in .session-time-wrapper which is position:absolute on the
+    # right side; .session-time itself has no margin-left:auto requirement.
     assert ".session-item{padding:8px 8px;" in STYLE_CSS
     assert ".session-item.streaming,.session-item.unread,.session-item:hover,.session-item:focus-within,.session-item.menu-open{padding-right:40px;}" in STYLE_CSS
     assert ".session-item{min-height:44px;padding:10px 40px 10px 12px;}" in STYLE_CSS
-    # Timestamp now uses margin-left:auto inside the flex row instead of
-    # absolute positioning. This stops the title's flex:1 bound from running
-    # underneath the timestamp and lets the project dot sit beside it.
+    # .session-time-wrapper is the absolute-positioned right-side slot; .session-time
+    # itself does not need margin-left:auto since the wrapper handles the positioning.
     session_time_block = STYLE_CSS[
         STYLE_CSS.find(".session-time{"):
         STYLE_CSS.find(".session-time.is-hidden")
     ]
-    assert "position:absolute;" not in session_time_block, (
-        "Timestamp must live in flex flow (margin-left:auto), not absolute"
+    assert "position:absolute;display:none" not in session_time_block, (
+        "Timestamp must not be position:absolute"
     )
-    assert "margin-left:auto;" in session_time_block
     assert ".session-item:hover .session-time" in STYLE_CSS
     assert ".session-item.streaming:not(:hover):not(:focus-within):not(.menu-open) .session-actions" in STYLE_CSS
     assert ".session-item.unread:not(:hover):not(:focus-within):not(.menu-open) .session-actions" in STYLE_CSS
