@@ -1166,11 +1166,16 @@ def invalidate_provider_models_cache(provider_id: str):
     Args:
         provider_id: canonical provider id (e.g. 'openai', 'anthropic', 'custom:my-key')
     """
-    global _available_models_cache, _available_models_cache_ts
+    global _available_models_cache, _available_models_cache_ts, _CREDENTIAL_POOL_CACHE
     with _available_models_cache_lock:
         _available_models_cache = None
         _available_models_cache_ts = 0.0
         _provider_models_invalidated_ts[provider_id] = time.time()
+        # Also evict the credential pool so the next cold path re-loads it.
+        # Must evict both the original key and its canonical form (load_pool
+        # may be called with either, and both paths cache under their own key).
+        _CREDENTIAL_POOL_CACHE.pop(provider_id, None)
+        _CREDENTIAL_POOL_CACHE.pop(_resolve_provider_alias(provider_id), None)
     _delete_models_cache_on_disk()
 
 
