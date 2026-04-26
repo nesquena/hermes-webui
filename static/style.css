@@ -568,7 +568,7 @@
   .role-icon{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;flex-shrink:0;}
   .role-icon.user{background:var(--accent-bg);color:var(--accent-text);border:1px solid var(--accent-bg-strong);}
   .role-icon.assistant{background:var(--accent-bg-strong);color:var(--accent-text);border:1px solid var(--accent-bg-strong);}
-  .msg-body{font-size:14px;line-height:1.75;color:var(--text);padding-left:30px;max-width:680px;}
+  .msg-body{font-size:14px;line-height:1.75;color:var(--text);padding-left:30px;max-width:680px;overflow-wrap:anywhere;}
   .msg-body p{margin-bottom:10px;}.msg-body p:last-child{margin-bottom:0;}
   .msg-body ul,.msg-body ol{margin:6px 0 10px 20px;}.msg-body li{margin-bottom:3px;}
   .msg-body h1,.msg-body h2,.msg-body h3{margin:16px 0 6px;font-weight:600;}
@@ -1969,6 +1969,7 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
   padding-left: 14px;
   max-width: none;
   color: var(--user-bubble-text);
+  overflow-wrap: anywhere;
 }
 .msg-row[data-role="user"] .msg-body::selection,
 .msg-row[data-role="user"] .msg-body *::selection {
