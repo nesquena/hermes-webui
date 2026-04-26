@@ -1413,6 +1413,8 @@ def get_available_models() -> dict:
                 "OPENCODE_GO_API_KEY",
                 "MINIMAX_API_KEY",
                 "MINIMAX_CN_API_KEY",
+                "XAI_API_KEY",
+                "MISTRAL_API_KEY",
             ):
                 val = os.getenv(k)
                 if val:
@@ -1435,10 +1437,23 @@ def get_available_models() -> dict:
                 detected_providers.add("minimax")
             if all_env.get("DEEPSEEK_API_KEY"):
                 detected_providers.add("deepseek")
+            if all_env.get("XAI_API_KEY"):
+                detected_providers.add("x-ai")
+            if all_env.get("MISTRAL_API_KEY"):
+                detected_providers.add("mistralai")
             if all_env.get("OPENCODE_ZEN_API_KEY"):
                 detected_providers.add("opencode-zen")
             if all_env.get("OPENCODE_GO_API_KEY"):
                 detected_providers.add("opencode-go")
+
+        # Also detect providers explicitly listed in config.yaml providers section.
+        # A user may configure a provider key via config.yaml providers.<name>.api_key
+        # without setting the corresponding env var. (#604)
+        _cfg_providers = cfg.get("providers", {})
+        if isinstance(_cfg_providers, dict):
+            for _pid_key in _cfg_providers:
+                if _pid_key in _PROVIDER_MODELS:
+                    detected_providers.add(_pid_key)
 
         # 4. Fetch models from custom endpoint if base_url is configured
         auto_detected_models = []
