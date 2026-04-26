@@ -3,6 +3,7 @@ import collections
 import json
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -590,16 +591,91 @@ def all_sessions():
 
 
 def title_from(messages, fallback: str='Untitled'):
-    """Derive a session title from the first user message."""
+    """Derive a compact, human-readable title from user messages.
+
+    Strategy (inspired by craft-agents style title hygiene):
+      1) collect user messages
+      2) drop trailing low-signal turns ("ok", "thanks", "hello")
+      3) prefer first substantive message, else latest substantive
+      4) sanitize markdown/preamble noise and clamp length
+    """
+    user_texts = []
     for m in messages:
-        if m.get('role') == 'user':
-            c = m.get('content', '')
-            if isinstance(c, list):
-                c = ' '.join(p.get('text', '') for p in c if isinstance(p, dict) and p.get('type') == 'text')
-            text = str(c).strip()
-            if text:
-                return text[:64]
-    return fallback
+        if m.get('role') != 'user':
+            continue
+        text = _flatten_message_text(m.get('content', ''))
+        if text:
+            user_texts.append(text)
+    derived = _derive_title_from_texts(user_texts, fallback='')
+    return derived or fallback
+
+
+def _flatten_message_text(content) -> str:
+    """Flatten message content (str or Anthropic-style parts) into plain text."""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for p in content:
+            if isinstance(p, dict) and p.get('type') == 'text':
+                parts.append(str(p.get('text', '')).strip())
+        return ' '.join(x for x in parts if x).strip()
+    return str(content or '').strip()
+
+
+def _is_low_signal(text: str) -> bool:
+    """Heuristic for acknowledgements/placeholder inputs that make ugly titles."""
+    t = (text or '').strip().lower()
+    if not t:
+        return True
+    if '?' in t:
+        return False
+    # Short single-turn acknowledgements in common chat styles.
+    low_signal_tokens = {
+        'ok', 'okay', 'sure', 'yes', 'no', 'hi', 'hello', 'hey', 'yo',
+        'thanks', 'thank you', 'thx', 'cool', 'nice', 'done', 'start',
+        '继续', '好的', '好', '收到', '谢谢', '你好', '嗨',
+    }
+    if t in low_signal_tokens:
+        return True
+    if len(t) <= 12 and len(t.split()) <= 2:
+        return True
+    return False
+
+
+def _clean_title_candidate(text: str) -> str:
+    t = str(text or '').strip()
+    if not t:
+        return ''
+    # Remove common markdown/preamble wrappers.
+    t = re.sub(r'^[#\-\*]+\s+', '', t)
+    t = re.sub(r'^\s*(title|topic)\s*:\s*', '', t, flags=re.IGNORECASE)
+    if t.startswith('**') and t.endswith('**') and len(t) > 4:
+        t = t[2:-2].strip()
+    t = re.sub(r'\s+', ' ', t).strip()
+    if (t.startswith('"') and t.endswith('"')) or (t.startswith("'") and t.endswith("'")):
+        t = t[1:-1].strip()
+    # Bound length and avoid overly long run-on titles.
+    words = t.split()
+    if len(words) > 10:
+        t = ' '.join(words[:10])
+    return t[:80].strip()
+
+
+def _derive_title_from_texts(texts, fallback: str = '') -> str:
+    candidates = [str(x or '').strip() for x in (texts or []) if str(x or '').strip()]
+    if not candidates:
+        return fallback
+    trimmed = list(candidates)
+    while len(trimmed) > 1 and _is_low_signal(trimmed[-1]):
+        trimmed.pop()
+    substantive = [t for t in trimmed if not _is_low_signal(t)]
+    if substantive:
+        seed = substantive[0]
+    else:
+        seed = trimmed[-1] if trimmed else candidates[0]
+    cleaned = _clean_title_candidate(seed)
+    return cleaned or fallback
 
 
 # ── Project helpers ──────────────────────────────────────────────────────────
@@ -709,7 +785,14 @@ def get_cli_sessions() -> list:
                                     break
                     except Exception:
                         pass  # degrade gracefully
-            _display_title = _title or f'{_source.title()} Session'
+            _display_title = _title
+            if not _display_title:
+                _display_title = _derive_title_from_texts(
+                    [row.get('first_user_content'), row.get('last_user_content')],
+                    fallback='',
+                )
+            if not _display_title:
+                _display_title = f'{_source.title()} Session'
             cli_sessions.append({
                 'session_id': sid,
                 'title': _display_title,

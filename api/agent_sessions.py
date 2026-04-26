@@ -99,6 +99,7 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         for key in (
             'id', 'model', 'message_count', 'actual_message_count',
             'ended_at', 'end_reason', 'last_activity',
+            'first_user_content', 'last_user_content',
         ):
             if key in tip:
                 merged[key] = tip[key]
@@ -149,9 +150,26 @@ def read_importable_agent_session_rows(db_path: Path, limit: int = 200, log=None
             )
             return []
 
+        cur.execute("PRAGMA table_info(messages)")
+        message_cols = {row[1] for row in cur.fetchall()}
+
         parent_expr = _optional_col('parent_session_id', session_cols)
         ended_expr = _optional_col('ended_at', session_cols)
         end_reason_expr = _optional_col('end_reason', session_cols)
+        if {'role', 'content', 'timestamp'}.issubset(message_cols):
+            first_user_expr = (
+                "(SELECT m1.content FROM messages m1 "
+                "WHERE m1.session_id = s.id AND m1.role = 'user' "
+                "ORDER BY m1.timestamp ASC LIMIT 1) AS first_user_content"
+            )
+            last_user_expr = (
+                "(SELECT m2.content FROM messages m2 "
+                "WHERE m2.session_id = s.id AND m2.role = 'user' "
+                "ORDER BY m2.timestamp DESC LIMIT 1) AS last_user_content"
+            )
+        else:
+            first_user_expr = "NULL AS first_user_content"
+            last_user_expr = "NULL AS last_user_content"
 
         cur.execute(
             f"""
@@ -160,6 +178,8 @@ def read_importable_agent_session_rows(db_path: Path, limit: int = 200, log=None
                    {parent_expr},
                    {ended_expr},
                    {end_reason_expr},
+                   {first_user_expr},
+                   {last_user_expr},
                    COUNT(m.id) AS actual_message_count,
                    MAX(m.timestamp) AS last_activity
             FROM sessions s
