@@ -86,7 +86,7 @@ class TestSlashCommandHandlers:
     def test_cmd_interrupt_calls_cancel_stream(self):
         idx = COMMANDS_JS.find("async function cmdInterrupt(")
         assert idx >= 0
-        body = COMMANDS_JS[idx:idx + 800]
+        body = COMMANDS_JS[idx:idx + 1300]  # expanded: idle-fallback block added before the busy path
         assert "queueSessionMessage" in body, "/interrupt must queue the new message before cancelling"
         assert "cancelStream" in body, "/interrupt must call cancelStream() so the drain re-sends"
 

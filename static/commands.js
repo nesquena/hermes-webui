@@ -546,7 +546,13 @@ async function cmdStop(){
 async function cmdQueue(args){
   const msg=(args||'').trim();
   if(!msg){showToast(t('cmd_queue_no_msg'));return;}
-  if(!S.busy){showToast(t('cmd_queue_not_busy'));return;}
+  // If nothing is running, /queue <msg> just sends like a normal message
+  if(!S.busy){
+    const inp=$('msg');
+    if(inp){inp.value=msg;}
+    if(typeof send==='function'){await send();}
+    return;
+  }
   if(!S.session){showToast(t('no_active_session'));return;}
   queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
   updateQueueBadge(S.session.session_id);
@@ -561,7 +567,13 @@ async function cmdQueue(args){
 async function cmdInterrupt(args){
   const msg=(args||'').trim();
   if(!msg){showToast(t('cmd_interrupt_no_msg'));return;}
-  if(!S.busy||!S.activeStreamId){showToast(t('no_active_task'));return;}
+  // If nothing is running, /interrupt <msg> just sends like a normal message
+  if(!S.busy||!S.activeStreamId){
+    const inp=$('msg');
+    if(inp){inp.value=msg;}
+    if(typeof send==='function'){await send();}
+    return;
+  }
   if(!S.session){showToast(t('no_active_session'));return;}
   // Queue the message first (before cancel sets busy=false and drains)
   queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
@@ -586,7 +598,13 @@ async function cmdInterrupt(args){
 async function cmdSteer(args){
   const msg=(args||'').trim();
   if(!msg){showToast(t('cmd_steer_no_msg'));return;}
-  if(!S.busy||!S.activeStreamId){showToast(t('no_active_task'));return;}
+  // If nothing is running, /steer <msg> just sends like a normal message
+  if(!S.busy||!S.activeStreamId){
+    const inp=$('msg');
+    if(inp){inp.value=msg;}
+    if(typeof send==='function'){await send();}
+    return;
+  }
   if(!S.session){showToast(t('no_active_session'));return;}
   await _trySteer(msg, /*explicitSteer=*/true);
 }
