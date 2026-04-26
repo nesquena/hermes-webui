@@ -10,6 +10,13 @@ const ICONS={
   more:'<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" stroke="none"><circle cx="8" cy="3" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="8" cy="13" r="1.25"/></svg>',
 };
 
+// FNV-32 hash → 0..359 for stable per-conversation accent hue.
+function _hashHue(s){
+  let h=2166136261>>>0;
+  for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619)>>>0;}
+  return h%360;
+}
+
 // Tracks which session_id is currently being loaded. Used to discard stale
 // responses from in-flight requests when the user switches sessions again
 // before the first request completes (#1060).
@@ -1008,6 +1015,18 @@ function renderSessionListFromCache(){
     // (Project dot is appended above, between title and timestamp, so it
     // sits outside the truncating title span and stays visible.)
     el.appendChild(sessionText);
+    // Per-session status dot (gateway/CLI activity) + per-conversation accent
+    const sDot=document.createElement('span');
+    sDot.className='status-dot';
+    sDot.dataset.sessionId=s.session_id;
+    if(s.kind==='cli'||s.session_kind==='cli'||s.is_cli){sDot.dataset.cliSession='1';}
+    const _upd=s.updated_at||s.last_active||s.last_updated||0;
+    if(_upd) sDot.dataset.updatedAt=String(_upd);
+    el.insertBefore(sDot,sessionText);
+    try{
+      const _hue=_hashHue(String(s.session_id||''));
+      el.style.setProperty('--conv-accent',`hsl(${_hue},65%,60%)`);
+    }catch(e){}
     const state=document.createElement('span');
     state.className='session-attention-indicator session-state-indicator'+(isStreaming?' is-streaming':(hasUnread?' is-unread':''));
     state.setAttribute('aria-hidden','true');

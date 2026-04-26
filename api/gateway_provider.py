@@ -306,3 +306,26 @@ def resolve_gateway_model(model_id: str) -> Optional[Dict[str, str]]:
             "x-instance-keyword": keyword,
         },
     }
+
+
+def get_gateway_instance_statuses() -> List[Dict[str, str]]:
+    """Return status of all gateway instances across all configured gateways.
+
+    Each entry: {label, keyword, model, cli, status}.
+    """
+    results: List[Dict[str, str]] = []
+    for cfg in _load_gateway_configs():
+        label = cfg.get("label", "local")
+        url = cfg.get("url", "")
+        if not url:
+            continue
+        instances = discover_instances(url, force_refresh=False)
+        for inst in instances:
+            results.append({
+                "label": label,
+                "keyword": inst.get("keyword", ""),
+                "model": inst.get("model", ""),
+                "cli": inst.get("cli", ""),
+                "status": inst.get("status", "unknown"),
+            })
+    return results

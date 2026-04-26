@@ -656,6 +656,13 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/models":
         return j(handler, get_available_models())
 
+    if parsed.path == "/api/gateway-status":
+        try:
+            from api.gateway_provider import get_gateway_instance_statuses
+            return j(handler, get_gateway_instance_statuses())
+        except Exception:
+            return j(handler, [])
+
     if parsed.path == "/api/models/live":
         return _handle_live_models(handler, parsed)
 

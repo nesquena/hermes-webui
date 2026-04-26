@@ -1046,6 +1046,7 @@ function updateSendBtn(){
 function setBusy(v){
   S.busy=v;
   updateSendBtn();
+  if(typeof updateSessionDots==='function') updateSessionDots();
   if(!v){
     setStatus('');
     setComposerStatus('');
@@ -3266,3 +3267,94 @@ async function uploadPendingFiles(){
   if(failures===total&&total>0)throw new Error(t('all_uploads_failed',total));
   return names;
 }
+
+
+/* ── Gateway Instance Status Polling (PR #4) ──────────────────────────────── */
+let _gwStatusCache=[];
+let _gwPollTimer=null;
+
+async function pollGatewayStatus(){
+  try{
+    const res=await fetch('/api/gateway-status');
+    if(!res.ok) return;
+    _gwStatusCache=await res.json();
+    _updateGatewayDot();
+    _updateDropdownStatusSuffix();
+  }catch(e){/* ignore network errors */}
+}
+
+function _updateGatewayDot(){
+  const dot=$('gatewayDot');
+  if(!dot) return;
+  const chip=$('composerModelChip')||$('modelChip');
+  if(!chip) return;
+  const txt=(chip.textContent||'').trim();
+  const inst=_gwStatusCache.find(i=>{
+    const dispName=`copilot-${i.label}/${i.model}/${i.keyword}`;
+    return txt.includes(i.model)||txt.includes(dispName);
+  });
+  dot.className='status-dot';
+  if(inst){
+    dot.classList.add(inst.status||'ready');
+    dot.title=`Gateway: ${inst.status}`;
+  }
+}
+
+function _updateDropdownStatusSuffix(){
+  const sel=$('settingsModel')||$('modelSelect');
+  if(!sel) return;
+  for(const opt of sel.options){
+    const val=opt.value||'';
+    if(!val.startsWith('@gateway-')) continue;
+    const m=val.match(/^@gateway-(\w+):([\w.:-]+)\/([\w.-]+)$/);
+    if(!m) continue;
+    const [,label,model,keyword]=m;
+    const inst=_gwStatusCache.find(i=>i.label===label&&i.model===model&&i.keyword===keyword);
+    const cleanText=opt.textContent.replace(/\s*\([a-z]+\)$/,'');
+    if(inst){
+      opt.textContent=`${cleanText} (${inst.status})`;
+    }
+  }
+}
+
+function startGatewayPolling(){
+  if(_gwPollTimer) return;
+  pollGatewayStatus();
+  _gwPollTimer=setInterval(pollGatewayStatus,10000);
+}
+
+if(document.readyState==='loading'){
+  document.addEventListener('DOMContentLoaded',startGatewayPolling);
+}else{
+  startGatewayPolling();
+}
+
+/* ── Session Status Dots (PR #4 + PR #6 enhancements) ─────────────────────── */
+// CLI-busy recency window (seconds). Configurable via window.HERMES_CLI_BUSY_WINDOW_S.
+function _cliBusyWindow(){
+  const v=Number(window.HERMES_CLI_BUSY_WINDOW_S);
+  return Number.isFinite(v)&&v>0?v:15;
+}
+
+function updateSessionDots(){
+  const dots=document.querySelectorAll('.session-item .status-dot');
+  const nowSec=Date.now()/1000;
+  const win=_cliBusyWindow();
+  dots.forEach(dot=>{
+    dot.className='status-dot';
+    const sid=dot.dataset.sessionId;
+    const isCli=dot.dataset.cliSession==='1';
+    const upd=Number(dot.dataset.updatedAt||0);
+    if(S.busy&&S.session&&sid===S.session.session_id){
+      dot.classList.add('running');
+    }else if(isCli&&upd&&(nowSec-upd)<=win){
+      // CLI session updated recently → likely still busy.
+      dot.classList.add('running');
+    }else if(S.session&&sid===S.session.session_id){
+      dot.classList.add('recent');
+    }
+  });
+}
+
+// Auto-refresh dots every 3s so CLI recency window decays naturally.
+setInterval(()=>{ try{ updateSessionDots(); }catch(e){} }, 3000);
