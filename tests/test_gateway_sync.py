@@ -327,8 +327,12 @@ def test_compression_chain_collapses_to_latest_tip_in_sidebar():
         assert tip is not None
         assert tip.get('title') == 'Magazine Style PPT Skill'
         assert tip.get('message_count') == 2
+        # created_at = the chain head's started_at (preserves original conversation date)
         assert abs(tip.get('created_at') - t0) < 0.01
-        assert abs(tip.get('updated_at') - (t0 + 2)) < 0.01
+        # updated_at = the tip's last message timestamp so the sidebar entry
+        # bubbles to the top by true recency, not by the root's stale activity.
+        # tip messages are at t0+201 and t0+202, so last_activity = t0 + 202.
+        assert abs(tip.get('updated_at') - (t0 + 202)) < 0.01
 
         from api.agent_sessions import read_importable_agent_session_rows
 
@@ -511,6 +515,108 @@ def test_agent_session_limit_applies_after_compression_projection():
     finally:
         try:
             _remove_test_sessions(conn, *(chain_ids + [standalone_id]))
+            conn.close()
+        except Exception:
+            pass
+
+
+def test_compression_chain_bubbles_to_top_by_tip_activity():
+    """An actively-used compression chain must surface in the sidebar by its
+    TIP's last activity, not by the (stale) root's last activity.
+
+    Without overriding ``last_activity`` from the tip, a long-running chain
+    whose tip is being actively edited NOW would sort by the root's old
+    timestamp and fall below recently touched standalone sessions — the
+    inverse of what users expect from "Show agent sessions" sorted by
+    recency. This regression test pins the override.
+    """
+    conn = _ensure_state_db()
+    ids_to_remove = ('bubble_root_001', 'bubble_tip_001', 'bubble_standalone_001')
+    now = time.time()
+    # Root started long ago; tip is being edited "now" (very recent message)
+    root_started = now - 30 * 86400
+    root_ended = now - 28 * 86400
+    tip_started = root_ended + 1
+    tip_latest_msg = now - 5  # 5 seconds ago — most recent activity in the DB
+    # A standalone session active 2 days ago — older than tip, much newer
+    # than the root. Without the fix, the chain row sorts by ROOT's age and
+    # standalone wins; with the fix, the chain wins.
+    standalone_msg = now - 2 * 86400
+    try:
+        _insert_agent_session_row(
+            conn,
+            'bubble_root_001',
+            title='Bubble Root',
+            started_at=root_started,
+            ended_at=root_ended,
+            end_reason='compression',
+            messages=2,
+        )
+        # Override message timestamps so root's last_activity is genuinely old.
+        conn.execute("DELETE FROM messages WHERE session_id = 'bubble_root_001'")
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+            ('bubble_root_001', 'user', 'old root msg', root_started + 60),
+        )
+        _insert_agent_session_row(
+            conn,
+            'bubble_tip_001',
+            title='Bubble Tip',
+            started_at=tip_started,
+            parent_session_id='bubble_root_001',
+            messages=1,
+        )
+        conn.execute("DELETE FROM messages WHERE session_id = 'bubble_tip_001'")
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+            ('bubble_tip_001', 'user', 'fresh tip msg', tip_latest_msg),
+        )
+        _insert_agent_session_row(
+            conn,
+            'bubble_standalone_001',
+            title='Bubble Standalone',
+            started_at=now - 2 * 86400 - 60,
+            messages=1,
+        )
+        conn.execute("DELETE FROM messages WHERE session_id = 'bubble_standalone_001'")
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+            ('bubble_standalone_001', 'user', 'standalone msg', standalone_msg),
+        )
+        conn.commit()
+
+        from api.agent_sessions import read_importable_agent_session_rows
+
+        rows = read_importable_agent_session_rows(_get_state_db_path(), limit=200)
+        ids = [row.get('id') for row in rows]
+        # Filter out unrelated rows from the shared DB
+        ids = [i for i in ids if i in ('bubble_root_001', 'bubble_tip_001', 'bubble_standalone_001')]
+
+        assert 'bubble_tip_001' in ids, (
+            f"Compression tip must appear in projected output. ids={ids}"
+        )
+        assert 'bubble_root_001' not in ids, (
+            "Compression root row must be hidden once the tip is the active row."
+        )
+
+        tip_pos = ids.index('bubble_tip_001')
+        standalone_pos = ids.index('bubble_standalone_001') if 'bubble_standalone_001' in ids else -1
+        assert standalone_pos == -1 or tip_pos < standalone_pos, (
+            f"Active compression tip (last msg 5s ago) must sort BEFORE standalone "
+            f"session (last msg 2d ago). Got order: {ids}. "
+            f"This indicates merged.last_activity is the root's stale value, "
+            f"not the tip's recent value."
+        )
+
+        tip_row = next(r for r in rows if r['id'] == 'bubble_tip_001')
+        assert abs(tip_row['last_activity'] - tip_latest_msg) < 0.01, (
+            f"Projected tip's last_activity must equal the tip's most recent "
+            f"message timestamp ({tip_latest_msg}), not the root's "
+            f"({root_started + 60}). Got: {tip_row['last_activity']}"
+        )
+    finally:
+        try:
+            _remove_test_sessions(conn, *ids_to_remove)
             conn.close()
         except Exception:
             pass
