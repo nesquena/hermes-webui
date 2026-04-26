@@ -2248,7 +2248,14 @@ function renderMessages(){
     const isLastAssistant=!isUser&&vi===visWithIdx.length-1;
     let filesHtml='';
     if(m.attachments&&m.attachments.length){
-      filesHtml=`<div class="msg-files">${m.attachments.map(f=>`<div class="msg-file-badge">${li('paperclip',12)} ${esc(f)}</div>`).join('')}</div>`;
+      filesHtml=`<div class="msg-files">${m.attachments.map(f=>{
+        const fname=f.split('/').pop()||f;
+        if(_IMAGE_EXTS.test(fname)){
+          const imgUrl='api/media?path='+encodeURIComponent(f);
+          return `<img class="msg-media-img" src="${esc(imgUrl)}" alt="${esc(fname)}" loading="lazy" onclick="this.classList.toggle('msg-media-img--full')">`;
+        }
+        return `<div class="msg-file-badge">${li('paperclip',12)} ${esc(fname)}</div>`;
+      }).join('')}</div>`;
     }
     const bodyHtml = isUser ? esc(String(content)).replace(/\n/g,'<br>') : renderMd(_stripXmlToolCallsDisplay(String(content)));
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
