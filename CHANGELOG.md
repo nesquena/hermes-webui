@@ -4,9 +4,11 @@
 
 ### Fixed
 
-- **Project context menu transparent background** — the right-click menu on project chips no longer bleeds the session list through it. Root cause: `_showProjectContextMenu` set `background: var(--panel)`, but `--panel` is not defined as a CSS custom property in this codebase, so the menu fell back to `transparent`. Fix: use `var(--surface)` (the same opaque variable used by `.session-action-menu` and other floating popovers). (`static/sessions.js`)
-- **Project rename input width** — the rename / new-project text field is no longer fixed at 100px regardless of content. Replaced the hard-coded `width:100px` on `.project-create-input` with `min-width:40px; max-width:180px; width:auto`, and added a `_resizeProjectInput()` helper that measures the current value with a hidden span and grows the field as the user types. Wired into both the rename flow (`_startProjectRename`) and the new-project flow (`_startProjectCreate`). (`static/style.css`, `static/sessions.js`)
+## v0.50.219 — 2026-04-26
 
+### Fixed
+- **Project context menu transparent background** — the right-click menu on project chips no longer bleeds the session list through it. `_showProjectContextMenu` was using `background: var(--panel)`, but `--panel` is not defined in this codebase — CSS fell back to `transparent`. Fix: use `var(--surface)` (same opaque variable used by `.session-action-menu` and other floating popovers). (`static/sessions.js`) [#1086]
+- **Project rename / create input auto-sizing** — the rename and new-project input is no longer fixed at 100px. CSS changed to `min-width:40px; max-width:180px; width:auto`. New `_resizeProjectInput()` helper measures the current value via a hidden span (font properties read from `getComputedStyle`) and updates the pixel width as the user types. Wired into both `_startProjectRename` and `_startProjectCreate`. (`static/sessions.js`, `static/style.css`) [#1086]
 ## v0.50.218 — 2026-04-26
 
 ### Fixed
