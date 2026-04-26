@@ -794,6 +794,7 @@ function applyBotName(){
     window._notificationsEnabled=!!s.notifications_enabled;
     window._showThinking=s.show_thinking!==false;
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
+    window._busyInputMode=(s.busy_input_mode||'queue');
     window._botName=s.bot_name||'Hermes';
     if(s.default_model) window._defaultModel=s.default_model;
     // Persist default workspace so the blank new-chat page can show it
@@ -820,6 +821,7 @@ function applyBotName(){
     window._notificationsEnabled=false;
     window._showThinking=true;
     window._sidebarDensity='compact';
+    window._busyInputMode='queue';
     window._botName='Hermes';
     _bootSettings={check_for_updates:false};
     if(typeof setLocale==='function'){

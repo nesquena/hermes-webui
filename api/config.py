@@ -1859,6 +1859,7 @@ _SETTINGS_DEFAULTS = {
     "show_thinking": True,  # show/hide thinking/reasoning blocks in chat view
     "sidebar_density": "compact",  # compact | detailed
     "auto_title_refresh_every": "0",  # adaptive title refresh: 0=off, 5/10/20=every N exchanges
+    "busy_input_mode": "queue",  # behavior when sending while agent is running: queue | interrupt | steer
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
 }
 _SETTINGS_LEGACY_DROP_KEYS = {"assistant_language", "bubble_layout", "default_model"}
@@ -1960,6 +1961,7 @@ _SETTINGS_ENUM_VALUES = {
     "send_key": {"enter", "ctrl+enter"},
     "sidebar_density": {"compact", "detailed"},
     "auto_title_refresh_every": {"0", "5", "10", "20"},
+    "busy_input_mode": {"queue", "interrupt", "steer"},
 }
 _SETTINGS_BOOL_KEYS = {
     "onboarding_completed",

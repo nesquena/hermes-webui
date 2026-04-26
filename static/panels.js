@@ -2368,6 +2368,13 @@ async function loadSettingsPanel(){
       autoTitleRefreshSel.value=['0','5','10','20'].includes(val)?val:'0';
       autoTitleRefreshSel.addEventListener('change',_markSettingsDirty,{once:false});
     }
+    // Busy input mode
+    const busyInputModeSel=$('settingsBusyInputMode');
+    if(busyInputModeSel){
+      const val=String(settings.busy_input_mode||'queue');
+      busyInputModeSel.value=['queue','interrupt','steer'].includes(val)?val:'queue';
+      busyInputModeSel.addEventListener('change',_markSettingsDirty,{once:false});
+    }
     // Bot name
     const botNameField=$('settingsBotName');
     if(botNameField){botNameField.value=settings.bot_name||'Hermes';botNameField.addEventListener('input',_markSettingsDirty,{once:false});}
@@ -2608,6 +2615,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._notificationsEnabled=body.notifications_enabled;
   window._showThinking=body.show_thinking!==false;
   window._sidebarDensity=sidebarDensity==='detailed'?'detailed':'compact';
+  window._busyInputMode=body.busy_input_mode||'queue';
   window._botName=body.bot_name||'Hermes';
   if(typeof applyBotName==='function') applyBotName();
   if(typeof setLocale==='function') setLocale(language);
@@ -2689,6 +2697,7 @@ async function saveSettings(andClose){
   const fontSize=($('settingsFontSize')||{}).value||localStorage.getItem('hermes-font-size')||'default';
   const language=($('settingsLanguage')||{}).value||'en';
   const sidebarDensity=($('settingsSidebarDensity')||{}).value==='detailed'?'detailed':'compact';
+  const busyInputMode=($('settingsBusyInputMode')||{}).value||'queue';
   const body={};
 
   if(sendKey) body.send_key=sendKey;
@@ -2703,6 +2712,7 @@ async function saveSettings(andClose){
   body.notifications_enabled=!!($('settingsNotificationsEnabled')||{}).checked;
   body.show_thinking=window._showThinking!==false;
   body.sidebar_density=sidebarDensity;
+  body.busy_input_mode=busyInputMode;
   body.auto_title_refresh_every=(($('settingsAutoTitleRefresh')||{}).value||'0');
   const botName=(($('settingsBotName')||{}).value||'').trim();
   body.bot_name=botName||'Hermes';

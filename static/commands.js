@@ -17,6 +17,9 @@ const COMMANDS=[
   {name:'personality', desc:t('cmd_personality'), fn:cmdPersonality, arg:'name', subArgs:'personalities'},
   {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'query'},
   {name:'stop',      desc:t('cmd_stop'),     fn:cmdStop,      noEcho:true},
+  {name:'queue',     desc:t('cmd_queue'),    fn:cmdQueue,     arg:'message'},
+  {name:'interrupt', desc:t('cmd_interrupt'), fn:cmdInterrupt, arg:'message', noEcho:true},
+  {name:'steer',     desc:t('cmd_steer'),    fn:cmdSteer,     arg:'message', noEcho:true},
   {name:'title',     desc:t('cmd_title'),    fn:cmdTitle,    arg:'[title]'},
   {name:'retry',     desc:t('cmd_retry'),    fn:cmdRetry,     noEcho:true},
   {name:'undo',      desc:t('cmd_undo'),     fn:cmdUndo,      noEcho:true},
@@ -531,6 +534,61 @@ async function cmdStop(){
   if(typeof cancelStream==='function'){await cancelStream();showToast(t('stream_stopped'));}
   else showToast(t('cancel_unavailable'));
 }
+
+// ── Busy-input mode commands ──────────────────────────────────────────────
+// These commands let users override the default busy_input_mode setting for a
+// specific message.  They are only meaningful while the agent is running.
+
+/**
+ * /queue <message> — Explicitly queue a message for the next turn.
+ * Works regardless of the busy_input_mode setting.
+ */
+async function cmdQueue(args){
+  const msg=(args||'').trim();
+  if(!msg){showToast(t('cmd_queue_no_msg'));return;}
+  if(!S.busy){showToast(t('cmd_queue_not_busy'));return;}
+  if(!S.session){showToast(t('no_active_session'));return;}
+  queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
+  updateQueueBadge(S.session.session_id);
+  showToast(t('cmd_queue_confirm'),2000);
+}
+
+/**
+ * /interrupt <message> — Cancel the current turn and send a new message.
+ * Calls cancelStream() then queues the message so the drain picks it up.
+ */
+async function cmdInterrupt(args){
+  const msg=(args||'').trim();
+  if(!msg){showToast(t('cmd_interrupt_no_msg'));return;}
+  if(!S.busy||!S.activeStreamId){showToast(t('no_active_task'));return;}
+  if(!S.session){showToast(t('no_active_session'));return;}
+  // Queue the message first (before cancel sets busy=false and drains)
+  queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
+  updateQueueBadge(S.session.session_id);
+  // Cancel the active stream; setBusy(false) will drain the queue
+  if(typeof cancelStream==='function'){await cancelStream();}
+  showToast(t('cmd_interrupt_confirm'),2000);
+}
+
+/**
+ * /steer <message> — Inject a steering hint mid-task.
+ * Currently falls back to interrupt behaviour because the WebUI cannot
+ * inject messages into an in-flight agent thread.  Shows a toast to
+ * inform the user that true steering is not yet available.
+ */
+async function cmdSteer(args){
+  const msg=(args||'').trim();
+  if(!msg){showToast(t('cmd_steer_no_msg'));return;}
+  if(!S.busy||!S.activeStreamId){showToast(t('no_active_task'));return;}
+  if(!S.session){showToast(t('no_active_session'));return;}
+  // True steer (inject without cancelling) requires agent-side support
+  // that is not yet available in the WebUI.  Fall back to interrupt.
+  queueSessionMessage(S.session.session_id,{text:msg,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
+  updateQueueBadge(S.session.session_id);
+  if(typeof cancelStream==='function'){await cancelStream();}
+  showToast(t('cmd_steer_fallback'),2500);
+}
+
 async function cmdTitle(args){
   if(!S.session){showToast(t('no_active_session'));return;}
   const name=(args||'').trim();

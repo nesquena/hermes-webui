@@ -10,15 +10,35 @@ async function send(){
   // Don't send while an inline message edit is active
   if(document.querySelector('.msg-edit-area'))return;
   const compressionRunning=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
-  // If busy or a manual compression is still running, queue the message instead
+  // If busy or a manual compression is still running, handle based on busy_input_mode
   if(S.busy||compressionRunning){
     if(text){
       if(!S.session){await newSession();await renderSessionList();}
-      queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
-      $('msg').value='';autoResize();
-      S.pendingFiles=[];renderTray();
-      updateQueueBadge(S.session.session_id);
-      showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
+      const busyMode=window._busyInputMode||'queue';
+      if(busyMode==='interrupt'||busyMode==='steer'){
+        // Cancel the current stream, then queue so drain sends it after cleanup
+        queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
+        updateQueueBadge(S.session.session_id);
+        $('msg').value='';autoResize();
+        S.pendingFiles=[];renderTray();
+        if(S.activeStreamId&&typeof cancelStream==='function'){
+          if(busyMode==='steer'){
+            showToast(t('busy_steer_fallback'),2500);
+          } else {
+            showToast(t('busy_interrupt_confirm'),2000);
+          }
+          await cancelStream();
+        } else {
+          showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
+        }
+      } else {
+        // Default: queue mode (current behavior)
+        queueSessionMessage(S.session.session_id,{text,files:[...S.pendingFiles],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
+        $('msg').value='';autoResize();
+        S.pendingFiles=[];renderTray();
+        updateQueueBadge(S.session.session_id);
+        showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
+      }
     }
     return;
   }
