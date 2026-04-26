@@ -2,8 +2,6 @@
 
 ## [Unreleased]
 
-### Fixed
-- **Show agent sessions now collapses compression continuation chains** — long Hermes Agent conversations can rotate through many `parent_session_id` segments during context compression, which made one Weixin/Cron/CLI conversation appear as many sidebar rows. Agent-session listing now projects compression chains to a single logical sidebar entry, preserves the chain head as the visible representative, points import/current state at the latest importable segment, keeps non-compression parent/child relationships unchanged, filters empty chains, and applies the sidebar limit after projection. (`api/agent_sessions.py`, `tests/test_gateway_sync.py`)
 
 ## v0.50.216 — 2026-04-26
 
