@@ -14,6 +14,23 @@ async function send(){
   if(S.busy||compressionRunning){
     if(text){
       if(!S.session){await newSession();await renderSessionList();}
+      // Busy-control slash commands must be intercepted HERE, before the
+      // busyMode routing block, so the user can always type /steer, /interrupt,
+      // or /queue while the agent is running and have them execute immediately.
+      // Without this intercept they fall through to the queue and execute after
+      // the current turn ends — by which point there is no active stream and
+      // cmdSteer / cmdInterrupt say "No active task to stop."
+      if(text.startsWith('/')){
+        const _pc=typeof parseCommand==='function'&&parseCommand(text);
+        if(_pc&&['steer','interrupt','queue'].includes(_pc.name)){
+          const _bc=COMMANDS.find(c=>c.name===_pc.name);
+          if(_bc){
+            $('msg').value='';autoResize();
+            await _bc.fn(_pc.args);
+            return;
+          }
+        }
+      }
       const busyMode=window._busyInputMode||'queue';
       if(busyMode==='steer'&&S.activeStreamId&&typeof _trySteer==='function'){
         // Real steer: clear the input first so the user gets immediate
