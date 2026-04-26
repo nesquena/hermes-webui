@@ -1030,16 +1030,31 @@ function renderSessionListFromCache(){
     actions.appendChild(menuBtn);
     el.appendChild(actions);
 
-    // Use a click timer to distinguish single-click (navigate) from double-click (rename).
-    // This prevents loadSession from firing on the first click of a double-click,
-    // which would re-render the list and destroy the dblclick target before it fires.
-    let _clickTimer=null;
-    el.onclick=async(e)=>{
-      if(_renamingSid) return; // ignore while any rename is active
+    // Use pointerup + manual double-tap detection instead of onclick/ondblclick.
+    // onclick/ondblclick are unreliable on touch devices (iPad Safari especially):
+    // hover-triggered layout shifts, ghost clicks, and 300ms delay all break
+    // single-tap navigation. pointerup fires immediately on both mouse & touch.
+    let _lastTapTime=0;
+    let _tapTimer=null;
+    el.onpointerup=(e)=>{
+      if(_renamingSid) return;
       if(actions.contains(e.target)) return;
-      clearTimeout(_clickTimer);
-      _clickTimer=setTimeout(async()=>{
-        _clickTimer=null;
+      const now=Date.now();
+      if(now-_lastTapTime<350){
+        // Double-tap: rename
+        clearTimeout(_tapTimer);
+        _tapTimer=null;
+        _lastTapTime=0;
+        startRename();
+        return;
+      }
+      _lastTapTime=now;
+      // Single tap: wait to ensure it's not the first of a double-tap,
+      // then navigate
+      clearTimeout(_tapTimer);
+      _tapTimer=setTimeout(async()=>{
+        _tapTimer=null;
+        _lastTapTime=0;
         if(_renamingSid) return;
         // For CLI sessions, import into WebUI store first (idempotent)
         if(s.is_cli_session){
@@ -1049,14 +1064,7 @@ function renderSessionListFromCache(){
         }
         await loadSession(s.session_id);renderSessionListFromCache();
         if(typeof closeMobileSidebar==='function')closeMobileSidebar();
-      }, 220);
-    };
-    el.ondblclick=async(e)=>{
-      e.stopPropagation();
-      e.preventDefault();
-      clearTimeout(_clickTimer); // cancel the pending single-click navigation
-      _clickTimer=null;
-      startRename();
+      }, 300);
     };
     return el;
   }

@@ -242,8 +242,8 @@
      and attention indicator (26x26 at right:6px) still need 40px reserved
      when they're visible — covered by the hover / streaming / unread /
      menu-open / focus-within rule below. */
-  .session-item{padding:8px 8px;margin-bottom:2px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--muted);transition:background .15s,color .15s;display:flex;align-items:flex-start;gap:8px;min-width:0;position:relative;}
-  .session-item.streaming,.session-item.unread,.session-item:hover,.session-item:focus-within,.session-item.menu-open{padding-right:40px;}
+  .session-item{padding:8px 8px;margin-bottom:2px;border-radius:8px;cursor:pointer;font-size:13px;color:var(--muted);transition:background .15s,color .15s;display:flex;align-items:flex-start;gap:8px;min-width:0;position:relative;touch-action:manipulation;-webkit-tap-highlight-color:transparent;}
+  .session-item.streaming,.session-item.unread,.session-item:focus-within,.session-item.menu-open{padding-right:40px;}
   .session-item:hover{background:var(--hover-bg);color:var(--text);}
   .session-item.active{background:var(--accent-bg);color:var(--accent);}
   .session-item.streaming .session-title{color:var(--accent);}
