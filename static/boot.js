@@ -870,6 +870,8 @@ function applyBotName(){
   // separately below by a `pageshow` listener — the async IIFE here does NOT
   // re-run when the browser restores the page from bfcache.
   const _srch = document.getElementById('sessionSearch'); if (_srch) _srch.value = '';
+  // Initialize reasoning chip on boot (fixes #1103 — chip hidden until session load)
+  if(typeof fetchReasoningChip==='function') fetchReasoningChip();
   const saved=localStorage.getItem('hermes-webui-session');
   if(saved){
     try{
