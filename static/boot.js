@@ -648,10 +648,9 @@ function _setResolvedTheme(isDark){
   const want=isDark
     ?'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css'
     :'https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism.min.css';
-  const wantIntegrity=isDark
-    ?'sha384-wFjoQjtV1y5jVHbt0p35Ui8aV8GVpEZkyF99OXWqP/eNJDU93D3Ugxkoyh6Y2I4A'
-    :'sha384-rCCjoCPCsizaAAYVoz1Q0CmCTvnctK0JkfCSjx7IIxexTBg+uCKtFYycedUjMyA2';
-  if(link.href!==want){ link.integrity=wantIntegrity; link.href=want; }
+  // No SRI integrity on theme CSS — jsdelivr edge nodes serve different
+  // digests for the same pinned version, causing intermittent blocking (#1100).
+  if(link.href!==want){ link.integrity=''; link.href=want; }
 }
 
 function _applyTheme(name){
@@ -769,7 +768,15 @@ function _buildSkinPicker(activeSkin){
 }
 
 function applyBotName(){
-  const name=window._botName||'Hermes';
+  // Prefer profile name over global bot_name for personalised placeholder.
+  // If activeProfile is set and not 'default', use it (capitalised).
+  // Falls back to window._botName (global bot_name setting) or 'Hermes'.
+  let name;
+  if(S.activeProfile && S.activeProfile!=='default'){
+    name=S.activeProfile.charAt(0).toUpperCase()+S.activeProfile.slice(1);
+  }else{
+    name=window._botName||'Hermes';
+  }
   document.title=name;
   const sidebarH1=document.querySelector('.sidebar-header h1');
   if(sidebarH1) sidebarH1.textContent=name;
@@ -870,6 +877,8 @@ function applyBotName(){
   // separately below by a `pageshow` listener — the async IIFE here does NOT
   // re-run when the browser restores the page from bfcache.
   const _srch = document.getElementById('sessionSearch'); if (_srch) _srch.value = '';
+  // Initialize reasoning chip on boot (fixes #1103 — chip hidden until session load)
+  if(typeof fetchReasoningChip==='function') fetchReasoningChip();
   const saved=localStorage.getItem('hermes-webui-session');
   if(saved){
     try{

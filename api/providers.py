@@ -15,8 +15,11 @@ from typing import Any
 from api.config import (
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
+    _get_config_path,
+    _save_yaml_config_file,
     get_config,
     invalidate_models_cache,
+    reload_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -129,7 +132,7 @@ def _provider_has_key(provider_id: str) -> bool:
     Checks (in order):
     1. ``~/.hermes/.env`` for the known env var
     2. ``os.environ`` for the known env var
-    3. ``config.yaml → model.api_key``
+    3. ``config.yaml → model.api_key`` (only if provider is the active one)
     4. ``config.yaml → providers.<id>.api_key``
     5. ``config.yaml → custom_providers[].api_key`` (for custom providers)
     """
@@ -143,10 +146,14 @@ def _provider_has_key(provider_id: str) -> bool:
             return True
 
     cfg = get_config()
-    # Check model.api_key
+    # Check model.api_key — only match if this provider is the active one.
+    # Previously this checked globally, causing all providers to show
+    # "configured" when the active provider had a top-level api_key.
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict) and str(model_cfg.get("api_key") or "").strip():
-        return True
+        active_provider = model_cfg.get("provider")
+        if active_provider and str(active_provider).strip().lower() == provider_id.lower():
+            return True
     # Check providers.<id>.api_key
     providers_cfg = cfg.get("providers", {})
     if isinstance(providers_cfg, dict):
@@ -326,6 +333,90 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
 def remove_provider_key(provider_id: str) -> dict[str, Any]:
     """Remove the API key for a provider.
 
-    Convenience wrapper around ``set_provider_key(id, None)``.
+    Removes the key from ``~/.hermes/.env`` (via ``set_provider_key``)
+    and also cleans up ``config.yaml`` if the key is stored there
+    (``providers.<id>.api_key`` or top-level ``model.api_key`` when this
+    provider is the active one).
+
+    Returns a status dict with the operation result.
     """
-    return set_provider_key(provider_id, None)
+    result = set_provider_key(provider_id, None)
+
+    # Even if the .env removal succeeded, the key might also live in
+    # config.yaml (e.g. providers.<id>.api_key or model.api_key).
+    # Clean those up so _provider_has_key() returns False after removal.
+    if result.get("ok"):
+        _clean_provider_key_from_config(provider_id)
+
+    return result
+
+
+def _clean_provider_key_from_config(provider_id: str) -> None:
+    """Remove provider API key entries from config.yaml.
+
+    Handles three storage locations:
+    1. ``providers.<id>.api_key`` — per-provider key
+    2. ``model.api_key`` — top-level key (only if provider is active)
+    3. ``custom_providers[].api_key`` — custom provider entries
+
+    Writes back to config.yaml only if something was actually removed.
+    Uses ``_cfg_lock`` to prevent TOCTOU races.
+    """
+    from api.config import _cfg_lock
+
+    try:
+        config_path = _get_config_path()
+    except Exception:
+        return
+
+    if not config_path.exists():
+        return
+
+    try:
+        import yaml as _yaml
+
+        changed = False
+
+        with _cfg_lock:
+            raw = config_path.read_text(encoding="utf-8")
+            cfg = _yaml.safe_load(raw)
+            if not isinstance(cfg, dict):
+                return
+
+            # 1. Clean providers.<id>.api_key
+            providers_cfg = cfg.get("providers", {})
+            if isinstance(providers_cfg, dict):
+                provider_cfg = providers_cfg.get(provider_id, {})
+                if isinstance(provider_cfg, dict) and provider_cfg.get("api_key"):
+                    del provider_cfg["api_key"]
+                    changed = True
+
+            # 2. Clean model.api_key — only if this provider is the active one
+            model_cfg = cfg.get("model", {})
+            if isinstance(model_cfg, dict) and model_cfg.get("api_key"):
+                active_provider = model_cfg.get("provider")
+                if active_provider and str(active_provider).strip().lower() == provider_id.lower():
+                    del model_cfg["api_key"]
+                    changed = True
+
+            # 3. Clean custom_providers[].api_key
+            custom_providers = cfg.get("custom_providers", [])
+            if isinstance(custom_providers, list):
+                for cp in custom_providers:
+                    if isinstance(cp, dict):
+                        cp_name = (cp.get("name") or "").strip().lower().replace(" ", "-")
+                        if f"custom:{cp_name}" == provider_id or cp.get("name", "").strip().lower() == provider_id:
+                            if cp.get("api_key"):
+                                del cp["api_key"]
+                                changed = True
+
+            if changed:
+                _save_yaml_config_file(config_path, cfg)
+        # Sync in-memory cache and bust model TTL cache
+        # MUST be called outside _cfg_lock to avoid deadlock:
+        # _cfg_lock is a threading.Lock (non-reentrant) and
+        # reload_config() also acquires _cfg_lock internally.
+        if changed:
+            reload_config()
+    except Exception:
+        logger.exception("Failed to clean provider key from config.yaml for %s", provider_id)

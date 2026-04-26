@@ -90,7 +90,14 @@ def test_timestamp_hidden_when_attention_state_is_present():
     # focus-within all expand to 40px to make room for the absolute action
     # button + attention indicator.
     assert ".session-item{padding:8px 8px;" in STYLE_CSS
-    assert ".session-item.streaming,.session-item.unread,.session-item:hover,.session-item:focus-within,.session-item.menu-open{padding-right:40px;}" in STYLE_CSS
+    # PR #1110: :hover removed from the COMBINED padding-right rule (touch layout-shift fix).
+    # Instead, hover padding is restored via @media (hover:hover) which only applies to
+    # devices with a real hover capability (mouse). Touch/iPad devices satisfy hover:none
+    # and skip that block, preventing the layout-reflow mid-tap bug.
+    assert ".session-item.streaming,.session-item.unread,.session-item:focus-within,.session-item.menu-open{padding-right:40px;}" in STYLE_CSS
+    # Desktop hover padding restored via media query (mouse devices only)
+    assert "@media (hover:hover)" in STYLE_CSS
+    assert ".session-item:hover{padding-right:40px;}" in STYLE_CSS
     assert ".session-item{min-height:44px;padding:10px 40px 10px 12px;}" in STYLE_CSS
     # Timestamp now uses margin-left:auto inside the flex row instead of
     # absolute positioning. This stops the title's flex:1 bound from running
@@ -141,4 +148,15 @@ def test_apperror_path_calls_render_session_list():
     assert "renderSessionList()" in apperror_block, (
         "apperror handler must call renderSessionList() so the streaming indicator "
         "clears immediately on server errors, not after a 5s poll delay"
+    )
+
+
+def test_pointerup_ignores_non_primary_mouse_buttons():
+    """Right-click and middle-click must not trigger session navigation.
+    onpointerup fires for all mouse buttons; we filter to button===0
+    (primary). pointerType==='mouse' scopes the check to mouse only —
+    touch/stylus always report button===0 so they're unaffected."""
+    assert "e.pointerType==='mouse' && e.button!==0" in SESSIONS_JS, (
+        "pointerup handler must filter out non-primary mouse buttons "
+        "(right-click / middle-click must not navigate)"
     )

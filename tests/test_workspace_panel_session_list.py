@@ -220,18 +220,23 @@ class TestProjectDotPlacement:
         assert ".session-item{min-height:44px;padding:10px 40px 10px 12px;}" in STYLE_CSS
 
     def test_session_item_expands_padding_on_hover_and_attention(self):
-        """When hover/focus/menu-open/streaming/unread shows the action
-        button or attention indicator, padding-right expands to 40px to
-        reserve space for them (they're position:absolute at right:6px,
-        26px wide → 32px footprint, 40px gives 8px breathing)."""
+        """PR #1110: Touch layout-shift fix — :hover removed from the COMBINED
+        padding-right selector. Touch devices (iPad, phone) see hover:none so
+        they skip the @media (hover:hover) block below. Mouse devices see
+        hover:hover and get the padding-right on hover.
+        streaming/unread/focus-within/menu-open expand to 40px for all devices."""
+        # Touch-safe combined rule (no :hover in this one)
         sel = (
             ".session-item.streaming,.session-item.unread,"
-            ".session-item:hover,.session-item:focus-within,"
+            ".session-item:focus-within,"
             ".session-item.menu-open"
         )
         idx = STYLE_CSS.find(sel)
         assert idx >= 0, (
-            f"Combined hover/streaming/unread padding rule not found"
+            "Combined streaming/unread/focus-within/menu-open padding rule not found"
         )
         rule = STYLE_CSS[idx: STYLE_CSS.find("}", idx)]
         assert "padding-right:40px" in rule
+        # Desktop hover padding restored via @media (hover:hover) — mouse devices only
+        assert "@media (hover:hover)" in STYLE_CSS
+        assert ".session-item:hover{padding-right:40px;}" in STYLE_CSS

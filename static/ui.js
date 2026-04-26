@@ -50,6 +50,7 @@ function _setCompressionSessionLock(sid){
   window._compressionLockSid=sid||null;
 }
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
@@ -747,7 +748,6 @@ function renderMd(raw){
   // Detect MEDIA:<path-or-url> tokens emitted by the agent (e.g. screenshots,
   // generated images) and replace them with inline <img> or download links.
   // Stashed so the path/URL is never processed as markdown.
-  const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico)$/i;
   const media_stash=[];
   s=s.replace(/MEDIA:([^\s\)\]]+)/g,(_,raw_ref)=>{
     media_stash.push(raw_ref);
@@ -1546,14 +1546,34 @@ function showPromptDialog(opts={}){
 }
 
 
+function _copyText(text){
+  if(navigator.clipboard && window.isSecureContext){
+    return navigator.clipboard.writeText(text).catch(()=>{
+      // Fallback if clipboard API fails (e.g. permissions)
+      return _fallbackCopy(text);
+    });
+  }
+  return _fallbackCopy(text);
+}
+function _fallbackCopy(text){
+  return new Promise((resolve,reject)=>{
+    const ta=document.createElement('textarea');
+    ta.value=text;ta.style.cssText='position:fixed;left:0;top:0;width:2em;height:2em;padding:0;border:none;outline:none;box-shadow:none;background:transparent;z-index:-1';
+    document.body.appendChild(ta);
+    ta.focus();ta.select();
+    try{document.execCommand('copy');resolve();}
+    catch(e){reject(e);}
+    finally{document.body.removeChild(ta);}
+  });
+}
 function copyMsg(btn){
   const row=btn.closest('[data-raw-text]');
   const text=row?row.dataset.rawText:'';
   if(!text)return;
-  navigator.clipboard.writeText(text).then(()=>{
+  _copyText(text).then(()=>{
     const orig=btn.innerHTML;btn.innerHTML=li('check',13);btn.style.color='var(--blue)';
     setTimeout(()=>{btn.innerHTML=orig;btn.style.color='';},1500);
-  }).catch(()=>showToast('Copy failed'));
+  }).catch(()=>showToast(t('copy_failed')));
 }
 
 // ── Reconnect banner (B4/B5: reload resilience) ──
@@ -2255,7 +2275,14 @@ function renderMessages(){
     const isLastAssistant=!isUser&&vi===visWithIdx.length-1;
     let filesHtml='';
     if(m.attachments&&m.attachments.length){
-      filesHtml=`<div class="msg-files">${m.attachments.map(f=>`<div class="msg-file-badge">${li('paperclip',12)} ${esc(f)}</div>`).join('')}</div>`;
+      filesHtml=`<div class="msg-files">${m.attachments.map(f=>{
+        const fname=f.split('/').pop()||f;
+        if(_IMAGE_EXTS.test(fname)){
+          const imgUrl='api/media?path='+encodeURIComponent(f);
+          return `<img class="msg-media-img" src="${esc(imgUrl)}" alt="${esc(fname)}" loading="lazy" onclick="this.classList.toggle('msg-media-img--full')">`;
+        }
+        return `<div class="msg-file-badge">${li('paperclip',12)} ${esc(fname)}</div>`;
+      }).join('')}</div>`;
     }
     const bodyHtml = isUser ? esc(String(content)).replace(/\n/g,'<br>') : renderMd(_stripXmlToolCallsDisplay(String(content)));
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
@@ -2765,10 +2792,10 @@ function addCopyButtons(container){
     btn.textContent=t('copy');
     btn.onclick=(e)=>{
       e.stopPropagation();
-      navigator.clipboard.writeText(codeEl.textContent).then(()=>{
+      _copyText(codeEl.textContent).then(()=>{
         btn.textContent=t('copied');
         setTimeout(()=>{btn.textContent=t('copy');},1500);
-      });
+      }).catch(()=>{btn.textContent=t('copy_failed');setTimeout(()=>{btn.textContent=t('copy');},1500);});
     };
     const header=pre.previousElementSibling;
     if(header&&header.classList.contains('pre-header')){
@@ -3028,6 +3055,8 @@ function _renderTreeItems(container, entries, depth){
   for(const item of entries){
     const el=document.createElement('div');el.className='file-item';
     el.style.paddingLeft=(8+depth*16)+'px';
+    el.setAttribute('draggable','true');
+    el.ondragstart=(e)=>{e.dataTransfer.setData('application/ws-path',item.path);e.dataTransfer.setData('application/ws-type',item.type);e.dataTransfer.effectAllowed='copy';};
 
     if(item.type==='dir'){
       // Toggle arrow for directories

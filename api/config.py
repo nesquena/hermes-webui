@@ -1413,6 +1413,8 @@ def get_available_models() -> dict:
                 "OPENCODE_GO_API_KEY",
                 "MINIMAX_API_KEY",
                 "MINIMAX_CN_API_KEY",
+                "XAI_API_KEY",
+                "MISTRAL_API_KEY",
             ):
                 val = os.getenv(k)
                 if val:
@@ -1435,10 +1437,23 @@ def get_available_models() -> dict:
                 detected_providers.add("minimax")
             if all_env.get("DEEPSEEK_API_KEY"):
                 detected_providers.add("deepseek")
+            if all_env.get("XAI_API_KEY"):
+                detected_providers.add("x-ai")
+            if all_env.get("MISTRAL_API_KEY"):
+                detected_providers.add("mistralai")
             if all_env.get("OPENCODE_ZEN_API_KEY"):
                 detected_providers.add("opencode-zen")
             if all_env.get("OPENCODE_GO_API_KEY"):
                 detected_providers.add("opencode-go")
+
+        # Also detect providers explicitly listed in config.yaml providers section.
+        # A user may configure a provider key via config.yaml providers.<name>.api_key
+        # without setting the corresponding env var. (#604)
+        _cfg_providers = cfg.get("providers", {})
+        if isinstance(_cfg_providers, dict):
+            for _pid_key in _cfg_providers:
+                if _pid_key in _PROVIDER_MODELS:
+                    detected_providers.add(_pid_key)
 
         # 4. Fetch models from custom endpoint if base_url is configured
         auto_detected_models = []
@@ -1501,6 +1516,20 @@ def get_available_models() -> dict:
 
                 import socket
 
+                # Build set of hostnames from custom_providers config — these are
+                # user-explicitly configured endpoints and should not be blocked by SSRF.
+                _ssrf_trusted_hosts: set[str] = set()
+                _custom_providers_cfg = cfg.get("custom_providers", [])
+                if isinstance(_custom_providers_cfg, list):
+                    for _cp in _custom_providers_cfg:
+                        if not isinstance(_cp, dict):
+                            continue
+                        _cp_base = (_cp.get("base_url") or "").strip()
+                        if _cp_base:
+                            _cp_parsed = urlparse(_cp_base if "://" in _cp_base else f"http://{_cp_base}")
+                            if _cp_parsed.hostname:
+                                _ssrf_trusted_hosts.add(_cp_parsed.hostname.lower())
+
                 parsed_url = urlparse(
                     endpoint_url if "://" in endpoint_url else f"http://{endpoint_url}"
                 )
@@ -1521,7 +1550,7 @@ def get_available_models() -> dict:
                                         "lmstudio",
                                         "lm-studio",
                                     )
-                                )
+                                ) or (parsed_url.hostname or "").lower() in _ssrf_trusted_hosts
                                 if not is_known_local:
                                     raise ValueError(
                                         f"SSRF: resolved hostname to private IP {addr[0]}"
@@ -1564,22 +1593,34 @@ def get_available_models() -> dict:
             for _cp in _custom_providers_cfg:
                 if not isinstance(_cp, dict):
                     continue
-                _cp_model = _cp.get("model", "")
                 _cp_name = (_cp.get("name") or "").strip()
-                if _cp_model and _cp_model not in _seen_custom_ids:
-                    _cp_label = _get_label_for_model(_cp_model, [])
-                    _seen_custom_ids.add(_cp_model)
-                    if _cp_name:
-                        _slug = "custom:" + _cp_name.lower().replace(" ", "-")
-                        if _slug not in _named_custom_groups:
-                            _named_custom_groups[_slug] = (_cp_name, [])
+                _slug = ("custom:" + _cp_name.lower().replace(" ", "-")) if _cp_name else None
+
+                # Collect model IDs: singular "model" field first, then "models" dict keys
+                _cp_model_ids: list[str] = []
+                _cp_model = _cp.get("model", "")
+                if _cp_model:
+                    _cp_model_ids.append(_cp_model)
+                _cp_models_dict = _cp.get("models")
+                if isinstance(_cp_models_dict, dict):
+                    for _m_id in _cp_models_dict:
+                        if isinstance(_m_id, str) and _m_id.strip() and _m_id not in _cp_model_ids:
+                            _cp_model_ids.append(_m_id.strip())
+
+                for _cp_model in _cp_model_ids:
+                    if _cp_model and _cp_model not in _seen_custom_ids:
+                        _cp_label = _get_label_for_model(_cp_model, [])
+                        _seen_custom_ids.add(_cp_model)
+                        if _slug:
+                            if _slug not in _named_custom_groups:
+                                _named_custom_groups[_slug] = (_cp_name, [])
                             detected_providers.add(_slug)
-                        _named_custom_groups[_slug][1].append(
-                            {"id": _cp_model, "label": _cp_label}
-                        )
-                    else:
-                        auto_detected_models.append({"id": _cp_model, "label": _cp_label})
-                        detected_providers.add("custom")
+                            _named_custom_groups[_slug][1].append(
+                                {"id": _cp_model, "label": _cp_label}
+                            )
+                        else:
+                            auto_detected_models.append({"id": _cp_model, "label": _cp_label})
+                            detected_providers.add("custom")
 
         _has_custom_providers = isinstance(_custom_providers_cfg, list) and len(_custom_providers_cfg) > 0
         if active_provider and active_provider != "custom" and not _has_custom_providers:

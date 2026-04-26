@@ -4,6 +4,28 @@
 
 ### Fixed
 
+## v0.50.223 — 2026-04-26
+
+### Added
+- **Drag & drop workspace files into composer** — files and folders in the workspace file tree are now draggable; dropping them into the chat composer inserts an `@path` reference at the cursor with smart spacing. OS file drag-and-drop (attach files) still works as before. (`static/ui.js`, `static/panels.js`) [#1123 @bergeouss] Closes #1097
+- **Composer placeholder reflects active profile** — when a named profile is active (not `default`), the composer placeholder and title bar show the profile name (capitalised) instead of the global `bot_name`; falls back to `bot_name`/Hermes for the default profile. (`static/boot.js`, `static/panels.js`) [#1122 @bergeouss] Closes #1116
+
+### Fixed
+- **Copy buttons — clipboard-write Permissions-Policy** — added `clipboard-write=(self)` to the `Permissions-Policy` header so Firefox allows `navigator.clipboard.writeText()`. Extracted `_fallbackCopy()` with explicit `focus()` before `select()` and correct visible-but-hidden positioning (no more `-9999px` offscreen failure). (`api/helpers.py`, `static/ui.js`) [#1125 @bergeouss] Closes #1096
+- **Model picker shows all configured providers** — `XAI_API_KEY` and `MISTRAL_API_KEY` env vars now map to `x-ai` and `mistralai` respectively. Providers configured in `config.yaml` under `providers:` are also detected and shown in the model picker. (`api/config.py`) [#1126 @bergeouss] Partially closes #604
+- **api() retries on stale keep-alive after idle** — after a long idle period, `fetch()` throws a `TypeError` when the TCP connection has been dropped by a NAT or proxy timeout. `api()` in `workspace.js` now retries up to 3 times on `TypeError` only; 4xx/5xx HTTP errors and 401 redirects are not retried. (`static/workspace.js`) [#1121 @bergeouss] Closes #1118
+- **Google Fonts allowed in CSP** — Mermaid themes inject `@import url(fonts.googleapis.com)` at render time; the CSP `style-src` and `font-src` directives now include `fonts.googleapis.com` and `fonts.gstatic.com`. (`api/helpers.py`) [#1121 @bergeouss] Closes #1112
+
+## v0.50.221 — 2026-04-26
+
+### Fixed
+- **Custom providers model dropdown** — models dict keys in `custom_providers[].models` now all appear in the dropdown; previously only the singular `model` field was read. (`api/config.py`) [#1111 @bergeouss] Closes #1106
+- **Custom providers SSRF false positive** — hostnames from user-configured `custom_providers[].base_url` are now trusted through the SSRF check; local inference servers (llama.cpp, vLLM, TabbyAPI) no longer blocked. (`api/config.py`) [#1113 @bergeouss] Closes #1105
+- **Mobile/iPad session navigation** — tap no longer fails on first touch; replaced hover-triggered layout-shift pattern with `onpointerup` + right/middle-click filter + `touch-action:manipulation`. Desktop hover padding restored via `@media (hover:hover)` so mouse users are unaffected. (`static/sessions.js`, `static/style.css`) [#1110 @sheng-di]
+- **Pasted/dragged images render inline** — image attachments now show as `<img>` with click-to-fullscreen instead of a paperclip badge. Hoisted `_IMAGE_EXTS` to module scope (was causing `ReferenceError` in `renderMessages`); added `avif` support. (`static/ui.js`) [#1109 @bergeouss] Closes #1095
+- **Copy buttons on HTTP** — `_copyText()` helper checks `isSecureContext` and falls back to `execCommand('copy')` for plain-HTTP self-hosted installs. Silent failure in `addCopyButtons` fixed with error feedback. All 6 locales get `copy_failed` key. (`static/ui.js`, `static/i18n.js`) [#1107 @bergeouss] Closes #1096
+
+
 ## v0.50.220 — 2026-04-26
 
 ### Fixed
