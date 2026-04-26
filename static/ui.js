@@ -3404,25 +3404,26 @@ if(document.readyState==='loading'){
 
 /* ── Session Status Dots (PR #4 + PR #6 enhancements) ─────────────────────── */
 // CLI-busy recency window (seconds). Configurable via window.HERMES_CLI_BUSY_WINDOW_S.
-function _cliBusyWindow(){
-  const v=Number(window.HERMES_CLI_BUSY_WINDOW_S);
-  return Number.isFinite(v)&&v>0?v:15;
-}
+const _CLI_BUSY_WINDOW_S = 15;
 
 function updateSessionDots(){
   const dots=document.querySelectorAll('.session-item .status-dot');
   const nowSec=Date.now()/1000;
-  const win=_cliBusyWindow();
+  const _winOverride=(typeof window!=='undefined')&&Number(window.HERMES_CLI_BUSY_WINDOW_S);
+  const win=Number.isFinite(_winOverride)&&_winOverride>0?_winOverride:_CLI_BUSY_WINDOW_S;
   dots.forEach(dot=>{
     dot.className='status-dot';
+    dot.title='';
     const sid=dot.dataset.sessionId;
     const isCli=dot.dataset.cliSession==='1';
     const upd=Number(dot.dataset.updatedAt||0);
     if(S.busy&&S.session&&sid===S.session.session_id){
       dot.classList.add('running');
+      dot.title='busy';
     }else if(isCli&&upd&&(nowSec-upd)<=win){
       // CLI session updated recently → likely still busy.
       dot.classList.add('running');
+      dot.title=`CLI active (${Math.round(nowSec-upd)}s ago)`;
     }else if(S.session&&sid===S.session.session_id){
       dot.classList.add('recent');
     }

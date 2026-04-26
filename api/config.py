@@ -843,6 +843,16 @@ def resolve_model_provider(model_id: str) -> tuple:
 
     Returns (model, provider, base_url) where provider and base_url may be None.
     """
+    # Gateway models (@gateway-*:model/keyword) are handled by the gateway module
+    try:
+        from api.gateway_provider import is_gateway_model, resolve_gateway_model
+        if is_gateway_model(model_id or ""):
+            resolved = resolve_gateway_model(model_id)
+            if resolved:
+                return resolved["model"], resolved["provider"], resolved["base_url"]
+    except Exception:
+        pass  # gateway module missing — fall through to normal resolution
+
     config_provider = None
     config_base_url = None
     model_cfg = cfg.get("model", {})

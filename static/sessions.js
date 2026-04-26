@@ -12,6 +12,7 @@ const ICONS={
 
 // FNV-32 hash → 0..359 for stable per-conversation accent hue.
 function _hashHue(s){
+  s=String(s==null?'':s);
   let h=2166136261>>>0;
   for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619)>>>0;}
   return h%360;

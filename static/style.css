@@ -638,7 +638,7 @@
   .stream-cursor{display:inline-block;width:2px;height:1em;background:var(--blue);margin-left:1px;vertical-align:text-bottom;animation:blink-cursor 1s step-end infinite;}
   @keyframes blink-cursor{0%,100%{opacity:1;}50%{opacity:0;}}
   /* Per-conversation accent (PR #6) */
-  .session-item[style*="--conv-accent"]{border-left:3px solid color-mix(in srgb, var(--conv-accent) 70%, transparent);}
+  .session-item[style*="--conv-accent"]{border-left-width:3px;border-left-style:solid;border-left-color:color-mix(in srgb, var(--conv-accent) 70%, transparent);}
   .empty-state{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:40px;color:var(--muted);}
   .empty-logo{width:64px;height:64px;border-radius:20px;background:linear-gradient(145deg,var(--accent-bg),var(--accent-bg));border:1px solid var(--accent-bg);display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:700;color:var(--accent-text);margin-bottom:4px;box-shadow:0 4px 20px var(--accent-bg);}
   .empty-state h2{font-size:20px;color:var(--text);font-weight:700;letter-spacing:-.02em;}

@@ -147,7 +147,7 @@ class TestGatewayResolveIntegration(unittest.TestCase):
         result = resolve_gateway_model(model_id)
 
         self.assertIsNotNone(result)
-        self.assertEqual(result["model"], "gpt-4")
+        self.assertEqual(result["model"], "gw:gpt-4")
         self.assertIn("extra_headers", result)
         self.assertEqual(result["extra_headers"]["x-instance-keyword"], "my-cursor-1")
 
@@ -223,7 +223,7 @@ class TestConfigIntegration(unittest.TestCase):
         model_id = build_model_id("local", "gpt-4", "my-cursor-1")
         model, provider, base_url = resolve_model_provider(model_id)
 
-        self.assertEqual(model, "gpt-4")
+        self.assertEqual(model, "gw:gpt-4")
         self.assertEqual(provider, "openai")
         self.assertIn("/cursor/v1", base_url)
 
