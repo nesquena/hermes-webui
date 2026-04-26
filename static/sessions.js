@@ -1182,6 +1182,20 @@ function _showProjectPicker(session, anchorEl){
   setTimeout(()=>document.addEventListener('click',close),0);
 }
 
+// Resize a .project-create-input to fit its current value (or placeholder).
+// Bounded by the CSS min-width:40px / max-width:180px on the same class so
+// the input is never comically tiny nor wider than the project bar.
+// Uses a hidden span sized with the same font/padding to measure text width.
+function _resizeProjectInput(inp){
+  const sizer=document.createElement('span');
+  sizer.style.cssText='position:absolute;visibility:hidden;white-space:pre;font-size:10px;padding:0 8px;font-family:inherit;';
+  sizer.textContent=inp.value||inp.placeholder||' ';
+  document.body.appendChild(sizer);
+  const w=Math.min(180,Math.max(40,sizer.offsetWidth+2));
+  document.body.removeChild(sizer);
+  inp.style.width=w+'px';
+}
+
 function _startProjectCreate(bar, addBtn){
   const inp=document.createElement('input');
   inp.className='project-create-input';
@@ -1205,7 +1219,9 @@ function _startProjectCreate(bar, addBtn){
     if(e.key==='Escape'){e.preventDefault();finish(false);}
   };
   inp.onblur=()=>finish(false);
+  inp.addEventListener('input',()=>_resizeProjectInput(inp));
   addBtn.replaceWith(inp);
+  _resizeProjectInput(inp);
   setTimeout(()=>inp.focus(),10);
 }
 
@@ -1232,7 +1248,9 @@ function _startProjectRename(proj, chip){
   };
   inp.onblur=()=>finish(false);
   inp.onclick=(e)=>e.stopPropagation();
+  inp.addEventListener('input',()=>_resizeProjectInput(inp));
   chip.replaceWith(inp);
+  _resizeProjectInput(inp);
   setTimeout(()=>{inp.focus();inp.select();},10);
 }
 
@@ -1240,7 +1258,11 @@ function _showProjectContextMenu(e, proj, chip){
   document.querySelectorAll('.project-ctx-menu').forEach(el=>el.remove());
   const menu=document.createElement('div');
   menu.className='project-ctx-menu';
-  menu.style.cssText='position:fixed;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:6px 0;z-index:9999;min-width:140px;box-shadow:0 4px 16px rgba(0,0,0,.35);';
+  // background: var(--surface) — fully-opaque theme variable (not var(--panel),
+  // which is undefined in this codebase and falls back to transparent, letting
+  // the session list show through the menu). Same variable used by
+  // .session-action-menu and other floating popovers.
+  menu.style.cssText='position:fixed;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 0;z-index:9999;min-width:140px;box-shadow:0 4px 16px rgba(0,0,0,.35);';
   menu.style.left=e.clientX+'px';
   menu.style.top=e.clientY+'px';
 
