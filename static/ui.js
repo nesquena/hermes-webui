@@ -769,8 +769,16 @@ function renderMd(raw){
   //   3. After the fenced-code pass, lines of > preceding/following code
   //      blocks were left as literals because .+ didn't match empty lines
   s=s.replace(/((?:^>[^\n]*(?:\n|$))+)/gm,block=>{
-    const inner=block.split('\n')
-      .filter((_,i,a)=>i<a.length-1||_.trim()!='>')  // drop lone trailing '>' artifact
+    const lines=block.split('\n');
+    // Drop trailing artifacts: empty string from a trailing \n in the match
+    // (split adds '' after the final \n) and lone bare '>' lines that
+    // weren't intended as content. Without this, a blockquote whose source
+    // ends with \n (the common case — anything followed by another block)
+    // renders with a phantom <br> before </blockquote>.
+    while(lines.length&&(lines[lines.length-1].trim()===''||lines[lines.length-1].trim()==='>')){
+      lines.pop();
+    }
+    const inner=lines
       .map(l=>l.replace(/^>[ \t]?/,''))               // strip "> " or ">"
       .map(l=>l.trim()===''?'<br>':inlineMd(l))        // blank lines → <br>, text → inlineMd
       .join('\n');
