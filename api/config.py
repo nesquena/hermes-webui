@@ -1145,6 +1145,13 @@ def invalidate_models_cache():
     Call this after modifying config.cfg in-memory (e.g. in tests) so
     the next call to get_available_models() picks up the changes rather
     than returning a stale cached result.
+
+    Also deletes the on-disk cache so that a subsequent cold build does
+    not immediately reload a stale disk snapshot and skip the fresh build.
+    This is essential for test isolation: without the disk delete, tests
+    that call invalidate_models_cache() still get back the previous test's
+    result from /dev/shm because the disk hit is checked before the memory
+    cache rebuild runs.
     """
     global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts, _cache_build_cv
     with _available_models_cache_lock:
@@ -1157,6 +1164,9 @@ def invalidate_models_cache():
         # stale CredentialPool from a prior auth_store payload — the test_
         # credential_pool_providers suite was hitting this directly.
         _CREDENTIAL_POOL_CACHE.clear()
+    # Also delete the disk cache so the next cold build starts fresh.
+    # Disk delete is outside the lock — file I/O shouldn't block other readers.
+    _delete_models_cache_on_disk()
 
 
 def invalidate_provider_models_cache(provider_id: str):
@@ -1738,7 +1748,14 @@ def get_available_models() -> dict:
         # Cold path: full rebuild — only one thread reaches here at a time
         with _cache_build_cv:
             _cache_build_in_progress = True
-        result = _build_available_models_uncached()
+        try:
+            result = _build_available_models_uncached()
+        except Exception:
+            # Always reset the flag so waiting threads don't block for 60s
+            with _cache_build_cv:
+                _cache_build_in_progress = False
+                _cache_build_cv.notify_all()
+            raise
         with _cache_build_cv:
             _available_models_cache = result
             _available_models_cache_ts = time.monotonic()
