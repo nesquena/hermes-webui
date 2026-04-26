@@ -8,7 +8,7 @@
 - **Compact sidebar timestamps** — session timestamps in the left sidebar now show short labels (`1m`, `6m`, `1h`, `1d`, `1w`) instead of verbose strings like "6 minutes ago". Keeps all existing i18n paths; bucket headers (Today, Yesterday, This week) unchanged. (`static/sessions.js`, `static/i18n.js`) [#1057 @pavolbiely]
 
 ### Added
-- **Adaptive session title refresh** — new opt-in setting (`Settings → Appearance → Adaptive title refresh`) re-generates the session title from the latest exchange every N turns (5, 10, or 20). Off by default. Runs in a daemon thread after stream end, never blocks the stream. Manual title renames are preserved (double-checked before and after LLM call). (`api/streaming.py`, `api/config.py`, `static/panels.js`, `static/i18n.js`, `static/index.html`) [#1058 @bergeouss]
+- **Adaptive session title refresh** — new opt-in setting (`Settings → Preferences → Adaptive title refresh`) re-generates the session title from the latest exchange every N turns (5, 10, or 20). Off by default. Runs in a daemon thread after stream end, never blocks the stream. Manual title renames are preserved (double-checked before and after LLM call). (`api/streaming.py`, `api/config.py`, `static/panels.js`, `static/i18n.js`, `static/index.html`) [#1058 @bergeouss]
 
 ### Fixed
 - **Settings picker active state** — theme, skin, and font-size picker cards in Settings → Appearance now correctly highlight the selected option. Root cause: the base CSS rule used `!important` on `border-color`, overriding the inline style set by `_syncThemePicker()` and siblings. Fix moves to an `.active` class with its own `!important` rule. (`static/style.css`, `static/boot.js`) [#1059]
