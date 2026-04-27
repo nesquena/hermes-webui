@@ -8,14 +8,19 @@ This runbook preserves the operational context for the Capy WebUI on Brendan's M
 - Process manager: user launchd LaunchAgent
 - LaunchAgent: `/Users/bschmidy10/Library/LaunchAgents/com.capy.webui.plist`
 - Service label: `com.capy.webui`
+- Entrypoint: `/Users/bschmidy10/hermes-webui/server.py`
+- Python: `/Users/bschmidy10/.hermes/hermes-agent/venv/bin/python`
 - Local URL: `http://127.0.0.1:8787/`
 - Local health: `http://127.0.0.1:8787/health`
 - Tailnet health: `https://capy.tail9c6e3.ts.net/health`
+- State dir: `/Users/bschmidy10/.hermes/webui-mvp`
+- Default workspace: `/Users/bschmidy10/workspace`
+- Bot name: `Capy`
 - Logs:
   - `/Users/bschmidy10/.hermes/webui-mvp/launchd.out.log`
   - `/Users/bschmidy10/.hermes/webui-mvp/launchd.err.log`
 
-The WebUI stays bound to localhost. Tailscale Serve exposes it privately to the tailnet by proxying `https://capy.tail9c6e3.ts.net/` to `http://127.0.0.1:8787/`.
+The WebUI stays bound to localhost. Tailscale Serve exposes it privately to the tailnet by proxying `https://capy.tail9c6e3.ts.net/` to `http://127.0.0.1:8787/`. On this Mac, the Tailscale CLI lives at `/Applications/Tailscale.app/Contents/MacOS/tailscale`.
 
 ## Decisions
 
