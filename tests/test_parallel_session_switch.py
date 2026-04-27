@@ -446,3 +446,89 @@ class TestMessagePaginationFrontend:
         assert idx >= 0, (
             "_oldestIdx must be reset to 0 alongside _messagesTruncated on session switch"
         )
+
+
+# ── 5. Session-switch cancellation safety ───────────────────────────────────
+
+
+class TestSessionSwitchCancellation:
+    """When the user switches sessions while _loadOlderMessages is in-flight,
+    the stale response must NOT land on the new session's message array.
+
+    Guarards in place:
+    - _loadOlderMessages captures `sid` at entry, checks _loadingSessionId
+      after await (line ~373)
+    - loadSession resets _loadingOlder, _messagesTruncated, _oldestIdx
+      on session switch (line ~120-122)
+    """
+
+    def test_load_older_checks_loading_session_id(self):
+        """_loadOlderMessages must check _loadingSessionId after await."""
+        fn_start = SESSIONS_JS.find("async function _loadOlderMessages")
+        fn_end = SESSIONS_JS.find("\n}", fn_start) + 2
+        fn_body = SESSIONS_JS[fn_start:fn_end]
+
+        assert "_loadingSessionId" in fn_body, (
+            "_loadOlderMessages must check _loadingSessionId after the API "
+            "call returns to detect session-switch race conditions."
+        )
+        # The guard should be: if _loadingSessionId !== null && _loadingSessionId !== sid
+        assert "_loadingSessionId !== null" in fn_body or "_loadingSessionId!==null" in fn_body, (
+            "_loadOlderMessages should bail out if a new session load started "
+            "while the older-messages request was in flight."
+        )
+
+    def test_loading_older_reset_on_session_switch(self):
+        """loadSession must reset _loadingOlder when switching sessions."""
+        # Find the reset block in loadSession
+        marker = "_messagesTruncated = false;\n    _oldestIdx = 0;\n    _loadingOlder = false;"
+        idx = SESSIONS_JS.find(marker)
+        assert idx >= 0, (
+            "loadSession must reset _loadingOlder=false on session switch "
+            "to prevent a stale _loadOlderMessages lock from blocking the "
+            "new session's scroll-to-top loading."
+        )
+
+    def test_stale_cannot_mutate_messages(self):
+        """Verify the guard prevents S.messages mutation.
+
+        The guard `if (_loadingSessionId !== null && _loadingSessionId !== sid) return`
+        runs BEFORE `S.messages = [...olderMsgs, ...S.messages]`.
+        If the session changed, we return early — no mutation.
+        """
+        fn_start = SESSIONS_JS.find("async function _loadOlderMessages")
+        fn_end = SESSIONS_JS.find("\n}", fn_start) + 2
+        fn_body = SESSIONS_JS[fn_start:fn_end]
+
+        # Guard must appear before S.messages mutation
+        guard_idx = fn_body.find("_loadingSessionId")
+        mutation_idx = fn_body.find("S.messages = [...olderMsgs")
+        assert guard_idx >= 0 and mutation_idx >= 0 and guard_idx < mutation_idx, (
+            "The _loadingSessionId guard must appear BEFORE the S.messages "
+            "mutation to prevent stale data from landing on the wrong session."
+        )
+
+    def test_messages_truncated_reset_on_switch(self):
+        """loadSession must reset _messagesTruncated on session switch."""
+        marker = "_messagesTruncated = false;\n    _oldestIdx = 0;\n    _loadingOlder = false;"
+        idx = SESSIONS_JS.find(marker)
+        assert idx >= 0, (
+            "_messagesTruncated must be reset to false on session switch "
+            "to prevent the scroll-to-top handler from trying to load "
+            "older messages from the previous session."
+        )
+
+    def test_oldest_idx_reset_prevents_wrong_cursor(self):
+        """_oldestIdx=0 after switch prevents passing stale cursor to API."""
+        # If _oldestIdx carried over from session A (e.g. _oldestIdx=70),
+        # and session B only has 10 messages, msg_before=70 would return empty.
+        # Resetting to 0 ensures session B starts fresh.
+        fn_start = SESSIONS_JS.find("async function _loadOlderMessages")
+        fn_end = SESSIONS_JS.find("\n}", fn_start) + 2
+        fn_body = SESSIONS_JS[fn_start:fn_end]
+
+        # _loadOlderMessages checks _oldestIdx <= 0 early and exits
+        assert "_oldestIdx <= 0" in fn_body, (
+            "_loadOlderMessages should bail out if _oldestIdx <= 0, "
+            "which is the reset value after session switch."
+        )
