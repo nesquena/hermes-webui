@@ -1346,45 +1346,6 @@ function _updateQueuePill(sid,count){
   }
 }
 
-function _syncQueueTitlebar(sid,count){
-  const sub=document.getElementById('appTitlebarSub');
-  if(!sub) return;
-  if(count>0){
-    const label=typeof t==='function'?t('queued_count',count):(count===1?'1 queued':`${count} queued`);
-    sub.textContent=label;
-    sub.hidden=false;
-    sub.setAttribute('role','button');
-    sub.setAttribute('tabindex','0');
-    sub.setAttribute('aria-label',label);
-    sub.style.cursor='pointer';sub.style.color='var(--muted)';sub.style.fontWeight='600';sub.style.fontSize='11px';sub.style.background='var(--hover-bg)';sub.style.padding='2px 6px';sub.style.borderRadius='6px';sub.style.border='1px solid var(--border)';
-    const toggleQueue=()=>{
-      const activeSid=S.session&&S.session.session_id;
-      if(!activeSid) return;
-      const qCard=document.getElementById('queueCard');
-      if(!qCard) return;
-      if(qCard.classList.contains('visible')){
-        qCard.classList.remove('visible');
-        // Show pill since flyout is now hidden
-        const liveCount=_getSessionQueue(activeSid,false).length;
-        _updateQueuePill(activeSid,liveCount);
-      } else {
-        qCard.classList.add('visible');
-        // Hide pill since flyout is now showing
-        _updateQueuePill(activeSid,0);
-        if(typeof scrollToBottom==='function') scrollToBottom();
-      }
-    };
-    sub.onclick=toggleQueue;
-    sub.onkeydown=(e)=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();toggleQueue();}};
-    sub.title='Click to show/hide queue panel';
-  } else {
-    sub.textContent='';sub.hidden=true;
-    sub.removeAttribute('role');sub.removeAttribute('tabindex');sub.removeAttribute('aria-label');
-    sub.style.cssText='';
-    sub.onclick=null;sub.onkeydown=null;
-  }
-}
-
 function updateQueueBadge(sessionId){
   const sid=sessionId||(S.session&&S.session.session_id);
   const count=sid?getQueuedSessionCount(sid):0;
@@ -1409,8 +1370,6 @@ function updateQueueBadge(sessionId){
       _updateQueuePill(sid,0);
     }
   }
-  // Only update titlebar if this is the active session
-  if(!S.session||sid===S.session.session_id) _syncQueueTitlebar(sid,count);
 }
 function showToast(msg,ms,type){const el=$('toast');if(!el)return;const s=String(msg==null?'':msg);let t=type;if(!t){const low=s.toLowerCase();if(/fail|error|denied|invalid|unavailable|no active|no workspace match|no model match|no personalities/.test(low))t='error';else if(/warn|queued|takes effect|skipped|fallback/.test(low))t='warning';else if(/saved|created|imported|restored|switched|set to|updated|duplicated|moved to|renamed|deleted|complete|pinned|archived|cleared|stopped/.test(low))t='success';else t='info';}el.textContent=s;el.className='toast show '+t;clearTimeout(el._t);el._t=setTimeout(()=>{el.classList.remove('show');},ms||2800);}
 
@@ -1859,7 +1818,6 @@ function syncTopbar(){
   const vis=S.messages.filter(m=>m&&m.role&&m.role!=='tool');
   const _topbarMeta=$('topbarMeta');if(_topbarMeta)_topbarMeta.textContent=t('n_messages',vis.length);
   if(typeof syncAppTitlebar==='function') syncAppTitlebar();
-  if(typeof _syncQueueTitlebar==='function'){const _qs=S.session&&S.session.session_id;_syncQueueTitlebar(_qs,_qs?getQueuedSessionCount(_qs):0);}
   // If a profile switch just happened, apply its model rather than the session's stale value.
   // S._pendingProfileModel is set by switchToProfile() and cleared here after one application.
   const modelOverride=S._pendingProfileModel;
