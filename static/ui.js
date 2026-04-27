@@ -3257,6 +3257,7 @@ function renderTray(){
 }
 function addFiles(files){for(const f of files){if(!S.pendingFiles.find(p=>p.name===f.name))S.pendingFiles.push(f);}renderTray();}
 async function uploadPendingFiles(){
+  if(!S.pendingFiles.length||!S.session)return[];
   const names=[];let failures=0;
   const bar=$('uploadBar');const barWrap=$('uploadBarWrap');
   barWrap.classList.add('active');bar.style.width='0%';
