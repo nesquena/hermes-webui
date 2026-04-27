@@ -1,0 +1,140 @@
+name: Track Upstream
+
+# Keeps ash's fork rebased onto nesquena/hermes-webui:master.
+#
+# Daily at 06:00 UTC (offset from upstream's typical evening release window):
+#   1. Fetch upstream/master
+#   2. If we're not behind, no-op
+#   3. Try to rebase our 8 custom commits onto upstream/master
+#   4a. Clean rebase  → force-push to ash/master + trigger hermesdeploy-image build
+#   4b. Conflicts     → push the conflicted state to a branch + open a PR for manual resolution
+#
+# Manual trigger via "Run workflow" is supported for ad-hoc syncing.
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write  # needed to trigger the image-build workflow on success
+
+jobs:
+  rebase-onto-upstream:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout ash/master with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/nesquena/hermes-webui.git
+
+      - name: Fetch upstream master
+        run: git fetch upstream master
+
+      - name: Determine sync state
+        id: state
+        run: |
+          BEHIND=$(git rev-list --count HEAD..upstream/master)
+          AHEAD=$(git rev-list --count upstream/master..HEAD)
+          UPSTREAM_HEAD=$(git rev-parse upstream/master)
+          echo "behind=$BEHIND"   >> "$GITHUB_OUTPUT"
+          echo "ahead=$AHEAD"     >> "$GITHUB_OUTPUT"
+          echo "upstream=$UPSTREAM_HEAD" >> "$GITHUB_OUTPUT"
+          echo ""
+          echo "ash/master is $BEHIND commits behind / $AHEAD commits ahead of upstream/master."
+          echo "Latest upstream commit: $UPSTREAM_HEAD"
+
+      - name: No-op if already up to date
+        if: steps.state.outputs.behind == '0'
+        run: echo "Already up to date — exiting."
+
+      - name: Attempt rebase
+        if: steps.state.outputs.behind != '0'
+        id: rebase
+        continue-on-error: true
+        run: |
+          set +e
+          git rebase upstream/master
+          STATUS=$?
+          set -e
+          if [ "$STATUS" -eq 0 ]; then
+            echo "status=clean" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=conflict" >> "$GITHUB_OUTPUT"
+            # Capture conflict summary before aborting
+            git diff --name-only --diff-filter=U > /tmp/conflicted_files.txt || true
+            git rebase --abort || true
+          fi
+
+      - name: Push (clean rebase)
+        if: steps.rebase.outputs.status == 'clean'
+        run: |
+          git push origin master --force-with-lease
+          echo "✓ ash/master rebased onto upstream/master ($BEHIND new commits absorbed)."
+        env:
+          BEHIND: ${{ steps.state.outputs.behind }}
+
+      - name: Trigger image build (clean rebase)
+        if: steps.rebase.outputs.status == 'clean'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run hermesdeploy-image.yml --ref master
+          echo "✓ Triggered hermesdeploy-image build for new master."
+
+      - name: Open PR (conflicted rebase)
+        if: steps.rebase.outputs.status == 'conflict'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="upstream-sync-$(date +%Y%m%d-%H%M%S)"
+          git checkout -B "$BRANCH" upstream/master
+
+          # Cherry-pick our custom commits one at a time so the PR diff cleanly
+          # shows where conflicts landed; record any failures into the PR body.
+          CUSTOM_COMMITS=$(git log --reverse --format=%H "$BRANCH"..origin/master 2>/dev/null || true)
+          FAILED=""
+          for sha in $CUSTOM_COMMITS; do
+            if ! git cherry-pick --no-commit "$sha"; then
+              FAILED="${FAILED}- ${sha} ($(git log -1 --format=%s "$sha"))%0A"
+              git cherry-pick --abort || true
+            else
+              git commit --allow-empty -m "$(git log -1 --format='%s%n%n%b' "$sha")"
+            fi
+          done
+
+          git push origin "$BRANCH"
+
+          CONFLICTED=$(cat /tmp/conflicted_files.txt 2>/dev/null | tr '\n' ' ')
+          BODY=$(cat <<EOF
+          Auto-track-upstream detected new commits on \`nesquena/hermes-webui:master\`
+          but the rebase of ash's custom commits hit conflicts.
+
+          **Upstream HEAD**: ${{ steps.state.outputs.upstream }}
+          **Behind by**: ${{ steps.state.outputs.behind }} commits
+          **Conflicted files**: ${CONFLICTED:-(see cherry-pick attempts below)}
+
+          **Cherry-pick failures**:
+          ${FAILED:-(none — conflicts were in the rebase itself)}
+
+          Resolve conflicts on this branch, push, then merge into master.
+          The hermesdeploy-image build will fire automatically on merge.
+          EOF
+          )
+          gh pr create \
+            --title "Sync upstream — manual conflict resolution required" \
+            --body "$BODY" \
+            --base master --head "$BRANCH"
