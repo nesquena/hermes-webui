@@ -746,10 +746,15 @@ function renderSessionListFromCache(){
   // Merge content matches (deduped): content matches appended after title matches
   const titleIds=new Set(titleMatches.map(s=>s.session_id));
   const allMatched=q?[...titleMatches,..._contentSearchResults.filter(s=>!titleIds.has(s.session_id))]:titleMatches;
+  // Never surface ephemeral 0-message sessions in the sidebar — they only become
+  // real once the first message is sent. The server already filters them, but this
+  // guard ensures a brand-new active session doesn't flash into the list while
+  // _allSessions is stale from a prior render (#1171).
+  const withMessages=allMatched.filter(s=>(s.message_count||0)>0 || (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0));
   // Filter by active profile (unless "All profiles" is toggled on)
   // Server backfills profile='default' for legacy sessions, so every session has a profile.
   // Show only sessions tagged to the active profile; 'All profiles' toggle overrides.
-  const profileFiltered=_showAllProfiles?allMatched:allMatched.filter(s=>s.is_cli_session||s.profile===S.activeProfile);
+  const profileFiltered=_showAllProfiles?withMessages:withMessages.filter(s=>s.is_cli_session||s.profile===S.activeProfile);
   // Filter by active project
   const projectFiltered=_activeProject?profileFiltered.filter(s=>s.project_id===_activeProject):profileFiltered;
   // Filter archived unless toggle is on
@@ -798,7 +803,7 @@ function renderSessionListFromCache(){
     list.appendChild(bar);
   }
   // Profile filter toggle (show sessions from other profiles)
-  const otherProfileCount=allMatched.filter(s=>s.profile&&s.profile!==S.activeProfile).length;
+  const otherProfileCount=withMessages.filter(s=>s.profile&&s.profile!==S.activeProfile).length;
   if(otherProfileCount>0&&!_showAllProfiles){
     const pfToggle=document.createElement('div');
     pfToggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
