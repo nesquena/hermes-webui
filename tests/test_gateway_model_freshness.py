@@ -57,12 +57,20 @@ def fake_gateway(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _clear_gateway_cache(monkeypatch):
-    """Isolate the global model cache between tests in this module."""
+    """Isolate the global model cache between tests in this module.
+
+    Clears both the in-memory and on-disk model cache before each test so that
+    test ordering cannot pollute results (e.g. an earlier test that called
+    get_available_models() and saved gateway-only data to disk).
+    """
     from api import config
     monkeypatch.setattr(config, "_available_models_cache", None)
     monkeypatch.setattr(config, "_available_models_cache_ts", 0.0)
-    # Prevent disk cache reads from interfering with monkeypatched memory state
-    monkeypatch.setattr(config, "_load_models_cache_from_disk", lambda: None)
+    # Delete the disk cache so disk_groups (loaded before the lock) is None.
+    # Without this, an earlier test's get_available_models() may have saved
+    # gateway-only data to models_cache.json, which would be loaded as disk_groups
+    # and used if the memory cache path somehow isn't taken.
+    config._delete_models_cache_on_disk()
 
 
 @pytest.fixture(autouse=False)
@@ -70,7 +78,20 @@ def warm_cache(monkeypatch):
     """Pre-populate the model cache so we exercise the cached fast-path."""
     from api import config
     import time as _t
-    # Force-set both values under monkeypatch so teardown restores them
+    import pathlib
+    # Prevent disk cache from interfering: force _load_models_cache_from_disk to return
+    # None so that disk_groups is always None inside get_available_models(), ensuring
+    # the memory cache (set below) is the sole source of truth.
+    monkeypatch.setattr(config, "_load_models_cache_from_disk", lambda: None)
+    # Prevent _cfg_changed from nuking the warm cache: synchronise _cfg_mtime to the
+    # actual config file mtime so get_available_models() sees _cfg_changed = False.
+    try:
+        _cfg_path = config._get_config_path()
+        _mtime = pathlib.Path(_cfg_path).stat().st_mtime if pathlib.Path(_cfg_path).exists() else 0.0
+    except Exception:
+        _mtime = 0.0
+    monkeypatch.setattr(config, "_cfg_mtime", _mtime)
+    # Set the warm in-memory cache with a known openai group and fresh timestamp.
     monkeypatch.setattr(config, "_available_models_cache",
                         {"active_provider": None, "default_model": "x",
                          "groups": [{"provider": "openai",
@@ -144,13 +165,6 @@ def test_gateway_models_removed_disappear_immediately(fake_gateway, warm_cache):
     )
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="Known ordering-dependent isolation issue in full suite — passes when run in "
-           "isolation. The global model cache is populated with gateway-only data by an "
-           "earlier test before the warm_cache fixture can seed openai groups. Tracked for "
-           "a follow-up fix to the test infrastructure."
-)
 def test_cached_non_gateway_groups_are_preserved(fake_gateway, warm_cache):
     """The cache fast-path still serves the heavy provider list — only
     the gateway slice is recomputed."""
@@ -160,6 +174,7 @@ def test_cached_non_gateway_groups_are_preserved(fake_gateway, warm_cache):
         "provider": "gateway-prod",
         "models": [{"id": "gateway-prod/claude", "label": "C"}],
     }]
+
     result = get_available_models()
     providers = [g.get("provider") for g in result.get("groups", [])]
     # The warm-cache fixture seeded an "openai" group; it must survive.
