@@ -891,6 +891,20 @@ function applyBotName(){
   if(saved){
     try{
       await loadSession(saved);
+      // If the restored session has no messages it is an ephemeral scratch pad —
+      // treat the page as a fresh start rather than resuming a blank conversation.
+      // The session stays on disk (it will be cleaned up later) but we don't surface
+      // it or lock the user into it. Clear the stored ID so a true new session is
+      // created the first time the user hits + or sends a message (#1171).
+      if(S.session && (S.session.message_count||0) === 0){
+        localStorage.removeItem('hermes-webui-session');
+        S.session=null; S.messages=[];
+        S._bootReady=true;
+        syncTopbar();syncWorkspacePanelState();
+        $('emptyState').style.display='';
+        await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();
+        return;
+      }
       // Restore the panel from localStorage when the session has a workspace.
       // Preference key takes priority over runtime state so that closing
       // the panel via toolbar X doesn't suppress the "keep open" setting.
