@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Fixed
+- **Auto-title generic fallback** — when the auxiliary title-generation call
+  fails and the local fallback can only produce the generic label
+  `Conversation topic`, the WebUI now keeps the existing provisional title
+  instead of persisting the generic placeholder as a generated title. The
+  `title_status` diagnostic still preserves the underlying LLM failure reason.
+  (`api/streaming.py`, `tests/test_title_aux_routing.py`) Closes #1155.
 - **Recurring cron jobs with no next run need attention** — the Tasks panel now
   distinguishes anomalous recurring jobs (`enabled=false`, `state=completed`,
   `next_run_at=null`) from ordinary off jobs, shows a warning with recovery
