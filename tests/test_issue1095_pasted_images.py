@@ -131,7 +131,7 @@ class TestChatHistoryImageRendering:
         ui = _read_js('ui.js')
         m = re.search(r'm\.attachments&&m\.attachments\.length', ui)
         body = ui[m.start():m.start() + 1200]
-        assert 'msg-media-img--full' in body, 'Chat history images must toggle fullscreen on click'
+        assert '_openImgLightbox' in body, 'Chat history images must open lightbox on click'
 
     def test_attachment_render_non_image_keeps_paperclip(self):
         """Non-image attachments in chat history must still show paperclip badge."""
