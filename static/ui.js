@@ -1200,10 +1200,10 @@ function _renderQueueChips(sid){
     clearBtn.onclick=()=>{q.length=0;_saveAndRefresh();};
     actions.appendChild(mergeBtn);
     actions.appendChild(clearBtn);
-    // Hide button — collapses flyout entirely; titlebar "N queued" re-shows it
+    // Hide button — collapses flyout entirely; queue pill re-shows it
     const hideBtn=document.createElement('button');
     hideBtn.className='queue-card-icon-btn';
-    hideBtn.title='Hide queue (click the titlebar badge to show again)';
+    hideBtn.title='Hide queue (click the queue pill to show again)';
     hideBtn.setAttribute('aria-label','Hide queue panel');
     hideBtn.innerHTML=li('chevron-down',14);
     hideBtn.onclick=()=>{
