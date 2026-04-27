@@ -2614,9 +2614,9 @@ function buildToolCard(tc){
   let displaySnippet='';
   if(tc.snippet){
     const s=tc.snippet;
-    if(s.length<=220){displaySnippet=s;}
+    if(s.length<=800){displaySnippet=s;}
     else{
-      const cutoff=s.slice(0,220);
+      const cutoff=s.slice(0,800);
       const lastBreak=Math.max(cutoff.lastIndexOf('. '),cutoff.lastIndexOf('\n'),cutoff.lastIndexOf('; '));
       displaySnippet=lastBreak>80?s.slice(0,lastBreak+1):cutoff;
     }
