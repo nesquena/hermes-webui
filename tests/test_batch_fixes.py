@@ -30,10 +30,16 @@ class TestRootWorkspaceUnblocked:
         )
 
     def test_etc_still_blocked(self):
-        """Sanity: other dangerous paths remain blocked."""
+        """Sanity: other dangerous paths remain blocked.
+
+        After the macOS symlink fix, blocked roots are listed as bare strings
+        in a tuple and ``_workspace_blocked_roots()`` materialises both the
+        literal and resolved-canonical Path forms.  Assert the source still
+        names ``/etc`` and ``/proc`` as blocked roots.
+        """
         src = read("api/workspace.py")
-        assert "Path('/etc')" in src
-        assert "Path('/proc')" in src
+        assert "'/etc'" in src or 'Path("/etc")' in src or "Path('/etc')" in src
+        assert "'/proc'" in src or 'Path("/proc")' in src or "Path('/proc')" in src
 
     def test_split_guard_present(self):
         src = read("api/streaming.py")
