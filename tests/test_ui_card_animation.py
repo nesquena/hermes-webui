@@ -16,7 +16,12 @@ def test_tool_card_toggle_uses_transformable_layout_and_transition():
 def test_tool_card_detail_uses_transitionable_collapsed_state():
     assert ".tool-card-detail{display:block;max-height:0;opacity:0;overflow:hidden;" in COMPACT_CSS
     assert re.search(
-        r"\.tool-card\.open\s+\.tool-card-detail\s*\{[^}]*max-height:\s*520px;[^}]*opacity:\s*1;",
+        r"\.tool-card\.open\s+\.tool-card-detail\s*\{[^}]*max-height:\s*600px;[^}]*opacity:\s*1;",
+        STYLE_CSS,
+    )
+    # Open state must set overflow to auto so the inner <pre> scroll is not clipped (#1170).
+    assert re.search(
+        r"\.tool-card\.open\s+\.tool-card-detail\s*\{[^}]*overflow:\s*auto;",
         STYLE_CSS,
     )
 

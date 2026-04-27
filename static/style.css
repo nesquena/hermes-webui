@@ -1233,12 +1233,12 @@ body.resizing{user-select:none;cursor:col-resize;}
 .tool-card-toggle{font-size:10px;color:var(--muted);opacity:.5;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;transform-origin:center;transition:transform .18s ease;will-change:transform;}
 .tool-card.open .tool-card-toggle{transform:rotate(90deg);}
 .tool-card-detail{display:block;max-height:0;opacity:0;overflow:hidden;border-top:1px solid transparent;padding:0 12px;transition:max-height .22s ease,opacity .18s ease,padding .22s ease,border-top-color .22s ease;}
-.tool-card.open .tool-card-detail{max-height:520px;opacity:1;padding:8px 12px;border-top-color:rgba(255,255,255,.06);}
+.tool-card.open .tool-card-detail{max-height:600px;opacity:1;padding:8px 12px;border-top-color:rgba(255,255,255,.06);overflow:auto;}
 .tool-card-args{margin-bottom:6px;}
 .tool-card-args div{font-size:11px;line-height:1.6;}
 .tool-arg-key{color:var(--blue);font-family:'SF Mono',ui-monospace,monospace;font-size:11px;}
 .tool-arg-val{color:var(--muted);font-family:'SF Mono',ui-monospace,monospace;font-size:11px;word-break:break-all;}
-.tool-card-result pre{font-size:11px;color:var(--muted);font-family:'SF Mono',ui-monospace,monospace;white-space:pre-wrap;word-break:break-word;max-height:180px;overflow-y:auto;margin:0;line-height:1.55;}
+.tool-card-result pre{font-size:11px;color:var(--muted);font-family:'SF Mono',ui-monospace,monospace;white-space:pre-wrap;word-break:break-word;max-height:360px;overflow-y:auto;margin:0;line-height:1.55;}
 
 /* ── Manual compression cards (transient transcript-local feedback) ── */
 .live-compression-cards{
