@@ -7,6 +7,12 @@
   old explicit provider hint (for example `@copilot:gpt-5.5`) now pass through
   the same stale-model compatibility recovery as slash-prefixed session models,
   so they can continue after the active provider changes. (`api/routes.py`)
+- **Docker Hindsight memory provider dependency** — Docker startup now ensures
+  `hindsight-client` is installed in the WebUI container venv, even on fast
+  restarts where `/app/venv/.deps_installed` already exists. This lets
+  two-container WebUI deployments import Hermes Agent's Hindsight memory
+  provider without a manual container-side install. (`docker_init.bash`,
+  `tests/test_issue926_hindsight_docker_dependency.py`) Closes #926.
 
 ## v0.50.223 — 2026-04-26
 
