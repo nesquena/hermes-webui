@@ -2465,26 +2465,31 @@ function renderMessages(){
       if(anchorRow&&lastInsertedNode) anchorInsertAfter.set(anchorRow, lastInsertedNode);
     }
   }
-  // Render cumulative usage on the last assistant footer row (if enabled).
-  if(window._showTokenUsage&&S.session&&(S.session.input_tokens||S.session.output_tokens)){
-    const rows=inner.querySelectorAll('.assistant-turn');
-    let lastAssist=null;
-    for(let i=rows.length-1;i>=0;i--){lastAssist=rows[i];break;}
-    if(lastAssist){
-      const footerRows=lastAssist.querySelectorAll('.msg-foot');
+  // Render per-turn token usage on each assistant message that has it (#503).
+  // Replaces the old cumulative-total-on-last-bubble approach.
+  if(window._showTokenUsage){
+    const asstRows=inner.querySelectorAll('.assistant-turn');
+    let ai=0; // assistant-only index for DOM rows
+    for(let mi=0;mi<S.messages.length;mi++){
+      const msg=S.messages[mi];
+      if(msg.role!=='assistant'){continue;}
+      if(!msg._turnUsage){ai++;continue;}
+      if(ai>=asstRows.length) continue;
+      const row=asstRows[ai];
+      const footerRows=row.querySelectorAll('.msg-foot');
       const targetFoot=footerRows.length?footerRows[footerRows.length-1]:null;
-      if(targetFoot&&!targetFoot.querySelector('.msg-usage-inline')){
-        const usage=document.createElement('span');
-        usage.className='msg-usage-inline';
-        const inTok=S.session.input_tokens||0;
-        const outTok=S.session.output_tokens||0;
-        const cost=S.session.estimated_cost;
-        let text=`${_fmtTokens(inTok)} in · ${_fmtTokens(outTok)} out`;
-        if(cost) text+=` · ~$${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
-        usage.textContent=text;
-        targetFoot.classList.add('msg-foot-with-usage');
-        targetFoot.insertBefore(usage, targetFoot.firstChild);
-      }
+      if(!targetFoot||targetFoot.querySelector('.msg-usage-inline')){ai++;continue;}
+      const usage=document.createElement('span');
+      usage.className='msg-usage-inline';
+      const inTok=msg._turnUsage.input_tokens||0;
+      const outTok=msg._turnUsage.output_tokens||0;
+      const cost=msg._turnUsage.estimated_cost;
+      let text=`${_fmtTokens(inTok)} in · ${_fmtTokens(outTok)} out`;
+      if(cost) text+=` · ~$${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
+      usage.textContent=text;
+      targetFoot.classList.add('msg-foot-with-usage');
+      targetFoot.insertBefore(usage, targetFoot.firstChild);
+      ai++;
     }
   }
   // Only force-scroll when not actively streaming — mid-stream re-renders

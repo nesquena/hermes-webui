@@ -759,7 +759,26 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(reasoningText&&lastAsst&&!lastAsst.reasoning) lastAsst.reasoning=reasoningText;
         // Stamp _ts on the last assistant message if it has no timestamp
         if(lastAsst&&!lastAsst._ts&&!lastAsst.timestamp) lastAsst._ts=Date.now()/1000;
-        if(d.usage){S.lastUsage=d.usage;_syncCtxIndicator(d.usage);}
+        if(d.usage){
+          S.lastUsage=d.usage;_syncCtxIndicator(d.usage);
+          // #503 — compute per-turn cost delta and attach to last assistant message
+          if(lastAsst){
+            const prevIn=S.session.input_tokens||0;
+            const prevOut=S.session.output_tokens||0;
+            const prevCost=S.session.estimated_cost||0;
+            const curIn=d.usage.input_tokens||0;
+            const curOut=d.usage.output_tokens||0;
+            const curCost=d.usage.estimated_cost||0;
+            // Only set delta if values actually increased (skip no-op turns)
+            if(curIn>prevIn||curOut>prevOut){
+              lastAsst._turnUsage={
+                input_tokens:Math.max(0,curIn-prevIn),
+                output_tokens:Math.max(0,curOut-prevOut),
+                estimated_cost:Math.max(0,curCost-prevCost),
+              };
+            }
+          }
+        }
         if(d.session.tool_calls&&d.session.tool_calls.length){
           S.toolCalls=d.session.tool_calls.map(tc=>({...tc,done:true}));
         } else {
