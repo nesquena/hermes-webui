@@ -357,6 +357,14 @@
   workspace subtree) and never enumerate blocked system roots. (`api/routes.py`,
   `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
 
+## [v0.50.228] — 2026-04-27
+
+### Fixed
+- **Raw `<pre>` blocks preserved in markdown renderer** — the inline `<code>` rewrite
+  pass in `renderMd()` no longer processes content inside raw `<pre>` blocks, preventing
+  multiline code blocks passed as HTML from being degraded to backtick-wrapped strings.
+  (`static/ui.js`, `tests/test_renderer_js_behaviour.py`) (#1150)
+
 ## [v0.50.227] — 2026-04-27
 
 ### Fixed
