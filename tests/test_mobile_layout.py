@@ -232,6 +232,30 @@ def test_composer_textarea_font_size_mobile():
         "Composer textarea must have font-size:16px at mobile widths to prevent iOS zoom-on-focus"
 
 
+def test_touch_device_inputs_meet_zoom_threshold():
+    """All input/textarea/select must clear iOS Safari's 16px zoom threshold
+    on touch-primary devices, not just the composer textarea (#1167).
+
+    This locks the global media-query floor so future per-element font-size
+    tweaks (sidebar search 13px, settings selects 12px, dialog inputs 14px,
+    onboarding fields 13px) cannot accidentally re-introduce auto-zoom.
+    """
+    # The hover:none + pointer:coarse pair is the canonical touch-primary
+    # detection (won't match desktop with mouse, won't match touch laptops
+    # that report hover:hover).
+    pattern = re.compile(
+        r'@media\s*\(hover:none\)\s*and\s*\(pointer:coarse\)\s*\{[^}]*'
+        r'input\s*,\s*textarea\s*,\s*select\s*\{[^}]*'
+        r'font-size:\s*max\(\s*16px',
+        re.DOTALL,
+    )
+    assert pattern.search(CSS), (
+        "style.css must contain a (hover:none) and (pointer:coarse) media "
+        "query that bumps input/textarea/select to font-size:max(16px,…) "
+        "so iOS Safari does not auto-zoom on focus (#1167)"
+    )
+
+
 
 # ── Sidebar tabs on mobile ───────────────────────────────────────────────────
 
