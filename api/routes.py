@@ -869,7 +869,10 @@ def handle_get(handler, parsed) -> bool:
         if settings.get("show_cli_sessions"):
             cli = get_cli_sessions()
             webui_ids = {s["session_id"] for s in webui_sessions}
-            deduped_cli = [s for s in cli if s["session_id"] not in webui_ids]
+            from api.models import _hide_from_default_sidebar as _cron_hide
+            deduped_cli = [s for s in cli
+                           if s["session_id"] not in webui_ids
+                           and not _cron_hide(s)]
         else:
             deduped_cli = []
         merged = webui_sessions + deduped_cli

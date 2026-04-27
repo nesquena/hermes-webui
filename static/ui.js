@@ -2017,7 +2017,7 @@ function _compressionCardsNode(state){
   return wrap;
 }
 function _isContextCompactionMessage(m){
-  if(!m||m.role!=='assistant') return false;
+  if(!m||!m.role||m.role==='tool') return false;
   const text=msgContent(m)||String(m.content||'');
   return /^\s*\[context compaction/i.test(text) || /^\s*context compaction/i.test(text);
 }
