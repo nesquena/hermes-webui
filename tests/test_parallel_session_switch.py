@@ -532,3 +532,28 @@ class TestSessionSwitchCancellation:
             "_loadOlderMessages should bail out if _oldestIdx <= 0, "
             "which is the reset value after session switch."
         )
+
+    def test_load_older_compares_against_active_session_id(self):
+        """_loadOlderMessages must verify S.session.session_id === sid after await.
+
+        _loadingSessionId alone is insufficient: it is null between session
+        loads, so a stale older-messages response that lands AFTER a
+        completed session switch would otherwise pass the guard and prepend
+        onto the new session's S.messages. The S.session.session_id check
+        closes that window.
+        """
+        fn_start = SESSIONS_JS.find("async function _loadOlderMessages")
+        fn_end = SESSIONS_JS.find("\n}", fn_start) + 2
+        fn_body = SESSIONS_JS[fn_start:fn_end]
+
+        assert "S.session.session_id !== sid" in fn_body, (
+            "_loadOlderMessages must compare S.session.session_id against "
+            "the captured sid after await — _loadingSessionId is null "
+            "between sessions and would let a stale response through."
+        )
+        # The S.session check must appear BEFORE the S.messages mutation.
+        active_check_idx = fn_body.find("S.session.session_id !== sid")
+        mutation_idx = fn_body.find("S.messages = [...olderMsgs")
+        assert active_check_idx >= 0 and mutation_idx >= 0 and active_check_idx < mutation_idx, (
+            "Active-session guard must run before S.messages mutation."
+        )
