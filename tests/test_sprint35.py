@@ -67,13 +67,20 @@ def test_messages_inner_no_hardcoded_800px():
 
 
 def test_messages_inner_breakpoint_values():
-    """The breakpoints should expand max-width at 1400px and 1800px."""
+    """Issue #3: chat output container is now full-width.
+
+    The historical 1100/1200px caps at 1400/1800px breakpoints were
+    removed so the message column expands with the viewport. This test
+    guards against the caps being reintroduced — they were re-applied
+    once before by a stray upstream merge that took the test file but
+    not the CSS patch (PR #3).
+    """
     css = read("static/style.css")
-    assert "max-width:1100px" in css or "max-width: 1100px" in css, (
-        "Expected max-width:1100px at 1400px breakpoint"
+    assert "max-width:1100px" not in css and "max-width: 1100px" not in css, (
+        "max-width:1100px reintroduced — breaks issue #3 full-width chat"
     )
-    assert "max-width:1200px" in css or "max-width: 1200px" in css, (
-        "Expected max-width:1200px at 1800px breakpoint"
+    assert "max-width:1200px" not in css and "max-width: 1200px" not in css, (
+        "max-width:1200px reintroduced — breaks issue #3 full-width chat"
     )
 
 
