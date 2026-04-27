@@ -118,6 +118,61 @@ def sync_session_usage(session_id: str, input_tokens: int=0, output_tokens: int=
             logger.debug("Failed to close state.db")
 
 
+def _sanitize_title(title: str) -> str:
+    """Mirror SessionDB.set_session_title sanitization and the WebUI cap."""
+    return (title or "").strip()[:80] or "Untitled"
+
+
+def _resolve_lineage_root(db_path: Path, session_id: str) -> str:
+    """Walk parent_session_id upward to find the lineage root.
+
+    Renames target the chain head so the projection (which prefers the
+    head's title) shows the new name. Stops at the first row whose
+    ``parent_session_id`` is NULL or unknown, or when the parent's
+    ``end_reason`` isn't ``compression`` (only compression chains are
+    considered the same logical conversation). Returns ``session_id``
+    unchanged on any error.
+    """
+    import sqlite3
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5)
+    except Exception:
+        return session_id
+    try:
+        cur = conn.execute("PRAGMA table_info(sessions)")
+        cols = {row[1] for row in cur.fetchall()}
+        if 'parent_session_id' not in cols:
+            return session_id
+        current = session_id
+        seen = {current}
+        for _ in range(64):
+            row = conn.execute(
+                "SELECT parent_session_id, end_reason FROM sessions WHERE id = ?",
+                (current,),
+            ).fetchone()
+            if not row:
+                return current
+            parent_id = row[0]
+            if not parent_id or parent_id in seen:
+                return current
+            parent_row = conn.execute(
+                "SELECT end_reason FROM sessions WHERE id = ?",
+                (parent_id,),
+            ).fetchone()
+            if not parent_row or parent_row[0] != 'compression':
+                return current
+            current = parent_id
+            seen.add(current)
+        return current
+    except Exception:
+        return session_id
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def rename_cli_session(session_id: str, title: str) -> bool:
     """Rename a CLI / agent / gateway-imported session in state.db.
 
@@ -126,11 +181,18 @@ def rename_cli_session(session_id: str, title: str) -> bool:
     updated, False if the session_id was not found, or raises ValueError
     on title-uniqueness conflicts (mirrors SessionDB.set_session_title).
 
-    Implementation note: we try SessionDB.set_session_title first because it
-    enforces title sanitization and uniqueness. If SessionDB cannot be opened
-    (e.g. the on-disk state.db schema doesn't match the installed
-    hermes_state version), we fall back to a defensive raw SQL UPDATE so the
-    WebUI rename feature still works in degraded environments.
+    Note on compression chains
+    --------------------------
+    The sidebar projection (``api.agent_sessions._project_agent_session_rows``)
+    collapses a compression chain into a single row that uses the *tip*'s
+    session_id for navigation but the chain *head*'s title for visible
+    identity. So the rename must hit the head — otherwise the new name
+    would never appear after a hard refresh. We walk ``parent_session_id``
+    upward from the supplied id (only across compression boundaries) and
+    update the lineage root. Updating just one row keeps us compatible
+    with ``hermes_state``'s ``UNIQUE INDEX … ON sessions(title) WHERE
+    title IS NOT NULL`` — the auto-generated ``#N`` titles on the
+    intermediate / tip rows stay distinct.
     """
     # Resolve the state.db path the same way _get_state_db does
     try:
@@ -142,47 +204,53 @@ def rename_cli_session(session_id: str, title: str) -> bool:
     if not db_path.exists():
         return False
 
-    # Path 1: preferred — go through SessionDB so sanitization / uniqueness apply.
-    db = _get_state_db()
-    if db is not None:
+    safe_title = _sanitize_title(title)
+
+    # Walk to the lineage root so the projection (head-prefer title)
+    # surfaces the new name on the next refresh.
+    target_id = _resolve_lineage_root(db_path, session_id)
+
+    # Path 1: hand the canonical update to SessionDB so it can do its
+    # own bookkeeping (event emission, cache invalidation, uniqueness
+    # validation, etc.) when the agent's hermes_state package is installed.
+    sdb = _get_state_db()
+    if sdb is not None:
         try:
-            return bool(db.set_session_title(session_id, title))
+            return bool(sdb.set_session_title(target_id, safe_title))
         except ValueError:
             raise
         except Exception:
-            pass  # fall through to the raw-SQL fallback
+            # Fall through to raw SQL for degraded environments.
+            pass
         finally:
             try:
-                db.close()
+                sdb.close()
             except Exception:
                 pass
 
-    # Path 2: defensive raw SQL fallback — used when SessionDB schema migration
-    # fails (e.g. older state.db missing columns that the installed hermes_state
-    # version expects).  Cap title length the same way the WebUI does.
+    # Path 2: raw SQL fallback (no hermes_state available).
     import sqlite3
-    safe_title = (title or "").strip()[:80] or "Untitled"
     try:
         conn = sqlite3.connect(str(db_path), timeout=5)
-        try:
-            # Uniqueness check (mirrors SessionDB.set_session_title behaviour)
-            conflict = conn.execute(
-                "SELECT id FROM sessions WHERE title = ? AND id != ?",
-                (safe_title, session_id),
-            ).fetchone()
-            if conflict:
-                raise ValueError(
-                    f"Title {safe_title!r} is already in use by session {conflict[0]}"
-                )
-            cursor = conn.execute(
-                "UPDATE sessions SET title = ? WHERE id = ?",
-                (safe_title, session_id),
-            )
-            conn.commit()
-            return cursor.rowcount > 0
-        finally:
-            conn.close()
-    except ValueError:
-        raise
     except Exception:
         return False
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.execute(
+            "UPDATE sessions SET title = ? WHERE id = ?",
+            (safe_title, target_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    except sqlite3.IntegrityError as exc:
+        # Mirror SessionDB.set_session_title's conflict semantics.
+        raise ValueError(
+            f"Title {safe_title!r} is already in use by another session"
+        ) from exc
+    except Exception:
+        return False
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass

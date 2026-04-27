@@ -88,8 +88,7 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
             continue
 
         merged = dict(row)
-        # Keep the chain head's visible identity (title, started_at), but
-        # point the row at the latest importable segment for navigation AND
+        # Point the row at the latest importable segment for navigation AND
         # surface the tip's recency so an actively-used chain bubbles to the
         # top of the sidebar by its true last activity. Without overriding
         # last_activity, a long-lived chain whose tip is being edited NOW
@@ -102,6 +101,10 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         ):
             if key in tip:
                 merged[key] = tip[key]
+        # Keep the chain head's visible identity (title, started_at).
+        # Renames flow to the lineage *root* via state_sync.rename_cli_session
+        # (it walks parent_session_id up the chain and updates the head),
+        # so head-prefer keeps working AND survives hard refresh.
         if not merged.get('title'):
             merged['title'] = tip.get('title')
         if not merged.get('source'):
