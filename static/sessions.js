@@ -970,25 +970,49 @@ function renderSessionListFromCache(){
     const startRename=()=>{
       closeSessionActionMenu();
       _renamingSid = s.session_id;
+      const oldTitle=s.title||'Untitled';
       const inp=document.createElement('input');
       inp.className='session-title-input';
-      inp.value=s.title||'Untitled';
+      inp.value=oldTitle;
       ['click','mousedown','dblclick','pointerdown'].forEach(ev=>
         inp.addEventListener(ev, e2=>e2.stopPropagation())
       );
+      const applyTitle=(nextTitle, updateDom=true)=>{
+        if(updateDom) title.textContent=nextTitle;
+        s.title=nextTitle;
+        const cached=_allSessions.find(item=>item&&item.session_id===s.session_id);
+        if(cached) cached.title=nextTitle;
+        if(S.session&&S.session.session_id===s.session_id){S.session.title=nextTitle;syncTopbar();}
+      };
+      let finishDone=false;
       const finish=async(save)=>{
-        _renamingSid = null;
-        if(save){
-          const newTitle=inp.value.trim()||'Untitled';
-          title.textContent=newTitle;
-          s.title=newTitle;
-          if(S.session&&S.session.session_id===s.session_id){S.session.title=newTitle;syncTopbar();}
-          try{await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:s.session_id,title:newTitle})});}
-          catch(err){setStatus('Rename failed: '+err.message);}
+        if(finishDone) return;
+        finishDone=true;
+        const releaseRename=()=>{
+          _renamingSid = null;
+          if(inp.isConnected) inp.replaceWith(title);
+          // Allow list re-renders again after DOM cleanup has completed.
+          setTimeout(()=>{ if(_renamingSid===null) renderSessionListFromCache(); },50);
+        };
+        if(!save){
+          applyTitle(oldTitle,false);
+          releaseRename();
+          return;
         }
-        inp.replaceWith(title);
-        // Allow list re-renders again after a short delay
-        setTimeout(()=>{ if(_renamingSid===null) renderSessionListFromCache(); },50);
+        const newTitle=inp.value.trim()||'Untitled';
+        try{
+          if(newTitle!==oldTitle){
+            await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:s.session_id,title:newTitle})});
+          }
+          applyTitle(newTitle);
+        }catch(err){
+          applyTitle(oldTitle,false);
+          const msg='Rename failed: '+(err&&err.message?err.message:String(err));
+          setStatus(msg);
+          if(typeof showToast==='function') showToast(msg,3000,'error');
+        }finally{
+          releaseRename();
+        }
       };
       inp.onkeydown=e2=>{
         if(e2.key==='Enter'){
