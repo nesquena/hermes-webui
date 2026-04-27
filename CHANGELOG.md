@@ -405,11 +405,6 @@
   auto-compressed]*` assistant message; preserved task-list user messages also render as
   sub-cards. (`static/messages.js`, `static/ui.js`, `static/i18n.js`) (#1142)
 
-### Added
-- **UI/UX philosophy document** — `UI.md` documents the four core design principles
-  (Cleanness, Space Is Scarce, Progressive Disclosure, Minimal Surface) that guide all
-  WebUI UI decisions. (`UI.md`, `CONTRIBUTING.md`) (#1166)
-
 ## [v0.50.226] — 2026-04-27
 
 ### Fixed
