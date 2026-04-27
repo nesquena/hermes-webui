@@ -322,7 +322,7 @@ const LOCALES = {
     tab_skills: 'Skills',
     tab_memory: 'Memory',
     tab_workspaces: 'Spaces',
-    tab_profiles: 'Profiles',
+    tab_profiles: 'profiles : multi agents',
     tab_todos: 'Todos',
     tab_settings: 'Settings',
     new_conversation: 'New conversation',

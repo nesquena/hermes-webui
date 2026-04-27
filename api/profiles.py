@@ -316,28 +316,97 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
 
 
 def list_profiles_api() -> list:
-    """List all profiles with metadata, serialized for JSON response."""
+    """List all profiles with metadata, serialized for JSON response.
+
+    Prefer hermes_cli's richer profile metadata, but never let a CLI-side
+    parsing/runtime error blank the Profiles UI.  If listing via hermes_cli
+    fails, fall back to the on-disk profile directories so the page still has
+    selectable data.
+    """
     try:
         from hermes_cli.profiles import list_profiles
         infos = list_profiles()
     except ImportError:
-        # hermes_cli not available -- return just the default
-        return [_default_profile_dict()]
+        return _list_profiles_from_filesystem()
+    except Exception as exc:
+        logger.warning("hermes_cli list_profiles failed; using filesystem fallback: %s", exc)
+        return _list_profiles_from_filesystem()
 
     active = get_active_profile_name()
     result = []
-    for p in infos:
-        result.append({
-            'name': p.name,
-            'path': str(p.path),
-            'is_default': p.is_default,
-            'is_active': p.name == active,
-            'gateway_running': p.gateway_running,
-            'model': p.model,
-            'provider': p.provider,
-            'has_env': p.has_env,
-            'skill_count': p.skill_count,
-        })
+    try:
+        for p in infos:
+            name = getattr(p, 'name')
+            result.append({
+                'name': name,
+                'path': str(getattr(p, 'path')),
+                'is_default': bool(getattr(p, 'is_default', name == 'default')),
+                'is_active': name == active,
+                'gateway_running': bool(getattr(p, 'gateway_running', False)),
+                'model': getattr(p, 'model', None),
+                'provider': getattr(p, 'provider', None),
+                'has_env': bool(getattr(p, 'has_env', False)),
+                'skill_count': int(getattr(p, 'skill_count', 0) or 0),
+            })
+    except Exception as exc:
+        logger.warning("Failed to serialize hermes_cli profiles; using filesystem fallback: %s", exc)
+        return _list_profiles_from_filesystem()
+    return result
+
+
+def _read_profile_model_metadata(profile_dir: Path) -> tuple[str | None, str | None]:
+    """Best-effort model/provider extraction for fallback profile listing."""
+    config_path = profile_dir / 'config.yaml'
+    if not config_path.exists():
+        return None, None
+    try:
+        import yaml as _yaml
+        cfg = _yaml.safe_load(config_path.read_text(encoding='utf-8')) or {}
+    except Exception:
+        return None, None
+    if not isinstance(cfg, dict):
+        return None, None
+    model_cfg = cfg.get('model', {})
+    if isinstance(model_cfg, str):
+        return model_cfg, None
+    if isinstance(model_cfg, dict):
+        return model_cfg.get('default'), model_cfg.get('provider')
+    return None, None
+
+
+def _profile_dict_from_path(name: str, profile_dir: Path, *, is_default: bool) -> dict:
+    model, provider = _read_profile_model_metadata(profile_dir)
+    active = get_active_profile_name()
+    skills_dir = profile_dir / 'skills'
+    try:
+        skill_count = sum(1 for child in skills_dir.iterdir() if child.is_dir()) if skills_dir.is_dir() else 0
+    except Exception:
+        skill_count = 0
+    return {
+        'name': name,
+        'path': str(profile_dir),
+        'is_default': is_default,
+        'is_active': name == active,
+        'gateway_running': False,
+        'model': model,
+        'provider': provider,
+        'has_env': (profile_dir / '.env').exists(),
+        'skill_count': skill_count,
+    }
+
+
+def _list_profiles_from_filesystem() -> list:
+    """Fallback profile list based only on ~/.hermes/profiles directories."""
+    result = [_profile_dict_from_path('default', _DEFAULT_HERMES_HOME, is_default=True)]
+    profiles_root = _DEFAULT_HERMES_HOME / 'profiles'
+    if not profiles_root.is_dir():
+        return result
+    try:
+        profile_dirs = sorted(p for p in profiles_root.iterdir() if p.is_dir() and _PROFILE_ID_RE.fullmatch(p.name))
+    except Exception:
+        return result
+    for profile_dir in profile_dirs:
+        result.append(_profile_dict_from_path(profile_dir.name, profile_dir, is_default=False))
     return result
 
 
