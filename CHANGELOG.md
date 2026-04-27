@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Fixed
+- **Sidebar session rename first Enter** — double-click inline rename now keeps
+  the session-list render guard active until `/api/session/rename` finishes, so
+  the first Enter cannot be overwritten by a stale refresh. Duplicate completion
+  paths are ignored, cache/active titles update after success, and failures
+  restore state with an error message. (`static/sessions.js`,
+  `tests/test_session_rename_lifecycle.py`) [#1153]
 - **Recurring cron jobs with no next run need attention** — the Tasks panel now
   distinguishes anomalous recurring jobs (`enabled=false`, `state=completed`,
   `next_run_at=null`) from ordinary off jobs, shows a warning with recovery
