@@ -279,8 +279,10 @@ async function loadCrons(animate) {
       item.className = 'cron-item';
       item.id = 'cron-' + job.id;
       const status = _cronStatusMeta(job);
+      const isNewRun = _cronNewJobIds.has(String(job.id));
       item.innerHTML = `
         <div class="cron-header">
+          ${isNewRun ? '<span class="cron-new-dot" title="New run"></span>' : ''}
           <span class="cron-name" title="${esc(job.name)}">${esc(job.name)}</span>
           <span class="cron-status ${status.listClass}">${esc(status.label)}</span>
         </div>`;
@@ -349,7 +351,7 @@ function _renderCronDetail(job){
         <div class="detail-card-title">Prompt</div>
         <div class="detail-prompt">${esc(job.prompt || '')}</div>
       </div>
-      <div class="detail-card" id="cronDetailRuns">
+      <div class="detail-card ${_cronNewJobIds.has(String(job.id)) ? 'has-new-run' : ''}" id="cronDetailRuns">
         <div class="detail-card-title">${esc(t('cron_last_output'))}</div>
         <div style="color:var(--muted);font-size:12px">${esc(t('loading'))}</div>
       </div>
@@ -419,6 +421,10 @@ function openCronDetail(id, el){
   document.querySelectorAll('.cron-item').forEach(e => e.classList.remove('active'));
   const target = el || $('cron-' + id);
   if (target) target.classList.add('active');
+  // Remove new-run dot from this job since user is now viewing it
+  _clearCronUnreadForJob(id);
+  const dot = target && target.querySelector('.cron-new-dot');
+  if (dot) dot.remove();
   _cronPreFormDetail = null;
   _editingCronId = null;
   _renderCronDetail(job);
@@ -2919,6 +2925,7 @@ async function disableAuth(){
 let _cronPollSince=Date.now()/1000;  // track from page load
 let _cronPollTimer=null;
 let _cronUnreadCount=0;
+const _cronNewJobIds=new Set();  // track which job IDs had new completions (unread)
 
 // Auto-refresh the cron list when a job is created from chat or any external source.
 // The chat path dispatches this event when the agent response mentions cron creation.
@@ -2936,6 +2943,7 @@ function startCronPolling(){
         for(const c of data.completions){
           showToast(t('cron_completion_status', c.name, c.status==='error' ? t('status_failed') : t('status_completed')),4000);
           _cronPollSince=Math.max(_cronPollSince,c.completed_at);
+          if(c.job_id) _cronNewJobIds.add(String(c.job_id));
         }
         _cronUnreadCount+=data.completions.length;
         updateCronBadge();
@@ -2962,12 +2970,18 @@ function updateCronBadge(){
   }
 }
 
-// Clear cron badge when Tasks tab is opened
+// Clear cron badge only when all unread jobs have been viewed (not on panel open)
+function _clearCronUnreadForJob(jobId){
+  const id=String(jobId);
+  if(_cronNewJobIds.has(id)){
+    _cronNewJobIds.delete(id);
+    _cronUnreadCount=Math.max(0, _cronUnreadCount-1);
+    updateCronBadge();
+  }
+}
+
 const _origSwitchPanel=switchPanel;
-switchPanel=async function(name){
-  if(name==='tasks'){_cronUnreadCount=0;updateCronBadge();}
-  return _origSwitchPanel(name);
-};
+switchPanel=async function(name){ return _origSwitchPanel(name); };
 
 // Start polling on page load
 startCronPolling();
