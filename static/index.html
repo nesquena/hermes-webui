@@ -286,6 +286,9 @@
               <span class="approval-btn-label" data-i18n="approval_btn_deny">Deny</span>
             </button>
           </div>
+          <button class="approval-skip-all" id="approvalSkipAll" onclick="toggleYoloFromApproval()" title="Skip all approvals this session" data-i18n-title="approval_skip_all_title">
+            <span data-i18n="approval_skip_all">⚡ Skip all this session</span>
+          </button>
         </div>
       </div>
       <div class="clarify-card" id="clarifyCard" role="dialog" aria-labelledby="clarifyHeading" aria-describedby="clarifyQuestion clarifyHint">
@@ -332,6 +335,10 @@
               </svg>
             </button>
             <div class="composer-divider" aria-hidden="true"></div>
+            <button class="yolo-pill" id="yoloPill" type="button" onclick="cmdYolo()" style="display:none" title="YOLO mode — click to disable" data-i18n-title="yolo_pill_title_active">
+              <span class="yolo-pill-icon" aria-hidden="true">⚡</span>
+              <span class="yolo-pill-label" data-i18n="yolo_pill_label">YOLO</span>
+            </button>
             <div id="profileChipWrap" class="composer-profile-wrap">
               <button class="composer-profile-chip profile-chip" id="profileChip" type="button" onclick="toggleProfileDropdown()" title="Switch profile">
                 <span class="composer-profile-icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></span>

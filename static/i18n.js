@@ -655,7 +655,15 @@ const LOCALES = {
     // profile form
     profile_name_label: 'Name',
     profile_base_url_label: 'Base URL',
-    profile_api_key_label: 'API key',
+    profile_api_key_label: 'API key',,
+    cmd_yolo: 'Toggle YOLO mode (skip approvals)',
+    yolo_no_session: 'No active session',
+    yolo_enabled: '⚡ YOLO mode ON — approvals skipped this session',
+    yolo_disabled: 'YOLO mode OFF',
+    yolo_pill_label: 'YOLO',
+    yolo_pill_title_active: 'YOLO mode active — click to disable',
+    approval_skip_all: '⚡ Skip all this session',
+    approval_skip_all_title: 'Skip all approval prompts for this session'
   },
 
   ru: {
@@ -1122,7 +1130,15 @@ const LOCALES = {
       : (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)
         ? 'навыка'
         : 'навыков');
-    return `${count} ${word}`;
+    return `${count} ${word}`;,
+    cmd_yolo: 'Переключить YOLO режим (без подтверждений)',
+    yolo_no_session: 'Нет активного сеанса',
+    yolo_enabled: '⚡ YOLO режим ВКЛ — подтверждения пропущены',
+    yolo_disabled: 'YOLO режим ВЫКЛ',
+    yolo_pill_label: 'YOLO',
+    yolo_pill_title_active: 'YOLO режим активен — нажмите для отключения',
+    approval_skip_all: '⚡ Пропустить все в этом сеансе',
+    approval_skip_all_title: 'Пропустить все запросы подтверждения в этом сеансе'
   },
     profile_use: 'Использовать',
     profile_switch_title: 'Переключиться на этот профиль',
@@ -1847,7 +1863,15 @@ const LOCALES = {
     settings_tab_appearance: 'Appearance',
     settings_tab_conversation: 'Conversation',
     settings_tab_preferences: 'Preferences',
-    settings_tab_system: 'System',
+    settings_tab_system: 'System',,
+    cmd_yolo: 'Alternar modo YOLO (omitir aprobaciones)',
+    yolo_no_session: 'Sin sesión activa',
+    yolo_enabled: '⚡ Modo YOLO ON — aprobaciones omitidas en esta sesión',
+    yolo_disabled: 'Modo YOLO OFF',
+    yolo_pill_label: 'YOLO',
+    yolo_pill_title_active: 'Modo YOLO activo — clic para desactivar',
+    approval_skip_all: '⚡ Omitir todo en esta sesión',
+    approval_skip_all_title: 'Omitir todas las aprobaciones en esta sesión'
   },
 
   de: {
@@ -2215,7 +2239,15 @@ const LOCALES = {
     settings_tab_conversation: 'Conversation',
     settings_tab_preferences: 'Preferences',
     settings_tab_system: 'System',
-},
+    cmd_yolo: 'YOLO-Modus umschalten',
+    yolo_no_session: 'Keine aktive Sitzung',
+    yolo_enabled: '⚡ YOLO-Modus AN — Genehmigungen übersprungen',
+    yolo_disabled: 'YOLO-Modus AUS',
+    yolo_pill_label: 'YOLO',
+    yolo_pill_title_active: 'YOLO-Modus aktiv — Klicken zum Deaktivieren',
+    approval_skip_all: '⚡ Alle in dieser Sitzung überspringen',
+    approval_skip_all_title: 'Alle Genehmigungsanfragen in dieser Sitzung überspringen'
+  },
 
   zh: {
     _lang: 'zh',
@@ -3444,7 +3476,23 @@ const LOCALES = {
     usage_personality_none: '\u7121',
     usage_settings_tip: '\u6ce8\u610f\uff1a\u8cbb\u7528\u70ba\u9810\u4f30\u503c\u3002',
     usage_total: '\u7e3d Token \u6578',
-    usage_unknown: '\u672a\u77e5',
+    usage_unknown: '\u672a\u77e5',,
+    cmd_yolo: 'YOLO-Modus umschalten (Genehmigungen überspringen)',
+    yolo_no_session: 'Keine aktive Sitzung',
+    yolo_enabled: '⚡ YOLO-Modus AN — Genehmigungen übersprungen',
+    yolo_disabled: 'YOLO-Modus AUS',
+    yolo_pill_label: 'YOLO',
+    yolo_pill_title_active: 'YOLO-Modus aktiv — klicken zum Deaktivieren',
+    approval_skip_all: '⚡ Alle in dieser Sitzung überspringen',
+    approval_skip_all_title: 'Alle Genehmigungsaufforderungen in dieser Sitzung überspringen',
+    cmd_yolo: '切换 YOLO 模式（跳过审批）',
+    yolo_no_session: '无活跃会话',
+    yolo_enabled: '⚡ YOLO 模式已开启 — 本次会话跳过审批',
+    yolo_disabled: 'YOLO 模式已关闭',
+    yolo_pill_label: 'YOLO',
+    yolo_pill_title_active: 'YOLO 模式已激活 — 点击关闭',
+    approval_skip_all: '⚡ 本次会话全部跳过',
+    approval_skip_all_title: '跳过本次会话的所有审批提示'
   },
 
   ko: {
@@ -4090,6 +4138,14 @@ const LOCALES = {
     profile_name_label: 'Name',
     profile_base_url_label: 'Base URL',
     profile_api_key_label: 'API key',
+    cmd_yolo: 'YOLO 모드 전환',
+    yolo_no_session: '활성 세션 없음',
+    yolo_enabled: '⚡ YOLO 모드 켜짐 — 이 세션에서 승인 건너뜀',
+    yolo_disabled: 'YOLO 모드 꺼짐',
+    yolo_pill_label: 'YOLO',
+    yolo_pill_title_active: 'YOLO 모드 활성 — 클릭하여 비활성화',
+    approval_skip_all: '⚡ 이 세션에서 모두 건너뛰기',
+    approval_skip_all_title: '이 세션의 모든 승인 요청 건너뛰기'
   }
 };
 

@@ -432,6 +432,9 @@ try:
         _lock,
         _permanent_approved,
         resolve_gateway_approval,
+        enable_session_yolo,
+        disable_session_yolo,
+        is_session_yolo_enabled,
     )
 except ImportError:
     _submit_pending_raw = lambda *a, **k: None
@@ -440,6 +443,9 @@ except ImportError:
     save_permanent_allowlist = lambda *a, **k: None
     is_approved = lambda *a, **k: True
     resolve_gateway_approval = lambda *a, **k: 0
+    enable_session_yolo = lambda *a, **k: None
+    disable_session_yolo = lambda *a, **k: None
+    is_session_yolo_enabled = lambda *a, **k: False
     _pending = {}
     _lock = threading.Lock()
     _permanent_approved = set()
@@ -845,6 +851,12 @@ def handle_get(handler, parsed) -> bool:
             return j(handler, session_status(sid))
         except KeyError:
             return bad(handler, "Session not found", 404)
+
+    if parsed.path == "/api/session/yolo":
+        sid = parse_qs(parsed.query).get("session_id", [""])[0]
+        if not sid:
+            return bad(handler, "Missing session_id")
+        return j(handler, {"yolo_enabled": is_session_yolo_enabled(sid)})
 
     if parsed.path == "/api/session/usage":
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
@@ -1401,6 +1413,31 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         except ValueError as e:
             return j(handler, {"error": str(e)})
+
+    # ── YOLO mode toggle (POST) ──
+    # Session-scoped only — never persistent, never global across sessions.
+    # Fixes #467
+    if parsed.path == "/api/session/yolo":
+        try:
+            require(body, "session_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        sid = body["session_id"]
+        enabled = bool(body.get("enabled", True))
+        if enabled:
+            enable_session_yolo(sid)
+            # Also resolve any pending approvals for this session so the
+            # agent doesn't stay stuck waiting on an already-dismissed card.
+            try:
+                from tools.approval import _pending as _p, _lock as _l
+                with _l:
+                    _p.pop(sid, None)
+            except Exception:
+                pass
+            resolve_gateway_approval(sid, "once", resolve_all=True)
+        else:
+            disable_session_yolo(sid)
+        return j(handler, {"ok": True, "yolo_enabled": enabled})
 
     if parsed.path == "/api/btw":
         return _handle_btw(handler, body)
