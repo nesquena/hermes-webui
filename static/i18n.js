@@ -53,6 +53,7 @@ const LOCALES = {
     clarify_responding: 'Responding\u2026',
     untitled: 'Untitled',
     n_messages: (n) => `${n} messages`,
+    load_older_messages: '↑ Scroll up or click to load older messages',
     queued_label: 'Sends after response',
     queued_count: (n) => n === 1 ? '1 queued' : `${n} queued`,
     queued_cancel: 'Cancel queued message',

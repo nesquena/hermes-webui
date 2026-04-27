@@ -2253,9 +2253,8 @@ function renderMessages(){
   if(typeof _messagesTruncated!=='undefined' && _messagesTruncated && S.messages.length>0){
     const indicator=document.createElement('div');
     indicator.id='loadOlderIndicator';
-    indicator.className='msg-date-sep';
-    indicator.style.cssText='cursor:pointer;color:var(--blue);font-size:13px;padding:10px 0;text-align:center;';
-    indicator.textContent='↑ Scroll up or click to load older messages';
+    indicator.className='load-older-indicator';
+    indicator.textContent=typeof t==='function'?t('load_older_messages'):'↑ Scroll up or click to load older messages';
     indicator.onclick=()=>{if(typeof _loadOlderMessages==='function') _loadOlderMessages();};
     inner.appendChild(indicator);
   }

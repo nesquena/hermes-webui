@@ -2184,6 +2184,8 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 .assistant-segment[data-error="1"] .role-icon { background: rgba(239,83,80,.12); color: var(--error); border-color: var(--error); }
 
 /* ── Day-change separator ── */
+.load-older-indicator{cursor:pointer;color:var(--accent-text,var(--blue));font-size:13px;padding:10px 0;text-align:center;user-select:none;}
+.load-older-indicator:hover{opacity:.75;}
 .msg-date-sep {
   display: flex; align-items: center; gap: 10px;
   margin: 22px 0 10px; padding: 0 var(--msg-rail);
