@@ -177,6 +177,87 @@ async function switchPanel(name, opts = {}) {
 }
 
 // ── Cron panel ──
+function _isRecurringCronJob(job) {
+  const kind = job && job.schedule && job.schedule.kind;
+  return kind === 'cron' || kind === 'interval';
+}
+
+function _hasUnlimitedRepeat(job) {
+  return !!(job && job.repeat && job.repeat.times == null);
+}
+
+function _isCronNeedsAttention(job) {
+  return _isRecurringCronJob(job) &&
+    _hasUnlimitedRepeat(job) &&
+    job.enabled === false &&
+    job.state === 'completed' &&
+    !job.next_run_at;
+}
+
+function _isCronScheduleError(job) {
+  return _isRecurringCronJob(job) &&
+    !job.next_run_at &&
+    (job.state === 'error' || job.last_status === 'error');
+}
+
+function _cronStatusMeta(job) {
+  if (_isCronNeedsAttention(job)) return {
+    state: 'needs_attention',
+    listClass: 'attention',
+    detailClass: 'warn',
+    label: t('cron_status_needs_attention'),
+  };
+  if (_isCronScheduleError(job)) return {
+    state: 'schedule_error',
+    listClass: 'attention',
+    detailClass: 'warn',
+    label: t('cron_status_needs_attention'),
+  };
+  if (job.state === 'paused') return {
+    state: 'paused',
+    listClass: 'paused',
+    detailClass: 'warn',
+    label: t('cron_status_paused'),
+  };
+  if (job.enabled === false) return {
+    state: 'off',
+    listClass: 'disabled',
+    detailClass: 'warn',
+    label: t('cron_status_off'),
+  };
+  if (job.last_status === 'error') return {
+    state: 'error',
+    listClass: 'error',
+    detailClass: 'err',
+    label: t('cron_status_error'),
+  };
+  return {
+    state: 'active',
+    listClass: 'active',
+    detailClass: 'ok',
+    label: t('cron_status_active'),
+  };
+}
+
+function _cronDiagnostics(job) {
+  const fields = {
+    id: job.id,
+    name: job.name || null,
+    schedule: job.schedule || null,
+    schedule_display: job.schedule_display || null,
+    enabled: job.enabled,
+    state: job.state,
+    next_run_at: job.next_run_at || null,
+    last_run_at: job.last_run_at || null,
+    last_status: job.last_status || null,
+    last_error: job.last_error || null,
+    last_delivery_error: job.last_delivery_error || null,
+    repeat: job.repeat || null,
+    deliver: job.deliver || null,
+  };
+  return JSON.stringify(fields, null, 2);
+}
+
 async function loadCrons(animate) {
   const box = $('cronList');
   const refreshBtn = $('cronRefreshBtn');
@@ -197,12 +278,11 @@ async function loadCrons(animate) {
       const item = document.createElement('div');
       item.className = 'cron-item';
       item.id = 'cron-' + job.id;
-      const statusClass = job.enabled === false ? 'disabled' : job.state === 'paused' ? 'paused' : job.last_status === 'error' ? 'error' : 'active';
-      const statusLabel = job.enabled === false ? t('cron_status_off') : job.state === 'paused' ? t('cron_status_paused') : job.last_status === 'error' ? t('cron_status_error') : t('cron_status_active');
+      const status = _cronStatusMeta(job);
       item.innerHTML = `
         <div class="cron-header">
           <span class="cron-name" title="${esc(job.name)}">${esc(job.name)}</span>
-          <span class="cron-status ${statusClass}">${esc(statusLabel)}</span>
+          <span class="cron-status ${status.listClass}">${esc(status.label)}</span>
         </div>`;
       item.onclick = () => openCronDetail(job.id, item);
       if (_currentCronDetail && _currentCronDetail.id === job.id) item.classList.add('active');
@@ -230,19 +310,34 @@ function _renderCronDetail(job){
   const empty = $('taskDetailEmpty');
   if (!title || !body) return;
   title.textContent = job.name || job.schedule_display || '(unnamed)';
-  const statusClass = job.enabled === false ? 'warn' : job.state === 'paused' ? 'warn' : job.last_status === 'error' ? 'err' : 'ok';
-  const statusLabel = job.enabled === false ? t('cron_status_off') : job.state === 'paused' ? t('cron_status_paused') : job.last_status === 'error' ? t('cron_status_error') : t('cron_status_active');
+  const status = _cronStatusMeta(job);
   const nextRun = job.next_run_at ? new Date(job.next_run_at).toLocaleString() : t('not_available');
   const lastRun = job.last_run_at ? new Date(job.last_run_at).toLocaleString() : t('never');
   const schedule = job.schedule_display || (job.schedule && job.schedule.expression) || '';
   const skills = Array.isArray(job.skills) && job.skills.length ? job.skills.join(', ') : '—';
   const deliver = job.deliver || 'local';
   const lastError = job.last_error ? `<div class="detail-row"><div class="detail-row-label">${esc(t('error_prefix').replace(/:\s*$/,''))}</div><div class="detail-row-value" style="color:var(--accent-text)">${esc(job.last_error)}</div></div>` : '';
+  const attention = status.state === 'needs_attention' || status.state === 'schedule_error';
+  const croniterHint = job.last_error && /croniter/i.test(job.last_error)
+    ? `<p>${esc(t('cron_attention_croniter_hint'))}</p>`
+    : '';
+  const attentionBanner = attention ? `
+      <div class="detail-alert cron-attention-panel">
+        <div class="detail-alert-title">${esc(t('cron_status_needs_attention'))}</div>
+        <p>${esc(t('cron_attention_desc'))}</p>
+        ${croniterHint}
+        <div class="detail-alert-actions">
+          <button type="button" class="cron-btn run" onclick="resumeCurrentCron()">${esc(t('cron_attention_resume'))}</button>
+          <button type="button" class="cron-btn" onclick="runCurrentCron()">${esc(t('cron_attention_run_once'))}</button>
+          <button type="button" class="cron-btn" onclick="copyCurrentCronDiagnostics()">${esc(t('cron_attention_copy_diagnostics'))}</button>
+        </div>
+      </div>` : '';
   body.innerHTML = `
     <div class="main-view-content">
+      ${attentionBanner}
       <div class="detail-card">
         <div class="detail-card-title">${esc(t('cron_status_active').replace(/./,c=>c.toUpperCase()))}</div>
-        <div class="detail-row"><div class="detail-row-label">Status</div><div class="detail-row-value"><span class="detail-badge ${statusClass}">${esc(statusLabel)}</span></div></div>
+        <div class="detail-row"><div class="detail-row-label">Status</div><div class="detail-row-value"><span class="detail-badge ${status.detailClass}">${esc(status.label)}</span></div></div>
         <div class="detail-row"><div class="detail-row-label">Schedule</div><div class="detail-row-value"><code>${esc(schedule)}</code></div></div>
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_next'))}</div><div class="detail-row-value">${esc(nextRun)}</div></div>
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_last'))}</div><div class="detail-row-value">${esc(lastRun)}</div></div>
@@ -279,7 +374,12 @@ function _setCronHeaderButtons(mode, job) {
   const show = b => b && (b.style.display = '');
   if (mode === 'read') {
     show(runBtn);
-    if (job && job.state === 'paused') { hide(pauseBtn); show(resumeBtn); }
+    const status = job ? _cronStatusMeta(job) : null;
+    const resumable = job && (
+      job.state === 'paused' ||
+      (status && (status.state === 'needs_attention' || status.state === 'schedule_error'))
+    );
+    if (resumable) { hide(pauseBtn); show(resumeBtn); }
     else { show(pauseBtn); hide(resumeBtn); }
     show(editBtn); show(delBtn); hide(cancelBtn); hide(saveBtn);
   } else if (mode === 'create' || mode === 'edit') {
@@ -339,6 +439,13 @@ function _clearCronDetail(){
 async function runCurrentCron(){ if (_currentCronDetail) await cronRun(_currentCronDetail.id); }
 async function pauseCurrentCron(){ if (_currentCronDetail) await cronPause(_currentCronDetail.id); }
 async function resumeCurrentCron(){ if (_currentCronDetail) await cronResume(_currentCronDetail.id); }
+async function copyCurrentCronDiagnostics(){
+  if (!_currentCronDetail) return;
+  try {
+    await _copyText(_cronDiagnostics(_currentCronDetail));
+    showToast(t('cron_diagnostics_copied'));
+  } catch(e) { showToast(t('copy_failed'), 4000); }
+}
 function editCurrentCron(){
   if (!_currentCronDetail) return;
   openCronEdit(_currentCronDetail);

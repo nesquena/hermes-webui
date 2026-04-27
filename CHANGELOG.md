@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Fixed
+- **Recurring cron jobs with no next run need attention** — the Tasks panel now
+  distinguishes anomalous recurring jobs (`enabled=false`, `state=completed`,
+  `next_run_at=null`) from ordinary off jobs, shows a warning with recovery
+  actions, and lets users copy diagnostics for scheduler/runtime failures.
+  (`static/panels.js`, `static/style.css`, `static/i18n.js`,
+  `tests/test_cron_needs_attention.py`)
 - **Legacy `@provider:model` session models** — persisted sessions with an
   old explicit provider hint (for example `@copilot:gpt-5.5`) now pass through
   the same stale-model compatibility recovery as slash-prefixed session models,
