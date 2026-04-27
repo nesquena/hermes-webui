@@ -165,6 +165,9 @@ async function populateModelDropdown(){
 
 // Cache so we don't re-fetch on every page load
 const _liveModelCache={};
+// Track in-flight live model fetches so syncTopbar() doesn't prematurely
+// reset the session model to the first static option (#1169).
+const _liveModelFetchPending={};
 
 function _addLiveModelsToSelect(provider, models, sel){
   if(!provider||!models||!models.length||!sel) return 0;
@@ -220,12 +223,19 @@ function _addLiveModelsToSelect(provider, models, sel){
 
 async function _fetchLiveModels(provider, sel){
   if(!provider||!sel) return;
+  const _pkey=(provider||'').toLowerCase();
   // Already fetched — apply cached models to this select element (#872)
   if(_liveModelCache[provider]){
     const added=_addLiveModelsToSelect(provider,_liveModelCache[provider],sel);
-    if(added>0 && typeof syncModelChip==='function') syncModelChip();
+    if(added>0){
+      _reapplySessionModelIfFound(sel);
+      if(typeof syncModelChip==='function') syncModelChip();
+    }
     return;
   }
+  // Mark fetch as in-flight so syncTopbar() won't prematurely reset the
+  // session model to the first static option (#1169).
+  _liveModelFetchPending[_pkey]=true;
   try{
     const url=new URL('api/models/live',location.href);
     url.searchParams.set('provider',provider);
@@ -236,11 +246,36 @@ async function _fetchLiveModels(provider, sel){
     _liveModelCache[provider]=data.models;
     const added=_addLiveModelsToSelect(provider,data.models,sel);
     if(added>0){
+      _reapplySessionModelIfFound(sel);
       if(typeof syncModelChip==='function') syncModelChip();
       console.log('[hermes] Live models loaded for',provider+':',added,'new models added');
     }
   }catch(e){
     console.debug('[hermes] Live model fetch failed for',provider,e.message);
+  }finally{
+    delete _liveModelFetchPending[_pkey];
+  }
+}
+
+/**
+ * After live models are added to the dropdown, re-apply the session model
+ * if it's now findable — correcting any premature reset that may have
+ * occurred while the live fetch was in flight (#1169).
+ */
+function _reapplySessionModelIfFound(sel){
+  if(!sel || !S.session || !S.session.model) return;
+  const sessionModel=S.session.model;
+  const resolved=_findModelInDropdown(sessionModel,sel);
+  if(resolved && sel.value!==resolved){
+    sel.value=resolved;
+    // If the dropdown was incorrectly set to a different model, restore the
+    // correct session model and persist the fix.
+    S.session.model=sessionModel;
+    fetch(new URL('api/session/update',location.href).href,{
+      method:'POST',credentials:'include',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({session_id:S.session.id||S.session.session_id,model:sessionModel})
+    }).catch(()=>{});
   }
 }
 
@@ -1832,6 +1867,9 @@ function syncTopbar(){
     // first available model so stale values don't pollute the picker (#829).
     if(!applied && currentModel){
       const deferModelCorrection=Boolean(S.session._modelResolutionDeferred);
+      // Also defer if a live model fetch is still in flight — the model may
+      // appear once live models are loaded (#1169).
+      const liveFetchPending=Boolean(_liveModelFetchPending[(window._activeProvider||'').toLowerCase()]);
       // Stale session model not in the current provider catalog — reset to the
       // first available model rather than injecting an "(unavailable)" option
       // that visually appears under the wrong provider group (#829).
@@ -1839,7 +1877,7 @@ function syncTopbar(){
       const first=modelSel&&modelSel.querySelector('optgroup > option, option');
       if(first){
         modelSel.value=first.value;
-        if(!deferModelCorrection){
+        if(!deferModelCorrection && !liveFetchPending){
           S.session.model=first.value;
           // Persist the correction so the session doesn't re-inject on next load.
           fetch(new URL('api/session/update',location.href).href,{
