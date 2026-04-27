@@ -1,23 +1,44 @@
 {
-  "name": "Hermes",
-  "short_name": "Hermes",
-  "description": "Hermes AI Agent Web UI",
+  "name": "Capy",
+  "short_name": "Capy",
+  "description": "Capy AI Agent Web UI",
   "start_url": "./",
+  "scope": "./",
   "display": "standalone",
   "background_color": "#1a1a1a",
   "theme_color": "#1a1a1a",
   "orientation": "portrait-primary",
   "icons": [
     {
-      "src": "static/favicon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
-      "purpose": "any maskable"
+      "src": "static/capy-icon-16.png",
+      "sizes": "16x16",
+      "type": "image/png"
     },
     {
-      "src": "static/favicon-32.png",
+      "src": "static/capy-icon-32.png",
       "sizes": "32x32",
       "type": "image/png"
+    },
+    {
+      "src": "static/capy-icon-180.png",
+      "sizes": "180x180",
+      "type": "image/png"
+    },
+    {
+      "src": "static/capy-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "static/capy-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "static/capy-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ]
 }

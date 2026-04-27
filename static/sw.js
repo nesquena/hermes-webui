@@ -23,8 +23,13 @@ const SHELL_ASSETS = [
   './static/i18n.js',
   './static/workspace.js',
   './static/onboarding.js',
-  './static/favicon.svg',
-  './static/favicon-32.png',
+  './static/capy-icon-16.png',
+  './static/capy-icon-32.png',
+  './static/capy-icon-180.png',
+  './static/capy-icon-192.png',
+  './static/capy-icon-512.png',
+  './static/capy-maskable-512.png',
+  './static/apple-touch-icon.png',
   './manifest.json',
 ];
 

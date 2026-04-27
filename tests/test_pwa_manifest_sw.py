@@ -18,6 +18,7 @@ MANIFEST = ROOT / "static" / "manifest.json"
 SW = ROOT / "static" / "sw.js"
 INDEX = ROOT / "static" / "index.html"
 ROUTES = ROOT / "api" / "routes.py"
+AUTH = ROOT / "api" / "auth.py"
 
 
 class TestManifest:
@@ -102,7 +103,7 @@ class TestPWARoutes:
     def test_manifest_route_serves_correct_content_type(self):
         src = ROUTES.read_text(encoding="utf-8")
         # The handler block for /manifest.json
-        idx = src.find('"/manifest.json"')
+        idx = src.find('if parsed.path in ("/manifest.json"')
         assert idx != -1, "routes.py must handle /manifest.json"
         block = src[idx:idx + 800]
         assert "application/manifest+json" in block, (
@@ -132,6 +133,14 @@ class TestPWARoutes:
             "sw.js route must set Service-Worker-Allowed header so the SW can control "
             "the expected scope"
         )
+
+    def test_pwa_public_assets_do_not_redirect_to_login_when_auth_enabled(self):
+        src = AUTH.read_text(encoding="utf-8")
+        for public_path in ("/manifest.json", "/manifest.webmanifest", "/sw.js"):
+            assert public_path in src, (
+                f"{public_path} must be in auth.PUBLIC_PATHS so PWA install metadata "
+                "and service worker updates are reachable before login"
+            )
 
 
 class TestIndexHtmlIntegration:

@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 # ── Public paths (no auth required) ─────────────────────────────────────────
 PUBLIC_PATHS = frozenset({
     '/login', '/health', '/favicon.ico',
+    '/manifest.json', '/manifest.webmanifest', '/sw.js',
     '/api/auth/login', '/api/auth/status',
 })
 
