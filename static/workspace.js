@@ -64,7 +64,7 @@ async function loadDir(path){
     // Pre-fetch contents of restored expanded dirs so they render without a second click
     // (parallelized — avoids serial waterfall when multiple dirs are expanded)
     if(!path||path==='.'){
-      const expanded=S._expandedDirs||[];
+      const expanded=S._expandedDirs||new Set();
       const pending=[...expanded].filter(dirPath=>!S._dirCache[dirPath]);
       if(pending.length){
         const results=await Promise.all(pending.map(dirPath=>
