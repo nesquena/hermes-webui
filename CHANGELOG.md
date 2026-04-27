@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Fixed
+- **Legacy `@provider:model` session models** — persisted sessions with an
+  old explicit provider hint (for example `@copilot:gpt-5.5`) now pass through
+  the same stale-model compatibility recovery as slash-prefixed session models,
+  so they can continue after the active provider changes. (`api/routes.py`)
 
 ## v0.50.223 — 2026-04-26
 

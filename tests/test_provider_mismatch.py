@@ -336,6 +336,123 @@ def test_prefixed_google_session_model_normalizes_to_active_provider_default(mon
     assert effective == "gpt-5.4-mini"
 
 
+def test_legacy_at_provider_session_model_normalizes_when_provider_hidden(monkeypatch):
+    """Old @provider:model session values must not bypass stale-model recovery."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+                },
+            ],
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "@copilot:gpt-5.5"
+    )
+
+    assert changed is True
+    assert effective == "gpt-5.5"
+
+
+def test_active_at_provider_session_model_strips_redundant_hint(monkeypatch):
+    """@active-provider:model is an old persisted form; use the bare model now."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"}],
+                },
+            ],
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "@openai-codex:gpt-5.4-mini"
+    )
+
+    assert changed is True
+    assert effective == "gpt-5.4-mini"
+
+
+def test_routable_non_active_at_provider_session_model_is_preserved(monkeypatch):
+    """Visible cross-provider dropdown selections must keep their provider hint."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+                },
+                {
+                    "provider": "GitHub Copilot",
+                    "provider_id": "copilot",
+                    "models": [{"id": "@copilot:gpt-5.4", "label": "GPT-5.4"}],
+                },
+            ],
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "@copilot:gpt-5.4"
+    )
+
+    assert changed is False
+    assert effective == "@copilot:gpt-5.4"
+
+
+def test_stale_at_provider_model_falls_back_when_family_mismatches(monkeypatch):
+    """Unroutable @provider:model should not invent a bare model for another family."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+                },
+            ],
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "@copilot:claude-opus-4.6"
+    )
+
+    assert changed is True
+    assert effective == "gpt-5.5"
+
+
 def test_google_active_provider_keeps_valid_gemini_session_model(monkeypatch):
     """A Google-configured session must keep its Gemini model."""
     import api.routes as routes

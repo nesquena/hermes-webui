@@ -216,6 +216,44 @@ def _normalize_provider_id(value: str | None) -> str:
     return "" 
 
 
+def _catalog_provider_id_sets(catalog: dict) -> tuple[set[str], set[str]]:
+    raw_provider_ids: set[str] = set()
+    normalized_provider_ids: set[str] = set()
+    for group in catalog.get("groups") or []:
+        raw = str(group.get("provider_id") or "").strip().lower()
+        if not raw:
+            continue
+        raw_provider_ids.add(raw)
+        normalized = _normalize_provider_id(raw)
+        if normalized:
+            normalized_provider_ids.add(normalized)
+    return raw_provider_ids, normalized_provider_ids
+
+
+def _catalog_has_provider(
+    provider_raw: str,
+    provider_normalized: str,
+    raw_provider_ids: set[str],
+    normalized_provider_ids: set[str],
+) -> bool:
+    return (
+        provider_raw in raw_provider_ids
+        or (provider_normalized and provider_normalized in raw_provider_ids)
+        or (provider_normalized and provider_normalized in normalized_provider_ids)
+    )
+
+
+def _model_matches_active_provider_family(
+    model: str,
+    active_provider: str,
+) -> bool:
+    model_lower = model.lower()
+    for bare_prefix in ("gpt", "claude", "gemini"):
+        if model_lower.startswith(bare_prefix):
+            return _normalize_provider_id(bare_prefix) == active_provider
+    return False
+
+
 def _resolve_compatible_session_model(model_id: str | None) -> tuple[str, bool]:
     """Return (effective_model, was_normalized) for persisted session models.
 
@@ -239,6 +277,37 @@ def _resolve_compatible_session_model(model_id: str | None) -> tuple[str, bool]:
     # is stale relative to this unknown active provider. (#1023)
     raw_active_provider = str(catalog.get("active_provider") or "").strip().lower()
     if not active_provider and not raw_active_provider:
+        return model, False
+
+    if model.startswith("@") and ":" in model:
+        provider_hint, bare_model = model[1:].split(":", 1)
+        provider_raw = provider_hint.strip().lower()
+        provider_normalized = _normalize_provider_id(provider_raw)
+        bare_model = bare_model.strip()
+        if not provider_raw or not bare_model:
+            return model, False
+
+        raw_provider_ids, normalized_provider_ids = _catalog_provider_id_sets(catalog)
+        hint_matches_active = (
+            provider_raw == raw_active_provider
+            or provider_raw == active_provider
+            or (provider_normalized and provider_normalized == active_provider)
+        )
+        if hint_matches_active:
+            return bare_model, True
+
+        if _catalog_has_provider(
+            provider_raw,
+            provider_normalized,
+            raw_provider_ids,
+            normalized_provider_ids,
+        ):
+            return model, False
+
+        if _model_matches_active_provider_family(bare_model, active_provider):
+            return bare_model, True
+        if default_model:
+            return default_model, True
         return model, False
 
     slash = model.find("/")
