@@ -1,14 +1,17 @@
 """
 Regression tests for GitHub issue #789.
 
-Bug: every brand-new session immediately disappeared from the sidebar because
-all_sessions() filtered out sessions where title == 'Untitled' AND
-message_count == 0. Since every new session starts with those values, it was
-filtered out of /api/sessions on the next refresh.
+Original bug (#789): new sessions immediately disappeared because all_sessions()
+filtered out Untitled + 0-message sessions.
 
-Fix: exempt sessions younger than 60 seconds from that filter. Sessions older
-than 60 seconds that are still Untitled with 0 messages are still suppressed
-(ghost sessions from test runs / accidental reloads).
+Original fix: exempt sessions younger than 60 seconds.
+
+Updated for #1171 / #1182: a session only "exists" from the user's perspective
+once the first message is sent. Untitled + 0-message sessions are now hidden
+from the sidebar **regardless of age** — no grace window. The button guard
+(#1176) and the boot-restore guard (#1182) ensure the user is never locked
+out of typing into a fresh session, but the sidebar list never surfaces empty
+ones. These tests reflect the new contract.
 """
 import json
 import time
@@ -67,34 +70,37 @@ def _make_titled_session(age_seconds, session_id=None):
     return s
 
 
-# ── Test 1: brand-new Untitled 0-message session IS included ─────────────────
+# ── Test 1: Untitled 0-message sessions are hidden regardless of age (#1171) ─
 
-def test_new_untitled_session_is_visible_in_sidebar():
-    """A session created just now (0 seconds old) must appear in all_sessions()."""
+def test_new_untitled_session_is_hidden_from_sidebar():
+    """A brand-new (0 s old) Untitled 0-message session must NOT appear (#1171).
+
+    Updated for #1171/#1182: sessions only "exist" once the first message is
+    sent. Empty scratch-pad sessions never surface in the sidebar.
+    """
     new_session = _make_untitled_session(age_seconds=0)
 
     result = all_sessions()
     ids = {s["session_id"] for s in result}
 
-    assert new_session.session_id in ids, (
-        "Brand-new Untitled 0-message session must be visible in the sidebar "
-        "(fix for issue #789)"
+    assert new_session.session_id not in ids, (
+        "Untitled 0-message session must be hidden regardless of age (#1171)"
     )
 
 
-def test_recent_untitled_session_under_60s_is_visible():
-    """A session 30 seconds old should still be visible."""
+def test_recent_untitled_session_under_60s_is_hidden():
+    """A 30-second-old empty session must also be hidden (no grace window)."""
     recent_session = _make_untitled_session(age_seconds=30)
 
     result = all_sessions()
     ids = {s["session_id"] for s in result}
 
-    assert recent_session.session_id in ids, (
-        "Untitled 0-message session younger than 60 s must be visible (#789)"
+    assert recent_session.session_id not in ids, (
+        "Untitled 0-message session younger than 60 s is also hidden (#1171)"
     )
 
 
-# ── Test 2: old Untitled 0-message session IS still filtered ─────────────────
+# ── Test 2: old Untitled 0-message session is still filtered ─────────────────
 
 def test_old_untitled_session_over_60s_is_filtered():
     """A ghost session (Untitled, 0 messages, >60 s old) must be hidden."""
@@ -109,14 +115,14 @@ def test_old_untitled_session_over_60s_is_filtered():
 
 
 def test_session_exactly_at_boundary_is_filtered():
-    """A session just over 60 seconds old should be filtered."""
+    """A session at any age (the previous 60 s threshold no longer applies)."""
     boundary_session = _make_untitled_session(age_seconds=61)
 
     result = all_sessions()
     ids = {s["session_id"] for s in result}
 
     assert boundary_session.session_id not in ids, (
-        "Untitled 0-message session older than 60 s must be filtered out"
+        "Untitled 0-message session is filtered regardless of age (#1171)"
     )
 
 
@@ -181,7 +187,8 @@ def test_titled_session_with_no_messages_old_is_visible():
 # ── Test 4: mixed bag — only old Untitled empty sessions are filtered ─────────
 
 def test_mixed_sessions_correct_visibility():
-    """With a mix of sessions, only old+Untitled+empty ones are suppressed."""
+    """With a mix of sessions, only sessions with messages OR titled sessions
+    are surfaced (#1171). Both new and old Untitled+empty sessions are hidden."""
     new_ghost = _make_untitled_session(age_seconds=5, session_id="new_ghost")
     old_ghost = _make_untitled_session(age_seconds=200, session_id="old_ghost")
     real_session = _make_titled_session(age_seconds=500, session_id="real_session")
@@ -189,6 +196,6 @@ def test_mixed_sessions_correct_visibility():
     result = all_sessions()
     ids = {s["session_id"] for s in result}
 
-    assert "new_ghost" in ids, "New Untitled session (5s old) must be visible"
-    assert "old_ghost" not in ids, "Old Untitled session (200s old) must be hidden"
+    assert "new_ghost" not in ids, "New Untitled empty session is also hidden (#1171)"
+    assert "old_ghost" not in ids, "Old Untitled session must be hidden"
     assert "real_session" in ids, "Titled session with messages must be visible"
