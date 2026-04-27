@@ -118,7 +118,12 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
     return projected
 
 
-def read_importable_agent_session_rows(db_path: Path, limit: int = 200, log=None) -> list[dict]:
+def read_importable_agent_session_rows(
+    db_path: Path,
+    limit: int = 200,
+    log=None,
+    exclude_sources: tuple[str, ...] | None = ("cron",),
+) -> list[dict]:
     """Return non-WebUI agent sessions projected as importable conversations.
 
     Hermes Agent can create rows in ``state.db.sessions`` before a session has
@@ -126,6 +131,12 @@ def read_importable_agent_session_rows(db_path: Path, limit: int = 200, log=None
     rows. WebUI cannot import empty rows and should not show compression
     segments as separate conversations, so both the regular ``/api/sessions``
     path and the gateway SSE watcher use this shared projection.
+
+    By default, omit background/internal sources such as ``cron`` from the WebUI
+    sidebar. This mirrors Hermes Agent CLI's session-list behaviour: interactive
+    views should stay focused on user-facing conversations, while callers that
+    need a source-specific diagnostic view can opt out by passing
+    ``exclude_sources=None``.
     """
     db_path = Path(db_path)
     if not db_path.exists():
@@ -153,6 +164,15 @@ def read_importable_agent_session_rows(db_path: Path, limit: int = 200, log=None
         ended_expr = _optional_col('ended_at', session_cols)
         end_reason_expr = _optional_col('end_reason', session_cols)
 
+        where_clauses = ["s.source IS NOT NULL", "s.source != 'webui'"]
+        params: list[str] = []
+        if exclude_sources:
+            excluded = tuple(str(source) for source in exclude_sources if source)
+            if excluded:
+                placeholders = ", ".join("?" for _ in excluded)
+                where_clauses.append(f"s.source NOT IN ({placeholders})")
+                params.extend(excluded)
+
         cur.execute(
             f"""
             SELECT s.id, s.title, s.model, s.message_count,
@@ -164,10 +184,11 @@ def read_importable_agent_session_rows(db_path: Path, limit: int = 200, log=None
                    MAX(m.timestamp) AS last_activity
             FROM sessions s
             LEFT JOIN messages m ON m.session_id = s.id
-            WHERE s.source IS NOT NULL AND s.source != 'webui'
+            WHERE {' AND '.join(where_clauses)}
             GROUP BY s.id
             ORDER BY COALESCE(MAX(m.timestamp), s.started_at) DESC
             """,
+            params,
         )
         projected = _project_agent_session_rows([dict(row) for row in cur.fetchall()])
         if limit is None:

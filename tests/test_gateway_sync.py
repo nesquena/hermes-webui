@@ -248,14 +248,14 @@ def test_gateway_watcher_hides_sessions_without_messages(monkeypatch):
         conn.execute(
             "INSERT OR REPLACE INTO sessions (id, source, title, model, started_at, message_count) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            (empty_sid, 'cron', 'Empty Cron Session', 'openai/gpt-5', time.time(), 0),
+            (empty_sid, 'telegram', 'Empty Telegram Session', 'openai/gpt-5', time.time(), 0),
         )
         conn.execute("DELETE FROM messages WHERE session_id = ?", (empty_sid,))
         _insert_gateway_session(
             conn,
             session_id=live_sid,
-            source='cron',
-            title='Live Cron Session',
+            source='telegram',
+            title='Live Telegram Session',
             message_count=0,
         )
 
@@ -667,6 +667,55 @@ def test_gateway_session_has_correct_metadata():
         except Exception:
             pass
         post('/api/settings', {'show_cli_sessions': False})
+
+
+def test_cron_sessions_hidden_from_sidebar_by_default():
+    """Cron-run sessions are background/internal and should not appear in the default sidebar list."""
+    conn = _ensure_state_db()
+    try:
+        _insert_gateway_session(conn, session_id='cron_job123_20260427', source='cron', title='Nightly Cleanup')
+        _insert_gateway_session(conn, session_id='gw_noncron_001', source='telegram', title='Visible Chat')
+
+        post('/api/settings', {'show_cli_sessions': True})
+
+        data, status = get('/api/sessions')
+        assert status == 200
+        sessions = data.get('sessions', [])
+        ids = {s['session_id'] for s in sessions}
+        assert 'gw_noncron_001' in ids, "Non-cron agent session should still appear"
+        assert 'cron_job123_20260427' not in ids, "Cron session should be hidden by default"
+    finally:
+        try:
+            _remove_test_sessions(conn, 'cron_job123_20260427', 'gw_noncron_001')
+            conn.close()
+        except Exception:
+            pass
+        post('/api/settings', {'show_cli_sessions': False})
+
+
+def test_importable_agent_rows_can_opt_into_cron_source():
+    """Diagnostic callers can opt out of the default cron exclusion explicitly."""
+    conn = _ensure_state_db()
+    try:
+        _insert_agent_session_row(conn, session_id='cron_diag_20260427', source='cron', title='Cron Diagnostic')
+
+        from api.agent_sessions import read_importable_agent_session_rows
+
+        default_rows = read_importable_agent_session_rows(_get_state_db_path(), limit=None)
+        assert 'cron_diag_20260427' not in {row.get('id') for row in default_rows}
+
+        diagnostic_rows = read_importable_agent_session_rows(
+            _get_state_db_path(),
+            limit=None,
+            exclude_sources=None,
+        )
+        assert 'cron_diag_20260427' in {row.get('id') for row in diagnostic_rows}
+    finally:
+        try:
+            _remove_test_sessions(conn, 'cron_diag_20260427')
+            conn.close()
+        except Exception:
+            pass
 
 
 def test_gateway_session_has_message_count():
