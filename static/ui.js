@@ -165,6 +165,10 @@ async function populateModelDropdown(){
 
 // Cache so we don't re-fetch on every page load
 const _liveModelCache={};
+// Tracks providers for which a live-model fetch is in flight.
+// Used by syncTopbar() to defer model corrections until the fetch completes,
+// preventing premature fallback to the first static model (#1169).
+const _liveModelFetchPending=new Set();
 
 function _addLiveModelsToSelect(provider, models, sel){
   if(!provider||!models||!models.length||!sel) return 0;
@@ -215,6 +219,14 @@ function _addLiveModelsToSelect(provider, models, sel){
     added++;
   }
   if(added>0 && currentVal) _applyModelToDropdown(currentVal, sel);
+  // After live models are added, re-apply the session's model in case it was
+  // absent from the static list and syncTopbar() fired before the live fetch
+  // completed (#1169). This ensures the session model wins over any premature
+  // fallback that may have set sel.value to the first available option.
+  if(S.session && S.session.model && sel.id==='modelSelect'){
+    const reapplied=_applyModelToDropdown(S.session.model, sel);
+    if(reapplied && typeof syncModelChip==='function') syncModelChip();
+  }
   return added;
 }
 
@@ -226,6 +238,7 @@ async function _fetchLiveModels(provider, sel){
     if(added>0 && typeof syncModelChip==='function') syncModelChip();
     return;
   }
+  _liveModelFetchPending.add(provider);
   try{
     const url=new URL('api/models/live',location.href);
     url.searchParams.set('provider',provider);
@@ -241,6 +254,8 @@ async function _fetchLiveModels(provider, sel){
     }
   }catch(e){
     console.debug('[hermes] Live model fetch failed for',provider,e.message);
+  }finally{
+    _liveModelFetchPending.delete(provider);
   }
 }
 
@@ -1838,21 +1853,30 @@ function syncTopbar(){
     // first available model so stale values don't pollute the picker (#829).
     if(!applied && currentModel){
       const deferModelCorrection=Boolean(S.session._modelResolutionDeferred);
-      // Stale session model not in the current provider catalog — reset to the
-      // first available model rather than injecting an "(unavailable)" option
-      // that visually appears under the wrong provider group (#829).
-      const modelSel=$('modelSelect');
-      const first=modelSel&&modelSel.querySelector('optgroup > option, option');
-      if(first){
-        modelSel.value=first.value;
-        if(!deferModelCorrection){
-          S.session.model=first.value;
-          // Persist the correction so the session doesn't re-inject on next load.
-          fetch(new URL('api/session/update',location.href).href,{
-            method:'POST',credentials:'include',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({session_id:S.session.id||S.session.session_id,model:first.value})
-          }).catch(()=>{});
+      // Also defer if a live model fetch is still in flight — the model may be
+      // in the list once the fetch completes. Persisting now would corrupt the
+      // session with the wrong model before live models arrive (#1169).
+      const liveStillPending=window._activeProvider&&_liveModelFetchPending.has(window._activeProvider);
+      if(liveStillPending){
+        // Live fetch in flight — don't touch sel.value or S.session.model yet.
+        // _addLiveModelsToSelect() will re-apply S.session.model once done (#1169).
+      } else {
+        // Stale session model not in the current provider catalog — reset to the
+        // first available model rather than injecting an "(unavailable)" option
+        // that visually appears under the wrong provider group (#829).
+        const modelSel=$('modelSelect');
+        const first=modelSel&&modelSel.querySelector('optgroup > option, option');
+        if(first){
+          modelSel.value=first.value;
+          if(!deferModelCorrection){
+            S.session.model=first.value;
+            // Persist the correction so the session doesn't re-inject on next load.
+            fetch(new URL('api/session/update',location.href).href,{
+              method:'POST',credentials:'include',
+              headers:{'Content-Type':'application/json'},
+              body:JSON.stringify({session_id:S.session.id||S.session.session_id,model:first.value})
+            }).catch(()=>{});
+          }
         }
       }
     }
