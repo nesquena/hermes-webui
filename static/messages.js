@@ -759,7 +759,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const _prevIn=(S.session&&S.session.input_tokens)||0;
         const _prevOut=(S.session&&S.session.output_tokens)||0;
         const _prevCost=(S.session&&S.session.estimated_cost)||0;
-        S.session=d.session;S.messages=d.session.messages||[];
+        S.session=d.session;S.messages=d.session.messages||[];if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
         if(
           window._compressionUi&&window._compressionUi.automatic&&
           window._compressionUi.sessionId===activeSid&&
