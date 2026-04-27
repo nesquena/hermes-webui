@@ -263,7 +263,12 @@ async function loadSession(sid){
       setStatus('');
       setComposerStatus('');
       updateQueueBadge(sid);
-      syncTopbar();renderMessages();highlightCode();loadDir('.');
+      syncTopbar();renderMessages();
+      // Kick off loadDir first (issues network requests), then highlight code.
+      // The fetch is dispatched before the CPU-bound Prism pass begins.
+      const _dirP=loadDir('.');
+      highlightCode();
+      await _dirP;
     }
   }
 
