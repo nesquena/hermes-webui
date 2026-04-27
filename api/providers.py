@@ -88,6 +88,10 @@ def _write_env_file(env_path: Path, updates: dict[str, str | None]) -> None:
     """Write key=value pairs to the .env file.
 
     Values of ``None`` cause the key to be removed.
+
+    Preserves comments, blank lines, and original key order (#1164).
+    New keys are appended at the end of the file with a blank-line separator.
+
     Holds ``_ENV_LOCK`` from ``api.streaming`` for the entire load → modify →
     write cycle to prevent TOCTOU races between concurrent POST /api/providers
     calls (each reading the same file baseline and overwriting the other's key).
@@ -97,11 +101,31 @@ def _write_env_file(env_path: Path, updates: dict[str, str | None]) -> None:
     import stat as _stat
 
     with _ENV_LOCK:
-        current = _load_env_file(env_path)
+        # ── Read existing lines (preserving comments and blank lines) ──
+        existing_lines: list[str] = []
+        if env_path.exists():
+            try:
+                existing_lines = env_path.read_text(encoding="utf-8").splitlines()
+            except Exception:
+                existing_lines = []
+
+        # Map each existing key to its line index so we can update in-place.
+        existing_key_indices: dict[str, int] = {}
+        for _i, _raw in enumerate(existing_lines):
+            _stripped = _raw.strip()
+            if _stripped and not _stripped.startswith("#") and "=" in _stripped:
+                _existing_key_indices_key = _stripped.split("=", 1)[0].strip()
+                existing_key_indices[_existing_key_indices_key] = _i
+
+        output_lines = list(existing_lines)
+        new_keys: list[str] = []
+
         for key, value in updates.items():
             if value is None:
-                current.pop(key, None)
+                # Mark the line for removal (None sentinel) and clear env.
                 os.environ.pop(key, None)
+                if key in existing_key_indices:
+                    output_lines[existing_key_indices[key]] = None  # type: ignore[assignment]
                 continue
             clean = str(value).strip()
             if not clean:
@@ -109,17 +133,32 @@ def _write_env_file(env_path: Path, updates: dict[str, str | None]) -> None:
             # Reject embedded newlines/carriage returns to prevent .env injection
             if "\n" in clean or "\r" in clean:
                 raise ValueError("API key must not contain newline characters.")
-            current[key] = clean
             os.environ[key] = clean
 
+            if key in existing_key_indices:
+                output_lines[existing_key_indices[key]] = f"{key}={clean}"
+            else:
+                new_keys.append(f"{key}={clean}")
+
+        # Remove deleted lines (None sentinels)
+        output_lines = [l for l in output_lines if l is not None]
+
+        # Append new keys after a blank-line separator
+        if new_keys:
+            if output_lines and output_lines[-1].strip() != "":
+                output_lines.append("")
+            output_lines.extend(new_keys)
+
         env_path.parent.mkdir(parents=True, exist_ok=True)
-        lines = [f"{key}={current[key]}" for key in sorted(current)]
+        content = "\n".join(output_lines)
+        if content:
+            content += "\n"
         # Create at owner-only mode from the first byte (O_CREAT honours the mode
         # argument subject to umask). A trailing chmod guards pre-existing files.
         _mode = _stat.S_IRUSR | _stat.S_IWUSR  # 0o600
         _fd = os.open(str(env_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _mode)
         with os.fdopen(_fd, "w", encoding="utf-8") as _f:
-            _f.write("\n".join(lines) + ("\n" if lines else ""))
+            _f.write(content)
         try:
             env_path.chmod(_mode)
         except OSError:

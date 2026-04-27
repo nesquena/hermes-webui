@@ -23,6 +23,7 @@ from api.config import (
     save_settings,
     verify_hermes_imports,
 )
+from api.providers import _write_env_file  # shared impl with _ENV_LOCK (#1164)
 from api.workspace import get_last_workspace, load_workspaces
 
 logger = logging.getLogger(__name__)
@@ -166,26 +167,6 @@ def _load_env_file(env_path: Path) -> dict[str, str]:
         return {}
     return values
 
-
-def _write_env_file(env_path: Path, updates: dict[str, str]) -> None:
-    current = _load_env_file(env_path)
-    for key, value in updates.items():
-        if value is None:
-            current.pop(key, None)
-            os.environ.pop(key, None)
-            continue
-        clean = str(value).strip()
-        if not clean:
-            continue
-        # Reject embedded newlines/carriage returns to prevent .env injection
-        if "\n" in clean or "\r" in clean:
-            raise ValueError("API key must not contain newline characters.")
-        current[key] = clean
-        os.environ[key] = clean
-
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [f"{key}={current[key]}" for key in sorted(current)]
-    env_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
 
 def _load_yaml_config(config_path: Path) -> dict:
