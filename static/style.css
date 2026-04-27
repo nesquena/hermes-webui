@@ -2353,3 +2353,14 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
   .queue-pill:hover{background:color-mix(in srgb,var(--hover-bg) 60%,var(--surface));}
   .queue-pill-count{color:var(--text);}
   .queue-pill-chevron{margin-left:auto;opacity:.5;}
+
+/* ── Mobile: prevent iOS auto-zoom on input focus ─────────────────────────
+   iOS Safari zooms in when a focused input/select has font-size < 16px.
+   This media query targets touch-primary devices (phones and tablets) and
+   bumps all interactive inputs to the minimum non-zoom threshold.
+   The textarea#msg composer is already 16px; the sidebar search, rename
+   inputs, settings selects, and dialog inputs are not.  (#1167)
+──────────────────────────────────────────────────────────────────────── */
+@media (hover:none) and (pointer:coarse){
+  input,textarea,select{font-size:max(16px,1em)!important;}
+}
