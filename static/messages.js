@@ -1,3 +1,6 @@
+// #503 — per-turn usage delta
+function _attachTurnUsage(m,u){if(!m||!u)return;const pi=S.session.input_tokens||0,po=S.session.output_tokens||0,pc=S.session.estimated_cost||0,ci=u.input_tokens||0,co=u.output_tokens||0,cc=u.estimated_cost||0;if(ci>pi||co>po)m._turnUsage={input_tokens:Math.max(0,ci-pi),output_tokens:Math.max(0,co-po),estimated_cost:Math.max(0,cc-pc)};}
+
 function _markSessionViewed(sid, messageCount) {
   if(typeof _setSessionViewedCount!=='function' || !sid) return;
   const next = Number.isFinite(messageCount) ? Number(messageCount) : 0;
@@ -753,31 +756,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       if(S.session&&S.session.session_id===activeSid){
         S.session=d.session;S.messages=d.session.messages||[];
-        // Find the last assistant message once for both reasoning persistence and timestamp
         const lastAsst=[...S.messages].reverse().find(m=>m.role==='assistant');
         // Persist reasoning trace so thinking card survives page reload
         if(reasoningText&&lastAsst&&!lastAsst.reasoning) lastAsst.reasoning=reasoningText;
-        // Stamp _ts on the last assistant message if it has no timestamp
         if(lastAsst&&!lastAsst._ts&&!lastAsst.timestamp) lastAsst._ts=Date.now()/1000;
         if(d.usage){
-          S.lastUsage=d.usage;_syncCtxIndicator(d.usage);
-          // #503 — compute per-turn cost delta and attach to last assistant message
-          if(lastAsst){
-            const prevIn=S.session.input_tokens||0;
-            const prevOut=S.session.output_tokens||0;
-            const prevCost=S.session.estimated_cost||0;
-            const curIn=d.usage.input_tokens||0;
-            const curOut=d.usage.output_tokens||0;
-            const curCost=d.usage.estimated_cost||0;
-            // Only set delta if values actually increased (skip no-op turns)
-            if(curIn>prevIn||curOut>prevOut){
-              lastAsst._turnUsage={
-                input_tokens:Math.max(0,curIn-prevIn),
-                output_tokens:Math.max(0,curOut-prevOut),
-                estimated_cost:Math.max(0,curCost-prevCost),
-              };
-            }
-          }
+          S.lastUsage=d.usage;_syncCtxIndicator(d.usage);_attachTurnUsage(lastAsst,d.usage);
         }
         if(d.session.tool_calls&&d.session.tool_calls.length){
           S.toolCalls=d.session.tool_calls.map(tc=>({...tc,done:true}));
