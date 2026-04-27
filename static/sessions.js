@@ -370,7 +370,15 @@ async function _loadOlderMessages() {
   _loadingOlder = true;
   try {
     const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`);
-    if (!data || !data.session || (_loadingSessionId !== null && _loadingSessionId !== sid)) return;
+    // Cancellation guards:
+    //  - response shape sane
+    //  - the active session is still the one we issued the request for.
+    //    Compare against S.session.session_id, NOT _loadingSessionId — the
+    //    latter is null between session loads, leaving a window where a
+    //    stale response could prepend onto the new session's S.messages.
+    if (!data || !data.session) return;
+    if (!S.session || S.session.session_id !== sid) return;
+    if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
     const olderMsgs = (data.session.messages || []).filter(m => m && m.role);
     if (!olderMsgs.length) { _messagesTruncated = false; return; }
     // Prepend older messages
