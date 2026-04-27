@@ -669,6 +669,26 @@ def test_gateway_session_has_correct_metadata():
         post('/api/settings', {'show_cli_sessions': False})
 
 
+def test_imported_cron_sessions_hidden_from_sidebar_by_default(cleanup_test_sessions):
+    """Cron sessions already imported into the WebUI store should stay hidden from the sidebar."""
+    from api.models import Session
+
+    sid = 'cron_imported_20260427'
+    cleanup_test_sessions.append(sid)
+    s = Session(
+        session_id=sid,
+        title='Hourly Cron Import',
+        messages=[{'role': 'user', 'content': 'run hourly job', 'timestamp': time.time()}],
+        model='openai/gpt-5',
+    )
+    s.is_cli_session = True
+    s.save(touch_updated_at=False)
+
+    data, status = get('/api/sessions')
+    assert status == 200
+    assert sid not in {session.get('session_id') for session in data.get('sessions', [])}
+
+
 def test_cron_sessions_hidden_from_sidebar_by_default():
     """Cron-run sessions are background/internal and should not appear in the default sidebar list."""
     conn = _ensure_state_db()
