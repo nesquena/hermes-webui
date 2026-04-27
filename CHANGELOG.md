@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Fixed
+- **Docker Hindsight memory provider dependency** — Docker startup now ensures
+  `hindsight-client` is installed in the WebUI container venv, even on fast
+  restarts where `/app/venv/.deps_installed` already exists. This lets
+  two-container WebUI deployments import Hermes Agent's Hindsight memory
+  provider without a manual container-side install. (`docker_init.bash`,
+  `tests/test_issue926_hindsight_docker_dependency.py`) Closes #926.
 
 ## v0.50.223 — 2026-04-26
 

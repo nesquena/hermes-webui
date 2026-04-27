@@ -285,6 +285,19 @@ echo "";echo "== Activating hermes webui's virtual environment"
 source /app/venv/bin/activate || error_exit "Failed to activate hermeswebui virtual environment"
 test -x /app/venv/bin/python3
 
+ensure_hindsight_client_docker_dependency() {
+  # Keep this outside the .deps_installed fast-restart guard so existing
+  # two-container Docker venvs self-heal after this dependency was added.
+  _hindsight_client_requirement="hindsight-client>=0.4.22"
+  echo ""; echo "== Checking Hindsight memory provider dependency"
+  if uv pip show hindsight-client >/dev/null 2>&1; then
+    echo "-- hindsight-client already installed"
+  else
+    echo "-- Installing ${_hindsight_client_requirement} for Hindsight memory provider support"
+    uv pip install "${_hindsight_client_requirement}" --trusted-host pypi.org --trusted-host files.pythonhosted.org || error_exit "Failed to install hindsight-client"
+  fi
+}
+
 if [ -f /app/venv/.deps_installed ]; then
   echo ""; echo "== Dependencies already installed — skipping (fast restart)"
 else
@@ -322,6 +335,8 @@ else
   fi
   touch /app/venv/.deps_installed
 fi
+
+ensure_hindsight_client_docker_dependency
 
 echo ""; echo "== Running hermes-webui"
 cd /app; python server.py || error_exit "hermes-webui failed or exited with an error"
