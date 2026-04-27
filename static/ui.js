@@ -50,6 +50,37 @@ function _setCompressionSessionLock(sid){
   window._compressionLockSid=sid||null;
 }
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+/* ── Image lightbox — click any .msg-media-img to enlarge ─────────────────── */
+function _openImgLightbox(src, alt) {
+  const lb = document.createElement('div');
+  lb.className = 'img-lightbox';
+  lb.setAttribute('role', 'dialog');
+  lb.setAttribute('aria-label', alt || 'Image');
+  const img = document.createElement('img');
+  img.src = src;
+  img.alt = alt || '';
+  img.onclick = e => e.stopPropagation();
+  const cls = document.createElement('button');
+  cls.className = 'img-lightbox-close';
+  cls.setAttribute('aria-label', 'Close');
+  cls.textContent = '×';
+  cls.onclick = () => _closeImgLightbox(lb);
+  lb.appendChild(img);
+  lb.appendChild(cls);
+  lb.onclick = () => _closeImgLightbox(lb);
+  document.body.appendChild(lb);
+  // Close on Escape
+  lb._escHandler = e => { if(e.key==='Escape') _closeImgLightbox(lb); };
+  document.addEventListener('keydown', lb._escHandler);
+}
+function _closeImgLightbox(lb) {
+  if(!lb || !lb.parentNode) return;
+  document.removeEventListener('keydown', lb._escHandler);
+  lb.style.animation = 'lb-in .12s ease reverse';
+  setTimeout(() => lb.parentNode && lb.parentNode.removeChild(lb), 120);
+}
+
 const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
@@ -815,7 +846,7 @@ function renderMd(raw){
     // backticks stays protected as a \x00C token and is never rendered as <img>.
     // Must run before _code_stash restore and before _link_stash so the image
     // is not consumed by the [label](url) link regex.
-    t=t.replace(/!\[([^\]]*)\]\((https?:\/\/[^\)]+)\)/g,(_,alt,url)=>`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy" onclick="this.classList.toggle('msg-media-img--full')">`);
+    t=t.replace(/!\[([^\]]*)\]\((https?:\/\/[^\)]+)\)/g,(_,alt,url)=>`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy" onclick="_openImgLightbox(this.src,this.alt)">`);
     // Stash rendered <img> tags so autolink never matches URLs inside src=
     const _img_stash=[];
     t=t.replace(/(<img\b[^>]*>)/g,m=>{_img_stash.push(m);return `\x00G${_img_stash.length-1}\x00`;});
@@ -894,7 +925,7 @@ function renderMd(raw){
   // #487: Outer image pass — handles ![alt](url) in plain paragraphs (outside tables/lists).
   // Runs AFTER the table pass (images in table cells are handled by inlineMd() above).
   // Runs BEFORE the outer [label](url) link pass so the image is not consumed as a plain link.
-  s=s.replace(/!\[([^\]]*)\]\((https?:\/\/[^\)]+)\)/g,(_,alt,url)=>`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy" onclick="this.classList.toggle('msg-media-img--full')">`);
+  s=s.replace(/!\[([^\]]*)\]\((https?:\/\/[^\)]+)\)/g,(_,alt,url)=>`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy" onclick="_openImgLightbox(this.src,this.alt)">`);
   // Outer link pass for labeled links in plain paragraphs (outside table cells).
   // Runs AFTER the table pass so table cells are processed by inlineMd() only.
   // Stash existing <a> tags first to avoid re-linking already-linked URLs.
@@ -958,14 +989,14 @@ function renderMd(raw){
       // Render all https:// URLs as <img> — extension check would miss extensionless
       // CDN paths like fal.media content-addressed URLs (closes #853).
       if(_IMAGE_EXTS.test(src.split('?')[0]) || /^https?:\/\//i.test(src)){
-        return `<img class="msg-media-img" src="${esc(src)}" alt="image" loading="lazy" onclick="this.classList.toggle('msg-media-img--full')">`;
+        return `<img class="msg-media-img" src="${esc(src)}" alt="image" loading="lazy" onclick="_openImgLightbox(this.src,this.alt)">`;
       }
       return `<a href="${esc(src)}" target="_blank" rel="noopener">${esc(src)}</a>`;
     }
     // Local file path
     const apiUrl='api/media?path='+encodeURIComponent(ref);
     if(_IMAGE_EXTS.test(ref)){
-      return `<img class="msg-media-img" src="${esc(apiUrl)}" alt="${esc(ref.split('/').pop())}" loading="lazy" onclick="this.classList.toggle('msg-media-img--full')">`;
+      return `<img class="msg-media-img" src="${esc(apiUrl)}" alt="${esc(ref.split('/').pop())}" loading="lazy" onclick="_openImgLightbox(this.src,this.alt)">`;
     }
     // Non-image local file — show download link with filename
     const fname=esc(ref.split('/').pop()||ref);
@@ -2255,11 +2286,14 @@ function renderMessages(){
     const isLastAssistant=!isUser&&vi===visWithIdx.length-1;
     let filesHtml='';
     if(m.attachments&&m.attachments.length){
+      const _attachSid=(S.session&&S.session.session_id)||'';
       filesHtml=`<div class="msg-files">${m.attachments.map(f=>{
         const fname=f.split('/').pop()||f;
         if(_IMAGE_EXTS.test(fname)){
-          const imgUrl='api/media?path='+encodeURIComponent(f);
-          return `<img class="msg-media-img" src="${esc(imgUrl)}" alt="${esc(fname)}" loading="lazy" onclick="this.classList.toggle('msg-media-img--full')">`;
+          // Use api/file/raw which resolves filename relative to the session workspace.
+          // api/media expects a full absolute path which we don't store on the client side.
+          const imgUrl='api/file/raw?session_id='+encodeURIComponent(_attachSid)+'&path='+encodeURIComponent(fname);
+          return `<img class="msg-media-img" src="${esc(imgUrl)}" alt="${esc(fname)}" loading="lazy" onclick="_openImgLightbox(this.src,this.alt)">`;
         }
         return `<div class="msg-file-badge">${li('paperclip',12)} ${esc(fname)}</div>`;
       }).join('')}</div>`;
@@ -3235,13 +3269,24 @@ function renderTray(){
   updateSendBtn();
   S.pendingFiles.forEach((f,i)=>{
     const chip=document.createElement('div');chip.className='attach-chip';
-    chip.innerHTML=`${li('paperclip',12)} ${esc(f.name)} <button title="${t('remove_title')}">${li('x',12)}</button>`;
-    chip.querySelector('button').onclick=()=>{S.pendingFiles.splice(i,1);renderTray();};
+    // Image files get a thumbnail preview; other files keep the paperclip chip
+    if(_IMAGE_EXTS.test(f.name)){
+      const blobUrl=URL.createObjectURL(f);
+      chip.className='attach-chip attach-chip--image';
+      chip.dataset.blobUrl=blobUrl;
+      chip.innerHTML=`<img class="attach-thumb" src="${esc(blobUrl)}" alt="${esc(f.name)}" title="${esc(f.name)}"><button title="${t('remove_title')}">${li('x',12)}</button>`;
+    } else {
+      chip.innerHTML=`${li('paperclip',12)} ${esc(f.name)} <button title="${t('remove_title')}">${li('x',12)}</button>`;
+    }
+    chip.querySelector('button').onclick=()=>{
+      // Revoke blob URL to avoid memory leak before removing
+      if(chip.dataset.blobUrl) URL.revokeObjectURL(chip.dataset.blobUrl);
+      S.pendingFiles.splice(i,1);renderTray();
+    };
     tray.appendChild(chip);
   });
 }
 function addFiles(files){for(const f of files){if(!S.pendingFiles.find(p=>p.name===f.name))S.pendingFiles.push(f);}renderTray();}
-
 async function uploadPendingFiles(){
   if(!S.pendingFiles.length||!S.session)return[];
   const names=[];let failures=0;
