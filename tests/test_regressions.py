@@ -433,7 +433,9 @@ def test_done_handler_sets_busy_false_before_renderMessages(cleanup_test_session
     if done_idx < 0:
         done_idx = src.find("es.addEventListener('done'")
     assert done_idx >= 0
-    done_block = src[done_idx:done_idx+3300]
+    stream_end_idx = src.find("source.addEventListener('stream_end'", done_idx)
+    assert stream_end_idx >= 0, "stream_end listener after done handler not found"
+    done_block = src[done_idx:stream_end_idx]
     # S.busy=false must appear before renderMessages() within the done handler
     busy_pos = done_block.find("S.busy=false;")
     render_pos = done_block.find("renderMessages()")
