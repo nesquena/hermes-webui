@@ -1072,7 +1072,14 @@ function autoResize(){const el=$('msg');el.style.height='auto';el.style.height=M
 
 
 // ── YOLO mode state ──
-// Session-scoped; resets on page reload (intentional — not persisted).
+// Session-scoped; stored server-side in memory (tools/approval.py).
+// Lifecycle:
+//   • Page reload: state PERSISTS — _fetchYoloState() re-syncs from backend.
+//   • Cross-tab: state is SHARED — enabling YOLO in Tab A affects Tab B for
+//     the same session (both poll the same server-side flag).
+//   • Server restart: state is LOST — in-memory only, not persisted to disk.
+//   • Session switch: state resets — loadSession() clears _yoloEnabled and
+//     fetches the new session's state.
 let _yoloEnabled = false;
 
 async function _fetchYoloState(sid) {

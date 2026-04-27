@@ -1415,7 +1415,12 @@ def handle_post(handler, parsed) -> bool:
             return j(handler, {"error": str(e)})
 
     # ── YOLO mode toggle (POST) ──
-    # Session-scoped only — never persistent, never global across sessions.
+    # Session-scoped only — stored in-memory on the server side.
+    # Important lifecycle notes:
+    #   • Page reload: state PERSISTS (frontend re-fetches via GET endpoint)
+    #   • Cross-tab: state is SHARED (same server-side flag per session)
+    #   • Server restart: state is LOST (in-memory only)
+    #   • Cross-session: isolated (each session has its own flag)
     # Fixes #467
     if parsed.path == "/api/session/yolo":
         try:
