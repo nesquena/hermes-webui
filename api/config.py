@@ -1814,6 +1814,7 @@ def get_available_models() -> dict:
     if _available_models_cache is None:
         disk_groups = _load_models_cache_from_disk()
 
+    _base_result = None  # resolved inside lock; gateway HTTP call happens outside
     with _available_models_cache_lock:
         # If another thread is already building, wait for its result instead
         # of re-entering the cold path (avoids duplicate 10s zai load_pool calls).
@@ -1823,44 +1824,51 @@ def get_available_models() -> dict:
                 timeout=60
             )
             if _available_models_cache is not None and (time.monotonic() - _available_models_cache_ts) < _AVAILABLE_MODELS_CACHE_TTL:
-                return _attach_fresh_gateway_groups(_available_models_cache)
+                _base_result = _available_models_cache
 
-        # Reload config if changed
-        if _cfg_changed:
-            reload_config()
-            _available_models_cache = None
-            _available_models_cache_ts = 0.0
+        if _base_result is None:
+            # Reload config if changed
+            if _cfg_changed:
+                reload_config()
+                _available_models_cache = None
+                _available_models_cache_ts = 0.0
 
-        # Serve from memory cache if fresh
-        now = time.monotonic()
-        if _available_models_cache is not None and (now - _available_models_cache_ts) < _AVAILABLE_MODELS_CACHE_TTL:
-            return _attach_fresh_gateway_groups(_available_models_cache)
+            # Serve from memory cache if fresh
+            now = time.monotonic()
+            if _available_models_cache is not None and (now - _available_models_cache_ts) < _AVAILABLE_MODELS_CACHE_TTL:
+                _base_result = _available_models_cache
 
-        # Cold path: disk cache hit — use it (fast, no lock contention)
-        if disk_groups is not None:
-            _available_models_cache = disk_groups
-            _available_models_cache_ts = now
-            _save_models_cache_to_disk(disk_groups)
-            return _attach_fresh_gateway_groups(disk_groups)
+        if _base_result is None:
+            # Cold path: disk cache hit — use it (fast, no lock contention)
+            if disk_groups is not None:
+                _available_models_cache = disk_groups
+                _available_models_cache_ts = now if 'now' in dir() else time.monotonic()
+                _save_models_cache_to_disk(disk_groups)
+                _base_result = disk_groups
 
-        # Cold path: full rebuild — only one thread reaches here at a time
-        with _cache_build_cv:
-            _cache_build_in_progress = True
-        try:
-            result = _build_available_models_uncached()
-        except Exception:
-            # Always reset the flag so waiting threads don't block for 60s
+        if _base_result is None:
+            # Cold path: full rebuild — only one thread reaches here at a time
             with _cache_build_cv:
+                _cache_build_in_progress = True
+            try:
+                result = _build_available_models_uncached()
+            except Exception:
+                # Always reset the flag so waiting threads don't block for 60s
+                with _cache_build_cv:
+                    _cache_build_in_progress = False
+                    _cache_build_cv.notify_all()
+                raise
+            with _cache_build_cv:
+                _available_models_cache = result
+                _available_models_cache_ts = time.monotonic()
                 _cache_build_in_progress = False
                 _cache_build_cv.notify_all()
-            raise
-        with _cache_build_cv:
-            _available_models_cache = result
-            _available_models_cache_ts = time.monotonic()
-            _cache_build_in_progress = False
-            _cache_build_cv.notify_all()
-        _save_models_cache_to_disk(result)
-        return _attach_fresh_gateway_groups(result)
+            _save_models_cache_to_disk(result)
+            _base_result = result
+
+    # _attach_fresh_gateway_groups runs OUTSIDE the cache lock to avoid
+    # holding the lock during HTTP calls to gateway instances (up to 5s each).
+    return _attach_fresh_gateway_groups(_base_result)
 
 
 # ── Static file path ─────────────────────────────────────────────────────────

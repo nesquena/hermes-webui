@@ -86,7 +86,11 @@ def _fetch_instances(gateway_url: str, timeout_s: float = 5.0) -> List[GatewayIn
     import urllib.request
     import urllib.error
     import json as _json
+    from urllib.parse import urlparse as _urlparse
 
+    if _urlparse(gateway_url).scheme not in ("http", "https"):
+        logger.debug("gateway_provider: rejecting non-http(s) URL: %s", gateway_url)
+        return []
     admin_url = gateway_url.rstrip("/") + "/admin/instances"
     req = urllib.request.Request(admin_url, headers={"Accept": "application/json"})
     try:
@@ -145,6 +149,8 @@ def parse_model_id(model_id: str) -> Optional[Dict[str, str]]:
 
     Returns dict with keys: label, model_name, keyword, provider_id
     """
+    if not model_id:
+        return None
     if not model_id.startswith("@" + GATEWAY_PROVIDER_PREFIX):
         return None
 
