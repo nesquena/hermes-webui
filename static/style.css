@@ -1831,6 +1831,9 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 
 /* ── Cron alert badge ── */
 .cron-badge{position:absolute;top:2px;right:2px;background:#e53e3e;color:#fff;font-size:9px;font-weight:700;min-width:14px;height:14px;line-height:14px;text-align:center;border-radius:7px;padding:0 3px;}
+.cron-new-dot{width:7px;height:7px;border-radius:50%;background:var(--success,#22c55e);flex-shrink:0;animation:cron-dot-pulse 2s ease-in-out infinite;}
+@keyframes cron-dot-pulse{0%,100%{opacity:1;}50%{opacity:.4;}}
+.has-new-run{border-color:var(--success,#22c55e)!important;box-shadow:0 0 0 1px var(--success,#22c55e);}
 
 /* ── Background error banner ── */
 /* ── Archived sessions ── */
