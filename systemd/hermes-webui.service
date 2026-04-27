@@ -1,0 +1,14 @@
+[Unit]
+Description=Hermes Web UI
+After=default.target
+
+[Service]
+Type=simple
+Environment=HERMES_WEBUI_REPO=%h/hermes-webui
+Environment=HERMES_WEBUI_HOST=0.0.0.0
+ExecStart=/usr/bin/env bash -lc 'cd "$HERMES_WEBUI_REPO" && exec ./scripts/run-systemd-user-service.sh'
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

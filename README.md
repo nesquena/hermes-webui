@@ -109,6 +109,61 @@ Or keep using the shell launcher:
 ./start.sh
 ```
 
+For a long-running `systemd --user` service, do not point the unit at
+`start.sh`. `start.sh` runs `bootstrap.py`, and `bootstrap.py` intentionally
+spawns `server.py` into a separate background session before exiting. For
+systemd, use the checked-in foreground launcher instead. The checked-in unit
+expects this repo at `~/hermes-webui` by default and binds to `0.0.0.0`, so
+set `HERMES_WEBUI_PASSWORD` before exposing it beyond localhost:
+
+```bash
+chmod +x scripts/run-systemd-user-service.sh
+mkdir -p ~/.config/systemd/user
+cp systemd/hermes-webui.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now hermes-webui.service
+```
+
+Useful follow-ups:
+
+```bash
+systemctl --user status hermes-webui.service
+journalctl --user -u hermes-webui.service -f
+curl http://127.0.0.1:8787/health
+```
+
+The service script sources `.env` from this repo automatically, so overrides
+like `HERMES_WEBUI_PORT`, `HERMES_WEBUI_HOST`, `HERMES_WEBUI_PASSWORD`,
+`HERMES_WEBUI_AGENT_DIR`, and `HERMES_WEBUI_PYTHON` continue to work.
+If this repo is cloned somewhere other than `~/hermes-webui`, edit the copied
+unit and set `HERMES_WEBUI_REPO` to the absolute repo path.
+
+If you also want the Hermes CLI dashboard under `systemd --user`, use the
+separate checked-in unit. Hermes requires `--insecure` for any non-localhost
+bind, so the wrapper adds that automatically when `HERMES_DASHBOARD_HOST` is
+not loopback. The dashboard unit also expects this repo at `~/hermes-webui`
+unless `HERMES_DASHBOARD_REPO` is changed in the copied unit:
+
+```bash
+chmod +x scripts/run-hermes-dashboard-service.sh
+mkdir -p ~/.config/systemd/user
+cp systemd/hermes-dashboard.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now hermes-dashboard.service
+```
+
+Useful follow-ups:
+
+```bash
+systemctl --user status hermes-dashboard.service
+journalctl --user -u hermes-dashboard.service -f
+curl http://127.0.0.1:9119/
+```
+
+Supported overrides: `HERMES_DASHBOARD_BIN`, `HERMES_DASHBOARD_HOST`,
+`HERMES_DASHBOARD_PORT`, `HERMES_DASHBOARD_ALLOW_INSECURE`, and
+`HERMES_DASHBOARD_NODE_BIN`.
+
 The bootstrap will:
 
 1. Detect Hermes Agent and, if missing, attempt the official installer (`curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash`).
@@ -391,6 +446,9 @@ HERMES_WEBUI_PORT=8787 venv/bin/python /path/to/hermes-webui/server.py
 ```
 
 Note: use the agent venv Python (or any Python environment that has the Hermes agent dependencies installed). System Python will be missing `openai`, `httpx`, and other required packages.
+
+This direct foreground form is also what the `systemd/hermes-webui.service`
+unit uses, via `scripts/run-systemd-user-service.sh`.
 
 Health check:
 

@@ -4,6 +4,8 @@
 > Everything you can do from the CLI terminal, you can do from this UI.
 >
 > Last updated: v0.50.225 (April 26, 2026) — 2591 tests collected
+> Ops note: checked-in `systemd --user` units now cover both the Web UI server and the Hermes CLI dashboard launcher.
+> Local delta: enabling password from Settings keeps the current browser signed in; the former Assistant Reply Language enhancement has been removed; workspace panel closed-state now preloads in `<head>` so desktop first paint no longer flashes open before boot sync; thinking cards and tool call cards now animate both their carets and disclosure bodies smoothly on expand/collapse, and thinking cards now use the same bordered rounded panel chrome as tool cards with a gold palette.
 > Tests: 2107 collected (`pytest tests/ --collect-only -q`)
 > Source: <repo>/
 

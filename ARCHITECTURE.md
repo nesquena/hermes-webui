@@ -115,6 +115,16 @@ Log file:
 - Server binds to 127.0.0.1:8787 (localhost only, not public internet)
 - Access from Mac: SSH tunnel: ssh -N -L 8787:127.0.0.1:8787 <user>@<your-server>
 - The server imports Hermes modules via sys.path.insert(0, parent_dir)
+- `start.sh` is a bootstrap entrypoint, not a service entrypoint. It execs
+  `bootstrap.py`, which launches `server.py` in a detached child session and
+  exits after health succeeds.
+- `systemd --user` should supervise the foreground server process directly via
+  `<repo>/scripts/run-systemd-user-service.sh` and
+  `<repo>/systemd/hermes-webui.service`.
+- A separate Hermes CLI dashboard unit is checked in at
+  `<repo>/systemd/hermes-dashboard.service`, using
+  `<repo>/scripts/run-hermes-dashboard-service.sh` to resolve `hermes`,
+  apply `--no-open`, and add `--insecure` automatically for non-loopback binds.
 
 Environment variables controlling behavior:
 

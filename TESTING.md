@@ -7,6 +7,13 @@
 >
 > Prerequisites: SSH tunnel is active on port 8787. Open http://localhost:8787 in browser.
 > Server health check: curl http://127.0.0.1:8787/health should return {"status":"ok"}.
+> If started with `systemd --user`: `systemctl --user status hermes-webui.service`
+> and `journalctl --user -u hermes-webui.service -f` should show the server
+> running under `scripts/run-systemd-user-service.sh`.
+> If the Hermes CLI dashboard is also supervised by `systemd --user`, use
+> `systemctl --user status hermes-dashboard.service` and
+> `journalctl --user -u hermes-dashboard.service -f`, then verify
+> `curl http://127.0.0.1:9119/` responds.
 >
 > Automated coverage: 2591 tests collected via `pytest tests/ --collect-only -q`. Includes onboarding coverage for bootstrap/static wizard presence, real provider config persistence (`config.yaml` + `.env`), the `/api/onboarding/*` backend, the onboarding skip/existing-config guard, and CSS regression coverage for smooth thinking/tool card disclosure animation.
 > Run: `pytest tests/ -v --timeout=60`

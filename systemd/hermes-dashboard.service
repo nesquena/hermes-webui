@@ -1,0 +1,14 @@
+[Unit]
+Description=Hermes Dashboard
+After=network.target
+
+[Service]
+Type=simple
+Environment=HERMES_DASHBOARD_REPO=%h/hermes-webui
+Environment=HERMES_DASHBOARD_HOST=0.0.0.0
+ExecStart=/usr/bin/env bash -lc 'cd "$HERMES_DASHBOARD_REPO" && exec ./scripts/run-hermes-dashboard-service.sh'
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
