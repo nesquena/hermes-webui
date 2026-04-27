@@ -36,7 +36,8 @@ class TestMediaUrlRendersInline:
         js = _read("static/ui.js")
         # The img tag is constructed with the existing class + onclick toggle
         assert "msg-media-img" in js
-        assert "msg-media-img--full" in js
+        # PR #1135: CSS class toggle replaced by lightbox. Class removed; _openImgLightbox handles zoom.
+        assert "_openImgLightbox" in js, "Image click must open lightbox overlay"
 
 
 # ── #857: thinking-preamble stripping in auto-title ──────────────────────────

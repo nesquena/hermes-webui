@@ -76,8 +76,9 @@ class TestMediaRenderMdStash(unittest.TestCase):
         )
 
     def test_zoom_toggle_on_click(self):
-        self.assertIn("msg-media-img--full", UI_JS,
-                      "Clicking the image must toggle msg-media-img--full class for zoom")
+        # PR #1135: CSS class toggle replaced by proper lightbox overlay
+        self.assertIn("_openImgLightbox", UI_JS,
+                      "Clicking the image must open lightbox overlay (_openImgLightbox)")
 
 
 # ── Static analysis: CSS ──────────────────────────────────────────────────────
@@ -90,14 +91,16 @@ class TestMediaCSS(unittest.TestCase):
         self.assertIn(".msg-media-img", self.CSS)
 
     def test_msg_media_img_max_width(self):
-        # Should have a max-width to prevent huge images breaking layout
+        # PR #1135: resting thumbnail is 120x90px (fixed size); no max-width needed.
+        # Lightbox shows full-size. Check width is set instead.
         idx = self.CSS.find(".msg-media-img{")
         self.assertGreater(idx, 0)
         rule = self.CSS[idx:idx+200]
-        self.assertIn("max-width", rule)
+        self.assertIn("width:120px", rule, "Thumbnail must have fixed 120px width")
 
     def test_msg_media_img_full_class_defined(self):
-        self.assertIn(".msg-media-img--full", self.CSS,
+        # PR #1135: .msg-media-img--full removed; lightbox replaces inline zoom.
+        self.assertIn(".img-lightbox", self.CSS,
                       "Full-size toggle class must exist for zoom-on-click")
 
     def test_msg_media_link_class_defined(self):
