@@ -813,15 +813,15 @@ function renderMd(raw){
   // Stash raw <pre> blocks so the inline <code> rewrite below does not run
   // inside them. Running that rewrite in <pre> content can introduce stray
   // backticks for multiline code and break subsequent code-box rendering.
-  const raw_pre_stash=[];
-  s=s.replace(/(<pre\b[^>]*>[\s\S]*?<\/pre>)/gi,m=>{raw_pre_stash.push(m);return `\x00R${raw_pre_stash.length-1}\x00`;});
+  const rawPreStash=[];
+  s=s.replace(/(<pre\b[^>]*>[\s\S]*?<\/pre>)/gi,m=>{rawPreStash.push(m);return `\x00R${rawPreStash.length-1}\x00`;});
   s=s.replace(/<strong>([\s\S]*?)<\/strong>/gi,(_,t)=>'**'+t+'**');
   s=s.replace(/<b>([\s\S]*?)<\/b>/gi,(_,t)=>'**'+t+'**');
   s=s.replace(/<em>([\s\S]*?)<\/em>/gi,(_,t)=>'*'+t+'*');
   s=s.replace(/<i>([\s\S]*?)<\/i>/gi,(_,t)=>'*'+t+'*');
   s=s.replace(/<code>([^<]*?)<\/code>/gi,(_,t)=>'`'+t+'`');
   s=s.replace(/<br\s*\/?>/gi,'\n');
-  s=s.replace(/\x00R(\d+)\x00/g,(_,i)=>raw_pre_stash[+i]);
+  s=s.replace(/\x00R(\d+)\x00/g,(_,i)=>rawPreStash[+i]);
   // Restore stashed code blocks
   s=s.replace(/\x00F(\d+)\x00/g,(_,i)=>fence_stash[+i]);
   // Mermaid blocks: render as diagram containers (processed after DOM insertion)
