@@ -1260,6 +1260,12 @@ const LOCALES = {
     settings_tab_conversation: 'Conversation',
     settings_tab_preferences: 'Preferences',
     settings_tab_system: 'System',
+
+    status_no_tokens: 'No token data',
+    status_profile: 'Profile',
+    status_started: 'Started',
+    status_tokens: 'Tokens',
+    status_unknown: 'Unknown',
   },
 
   es: {
@@ -1853,6 +1859,12 @@ const LOCALES = {
     settings_tab_conversation: 'Conversation',
     settings_tab_preferences: 'Preferences',
     settings_tab_system: 'System',
+
+    status_no_tokens: 'No token data',
+    status_profile: 'Profile',
+    status_started: 'Started',
+    status_tokens: 'Tokens',
+    status_unknown: 'Unknown',
   },
 
   de: {
@@ -2220,6 +2232,12 @@ const LOCALES = {
     settings_tab_conversation: 'Conversation',
     settings_tab_preferences: 'Preferences',
     settings_tab_system: 'System',
+
+    status_no_tokens: 'No token data',
+    status_profile: 'Profile',
+    status_started: 'Started',
+    status_tokens: 'Tokens',
+    status_unknown: 'Unknown',
 },
 
   zh: {
@@ -2810,7 +2828,13 @@ const LOCALES = {
     settings_tab_conversation: 'Conversation',
     settings_tab_preferences: 'Preferences',
     settings_tab_system: 'System',
-},
+
+    status_no_tokens: 'No token data',
+    status_profile: 'Profile',
+    status_started: 'Started',
+    status_tokens: 'Tokens',
+    status_unknown: 'Unknown',
+  },
 
   // Traditional Chinese (zh-Hant)
   'zh-Hant': {
