@@ -207,12 +207,8 @@
   body,header,footer,aside,nav,main,div,button,input,textarea,select{transition-property:background-color,border-color,color;transition-duration:.15s;transition-timing-function:ease;}
   body{background:var(--bg);color:var(--text);height:100vh;height:100dvh;overflow:hidden;display:flex;flex-direction:column;}
   .layout{display:flex;width:100%;flex:1 1 auto;min-height:0;}
-  .app-titlebar{display:flex;align-items:center;justify-content:space-between;height:38px;flex-shrink:0;background:var(--sidebar);border-bottom:1px solid var(--border);padding:0 12px;padding-top:env(safe-area-inset-top,0);padding-left:max(12px,env(safe-area-inset-left,0));padding-right:max(12px,env(safe-area-inset-right,0));box-sizing:content-box;font-size:12px;color:var(--muted);user-select:none;-webkit-app-region:drag;position:relative;z-index:20;}
-  .app-titlebar-inner{display:flex;align-items:center;gap:8px;min-width:0;max-width:100%;flex:1 1 auto;justify-content:space-between;}
-  .tps-chip{
-    font-size:11px;font-family:ui-monospace,'SF Mono',monospace;color:var(--muted);
-    white-space:nowrap;letter-spacing:.02em;flex-shrink:0;
-  }
+  .app-titlebar{display:flex;align-items:center;justify-content:center;height:38px;flex-shrink:0;background:var(--sidebar);border-bottom:1px solid var(--border);padding:0 12px;padding-top:env(safe-area-inset-top,0);padding-left:max(12px,env(safe-area-inset-left,0));padding-right:max(12px,env(safe-area-inset-right,0));box-sizing:content-box;font-size:12px;color:var(--muted);user-select:none;-webkit-app-region:drag;position:relative;z-index:20;}
+  .app-titlebar-inner{display:flex;align-items:center;gap:8px;min-width:0;max-width:100%;justify-content:center;}
   .app-titlebar-icon{display:inline-flex;align-items:center;color:var(--accent);}
   .app-titlebar-title{font-size:12px;font-weight:600;color:var(--text);letter-spacing:-.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:60vw;}
   .app-titlebar-sub{font-size:10px;color:var(--muted);background:var(--hover-bg);padding:2px 7px;border-radius:4px;font-family:'SF Mono',ui-monospace,monospace;white-space:nowrap;flex-shrink:0;}
@@ -845,7 +841,9 @@
     .sidebar.mobile-open{left:0;}
     .sidebar .resize-handle{display:none;}
     /* Hamburger button (in app titlebar on mobile) */
+    .app-titlebar{justify-content:space-between;}
     .app-titlebar-hamburger,.app-titlebar-spacer{display:flex;}
+    .app-titlebar-inner{flex:1 1 auto;}
     /* Overlay backdrop */
     .mobile-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);
       z-index:199;-webkit-tap-highlight-color:transparent;}

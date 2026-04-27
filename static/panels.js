@@ -33,6 +33,8 @@ function syncAppTitlebar() {
   let subText = '';
   if (panel === 'chat' && typeof S !== 'undefined' && S && S.session) {
     mainText = S.session.title || (typeof t === 'function' ? t('untitled') : 'Untitled');
+    const vis = Array.isArray(S.messages) ? S.messages.filter(m => m && m.role && m.role !== 'tool') : [];
+    if (typeof t === 'function') subText = t('n_messages', vis.length);
   } else {
     const key = APP_TITLEBAR_KEYS[panel];
     mainText = key && typeof t === 'function' ? t(key) : (panel.charAt(0).toUpperCase() + panel.slice(1));
