@@ -11,6 +11,7 @@ def test_resolve_default_workspace_falls_back_to_existing_home_work(monkeypatch,
 
     monkeypatch.setattr(config, "HOME", tmp_path)
     monkeypatch.setattr(config, "STATE_DIR", state_dir)
+    monkeypatch.delenv("HERMES_WEBUI_DEFAULT_WORKSPACE", raising=False)
 
     resolved = config.resolve_default_workspace("/definitely/not/usable")
 
@@ -28,6 +29,7 @@ def test_save_settings_rewrites_bad_default_workspace_to_fallback(monkeypatch, t
     monkeypatch.setattr(config, "STATE_DIR", state_dir)
     monkeypatch.setattr(config, "SETTINGS_FILE", settings_file)
     monkeypatch.setattr(config, "DEFAULT_WORKSPACE", preferred)
+    monkeypatch.delenv("HERMES_WEBUI_DEFAULT_WORKSPACE", raising=False)
 
     saved = config.save_settings({"default_workspace": "/definitely/not/usable"})
     on_disk = json.loads(settings_file.read_text(encoding="utf-8"))
@@ -41,6 +43,7 @@ def test_resolve_default_workspace_creates_home_workspace_when_missing(monkeypat
     state_dir = tmp_path / "state"
     monkeypatch.setattr(config, "HOME", tmp_path)
     monkeypatch.setattr(config, "STATE_DIR", state_dir)
+    monkeypatch.delenv("HERMES_WEBUI_DEFAULT_WORKSPACE", raising=False)
     # Neither ~/work nor ~/workspace exists yet
     resolved = config.resolve_default_workspace(None)
     assert resolved == (tmp_path / "workspace").resolve()
@@ -145,4 +148,3 @@ def test_env_var_wins_over_settings_json_on_startup(monkeypatch, tmp_path):
         f"Expected {env_ws.resolve()}, got {current_ws}. "
         "settings.json must not override HERMES_WEBUI_DEFAULT_WORKSPACE."
     )
-
