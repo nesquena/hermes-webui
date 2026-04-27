@@ -152,3 +152,19 @@ class TestOnboardingUsesProviderWriteEnv(unittest.TestCase):
                       "_write_env_file must use _ENV_LOCK for concurrency safety")
         self.assertIn("from api.streaming import _ENV_LOCK", source,
                       "_ENV_LOCK must be imported from api.streaming")
+
+    def test_providers_write_env_uses_atomic_rename(self):
+        """providers._write_env_file must write atomically via tempfile +
+        os.replace so cross-process readers (Telegram, CLI) never observe
+        a truncated half-written file (#1164 cross-process leg)."""
+        import inspect
+        from api.providers import _write_env_file
+        source = inspect.getsource(_write_env_file)
+        self.assertIn("tempfile", source,
+                      "_write_env_file must stage writes through a tempfile")
+        self.assertIn("os.replace(", source,
+                      "_write_env_file must atomically rename via os.replace")
+        # The original O_TRUNC pattern must NOT remain — it is the source of
+        # the cross-process race the PR is closing.
+        self.assertNotIn("O_TRUNC", source,
+                         "_write_env_file must not truncate-in-place (#1164)")

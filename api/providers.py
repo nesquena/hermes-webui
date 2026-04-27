@@ -153,12 +153,29 @@ def _write_env_file(env_path: Path, updates: dict[str, str | None]) -> None:
         content = "\n".join(output_lines)
         if content:
             content += "\n"
-        # Create at owner-only mode from the first byte (O_CREAT honours the mode
-        # argument subject to umask). A trailing chmod guards pre-existing files.
+        # Atomic write via tempfile + os.replace so cross-process readers
+        # (Telegram bot, CLI) never see a half-truncated file.  The shared
+        # ``~/.hermes/.env`` is also written by ``hermes_cli.config.save_env_value``
+        # using the same atomic pattern; matching it here closes the
+        # cross-process leg of #1164 (within-process is covered by _ENV_LOCK).
         _mode = _stat.S_IRUSR | _stat.S_IWUSR  # 0o600
-        _fd = os.open(str(env_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _mode)
-        with os.fdopen(_fd, "w", encoding="utf-8") as _f:
-            _f.write(content)
+        import tempfile as _tempfile
+        _tmp_fd, _tmp_path = _tempfile.mkstemp(
+            dir=str(env_path.parent), prefix=".env_", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(_tmp_fd, "w", encoding="utf-8") as _f:
+                _f.write(content)
+                _f.flush()
+                os.fsync(_f.fileno())
+            os.chmod(_tmp_path, _mode)  # tighten before rename so readers see 0600
+            os.replace(_tmp_path, env_path)
+        except BaseException:
+            try:
+                os.unlink(_tmp_path)
+            except OSError:
+                pass
+            raise
         try:
             env_path.chmod(_mode)
         except OSError:
