@@ -541,6 +541,16 @@ def test_api_session_is_side_effect_free_for_stale_models():
     sid = created["session"]["session_id"]
 
     session_path = TEST_STATE_DIR / "sessions" / f"{sid}.json"
+    # POST /api/session/new no longer eagerly writes empty sessions to disk
+    # (#1171 follow-up). Materialise the file from the API response so the
+    # rest of this test, which checks that GET is side-effect-free against
+    # an on-disk session with a stale model, has a file to work with.
+    if not session_path.exists():
+        session_path.parent.mkdir(parents=True, exist_ok=True)
+        session_path.write_text(
+            json.dumps(created["session"], ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     session_data = json.loads(session_path.read_text(encoding="utf-8"))
     stale_model = "google/gemini-3.1-pro-preview"
     session_data["model"] = stale_model
