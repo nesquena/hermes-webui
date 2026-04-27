@@ -1155,6 +1155,8 @@ function hideApprovalCard(force=false) {
   _approvalSessionId = null;
   _resetApprovalCardState();
   card.classList.remove("visible");
+  card.setAttribute("aria-hidden", "true");
+  card.setAttribute("inert", "");
   $("approvalCmd").textContent = "";
   $("approvalDesc").textContent = "";
 }
@@ -1194,6 +1196,8 @@ function showApprovalCard(pending, pendingCount) {
     const b = $(id); if (b) { b.disabled = false; b.classList.remove("loading"); }
   });
   card.classList.add("visible");
+  card.removeAttribute("aria-hidden");
+  card.removeAttribute("inert");
   if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
   const onceBtn = $("approvalBtnOnce");
   if (onceBtn) setTimeout(() => onceBtn.focus({preventScroll: true}), 50);
@@ -1257,6 +1261,8 @@ function _ensureClarifyCardDom() {
   card.setAttribute("role", "dialog");
   card.setAttribute("aria-labelledby", "clarifyHeading");
   card.setAttribute("aria-describedby", "clarifyQuestion clarifyHint");
+  card.setAttribute("aria-hidden", "true");
+  card.setAttribute("inert", "");
   card.innerHTML = `
     <div class="clarify-inner">
       <div class="clarify-header">
@@ -1316,6 +1322,8 @@ function hideClarifyCard(force=false) {
   _clarifySessionId = null;
   _resetClarifyCardState();
   card.classList.remove("visible");
+  card.setAttribute("aria-hidden", "true");
+  card.setAttribute("inert", "");
   if (typeof unlockComposerForClarify === "function") unlockComposerForClarify();
   $("clarifyQuestion").textContent = "";
   $("clarifyChoices").innerHTML = "";
@@ -1426,6 +1434,8 @@ function showClarifyCard(pending) {
   }
   _clarifySetControlsDisabled(false, false);
   card.classList.add("visible");
+  card.removeAttribute("aria-hidden");
+  card.removeAttribute("inert");
   if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
   if (input && !sameClarify) setTimeout(() => input.focus({preventScroll: true}), 50);
 }
