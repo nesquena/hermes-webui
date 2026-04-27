@@ -772,6 +772,16 @@ def handle_get(handler, parsed) -> bool:
         load_messages = query.get("messages", ["1"])[0] != "0"
         resolve_model_default = "1" if load_messages else "0"
         resolve_model = query.get("resolve_model", [resolve_model_default])[0] != "0"
+        # ?msg_limit=N returns only the last N messages (tail window).
+        # Used by the frontend for fast session switching — avoids serialising
+        # and sending hundreds of messages when the user only sees the most
+        # recent exchange.  Older messages are loaded on-demand via scrolling.
+        _msg_limit = query.get("msg_limit", [None])[0]
+        msg_limit = int(_msg_limit) if _msg_limit else None
+        # ?msg_before=TS — only return messages with timestamp < TS (for
+        # scroll-to-top lazy loading).  Combined with msg_limit for paging.
+        _msg_before = query.get("msg_before", [None])[0]
+        msg_before = float(_msg_before) if _msg_before else None
         try:
             _t1 = _time.monotonic()
             s = get_session(sid, metadata_only=(not load_messages))
@@ -782,14 +792,34 @@ def handle_get(handler, parsed) -> bool:
                 else None
             )
             _t3 = _time.monotonic()
+            _all_msgs = s.messages if load_messages else []
+            if load_messages:
+                if msg_before is not None:
+                    # Scroll-to-top paging: return messages older than anchor
+                    _filtered = [
+                        m for m in _all_msgs
+                        if (m.get('_ts') or m.get('timestamp') or 0) < msg_before
+                    ]
+                    _truncated_msgs = _filtered[-msg_limit:] if msg_limit else _filtered
+                elif msg_limit and len(_all_msgs) > msg_limit:
+                    _truncated_msgs = _all_msgs[-msg_limit:]
+                else:
+                    _truncated_msgs = _all_msgs
+            else:
+                _truncated_msgs = _all_msgs
             raw = s.compact() | {
-                "messages": s.messages if load_messages else [],
+                "messages": _truncated_msgs,
                 "tool_calls": getattr(s, "tool_calls", []) if load_messages else [],
                 "active_stream_id": getattr(s, "active_stream_id", None),
                 "pending_user_message": getattr(s, "pending_user_message", None),
                 "pending_attachments": getattr(s, "pending_attachments", []) if load_messages else [],
                 "pending_started_at": getattr(s, "pending_started_at", None),
             }
+            # Signal to the frontend that older messages were omitted.
+            raw["_messages_truncated"] = (
+                load_messages and msg_limit is not None
+                and len(_all_msgs) > msg_limit
+            )
             _t4 = _time.monotonic()
             if effective_model:
                 raw["model"] = effective_model

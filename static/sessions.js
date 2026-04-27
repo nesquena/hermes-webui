@@ -117,6 +117,7 @@ async function loadSession(sid){
   if (currentSid !== sid) {
     S.messages = [];
     S.toolCalls = [];
+    _messagesTruncated = false;
     const _msgInner = $('msgInner');
     if (_msgInner) _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
   }
@@ -307,17 +308,27 @@ function _resolveSessionModelForDisplaySoon(sid){
   },0);
 }
 
+// Tracks whether the current session has older messages that were not
+// loaded during the initial paginated fetch (msg_limit window).
+// When true, scrolling to the top triggers _loadOlderMessages().
+let _messagesTruncated = false;
+
 // Load session messages if not already present.
 // Called after loadSession fetches metadata (messages=0).
 // Idempotent: if messages are already in S.messages, resolves immediately.
 // Handles streaming sessions specially: restores from INFLIGHT cache or API.
+// msg_limit (default 30): only fetch the last N messages for fast switching.
+// Older messages are loaded on-demand via _loadOlderMessages().
+const _INITIAL_MSG_LIMIT = 30;
+
 async function _ensureMessagesLoaded(sid) {
   // Already have messages? (e.g. from INFLIGHT restore path, already set)
   if (S.messages && S.messages.length > 0 && S.messages[0] && S.messages[0].role) {
     return;
   }
-  // Fetch full session with messages
-  const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`);
+  // Fetch session messages with a tail window for fast initial load.
+  const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${_INITIAL_MSG_LIMIT}`);
+  _messagesTruncated = !!data.session._messages_truncated;
   const msgs = (data.session.messages || []).filter(m => m && m.role);
   // Check for tool-call metadata on messages (for tool-call card rendering)
   const hasMessageToolMetadata = msgs.some(m => {
@@ -337,6 +348,55 @@ async function _ensureMessagesLoaded(sid) {
     S.session.message_count=Number(data.session.message_count || msgs.length);
     S.lastUsage={...(data.session.last_usage||S.lastUsage||{})};
     _setSessionViewedCount(sid, Number(S.session.message_count || msgs.length));
+  }
+}
+
+// Load older messages when the user scrolls to the top of the conversation.
+// Prepends them to S.messages and re-renders, preserving scroll position.
+let _loadingOlder = false;
+async function _loadOlderMessages() {
+  if (_loadingOlder) return;
+  const sid = S.session ? S.session.session_id : null;
+  if (!sid || !S.messages.length) return;
+  // Use the _ts or timestamp of the oldest loaded message as a cursor.
+  // We ask for messages older than the first one we have.
+  const oldestMsg = S.messages[0];
+  const anchorTs = (oldestMsg._ts || oldestMsg.timestamp || 0);
+  _loadingOlder = true;
+  try {
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${encodeURIComponent(String(anchorTs))}&msg_limit=${_INITIAL_MSG_LIMIT}`);
+    if (!data || !data.session || _loadingSessionId !== null && _loadingSessionId !== sid) return;
+    const olderMsgs = (data.session.messages || []).filter(m => m && m.role);
+    if (!olderMsgs.length) { _messagesTruncated = false; return; }
+    // Prepend older messages
+    const inner = $('msgInner');
+    const prevScrollH = inner ? inner.scrollHeight : 0;
+    S.messages = [...olderMsgs, ...S.messages];
+    _messagesTruncated = !!data.session._messages_truncated;
+    renderMessages();
+    // Restore scroll position so the user stays at the same message
+    if (inner) {
+      const newScrollH = inner.scrollHeight;
+      inner.scrollTop = newScrollH - prevScrollH;
+    }
+  } catch(e) {
+    console.warn('_loadOlderMessages failed:', e);
+  } finally {
+    _loadingOlder = false;
+  }
+}
+
+// Ensure the full message history is loaded (for undo, export, etc).
+// If the session was loaded with msg_limit, this fetches all messages.
+async function _ensureAllMessagesLoaded() {
+  if (!_messagesTruncated || !S.session) return;
+  const sid = S.session.session_id;
+  const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`);
+  const msgs = (data.session.messages || []).filter(m => m && m.role);
+  S.messages = msgs;
+  _messagesTruncated = false;
+  if(S.session && S.session.session_id === sid){
+    S.session.message_count = Number(data.session.message_count || msgs.length);
   }
 }
 
