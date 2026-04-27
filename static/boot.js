@@ -382,7 +382,12 @@ $('btnAttach').onclick=()=>$('fileInput').click();
 window._micActive=window._micActive||false;
 window._micPendingSend=window._micPendingSend||false;
 $('fileInput').onchange=e=>{addFiles(Array.from(e.target.files));e.target.value='';};
-$('btnNewChat').onclick=async()=>{await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();};
+$('btnNewChat').onclick=async()=>{
+  // If the current session has no messages, just focus the composer rather than
+  // creating another empty session that will clutter the sidebar list (#1171).
+  if(S.session&&(S.session.message_count||0)===0){$('msg').focus();closeMobileSidebar();return;}
+  await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
+};
 $('btnDownload').onclick=()=>{
   if(!S.session)return;
   const blob=new Blob([transcript()],{type:'text/markdown'});
@@ -516,6 +521,9 @@ document.addEventListener('keydown',async e=>{
   }
   if((e.metaKey||e.ctrlKey)&&e.key==='k'){
     e.preventDefault();
+    // If the current session has no messages, just focus the composer rather than
+    // creating another empty session that will clutter the sidebar list (#1171).
+    if(S.session&&(S.session.message_count||0)===0){$('msg').focus();return;}
     if(!S.busy){await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();}
   }
   if(e.key==='Escape'){

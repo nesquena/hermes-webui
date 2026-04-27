@@ -147,14 +147,17 @@ def test_toggle_mobile_files_js_defined():
 def test_new_conversation_closes_mobile_sidebar():
     """New conversation must close the mobile drawer so the chat pane is visible immediately."""
     boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
-    click_line = next((ln for ln in boot_js.splitlines() if "$('btnNewChat').onclick" in ln), "")
-    assert click_line, "btnNewChat onclick handler missing from static/boot.js"
-    assert "closeMobileSidebar" in click_line, \
+    # Handler is now multi-line — search for the full block rather than a single line.
+    assert "$('btnNewChat').onclick" in boot_js, "btnNewChat onclick handler missing from static/boot.js"
+    # Find the handler block and verify closeMobileSidebar appears in it.
+    idx = boot_js.find("$('btnNewChat').onclick")
+    handler_block = boot_js[idx:idx+500]
+    assert "closeMobileSidebar" in handler_block, \
         "btnNewChat handler must closeMobileSidebar() after creating the new session"
 
     shortcut_line = next((ln for ln in boot_js.splitlines() if "e.key==='k'" in ln or "e.key === 'k'" in ln), "")
     assert shortcut_line, "Cmd/Ctrl+K new chat shortcut missing from static/boot.js"
-    shortcut_block = "\n".join(boot_js.splitlines()[boot_js.splitlines().index(shortcut_line):boot_js.splitlines().index(shortcut_line)+4])
+    shortcut_block = "\n".join(boot_js.splitlines()[boot_js.splitlines().index(shortcut_line):boot_js.splitlines().index(shortcut_line)+6])
     assert "closeMobileSidebar" in shortcut_block, \
         "Cmd/Ctrl+K new chat shortcut must closeMobileSidebar() after creating the new session"
 
