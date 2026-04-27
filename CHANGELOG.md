@@ -345,6 +345,15 @@
   workspace subtree) and never enumerate blocked system roots. (`api/routes.py`,
   `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
 
+## [v0.50.226] — 2026-04-27
+
+### Fixed
+- **App titlebar restored to rail-era centered layout** — removes the TPS metering chip
+  from the top bar, centers the title and subtitle, and restores the message count in the
+  subtitle slot. Queue state no longer overrides the titlebar subtitle slot.
+  (`static/index.html`, `static/panels.js`, `static/style.css`, `static/ui.js`,
+  `tests/test_app_titlebar_restore.py`)
+
 ## [v0.50.183] — 2026-04-24
 
 ### Added
