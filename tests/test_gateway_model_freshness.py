@@ -58,6 +58,10 @@ def fake_gateway(monkeypatch):
 def warm_cache(monkeypatch):
     """Pre-populate the model cache so we exercise the cached fast-path."""
     from api import config
+    # Reset first so any state left by previous tests doesn't bleed through
+    monkeypatch.setattr(config, "_available_models_cache", None)
+    monkeypatch.setattr(config, "_available_models_cache_ts", 0.0)
+    # Now set the warm cache with a known openai group
     monkeypatch.setattr(config, "_available_models_cache",
                         {"active_provider": None, "default_model": "x",
                          "groups": [{"provider": "openai",
