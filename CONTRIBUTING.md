@@ -84,7 +84,6 @@ Common files:
 - [ROADMAP.md](ROADMAP.md) for shipped features and sprint history
 - [ARCHITECTURE.md](ARCHITECTURE.md) for implementation details and design constraints
 - [TESTING.md](TESTING.md) for manual and automated verification guidance
-- [UI.md](UI.md) for the UI/UX philosophy — read this before touching primary surfaces
 - [CHANGELOG.md](CHANGELOG.md) when maintainers want release-note-ready entries
 
 ## Project-Specific Guidelines
