@@ -386,12 +386,17 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
         raise ValueError(f"Path is not a directory: {candidate}")
 
     # (A) Trusted if under the user's home directory — cross-platform via Path.home()
-    # Must be checked before system roots to allow symlinks like /var/home
-    try:
-        candidate.relative_to(Path.home().resolve())
-        return candidate
-    except ValueError:
-        pass
+    # Must be checked before system roots to allow symlinks like /var/home.
+    # Guard: skip if HOME is / or is itself a blocked root (unusual container setups).
+    _home = Path.home().resolve()
+    _home_is_sane = (_home != Path("/") and
+                     not any(_is_within(_home, b) for b in _workspace_blocked_roots()))
+    if _home_is_sane:
+        try:
+            candidate.relative_to(_home)
+            return candidate
+        except ValueError:
+            pass
 
     # Block known system roots and their children
     for blocked in _workspace_blocked_roots():
@@ -482,9 +487,20 @@ def safe_resolve_ws(root: Path, requested: str) -> Path:
     norm = Path(os.path.normpath(str(unresolved)))
     try:
         norm.relative_to(root)
-        return resolved
     except ValueError:
         raise ValueError(f"Path traversal blocked: {requested}")
+    # Symlink points outside workspace root — additionally block system directories.
+    # Even if the user placed the symlink intentionally, prevent reads from
+    # /etc, /proc, /sys, /dev and other blocked roots (LLM agents can call
+    # read_file_content via tool calls, not just human users).
+    for blocked in _workspace_blocked_roots():
+        try:
+            resolved.relative_to(blocked)
+            raise ValueError(f"Path traversal blocked (system dir): {requested}")
+        except ValueError as _e:
+            if "system dir" in str(_e):
+                raise
+    return resolved
 
 
 def list_dir(workspace: Path, rel: str='.'):
@@ -512,6 +528,17 @@ def list_dir(workspace: Path, rel: str='.'):
                 continue
             except ValueError:
                 pass
+            # Block symlinks that resolve to system directories.
+            _sym_blocked = False
+            for _blocked in _workspace_blocked_roots():
+                try:
+                    link_target.relative_to(_blocked)
+                    _sym_blocked = True
+                    break
+                except ValueError:
+                    pass
+            if _sym_blocked:
+                continue
             is_dir = link_target.is_dir()
             # Keep the display path relative to workspace (don't follow the link)
             display_path = str(Path(item.name))

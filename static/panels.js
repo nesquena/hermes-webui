@@ -2926,7 +2926,6 @@ async function disableAuth(){
 
 let _cronPollSince=Date.now()/1000;  // track from page load
 let _cronPollTimer=null;
-let _cronUnreadCount=0;
 const _cronNewJobIds=new Set();  // track which job IDs had new completions (unread)
 
 // Auto-refresh the cron list when a job is created from chat or any external source.
@@ -2947,7 +2946,7 @@ function startCronPolling(){
           _cronPollSince=Math.max(_cronPollSince,c.completed_at);
           if(c.job_id) _cronNewJobIds.add(String(c.job_id));
         }
-        _cronUnreadCount+=data.completions.length;
+
         updateCronBadge();
       }
     }catch(e){}
@@ -2958,6 +2957,7 @@ function updateCronBadge(){
   const tab=document.querySelector('.nav-tab[data-panel="tasks"]');
   if(!tab) return;
   let badge=tab.querySelector('.cron-badge');
+  const _cronUnreadCount=_cronNewJobIds.size;
   if(_cronUnreadCount>0){
     if(!badge){
       badge=document.createElement('span');
@@ -2977,7 +2977,6 @@ function _clearCronUnreadForJob(jobId){
   const id=String(jobId);
   if(_cronNewJobIds.has(id)){
     _cronNewJobIds.delete(id);
-    _cronUnreadCount=Math.max(0, _cronUnreadCount-1);
     updateCronBadge();
   }
 }

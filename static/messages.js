@@ -752,6 +752,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
       }
       if(S.session&&S.session.session_id===activeSid){
+        // Capture previous session totals BEFORE overwriting S.session with the new
+        // cumulative values from the done event. prevIn/prevOut are the totals as of
+        // the start of this turn; curIn/curOut are the full post-turn totals — the
+        // delta is the per-turn usage for #1159.
+        const _prevIn=(S.session&&S.session.input_tokens)||0;
+        const _prevOut=(S.session&&S.session.output_tokens)||0;
+        const _prevCost=(S.session&&S.session.estimated_cost)||0;
         S.session=d.session;S.messages=d.session.messages||[];
         if(
           window._compressionUi&&window._compressionUi.automatic&&
@@ -770,9 +777,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           S.lastUsage=d.usage;_syncCtxIndicator(d.usage);
           // #503 — compute per-turn cost delta and attach to last assistant message
           if(lastAsst){
-            const prevIn=S.session.input_tokens||0;
-            const prevOut=S.session.output_tokens||0;
-            const prevCost=S.session.estimated_cost||0;
+            const prevIn=_prevIn;
+            const prevOut=_prevOut;
+            const prevCost=_prevCost;
             const curIn=d.usage.input_tokens||0;
             const curOut=d.usage.output_tokens||0;
             const curCost=d.usage.estimated_cost||0;
