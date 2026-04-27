@@ -357,6 +357,30 @@
   workspace subtree) and never enumerate blocked system roots. (`api/routes.py`,
   `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
 
+## [v0.50.229] — 2026-04-27
+
+### Added
+- **Agent-API gateway integration** — a new `gateway_provider.py` module allows the
+  WebUI to route completions through a locally-running hermes-agent gateway. Models are
+  identified by the `@gateway-{label}:{model}/{keyword}` convention. The gateway
+  model picker refreshes on dropdown open and streams status via SSE.
+  (`api/gateway_provider.py`, `api/config.py`, `api/routes.py`, `api/streaming.py`)
+
+### Fixed
+- **Sidebar rename for CLI/gateway sessions** — renaming a session imported from
+  `state.db` (agent/gateway source) now routes through `state_sync.rename_cli_session`
+  so the rename persists to both the WebUI JSON and the agent's SQLite store.
+  (`api/routes.py`, `api/state_sync.py`, `static/sessions.js`) (#1134)
+- **Model picker freshness on dropdown open** — the model list is re-fetched from the
+  gateway each time the dropdown opens, preventing stale model entries after provider
+  changes. (`static/sessions.js`)
+- **Full-width chat output container** — removes the historical 1100/1200px max-width
+  caps on the message column so it expands with the viewport.
+  (`static/ui.js`, `static/style.css`)
+- **Sidebar status indicators** — CLI busy dot, per-session accent colour, and gateway
+  connection dot are shown on session items when the agent is active.
+  (`static/sessions.js`, `static/style.css`, `static/index.html`)
+
 ## [v0.50.227] — 2026-04-27
 
 ### Fixed
