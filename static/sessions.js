@@ -341,6 +341,11 @@ let _showArchived = false;  // toggle to show archived sessions
 let _allProjects = [];  // cached project list
 let _activeProject = null;  // project_id filter (null = show all)
 let _showAllProfiles = false;  // false = filter to active profile only
+let _cronSessionsCollapsed = true;  // fold noisy scheduled-task sessions in sidebar
+try{
+  const storedCronCollapse=localStorage.getItem('hermes-cron-sessions-collapsed');
+  if(storedCronCollapse!==null) _cronSessionsCollapsed = storedCronCollapse !== 'false';
+}catch(e){}
 let _sessionActionMenu = null;
 let _sessionActionAnchor = null;
 let _sessionActionSessionId = null;
@@ -676,6 +681,40 @@ function _sessionTimestampMs(session) {
   return Number.isFinite(raw) ? raw * 1000 : 0;
 }
 
+function _isCronSession(session) {
+  if(!session) return false;
+  const title=String(session.title||'').trim();
+  return title==='Cron Session' || title.startsWith('[SYSTEM: You are running as a scheduled cron job.');
+}
+
+function _saveCronSessionsCollapsed(){
+  try{localStorage.setItem('hermes-cron-sessions-collapsed', _cronSessionsCollapsed?'true':'false');}catch(e){}
+}
+
+function _renderCronSessionsToggle(cronSessions, initiallyCollapsed, onToggle){
+  const row=document.createElement('div');
+  row.className='cron-sessions-toggle';
+  const caret=document.createElement('span');
+  caret.className='session-date-caret'+(initiallyCollapsed?' collapsed':'');
+  caret.textContent='\u25B8';
+  const label=document.createElement('span');
+  label.className='cron-sessions-toggle-label';
+  label.textContent='Cron Sessions';
+  const count=document.createElement('span');
+  count.className='cron-sessions-toggle-count';
+  count.textContent=String(cronSessions.length);
+  row.appendChild(caret);
+  row.appendChild(label);
+  row.appendChild(count);
+  row.title=initiallyCollapsed?'展开定时任务会话':'折叠定时任务会话';
+  row.onclick=(e)=>{
+    e.preventDefault();
+    e.stopPropagation();
+    onToggle(row, caret);
+  };
+  return row;
+}
+
 function _localDayOrdinal(timestampMs) {
   const date = new Date(timestampMs);
   return Math.floor(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / 86400000);
@@ -873,7 +912,31 @@ function renderSessionListFromCache(){
       _saveCollapsed();
     };
     wrapper.appendChild(hdr);
-    for(const s of g.items){ body.appendChild(_renderOneSession(s, Boolean(g.isPinned))); }
+    const isPinnedGroup=Boolean(g.isPinned);
+    const cronItems=g.items.filter(_isCronSession);
+    const nonCronItems=g.items.filter(s=>!_isCronSession(s));
+    for(const s of nonCronItems){ body.appendChild(_renderOneSession(s, isPinnedGroup)); }
+    if(cronItems.length===1){
+      body.appendChild(_renderOneSession(cronItems[0], isPinnedGroup));
+    }else if(cronItems.length>1){
+      const activeCron=!!(S.session&&cronItems.some(s=>s.session_id===S.session.session_id));
+      const qActive=!!q;
+      const initiallyCollapsed=cronItems.length>1 && _cronSessionsCollapsed && !activeCron && !qActive;
+      const cronBody=document.createElement('div');
+      cronBody.className='cron-sessions-body';
+      if(initiallyCollapsed) cronBody.style.display='none';
+      const toggle=_renderCronSessionsToggle(cronItems, initiallyCollapsed, (row, caret)=>{
+        const isCollapsed=cronBody.style.display==='none';
+        cronBody.style.display=isCollapsed?'':'none';
+        caret.classList.toggle('collapsed',!isCollapsed);
+        row.title=isCollapsed?'折叠定时任务会话':'展开定时任务会话';
+        _cronSessionsCollapsed=!isCollapsed;
+        _saveCronSessionsCollapsed();
+      });
+      body.appendChild(toggle);
+      for(const s of cronItems){ cronBody.appendChild(_renderOneSession(s, isPinnedGroup)); }
+      body.appendChild(cronBody);
+    }
     wrapper.appendChild(body);
     list.appendChild(wrapper);
   }

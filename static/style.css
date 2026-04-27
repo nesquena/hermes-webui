@@ -332,6 +332,11 @@
   .session-date-header.pinned{color:var(--accent);}
   .session-date-caret{font-size:9px;transition:transform .2s;flex-shrink:0;display:inline-block;transform:rotate(0deg);}
   .session-date-caret.collapsed{transform:rotate(-90deg);}
+  .cron-sessions-toggle{display:flex;align-items:center;gap:6px;margin:2px 4px 4px;padding:7px 10px;border-radius:8px;color:var(--muted);font-size:12px;cursor:pointer;user-select:none;background:rgba(255,255,255,.025);border:1px solid transparent;transition:background .15s,border-color .15s,color .15s;}
+  .cron-sessions-toggle:hover{background:var(--hover-bg);border-color:var(--border2);color:var(--text);}
+  .cron-sessions-toggle-label{font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .cron-sessions-toggle-count{font-size:10px;color:var(--muted);border:1px solid var(--border2);border-radius:999px;padding:1px 6px;background:rgba(255,255,255,.035);}
+  .cron-sessions-body{padding-left:8px;border-left:1px dashed var(--border2);margin-left:12px;}
   .app-dialog-overlay{position:fixed;inset:0;background:rgba(7,12,19,.62);backdrop-filter:blur(6px);z-index:1100;display:none;align-items:center;justify-content:center;padding:24px;}
   .app-dialog{width:min(460px,100%);background:linear-gradient(180deg,rgba(21,31,45,.98),rgba(13,20,31,.98));border:1px solid var(--accent-bg-strong);border-radius:18px;box-shadow:0 18px 60px rgba(0,0,0,.45);padding:18px 18px 16px;color:var(--text);}
   .app-dialog-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px;}
