@@ -703,6 +703,11 @@ def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Option
     return 'Conversation topic'
 
 
+def _is_generic_fallback_title(title: str) -> bool:
+    """Return True for low-information fallback labels that should not be persisted."""
+    return str(title or '').strip().lower() in {'conversation topic'}
+
+
 def _run_background_title_update(session_id: str, user_text: str, assistant_text: str, placeholder_title: str, put_event, agent=None):
     """Generate and publish a better title after `done`, then end the stream."""
     try:
@@ -737,10 +742,13 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
         source = llm_status
         if not next_title:
-            next_title = _fallback_title_from_exchange(user_text, assistant_text)
-            if next_title:
+            fallback_title = _fallback_title_from_exchange(user_text, assistant_text)
+            if fallback_title and not _is_generic_fallback_title(fallback_title):
                 logger.debug("Using local fallback for session title generation")
+                next_title = fallback_title
                 source = 'fallback'
+            elif fallback_title:
+                logger.debug("Skipping generic local fallback for session title generation: %r", fallback_title)
         fallback_reason = (
             f'local_summary:{llm_status}'
             if source == 'fallback' and llm_status

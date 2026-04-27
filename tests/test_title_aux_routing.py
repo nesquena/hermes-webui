@@ -269,6 +269,48 @@ class TestReasoningModelTitleGeneration(unittest.TestCase):
         self.assertEqual(title_status[0]['status'], 'fallback')
         self.assertEqual(title_status[0]['reason'], 'local_summary:llm_length_aux')
 
+    @patch('api.streaming._aux_title_configured', return_value=True)
+    @patch('api.streaming._generate_llm_session_title_via_aux')
+    @patch('api.streaming.get_session')
+    def test_generic_fallback_title_is_not_persisted(
+        self, mock_get_session, mock_aux_title, mock_configured,
+    ):
+        """A generic local fallback is worse than the provisional first-message title."""
+        from api.streaming import _run_background_title_update
+
+        provisional_title = '\u5e2e\u6211\u53bb\u627e\u4e00\u672c\u300a\u7ea2\u697c\u68a6\u300b\u7535\u5b50\u4e66'
+        first_user_text = provisional_title + '\u3002'
+        mock_session = MagicMock()
+        mock_session.title = provisional_title
+        mock_session.llm_title_generated = False
+        mock_session.messages = [
+            {'role': 'user', 'content': first_user_text},
+            {'role': 'assistant', 'content': ''},
+        ]
+        mock_get_session.return_value = mock_session
+        mock_aux_title.return_value = (None, 'llm_error_aux', '')
+        events = []
+
+        _run_background_title_update(
+            session_id='generic-title-session',
+            user_text=first_user_text,
+            assistant_text='',
+            placeholder_title=provisional_title,
+            put_event=lambda event_type, data: events.append((event_type, data)),
+            agent=None,
+        )
+
+        title_events = [data for event_type, data in events if event_type == 'title']
+        title_status = [data for event_type, data in events if event_type == 'title_status']
+        self.assertEqual(title_events, [])
+        self.assertTrue(title_status)
+        self.assertEqual(title_status[0]['status'], 'skipped')
+        self.assertEqual(title_status[0]['reason'], 'llm_error_aux')
+        self.assertEqual(title_status[0]['title'], provisional_title)
+        self.assertEqual(mock_session.title, provisional_title)
+        self.assertFalse(mock_session.llm_title_generated)
+        mock_session.save.assert_not_called()
+
 
 class TestAuxTitleTimeoutEdgeCases(unittest.TestCase):
     """Comment 4: _aux_title_timeout must reject zero, negative, and non-numeric values."""
