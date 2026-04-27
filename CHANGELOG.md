@@ -357,6 +357,32 @@
   workspace subtree) and never enumerate blocked system roots. (`api/routes.py`,
   `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
 
+## [v0.50.228] — 2026-04-27
+
+### Fixed
+- **Raw `<pre>` blocks preserved in markdown renderer** — the inline `<code>` rewrite
+  pass in `renderMd()` no longer processes content inside raw `<pre>` blocks, preventing
+  multiline HTML code blocks from being degraded to backtick strings.
+  (`static/ui.js`) (#1150, @bsgdigital)
+- **Live model race silently overwrites session model** — `syncTopbar()` now skips
+  the destructive fallback-to-first-model path while a live model fetch is in flight
+  for the active provider; `_addLiveModelsToSelect()` re-applies the session model
+  once the fetch completes, so models only present in the live catalog (e.g. Kimi K2)
+  are never silently replaced. (`static/ui.js`) (#1169)
+- **Tool card output truncated at 220 chars and unscrollable** — JS truncation threshold
+  raised to 800 chars; CSS `overflow:auto` added to `.tool-card.open .tool-card-detail`
+  so the inner `<pre>` scroll works correctly; `<pre>` max-height raised to 360 px.
+  (`static/ui.js`, `static/style.css`) (#1170)
+- **New Conversation creates empty session when already on empty session** — clicking
+  the New Conversation button or pressing Cmd/Ctrl+K when the current session has zero
+  messages now focuses the composer instead of creating another empty Untitled session.
+  (`static/boot.js`) (#1171)
+- **`.env` file corruption from concurrent WebUI and CLI/Telegram writes** — removes
+  the unlocked duplicate `_write_env_file()` in `api/onboarding.py` that bypassed
+  `_ENV_LOCK`; rewrites the shared version to preserve comments, blank lines, and
+  original key order rather than rebuilding from a sorted dict.
+  (`api/onboarding.py`, `api/providers.py`) (#1164, @bergeouss)
+
 ## [v0.50.227] — 2026-04-27
 
 ### Fixed
