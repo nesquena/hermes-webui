@@ -118,6 +118,7 @@ async function loadSession(sid){
     S.messages = [];
     S.toolCalls = [];
     _messagesTruncated = false;
+    _oldestIdx = 0;
     const _msgInner = $('msgInner');
     if (_msgInner) _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
   }
@@ -329,6 +330,7 @@ async function _ensureMessagesLoaded(sid) {
   // Fetch session messages with a tail window for fast initial load.
   const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${_INITIAL_MSG_LIMIT}`);
   _messagesTruncated = !!data.session._messages_truncated;
+  _oldestIdx = data.session._messages_offset || 0;
   const msgs = (data.session.messages || []).filter(m => m && m.role);
   // Check for tool-call metadata on messages (for tool-call card rendering)
   const hasMessageToolMetadata = msgs.some(m => {
@@ -354,18 +356,20 @@ async function _ensureMessagesLoaded(sid) {
 // Load older messages when the user scrolls to the top of the conversation.
 // Prepends them to S.messages and re-renders, preserving scroll position.
 let _loadingOlder = false;
+// _oldestIdx tracks the index (in the server's full message array) of the
+// oldest message currently loaded in S.messages. Starts at 0 when all
+// messages are loaded, or > 0 when truncated by msg_limit.
+let _oldestIdx = 0;
+
 async function _loadOlderMessages() {
-  if (_loadingOlder) return;
+  if (_loadingOlder || !_messagesTruncated) return;
   const sid = S.session ? S.session.session_id : null;
   if (!sid || !S.messages.length) return;
-  // Use the _ts or timestamp of the oldest loaded message as a cursor.
-  // We ask for messages older than the first one we have.
-  const oldestMsg = S.messages[0];
-  const anchorTs = (oldestMsg._ts || oldestMsg.timestamp || 0);
+  if (_oldestIdx <= 0) { _messagesTruncated = false; return; }
   _loadingOlder = true;
   try {
-    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${encodeURIComponent(String(anchorTs))}&msg_limit=${_INITIAL_MSG_LIMIT}`);
-    if (!data || !data.session || _loadingSessionId !== null && _loadingSessionId !== sid) return;
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`);
+    if (!data || !data.session || (_loadingSessionId !== null && _loadingSessionId !== sid)) return;
     const olderMsgs = (data.session.messages || []).filter(m => m && m.role);
     if (!olderMsgs.length) { _messagesTruncated = false; return; }
     // Prepend older messages
@@ -373,6 +377,7 @@ async function _loadOlderMessages() {
     const prevScrollH = inner ? inner.scrollHeight : 0;
     S.messages = [...olderMsgs, ...S.messages];
     _messagesTruncated = !!data.session._messages_truncated;
+    _oldestIdx = data.session._messages_offset || 0;
     renderMessages();
     // Restore scroll position so the user stays at the same message
     if (inner) {

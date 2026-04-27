@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import subprocess
+import concurrent.futures
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -520,7 +521,6 @@ def git_info_for_workspace(workspace: Path) -> dict:
     # independent subprocess calls and together can take 50-200ms when run
     # serially.  Threading is safe here because each call blocks only on the
     # subprocess pipe, not on the GIL.
-    import concurrent.futures
     def _ahead():
         r = _run_git(['rev-list', '--count', '@{u}..HEAD'], workspace)
         return int(r) if r and r.isdigit() else 0

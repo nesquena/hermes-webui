@@ -777,11 +777,18 @@ def handle_get(handler, parsed) -> bool:
         # and sending hundreds of messages when the user only sees the most
         # recent exchange.  Older messages are loaded on-demand via scrolling.
         _msg_limit = query.get("msg_limit", [None])[0]
-        msg_limit = int(_msg_limit) if _msg_limit else None
-        # ?msg_before=TS — only return messages with timestamp < TS (for
-        # scroll-to-top lazy loading).  Combined with msg_limit for paging.
+        try:
+            msg_limit = max(1, int(_msg_limit)) if _msg_limit else None
+        except (ValueError, TypeError):
+            msg_limit = None
+        # ?msg_before=N — 0-based index into the full message array.
+        # Returns messages before this index (for scroll-to-top lazy loading).
+        # Combined with msg_limit for paging.
         _msg_before = query.get("msg_before", [None])[0]
-        msg_before = float(_msg_before) if _msg_before else None
+        try:
+            msg_before = int(_msg_before) if _msg_before else None
+        except (ValueError, TypeError):
+            msg_before = None
         try:
             _t1 = _time.monotonic()
             s = get_session(sid, metadata_only=(not load_messages))
@@ -795,12 +802,14 @@ def handle_get(handler, parsed) -> bool:
             _all_msgs = s.messages if load_messages else []
             if load_messages:
                 if msg_before is not None:
-                    # Scroll-to-top paging: return messages older than anchor
-                    _filtered = [
-                        m for m in _all_msgs
-                        if (m.get('_ts') or m.get('timestamp') or 0) < msg_before
-                    ]
-                    _truncated_msgs = _filtered[-msg_limit:] if msg_limit else _filtered
+                    # Scroll-to-top paging: msg_before is a 0-based index into
+                    # the full message list. Return the msg_limit messages that
+                    # appear *before* this index (i.e. older messages).
+                    # Using index instead of timestamp avoids issues with
+                    # duplicate/missing timestamps.
+                    _before_idx = max(0, min(int(msg_before), len(_all_msgs)))
+                    _slice = _all_msgs[:_before_idx]
+                    _truncated_msgs = _slice[-msg_limit:] if msg_limit else _slice
                 elif msg_limit and len(_all_msgs) > msg_limit:
                     _truncated_msgs = _all_msgs[-msg_limit:]
                 else:
@@ -816,10 +825,20 @@ def handle_get(handler, parsed) -> bool:
                 "pending_started_at": getattr(s, "pending_started_at", None),
             }
             # Signal to the frontend that older messages were omitted.
-            raw["_messages_truncated"] = (
-                load_messages and msg_limit is not None
-                and len(_all_msgs) > msg_limit
-            )
+            # For msg_before paging, compare against the filtered set,
+            # not the full list — otherwise we signal truncation even when
+            # all older messages were returned.
+            if msg_before is not None:
+                _truncated = load_messages and msg_limit is not None and len(_slice) > msg_limit
+            else:
+                _truncated = load_messages and msg_limit is not None and len(_all_msgs) > msg_limit
+            raw["_messages_truncated"] = _truncated
+            # Index of the first returned message in the full message array.
+            # Frontend uses this as cursor for scroll-to-top paging.
+            if msg_before is not None:
+                raw["_messages_offset"] = max(0, _before_idx - len(_truncated_msgs))
+            else:
+                raw["_messages_offset"] = max(0, len(_all_msgs) - len(_truncated_msgs))
             _t4 = _time.monotonic()
             if effective_model:
                 raw["model"] = effective_model
