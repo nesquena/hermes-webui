@@ -357,6 +357,18 @@
   workspace subtree) and never enumerate blocked system roots. (`api/routes.py`,
   `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
 
+## [v0.50.230] — 2026-04-27
+
+### Fixed
+- **No disk write for empty sessions** — `new_session()` no longer eagerly writes an empty
+  JSON file to disk. The session lives in the in-memory `SESSIONS` dict only; the first disk
+  write happens at the natural "this is now a real session" moment (first user message via
+  `/api/chat/start`, or explicit `s.save()` in the btw/background-agent paths). Eliminates
+  orphan `sessions/*.json` files that accumulated on every page reload, New Conversation click,
+  or onboarding pass without sending a message. Crash-safety: if the process exits between
+  create and first message, the session is lost — since it had no messages, there is nothing
+  to lose. (`api/models.py`) (#1171 follow-up, #1184)
+
 ## [v0.50.229] — 2026-04-27
 
 ### Performance
