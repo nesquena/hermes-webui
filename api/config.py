@@ -1243,6 +1243,41 @@ def _get_label_for_model(model_id: str, existing_groups: list) -> str:
     )
 
 
+def _is_gateway_group(grp: dict) -> bool:
+    """Recognise a gateway-provider group regardless of legacy naming.
+    Gateway provider ids/labels start with ``gateway`` (e.g. ``gateway-prod``)
+    or ``gw`` (legacy short form). Used to filter cached groups before
+    re-appending the fresh list from agent-api-gateway."""
+    if not isinstance(grp, dict):
+        return False
+    pid = (grp.get("provider") or grp.get("id") or "").lower()
+    return pid.startswith("gateway") or pid.startswith("gw-") or pid == "gw"
+
+
+def _attach_fresh_gateway_groups(result: dict) -> dict:
+    """Strip cached gateway groups from ``result`` and re-append fresh ones.
+
+    ``get_available_models()`` caches the heavy provider/credential discovery
+    for 24 h, but the gateway model list must reflect console-side changes
+    within seconds. We therefore keep gateway discovery OUTSIDE the cache
+    and re-attach it on every call. ``get_gateway_model_groups`` itself
+    has a short TTL (~30 s, see ``api.gateway_provider``) so this stays
+    cheap.
+
+    Always returns a deep copy of ``result`` with its ``groups`` rewritten;
+    callers must NOT mutate the returned dict back into the cache.
+    """
+    out = copy.deepcopy(result) if result else {"groups": []}
+    base_groups = [g for g in out.get("groups", []) if not _is_gateway_group(g)]
+    try:
+        from api.gateway_provider import get_gateway_model_groups
+        fresh = list(get_gateway_model_groups() or [])
+    except Exception:
+        fresh = []  # gateway unavailable — never crash the model picker
+    out["groups"] = base_groups + fresh
+    return out
+
+
 def get_available_models() -> dict:
     """
     Return available models grouped by provider.
@@ -1746,15 +1781,11 @@ def get_available_models() -> dict:
                         }
                     )
 
-        # Append gateway provider groups (agent-api-gateway integration).
-        # Kept inside the cold-path builder so the result is cached normally;
-        # if discovery is slow, the next request hits the cache instead of
-        # repeating the HTTP probe.
-        try:
-            from api.gateway_provider import get_gateway_model_groups
-            groups.extend(get_gateway_model_groups())
-        except Exception:
-            pass  # gateway module missing or discovery failed — never crash
+        # NOTE: gateway provider groups intentionally NOT appended here.
+        # They are appended OUTSIDE the cache (see _attach_fresh_gateway_groups)
+        # so console-side changes to the gateway propagate within seconds —
+        # otherwise a fresh model added to the gateway would be invisible
+        # to the WebUI for up to ``_AVAILABLE_MODELS_CACHE_TTL`` (24 h).
 
         return {
             "active_provider": active_provider,
@@ -1792,7 +1823,7 @@ def get_available_models() -> dict:
                 timeout=60
             )
             if _available_models_cache is not None and (time.monotonic() - _available_models_cache_ts) < _AVAILABLE_MODELS_CACHE_TTL:
-                return copy.deepcopy(_available_models_cache)
+                return _attach_fresh_gateway_groups(_available_models_cache)
 
         # Reload config if changed
         if _cfg_changed:
@@ -1803,14 +1834,14 @@ def get_available_models() -> dict:
         # Serve from memory cache if fresh
         now = time.monotonic()
         if _available_models_cache is not None and (now - _available_models_cache_ts) < _AVAILABLE_MODELS_CACHE_TTL:
-            return copy.deepcopy(_available_models_cache)
+            return _attach_fresh_gateway_groups(_available_models_cache)
 
         # Cold path: disk cache hit — use it (fast, no lock contention)
         if disk_groups is not None:
             _available_models_cache = disk_groups
             _available_models_cache_ts = now
             _save_models_cache_to_disk(disk_groups)
-            return copy.deepcopy(disk_groups)
+            return _attach_fresh_gateway_groups(disk_groups)
 
         # Cold path: full rebuild — only one thread reaches here at a time
         with _cache_build_cv:
@@ -1829,7 +1860,7 @@ def get_available_models() -> dict:
             _cache_build_in_progress = False
             _cache_build_cv.notify_all()
         _save_models_cache_to_disk(result)
-        return copy.deepcopy(result)
+        return _attach_fresh_gateway_groups(result)
 
 
 # ── Static file path ─────────────────────────────────────────────────────────

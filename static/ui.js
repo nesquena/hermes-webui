@@ -424,6 +424,84 @@ async function selectModelFromDropdown(value){
   if(typeof sel.onchange==='function') await sel.onchange();
 }
 
+function _isGatewayProvider(provider){
+  if(!provider) return false;
+  const s=String(provider).toLowerCase();
+  return s.startsWith('gateway')||s.startsWith('gw-')||s==='gw';
+}
+
+// Re-fetch /api/models, then surgically rewrite the optgroups whose
+// provider is gateway-side. Non-gateway groups (openai, anthropic, …)
+// are left untouched so we don't disturb the user's selection or any
+// in-flight live-model fetches.
+//
+// Triggered when the model picker is opened and on gateway SSE
+// `sessions_changed`, so a model added/removed on the agent-api-gateway
+// console becomes visible within seconds — the WebUI's 24h model cache
+// no longer masks gateway changes (issue #2).
+async function refreshGatewayModelOptions(){
+  const sel=$('modelSelect');
+  if(!sel) return false;
+  let data;
+  try{
+    const r=await fetch(new URL('api/models',location.href).href,{credentials:'include',cache:'no-store'});
+    if(_redirectIfUnauth(r)) return false;
+    data=await r.json();
+  }catch(e){
+    console.debug('[hermes] gateway model refresh failed:',e&&e.message);
+    return false;
+  }
+  if(!data||!Array.isArray(data.groups)) return false;
+
+  // Index fresh gateway groups by provider id.
+  const freshById=new Map();
+  for(const g of data.groups){
+    if(_isGatewayProvider(g.provider||g.provider_id)){
+      freshById.set((g.provider_id||g.provider||'').toLowerCase(),g);
+    }
+  }
+
+  const previousValue=sel.value;
+  let changed=false;
+
+  // Remove every optgroup that points at a gateway provider.
+  for(const og of Array.from(sel.querySelectorAll('optgroup'))){
+    const pid=(og.dataset.provider||og.label||'').toLowerCase();
+    if(_isGatewayProvider(pid)){
+      og.remove();
+      changed=true;
+    }
+  }
+
+  // Re-append fresh gateway optgroups in the order the server returned them.
+  for(const [,g] of freshById){
+    if(!g.models||!g.models.length) continue;
+    const og=document.createElement('optgroup');
+    og.label=g.provider;
+    if(g.provider_id) og.dataset.provider=g.provider_id;
+    for(const m of g.models){
+      const opt=document.createElement('option');
+      opt.value=m.id;
+      opt.textContent=m.label||m.id;
+      og.appendChild(opt);
+      _dynamicModelLabels[m.id]=m.label||m.id;
+    }
+    sel.appendChild(og);
+    changed=true;
+  }
+
+  // Restore the previous selection if it survived; otherwise the
+  // browser will fall back to the first option, and our chip sync
+  // will reflect that.
+  if(previousValue){
+    const stillThere=Array.from(sel.options).some(o=>o.value===previousValue);
+    if(stillThere) sel.value=previousValue;
+  }
+  if(changed && typeof syncModelChip==='function') syncModelChip();
+  return changed;
+}
+window.refreshGatewayModelOptions=refreshGatewayModelOptions;
+
 function toggleModelDropdown(){
   const dd=$('composerModelDropdown');
   const chip=$('composerModelChip');
@@ -434,6 +512,12 @@ function toggleModelDropdown(){
   if(typeof closeProfileDropdown==='function') closeProfileDropdown();
   if(typeof closeWsDropdown==='function') closeWsDropdown();
   if(typeof closeReasoningDropdown==='function') closeReasoningDropdown();
+  // Refresh gateway-side options BEFORE rendering the dropdown so newly
+  // added/removed gateway models are visible without a hard refresh
+  // (issue #2). Best-effort: failure (offline, slow) does not block open.
+  Promise.resolve(refreshGatewayModelOptions()).then(ch=>{
+    if(ch) renderModelDropdown();
+  }).catch(()=>{});
   renderModelDropdown();
   dd.classList.add('open');
   _positionModelDropdown();

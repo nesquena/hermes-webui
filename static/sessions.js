@@ -614,6 +614,14 @@ function startGatewaySSE(){
           stopGatewayPollFallback();
           _gatewaySSEWarningShown = false;
           renderSessionList(); // re-fetch and re-render
+          // Console-side changes on the gateway (new model registered,
+          // model removed, instance flipped) often arrive interleaved
+          // with sessions_changed. Refresh the model picker so issue #2
+          // (stale gateway models) is resolved without the user having
+          // to hard-refresh. Best-effort, never blocks the SSE handler.
+          if(typeof window.refreshGatewayModelOptions === 'function'){
+            try{ Promise.resolve(window.refreshGatewayModelOptions()).catch(()=>{}); }catch(_){ }
+          }
           // If the active session received new gateway messages, refresh the conversation view.
           // S.busy check prevents stomping on an in-progress WebUI response.
           // is_cli_session check ensures we only poll import_cli for CLI-originated sessions.
