@@ -753,6 +753,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       if(S.session&&S.session.session_id===activeSid){
         S.session=d.session;S.messages=d.session.messages||[];
+        if(
+          window._compressionUi&&window._compressionUi.automatic&&
+          window._compressionUi.sessionId===activeSid&&
+          d.session&&d.session.session_id
+        ){
+          window._compressionUi={...window._compressionUi, sessionId:d.session.session_id};
+        }
         // Find the last assistant message once for both reasoning persistence and timestamp
         const lastAsst=[...S.messages].reverse().find(m=>m.role==='assistant');
         // Persist reasoning trace so thinking card survives page reload
@@ -833,14 +840,25 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('compressed',e=>{
-      // Context was auto-compressed during this turn -- show a system message
+      // Context was auto-compressed during this turn. Render it through the
+      // same transient compression-card path as manual /compress, without
+      // inserting a fake assistant message into history or model context.
       if(!S.session||S.session.session_id!==activeSid) return;
-      try{
-        const d=JSON.parse(e.data);
-        const sysMsg={role:'assistant',content:'*[Context was auto-compressed to continue the conversation]*'};
-        S.messages.push(sysMsg);
-        showToast(d.message||'Context compressed');
-      }catch(err){}
+      let d={};
+      try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }
+      const message=String(d.message||'Context auto-compressed to continue the conversation').trim();
+      if(typeof setCompressionUi==='function'){
+        setCompressionUi({
+          sessionId:activeSid,
+          phase:'done',
+          automatic:true,
+          message,
+          summary:{headline:message},
+        });
+      }
+      if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
+      if(!S.busy&&typeof renderMessages==='function') renderMessages();
+      showToast(message||'Context compressed');
     });
 
     source.addEventListener('metering',e=>{

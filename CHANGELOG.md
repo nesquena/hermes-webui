@@ -15,6 +15,12 @@
   actions, and lets users copy diagnostics for scheduler/runtime failures.
   (`static/panels.js`, `static/style.css`, `static/i18n.js`,
   `tests/test_cron_needs_attention.py`)
+- **Auto-compression notification uses compression cards** — automatic context
+  compression now renders as a transient compression card in the transcript
+  instead of adding an italic fake assistant message, and preserved task-list
+  snapshots appended by Hermes Agent render as compression sub-cards instead of
+  ordinary user bubbles. (`static/messages.js`, `static/ui.js`,
+  `static/i18n.js`)
 - **Legacy `@provider:model` session models** — persisted sessions with an
   old explicit provider hint (for example `@copilot:gpt-5.5`) now pass through
   the same stale-model compatibility recovery as slash-prefixed session models,
