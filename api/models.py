@@ -484,7 +484,21 @@ def get_session(sid, metadata_only=False):
     raise KeyError(sid)
 
 def new_session(workspace=None, model=None, profile=None):
-    """Create a new in-memory session and persist it.
+    """Create a new in-memory session.
+
+    The session lives in the SESSIONS dict only — no disk write happens until
+    the first message is appended (#1171 follow-up).  This avoids the
+    "ghost Untitled session on disk" pile-up that occurred when users clicked
+    New Conversation, reloaded the page, or completed onboarding without ever
+    sending a message.  Subsequent code paths that populate state immediately
+    (btw / background agent at api/routes.py) call ``s.save()`` themselves
+    after setting title/messages, and ``_handle_chat_start`` saves the
+    session as soon as the user actually sends a message — both are the
+    natural first-write moments for a real session.
+
+    Crash-safety: if the process exits between session creation and first
+    message, the session is lost.  Since it had no messages, there is
+    nothing to lose.
 
     *profile* — when supplied by the caller (e.g. from the request body sent
     by the active browser tab), it is used directly so that concurrent clients
@@ -510,7 +524,6 @@ def new_session(workspace=None, model=None, profile=None):
         SESSIONS.move_to_end(s.session_id)
         while len(SESSIONS) > SESSIONS_MAX:
             SESSIONS.popitem(last=False)
-    s.save()
     return s
 
 def _hide_from_default_sidebar(session: dict) -> bool:
