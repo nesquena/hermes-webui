@@ -2255,10 +2255,13 @@ function renderMessages(){
     const isLastAssistant=!isUser&&vi===visWithIdx.length-1;
     let filesHtml='';
     if(m.attachments&&m.attachments.length){
+      const _attachSid=(S.session&&S.session.session_id)||'';
       filesHtml=`<div class="msg-files">${m.attachments.map(f=>{
         const fname=f.split('/').pop()||f;
         if(_IMAGE_EXTS.test(fname)){
-          const imgUrl='api/media?path='+encodeURIComponent(f);
+          // Use api/file/raw which resolves filename relative to the session workspace.
+          // api/media expects a full absolute path which we don't store on the client side.
+          const imgUrl='api/file/raw?session_id='+encodeURIComponent(_attachSid)+'&path='+encodeURIComponent(fname);
           return `<img class="msg-media-img" src="${esc(imgUrl)}" alt="${esc(fname)}" loading="lazy" onclick="this.classList.toggle('msg-media-img--full')">`;
         }
         return `<div class="msg-file-badge">${li('paperclip',12)} ${esc(fname)}</div>`;
@@ -3235,15 +3238,25 @@ function renderTray(){
   updateSendBtn();
   S.pendingFiles.forEach((f,i)=>{
     const chip=document.createElement('div');chip.className='attach-chip';
-    chip.innerHTML=`${li('paperclip',12)} ${esc(f.name)} <button title="${t('remove_title')}">${li('x',12)}</button>`;
-    chip.querySelector('button').onclick=()=>{S.pendingFiles.splice(i,1);renderTray();};
+    // Image files get a thumbnail preview; other files keep the paperclip chip
+    if(_IMAGE_EXTS.test(f.name)){
+      const blobUrl=URL.createObjectURL(f);
+      chip.className='attach-chip attach-chip--image';
+      chip.dataset.blobUrl=blobUrl;
+      chip.innerHTML=`<img class="attach-thumb" src="${esc(blobUrl)}" alt="${esc(f.name)}" title="${esc(f.name)}"><button title="${t('remove_title')}">${li('x',12)}</button>`;
+    } else {
+      chip.innerHTML=`${li('paperclip',12)} ${esc(f.name)} <button title="${t('remove_title')}">${li('x',12)}</button>`;
+    }
+    chip.querySelector('button').onclick=()=>{
+      // Revoke blob URL to avoid memory leak before removing
+      if(chip.dataset.blobUrl) URL.revokeObjectURL(chip.dataset.blobUrl);
+      S.pendingFiles.splice(i,1);renderTray();
+    };
     tray.appendChild(chip);
   });
 }
 function addFiles(files){for(const f of files){if(!S.pendingFiles.find(p=>p.name===f.name))S.pendingFiles.push(f);}renderTray();}
-
 async function uploadPendingFiles(){
-  if(!S.pendingFiles.length||!S.session)return[];
   const names=[];let failures=0;
   const bar=$('uploadBar');const barWrap=$('uploadBarWrap');
   barWrap.classList.add('active');bar.style.width='0%';
