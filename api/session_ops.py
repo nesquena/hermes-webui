@@ -115,6 +115,8 @@ def session_status(session_id: str) -> dict[str, Any]:
     (active_stream_id is set).
     """
     s = get_session(session_id)
+    inp = int(s.input_tokens or 0)
+    out = int(s.output_tokens or 0)
     return {
         'session_id': s.session_id,
         'title': s.title,
@@ -125,6 +127,10 @@ def session_status(session_id: str) -> dict[str, Any]:
         'created_at': s.created_at,
         'updated_at': s.updated_at,
         'agent_running': bool(getattr(s, 'active_stream_id', None)),
+        'input_tokens': inp,
+        'output_tokens': out,
+        'total_tokens': inp + out,
+        'estimated_cost': s.estimated_cost,
     }
 
 
