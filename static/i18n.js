@@ -665,6 +665,7 @@ const LOCALES = {
     approval_skip_all: '⚡ Skip all this session',
     approval_skip_all_title: 'Skip all approval prompts for this session'
   },
+
   ru: {
     _lang: 'ru',
     _label: 'Русский',
@@ -1271,6 +1272,7 @@ const LOCALES = {
     approval_skip_all: '⚡ Пропустить все в этом сеансе',
     approval_skip_all_title: 'Пропустить все запросы подтверждения в этом сеансе'
   },
+
   es: {
     _lang: 'es',
     _label: 'Español',
@@ -1871,6 +1873,7 @@ const LOCALES = {
     approval_skip_all: '⚡ Saltar todo en esta sesión',
     approval_skip_all_title: 'Saltar todas las solicitudes de aprobación en esta sesión'
   },
+
   de: {
     _lang: 'de',
     _label: 'Deutsch',
@@ -2245,6 +2248,7 @@ const LOCALES = {
     approval_skip_all: '⚡ Alle in dieser Sitzung überspringen',
     approval_skip_all_title: 'Alle Genehmigungsanfragen in dieser Sitzung überspringen'
 },
+
   zh: {
     _lang: 'zh',
     _label: '\u7b80\u4f53\u4e2d\u6587',
@@ -3490,6 +3494,7 @@ const LOCALES = {
     approval_skip_all: '⚡ 本次工作階段全部跳過',
     approval_skip_all_title: '跳過本次工作階段的所有審批提示'
   },
+
   ko: {
     _lang: 'ko',
     _label: 'Korean (한국어)',
