@@ -734,7 +734,27 @@ async function cmdStatus(){
   try{
     const r=await api('/api/session/status?session_id='+encodeURIComponent(S.session.session_id));
     if(r&&r.error){showToast(r.error);return;}
-    S.messages.push({role:'assistant',content:[`**${t('status_heading')}**`,'',`**${t('status_session_id')}:** \`${r.session_id}\``,`**${t('status_title')}:** ${r.title||t('untitled')}`,`**${t('status_model')}:** ${r.model||t('usage_default_model')}`,`**${t('status_workspace')}:** ${r.workspace}`,`**${t('status_personality')}:** ${r.personality||t('usage_personality_none')}`,`**${t('status_messages')}:** ${r.message_count}`,`**${t('status_agent_running')}:** ${r.agent_running?t('status_yes'):t('status_no')}`,].join('\n')});
+    // Build status card lines matching CLI /status output
+    const provider=window._activeProvider||'';
+    const profile=S.activeProfile||'default';
+    const started=r.created_at?new Date(r.created_at).toLocaleString():t('status_unknown');
+    const fmtNum=n=>typeof n==='number'?n.toLocaleString():'0';
+    const tokens=r.total_tokens?`${fmtNum(r.input_tokens)} in / ${fmtNum(r.output_tokens)} out`:t('status_no_tokens');
+    const cost=r.estimated_cost?` (~$${Number(r.estimated_cost).toFixed(4)})`:'';
+    const lines=[
+      `**${t('status_heading')}**`,'',
+      `\`${r.session_id}\``,'',
+      `**${t('status_title')}:** ${r.title||t('untitled')}`,
+      `**${t('status_model')}:** ${r.model||t('usage_default_model')}${provider?'  ('+provider+')':''}`,
+      `**${t('status_profile')}:** ${profile}`,
+      `**${t('status_workspace')}:** ${r.workspace}`,
+      `**${t('status_personality')}:** ${r.personality||t('usage_personality_none')}`,
+      `**${t('status_started')}:** ${started}`,
+      `**${t('status_tokens')}:** ${tokens}${cost}`,
+      `**${t('status_messages')}:** ${r.message_count}`,
+      `**${t('status_agent_running')}:** ${r.agent_running?t('status_yes'):t('status_no')}`,
+    ];
+    S.messages.push({role:'assistant',content:lines.join('\n')});
     renderMessages();
   }catch(e){showToast(t('status_load_failed')+e.message);}
 }
