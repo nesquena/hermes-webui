@@ -1452,7 +1452,7 @@ def get_available_models() -> dict:
         _cfg_providers = cfg.get("providers", {})
         if isinstance(_cfg_providers, dict):
             for _pid_key in _cfg_providers:
-                if _pid_key in _PROVIDER_MODELS:
+                if _pid_key in _PROVIDER_MODELS or _pid_key in cfg.get("providers", {}):
                     detected_providers.add(_pid_key)
 
         # 4. Fetch models from custom endpoint if base_url is configured
@@ -1678,7 +1678,7 @@ def get_available_models() -> dict:
                             }
                         )
                 elif pid in _PROVIDER_MODELS or pid in cfg.get("providers", {}):
-                    raw_models = _PROVIDER_MODELS.get(pid, [])
+                    raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
 
                     provider_cfg = cfg.get("providers", {}).get(pid, {})
                     if isinstance(provider_cfg, dict) and "models" in provider_cfg:
