@@ -10,10 +10,14 @@ Conversely, ``/private/var/folders/<hash>/T/`` is the per-user tmp tree
 (this is where pytest's ``tmp_path_factory`` writes), and must remain a
 valid workspace candidate even though it lives nominally under ``/var``.
 
-These tests run on every platform — on Linux all the macOS-aliased paths
-are no-ops because ``Path('/etc').resolve() == Path('/etc')``, but the
-Linux-side invariants (``/etc`` blocked, ``/tmp`` allowed) are also locked.
+The ``TestEtcAlwaysBlocked`` and ``TestVarSystemBlockedButUserTmpAllowed``
+classes contain checks that depend on the macOS layout (where ``/etc``
+resolves to ``/private/etc``); those tests are skipped on Linux where
+``/etc.resolve() == /etc`` and the ``/private/*`` aliases simply don't exist.
+The cross-platform invariants (``/etc`` literal blocked, ``/tmp`` allowed,
+non-symlink roots blocked) run on every platform.
 """
+import sys
 from pathlib import Path
 
 import pytest
@@ -23,6 +27,10 @@ from api.workspace import (
     _is_blocked_system_path,
     _workspace_blocked_roots,
 )
+
+
+_IS_MACOS = sys.platform == 'darwin'
+_macos_only = pytest.mark.skipif(not _IS_MACOS, reason="macOS-specific symlink layout")
 
 
 # ── Blocked-roots set includes both literal and resolved forms ──────────────
@@ -56,9 +64,12 @@ class TestEtcAlwaysBlocked:
     def test_etc_subpath_blocked(self):
         assert _is_blocked_system_path(Path('/etc/hostname').resolve())
 
+    @_macos_only
     def test_private_etc_explicit_blocked(self):
         """Even if the user writes ``/private/etc`` directly (knowing the
-        macOS layout), it must still be blocked."""
+        macOS layout), it must still be blocked.  Skipped on Linux —
+        ``/private/etc`` doesn't exist there and ``Path('/etc').resolve()``
+        is ``/etc`` so the resolved-form aliasing is a no-op."""
         assert _is_blocked_system_path(Path('/private/etc'))
 
 
@@ -72,7 +83,11 @@ class TestVarSystemBlockedButUserTmpAllowed:
         didn't match the literal blocked root."""
         assert _is_blocked_system_path(Path('/var/log').resolve())
 
+    @_macos_only
     def test_private_var_log_blocked(self):
+        """Skipped on Linux: ``/private/var/log`` isn't an alias for
+        ``/var/log`` there; ``Path('/var').resolve() == /var`` so no
+        ``/private/var`` ever lands in the blocked set."""
         assert _is_blocked_system_path(Path('/private/var/log'))
 
     def test_var_folders_user_tmp_allowed(self):
