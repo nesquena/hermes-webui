@@ -409,6 +409,7 @@ from api.workspace import (
     safe_resolve_ws,
     resolve_trusted_workspace,
     validate_workspace_to_add,
+    _is_blocked_system_path,
     _workspace_blocked_roots,
 )
 from api.upload import handle_upload, handle_transcribe
@@ -3204,13 +3205,12 @@ def _handle_workspace_add(handler, body):
         return bad(handler, "path is required")
     # Validate the path is NOT a blocked system root BEFORE any filesystem mutation.
     # This prevents creating orphan directories on rejected paths (#782 review).
+    # _is_blocked_system_path honours user-tmp carve-outs (e.g. /var/folders on
+    # macOS) so pytest's tmp_path_factory paths and other legit user-tmp dirs
+    # still register cleanly.
     candidate = Path(path_str).expanduser().resolve()
-    for blocked in _workspace_blocked_roots():
-        try:
-            candidate.relative_to(blocked)
-            return bad(handler, f"Path points to a system directory: {candidate}")
-        except ValueError:
-            pass
+    if _is_blocked_system_path(candidate):
+        return bad(handler, f"Path points to a system directory: {candidate}")
     # Now safe to create the directory if requested
     if auto_create:
         try:
