@@ -1975,6 +1975,7 @@ function setCompressionUi(state){
 }
 function _compressionCardsHtml(state){
   if(!state) return '';
+  if(state.automatic) return _autoCompressionCardsHtml(state);
   const cmdText=state.commandText||'/compress';
   const focusText=state.focusTopic?`${t('focus_label')}: ${state.focusTopic}`:'';
   const headerText=state.phase==='done'
@@ -2035,6 +2036,22 @@ function _compressionCardsHtml(state){
     </div>
     ${referenceHtml}`;
 }
+function _autoCompressionCardsHtml(state){
+  const fallback='Context auto-compressed to continue the conversation';
+  const detail=String(state.message||fallback).trim()||fallback;
+  const preview=String(state.summary?.headline||detail).trim()||detail;
+  return `
+    <div class="tool-card-row compression-card-row" data-compression-card="1">
+      ${_compressionStatusCardHtml({
+        statusLabel: t('auto_compress_label'),
+        previewText: preview,
+        detail,
+        icon: li('check',13),
+        open: false,
+        variantClass: 'tool-card-compress-complete tool-card-compress-auto',
+      })}
+    </div>`;
+}
 function _compressionCardsNode(state){
   const wrap=document.createElement('div');
   wrap.className='compression-turn';
@@ -2042,9 +2059,20 @@ function _compressionCardsNode(state){
   return wrap;
 }
 function _isContextCompactionMessage(m){
-  if(!m||m.role!=='assistant') return false;
+  if(!m||!m.role||m.role==='tool') return false;
   const text=msgContent(m)||String(m.content||'');
   return /^\s*\[context compaction/i.test(text) || /^\s*context compaction/i.test(text);
+}
+function _isPreservedCompressionTaskListMessage(m){
+  if(!m||m.role!=='user') return false;
+  const text=msgContent(m)||String(m.content||'');
+  return /^\s*\[your active task list was preserved across context compression\]/i.test(text);
+}
+function _preservedCompressionTaskListPreview(text){
+  const body=String(text||'')
+    .replace(/^\s*\[your active task list was preserved across context compression\]\s*/i,'')
+    .trim();
+  return (body.split(/\n+/).map(line=>line.trim()).filter(Boolean).slice(0,2).join(' ') || t('preserved_task_list_label'));
 }
 function _compressionMessageAnchorKey(m){
   if(!m||!m.role||m.role==='tool') return null;
@@ -2098,6 +2126,27 @@ function _compressionReferenceCardHtml(text, open=false){
       
     </div>`;
 }
+function _preservedCompressionTaskListCardHtml(m, open=false){
+  const text=msgContent(m)||String(m.content||'');
+  return `
+    <div class="tool-card-row compression-card-row" data-compression-card="1" data-raw-text="${esc(text)}">
+      ${_compressionStatusCardHtml({
+        statusLabel: t('preserved_task_list_label'),
+        previewText: _preservedCompressionTaskListPreview(text),
+        detail: text,
+        icon: li('list-todo',13),
+        open,
+        variantClass: 'tool-card-compress-reference',
+      })}
+    </div>`;
+}
+function _preservedCompressionTaskListCardsHtml(messages){
+  return (messages||[]).map(m=>_preservedCompressionTaskListCardHtml(m, false)).join('');
+}
+function _latestPreservedCompressionTaskListMessages(messages){
+  const latest=[...(messages||[])].reverse().find(m=>_isPreservedCompressionTaskListMessage(m));
+  return latest?[latest]:[];
+}
 function _isSameLocalDay(dateA, dateB){
   return dateA.getFullYear()===dateB.getFullYear()
     && dateA.getMonth()===dateB.getMonth()
@@ -2142,9 +2191,9 @@ function _compressionStatusCardHtml({
       ${bodyHtml}
     </div>`;
 }
-function _contextCompactionMessageHtml(m, tsTitle=''){
+function _contextCompactionMessageHtml(m, tsTitle='', preservedMessages=[]){
   const text=msgContent(m)||String(m.content||'');
-  return `<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(text, false, tsTitle)}</div></div>`;
+  return `<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(text, false, tsTitle)}${_preservedCompressionTaskListCardsHtml(preservedMessages)}</div></div>`;
 }
 function renderCompressionUi(){
   const el=$('liveCompressionCards');
@@ -2194,8 +2243,11 @@ function renderMessages(){
   const sessionCompressionAnchorKey=(
     S.session && S.session.compression_anchor_message_key && typeof S.session.compression_anchor_message_key==='object'
   ) ? S.session.compression_anchor_message_key : null;
+  const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);
   const vis=S.messages.filter(m=>{
     if(!m||!m.role||m.role==='tool')return false;
+    if(_isContextCompactionMessage(m)) return false;
+    if(_isPreservedCompressionTaskListMessage(m)) return false;
     if(m.role==='assistant'){
       const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
       const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
@@ -2203,18 +2255,21 @@ function renderMessages(){
     }
     return msgContent(m)||m.attachments?.length;
   });
-  $('emptyState').style.display=vis.length?'none':'';
+  $('emptyState').style.display=(vis.length||preservedCompressionTaskMessages.length)?'none':'';
   inner.innerHTML='';
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const referenceMessage=S.messages.find(m=>_isContextCompactionMessage(m));
   const referenceText=referenceMessage?msgContent(referenceMessage)||String(referenceMessage.content||''):'';
   const referenceNode=(!compressionState && referenceMessage && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey))
-    ? (()=>{const row=document.createElement('div');row.innerHTML=_compressionReferenceCardHtml(referenceText,false);return row.firstElementChild;})()
+    ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(referenceText,false)}${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
     : null;
+  let preservedCompressionTaskCardsAttached=!!referenceNode;
   const visWithIdx=[];
+  const preservedCompressionRawIdxs=[];
   let rawIdx=0;
   for(const m of S.messages){
     if(!m||!m.role||m.role==='tool'){rawIdx++;continue;}
+    if(_isPreservedCompressionTaskListMessage(m)){preservedCompressionRawIdxs.push(rawIdx);rawIdx++;continue;}
     const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
     const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
     if(msgContent(m)||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)))) visWithIdx.push({m,rawIdx});
@@ -2310,6 +2365,20 @@ function renderMessages(){
     const timeHtml = tsTime ? `<span class="msg-time" title="${esc(tsTitle)}">${tsTime}</span>` : '';
     const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${copyBtn}${retryBtn}</span></div>`;
 
+    if(_isContextCompactionMessage(m)){
+      if(compressionState || referenceNode){
+        continue;
+      }else{
+        currentAssistantTurn=null;
+        const row=document.createElement('div');
+        const preservedForThisCard=preservedCompressionTaskCardsAttached?[]:preservedCompressionTaskMessages;
+        row.innerHTML=_contextCompactionMessageHtml(m, tsTitle, preservedForThisCard);
+        if(preservedForThisCard.length) preservedCompressionTaskCardsAttached=true;
+        inner.appendChild(row.firstElementChild);
+        continue;
+      }
+    }
+
     if(isUser){
       currentAssistantTurn=null;
       const row=document.createElement('div');
@@ -2321,18 +2390,6 @@ function renderMessages(){
       inner.appendChild(row);
       userRows.set(rawIdx, row);
       continue;
-    }
-
-    if(_isContextCompactionMessage(m)){
-      if(compressionState || referenceNode){
-        continue;
-      }else{
-        currentAssistantTurn=null;
-        const row=document.createElement('div');
-        row.innerHTML=_contextCompactionMessageHtml(m, tsTitle);
-        inner.appendChild(row.firstElementChild);
-        continue;
-      }
     }
 
     if(!currentAssistantTurn){
@@ -2359,10 +2416,11 @@ function renderMessages(){
     assistantSegments.set(rawIdx, seg);
   }
 
-  function _insertCompressionLikeNode(node){
+  function _insertCompressionLikeNode(node, anchorIndex){
     if(!node) return;
-    if(insertionAnchor!==null && visWithIdx[insertionAnchor]){
-      const anchorRawIdx=visWithIdx[insertionAnchor].rawIdx;
+    const anchorIdx=anchorIndex===undefined?insertionAnchor:anchorIndex;
+    if(anchorIdx!==null && visWithIdx[anchorIdx]){
+      const anchorRawIdx=visWithIdx[anchorIdx].rawIdx;
       const anchorSeg=assistantSegments.get(anchorRawIdx);
       if(anchorSeg){
         const turn=anchorSeg.closest('.assistant-turn');
@@ -2380,9 +2438,16 @@ function renderMessages(){
     }
     inner.appendChild(node);
   }
+  const preservedOnlyNode=(!preservedCompressionTaskCardsAttached&&(!referenceMessage||compressionState)&&preservedCompressionTaskMessages.length)
+    ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
+    : null;
+  const preservedOnlyAnchor=preservedCompressionRawIdxs.length
+    ? (()=>{let idx=null;for(let i=0;i<visWithIdx.length;i++){if(visWithIdx[i].rawIdx<preservedCompressionRawIdxs[0]) idx=i;}return idx;})()
+    : null;
 
   _insertCompressionLikeNode(compressionNode);
   _insertCompressionLikeNode(referenceNode);
+  _insertCompressionLikeNode(preservedOnlyNode, preservedOnlyAnchor);
   renderCompressionUi();
   // Insert settled tool call cards (history view only).
   // During live streaming, tool cards are rendered in #liveToolCards by the
