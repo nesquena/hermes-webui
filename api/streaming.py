@@ -1489,7 +1489,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             # the key is absent or invalid, pass None → agent uses its default.
             try:
                 from api.config import parse_reasoning_effort as _parse_reff
-                _effort_cfg = _cfg.cfg.get('agent', {}) if isinstance(_cfg.cfg, dict) else {}
+                _effort_cfg = _cfg.get('agent', {}) if isinstance(_cfg, dict) else {}
                 _effort_raw = _effort_cfg.get('reasoning_effort') if isinstance(_effort_cfg, dict) else None
                 _reasoning_config = _parse_reff(_effort_raw)
             except Exception:

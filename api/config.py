@@ -186,15 +186,26 @@ _cfg_mtime: float = 0.0  # last known mtime of config.yaml; 0 = never loaded
 
 
 def _get_config_path() -> Path:
-    """Return config.yaml path for the active profile."""
-    env_override = os.getenv("HERMES_CONFIG_PATH")
-    if env_override:
-        return Path(env_override).expanduser()
-    try:
-        from api.profiles import get_active_hermes_home
+    """Return config.yaml path for the active profile.
 
-        return get_active_hermes_home() / "config.yaml"
+    ``HERMES_CONFIG_PATH`` is useful for single-profile launches, but it must
+    not pin named WebUI profiles to the default config.  Request/profile
+    context wins whenever it resolves to an actual profile directory.
+    """
+    env_override = os.getenv("HERMES_CONFIG_PATH")
+    try:
+        from api.profiles import get_active_hermes_home, get_active_profile_name
+
+        active_home = get_active_hermes_home()
+        active_name = get_active_profile_name()
+        if active_name != "default" and active_home.parent.name == "profiles":
+            return active_home / "config.yaml"
+        if env_override:
+            return Path(env_override).expanduser()
+        return active_home / "config.yaml"
     except ImportError:
+        if env_override:
+            return Path(env_override).expanduser()
         return HOME / ".hermes" / "config.yaml"
 
 
