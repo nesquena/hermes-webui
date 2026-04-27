@@ -589,6 +589,10 @@ let _scrollPinned=true;
     _scrollPinned=nearBottom;
     const btn=$('scrollToBottomBtn');
     if(btn) btn.style.display=_scrollPinned?'none':'flex';
+    // Load older messages when scrolled near the top
+    if(el.scrollTop<80 && typeof _messagesTruncated!=='undefined' && _messagesTruncated && typeof _loadOlderMessages==='function'){
+      _loadOlderMessages();
+    }
   });
 })();
 function _fmtTokens(n){if(!n||n<0)return'0';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'k';return String(n);}
@@ -2245,6 +2249,16 @@ function renderMessages(){
   });
   $('emptyState').style.display=(vis.length||preservedCompressionTaskMessages.length)?'none':'';
   inner.innerHTML='';
+  // Show "load older" indicator when older messages are available
+  if(typeof _messagesTruncated!=='undefined' && _messagesTruncated && S.messages.length>0){
+    const indicator=document.createElement('div');
+    indicator.id='loadOlderIndicator';
+    indicator.className='msg-date-sep';
+    indicator.style.cssText='cursor:pointer;color:var(--blue);font-size:13px;padding:10px 0;text-align:center;';
+    indicator.textContent='↑ Scroll up or click to load older messages';
+    indicator.onclick=()=>{if(typeof _loadOlderMessages==='function') _loadOlderMessages();};
+    inner.appendChild(indicator);
+  }
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const referenceMessage=S.messages.find(m=>_isContextCompactionMessage(m));
   const referenceText=referenceMessage?msgContent(referenceMessage)||String(referenceMessage.content||''):'';
