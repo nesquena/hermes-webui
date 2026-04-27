@@ -513,6 +513,13 @@ def new_session(workspace=None, model=None, profile=None):
     s.save()
     return s
 
+def _hide_from_default_sidebar(session: dict) -> bool:
+    """Return True for internal/background sessions hidden from the default list."""
+    sid = str(session.get('session_id') or '')
+    source = session.get('source_tag') or session.get('source')
+    return source == 'cron' or sid.startswith('cron_')
+
+
 def all_sessions():
     active_stream_ids = _active_stream_ids()
     # Phase C: try index first for O(1) read; fall back to full scan
@@ -557,6 +564,7 @@ def all_sessions():
                 and s.get('message_count', 0) == 0
                 and (_now - s.get('updated_at', _now)) > 60
             )]
+            result = [s for s in result if not _hide_from_default_sidebar(s)]
             # Backfill: sessions created before Sprint 22 have no profile tag.
             # Attribute them to 'default' so the client profile filter works correctly.
             for s in result:
@@ -583,6 +591,7 @@ def all_sessions():
         and len(s.messages) == 0
         and (_now - s.updated_at) > 60
     )]
+    result = [s for s in result if not _hide_from_default_sidebar(s)]
     for s in result:
         if not s.get('profile'):
             s['profile'] = 'default'
