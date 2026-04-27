@@ -683,7 +683,7 @@ def get_cli_sessions() -> list:
         _cli_profile = None  # older agent -- fall back to no profile
 
     try:
-        for row in read_importable_agent_session_rows(db_path, limit=200, log=logger):
+        for row in read_importable_agent_session_rows(db_path, limit=200, log=logger, exclude_sources=None):
             sid = row['id']
             raw_ts = row['last_activity'] or row['started_at']
             # Prefer the CLI session's own profile from the DB; fall back to
