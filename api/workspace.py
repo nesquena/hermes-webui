@@ -385,6 +385,14 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
     if not candidate.is_dir():
         raise ValueError(f"Path is not a directory: {candidate}")
 
+    # (A) Trusted if under the user's home directory — cross-platform via Path.home()
+    # Must be checked before system roots to allow symlinks like /var/home
+    try:
+        candidate.relative_to(Path.home().resolve())
+        return candidate
+    except ValueError:
+        pass
+
     # Block known system roots and their children
     for blocked in _workspace_blocked_roots():
         try:
@@ -394,13 +402,6 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
             if "system directory" in str(e):
                 raise
             # relative_to raised ValueError = candidate is NOT under blocked = safe
-
-    # (A) Trusted if under the user's home directory — cross-platform via Path.home()
-    try:
-        candidate.relative_to(Path.home().resolve())
-        return candidate
-    except ValueError:
-        pass
 
     # (B) Trusted if already in the saved workspace list — covers non-home installs
     try:
