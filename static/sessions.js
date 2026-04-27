@@ -119,6 +119,7 @@ async function loadSession(sid){
     S.toolCalls = [];
     _messagesTruncated = false;
     _oldestIdx = 0;
+    _loadingOlder = false;
     const _msgInner = $('msgInner');
     if (_msgInner) _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
   }
@@ -387,6 +388,9 @@ async function _loadOlderMessages() {
   } catch(e) {
     console.warn('_loadOlderMessages failed:', e);
   } finally {
+    // Always clear the loading lock. If the user switched sessions while
+    // this request was in flight, loadSession() already set _loadingOlder=false
+    // (see line ~122), so this is a harmless double-reset.
     _loadingOlder = false;
   }
 }
