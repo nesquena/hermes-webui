@@ -461,3 +461,30 @@ class TestBlockquoteEntityEncodedInput:
             f"Entity-encoded blockquote with fenced code must render: {out!r}"
         )
         assert "<pre>" in out, f"Fenced code inside entity-encoded blockquote must render: {out!r}"
+
+
+class TestRawPreCodePreservation:
+    """Raw <pre><code> HTML from model output should remain structurally intact."""
+
+    def test_multiline_pre_code_blocks_do_not_degrade_to_backticks(self, driver_path):
+        src = (
+            "<pre><code>line 1\n"
+            "line 2\n"
+            "</code></pre>\n\n"
+            "After paragraph.\n\n"
+            "<pre><code>line 3\n"
+            "line 4\n"
+            "</code></pre>\n\n"
+            "Done."
+        )
+        out = _render(driver_path, src)
+        assert out.count("<pre>") == 2 and out.count("</pre>") == 2, (
+            f"Expected two balanced <pre> blocks, got: {out!r}"
+        )
+        assert out.count("<code>") == 2 and out.count("</code>") == 2, (
+            f"Expected two balanced <code> blocks, got: {out!r}"
+        )
+        assert "`line 1" not in out and "line 2\n`</pre>" not in out, (
+            f"<code> content inside <pre> must not be rewritten to backticks: {out!r}"
+        )
+        assert "After paragraph." in out and "Done." in out
