@@ -2946,9 +2946,8 @@ function startCronPolling(){
           showToast(t('cron_completion_status', c.name, c.status==='error' ? t('status_failed') : t('status_completed')),4000);
           _cronPollSince=Math.max(_cronPollSince,c.completed_at);
           if(c.job_id) _cronNewJobIds.add(String(c.job_id));
-        _cronUnreadCount+=data.completions.length;
         }
-
+        // _cronUnreadCount is derived from _cronNewJobIds.size in updateCronBadge.
         updateCronBadge();
       }
     }catch(e){}
@@ -2979,8 +2978,7 @@ function _clearCronUnreadForJob(jobId){
   const id=String(jobId);
   if(_cronNewJobIds.has(id)){
     _cronNewJobIds.delete(id);
-    _cronUnreadCount=Math.max(0,_cronUnreadCount-1);
-    updateCronBadge();
+    updateCronBadge();  // re-derives _cronUnreadCount from set size
   }
 }
 

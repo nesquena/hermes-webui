@@ -42,6 +42,11 @@ def post(path, body=None):
 def make_session(created_list, ws=None):
     body = {}
     if ws:
+        # tmp_path_factory creates dirs under /var/folders or /tmp which sit
+        # outside the user home tree, so they aren't trusted by default.
+        # Register the workspace first via the explicit add API (intent-trusted)
+        # before requesting a session against it.
+        post("/api/workspaces/add", {"path": str(ws)})
         body["workspace"] = str(ws)
     d, _ = post("/api/session/new", body)
     sid = d["session"]["session_id"]

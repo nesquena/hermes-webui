@@ -51,16 +51,22 @@ def test_open_cron_detail_clears_unread():
 
 
 def test_clear_cron_unread_for_job_function():
-    """_clearCronUnreadForJob should delete from set and decrement count."""
+    """_clearCronUnreadForJob should delete from set and refresh badge.
+
+    _cronUnreadCount is derived from _cronNewJobIds.size in updateCronBadge,
+    so the function only needs to delete from the set and trigger a badge sync.
+    """
     with open('static/panels.js') as f:
         src = f.read()
 
-    assert 'def' not in src.lower() or True  # JS function, not Python
-    # Check function implementation
-    assert '_cronNewJobIds.delete(id)' in src, \
+    # Locate the function body to make assertions order-dependent
+    start = src.find('function _clearCronUnreadForJob(')
+    assert start != -1, '_clearCronUnreadForJob should be defined'
+    body = src[start:start + 400]
+    assert '_cronNewJobIds.delete(id)' in body, \
         '_clearCronUnreadForJob should delete from _cronNewJobIds'
-    assert '_cronUnreadCount=Math.max(0' in src, \
-        '_clearCronUnreadForJob should decrement _cronUnreadCount'
+    assert 'updateCronBadge()' in body, \
+        '_clearCronUnreadForJob should call updateCronBadge to re-sync count'
 
 
 def test_switch_panel_no_longer_clears_badge():
