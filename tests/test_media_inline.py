@@ -108,6 +108,57 @@ class TestMediaCSS(unittest.TestCase):
                       "Download link style must be defined for non-image media")
 
 
+
+class TestInlineAudioVideoEditor(unittest.TestCase):
+    """Static checks for inline audio/video preview controls in chat and workspace."""
+
+    CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    WORKSPACE_JS = (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
+    INDEX_HTML = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+    def test_audio_and_video_extension_detection_exists(self):
+        self.assertIn("_AUDIO_EXTS", UI_JS)
+        self.assertIn("_VIDEO_EXTS", UI_JS)
+        for ext in ["mp3", "wav", "m4a", "mp4", "mov", "webm"]:
+            self.assertIn(ext, UI_JS)
+
+    def test_media_player_markup_has_native_controls(self):
+        self.assertIn("_mediaPlayerHtml", UI_JS)
+        self.assertIn("<audio", UI_JS)
+        self.assertIn("<video", UI_JS)
+        self.assertIn("controls", UI_JS)
+        self.assertIn("playsinline", UI_JS)
+
+    def test_variable_speed_buttons_and_playback_rate_handler_exist(self):
+        self.assertIn("MEDIA_PLAYBACK_RATES", UI_JS)
+        for rate in ["0.5", "0.75", "1.25", "1.5", "2"]:
+            self.assertIn(rate, UI_JS)
+        self.assertIn("playbackRate", UI_JS)
+        self.assertIn("media-speed-btn", UI_JS)
+        self.assertIn("aria-pressed", UI_JS)
+
+    def test_message_attachments_render_audio_video_instead_of_badges(self):
+        self.assertIn("_renderAttachmentHtml", UI_JS)
+        self.assertIn("data-media-kind", UI_JS)
+        self.assertIn("api/file/raw?session_id=", UI_JS)
+
+    def test_composer_tray_recognizes_audio_video_files(self):
+        self.assertIn("attach-chip--media", UI_JS)
+        self.assertIn("attach-chip--'+mediaKind", UI_JS)
+        self.assertIn("URL.createObjectURL(f)", UI_JS)
+
+    def test_workspace_preview_routes_audio_video_inline(self):
+        self.assertIn("AUDIO_EXTS", self.WORKSPACE_JS)
+        self.assertIn("VIDEO_EXTS", self.WORKSPACE_JS)
+        self.assertIn("previewMediaWrap", self.WORKSPACE_JS)
+        self.assertIn("showPreview(mode)", self.WORKSPACE_JS)
+        self.assertIn("&inline=1", self.WORKSPACE_JS)
+        self.assertIn('id="previewMediaWrap"', self.INDEX_HTML)
+
+    def test_media_editor_css_defined(self):
+        for cls in [".msg-media-editor", ".msg-media-player", ".msg-media-video", ".media-speed-controls", ".media-speed-btn", ".preview-media-wrap"]:
+            self.assertIn(cls, self.CSS)
+
 # ── Backend: /api/media endpoint (unit-level, no server needed) ─────────────
 
 class TestMediaEndpointUnit(unittest.TestCase):

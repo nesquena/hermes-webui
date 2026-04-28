@@ -88,6 +88,49 @@ document.addEventListener('click', e => {
 });
 
 const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
+const _AUDIO_EXTS=/\.(mp3|wav|m4a|aac|ogg|oga|opus|flac)$/i;
+const _VIDEO_EXTS=/\.(mp4|mov|m4v|webm|ogv|avi|mkv)$/i;
+const MEDIA_PLAYBACK_RATES=[0.5,0.75,1,1.25,1.5,2];
+function _mediaKindForName(name=''){
+  const clean=String(name||'').split('?')[0].toLowerCase();
+  if(_AUDIO_EXTS.test(clean)) return 'audio';
+  if(_VIDEO_EXTS.test(clean)) return 'video';
+  if(_IMAGE_EXTS.test(clean)) return 'image';
+  return '';
+}
+function _mediaSpeedControlsHtml(kind, label){
+  const safeLabel=esc(label||kind||'media');
+  return `<div class="media-speed-controls" role="group" aria-label="Playback speed for ${safeLabel}">${MEDIA_PLAYBACK_RATES.map(rate=>`<button type="button" class="media-speed-btn${rate===1?' active':''}" data-rate="${rate}" aria-pressed="${rate===1?'true':'false'}">${rate}×</button>`).join('')}</div>`;
+}
+function _mediaPlayerHtml(kind, src, name, extra=''){
+  const safeName=esc(name||'media');
+  const safeSrc=esc(src);
+  const tag=kind==='video'
+    ? `<video class="msg-media-player msg-media-video" src="${safeSrc}" controls preload="metadata" playsinline title="${safeName}"></video>`
+    : `<audio class="msg-media-player msg-media-audio" src="${safeSrc}" controls preload="metadata" title="${safeName}"></audio>`;
+  return `<div class="msg-media-editor msg-media-editor--${kind}" data-media-kind="${kind}">${tag}<div class="msg-media-meta"><span class="msg-media-name">${safeName}</span>${extra}</div>${_mediaSpeedControlsHtml(kind,safeName)}</div>`;
+}
+function _renderAttachmentHtml(fname, url){
+  const kind=_mediaKindForName(fname);
+  if(kind==='image') return `<img class="msg-media-img" src="${esc(url)}" alt="${esc(fname)}" loading="lazy">`;
+  if(kind==='audio'||kind==='video') return _mediaPlayerHtml(kind,url,fname);
+  return `<div class="msg-file-badge">${li('paperclip',12)} ${esc(fname)}</div>`;
+}
+document.addEventListener('click', e => {
+  const btn = e.target && e.target.closest ? e.target.closest('.media-speed-btn') : null;
+  if(!btn) return;
+  const editor=btn.closest('.msg-media-editor,.preview-media-wrap');
+  if(!editor) return;
+  const media=editor.querySelector('audio,video');
+  if(!media) return;
+  const rate=Number(btn.dataset.rate)||1;
+  media.playbackRate=rate;
+  editor.querySelectorAll('.media-speed-btn').forEach(b=>{
+    const active=b===btn;
+    b.classList.toggle('active',active);
+    b.setAttribute('aria-pressed',active?'true':'false');
+  });
+});
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
@@ -1118,17 +1161,22 @@ function renderMd(raw){
       // MEDIA: tokens are only emitted for tool-generated images (image_generate etc.).
       // Render all https:// URLs as <img> — extension check would miss extensionless
       // CDN paths like fal.media content-addressed URLs (closes #853).
-      if(_IMAGE_EXTS.test(src.split('?')[0]) || /^https?:\/\//i.test(src)){
+      const urlPath=src.split('?')[0];
+      const mediaKind=_mediaKindForName(urlPath);
+      if(mediaKind==='audio'||mediaKind==='video') return _mediaPlayerHtml(mediaKind,src,urlPath.split('/').pop()||mediaKind);
+      if(mediaKind==='image' || /^https?:\/\//i.test(src)){
         return `<img class="msg-media-img" src="${esc(src)}" alt="image" loading="lazy">`;
       }
       return `<a href="${esc(src)}" target="_blank" rel="noopener">${esc(src)}</a>`;
     }
     // Local file path
     const apiUrl='api/media?path='+encodeURIComponent(ref);
-    if(_IMAGE_EXTS.test(ref)){
+    const localKind=_mediaKindForName(ref);
+    if(localKind==='image'){
       return `<img class="msg-media-img" src="${esc(apiUrl)}" alt="${esc(ref.split('/').pop())}" loading="lazy">`;
     }
-    // Non-image local file — show download link with filename
+    if(localKind==='audio'||localKind==='video') return _mediaPlayerHtml(localKind,apiUrl,ref.split('/').pop()||ref);
+    // Non-previewable local file — show download link with filename
     const fname=esc(ref.split('/').pop()||ref);
     return `<a class="msg-media-link" href="${esc(apiUrl+'&download=1')}" download="${fname}">📎 ${fname}</a>`;
   });
@@ -2454,13 +2502,10 @@ function renderMessages(){
       const _attachSid=(S.session&&S.session.session_id)||'';
       filesHtml=`<div class="msg-files">${m.attachments.map(f=>{
         const fname=f.split('/').pop()||f;
-        if(_IMAGE_EXTS.test(fname)){
-          // Use api/file/raw which resolves filename relative to the session workspace.
-          // api/media expects a full absolute path which we don't store on the client side.
-          const imgUrl='api/file/raw?session_id='+encodeURIComponent(_attachSid)+'&path='+encodeURIComponent(fname);
-          return `<img class="msg-media-img" src="${esc(imgUrl)}" alt="${esc(fname)}" loading="lazy">`;
-        }
-        return `<div class="msg-file-badge">${li('paperclip',12)} ${esc(fname)}</div>`;
+        // Use api/file/raw which resolves filename relative to the session workspace.
+        // api/media expects a full absolute path which we don't store on the client side.
+        const fileUrl='api/file/raw?session_id='+encodeURIComponent(_attachSid)+'&path='+encodeURIComponent(fname);
+        return _renderAttachmentHtml(fname,fileUrl);
       }).join('')}</div>`;
     }
     const bodyHtml = isUser ? esc(String(content)).replace(/\n/g,'<br>') : renderMd(_stripXmlToolCallsDisplay(String(content)));
@@ -3452,12 +3497,17 @@ function renderTray(){
   updateSendBtn();
   S.pendingFiles.forEach((f,i)=>{
     const chip=document.createElement('div');chip.className='attach-chip';
-    // Image files get a thumbnail preview; other files keep the paperclip chip
-    if(_IMAGE_EXTS.test(f.name)){
+    const mediaKind=_mediaKindForName(f.name);
+    if(mediaKind==='image'||mediaKind==='audio'||mediaKind==='video'){
       const blobUrl=URL.createObjectURL(f);
-      chip.className='attach-chip attach-chip--image';
+      chip.className='attach-chip attach-chip--media attach-chip--'+mediaKind;
       chip.dataset.blobUrl=blobUrl;
-      chip.innerHTML=`<img class="attach-thumb" src="${esc(blobUrl)}" alt="${esc(f.name)}" title="${esc(f.name)}"><button title="${t('remove_title')}">${li('x',12)}</button>`;
+      if(mediaKind==='image'){
+        chip.innerHTML=`<img class="attach-thumb" src="${esc(blobUrl)}" alt="${esc(f.name)}" title="${esc(f.name)}"><button title="${t('remove_title')}">${li('x',12)}</button>`;
+      }else{
+        const icon=mediaKind==='video'?li('video',12):li('volume-2',12);
+        chip.innerHTML=`<span class="attach-media-icon">${icon}</span><span class="attach-chip-name">${esc(f.name)}</span><button title="${t('remove_title')}">${li('x',12)}</button>`;
+      }
     } else {
       chip.innerHTML=`${li('paperclip',12)} ${esc(f.name)} <button title="${t('remove_title')}">${li('x',12)}</button>`;
     }
