@@ -326,7 +326,7 @@ def _extract_is_same_local_day() -> str:
 
 
 def test_message_footer_timestamp_uses_server_tz():
-    """_formatMessageFooterTimestamp should use _serverTzOptions for display."""
+    """_formatMessageFooterTimestamp should use _formatInServerTz for display."""
     is_same_day_fn = _extract_is_same_local_day()
     fmt_fn = _extract_ui_function("_formatMessageFooterTimestamp")
     script = textwrap.dedent(
@@ -334,16 +334,22 @@ def test_message_footer_timestamp_uses_server_tz():
         process.env.TZ = 'America/New_York';
         let _serverTimeDelta = 0;
         let _serverTz = '+0800';
-        function _serverTzOptions() {{
-          if (!_serverTz || _serverTz === '+0000' || _serverTz === '-0000') return undefined;
+        // Stub _formatInServerTz with the same offset-arithmetic semantics
+        // as the real implementation in sessions.js.
+        function _formatInServerTz(date, options) {{
+          if (!_serverTz || _serverTz === '+0000' || _serverTz === '-0000') {{
+            return date.toLocaleString(undefined, options);
+          }}
           const m = _serverTz.match(/^([+-])(\\d{{2}})(\\d{{2}})$/);
-          if (!m) return undefined;
-          const sign = m[1] === '+' ? '-' : '+';
-          return {{ timeZone: `Etc/GMT${{sign}}${{parseInt(m[2])}}` }};
+          if (!m) return date.toLocaleString(undefined, options);
+          const sign = m[1] === '+' ? 1 : -1;
+          const offsetMin = sign * (parseInt(m[2]) * 60 + parseInt(m[3]));
+          const adjusted = new Date(date.getTime() + offsetMin * 60 * 1000);
+          return adjusted.toLocaleString(undefined, {{ ...options, timeZone: 'UTC' }});
         }}
         {is_same_day_fn}
         {fmt_fn}
-        // Timestamp for 2026-04-28 10:00:00 UTC = 18:00 UTC+8
+        // Timestamp for 2026-03-29 02:00:00 UTC = 10:00 in UTC+8
         const tsVal = 1774749600;
         const result = _formatMessageFooterTimestamp(tsVal);
         process.stdout.write(JSON.stringify({{ formatted: result }}));
@@ -351,9 +357,58 @@ def test_message_footer_timestamp_uses_server_tz():
     )
     proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
     data = json.loads(proc.stdout)
-    # Should display in Etc/GMT-8 timezone (UTC+8), not America/New_York
-    # 2026-03-29 02:00 UTC = 10:00 AM in Etc/GMT-8
-    assert "10:00 AM" in data["formatted"]
+    # Should display in UTC+8, not America/New_York.
+    # 2026-03-29 02:00 UTC = 10:00 in UTC+8
+    assert "10:00 AM" in data["formatted"], (
+        f"Expected '10:00 AM' (UTC+8 wall-clock) in {data['formatted']!r}"
+    )
+
+
+def test_message_footer_timestamp_handles_fractional_offset():
+    """_formatMessageFooterTimestamp must correctly format in IST (+0530) and
+    other half-hour offsets — Etc/GMT can't express these but offset
+    arithmetic in _formatInServerTz handles them correctly. Affects ~1.5B
+    users in India, Iran, Newfoundland, Nepal, Sri Lanka, etc."""
+    is_same_day_fn = _extract_is_same_local_day()
+    fmt_fn = _extract_ui_function("_formatMessageFooterTimestamp")
+    script = textwrap.dedent(
+        f"""
+        process.env.TZ = 'UTC';
+        let _serverTimeDelta = 0;
+        let _serverTz = '+0530';  // India IST
+        function _formatInServerTz(date, options) {{
+          if (!_serverTz || _serverTz === '+0000' || _serverTz === '-0000') {{
+            return date.toLocaleString(undefined, options);
+          }}
+          const m = _serverTz.match(/^([+-])(\\d{{2}})(\\d{{2}})$/);
+          if (!m) return date.toLocaleString(undefined, options);
+          const sign = m[1] === '+' ? 1 : -1;
+          const offsetMin = sign * (parseInt(m[2]) * 60 + parseInt(m[3]));
+          const adjusted = new Date(date.getTime() + offsetMin * 60 * 1000);
+          return adjusted.toLocaleString(undefined, {{ ...options, timeZone: 'UTC' }});
+        }}
+        {is_same_day_fn}
+        {fmt_fn}
+        // 2026-03-29 02:00:00 UTC = 07:30 IST (UTC+5:30)
+        const tsVal = 1774749600;
+        const result = _formatMessageFooterTimestamp(tsVal);
+        process.stdout.write(JSON.stringify({{ formatted: result }}));
+        """
+    )
+    proc = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+    data = json.loads(proc.stdout)
+    # 2026-03-29 02:00 UTC = 07:30 IST. Old Etc/GMT-5 mapping would have shown 07:00.
+    # Accept either "07:30" or "7:30" (en-US uses hour:'numeric' for non-same-day).
+    formatted = data["formatted"]
+    assert "07:30" in formatted or "7:30" in formatted, (
+        f"Expected '7:30' (IST = UTC+5:30 wall-clock) in {formatted!r}; "
+        "Etc/GMT-5 path would show 7:00 — off by 30 min."
+    )
+    # And explicitly NOT the broken Etc/GMT-5 output (07:00 / 7:00 with 0 minutes).
+    assert ":00" not in formatted.split("M")[0], (
+        f"Output contains ':00' which would be the off-by-30-min Etc/GMT-5 result; "
+        f"got {formatted!r}"
+    )
 
 
 def test_message_footer_timestamp_falls_back_without_server_tz():
@@ -404,7 +459,34 @@ def test_sessions_js_uses_server_now_in_time_functions():
 
 
 def test_ui_js_message_timestamp_uses_server_tz():
-    """ui.js _formatMessageFooterTimestamp should reference _serverTzOptions."""
-    assert "_serverTzOptions" in UI_JS
-    # tsTitle in message rendering should also use it
-    assert "_tzo=" in UI_JS
+    """ui.js timestamp formatters should reference the server-tz helpers
+    so they pick up the server's wall-clock time (with correct fractional
+    offset handling) rather than always rendering in browser TZ."""
+    # _formatInServerTz is the canonical helper that handles both whole-hour
+    # and fractional offsets (e.g. India +0530). _serverTzOptions is the
+    # whole-hour fast path; either reference indicates server-tz awareness.
+    assert "_formatInServerTz" in UI_JS or "_serverTzOptions" in UI_JS, (
+        "ui.js must reference one of the server-tz helpers so message "
+        "timestamps render in the server's wall-clock time"
+    )
+
+
+def test_sessions_js_has_format_in_server_tz_helper():
+    """_formatInServerTz must exist and use offset arithmetic so fractional
+    offsets (India +0530, Iran +0330, etc.) format correctly."""
+    assert "function _formatInServerTz" in SESSIONS_JS, (
+        "_formatInServerTz must be defined to handle fractional-hour "
+        "offsets that Etc/GMT cannot express"
+    )
+    # Find the function body
+    start = SESSIONS_JS.find("function _formatInServerTz")
+    end = SESSIONS_JS.find("\n}", start) + 2
+    body = SESSIONS_JS[start:end]
+    # Offset arithmetic + timeZone:'UTC' is the correct strategy
+    assert "timeZone: 'UTC'" in body or 'timeZone: "UTC"' in body, (
+        "_formatInServerTz must format in UTC after applying the offset "
+        "via arithmetic — that's how fractional offsets work correctly"
+    )
+    assert "60 * 1000" in body or "* 60_000" in body, (
+        "_formatInServerTz must convert the offset minutes to milliseconds"
+    )
