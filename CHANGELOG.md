@@ -357,6 +357,15 @@
   workspace subtree) and never enumerate blocked system roots. (`api/routes.py`,
   `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
 
+## [v0.50.233] — 2026-04-28
+
+### Fixed
+- **Workspace trust for /var/home paths** — workspaces under `/var/home` (used by
+  systemd-homed on Fedora/RHEL) were incorrectly blocked because `_is_blocked_system_path`
+  flagged `/var` as a system root. The home-directory trust check in both
+  `resolve_trusted_workspace` and `validate_workspace_to_add` now correctly trusts any
+  path under `Path.home()` regardless of where the home directory lives on disk.
+  (`api/workspace.py`) (by @frap129, PR #1199)
 ## [v0.50.232] — 2026-04-28
 
 ### Fixed
