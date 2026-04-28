@@ -739,13 +739,18 @@
   .msg-media-svg{display:block;max-width:100%;height:auto;border-radius:6px;margin:6px 0;border:1px solid var(--border);background:var(--surface);}
   .msg-media-label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:4px;user-select:none;}
 
-  /* ── Inline audio player ── */
-  .msg-media-audio{margin:6px 0;padding:8px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;max-width:480px;}
-  .msg-media-audio audio{width:100%;height:36px;border-radius:4px;}
-
-  /* ── Inline video player ── */
-  .msg-media-video{margin:6px 0;background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden;max-width:640px;}
-  .msg-media-video video{width:100%;display:block;border-radius:8px 8px 0 0;}
+  /* ── Inline audio/video media editor with speed controls ── */
+  .msg-media-editor{display:flex;flex-direction:column;gap:8px;width:min(520px,100%);max-width:100%;padding:10px;border:1px solid var(--border);border-radius:10px;background:var(--surface);margin:6px 0;}
+  .msg-media-editor--audio{min-width:min(360px,100%);}
+  .msg-media-player{width:100%;display:block;border-radius:8px;}
+  .msg-media-video.msg-media-player{max-height:320px;object-fit:contain;background:#000;border:1px solid var(--border2);}
+  .msg-media-audio.msg-media-player{height:36px;background:transparent;}
+  .msg-media-meta{display:flex;align-items:center;gap:8px;min-width:0;font-size:11px;color:var(--muted);}
+  .msg-media-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .media-speed-controls{display:flex;flex-wrap:wrap;gap:4px;align-items:center;}
+  .media-speed-btn{border:1px solid var(--border2);background:var(--input-bg);color:var(--muted);border-radius:999px;padding:3px 8px;font-size:11px;font-weight:600;line-height:1.2;cursor:pointer;transition:background .15s,border-color .15s,color .15s;}
+  .media-speed-btn:hover{background:var(--hover-bg);color:var(--text);}
+  .media-speed-btn.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--accent-text);}
 
   /* ── Composer attachment chips for media ── */
   .attach-thumb--svg{background:var(--surface);padding:2px;border-radius:4px;}
@@ -794,6 +799,9 @@
   .attach-chip button:hover{color:var(--accent);}
   /* Image attachment chips show a thumbnail preview instead of a paperclip chip */
   .attach-chip--image{background:transparent;border-color:var(--border);padding:3px;border-radius:6px;}
+  .attach-chip--audio,.attach-chip--video{max-width:260px;}
+  .attach-media-icon{display:inline-flex;align-items:center;color:var(--accent-text);}
+  .attach-chip-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .attach-thumb{width:56px;height:56px;object-fit:cover;border-radius:4px;display:block;cursor:default;}
   textarea#msg{width:100%;background:transparent;border:none;outline:none;color:var(--text);font-size:16px;line-height:1.65;padding:12px 16px 6px;resize:none;min-height:44px;max-height:200px;font-family:inherit;}
   textarea#msg::placeholder{color:var(--muted);}
@@ -975,6 +983,9 @@
   /* Image preview */
   .preview-img-wrap{display:flex;align-items:center;justify-content:center;flex:1;padding:8px 0;min-height:0;}
   .preview-img{max-width:100%;max-height:100%;object-fit:contain;border-radius:6px;box-shadow:0 2px 12px rgba(0,0,0,.4);}
+  .preview-media-wrap{display:flex;align-items:center;justify-content:center;flex:1;min-height:0;padding:12px 0;}
+  .preview-media-wrap .msg-media-editor{width:100%;max-width:100%;background:var(--surface);}
+  .preview-media-wrap .msg-media-video{max-height:60vh;}
   /* Markdown rendered preview */
   .preview-md{font-size:13px;line-height:1.7;color:var(--text);flex:1;overflow-y:auto;min-height:0;}
   .preview-md p{margin-bottom:10px;}.preview-md p:last-child{margin-bottom:0;}
@@ -1000,7 +1011,7 @@
   .preview-md td code,.preview-md th code{font-size:0.85em;padding:1px 4px;vertical-align:baseline;}
   /* File type badge in preview path bar */
   .preview-badge{display:inline-block;font-size:10px;font-weight:600;padding:2px 6px;border-radius:4px;margin-left:8px;text-transform:uppercase;letter-spacing:.06em;}
-  .preview-badge.img{background:var(--accent-bg);color:var(--accent-text);}
+  .preview-badge.img,.preview-badge.image,.preview-badge.audio,.preview-badge.video{background:var(--accent-bg);color:var(--accent-text);}
   .preview-badge.md{background:var(--accent-bg-strong);color:var(--accent-text);}
   .preview-badge.code{background:var(--hover-bg);color:var(--muted);}
   ::-webkit-scrollbar{width:4px;height:4px}
