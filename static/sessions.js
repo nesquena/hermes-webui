@@ -374,17 +374,23 @@ async function _loadOlderMessages() {
     const olderMsgs = (data.session.messages || []).filter(m => m && m.role);
     if (!olderMsgs.length) { _messagesTruncated = false; return; }
     // Prepend older messages
-    const inner = $('msgInner');
-    const prevScrollH = inner ? inner.scrollHeight : 0;
+    // Use $('messages') — the scrollable container (#msgInner is not scrollable).
+    const container = $('messages');
+    const prevScrollH = container ? container.scrollHeight : 0;
     S.messages = [...olderMsgs, ...S.messages];
     _messagesTruncated = !!data.session._messages_truncated;
     _oldestIdx = data.session._messages_offset || 0;
     renderMessages();
-    // Restore scroll position so the user stays at the same message
-    if (inner) {
-      const newScrollH = inner.scrollHeight;
-      inner.scrollTop = newScrollH - prevScrollH;
+    // Restore scroll position so the user stays at the same message.
+    // renderMessages() calls scrollToBottom() at the end, so we must
+    // counter-scroll to where the user was before loading older messages.
+    if (container) {
+      const newScrollH = container.scrollHeight;
+      container.scrollTop = newScrollH - prevScrollH;
     }
+    // renderMessages() called scrollToBottom() which set _scrollPinned=true.
+    // We just restored the user's scroll position, so mark as not pinned.
+    _scrollPinned = false;
   } catch(e) {
     console.warn('_loadOlderMessages failed:', e);
   } finally {
