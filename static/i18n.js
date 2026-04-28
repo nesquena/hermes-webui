@@ -25,6 +25,8 @@ const LOCALES = {
     copy: 'Copy',
     copied: 'Copied!',
     copy_failed: 'Copy failed',
+
+    diff_loading: 'Loading diff',
     you: 'You',
     thinking: 'Thinking',
     expand_all: 'Expand all',
@@ -695,6 +697,8 @@ const LOCALES = {
     copy: 'Копировать',
     copied: 'Скопировано!',
     copy_failed: '\u041e\u0448\u0438\u0431\u043a\u0430 \u043a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f',
+
+    diff_loading: 'Загрузка diff',
     you: 'Вы',
     thinking: 'Думаю',
     expand_all: 'Развернуть всё',
@@ -1314,6 +1318,8 @@ const LOCALES = {
     copy: 'Copiar',
     copied: '¡Copiado!',
     copy_failed: 'Error al copiar',
+
+    diff_loading: 'Cargando diff',
     you: 'Tú',
     thinking: 'Pensando',
     expand_all: 'Expandir todo',
@@ -1925,6 +1931,8 @@ const LOCALES = {
     copy: 'Kopieren',
     copied: 'Kopiert!',
     copy_failed: 'Kopieren fehlgeschlagen',
+
+    diff_loading: 'Lade Diff',
     you: 'Du',
     thinking: 'Nachdenken',
     expand_all: 'Alle ausklappen',
@@ -2310,6 +2318,8 @@ const LOCALES = {
     copy: '\u590d\u5236',
     copied: '\u5df2\u590d\u5236',
     copy_failed: '\u590d\u5236\u5931\u8d25',
+
+    diff_loading: '加载 diff',
     you: '\u4f60',
     thinking: '\u601d\u8003\u8fc7\u7a0b',
     expand_all: '\u5168\u90e8\u5c55\u5f00',
@@ -2919,6 +2929,8 @@ const LOCALES = {
     copy: '\u8907\u88fd',
     copied: '\u5df2\u8907\u88fd',
     copy_failed: '\u8907\u88fd\u5931\u6557',
+
+    diff_loading: '載入 diff',
     you: '\u4f60',
     thinking: '\u601d\u8003\u904e\u7a0b',
     expand_all: '\u5168\u90e8\u5c55\u958b',
@@ -3577,6 +3589,8 @@ const LOCALES = {
     copy: '복사',
     copied: '복사됨!',
     copy_failed: '복사 실패',
+
+    diff_loading: 'diff 불러오는 중',
     you: '나',
     thinking: '생각 중',
     expand_all: '모두 펼치기',

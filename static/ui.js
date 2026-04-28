@@ -845,7 +845,18 @@ function renderMd(raw){
       const code=m?m[2]:raw.replace(/^\n?/,'');
       const h=lang?`<div class="pre-header">${esc(lang)}</div>`:'';
       const langAttr=lang?` class="language-${esc(lang)}"`:'';
-      _preBlock_stash.push(`${h}<pre><code${langAttr}>${esc(code.replace(/\n$/,''))}</code></pre>`);
+      // For diff/patch blocks, wrap each line in a colored span
+      if(lang==='diff'||lang==='patch'){
+        const colored=esc(code.replace(/\n$/,'')).split('\n').map(line=>{
+          if(line.startsWith('@@')) return `<span class="diff-line diff-hunk">${line}</span>`;
+          if(line.startsWith('+')) return `<span class="diff-line diff-plus">${line}</span>`;
+          if(line.startsWith('-')) return `<span class="diff-line diff-minus">${line}</span>`;
+          return `<span class="diff-line">${line}</span>`;
+        }).join('\n');
+        _preBlock_stash.push(`${h}<pre class="diff-block"><code${langAttr}>${colored}</code></pre>`);
+      } else {
+        _preBlock_stash.push(`${h}<pre><code${langAttr}>${esc(code.replace(/\n$/,''))}</code></pre>`);
+      }
     }
     return '\x00P'+(_preBlock_stash.length-1)+'\x00';
   });
@@ -1130,6 +1141,10 @@ function renderMd(raw){
     }
     // Non-image local file — show download link with filename
     const fname=esc(ref.split('/').pop()||ref);
+    // .patch/.diff files → render inline as colored diff instead of download
+    if(/\.(patch|diff)$/i.test(ref)){
+      return `<div class="diff-inline-load" data-path="${esc(ref)}">${t('diff_loading')} ${fname}...</div>`;
+    }
     return `<a class="msg-media-link" href="${esc(apiUrl+'&download=1')}" download="${fname}">📎 ${fname}</a>`;
   });
   // ── End MEDIA restore ──────────────────────────────────────────────────────
@@ -2330,7 +2345,7 @@ function renderMessages(){
       inner.innerHTML=cached.html;
       _sessionHtmlCacheSid=sid;
       if(S.activeStreamId){scrollIfPinned();}else{scrollToBottom();}
-      requestAnimationFrame(()=>{highlightCode();addCopyButtons();renderMermaidBlocks();renderKatexBlocks();});
+      requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();renderMermaidBlocks();renderKatexBlocks();});
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
       return;
     }
@@ -2721,7 +2736,7 @@ function renderMessages(){
     scrollToBottom();
   }
   // Apply syntax highlighting after DOM is built
-  requestAnimationFrame(()=>{highlightCode();addCopyButtons();renderMermaidBlocks();renderKatexBlocks();});
+  requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();renderMermaidBlocks();renderKatexBlocks();});
   // Refresh todo panel if it's currently open
   if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){
     loadTodos();
@@ -3010,6 +3025,28 @@ function addCopyButtons(container){
 
 let _mermaidLoading=false;
 let _mermaidReady=false;
+
+function loadDiffInline(){
+  document.querySelectorAll('.diff-inline-load:not([data-loaded])').forEach(el=>{
+    el.setAttribute('data-loaded','1');
+    const path=el.dataset.path;
+    fetch('api/media?path='+encodeURIComponent(path))
+      .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
+      .then(text=>{
+        const lines=text.split('\n').map(line=>{
+          const e=esc(line);
+          if(e.startsWith('@@')) return `<span class="diff-line diff-hunk">${e}</span>`;
+          if(e.startsWith('+')) return `<span class="diff-line diff-plus">${e}</span>`;
+          if(e.startsWith('-')) return `<span class="diff-line diff-minus">${e}</span>`;
+          return `<span class="diff-line">${e}</span>`;
+        }).join('\n');
+        el.outerHTML=`<div class="diff-inline"><div class="pre-header">${esc(path.split('/').pop())}</div><pre class="diff-block"><code>${lines}</code></pre></div>`;
+      })
+      .catch(()=>{
+        el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}</div>`;
+      });
+  });
+}
 
 function renderMermaidBlocks(){
   const blocks=document.querySelectorAll('.mermaid-block:not([data-rendered])');

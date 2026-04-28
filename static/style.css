@@ -603,6 +603,15 @@
   .pre-header{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:8px 16px 8px;background:var(--input-bg);border-radius:10px 10px 0 0;border:1px solid var(--border);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px;}
   .pre-header::before{content:'';width:8px;height:8px;border-radius:50%;background:var(--muted);opacity:.4;}
   .pre-header+pre{border-radius:0 0 10px 10px;border-top:none;margin-top:0;}
+  /* Diff/patch viewer */
+  .diff-block{margin:0;counter-reset:diff-line;}
+  .diff-block .diff-line{display:block;padding:0 16px;min-height:1.4em;white-space:pre;}
+  .diff-block .diff-plus{background:rgba(34,197,94,.1);color:#22c55e;}
+  .diff-block .diff-minus{background:rgba(239,68,68,.1);color:#ef4444;}
+  .diff-block .diff-hunk{color:var(--muted);font-style:italic;background:rgba(99,102,241,.06);}
+  .diff-inline-load{color:var(--muted);font-size:13px;padding:8px 12px;border:1px dashed var(--border);border-radius:8px;margin:6px 0;}
+  .diff-inline{margin:6px 0;}
+  .diff-inline-error{color:#ef4444;font-size:13px;padding:8px 12px;border:1px solid rgba(239,68,68,.2);border-radius:8px;margin:6px 0;}
   .msg-body blockquote{border-left:3px solid var(--blue);padding-left:14px;color:var(--muted);font-style:italic;margin:10px 0;}
   .msg-body blockquote p{margin:0;}
   .msg-body a{color:var(--blue);text-decoration:underline;}
