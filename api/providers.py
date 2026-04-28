@@ -311,12 +311,17 @@ def get_providers() -> dict[str, Any]:
                     key_source = "config_yaml"
             else:
                 key_source = "config_yaml"
-        else:
-            # Fallback: provider may be authenticated via hermes auth even
-            # though it is not in the hardcoded _OAUTH_PROVIDERS set
-            # (e.g. Anthropic connected via OAuth).  Check live auth
-            # status so the Providers tab agrees with the model picker
-            # (#1212).
+        elif pid not in _PROVIDER_ENV_VAR:
+            # Fallback: provider is not a known API-key provider and not in
+            # the hardcoded _OAUTH_PROVIDERS set.  It may be a custom or
+            # newly-added OAuth provider (e.g. Anthropic connected via OAuth).
+            # Check live auth status so the Providers tab agrees with the
+            # model picker (#1212).
+            #
+            # IMPORTANT: we skip providers in _PROVIDER_ENV_VAR because they
+            # are pure API-key providers — calling get_auth_status() for every
+            # unconfigured API-key provider would add unnecessary latency
+            # (network round-trip per provider) on the Settings page.
             try:
                 from hermes_cli.auth import get_auth_status as _gas
                 status = _gas(pid)
