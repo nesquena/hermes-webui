@@ -1109,6 +1109,70 @@ def _sse(handler, event, data):
     handler.wfile.flush()
 
 
+def _last_resort_sync_from_core(session, stream_id, agent_lock):
+    """Final-exit guard: if the stream exits with pending_user_message still set,
+    sync messages from the core transcript or add an error marker.
+    Called from the outer finally block of _run_agent_streaming.
+    Must never raise.
+    """
+    try:
+        try:
+            from api.profiles import get_hermes_home_for_profile
+            profile_home = get_hermes_home_for_profile(session.profile)
+        except ImportError:
+            profile_home = os.environ.get('HERMES_HOME', '~/.hermes')
+
+        core_dir = Path(profile_home) / 'sessions'
+        core_path = core_dir / f'session_{session.session_id}.json'
+
+        _lock_ctx = agent_lock if agent_lock is not None else contextlib.nullcontext()
+        with _lock_ctx:
+            # Re-check under lock — success/except paths may have already cleared these
+            if (getattr(session, 'active_stream_id', None) != stream_id
+                    or not getattr(session, 'pending_user_message', None)):
+                return
+
+            if core_path.exists():
+                with open(core_path, encoding='utf-8') as f:
+                    core = json.load(f)
+                core_messages = core.get('messages', [])
+                if core_messages:
+                    session.messages = core_messages
+                    session.tool_calls = core.get('tool_calls', [])
+                    session.active_stream_id = None
+                    session.pending_user_message = None
+                    session.pending_attachments = []
+                    session.pending_started_at = None
+                    session.save()
+                    logger.info(
+                        "_last_resort_sync_from_core: synced %d messages for session %s",
+                        len(core_messages), session.session_id,
+                    )
+                    return
+
+            # Core missing or empty — clear pending and add error marker
+            session.active_stream_id = None
+            session.pending_user_message = None
+            session.pending_attachments = []
+            session.pending_started_at = None
+            session.messages.append({
+                'role': 'assistant',
+                'content': '**Previous turn did not complete:** the original message has been preserved as a draft.',
+                'timestamp': int(time.time()),
+                '_error': True,
+            })
+            session.save()
+            logger.info(
+                "_last_resort_sync_from_core: no core transcript for session %s, added error marker",
+                session.session_id,
+            )
+    except Exception:
+        logger.exception(
+            "_last_resort_sync_from_core failed for session %s",
+            getattr(session, 'session_id', '?'),
+        )
+
+
 def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, attachments=None, *, ephemeral=False):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -2103,6 +2167,10 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             _apperror_payload['hint'] = _exc_hint
         put('apperror', _apperror_payload)
     finally:
+        if (s is not None
+                and getattr(s, 'active_stream_id', None) == stream_id
+                and getattr(s, 'pending_user_message', None)):
+            _last_resort_sync_from_core(s, stream_id, _agent_lock)
         # Stop periodic checkpoint thread if it was started (Issue #765)
         if _checkpoint_stop is not None:
             _checkpoint_stop.set()

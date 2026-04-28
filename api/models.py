@@ -12,7 +12,7 @@ import api.config as _cfg
 from api.config import (
     SESSION_DIR, SESSION_INDEX_FILE, SESSIONS, SESSIONS_MAX,
     LOCK, STREAMS, STREAMS_LOCK, DEFAULT_WORKSPACE, DEFAULT_MODEL, PROJECTS_FILE, HOME,
-    get_effective_default_model,
+    get_effective_default_model, _get_session_agent_lock,
 )
 from api.workspace import get_last_workspace
 from api.agent_sessions import read_importable_agent_session_rows
@@ -456,6 +456,83 @@ class Session:
             ) if include_runtime else False,
         }
 
+def _repair_stale_pending(session) -> bool:
+    """Recover a sidecar stuck with messages=[] and stale pending state.
+
+    Fires only when messages is empty, pending_user_message is set,
+    active_stream_id is set, and the stream is no longer alive.
+    Returns True if repair was applied, False otherwise.
+    Must never raise — all errors are caught and logged.
+    """
+    if (len(session.messages) != 0
+            or not session.pending_user_message
+            or not session.active_stream_id
+            or session.active_stream_id in _active_stream_ids()):
+        return False
+
+    sid = session.session_id
+    if not sid or not all(c in '0123456789abcdefghijklmnopqrstuvwxyz_' for c in sid):
+        return False
+
+    try:
+        try:
+            from api.profiles import get_hermes_home_for_profile
+            profile_home = get_hermes_home_for_profile(session.profile)
+        except ImportError:
+            profile_home = os.environ.get('HERMES_HOME', '~/.hermes')
+
+        core_dir = Path(profile_home) / 'sessions'
+        core_path = core_dir / f'session_{sid}.json'
+
+        with _get_session_agent_lock(sid):
+            # Re-check under lock — stream may have completed since the pre-lock check
+            if (len(session.messages) != 0
+                    or not session.pending_user_message
+                    or not session.active_stream_id):
+                return False
+
+            if core_path.exists():
+                with open(core_path, encoding='utf-8') as f:
+                    core = json.load(f)
+                core_messages = core.get('messages', [])
+                if core_messages:
+                    session.messages = core_messages
+                    session.tool_calls = core.get('tool_calls', [])
+                    for field in ('input_tokens', 'output_tokens', 'estimated_cost'):
+                        if core.get(field) is not None:
+                            setattr(session, field, core[field])
+                    session.active_stream_id = None
+                    session.pending_user_message = None
+                    session.pending_attachments = []
+                    session.pending_started_at = None
+                    session.save()
+                    logger.info(
+                        "Repaired stale sidecar for session %s: synced %d messages from core",
+                        sid, len(core_messages),
+                    )
+                    return True
+
+            # Core missing or has no messages — clear pending and add error marker
+            session.active_stream_id = None
+            session.pending_user_message = None
+            session.pending_attachments = []
+            session.pending_started_at = None
+            session.messages.append({
+                'role': 'assistant',
+                'content': '**Previous turn did not complete:** the original message has been preserved as a draft.',
+                'timestamp': int(time.time()),
+                '_error': True,
+            })
+            session.save()
+            logger.info(
+                "Repaired stale sidecar for session %s: no core transcript, added error marker", sid,
+            )
+            return True
+    except Exception:
+        logger.exception("_repair_stale_pending failed for session %s", sid)
+        return False
+
+
 def get_session(sid, metadata_only=False):
     """Load a session, optionally with metadata only (skipping the messages array).
 
@@ -480,6 +557,11 @@ def get_session(sid, metadata_only=False):
             SESSIONS.move_to_end(sid)
             while len(SESSIONS) > SESSIONS_MAX:
                 SESSIONS.popitem(last=False)  # evict least recently used
+        if not metadata_only:
+            try:
+                _repair_stale_pending(s)
+            except Exception:
+                pass  # repair is best-effort
         return s
     raise KeyError(sid)
 
