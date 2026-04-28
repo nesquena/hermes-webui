@@ -73,7 +73,20 @@ global.fetch = async function(path, opts = {}) {
     return response({ enabled: true, spaces: [{ space_id: 'lab', name: 'Lab', widget_count: 1, revision_event_id: 'rev1' }] });
   }
   if (path === 'api/spaces/recovery') {
-    return response({ enabled: true, generated_widgets_rendered: false });
+    return response({
+      enabled: true,
+      generated_widgets_rendered: false,
+      spaces: [
+        {
+          space_id: 'broken',
+          name: 'Broken <Space>',
+          description: 'Recover without <script>running</script>',
+          widget_count: 2,
+          revision_event_id: 'rev-broken',
+          renderer: '<script>bad()</script>',
+        }
+      ],
+    });
   }
   if (path === 'api/spaces/widgets?space_id=lab') {
     return response({ widgets: [{ id: 'weather', kind: 'markdown', title: '<Weather>', layout: { x: 12, y: 3, w: 5, h: 4, minimized: false }, renderer: '<script>bad()</script>' }] });
@@ -180,10 +193,12 @@ async function click(action, dataset) {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return false; };
     await window.loadCapySpaces();
     await click('deleteSpace', { spaceId: 'lab' });
+  } else if (scenario === 'recovery') {
+    await window.loadCapySpacesRecovery();
   } else {
     throw new Error('unknown scenario: ' + scenario);
   }
-  process.stdout.write(JSON.stringify({ rootHtml: root.innerHTML, calls, values, rootDataset: root.dataset, dialogs }));
+  process.stdout.write(JSON.stringify({ rootHtml: root.innerHTML, recoveryHtml: makeElement('capySpacesRecovery').innerHTML, recoveryText: makeElement('capySpacesRecovery').textContent, calls, values, rootDataset: root.dataset, dialogs }));
 })().catch(err => {
   console.error(err && err.stack || String(err));
   process.exit(1);
@@ -330,6 +345,18 @@ def test_spaces_ui_cancelled_delete_space_does_not_post(driver_path):
 
     assert out["dialogs"]
     assert not any(call["path"] == "api/spaces/delete" for call in out["calls"])
+
+
+def test_spaces_ui_recovery_panel_lists_safe_space_metadata_without_widget_code(driver_path):
+    out = _run_spaces_scenario(driver_path, "recovery")
+
+    assert {"path": "api/spaces/recovery", "method": "GET", "body": ""} in out["calls"]
+    assert "Safe recovery" in out["recoveryHtml"]
+    assert "Broken &lt;Space&gt;" in out["recoveryHtml"]
+    assert "Widgets: 2" in out["recoveryHtml"]
+    assert "Generated widgets rendered: false" in out["recoveryHtml"]
+    assert "<script>" not in out["recoveryHtml"]
+    assert "renderer" not in out["recoveryHtml"]
 
 
 def test_spaces_ui_opens_space_detail_without_rendering_widget_code(driver_path):
