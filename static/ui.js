@@ -2294,7 +2294,12 @@ function renderMessages(){
     return msgContent(m)||m.attachments?.length;
   });
   $('emptyState').style.display=vis.length?'none':'';
-  inner.innerHTML='';
+  // Task 7: build into a DocumentFragment and mount in one shot.  Each
+  // appendChild on a *detached* fragment costs ~0 — no layout, no paint,
+  // no style invalidation.  A 200-message session goes from N reflows to 1.
+  // We mount via inner.replaceChildren(_frag) at the end, which atomically
+  // empties old children and adopts the new ones.
+  const _frag=document.createDocumentFragment();
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const referenceMessage=S.messages.find(m=>_isContextCompactionMessage(m));
   const referenceText=referenceMessage?msgContent(referenceMessage)||String(referenceMessage.content||''):'';
@@ -2338,7 +2343,7 @@ function renderMessages(){
         const sep=document.createElement('div');
         sep.className='msg-date-sep';
         sep.textContent=_fmtDateSep(_d);
-        inner.appendChild(sep);
+        _frag.appendChild(sep);
       }
       _prevSepKey=_key;
     }
@@ -2405,7 +2410,7 @@ function renderMessages(){
       row.dataset.role='user';
       row.dataset.rawText=String(content).trim();
       row.innerHTML=`${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`;
-      inner.appendChild(row);
+      _frag.appendChild(row);
       userRows.set(rawIdx, row);
       continue;
     }
@@ -2417,14 +2422,14 @@ function renderMessages(){
         currentAssistantTurn=null;
         const row=document.createElement('div');
         row.innerHTML=_contextCompactionMessageHtml(m, tsTitle);
-        inner.appendChild(row.firstElementChild);
+        _frag.appendChild(row.firstElementChild);
         continue;
       }
     }
 
     if(!currentAssistantTurn){
       currentAssistantTurn=_createAssistantTurn(tsTitle);
-      inner.appendChild(currentAssistantTurn);
+      _frag.appendChild(currentAssistantTurn);
     }
     const seg=document.createElement('div');
     seg.className='assistant-segment';
@@ -2465,11 +2470,16 @@ function renderMessages(){
         return;
       }
     }
-    inner.appendChild(node);
+    _frag.appendChild(node);
   }
 
   _insertCompressionLikeNode(compressionNode);
   _insertCompressionLikeNode(referenceNode);
+  // Atomic mount: replaces any old children and adopts the fragment in one
+  // operation.  Browsers move adopted nodes without re-parsing, so this is
+  // the cheapest possible commit.  Subsequent code below operates on the
+  // live `inner` (querySelectorAll for tool-cards etc) and works as before.
+  inner.replaceChildren(_frag);
   renderCompressionUi();
   // Insert settled tool call cards (history view only).
   // During live streaming, tool cards are rendered in #liveToolCards by the
