@@ -658,6 +658,9 @@
   .composer-profile-chip{display:inline-flex;align-items:center;gap:8px;max-width:180px;padding:8px 10px 8px 12px;border-radius:999px;border:1px solid transparent;background-color:transparent;font-weight:500;cursor:pointer;transition:color .15s,background-color .15s,border-color .15s;}
   .composer-profile-chip:hover{background-color:var(--hover-bg);}
   .composer-profile-chip.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);}
+  .composer-profile-chip.switching{opacity:.65;cursor:wait;pointer-events:none;}
+  .composer-profile-chip.switching .composer-profile-icon::after{content:'';display:inline-block;width:10px;height:10px;border:1.5px solid currentColor;border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite;position:absolute;left:50%;top:50%;margin-left:-5px;margin-top:-5px;}
+  .composer-profile-chip.switching .composer-profile-icon{position:relative;}
   .composer-profile-icon,.composer-profile-chevron{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;line-height:1;}
   .composer-profile-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .composer-ws-wrap{position:relative;flex:0 1 auto;min-width:0;display:flex;align-items:center;gap:4px;}
