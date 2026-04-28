@@ -8,9 +8,10 @@
   `done` events now set an explicit unread-completion marker, including
   session-switch races and hidden/unfocused tabs where the old session is no
   longer being viewed. Session-list polling also marks unread when a session the
-  page previously saw streaming later reports stopped, and the marker clears
-  only when that session is opened or the user returns to the active completed
-  session. (`static/sessions.js`,
+  page previously saw streaming later reports stopped, including local
+  `INFLIGHT`-only sidebar spinners and reconnect/settled-stream fallback paths.
+  The marker clears only when that session is opened or the user returns to the
+  active completed session. (`static/sessions.js`,
   `static/messages.js`, `tests/test_issue856_background_completion_unread.py`)
 - **Auto-title generic fallback** — when the auxiliary title-generation call
   fails and the local fallback can only produce the generic label

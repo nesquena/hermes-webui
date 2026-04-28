@@ -108,6 +108,19 @@ function _isSessionActivelyViewedForList(sid) {
   return true;
 }
 
+function _isSessionLocallyStreaming(s) {
+  if (!s || !s.session_id) return false;
+  const isActive = S.session && s.session_id === S.session.session_id;
+  return Boolean(
+    (isActive && S.busy)
+    || (typeof INFLIGHT === 'object' && INFLIGHT && INFLIGHT[s.session_id])
+  );
+}
+
+function _isSessionEffectivelyStreaming(s) {
+  return Boolean(s && (s.is_streaming || _isSessionLocallyStreaming(s)));
+}
+
 function _markPollingCompletionUnreadTransitions(sessions) {
   if (!Array.isArray(sessions)) return;
   const seen = new Set();
@@ -116,7 +129,7 @@ function _markPollingCompletionUnreadTransitions(sessions) {
     const sid = s.session_id;
     seen.add(sid);
     const wasStreaming = _sessionStreamingById.get(sid);
-    const isStreaming = Boolean(s.is_streaming);
+    const isStreaming = _isSessionEffectivelyStreaming(s);
     if (wasStreaming === true && !isStreaming && !_isSessionActivelyViewedForList(sid)) {
       _markSessionCompletionUnread(sid, s.message_count);
     }
@@ -1103,14 +1116,7 @@ function renderSessionListFromCache(){
   function _renderOneSession(s, isPinnedGroup=false){
     const el=document.createElement('div');
     const isActive=S.session&&s.session_id===S.session.session_id;
-    const isLocalStreaming=Boolean(
-      s.session_id
-      && (
-        (isActive&&S.busy)
-        || (typeof INFLIGHT==='object'&&INFLIGHT&&INFLIGHT[s.session_id])
-      )
-    );
-    const isStreaming=Boolean(s.is_streaming||isLocalStreaming);
+    const isStreaming=_isSessionEffectivelyStreaming(s);
     const hasUnread=_hasUnreadForSession(s)&&!isActive;
     el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(isStreaming?' streaming':'')+(hasUnread?' unread':'');
     if(isActive&&S.session&&S.session._flash)delete S.session._flash;

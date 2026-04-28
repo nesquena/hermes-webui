@@ -57,13 +57,18 @@ def test_polling_transition_marks_completion_unread_without_sse_done():
         "_markPollingCompletionUnreadTransitions",
         "newSession",
     )
+    effective_block = _sessions_function_block(
+        "_isSessionEffectivelyStreaming",
+        "_markPollingCompletionUnreadTransitions",
+    )
     render_idx = SESSIONS_JS.find("async function renderSessionList()")
     assert render_idx != -1, "renderSessionList not found"
     render_block = SESSIONS_JS[render_idx:SESSIONS_JS.find("// ── Gateway session SSE", render_idx)]
 
     assert "const _sessionStreamingById = new Map();" in SESSIONS_JS
     assert "const wasStreaming = _sessionStreamingById.get(sid);" in transition_block
-    assert "const isStreaming = Boolean(s.is_streaming);" in transition_block
+    assert "const isStreaming = _isSessionEffectivelyStreaming(s);" in transition_block
+    assert "s.is_streaming || _isSessionLocallyStreaming(s)" in effective_block
     assert "wasStreaming === true && !isStreaming" in transition_block, (
         "polling fallback must only fire on an observed streaming -> stopped transition"
     )
@@ -107,6 +112,28 @@ def test_polling_transition_skips_visible_focused_active_session():
     assert "!_isSessionActivelyViewedForList(sid)" in transition_block, (
         "polling fallback must not create an unread marker for a session the "
         "user is visibly and focusedly reading"
+    )
+
+
+def test_polling_transition_tracks_the_same_effective_streaming_state_as_sidebar():
+    local_block = _sessions_function_block(
+        "_isSessionLocallyStreaming",
+        "_isSessionEffectivelyStreaming",
+    )
+    effective_block = _sessions_function_block(
+        "_isSessionEffectivelyStreaming",
+        "_markPollingCompletionUnreadTransitions",
+    )
+    render_idx = SESSIONS_JS.find("function _renderOneSession")
+    assert render_idx != -1, "_renderOneSession not found"
+    render_block = SESSIONS_JS[render_idx:SESSIONS_JS.find("const hasUnread=", render_idx)]
+
+    assert "(isActive && S.busy)" in local_block
+    assert "INFLIGHT && INFLIGHT[s.session_id]" in local_block
+    assert "s.is_streaming || _isSessionLocallyStreaming(s)" in effective_block
+    assert "const isStreaming=_isSessionEffectivelyStreaming(s);" in render_block, (
+        "the row spinner and polling completion transition must use the same "
+        "effective streaming source, including local INFLIGHT-only streams"
     )
 
 
@@ -178,6 +205,19 @@ def test_switching_away_counts_as_background_completion():
     assert "_loadingSessionId!==sid" in helper_block, (
         "if loadSession(B) is in flight while done(A) arrives, A must be treated "
         "as background even though S.session can still temporarily point at A"
+    )
+
+
+def test_restore_settled_background_stream_marks_completion_unread():
+    restore_idx = MESSAGES_JS.find("async function _restoreSettledSession()")
+    assert restore_idx != -1, "_restoreSettledSession not found"
+    restore_block = MESSAGES_JS[restore_idx:MESSAGES_JS.find("function _handleStreamError", restore_idx)]
+
+    assert "const isSessionViewed=_isSessionActivelyViewed(activeSid);" in restore_block
+    assert "if(!isSessionViewed && typeof _markSessionCompletionUnread==='function')" in restore_block
+    assert "_markSessionCompletionUnread(activeSid, session.message_count);" in restore_block
+    assert "if(isSessionViewed) _markSessionViewed(activeSid" in restore_block, (
+        "restore-settled fallback must not mark a hidden/background completion read"
     )
 
 

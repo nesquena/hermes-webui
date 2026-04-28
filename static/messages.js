@@ -1049,6 +1049,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _closeSource();
       if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);
       if(!_clarifySessionId||_clarifySessionId===activeSid) hideClarifyCard(true);
+      const isSessionViewed=_isSessionActivelyViewed(activeSid);
+      if(!isSessionViewed && typeof _markSessionCompletionUnread==='function'){
+        _markSessionCompletionUnread(activeSid, session.message_count);
+      }
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;const _cbe=$('btnCancel');if(_cbe)_cbe.style.display='none';
         clearLiveToolCards();if(!assistantText)removeThinking();
@@ -1064,7 +1068,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }else{
           S.toolCalls=[];
         }
-        _markSessionViewed(activeSid, session.message_count ?? S.messages.length);
+        if(isSessionViewed) _markSessionViewed(activeSid, session.message_count ?? S.messages.length);
         syncTopbar();renderMessages();
       }
       _queueDrainSid=activeSid;renderSessionList();setBusy(false);setComposerStatus('');

@@ -118,10 +118,11 @@ def test_timestamp_hidden_when_attention_state_is_present():
 def test_sidebar_uses_local_inflight_state_for_immediate_spinner():
     messages_js = (Path(__file__).resolve().parent.parent / "static" / "messages.js").read_text()
 
-    assert "const isLocalStreaming=Boolean(" in SESSIONS_JS
-    assert "(isActive&&S.busy)" in SESSIONS_JS
+    assert "function _isSessionLocallyStreaming(s)" in SESSIONS_JS
+    assert "(isActive && S.busy)" in SESSIONS_JS
     assert "INFLIGHT[s.session_id]" in SESSIONS_JS
-    assert "const isStreaming=Boolean(s.is_streaming||isLocalStreaming);" in SESSIONS_JS
+    assert "function _isSessionEffectivelyStreaming(s)" in SESSIONS_JS
+    assert "const isStreaming=_isSessionEffectivelyStreaming(s);" in SESSIONS_JS
     assert "if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();" in messages_js
 
 
