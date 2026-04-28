@@ -935,7 +935,12 @@ def handle_get(handler, parsed) -> bool:
             if isinstance(item.get("title"), str):
                 item["title"] = _redact_text(item["title"])
             safe_merged.append(item)
-        return j(handler, {"sessions": safe_merged, "cli_count": len(deduped_cli)})
+        return j(handler, {
+            "sessions": safe_merged,
+            "cli_count": len(deduped_cli),
+            "server_time": time.time(),
+            "server_tz": time.strftime("%z"),
+        })
 
     if parsed.path == "/api/projects":
         return j(handler, {"projects": load_projects()})
