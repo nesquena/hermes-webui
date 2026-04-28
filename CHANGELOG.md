@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Fixed
+- **Background session completion unread dots** — sidebar unread dots no longer
+  depend solely on `message_count` increasing after a stream finishes. Background
+  `done` events now set an explicit unread-completion marker, including
+  session-switch races where the old session is no longer the user's intended
+  view, and the marker clears only when that session is opened. (`static/sessions.js`,
+  `static/messages.js`, `tests/test_issue856_background_completion_unread.py`)
 - **Auto-title generic fallback** — when the auxiliary title-generation call
   fails and the local fallback can only produce the generic label
   `Conversation topic`, the WebUI now keeps the existing provisional title

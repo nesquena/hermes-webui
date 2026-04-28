@@ -16,7 +16,9 @@ const ICONS={
 let _loadingSessionId = null;
 
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
+const SESSION_COMPLETION_UNREAD_KEY = 'hermes-session-completion-unread';
 let _sessionViewedCounts = null;
+let _sessionCompletionUnread = null;
 
 function _getSessionViewedCounts() {
   if (_sessionViewedCounts !== null) return _sessionViewedCounts;
@@ -45,8 +47,49 @@ function _setSessionViewedCount(sid, messageCount = 0) {
   _saveSessionViewedCounts();
 }
 
+function _getSessionCompletionUnread() {
+  if (_sessionCompletionUnread !== null) return _sessionCompletionUnread;
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SESSION_COMPLETION_UNREAD_KEY) || '{}');
+    _sessionCompletionUnread = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_){
+    _sessionCompletionUnread = {};
+  }
+  return _sessionCompletionUnread;
+}
+
+function _saveSessionCompletionUnread() {
+  try {
+    localStorage.setItem(SESSION_COMPLETION_UNREAD_KEY, JSON.stringify(_getSessionCompletionUnread()));
+  } catch (_){
+    // Ignore localStorage write failures.
+  }
+}
+
+function _markSessionCompletionUnread(sid, messageCount = 0) {
+  if (!sid) return;
+  const unread = _getSessionCompletionUnread();
+  const count = Number.isFinite(messageCount) ? Number(messageCount) : 0;
+  unread[sid] = {message_count: count, completed_at: Date.now()};
+  _saveSessionCompletionUnread();
+}
+
+function _clearSessionCompletionUnread(sid) {
+  if (!sid) return;
+  const unread = _getSessionCompletionUnread();
+  if (!Object.prototype.hasOwnProperty.call(unread, sid)) return;
+  delete unread[sid];
+  _saveSessionCompletionUnread();
+}
+
+function _hasSessionCompletionUnread(sid) {
+  if (!sid) return false;
+  return Object.prototype.hasOwnProperty.call(_getSessionCompletionUnread(), sid);
+}
+
 function _hasUnreadForSession(s) {
   if (!s || !s.session_id) return false;
+  if (_hasSessionCompletionUnread(s.session_id)) return true;
   const counts = _getSessionViewedCounts();
   if (!Object.prototype.hasOwnProperty.call(counts, s.session_id)) {
     _setSessionViewedCount(s.session_id, Number(s.message_count || 0));
@@ -147,6 +190,7 @@ async function loadSession(sid){
   S.session._modelResolutionDeferred=true;
   S.lastUsage={...(data.session.last_usage||{})};
   _setSessionViewedCount(S.session.session_id, Number(data.session.message_count || 0));
+  _clearSessionCompletionUnread(S.session.session_id);
   localStorage.setItem('hermes-webui-session',S.session.session_id);
 
   const activeStreamId=S.session.active_stream_id||null;

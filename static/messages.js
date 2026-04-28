@@ -4,6 +4,15 @@ function _markSessionViewed(sid, messageCount) {
   _setSessionViewedCount(sid, next);
 }
 
+function _isSessionActivelyViewed(sid) {
+  if(!sid || !S.session || S.session.session_id!==sid) return false;
+  // During session switching, S.session still points at the previous row until
+  // the next metadata request resolves. Treat that in-flight switch as
+  // background so a just-finished old stream still gets an unread marker.
+  if(typeof _loadingSessionId!=='undefined' && _loadingSessionId && _loadingSessionId!==sid) return false;
+  return true;
+}
+
 async function send(){
   const text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length)return;
@@ -741,17 +750,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _smdEndParser();
       }
       const d=JSON.parse(e.data);
+      const isSessionViewed=_isSessionActivelyViewed(activeSid);
+      if(!isSessionViewed && typeof _markSessionCompletionUnread==='function'){
+        _markSessionCompletionUnread(activeSid, d.session&&d.session.message_count);
+      }
       delete INFLIGHT[activeSid];
       clearInflight();clearInflightState(activeSid);
       stopApprovalPolling();
       stopClarifyPolling();
       if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);
       if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true);
-      if(S.session&&S.session.session_id===activeSid){
+      if(isSessionViewed){
         S.activeStreamId=null;
         const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
       }
-      if(S.session&&S.session.session_id===activeSid){
+      if(isSessionViewed){
         // Capture previous session totals BEFORE overwriting S.session with the new
         // cumulative values from the done event. prevIn/prevOut are the totals as of
         // the start of this turn; curIn/curOut are the full post-turn totals — the
