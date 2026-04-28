@@ -11,6 +11,11 @@
   so the latest chat remains readable above the approval-card-like terminal
   surface, while close restores the normal layout. (`static/terminal.js`,
   `static/style.css`, `tests/test_embedded_workspace_terminal.py`)
+- **Embedded terminal has controlled desktop resizing** — the approval-card-like
+  terminal now exposes a drag handle with bounded height, refits xterm, resizes
+  the backend PTY, and recomputes transcript spacing after each resize.
+  (`static/index.html`, `static/terminal.js`, `static/style.css`,
+  `tests/test_embedded_workspace_terminal.py`)
 - **Auto-title generic fallback** — when the auxiliary title-generation call
   fails and the local fallback can only produce the generic label
   `Conversation topic`, the WebUI now keeps the existing provisional title

@@ -33,12 +33,45 @@ def test_terminal_surface_uses_composer_flyout_card_pattern():
     flyout = html.split('<div class="composer-flyout">', 1)[1].split('<div class="queue-pill-outer">', 1)[0]
     assert 'id="composerTerminalPanel"' in flyout
     assert 'class="composer-terminal-inner"' in flyout
+    assert 'id="terminalResizeHandle"' in flyout
     assert 'id="composerTerminalPanel"' not in html.split('<div class="queue-pill-outer">', 1)[1]
     assert ".composer-terminal-panel{position:absolute" in style_css
     assert "bottom:-24px" in style_css
     assert "width:min(calc(100% - 64px),720px)" in style_css
-    assert ".composer-terminal-inner{height:260px" in style_css
+    assert ".composer-terminal-inner{height:var(--composer-terminal-height,260px)" in style_css
     assert "transform:translateY(100%)" in style_css
+
+
+def test_terminal_uses_controlled_desktop_resize_handle():
+    html = _read("static/index.html")
+    style_css = _read("static/style.css")
+    terminal_js = _read("static/terminal.js")
+
+    assert 'class="composer-terminal-resize-handle"' in html
+    assert 'role="separator"' in html
+    assert 'aria-orientation="horizontal"' in html
+    terminal_inner_rule = style_css.split(".composer-terminal-inner{", 1)[1].split("}", 1)[0]
+    assert "resize:" not in terminal_inner_rule
+    assert "cursor:ns-resize" in style_css
+    assert "const TERMINAL_HEIGHT_DEFAULT=260" in terminal_js
+    assert "const TERMINAL_HEIGHT_MIN=180" in terminal_js
+    assert "const TERMINAL_HEIGHT_MAX=520" in terminal_js
+    assert "max:Math.max(min,Math.min(hardMax,maxByViewport))" in terminal_js
+
+
+def test_terminal_resize_path_refits_backend_and_transcript_space():
+    terminal_js = _read("static/terminal.js")
+
+    assert "function _applyTerminalHeight" in terminal_js
+    apply_block = terminal_js.split("function _applyTerminalHeight", 1)[1].split("function _resetTerminalHeightForViewport", 1)[0]
+    assert "_fitTerminal();" in apply_block
+    assert "_syncTerminalTranscriptSpace(true);" in apply_block
+    assert "function _moveTerminalHeightResize" in terminal_js
+    assert "_applyTerminalHeight(TERMINAL_UI.resizeStartHeight+(TERMINAL_UI.resizeStartY-ev.clientY))" in terminal_js
+    assert "handle.addEventListener('pointerdown',_startTerminalHeightResize)" in terminal_js
+    assert "handle.addEventListener('pointermove',_moveTerminalHeightResize)" in terminal_js
+    assert "clearTimeout(TERMINAL_UI.resizeTimer)" in terminal_js
+    assert "api('/api/terminal/resize'" in terminal_js
 
 
 def test_terminal_open_reserves_transcript_space():
