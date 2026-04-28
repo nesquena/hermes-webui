@@ -62,14 +62,19 @@ function syncWorkspacePanelState(){
     return;
   }
   if(!S.session){
-    _setWorkspacePanelMode('closed');
+    // No active session — if the panel was explicitly opened (browse mode), keep it
+    // open so the workspace pane doesn't vanish on a fresh-page or empty-session boot.
+    // The file tree will show the "no workspace" placeholder naturally via renderFileTree().
+    // Only force-close if the mode is 'preview' (file preview without a session is invalid).
+    if(_workspacePanelMode==='preview') _setWorkspacePanelMode('closed');
+    else syncWorkspacePanelUI();
     return;
   }
   _setWorkspacePanelMode(_workspacePanelMode==='preview'?'closed':_workspacePanelMode);
 }
 
 function openWorkspacePanel(mode='browse'){
-  if(mode==='browse'&&!S.session&&!_hasWorkspacePreviewVisible())return;
+  if(mode==='browse'&&!S.session&&!_hasWorkspacePreviewVisible()&&!S._profileDefaultWorkspace)return;
   if(mode==='preview'&&_workspacePanelMode==='browse'){
     syncWorkspacePanelUI();
     return;
@@ -101,7 +106,7 @@ function syncWorkspacePanelUI(){
   const mobileOpen=panel.classList.contains('mobile-open');
   const isCompact=_isCompactWorkspaceViewport();
   const isOpen=isCompact?mobileOpen:desktopOpen;
-  const canBrowse=!!S.session||_hasWorkspacePreviewVisible();
+  const canBrowse=!!S.session||_hasWorkspacePreviewVisible()||!!(S._profileDefaultWorkspace);
   const hasPreview=_hasWorkspacePreviewVisible();
   if(toggleBtn){
     toggleBtn.classList.toggle('active',isOpen);
@@ -900,6 +905,11 @@ function applyBotName(){
         localStorage.removeItem('hermes-webui-session');
         S.session=null; S.messages=[];
         S._bootReady=true;
+        // Restore panel pref before syncing so the workspace panel stays visible
+        // even though there is no active session (#workspace-persist).
+        const _ephPanelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
+          || localStorage.getItem('hermes-webui-workspace-panel')==='open';
+        if(_ephPanelPref) _workspacePanelMode='browse';
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
         await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();
@@ -920,6 +930,11 @@ function applyBotName(){
   // no saved session - show empty state, wait for user to hit +
   S._bootReady=true;
   syncTopbar();
+  // Restore panel pref so the workspace panel stays visible on a fresh load if the
+  // user had it open during their last session (#workspace-persist).
+  const _freshPanelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
+    || localStorage.getItem('hermes-webui-workspace-panel')==='open';
+  if(_freshPanelPref) _workspacePanelMode='browse';
   syncWorkspacePanelState();
   $('emptyState').style.display='';
   await renderSessionList();

@@ -59,14 +59,15 @@ class TestBootJsProfileDefaultWorkspace:
         """The settings block (lines ~758-800 in boot.js) must set
         S._profileDefaultWorkspace from the /api/settings response."""
         src = read('static/boot.js')
-        # Find the settings fetch and the _profileDefaultWorkspace assignment
-        # and confirm both are in the same settings-read block (within ~50 lines)
-        ws_idx = src.find('_profileDefaultWorkspace')
+        # Find the settings fetch and the _profileDefaultWorkspace ASSIGNMENT
+        # (the if(s.default_workspace) line, not usages elsewhere in the file)
         settings_idx = src.find("await api('/api/settings')")
-        assert ws_idx != -1, "_profileDefaultWorkspace not found in boot.js"
         assert settings_idx != -1, "await api('/api/settings') not found in boot.js"
-        # Both must be within 300 chars of each other (same block)
-        assert abs(ws_idx - settings_idx) < 1000, (
+        # Find the assignment specifically — it uses 's.default_workspace'
+        ws_assign_idx = src.find('S._profileDefaultWorkspace=s.default_workspace')
+        assert ws_assign_idx != -1, "S._profileDefaultWorkspace assignment not found in boot.js"
+        # The assignment must be in the same settings-fetch block (within a few hundred chars)
+        assert abs(ws_assign_idx - settings_idx) < 1000, (
             "S._profileDefaultWorkspace must be set in the same settings-fetch block"
         )
 
