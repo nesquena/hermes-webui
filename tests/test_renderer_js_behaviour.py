@@ -36,6 +36,7 @@ global.window = {};
 global.document = { createElement: () => ({ innerHTML: '', textContent: '' }) };
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => (
   {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
 
 function extractFunc(name) {
   const re = new RegExp('function\\s+' + name + '\\s*\\(');
@@ -141,6 +142,42 @@ class TestBlockquotePrefixStrip:
 # Common LLM output shapes — sanity-check the most frequent constructs render
 # the way a user would expect.
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestRendererSanitization:
+    """Raw/model-provided HTML must not survive with executable attributes or schemes."""
+
+    @pytest.mark.parametrize(
+        "payload, forbidden",
+        [
+            ('<img src=x onerror=alert(1)>', 'onerror'),
+            ('<span onclick=alert(1)>click</span>', 'onclick'),
+            ('<div onmouseover=alert(1)>hover</div>', 'onmouseover'),
+            ('<a href="javascript:alert(1)">x</a>', 'javascript:'),
+        ],
+    )
+    def test_raw_html_dangerous_attributes_and_schemes_are_removed(self, driver_path, payload, forbidden):
+        out = _render(driver_path, payload).lower()
+        assert forbidden not in out, f"dangerous HTML survived sanitization: {out!r}"
+        assert 'alert(1)' not in out, f"executable payload text should not remain executable: {out!r}"
+
+    def test_generated_image_markdown_uses_delegated_lightbox_not_inline_js(self, driver_path):
+        out = _render(driver_path, "![capy](https://example.com/capy.png)").lower()
+        assert '<img' in out and 'msg-media-img' in out
+        assert 'onclick' not in out
+        assert '_openimglightbox' not in out
+
+    def test_media_token_image_uses_delegated_lightbox_not_inline_js(self, driver_path):
+        out = _render(driver_path, "MEDIA:https://example.com/capy.png").lower()
+        assert '<img' in out and 'msg-media-img' in out
+        assert 'onclick' not in out
+        assert '_openimglightbox' not in out
+
+    def test_incomplete_raw_html_tag_is_escaped_before_paragraph_wrapping(self, driver_path):
+        out = _render(driver_path, '<img src=x onerror=alert(1)//').lower()
+        assert '&lt;img' in out
+        assert '<img' not in out
+        assert 'onerror' not in out or '&lt;img' in out
 
 
 class TestCommonLLMShapes:
