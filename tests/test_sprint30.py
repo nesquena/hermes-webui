@@ -564,6 +564,20 @@ class TestClarifyCardTimerLogic:
         assert 'expires_at' in src, \
             'clarify countdown must use expires_at from the pending payload'
 
+    def test_clarify_countdown_does_not_restart_for_same_expiry(self):
+        src = self._get_js().read_text()
+        m = re.search(r'function _startClarifyCountdown.*?(?=\nfunction |\nasync function |\Z)',
+                      src, re.DOTALL)
+        assert m, '_startClarifyCountdown function not found'
+        body = m.group(0)
+        assert 'const expiresAt = _clarifyExpiryMs(pending)' in body, \
+            'countdown start should compute the next expiry before clearing the existing timer'
+        assert '_clarifyCountdownTimer && _clarifyExpiresAt === expiresAt' in body, \
+            'same pending clarify poll updates must not restart the countdown interval'
+        assert body.index('_clarifyCountdownTimer && _clarifyExpiresAt === expiresAt') < \
+               body.index('_clearClarifyCountdownTimer()'), \
+            'same-expiry guard must run before clearing the current interval'
+
     def test_hide_clarify_card_can_preserve_draft(self):
         src = self._get_js().read_text()
         assert 'function _stashClarifyDraft' in src

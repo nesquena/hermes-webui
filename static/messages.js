@@ -1368,8 +1368,10 @@ function _updateClarifyCountdown() {
 }
 
 function _startClarifyCountdown(pending) {
+  const expiresAt = _clarifyExpiryMs(pending);
+  if (_clarifyCountdownTimer && _clarifyExpiresAt === expiresAt) return;
   _clearClarifyCountdownTimer();
-  _clarifyExpiresAt = _clarifyExpiryMs(pending);
+  _clarifyExpiresAt = expiresAt;
   if (!_clarifyExpiresAt) return;
   _updateClarifyCountdown();
   _clarifyCountdownTimer = setInterval(_updateClarifyCountdown, 1000);
