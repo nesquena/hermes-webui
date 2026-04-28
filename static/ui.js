@@ -2169,14 +2169,16 @@ function _formatMessageFooterTimestamp(tsVal){
   if(!tsVal) return '';
   const date=new Date(tsVal*1000);
   const now=new Date();
+  const tzOpts=(typeof _serverTzOptions==='function')?_serverTzOptions():undefined;
   if(_isSameLocalDay(date, now)){
-    return date.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+    return date.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', ...tzOpts});
   }
   return date.toLocaleString([], {
     month:'short',
     day:'numeric',
     hour:'numeric',
     minute:'2-digit',
+    ...tzOpts,
   });
 }
 function _compressionStatusCardHtml({
@@ -2382,7 +2384,8 @@ function renderMessages(){
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
     const tsVal=m._ts||m.timestamp;
-    const tsTitle=tsVal?new Date(tsVal*1000).toLocaleString():'';
+    const _tzo=(typeof _serverTzOptions==='function')?_serverTzOptions():undefined;
+    const tsTitle=tsVal?new Date(tsVal*1000).toLocaleString([],_tzo):'';
     const tsTime=_formatMessageFooterTimestamp(tsVal);
     const timeHtml = tsTime ? `<span class="msg-time" title="${esc(tsTitle)}">${tsTime}</span>` : '';
     const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${copyBtn}${retryBtn}</span></div>`;

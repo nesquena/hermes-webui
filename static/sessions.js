@@ -591,6 +591,16 @@ async function renderSessionList(){
     ]);
     _allSessions = sessData.sessions||[];
     _allProjects = projData.projects||[];
+    // Capture server clock for clock-skew compensation (issue #1144).
+    // server_time is epoch seconds from the server's time.time().
+    // _serverTimeDelta = client - server, so (Date.now() - _serverTimeDelta)
+    // gives an approximation of the current server time.
+    if (typeof sessData.server_time === 'number' && sessData.server_time > 0) {
+      _serverTimeDelta = Date.now() - (sessData.server_time * 1000);
+    }
+    if (typeof sessData.server_tz === 'string') {
+      _serverTz = sessData.server_tz;
+    }
     const isStreaming = _allSessions.some(s => Boolean(s && s.is_streaming));
     if (isStreaming) {
       startStreamingPoll();
@@ -735,6 +745,8 @@ function stopGatewaySSE(){
 
 let _searchDebounceTimer = null;
 let _contentSearchResults = [];  // results from /api/sessions/search content scan
+let _serverTimeDelta = 0;       // ms offset: client clock - server clock (for clock-skew compensation)
+let _serverTz = '';              // server timezone offset string (e.g. "+0800", "+0000", "-0500")
 
 function filterSessions(){
   // Immediate client-side title filter (no flicker)
@@ -758,12 +770,30 @@ function _sessionTimestampMs(session) {
   return Number.isFinite(raw) ? raw * 1000 : 0;
 }
 
+function _serverNowMs() {
+  // Compensate for clock skew between client and server (issue #1144).
+  // Returns an approximation of the current server time in ms.
+  return Date.now() - _serverTimeDelta;
+}
+
+function _serverTzOptions() {
+  // Build a timeZone option from _serverTz (e.g. "+0800" → "Etc/GMT-8").
+  // Falls back to undefined (uses browser timezone) if _serverTz is not set.
+  if (!_serverTz || _serverTz === '+0000' || _serverTz === '-0000') return undefined;
+  const m = _serverTz.match(/^([+-])(\d{2})(\d{2})$/);
+  if (!m) return undefined;
+  // IANA Etc/GMT uses inverted sign: UTC+8 → "Etc/GMT-8"
+  const sign = m[1] === '+' ? '-' : '+';
+  return { timeZone: `Etc/GMT${sign}${parseInt(m[2])}` };
+}
+
 function _localDayOrdinal(timestampMs) {
   const date = new Date(timestampMs);
   return Math.floor(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / 86400000);
 }
 
-function _sessionCalendarBoundaries(nowMs = Date.now()) {
+function _sessionCalendarBoundaries(nowMs) {
+  nowMs = nowMs || _serverNowMs();
   const now = new Date(nowMs);
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const startOfYesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
@@ -779,7 +809,8 @@ function _sessionCalendarBoundaries(nowMs = Date.now()) {
   };
 }
 
-function _formatSessionDate(timestampMs, nowMs = Date.now()) {
+function _formatSessionDate(timestampMs, nowMs) {
+  nowMs = nowMs || _serverNowMs();
   const date = new Date(timestampMs);
   const now = new Date(nowMs);
   const options = {month:'short', day:'numeric'};
@@ -787,8 +818,9 @@ function _formatSessionDate(timestampMs, nowMs = Date.now()) {
   return date.toLocaleDateString(undefined, options);
 }
 
-function _formatRelativeSessionTime(timestampMs, nowMs = Date.now()) {
+function _formatRelativeSessionTime(timestampMs, nowMs) {
   if (!timestampMs) return t('session_time_unknown');
+  nowMs = nowMs || _serverNowMs();
   const diffMs = Math.max(0, nowMs - timestampMs);
   const minute = 60 * 1000;
   const hour = 60 * minute;
@@ -809,8 +841,9 @@ function _formatRelativeSessionTime(timestampMs, nowMs = Date.now()) {
   return _formatSessionDate(timestampMs, nowMs);
 }
 
-function _sessionTimeBucketLabel(timestampMs, nowMs = Date.now()) {
+function _sessionTimeBucketLabel(timestampMs, nowMs) {
   if (!timestampMs) return t('session_time_bucket_older');
+  nowMs = nowMs || _serverNowMs();
   const {startOfToday, startOfYesterday, startOfWeek, startOfLastWeek} = _sessionCalendarBoundaries(nowMs);
   if (timestampMs >= startOfToday) return t('session_time_bucket_today');
   if (timestampMs >= startOfYesterday) return t('session_time_bucket_yesterday');
@@ -919,7 +952,7 @@ function renderSessionListFromCache(){
   const pinned=orderedSessions.filter(s=>s.pinned);
   const unpinned=orderedSessions.filter(s=>!s.pinned);
   // Date grouping: Pinned / Today / Yesterday / This week / Last week / Older
-  const now=Date.now();
+  const now=_serverNowMs();
   // Collapse state persisted in localStorage
   let _groupCollapsed={};
   try{_groupCollapsed=JSON.parse(localStorage.getItem('hermes-date-groups-collapsed')||'{}');}catch(e){}
