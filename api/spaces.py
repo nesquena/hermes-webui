@@ -161,13 +161,48 @@ def _summary(space: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _widget_summary(widget: dict[str, Any]) -> dict[str, Any]:
-    wid = validate_widget_id(widget.get("id"))
-    title = str(widget.get("title") or widget.get("name") or wid)
+def _clamped_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def _truthy_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in _TRUTHY
+
+
+def _normalize_widget_layout(layout: Any) -> dict[str, Any]:
+    raw = layout if isinstance(layout, dict) else {}
     return {
-        "id": wid,
-        "kind": str(widget.get("kind") or "custom"),
-        "title": title,
+        "x": _clamped_int(raw.get("x"), 0, 0, 10_000),
+        "y": _clamped_int(raw.get("y"), 0, 0, 10_000),
+        "w": _clamped_int(raw.get("w"), 6, 1, 24),
+        "h": _clamped_int(raw.get("h"), 4, 1, 24),
+        "minimized": _truthy_bool(raw.get("minimized")),
+    }
+
+
+def _normalize_widget(widget: dict[str, Any]) -> dict[str, Any]:
+    wid = validate_widget_id(widget.get("id"))
+    clean_widget = dict(widget)
+    clean_widget["id"] = wid
+    clean_widget["kind"] = str(clean_widget.get("kind") or "custom")
+    clean_widget["title"] = str(clean_widget.get("title") or clean_widget.get("name") or wid)
+    clean_widget["layout"] = _normalize_widget_layout(clean_widget.get("layout"))
+    return clean_widget
+
+
+def _widget_summary(widget: dict[str, Any]) -> dict[str, Any]:
+    clean_widget = _normalize_widget(widget)
+    return {
+        "id": clean_widget["id"],
+        "kind": clean_widget["kind"],
+        "title": clean_widget["title"],
+        "layout": clean_widget["layout"],
     }
 
 
@@ -403,11 +438,8 @@ def upsert_widget(space_id: str, widget: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("Capy Spaces is disabled")
     if not isinstance(widget, dict):
         raise ValueError("widget must be an object")
-    wid = validate_widget_id(widget.get("id"))
-    clean_widget = dict(widget)
-    clean_widget["id"] = wid
-    clean_widget["kind"] = str(clean_widget.get("kind") or "custom")
-    clean_widget["title"] = str(clean_widget.get("title") or clean_widget.get("name") or wid)
+    clean_widget = _normalize_widget(widget)
+    wid = clean_widget["id"]
 
     space = read_space(space_id)
     widgets = space.get("widgets") or []

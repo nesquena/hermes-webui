@@ -259,7 +259,9 @@ def test_widget_upsert_list_read_and_delete_are_revisioned(monkeypatch, tmp_path
     assert (spaces.events_dir() / f"{upserted['revision_event_id']}.json").exists()
 
     widgets = spaces.list_widgets(created["space_id"])
-    assert widgets == [{"id": "weather", "kind": "markdown", "title": "Weather"}]
+    assert widgets == [
+        {"id": "weather", "kind": "markdown", "title": "Weather", "layout": {"x": 0, "y": 0, "w": 6, "h": 4, "minimized": False}}
+    ]
     assert "renderer" not in json.dumps(widgets)
 
     full = spaces.read_widget(created["space_id"], "weather")
@@ -283,6 +285,29 @@ def test_widget_validation_rejects_pathlike_ids_and_non_object_specs(monkeypatch
         spaces.upsert_widget(created["space_id"], ["not", "a", "dict"])
 
 
+def test_widget_layout_is_normalized_for_canvas_metadata(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Layout Lab"})
+
+    upserted = spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "chart",
+            "kind": "chart",
+            "title": "Chart",
+            "layout": {"x": "12", "y": -9, "w": 99, "h": 0, "minimized": "yes", "renderer": "<script>bad()</script>"},
+            "renderer": "<script>doNotExpose()</script>",
+        },
+    )
+
+    assert upserted["widget"]["layout"] == {"x": 12, "y": 0, "w": 24, "h": 1, "minimized": True}
+    listed = spaces.list_widgets(created["space_id"])
+    assert listed == [
+        {"id": "chart", "kind": "chart", "title": "Chart", "layout": {"x": 12, "y": 0, "w": 24, "h": 1, "minimized": True}}
+    ]
+    assert "renderer" not in json.dumps(listed)
+
+
 def test_widget_routes_upsert_list_read_and_delete(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Route Widgets"})
@@ -299,7 +324,9 @@ def test_widget_routes_upsert_list_read_and_delete(monkeypatch, tmp_path):
     handled, status, body = _route_get(f"/api/spaces/widgets?space_id={space_id}")
     assert handled is None
     assert status == 200
-    assert body["widgets"] == [{"id": "notes", "kind": "markdown", "title": "Notes"}]
+    assert body["widgets"] == [
+        {"id": "notes", "kind": "markdown", "title": "Notes", "layout": {"x": 0, "y": 0, "w": 6, "h": 4, "minimized": False}}
+    ]
 
     handled, status, body = _route_get(f"/api/spaces/widget?space_id={space_id}&widget_id=notes")
     assert handled is None
