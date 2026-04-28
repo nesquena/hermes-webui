@@ -3458,6 +3458,8 @@ const LOCALES = {
     providers_key_removed: 'API \u91d1\u9470\u5df2\u79fb\u9664',
     providers_key_updated: 'API \u91d1\u9470\u5df2\u5132\u5b58',
     providers_oauth_hint: '\u5df2\u900f\u904e OAuth \u9a57\u8b49\u3002\u7121\u9700 API \u91d1\u9470\u3002',
+    providers_oauth_config_yaml_hint: '\u5df2\u900f\u904e config.yaml \u8a2d\u5b9a\u6b0a\u8b49\u3002\u8981\u66f4\u65b0\uff0c\u8acb\u7de8\u8f2f config.yaml \u4e2d\u7684 providers \u5340\u6bb5\uff0c\u6216\u57f7\u884c hermes auth\u3002',
+    providers_oauth_not_configured_hint: '\u5c1a\u672a\u9a57\u8b49\u3002\u8acb\u5728\u7d42\u7aef\u6a5f\u57f7\u884c hermes auth \u4ee5\u8a2d\u5b9a\u6b64\u63d0\u4f9b\u8005\u3002',
     providers_remove: '\u79fb\u9664',
     providers_removing: '\u79fb\u9664\u4e2d\u2026',
     providers_save: '\u5132\u5b58',
