@@ -3290,6 +3290,15 @@ function _renderTreeItems(container, entries, depth){
                 session_id:S.session.session_id,path:item.path,new_name:newName
               })});
               showToast(t('renamed_to')+newName);
+              // Update expanded dirs cache key if renaming a directory
+              if(item.type==='dir'&&S._expandedDirs){
+                S._expandedDirs.delete(item.path);
+                const parent=item.path.includes('/')?item.path.substring(0,item.path.lastIndexOf('/')):'.';
+                const newPath=parent==='.'?newName:parent+'/'+newName;
+                S._expandedDirs.add(newPath);
+                if(S._dirCache[item.path]){S._dirCache[newPath]=S._dirCache[item.path];delete S._dirCache[item.path];}
+                if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();
+              }
               // Invalidate cache and re-render
               delete S._dirCache[S.currentDir];
               await loadDir(S.currentDir);
