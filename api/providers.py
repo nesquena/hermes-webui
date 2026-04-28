@@ -45,6 +45,7 @@ _PROVIDER_ENV_VAR: dict[str, str] = {
     "opencode-go": "OPENCODE_GO_API_KEY",
     "ollama": "OLLAMA_API_KEY",
     "ollama-cloud": "OLLAMA_API_KEY",
+    "nvidia": "NVIDIA_API_KEY",
 }
 
 # Providers that use OAuth or token flows — their credentials are managed

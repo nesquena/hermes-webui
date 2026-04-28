@@ -539,6 +539,7 @@ _PROVIDER_DISPLAY = {
     "mistralai": "Mistral",
     "qwen": "Qwen",
     "x-ai": "xAI",
+    "nvidia": "NVIDIA NIM",
 }
 
 # Provider alias → canonical slug.  Users configure providers using the
@@ -583,6 +584,10 @@ _PROVIDER_ALIASES = {
     "aliyun": "alibaba",
     "dashscope": "alibaba",
     "alibaba-cloud": "alibaba",
+    "nim": "nvidia",
+    "nvidia-nim": "nvidia",
+    "build-nvidia": "nvidia",
+    "nemotron": "nvidia",
 }
 
 
@@ -751,6 +756,13 @@ _PROVIDER_MODELS = {
         {"id": "qwen3-coder",   "label": "Qwen3 Coder"},
         {"id": "qwen3.6-plus",  "label": "Qwen3.6 Plus"},
     ],
+    # NVIDIA NIM — NVIDIA's inference platform
+    "nvidia": [
+        {"id": "nvidia/nemotron-3-super-120b-a12b", "label": "Nemotron 3 Super 120B"},
+        {"id": "nvidia/nemotron-3-nano-30b-a3b", "label": "Nemotron 3 Nano 30B"},
+        {"id": "nvidia/llama-3.3-nemotron-super-49b-v1.5", "label": "Llama 3.3 Nemotron Super 49B"},
+        {"id": "qwen/qwen3-next-80b-a3b-instruct", "label": "Qwen3 Next 80B"},
+    ],
     # xAI — prefix used in OpenRouter model IDs (x-ai/grok-4-20)
     "x-ai": [
         {"id": "grok-4.20", "label": "Grok 4.20"},
@@ -890,7 +902,9 @@ def resolve_model_provider(model_id: str) -> tuple:
         # Nous user whose config.yaml also has a base_url doesn't accidentally
         # fall into the prefix-stripping path (#894: minimax/minimax-m2.7 → bare
         # name sent to Nous → 404 because Nous requires the full namespace path).
-        _PORTAL_PROVIDERS = {"nous", "opencode-zen", "opencode-go"}
+        # NVIDIA NIM also serves models from multiple namespaces (qwen, nvidia, etc.)
+        # and requires the full model path.
+        _PORTAL_PROVIDERS = {"nous", "opencode-zen", "opencode-go", "nvidia"}
         if config_provider in _PORTAL_PROVIDERS:
             return model_id, config_provider, config_base_url
         # If a custom endpoint base_url is configured, don't reroute through OpenRouter
