@@ -845,7 +845,14 @@ function renderMd(raw){
       const code=m?m[2]:raw.replace(/^\n?/,'');
       const h=lang?`<div class="pre-header">${esc(lang)}</div>`:'';
       const langAttr=lang?` class="language-${esc(lang)}"`:'';
-      _preBlock_stash.push(`${h}<pre><code${langAttr}>${esc(code.replace(/\n$/,''))}</code></pre>`);
+      // For JSON/YAML blocks, add tree-view placeholder with raw data
+      if(lang==='json'||lang==='yaml'){
+        const rawCode=esc(code.replace(/\n$/,''));
+        const blockId='tree-'+Math.random().toString(36).slice(2,10);
+        _preBlock_stash.push(`<div class="code-tree-wrap" data-raw="${rawCode.replace(/"/g,'&quot;')}" data-lang="${lang}" id="${blockId}">${h}<pre class="tree-raw-view"><code${langAttr}>${rawCode}</code></pre></div>`);
+      } else {
+        _preBlock_stash.push(`${h}<pre><code${langAttr}>${esc(code.replace(/\n$/,''))}</code></pre>`);
+      }
     }
     return '\x00P'+(_preBlock_stash.length-1)+'\x00';
   });
@@ -2330,7 +2337,7 @@ function renderMessages(){
       inner.innerHTML=cached.html;
       _sessionHtmlCacheSid=sid;
       if(S.activeStreamId){scrollIfPinned();}else{scrollToBottom();}
-      requestAnimationFrame(()=>{highlightCode();addCopyButtons();renderMermaidBlocks();renderKatexBlocks();});
+      requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();renderMermaidBlocks();renderKatexBlocks();});
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
       return;
     }
@@ -2721,7 +2728,7 @@ function renderMessages(){
     scrollToBottom();
   }
   // Apply syntax highlighting after DOM is built
-  requestAnimationFrame(()=>{highlightCode();addCopyButtons();renderMermaidBlocks();renderKatexBlocks();});
+  requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();renderMermaidBlocks();renderKatexBlocks();});
   // Refresh todo panel if it's currently open
   if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){
     loadTodos();
@@ -2976,6 +2983,111 @@ function highlightCode(container) {
   const el = container || $('msgInner');
   if(!el) return;
   Prism.highlightAllUnder(el);
+}
+
+function initTreeViews(){
+  document.querySelectorAll('.code-tree-wrap:not([data-tree-init])').forEach(wrap=>{
+    wrap.setAttribute('data-tree-init','1');
+    const rawText=wrap.dataset.raw;
+    const lang=wrap.dataset.lang;
+    let parsed=null;
+    // Try JSON parse
+    try{ parsed=JSON.parse(rawText); }catch(e){}
+    // YAML: try parsing if js-yaml is available
+    if(!parsed && lang==='yaml' && typeof jsyaml!=='undefined'){
+      try{ parsed=jsyaml.load(rawText); }catch(e){}
+    }
+    if(!parsed || typeof parsed!=='object'){
+      return; // leave as raw view
+    }
+    const lineCount=rawText.split('\n').length;
+    // Default to raw for short blocks (<10 lines), tree for longer
+    const showTree=lineCount>=10;
+    // Build tree DOM
+    const treeDiv=document.createElement('div');
+    treeDiv.className='tree-view'+(showTree?'':' tree-hidden');
+    treeDiv.appendChild(_buildTreeDOM(parsed, 0));
+    // Toggle button in header
+    const header=wrap.querySelector('.pre-header');
+    if(header){
+      const toggle=document.createElement('button');
+      toggle.className='tree-toggle-btn';
+      toggle.textContent=showTree?t('raw_view'):t('tree_view');
+      toggle.onclick=(e)=>{
+        e.stopPropagation();
+        const isTreeHidden=treeDiv.classList.contains('tree-hidden');
+        treeDiv.classList.toggle('tree-hidden',!isTreeHidden);
+        const rawPre=wrap.querySelector('.tree-raw-view');
+        if(rawPre) rawPre.style.display=isTreeHidden?'none':'';
+        toggle.textContent=isTreeHidden?t('raw_view'):t('tree_view');
+      };
+      header.style.display='flex';
+      header.style.justifyContent='space-between';
+      header.style.alignItems='center';
+      header.appendChild(toggle);
+    }
+    if(!showTree){
+      const rawPre=wrap.querySelector('.tree-raw-view');
+      if(rawPre) rawPre.style.display='';
+    } else {
+      const rawPre=wrap.querySelector('.tree-raw-view');
+      if(rawPre) rawPre.style.display='none';
+    }
+    wrap.appendChild(treeDiv);
+  });
+}
+
+function _buildTreeDOM(val, depth){
+  const el=document.createElement('div');
+  el.className='tree-node';
+  if(val===null){ el.innerHTML=`<span class="tree-val tree-null">null</span>`; return el; }
+  if(typeof val==='boolean'){ el.innerHTML=`<span class="tree-val tree-bool">${val}</span>`; return el; }
+  if(typeof val==='number'){ el.innerHTML=`<span class="tree-val tree-num">${val}</span>`; return el; }
+  if(typeof val==='string'){ el.innerHTML=`<span class="tree-val tree-str">&quot;${esc(val)}&quot;</span>`; return el; }
+  if(Array.isArray(val)){
+    el.classList.add('tree-array');
+    const collapsed=depth>=2;
+    const header=document.createElement('span');
+    header.className='tree-collapsible';
+    header.innerHTML=(collapsed?'▸ ': '▾ ')+`<span class="tree-bracket">[</span><span class="tree-count">${val.length}</span><span class="tree-bracket">]</span>`;
+    const body=document.createElement('div');
+    body.className='tree-children'+(collapsed?' tree-collapsed':'');
+    val.forEach((item,i)=>{
+      const child=document.createElement('div');
+      child.className='tree-item';
+      child.appendChild(_buildTreeDOM(item, depth+1));
+      if(i<val.length-1) child.innerHTML+='<span class="tree-comma">,</span>';
+      body.appendChild(child);
+    });
+    el.appendChild(header);
+    el.appendChild(body);
+    header.onclick=(()=>{const c=body.classList.contains('tree-collapsed'); body.classList.toggle('tree-collapsed'); header.innerHTML=(c?'▾ ':'▸ ')+`<span class="tree-bracket">[</span><span class="tree-count">${val.length}</span><span class="tree-bracket">]</span>`;});
+    return el;
+  }
+  if(typeof val==='object'){
+    el.classList.add('tree-object');
+    const keys=Object.keys(val);
+    const collapsed=depth>=2;
+    const header=document.createElement('span');
+    header.className='tree-collapsible';
+    header.innerHTML=(collapsed?'▸ ': '▾ ')+`<span class="tree-bracket">{</span><span class="tree-count">${keys.length}</span><span class="tree-bracket">}</span>`;
+    const body=document.createElement('div');
+    body.className='tree-children'+(collapsed?' tree-collapsed':'');
+    keys.forEach((key,i)=>{
+      const child=document.createElement('div');
+      child.className='tree-item';
+      child.innerHTML=`<span class="tree-key">&quot;${esc(key)}&quot;</span><span class="tree-colon">: </span>`;
+      child.appendChild(_buildTreeDOM(val[key], depth+1));
+      if(i<keys.length-1) child.innerHTML+='<span class="tree-comma">,</span>';
+      body.appendChild(child);
+    });
+    el.appendChild(header);
+    el.appendChild(body);
+    header.onclick=(()=>{const c=body.classList.contains('tree-collapsed'); body.classList.toggle('tree-collapsed'); header.innerHTML=(c?'▾ ':'▸ ')+`<span class="tree-bracket">{</span><span class="tree-count">${keys.length}</span><span class="tree-bracket">}</span>`;});
+    return el;
+  }
+  el.innerHTML=`<span class="tree-val">${esc(String(val))}</span>`;
+  return el;
 }
 
 function addCopyButtons(container){
