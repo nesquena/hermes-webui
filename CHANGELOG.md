@@ -16,6 +16,12 @@
   the backend PTY, and recomputes transcript spacing after each resize.
   (`static/index.html`, `static/terminal.js`, `static/style.css`,
   `tests/test_embedded_workspace_terminal.py`)
+- **Embedded terminal can collapse without closing** — the terminal card now has
+  a collapsed dock state above the composer. Collapse preserves the live PTY and
+  terminal scrollback, Expand restores the full card, and Close remains
+  available from both states to release the PTY. (`static/index.html`,
+  `static/terminal.js`, `static/style.css`, `static/i18n.js`,
+  `tests/test_embedded_workspace_terminal.py`)
 - **Auto-title generic fallback** — when the auxiliary title-generation call
   fails and the local fallback can only produce the generic label
   `Conversation topic`, the WebUI now keeps the existing provisional title

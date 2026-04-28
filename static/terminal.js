@@ -1,5 +1,6 @@
 const TERMINAL_UI={
   open:false,
+  collapsed:false,
   sessionId:null,
   workspace:null,
   source:null,
@@ -27,11 +28,13 @@ function _terminalEls(){
   return {
     panel:$('composerTerminalPanel'),
     inner:$('composerTerminalPanel')&&$('composerTerminalPanel').querySelector('.composer-terminal-inner'),
+    dock:$('composerTerminalDock'),
     handle:$('terminalResizeHandle'),
     viewport:$('terminalViewport'),
     surface:$('terminalSurface'),
     toggle:$('btnTerminalToggle'),
     workspace:$('terminalWorkspaceLabel'),
+    dockWorkspace:$('terminalDockWorkspaceLabel'),
   };
 }
 
@@ -199,7 +202,7 @@ function _applyTerminalHeight(height){
     handle.setAttribute('aria-valuemax',String(bounds.max));
     handle.setAttribute('aria-valuenow',String(next));
   }
-  if(TERMINAL_UI.open){
+  if(TERMINAL_UI.open&&!TERMINAL_UI.collapsed){
     _fitTerminal();
     _syncTerminalTranscriptSpace(true);
   }
@@ -284,16 +287,28 @@ function _syncTerminalTranscriptSpace(open){
   const wasNearBottom=_terminalIsMessagesNearBottom(messages);
   if(!open){
     messages.classList.remove('terminal-open');
+    messages.classList.remove('terminal-collapsed');
     messages.style.removeProperty('--terminal-card-height');
+    messages.style.removeProperty('--terminal-dock-height');
     if(wasNearBottom&&typeof scrollToBottom==='function')requestAnimationFrame(scrollToBottom);
     return;
   }
-  messages.classList.add('terminal-open');
+  if(open==='collapsed'){
+    messages.classList.remove('terminal-open');
+    messages.classList.add('terminal-collapsed');
+  }else{
+    messages.classList.add('terminal-open');
+    messages.classList.remove('terminal-collapsed');
+  }
   const measure=()=>{
     if(!TERMINAL_UI.open)return;
-    const {panel,inner}= _terminalEls();
-    const h=(inner||panel)&&((inner||panel).getBoundingClientRect().height);
-    if(h>0)messages.style.setProperty('--terminal-card-height',Math.ceil(h+24)+'px');
+    const {panel,inner,dock}= _terminalEls();
+    const target=open==='collapsed'?(dock||panel):(inner||panel);
+    const h=target&&target.getBoundingClientRect().height;
+    if(h>0){
+      if(open==='collapsed')messages.style.setProperty('--terminal-dock-height',Math.ceil(h+24)+'px');
+      else messages.style.setProperty('--terminal-card-height',Math.ceil(h+24)+'px');
+    }
     if(wasNearBottom&&typeof scrollToBottom==='function')scrollToBottom();
   };
   requestAnimationFrame(measure);
@@ -303,11 +318,27 @@ function _syncTerminalTranscriptSpace(open){
 function _fitTerminal(){
   const term=TERMINAL_UI.term;
   if(!term)return;
+  if(TERMINAL_UI.collapsed)return;
   try{
     if(TERMINAL_UI.fitAddon)TERMINAL_UI.fitAddon.fit();
   }catch(_){}
   _syncTerminalTranscriptSpace(true);
   _scheduleTerminalResize();
+}
+
+function _setTerminalChromeState(state){
+  const {panel,inner,dock,workspace,dockWorkspace}= _terminalEls();
+  if(!panel)return;
+  const collapsed=state==='collapsed';
+  const expanded=state==='expanded';
+  panel.hidden=!(collapsed||expanded);
+  panel.classList.toggle('is-open',expanded);
+  panel.classList.toggle('is-collapsed',collapsed);
+  if(inner)inner.setAttribute('aria-hidden',collapsed?'true':'false');
+  if(dock)dock.hidden=!collapsed;
+  const label=_terminalWorkspaceName();
+  if(workspace)workspace.textContent=label;
+  if(dockWorkspace)dockWorkspace.textContent=label;
 }
 
 function syncTerminalButton(){
@@ -322,7 +353,7 @@ function syncTerminalButton(){
   toggle.disabled=!hasWorkspace;
   toggle.classList.toggle('active',TERMINAL_UI.open);
   toggle.setAttribute('aria-pressed',TERMINAL_UI.open?'true':'false');
-  toggle.title=hasWorkspace?t('terminal_open_title'):t('terminal_no_workspace_title');
+  toggle.title=hasWorkspace?(TERMINAL_UI.collapsed?t('terminal_expand'):t('terminal_open_title')):t('terminal_no_workspace_title');
   toggle.setAttribute('aria-label',toggle.title);
 }
 
@@ -392,19 +423,24 @@ async function _startComposerTerminal(restart=false){
 async function toggleComposerTerminal(force){
   const next=typeof force==='boolean'?force:!TERMINAL_UI.open;
   if(next){
-    const {panel,inner,workspace}= _terminalEls();
+    if(TERMINAL_UI.open){
+      if(TERMINAL_UI.collapsed)expandComposerTerminal();
+      else focusComposerTerminalInput();
+      return;
+    }
+    const {panel,inner}= _terminalEls();
     if(!panel)return;
     clearTimeout(TERMINAL_UI.closeTimer);
-    panel.hidden=false;
     _initTerminalResizeHandle();
     _resetTerminalHeightForViewport();
+    _setTerminalChromeState('expanded');
     requestAnimationFrame(()=>{
       panel.classList.add('is-open');
       window.setTimeout(_fitTerminal,80);
     });
     TERMINAL_UI.open=true;
+    TERMINAL_UI.collapsed=false;
     _syncTerminalTranscriptSpace(true);
-    if(workspace)workspace.textContent=_terminalWorkspaceName();
     syncTerminalButton();
     if(!TERMINAL_UI.resizeObserver&&window.ResizeObserver){
       TERMINAL_UI.resizeObserver=new ResizeObserver(()=>_fitTerminal());
@@ -419,6 +455,28 @@ async function toggleComposerTerminal(force){
   }else{
     await closeComposerTerminal();
   }
+}
+
+function collapseComposerTerminal(){
+  if(!TERMINAL_UI.open||TERMINAL_UI.collapsed)return;
+  TERMINAL_UI.collapsed=true;
+  _setTerminalChromeState('collapsed');
+  _syncTerminalTranscriptSpace('collapsed');
+  syncTerminalButton();
+}
+
+function expandComposerTerminal(){
+  if(!TERMINAL_UI.open)return;
+  TERMINAL_UI.collapsed=false;
+  clearTimeout(TERMINAL_UI.closeTimer);
+  _setTerminalChromeState('expanded');
+  _resetTerminalHeightForViewport();
+  _syncTerminalTranscriptSpace(true);
+  requestAnimationFrame(()=>{
+    _fitTerminal();
+    focusComposerTerminalInput();
+  });
+  syncTerminalButton();
 }
 
 function _disposeXterm(){
@@ -444,7 +502,7 @@ async function closeComposerTerminal(sessionId,opts){
   }
   const {panel}= _terminalEls();
   if(panel){
-    panel.classList.remove('is-open');
+    panel.classList.remove('is-open','is-collapsed');
     _syncTerminalTranscriptSpace(false);
     clearTimeout(TERMINAL_UI.closeTimer);
     TERMINAL_UI.closeTimer=setTimeout(()=>{
@@ -456,13 +514,14 @@ async function closeComposerTerminal(sessionId,opts){
     _disposeXterm();
   }
   TERMINAL_UI.open=false;
+  TERMINAL_UI.collapsed=false;
   TERMINAL_UI.sessionId=null;
   TERMINAL_UI.workspace=null;
   syncTerminalButton();
 }
 
 async function restartComposerTerminal(){
-  if(!TERMINAL_UI.open)return;
+  if(!TERMINAL_UI.open||TERMINAL_UI.collapsed)return;
   if(TERMINAL_UI.source){
     try{TERMINAL_UI.source.close();}catch(_){}
     TERMINAL_UI.source=null;
@@ -508,7 +567,7 @@ function _scheduleTerminalResize(){
 }
 
 async function _resizeComposerTerminal(){
-  if(!TERMINAL_UI.open)return;
+  if(!TERMINAL_UI.open||TERMINAL_UI.collapsed)return;
   const sid=TERMINAL_UI.sessionId||_terminalSessionId();
   if(!sid)return;
   const dims=_terminalDimensions();
@@ -536,6 +595,10 @@ window.addEventListener('beforeunload',()=>{
 
 window.addEventListener('resize',()=>{
   if(!TERMINAL_UI.open)return;
+  if(TERMINAL_UI.collapsed){
+    _syncTerminalTranscriptSpace('collapsed');
+    return;
+  }
   _resetTerminalHeightForViewport();
 });
 
