@@ -115,6 +115,8 @@ def test_terminal_collapsed_state_preserves_pty_and_output_surface():
     assert "composerWrap.classList.toggle('terminal-dock-visible',collapsed)" in terminal_js
     expand_block = terminal_js.split("function expandComposerTerminal", 1)[1].split("function _disposeXterm", 1)[0]
     assert "_setTerminalChromeState('expanded')" in expand_block
+    assert "_syncTerminalTranscriptSpace(true,{immediate:true});" in expand_block
+    assert expand_block.index("_syncTerminalTranscriptSpace(true,{immediate:true});") < expand_block.index("_setTerminalChromeState('expanded')")
     assert "_resetTerminalHeightForViewport();" in expand_block
     assert "focusComposerTerminalInput();" in expand_block
     close_block = terminal_js.split("async function closeComposerTerminal", 1)[1].split("async function restartComposerTerminal", 1)[0]

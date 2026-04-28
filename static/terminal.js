@@ -281,7 +281,8 @@ function _terminalIsMessagesNearBottom(el){
   return el.scrollHeight-el.scrollTop-el.clientHeight<150;
 }
 
-function _syncTerminalTranscriptSpace(open){
+function _syncTerminalTranscriptSpace(open,opts){
+  opts=opts||{};
   const messages=_terminalMessagesEl();
   if(!messages)return;
   const wasNearBottom=_terminalIsMessagesNearBottom(messages);
@@ -311,6 +312,7 @@ function _syncTerminalTranscriptSpace(open){
     }
     if(wasNearBottom&&typeof scrollToBottom==='function')scrollToBottom();
   };
+  if(opts.immediate)measure();
   requestAnimationFrame(measure);
   setTimeout(measure,420);
 }
@@ -471,9 +473,9 @@ function expandComposerTerminal(){
   if(!TERMINAL_UI.open)return;
   TERMINAL_UI.collapsed=false;
   clearTimeout(TERMINAL_UI.closeTimer);
+  _syncTerminalTranscriptSpace(true,{immediate:true});
   _setTerminalChromeState('expanded');
   _resetTerminalHeightForViewport();
-  _syncTerminalTranscriptSpace(true);
   requestAnimationFrame(()=>{
     _fitTerminal();
     focusComposerTerminalInput();
