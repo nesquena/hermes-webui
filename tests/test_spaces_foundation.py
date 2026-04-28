@@ -316,6 +316,85 @@ def test_widget_routes_upsert_list_read_and_delete(monkeypatch, tmp_path):
     assert spaces.list_widgets(space_id) == []
 
 
+def test_widget_event_queues_agent_bridge_request_without_widget_bodies_or_secret_values(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Research Harness"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "research-form",
+            "kind": "form",
+            "title": "Research Form",
+            "renderer": "<script>doNotPersistIntoEvent()</script>",
+            "html": "<button onclick=steal()>Run</button>",
+        },
+    )
+
+    queued = spaces.queue_widget_event(
+        created["space_id"],
+        "research-form",
+        "agent.prompt",
+        {
+            "query": "Summarize Claude Mythos",
+            "renderer": "<script>leak()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            "nested": {"password": "also-secret", "safe": "ok"},
+        },
+        prompt="Research this topic and update the widgets.",
+        session_id="session-123",
+    )
+
+    assert queued["queued"] is True
+    assert queued["event_id"]
+    assert queued["space_id"] == created["space_id"]
+    assert queued["widget_id"] == "research-form"
+    assert queued["event_name"] == "agent.prompt"
+    assert queued["payload_summary"]["query"] == "Summarize Claude Mythos"
+    serialized = json.dumps(queued)
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in serialized
+    assert "also-secret" not in serialized
+    assert "doNotPersistIntoEvent" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+
+    event = json.loads((spaces.events_dir() / f"{queued['event_id']}.json").read_text(encoding="utf-8"))
+    assert event["event_type"] == "widget.event.queued"
+    assert event["details"]["widget_id"] == "research-form"
+    assert event["details"]["session_id"] == "session-123"
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in json.dumps(event)
+
+
+def test_widget_event_route_validates_widget_and_returns_queued_metadata(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Route Events"})
+    spaces.upsert_widget(created["space_id"], {"id": "run", "kind": "button", "title": "Run"})
+
+    handled, status, body = _route_post(
+        "/api/spaces/widget/event",
+        {
+            "space_id": created["space_id"],
+            "widget_id": "run",
+            "event_name": "agent.prompt",
+            "prompt": "Refresh this widget",
+            "payload": {"unsafe_html": "<img src=x onerror=bad()>", "q": "weather"},
+        },
+    )
+    assert handled is None
+    assert status == 200
+    assert body["queued"] is True
+    assert body["widget_id"] == "run"
+    assert body["event_name"] == "agent.prompt"
+    assert body["payload_summary"]["q"] == "weather"
+    assert "onerror" not in json.dumps(body)
+
+    handled, status, body = _route_post(
+        "/api/spaces/widget/event",
+        {"space_id": created["space_id"], "widget_id": "missing", "event_name": "agent.prompt"},
+    )
+    assert handled is None
+    assert status == 404
+
+
 def test_active_space_context_is_compact_and_omits_widget_bodies(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space(

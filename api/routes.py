@@ -1648,6 +1648,31 @@ def handle_post(handler, parsed) -> bool:
         except FileNotFoundError:
             return bad(handler, "Widget not found", 404)
 
+    if parsed.path == "/api/spaces/widget/event":
+        from api import spaces as capy_spaces
+        space_id = body.get("space_id")
+        widget_id = body.get("widget_id")
+        if not space_id or not widget_id:
+            return bad(handler, "Missing space_id or widget_id")
+        try:
+            return j(
+                handler,
+                capy_spaces.queue_widget_event(
+                    space_id,
+                    widget_id,
+                    body.get("event_name") or "agent.prompt",
+                    body.get("payload") or {},
+                    prompt=body.get("prompt") or "",
+                    session_id=body.get("session_id") or "",
+                ),
+            )
+        except RuntimeError as e:
+            return bad(handler, str(e), 403)
+        except ValueError as e:
+            return bad(handler, str(e))
+        except FileNotFoundError:
+            return bad(handler, "Widget not found", 404)
+
     if parsed.path == "/api/spaces/activate":
         from api import spaces as capy_spaces
         space_id = body.get("space_id")

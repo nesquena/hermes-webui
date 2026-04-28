@@ -21,7 +21,23 @@ import api.config as config
 SCHEMA_VERSION = 1
 _SPACE_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 _WIDGET_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+_EVENT_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,79}$")
 _TRUTHY = {"1", "true", "yes", "on", "enabled"}
+_OMITTED_PAYLOAD_KEYS = {
+    "api_key",
+    "apikey",
+    "auth",
+    "authorization",
+    "cookie",
+    "data",
+    "html",
+    "password",
+    "renderer",
+    "script",
+    "secret",
+    "source",
+    "token",
+}
 
 
 def spaces_enabled() -> bool:
@@ -65,6 +81,13 @@ def validate_widget_id(widget_id: str) -> str:
     if not _WIDGET_ID_RE.fullmatch(wid):
         raise ValueError("Invalid widget_id")
     return wid
+
+
+def validate_event_name(event_name: str) -> str:
+    name = str(event_name or "agent.prompt").strip() or "agent.prompt"
+    if not _EVENT_NAME_RE.fullmatch(name):
+        raise ValueError("Invalid event_name")
+    return name
 
 
 def _space_dir(space_id: str) -> Path:
@@ -154,6 +177,38 @@ def _context_value(value: Any, limit: int = 500) -> str:
     if len(text) > limit:
         return text[: limit - 1].rstrip() + "…"
     return text
+
+
+def _payload_key_is_safe(key: str) -> bool:
+    lowered = str(key or "").strip().lower()
+    if not lowered:
+        return False
+    return not any(part in lowered for part in _OMITTED_PAYLOAD_KEYS)
+
+
+def _payload_summary(value: Any, depth: int = 0) -> Any:
+    """Return a bounded, metadata-safe widget event payload summary.
+
+    Widget events are the bridge toward agent-triggered UI actions, but this
+    first slice must not persist or echo generated renderer/html/script bodies
+    or obvious secret-bearing fields. Full payload delivery can be added later
+    behind explicit capability and sandbox checks.
+    """
+    if depth > 2:
+        return "[omitted]"
+    if isinstance(value, dict):
+        summary: dict[str, Any] = {}
+        for key, child in list(value.items())[:50]:
+            safe_key = _context_value(key, 80)
+            if not _payload_key_is_safe(safe_key):
+                continue
+            summary[safe_key] = _payload_summary(child, depth + 1)
+        return summary
+    if isinstance(value, list):
+        return [_payload_summary(child, depth + 1) for child in value[:20]]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return _context_value(value, 500)
+    return _context_value(type(value).__name__, 80)
 
 
 def build_agent_context(space_id: str | None) -> str:
@@ -391,6 +446,50 @@ def delete_widget(space_id: str, widget_id: str) -> dict[str, Any]:
         "space_id": saved["space_id"],
         "widget_id": wid,
         "revision_event_id": saved["revision_event_id"],
+    }
+
+
+def queue_widget_event(
+    space_id: str,
+    widget_id: str,
+    event_name: str = "agent.prompt",
+    payload: dict[str, Any] | None = None,
+    *,
+    prompt: str = "",
+    session_id: str = "",
+) -> dict[str, Any]:
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    sid = validate_space_id(space_id)
+    wid = validate_widget_id(widget_id)
+    name = validate_event_name(event_name)
+    if payload is not None and not isinstance(payload, dict):
+        raise ValueError("payload must be an object")
+    space = read_space(sid)
+    _widget_index(space, wid)
+    prompt_preview = _context_value(prompt, 1000)
+    payload_summary = _payload_summary(payload or {})
+    event_id = _record_event(
+        sid,
+        "widget.event.queued",
+        {
+            "widget_id": wid,
+            "event_name": name,
+            "prompt_preview": prompt_preview,
+            "payload_summary": payload_summary,
+            "session_id": _context_value(session_id, 120),
+            "status": "queued",
+        },
+    )
+    return {
+        "queued": True,
+        "status": "queued",
+        "space_id": sid,
+        "widget_id": wid,
+        "event_name": name,
+        "event_id": event_id,
+        "prompt_preview": prompt_preview,
+        "payload_summary": payload_summary,
     }
 
 

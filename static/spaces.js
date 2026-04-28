@@ -123,6 +123,7 @@
         '<div><strong>'+escapeHtml(title)+'</strong>' +
         '<div class="capy-spaces-muted">'+escapeHtml(kind)+' · '+escapeHtml(widgetId)+'</div></div>' +
         '<div class="capy-spaces-actions">' +
+        '<button type="button" class="capy-spaces-btn" data-capy-action="askWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-title="'+escapeHtml(title)+'">Ask Capy</button>' +
         '<button type="button" class="capy-spaces-btn" data-capy-action="editWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-title="'+escapeHtml(title)+'" data-widget-kind="'+escapeHtml(kind)+'">Edit</button>' +
         '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="deleteWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Delete</button>' +
         '</div></div>';
@@ -217,6 +218,26 @@
     if (action === 'editWidget') {
       const root = document.getElementById('capySpacesRoot');
       setWidgetForm(root, button.dataset.widgetId || '', button.dataset.widgetTitle || '', button.dataset.widgetKind || 'markdown');
+      return;
+    }
+    if (action === 'askWidget') {
+      if (typeof showPromptDialog !== 'function') return;
+      const widgetId = button.dataset.widgetId || '';
+      const widgetTitle = button.dataset.widgetTitle || widgetId;
+      const promptText = await showPromptDialog({
+        title: 'Ask Capy about this widget',
+        placeholder: 'Describe what Capy should do with '+widgetTitle,
+        confirmLabel: 'Queue event',
+      });
+      if (!promptText) return;
+      await postSpacesJson('api/spaces/widget/event', {
+        space_id: spaceId,
+        widget_id: widgetId,
+        event_name: 'agent.prompt',
+        prompt: promptText,
+        payload: {source: 'widget-manager', widget_title: widgetTitle},
+      });
+      await loadSpaceWidgets(spaceId);
       return;
     }
     if (action === 'saveWidget') {
