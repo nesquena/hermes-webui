@@ -33,6 +33,11 @@
   `tests/test_issue926_hindsight_docker_dependency.py`) Closes #926.
 
 
+## v0.50.233
+
+### Bug fixes
+- **fix(profiles): profile switch now shows correct workspace, model, and chip label immediately** — Three separate bugs caused profile switching to feel broken: (1) `switch_profile(process_wide=False)` returned the old profile's workspace because `get_last_workspace()` read from the wrong profile's directory; (2) the model dropdown showed stale results because the in-memory models cache wasn't invalidated after a switch; (3) the profile name chip in the composer stayed on the old profile name because `syncTopbar()` returned early (no session) without updating the chip. All three are now fixed. (#1200)
+- **fix(tests): stabilise `test_server_now_ms_compensates_positive_skew`** — Two consecutive `Date.now()` calls could differ by 1–2 ms under CPU load, causing the exact-equality assertion `diff === 3600000` to intermittently fail. Test now uses midpoint averaging with a ±5 ms tolerance window.
 ## v0.50.225 — 2026-04-27
 
 ### Added

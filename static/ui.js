@@ -1940,6 +1940,9 @@ function syncTopbar(){
       }
     }
     if(typeof syncAppTitlebar==='function') syncAppTitlebar();
+    // Update profile chip even when no session is active (e.g. right after profile switch)
+    const _profileLabel=$('profileChipLabel');
+    if(_profileLabel) _profileLabel.textContent=S.activeProfile||'default';
     return;
   }
   const sessionTitle=S.session.title||t('untitled');
