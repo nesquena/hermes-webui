@@ -129,6 +129,17 @@ global.fetch = async function(path, opts = {}) {
     return response({ space: { space_id: 'ops', name: 'Ops', description: '<b>Operations</b>', widget_count: 0, revision_event_id: 'rev4' } });
   }
   if (path === 'api/spaces/templates/install') {
+    const body = opts.body ? JSON.parse(opts.body) : {};
+    if (body.template === 'research') {
+      return response({
+        template: 'research',
+        space: { space_id: 'research-harness', name: 'Research Harness', description: 'Research harness starter', widget_count: 5, revision_event_id: 'rev-research' },
+        installed_widgets: [
+          { id: 'research-query', kind: 'prompt', title: 'Research query', layout: { x: 0, y: 0, w: 8, h: 4, minimized: false }, renderer: '<script>bad()</script>' },
+          { id: 'research-plan', kind: 'status', title: 'Plan', layout: { x: 8, y: 0, w: 8, h: 4, minimized: false } },
+        ],
+      });
+    }
     return response({
       template: 'weather',
       space: { space_id: 'weather-demo', name: 'Weather Demo', description: 'Prague weather starter', widget_count: 1, revision_event_id: 'rev-weather' },
@@ -196,6 +207,9 @@ async function click(action, dataset) {
   } else if (scenario === 'installWeatherDemo') {
     await window.loadCapySpaces();
     await click('installWeatherTemplate', {});
+  } else if (scenario === 'installResearchHarness') {
+    await window.loadCapySpaces();
+    await click('installResearchTemplate', {});
   } else if (scenario === 'openSpaceDetail') {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
@@ -366,6 +380,18 @@ def test_spaces_ui_install_weather_demo_posts_template_and_refreshes_without_wid
     assert "Install weather demo" in out["rootHtml"]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"template": "weather"}
+    assert out["calls"][-1]["path"] == "api/spaces"
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+
+
+def test_spaces_ui_install_research_harness_posts_template_and_refreshes_without_widget_code(driver_path):
+    out = _run_spaces_scenario(driver_path, "installResearchHarness")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/templates/install")
+
+    assert "Install research harness" in out["rootHtml"]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"template": "research"}
     assert out["calls"][-1]["path"] == "api/spaces"
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]

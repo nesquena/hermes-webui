@@ -591,6 +591,58 @@ def _weather_demo_widget() -> dict[str, Any]:
     }
 
 
+def _research_harness_widgets() -> list[dict[str, Any]]:
+    """Return safe declarative research harness widget seeds.
+
+    This starter maps the Space Agent demo's research workflow into metadata-only
+    Capy widgets: a prompt/event entry point plus plan, citations, notes, and
+    summary widgets that later agent runs can update through typed space APIs.
+    """
+    return [
+        {
+            "id": "research-query",
+            "kind": "prompt",
+            "title": "Research query",
+            "layout": {"x": 0, "y": 0, "w": 8, "h": 4, "minimized": False},
+            "event_bridge": {"event_name": "agent.prompt", "status": "ready-for-user-confirmation"},
+            "prompt": {
+                "placeholder": "Research a topic and update the harness widgets",
+                "suggested_event": "agent.prompt",
+            },
+        },
+        {
+            "id": "research-plan",
+            "kind": "status",
+            "title": "Plan",
+            "layout": {"x": 8, "y": 0, "w": 8, "h": 4, "minimized": False},
+            "status": {"phase": "ready", "message": "Waiting for a confirmed research prompt."},
+        },
+        {
+            "id": "research-sources",
+            "kind": "table",
+            "title": "Sources",
+            "layout": {"x": 16, "y": 0, "w": 8, "h": 6, "minimized": False},
+            "columns": ["title", "url", "notes"],
+            "permissions": {"network": "agent-mediated"},
+        },
+        {
+            "id": "research-notes",
+            "kind": "markdown",
+            "title": "Research notes",
+            "layout": {"x": 0, "y": 4, "w": 12, "h": 8, "minimized": False},
+            "content_status": "agent-managed-empty",
+        },
+        {
+            "id": "research-summary",
+            "kind": "markdown",
+            "title": "Summary report",
+            "layout": {"x": 12, "y": 6, "w": 12, "h": 8, "minimized": False},
+            "content_status": "agent-managed-empty",
+            "export": {"pdf": "planned"},
+        },
+    ]
+
+
 def install_template(template: str, *, space_id: str | None = None) -> dict[str, Any]:
     """Install a safe Capy Spaces demo template.
 
@@ -601,26 +653,46 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
     template_name = str(template or "").strip().lower()
-    if template_name not in {"weather", "weather-demo"}:
+    if template_name not in {"weather", "weather-demo", "research", "research-harness"}:
         raise ValueError("Unsupported template")
 
-    target_id = validate_space_id(space_id) if space_id else _unique_space_id("weather-demo")
-    if _manifest_path(target_id).exists():
-        space = read_space(target_id)
+    if template_name in {"weather", "weather-demo"}:
+        target_id = validate_space_id(space_id) if space_id else _unique_space_id("weather-demo")
+        if _manifest_path(target_id).exists():
+            space = read_space(target_id)
+        else:
+            space = create_space(
+                {
+                    "space_id": target_id,
+                    "name": "Weather Demo",
+                    "description": "Persistent Prague weather widget starter for the Space Agent demo parity path.",
+                    "agent_instructions": "Keep the weather widget declarative. Use typed Capy space APIs for updates and preserve revision history.",
+                    "template": "weather-demo",
+                }
+            )
+        widgets = [_weather_demo_widget()]
+        response_template = "weather"
     else:
-        space = create_space(
-            {
-                "space_id": target_id,
-                "name": "Weather Demo",
-                "description": "Persistent Prague weather widget starter for the Space Agent demo parity path.",
-                "agent_instructions": "Keep the weather widget declarative. Use typed Capy space APIs for updates and preserve revision history.",
-                "template": "weather-demo",
-            }
-        )
+        target_id = validate_space_id(space_id) if space_id else _unique_space_id("research-harness")
+        if _manifest_path(target_id).exists():
+            space = read_space(target_id)
+        else:
+            space = create_space(
+                {
+                    "space_id": target_id,
+                    "name": "Research Harness",
+                    "description": "Metadata-only starter for the Space Agent research workflow: prompt, plan, citations, notes, and summary.",
+                    "agent_instructions": "Use widget-to-agent events for confirmed prompts. Update research widgets through typed Capy space APIs, cite sources, and preserve revision history.",
+                    "template": "research-harness",
+                }
+            )
+        widgets = _research_harness_widgets()
+        response_template = "research"
 
-    upsert_widget(space["space_id"], _weather_demo_widget())
+    for widget in widgets:
+        upsert_widget(space["space_id"], widget)
     return {
-        "template": "weather",
+        "template": response_template,
         "space": read_space_detail(space["space_id"]),
         "installed_widgets": list_widgets(space["space_id"]),
     }
