@@ -206,6 +206,18 @@ def _widget_summary(widget: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _widget_recovery_summary(widget: dict[str, Any]) -> dict[str, Any]:
+    clean_widget = _normalize_widget(widget)
+    recovery = widget.get("recovery") if isinstance(widget.get("recovery"), dict) else {}
+    return {
+        "id": clean_widget["id"],
+        "kind": clean_widget["kind"],
+        "title": clean_widget["title"],
+        "disabled": bool(recovery.get("disabled")),
+        "disabled_reason": _context_value(recovery.get("disabled_reason"), 300),
+    }
+
+
 def _context_value(value: Any, limit: int = 500) -> str:
     """Return a single-line value safe for compact agent context."""
     text = re.sub(r"\s+", " ", str(value or "")).strip()
@@ -557,6 +569,37 @@ def delete_widget(space_id: str, widget_id: str) -> dict[str, Any]:
     }
 
 
+def disable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = "") -> dict[str, Any]:
+    """Mark a widget disabled from safe recovery without deleting its source.
+
+    The normal widget manifest keeps renderer/data for later repair or rollback,
+    while recovery/list APIs expose only safe metadata. This gives the recovery
+    panel an escape hatch for broken generated widgets without losing the
+    evidence needed to fix them.
+    """
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    wid = validate_widget_id(widget_id)
+    space = read_space(space_id)
+    idx = _widget_index(space, wid)
+    widgets = list(space.get("widgets") or [])
+    widget = dict(widgets[idx])
+    recovery = widget.get("recovery") if isinstance(widget.get("recovery"), dict) else {}
+    recovery = dict(recovery)
+    recovery["disabled"] = True
+    recovery["disabled_reason"] = _context_value(reason or "disabled from recovery", 300)
+    widget["recovery"] = recovery
+    widgets[idx] = widget
+    space["widgets"] = widgets
+    saved = _write_manifest(space, "widget.recovery_disabled", {"widget_id": wid, "reason": recovery["disabled_reason"]})
+    return {
+        "disabled": True,
+        "space_id": saved["space_id"],
+        "widget_id": wid,
+        "revision_event_id": saved["revision_event_id"],
+    }
+
+
 def queue_widget_event(
     space_id: str,
     widget_id: str,
@@ -606,9 +649,20 @@ def recovery_snapshot() -> dict[str, Any]:
     if not spaces_enabled():
         return {"enabled": False, "generated_widgets_rendered": False, "spaces": []}
     _ensure_dirs()
+    spaces: list[dict[str, Any]] = []
+    for manifest in manifests_dir().glob("*/space.json"):
+        try:
+            space = json.loads(manifest.read_text(encoding="utf-8"))
+            summary = _summary(space)
+            widgets = space.get("widgets") if isinstance(space.get("widgets"), list) else []
+            summary["widgets"] = [_widget_recovery_summary(widget) for widget in widgets if isinstance(widget, dict)]
+            spaces.append(summary)
+        except Exception:
+            continue
+    spaces.sort(key=lambda s: s.get("updated_at") or 0, reverse=True)
     return {
         "enabled": True,
         "schema_version": SCHEMA_VERSION,
         "generated_widgets_rendered": False,
-        "spaces": list_spaces(),
+        "spaces": spaces,
     }
