@@ -4056,7 +4056,7 @@ const LOCALES = {
     cron_status_paused: 'paused',
     cron_status_error: 'error',
     cron_status_active: 'active',
-    cron_status_running: 'running\u2026',
+    cron_status_running: '\uc2e4\ud589 \uc911\u2026',
     cron_status_needs_attention: '주의 필요',
     cron_attention_desc: '이 반복 작업에 다음 실행 시간이 없습니다. 스케줄러가 다음 실행을 계산하지 못했을 수 있습니다.',
     cron_attention_croniter_hint: 'Gateway 런타임에 croniter 패키지가 없을 수 있습니다. cron 지원이 포함된 환경으로 Gateway를 재시작한 후 이 작업을 재개하세요.',

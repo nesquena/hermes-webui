@@ -17,6 +17,38 @@ from urllib.parse import parse_qs
 
 logger = logging.getLogger(__name__)
 
+# ── Cron run tracking ────────────────────────────────────────────────────────
+# Track job IDs currently being executed so the frontend can poll status.
+_RUNNING_CRON_JOBS: dict[str, float] = {}  # job_id → start_timestamp
+_RUNNING_CRON_LOCK = threading.Lock()
+
+
+def _mark_cron_running(job_id: str):
+    with _RUNNING_CRON_LOCK:
+        _RUNNING_CRON_JOBS[job_id] = time.time()
+
+
+def _mark_cron_done(job_id: str):
+    with _RUNNING_CRON_LOCK:
+        _RUNNING_CRON_JOBS.pop(job_id, None)
+
+
+def _is_cron_running(job_id: str) -> tuple[bool, float]:
+    """Return (is_running, elapsed_seconds)."""
+    with _RUNNING_CRON_LOCK:
+        t = _RUNNING_CRON_JOBS.get(job_id)
+        if t is None:
+            return False, 0.0
+        return True, time.time() - t
+
+
+def _run_cron_tracked(job):
+    """Wrapper that tracks running state around cron.scheduler.run_job."""
+    try:
+        run_job(job)
+    finally:
+        _mark_cron_done(job.get("id", ""))
+
 _PROVIDER_ALIASES = {
     "claude": "anthropic",
     "gpt": "openai",
@@ -1113,6 +1145,9 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/crons/recent":
         return _handle_cron_recent(handler, parsed)
+
+    if parsed.path == "/api/crons/status":
+        return _handle_cron_status(handler, parsed)
 
     # ── Skills API (GET) ──
     if parsed.path == "/api/skills":
@@ -2637,6 +2672,19 @@ def _handle_cron_output(handler, parsed):
     return j(handler, {"job_id": job_id, "outputs": outputs})
 
 
+def _handle_cron_status(handler, parsed):
+    """Return running status for one or all cron jobs."""
+    qs = parse_qs(parsed.query)
+    job_id = qs.get("job_id", [""])[0]
+    if job_id:
+        running, elapsed = _is_cron_running(job_id)
+        return j(handler, {"job_id": job_id, "running": running, "elapsed": round(elapsed, 1)})
+    # Return status for all running jobs
+    with _RUNNING_CRON_LOCK:
+        all_running = {jid: round(time.time() - t, 1) for jid, t in _RUNNING_CRON_JOBS.items()}
+    return j(handler, {"running": all_running})
+
+
 def _handle_cron_recent(handler, parsed):
     """Return cron jobs that have completed since a given timestamp."""
     import datetime
@@ -3111,8 +3159,9 @@ def _handle_cron_run(handler, body):
     job = get_job(job_id)
     if not job:
         return bad(handler, "Job not found", 404)
-    threading.Thread(target=run_job, args=(job,), daemon=True).start()
-    return j(handler, {"ok": True, "job_id": job_id, "status": "triggered"})
+    _mark_cron_running(job_id)
+    threading.Thread(target=_run_cron_tracked, args=(job,), daemon=True).start()
+    return j(handler, {"ok": True, "job_id": job_id, "status": "running"})
 
 
 def _handle_cron_pause(handler, body):

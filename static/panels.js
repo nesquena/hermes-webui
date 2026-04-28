@@ -429,7 +429,9 @@ function openCronDetail(id, el){
   if (dot) dot.remove();
   _cronPreFormDetail = null;
   _editingCronId = null;
+  _stopCronWatch();
   _renderCronDetail(job);
+  _checkCronWatchOnDetail(id);
 }
 
 function _clearCronDetail(){
@@ -670,11 +672,83 @@ function _cronOutputSnippet(content) {
   return body.slice(0, 600) || '(empty)';
 }
 
+// ── Cron run watch ────────────────────────────────────────────────────────────
+let _cronWatchInterval = null;
+let _cronWatchStart = null;
+let _cronWatchTimerInterval = null;
+
+function _startCronWatch(jobId) {
+  _stopCronWatch();
+  _cronWatchStart = Date.now();
+  _cronWatchInterval = setInterval(async () => {
+    try {
+      const data = await api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}`);
+      if (!data.running) {
+        _stopCronWatch();
+        if (_currentCronDetail && _currentCronDetail.id === jobId) {
+          _loadCronDetailRuns(jobId);
+        }
+        return;
+      }
+      // Still running — update elapsed
+      if (_currentCronDetail && _currentCronDetail.id === jobId) {
+        const el = $('cronRunningIndicator');
+        if (el) el.querySelector('.cron-watch-elapsed').textContent = _formatElapsed(data.elapsed);
+      }
+    } catch(e) { /* ignore poll errors */ }
+  }, 3000);
+  // Timer update every second
+  _cronWatchTimerInterval = setInterval(() => {
+    if (_currentCronDetail && _cronWatchStart) {
+      const el = $('cronRunningIndicator');
+      if (el) el.querySelector('.cron-watch-elapsed').textContent = _formatElapsed((Date.now() - _cronWatchStart) / 1000);
+    }
+  }, 1000);
+  // Inject running indicator into detail card
+  if (_currentCronDetail && _currentCronDetail.id === jobId) {
+    _injectRunningIndicator();
+  }
+}
+
+function _stopCronWatch() {
+  if (_cronWatchInterval) { clearInterval(_cronWatchInterval); _cronWatchInterval = null; }
+  if (_cronWatchTimerInterval) { clearInterval(_cronWatchTimerInterval); _cronWatchTimerInterval = null; }
+  _cronWatchStart = null;
+  const el = $('cronRunningIndicator');
+  if (el) el.remove();
+}
+
+function _injectRunningIndicator() {
+  const card = $('cronDetailRuns');
+  if (!card || $('cronRunningIndicator')) return;
+  const div = document.createElement('div');
+  div.id = 'cronRunningIndicator';
+  div.className = 'cron-running-indicator';
+  div.innerHTML = `<span class="cron-watch-spinner"></span><span>${esc(t('cron_status_running'))}</span><span class="cron-watch-elapsed">0s</span>`;
+  card.insertAdjacentElement('beforebegin', div);
+}
+
+function _formatElapsed(seconds) {
+  if (seconds < 60) return Math.round(seconds) + 's';
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  return m + 'm ' + s + 's';
+}
+
+function _checkCronWatchOnDetail(jobId) {
+  // When opening a detail view, check if job is running
+  api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}`).then(data => {
+    if (data.running && _currentCronDetail && _currentCronDetail.id === jobId) {
+      _startCronWatch(jobId);
+    }
+  }).catch(() => {});
+}
+
 async function cronRun(id) {
   try {
     await api('/api/crons/run', {method:'POST', body: JSON.stringify({job_id: id})});
     showToast(t('cron_job_triggered'));
-    setTimeout(() => { if (_currentCronDetail && _currentCronDetail.id === id) _loadCronDetailRuns(id); }, 5000);
+    _startCronWatch(id);
   } catch(e) { showToast(t('failed_colon') + e.message, 4000); }
 }
 
