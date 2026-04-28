@@ -778,13 +778,41 @@ function _serverNowMs() {
 
 function _serverTzOptions() {
   // Build a timeZone option from _serverTz (e.g. "+0800" → "Etc/GMT-8").
-  // Falls back to undefined (uses browser timezone) if _serverTz is not set.
+  // Falls back to undefined (uses browser timezone) when:
+  //   - _serverTz is not set or is UTC (no offset to apply)
+  //   - _serverTz is malformed
+  //   - _serverTz has a fractional-hour component (India +0530, Iran +0330,
+  //     Newfoundland -0330, Nepal +0545, etc.) — IANA Etc/GMT zones cannot
+  //     express half/quarter-hour offsets; use _formatInServerTz() instead
+  //     for correct fractional-offset formatting.
   if (!_serverTz || _serverTz === '+0000' || _serverTz === '-0000') return undefined;
   const m = _serverTz.match(/^([+-])(\d{2})(\d{2})$/);
   if (!m) return undefined;
+  if (m[3] !== '00') return undefined;  // fractional offset — caller must use _formatInServerTz
   // IANA Etc/GMT uses inverted sign: UTC+8 → "Etc/GMT-8"
   const sign = m[1] === '+' ? '-' : '+';
   return { timeZone: `Etc/GMT${sign}${parseInt(m[2])}` };
+}
+
+function _formatInServerTz(date, options) {
+  // Format `date` in the server's wall-clock timezone, including correct
+  // handling of fractional-hour offsets that Etc/GMT cannot express.
+  //
+  // Strategy: shift the timestamp by the server's offset, then format with
+  // timeZone:'UTC' so no further conversion is applied — the formatted
+  // output reads as the wall-clock time in the server's timezone.
+  //
+  // Falls back to plain `date.toLocaleString(undefined, options)` (browser
+  // timezone) when _serverTz is absent, UTC, or malformed.
+  if (!_serverTz || _serverTz === '+0000' || _serverTz === '-0000') {
+    return date.toLocaleString(undefined, options);
+  }
+  const m = _serverTz.match(/^([+-])(\d{2})(\d{2})$/);
+  if (!m) return date.toLocaleString(undefined, options);
+  const sign = m[1] === '+' ? 1 : -1;
+  const offsetMin = sign * (parseInt(m[2]) * 60 + parseInt(m[3]));
+  const adjusted = new Date(date.getTime() + offsetMin * 60 * 1000);
+  return adjusted.toLocaleString(undefined, { ...options, timeZone: 'UTC' });
 }
 
 function _localDayOrdinal(timestampMs) {

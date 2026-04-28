@@ -2169,17 +2169,16 @@ function _formatMessageFooterTimestamp(tsVal){
   if(!tsVal) return '';
   const date=new Date(tsVal*1000);
   const now=new Date();
-  const tzOpts=(typeof _serverTzOptions==='function')?_serverTzOptions():undefined;
+  // Use _formatInServerTz when available — it correctly handles fractional-hour
+  // offsets like India +0530 that Etc/GMT cannot express. Falls back to plain
+  // toLocaleString when sessions.js hasn't loaded yet.
+  const fmt=(typeof _formatInServerTz==='function')?_formatInServerTz:null;
   if(_isSameLocalDay(date, now)){
-    return date.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', ...tzOpts});
+    const opts={hour:'2-digit', minute:'2-digit'};
+    return fmt?fmt(date,opts):date.toLocaleTimeString([], opts);
   }
-  return date.toLocaleString([], {
-    month:'short',
-    day:'numeric',
-    hour:'numeric',
-    minute:'2-digit',
-    ...tzOpts,
-  });
+  const opts={month:'short', day:'numeric', hour:'numeric', minute:'2-digit'};
+  return fmt?fmt(date,opts):date.toLocaleString([], opts);
 }
 function _compressionStatusCardHtml({
   statusLabel,
@@ -2384,8 +2383,10 @@ function renderMessages(){
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
     const tsVal=m._ts||m.timestamp;
-    const _tzo=(typeof _serverTzOptions==='function')?_serverTzOptions():undefined;
-    const tsTitle=tsVal?new Date(tsVal*1000).toLocaleString([],_tzo):'';
+    // _formatInServerTz handles fractional-hour offsets (India +0530 etc.)
+    // correctly via offset arithmetic; bare toLocaleString is the browser-tz fallback.
+    const _fmtSv=(typeof _formatInServerTz==='function')?_formatInServerTz:null;
+    const tsTitle=tsVal?(_fmtSv?_fmtSv(new Date(tsVal*1000),{}):new Date(tsVal*1000).toLocaleString()):'';
     const tsTime=_formatMessageFooterTimestamp(tsVal);
     const timeHtml = tsTime ? `<span class="msg-time" title="${esc(tsTitle)}">${tsTime}</span>` : '';
     const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${copyBtn}${retryBtn}</span></div>`;
