@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### Added
-- **Embedded workspace terminal prototype** — composer now has a terminal toggle next to the workspace control. It opens a compact terminal panel bound to the current session workspace, with live output, command input, resize, restart, clear, copy output, and close actions. Backend terminal processes use explicit per-process `cwd`/`env` and do not mutate global `os.environ`. (`api/terminal.py`, `api/routes.py`, `static/index.html`, `static/terminal.js`, `static/style.css`, `static/i18n.js`)
+- **Embedded workspace terminal prototype** — `/terminal` opens a compact utility card tucked behind the composer, following the approval-card layering pattern instead of adding a permanent composer icon or full-width dock. The terminal stays bound to the current session workspace with live output, command input, resize, restart, clear, copy output, and close actions. Backend terminal processes use explicit per-process `cwd`/`env` and do not mutate global `os.environ`. (`api/terminal.py`, `api/routes.py`, `static/index.html`, `static/terminal.js`, `static/commands.js`, `static/style.css`, `static/i18n.js`)
 
 ### Fixed
 - **Auto-title generic fallback** — when the auxiliary title-generation call

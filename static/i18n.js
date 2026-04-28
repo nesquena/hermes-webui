@@ -72,6 +72,7 @@ const LOCALES = {
     cmd_compact_alias: 'Legacy alias for /compress',
     cmd_model: 'Switch model (e.g. /model gpt-4o)',
     cmd_workspace: 'Switch workspace by name',
+    cmd_terminal: 'Open the workspace terminal',
     cmd_new: 'Start a new chat session',
     cmd_usage: 'Toggle token usage display on/off',
     cmd_theme: 'Switch appearance (theme: system/dark/light, skin: default/ares/mono/slate/poseidon/sisyphus/charizard)',

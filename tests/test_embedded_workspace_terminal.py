@@ -9,16 +9,36 @@ def _read(path: str) -> str:
     return (REPO_ROOT / path).read_text(encoding="utf-8")
 
 
-def test_composer_has_workspace_terminal_entrypoint():
+def test_terminal_is_opened_by_slash_command_not_permanent_composer_icon():
     html = _read("static/index.html")
+    commands_js = _read("static/commands.js")
     sw = _read("static/sw.js")
-    assert 'id="btnTerminalToggle"' in html
+    assert 'id="btnTerminalToggle"' not in html
+    assert "name:'terminal'" in commands_js
+    assert "fn:cmdTerminal" in commands_js
+    assert "api('/api/workspaces')" in commands_js
+    assert "await newSession()" in commands_js
+    assert "toggleComposerTerminal(true)" in commands_js
     assert 'id="terminalViewport"' in html
     assert 'id="terminalSurface"' in html
-    assert 'onclick="toggleComposerTerminal()"' in html
     assert 'static/terminal.js' in html
     assert './static/terminal.js' in sw
     assert "xterm@5.3.0" in html
+
+
+def test_terminal_surface_uses_composer_flyout_card_pattern():
+    html = _read("static/index.html")
+    style_css = _read("static/style.css")
+
+    flyout = html.split('<div class="composer-flyout">', 1)[1].split('<div class="queue-pill-outer">', 1)[0]
+    assert 'id="composerTerminalPanel"' in flyout
+    assert 'class="composer-terminal-inner"' in flyout
+    assert 'id="composerTerminalPanel"' not in html.split('<div class="queue-pill-outer">', 1)[1]
+    assert ".composer-terminal-panel{position:absolute" in style_css
+    assert "bottom:-24px" in style_css
+    assert "width:min(calc(100% - 64px),720px)" in style_css
+    assert ".composer-terminal-inner{height:260px" in style_css
+    assert "transform:translateY(100%)" in style_css
 
 
 def test_terminal_v1_does_not_expose_send_to_chat_action():

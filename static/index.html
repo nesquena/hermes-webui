@@ -311,6 +311,26 @@
           <div class="clarify-hint" id="clarifyHint" data-i18n="clarify_hint">Pick a choice, or type your own answer below.</div>
         </div>
       </div>
+      <div class="composer-terminal-panel" id="composerTerminalPanel" hidden>
+        <div class="composer-terminal-inner">
+          <div class="composer-terminal-header">
+            <div class="composer-terminal-title">
+              <span data-i18n="terminal_title">Terminal</span>
+              <span class="composer-terminal-dot" aria-hidden="true">·</span>
+              <span id="terminalWorkspaceLabel"></span>
+            </div>
+            <div class="composer-terminal-actions">
+              <button type="button" class="composer-terminal-action" id="btnTerminalClear" onclick="clearComposerTerminal()" data-i18n="terminal_clear">Clear</button>
+              <button type="button" class="composer-terminal-action" id="btnTerminalCopy" onclick="copyComposerTerminalOutput()" data-i18n="terminal_copy_output">Copy output</button>
+              <button type="button" class="composer-terminal-action" id="btnTerminalRestart" onclick="restartComposerTerminal()" data-i18n="terminal_restart">Restart</button>
+              <button type="button" class="composer-terminal-action" id="btnTerminalClose" onclick="closeComposerTerminal()" data-i18n="terminal_close">Close</button>
+            </div>
+          </div>
+          <div class="composer-terminal-viewport" id="terminalViewport" onclick="focusComposerTerminalInput()">
+            <div class="composer-terminal-surface" id="terminalSurface" aria-label="Workspace terminal"></div>
+          </div>
+        </div>
+      </div>
       </div>
       <!-- Queue pill outer: same positioning wrapper as .queue-card (max-width + padding) -->
       <div class="queue-pill-outer">
@@ -353,9 +373,6 @@
             </div>
             <div class="composer-ws-wrap">
               <div class="composer-workspace-group ws-chip" id="composerWorkspaceGroup" role="group" aria-label="Workspace controls">
-                <button class="composer-workspace-terminal-btn" id="btnTerminalToggle" type="button" onclick="toggleComposerTerminal()" title="Open workspace terminal" data-i18n-title="terminal_open_title" aria-pressed="false" aria-label="Open workspace terminal">
-                  <span class="composer-workspace-icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></span>
-                </button>
                 <button class="composer-workspace-files-btn" id="btnWorkspacePanelToggle" type="button" onclick="toggleWorkspacePanel()" title="Show workspace panel" aria-pressed="false" aria-label="Toggle workspace files panel">
                   <span class="composer-workspace-icon" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span>
                 </button>
@@ -440,24 +457,6 @@
           <div class="model-dropdown" id="composerModelDropdown"></div>
         </div>
         <div class="upload-bar-wrap" id="uploadBarWrap"><div class="upload-bar" id="uploadBar"></div></div>
-      </div>
-      <div class="composer-terminal-panel" id="composerTerminalPanel" hidden>
-        <div class="composer-terminal-header">
-          <div class="composer-terminal-title">
-            <span data-i18n="terminal_title">Terminal</span>
-            <span class="composer-terminal-dot" aria-hidden="true">·</span>
-            <span id="terminalWorkspaceLabel"></span>
-          </div>
-          <div class="composer-terminal-actions">
-            <button type="button" class="composer-terminal-action" id="btnTerminalClear" onclick="clearComposerTerminal()" data-i18n="terminal_clear">Clear</button>
-            <button type="button" class="composer-terminal-action" id="btnTerminalCopy" onclick="copyComposerTerminalOutput()" data-i18n="terminal_copy_output">Copy output</button>
-            <button type="button" class="composer-terminal-action" id="btnTerminalRestart" onclick="restartComposerTerminal()" data-i18n="terminal_restart">Restart</button>
-            <button type="button" class="composer-terminal-action" id="btnTerminalClose" onclick="closeComposerTerminal()" data-i18n="terminal_close">Close</button>
-          </div>
-        </div>
-        <div class="composer-terminal-viewport" id="terminalViewport" onclick="focusComposerTerminalInput()">
-          <div class="composer-terminal-surface" id="terminalSurface" aria-label="Workspace terminal"></div>
-        </div>
       </div>
     </div>
     </div><!-- /#mainChat -->

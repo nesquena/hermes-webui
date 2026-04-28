@@ -14,6 +14,7 @@ const TERMINAL_UI={
 function _terminalEls(){
   return {
     panel:$('composerTerminalPanel'),
+    inner:$('composerTerminalPanel')&&$('composerTerminalPanel').querySelector('.composer-terminal-inner'),
     viewport:$('terminalViewport'),
     surface:$('terminalSurface'),
     toggle:$('btnTerminalToggle'),
@@ -166,12 +167,12 @@ function _fitTerminal(){
 
 function syncTerminalButton(){
   const {toggle}= _terminalEls();
-  if(!toggle)return;
   const currentSid=_terminalSessionId();
   const currentWorkspace=S.session&&S.session.workspace;
   if(TERMINAL_UI.open&&TERMINAL_UI.sessionId&&(currentSid!==TERMINAL_UI.sessionId||currentWorkspace!==TERMINAL_UI.workspace)){
     closeComposerTerminal(TERMINAL_UI.sessionId);
   }
+  if(!toggle)return;
   const hasWorkspace=!!(S.session&&S.session.workspace);
   toggle.disabled=!hasWorkspace;
   toggle.classList.toggle('active',TERMINAL_UI.open);
@@ -246,7 +247,7 @@ async function _startComposerTerminal(restart=false){
 async function toggleComposerTerminal(force){
   const next=typeof force==='boolean'?force:!TERMINAL_UI.open;
   if(next){
-    const {panel,workspace}= _terminalEls();
+    const {panel,inner,workspace}= _terminalEls();
     if(!panel)return;
     clearTimeout(TERMINAL_UI.closeTimer);
     panel.hidden=false;
@@ -259,7 +260,7 @@ async function toggleComposerTerminal(force){
     syncTerminalButton();
     if(!TERMINAL_UI.resizeObserver&&window.ResizeObserver){
       TERMINAL_UI.resizeObserver=new ResizeObserver(()=>_fitTerminal());
-      TERMINAL_UI.resizeObserver.observe(panel);
+      TERMINAL_UI.resizeObserver.observe(inner||panel);
     }
     try{
       await _startComposerTerminal(false);

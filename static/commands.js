@@ -11,6 +11,7 @@ const COMMANDS=[
   {name:'compact',   desc:t('cmd_compact_alias'),       fn:cmdCompact, noEcho:true},
   {name:'model',     desc:t('cmd_model'),  fn:cmdModel,     arg:'model_name', subArgs:'models', noEcho:true},
   {name:'workspace', desc:t('cmd_workspace'),            fn:cmdWorkspace, arg:'name',           noEcho:true},
+  {name:'terminal',  desc:t('cmd_terminal'),             fn:cmdTerminal,                        noEcho:true},
   {name:'new',       desc:t('cmd_new'),            fn:cmdNew,       noEcho:true},
   {name:'usage',     desc:t('cmd_usage'),   fn:cmdUsage,     noEcho:true},
   {name:'theme',     desc:t('cmd_theme'), fn:cmdTheme, arg:'name',  noEcho:true},
@@ -260,6 +261,26 @@ async function cmdWorkspace(args){
     if(typeof switchToWorkspace==='function') await switchToWorkspace(ws.path, ws.name||ws.path);
     else showToast(t('switched_workspace')+(ws.name||ws.path));
   }catch(e){showToast(t('workspace_switch_failed')+e.message);}
+}
+
+async function cmdTerminal(){
+  if(!S.session&&typeof newSession==='function'){
+    if(!S._profileSwitchWorkspace&&!S._profileDefaultWorkspace){
+      try{
+        const data=await api('/api/workspaces');
+        const first=(data.workspaces||[])[0];
+        S._profileSwitchWorkspace=data.last||(first&&first.path)||null;
+      }catch(_){}
+    }
+    await newSession();
+    if(typeof renderSessionList==='function') await renderSessionList();
+  }
+  if(!S.session||!S.session.workspace){
+    showToast(t('terminal_no_workspace_title'),2600,'warning');
+    if(typeof syncTerminalButton==='function') syncTerminalButton();
+    return;
+  }
+  if(typeof toggleComposerTerminal==='function') await toggleComposerTerminal(true);
 }
 
 async function cmdNew(){
