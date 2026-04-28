@@ -1193,6 +1193,25 @@ function _composerHasContent(){
   return !!((msg&&msg.value.trim().length>0)||S.pendingFiles.length>0);
 }
 
+function _getExplicitBusyCommandAction(text){
+  const trimmed=(text||'').trim();
+  if(!trimmed.startsWith('/')) return null;
+  const body=trimmed.slice(1);
+  const name=(body.split(/\s+/)[0]||'').toLowerCase();
+  const args=body.slice(name.length).trim();
+  if(!args) return null;
+  if(name==='queue') return 'queue';
+  if(name==='steer'){
+    if(S.activeStreamId&&typeof _trySteer==='function') return 'steer';
+    return 'queue';
+  }
+  if(name==='interrupt'){
+    if(S.activeStreamId&&typeof cancelStream==='function') return 'interrupt';
+    return 'queue';
+  }
+  return null;
+}
+
 function getComposerPrimaryAction(){
   const msg=$('msg');
   const hasContent=_composerHasContent();
@@ -1205,6 +1224,8 @@ function getComposerPrimaryAction(){
     if(S.activeStreamId&&typeof cancelStream==='function') return 'stop';
     return 'disabled';
   }
+  const explicitAction=_getExplicitBusyCommandAction(msg&&msg.value);
+  if(explicitAction) return explicitAction;
   const busyMode=window._busyInputMode||'queue';
   if(busyMode==='steer'){
     if(S.activeStreamId&&typeof _trySteer==='function') return 'steer';

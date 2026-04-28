@@ -178,6 +178,26 @@ class TestBusySendButton:
         assert "return 'interrupt'" in body, "interrupt mode with an active stream must map to interrupt"
         assert "return 'steer'" in body, "steer mode with active stream support must map to steer"
         assert "window._busyInputMode||'queue'" in body, "helper must respect the Busy input mode setting"
+        assert "_getExplicitBusyCommandAction(msg&&msg.value)" in body, (
+            "explicit /queue, /interrupt, and /steer drafts must override the Busy input mode for button visuals"
+        )
+
+    def test_explicit_busy_commands_override_button_visual_action(self):
+        idx = UI_JS.find("function _getExplicitBusyCommandAction(")
+        assert idx >= 0, "_getExplicitBusyCommandAction() not found"
+        body = UI_JS[idx:UI_JS.find("function getComposerPrimaryAction", idx)]
+        assert "name==='queue'" in body and "return 'queue'" in body, (
+            "typing /queue <message> should show the queue/list-end button even in another busy mode"
+        )
+        assert "name==='steer'" in body and "return 'steer'" in body, (
+            "typing /steer <message> should show the steer/compass button even when the global mode is queue"
+        )
+        assert "name==='interrupt'" in body and "return 'interrupt'" in body, (
+            "typing /interrupt <message> should show the interrupt/skip-forward button even in another busy mode"
+        )
+        assert "if(!args) return null" in body, (
+            "partial slash commands without a payload should not override the primary button while the user is still typing"
+        )
 
     def test_send_button_click_uses_primary_action_handler(self):
         assert "function handleComposerPrimaryAction()" in UI_JS, (
