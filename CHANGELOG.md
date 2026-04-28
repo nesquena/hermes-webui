@@ -79,10 +79,16 @@
   `resolve_trusted_workspace` and `validate_workspace_to_add` now correctly trusts any
   path under `Path.home()` regardless of where the home directory lives on disk.
   (`api/workspace.py`) (by @frap129, PR #1199)
-## v0.50.234
+## v0.50.236
 
 ### Bug fixes
 - **fix(providers): OAuth provider cards now show "Configured" badge when token is via config.yaml** — `get_providers()` was unconditionally overwriting `has_key=True` (from `_provider_has_key()`) with `has_key=False` when `get_auth_status()` returned `logged_in=False`, discarding valid working tokens in `config.yaml`. Also: the Settings panel was filtering out all OAuth providers entirely (`filter(p=>p.configurable)` — OAuth providers always have `configurable=False`). Fixes surfaced the actionable auth error string (e.g. "refresh token consumed by Codex CLI") in the provider card body. (#1202)
+
+### Improvements
+- **ux(profiles): profile chip shows spinner and name immediately when switching** — The profile chip now gives instant visual feedback on click: the new profile name appears immediately (optimistic update), a small spinner appears on the icon, and the button is disabled to prevent double-clicks. All are cleaned up in a `finally` block so the UI never gets stuck in a loading state. On error, the chip reverts to the previous name. Additionally, the model dropdown fetch and workspace list fetch are now parallelized (`Promise.all`) instead of sequential, cutting switch time roughly in half.
+
+### Features
+- **feat: YOLO mode toggle** — `/yolo` slash command and "Skip all this session" button on approval cards. Enables session-scoped approval bypass. ⚡ amber pill in composer footer shows YOLO is active. (by @bergeouss, PR #1152, closes #467)
 ## v0.50.225 — 2026-04-27
 
 ### Added

@@ -2011,6 +2011,16 @@ window.addEventListener('resize',()=>{
 async function switchToProfile(name) {
   if (S.busy) { showToast(t('profiles_busy_switch')); return; }
 
+  // ── Loading indicator ───────────────────────────────────────────────────
+  // Show spinner on the profile chip immediately so the user gets visual
+  // feedback while the async switch is in progress.
+  const _chip = $('profileChip');
+  const _chipLabel = $('profileChipLabel');
+  const _prevProfileName = S.activeProfile || 'default';
+  if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
+  // Optimistic name update — shows the target name right away
+  if (_chipLabel) _chipLabel.textContent = name;
+
   // Determine whether the current session has any messages.
   // A session with messages is "in progress" and belongs to the current profile —
   // we must not retag it.  We'll start a fresh session for the new profile instead.
@@ -2020,10 +2030,15 @@ async function switchToProfile(name) {
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }) });
     S.activeProfile = data.active || name;
 
-    // ── Model ──────────────────────────────────────────────────────────────
+    // ── Model + Workspace (parallelized) ───────────────────────────────────
+    // populateModelDropdown hits /api/models; loadWorkspaceList hits /api/workspaces.
+    // They are fully independent — run both simultaneously to cut switch time ~50%.
     localStorage.removeItem('hermes-webui-model');
     _skillsData = null;
-    await populateModelDropdown();
+    _workspaceList = null;
+    await Promise.all([populateModelDropdown(), loadWorkspaceList()]);
+
+    // ── Apply model ────────────────────────────────────────────────────────
     if (data.default_model) {
       const sel = $('modelSelect');
       const resolved = _applyModelToDropdown(data.default_model, sel);
@@ -2035,9 +2050,7 @@ async function switchToProfile(name) {
       }
     }
 
-    // ── Workspace ──────────────────────────────────────────────────────────
-    _workspaceList = null;
-    await loadWorkspaceList();
+    // ── Apply workspace ────────────────────────────────────────────────────
     if (data.default_workspace) {
       // Always store the persistent profile default — used for blank-page display
       // and workspace auto-bind throughout the session lifecycle (#804, #823).
@@ -2099,7 +2112,14 @@ async function switchToProfile(name) {
     // Update composer placeholder and title bar to reflect profile name
     if (typeof applyBotName === 'function') applyBotName();
 
-  } catch (e) { showToast(t('switch_failed') + e.message); }
+  } catch (e) {
+    // Revert the optimistic name update on error
+    if (_chipLabel) _chipLabel.textContent = _prevProfileName;
+    showToast(t('switch_failed') + e.message);
+  } finally {
+    // Always remove loading indicator regardless of success or failure
+    if (_chip) { _chip.classList.remove('switching'); _chip.disabled = false; }
+  }
 }
 
 function openProfileCreate(){
