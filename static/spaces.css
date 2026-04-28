@@ -36,6 +36,13 @@
   gap: 12px;
 }
 
+.capy-spaces-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .capy-spaces-btn {
   border: 1px solid var(--border);
   border-radius: 10px;

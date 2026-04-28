@@ -24,18 +24,29 @@ const values = {
   '#capyWidgetId': 'notes',
   '#capyWidgetTitle': 'Notes',
   '#capyWidgetKind': 'markdown',
+  '#capySpaceId': 'ops',
+  '#capySpaceName': 'Ops',
+  '#capySpaceDescription': '<b>Operations</b>',
 };
+const inputs = {};
 const elements = {};
+function makeInput(selector) {
+  if (!(selector in values)) return null;
+  return inputs[selector] || (inputs[selector] = {
+    get value() { return values[selector]; },
+    set value(next) { values[selector] = next; },
+  });
+}
 function makeElement(id) {
   return elements[id] || (elements[id] = {
     id,
+    dataset: {},
     innerHTML: '',
     textContent: '',
     listeners: {},
     addEventListener(type, fn) { this.listeners[type] = fn; },
     querySelector(selector) {
-      if (!(selector in values)) return null;
-      return { value: values[selector] };
+      return makeInput(selector);
     },
   });
 }
@@ -67,6 +78,15 @@ global.fetch = async function(path, opts = {}) {
   }
   if (path === 'api/spaces/widget/delete') {
     return response({ deleted: true, space_id: 'lab', widget_id: 'weather', revision_event_id: 'rev3' });
+  }
+  if (path === 'api/spaces/create') {
+    return response({ space: { space_id: 'ops', name: 'Ops', description: '<b>Operations</b>', widget_count: 0, revision_event_id: 'rev4' } });
+  }
+  if (path === 'api/spaces/update') {
+    return response({ space: { space_id: 'lab', name: 'Lab Edited', description: 'Updated', widget_count: 1, revision_event_id: 'rev5' } });
+  }
+  if (path === 'api/spaces/delete') {
+    return response({ deleted: true, space_id: 'lab', revision_event_id: 'rev6' });
   }
   throw new Error('unexpected fetch path: ' + path);
 };
@@ -100,10 +120,20 @@ async function click(action, dataset) {
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
     await window.loadCapySpaces();
     await click('deleteWidget', { spaceId: 'lab', widgetId: 'weather' });
+  } else if (scenario === 'createSpace') {
+    await window.loadCapySpaces();
+    await click('saveSpace', {});
+  } else if (scenario === 'editSpace') {
+    await window.loadCapySpaces();
+    await click('editSpace', { spaceId: 'lab', spaceName: 'Lab Edited', spaceDescription: 'Updated' });
+    await click('saveSpace', {});
+  } else if (scenario === 'deleteSpace') {
+    await window.loadCapySpaces();
+    await click('deleteSpace', { spaceId: 'lab' });
   } else {
     throw new Error('unknown scenario: ' + scenario);
   }
-  process.stdout.write(JSON.stringify({ rootHtml: root.innerHTML, calls }));
+  process.stdout.write(JSON.stringify({ rootHtml: root.innerHTML, calls, values, rootDataset: root.dataset }));
 })().catch(err => {
   console.error(err && err.stack || String(err));
   process.exit(1);
@@ -159,3 +189,38 @@ def test_spaces_ui_delete_widget_posts_to_delete_and_refreshes_widgets(driver_pa
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"space_id": "lab", "widget_id": "weather"}
     assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
+
+
+def test_spaces_ui_create_space_posts_to_create_and_refreshes_spaces(driver_path):
+    out = _run_spaces_scenario(driver_path, "createSpace")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/create")
+
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {
+        "space_id": "ops",
+        "name": "Ops",
+        "description": "<b>Operations</b>",
+    }
+    assert out["calls"][-1]["path"] == "api/spaces"
+
+
+def test_spaces_ui_edit_space_posts_to_update_without_changing_space_id(driver_path):
+    out = _run_spaces_scenario(driver_path, "editSpace")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/update")
+
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {
+        "space_id": "lab",
+        "updates": {"name": "Lab Edited", "description": "Updated"},
+    }
+    assert out["values"]["#capySpaceId"] == "lab"
+    assert out["calls"][-1]["path"] == "api/spaces"
+
+
+def test_spaces_ui_delete_space_posts_to_delete_and_refreshes_spaces(driver_path):
+    out = _run_spaces_scenario(driver_path, "deleteSpace")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/delete")
+
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"space_id": "lab"}
+    assert out["calls"][-1]["path"] == "api/spaces"

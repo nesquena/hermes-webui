@@ -27,6 +27,7 @@
         root.innerHTML = '<div class="capy-spaces-card"><h3>Capy Spaces disabled</h3><div class="capy-spaces-muted">Set HERMES_WEBUI_SPACES_ENABLED=1 to enable the foundation shell.</div></div>';
         return;
       }
+      root.dataset.editingSpaceId = '';
       const spaces = data.spaces || [];
       root.innerHTML = renderSpacesList(spaces);
     } catch (err) {
@@ -37,13 +38,33 @@
   function renderSpacesList(spaces){
     const cards = spaces.length ? spaces.map(function(s){
       const spaceId = s.space_id || '';
+      const name = s.name || spaceId || 'Untitled';
+      const description = s.description || '';
       return '<div class="capy-spaces-card" data-space-id="'+escapeHtml(spaceId)+'">' +
-        '<div class="capy-spaces-card-row"><div><strong>'+escapeHtml(s.name||spaceId||'Untitled')+'</strong>' +
+        '<div class="capy-spaces-card-row"><div><strong>'+escapeHtml(name)+'</strong>' +
+        (description ? '<div class="capy-spaces-muted">'+escapeHtml(description)+'</div>' : '') +
         '<div class="capy-spaces-muted">Widgets: '+Number(s.widget_count||0)+' · Revision: '+escapeHtml(s.revision_event_id||'none')+'</div></div>' +
-        '<button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Manage widgets</button></div>' +
+        '<div class="capy-spaces-actions">' +
+        '<button type="button" class="capy-spaces-btn" data-capy-action="editSpace" data-space-id="'+escapeHtml(spaceId)+'" data-space-name="'+escapeHtml(name)+'" data-space-description="'+escapeHtml(description)+'">Edit</button>' +
+        '<button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Manage widgets</button>' +
+        '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="deleteSpace" data-space-id="'+escapeHtml(spaceId)+'">Delete</button>' +
+        '</div></div>' +
         '</div>';
-    }).join('') : '<div class="capy-spaces-card"><strong>No spaces yet</strong><div class="capy-spaces-muted">Create a space through the API or a future creation flow to start adding widgets.</div></div>';
-    return '<div class="capy-spaces-card"><h3>Capy Spaces</h3><div class="capy-spaces-muted">'+spaces.length+' space(s). Widget management lists metadata only; generated widget renderers are not executed here.</div></div>' + cards;
+    }).join('') : '<div class="capy-spaces-card"><strong>No spaces yet</strong><div class="capy-spaces-muted">Create a space below to start adding safe metadata-only widgets.</div></div>';
+    return '<div class="capy-spaces-card"><h3>Capy Spaces</h3><div class="capy-spaces-muted">'+spaces.length+' space(s). Widget management lists metadata only; generated widget renderers are not executed here.</div></div>' +
+      cards + renderSpaceForm();
+  }
+
+  function renderSpaceForm(){
+    return '<div class="capy-spaces-card"><h3>Create or edit a space</h3>' +
+      '<div class="capy-spaces-muted">Space IDs are path-safe identifiers. Editing keeps the original ID and updates metadata only.</div>' +
+      '<div class="capy-spaces-form" aria-label="Create or update space">' +
+      '<label>Space ID<input id="capySpaceId" type="text" autocomplete="off" placeholder="daily-ops"></label>' +
+      '<label>Name<input id="capySpaceName" type="text" autocomplete="off" placeholder="Daily Ops"></label>' +
+      '<label>Description<input id="capySpaceDescription" type="text" autocomplete="off" placeholder="Operational dashboard"></label>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="saveSpace">Save space</button>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="newSpace">New space</button>' +
+      '</div></div>';
   }
 
   async function loadSpaceWidgets(spaceId){
@@ -81,6 +102,19 @@
       '</div></div>';
   }
 
+  function getRootInput(root, selector){
+    return root && root.querySelector ? root.querySelector(selector) : null;
+  }
+
+  function setSpaceForm(root, spaceId, name, description){
+    const idInput = getRootInput(root, '#capySpaceId');
+    const nameInput = getRootInput(root, '#capySpaceName');
+    const descriptionInput = getRootInput(root, '#capySpaceDescription');
+    if (idInput) idInput.value = spaceId || '';
+    if (nameInput) nameInput.value = name || '';
+    if (descriptionInput) descriptionInput.value = description || '';
+  }
+
   async function handleCapySpacesClick(event){
     const button = event.target && event.target.closest ? event.target.closest('[data-capy-action]') : null;
     if (!button) return;
@@ -94,11 +128,48 @@
       await loadCapySpaces();
       return;
     }
+    if (action === 'newSpace') {
+      const root = document.getElementById('capySpacesRoot');
+      if (root) root.dataset.editingSpaceId = '';
+      setSpaceForm(root, '', '', '');
+      return;
+    }
+    if (action === 'editSpace') {
+      const root = document.getElementById('capySpacesRoot');
+      if (root) root.dataset.editingSpaceId = spaceId;
+      setSpaceForm(root, spaceId, button.dataset.spaceName || '', button.dataset.spaceDescription || '');
+      return;
+    }
+    if (action === 'saveSpace') {
+      const root = document.getElementById('capySpacesRoot');
+      const idInput = getRootInput(root, '#capySpaceId');
+      const nameInput = getRootInput(root, '#capySpaceName');
+      const descriptionInput = getRootInput(root, '#capySpaceDescription');
+      const editingSpaceId = root && root.dataset ? String(root.dataset.editingSpaceId || '').trim() : '';
+      const name = nameInput ? nameInput.value : '';
+      const description = descriptionInput ? descriptionInput.value : '';
+      if (editingSpaceId) {
+        await postSpacesJson('api/spaces/update', {space_id: editingSpaceId, updates: {name: name, description: description}});
+      } else {
+        await postSpacesJson('api/spaces/create', {space_id: idInput ? idInput.value : '', name: name, description: description});
+      }
+      await loadCapySpaces();
+      return;
+    }
+    if (action === 'deleteSpace') {
+      const ok = (typeof showConfirmDialog === 'function')
+        ? await showConfirmDialog({title: 'Delete Capy Space?', message: 'Delete space "'+spaceId+'"? This removes its manifest and widgets.', confirmLabel: 'Delete', danger: true, focusCancel: true})
+        : true;
+      if (!ok) return;
+      await postSpacesJson('api/spaces/delete', {space_id: spaceId});
+      await loadCapySpaces();
+      return;
+    }
     if (action === 'saveWidget') {
       const root = document.getElementById('capySpacesRoot');
-      const idInput = root && root.querySelector ? root.querySelector('#capyWidgetId') : null;
-      const titleInput = root && root.querySelector ? root.querySelector('#capyWidgetTitle') : null;
-      const kindInput = root && root.querySelector ? root.querySelector('#capyWidgetKind') : null;
+      const idInput = getRootInput(root, '#capyWidgetId');
+      const titleInput = getRootInput(root, '#capyWidgetTitle');
+      const kindInput = getRootInput(root, '#capyWidgetKind');
       const widget = {
         id: idInput ? idInput.value : '',
         title: titleInput ? titleInput.value : '',
