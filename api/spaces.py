@@ -569,6 +569,63 @@ def delete_widget(space_id: str, widget_id: str) -> dict[str, Any]:
     }
 
 
+def _weather_demo_widget() -> dict[str, Any]:
+    """Return the safe declarative weather demo widget seed.
+
+    This is intentionally metadata/declarative state only. It does not include
+    renderer/html/script bodies; later refresh tooling can fill live weather data
+    through typed APIs without exposing generated code through list/detail views.
+    """
+    return {
+        "id": "weather-current",
+        "kind": "weather",
+        "title": "Weather in Prague",
+        "layout": {"x": 0, "y": 0, "w": 8, "h": 5, "minimized": False},
+        "weather": {
+            "location": "Prague",
+            "country": "CZ",
+            "units": "metric",
+            "status": "ready-for-agent-refresh",
+        },
+        "permissions": {"network": "agent-mediated"},
+    }
+
+
+def install_template(template: str, *, space_id: str | None = None) -> dict[str, Any]:
+    """Install a safe Capy Spaces demo template.
+
+    Templates are early demo-parity seeds. They create/update persistent spaces
+    and widgets using the same validated storage primitives as normal mutations,
+    while returning only metadata-safe detail/list payloads.
+    """
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    template_name = str(template or "").strip().lower()
+    if template_name not in {"weather", "weather-demo"}:
+        raise ValueError("Unsupported template")
+
+    target_id = validate_space_id(space_id) if space_id else _unique_space_id("weather-demo")
+    if _manifest_path(target_id).exists():
+        space = read_space(target_id)
+    else:
+        space = create_space(
+            {
+                "space_id": target_id,
+                "name": "Weather Demo",
+                "description": "Persistent Prague weather widget starter for the Space Agent demo parity path.",
+                "agent_instructions": "Keep the weather widget declarative. Use typed Capy space APIs for updates and preserve revision history.",
+                "template": "weather-demo",
+            }
+        )
+
+    upsert_widget(space["space_id"], _weather_demo_widget())
+    return {
+        "template": "weather",
+        "space": read_space_detail(space["space_id"]),
+        "installed_widgets": list_widgets(space["space_id"]),
+    }
+
+
 def disable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = "") -> dict[str, Any]:
     """Mark a widget disabled from safe recovery without deleting its source.
 

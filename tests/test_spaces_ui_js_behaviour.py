@@ -128,6 +128,13 @@ global.fetch = async function(path, opts = {}) {
   if (path === 'api/spaces/create') {
     return response({ space: { space_id: 'ops', name: 'Ops', description: '<b>Operations</b>', widget_count: 0, revision_event_id: 'rev4' } });
   }
+  if (path === 'api/spaces/templates/install') {
+    return response({
+      template: 'weather',
+      space: { space_id: 'weather-demo', name: 'Weather Demo', description: 'Prague weather starter', widget_count: 1, revision_event_id: 'rev-weather' },
+      installed_widgets: [{ id: 'weather-current', kind: 'weather', title: 'Weather in Prague', layout: { x: 0, y: 0, w: 8, h: 5, minimized: false }, renderer: '<script>bad()</script>' }],
+    });
+  }
   if (path === 'api/spaces/update') {
     return response({ space: { space_id: 'lab', name: 'Lab Edited', description: 'Updated', widget_count: 1, revision_event_id: 'rev5' } });
   }
@@ -186,6 +193,9 @@ async function click(action, dataset) {
   } else if (scenario === 'createSpace') {
     await window.loadCapySpaces();
     await click('saveSpace', {});
+  } else if (scenario === 'installWeatherDemo') {
+    await window.loadCapySpaces();
+    await click('installWeatherTemplate', {});
   } else if (scenario === 'openSpaceDetail') {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
@@ -347,6 +357,18 @@ def test_spaces_ui_create_space_posts_to_create_and_refreshes_spaces(driver_path
         "description": "<b>Operations</b>",
     }
     assert out["calls"][-1]["path"] == "api/spaces"
+
+
+def test_spaces_ui_install_weather_demo_posts_template_and_refreshes_without_widget_code(driver_path):
+    out = _run_spaces_scenario(driver_path, "installWeatherDemo")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/templates/install")
+
+    assert "Install weather demo" in out["rootHtml"]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"template": "weather"}
+    assert out["calls"][-1]["path"] == "api/spaces"
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
 
 
 def test_spaces_ui_edit_space_posts_to_update_without_changing_space_id(driver_path):

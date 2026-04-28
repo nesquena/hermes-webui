@@ -179,6 +179,51 @@ def test_recovery_disable_widget_marks_safe_metadata_without_deleting_or_leaking
     assert "onerror" not in serialized
 
 
+def test_install_weather_template_creates_safe_persistent_weather_widget(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    installed = spaces.install_template("weather")
+
+    assert installed["template"] == "weather"
+    assert installed["space"]["template"] == "weather-demo"
+    assert installed["space"]["name"] == "Weather Demo"
+    assert installed["installed_widgets"] == [
+        {
+            "id": "weather-current",
+            "kind": "weather",
+            "title": "Weather in Prague",
+            "layout": {"x": 0, "y": 0, "w": 8, "h": 5, "minimized": False},
+        }
+    ]
+    full = spaces.read_widget(installed["space"]["space_id"], "weather-current")
+    assert full["weather"]["location"] == "Prague"
+    assert full["weather"]["status"] == "ready-for-agent-refresh"
+    serialized = json.dumps(installed).lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
+def test_weather_template_install_route_returns_safe_metadata(monkeypatch, tmp_path):
+    _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    handled, status, body = _route_post("/api/spaces/templates/install", {"template": "weather"})
+
+    assert handled is None
+    assert status == 200
+    assert body["template"] == "weather"
+    assert body["space"]["name"] == "Weather Demo"
+    assert body["installed_widgets"][0]["id"] == "weather-current"
+    serialized = json.dumps(body).lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
 def test_delete_space_removes_manifest_but_keeps_global_revision_event(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Disposable"})
@@ -224,6 +269,7 @@ def test_spaces_routes_and_static_shell_are_registered():
     assert '"/api/spaces/recovery/disable-widget"' in routes_src
     assert '"/api/spaces/revisions"' in routes_src
     assert '"/api/spaces/create"' in routes_src
+    assert '"/api/spaces/templates/install"' in routes_src
     assert 'static/spaces.js' in index_html
     assert 'static/spaces.css' in index_html
     assert 'id="mainCapySpaces"' in index_html
