@@ -176,7 +176,7 @@ def test_fence_stash_before_math_stash():
 def test_fence_stash_populated_before_math_stash():
     """The fence_stash s.replace call must appear before any math_stash s.replace calls."""
     # Find the s.replace call that populates each stash
-    fence_replace_pos = UI_JS.find("fence_stash.push(m)")
+    fence_replace_pos = UI_JS.find("fence_stash.push(")
     math_replace_pos = UI_JS.find("math_stash.push(")
     assert fence_replace_pos != -1, "fence_stash population call not found"
     assert math_replace_pos != -1, "math_stash population call not found"

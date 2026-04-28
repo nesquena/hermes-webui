@@ -813,10 +813,32 @@ function renderMd(raw){
   // Only runs OUTSIDE fenced code blocks and backtick spans (stash + restore).
   // Unsafe tags (anything not in the allowlist) are left as-is and will be
   // HTML-escaped by esc() when they reach an innerHTML assignment -- no XSS risk.
-  // Fence stash: protect code blocks and backtick spans from all further processing
-  // Must run BEFORE math_stash so $..$ inside code spans is not extracted as math
+  // Fence stash: protect code blocks and backtick spans from all further processing.
+  // Must run BEFORE math_stash so $..$ inside code spans is not extracted as math.
+  // Split into fenced blocks (\x00P — kept stashed until after all markdown passes)
+  // and inline backtick spans (\x00F — restored before bold/italic so **`code`** works).
+  // Fenced blocks are converted to <pre><code> here so their content is HTML-escaped
+  // and never exposed to list/heading/table regexes that could corrupt the layout.
+  // Fixes #1154: diff/patch lines inside fenced blocks (e.g. + added, - removed)
+  // were matching the unordered-list regex and injecting <ul>/<li> inside <pre>,
+  // breaking </pre> closure and corrupting all subsequent message rendering.
+  const _preBlock_stash=[];
   const fence_stash=[];
-  s=s.replace(/(```[\s\S]*?```|`[^`\n]+`)/g,m=>{fence_stash.push(m);return '\x00F'+(fence_stash.length-1)+'\x00';});
+  s=s.replace(/```([\s\S]*?)```/g,(_,raw)=>{
+    const m=raw.match(/^(\w[\w+-]*)\n?([\s\S]*)$/);
+    if(m&&m[1].trim().toLowerCase()==='mermaid'){
+      const id='mermaid-'+Math.random().toString(36).slice(2,10);
+      _preBlock_stash.push(`<div class="mermaid-block" data-mermaid-id="${id}">${esc(m[2].trim())}</div>`);
+    } else {
+      const lang=m?(m[1]||'').trim().toLowerCase():'';
+      const code=m?m[2]:raw.replace(/^\n?/,'');
+      const h=lang?`<div class="pre-header">${esc(lang)}</div>`:'';
+      const langAttr=lang?` class="language-${esc(lang)}"`:'';
+      _preBlock_stash.push(`${h}<pre><code${langAttr}>${esc(code.replace(/\n$/,''))}</code></pre>`);
+    }
+    return '\x00P'+(_preBlock_stash.length-1)+'\x00';
+  });
+  s=s.replace(/`([^`\n]+)`/g,(_,c)=>{fence_stash.push('<code>'+esc(c)+'</code>');return '\x00F'+(fence_stash.length-1)+'\x00';});
   // Math stash: protect $$..$$ and $..$ from markdown processing
   // Runs AFTER fence_stash so backtick code spans protect their dollar-sign contents
   const math_stash=[];
@@ -841,20 +863,9 @@ function renderMd(raw){
   s=s.replace(/<code>([^<]*?)<\/code>/gi,(_,t)=>'`'+t+'`');
   s=s.replace(/<br\s*\/?>/gi,'\n');
   s=s.replace(/\x00R(\d+)\x00/g,(_,i)=>rawPreStash[+i]);
-  // Restore stashed code blocks
+  // Inline backtick spans: restore <code> tags produced in the stash callback above.
+  // Must happen BEFORE bold/italic so **`code`** → <strong><code>code</code></strong>.
   s=s.replace(/\x00F(\d+)\x00/g,(_,i)=>fence_stash[+i]);
-  // Mermaid blocks: render as diagram containers (processed after DOM insertion)
-  s=s.replace(/```mermaid\n?([\s\S]*?)```/g,(_,code)=>{
-    const id='mermaid-'+Math.random().toString(36).slice(2,10);
-    return `<div class="mermaid-block" data-mermaid-id="${id}">${esc(code.trim())}</div>`;
-  });
-  s=s.replace(/```([\w+-]*)\n?([\s\S]*?)```/g,(_,lang,code)=>{
-    const normalizedLang=(lang||'').trim().toLowerCase();
-    const h=normalizedLang?`<div class="pre-header">${esc(normalizedLang)}</div>`:'';
-    const langAttr=normalizedLang?` class="language-${esc(normalizedLang)}"`:'';
-    return `${h}<pre><code${langAttr}>${esc(code.replace(/\n$/,''))}</code></pre>`;
-  });
-  s=s.replace(/`([^`\n]+)`/g,(_,c)=>`<code>${esc(c)}</code>`);
   // inlineMd: process bold/italic/code/links within a single line of text.
   // Used inside list items and blockquotes where the text may already contain
   // HTML from the pre-pass → bold pipeline, so we cannot call esc() directly.
@@ -984,6 +995,11 @@ function renderMd(raw){
     }
     return `<span class="katex-inline" data-katex="inline">${esc(item.src)}</span>`;
   });
+  // Restore fenced block stash (\x00P) → <pre><code> HTML.
+  // Happens AFTER all markdown passes (lists, headings, tables, etc.) so
+  // diff/patch content inside code blocks is never misinterpreted as markdown.
+  // The _pre_stash below then protects these blocks from paragraph splitting.
+  s=s.replace(/\x00P(\d+)\x00/g,(_,i)=>_preBlock_stash[+i]);
   // Stash rendered <pre> blocks (with optional pre-header div) and mermaid/katex
   // divs before paragraph splitting so \n inside code blocks is never replaced
   // with <br>. Token \x00E (next free after B D F G L M C O A).
