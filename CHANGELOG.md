@@ -33,11 +33,52 @@
   `tests/test_issue926_hindsight_docker_dependency.py`) Closes #926.
 
 
-## v0.50.233
+## [v0.50.235] — 2026-04-28
 
-### Bug fixes
-- **fix(profiles): profile switch now shows correct workspace, model, and chip label immediately** — Three separate bugs caused profile switching to feel broken: (1) `switch_profile(process_wide=False)` returned the old profile's workspace because `get_last_workspace()` read from the wrong profile's directory; (2) the model dropdown showed stale results because the in-memory models cache wasn't invalidated after a switch; (3) the profile name chip in the composer stayed on the old profile name because `syncTopbar()` returned early (no session) without updating the chip. All three are now fixed. (#1200)
-- **fix(tests): stabilise `test_server_now_ms_compensates_positive_skew`** — Two consecutive `Date.now()` calls could differ by 1–2 ms under CPU load, causing the exact-equality assertion `diff === 3600000` to intermittently fail. Test now uses midpoint averaging with a ±5 ms tolerance window.
+### Fixed
+- **Profile switch shows correct workspace, model, and chip label immediately** — Three separate
+  bugs caused profile switching to appear broken: (1) `switch_profile(process_wide=False)` returned
+  the old profile's workspace because `get_last_workspace()` routed through thread-local profile
+  context (still pointing at the old profile during the switch); (2) the model dropdown showed stale
+  results because the in-memory models cache wasn't invalidated; (3) the profile chip stayed on the
+  old name because `syncTopbar()` returned early without updating it when no session was active.
+  (`api/profiles.py`, `api/routes.py`, `static/ui.js`,
+  `tests/test_profile_switch_1200.py`) (PR #1203)
+- **Flaky test stabilisation** — `test_server_now_ms_compensates_positive_skew` used exact-ms
+  equality across two `Date.now()` calls; fixed with midpoint averaging and ±5 ms tolerance.
+  (`tests/test_issue1144_session_time_sync.py`)
+## [v0.50.234] — 2026-04-28
+
+### Fixed
+- **XSS hardening in markdown renderer** — HTML tags in LLM output were filtered by
+  tag name only, allowing event handlers like `onerror` and `onclick` to pass through
+  on `<img>` and other elements. The sanitizer now strips all attributes except a
+  per-tag allowlist and blocks `javascript:`, `data:`, and `vbscript:` URL schemes.
+  Incomplete raw tags (`<img src=x onerror=...//` with no closing `>`) are escaped
+  before paragraph wrapping so they cannot be completed by the renderer's own output.
+  (`static/ui.js`)
+- **Delegated image lightbox** — inline `onclick` handlers on `<img class="msg-media-img">`
+  replaced with a single delegated `document.addEventListener('click')`, eliminating the
+  last source of inline event handler HTML in rendered output. (`static/ui.js`)
+- **Workspace trust for macOS symlink paths** — `/etc` on macOS resolves to `/private/etc`
+  which previously bypassed the blocked-roots check. The new `_is_blocked_workspace_path`
+  helper compares both the raw and resolved path. Also adds `/System` and `/Library` to
+  the blocked roots. (`api/workspace.py`)
+- **Legacy `/api/chat` workspace validation** — the synchronous chat fallback endpoint
+  was not routing through `resolve_trusted_workspace()`, allowing arbitrary paths to be
+  set as workspace. (`api/routes.py`)
+- **`linked_files` type guard** — skill view responses with a `null` or non-dict
+  `linked_files` field no longer crash the skills API. (`api/routes.py`)
+  (by @bschmidy10, PR #1201)
+## [v0.50.233] — 2026-04-28
+
+### Fixed
+- **Workspace trust for /var/home paths** — workspaces under `/var/home` (used by
+  systemd-homed on Fedora/RHEL) were incorrectly blocked because `_is_blocked_system_path`
+  flagged `/var` as a system root. The home-directory trust check in both
+  `resolve_trusted_workspace` and `validate_workspace_to_add` now correctly trusts any
+  path under `Path.home()` regardless of where the home directory lives on disk.
+  (`api/workspace.py`) (by @frap129, PR #1199)
 ## v0.50.225 — 2026-04-27
 
 ### Added
@@ -362,38 +403,6 @@
   workspace subtree) and never enumerate blocked system roots. (`api/routes.py`,
   `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
 
-## [v0.50.234] — 2026-04-28
-
-### Fixed
-- **XSS hardening in markdown renderer** — HTML tags in LLM output were filtered by
-  tag name only, allowing event handlers like `onerror` and `onclick` to pass through
-  on `<img>` and other elements. The sanitizer now strips all attributes except a
-  per-tag allowlist and blocks `javascript:`, `data:`, and `vbscript:` URL schemes.
-  Incomplete raw tags (`<img src=x onerror=...//` with no closing `>`) are escaped
-  before paragraph wrapping so they cannot be completed by the renderer's own output.
-  (`static/ui.js`)
-- **Delegated image lightbox** — inline `onclick` handlers on `<img class="msg-media-img">`
-  replaced with a single delegated `document.addEventListener('click')`, eliminating the
-  last source of inline event handler HTML in rendered output. (`static/ui.js`)
-- **Workspace trust for macOS symlink paths** — `/etc` on macOS resolves to `/private/etc`
-  which previously bypassed the blocked-roots check. The new `_is_blocked_workspace_path`
-  helper compares both the raw and resolved path. Also adds `/System` and `/Library` to
-  the blocked roots. (`api/workspace.py`)
-- **Legacy `/api/chat` workspace validation** — the synchronous chat fallback endpoint
-  was not routing through `resolve_trusted_workspace()`, allowing arbitrary paths to be
-  set as workspace. (`api/routes.py`)
-- **`linked_files` type guard** — skill view responses with a `null` or non-dict
-  `linked_files` field no longer crash the skills API. (`api/routes.py`)
-  (by @bschmidy10, PR #1201)
-## [v0.50.233] — 2026-04-28
-
-### Fixed
-- **Workspace trust for /var/home paths** — workspaces under `/var/home` (used by
-  systemd-homed on Fedora/RHEL) were incorrectly blocked because `_is_blocked_system_path`
-  flagged `/var` as a system root. The home-directory trust check in both
-  `resolve_trusted_workspace` and `validate_workspace_to_add` now correctly trusts any
-  path under `Path.home()` regardless of where the home directory lives on disk.
-  (`api/workspace.py`) (by @frap129, PR #1199)
 ## [v0.50.232] — 2026-04-28
 
 ### Fixed
