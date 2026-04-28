@@ -91,6 +91,9 @@ global.fetch = async function(path, opts = {}) {
   if (path === 'api/spaces/widget/delete') {
     return response({ deleted: true, space_id: 'lab', widget_id: 'weather', revision_event_id: 'rev3' });
   }
+  if (path === 'api/spaces/widget/event') {
+    return response({ queued: true, space_id: 'lab', widget_id: 'weather', event_name: 'agent.prompt', event_id: 'evt1' });
+  }
   if (path === 'api/spaces/create') {
     return response({ space: { space_id: 'ops', name: 'Ops', description: '<b>Operations</b>', widget_count: 0, revision_event_id: 'rev4' } });
   }
@@ -137,6 +140,15 @@ async function click(action, dataset) {
     await window.loadCapySpaces();
     await window.loadSpaceWidgets('lab');
     await click('editWidget', { spaceId: 'lab', widgetId: 'weather', widgetTitle: '<Weather>', widgetKind: 'markdown' });
+  } else if (scenario === 'askWidget') {
+    global.showPromptDialog = async function(opts) { dialogs.push(opts); return 'Refresh the weather widget'; };
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('askWidget', { spaceId: 'lab', widgetId: 'weather', widgetTitle: '<Weather>' });
+  } else if (scenario === 'askWidgetNoPrompt') {
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('askWidget', { spaceId: 'lab', widgetId: 'weather', widgetTitle: '<Weather>' });
   } else if (scenario === 'createSpace') {
     await window.loadCapySpaces();
     await click('saveSpace', {});
@@ -228,6 +240,31 @@ def test_spaces_ui_edit_widget_prefills_safe_metadata_form_without_fetching_rend
     assert not any(call["path"] == "api/spaces/widget?space_id=lab&widget_id=weather" for call in out["calls"])
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
+
+
+def test_spaces_ui_ask_widget_uses_shared_prompt_and_queues_agent_event(driver_path):
+    out = _run_spaces_scenario(driver_path, "askWidget")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/event")
+
+    assert out["dialogs"]
+    assert out["dialogs"][0]["title"] == "Ask Capy about this widget"
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {
+        "space_id": "lab",
+        "widget_id": "weather",
+        "event_name": "agent.prompt",
+        "prompt": "Refresh the weather widget",
+        "payload": {"source": "widget-manager", "widget_title": "<Weather>"},
+    }
+    assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+
+
+def test_spaces_ui_ask_widget_fails_closed_without_shared_prompt(driver_path):
+    out = _run_spaces_scenario(driver_path, "askWidgetNoPrompt")
+
+    assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
 
 
 def test_spaces_ui_create_space_posts_to_create_and_refreshes_spaces(driver_path):
