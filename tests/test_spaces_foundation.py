@@ -314,3 +314,76 @@ def test_widget_routes_upsert_list_read_and_delete(monkeypatch, tmp_path):
     assert status == 200
     assert body["deleted"] is True
     assert spaces.list_widgets(space_id) == []
+
+
+def test_active_space_context_is_compact_and_omits_widget_bodies(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {
+            "space_id": "lab",
+            "name": "Research Lab",
+            "description": "Demo space",
+            "agent_instructions": "Prefer small widget patches and preserve rollback points.",
+        }
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "weather",
+            "kind": "markdown",
+            "title": "Weather",
+            "renderer": "<script>renderSecret()</script>",
+            "html": "<img src=x onerror=stealSecret()>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    context = spaces.build_agent_context("lab")
+
+    assert "## Active Capy Space" in context
+    assert "id: lab" in context
+    assert "name: Research Lab" in context
+    assert "Prefer small widget patches" in context
+    assert "weather|Weather|markdown" in context
+    assert "Use Capy space APIs/tools for mutations" in context
+    serialized = context.lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert "data" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "rendersecret" not in serialized
+    assert "stealsecret" not in serialized
+
+
+def test_streaming_agent_prompt_includes_active_space_context(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {
+            "space_id": "lab",
+            "name": "Research Lab",
+            "agent_instructions": "Use widget IDs and read before patching.",
+        }
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "sources",
+            "kind": "table",
+            "title": "Sources",
+            "renderer": "<script>doNotExpose()</script>",
+        },
+    )
+    from types import SimpleNamespace
+    from api.streaming import _build_agent_prompt_inputs
+
+    session = SimpleNamespace(workspace=str(tmp_path), active_space_id="lab")
+    user_message, system_message = _build_agent_prompt_inputs(session, "Update the source list")
+
+    assert user_message.startswith(f"[Workspace: {tmp_path}]")
+    assert "[Capy Space: lab]" in user_message
+    assert "Update the source list" in user_message
+    assert "## Active Capy Space" in system_message
+    assert "sources|Sources|table" in system_message
+    assert "Use widget IDs and read before patching." in system_message
+    assert "doNotExpose" not in system_message
+    assert "renderer" not in system_message

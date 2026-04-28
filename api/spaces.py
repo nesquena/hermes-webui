@@ -148,6 +148,73 @@ def _widget_summary(widget: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _context_value(value: Any, limit: int = 500) -> str:
+    """Return a single-line value safe for compact agent context."""
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) > limit:
+        return text[: limit - 1].rstrip() + "…"
+    return text
+
+
+def build_agent_context(space_id: str | None) -> str:
+    """Build compact active-space context for Hermes agent prompts.
+
+    This intentionally exposes metadata only. Widget renderer/html/script/data
+    bodies can contain generated code or sensitive payloads and must stay out of
+    chat/system prompts unless a later sandboxed viewer explicitly asks for them.
+    """
+    if not space_id or not spaces_enabled():
+        return ""
+
+    sid = validate_space_id(space_id)
+    space = read_space(sid)
+    lines = [
+        "## Active Capy Space",
+        f"id: {sid}",
+        f"name: {_context_value(space.get('name') or sid)}",
+    ]
+    description = _context_value(space.get("description"), 700)
+    if description:
+        lines.append(f"description: {description}")
+    template = _context_value(space.get("template"), 120)
+    if template:
+        lines.append(f"template: {template}")
+    instructions = _context_value(space.get("agent_instructions") or space.get("instructions"), 1500)
+    if instructions:
+        lines.append("instructions:")
+        lines.append(f"  {instructions}")
+    lines.append("widgets (id|title|kind):")
+    widgets = space.get("widgets") or []
+    summaries: list[dict[str, Any]] = []
+    if isinstance(widgets, list):
+        for widget in widgets:
+            if isinstance(widget, dict):
+                try:
+                    summaries.append(_widget_summary(widget))
+                except ValueError:
+                    continue
+    if summaries:
+        for widget in summaries[:25]:
+            lines.append(
+                "- "
+                f"{_context_value(widget['id'], 80)}|"
+                f"{_context_value(widget['title'], 160)}|"
+                f"{_context_value(widget['kind'], 80)}"
+            )
+        if len(summaries) > 25:
+            lines.append(f"- … {len(summaries) - 25} more widget(s) omitted")
+    else:
+        lines.append("- none")
+    revision = _context_value(space.get("revision_event_id"), 120)
+    if revision:
+        lines.append(f"revision_event_id: {revision}")
+    lines.append(
+        "Use Capy space APIs/tools for mutations. Prefer list/read before patching existing widgets; "
+        "do not infer or expose generated widget bodies from this compact context."
+    )
+    return "\n".join(lines)
+
+
 def _unique_space_id(base: str) -> str:
     sid = validate_space_id(_slugify(base))
     candidate = sid
@@ -188,6 +255,7 @@ def create_space(payload: dict[str, Any]) -> dict[str, Any]:
         "space_id": space_id,
         "name": name,
         "description": str(payload.get("description") or ""),
+        "agent_instructions": str(payload.get("agent_instructions") or payload.get("instructions") or ""),
         "template": str(payload.get("template") or "blank"),
         "created_at": now,
         "updated_at": now,
@@ -217,13 +285,15 @@ def update_space(space_id: str, updates: dict[str, Any]) -> dict[str, Any]:
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
     space = read_space(space_id)
-    allowed = {"name", "description", "layout", "widgets", "capabilities", "template"}
+    allowed = {"name", "description", "agent_instructions", "layout", "widgets", "capabilities", "template"}
     for key, value in (updates or {}).items():
         if key in allowed:
             if key == "widgets" and not isinstance(value, list):
                 raise ValueError("widgets must be a list")
             if key in {"layout", "capabilities"} and not isinstance(value, dict):
                 raise ValueError(f"{key} must be an object")
+            if key == "agent_instructions":
+                value = str(value or "")
             space[key] = value
     return _write_manifest(space, "space.updated", {"fields": sorted(set(updates or {}) & allowed)})
 

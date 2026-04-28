@@ -174,6 +174,36 @@ def _message_text(value) -> str:
     return _strip_thinking_markup(str(value or '').strip())
 
 
+def _build_agent_prompt_inputs(session, user_text: str) -> tuple[str, str]:
+    """Build workspace + optional active Capy Space prompt inputs for AIAgent."""
+    workspace = getattr(session, 'workspace', '')
+    workspace_ctx = f"[Workspace: {workspace}]\n"
+    workspace_system_msg = (
+        f"Active workspace at session start: {workspace}\n"
+        "Every user message is prefixed with [Workspace: /absolute/path] indicating the "
+        "workspace the user has selected in the web UI at the time they sent that message. "
+        "This tag is the single authoritative source of the active workspace and updates "
+        "with every message. It overrides any prior workspace mentioned in this system "
+        "prompt, memory, or conversation history. Always use the value from the most recent "
+        "[Workspace: ...] tag as your default working directory for ALL file operations: "
+        "write_file, read_file, search_files, terminal workdir, and patch. "
+        "Never fall back to a hardcoded path when this tag is present."
+    )
+
+    active_space_id = str(getattr(session, 'active_space_id', '') or '').strip()
+    if active_space_id:
+        try:
+            from api import spaces as capy_spaces
+            space_context = capy_spaces.build_agent_context(active_space_id)
+        except (ValueError, FileNotFoundError, RuntimeError):
+            space_context = ""
+        if space_context:
+            workspace_ctx += f"[Capy Space: {active_space_id}]\n"
+            workspace_system_msg += "\n\n" + space_context
+
+    return workspace_ctx + user_text, workspace_system_msg
+
+
 def _first_exchange_snippets(messages):
     """Return (first_user_text, first_assistant_text) snippets for title generation.
 
@@ -1601,20 +1631,9 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                     put('cancel', {'message': 'Cancelled by user'})
                     return
 
-            # Prepend workspace context so the agent always knows which directory
-            # to use for file operations, regardless of session age or AGENTS.md defaults.
-            workspace_ctx = f"[Workspace: {s.workspace}]\n"
-            workspace_system_msg = (
-                f"Active workspace at session start: {s.workspace}\n"
-                "Every user message is prefixed with [Workspace: /absolute/path] indicating the "
-                "workspace the user has selected in the web UI at the time they sent that message. "
-                "This tag is the single authoritative source of the active workspace and updates "
-                "with every message. It overrides any prior workspace mentioned in this system "
-                "prompt, memory, or conversation history. Always use the value from the most recent "
-                "[Workspace: ...] tag as your default working directory for ALL file operations: "
-                "write_file, read_file, search_files, terminal workdir, and patch. "
-                "Never fall back to a hardcoded path when this tag is present."
-            )
+            # Prepend workspace and active-space context so the agent always knows
+            # which directory/space to use, regardless of session age or defaults.
+            agent_user_message, agent_system_message = _build_agent_prompt_inputs(s, msg_text)
             # Resolve personality prompt from config.yaml agent.personalities
             # (matches hermes-agent CLI behavior — passes via ephemeral_system_prompt)
             _personality_prompt = None
@@ -1678,8 +1697,8 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             _ckpt_thread.start()
 
             result = agent.run_conversation(
-                user_message=workspace_ctx + msg_text,
-                system_message=workspace_system_msg,
+                user_message=agent_user_message,
+                system_message=agent_system_message,
                 conversation_history=_sanitize_messages_for_api(s.messages),
                 task_id=session_id,
                 persist_user_message=msg_text,
