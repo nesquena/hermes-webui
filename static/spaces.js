@@ -89,14 +89,17 @@
     const safeSpaceId = String(spaceId || '').trim();
     if (!safeSpaceId) return;
     try {
-      const data = await fetchSpacesJson('api/spaces/get?space_id='+encodeURIComponent(safeSpaceId));
-      root.innerHTML = renderSpaceDetail(data.space || {});
+      const results = await Promise.all([
+        fetchSpacesJson('api/spaces/get?space_id='+encodeURIComponent(safeSpaceId)),
+        fetchSpacesJson('api/spaces/revisions?space_id='+encodeURIComponent(safeSpaceId)),
+      ]);
+      root.innerHTML = renderSpaceDetail(results[0].space || {}, results[1].revisions || []);
     } catch (err) {
       root.innerHTML = '<div class="capy-spaces-card"><h3>Space detail unavailable</h3><div class="capy-spaces-muted">'+escapeHtml(err.message||String(err))+'</div><button type="button" class="capy-spaces-btn" data-capy-action="reloadSpaces">Back to spaces</button></div>';
     }
   }
 
-  function renderSpaceDetail(space){
+  function renderSpaceDetail(space, revisions){
     const spaceId = space.space_id || '';
     const name = space.name || spaceId || 'Untitled';
     const description = space.description || '';
@@ -112,7 +115,31 @@
       (description ? '<div class="capy-spaces-muted">'+escapeHtml(description)+'</div>' : '') +
       '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+' · Revision: '+escapeHtml(space.revision_event_id||'none')+'</div>' +
       '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Manage widgets</button></div>' +
-      '</div><div class="capy-spaces-card"><h3>Widgets</h3><div class="capy-spaces-muted">Metadata-only detail view. Generated widget code is intentionally not displayed or executed.</div><div class="capy-spaces-widget-list">'+widgetRows+'</div></div>';
+      '</div><div class="capy-spaces-card"><h3>Widgets</h3><div class="capy-spaces-muted">Metadata-only detail view. Generated widget code is intentionally not displayed or executed.</div><div class="capy-spaces-widget-list">'+widgetRows+'</div></div>' +
+      renderRevisionHistory(revisions || []);
+  }
+
+  function renderRevisionHistory(revisions){
+    const safeRevisions = Array.isArray(revisions) ? revisions : [];
+    const rows = safeRevisions.length ? safeRevisions.slice(0, 10).map(function(rev){
+      const eventId = rev && rev.event_id ? String(rev.event_id) : '';
+      const eventType = rev && rev.event_type ? String(rev.event_type) : 'unknown';
+      return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(eventType)+'</strong>' +
+        '<div class="capy-spaces-muted">'+escapeHtml(formatRevisionTime(rev && rev.created_at))+' · '+escapeHtml(eventId.slice(0, 12) || 'no-event-id')+'</div></div></div>';
+    }).join('') : '<div class="capy-spaces-muted">No revision events recorded yet.</div>';
+    return '<div class="capy-spaces-card"><h3>Revision history</h3>' +
+      '<div class="capy-spaces-muted">Newest safe metadata events. Rollback controls will build on this index; generated widget bodies are not displayed.</div>' +
+      '<div class="capy-spaces-widget-list">'+rows+'</div></div>';
+  }
+
+  function formatRevisionTime(value){
+    const seconds = Number(value);
+    if (!Number.isFinite(seconds) || seconds <= 0) return 'time unknown';
+    try {
+      return new Date(seconds * 1000).toISOString().replace('T', ' ').replace('.000Z', ' UTC');
+    } catch (err) {
+      return 'time unknown';
+    }
   }
 
   function renderWidgetManager(spaceId, widgets){
