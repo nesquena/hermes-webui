@@ -1260,8 +1260,20 @@ function updateSendBtn(){
   btn.classList.toggle('queue',action==='queue');
   btn.classList.toggle('interrupt',action==='interrupt');
   btn.classList.toggle('steer',action==='steer');
-  btn.title={send:'Send message',queue:'Queue message',interrupt:'Interrupt and send',steer:'Steer current response',stop:'Stop generation',disabled:'Send message'}[action]||'Send message';
-  btn.setAttribute('aria-label',btn.title);
+  const _tt=(key,fb)=>{if(typeof t!=='function')return fb;const val=t(key);return val===key?fb:(val||fb);};
+  let _btnTitle;
+  if(action==='disabled'){
+    const _dmsg=$('msg');
+    const _dcompr=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
+    if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
+    else if(_dcompr) _btnTitle=_tt('composer_disabled_compression','Waiting for compression to finish');
+    else _btnTitle=_tt('composer_disabled_empty','Type a message to send');
+  }else{
+    const _tmap={send:'Send message',queue:'Queue message',interrupt:'Interrupt and send',steer:'Steer current response',stop:'Stop generation'};
+    _btnTitle=_tt('composer_'+action,_tmap[action]||'Send message');
+  }
+  btn.title=_btnTitle;
+  btn.setAttribute('aria-label',_btnTitle);
   _setComposerPrimaryButtonIcon(btn,action);
   // Single primary action button: while busy/no-draft it becomes the red Stop
   // action; while busy with a draft it reflects queue/interrupt/steer.
@@ -1296,8 +1308,6 @@ function setBusy(v){
   if(!v){
     setStatus('');
     setComposerStatus('');
-    // Always hide Cancel button when not busy
-    const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
     const sid=_queueDrainSid||(S.session&&S.session.session_id);
     _queueDrainSid=null;
     updateQueueBadge(sid);

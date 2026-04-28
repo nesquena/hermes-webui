@@ -7,7 +7,6 @@ async function cancelStream(){
   // Clear status unconditionally after the cancel request completes.
   // The SSE cancel event may also fire, but if the connection is already
   // closed it won't arrive — so we handle cleanup here as the guaranteed path.
-  const btn=$('btnCancel');if(btn)btn.style.display='none';
   S.activeStreamId=null;
   setBusy(false);
   if(typeof setComposerStatus==='function') setComposerStatus('');

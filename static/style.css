@@ -724,9 +724,6 @@
   .ctx-indicator-wrap:hover .ctx-tooltip,.ctx-indicator-wrap:focus-within .ctx-tooltip{opacity:1;transform:translateY(0);}
   .ctx-tooltip-title{font-size:12px;font-weight:600;color:var(--text);margin-bottom:5px;}
   .ctx-tooltip-line+.ctx-tooltip-line{margin-top:3px;}
-  .cancel-btn{display:none!important;width:34px;height:34px;border-radius:50%;background:var(--error);border:none;color:#fff;cursor:pointer;align-items:center;justify-content:center;flex-shrink:0;transition:background .15s,transform .15s,box-shadow .15s;box-shadow:0 2px 10px rgba(0,0,0,.18);}
-  .cancel-btn:hover{background:var(--error);transform:scale(1.06);box-shadow:0 4px 14px rgba(0,0,0,.25);filter:brightness(1.1);}
-  .cancel-btn:active{transform:scale(.96);}
   .icon-btn{width:34px;height:34px;border-radius:8px;background:none;border:none;color:var(--muted);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:16px;transition:all .15s;}
   .icon-btn{opacity:.75;}
   .icon-btn:hover{background:rgba(255,255,255,.08);color:var(--text);opacity:1;}
@@ -906,7 +903,6 @@
     .composer-divider{display:none;}
     .composer-status{max-width:96px;font-size:10px;}
     .send-btn{width:32px;height:32px;}
-    .cancel-btn{width:32px;height:32px;}
     .ctx-indicator{width:32px;height:32px;}
     .ctx-tooltip{right:-4px;min-width:190px;max-width:220px;}
     /* Touch targets — minimum 44px */

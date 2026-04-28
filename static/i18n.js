@@ -674,6 +674,15 @@ const LOCALES = {
     yolo_pill_title_active: 'YOLO mode active — click to disable',
     approval_skip_all: '⚡ Skip all this session',
     approval_skip_all_title: 'Skip all approval prompts for this session'
+    // composer action tooltips
+    composer_send: 'Send message',
+    composer_queue: 'Queue message',
+    composer_interrupt: 'Interrupt and send',
+    composer_steer: 'Steer current response',
+    composer_stop: 'Stop generation',
+    composer_disabled_clarify: 'Respond to the clarification request',
+    composer_disabled_compression: 'Waiting for compression to finish',
+    composer_disabled_empty: 'Type a message to send',
   },
 
   ru: {
@@ -1291,6 +1300,15 @@ const LOCALES = {
     yolo_pill_title_active: 'YOLO режим активен — нажмите для отключения',
     approval_skip_all: '⚡ Пропустить все в этом сеансе',
     approval_skip_all_title: 'Пропустить все запросы подтверждения в этом сеансе',
+    // composer action tooltips
+    composer_send: 'Отправить сообщение',
+    composer_queue: 'Поставить в очередь',
+    composer_interrupt: 'Прервать и отправить',
+    composer_steer: 'Направить ответ',
+    composer_stop: 'Остановить генерацию',
+    composer_disabled_clarify: 'Ответьте на запрос о разъяснении',
+    composer_disabled_compression: 'Ожидание завершения сжатия',
+    composer_disabled_empty: 'Введите сообщение для отправки',
   },
 
   es: {
@@ -1902,6 +1920,15 @@ const LOCALES = {
     yolo_pill_title_active: 'Modo YOLO activo — haz clic para desactivar',
     approval_skip_all: '⚡ Saltar todo en esta sesión',
     approval_skip_all_title: 'Saltar todas las solicitudes de aprobación en esta sesión'
+    // composer action tooltips
+    composer_send: 'Enviar mensaje',
+    composer_queue: 'Poner en cola',
+    composer_interrupt: 'Interrumpir y enviar',
+    composer_steer: 'Dirigir respuesta actual',
+    composer_stop: 'Detener generación',
+    composer_disabled_clarify: 'Responde a la solicitud de aclaración',
+    composer_disabled_compression: 'Esperando a que finalice la compresión',
+    composer_disabled_empty: 'Escribe un mensaje para enviar',
   },
 
   de: {
@@ -2287,6 +2314,15 @@ const LOCALES = {
     yolo_pill_title_active: 'YOLO-Modus aktiv — Klicken zum Deaktivieren',
     approval_skip_all: '⚡ Alle in dieser Sitzung überspringen',
     approval_skip_all_title: 'Alle Genehmigungsanfragen in dieser Sitzung überspringen'
+    // composer action tooltips
+    composer_send: 'Nachricht senden',
+    composer_queue: 'Nachricht einreihen',
+    composer_interrupt: 'Unterbrechen und senden',
+    composer_steer: 'Antwort steuern',
+    composer_stop: 'Generierung stoppen',
+    composer_disabled_clarify: 'Auf die Klärungsanfrage antworten',
+    composer_disabled_compression: 'Warte auf Abschluss der Komprimierung',
+    composer_disabled_empty: 'Nachricht eingeben zum Senden',
 },
 
   zh: {
@@ -2895,6 +2931,15 @@ const LOCALES = {
     yolo_pill_title_active: 'YOLO 模式激活 — 点击关闭',
     approval_skip_all: '⚡ 本次会话全部跳过',
     approval_skip_all_title: '跳过本次会话的所有审批提示',
+    // composer action tooltips
+    composer_send: '发送消息',
+    composer_queue: '消息加入队列',
+    composer_interrupt: '中断并发送',
+    composer_steer: '引导当前响应',
+    composer_stop: '停止生成',
+    composer_disabled_clarify: '请回复上方的澄清请求',
+    composer_disabled_compression: '等待压缩完成',
+    composer_disabled_empty: '请输入消息后发送',
   },
 
   // Traditional Chinese (zh-Hant)
@@ -3554,6 +3599,15 @@ const LOCALES = {
     yolo_pill_title_active: 'YOLO 模式激活 — 點擊關閉',
     approval_skip_all: '⚡ 本次工作階段全部跳過',
     approval_skip_all_title: '跳過本次工作階段的所有審批提示'
+    // composer action tooltips
+    composer_send: '\u50b3\u9001\u8a0a\u606f',
+    composer_queue: '\u8a0a\u606f\u52a0\u5165\u4f47\u5217',
+    composer_interrupt: '\u4e2d\u65b7\u4e26\u50b3\u9001',
+    composer_steer: '\u5f15\u5c0e\u76ee\u524d\u56de\u61c9',
+    composer_stop: '\u505c\u6b62\u7522\u751f',
+    composer_disabled_clarify: '\u8acb\u56de\u8986\u4e0a\u65b9\u7684\u6f84\u6e05\u8981\u6c42',
+    composer_disabled_compression: '\u7b49\u5f85\u58d3\u7e2e\u5b8c\u6210',
+    composer_disabled_empty: '\u8acb\u8f38\u5165\u8a0a\u606f\u5f8c\u50b3\u9001',
   },
 
   ko: {
@@ -4217,6 +4271,15 @@ const LOCALES = {
     yolo_pill_title_active: 'YOLO 모드 활성 — 클릭하여 비활성화',
     approval_skip_all: '⚡ 이 세션에서 모두 건너뛰기',
     approval_skip_all_title: '이 세션의 모든 승인 요청 건너뛰기',
+    // composer action tooltips
+    composer_send: '메시지 보내기',
+    composer_queue: '메시지 대기열에 추가',
+    composer_interrupt: '중단하고 전송',
+    composer_steer: '현재 응답 유도',
+    composer_stop: '생성 중지',
+    composer_disabled_clarify: '위의 명확화 요청에 응답하세요',
+    composer_disabled_compression: '압축 완료 대기 중',
+    composer_disabled_empty: '메시지를 입력하세요',
   }
 };
 
