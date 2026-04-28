@@ -20,6 +20,7 @@ import api.config as config
 
 SCHEMA_VERSION = 1
 _SPACE_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+_WIDGET_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 _TRUTHY = {"1", "true", "yes", "on", "enabled"}
 
 
@@ -57,6 +58,13 @@ def validate_space_id(space_id: str) -> str:
     if not _SPACE_ID_RE.fullmatch(sid):
         raise ValueError("Invalid space_id")
     return sid
+
+
+def validate_widget_id(widget_id: str) -> str:
+    wid = str(widget_id or "").strip()
+    if not _WIDGET_ID_RE.fullmatch(wid):
+        raise ValueError("Invalid widget_id")
+    return wid
 
 
 def _space_dir(space_id: str) -> Path:
@@ -127,6 +135,16 @@ def _summary(space: dict[str, Any]) -> dict[str, Any]:
         "updated_at": space.get("updated_at"),
         "revision_event_id": space.get("revision_event_id"),
         "widget_count": len(widgets) if isinstance(widgets, list) else 0,
+    }
+
+
+def _widget_summary(widget: dict[str, Any]) -> dict[str, Any]:
+    wid = validate_widget_id(widget.get("id"))
+    title = str(widget.get("title") or widget.get("name") or wid)
+    return {
+        "id": wid,
+        "kind": str(widget.get("kind") or "custom"),
+        "title": title,
     }
 
 
@@ -220,6 +238,90 @@ def delete_space(space_id: str) -> dict[str, Any]:
     event_id = _record_event(sid, "space.deleted")
     shutil.rmtree(path)
     return {"deleted": True, "space_id": sid, "revision_event_id": event_id}
+
+
+def _widget_index(space: dict[str, Any], widget_id: str) -> int:
+    wid = validate_widget_id(widget_id)
+    widgets = space.get("widgets") or []
+    if not isinstance(widgets, list):
+        raise ValueError("widgets must be a list")
+    for idx, widget in enumerate(widgets):
+        if isinstance(widget, dict) and widget.get("id") == wid:
+            return idx
+    raise FileNotFoundError("Widget not found")
+
+
+def list_widgets(space_id: str) -> list[dict[str, Any]]:
+    if not spaces_enabled():
+        return []
+    space = read_space(space_id)
+    widgets = space.get("widgets") or []
+    if not isinstance(widgets, list):
+        raise ValueError("widgets must be a list")
+    summaries: list[dict[str, Any]] = []
+    for widget in widgets:
+        if isinstance(widget, dict):
+            summaries.append(_widget_summary(widget))
+    return summaries
+
+
+def read_widget(space_id: str, widget_id: str) -> dict[str, Any]:
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    space = read_space(space_id)
+    idx = _widget_index(space, widget_id)
+    return dict(space["widgets"][idx])
+
+
+def upsert_widget(space_id: str, widget: dict[str, Any]) -> dict[str, Any]:
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    if not isinstance(widget, dict):
+        raise ValueError("widget must be an object")
+    wid = validate_widget_id(widget.get("id"))
+    clean_widget = dict(widget)
+    clean_widget["id"] = wid
+    clean_widget["kind"] = str(clean_widget.get("kind") or "custom")
+    clean_widget["title"] = str(clean_widget.get("title") or clean_widget.get("name") or wid)
+
+    space = read_space(space_id)
+    widgets = space.get("widgets") or []
+    if not isinstance(widgets, list):
+        raise ValueError("widgets must be a list")
+    replaced = False
+    for idx, existing in enumerate(widgets):
+        if isinstance(existing, dict) and existing.get("id") == wid:
+            widgets[idx] = clean_widget
+            replaced = True
+            break
+    if not replaced:
+        widgets.append(clean_widget)
+    space["widgets"] = widgets
+    event_type = "widget.updated" if replaced else "widget.created"
+    saved = _write_manifest(space, event_type, {"widget_id": wid})
+    return {
+        "space_id": saved["space_id"],
+        "widget": clean_widget,
+        "revision_event_id": saved["revision_event_id"],
+    }
+
+
+def delete_widget(space_id: str, widget_id: str) -> dict[str, Any]:
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    wid = validate_widget_id(widget_id)
+    space = read_space(space_id)
+    idx = _widget_index(space, wid)
+    widgets = list(space.get("widgets") or [])
+    widgets.pop(idx)
+    space["widgets"] = widgets
+    saved = _write_manifest(space, "widget.deleted", {"widget_id": wid})
+    return {
+        "deleted": True,
+        "space_id": saved["space_id"],
+        "widget_id": wid,
+        "revision_event_id": saved["revision_event_id"],
+    }
 
 
 def recovery_snapshot() -> dict[str, Any]:

@@ -236,3 +236,81 @@ def test_disabled_spaces_get_route_does_not_return_manifest_details(monkeypatch,
     assert status == 403
     assert "space" not in body
     assert "secret" not in json.dumps(body)
+
+
+def test_widget_upsert_list_read_and_delete_are_revisioned(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Widget Lab"})
+
+    upserted = spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "weather",
+            "kind": "markdown",
+            "title": "Weather",
+            "renderer": "# {{temperature}}",
+            "data": {"temperature": "72F"},
+        },
+    )
+
+    assert upserted["space_id"] == created["space_id"]
+    assert upserted["widget"]["id"] == "weather"
+    assert upserted["revision_event_id"] != created["revision_event_id"]
+    assert (spaces.events_dir() / f"{upserted['revision_event_id']}.json").exists()
+
+    widgets = spaces.list_widgets(created["space_id"])
+    assert widgets == [{"id": "weather", "kind": "markdown", "title": "Weather"}]
+    assert "renderer" not in json.dumps(widgets)
+
+    full = spaces.read_widget(created["space_id"], "weather")
+    assert full["renderer"] == "# {{temperature}}"
+
+    deleted = spaces.delete_widget(created["space_id"], "weather")
+    assert deleted["deleted"] is True
+    assert deleted["revision_event_id"] != upserted["revision_event_id"]
+    assert spaces.list_widgets(created["space_id"]) == []
+
+
+def test_widget_validation_rejects_pathlike_ids_and_non_object_specs(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Widget Validation"})
+
+    for bad_id in ["../escape", "bad/id", ".hidden", "", "a" * 80]:
+        with pytest.raises(ValueError):
+            spaces.upsert_widget(created["space_id"], {"id": bad_id, "kind": "markdown"})
+
+    with pytest.raises(ValueError):
+        spaces.upsert_widget(created["space_id"], ["not", "a", "dict"])
+
+
+def test_widget_routes_upsert_list_read_and_delete(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Route Widgets"})
+    space_id = created["space_id"]
+
+    handled, status, body = _route_post(
+        "/api/spaces/widget/upsert",
+        {"space_id": space_id, "widget": {"id": "notes", "kind": "markdown", "title": "Notes"}},
+    )
+    assert handled is None
+    assert status == 200
+    assert body["widget"]["id"] == "notes"
+
+    handled, status, body = _route_get(f"/api/spaces/widgets?space_id={space_id}")
+    assert handled is None
+    assert status == 200
+    assert body["widgets"] == [{"id": "notes", "kind": "markdown", "title": "Notes"}]
+
+    handled, status, body = _route_get(f"/api/spaces/widget?space_id={space_id}&widget_id=notes")
+    assert handled is None
+    assert status == 200
+    assert body["widget"]["title"] == "Notes"
+
+    handled, status, body = _route_post(
+        "/api/spaces/widget/delete",
+        {"space_id": space_id, "widget_id": "notes"},
+    )
+    assert handled is None
+    assert status == 200
+    assert body["deleted"] is True
+    assert spaces.list_widgets(space_id) == []
