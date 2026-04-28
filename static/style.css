@@ -441,6 +441,7 @@
   /* Terminal flyout reserves transcript space so recent messages stay readable above it. */
   .messages.terminal-open{padding-bottom:var(--terminal-card-height,320px);scroll-padding-bottom:var(--terminal-card-height,320px);transition:padding-bottom .26s cubic-bezier(.2,.8,.2,1);}
   .messages.terminal-collapsed{padding-bottom:var(--terminal-dock-height,72px);scroll-padding-bottom:var(--terminal-dock-height,72px);transition:padding-bottom .22s cubic-bezier(.2,.8,.2,1);}
+  .messages.terminal-expanding-from-dock{transition:none!important;}
   .queue-card-inner{background:var(--surface);border:1px solid var(--border);border-bottom:none;border-radius:14px 14px 0 0;contain:paint;transform:translateY(100%);opacity:0;transition:transform .35s cubic-bezier(.32,.72,.16,1),opacity .2s ease;overflow:hidden;max-height:240px;overflow-y:auto;padding-bottom:4px;}
   .queue-card.visible .queue-card-inner{transform:translateY(0);opacity:1;}
   .queue-card-header{display:flex;align-items:center;gap:8px;padding:9px 14px 8px;border-bottom:1px solid var(--border);font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);}

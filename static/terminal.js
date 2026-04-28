@@ -289,6 +289,7 @@ function _syncTerminalTranscriptSpace(open,opts){
   if(!open){
     messages.classList.remove('terminal-open');
     messages.classList.remove('terminal-collapsed');
+    messages.classList.remove('terminal-expanding-from-dock');
     messages.style.removeProperty('--terminal-card-height');
     messages.style.removeProperty('--terminal-dock-height');
     if(wasNearBottom&&typeof scrollToBottom==='function')requestAnimationFrame(scrollToBottom);
@@ -472,10 +473,13 @@ function collapseComposerTerminal(){
 function expandComposerTerminal(){
   if(!TERMINAL_UI.open)return;
   const {panel}= _terminalEls();
+  const messages=_terminalMessagesEl();
   TERMINAL_UI.collapsed=false;
   clearTimeout(TERMINAL_UI.closeTimer);
   if(panel)panel.classList.add('is-expanding-from-dock');
+  if(messages)messages.classList.add('terminal-expanding-from-dock');
   _syncTerminalTranscriptSpace(true,{immediate:true});
+  if(messages)void messages.offsetHeight;
   _setTerminalChromeState('expanded');
   _resetTerminalHeightForViewport();
   requestAnimationFrame(()=>{
@@ -483,6 +487,7 @@ function expandComposerTerminal(){
     focusComposerTerminalInput();
     setTimeout(()=>{
       if(panel)panel.classList.remove('is-expanding-from-dock');
+      if(messages)messages.classList.remove('terminal-expanding-from-dock');
     },120);
   });
   syncTerminalButton();
