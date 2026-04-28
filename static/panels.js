@@ -3067,3 +3067,90 @@ function dismissErrorBanner(){
 }
 
 // Event wiring
+
+
+// ── MCP Server Management ──
+function loadMcpServers(){
+  const list=$('mcpServerList');
+  if(!list) return;
+  api('/api/mcp/servers').then(r=>{
+    if(!r||!r.servers) return;
+    if(!r.servers.length){
+      list.innerHTML=`<div style="color:var(--muted);font-size:12px;padding:6px 0">${t('mcp_no_servers')}</div>`;
+      return;
+    }
+    list.innerHTML=r.servers.map(s=>{
+      const badge=s.transport==='http'
+        ?`<span class="mcp-transport-badge mcp-http">HTTP</span>`
+        :`<span class="mcp-transport-badge mcp-stdio">stdio</span>`;
+      const detail=s.transport==='http'?s.url:`${s.command} ${s.args?s.args.join(' '):''}`;
+      const envInfo=s.env?Object.entries(s.env).map(([k,v])=>`${k}=${v}`).join(', '):'';
+      return `<div class="mcp-server-row">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="mcp-server-name">${esc(s.name)}</span>${badge}
+        </div>
+        <div class="mcp-server-detail">${esc(detail)}${envInfo?' | '+esc(envInfo):''}</div>
+        <button class="mcp-delete-btn" onclick="deleteMcpServer('${esc(s.name)}')" title="Delete">&times;</button>
+      </div>`;
+    }).join('');
+  }).catch(()=>{list.innerHTML=`<div style="color:#ef4444;font-size:12px;padding:6px 0">${t('mcp_load_failed')}</div>`});
+}
+
+function showMcpAddForm(){
+  const wrap=$('mcpAddFormWrap');
+  if(wrap) wrap.style.display='block';
+}
+function hideMcpAddForm(){
+  const wrap=$('mcpAddFormWrap');
+  if(wrap) wrap.style.display='none';
+  ['mcpName','mcpCommand','mcpArgs','mcpUrl','mcpTimeout'].forEach(id=>{
+    const el=$(id);if(el)el.value=id==='mcpTimeout'?'120':'';
+  });
+  const tr=$('mcpTransport');if(tr)tr.value='stdio';
+  mcpTransportChanged();
+}
+function mcpTransportChanged(){
+  const tr=$('mcpTransport');
+  const isHttp=tr&&tr.value==='http';
+  const cmdF=$('mcpCommandField');if(cmdF)cmdF.style.display=isHttp?'none':'';
+  const argsF=$('mcpArgsField');if(argsF)argsF.style.display=isHttp?'none':'';
+  const urlF=$('mcpUrlField');if(urlF)urlF.style.display=isHttp?'block':'none';
+}
+function saveMcpServer(){
+  const name=($('mcpName')||{}).value||'';
+  if(!name.trim()){showToast(t('mcp_name_required'));return;}
+  const tr=($('mcpTransport')||{}).value||'stdio';
+  const timeout=parseInt(($('mcpTimeout')||{}).value)||120;
+  const body={timeout};
+  if(tr==='http'){
+    body.url=($('mcpUrl')||{}).value||'';
+    if(!body.url.trim()){showToast(t('mcp_url_required'));return;}
+  }else{
+    body.command=($('mcpCommand')||{}).value||'';
+    if(!body.command.trim()){showToast(t('mcp_command_required'));return;}
+    const argsStr=($('mcpArgs')||{}).value||'';
+    if(argsStr.trim()) body.args=argsStr.split(',').map(a=>a.trim()).filter(Boolean);
+  }
+  const encName=encodeURIComponent(name.trim());
+  api(`/api/mcp/servers/${encName}`,{method:'PUT',body:JSON.stringify(body)})
+    .then(r=>{
+      if(r&&r.ok){showToast(t('mcp_saved'));hideMcpAddForm();loadMcpServers();}
+      else{showToast((r&&r.error)||t('mcp_save_failed'));}
+    }).catch(()=>{showToast(t('mcp_save_failed'));});
+}
+async function deleteMcpServer(name){
+  const _ok=await showConfirmDialog({title:t('mcp_delete_confirm_title'),message:t('mcp_delete_confirm_message',name),confirmLabel:t('delete_title'),danger:true,focusCancel:true});
+  if(!_ok) return;
+  const encName=encodeURIComponent(name);
+  api(`/api/mcp/servers/${encName}`,{method:'DELETE'})
+    .then(r=>{
+      if(r&&r.ok){showToast(t('mcp_deleted'));loadMcpServers();}
+      else{showToast((r&&r.error)||t('mcp_delete_failed'));}
+    }).catch(()=>{showToast(t('mcp_delete_failed'));});
+}
+// Load MCP servers when system settings tab opens
+const _origSwitchSettings=switchSettingsSection;
+switchSettingsSection=function(name){
+  _origSwitchSettings(name);
+  if(name==='system') loadMcpServers();
+};

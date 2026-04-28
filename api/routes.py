@@ -1563,6 +1563,19 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/workspaces/rename":
         return _handle_workspace_rename(handler, body)
 
+    # ── MCP Servers ──
+    if parsed.path == "/api/mcp/servers":
+        return _handle_mcp_servers_list(handler)
+
+    if parsed.path.startswith("/api/mcp/servers/") and parsed.path.count("/") == 4:
+        # DELETE /api/mcp/servers/<name>
+        name = parsed.path.split("/")[-1]
+        if handler.command == "DELETE":
+            return _handle_mcp_server_delete(handler, name)
+        # PUT /api/mcp/servers/<name>
+        if handler.command == "PUT":
+            return _handle_mcp_server_update(handler, name, body)
+
     # ── Approval (POST) ──
     if parsed.path == "/api/approval/respond":
         return _handle_approval_respond(handler, body)
@@ -3816,3 +3829,106 @@ def _handle_session_import(handler, body):
             SESSIONS.popitem(last=False)
     s.save()
     return j(handler, {"ok": True, "session": s.compact() | {"messages": s.messages}})
+
+
+# ── MCP Server helpers ──
+from api.config import get_config, _save_yaml_config_file, _get_config_path, reload_config
+
+def _mask_secrets(obj):
+    """Mask sensitive values in env vars and headers."""
+    if not isinstance(obj, dict):
+        return obj
+    sensitive = ("auth", "token", "key", "secret", "password", "credential")
+    masked = {}
+    for k, v in obj.items():
+        if isinstance(v, str) and any(s in k.lower() for s in sensitive):
+            masked[k] = "••••••"
+        elif isinstance(v, dict):
+            masked[k] = _mask_secrets(v)
+        else:
+            masked[k] = v
+    return masked
+
+
+def _server_summary(name, cfg):
+    """Return a safe summary of an MCP server config."""
+    out = {"name": name}
+    if "url" in cfg:
+        out["transport"] = "http"
+        # Mask auth headers
+        if "headers" in cfg:
+            out["headers"] = _mask_secrets(cfg["headers"])
+        out["url"] = cfg["url"]
+    else:
+        out["transport"] = "stdio"
+        out["command"] = cfg.get("command", "")
+        out["args"] = cfg.get("args", [])
+        if "env" in cfg:
+            out["env"] = _mask_secrets(cfg["env"])
+    out["timeout"] = cfg.get("timeout", 120)
+    return out
+
+
+def _handle_mcp_servers_list(handler):
+    """List all configured MCP servers."""
+    cfg = get_config()
+    servers = cfg.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        servers = {}
+    result = [_server_summary(name, scfg) for name, scfg in servers.items()]
+    return j(handler, {"servers": result})
+
+
+def _handle_mcp_server_delete(handler, name):
+    """Delete an MCP server by name."""
+    from urllib.parse import unquote
+    name = unquote(name)
+    if not name:
+        return bad(handler, "name is required")
+    cfg = get_config()
+    servers = cfg.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        servers = {}
+    if name not in servers:
+        return bad(handler, f"MCP server '{name}' not found", 404)
+    del servers[name]
+    cfg["mcp_servers"] = servers
+    _save_yaml_config_file(_get_config_path(), cfg)
+    reload_config()
+    return j(handler, {"ok": True, "deleted": name})
+
+
+def _handle_mcp_server_update(handler, name, body):
+    """Add or update an MCP server."""
+    from urllib.parse import unquote
+    name = unquote(name)
+    if not name:
+        return bad(handler, "name is required")
+    # Validate: must have url (http) or command (stdio)
+    server_cfg = {}
+    if body.get("url"):
+        server_cfg["url"] = body["url"].strip()
+        if body.get("headers"):
+            server_cfg["headers"] = body["headers"]
+    elif body.get("command"):
+        server_cfg["command"] = body["command"].strip()
+        if body.get("args"):
+            server_cfg["args"] = body["args"] if isinstance(body["args"], list) else [body["args"]]
+        if body.get("env"):
+            server_cfg["env"] = body["env"]
+    else:
+        return bad(handler, "url or command is required")
+    if body.get("timeout") is not None:
+        try:
+            server_cfg["timeout"] = int(body["timeout"])
+        except (ValueError, TypeError):
+            pass
+    cfg = get_config()
+    servers = cfg.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        servers = {}
+    servers[name] = server_cfg
+    cfg["mcp_servers"] = servers
+    _save_yaml_config_file(_get_config_path(), cfg)
+    reload_config()
+    return j(handler, {"ok": True, "server": _server_summary(name, server_cfg)})
