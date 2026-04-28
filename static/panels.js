@@ -3080,9 +3080,9 @@ function loadMcpServers(){
       return;
     }
     list.innerHTML=r.servers.map(s=>{
-      const badge=s.transport==='http'
-        ?`<span class="mcp-transport-badge mcp-http">HTTP</span>`
-        :`<span class="mcp-transport-badge mcp-stdio">stdio</span>`;
+      const transportLabel=s.transport==='http'?'HTTP':s.transport==='stdio'?'stdio':(''+s.transport);
+      const transportClass=s.transport==='http'?'mcp-http':s.transport==='stdio'?'mcp-stdio':'mcp-unknown';
+      const badge=`<span class="mcp-transport-badge ${transportClass}">${esc(transportLabel)}</span>`;
       const detail=s.transport==='http'?s.url:`${s.command} ${s.args?s.args.join(' '):''}`;
       const envInfo=s.env?Object.entries(s.env).map(([k,v])=>`${k}=${v}`).join(', '):'';
       return `<div class="mcp-server-row">

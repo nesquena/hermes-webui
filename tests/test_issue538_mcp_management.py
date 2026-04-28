@@ -7,6 +7,7 @@ from api.routes import (
     _handle_mcp_server_delete,
     _mask_secrets,
     _server_summary,
+    _strip_masked_values,
 )
 
 
@@ -200,7 +201,7 @@ class TestMaskSecrets:
     """Unit tests for _mask_secrets helper."""
 
     def test_masks_env_values(self):
-        obj = {"env": {"API_KEY": "secret123", "PUBLIC_VAR": "visible"}}
+        obj = {"env": {"API_KEY": "***", "PUBLIC_VAR": "visible"}}
         result = _mask_secrets(obj)
         assert result["env"]["API_KEY"] == "••••••"
         assert result["env"]["PUBLIC_VAR"] == "visible"
@@ -223,3 +224,39 @@ class TestMaskSecrets:
         obj = {"password": "hunter2"}
         result = _mask_secrets(obj)
         assert result["password"] == "••••••"
+
+
+class TestStripMaskedValues:
+    """Unit tests for _strip_masked_values helper (secret round-trip protection)."""
+
+    def test_masked_env_preserves_original(self):
+        """Submitting masked env value should keep the original stored value."""
+        existing = {"API_KEY": "real-secret-123", "PUBLIC": "visible"}
+        submitted = {"API_KEY": "••••••", "PUBLIC": "updated"}
+        result = _strip_masked_values(submitted, existing)
+        assert result["API_KEY"] == "real-secret-123"
+        assert result["PUBLIC"] == "updated"
+
+    def test_masked_headers_preserves_original(self):
+        """Submitting masked header value should keep the original stored value."""
+        existing = {"Authorization": "Bearer token123", "Accept": "application/json"}
+        submitted = {"Authorization": "••••••", "Accept": "text/html"}
+        result = _strip_masked_values(submitted, existing)
+        assert result["Authorization"] == "Bearer token123"
+        assert result["Accept"] == "text/html"
+
+    def test_new_key_still_saved(self):
+        """New keys (not in existing) should be saved even if they look sensitive."""
+        existing = {"OLD_KEY": "old"}
+        submitted = {"NEW_KEY": "new-value", "OLD_KEY": "••••••"}
+        result = _strip_masked_values(submitted, existing)
+        assert result["OLD_KEY"] == "old"
+        assert result["NEW_KEY"] == "new-value"
+
+    def test_non_dict_passthrough(self):
+        assert _strip_masked_values("hello", {}) == "hello"
+        assert _strip_masked_values(42, {}) == 42
+
+    def test_empty_dicts(self):
+        assert _strip_masked_values({}, {}) == {}
+        assert _strip_masked_values({"k": "v"}, {}) == {"k": "v"}

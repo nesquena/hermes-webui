@@ -3898,6 +3898,26 @@ def _handle_mcp_server_delete(handler, name):
     return j(handler, {"ok": True, "deleted": name})
 
 
+_MASKED_PLACEHOLDER = "••••••"
+
+
+def _strip_masked_values(submitted, existing):
+    """Remove masked placeholder values from submitted dict, keeping originals."""
+    if not isinstance(submitted, dict) or not isinstance(existing, dict):
+        return submitted
+    cleaned = {}
+    for k, v in submitted.items():
+        if isinstance(v, str) and v == _MASKED_PLACEHOLDER:
+            if k in existing and isinstance(existing[k], str):
+                cleaned[k] = existing[k]  # preserve original real value
+                continue
+        elif isinstance(v, dict) and k in existing and isinstance(existing[k], dict):
+            cleaned[k] = _strip_masked_values(v, existing[k])
+        else:
+            cleaned[k] = v
+    return cleaned
+
+
 def _handle_mcp_server_update(handler, name, body):
     """Add or update an MCP server."""
     from urllib.parse import unquote
@@ -3906,16 +3926,21 @@ def _handle_mcp_server_update(handler, name, body):
         return bad(handler, "name is required")
     # Validate: must have url (http) or command (stdio)
     server_cfg = {}
+    cfg = get_config()
+    servers = cfg.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        servers = {}
+    existing_cfg = servers.get(name, {})
     if body.get("url"):
         server_cfg["url"] = body["url"].strip()
         if body.get("headers"):
-            server_cfg["headers"] = body["headers"]
+            server_cfg["headers"] = _strip_masked_values(body["headers"], existing_cfg.get("headers", {}))
     elif body.get("command"):
         server_cfg["command"] = body["command"].strip()
         if body.get("args"):
             server_cfg["args"] = body["args"] if isinstance(body["args"], list) else [body["args"]]
         if body.get("env"):
-            server_cfg["env"] = body["env"]
+            server_cfg["env"] = _strip_masked_values(body["env"], existing_cfg.get("env", {}))
     else:
         return bad(handler, "url or command is required")
     if body.get("timeout") is not None:
@@ -3923,10 +3948,6 @@ def _handle_mcp_server_update(handler, name, body):
             server_cfg["timeout"] = int(body["timeout"])
         except (ValueError, TypeError):
             pass
-    cfg = get_config()
-    servers = cfg.get("mcp_servers", {})
-    if not isinstance(servers, dict):
-        servers = {}
     servers[name] = server_cfg
     cfg["mcp_servers"] = servers
     _save_yaml_config_file(_get_config_path(), cfg)
