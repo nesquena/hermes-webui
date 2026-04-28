@@ -371,6 +371,7 @@ function _setCronHeaderButtons(mode, job) {
   const pauseBtn = $('btnPauseTaskDetail');
   const resumeBtn = $('btnResumeTaskDetail');
   const editBtn = $('btnEditTaskDetail');
+  const dupBtn = $('btnDuplicateTaskDetail');
   const delBtn = $('btnDeleteTaskDetail');
   const cancelBtn = $('btnCancelTaskDetail');
   const saveBtn = $('btnSaveTaskDetail');
@@ -385,12 +386,12 @@ function _setCronHeaderButtons(mode, job) {
     );
     if (resumable) { hide(pauseBtn); show(resumeBtn); }
     else { show(pauseBtn); hide(resumeBtn); }
-    show(editBtn); show(delBtn); hide(cancelBtn); hide(saveBtn);
+    show(editBtn); show(dupBtn); show(delBtn); hide(cancelBtn); hide(saveBtn);
   } else if (mode === 'create' || mode === 'edit') {
-    hide(runBtn); hide(pauseBtn); hide(resumeBtn); hide(editBtn); hide(delBtn);
+    hide(runBtn); hide(pauseBtn); hide(resumeBtn); hide(editBtn); hide(dupBtn); hide(delBtn);
     show(cancelBtn); show(saveBtn);
   } else {
-    [runBtn,pauseBtn,resumeBtn,editBtn,delBtn,cancelBtn,saveBtn].forEach(hide);
+    [runBtn,pauseBtn,resumeBtn,editBtn,dupBtn,delBtn,cancelBtn,saveBtn].forEach(hide);
   }
 }
 
@@ -457,6 +458,28 @@ async function copyCurrentCronDiagnostics(){
 function editCurrentCron(){
   if (!_currentCronDetail) return;
   openCronEdit(_currentCronDetail);
+}
+function duplicateCurrentCron(){
+  if (!_currentCronDetail) return;
+  const job = _currentCronDetail;
+  if (typeof switchPanel === 'function' && _currentPanel !== 'tasks') switchPanel('tasks');
+  _cronPreFormDetail = { ...job };
+  _editingCronId = null;
+  _cronMode = 'create';
+  _cronSelectedSkills = Array.isArray(job.skills) ? [...job.skills] : [];
+  const dupName = job.name ? job.name + ' (copy)' : '';
+  _renderCronForm({
+    name: dupName,
+    schedule: job.schedule_display || (job.schedule && job.schedule.expression) || '',
+    prompt: job.prompt || '',
+    deliver: job.deliver || 'local',
+    isEdit: false,
+  });
+  if (!_cronSkillsCache) {
+    api('/api/skills').then(d=>{_cronSkillsCache=d.skills||[]; _bindCronSkillPicker();}).catch(()=>{});
+  } else {
+    _bindCronSkillPicker();
+  }
 }
 async function deleteCurrentCron(){
   if (!_currentCronDetail) return;
