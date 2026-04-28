@@ -437,6 +437,7 @@ function openCronDetail(id, el){
 function _clearCronDetail(){
   _currentCronDetail = null;
   _cronMode = 'empty';
+  _stopCronWatch();
   const title = $('taskDetailTitle');
   const body = $('taskDetailBody');
   const empty = $('taskDetailEmpty');
