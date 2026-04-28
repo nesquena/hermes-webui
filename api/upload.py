@@ -88,6 +88,98 @@ def handle_upload(handler):
         return j(handler, {'error': 'Upload failed'}, status=500)
 
 
+def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
+    """Extract a zip or tar archive into the workspace.
+
+    Returns a dict with ``extracted`` (int), ``files`` (list[str]).
+    Raises ValueError on zip-slip or unsupported format.
+    """
+    import zipfile, tarfile, io, os
+
+    name = Path(filename).name
+    stem = Path(filename).stem  # strip .zip / .tar.gz etc.
+
+    if name.lower().endswith(('.zip',)):
+        _mode = 'zip'
+    elif name.lower().endswith(('.tar', '.tar.gz', '.tgz', '.tar.bz2', '.tbz2', '.tar.xz', '.txz')):
+        _mode = 'tar'
+    else:
+        raise ValueError(f'Unsupported archive format: {filename}')
+
+    # Determine destination directory — use archive stem as folder name
+    dest_dir = safe_resolve_ws(workspace, stem)
+    # Avoid overwriting existing files by appending a suffix
+    if dest_dir.exists():
+        import string, random
+        while dest_dir.exists():
+            suffix = ''.join(random.choices(string.digits, k=3))
+            dest_dir = dest_dir.with_name(stem + '_' + suffix)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    extracted_files = []
+
+    if _mode == 'zip':
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+            for member in zf.infolist():
+                # Skip directories
+                if member.is_dir():
+                    continue
+                # Zip-slip protection
+                member_path = (dest_dir / member.filename).resolve()
+                if not str(member_path).startswith(str(dest_dir.resolve())):
+                    raise ValueError(f'Zip-slip blocked: {member.filename}')
+                member_path.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(member) as src, open(member_path, 'wb') as dst:
+                    dst.write(src.read())
+                extracted_files.append(str(member_path.relative_to(workspace.resolve())))
+
+    elif _mode == 'tar':
+        with tarfile.open(fileobj=io.BytesIO(file_bytes)) as tf:
+            for member in tf.getmembers():
+                if not member.isfile():
+                    continue
+                # Tar-slip protection
+                member_path = (dest_dir / member.name).resolve()
+                if not str(member_path).startswith(str(dest_dir.resolve())):
+                    raise ValueError(f'Tar-slip blocked: {member.name}')
+                member_path.parent.mkdir(parents=True, exist_ok=True)
+                with tf.extractfile(member) as src, open(member_path, 'wb') as dst:
+                    if src:
+                        dst.write(src.read())
+                extracted_files.append(str(member_path.relative_to(workspace.resolve())))
+
+    return {'extracted': len(extracted_files), 'files': extracted_files, 'dest': str(dest_dir)}
+
+
+def handle_upload_extract(handler):
+    """Handle archive upload and extraction."""
+    import traceback as _tb
+    try:
+        content_type = handler.headers.get('Content-Type', '')
+        content_length = int(handler.headers.get('Content-Length', 0) or 0)
+        if content_length > MAX_UPLOAD_BYTES:
+            return j(handler, {'error': f'File too large (max {MAX_UPLOAD_BYTES//1024//1024}MB)'}, status=413)
+        fields, files = parse_multipart(handler.rfile, content_type, content_length)
+        session_id = fields.get('session_id', '')
+        if 'file' not in files:
+            return j(handler, {'error': 'No file field in request'}, status=400)
+        filename, file_bytes = files['file']
+        if not filename:
+            return j(handler, {'error': 'No filename in upload'}, status=400)
+        try:
+            s = get_session(session_id)
+        except KeyError:
+            return j(handler, {'error': 'Session not found'}, status=404)
+        workspace = Path(s.workspace)
+        result = extract_archive(file_bytes, filename, workspace)
+        return j(handler, {'ok': True, **result})
+    except ValueError as e:
+        return j(handler, {'error': str(e)}, status=400)
+    except Exception:
+        print('[webui] upload extract error: ' + _tb.format_exc(), flush=True)
+        return j(handler, {'error': 'Archive extraction failed'}, status=500)
+
+
 def handle_transcribe(handler):
     import traceback as _tb
     temp_path = None

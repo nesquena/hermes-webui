@@ -236,6 +236,7 @@ const LOCALES = {
     empty_dir: '(empty)',
     upload_failed: 'Upload failed: ',
     all_uploads_failed: (n) => `All ${n} upload(s) failed`,
+    archive_extracted: (n, c) => `Extracted ${n} file(s) from ${c} archive(s)`,
     session_pin: 'Pin conversation',
     session_unpin: 'Unpin conversation',
     session_pin_desc: 'Keep this conversation at the top',
@@ -848,6 +849,7 @@ const LOCALES = {
     empty_dir: '(пусто)',
     upload_failed: 'Не удалось загрузить: ',
     all_uploads_failed: (n) => `Не удалось загрузить все ${n} файлов`,
+    archive_extracted: (n, c) => `Извлечено ${n} файл(ов) из ${c} архив(ов)`,
     settings_title: 'Настройки',
     settings_save_btn: 'Сохранить настройки',
     settings_label_model: 'Модель по умолчанию',
@@ -1456,6 +1458,7 @@ const LOCALES = {
     empty_dir: '(vacío)',
     upload_failed: 'Error al subir: ',
     all_uploads_failed: (n) => `Fallaron las ${n} subida(s)`,
+    archive_extracted: (n, c) => `${n} archivo(s) extraído(s) de ${c} archivo(s) comprimido(s)`,
     // settings panel
     settings_title: 'Configuración',
     settings_save_btn: 'Guardar configuración',
@@ -1964,6 +1967,7 @@ const LOCALES = {
     model_not_found_label: 'Modell nicht gefunden',
     // commands.js
     cmd_help: 'Verfügbare Befehle auflisten',
+    archive_extracted: (n, c) => `${n} Datei(en) aus ${c} Archiv(en) entpackt`,
     cmd_clear: 'Konversationsverlauf löschen',
     cmd_compress: 'Kontext manuell komprimieren (Nutzung: /compress [Thema])',
     cmd_compact_alias: 'Alte Alias für /compress',
@@ -2582,6 +2586,7 @@ const LOCALES = {
     // onboarding
     onboarding_badge: '首次运行',
     onboarding_title: '欢迎使用 Hermes Web UI',
+    archive_extracted: (n, c) => `从 ${c} 个压缩包中解压了 ${n} 个文件`,
     onboarding_lead: '快速引导将验证 Hermes、保存真实的提供商配置、选择工作区和模型，并可选设置密码保护应用。',
     onboarding_back: '返回',
     onboarding_continue: '继续',
@@ -3106,6 +3111,7 @@ const LOCALES = {
     settings_saved: '\u8a2d\u5b9a\u5df2\u5132\u5b58',
     settings_save_failed: '\u5132\u5b58\u5931\u6557\uff1a',
     settings_load_failed: '\u8a2d\u5b9a\u52a0\u8f09\u5931\u6557\uff1a',
+    archive_extracted: (n, c) => `\u5f9e ${c} \u500b\u58d3\u7e2e\u5305\u4e2d\u89e3\u58d3\u7e2e\u4e86 ${n} \u500b\u6a94\u6848`,
     settings_saved_pw: '\u8a2d\u5b9a\u5df2\u5132\u5b58\uff0c\u5bc6\u78bc\u4fdd\u8b77\u5df2\u555f\u7528\uff0c\u7576\u524d\u700f\u89bd\u5668\u6703\u4fdd\u6301\u767b\u5165',
     settings_saved_pw_updated: '\u8a2d\u5b9a\u5df2\u5132\u5b58\uff0c\u5bc6\u78bc\u5df2\u66f4\u65b0',
     // login page
@@ -3782,6 +3788,7 @@ const LOCALES = {
     workspace_auto_create_folder: '폴더가 없으면 생성',
     folder_add_as_space_btn: '스페이스로 추가',
     folder_add_as_space_msg: '이 폴더를 워크스페이스 목록의 새 스페이스로 추가할까요?',
+    archive_extracted: (n, c) => `${c}개 압축 파일에서 ${n}개 파일 압축 해제됨`,
     folder_add_as_space_title: '스페이스로 추가할까요?',
     remove_title: 'Remove',
     empty_dir: '(비어 있음)',

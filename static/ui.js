@@ -88,6 +88,7 @@ document.addEventListener('click', e => {
 });
 
 const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
+const _ARCHIVE_EXTS=/\.(zip|tar|tar\.gz|tgz|tar\.bz2|tbz2|tar\.xz|txz)$/i;
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
@@ -3480,17 +3481,27 @@ async function uploadPendingFiles(){
     const f=S.pendingFiles[i];const fd=new FormData();
     fd.append('session_id',S.session.session_id);fd.append('file',f,f.name);
     try{
-      const res=await fetch(new URL('api/upload',location.href).href,{method:'POST',credentials:'include',body:fd});
+      const isArchive=_ARCHIVE_EXTS.test(f.name);
+      const url=new URL(isArchive?'api/upload/extract':'api/upload',location.href).href;
+      const res=await fetch(url,{method:'POST',credentials:'include',body:fd});
       if(_redirectIfUnauth(res)) return;
       if(!res.ok){const err=await res.text();throw new Error(err);}
       const data=await res.json();
       if(data.error)throw new Error(data.error);
-      names.push({name: data.filename, path: data.path});
+      if(isArchive){
+        names.push({name: data.dest, path: data.dest, extracted: data.extracted});
+        if(typeof loadDir==='function')loadDir(S.currentDir||'.');
+      }else{
+        names.push({name: data.filename, path: data.path});
+      }
     }catch(e){failures++;setStatus(`\u274c ${t('upload_failed')}${f.name} \u2014 ${e.message}`);}
     bar.style.width=`${Math.round((i+1)/total*100)}%`;
   }
   barWrap.classList.remove('active');bar.style.width='0%';
   S.pendingFiles=[];renderTray();
   if(failures===total&&total>0)throw new Error(t('all_uploads_failed',total));
+  // Show extraction summary
+  const extracted=names.filter(n=>n.extracted);
+  if(extracted.length)showToast(t('archive_extracted',extracted.reduce((s,n)=>s+n.extracted,0),extracted.length));
   return names;
 }

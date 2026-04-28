@@ -412,7 +412,7 @@ from api.workspace import (
     _is_blocked_system_path,
     _workspace_blocked_roots,
 )
-from api.upload import handle_upload, handle_transcribe
+from api.upload import handle_upload, handle_upload_extract, handle_transcribe
 from api.streaming import _sse, _run_agent_streaming, cancel_stream
 from api.providers import get_providers, set_provider_key, remove_provider_key
 from api.onboarding import (
@@ -1195,6 +1195,8 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/upload":
         return handle_upload(handler)
+    if parsed.path == "/api/upload/extract":
+        return handle_upload_extract(handler)
 
     if parsed.path == "/api/transcribe":
         return handle_transcribe(handler)
