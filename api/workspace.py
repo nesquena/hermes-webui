@@ -245,17 +245,10 @@ _USER_TMP_PREFIXES: tuple[Path, ...] = (
 def _workspace_blocked_roots() -> tuple[Path, ...]:
     """System roots that must never be accepted as workspace candidates.
 
-    Returns both the literal path and its symlink-resolved canonical form,
-    deduped.  This matters on macOS where ``/etc``, ``/var``, and ``/tmp``
-    are symlinks to ``/private/etc`` etc.  Without the resolved forms,
-    callers that pass a ``.resolve()``-d candidate (every caller does)
-    would compare ``/private/etc`` against literal ``Path('/etc')`` and the
-    ``relative_to`` check would miss — letting ``/etc`` through as a
-    registered workspace on macOS.
-
-    Carve-outs for legitimate user-tmp paths nominally under these roots
-    (e.g. ``/var/folders/.../T/`` on macOS) are handled by
-    :func:`_is_blocked_system_path`, not by exclusion from this list.
+    Returns both literal paths and their symlink-resolved canonical forms,
+    deduped. This matters on macOS where roots such as ``/etc`` and
+    ``/var`` resolve under ``/private``. Carve-outs for legitimate user tmp
+    paths are handled by :func:`_is_blocked_system_path`.
     """
     _raw = (
         # Linux / macOS
@@ -271,6 +264,8 @@ def _workspace_blocked_roots() -> tuple[Path, ...]:
         '/lib',
         '/lib64',
         '/opt/homebrew',
+        '/System',
+        '/Library',
     )
     _seen: set[Path] = set()
     _out: list[Path] = []
@@ -296,7 +291,6 @@ def _is_blocked_system_path(candidate: Path) -> bool:
         if _is_within(candidate, blocked):
             return True
     return False
-
 
 def _is_within(path: Path, root: Path) -> bool:
     try:
@@ -446,8 +440,9 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
     if not candidate.is_dir():
         raise ValueError(f"Path is not a directory: {candidate}")
 
-    # (A) Trusted if under the user's home directory — cross-platform via Path.home()
-    # Must be checked before system roots to allow symlinks like /var/home.
+    # (A) Trusted if under the user's home directory — cross-platform via Path.home().
+    # Must be checked before system roots to allow unusual but valid homes such
+    # as /var/home.
     _home = Path.home().resolve()
     if _home != Path("/"):
         try:

@@ -183,8 +183,20 @@ def test_workspace_add_allows_external_valid_paths(tmp_path):
 
 def test_workspace_add_rejects_system_paths():
     """System paths (/, /etc, /sys) are always rejected even with the relaxed add validation."""
-    _, status = post("/api/workspaces/add", {"path": "/etc", "name": "System"})
+    for path in ("/etc", "/private/etc"):
+        _, status = post("/api/workspaces/add", {"path": path, "name": "System"})
+        assert status == 400, f"{path} should be rejected"
+
+
+def test_legacy_chat_rejects_workspace_outside_trusted_root(tmp_path):
+    """Legacy /api/chat must use the same trusted workspace validation as /api/chat/start."""
+    d, _ = post("/api/session/new", {})
+    sid = d["session"]["session_id"]
+    outside = tmp_path / "outside-legacy-chat"
+    outside.mkdir(parents=True, exist_ok=True)
+    result, status = post("/api/chat", {"session_id": sid, "message": "hello", "workspace": str(outside)})
     assert status == 400
+    assert "outside" in result.get("error", "").lower()
 
 
 def test_session_new_rejects_workspace_outside_trusted_root(tmp_path):
