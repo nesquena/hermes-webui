@@ -2148,7 +2148,7 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     "stream_id": str|None}.
     """
     from api.helpers import j, bad
-    from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
+    from api import config as _cfg
 
     sid = str((body or {}).get("session_id", "") or "").strip()
     text = str((body or {}).get("text", "") or "").strip()
@@ -2157,8 +2157,8 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     if not text:
         return bad(handler, "text required")
 
-    with SESSION_AGENT_CACHE_LOCK:
-        cached = SESSION_AGENT_CACHE.get(sid)
+    with _cfg.SESSION_AGENT_CACHE_LOCK:
+        cached = _cfg.SESSION_AGENT_CACHE.get(sid)
     if not cached:
         # No active agent for this session — caller falls back to interrupt
         return j(handler, {"accepted": False, "fallback": "no_cached_agent",
@@ -2181,8 +2181,8 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     if not active_stream_id:
         return j(handler, {"accepted": False, "fallback": "not_running",
                            "stream_id": None})
-    with STREAMS_LOCK:
-        stream_alive = active_stream_id in STREAMS
+    with _cfg.STREAMS_LOCK:
+        stream_alive = active_stream_id in _cfg.STREAMS
     if not stream_alive:
         # Active stream id is stale — stream has ended; caller falls back
         return j(handler, {"accepted": False, "fallback": "stream_dead",
@@ -2210,17 +2210,34 @@ def cancel_stream(stream_id: str) -> bool:
     a safe no-op. Session cleanup runs outside STREAMS_LOCK to preserve lock
     ordering (streaming thread does LOCK → STREAMS_LOCK; inverting would deadlock).
     """
-    with STREAMS_LOCK:
-        if stream_id not in STREAMS:
+    from api import config as _live_config
+
+    streams = STREAMS
+    cancel_flags = CANCEL_FLAGS
+    agent_instances = AGENT_INSTANCES
+    partial_texts = STREAM_PARTIAL_TEXT
+    streams_lock = STREAMS_LOCK
+    # Some tests and profile reload paths can replace api.config's state maps
+    # after api.streaming has imported aliases.  Pick the live maps when the
+    # requested stream lives there so cancel works across either reference.
+    if stream_id not in streams and getattr(_live_config, 'STREAMS', streams) is not streams:
+        streams = _live_config.STREAMS
+        cancel_flags = _live_config.CANCEL_FLAGS
+        agent_instances = _live_config.AGENT_INSTANCES
+        partial_texts = _live_config.STREAM_PARTIAL_TEXT
+        streams_lock = _live_config.STREAMS_LOCK
+
+    with streams_lock:
+        if stream_id not in streams:
             return False
 
         # Set WebUI layer cancel flag
-        flag = CANCEL_FLAGS.get(stream_id)
+        flag = cancel_flags.get(stream_id)
         if flag:
             flag.set()
 
         # Interrupt the AIAgent instance to stop tool execution
-        agent = AGENT_INSTANCES.get(stream_id)
+        agent = agent_instances.get(stream_id)
         if agent:
             try:
                 agent.interrupt("Cancelled by user")
@@ -2248,7 +2265,7 @@ def cancel_stream(stream_id: str) -> bool:
             logger.debug("Failed to clear clarify prompt during cancel")
 
         # Put a cancel sentinel into the queue so the SSE handler wakes up
-        q = STREAMS.get(stream_id)
+        q = streams.get(stream_id)
         if q:
             try:
                 q.put_nowait(('cancel', {'message': 'Cancelled by user'}))
@@ -2261,9 +2278,9 @@ def cancel_stream(stream_id: str) -> bool:
         # even if the agent thread is still blocked in a C-level syscall.
         # The worker thread's finally block uses .pop(key, None) too, so a
         # double-pop here is safe (no-op).
-        STREAMS.pop(stream_id, None)
-        CANCEL_FLAGS.pop(stream_id, None)
-        AGENT_INSTANCES.pop(stream_id, None)
+        streams.pop(stream_id, None)
+        cancel_flags.pop(stream_id, None)
+        agent_instances.pop(stream_id, None)
         # STREAM_PARTIAL_TEXT is intentionally NOT popped here — the agent thread may
         # still be appending tokens. We capture the snapshot two lines below; the
         # streaming finally block handles the cleanup when the thread exits.
@@ -2275,7 +2292,12 @@ def cancel_stream(stream_id: str) -> bool:
         # get_session() acquires LOCK, and the streaming thread does LOCK first
         # then STREAMS_LOCK, so inverting the order here would cause deadlock.
         _cancel_session_id = getattr(agent, 'session_id', None) if agent else None
-        _cancel_partial_text = STREAM_PARTIAL_TEXT.get(stream_id, '')
+        _cancel_partial_text = partial_texts.get(stream_id, '')
+        if not _cancel_partial_text and partial_texts is not STREAM_PARTIAL_TEXT:
+            _cancel_partial_text = STREAM_PARTIAL_TEXT.get(stream_id, '')
+        live_partials = getattr(_live_config, 'STREAM_PARTIAL_TEXT', partial_texts)
+        if not _cancel_partial_text and live_partials is not partial_texts:
+            _cancel_partial_text = live_partials.get(stream_id, '')
 
     # Session cleanup outside STREAMS_LOCK to preserve lock ordering.
     # Acquire the per-session _agent_lock too, mirroring every other session

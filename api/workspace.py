@@ -271,6 +271,8 @@ def _workspace_blocked_roots() -> tuple[Path, ...]:
         '/lib',
         '/lib64',
         '/opt/homebrew',
+        '/System',
+        '/Library',
     )
     _seen: set[Path] = set()
     _out: list[Path] = []
@@ -298,6 +300,80 @@ def _is_blocked_system_path(candidate: Path) -> bool:
     return False
 
 
+def _workspace_blocked_resolved_subtrees() -> tuple[Path, ...]:
+    roots = list(_workspace_blocked_roots()) + [Path('/private/etc')]
+    resolved: list[Path] = []
+    for root in roots:
+        try:
+            p = root.expanduser().resolve()
+        except Exception:
+            p = root
+        if p not in resolved:
+            resolved.append(p)
+    return tuple(resolved)
+
+
+def _workspace_blocked_exact_roots() -> tuple[Path, ...]:
+    roots = [Path('/'), Path('/private/var')]
+    for root in _workspace_blocked_roots():
+        try:
+            roots.append(root.expanduser().resolve())
+        except Exception:
+            roots.append(root)
+    unique: list[Path] = []
+    for root in roots:
+        if root not in unique:
+            unique.append(root)
+    return tuple(unique)
+
+
+def _is_blocked_workspace_path(candidate: Path, raw_path: str | Path | None = None) -> bool:
+    """Return True when candidate points at a known OS/system directory.
+
+    Compare both the original spelling and the resolved path.  This closes the
+    macOS /etc -> /private/etc bypass without globally banning temporary pytest
+    paths under /private/var/folders.
+    """
+    raw = None
+    if raw_path not in (None, ""):
+        try:
+            raw = Path(raw_path).expanduser()
+        except Exception:
+            raw = None
+
+    exact = _workspace_blocked_exact_roots()
+    if candidate in exact or (raw is not None and raw in _workspace_blocked_roots()):
+        return True
+
+    for tmp in _USER_TMP_PREFIXES:
+        if _is_within(candidate, tmp) or (raw is not None and _is_within(raw, tmp)):
+            return False
+
+    # Raw paths under literal roots (e.g. /etc/ssh, /var/db) are always blocked.
+    if raw is not None:
+        for blocked in _workspace_blocked_roots():
+            if _is_within(raw, blocked):
+                return True
+
+    # Resolved subtree checks catch symlink aliases such as /private/etc.  The
+    # macOS temp root /private/var/folders is intentionally allowed for pytest
+    # and per-user temporary workspaces; other direct /private/var system data
+    # such as /private/var/db and /private/var/log remains blocked.
+    allowed_private_var = (Path('/private/var/folders'), Path('/private/var/tmp'))
+    for blocked in _workspace_blocked_resolved_subtrees():
+        if blocked == Path('/private/var'):
+            if candidate == blocked:
+                return True
+            if any(_is_within(candidate, allowed) for allowed in allowed_private_var):
+                continue
+            if _is_within(candidate, blocked):
+                return True
+            continue
+        if _is_within(candidate, blocked):
+            return True
+    return False
+
+
 def _is_within(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
@@ -318,7 +394,7 @@ def _trusted_workspace_roots() -> list[Path]:
             return
         if not p.exists() or not p.is_dir():
             return
-        if _is_blocked_system_path(p):
+        if _is_blocked_workspace_path(p, candidate):
             return
         if p not in roots:
             roots.append(p)
@@ -456,8 +532,8 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
         except ValueError:
             pass
 
-    # Block known system roots and their children
-    if _is_blocked_system_path(candidate):
+    # Block known system roots and their children.
+    if _is_blocked_workspace_path(candidate, path):
         raise ValueError(f"Path points to a system directory: {candidate}")
 
     # (B) Trusted if already in the saved workspace list — covers non-home installs
@@ -513,8 +589,8 @@ def validate_workspace_to_add(path: str) -> Path:
     if _home != Path("/") and _is_within(candidate, _home):
         return candidate
 
-    # Block known system roots and their immediate children
-    if _is_blocked_system_path(candidate):
+    # Block known system roots and their immediate children.
+    if _is_blocked_workspace_path(candidate, path):
         raise ValueError(f"Path points to a system directory: {candidate}")
 
     return candidate

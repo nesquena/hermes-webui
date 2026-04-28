@@ -1144,7 +1144,7 @@ def handle_get(handler, parsed) -> bool:
             )
         raw = _skill_view(name)
         data = json.loads(raw) if isinstance(raw, str) else raw
-        if "linked_files" not in data:
+        if not isinstance(data.get("linked_files"), dict):
             data["linked_files"] = {}
         return j(handler, data)
 
@@ -2881,9 +2881,12 @@ def _handle_chat_sync(handler, body):
     msg = str(body.get("message", "")).strip()
     if not msg:
         return j(handler, {"error": "empty message"}, status=400)
-    workspace = Path(body.get("workspace") or s.workspace).expanduser().resolve()
+    try:
+        workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+    except ValueError as e:
+        return bad(handler, str(e))
     with _get_session_agent_lock(s.session_id):
-        s.workspace = str(workspace)
+        s.workspace = workspace
         s.model = body.get("model") or s.model
     from api.streaming import _ENV_LOCK
 

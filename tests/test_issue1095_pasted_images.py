@@ -127,11 +127,14 @@ class TestChatHistoryImageRendering:
         assert 'msg-media-img' in body, 'Image attachment <img> must use msg-media-img class'
 
     def test_attachment_render_click_to_fullscreen(self):
-        """Click-to-fullscreen must still work on chat history images."""
+        """Click-to-fullscreen uses the delegated .msg-media-img listener, not inline JS."""
         ui = _read_js('ui.js')
+        assert "document.addEventListener('click'" in ui
+        assert "closest('.msg-media-img')" in ui
         m = re.search(r'm\.attachments&&m\.attachments\.length', ui)
         body = ui[m.start():m.start() + 1200]
-        assert '_openImgLightbox' in body, 'Chat history images must open lightbox on click'
+        img_line = next(line for line in body.splitlines() if 'msg-media-img' in line)
+        assert 'onclick' not in img_line, 'Chat history image HTML must not embed inline JS handlers'
 
     def test_attachment_render_non_image_keeps_paperclip(self):
         """Non-image attachments in chat history must still show paperclip badge."""
