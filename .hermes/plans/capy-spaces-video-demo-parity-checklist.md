@@ -1,7 +1,7 @@
 # Capy Spaces — Space Agent Demo Video Parity Checklist
 
-Video reviewed: https://www.youtube.com/watch?v=F3ZzNgf-R7Y  
-Transcript duration: 46:51  
+Video reviewed: https://www.youtube.com/watch?v=F3ZzNgf-R7Y
+Transcript duration: 46:51
 Created: 2026-04-27
 
 ## Bottom line

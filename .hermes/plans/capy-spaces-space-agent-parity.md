@@ -1,6 +1,6 @@
 # Capy Spaces: Space Agent Feature-Parity Architecture Plan
 
-Created: 2026-04-27 23:28 CDT  
+Created: 2026-04-27 23:28 CDT
 Research targets:
 - Space Agent checkout: `/tmp/space-agent` at `1289793`
 - Hermes WebUI checkout: `/Users/bschmidy10/hermes-webui` at `5720fa5`
