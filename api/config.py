@@ -828,10 +828,18 @@ def _deduplicate_model_ids(groups: list[dict]) -> None:
     When multiple providers expose the same bare model ID (e.g. two
     custom providers both listing ``gpt-5.4``), the dropdown cannot
     distinguish them.  This post-process detects such collisions and
-    prefixes the ID with ``@provider_id:`` for every group that
-    contributes the colliding entry.  The *active* provider's copy
-    (first group matching ``active_provider``) is left bare so that
-    existing sessions referencing the bare name keep working.
+    prefixes colliding entries with ``@provider_id:`` so the frontend
+    can treat them as distinct options.
+
+    The first occurrence (in group order) is left bare for backward
+    compatibility with sessions that already store the bare model name.
+    If that provider is later removed from the config, the next cache
+    rebuild re-runs dedup — the remaining provider becomes the sole
+    occurrence and is left bare, so the session still matches.
+
+    The ``@provider_id:model`` format is consistent with the existing
+    ``_apply_provider_prefix()`` function and is handled by
+    ``resolve_model_provider()`` (splits on the first ``:``).
 
     Operates in-place on *groups*.
     """
@@ -849,14 +857,13 @@ def _deduplicate_model_ids(groups: list[dict]) -> None:
                 continue
             id_map.setdefault(mid, []).append((gi, mi))
 
-    # For any bare ID appearing in 2+ groups, prefix all occurrences.
-    # The first group that matches the provider_id format we see gets a
-    # bare copy so existing session references still resolve; the rest
-    # get ``@provider_id:id``.
+    # For any bare ID appearing in 2+ groups, prefix all but the first
+    # occurrence.  The first stays bare for backward compat; the rest
+    # get ``@provider_id:id`` and a disambiguated label.
     for bare_id, locations in id_map.items():
         if len(locations) < 2:
             continue
-        # Mark all but the first location for prefixing
+        # Prefix all occurrences after the first
         for gi, mi in locations[1:]:
             group = groups[gi]
             model = group["models"][mi]
@@ -868,12 +875,6 @@ def _deduplicate_model_ids(groups: list[dict]) -> None:
                 model["label"] = f"{model['label']} ({provider_name})"
             else:
                 model["label"] = f"{bare_id} ({provider_name})"
-        # Also prefix the first occurrence to keep things consistent —
-        # otherwise the "active" bare one and a prefixed one both match
-        # the same underlying model, which defeats the purpose.
-        # Actually, keep the first one bare for backward compatibility
-        # with sessions that already store the bare model name.
-        # If ALL copies are prefixed, old sessions break on model restore.
 
 
 def resolve_model_provider(model_id: str) -> tuple:
