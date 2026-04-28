@@ -643,6 +643,51 @@ def _research_harness_widgets() -> list[dict[str, Any]]:
     ]
 
 
+def _dashboard_demo_widgets() -> list[dict[str, Any]]:
+    """Return safe declarative daily dashboard widget seeds.
+
+    This starter covers the demo-parity path for prebuilt prices, news, and
+    daily dashboard surfaces without introducing live network fetches or
+    generated renderer bodies. Agents can later refresh these widgets through
+    typed space APIs while preserving safe list/detail responses.
+    """
+    return [
+        {
+            "id": "dashboard-prices",
+            "kind": "chart",
+            "title": "Market prices",
+            "layout": {"x": 0, "y": 0, "w": 8, "h": 5, "minimized": False},
+            "series": ["NVDA", "AAPL", "GOOGL"],
+            "refresh": {"mode": "agent-mediated", "status": "ready-for-agent-refresh"},
+            "permissions": {"network": "agent-mediated"},
+        },
+        {
+            "id": "dashboard-news",
+            "kind": "news",
+            "title": "News brief",
+            "layout": {"x": 8, "y": 0, "w": 8, "h": 5, "minimized": False},
+            "topics": ["markets", "ai", "local ops"],
+            "refresh": {"mode": "agent-mediated", "status": "ready-for-agent-refresh"},
+            "permissions": {"network": "agent-mediated"},
+        },
+        {
+            "id": "dashboard-agenda",
+            "kind": "checklist",
+            "title": "Daily agenda",
+            "layout": {"x": 16, "y": 0, "w": 8, "h": 5, "minimized": False},
+            "items_status": "agent-managed-empty",
+        },
+        {
+            "id": "dashboard-brief",
+            "kind": "markdown",
+            "title": "Daily brief",
+            "layout": {"x": 0, "y": 5, "w": 16, "h": 7, "minimized": False},
+            "content_status": "agent-managed-empty",
+            "export": {"markdown": "planned"},
+        },
+    ]
+
+
 def install_template(template: str, *, space_id: str | None = None) -> dict[str, Any]:
     """Install a safe Capy Spaces demo template.
 
@@ -653,7 +698,7 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
     template_name = str(template or "").strip().lower()
-    if template_name not in {"weather", "weather-demo", "research", "research-harness"}:
+    if template_name not in {"weather", "weather-demo", "research", "research-harness", "dashboard", "daily-dashboard"}:
         raise ValueError("Unsupported template")
 
     if template_name in {"weather", "weather-demo"}:
@@ -672,7 +717,7 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
             )
         widgets = [_weather_demo_widget()]
         response_template = "weather"
-    else:
+    elif template_name in {"research", "research-harness"}:
         target_id = validate_space_id(space_id) if space_id else _unique_space_id("research-harness")
         if _manifest_path(target_id).exists():
             space = read_space(target_id)
@@ -688,6 +733,22 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
             )
         widgets = _research_harness_widgets()
         response_template = "research"
+    else:
+        target_id = validate_space_id(space_id) if space_id else _unique_space_id("daily-dashboard")
+        if _manifest_path(target_id).exists():
+            space = read_space(target_id)
+        else:
+            space = create_space(
+                {
+                    "space_id": target_id,
+                    "name": "Daily Dashboard",
+                    "description": "Metadata-only starter for prices, news, agenda, and daily briefing widgets.",
+                    "agent_instructions": "Keep dashboard widgets declarative. Refresh data through typed Capy space APIs, cite sources, and preserve revision history.",
+                    "template": "daily-dashboard",
+                }
+            )
+        widgets = _dashboard_demo_widgets()
+        response_template = "dashboard"
 
     for widget in widgets:
         upsert_widget(space["space_id"], widget)

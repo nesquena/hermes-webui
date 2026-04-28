@@ -140,6 +140,16 @@ global.fetch = async function(path, opts = {}) {
         ],
       });
     }
+    if (body.template === 'dashboard') {
+      return response({
+        template: 'dashboard',
+        space: { space_id: 'daily-dashboard', name: 'Daily Dashboard', description: 'Prices, news, agenda, and briefing starter', widget_count: 4, revision_event_id: 'rev-dashboard' },
+        installed_widgets: [
+          { id: 'dashboard-prices', kind: 'chart', title: 'Market prices', layout: { x: 0, y: 0, w: 8, h: 5, minimized: false }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+          { id: 'dashboard-news', kind: 'news', title: 'News brief', layout: { x: 8, y: 0, w: 8, h: 5, minimized: false } },
+        ],
+      });
+    }
     return response({
       template: 'weather',
       space: { space_id: 'weather-demo', name: 'Weather Demo', description: 'Prague weather starter', widget_count: 1, revision_event_id: 'rev-weather' },
@@ -210,6 +220,9 @@ async function click(action, dataset) {
   } else if (scenario === 'installResearchHarness') {
     await window.loadCapySpaces();
     await click('installResearchTemplate', {});
+  } else if (scenario === 'installDashboardDemo') {
+    await window.loadCapySpaces();
+    await click('installDashboardTemplate', {});
   } else if (scenario === 'openSpaceDetail') {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
@@ -395,6 +408,19 @@ def test_spaces_ui_install_research_harness_posts_template_and_refreshes_without
     assert out["calls"][-1]["path"] == "api/spaces"
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
+
+
+def test_spaces_ui_install_dashboard_demo_posts_template_and_refreshes_without_widget_code(driver_path):
+    out = _run_spaces_scenario(driver_path, "installDashboardDemo")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/templates/install")
+
+    assert "Install dashboard demo" in out["rootHtml"]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"template": "dashboard"}
+    assert out["calls"][-1]["path"] == "api/spaces"
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
 
 
 def test_spaces_ui_edit_space_posts_to_update_without_changing_space_id(driver_path):
