@@ -6,6 +6,11 @@
 - **Embedded workspace terminal prototype** — `/terminal` opens a compact utility card tucked behind the composer, following the approval-card layering pattern instead of adding a permanent composer icon or full-width dock. The terminal stays bound to the current session workspace with live output, command input, resize, restart, clear, copy output, and close actions. Backend terminal processes use explicit per-process `cwd`/`env` and do not mutate global `os.environ`. (`api/terminal.py`, `api/routes.py`, `static/index.html`, `static/terminal.js`, `static/commands.js`, `static/style.css`, `static/i18n.js`)
 
 ### Fixed
+- **Embedded terminal no longer covers recent transcript messages** — opening
+  `/terminal` now reserves measured bottom space in the conversation scroll area
+  so the latest chat remains readable above the approval-card-like terminal
+  surface, while close restores the normal layout. (`static/terminal.js`,
+  `static/style.css`, `tests/test_embedded_workspace_terminal.py`)
 - **Auto-title generic fallback** — when the auxiliary title-generation call
   fails and the local fallback can only produce the generic label
   `Conversation topic`, the WebUI now keeps the existing provisional title

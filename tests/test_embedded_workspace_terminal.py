@@ -41,6 +41,20 @@ def test_terminal_surface_uses_composer_flyout_card_pattern():
     assert "transform:translateY(100%)" in style_css
 
 
+def test_terminal_open_reserves_transcript_space():
+    style_css = _read("static/style.css")
+    terminal_js = _read("static/terminal.js")
+
+    assert ".messages.terminal-open{padding-bottom:var(--terminal-card-height" in style_css
+    assert "scroll-padding-bottom:var(--terminal-card-height" in style_css
+    assert "classList.add('terminal-open')" in terminal_js
+    assert "classList.remove('terminal-open')" in terminal_js
+    assert "messages.style.setProperty('--terminal-card-height'" in terminal_js
+    assert "messages.style.removeProperty('--terminal-card-height')" in terminal_js
+    assert "function _terminalIsMessagesNearBottom" in terminal_js
+    assert "scrollToBottom" in terminal_js
+
+
 def test_terminal_v1_does_not_expose_send_to_chat_action():
     html = _read("static/index.html")
     terminal_js = _read("static/terminal.js")

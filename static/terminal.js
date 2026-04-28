@@ -156,12 +156,44 @@ function _terminalDimensions(){
   return {rows:18,cols:80};
 }
 
+function _terminalMessagesEl(){
+  return document.getElementById('messages');
+}
+
+function _terminalIsMessagesNearBottom(el){
+  if(!el)return false;
+  return el.scrollHeight-el.scrollTop-el.clientHeight<150;
+}
+
+function _syncTerminalTranscriptSpace(open){
+  const messages=_terminalMessagesEl();
+  if(!messages)return;
+  const wasNearBottom=_terminalIsMessagesNearBottom(messages);
+  if(!open){
+    messages.classList.remove('terminal-open');
+    messages.style.removeProperty('--terminal-card-height');
+    if(wasNearBottom&&typeof scrollToBottom==='function')requestAnimationFrame(scrollToBottom);
+    return;
+  }
+  messages.classList.add('terminal-open');
+  const measure=()=>{
+    if(!TERMINAL_UI.open)return;
+    const {panel,inner}= _terminalEls();
+    const h=(inner||panel)&&((inner||panel).getBoundingClientRect().height);
+    if(h>0)messages.style.setProperty('--terminal-card-height',Math.ceil(h+24)+'px');
+    if(wasNearBottom&&typeof scrollToBottom==='function')scrollToBottom();
+  };
+  requestAnimationFrame(measure);
+  setTimeout(measure,420);
+}
+
 function _fitTerminal(){
   const term=TERMINAL_UI.term;
   if(!term)return;
   try{
     if(TERMINAL_UI.fitAddon)TERMINAL_UI.fitAddon.fit();
   }catch(_){}
+  _syncTerminalTranscriptSpace(true);
   _scheduleTerminalResize();
 }
 
@@ -256,6 +288,7 @@ async function toggleComposerTerminal(force){
       window.setTimeout(_fitTerminal,80);
     });
     TERMINAL_UI.open=true;
+    _syncTerminalTranscriptSpace(true);
     if(workspace)workspace.textContent=_terminalWorkspaceName();
     syncTerminalButton();
     if(!TERMINAL_UI.resizeObserver&&window.ResizeObserver){
@@ -297,12 +330,14 @@ async function closeComposerTerminal(sessionId,opts){
   const {panel}= _terminalEls();
   if(panel){
     panel.classList.remove('is-open');
+    _syncTerminalTranscriptSpace(false);
     clearTimeout(TERMINAL_UI.closeTimer);
     TERMINAL_UI.closeTimer=setTimeout(()=>{
       if(!TERMINAL_UI.open)panel.hidden=true;
       _disposeXterm();
     },280);
   }else{
+    _syncTerminalTranscriptSpace(false);
     _disposeXterm();
   }
   TERMINAL_UI.open=false;
