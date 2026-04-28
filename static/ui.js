@@ -100,9 +100,14 @@ function _findModelInDropdown(modelId, sel){
   const target=norm(modelId);
   const exact=opts.find(o=>norm(o)===target);
   if(exact) return exact;
-  // 3. Prefix/substring: target starts with or contains a significant chunk
+  // 3. Prefix/substring: require the candidate to start with the FULL normalized target
+  // (not a truncated base). This avoids false matches like gpt.5.5 → gpt.5.4.mini (#1188).
+  // Only fall back to the shorter base form if target itself is very short (a bare root
+  // like "gpt" or "claude") where stripping would be a no-op anyway.
   const base=target.replace(/\.\d+$/,'');  // strip trailing version number
-  const partial=opts.find(o=>norm(o).startsWith(base)||norm(o).includes(base));
+  const useBase=base.length<=4||base===target; // bare root — stripping changed nothing meaningful
+  const prefixTarget=useBase?base:target;
+  const partial=opts.find(o=>norm(o).startsWith(prefixTarget));
   return partial||null;
 }
 
