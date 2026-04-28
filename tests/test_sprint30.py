@@ -518,6 +518,9 @@ class TestClarifyCardTimerLogic:
     def _get_html(self):
         return pathlib.Path(__file__).parent.parent / 'static' / 'index.html'
 
+    def _get_css(self):
+        return pathlib.Path(__file__).parent.parent / 'static' / 'style.css'
+
     def test_clarify_min_visible_ms_constant_present(self):
         src = self._get_js().read_text()
         assert 'CLARIFY_MIN_VISIBLE_MS' in src
@@ -567,6 +570,34 @@ class TestClarifyCardTimerLogic:
         assert 'sessionStorage.setItem' in src
         assert "$('msg')" in src, \
             'clarify timeout should keep the typed draft visible in the composer'
+
+    def test_clarify_draft_appends_to_existing_composer_text(self):
+        src = self._get_js().read_text()
+        m = re.search(r'function _stashClarifyDraft.*?(?=\nfunction |\nasync function |\Z)',
+                      src, re.DOTALL)
+        assert m, '_stashClarifyDraft function not found'
+        body = m.group(0)
+        assert 'current.replace(/\\s+$/, "")' in body, \
+            'preserved clarify drafts must append after existing composer text instead of replacing it'
+        assert '\\n\\n${draft}' in body, \
+            'preserved clarify drafts should be separated from existing composer text'
+
+    def test_cancel_stream_does_not_preserve_clarify_draft(self):
+        src = self._get_js().read_text()
+        m = re.search(r"source\.addEventListener\('cancel'.*?\n    \}\);",
+                      src, re.DOTALL)
+        assert m, 'cancel event handler not found'
+        body = m.group(0)
+        assert "hideClarifyCard(true, 'cancelled')" in body, \
+            'explicit stream cancel must not use the timeout/terminal draft preservation path'
+
+    def test_clarify_urgent_countdown_has_non_color_cue(self):
+        css = self._get_css().read_text()
+        m = re.search(r'\.clarify-countdown\.urgent\{([^}]*)\}', css)
+        assert m, 'urgent clarify countdown style missing'
+        body = m.group(1)
+        assert any(prop in body for prop in ('box-shadow', 'outline', 'border', 'text-decoration')), \
+            'urgent countdown styling must include a non-color visual cue'
 
     def test_respond_clarify_calls_hide_with_force(self):
         src = self._get_js().read_text()
