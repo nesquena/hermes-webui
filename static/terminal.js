@@ -328,9 +328,11 @@ function _fitTerminal(){
 
 function _setTerminalChromeState(state){
   const {panel,inner,dock,workspace,dockWorkspace}= _terminalEls();
+  const composerWrap=$('composerWrap');
   if(!panel)return;
   const collapsed=state==='collapsed';
   const expanded=state==='expanded';
+  if(composerWrap)composerWrap.classList.toggle('terminal-dock-visible',collapsed);
   panel.hidden=!(collapsed||expanded);
   panel.classList.toggle('is-open',expanded);
   panel.classList.toggle('is-collapsed',collapsed);
@@ -515,6 +517,8 @@ async function closeComposerTerminal(sessionId,opts){
   }
   TERMINAL_UI.open=false;
   TERMINAL_UI.collapsed=false;
+  const composerWrap=$('composerWrap');
+  if(composerWrap)composerWrap.classList.remove('terminal-dock-visible');
   TERMINAL_UI.sessionId=null;
   TERMINAL_UI.workspace=null;
   syncTerminalButton();

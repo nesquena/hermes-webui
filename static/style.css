@@ -410,6 +410,7 @@
   .update-btn:disabled{opacity:0.5;cursor:not-allowed;}
   /* ── Composer flyout (approval/clarify slide up from behind composer) ── */
   .composer-flyout{position:relative;height:0;z-index:1;}
+  .composer-wrap.terminal-dock-visible .composer-flyout{z-index:4;}
   /* ── Approval card ── */
   .approval-card{position:absolute;left:0;right:0;bottom:-24px;max-width:var(--msg-max);margin:0 auto;padding:0 20px;box-sizing:border-box;width:100%;overflow:hidden;pointer-events:none;}
   .approval-card.visible{pointer-events:auto;z-index:3;}
@@ -750,7 +751,7 @@
   .composer-terminal-panel[hidden]{display:none!important;}
   .composer-terminal-inner{height:var(--composer-terminal-height,260px);min-height:180px;max-height:min(520px,50vh);display:flex;flex-direction:column;overflow:hidden;border:1px solid var(--border2);border-radius:14px;background:var(--surface);box-shadow:0 12px 32px rgba(0,0,0,.22);padding-bottom:38px;transform:translateY(100%);opacity:0;transition:transform .4s cubic-bezier(.32,.72,.16,1),opacity .25s ease;}
   .composer-terminal-panel.is-open .composer-terminal-inner{transform:translateY(0);opacity:1;}
-  .composer-terminal-panel.is-collapsed{width:min(calc(100% - 112px),560px);}
+  .composer-terminal-panel.is-collapsed{bottom:-2px;width:min(calc(100% - 112px),560px);overflow:visible;z-index:4;}
   .composer-terminal-panel.is-collapsed .composer-terminal-inner{position:absolute;opacity:0;pointer-events:none;transform:translateY(100%);}
   .composer-terminal-dock{min-height:42px;display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid var(--border);border-radius:13px;background:color-mix(in srgb,var(--surface) 86%,transparent);box-shadow:0 8px 22px rgba(0,0,0,.16);padding:7px 9px 7px 12px;backdrop-filter:blur(10px);transform:translateY(100%);opacity:0;transition:transform .32s cubic-bezier(.32,.72,.16,1),opacity .2s ease;}
   .composer-terminal-panel.is-collapsed .composer-terminal-dock{transform:translateY(0);opacity:.94;}
@@ -938,7 +939,7 @@
     .ctx-indicator{width:32px;height:32px;}
     .ctx-tooltip{right:-4px;min-width:190px;max-width:220px;}
     .composer-terminal-panel{width:calc(100% - 20px);}
-    .composer-terminal-panel.is-collapsed{width:calc(100% - 28px);}
+    .composer-terminal-panel.is-collapsed{bottom:-1px;width:calc(100% - 28px);}
     .composer-terminal-inner{height:var(--composer-terminal-height,190px);min-height:140px;max-height:min(300px,44vh);border-radius:12px;padding-bottom:28px;}
     .composer-terminal-dock{min-height:40px;padding:6px 7px 6px 10px;border-radius:12px;gap:8px;}
     .composer-terminal-dock-title{font-size:11px;}

@@ -39,7 +39,8 @@ def test_terminal_surface_uses_composer_flyout_card_pattern():
     assert ".composer-terminal-panel{position:absolute" in style_css
     assert "bottom:-24px" in style_css
     assert "width:min(calc(100% - 64px),720px)" in style_css
-    assert ".composer-terminal-panel.is-collapsed{width:min(calc(100% - 112px),560px)" in style_css
+    assert ".composer-wrap.terminal-dock-visible .composer-flyout{z-index:4" in style_css
+    assert ".composer-terminal-panel.is-collapsed{bottom:-2px;width:min(calc(100% - 112px),560px);overflow:visible;z-index:4" in style_css
     assert ".composer-terminal-dock{min-height:42px" in style_css
     assert ".composer-terminal-inner{height:var(--composer-terminal-height,260px)" in style_css
     assert "transform:translateY(100%)" in style_css
@@ -111,6 +112,7 @@ def test_terminal_collapsed_state_preserves_pty_and_output_surface():
     assert "api('/api/terminal/close'" not in collapse_block
     assert "_disposeXterm" not in collapse_block
     assert "_setTerminalChromeState('collapsed')" in collapse_block
+    assert "composerWrap.classList.toggle('terminal-dock-visible',collapsed)" in terminal_js
     expand_block = terminal_js.split("function expandComposerTerminal", 1)[1].split("function _disposeXterm", 1)[0]
     assert "_setTerminalChromeState('expanded')" in expand_block
     assert "_resetTerminalHeightForViewport();" in expand_block
