@@ -28,6 +28,7 @@ const COMMANDS=[
   {name:'status',    desc:t('cmd_status'),   fn:cmdStatus},
   {name:'voice',     desc:t('cmd_voice'),    fn:cmdVoice,     noEcho:true},
   {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|none|minimal|low|medium|high|xhigh', subArgs:['show','hide','none','minimal','low','medium','high','xhigh'], noEcho:true},
+  {name:'codex',     desc:t('cmd_codex'),    fn:cmdCodex,     arg:'[model] [effort]', subArgs:'codexModels', noEcho:true},
   {name:'yolo', desc:t('cmd_yolo'), fn:cmdYolo, noEcho:true},
 ];
 
@@ -81,6 +82,8 @@ function getMatchingCommands(prefix){
 
 let _slashModelCache=null;
 let _slashModelCachePromise=null;
+let _slashCodexModelCache=null;
+let _slashCodexModelCachePromise=null;
 let _slashPersonalityCache=null;
 let _slashPersonalityCachePromise=null;
 
@@ -154,9 +157,34 @@ async function _loadSlashPersonalitySubArgs(force=false){
   return _slashPersonalityCachePromise;
 }
 
+async function _loadSlashCodexModelSubArgs(force=false){
+  if(_slashCodexModelCache&&!force) return _slashCodexModelCache;
+  if(_slashCodexModelCachePromise&&!force) return _slashCodexModelCachePromise;
+  _slashCodexModelCachePromise=(async()=>{
+    try{
+      const data=await api('/api/codex/capabilities?live=0');
+      const values=[];
+      for(const model of (data&&data.models)||[]){
+        const id=_normalizeSlashSubArg(model&&model.id);
+        if(id) values.push(id);
+      }
+      const deduped=Array.from(new Set(values)).sort((a,b)=>a.localeCompare(b));
+      _slashCodexModelCache=deduped;
+      return deduped;
+    }catch(_){
+      _slashCodexModelCache=[];
+      return _slashCodexModelCache;
+    }finally{
+      _slashCodexModelCachePromise=null;
+    }
+  })();
+  return _slashCodexModelCachePromise;
+}
+
 function _getSlashSubArgOptions(spec){
   if(Array.isArray(spec)) return Promise.resolve(spec.slice());
   if(spec==='models') return _loadSlashModelSubArgs();
+  if(spec==='codexModels') return _loadSlashCodexModelSubArgs();
   if(spec==='personalities') return _loadSlashPersonalitySubArgs();
   return Promise.resolve([]);
 }
@@ -809,6 +837,108 @@ function cmdReasoning(args){
     return true;
   }
   showToast('Unknown argument: '+arg+' \u2014 use show|hide|'+EFFORTS.join('|'));
+  return true;
+}
+async function cmdCodex(args){
+  const raw=(args||'').trim();
+  const EFFORTS=['none','minimal','low','medium','high','xhigh'];
+  const usage='Usage: /codex <model> [none|minimal|low|medium|high|xhigh]';
+
+  function _renderStatus(cap){
+    const auth=cap&&cap.authenticated?'ok':'needs auth';
+    const err=cap&&cap.auth&&cap.auth.error?(' — '+cap.auth.error):'';
+    const current=(cap&&cap.current_model)||'(unset)';
+    const effort=(cap&&cap.reasoning_effort)||'default';
+    const count=(cap&&cap.model_count)||0;
+    const examples=((cap&&cap.models)||[]).slice(0,8).map(m=>'`'+m.id+'`').join(', ');
+    const lines=[
+      '**Codex control plane**','',
+      `provider: \`${(cap&&cap.provider)||'openai-codex'}\` · api_mode: \`${(cap&&cap.api_mode)||'codex_responses'}\``,
+      `auth: **${auth}**${err}`,
+      `current model: \`${current}\``,
+      `reasoning: \`${effort}\` · display: \`${cap&&cap.show_reasoning===false?'off':'on'}\``,
+      `models: **${count}**`,
+      examples?`examples: ${examples}`:'',
+      '',
+      usage,
+    ].filter(Boolean);
+    S.messages.push({role:'assistant',content:lines.join('\n')});
+    renderMessages();
+  }
+
+  if(!raw){
+    try{
+      const cap=await api('/api/codex/capabilities?live=1');
+      _renderStatus(cap);
+      showToast('Codex: '+((cap&&cap.model_count)||0)+' models');
+    }catch(e){
+      showToast('Codex status failed: '+(e&&e.message?e.message:e));
+    }
+    return true;
+  }
+
+  const parts=raw.split(/\s+/).filter(Boolean);
+  let effort='';
+  if(parts.length&&EFFORTS.includes(parts[parts.length-1].toLowerCase())){
+    effort=parts.pop().toLowerCase();
+  }
+  const model=parts.join(' ').trim();
+  if(!model&&!effort){showToast(usage);return true;}
+
+  try{
+    const payload={};
+    if(model) payload.model=model;
+    if(effort) payload.effort=effort;
+    const res=await api('/api/codex/select',{method:'POST',body:JSON.stringify(payload)});
+    const selected=(res&&res.selected_model)||(res&&res.current_model)||model;
+    const selectedEffort=(res&&res.selected_effort)||(res&&res.reasoning_effort)||effort||'default';
+
+    window._activeProvider='openai-codex';
+    if(selected) window._defaultModel=selected;
+    if(selected) localStorage.setItem('hermes-webui-model',selected);
+    _slashCodexModelCache=null;
+    _slashModelCache=null;
+
+    if(typeof populateModelDropdown==='function'){
+      await populateModelDropdown();
+    }
+
+    const sel=$('modelSelect');
+    if(sel&&selected){
+      if(!_applyModelToDropdown(selected,sel)){
+        const opt=document.createElement('option');
+        opt.value=selected;
+        opt.textContent=selected;
+        opt.dataset.custom='1';
+        sel.appendChild(opt);
+        sel.value=selected;
+        if(typeof syncModelChip==='function') syncModelChip();
+      }
+    }
+
+    if(effort&&typeof _applyReasoningChip==='function') _applyReasoningChip(selectedEffort);
+
+    if(S.session&&selected){
+      try{
+        await api('/api/session/update',{
+          method:'POST',
+          body:JSON.stringify({
+            session_id:S.session.session_id,
+            workspace:S.session.workspace,
+            model:selected,
+          }),
+        });
+        S.session.model=selected;
+      }catch(updateErr){
+        showToast('Codex selected, but session update failed: '+(updateErr&&updateErr.message?updateErr.message:updateErr),4000);
+      }
+    }
+
+    if(typeof syncModelChip==='function') syncModelChip();
+    showToast('Codex ready: '+(selected||'current')+' · reasoning '+selectedEffort);
+  }catch(e){
+    showToast('Codex select failed: '+(e&&e.message?e.message:e));
+  }
   return true;
 }
 function cmdVoice(){

@@ -643,12 +643,21 @@ _PROVIDER_MODELS = {
     "openai-codex": [
         {"id": "gpt-5.5", "label": "GPT-5.5"},
         {"id": "gpt-5.5-mini", "label": "GPT-5.5 Mini"},
+        {"id": "gpt-5.4-pro", "label": "GPT-5.4 Pro"},
         {"id": "gpt-5.4", "label": "GPT-5.4"},
         {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
+        {"id": "gpt-5.4-nano", "label": "GPT-5.4 Nano"},
         {"id": "gpt-5.3-codex", "label": "GPT-5.3 Codex"},
+        {"id": "gpt-5.3-codex-spark", "label": "GPT-5.3 Codex Spark"},
+        {"id": "gpt-5.2", "label": "GPT-5.2"},
         {"id": "gpt-5.2-codex", "label": "GPT-5.2 Codex"},
+        {"id": "gpt-5.1", "label": "GPT-5.1"},
+        {"id": "gpt-5.1-codex", "label": "GPT-5.1 Codex"},
         {"id": "gpt-5.1-codex-max", "label": "GPT-5.1 Codex Max"},
         {"id": "gpt-5.1-codex-mini", "label": "GPT-5.1 Codex Mini"},
+        {"id": "gpt-5", "label": "GPT-5"},
+        {"id": "gpt-5-codex", "label": "GPT-5 Codex"},
+        {"id": "gpt-5-nano", "label": "GPT-5 Nano"},
         {"id": "codex-mini-latest", "label": "Codex Mini (latest)"},
     ],
     "google": [
@@ -1429,6 +1438,253 @@ def _get_label_for_model(model_id: str, existing_groups: list) -> str:
     )
 
 
+CODEX_PROVIDER_ID = "openai-codex"
+CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
+CODEX_REASONING_EFFORTS = ("none",) + VALID_REASONING_EFFORTS
+_CODEX_SAFE_MODEL_RE = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+_CODEX_FALLBACK_MODEL_IDS = tuple(
+    m["id"] for m in _PROVIDER_MODELS.get(CODEX_PROVIDER_ID, []) if m.get("id")
+)
+
+
+def _dedupe_model_ids(model_ids) -> list[str]:
+    """Case-insensitive ordered de-duplication for provider catalogs."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in model_ids or []:
+        mid = str(item or "").strip()
+        if not mid:
+            continue
+        key = mid.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(mid)
+    return out
+
+
+def _normalize_codex_model_id(model_id: str | None) -> str:
+    """Normalize WebUI-facing Codex model IDs to the bare Codex slug.
+
+    Accepts:
+      - gpt-5.3-codex
+      - @openai-codex:gpt-5.3-codex
+      - openai/gpt-5.3-codex
+
+    It intentionally does not accept arbitrary provider prefixes. Codex is a
+    first-class Hermes runtime route, not a generic OpenRouter namespace.
+    """
+    raw = str(model_id or "").strip()
+    if raw.startswith("@") and ":" in raw:
+        provider_hint, bare = raw[1:].split(":", 1)
+        if provider_hint.strip().lower() != CODEX_PROVIDER_ID:
+            raise ValueError(
+                f"Codex model must use @{CODEX_PROVIDER_ID}: prefix, got @{provider_hint}:"
+            )
+        raw = bare.strip()
+    if raw.lower().startswith("openai/"):
+        raw = raw.split("/", 1)[1].strip()
+    return raw
+
+
+def _is_safe_future_codex_model(model_id: str) -> bool:
+    """Allow forward-compatible Codex/GPT slugs without accepting junk input."""
+    import re as _re
+
+    mid = str(model_id or "").strip()
+    if not _re.match(_CODEX_SAFE_MODEL_RE, mid):
+        return False
+    lowered = mid.lower()
+    return lowered.startswith("gpt-") or lowered.startswith("codex-")
+
+
+def get_codex_model_ids_for_webui(include_live: bool = True) -> list[str]:
+    """Return the WebUI Codex catalog with live/cache/static sources merged.
+
+    The Hermes agent is the primary source of truth when available because it
+    knows how to query the ChatGPT/Codex model endpoint with OAuth.  The WebUI
+    then overlays local Codex config/cache and a rich static fallback so the
+    picker never regresses to a stale partial list when the live endpoint is
+    unavailable or the installed agent predates a newly exposed model slug.
+    """
+    ids: list[str] = []
+
+    if include_live:
+        try:
+            from hermes_cli.models import provider_model_ids as _provider_model_ids
+
+            ids.extend(_provider_model_ids(CODEX_PROVIDER_ID) or [])
+        except Exception:
+            logger.debug("Failed to load live Codex model ids from hermes_cli.models")
+
+    try:
+        from hermes_cli.codex_models import get_codex_model_ids as _get_codex_model_ids
+
+        # No token argument: this reads ~/.codex/config.toml and local cache
+        # without forcing a network call.  It also supplies hermes-agent's own
+        # defaults when the cache is empty.
+        ids.extend(_get_codex_model_ids(access_token=None) or [])
+    except Exception:
+        logger.debug("Failed to load local Codex model ids from hermes_cli.codex_models")
+
+    ids.extend(_CODEX_FALLBACK_MODEL_IDS)
+    return _dedupe_model_ids(ids)
+
+
+def get_codex_model_catalog(include_live: bool = True) -> list[dict]:
+    """Return ``[{id, label}]`` entries for the Codex control plane."""
+    static_group = [
+        {
+            "provider": "OpenAI Codex",
+            "models": _PROVIDER_MODELS.get(CODEX_PROVIDER_ID, []),
+        }
+    ]
+    return [
+        {"id": mid, "label": _get_label_for_model(mid, static_group)}
+        for mid in get_codex_model_ids_for_webui(include_live=include_live)
+    ]
+
+
+def _validate_codex_model(model_id: str) -> tuple[str, bool]:
+    """Return (bare_model_id, recognized) or raise ValueError."""
+    model = _normalize_codex_model_id(model_id)
+    if not model:
+        raise ValueError("model is required")
+    known = set(get_codex_model_ids_for_webui(include_live=True))
+    if model in known:
+        return model, True
+    # Future-proof: live Codex can expose new GPT/Codex slugs before Hermes is
+    # updated.  Permit sane GPT/Codex-shaped IDs, but report recognized=False so
+    # the UI can distinguish forward-compat from catalog-confirmed selection.
+    if _is_safe_future_codex_model(model):
+        return model, False
+    raise ValueError(f"Unknown Codex model '{model_id}'")
+
+
+def get_codex_capabilities(include_live: bool = True) -> dict:
+    """Return a single WebUI control-plane snapshot for OpenAI Codex."""
+    config_data = _load_yaml_config_file(_get_config_path())
+    model_cfg = config_data.get("model") if isinstance(config_data.get("model"), dict) else {}
+    provider = str(model_cfg.get("provider") or "").strip() if isinstance(model_cfg, dict) else ""
+    current_model = str(model_cfg.get("default") or "").strip() if isinstance(model_cfg, dict) else ""
+    if not current_model:
+        current_model = get_effective_default_model(config_data)
+
+    reasoning = get_reasoning_status()
+    models = get_codex_model_catalog(include_live=include_live)
+
+    auth = {"authenticated": False}
+    try:
+        from hermes_cli.auth import get_auth_status as _get_auth_status
+
+        status = _get_auth_status(CODEX_PROVIDER_ID)
+        if isinstance(status, dict):
+            auth = {
+                "authenticated": bool(
+                    status.get("logged_in")
+                    or status.get("authenticated")
+                    or status.get("ok")
+                ),
+                "key_source": status.get("key_source"),
+                "error": status.get("error"),
+            }
+    except Exception as exc:
+        auth = {"authenticated": False, "error": str(exc)}
+
+    return {
+        "ok": True,
+        "provider": CODEX_PROVIDER_ID,
+        "provider_label": _PROVIDER_DISPLAY.get(CODEX_PROVIDER_ID, "OpenAI Codex"),
+        "base_url": CODEX_BASE_URL,
+        "api_mode": "codex_responses",
+        "runtime_command": "codex",
+        "credential_pool": CODEX_PROVIDER_ID,
+        "authenticated": bool(auth.get("authenticated")),
+        "auth": auth,
+        "current_provider": provider,
+        "current_model": current_model,
+        "active": provider == CODEX_PROVIDER_ID,
+        "models": models,
+        "model_count": len(models),
+        "reasoning_efforts": list(CODEX_REASONING_EFFORTS),
+        "reasoning_effort": reasoning.get("reasoning_effort", ""),
+        "show_reasoning": reasoning.get("show_reasoning", True),
+    }
+
+
+def set_codex_model_and_reasoning(model_id: str | None = None, effort: str | None = None) -> dict:
+    """Atomically select the Codex runtime model and optional reasoning effort."""
+    selected_model = None
+    recognized = None
+    if model_id is not None and str(model_id).strip():
+        selected_model, recognized = _validate_codex_model(model_id)
+
+    selected_effort = None
+    if effort is not None and str(effort).strip():
+        raw_effort = str(effort or "").strip().lower()
+        if raw_effort not in CODEX_REASONING_EFFORTS:
+            raise ValueError(
+                f"Unknown reasoning effort '{effort}'. "
+                f"Valid: {', '.join(CODEX_REASONING_EFFORTS)}."
+            )
+        selected_effort = raw_effort
+
+    if selected_model is None and selected_effort is None:
+        raise ValueError("model or effort is required")
+
+    config_path = _get_config_path()
+    with _cfg_lock:
+        config_data = _load_yaml_config_file(config_path)
+
+        model_cfg = config_data.get("model")
+        if not isinstance(model_cfg, dict):
+            model_cfg = {}
+        if selected_model is None:
+            existing_model = str(model_cfg.get("default") or "").strip()
+            existing_provider = str(model_cfg.get("provider") or "").strip()
+            if existing_provider == CODEX_PROVIDER_ID and existing_model:
+                try:
+                    normalized_existing = _normalize_codex_model_id(existing_model)
+                    fallback_ids = get_codex_model_ids_for_webui(include_live=False)
+                    if normalized_existing in set(
+                        fallback_ids
+                    ) or _is_safe_future_codex_model(normalized_existing):
+                        selected_model = normalized_existing
+                        recognized = normalized_existing in set(fallback_ids)
+                except ValueError:
+                    selected_model = None
+            if selected_model is None:
+                fallback_ids = get_codex_model_ids_for_webui(include_live=False)
+                selected_model = fallback_ids[0] if fallback_ids else "gpt-5.5"
+                recognized = selected_model in set(fallback_ids)
+        model_cfg["provider"] = CODEX_PROVIDER_ID
+        model_cfg["base_url"] = CODEX_BASE_URL
+        if selected_model is not None:
+            model_cfg["default"] = selected_model
+        config_data["model"] = model_cfg
+
+        if selected_effort is not None:
+            agent_cfg = config_data.get("agent")
+            if not isinstance(agent_cfg, dict):
+                agent_cfg = {}
+            agent_cfg["reasoning_effort"] = selected_effort
+            config_data["agent"] = agent_cfg
+
+        _save_yaml_config_file(config_path, config_data)
+
+    reload_config()
+    invalidate_models_cache()
+    result = get_codex_capabilities(include_live=False)
+    result.update(
+        {
+            "selected_model": selected_model or result.get("current_model", ""),
+            "model_recognized": recognized,
+            "selected_effort": selected_effort or result.get("reasoning_effort", ""),
+        }
+    )
+    return result
+
+
 def get_available_models() -> dict:
     """
     Return available models grouped by provider.
@@ -1906,6 +2162,16 @@ def get_available_models() -> dict:
                                 {"id": m["id"], "label": m["label"]}
                                 for m in _FALLBACK_MODELS
                             ],
+                        }
+                    )
+                elif pid == CODEX_PROVIDER_ID:
+                    raw_models = get_codex_model_catalog(include_live=False)
+                    models = _apply_provider_prefix(raw_models, pid, active_provider)
+                    groups.append(
+                        {
+                            "provider": provider_name,
+                            "provider_id": pid,
+                            "models": models,
                         }
                     )
                 elif pid == "ollama-cloud":

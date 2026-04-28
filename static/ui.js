@@ -286,7 +286,7 @@ function _checkProviderMismatch(modelId){
   // @provider: prefixed IDs came from that provider's live model list — no mismatch possible
   if(modelId.startsWith('@')) return null;
   // Normalise common aliases
-  const aliases={'claude':'anthropic','gpt':'openai','gemini':'google'};
+  const aliases={'claude':'anthropic','gpt':'openai','gemini':'google','openai-codex':'openai','codex':'openai'};
   const norm=p=>aliases[p]||p;
   let modelProvider=null;
   const slash=modelId.indexOf('/');

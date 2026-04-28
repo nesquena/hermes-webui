@@ -81,6 +81,8 @@ from api.config import (
     get_reasoning_status,
     set_reasoning_display,
     set_reasoning_effort,
+    get_codex_capabilities,
+    set_codex_model_and_reasoning,
 )
 from api.helpers import (
     require,
@@ -754,6 +756,11 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/models/live":
         return _handle_live_models(handler, parsed)
 
+    if parsed.path == "/api/codex/capabilities":
+        qs = parse_qs(parsed.query)
+        live = str(qs.get("live", ["1"])[0]).strip().lower() not in ("0", "false", "no")
+        return j(handler, get_codex_capabilities(include_live=live))
+
     # ── Providers (GET) ──
     if parsed.path == "/api/providers":
         return j(handler, get_providers())
@@ -1233,6 +1240,20 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/default-model":
         try:
             return j(handler, set_hermes_default_model(body.get("model")))
+        except ValueError as e:
+            return bad(handler, str(e))
+        except RuntimeError as e:
+            return bad(handler, str(e), 500)
+
+    if parsed.path == "/api/codex/select":
+        try:
+            return j(
+                handler,
+                set_codex_model_and_reasoning(
+                    body.get("model") or body.get("default_model"),
+                    body.get("effort") or body.get("reasoning_effort"),
+                ),
+            )
         except ValueError as e:
             return bad(handler, str(e))
         except RuntimeError as e:
@@ -2562,6 +2583,19 @@ def _handle_live_models(handler, parsed):
         # works even when hermes_cli is not on sys.path.
         from api.config import _resolve_provider_alias
         provider = _resolve_provider_alias(provider)
+
+        if provider == "openai-codex":
+            from api.config import get_codex_model_catalog as _codex_catalog
+
+            models_out = _codex_catalog(include_live=True)
+            return j(
+                handler,
+                {
+                    "provider": provider,
+                    "models": models_out,
+                    "count": len(models_out),
+                },
+            )
 
         # Delegate to the agent's live-fetch + fallback resolver.
         # provider_model_ids() tries live endpoints first and falls back to
