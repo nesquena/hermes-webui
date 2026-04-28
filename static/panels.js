@@ -2099,6 +2099,9 @@ async function switchToProfile(name) {
       // No messages yet — just refresh the list and topbar in place
       await renderSessionList();
       syncTopbar();
+      // Refresh workspace file tree so the right panel shows the new
+      // profile's workspace, not the previous one (#1214).
+      if (S.session && S.session.workspace) loadDir('.');
       showToast(t('profile_switched', name));
     }
 

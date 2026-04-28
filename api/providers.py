@@ -51,8 +51,10 @@ _PROVIDER_ENV_VAR: dict[str, str] = {
 # through the Hermes CLI, not via API keys.  The WebUI cannot set these.
 _OAUTH_PROVIDERS = frozenset({
     "copilot",
-    "openai-codex",
+    "copilot-acp",
     "nous",
+    "openai-codex",
+    "qwen-oauth",
 })
 
 # SECTION: Helper functions
@@ -309,6 +311,21 @@ def get_providers() -> dict[str, Any]:
                     key_source = "config_yaml"
             else:
                 key_source = "config_yaml"
+        else:
+            # Fallback: provider may be authenticated via hermes auth even
+            # though it is not in the hardcoded _OAUTH_PROVIDERS set
+            # (e.g. Anthropic connected via OAuth).  Check live auth
+            # status so the Providers tab agrees with the model picker
+            # (#1212).
+            try:
+                from hermes_cli.auth import get_auth_status as _gas
+                status = _gas(pid)
+                if isinstance(status, dict) and status.get("logged_in"):
+                    has_key = True
+                    key_source = status.get("key_source", "oauth")
+                    is_oauth = True
+            except Exception:
+                pass
 
         models = _PROVIDER_MODELS.get(pid, [])
         # Also include models from config.yaml providers section
