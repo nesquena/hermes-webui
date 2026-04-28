@@ -215,3 +215,30 @@ class TestFrontendNormRegex(unittest.TestCase):
         r1 = subprocess.run(["node", "-e", f"console.log(({norm_js})('minimax-m2.7'))"], capture_output=True, text=True)
         r2 = subprocess.run(["node", "-e", f"console.log(({norm_js})('@minimax:MiniMax-M2.7'))"], capture_output=True, text=True)
         assert r1.stdout.strip() == r2.stdout.strip(), f"{r1.stdout.strip()} != {r2.stdout.strip()}"
+
+
+class TestResolveModelProviderColonInProviderId(unittest.TestCase):
+    """resolve_model_provider() must handle provider_ids containing ':'.
+
+    Custom named providers use IDs like 'custom:my-key'. When dedup
+    prefixes produce '@custom:my-key:model', rsplit(':', 1) must split
+    correctly into provider='custom:my-key' and model='model'.
+    """
+
+    def test_custom_provider_id_with_colon(self):
+        """@custom:edith:gpt-5.4 → ('gpt-5.4', 'custom:edith', None)."""
+        from api.config import resolve_model_provider
+        model, provider, base_url = resolve_model_provider("@custom:edith:gpt-5.4")
+        assert model == "gpt-5.4", f"Expected bare model 'gpt-5.4', got '{model}'"
+        assert provider == "custom:edith", f"Expected provider 'custom:edith', got '{provider}'"
+        assert base_url is None
+
+    def test_simple_provider_id_unchanged(self):
+        """@openai-codex:gpt-5.4 → ('gpt-5.4', 'openai-codex', None).
+
+        Backward compat: simple provider_ids (no colon) still work.
+        """
+        from api.config import resolve_model_provider
+        model, provider, base_url = resolve_model_provider("@openai-codex:gpt-5.4")
+        assert model == "gpt-5.4"
+        assert provider == "openai-codex"

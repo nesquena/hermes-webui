@@ -837,9 +837,16 @@ def _deduplicate_model_ids(groups: list[dict]) -> None:
     rebuild re-runs dedup — the remaining provider becomes the sole
     occurrence and is left bare, so the session still matches.
 
+    .. note::
+       The "first occurrence wins" rule means the bare ID is not stable
+       across config changes (adding, removing, or reordering providers).
+       This is acceptable because the dedup runs on every cache rebuild,
+       so sessions always resolve to the current canonical bare ID.
+
     The ``@provider_id:model`` format is consistent with the existing
     ``_apply_provider_prefix()`` function and is handled by
-    ``resolve_model_provider()`` (splits on the first ``:``).
+    ``resolve_model_provider()`` (rsplits on the last ``:`` to handle
+    provider_ids that themselves contain ``:``).
 
     Operates in-place on *groups*.
     """
@@ -860,6 +867,8 @@ def _deduplicate_model_ids(groups: list[dict]) -> None:
     # For any bare ID appearing in 2+ groups, prefix all but the first
     # occurrence.  The first stays bare for backward compat; the rest
     # get ``@provider_id:id`` and a disambiguated label.
+    # This handles N>2 providers correctly: the loop iterates over all
+    # occurrences after the first, prefixing each with its own provider_id.
     for bare_id, locations in id_map.items():
         if len(locations) < 2:
             continue
@@ -926,8 +935,10 @@ def resolve_model_provider(model_id: str) -> tuple:
     # @provider:model format — explicit provider hint from the dropdown.
     # Route through that provider directly (resolve_runtime_provider will
     # resolve credentials in streaming.py).
+    # Use rsplit to handle provider_ids that contain ':' (e.g. custom:my-key).
+    # With rsplit, "@custom:my-key:model" → provider="custom:my-key", model="model".
     if model_id.startswith("@") and ":" in model_id:
-        provider_hint, bare_model = model_id[1:].split(":", 1)
+        provider_hint, bare_model = model_id[1:].rsplit(":", 1)
         return bare_model, provider_hint, None
 
     if "/" in model_id:
