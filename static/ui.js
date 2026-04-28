@@ -3253,6 +3253,7 @@ function _renderTreeItems(container, entries, depth){
     const el=document.createElement('div');el.className='file-item';
     el.style.paddingLeft=(8+depth*16)+'px';
     el.setAttribute('draggable','true');
+    el.oncontextmenu=(e)=>{e.preventDefault();e.stopPropagation();_showFileContextMenu(e,item);};
     el.ondragstart=(e)=>{e.dataTransfer.setData('application/ws-path',item.path);e.dataTransfer.setData('application/ws-type',item.type);e.dataTransfer.effectAllowed='copy';};
 
     if(item.type==='dir'){
@@ -3319,11 +3320,16 @@ function _renderTreeItems(container, entries, depth){
       el.appendChild(sizeEl);
     }
 
-    // Delete button -- for files
+    // Delete button -- for files and directories
     if(item.type==='file'){
       const del=document.createElement('button');
       del.className='file-del-btn';del.title=t('delete_title');del.textContent='\u00d7';
       del.onclick=async(e)=>{e.stopPropagation();await deleteWorkspaceFile(item.path,item.name);};
+      el.appendChild(del);
+    }else if(item.type==='dir'){
+      const del=document.createElement('button');
+      del.className='file-del-btn';del.title=t('delete_title');del.textContent='\u00d7';
+      del.onclick=async(e)=>{e.stopPropagation();await deleteWorkspaceDir(item.path,item.name);};
       el.appendChild(del);
     }
 
@@ -3368,6 +3374,77 @@ function _renderTreeItems(container, entries, depth){
       }
     }
   }
+}
+
+async function deleteWorkspaceDir(relPath, name){
+  if(!S.session)return;
+  const ok=await showConfirmDialog({title:t('delete_dir_confirm',name),message:'',confirmLabel:'Delete',danger:true,focusCancel:true});
+  if(!ok)return;
+  try{
+    await api('/api/file/delete',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath,recursive:true})});
+    showToast(t('deleted')+name);
+    // Remove from expanded dirs cache
+    if(S._expandedDirs){S._expandedDirs.delete(relPath);if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();}
+    delete S._dirCache[relPath];
+    await loadDir(S.currentDir);
+  }catch(e){setStatus(t('delete_failed')+e.message);}
+}
+
+function _showFileContextMenu(e, item){
+  document.querySelectorAll('.file-ctx-menu').forEach(el=>el.remove());
+  const menu=document.createElement('div');
+  menu.className='file-ctx-menu';
+  menu.style.cssText='position:fixed;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 0;z-index:9999;min-width:140px;box-shadow:0 4px 16px rgba(0,0,0,.35);';
+  // Keep menu within viewport
+  const vw=window.innerWidth,vh=window.innerHeight;
+  menu.style.left=(e.clientX+140>vw?e.clientX-150:e.clientX)+'px';
+  menu.style.top=(e.clientY+100>vh?e.clientY-100:e.clientY)+'px';
+
+  // Rename
+  const renameItem=document.createElement('div');
+  renameItem.textContent=t('rename_title');
+  renameItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+  renameItem.onmouseenter=()=>renameItem.style.background='var(--hover)';
+  renameItem.onmouseleave=()=>renameItem.style.background='';
+  renameItem.onclick=()=>{menu.remove();_inlineRenameFileItem(item);};
+  menu.appendChild(renameItem);
+
+  // Divider + Delete
+  const sep=document.createElement('hr');
+  sep.style.cssText='border:none;border-top:1px solid var(--border);margin:4px 0;';
+  menu.appendChild(sep);
+  const delItem=document.createElement('div');
+  delItem.textContent=t('delete_title');
+  delItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--error,#e94560);';
+  delItem.onmouseenter=()=>delItem.style.background='var(--hover)';
+  delItem.onmouseleave=()=>delItem.style.background='';
+  delItem.onclick=()=>{menu.remove();if(item.type==='dir')deleteWorkspaceDir(item.path,item.name);else deleteWorkspaceFile(item.path,item.name);};
+  menu.appendChild(delItem);
+
+  document.body.appendChild(menu);
+  const dismiss=()=>{menu.remove();document.removeEventListener('click',dismiss);};
+  setTimeout(()=>document.addEventListener('click',dismiss),0);
+}
+
+async function _inlineRenameFileItem(item){
+  if(!S.session)return;
+  const newName=await showPromptDialog({message:t('rename_prompt'),defaultValue:item.name,placeholder:item.name,confirmLabel:t('rename_title')});
+  if(!newName||newName===item.name)return;
+  try{
+    await api('/api/file/rename',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path,new_name:newName})});
+    showToast(t('renamed_to')+newName);
+    // Update expanded dirs cache key if renaming a directory
+    if(item.type==='dir'&&S._expandedDirs){
+      S._expandedDirs.delete(item.path);
+      const parent=item.path.includes('/')?item.path.substring(0,item.path.lastIndexOf('/')):'.';
+      const newPath=parent==='.'?newName:parent+'/'+newName;
+      S._expandedDirs.add(newPath);
+      if(S._dirCache[item.path]){S._dirCache[newPath]=S._dirCache[item.path];delete S._dirCache[item.path];}
+      if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();
+    }
+    delete S._dirCache[S.currentDir];
+    await loadDir(S.currentDir);
+  }catch(err){showToast(t('rename_failed')+err.message);}
 }
 
 async function deleteWorkspaceFile(relPath, name){

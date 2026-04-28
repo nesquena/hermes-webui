@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import queue
+import shutil
 import sys
 import threading
 import time
@@ -3153,8 +3154,11 @@ def _handle_file_delete(handler, body):
         if not target.exists():
             return bad(handler, "File not found", 404)
         if target.is_dir():
-            return bad(handler, "Cannot delete directories via this endpoint")
-        target.unlink()
+            if not body.get("recursive"):
+                return bad(handler, "Set recursive=true to delete directories")
+            shutil.rmtree(target)
+        else:
+            target.unlink()
         return j(handler, {"ok": True, "path": body["path"]})
     except (ValueError, PermissionError) as e:
         return bad(handler, _sanitize_error(e))
