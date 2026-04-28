@@ -45,6 +45,7 @@
         (description ? '<div class="capy-spaces-muted">'+escapeHtml(description)+'</div>' : '') +
         '<div class="capy-spaces-muted">Widgets: '+Number(s.widget_count||0)+' · Revision: '+escapeHtml(s.revision_event_id||'none')+'</div></div>' +
         '<div class="capy-spaces-actions">' +
+        '<button type="button" class="capy-spaces-btn" data-capy-action="openSpace" data-space-id="'+escapeHtml(spaceId)+'">Open</button>' +
         '<button type="button" class="capy-spaces-btn" data-capy-action="editSpace" data-space-id="'+escapeHtml(spaceId)+'" data-space-name="'+escapeHtml(name)+'" data-space-description="'+escapeHtml(description)+'">Edit</button>' +
         '<button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Manage widgets</button>' +
         '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="deleteSpace" data-space-id="'+escapeHtml(spaceId)+'">Delete</button>' +
@@ -79,6 +80,38 @@
     } catch (err) {
       root.innerHTML = '<div class="capy-spaces-card"><h3>Widget manager unavailable</h3><div class="capy-spaces-muted">'+escapeHtml(err.message||String(err))+'</div><button type="button" class="capy-spaces-btn" data-capy-action="reloadSpaces">Back to spaces</button></div>';
     }
+  }
+
+  async function openSpaceDetail(spaceId){
+    const root = document.getElementById('capySpacesRoot');
+    if (!root) return;
+    ensureCapySpacesHandlers();
+    const safeSpaceId = String(spaceId || '').trim();
+    if (!safeSpaceId) return;
+    try {
+      const data = await fetchSpacesJson('api/spaces/get?space_id='+encodeURIComponent(safeSpaceId));
+      root.innerHTML = renderSpaceDetail(data.space || {});
+    } catch (err) {
+      root.innerHTML = '<div class="capy-spaces-card"><h3>Space detail unavailable</h3><div class="capy-spaces-muted">'+escapeHtml(err.message||String(err))+'</div><button type="button" class="capy-spaces-btn" data-capy-action="reloadSpaces">Back to spaces</button></div>';
+    }
+  }
+
+  function renderSpaceDetail(space){
+    const spaceId = space.space_id || '';
+    const name = space.name || spaceId || 'Untitled';
+    const description = space.description || '';
+    const widgets = Array.isArray(space.widgets) ? space.widgets : [];
+    const widgetRows = widgets.length ? widgets.map(function(w){
+      const widgetId = w.id || '';
+      return '<div class="capy-spaces-widget" data-widget-id="'+escapeHtml(widgetId)+'"><div><strong>'+escapeHtml(w.title||widgetId||'Untitled widget')+'</strong>' +
+        '<div class="capy-spaces-muted">'+escapeHtml(w.kind||'custom')+' · '+escapeHtml(widgetId)+'</div></div></div>';
+    }).join('') : '<div class="capy-spaces-muted">No widgets yet.</div>';
+    return '<div class="capy-spaces-card"><button type="button" class="capy-spaces-btn" data-capy-action="reloadSpaces">← Back to spaces</button>' +
+      '<h3>'+escapeHtml(name)+'</h3>' +
+      (description ? '<div class="capy-spaces-muted">'+escapeHtml(description)+'</div>' : '') +
+      '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+' · Revision: '+escapeHtml(space.revision_event_id||'none')+'</div>' +
+      '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Manage widgets</button></div>' +
+      '</div><div class="capy-spaces-card"><h3>Widgets</h3><div class="capy-spaces-muted">Metadata-only detail view. Generated widget code is intentionally not displayed or executed.</div><div class="capy-spaces-widget-list">'+widgetRows+'</div></div>';
   }
 
   function renderWidgetManager(spaceId, widgets){
@@ -124,6 +157,10 @@
       await loadSpaceWidgets(spaceId);
       return;
     }
+    if (action === 'openSpace') {
+      await openSpaceDetail(spaceId);
+      return;
+    }
     if (action === 'reloadSpaces') {
       await loadCapySpaces();
       return;
@@ -157,9 +194,8 @@
       return;
     }
     if (action === 'deleteSpace') {
-      const ok = (typeof showConfirmDialog === 'function')
-        ? await showConfirmDialog({title: 'Delete Capy Space?', message: 'Delete space "'+spaceId+'"? This removes its manifest and widgets.', confirmLabel: 'Delete', danger: true, focusCancel: true})
-        : true;
+      if (typeof showConfirmDialog !== 'function') return;
+      const ok = await showConfirmDialog({title: 'Delete Capy Space?', message: 'Delete space "'+spaceId+'"? This removes its manifest and widgets.', confirmLabel: 'Delete', danger: true, focusCancel: true});
       if (!ok) return;
       await postSpacesJson('api/spaces/delete', {space_id: spaceId});
       await loadCapySpaces();
@@ -215,6 +251,7 @@
   window.loadCapySpaces = loadCapySpaces;
   window.loadCapySpacesRecovery = loadCapySpacesRecovery;
   window.loadSpaceWidgets = loadSpaceWidgets;
+  window.openSpaceDetail = openSpaceDetail;
   window.addEventListener('DOMContentLoaded', function(){
     ensureCapySpacesHandlers();
     loadCapySpaces();
