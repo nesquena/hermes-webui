@@ -12,12 +12,11 @@ Tests for:
 """
 
 import json
+import pathlib
 import re
 import urllib.request
 import urllib.error
 import urllib.parse
-
-import pytest
 
 from tests._pytest_port import BASE
 
@@ -44,8 +43,6 @@ def read(path):
     with open(path, encoding="utf-8") as f:
         return f.read()
 
-
-import pathlib
 REPO = pathlib.Path(__file__).parent.parent
 
 
@@ -518,6 +515,9 @@ class TestClarifyCardTimerLogic:
     def _get_js(self):
         return pathlib.Path(__file__).parent.parent / 'static' / 'messages.js'
 
+    def _get_html(self):
+        return pathlib.Path(__file__).parent.parent / 'static' / 'index.html'
+
     def test_clarify_min_visible_ms_constant_present(self):
         src = self._get_js().read_text()
         assert 'CLARIFY_MIN_VISIBLE_MS' in src
@@ -529,6 +529,7 @@ class TestClarifyCardTimerLogic:
     def test_hide_clarify_card_has_force_parameter(self):
         src = self._get_js().read_text()
         assert 'hideClarifyCard(force=false)' in src or \
+               'hideClarifyCard(force=false, reason=' in src or \
                'hideClarifyCard(force = false)' in src, \
             'hideClarifyCard must have force=false default parameter'
 
@@ -548,6 +549,25 @@ class TestClarifyCardTimerLogic:
         src = self._get_js().read_text()
         assert '_clarifySignature' in src
 
+    def test_clarify_countdown_element_present(self):
+        html = self._get_html().read_text()
+        assert 'id="clarifyCountdown"' in html, \
+            'clarify card must include a countdown element so users see timeout risk'
+
+    def test_clarify_countdown_uses_pending_expiry(self):
+        src = self._get_js().read_text()
+        assert '_clarifyCountdownTimer' in src
+        assert 'function _startClarifyCountdown' in src
+        assert 'expires_at' in src, \
+            'clarify countdown must use expires_at from the pending payload'
+
+    def test_hide_clarify_card_can_preserve_draft(self):
+        src = self._get_js().read_text()
+        assert 'function _stashClarifyDraft' in src
+        assert 'sessionStorage.setItem' in src
+        assert "$('msg')" in src, \
+            'clarify timeout should keep the typed draft visible in the composer'
+
     def test_respond_clarify_calls_hide_with_force(self):
         src = self._get_js().read_text()
         import re
@@ -555,14 +575,15 @@ class TestClarifyCardTimerLogic:
                       src, re.DOTALL)
         assert m, 'respondClarify function not found'
         body = m.group(0)
-        assert 'hideClarifyCard(true)' in body, \
+        assert 'hideClarifyCard(true' in body, \
             'respondClarify must call hideClarifyCard(true) so card hides immediately after user clicks'
+        assert "'sent'" in body, \
+            'respondClarify must mark user-submitted hides so drafts are not re-stashed'
 
     def test_clarify_poll_loop_uses_no_force(self):
         src = self._get_js().read_text()
-        assert 'else { hideClarifyCard(); }' in src or \
-               'else {hideClarifyCard();}' in src or \
-               'else { hideClarifyCard() }' in src, \
+        assert "else { hideClarifyCard(false, 'expired'); }" in src or \
+               "else {hideClarifyCard(false,'expired');}" in src, \
             'Clarify poll loop should hide without force=true'
 
     def test_show_clarify_card_signature_dedup(self):

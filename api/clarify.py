@@ -7,9 +7,11 @@ clarification string instead of an approval decision.
 from __future__ import annotations
 
 import threading
+import time
 from typing import Optional
 
 
+DEFAULT_TIMEOUT_SECONDS = 120
 _lock = threading.Lock()
 _pending: dict[str, dict] = {}
 _gateway_queues: dict[str, list] = {}
@@ -57,8 +59,20 @@ def clear_pending(session_key: str) -> int:
     return len(entries)
 
 
+def _with_timeout_metadata(data: dict) -> dict:
+    item = dict(data or {})
+    requested_at = float(item.get("requested_at") or time.time())
+    timeout_seconds = int(item.get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS)
+    expires_at = float(item.get("expires_at") or requested_at + timeout_seconds)
+    item["requested_at"] = requested_at
+    item["timeout_seconds"] = timeout_seconds
+    item["expires_at"] = expires_at
+    return item
+
+
 def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
     """Queue a pending clarify request and notify the UI callback if registered."""
+    data = _with_timeout_metadata(data)
     with _lock:
         queue = _gateway_queues.setdefault(session_key, [])
         # De-duplicate while unresolved: if the most recent pending clarify is

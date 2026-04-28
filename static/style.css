@@ -472,6 +472,8 @@
   .clarify-card.visible .clarify-inner{transform:translateY(0);opacity:1;}
   .clarify-inner{background:var(--surface);backdrop-filter:blur(8px);border:1px solid var(--accent-bg-strong);border-radius:12px;padding:12px 14px 36px;box-shadow:0 1px 0 rgba(255,255,255,.02) inset;}
   .clarify-header{display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:12px;font-weight:700;color:var(--blue);letter-spacing:.01em;}
+  .clarify-countdown{margin-left:auto;min-width:42px;text-align:right;color:var(--muted);font-variant-numeric:tabular-nums;font-weight:700;}
+  .clarify-countdown.urgent{color:var(--error);}
   .clarify-question{font-size:14px;color:var(--text);line-height:1.7;white-space:pre-wrap;margin-bottom:12px;}
   .clarify-choices{display:flex;flex-direction:column;gap:8px;margin-bottom:12px;}
   .clarify-choice{display:flex;align-items:flex-start;gap:10px;width:100%;padding:11px 14px;border-radius:12px;font-size:13px;font-weight:600;border:1px solid var(--accent-bg-strong);background:var(--accent-bg);color:var(--accent-text);cursor:pointer;transition:all .15s;white-space:normal;text-align:left;box-shadow:0 1px 0 rgba(255,255,255,.03) inset;}
