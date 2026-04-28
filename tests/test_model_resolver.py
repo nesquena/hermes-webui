@@ -133,6 +133,22 @@ def test_provider_hint_deepseek():
     assert provider == 'deepseek'
 
 
+def test_provider_hint_ollama_local_preserves_runtime_hint():
+    """@ollama-local:gemma4:26b must route to the named local provider."""
+    model, provider, base_url = _resolve_with_config(
+        '@ollama-local:gemma4:26b', provider='openrouter',
+    )
+    assert model == 'gemma4:26b'
+    assert provider == 'ollama-local'
+    assert base_url is None
+
+
+def test_ollama_alias_does_not_collapse_to_custom():
+    """The WebUI catalog must not hide Ollama by applying the CLI custom alias."""
+    assert config._resolve_provider_alias('ollama') == 'ollama'
+    assert config._resolve_provider_alias('ollama-local') == 'ollama-local'
+
+
 def test_slash_prefix_non_default_still_routes_openrouter():
     """minimax/MiniMax-M2.7 (old format) still routes through openrouter."""
     model, provider, base_url = _resolve_with_config(
@@ -246,6 +262,101 @@ def test_default_provider_models_not_prefixed():
             assert bare_id in returned_ids, (
                 f"_PROVIDER_MODELS entry '{bare_id}' is missing from the Anthropic group"
             )
+
+
+def test_configured_ollama_local_models_show_with_route_prefix(monkeypatch):
+    """Secondary providers.ollama-local must appear while OpenRouter is active."""
+    import sys, types
+    import api.config as _cfg
+
+    fake_mod = types.ModuleType('hermes_cli.models')
+    fake_mod.list_available_providers = lambda: []
+    fake_auth = types.ModuleType('hermes_cli.auth')
+    fake_auth.get_auth_status = lambda pid: {'key_source': 'env'}
+    monkeypatch.setitem(sys.modules, 'hermes_cli.models', fake_mod)
+    monkeypatch.setitem(sys.modules, 'hermes_cli.auth', fake_auth)
+    monkeypatch.setattr(
+        _cfg,
+        '_fetch_openai_compatible_models',
+        lambda *a, **k: [{'id': 'gemma4:26b', 'label': 'Gemma4 (26B)'}],
+    )
+
+    old_cfg = dict(_cfg.cfg)
+    _cfg.cfg['model'] = {
+        'provider': 'openrouter',
+        'default': 'qwen/qwen3.6-plus',
+        'base_url': 'https://openrouter.ai/api/v1',
+    }
+    _cfg.cfg['providers'] = {
+        'ollama-local': {
+            'base_url': 'http://127.0.0.1:11434/v1',
+            'api_key': 'ollama',
+        },
+    }
+    try:
+        try:
+            _cfg._cfg_mtime = _cfg.Path(_cfg._get_config_path()).stat().st_mtime
+        except Exception:
+            _cfg._cfg_mtime = 0.0
+        result = _cfg.get_available_models()
+    finally:
+        _cfg.cfg.clear()
+        _cfg.cfg.update(old_cfg)
+
+    groups_by_id = {g.get('provider_id'): g for g in result['groups']}
+    assert 'ollama-local' in groups_by_id
+    assert groups_by_id['ollama-local']['provider'] == 'Ollama'
+    assert '@ollama-local:gemma4:26b' in [
+        m['id'] for m in groups_by_id['ollama-local']['models']
+    ]
+
+
+def test_active_ollama_local_models_stay_bare(monkeypatch):
+    """When ollama-local is active, gemma4:26b must not be @prefixed."""
+    import sys, types
+    import api.config as _cfg
+
+    fake_mod = types.ModuleType('hermes_cli.models')
+    fake_mod.list_available_providers = lambda: []
+    fake_auth = types.ModuleType('hermes_cli.auth')
+    fake_auth.get_auth_status = lambda pid: {'key_source': 'env'}
+    monkeypatch.setitem(sys.modules, 'hermes_cli.models', fake_mod)
+    monkeypatch.setitem(sys.modules, 'hermes_cli.auth', fake_auth)
+    monkeypatch.setattr(
+        _cfg,
+        '_fetch_openai_compatible_models',
+        lambda *a, **k: [{'id': 'gemma4:26b', 'label': 'Gemma4 (26B)'}],
+    )
+
+    old_cfg = dict(_cfg.cfg)
+    _cfg.cfg['model'] = {
+        'provider': 'ollama-local',
+        'default': 'gemma4:26b',
+        'base_url': 'http://127.0.0.1:11434/v1',
+        'api_key': 'ollama',
+    }
+    _cfg.cfg['providers'] = {
+        'ollama-local': {
+            'base_url': 'http://127.0.0.1:11434/v1',
+            'api_key': 'ollama',
+        },
+    }
+    try:
+        try:
+            _cfg._cfg_mtime = _cfg.Path(_cfg._get_config_path()).stat().st_mtime
+        except Exception:
+            _cfg._cfg_mtime = 0.0
+        result = _cfg.get_available_models()
+    finally:
+        _cfg.cfg.clear()
+        _cfg.cfg.update(old_cfg)
+
+    groups_by_id = {g.get('provider_id'): g for g in result['groups']}
+    assert result['active_provider'] == 'ollama-local'
+    assert 'gemma4:26b' in [m['id'] for m in groups_by_id['ollama-local']['models']]
+    assert '@ollama-local:gemma4:26b' not in [
+        m['id'] for m in groups_by_id['ollama-local']['models']
+    ]
 
 
 # ── get_available_models(): phantom "Custom" group regression ─────────────

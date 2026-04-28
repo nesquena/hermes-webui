@@ -1441,12 +1441,23 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             # Resolve API key via Hermes runtime provider (matches gateway behaviour).
             # Pass the resolved provider so non-default providers get their own credentials.
             resolved_api_key = None
+            _rt = {}
             try:
                 from hermes_cli.runtime_provider import resolve_runtime_provider
                 _rt = resolve_runtime_provider(requested=resolved_provider)
                 resolved_api_key = _rt.get("api_key")
-                if not resolved_provider:
-                    resolved_provider = _rt.get("provider")
+                _runtime_provider = _rt.get("provider")
+                if _runtime_provider and (
+                    not resolved_provider
+                    or _runtime_provider == "custom"
+                    or str(resolved_provider).startswith("custom:")
+                ):
+                    # Named local providers such as "ollama-local" resolve to
+                    # Hermes' generic OpenAI-compatible custom transport.  Use
+                    # that runtime provider so the transport can send provider-
+                    # specific extras (notably Ollama/Gemma think:false when
+                    # reasoning is disabled).
+                    resolved_provider = _runtime_provider
                 if not resolved_base_url:
                     resolved_base_url = _rt.get("base_url")
             except Exception as _e:
@@ -1489,7 +1500,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             # the key is absent or invalid, pass None → agent uses its default.
             try:
                 from api.config import parse_reasoning_effort as _parse_reff
-                _effort_cfg = _cfg.cfg.get('agent', {}) if isinstance(_cfg.cfg, dict) else {}
+                _effort_cfg = _cfg.get('agent', {}) if isinstance(_cfg, dict) else {}
                 _effort_raw = _effort_cfg.get('reasoning_effort') if isinstance(_effort_cfg, dict) else None
                 _reasoning_config = _parse_reff(_effort_raw)
             except Exception:

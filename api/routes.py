@@ -22,6 +22,12 @@ _PROVIDER_ALIASES = {
     "gpt": "openai",
     "gemini": "google",
     "openai-codex": "openai",
+    "ollama": "custom",
+    "ollama-local": "custom",
+    "local-ollama": "custom",
+    "lmstudio": "custom",
+    "lm-studio": "custom",
+    "local": "custom",
 }
 
 # OpenAI-compatible /v1/models endpoints for live model discovery.
@@ -207,6 +213,12 @@ def _normalize_provider_id(value: str | None) -> str:
         ("google", "google"),
         ("gemini", "google"),
         ("openrouter", "openrouter"),
+        ("ollama-local", "custom"),
+        ("local-ollama", "custom"),
+        ("ollama", "custom"),
+        ("lm-studio", "custom"),
+        ("lmstudio", "custom"),
+        ("local", "custom"),
         ("custom", "custom"),
     ):
         if raw.startswith(prefix):
@@ -214,6 +226,14 @@ def _normalize_provider_id(value: str | None) -> str:
     # Unknown prefix — return empty so callers treat it as "no match" and pass
     # the model through unchanged rather than incorrectly stripping it.
     return "" 
+
+
+def _model_profile_match_key(value: str | None) -> str:
+    """Normalize model IDs for profile auto-switch matching."""
+    raw = str(value or "").strip()
+    if raw.startswith("@") and ":" in raw:
+        raw = raw.split(":", 1)[1]
+    return raw
 
 
 def _catalog_provider_id_sets(catalog: dict) -> tuple[set[str], set[str]]:
@@ -409,8 +429,7 @@ from api.workspace import (
     safe_resolve_ws,
     resolve_trusted_workspace,
     validate_workspace_to_add,
-    _is_blocked_system_path,
-    _workspace_blocked_roots,
+    _is_blocked_workspace_path,
 )
 from api.upload import handle_upload, handle_transcribe
 from api.streaming import _sse, _run_agent_streaming, cancel_stream
@@ -1358,12 +1377,56 @@ def handle_post(handler, parsed) -> bool:
             new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace)))
         except ValueError as e:
             return bad(handler, str(e))
+        new_model = body.get("model", s.model)
+        # Transparent profile auto-switch: if the new model is the default of a
+        # different profile than the active one, hop the per-client profile so
+        # the session points at a backend that actually serves this model.
+        # Best-effort: a failure here must not block the session update itself.
+        auto_switch_info = None
+        extra_headers = None
+        if new_model and new_model != s.model:
+            try:
+                from api.profiles import (
+                    list_profiles_api,
+                    get_active_profile_name,
+                    switch_profile,
+                )
+                from api.helpers import build_profile_cookie
+                profiles = list_profiles_api()
+                active_name = get_active_profile_name()
+                new_model_key = _model_profile_match_key(new_model)
+                target = next(
+                    (p for p in profiles
+                     if _model_profile_match_key(p.get('model')) == new_model_key
+                     and p.get('name') != active_name),
+                    None,
+                )
+                if target:
+                    target_name = target['name']
+                    switch_profile(target_name, process_wide=False)
+                    auto_switch_info = {
+                        'from': active_name,
+                        'to': target_name,
+                        'reason': f"model '{new_model}' is the default of profile '{target_name}'",
+                    }
+                    extra_headers = {'Set-Cookie': build_profile_cookie(target_name)}
+            except Exception as _profile_switch_exc:
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "profile auto-switch skipped for model=%s: %s",
+                    new_model, _profile_switch_exc,
+                )
         with _get_session_agent_lock(body["session_id"]):
             s.workspace = new_ws
-            s.model = body.get("model", s.model)
+            s.model = new_model
             s.save()
         set_last_workspace(new_ws)
-        return j(handler, {"session": s.compact() | {"messages": s.messages}})
+        payload = {"session": s.compact() | {"messages": s.messages}}
+        if auto_switch_info:
+            payload["profile_auto_switched"] = auto_switch_info
+        if extra_headers:
+            return j(handler, payload, extra_headers=extra_headers)
+        return j(handler, payload)
 
     if parsed.path == "/api/session/delete":
         sid = body.get("session_id", "")
@@ -2534,6 +2597,51 @@ def _handle_live_models(handler, parsed):
                 except Exception:
                     pass
 
+        if not ids:
+            # Named OpenAI-compatible providers in config.yaml (notably
+            # providers.ollama-local) are runtime-routed as "custom" by the
+            # Hermes agent, but the WebUI must still show their live models.
+            try:
+                from api.config import (
+                    _fetch_openai_compatible_models as _fetch_compat_models,
+                    _get_provider_config as _provider_cfg_for,
+                    _models_from_provider_config as _models_from_cfg,
+                )
+
+                _providers_cfg = cfg.get("providers", {})
+                _prov = _provider_cfg_for(_providers_cfg, provider)
+                if isinstance(_prov, dict) and _prov:
+                    _cfg_models = _models_from_cfg(_prov, provider)
+                    if _cfg_models:
+                        ids = [m.get("id", "") for m in _cfg_models if m.get("id")]
+                    elif _prov.get("base_url"):
+                        _fetched = _fetch_compat_models(
+                            _prov.get("base_url"),
+                            _prov.get("api_key"),
+                            provider,
+                            timeout=5.0,
+                        )
+                        ids = [m.get("id", "") for m in _fetched if m.get("id")]
+            except Exception as _cfg_fetch_err:
+                logger.debug("config provider model fetch failed for %s: %s", provider, _cfg_fetch_err)
+
+        if not ids and provider in ("ollama", "ollama-local", "local-ollama"):
+            # Cold-start safety net: on the very first request after a server
+            # restart, config may not yet expose providers.ollama-local to this
+            # route, but the local Ollama API is deterministic.
+            try:
+                from api.config import _fetch_openai_compatible_models as _fetch_compat_models
+
+                _fetched = _fetch_compat_models(
+                    "http://127.0.0.1:11434/v1",
+                    "ollama",
+                    provider,
+                    timeout=5.0,
+                )
+                ids = [m.get("id", "") for m in _fetched if m.get("id")]
+            except Exception as _ollama_fetch_err:
+                logger.debug("local Ollama model fetch failed: %s", _ollama_fetch_err)
+
         # ── OpenAI-compat live fetch fallback ──────────────────────────────────
         # When provider_model_ids() is unavailable or returns [] for a provider
         # that exposes a standard /v1/models endpoint, fetch directly.  This
@@ -2578,13 +2686,13 @@ def _handle_live_models(handler, parsed):
             return j(handler, {"provider": provider, "models": [], "count": 0})
 
         # Normalise to {id, label} — provider_model_ids() returns plain string IDs.
-        # For ollama-cloud use the shared Ollama formatter (handles `:variant` suffix).
+        # For Ollama-family providers use the shared formatter (handles `:variant` suffix).
         # For all other providers use a simpler hyphen-split capitaliser.
         from api.config import _format_ollama_label as _fmt_ollama
 
         def _make_label(mid):
             """Best-effort human label from a model ID string."""
-            if provider in ("ollama", "ollama-cloud"):
+            if provider in ("ollama", "ollama-local", "local-ollama", "ollama-cloud"):
                 return _fmt_ollama(mid)
             # Preserve slashes for router IDs like "anthropic/claude-sonnet-4.6"
             display = mid.split("/")[-1] if "/" in mid else mid
@@ -2878,7 +2986,53 @@ def _handle_chat_start(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
     requested_model = body.get("model") or s.model
-    model, normalized_model = _resolve_compatible_session_model(requested_model)
+    # Pre-flight profile auto-switch: if `requested_model` is the default of a
+    # profile that is not currently active, hop the active profile (process-wide)
+    # BEFORE _resolve_compatible_session_model() runs — otherwise that helper
+    # rewrites a cross-provider model down to the active provider's default and
+    # defeats the auto-switch. process_wide=True is required because the chat
+    # thread spawned below does not inherit thread-local profile state.
+    chat_auto_switch_info = None
+    chat_extra_headers = None
+    try:
+        from api.profiles import (
+            list_profiles_api,
+            get_active_profile_name,
+            switch_profile,
+        )
+        from api.helpers import build_profile_cookie
+        _profiles = list_profiles_api()
+        _active_name = get_active_profile_name()
+        _requested_model_key = _model_profile_match_key(requested_model)
+        _target = next(
+            (p for p in _profiles
+             if _model_profile_match_key(p.get('model')) == _requested_model_key
+             and p.get('name') != _active_name),
+            None,
+        )
+        if _target:
+            _target_name = _target['name']
+            switch_profile(_target_name, process_wide=True)
+            chat_auto_switch_info = {
+                'from': _active_name,
+                'to': _target_name,
+                'reason': f"model '{requested_model}' is the default of profile '{_target_name}'",
+            }
+            chat_extra_headers = {'Set-Cookie': build_profile_cookie(_target_name)}
+    except Exception as _chat_switch_exc:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "chat-start profile auto-switch skipped for model=%s: %s",
+            requested_model, _chat_switch_exc,
+        )
+    if chat_auto_switch_info:
+        # Profile just changed; trust requested_model as-is. Running normalize here
+        # would still see the cached pre-switch active_provider and rewrite the
+        # model to the old provider's default, which is exactly what we just
+        # avoided by switching.
+        model, normalized_model = requested_model, False
+    else:
+        model, normalized_model = _resolve_compatible_session_model(requested_model)
     # Prevent duplicate runs in the same session while a stream is still active.
     # This commonly happens after page refresh/reconnect races and can produce
     # duplicated clarify cards for what appears to be a single user request.
@@ -2919,6 +3073,10 @@ def _handle_chat_start(handler, body):
     response = {"stream_id": stream_id, "session_id": s.session_id}
     if normalized_model:
         response["effective_model"] = model
+    if chat_auto_switch_info:
+        response["profile_auto_switched"] = chat_auto_switch_info
+    if chat_extra_headers:
+        return j(handler, response, extra_headers=chat_extra_headers)
     return j(handler, response)
 
 
@@ -3264,7 +3422,7 @@ def _handle_workspace_add(handler, body):
     # macOS) so pytest's tmp_path_factory paths and other legit user-tmp dirs
     # still register cleanly.
     candidate = Path(path_str).expanduser().resolve()
-    if _is_blocked_system_path(candidate):
+    if _is_blocked_workspace_path(candidate, path_str):
         return bad(handler, f"Path points to a system directory: {candidate}")
     # Now safe to create the directory if requested
     if auto_create:

@@ -183,6 +183,7 @@ else:
 _cfg_cache = {}
 _cfg_lock = threading.Lock()
 _cfg_mtime: float = 0.0  # last known mtime of config.yaml; 0 = never loaded
+_cfg_path: str | None = None  # last loaded config path; profile-aware mtime guard
 
 
 def _get_config_path() -> Path:
@@ -207,10 +208,11 @@ def get_config() -> dict:
 
 def reload_config() -> None:
     """Reload config.yaml from the active profile's directory."""
-    global _cfg_mtime
+    global _cfg_mtime, _cfg_path
     with _cfg_lock:
         _cfg_cache.clear()
         config_path = _get_config_path()
+        _cfg_path = str(Path(config_path).expanduser().resolve())
         # Remember the old mtime so we can tell whether config actually changed
         # vs. first-ever load (mtime == 0.0, e.g. server start or profile switch).
         _old_cfg_mtime = _cfg_mtime
@@ -532,6 +534,8 @@ _PROVIDER_DISPLAY = {
     "huggingface": "HuggingFace",
     "alibaba": "Alibaba",
     "ollama": "Ollama",
+    "ollama-local": "Ollama",
+    "local-ollama": "Ollama",
     "ollama-cloud": "Ollama Cloud",
     "opencode-zen": "OpenCode Zen",
     "opencode-go": "OpenCode Go",
@@ -539,6 +543,12 @@ _PROVIDER_DISPLAY = {
     "mistralai": "Mistral",
     "qwen": "Qwen",
     "x-ai": "xAI",
+}
+
+_LOCAL_OLLAMA_ALIASES = {
+    "ollama": "ollama",
+    "ollama-local": "ollama-local",
+    "local-ollama": "local-ollama",
 }
 
 # Provider alias → canonical slug.  Users configure providers using the
@@ -597,6 +607,14 @@ def _resolve_provider_alias(name: str) -> str:
     if not name:
         return name
     raw = str(name).strip().lower()
+    # The Hermes CLI routes local Ollama profiles through its generic
+    # OpenAI-compatible "custom" transport.  That is correct at runtime, but
+    # wrong for the WebUI catalog: if we let the CLI alias table rewrite
+    # "ollama" to "custom", /api/models/live?provider=ollama returns no local
+    # models and the dropdown hides gemma4:26b.  Keep local Ollama IDs stable
+    # here; streaming.py still asks resolve_runtime_provider() before sending.
+    if raw in _LOCAL_OLLAMA_ALIASES:
+        return _LOCAL_OLLAMA_ALIASES[raw]
     # Prefer the agent's table when available so new aliases added there
     # work automatically; otherwise fall through to our local copy.
     try:
@@ -797,6 +815,152 @@ def _format_ollama_label(mid: str) -> str:
     if variant:
         label += f" ({_fmt(variant)})"
     return label
+
+
+def _looks_like_ollama_provider(provider_id: str | None, base_url: str | None = None) -> bool:
+    raw = str(provider_id or "").strip().lower()
+    if raw in {"ollama", "ollama-local", "local-ollama"} or "ollama" in raw:
+        return True
+    try:
+        parsed = urlparse(str(base_url or "") if "://" in str(base_url or "") else f"http://{base_url or ''}")
+        host = (parsed.hostname or "").lower()
+        return (
+            "ollama" in host
+            or host in {"127.0.0.1", "localhost", "::1"}
+            and str(parsed.port or "") == "11434"
+        )
+    except Exception:
+        return False
+
+
+def _looks_like_local_compat_provider(provider_id: str | None, base_url: str | None = None) -> bool:
+    raw = str(provider_id or "").strip().lower()
+    if raw.startswith("custom:") or raw in {
+        "custom",
+        "local",
+        "ollama",
+        "ollama-local",
+        "local-ollama",
+        "lmstudio",
+        "lm-studio",
+    }:
+        return True
+    if "ollama" in raw or "lmstudio" in raw or "lm-studio" in raw:
+        return True
+    try:
+        parsed = urlparse(str(base_url or "") if "://" in str(base_url or "") else f"http://{base_url or ''}")
+        host = (parsed.hostname or "").lower()
+        return host in {"127.0.0.1", "localhost", "::1"} or str(parsed.port or "") in {"11434", "1234"}
+    except Exception:
+        return False
+
+
+def _get_provider_config(providers_cfg: dict | None, provider_id: str | None) -> dict:
+    """Return config.yaml providers.<provider_id>, accepting aliases.
+
+    Local Ollama profiles often use ``providers.ollama-local`` while the UI may
+    ask for ``ollama``.  This helper keeps the display/catalog layer tolerant
+    without changing runtime routing, which still receives the original
+    provider hint such as ``ollama-local``.
+    """
+    if not isinstance(providers_cfg, dict) or not provider_id:
+        return {}
+    raw = str(provider_id).strip().lower()
+    if raw in providers_cfg and isinstance(providers_cfg.get(raw), dict):
+        return providers_cfg.get(raw, {})
+    for key, value in providers_cfg.items():
+        if not isinstance(value, dict):
+            continue
+        key_s = str(key).strip().lower()
+        if key_s == raw or _resolve_provider_alias(key_s) == raw:
+            return value
+    if raw == "ollama":
+        for key, value in providers_cfg.items():
+            if isinstance(value, dict) and _looks_like_ollama_provider(str(key), value.get("base_url")):
+                return value
+    return {}
+
+
+def _models_from_provider_config(provider_cfg: dict | None, provider_id: str | None = None) -> list[dict]:
+    """Normalize providers.<id>.models into ``[{id, label}]`` entries."""
+    if not isinstance(provider_cfg, dict) or "models" not in provider_cfg:
+        return []
+    raw = provider_cfg.get("models")
+    out: list[dict] = []
+    if isinstance(raw, dict):
+        iterable = raw.items()
+    elif isinstance(raw, list):
+        iterable = [(item, None) for item in raw]
+    else:
+        return []
+    for item, meta in iterable:
+        if isinstance(item, dict):
+            mid = str(item.get("id") or item.get("model") or item.get("name") or "").strip()
+            label = str(item.get("label") or item.get("name") or mid).strip()
+        else:
+            mid = str(item or "").strip()
+            label = ""
+            if isinstance(meta, dict):
+                label = str(meta.get("label") or meta.get("name") or "").strip()
+        if not mid:
+            continue
+        if not label:
+            label = _format_ollama_label(mid) if _looks_like_ollama_provider(provider_id) else mid
+        out.append({"id": mid, "label": label})
+    return out
+
+
+def _fetch_openai_compatible_models(
+    base_url: str | None,
+    api_key: str | None = None,
+    provider_id: str | None = None,
+    timeout: float = 5.0,
+) -> list[dict]:
+    """Fetch ``/v1/models`` from a user-configured OpenAI-compatible endpoint."""
+    base = str(base_url or "").strip()
+    if not base:
+        return []
+    try:
+        import urllib.request
+
+        endpoint_url = base.rstrip("/") + ("/models" if base.rstrip("/").endswith("/v1") else "/v1/models")
+        parsed_url = urlparse(endpoint_url if "://" in endpoint_url else f"http://{endpoint_url}")
+        if parsed_url.scheme not in ("http", "https"):
+            return []
+        req = urllib.request.Request(endpoint_url, method="GET")
+        req.add_header("User-Agent", "OpenAI/Python 1.0")
+        key = str(api_key or "").strip()
+        if key:
+            req.add_header("Authorization", f"Bearer {key}")
+        with urllib.request.urlopen(req, timeout=timeout) as response:  # nosec B310 - explicit user-configured endpoint
+            data = json.loads(response.read().decode("utf-8"))
+
+        models_list = []
+        if isinstance(data, dict) and isinstance(data.get("data"), list):
+            models_list = data["data"]
+        elif isinstance(data, dict) and isinstance(data.get("models"), list):
+            models_list = data["models"]
+
+        out: list[dict] = []
+        for model in models_list:
+            if isinstance(model, str):
+                model_id = model
+                model_name = model
+            elif isinstance(model, dict):
+                model_id = model.get("id", "") or model.get("name", "") or model.get("model", "")
+                model_name = model.get("name", "") or model.get("model", "") or model_id
+            else:
+                continue
+            model_id = str(model_id or "").strip()
+            model_name = str(model_name or "").strip()
+            if not model_id:
+                continue
+            label = _format_ollama_label(model_id) if _looks_like_ollama_provider(provider_id, base) else (model_name or model_id)
+            out.append({"id": model_id, "label": label})
+        return out
+    except Exception as exc:
+        logger.debug("OpenAI-compatible model fetch failed for %s: %s", provider_id or base, exc)
+        return []
 
 
 def _apply_provider_prefix(
@@ -1088,6 +1252,7 @@ def set_hermes_default_model(model_id: str) -> dict:
 # ── TTL cache for get_available_models() ─────────────────────────────────────
 _available_models_cache: dict | None = None
 _available_models_cache_ts: float = 0.0
+_available_models_cache_key: str | None = None
 _AVAILABLE_MODELS_CACHE_TTL: float = 86400.0  # 24 hours
 _available_models_cache_lock = threading.RLock()  # must be RLock: cold path refactoring moved slow work inside this lock, requiring re-entry
 _cache_build_cv = threading.Condition(_available_models_cache_lock)  # shares underlying RLock so notify_all() is safe inside with _available_models_cache_lock
@@ -1120,7 +1285,7 @@ def _delete_models_cache_on_disk() -> None:
         pass  # already absent
 
 
-def _load_models_cache_from_disk() -> dict | None:
+def _load_models_cache_from_disk(cache_key: str | None = None) -> dict | None:
     """Load groups dict from disk cache if it exists and is valid."""
     try:
         import json as _j
@@ -1128,18 +1293,37 @@ def _load_models_cache_from_disk() -> dict | None:
             return None
         with open(_models_cache_path, encoding="utf-8") as f:
             cache = _j.load(f)
-        return cache if isinstance(cache, dict) and "groups" in cache else None
+        if not isinstance(cache, dict):
+            return None
+        if cache_key is not None and cache.get("cache_key") != cache_key:
+            return None
+        payload = cache.get("payload")
+        if isinstance(payload, dict) and "groups" in payload:
+            return payload
+        # Legacy cache format (pre profile-aware key).  Only trust it when the
+        # caller did not request a key; keyed callers must rebuild.
+        return cache if cache_key is None and "groups" in cache else None
     except Exception:
         return None
 
 
-def _save_models_cache_to_disk(cache: dict) -> None:
+def _save_models_cache_to_disk(cache: dict, cache_key: str | None = None) -> None:
     """Save cache to disk so it survives server restarts."""
     try:
         import time as _cache_time
         tmp = str(_models_cache_path) + f".{os.getpid()}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"groups": cache.get("groups", [])}, f, indent=2)
+            json.dump(
+                {
+                    "cache_key": cache_key,
+                    "payload": cache,
+                    # Keep top-level groups for old diagnostics/scripts that
+                    # peek at this file, while keyed readers use payload.
+                    "groups": cache.get("groups", []),
+                },
+                f,
+                indent=2,
+            )
         os.rename(tmp, str(_models_cache_path))
     except Exception:
         pass  # Non-fatal -- cache will rebuild on next call
@@ -1159,10 +1343,21 @@ def invalidate_models_cache():
     result from the disk cache because the disk hit is checked before the memory
     cache rebuild runs.
     """
-    global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts, _cache_build_cv
+    global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts, _available_models_cache_key, _cache_build_cv, _cfg_path
     with _available_models_cache_lock:
         _available_models_cache = None
         _available_models_cache_ts = 0.0
+        _available_models_cache_key = None
+        try:
+            # Keep the profile-path guard aligned with the caller's current
+            # config context.  Tests and settings handlers commonly mutate
+            # cfg in-memory, call invalidate_models_cache(), then pin _cfg_mtime
+            # to avoid a reload.  Without this, the path guard would reload
+            # over their explicit in-memory config even though the caller just
+            # requested a clean cache rebuild.
+            _cfg_path = str(Path(_get_config_path()).expanduser().resolve())
+        except Exception:
+            pass
         _cache_build_in_progress = False
         _cache_build_cv.notify_all()
         # Clear the credential pool cache too. The cache key is provider_id
@@ -1187,10 +1382,11 @@ def invalidate_provider_models_cache(provider_id: str):
     Args:
         provider_id: canonical provider id (e.g. 'openai', 'anthropic', 'custom:my-key')
     """
-    global _available_models_cache, _available_models_cache_ts, _CREDENTIAL_POOL_CACHE
+    global _available_models_cache, _available_models_cache_ts, _available_models_cache_key, _CREDENTIAL_POOL_CACHE
     with _available_models_cache_lock:
         _available_models_cache = None
         _available_models_cache_ts = 0.0
+        _available_models_cache_key = None
         _provider_models_invalidated_ts[provider_id] = time.time()
         # Also evict the credential pool so the next cold path re-loads it.
         # Must evict both the original key and its canonical form (load_pool
@@ -1249,7 +1445,7 @@ def get_available_models() -> dict:
         'groups': [{'provider': str, 'models': [{'id': str, 'label': str}]}]
     }
     """
-    global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts, _cache_build_cv
+    global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts, _available_models_cache_key, _cache_build_cv
     # Config mtime check — must come before any config reads.
     # (Test #585 verifies _current_mtime appears before active_provider = None)
     try:
@@ -1303,6 +1499,7 @@ def get_available_models() -> dict:
 
         # 3. Detect available providers.
         detected_providers = set()
+        _provider_live_models: dict[str, list[dict]] = {}
         if active_provider:
             detected_providers.add(active_provider)
 
@@ -1454,11 +1651,50 @@ def get_available_models() -> dict:
         # Also detect providers explicitly listed in config.yaml providers section.
         # A user may configure a provider key via config.yaml providers.<name>.api_key
         # without setting the corresponding env var. (#604)
+        # Known providers are still gated by _PROVIDER_MODELS; named local
+        # OpenAI-compatible providers are included only when they declare
+        # models/base_url because they have no static catalog entry.
         _cfg_providers = cfg.get("providers", {})
         if isinstance(_cfg_providers, dict):
-            for _pid_key in _cfg_providers:
-                if _pid_key in _PROVIDER_MODELS or _pid_key in cfg.get("providers", {}):
-                    detected_providers.add(_pid_key)
+            for _pid_key, _prov_cfg in _cfg_providers.items():
+                _pid_raw = str(_pid_key or "").strip().lower()
+                if not _pid_raw:
+                    continue
+                _canonical_pid = _resolve_provider_alias(_pid_raw)
+                _catalog_pid = _canonical_pid if _canonical_pid in _PROVIDER_MODELS else _pid_raw
+
+                if _pid_raw in _PROVIDER_MODELS:
+                    detected_providers.add(_pid_raw)
+                    _catalog_pid = _pid_raw
+                elif _canonical_pid in _PROVIDER_MODELS:
+                    detected_providers.add(_canonical_pid)
+                    _catalog_pid = _canonical_pid
+                elif isinstance(_prov_cfg, dict) and (
+                    _prov_cfg.get("models") or _prov_cfg.get("base_url")
+                ):
+                    # Named local/OpenAI-compatible providers (for example
+                    # providers.ollama-local) do not have a hardcoded static
+                    # catalog.  They still must appear in the dropdown.
+                    detected_providers.add(_catalog_pid)
+
+                if isinstance(_prov_cfg, dict):
+                    _cfg_models = _models_from_provider_config(_prov_cfg, _catalog_pid)
+                    if _cfg_models:
+                        _provider_live_models[_catalog_pid] = _cfg_models
+                    elif _prov_cfg.get("base_url") and _looks_like_local_compat_provider(
+                        _pid_raw,
+                        _prov_cfg.get("base_url"),
+                    ):
+                        _api_key = str(_prov_cfg.get("api_key") or "").strip()
+                        _fetched = _fetch_openai_compatible_models(
+                            _prov_cfg.get("base_url"),
+                            _api_key,
+                            _catalog_pid,
+                            timeout=4.0,
+                        )
+                        if _fetched:
+                            _provider_live_models[_catalog_pid] = _fetched
+                            detected_providers.add(_catalog_pid)
 
         # 4. Fetch models from custom endpoint if base_url is configured
         auto_detected_models = []
@@ -1474,6 +1710,8 @@ def get_available_models() -> dict:
                     endpoint_url = base_url.rstrip("/") + "/v1/models"
 
                 provider = "custom"
+                if active_provider and _looks_like_local_compat_provider(active_provider, base_url):
+                    provider = str(active_provider).lower()
                 parsed = urlparse(base_url if "://" in base_url else f"http://{base_url}")
                 host = (parsed.netloc or parsed.path).lower()
 
@@ -1482,7 +1720,11 @@ def get_available_models() -> dict:
                         addr = ipaddress.ip_address(parsed.hostname)
                         if addr.is_private or addr.is_loopback or addr.is_link_local:
                             if "ollama" in host or "127.0.0.1" in host or "localhost" in host:
-                                provider = "ollama"
+                                provider = (
+                                    str(active_provider).lower()
+                                    if active_provider and _looks_like_ollama_provider(active_provider, base_url)
+                                    else "ollama"
+                                )
                             elif "lmstudio" in host or "lm-studio" in host:
                                 provider = "lmstudio"
                             else:
@@ -1585,9 +1827,14 @@ def get_available_models() -> dict:
                     )
                     model_name = model.get("name", "") or model.get("model", "") or model_id
                     if model_id and model_name:
-                        label = _format_ollama_label(model_id) if provider in ("ollama", "ollama-cloud") else model_name
-                        auto_detected_models.append({"id": model_id, "label": label})
-                        detected_providers.add(provider.lower())
+                        label = _format_ollama_label(model_id) if _looks_like_ollama_provider(provider, base_url) else model_name
+                        entry = {"id": model_id, "label": label}
+                        auto_detected_models.append(entry)
+                        provider_key = provider.lower()
+                        existing = _provider_live_models.setdefault(provider_key, [])
+                        if not any(m.get("id") == model_id for m in existing):
+                            existing.append(entry)
+                        detected_providers.add(provider_key)
             except Exception:
                 logger.debug("Custom endpoint unreachable or misconfigured for provider: %s", provider)
 
@@ -1682,16 +1929,23 @@ def get_available_models() -> dict:
                                 "models": models,
                             }
                         )
-                elif pid in _PROVIDER_MODELS or pid in cfg.get("providers", {}):
+                elif pid in _provider_live_models:
+                    raw_models = _provider_live_models.get(pid, [])
+                    models = _apply_provider_prefix(raw_models, pid, active_provider)
+                    groups.append(
+                        {
+                            "provider": provider_name,
+                            "provider_id": pid,
+                            "models": models,
+                        }
+                    )
+                elif pid in _PROVIDER_MODELS or _get_provider_config(cfg.get("providers", {}), pid):
                     raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
 
-                    provider_cfg = cfg.get("providers", {}).get(pid, {})
-                    if isinstance(provider_cfg, dict) and "models" in provider_cfg:
-                        cfg_models = provider_cfg["models"]
-                        if isinstance(cfg_models, dict):
-                            raw_models = [{"id": k, "label": k} for k in cfg_models.keys()]
-                        elif isinstance(cfg_models, list):
-                            raw_models = [{"id": k, "label": k} for k in cfg_models]
+                    provider_cfg = _get_provider_config(cfg.get("providers", {}), pid)
+                    cfg_models = _models_from_provider_config(provider_cfg, pid)
+                    if cfg_models:
+                        raw_models = cfg_models
                     models = _apply_provider_prefix(raw_models, pid, active_provider)
                     groups.append(
                         {
@@ -1717,7 +1971,11 @@ def get_available_models() -> dict:
                 )
 
         if default_model:
-            _norm = lambda mid: (mid.split("/", 1)[-1] if "/" in mid else mid).replace("-", ".")
+            _norm = lambda mid: (
+                (mid.split(":", 1)[-1] if str(mid).startswith("@") and ":" in str(mid) else mid)
+                .split("/", 1)[-1]
+                .replace("-", ".")
+            )
             all_ids_norm = {_norm(m["id"]) for g in groups for m in g.get("models", [])}
             if _norm(default_model) not in all_ids_norm:
                 label = _get_label_for_model(default_model, groups)
@@ -1756,17 +2014,21 @@ def get_available_models() -> dict:
     # Check config mtime OUTSIDE the lock so this cheap check doesn't serialize
     # concurrent requests.  Must come before any config reads in the cold path.
     try:
-        _current_mtime = Path(_get_config_path()).stat().st_mtime
+        _config_path_for_cache = Path(_get_config_path()).resolve()
+        _current_mtime = _config_path_for_cache.stat().st_mtime
     except OSError:
+        _config_path_for_cache = Path(_get_config_path()).resolve()
         _current_mtime = 0.0
-    _cfg_changed = _current_mtime != _cfg_mtime
+    _config_path_key = str(_config_path_for_cache)
+    _cache_key = f"{_config_path_key}:{_current_mtime}"
+    _cfg_changed = _current_mtime != _cfg_mtime or _config_path_key != _cfg_path
 
     # Disk load BEFORE lock: ~0.1ms, lets concurrent requests skip entirely.
     # Then acquire lock and check memory cache.  Cold path runs inside the lock
     # so only one thread rebuilds while others wait.
     disk_groups = None
-    if _available_models_cache is None:
-        disk_groups = _load_models_cache_from_disk()
+    if _available_models_cache is None or _available_models_cache_key != _cache_key:
+        disk_groups = _load_models_cache_from_disk(_cache_key)
 
     with _available_models_cache_lock:
         # If another thread is already building, wait for its result instead
@@ -1776,25 +2038,42 @@ def get_available_models() -> dict:
                 lambda: not _cache_build_in_progress and _available_models_cache is not None,
                 timeout=60
             )
-            if _available_models_cache is not None and (time.monotonic() - _available_models_cache_ts) < _AVAILABLE_MODELS_CACHE_TTL:
+            if (
+                _available_models_cache is not None
+                and _available_models_cache_key == _cache_key
+                and (time.monotonic() - _available_models_cache_ts) < _AVAILABLE_MODELS_CACHE_TTL
+            ):
                 return copy.deepcopy(_available_models_cache)
 
-        # Reload config if changed
+        # Reload config if changed; a cache-key mismatch alone only means a
+        # different profile/cache entry is being requested, not necessarily
+        # that the in-memory cfg should be overwritten (tests mutate cfg
+        # directly and pin _cfg_mtime).
         if _cfg_changed:
             reload_config()
             _available_models_cache = None
             _available_models_cache_ts = 0.0
+            _available_models_cache_key = None
+        elif _available_models_cache_key != _cache_key:
+            _available_models_cache = None
+            _available_models_cache_ts = 0.0
+            _available_models_cache_key = None
 
         # Serve from memory cache if fresh
         now = time.monotonic()
-        if _available_models_cache is not None and (now - _available_models_cache_ts) < _AVAILABLE_MODELS_CACHE_TTL:
+        if (
+            _available_models_cache is not None
+            and _available_models_cache_key == _cache_key
+            and (now - _available_models_cache_ts) < _AVAILABLE_MODELS_CACHE_TTL
+        ):
             return copy.deepcopy(_available_models_cache)
 
         # Cold path: disk cache hit — use it (fast, no lock contention)
         if disk_groups is not None:
             _available_models_cache = disk_groups
             _available_models_cache_ts = now
-            _save_models_cache_to_disk(disk_groups)
+            _available_models_cache_key = _cache_key
+            _save_models_cache_to_disk(disk_groups, _cache_key)
             return copy.deepcopy(disk_groups)
 
         # Cold path: full rebuild — only one thread reaches here at a time
@@ -1811,9 +2090,10 @@ def get_available_models() -> dict:
         with _cache_build_cv:
             _available_models_cache = result
             _available_models_cache_ts = time.monotonic()
+            _available_models_cache_key = _cache_key
             _cache_build_in_progress = False
             _cache_build_cv.notify_all()
-        _save_models_cache_to_disk(result)
+        _save_models_cache_to_disk(result, _cache_key)
         return copy.deepcopy(result)
 
 

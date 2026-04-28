@@ -285,12 +285,24 @@ function _checkProviderMismatch(modelId){
   if(!ap||ap==='custom'||ap==='openrouter') return null; // can't reliably check
   // @provider: prefixed IDs came from that provider's live model list — no mismatch possible
   if(modelId.startsWith('@')) return null;
-  const slash=modelId.indexOf('/');
-  if(slash<0) return null; // bare model name, no provider prefix
-  const modelProvider=modelId.substring(0,slash).toLowerCase();
   // Normalise common aliases
   const aliases={'claude':'anthropic','gpt':'openai','gemini':'google'};
   const norm=p=>aliases[p]||p;
+  let modelProvider=null;
+  const slash=modelId.indexOf('/');
+  if(slash>=0){
+    modelProvider=modelId.substring(0,slash).toLowerCase();
+  }else{
+    // Bare ID with no provider prefix — infer from common alias prefixes so
+    // bare "claude-opus-4-7" / "gpt-4o" / "gemini-pro" still get checked.
+    const lower=modelId.toLowerCase();
+    for(const pref of ['claude','gpt','gemini']){
+      if(lower.startsWith(pref+'-')||lower.startsWith(pref+'.')||lower===pref){
+        modelProvider=pref;break;
+      }
+    }
+    if(!modelProvider) return null; // unknown shape — keep silent
+  }
   if(norm(modelProvider)!==norm(ap)){
     return (window.t?window.t('provider_mismatch_warning',modelId,ap):
       `"${modelId}" may not work with your configured provider (${ap}). Send anyway or run \`hermes model\` to switch.`);

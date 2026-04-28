@@ -444,20 +444,40 @@ $('btnClearPreview').onclick=handleWorkspaceClose;
 $('modelSelect').onchange=async()=>{
   if(!S.session)return;
   const selectedModel=$('modelSelect').value;
+  const previousModel=S.session.model||'';
+  if(typeof _checkProviderMismatch==='function'){
+    const warn=_checkProviderMismatch(selectedModel);
+    if(warn){
+      if(typeof showToast==='function') showToast(warn,4000);
+      const proceed=typeof showConfirmDialog==='function'
+        ? await showConfirmDialog({
+            title:'Provider mismatch',
+            message:warn,
+            confirmLabel:'Proceed',
+            danger:false,
+            focusCancel:true
+          })
+        : false;
+      if(!proceed){
+        $('modelSelect').value=previousModel;
+        if(typeof syncModelChip==='function') syncModelChip();
+        return;
+      }
+    }
+  }
   if(typeof closeModelDropdown==='function') closeModelDropdown();
+  if(S.messages && S.messages.length > 0 && typeof showToast==='function'){
+    showToast('Model change takes effect in your next conversation', 3000);
+  }
   localStorage.setItem('hermes-webui-model', selectedModel);
-  await api('/api/session/update',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,workspace:S.session.workspace,model:selectedModel})});
+  const _resp=await api('/api/session/update',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,workspace:S.session.workspace,model:selectedModel})});
   S.session.model=selectedModel;
   if(typeof syncModelChip==='function') syncModelChip();
   syncTopbar();
-  // Warn if selected model belongs to a different provider than what Hermes is configured for
-  if(typeof _checkProviderMismatch==='function'){
-    const warn=_checkProviderMismatch(selectedModel);
-    if(warn&&typeof showToast==='function') showToast(warn,4000);
-  }
-  // Notify user that model changes only take effect in the next conversation (#419)
-  if(S.messages && S.messages.length > 0 && typeof showToast==='function'){
-    showToast('Model change takes effect in your next conversation', 3000);
+  if(_resp&&_resp.profile_auto_switched){
+    const sw=_resp.profile_auto_switched;
+    if(typeof showToast==='function') showToast(`Profile switched: ${sw.from||'(none)'} -> ${sw.to}`,5000);
+    setTimeout(()=>{ location.reload(); }, 700);
   }
 };
 $('msg').addEventListener('input',()=>{
