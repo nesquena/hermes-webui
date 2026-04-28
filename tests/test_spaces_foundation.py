@@ -1,6 +1,8 @@
 import importlib
+import io
 import json
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
@@ -150,3 +152,87 @@ def test_spaces_routes_and_static_shell_are_registered():
     assert 'static/spaces.css' in index_html
     assert 'id="mainCapySpaces"' in index_html
     assert 'id="capySpacesRecovery"' in index_html
+
+
+class _RouteHandler:
+    def __init__(self, body=None):
+        raw = json.dumps(body or {}).encode("utf-8")
+        self.rfile = io.BytesIO(raw)
+        self.wfile = io.BytesIO()
+        self.headers = {
+            "Content-Length": str(len(raw)),
+            "Accept-Encoding": "",
+            "Host": "127.0.0.1:8787",
+        }
+        self.status = None
+        self.sent_headers = []
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, key, value):
+        self.sent_headers.append((key, value))
+
+    def end_headers(self):
+        pass
+
+    def json_body(self):
+        return json.loads(self.wfile.getvalue().decode("utf-8"))
+
+
+def _route_get(path):
+    import api.routes as routes
+
+    handler = _RouteHandler()
+    handled = routes.handle_get(handler, urlparse(path))
+    return handled, handler.status, handler.json_body()
+
+
+def _route_post(path, body):
+    import api.routes as routes
+
+    handler = _RouteHandler(body)
+    handled = routes.handle_post(handler, urlparse(path))
+    return handled, handler.status, handler.json_body()
+
+
+def test_spaces_routes_create_list_get_and_recovery(monkeypatch, tmp_path):
+    _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    handled, status, body = _route_post("/api/spaces/create", {"name": "Route Space"})
+    assert handled is None
+    assert status == 200
+    space_id = body["space"]["space_id"]
+
+    handled, status, body = _route_get("/api/spaces")
+    assert handled is None
+    assert status == 200
+    assert body["enabled"] is True
+    assert body["spaces"][0]["space_id"] == space_id
+
+    handled, status, body = _route_get(f"/api/spaces/get?space_id={space_id}")
+    assert handled is None
+    assert status == 200
+    assert body["space"]["name"] == "Route Space"
+
+    handled, status, body = _route_get("/api/spaces/recovery")
+    assert handled is None
+    assert status == 200
+    assert body["generated_widgets_rendered"] is False
+
+
+def test_disabled_spaces_get_route_does_not_return_manifest_details(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Disabled Leak"})
+    spaces.update_space(
+        created["space_id"],
+        {"widgets": [{"id": "w1", "renderer": "<script>secret()</script>"}]},
+    )
+    _load_spaces(monkeypatch, tmp_path, enabled=False)
+
+    handled, status, body = _route_get(f"/api/spaces/get?space_id={created['space_id']}")
+
+    assert handled is None
+    assert status == 403
+    assert "space" not in body
+    assert "secret" not in json.dumps(body)
