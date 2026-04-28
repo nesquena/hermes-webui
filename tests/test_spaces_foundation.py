@@ -224,6 +224,61 @@ def test_weather_template_install_route_returns_safe_metadata(monkeypatch, tmp_p
     assert "secret" not in serialized
 
 
+def test_install_research_template_creates_safe_harness_widgets(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    installed = spaces.install_template("research")
+
+    assert installed["template"] == "research"
+    assert installed["space"]["template"] == "research-harness"
+    assert installed["space"]["name"] == "Research Harness"
+    assert [widget["id"] for widget in installed["installed_widgets"]] == [
+        "research-query",
+        "research-plan",
+        "research-sources",
+        "research-notes",
+        "research-summary",
+    ]
+    assert [widget["kind"] for widget in installed["installed_widgets"]] == [
+        "prompt",
+        "status",
+        "table",
+        "markdown",
+        "markdown",
+    ]
+    query_widget = spaces.read_widget(installed["space"]["space_id"], "research-query")
+    assert query_widget["event_bridge"] == {"event_name": "agent.prompt", "status": "ready-for-user-confirmation"}
+    sources_widget = spaces.read_widget(installed["space"]["space_id"], "research-sources")
+    assert sources_widget["columns"] == ["title", "url", "notes"]
+    serialized = json.dumps(installed).lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert '"script"' not in serialized
+    assert '"data"' not in serialized
+    assert '"source"' not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
+def test_research_template_install_route_returns_safe_metadata(monkeypatch, tmp_path):
+    _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    handled, status, body = _route_post("/api/spaces/templates/install", {"template": "research"})
+
+    assert handled is None
+    assert status == 200
+    assert body["template"] == "research"
+    assert body["space"]["name"] == "Research Harness"
+    assert body["installed_widgets"][0]["id"] == "research-query"
+    assert len(body["installed_widgets"]) == 5
+    serialized = json.dumps(body).lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
 def test_delete_space_removes_manifest_but_keeps_global_revision_event(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Disposable"})
