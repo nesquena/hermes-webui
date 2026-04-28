@@ -88,6 +88,19 @@ def test_terminal_open_reserves_transcript_space():
     assert "scrollToBottom" in terminal_js
 
 
+def test_terminal_initial_open_settles_transcript_space_before_reveal():
+    terminal_js = _read("static/terminal.js")
+
+    open_block = terminal_js.split("async function toggleComposerTerminal", 1)[1].split("function collapseComposerTerminal", 1)[0]
+    assert "messages.classList.add('terminal-expanding-from-dock')" in open_block
+    assert "_syncTerminalTranscriptSpace(true,{immediate:true});" in open_block
+    assert "void messages.offsetHeight;" in open_block
+    assert "panel.classList.add('is-open')" in open_block
+    assert "messages.classList.remove('terminal-expanding-from-dock')" in open_block
+    assert open_block.index("_syncTerminalTranscriptSpace(true,{immediate:true});") < open_block.index("panel.classList.add('is-open')")
+    assert open_block.index("void messages.offsetHeight;") < open_block.index("panel.classList.add('is-open')")
+
+
 def test_terminal_collapsed_state_preserves_pty_and_output_surface():
     html = _read("static/index.html")
     terminal_js = _read("static/terminal.js")
