@@ -12357,6 +12357,20 @@ def handle_get(handler, parsed) -> bool:
             logger.exception("spaces memory failed")
             return bad(handler, _sanitize_error(exc), 500)
 
+    if parsed.path == "/api/spaces/revisions":
+        from api import spaces as capy_spaces
+        if not capy_spaces.spaces_enabled():
+            return bad(handler, "Capy Spaces is disabled", 403)
+        space_id = parse_qs(parsed.query).get("space_id", [""])[0]
+        if not space_id:
+            return bad(handler, "Missing space_id")
+        try:
+            return j(handler, {"revisions": capy_spaces.list_revision_events(space_id)})
+        except ValueError as e:
+            return bad(handler, str(e))
+        except FileNotFoundError:
+            return bad(handler, "Space not found", 404)
+
     if parsed.path == "/api/spaces/widgets":
         from api import spaces as capy_spaces
         if not capy_spaces.spaces_enabled():

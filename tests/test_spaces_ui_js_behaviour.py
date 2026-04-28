@@ -89,6 +89,12 @@ global.fetch = async function(path, opts = {}) {
       recovery: { safe_mode_available: true },
     } });
   }
+  if (path === 'api/spaces/revisions?space_id=lab') {
+    return response({ revisions: [
+      { event_id: 'rev2', event_type: 'widget.updated', space_id: 'lab', created_at: 1710000000, details: { widget_id: 'weather', renderer: '<script>bad()</script>' } },
+      { event_id: 'rev1', event_type: 'space.created', space_id: 'lab', created_at: 1709999900, details: { name: 'Lab <Detail>' } },
+    ] });
+  }
   if (path === 'api/spaces/widget/upsert') {
     return response({ space_id: 'lab', widget: { id: 'notes', kind: 'markdown', title: 'Notes', layout: { x: 2, y: 3, w: 8, h: 5 } }, revision_event_id: 'rev2' });
   }
@@ -330,9 +336,14 @@ def test_spaces_ui_opens_space_detail_without_rendering_widget_code(driver_path)
     out = _run_spaces_scenario(driver_path, "openSpaceDetail")
 
     assert {"path": "api/spaces/get?space_id=lab", "method": "GET", "body": ""} in out["calls"]
+    assert {"path": "api/spaces/revisions?space_id=lab", "method": "GET", "body": ""} in out["calls"]
     assert "Lab &lt;Detail&gt;" in out["rootHtml"]
     assert "Unsafe &lt;detail&gt;" in out["rootHtml"]
     assert "&lt;Weather&gt;" in out["rootHtml"]
     assert "x12 y3 · 5×4" in out["rootHtml"]
+    assert "Revision history" in out["rootHtml"]
+    assert "widget.updated" in out["rootHtml"]
+    assert "space.created" in out["rootHtml"]
+    assert "rev2" in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]

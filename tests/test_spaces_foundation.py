@@ -86,6 +86,35 @@ def test_update_space_creates_new_revision_event_and_preserves_widget_specs(monk
     assert spaces.read_space(created["space_id"])["widgets"][0]["id"] == "widget-1"
 
 
+def test_list_revision_events_returns_safe_metadata_newest_first(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Revision Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "weather",
+            "kind": "markdown",
+            "title": "Weather",
+            "renderer": "<script>doNotExpose()</script>",
+            "data": {"api_key": "SECRET...LEAK"},
+        },
+    )
+    updated = spaces.update_space(created["space_id"], {"description": "Ready for rollback UI"})
+
+    revisions = spaces.list_revision_events(created["space_id"])
+
+    assert [event["event_type"] for event in revisions] == ["space.updated", "widget.created", "space.created"]
+    assert revisions[0]["event_id"] == updated["revision_event_id"]
+    assert revisions[0]["space_id"] == created["space_id"]
+    assert revisions[0]["details"] == {"fields": ["description"]}
+    serialized = json.dumps(revisions).lower()
+    assert "donotexpose" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
 def test_recovery_snapshot_never_returns_generated_widget_renderers(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Broken Widgets"})
@@ -147,6 +176,7 @@ def test_spaces_routes_and_static_shell_are_registered():
 
     assert '"/api/spaces"' in routes_src
     assert '"/api/spaces/recovery"' in routes_src
+    assert '"/api/spaces/revisions"' in routes_src
     assert '"/api/spaces/create"' in routes_src
     assert 'static/spaces.js' in index_html
     assert 'static/spaces.css' in index_html
@@ -214,6 +244,12 @@ def test_spaces_routes_create_list_get_and_recovery(monkeypatch, tmp_path):
     assert handled is None
     assert status == 200
     assert body["space"]["name"] == "Route Space"
+
+    handled, status, body = _route_get(f"/api/spaces/revisions?space_id={space_id}")
+    assert handled is None
+    assert status == 200
+    assert body["revisions"][0]["event_type"] == "space.created"
+    assert body["revisions"][0]["space_id"] == space_id
 
     handled, status, body = _route_get("/api/spaces/recovery")
     assert handled is None

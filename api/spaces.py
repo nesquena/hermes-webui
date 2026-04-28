@@ -246,6 +246,27 @@ def _payload_summary(value: Any, depth: int = 0) -> Any:
     return _context_value(type(value).__name__, 80)
 
 
+def _event_id_is_safe(event_id: Any) -> bool:
+    return bool(re.fullmatch(r"[a-f0-9]{32}", str(event_id or "")))
+
+
+def _event_summary(event: dict[str, Any], sid: str) -> dict[str, Any] | None:
+    event_id = str(event.get("event_id") or "")
+    if not _event_id_is_safe(event_id) or event.get("space_id") != sid:
+        return None
+    details = _payload_summary(event.get("details") or {})
+    if not isinstance(details, dict):
+        details = {}
+    return {
+        "schema_version": event.get("schema_version", SCHEMA_VERSION),
+        "event_id": event_id,
+        "event_type": _context_value(event.get("event_type"), 120),
+        "space_id": sid,
+        "created_at": event.get("created_at"),
+        "details": details,
+    }
+
+
 def build_agent_context(space_id: str | None) -> str:
     """Build compact active-space context for Hermes agent prompts.
 
@@ -369,6 +390,37 @@ def read_space(space_id: str) -> dict[str, Any]:
     data.setdefault("layout", {})
     data.setdefault("revision_events", [])
     return data
+
+
+def list_revision_events(space_id: str, limit: int = 20) -> list[dict[str, Any]]:
+    """Return newest-first revision event metadata for a space.
+
+    This is deliberately a safe history index, not a rollback executor yet: it
+    exposes event type, id, timestamp, and sanitized details only. Generated
+    widget bodies, renderer/html/script/data payloads, and secret-looking keys
+    are omitted before returning data to recovery/detail UIs.
+    """
+    if not spaces_enabled():
+        return []
+    sid = validate_space_id(space_id)
+    space = read_space(sid)
+    max_events = _clamped_int(limit, 20, 1, 100)
+    revision_ids = [str(event_id) for event_id in (space.get("revision_events") or []) if _event_id_is_safe(event_id)]
+    summaries: list[dict[str, Any]] = []
+    for event_id in reversed(revision_ids):
+        if len(summaries) >= max_events:
+            break
+        event_path = events_dir() / f"{event_id}.json"
+        try:
+            event = json.loads(event_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(event, dict):
+            continue
+        summary = _event_summary(event, sid)
+        if summary is not None:
+            summaries.append(summary)
+    return summaries
 
 
 def update_space(space_id: str, updates: dict[str, Any]) -> dict[str, Any]:
