@@ -986,6 +986,8 @@
   .preview-media-wrap{display:flex;align-items:center;justify-content:center;flex:1;min-height:0;padding:12px 0;}
   .preview-media-wrap .msg-media-editor{width:100%;max-width:100%;background:var(--surface);}
   .preview-media-wrap .msg-media-video{max-height:60vh;}
+  .preview-pdf-wrap{display:flex;flex:1;min-height:360px;border:1px solid var(--border2);border-radius:8px;overflow:hidden;background:#fff;}
+  .preview-pdf-frame{width:100%;height:100%;min-height:70vh;border:none;background:#fff;}
   /* Markdown rendered preview */
   .preview-md{font-size:13px;line-height:1.7;color:var(--text);flex:1;overflow-y:auto;min-height:0;}
   .preview-md p{margin-bottom:10px;}.preview-md p:last-child{margin-bottom:0;}
@@ -1012,6 +1014,7 @@
   /* File type badge in preview path bar */
   .preview-badge{display:inline-block;font-size:10px;font-weight:600;padding:2px 6px;border-radius:4px;margin-left:8px;text-transform:uppercase;letter-spacing:.06em;}
   .preview-badge.img,.preview-badge.image,.preview-badge.audio,.preview-badge.video{background:var(--accent-bg);color:var(--accent-text);}
+  .preview-badge.pdf{background:rgba(239,68,68,.12);color:#f87171;}
   .preview-badge.md{background:var(--accent-bg-strong);color:var(--accent-text);}
   .preview-badge.code{background:var(--hover-bg);color:var(--muted);}
   ::-webkit-scrollbar{width:4px;height:4px}

@@ -159,6 +159,29 @@ class TestInlineAudioVideoEditor(unittest.TestCase):
         for cls in [".msg-media-editor", ".msg-media-player", ".msg-media-video", ".media-speed-controls", ".media-speed-btn", ".preview-media-wrap"]:
             self.assertIn(cls, self.CSS)
 
+
+class TestWorkspacePdfViewer(unittest.TestCase):
+    """Static checks for inline PDF preview support in the workspace panel."""
+
+    CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
+    WORKSPACE_JS = (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
+    INDEX_HTML = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+    def test_pdf_extension_routes_to_inline_viewer(self):
+        self.assertIn("PDF_EXTS", self.WORKSPACE_JS)
+        self.assertIn("PDF_EXTS.has(ext)", self.WORKSPACE_JS)
+        self.assertIn("showPreview('pdf')", self.WORKSPACE_JS)
+        self.assertIn("&inline=1", self.WORKSPACE_JS)
+
+    def test_pdf_viewer_markup_exists(self):
+        self.assertIn('id="previewPdfWrap"', self.INDEX_HTML)
+        self.assertIn('id="previewPdfFrame"', self.INDEX_HTML)
+        self.assertIn('title="PDF preview"', self.INDEX_HTML)
+
+    def test_pdf_preview_css_defined(self):
+        for cls in [".preview-pdf-wrap", ".preview-pdf-frame", ".preview-badge.pdf"]:
+            self.assertIn(cls, self.CSS)
+
 # ── Backend: /api/media endpoint (unit-level, no server needed) ─────────────
 
 class TestMediaEndpointUnit(unittest.TestCase):

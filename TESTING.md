@@ -346,6 +346,19 @@ EXPECT:
   - Video scales to the preview panel without overflowing
 FAIL: Browser downloads the media immediately, raw binary appears, or speed controls are missing/broken.
 
+### T5.5c: Preview PDF Files Inline
+SETUP: Workspace contains at least one `.pdf` file.
+STEPS:
+  1. Click the PDF file in the workspace file tree
+  2. Use the browser/PDF viewer scroll and zoom controls if available
+  3. Click "Open in browser" as a fallback
+EXPECT:
+  - PDF opens in the workspace preview panel instead of downloading immediately
+  - Path badge shows `pdf`
+  - PDF iframe fills the preview area
+  - "Open in browser" opens the same raw file endpoint in a new tab
+FAIL: Browser downloads the PDF immediately, raw binary appears, or the preview panel is blank without an open fallback.
+
 ### T5.6: Preview a Markdown File (Sprint 2)
 SETUP: Workspace has a .md file (or create one: upload a file named README.md with some markdown content).
 STEPS:

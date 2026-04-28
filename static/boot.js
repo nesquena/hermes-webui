@@ -429,6 +429,8 @@ function clearPreview(){
   const closePanelAfter=_workspacePanelMode==='preview';
   const pa=$('previewArea');if(pa)pa.classList.remove('visible');
   const pi=$('previewImg');if(pi){pi.onerror=null;pi.src='';}
+  const pdf=$('previewPdfFrame');if(pdf)pdf.src='';
+  const html=$('previewHtmlIframe');if(html)html.src='';
   const pm=$('previewMd');if(pm)pm.innerHTML='';
   const pc=$('previewCode');if(pc)pc.textContent='';
   const pp=$('previewPathText');if(pp)pp.textContent='';
