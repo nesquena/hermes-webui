@@ -345,14 +345,30 @@
     handlersBound = true;
   }
 
+  function renderRecoverySnapshot(data){
+    if (!data || !data.enabled) {
+      return '<div class="capy-spaces-card"><h3>Capy Spaces recovery disabled</h3><div class="capy-spaces-muted">Capy Spaces recovery is disabled because Spaces are disabled.</div></div>';
+    }
+    const spaces = Array.isArray(data.spaces) ? data.spaces : [];
+    const rows = spaces.length ? spaces.map(function(s){
+      const spaceId = s.space_id || '';
+      const name = s.name || spaceId || 'Untitled';
+      const description = s.description || '';
+      return '<div class="capy-spaces-widget" data-space-id="'+escapeHtml(spaceId)+'"><div><strong>'+escapeHtml(name)+'</strong>' +
+        (description ? '<div class="capy-spaces-muted">'+escapeHtml(description)+'</div>' : '') +
+        '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+' · Widgets: '+Number(s.widget_count||0)+' · Revision: '+escapeHtml(s.revision_event_id||'none')+'</div></div></div>';
+    }).join('') : '<div class="capy-spaces-muted">No spaces found in recovery metadata.</div>';
+    return '<div class="capy-spaces-card"><h3>Safe recovery</h3>' +
+      '<div class="capy-spaces-muted">Generated widgets rendered: '+String(!!data.generated_widgets_rendered)+'. This panel lists metadata only so broken generated UI cannot execute here.</div>' +
+      '<div class="capy-spaces-widget-list">'+rows+'</div></div>';
+  }
+
   async function loadCapySpacesRecovery(){
     const root = document.getElementById('capySpacesRecovery');
     if (!root) return;
     try {
       const data = await fetchSpacesJson('api/spaces/recovery');
-      root.textContent = data.enabled
-        ? 'Safe recovery available. Generated widgets rendered here: '+String(!!data.generated_widgets_rendered)
-        : 'Capy Spaces recovery is disabled because Spaces are disabled.';
+      root.innerHTML = renderRecoverySnapshot(data);
     } catch (err) {
       root.textContent = 'Safe recovery unavailable: '+(err.message||String(err));
     }
