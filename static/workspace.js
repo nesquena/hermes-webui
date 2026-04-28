@@ -120,12 +120,13 @@ function navigateUp(){
 const IMAGE_EXTS  = new Set(['.png','.jpg','.jpeg','.gif','.svg','.webp','.ico','.bmp']);
 const MD_EXTS     = new Set(['.md','.markdown','.mdown']);
 const HTML_EXTS   = new Set(['.html','.htm']);
+const PDF_EXTS    = new Set(['.pdf']);
 const AUDIO_EXTS  = new Set(['.mp3','.wav','.m4a','.aac','.ogg','.oga','.opus','.flac']);
 const VIDEO_EXTS  = new Set(['.mp4','.mov','.m4v','.webm','.ogv','.avi','.mkv']);
 // Binary formats that should download rather than preview
 const DOWNLOAD_EXTS = new Set([
   '.docx','.doc','.xlsx','.xls','.pptx','.ppt','.odt','.ods','.odp',
-  '.pdf','.zip','.tar','.gz','.bz2','.7z','.rar',
+  '.zip','.tar','.gz','.bz2','.7z','.rar',
   '.exe','.dmg','.pkg','.deb','.rpm',
   '.woff','.woff2','.ttf','.otf','.eot',
   '.bin','.dat','.db','.sqlite','.pyc','.class','.so','.dylib','.dll',
@@ -134,26 +135,27 @@ const DOWNLOAD_EXTS = new Set([
 function fileExt(p){ const i=p.lastIndexOf('.'); return i>=0?p.slice(i).toLowerCase():''; }
 
 let _previewCurrentPath = '';  // relative path of currently previewed file
-let _previewCurrentMode = '';  // 'code' | 'md' | 'image' | 'html' | 'audio' | 'video'
+let _previewCurrentMode = '';  // 'code' | 'md' | 'image' | 'html' | 'pdf' | 'audio' | 'video'
 let _previewDirty = false;     // true when edits are unsaved
 
 function showPreview(mode){
-  // mode: 'code' | 'image' | 'md' | 'html' | 'audio' | 'video'
+  // mode: 'code' | 'image' | 'md' | 'html' | 'pdf' | 'audio' | 'video'
   $('previewCode').style.display     = mode==='code'  ? '' : 'none';
   $('previewImgWrap').style.display  = mode==='image' ? '' : 'none';
   const mediaWrap=$('previewMediaWrap'); if(mediaWrap) mediaWrap.style.display = (mode==='audio'||mode==='video') ? '' : 'none';
+  const pdfWrap=$('previewPdfWrap'); if(pdfWrap) pdfWrap.style.display = mode==='pdf' ? '' : 'none';
   $('previewMd').style.display       = mode==='md'    ? '' : 'none';
   $('previewHtmlWrap').style.display = mode==='html'  ? '' : 'none';
   $('previewEditArea').style.display = 'none';  // start in read-only
   const badge=$('previewBadge');
   badge.className='preview-badge '+mode;
-  badge.textContent = mode==='image'?'image':mode==='audio'?'audio':mode==='video'?'video':mode==='md'?'md':mode==='html'?'html':fileExt($('previewPathText').textContent)||'text';
+  badge.textContent = mode==='image'?'image':mode==='audio'?'audio':mode==='video'?'video':mode==='pdf'?'pdf':mode==='md'?'md':mode==='html'?'html':fileExt($('previewPathText').textContent)||'text';
   _previewCurrentMode = mode;
   _previewDirty = false;
   updateEditBtn();
-  // Show "Open in browser" button only for HTML mode
+  // Show "Open in browser" button for iframe-backed document previews
   const openBtn=$('btnOpenInBrowser');
-  if(openBtn) openBtn.style.display = mode==='html'?'inline-flex':'none';
+  if(openBtn) openBtn.style.display = (mode==='html'||mode==='pdf')?'inline-flex':'none';
 }
 
 function updateEditBtn(){
@@ -248,6 +250,15 @@ async function openFile(path){
       wrap.innerHTML=(typeof _mediaPlayerHtml==='function')
         ? _mediaPlayerHtml(mode,url,path.split('/').pop()||path)
         : `<${mode} src="${url.replace(/"/g,'%22')}" controls preload="metadata"></${mode}>`;
+    }
+  } else if(PDF_EXTS.has(ext)){
+    showPreview('pdf');
+    const url=`api/file/raw?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}&inline=1`;
+    const frame=$('previewPdfFrame');
+    if(frame){
+      frame.src=''; // clear first to avoid stale content
+      frame.src=url;
+      frame.title=`PDF preview: ${path.split('/').pop()||path}`;
     }
   } else if(MD_EXTS.has(ext)){
     // Markdown: fetch text, render with renderMd, display as formatted HTML
