@@ -357,6 +357,28 @@
   workspace subtree) and never enumerate blocked system roots. (`api/routes.py`,
   `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
 
+## [v0.50.231] — 2026-04-28
+
+### Fixed
+- **macOS `/etc` symlink bypass in workspace blocked-roots** — on macOS, `/etc`, `/var`, and
+  `/tmp` are symlinks to `/private/etc` etc. `_workspace_blocked_roots()` now materialises both
+  the literal and `Path.resolve()` forms of every blocked root, and a new `_is_blocked_system_path()`
+  helper applies the check with `/var/folders` and `/var/tmp` carve-outs so pytest `tmp_path_factory`
+  paths and other legitimate per-user tmp dirs remain registerable as workspaces.
+  (`api/workspace.py`, `api/routes.py`) (#1186)
+- **Workspace panel stuck closed after empty-session reload** — a regression from #1182: when a
+  user had the workspace panel open and reloaded the page on an empty/new session, the panel was
+  force-closed and the toggle disabled. `syncWorkspacePanelState()` now only force-closes in
+  `'preview'` mode (which requires a session); `'browse'` mode renders the panel chrome with a
+  no-workspace placeholder. Both boot paths restore the user's localStorage panel preference before
+  the sync call. (`static/boot.js`) (#1187)
+- **Fenced code content leaking into markdown passes** — large tool outputs with diff/patch/log
+  content (lines starting with `-`, `+`, `*`, `#` inside code blocks) were having `<ul>/<li>/<h>` tags
+  injected by the list/heading regexes, breaking `</pre>` closure and corrupting subsequent message
+  rendering. The fix keeps fenced blocks stashed as `\x00P<n>\x00` tokens through ALL markdown
+  passes and restores them AFTER lists/headings/tables, so those regexes never see the rendered HTML.
+  (`static/ui.js`) (#1154, @bergeouss)
+
 ## [v0.50.230] — 2026-04-27
 
 ### Fixed
