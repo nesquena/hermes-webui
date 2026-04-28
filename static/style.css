@@ -159,6 +159,9 @@
   :root:not(.dark) .ctx-ring-center{background:var(--bg);color:#5a544a;}
   :root:not(.dark) .ctx-ring-track{stroke:rgba(0,0,0,.12);}
   :root:not(.dark) .ws-opt:hover{background:rgba(0,0,0,.05);}
+  :root:not(.dark) .ws-row:hover{background:rgba(0,0,0,.04);}
+  :root:not(.dark) .ws-drag-handle{color:#999;}
+  :root:not(.dark) .ws-row.drag-over{background:rgba(0,0,0,.06);}
   :root:not(.dark) .profile-opt:hover{background:rgba(0,0,0,.05);}
   :root:not(.dark) .profile-opt.active{background:var(--accent-bg);}
   :root:not(.dark) .profile-chip{color:var(--accent-text)!important;}
@@ -978,7 +981,7 @@
 .ws-opt-icon{display:inline-flex;align-items:center;justify-content:center;opacity:.82;flex-shrink:0;}
 .ws-opt-meta{font-size:11px;color:var(--muted);}
 /* ── Workspace management panel ── */
-.ws-row{display:flex;align-items:center;gap:8px;padding:8px 10px;margin-bottom:2px;border:1px solid transparent;border-radius:8px;cursor:pointer;color:var(--muted);transition:background .15s,border-color .15s,color .15s;}
+.ws-row{display:flex;align-items:center;gap:8px;padding:8px 10px;margin-bottom:2px;border:1px solid transparent;border-radius:8px;cursor:pointer;color:var(--muted);transition:background .15s,border-color .15s,color .15s,opacity .15s;}
 .ws-row:hover{background:var(--surface);color:var(--text);}
 .ws-row.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--accent-text);}
 .ws-row-info{flex:1;min-width:0;}
@@ -986,6 +989,11 @@
 .ws-row-path{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .ws-row.active .ws-row-path{color:var(--accent-text);opacity:.8;}
 .ws-row-actions{display:flex;gap:4px;flex-shrink:0;}
+.ws-drag-handle{display:flex;align-items:center;justify-content:center;opacity:.25;flex-shrink:0;cursor:grab;transition:opacity .15s;color:var(--muted);padding:2px;}
+.ws-row:hover .ws-drag-handle{opacity:.55;}
+.ws-drag-handle:active{cursor:grabbing;}
+.ws-row.dragging{opacity:.35;border:1px dashed var(--accent-bg-strong);}
+.ws-row.drag-over{border-color:var(--accent-text);background:var(--accent-bg);}
 .ws-action-btn{padding:4px 8px;border-radius:6px;font-size:11px;font-weight:600;border:1px solid var(--border2);background:rgba(255,255,255,.05);color:var(--muted);cursor:pointer;transition:all .15s;white-space:nowrap;}
 .ws-action-btn:hover{background:rgba(255,255,255,.1);color:var(--text);}
 /* ── Profile dropdown + management panel ── */

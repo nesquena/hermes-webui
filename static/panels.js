@@ -1427,19 +1427,76 @@ function renderWorkspacesPanel(workspaces){
   const panel=$('workspacesPanel');
   panel.innerHTML='';
   const activePath = S.session ? S.session.workspace : '';
-  for(const w of workspaces){
+  for(let i=0;i<workspaces.length;i++){
+    const w=workspaces[i];
     const row=document.createElement('div');
     row.className='ws-row';
     row.dataset.path = w.path;
+    row.draggable=true;
     const isActive = w.path === activePath;
     const activeBadge = isActive ? `<span class="detail-badge active" style="margin-left:6px;font-size:9px;padding:1px 6px">${esc(t('profile_active'))}</span>` : '';
     row.innerHTML=`
+      <span class="ws-drag-handle" title="${esc(t('workspace_drag_hint'))}">${li('grip-vertical',12)}</span>
       <div class="ws-row-info">
         <div class="ws-row-name">${esc(w.name)}${activeBadge}</div>
         <div class="ws-row-path">${esc(w.path)}</div>
       </div>`;
-    row.onclick = () => openWorkspaceDetail(w.path, row);
+    // Click on info area only — not on drag handle
+    const info=row.querySelector('.ws-row-info');
+    if(info) info.onclick = (e) => { e.stopPropagation(); openWorkspaceDetail(w.path, row); };
     if (_currentWorkspaceDetail && _currentWorkspaceDetail.path === w.path) row.classList.add('active');
+
+    // ── Drag-and-drop reorder ──
+    row.addEventListener('dragstart', (e) => {
+      // Only allow drag from the grip handle or the row itself
+      row.classList.add('dragging');
+      e.dataTransfer.effectAllowed='move';
+      e.dataTransfer.setData('text/plain', w.path);
+      // Required for Firefox drag ghost
+      if(e.dataTransfer.setDragImage) e.dataTransfer.setDragImage(row, 0, 0);
+    });
+    row.addEventListener('dragend', () => {
+      row.classList.remove('dragging');
+      panel.querySelectorAll('.ws-row.drag-over').forEach(r => r.classList.remove('drag-over'));
+    });
+    row.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect='move';
+      // Highlight drop target
+      panel.querySelectorAll('.ws-row.drag-over').forEach(r => r.classList.remove('drag-over'));
+      if(!row.classList.contains('dragging')) row.classList.add('drag-over');
+    });
+    row.addEventListener('dragleave', () => {
+      row.classList.remove('drag-over');
+    });
+    row.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      row.classList.remove('drag-over');
+      const fromPath = e.dataTransfer.getData('text/plain');
+      const toPath = w.path;
+      if(fromPath === toPath) return; // Same item, no-op
+      // Compute new order
+      const currentPaths = workspaces.map(ws => ws.path);
+      const fromIdx = currentPaths.indexOf(fromPath);
+      const toIdx = currentPaths.indexOf(toPath);
+      if(fromIdx < 0 || toIdx < 0) return;
+      currentPaths.splice(fromIdx, 1);
+      currentPaths.splice(toIdx, 0, fromPath);
+      try {
+        const res = await api('/api/workspaces/reorder', {
+          method: 'POST',
+          body: JSON.stringify({ paths: currentPaths })
+        });
+        if(res && res.ok){
+          renderWorkspacesPanel(res.workspaces);
+          // Also refresh sidebar dropdown
+          loadWorkspaceList().then(() => {});
+        }
+      } catch(err){
+        showToast(t('workspace_reorder_failed') + ': ' + err.message, 'error');
+      }
+    });
+
     panel.appendChild(row);
   }
   const hint=document.createElement('div');

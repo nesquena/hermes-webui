@@ -585,6 +585,9 @@ const LOCALES = {
     workspace_use: 'Use',
     workspace_add_path_placeholder: 'Add workspace path (e.g. /home/user/my-project)',
     workspace_paths_validated_hint: 'Paths are validated as existing directories before saving.',
+
+    workspace_drag_hint: 'Drag to reorder',
+    workspace_reorder_failed: 'Reorder failed',
     workspace_added: 'Workspace added',
     workspace_renamed: 'Workspace renamed',
     workspace_remove_confirm_title: 'Remove workspace',
@@ -1116,6 +1119,9 @@ const LOCALES = {
     workspace_use: 'Использовать',
     workspace_add_path_placeholder: 'Добавьте путь к рабочему пространству (например, /Users/you/project)',
     workspace_paths_validated_hint: 'Перед сохранением пути проверяются на существование.',
+
+    workspace_drag_hint: 'Перетащите для изменения порядка',
+    workspace_reorder_failed: 'Не удалось изменить порядок',
     workspace_added: 'Рабочее пространство добавлено',
     workspace_renamed: 'Рабочее пространство переименовано',
     workspace_remove_confirm_title: 'Удалить рабочее пространство',
@@ -1757,6 +1763,9 @@ const LOCALES = {
     workspace_use: 'Use',
     workspace_add_path_placeholder: 'Add workspace path (e.g. /home/user/my-project)',
     workspace_paths_validated_hint: 'Paths are validated as existing directories before saving.',
+
+    workspace_drag_hint: 'Arrastra para reordenar',
+    workspace_reorder_failed: 'Error al reordenar',
     workspace_added: 'Workspace added',
     workspace_renamed: 'Espacio renombrado',
     workspace_remove_confirm_title: 'Remove workspace',
@@ -2268,6 +2277,9 @@ const LOCALES = {
     settings_update_check_failed: 'Update-Prüfung fehlgeschlagen',
     settings_label_workspace_panel_open: 'Arbeitsbereich-Panel standardmäßig öffnen',
     settings_desc_workspace_panel_open: 'Wenn aktiviert, wird der Datei-Browser bei jeder neuen Sitzung automatisch geöffnet. Er kann jederzeit manuell geschlossen werden.',
+
+    workspace_drag_hint: 'Ziehen zum Neuordnen',
+    workspace_reorder_failed: 'Neuordnen fehlgeschlagen',
     open_in_browser: 'Im Browser öffnen',
     settings_section_system_title: 'System',
     settings_tab_appearance: 'Appearance',
@@ -2738,6 +2750,9 @@ const LOCALES = {
     workspace_use: '使用',
     workspace_add_path_placeholder: '添加工作区路径（例如 /home/user/my-project）',
     workspace_paths_validated_hint: '保存前会校验路径是否为已存在目录。',
+
+    workspace_drag_hint: '拖动以重新排序',
+    workspace_reorder_failed: '重新排序失败',
     workspace_added: '工作区已添加',
     workspace_renamed: '工作区已重命名',
     workspace_remove_confirm_title: '移除工作区',
@@ -3423,6 +3438,9 @@ const LOCALES = {
     workspace_manage_meta: '\u958b\u555f Spaces \u9762\u677f',
     workspace_not_added: '\u5de5\u4f5c\u5340\u672a\u65b0\u589e',
     workspace_paths_validated_hint: '\u8def\u5f91\u6703\u5148\u9a57\u8b49\u662f\u5426\u5b58\u5728\u518d\u5132\u5b58\u3002',
+
+    workspace_drag_hint: '拖曳以重新排列',
+    workspace_reorder_failed: '重新排列失敗',
     workspace_remove_confirm_message: (name) => `移除工作區「${name}」？`,
     workspace_remove_confirm_title: '\u79fb\u9664\u5de5\u4f5c\u5340',
     workspace_removed: '\u5de5\u4f5c\u5340\u5df2\u79fb\u9664',
@@ -4128,6 +4146,9 @@ const LOCALES = {
     workspace_use: 'Use',
     workspace_add_path_placeholder: 'Add workspace path (e.g. /home/user/my-project)',
     workspace_paths_validated_hint: 'Paths are validated as existing directories before saving.',
+
+    workspace_drag_hint: '드래그하여 순서 변경',
+    workspace_reorder_failed: '순서 변경 실패',
     workspace_added: 'Workspace added',
     workspace_renamed: 'Workspace renamed',
     workspace_remove_confirm_title: 'Remove workspace',

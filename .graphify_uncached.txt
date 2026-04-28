@@ -1,0 +1,17 @@
+/home/fr33m1nd/hermes-webui-src/SPRINTS.md
+/home/fr33m1nd/hermes-webui-src/CONTRIBUTING.md
+/home/fr33m1nd/hermes-webui-src/CHANGELOG.md
+/home/fr33m1nd/hermes-webui-src/requirements.txt
+/home/fr33m1nd/hermes-webui-src/ROADMAP.md
+/home/fr33m1nd/hermes-webui-src/README.md
+/home/fr33m1nd/hermes-webui-src/BUGS.md
+/home/fr33m1nd/hermes-webui-src/THEMES.md
+/home/fr33m1nd/hermes-webui-src/TESTING.md
+/home/fr33m1nd/hermes-webui-src/HERMES.md
+/home/fr33m1nd/hermes-webui-src/docs/ui-ux/two-stage-proposal.html
+/home/fr33m1nd/hermes-webui-src/docs/ui-ux/index.html
+/home/fr33m1nd/hermes-webui-src/static/index.html
+/home/fr33m1nd/hermes-webui-src/docs/images/ui-sessions.png
+/home/fr33m1nd/hermes-webui-src/docs/images/ui-workspace.png
+/home/fr33m1nd/hermes-webui-src/static/favicon-32.png
+/home/fr33m1nd/hermes-webui-src/static/favicon.svg
