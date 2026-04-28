@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Fixed
+- **Model catalog disk cache metadata** — `/api/models` disk-cache hits now
+  preserve `active_provider` and `default_model` alongside provider groups.
+  Legacy cache files that only contain `groups` are ignored and rebuilt, so
+  the frontend does not lose the configured provider/default-model source of
+  truth after restart. (`api/config.py`, `tests/test_model_cache_metadata.py`)
 - **Auto-title generic fallback** — when the auxiliary title-generation call
   fails and the local fallback can only produce the generic label
   `Conversation topic`, the WebUI now keeps the existing provisional title

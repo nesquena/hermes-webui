@@ -1120,15 +1120,29 @@ def _delete_models_cache_on_disk() -> None:
         pass  # already absent
 
 
+def _is_valid_models_cache(cache: object) -> bool:
+    """Return True when a disk cache payload has the full /api/models shape."""
+    if not isinstance(cache, dict):
+        return False
+    if not {"active_provider", "default_model", "groups"}.issubset(cache):
+        return False
+    active_provider = cache.get("active_provider")
+    return (
+        (active_provider is None or isinstance(active_provider, str))
+        and isinstance(cache.get("default_model"), str)
+        and isinstance(cache.get("groups"), list)
+    )
+
+
 def _load_models_cache_from_disk() -> dict | None:
-    """Load groups dict from disk cache if it exists and is valid."""
+    """Load /api/models cache from disk if it exists and has current metadata."""
     try:
         import json as _j
         if not _models_cache_path.exists():
             return None
         with open(_models_cache_path, encoding="utf-8") as f:
             cache = _j.load(f)
-        return cache if isinstance(cache, dict) and "groups" in cache else None
+        return cache if _is_valid_models_cache(cache) else None
     except Exception:
         return None
 
@@ -1136,10 +1150,19 @@ def _load_models_cache_from_disk() -> dict | None:
 def _save_models_cache_to_disk(cache: dict) -> None:
     """Save cache to disk so it survives server restarts."""
     try:
-        import time as _cache_time
+        if not _is_valid_models_cache(cache):
+            return
         tmp = str(_models_cache_path) + f".{os.getpid()}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"groups": cache.get("groups", [])}, f, indent=2)
+            json.dump(
+                {
+                    "active_provider": cache["active_provider"],
+                    "default_model": cache["default_model"],
+                    "groups": cache["groups"],
+                },
+                f,
+                indent=2,
+            )
         os.rename(tmp, str(_models_cache_path))
     except Exception:
         pass  # Non-fatal -- cache will rebuild on next call
