@@ -103,8 +103,9 @@
     const widgets = Array.isArray(space.widgets) ? space.widgets : [];
     const widgetRows = widgets.length ? widgets.map(function(w){
       const widgetId = w.id || '';
+      const layout = widgetLayout(w);
       return '<div class="capy-spaces-widget" data-widget-id="'+escapeHtml(widgetId)+'"><div><strong>'+escapeHtml(w.title||widgetId||'Untitled widget')+'</strong>' +
-        '<div class="capy-spaces-muted">'+escapeHtml(w.kind||'custom')+' · '+escapeHtml(widgetId)+'</div></div></div>';
+        '<div class="capy-spaces-muted">'+escapeHtml(w.kind||'custom')+' · '+escapeHtml(widgetId)+' · '+escapeHtml(formatWidgetLayout(layout))+'</div></div></div>';
     }).join('') : '<div class="capy-spaces-muted">No widgets yet.</div>';
     return '<div class="capy-spaces-card"><button type="button" class="capy-spaces-btn" data-capy-action="reloadSpaces">← Back to spaces</button>' +
       '<h3>'+escapeHtml(name)+'</h3>' +
@@ -119,12 +120,13 @@
       const widgetId = w.id || '';
       const title = w.title || widgetId || 'Untitled widget';
       const kind = w.kind || 'custom';
+      const layout = widgetLayout(w);
       return '<div class="capy-spaces-widget" data-widget-id="'+escapeHtml(widgetId)+'">' +
         '<div><strong>'+escapeHtml(title)+'</strong>' +
-        '<div class="capy-spaces-muted">'+escapeHtml(kind)+' · '+escapeHtml(widgetId)+'</div></div>' +
+        '<div class="capy-spaces-muted">'+escapeHtml(kind)+' · '+escapeHtml(widgetId)+' · '+escapeHtml(formatWidgetLayout(layout))+'</div></div>' +
         '<div class="capy-spaces-actions">' +
         '<button type="button" class="capy-spaces-btn" data-capy-action="askWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-title="'+escapeHtml(title)+'">Ask Capy</button>' +
-        '<button type="button" class="capy-spaces-btn" data-capy-action="editWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-title="'+escapeHtml(title)+'" data-widget-kind="'+escapeHtml(kind)+'">Edit</button>' +
+        '<button type="button" class="capy-spaces-btn" data-capy-action="editWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-title="'+escapeHtml(title)+'" data-widget-kind="'+escapeHtml(kind)+'" data-widget-x="'+escapeHtml(layout.x)+'" data-widget-y="'+escapeHtml(layout.y)+'" data-widget-w="'+escapeHtml(layout.w)+'" data-widget-h="'+escapeHtml(layout.h)+'">Edit</button>' +
         '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="deleteWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Delete</button>' +
         '</div></div>';
     }).join('') : '<div class="capy-spaces-muted">No widgets yet.</div>';
@@ -136,8 +138,41 @@
       '<label>Widget ID<input id="capyWidgetId" type="text" autocomplete="off" placeholder="weather"></label>' +
       '<label>Title<input id="capyWidgetTitle" type="text" autocomplete="off" placeholder="Weather"></label>' +
       '<label>Kind<input id="capyWidgetKind" type="text" autocomplete="off" value="markdown"></label>' +
+      '<label>X<input id="capyWidgetX" type="number" min="0" step="1" value="0"></label>' +
+      '<label>Y<input id="capyWidgetY" type="number" min="0" step="1" value="0"></label>' +
+      '<label>W<input id="capyWidgetW" type="number" min="1" max="24" step="1" value="6"></label>' +
+      '<label>H<input id="capyWidgetH" type="number" min="1" max="24" step="1" value="4"></label>' +
       '<button type="button" class="capy-spaces-btn" data-capy-action="saveWidget" data-space-id="'+escapeHtml(spaceId)+'">Save widget</button>' +
       '</div></div>';
+  }
+
+  function layoutNumber(value, fallback, min, max){
+    const parsed = parseInt(value, 10);
+    const n = Number.isFinite(parsed) ? parsed : fallback;
+    return Math.max(min, Math.min(max, n));
+  }
+
+  function widgetLayout(widget){
+    const raw = widget && widget.layout && typeof widget.layout === 'object' ? widget.layout : {};
+    return {
+      x: layoutNumber(raw.x, 0, 0, 10000),
+      y: layoutNumber(raw.y, 0, 0, 10000),
+      w: layoutNumber(raw.w, 6, 1, 24),
+      h: layoutNumber(raw.h, 4, 1, 24),
+    };
+  }
+
+  function formLayout(root){
+    return {
+      x: layoutNumber((getRootInput(root, '#capyWidgetX') || {}).value, 0, 0, 10000),
+      y: layoutNumber((getRootInput(root, '#capyWidgetY') || {}).value, 0, 0, 10000),
+      w: layoutNumber((getRootInput(root, '#capyWidgetW') || {}).value, 6, 1, 24),
+      h: layoutNumber((getRootInput(root, '#capyWidgetH') || {}).value, 4, 1, 24),
+    };
+  }
+
+  function formatWidgetLayout(layout){
+    return 'x'+layout.x+' y'+layout.y+' · '+layout.w+'×'+layout.h;
   }
 
   function getRootInput(root, selector){
@@ -153,13 +188,22 @@
     if (descriptionInput) descriptionInput.value = description || '';
   }
 
-  function setWidgetForm(root, widgetId, title, kind){
+  function setWidgetForm(root, widgetId, title, kind, layout){
     const idInput = getRootInput(root, '#capyWidgetId');
     const titleInput = getRootInput(root, '#capyWidgetTitle');
     const kindInput = getRootInput(root, '#capyWidgetKind');
+    const xInput = getRootInput(root, '#capyWidgetX');
+    const yInput = getRootInput(root, '#capyWidgetY');
+    const wInput = getRootInput(root, '#capyWidgetW');
+    const hInput = getRootInput(root, '#capyWidgetH');
+    const safeLayout = widgetLayout({layout: layout || {}});
     if (idInput) idInput.value = widgetId || '';
     if (titleInput) titleInput.value = title || '';
     if (kindInput) kindInput.value = kind || 'markdown';
+    if (xInput) xInput.value = String(safeLayout.x);
+    if (yInput) yInput.value = String(safeLayout.y);
+    if (wInput) wInput.value = String(safeLayout.w);
+    if (hInput) hInput.value = String(safeLayout.h);
   }
 
   async function handleCapySpacesClick(event){
@@ -217,7 +261,12 @@
     }
     if (action === 'editWidget') {
       const root = document.getElementById('capySpacesRoot');
-      setWidgetForm(root, button.dataset.widgetId || '', button.dataset.widgetTitle || '', button.dataset.widgetKind || 'markdown');
+      setWidgetForm(root, button.dataset.widgetId || '', button.dataset.widgetTitle || '', button.dataset.widgetKind || 'markdown', {
+        x: button.dataset.widgetX,
+        y: button.dataset.widgetY,
+        w: button.dataset.widgetW,
+        h: button.dataset.widgetH,
+      });
       return;
     }
     if (action === 'askWidget') {
@@ -249,6 +298,7 @@
         id: idInput ? idInput.value : '',
         title: titleInput ? titleInput.value : '',
         kind: kindInput && kindInput.value ? kindInput.value : 'markdown',
+        layout: formLayout(root),
       };
       await postSpacesJson('api/spaces/widget/upsert', {space_id: spaceId, widget: widget});
       await loadSpaceWidgets(spaceId);

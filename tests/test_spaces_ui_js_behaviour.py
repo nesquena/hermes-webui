@@ -25,6 +25,10 @@ const values = {
   '#capyWidgetId': 'notes',
   '#capyWidgetTitle': 'Notes',
   '#capyWidgetKind': 'markdown',
+  '#capyWidgetX': '2',
+  '#capyWidgetY': '3',
+  '#capyWidgetW': '8',
+  '#capyWidgetH': '5',
   '#capySpaceId': 'ops',
   '#capySpaceName': 'Ops',
   '#capySpaceDescription': '<b>Operations</b>',
@@ -72,7 +76,7 @@ global.fetch = async function(path, opts = {}) {
     return response({ enabled: true, generated_widgets_rendered: false });
   }
   if (path === 'api/spaces/widgets?space_id=lab') {
-    return response({ widgets: [{ id: 'weather', kind: 'markdown', title: '<Weather>', renderer: '<script>bad()</script>' }] });
+    return response({ widgets: [{ id: 'weather', kind: 'markdown', title: '<Weather>', layout: { x: 12, y: 3, w: 5, h: 4, minimized: false }, renderer: '<script>bad()</script>' }] });
   }
   if (path === 'api/spaces/get?space_id=lab') {
     return response({ space: {
@@ -80,13 +84,13 @@ global.fetch = async function(path, opts = {}) {
       name: 'Lab <Detail>',
       description: 'Unsafe <detail>',
       revision_event_id: 'rev1',
-      widgets: [{ id: 'weather', kind: 'markdown', title: '<Weather>', renderer: '<script>bad()</script>' }],
+      widgets: [{ id: 'weather', kind: 'markdown', title: '<Weather>', layout: { x: 12, y: 3, w: 5, h: 4, minimized: false }, renderer: '<script>bad()</script>' }],
       capabilities: { toolsets: ['web'] },
       recovery: { safe_mode_available: true },
     } });
   }
   if (path === 'api/spaces/widget/upsert') {
-    return response({ space_id: 'lab', widget: { id: 'notes', kind: 'markdown', title: 'Notes' }, revision_event_id: 'rev2' });
+    return response({ space_id: 'lab', widget: { id: 'notes', kind: 'markdown', title: 'Notes', layout: { x: 2, y: 3, w: 8, h: 5 } }, revision_event_id: 'rev2' });
   }
   if (path === 'api/spaces/widget/delete') {
     return response({ deleted: true, space_id: 'lab', widget_id: 'weather', revision_event_id: 'rev3' });
@@ -139,7 +143,7 @@ async function click(action, dataset) {
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
     await window.loadCapySpaces();
     await window.loadSpaceWidgets('lab');
-    await click('editWidget', { spaceId: 'lab', widgetId: 'weather', widgetTitle: '<Weather>', widgetKind: 'markdown' });
+    await click('editWidget', { spaceId: 'lab', widgetId: 'weather', widgetTitle: '<Weather>', widgetKind: 'markdown', widgetX: '12', widgetY: '3', widgetW: '5', widgetH: '4' });
   } else if (scenario === 'askWidget') {
     global.showPromptDialog = async function(opts) { dialogs.push(opts); return 'Refresh the weather widget'; };
     await window.loadCapySpaces();
@@ -205,6 +209,7 @@ def test_spaces_ui_lists_widgets_without_rendering_widget_code(driver_path):
 
     assert "Weather" in out["rootHtml"]
     assert "&lt;Weather&gt;" in out["rootHtml"]
+    assert "x12 y3 · 5×4" in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert {"path": "api/spaces/widgets?space_id=lab", "method": "GET", "body": ""} in out["calls"]
@@ -217,7 +222,7 @@ def test_spaces_ui_save_widget_posts_to_upsert_and_refreshes_widgets(driver_path
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {
         "space_id": "lab",
-        "widget": {"id": "notes", "title": "Notes", "kind": "markdown"},
+        "widget": {"id": "notes", "title": "Notes", "kind": "markdown", "layout": {"x": 2, "y": 3, "w": 8, "h": 5}},
     }
     assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
 
@@ -237,6 +242,10 @@ def test_spaces_ui_edit_widget_prefills_safe_metadata_form_without_fetching_rend
     assert out["values"]["#capyWidgetId"] == "weather"
     assert out["values"]["#capyWidgetTitle"] == "<Weather>"
     assert out["values"]["#capyWidgetKind"] == "markdown"
+    assert out["values"]["#capyWidgetX"] == "12"
+    assert out["values"]["#capyWidgetY"] == "3"
+    assert out["values"]["#capyWidgetW"] == "5"
+    assert out["values"]["#capyWidgetH"] == "4"
     assert not any(call["path"] == "api/spaces/widget?space_id=lab&widget_id=weather" for call in out["calls"])
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
@@ -324,5 +333,6 @@ def test_spaces_ui_opens_space_detail_without_rendering_widget_code(driver_path)
     assert "Lab &lt;Detail&gt;" in out["rootHtml"]
     assert "Unsafe &lt;detail&gt;" in out["rootHtml"]
     assert "&lt;Weather&gt;" in out["rootHtml"]
+    assert "x12 y3 · 5×4" in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
