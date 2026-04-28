@@ -88,13 +88,18 @@ def handle_upload(handler):
         return j(handler, {'error': 'Upload failed'}, status=500)
 
 
+# Maximum total extracted bytes — guards against zip/tar bombs.
+# Set to 10x the upload limit; a legitimate archive rarely exceeds 3-4x.
+_MAX_EXTRACTED_BYTES = 10 * 20 * 1024 * 1024  # 200 MB
+
+
 def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
     """Extract a zip or tar archive into the workspace.
 
     Returns a dict with ``extracted`` (int), ``files`` (list[str]).
     Raises ValueError on zip-slip or unsupported format.
     """
-    import zipfile, tarfile, io, os
+    import zipfile, tarfile, io, os, shutil
 
     name = Path(filename).name
     stem = Path(filename).stem  # strip .zip / .tar.gz etc.
@@ -117,36 +122,61 @@ def extract_archive(file_bytes: bytes, filename: str, workspace: Path):
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     extracted_files = []
+    total_extracted = 0
 
-    if _mode == 'zip':
-        with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
-            for member in zf.infolist():
-                # Skip directories
-                if member.is_dir():
-                    continue
-                # Zip-slip protection
-                member_path = (dest_dir / member.filename).resolve()
-                if not str(member_path).startswith(str(dest_dir.resolve())):
-                    raise ValueError(f'Zip-slip blocked: {member.filename}')
-                member_path.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(member) as src, open(member_path, 'wb') as dst:
-                    dst.write(src.read())
-                extracted_files.append(str(member_path.relative_to(workspace.resolve())))
-
-    elif _mode == 'tar':
-        with tarfile.open(fileobj=io.BytesIO(file_bytes)) as tf:
-            for member in tf.getmembers():
-                if not member.isfile():
-                    continue
-                # Tar-slip protection
-                member_path = (dest_dir / member.name).resolve()
-                if not str(member_path).startswith(str(dest_dir.resolve())):
-                    raise ValueError(f'Tar-slip blocked: {member.name}')
-                member_path.parent.mkdir(parents=True, exist_ok=True)
-                with tf.extractfile(member) as src, open(member_path, 'wb') as dst:
-                    if src:
+    try:
+        if _mode == 'zip':
+            with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+                for member in zf.infolist():
+                    # Skip directories
+                    if member.is_dir():
+                        continue
+                    # Zip-slip protection
+                    member_path = (dest_dir / member.filename).resolve()
+                    if not str(member_path).startswith(str(dest_dir.resolve())):
+                        raise ValueError(f'Zip-slip blocked: {member.filename}')
+                    # Zip-bomb protection: enforce cumulative extraction limit
+                    total_extracted += member.file_size
+                    if total_extracted > _MAX_EXTRACTED_BYTES:
+                        raise ValueError(
+                            f'Extraction too large ({total_extracted // (1024*1024)} MB > '
+                            f'{_MAX_EXTRACTED_BYTES // (1024*1024)} MB limit). '
+                            f'Possible zip bomb.'
+                        )
+                    member_path.parent.mkdir(parents=True, exist_ok=True)
+                    with zf.open(member) as src, open(member_path, 'wb') as dst:
                         dst.write(src.read())
-                extracted_files.append(str(member_path.relative_to(workspace.resolve())))
+                    extracted_files.append(str(member_path.relative_to(workspace.resolve())))
+
+        elif _mode == 'tar':
+            with tarfile.open(fileobj=io.BytesIO(file_bytes)) as tf:
+                for member in tf.getmembers():
+                    if not member.isfile():
+                        continue
+                    # Tar-slip protection
+                    member_path = (dest_dir / member.name).resolve()
+                    if not str(member_path).startswith(str(dest_dir.resolve())):
+                        raise ValueError(f'Tar-slip blocked: {member.name}')
+                    # Tar-bomb protection: enforce cumulative extraction limit
+                    total_extracted += member.size
+                    if total_extracted > _MAX_EXTRACTED_BYTES:
+                        raise ValueError(
+                            f'Extraction too large ({total_extracted // (1024*1024)} MB > '
+                            f'{_MAX_EXTRACTED_BYTES // (1024*1024)} MB limit). '
+                            f'Possible zip bomb.'
+                        )
+                    member_path.parent.mkdir(parents=True, exist_ok=True)
+                    with tf.extractfile(member) as src, open(member_path, 'wb') as dst:
+                        if src:
+                            dst.write(src.read())
+                    extracted_files.append(str(member_path.relative_to(workspace.resolve())))
+    except Exception:
+        # Clean up partially-extracted directory to avoid orphaned folders
+        try:
+            shutil.rmtree(dest_dir, ignore_errors=True)
+        except Exception:
+            pass
+        raise
 
     return {'extracted': len(extracted_files), 'files': extracted_files, 'dest': str(dest_dir)}
 
