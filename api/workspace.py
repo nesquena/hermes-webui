@@ -448,10 +448,8 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
 
     # (A) Trusted if under the user's home directory — cross-platform via Path.home()
     # Must be checked before system roots to allow symlinks like /var/home.
-    # Guard: skip if HOME is / or is itself a blocked root (unusual container setups).
     _home = Path.home().resolve()
-    _home_is_sane = (_home != Path("/") and not _is_blocked_system_path(_home))
-    if _home_is_sane:
+    if _home != Path("/"):
         try:
             candidate.relative_to(_home)
             return candidate
@@ -508,6 +506,12 @@ def validate_workspace_to_add(path: str) -> Path:
         raise ValueError(f"Path does not exist: {candidate}")
     if not candidate.is_dir():
         raise ValueError(f"Path is not a directory: {candidate}")
+
+    # Home directory is always trusted regardless of where it lives on disk
+    # (e.g. /var/home/... on systemd-homed Fedora/RHEL).
+    _home = Path.home().resolve()
+    if _home != Path("/") and _is_within(candidate, _home):
+        return candidate
 
     # Block known system roots and their immediate children
     if _is_blocked_system_path(candidate):
