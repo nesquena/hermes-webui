@@ -19,6 +19,10 @@ This runbook preserves the operational context for the Capy WebUI on Brendan's M
 - Logs:
   - `/Users/bschmidy10/.hermes/webui-mvp/launchd.out.log`
   - `/Users/bschmidy10/.hermes/webui-mvp/launchd.err.log`
+- Log rotation:
+  - LaunchAgent: `/Users/bschmidy10/Library/LaunchAgents/com.capy.logrotate.plist`
+  - Script: `/Users/bschmidy10/.hermes/scripts/rotate-capy-logs.py`
+  - Label: `com.capy.logrotate`
 
 The WebUI stays bound to localhost. Tailscale Serve exposes it privately to the tailnet by proxying `https://capy.tail9c6e3.ts.net/` to `http://127.0.0.1:8787/`. On this Mac, the Tailscale CLI lives at `/Applications/Tailscale.app/Contents/MacOS/tailscale`.
 
@@ -55,6 +59,18 @@ uid=$(id -u)
 launchctl kickstart -k gui/$uid/com.capy.webui
 curl -fsS http://127.0.0.1:8787/health
 ```
+
+## Log rotation
+
+Capy uses a user-level, no-sudo log rotation LaunchAgent to keep launchd logs bounded while preserving the same log file inodes that launchd writes to.
+
+```bash
+plutil -lint /Users/bschmidy10/Library/LaunchAgents/com.capy.logrotate.plist
+/Users/bschmidy10/.hermes/hermes-agent/venv/bin/python -m py_compile /Users/bschmidy10/.hermes/scripts/rotate-capy-logs.py
+launchctl print gui/$(id -u)/com.capy.logrotate
+```
+
+Expected: plist lint is OK, py_compile is quiet, and launchd has the `com.capy.logrotate` job loaded.
 
 ## Debug checklist
 
