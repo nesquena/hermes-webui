@@ -357,6 +357,31 @@
   workspace subtree) and never enumerate blocked system roots. (`api/routes.py`,
   `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
 
+## [v0.50.232] — 2026-04-28
+
+### Fixed
+- **Model chip fuzzy-match false positive** — `_findModelInDropdown()` step-3 fuzzy fallback
+  was stripping the trailing version segment and matching via `startsWith(base) || includes(base)`,
+  causing `gpt-5.5` to resolve to `@nous:openai/gpt-5.4-mini` (both start with `gpt.5`). The fix
+  uses the full normalized target as the prefix when `base.length > 4 && base !== target`, only
+  falling back to the stripped base for bare roots (≤4 chars) where the strip was a no-op.
+  (`static/ui.js`) (#1188)
+- **openai-codex not detected in model picker** — `OPENAI_API_KEY` now also registers the
+  `openai-codex` provider group in the env-var fallback path, so users who have Codex OAuth set up
+  no longer need a manual `config.yaml` edit to see the picker entries. Note: OAuth-authenticated
+  users are already detected via `hermes_cli.auth`; this fixes the env-var-only fallback path.
+  (`api/config.py`) (#1189)
+- **Workspace files blank after second empty-session reload** — the ephemeral-session guard in
+  `boot.js` was calling `localStorage.removeItem('hermes-webui-session')`, which caused the second
+  reload to fall into the no-saved-session path that never calls `loadDir()`. Removing that line
+  keeps the session key so every reload follows the same `loadSession → loadDir` path.
+  (`static/boot.js`) (#1196)
+- **Session timestamps wrong when client and server clocks differ** — the session list's relative
+  time labels and message-footer timestamps now use a server-clock approximation (`_serverNowMs()`)
+  derived from the `server_time` field returned by `/api/sessions`. Fractional-hour timezone offsets
+  (India `+0530`, Nepal `+0545`, etc.) are handled correctly via offset-minutes arithmetic.
+  (`api/routes.py`, `static/sessions.js`) (#1144, @bergeouss)
+
 ## [v0.50.231] — 2026-04-28
 
 ### Fixed
