@@ -423,6 +423,15 @@
   .approval-btn:hover{background:rgba(255,255,255,0.12);transform:translateY(-1px);box-shadow:0 2px 8px rgba(0,0,0,0.2);}
   .approval-btn:active{transform:translateY(0);box-shadow:none;}
   .approval-btn:disabled{opacity:.5;cursor:not-allowed;transform:none;}
+  /* ── YOLO skip-all button (approval-btn variant) ── */
+  .approval-btn.yolo{background:rgba(245,158,11,0.12);border-color:rgba(245,158,11,0.3);color:#f59e0b;}
+  .approval-btn.yolo:hover{background:rgba(245,158,11,0.22);border-color:rgba(245,158,11,0.5);color:#fbbf24;}
+  /* ── YOLO pill in composer footer ── */
+  .yolo-pill{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;background:rgba(245,158,11,0.15);color:#f59e0b;border:1px solid rgba(245,158,11,0.35);cursor:pointer;transition:all .15s;line-height:1.4;white-space:nowrap;}
+  .yolo-pill:hover{background:rgba(245,158,11,0.25);border-color:rgba(245,158,11,0.5);transform:translateY(-1px);}
+  .yolo-pill:active{transform:translateY(0);}
+  .yolo-pill-icon{font-size:12px;}
+  .yolo-pill-label{font-size:10px;}
   /* ── Queue flyout (same slide-up pattern as approval-card) ── */
   .queue-card{position:absolute;left:0;right:0;bottom:0;max-width:var(--msg-max);margin:0 auto;padding:0 20px;box-sizing:border-box;width:100%;overflow:hidden;pointer-events:none;z-index:2;}
   .queue-card.visible{pointer-events:auto;}

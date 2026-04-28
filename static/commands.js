@@ -28,6 +28,7 @@ const COMMANDS=[
   {name:'status',    desc:t('cmd_status'),   fn:cmdStatus},
   {name:'voice',     desc:t('cmd_voice'),    fn:cmdVoice,     noEcho:true},
   {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|none|minimal|low|medium|high|xhigh', subArgs:['show','hide','none','minimal','low','medium','high','xhigh'], noEcho:true},
+  {name:'yolo', desc:t('cmd_yolo'), fn:cmdYolo, noEcho:true},
 ];
 
 const SLASH_SUBARG_SOURCES={
@@ -815,6 +816,31 @@ function cmdVoice(){
   if(mic&&mic.style.display!=='none'&&!mic.disabled){try{mic.click();return;}catch(_){}}
   showToast(t('cmd_voice_use_mic'));
 }
+
+// ── YOLO mode toggle ──
+// Session-scoped: skips all approval prompts for the current session.
+// Toggles on/off; state is not persisted across page reloads.
+async function cmdYolo(){
+  const sid=S.session&&S.session.session_id;
+  if(!sid){showToast(t('yolo_no_session'));return;}
+  try{
+    // Check current state first to toggle
+    const status=await api('/api/session/yolo?session_id='+encodeURIComponent(sid));
+    const enable=!status.yolo_enabled;
+    await api('/api/session/yolo',{
+      method:'POST',
+      body:JSON.stringify({session_id:sid,enabled:enable}),
+    });
+    _yoloEnabled=enable;
+    _updateYoloPill();
+    showToast(enable?t('yolo_enabled'):t('yolo_disabled'));
+    if(enable){
+      // Dismiss any visible approval card
+      hideApprovalCard(true);
+    }
+  }catch(e){showToast('YOLO: '+e.message);}
+}
+
 let _skillCommandCache=[];
 let _skillCommandLoadPromise=null;
 let _skillCommandCacheReady=false;
