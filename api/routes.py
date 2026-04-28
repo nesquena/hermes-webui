@@ -971,6 +971,8 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/spaces/get":
         from api import spaces as capy_spaces
+        if not capy_spaces.spaces_enabled():
+            return bad(handler, "Capy Spaces is disabled", 403)
         space_id = parse_qs(parsed.query).get("space_id", [""])[0]
         if not space_id:
             return bad(handler, "Missing space_id")
