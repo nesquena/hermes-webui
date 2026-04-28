@@ -121,6 +121,11 @@ function _isSessionEffectivelyStreaming(s) {
   return Boolean(s && (s.is_streaming || _isSessionLocallyStreaming(s)));
 }
 
+function _rememberRenderedStreamingState(s, isStreaming) {
+  if (!s || !s.session_id || !isStreaming) return;
+  _sessionStreamingById.set(s.session_id, true);
+}
+
 function _markPollingCompletionUnreadTransitions(sessions) {
   if (!Array.isArray(sessions)) return;
   const seen = new Set();
@@ -1117,6 +1122,7 @@ function renderSessionListFromCache(){
     const el=document.createElement('div');
     const isActive=S.session&&s.session_id===S.session.session_id;
     const isStreaming=_isSessionEffectivelyStreaming(s);
+    _rememberRenderedStreamingState(s, isStreaming);
     const hasUnread=_hasUnreadForSession(s)&&!isActive;
     el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(isStreaming?' streaming':'')+(hasUnread?' unread':'');
     if(isActive&&S.session&&S.session._flash)delete S.session._flash;

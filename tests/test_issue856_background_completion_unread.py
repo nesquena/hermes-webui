@@ -137,6 +137,24 @@ def test_polling_transition_tracks_the_same_effective_streaming_state_as_sidebar
     )
 
 
+def test_cache_render_seeds_streaming_transition_state_for_visible_spinners():
+    remember_block = _sessions_function_block(
+        "_rememberRenderedStreamingState",
+        "_markPollingCompletionUnreadTransitions",
+    )
+    render_idx = SESSIONS_JS.find("function _renderOneSession")
+    assert render_idx != -1, "_renderOneSession not found"
+    render_block = SESSIONS_JS[render_idx:SESSIONS_JS.find("const hasUnread=", render_idx)]
+
+    assert "if (!s || !s.session_id || !isStreaming) return;" in remember_block
+    assert "_sessionStreamingById.set(s.session_id, true);" in remember_block
+    assert "const isStreaming=_isSessionEffectivelyStreaming(s);" in render_block
+    assert "_rememberRenderedStreamingState(s, isStreaming);" in render_block, (
+        "renderSessionListFromCache can display a spinner from local INFLIGHT "
+        "state before a full poll runs, so it must seed the transition map too"
+    )
+
+
 def test_active_done_marks_viewed_without_setting_unread_marker():
     done_block = _done_block()
     marker_idx = done_block.find("_markSessionCompletionUnread(activeSid")
