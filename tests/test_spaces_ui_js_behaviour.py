@@ -20,6 +20,7 @@ const src = fs.readFileSync(process.argv[2], 'utf8');
 const scenario = process.argv[3];
 
 const calls = [];
+const dialogs = [];
 const values = {
   '#capyWidgetId': 'notes',
   '#capyWidgetTitle': 'Notes',
@@ -73,6 +74,17 @@ global.fetch = async function(path, opts = {}) {
   if (path === 'api/spaces/widgets?space_id=lab') {
     return response({ widgets: [{ id: 'weather', kind: 'markdown', title: '<Weather>', renderer: '<script>bad()</script>' }] });
   }
+  if (path === 'api/spaces/get?space_id=lab') {
+    return response({ space: {
+      space_id: 'lab',
+      name: 'Lab <Detail>',
+      description: 'Unsafe <detail>',
+      revision_event_id: 'rev1',
+      widgets: [{ id: 'weather', kind: 'markdown', title: '<Weather>', renderer: '<script>bad()</script>' }],
+      capabilities: { toolsets: ['web'] },
+      recovery: { safe_mode_available: true },
+    } });
+  }
   if (path === 'api/spaces/widget/upsert') {
     return response({ space_id: 'lab', widget: { id: 'notes', kind: 'markdown', title: 'Notes' }, revision_event_id: 'rev2' });
   }
@@ -123,6 +135,9 @@ async function click(action, dataset) {
   } else if (scenario === 'createSpace') {
     await window.loadCapySpaces();
     await click('saveSpace', {});
+  } else if (scenario === 'openSpaceDetail') {
+    await window.loadCapySpaces();
+    await click('openSpace', { spaceId: 'lab' });
   } else if (scenario === 'editSpace') {
     await window.loadCapySpaces();
     await click('editSpace', { spaceId: 'lab', spaceName: 'Lab Edited', spaceDescription: 'Updated' });
@@ -130,10 +145,18 @@ async function click(action, dataset) {
   } else if (scenario === 'deleteSpace') {
     await window.loadCapySpaces();
     await click('deleteSpace', { spaceId: 'lab' });
+  } else if (scenario === 'deleteSpaceConfirmed') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    await window.loadCapySpaces();
+    await click('deleteSpace', { spaceId: 'lab' });
+  } else if (scenario === 'deleteSpaceCancelled') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return false; };
+    await window.loadCapySpaces();
+    await click('deleteSpace', { spaceId: 'lab' });
   } else {
     throw new Error('unknown scenario: ' + scenario);
   }
-  process.stdout.write(JSON.stringify({ rootHtml: root.innerHTML, calls, values, rootDataset: root.dataset }));
+  process.stdout.write(JSON.stringify({ rootHtml: root.innerHTML, calls, values, rootDataset: root.dataset, dialogs }));
 })().catch(err => {
   console.error(err && err.stack || String(err));
   process.exit(1);
@@ -218,9 +241,35 @@ def test_spaces_ui_edit_space_posts_to_update_without_changing_space_id(driver_p
 
 
 def test_spaces_ui_delete_space_posts_to_delete_and_refreshes_spaces(driver_path):
-    out = _run_spaces_scenario(driver_path, "deleteSpace")
+    out = _run_spaces_scenario(driver_path, "deleteSpaceConfirmed")
     post = next(call for call in out["calls"] if call["path"] == "api/spaces/delete")
 
+    assert out["dialogs"]
+    assert out["dialogs"][0]["danger"] is True
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"space_id": "lab"}
     assert out["calls"][-1]["path"] == "api/spaces"
+
+
+def test_spaces_ui_delete_space_fails_closed_without_shared_dialog(driver_path):
+    out = _run_spaces_scenario(driver_path, "deleteSpace")
+
+    assert not any(call["path"] == "api/spaces/delete" for call in out["calls"])
+
+
+def test_spaces_ui_cancelled_delete_space_does_not_post(driver_path):
+    out = _run_spaces_scenario(driver_path, "deleteSpaceCancelled")
+
+    assert out["dialogs"]
+    assert not any(call["path"] == "api/spaces/delete" for call in out["calls"])
+
+
+def test_spaces_ui_opens_space_detail_without_rendering_widget_code(driver_path):
+    out = _run_spaces_scenario(driver_path, "openSpaceDetail")
+
+    assert {"path": "api/spaces/get?space_id=lab", "method": "GET", "body": ""} in out["calls"]
+    assert "Lab &lt;Detail&gt;" in out["rootHtml"]
+    assert "Unsafe &lt;detail&gt;" in out["rootHtml"]
+    assert "&lt;Weather&gt;" in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
