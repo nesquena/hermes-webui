@@ -392,6 +392,30 @@ def read_space(space_id: str) -> dict[str, Any]:
     return data
 
 
+def read_space_detail(space_id: str) -> dict[str, Any]:
+    """Return safe metadata for detail/list APIs without widget bodies."""
+    space = read_space(space_id)
+    detail = {
+        "schema_version": space.get("schema_version", SCHEMA_VERSION),
+        "space_id": space.get("space_id"),
+        "name": space.get("name") or space.get("space_id"),
+        "description": space.get("description", ""),
+        "agent_instructions": space.get("agent_instructions", ""),
+        "template": space.get("template", "blank"),
+        "created_at": space.get("created_at"),
+        "updated_at": space.get("updated_at"),
+        "layout": space.get("layout") if isinstance(space.get("layout"), dict) else {},
+        "revision_event_id": space.get("revision_event_id"),
+        "revision_events": [event_id for event_id in (space.get("revision_events") or []) if _event_id_is_safe(event_id)],
+        "recovery": {"safe_mode_available": True},
+        "widgets": [],
+    }
+    widgets = space.get("widgets") or []
+    if isinstance(widgets, list):
+        detail["widgets"] = [_widget_summary(widget) for widget in widgets if isinstance(widget, dict)]
+    return detail
+
+
 def list_revision_events(space_id: str, limit: int = 20) -> list[dict[str, Any]]:
     """Return newest-first revision event metadata for a space.
 

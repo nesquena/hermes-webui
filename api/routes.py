@@ -977,7 +977,7 @@ def handle_get(handler, parsed) -> bool:
         if not space_id:
             return bad(handler, "Missing space_id")
         try:
-            return j(handler, {"space": capy_spaces.read_space(space_id)})
+            return j(handler, {"space": capy_spaces.read_space_detail(space_id)})
         except ValueError as e:
             return bad(handler, str(e))
         except FileNotFoundError:
