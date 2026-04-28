@@ -2207,31 +2207,67 @@ function renderCompressionUi(){
   el.style.display='none';
 }
 // Session render cache: avoids full markdown+DOM rebuild when switching back
-// to a session that was already rendered with the same message count.
-// Keyed by session_id. Only used on cross-session navigation, never for
-// in-session updates (new messages, edits, stream events).
+// to a session that was already rendered.  Keyed by session_id.  Only used on
+// cross-session navigation, never for in-session updates (new messages, edits,
+// stream events).
 //
-// Known limitation: cache key is session_id + message count. Edits and retries
-// that mutate message content without changing the count will serve stale HTML
-// on back-navigation until the user triggers an in-session update. Acceptable
-// for the common read-only back-navigation case; not suitable as a general cache.
+// Cache value shape: {node, count, lastKey} where `node` is a deep clone of
+// the rendered #msgInner (Element, not Fragment — clones cheaply via
+// cloneNode(true) and avoids the HTML-string serialize/parse round-trip).
+// Invalidation key = (msgCount, lastKey) — see _sessionCacheKey() below.
 const _sessionHtmlCache=new Map();
 let _sessionHtmlCacheSid=null; // session_id currently rendered in the DOM
+const _SESSION_CACHE_MAX=16;
+
+// Cheap fingerprint of a session for cache invalidation.  We hash *only* the
+// last message (count change is the dominant invalidation; edit-without-count
+// only mutates the most recent turn in practice — branching/forking writes a
+// new sid).  O(1) cost per session switch vs O(N) for a full hash.
+function _sessionCacheKey(messages){
+  const n=Array.isArray(messages)?messages.length:0;
+  if(!n) return {count:0,lastKey:''};
+  const m=messages[n-1]||{};
+  let txt='';
+  const c=m.content;
+  if(typeof c==='string') txt=c;
+  else if(Array.isArray(c)){
+    for(const p of c){
+      if(!p) continue;
+      txt+=(p.text||p.thinking||p.reasoning||p.content||'');
+    }
+  }
+  // Include role (so a truncated tail with a different role invalidates) and
+  // a small content fingerprint (length + head + tail) — enough to catch
+  // edits/retries without scanning the whole string.
+  const head=txt.length>32?txt.slice(0,32):txt;
+  const tail=txt.length>32?txt.slice(-32):'';
+  return {count:n,lastKey:`${m.role||'?'}|${txt.length}|${head}|${tail}`};
+}
 
 function renderMessages(){
   const inner=$('msgInner');
   const sid=S.session?S.session.session_id:null;
   const msgCount=S.messages.length;
 
-  // Fast path: switching back to a previously rendered session with same count.
-  // Guard: sid !== _sessionHtmlCacheSid ensures in-session updates (edits,
-  // new messages, tool_complete) always get a fresh rebuild.
-  // Skip cache if this session is still streaming — the live smd parser writes
-  // into a DOM node inside the cached subtree; serving cached HTML detaches it.
+  // Fast path: switching back to a previously rendered session.  Cache is
+  // invalidated by both message count AND a fingerprint of the last message,
+  // so edits/retries on the most recent turn no longer serve stale DOM.
+  // Skip cache while this session is still streaming — the live smd parser
+  // writes into a DOM node inside the cached subtree; serving cached HTML
+  // would detach it.
   if(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]){
     const cached=_sessionHtmlCache.get(sid);
-    if(cached&&cached.msgCount===msgCount){
-      inner.innerHTML=cached.html;
+    const k=_sessionCacheKey(S.messages);
+    if(cached&&cached.count===k.count&&cached.lastKey===k.lastKey){
+      // Cloning the cached node keeps the cache entry pristine across
+      // multiple back-and-forth switches — the live DOM never mutates the
+      // stored copy.  cloneNode(true) is dramatically faster than
+      // re-parsing innerHTML for sessions with many code blocks.
+      const clone=cached.node.cloneNode(true);
+      inner.replaceChildren(...clone.childNodes);
+      // LRU touch: re-insert moves to most-recently-used position.
+      _sessionHtmlCache.delete(sid);
+      _sessionHtmlCache.set(sid,cached);
       _sessionHtmlCacheSid=sid;
       if(S.activeStreamId){scrollIfPinned();}else{scrollToBottom();}
       requestAnimationFrame(()=>{highlightCode();addCopyButtons();renderMermaidBlocks();renderKatexBlocks();});
@@ -2595,13 +2631,18 @@ function renderMessages(){
     loadTodos();
   }
   // Populate session cache so switching back here skips a full rebuild.
+  // We clone the live #msgInner: subsequent switches restore from a fresh
+  // clone so the cache copy never gets mutated by the active DOM.
   _sessionHtmlCacheSid=sid;
   if(sid){
-    const _html=inner.innerHTML;
-    // Only cache sessions with <300KB rendered HTML; evict oldest beyond 8 sessions.
-    if(_html.length<300_000){
-      _sessionHtmlCache.set(sid,{html:_html,msgCount});
-      if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
+    // Skip caching if the rendered DOM is huge — keeps memory bounded and
+    // avoids long cloneNode times that would defeat the win.
+    if(inner.childElementCount<=2000 && inner.innerHTML.length<300_000){
+      const k=_sessionCacheKey(S.messages);
+      _sessionHtmlCache.set(sid,{node:inner.cloneNode(true),count:k.count,lastKey:k.lastKey});
+      while(_sessionHtmlCache.size>_SESSION_CACHE_MAX){
+        _sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);
+      }
     }
   }
 }
