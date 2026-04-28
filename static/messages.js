@@ -127,6 +127,7 @@ async function send(){
   if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
   startApprovalPolling(activeSid);
   startClarifyPolling(activeSid);
+  _fetchYoloState(activeSid);  // sync YOLO pill with backend state
   S.activeStreamId = null;  // will be set after stream starts
 
   // Set provisional title from user message immediately so session appears
@@ -1113,6 +1114,51 @@ function transcript(){
 
 function autoResize(){const el=$('msg');el.style.height='auto';el.style.height=Math.min(el.scrollHeight,200)+'px';updateSendBtn();}
 
+
+// ── YOLO mode state ──
+// Session-scoped; stored server-side in memory (tools/approval.py).
+// Lifecycle:
+//   • Page reload: state PERSISTS — _fetchYoloState() re-syncs from backend.
+//   • Cross-tab: state is SHARED — enabling YOLO in Tab A affects Tab B for
+//     the same session (both poll the same server-side flag).
+//   • Server restart: state is LOST — in-memory only, not persisted to disk.
+//   • Session switch: state resets — loadSession() clears _yoloEnabled and
+//     fetches the new session's state.
+let _yoloEnabled = false;
+
+async function _fetchYoloState(sid) {
+  try {
+    const data = await api('/api/session/yolo?session_id=' + encodeURIComponent(sid));
+    _yoloEnabled = !!data.yolo_enabled;
+    _updateYoloPill();
+  } catch (_) { /* ignore */ }
+}
+
+function _updateYoloPill() {
+  const pill = $('yoloPill');
+  if (!pill) return;
+  pill.style.display = _yoloEnabled ? '' : 'none';
+  if (_yoloEnabled) {
+    pill.title = t('yolo_pill_title_active');
+    pill.setAttribute('data-i18n-title', 'yolo_pill_title_active');
+  }
+  if (typeof applyLocaleToDOM === 'function') applyLocaleToDOM();
+}
+
+async function toggleYoloFromApproval() {
+  const sid = S.session && S.session.session_id;
+  if (!sid) return;
+  try {
+    await api('/api/session/yolo', {
+      method: 'POST',
+      body: JSON.stringify({ session_id: sid, enabled: true }),
+    });
+    _yoloEnabled = true;
+    _updateYoloPill();
+    hideApprovalCard(true);
+    showToast(t('yolo_enabled'));
+  } catch (e) { showToast('YOLO: ' + e.message); }
+}
 
 // ── Approval polling ──
 let _approvalPollTimer = null;

@@ -102,6 +102,7 @@ async function loadSession(sid){
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   _loadingSessionId = sid;
   stopApprovalPolling();hideApprovalCard();
+  _yoloEnabled=false;_updateYoloPill();
   if(typeof stopClarifyPolling==='function') stopClarifyPolling();
   if(typeof hideClarifyCard==='function') hideClarifyCard();
   // Show loading indicator immediately for responsiveness.
@@ -179,6 +180,7 @@ async function loadSession(sid){
     setBusy(true);setComposerStatus('');
     startApprovalPolling(sid);
     if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
+    if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
     S.activeStreamId=activeStreamId;
     const _cb=$('btnCancel');if(_cb&&activeStreamId)_cb.style.display='inline-flex';
     if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function'){
@@ -256,6 +258,7 @@ async function loadSession(sid){
       updateQueueBadge(sid);
       startApprovalPolling(sid);
       if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
+      if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
       if(typeof attachLiveStream==='function') attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
       else if(typeof watchInflightSession==='function') watchInflightSession(sid, activeStreamId);
     }else{
