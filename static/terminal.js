@@ -471,14 +471,19 @@ function collapseComposerTerminal(){
 
 function expandComposerTerminal(){
   if(!TERMINAL_UI.open)return;
+  const {panel}= _terminalEls();
   TERMINAL_UI.collapsed=false;
   clearTimeout(TERMINAL_UI.closeTimer);
+  if(panel)panel.classList.add('is-expanding-from-dock');
   _syncTerminalTranscriptSpace(true,{immediate:true});
   _setTerminalChromeState('expanded');
   _resetTerminalHeightForViewport();
   requestAnimationFrame(()=>{
     _fitTerminal();
     focusComposerTerminalInput();
+    setTimeout(()=>{
+      if(panel)panel.classList.remove('is-expanding-from-dock');
+    },120);
   });
   syncTerminalButton();
 }
@@ -506,7 +511,7 @@ async function closeComposerTerminal(sessionId,opts){
   }
   const {panel}= _terminalEls();
   if(panel){
-    panel.classList.remove('is-open','is-collapsed');
+    panel.classList.remove('is-open','is-collapsed','is-expanding-from-dock');
     _syncTerminalTranscriptSpace(false);
     clearTimeout(TERMINAL_UI.closeTimer);
     TERMINAL_UI.closeTimer=setTimeout(()=>{
