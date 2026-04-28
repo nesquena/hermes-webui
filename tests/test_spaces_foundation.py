@@ -257,6 +257,38 @@ def test_spaces_routes_create_list_get_and_recovery(monkeypatch, tmp_path):
     assert body["generated_widgets_rendered"] is False
 
 
+def test_spaces_get_route_returns_metadata_only_widgets(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Safe Detail"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "weather",
+            "kind": "markdown",
+            "title": "Weather",
+            "layout": {"x": 2, "y": 3, "w": 8, "h": 5},
+            "renderer": "<script>secret()</script>",
+            "html": "<img src=x onerror=stealSecret()>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    handled, status, body = _route_get(f"/api/spaces/get?space_id={created['space_id']}")
+
+    assert handled is None
+    assert status == 200
+    assert body["space"]["widgets"] == [
+        {"id": "weather", "kind": "markdown", "title": "Weather", "layout": {"x": 2, "y": 3, "w": 8, "h": 5, "minimized": False}}
+    ]
+    serialized = json.dumps(body).lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert "data" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "stealsecret" not in serialized
+    assert "<script" not in serialized
+
+
 def test_disabled_spaces_get_route_does_not_return_manifest_details(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Disabled Leak"})
