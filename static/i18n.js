@@ -1719,7 +1719,7 @@ const LOCALES = {
     cron_status_paused: 'paused',
     cron_status_error: 'error',
     cron_status_active: 'active',
-    cron_status_running: 'running\u2026',
+    cron_status_running: 'ejecutándose\u2026',
     cron_status_needs_attention: 'needs attention',
     cron_attention_desc: 'This recurring job has no next run time. The scheduler may have failed to compute its next run.',
     cron_attention_croniter_hint: 'The Gateway runtime may be missing the croniter package. Restart the Gateway with cron support, then resume this job.',
@@ -2264,6 +2264,7 @@ const LOCALES = {
     cron_skills_label: 'Fähigkeiten',
     cron_skills_placeholder: 'Fähigkeiten hinzufügen (optional)…',
     cron_skills_edit_hint: 'Die Fähigkeitenliste kann nach der Erstellung nicht bearbeitet werden.',
+    cron_status_running: 'läuft\u2026',
     // workspace form
     workspace_name_label: 'Name',
     workspace_name_placeholder: 'Optionaler Anzeigename',
