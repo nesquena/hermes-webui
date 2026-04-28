@@ -87,6 +87,7 @@ from api.helpers import (
     _sanitize_error,
     redact_session_data,
     _redact_text,
+    send_304,
 )
 
 # ── CSRF: validate Origin/Referer on POST ────────────────────────────────────
@@ -738,6 +739,31 @@ def handle_get(handler, parsed) -> bool:
             _t1 = _time.monotonic()
             s = get_session(sid, metadata_only=(not load_messages))
             _t2 = _time.monotonic()
+            # ── ETag / 304 fast path (Task 6) ──────────────────────────────
+            # Cheap weak ETag built from session fingerprint + request
+            # parameters that change response shape.  When client sends
+            # If-None-Match matching this, return 304 with empty body —
+            # skips JSON serialize, redact, gzip, and network bytes.
+            import hashlib as _hashlib
+            _etag_src = "|".join([
+                sid,
+                str(getattr(s, "updated_at", 0)),
+                str(len(getattr(s, "messages", []) or [])),
+                "m1" if load_messages else "m0",
+                "r1" if resolve_model else "r0",
+                f"t{tail_n}", f"s{since_idx}", f"l{limit_n}",
+            ])
+            _etag = 'W/"' + _hashlib.sha1(_etag_src.encode()).hexdigest()[:16] + '"'
+            _inm = handler.headers.get("If-None-Match", "") if hasattr(handler, "headers") else ""
+            if _inm and _inm.strip() == _etag:
+                send_304(handler, _etag)
+                if _debug_slow:
+                    logger.warning(
+                        "[SLOW] session_id=%s 304 etag-hit total=%.1fms",
+                        sid, (_time.monotonic()-_t0)*1000,
+                    )
+                return
+            _extra_headers = {"ETag": _etag, "Cache-Control": "no-cache"}
             effective_model = (
                 _resolve_effective_session_model_for_display(s)
                 if resolve_model
@@ -789,7 +815,7 @@ def handle_get(handler, parsed) -> bool:
                 raw["model"] = effective_model
             redact = redact_session_data(raw)
             _t5 = _time.monotonic()
-            resp = j(handler, {"session": redact})
+            resp = j(handler, {"session": redact}, extra_headers=_extra_headers)
             _t6 = _time.monotonic()
             if _debug_slow:
                 logger.warning(

@@ -83,13 +83,39 @@ def j(handler, payload, status: int=200, extra_headers: dict=None) -> None:
         handler.send_header('Content-Encoding', 'gzip')
 
     handler.send_header('Content-Length', str(len(body)))
-    handler.send_header('Cache-Control', 'no-store')
+    # Suppress the default no-store when the caller wants conditional caching
+    # (e.g. ETag/304 fast path on /api/session) — otherwise the browser
+    # never sends If-None-Match and the 304 path is dead.
+    has_cc_override = bool(extra_headers and any(
+        k.lower() == 'cache-control' for k in extra_headers
+    ))
+    if not has_cc_override:
+        handler.send_header('Cache-Control', 'no-store')
     _security_headers(handler)
     if extra_headers:
         for k, v in extra_headers.items():
             handler.send_header(k, v)
     handler.end_headers()
     handler.wfile.write(body)
+
+
+def send_304(handler, etag: str, extra_headers: dict | None = None) -> None:
+    """Send a 304 Not Modified with ETag (and optional extras).
+
+    Used by endpoints that support conditional GET (e.g. /api/session) to
+    short-circuit when the client's If-None-Match matches the current
+    fingerprint — saves serialization, gzip, and network bytes.
+    """
+    handler.send_response(304)
+    handler.send_header('ETag', etag)
+    handler.send_header('Cache-Control', 'no-cache')
+    _security_headers(handler)
+    if extra_headers:
+        for k, v in extra_headers.items():
+            if k.lower() in ('etag', 'cache-control'):
+                continue
+            handler.send_header(k, v)
+    handler.end_headers()
 
 
 def t(handler, payload, status: int=200, content_type: str='text/plain; charset=utf-8') -> None:

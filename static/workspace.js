@@ -1,13 +1,42 @@
+// ETag/304 client cache for read-only GETs (currently only /api/session*).
+// Map: full URL string → {etag, body}.  When the server returns 304 we
+// resurrect the cached body — no JSON parse, no network bytes.  Bounded to
+// 32 entries (LRU via Map insertion order) so a session-heavy user doesn't
+// leak memory.
+const _apiEtagCache = new Map();
+const _API_ETAG_MAX = 32;
+function _apiEtagEligible(url, opts) {
+  const method = (opts && opts.method) || 'GET';
+  if (method !== 'GET') return false;
+  // Only the heavy session endpoint benefits today — keep the surface tight
+  // so we don't accidentally serve stale data for endpoints whose ETag the
+  // server didn't think through.
+  return /\/api\/session(?:\?|$)/.test(url);
+}
 async function api(path,opts={}){
   // Strip leading slash so URL resolves relative to location.href (supports subpath mounts)
   const rel = path.startsWith('/') ? path.slice(1) : path;
   const url=new URL(rel,location.href);
+  const urlStr=url.href;
+  const etagable=_apiEtagEligible(urlStr, opts);
+  const cached=etagable?_apiEtagCache.get(urlStr):null;
   // Retry up to 2 times on network errors (e.g. stale keep-alive after long idle).
   // Server errors (4xx/5xx) are NOT retried — only connection failures.
   let lastErr;
   for(let attempt=0;attempt<3;attempt++){
     try{
-      const res=await fetch(url.href,{credentials:'include',headers:{'Content-Type':'application/json'},...opts});
+      const reqHeaders={'Content-Type':'application/json'};
+      if(cached) reqHeaders['If-None-Match']=cached.etag;
+      // Merge caller-supplied headers last so they can override.
+      const headers={...reqHeaders, ...((opts&&opts.headers)||{})};
+      const res=await fetch(url.href,{credentials:'include',...opts,headers});
+      // 304 fast path: the server says our cached copy is still valid.
+      // Re-insert to bump LRU position.
+      if(res.status===304 && cached){
+        _apiEtagCache.delete(urlStr);
+        _apiEtagCache.set(urlStr, cached);
+        return cached.body;
+      }
       if(!res.ok){
         // 401 means the auth session expired. Redirect to /login so the user can
         // re-authenticate. This is especially important for iOS PWA (standalone mode)
@@ -20,7 +49,18 @@ async function api(path,opts={}){
         catch(e){if(e instanceof SyntaxError)throw new Error(text);throw e;}
       }
       const ct=res.headers.get('content-type')||'';
-      return ct.includes('application/json')?res.json():res.text();
+      const body=ct.includes('application/json')?await res.json():await res.text();
+      // Cache the body keyed by ETag (if server provided one and url is eligible).
+      if(etagable){
+        const newEtag=res.headers.get('ETag')||res.headers.get('etag');
+        if(newEtag){
+          _apiEtagCache.set(urlStr, {etag:newEtag, body});
+          while(_apiEtagCache.size>_API_ETAG_MAX){
+            _apiEtagCache.delete(_apiEtagCache.keys().next().value);
+          }
+        }
+      }
+      return body;
     }catch(e){
       lastErr=e;
       // Only retry on network errors (TypeError from fetch), not on HTTP errors

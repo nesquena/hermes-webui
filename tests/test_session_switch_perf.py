@@ -168,13 +168,15 @@ def test_baseline_payload_is_gzipped(long_session):
     )
 
 
-def test_baseline_no_etag_today(long_session):
+def test_etag_present_after_task6(long_session):
     """
-    Document the current state: server does NOT emit ETag on /api/session.
-    Task 6 adds it; this test will be updated then.
+    After Task 6 (commit perf(api): gzip + ETag for /api/session) the
+    server must emit a weak ETag on /api/session so clients can use the
+    304 fast-path on session re-switch.  This test was originally a
+    baseline check ("no ETag today") and was flipped when Task 6 landed.
     """
     sid, _size = long_session
     _body, _elapsed, hdrs = _api_get_timed(f"/api/session?session_id={sid}")
-    assert "ETag" not in hdrs and "etag" not in hdrs, (
-        "ETag header found at baseline — did Task 6 land?"
-    )
+    etag = hdrs.get("ETag") or hdrs.get("Etag") or hdrs.get("etag")
+    assert etag, "Task 6 should have added an ETag header to /api/session"
+    assert etag.startswith('W/"'), f"ETag must be weak; got {etag!r}"
