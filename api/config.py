@@ -1423,7 +1423,11 @@ def get_available_models() -> dict:
                 detected_providers.add("anthropic")
             if all_env.get("OPENAI_API_KEY"):
                 detected_providers.add("openai")
-                detected_providers.add("openai-codex")  # same key authenticates both (#1189)
+                # openai-codex uses ChatGPT OAuth (not OPENAI_API_KEY) for its default endpoint.
+                # Detecting it here lets users who have both credentials configured find it in the
+                # picker without a manual config.yaml edit. Users without Codex OAuth will see
+                # picker entries but hit auth errors at inference time (#1189 known limitation).
+                detected_providers.add("openai-codex")
             if all_env.get("OPENROUTER_API_KEY"):
                 detected_providers.add("openrouter")
             if all_env.get("GOOGLE_API_KEY"):
