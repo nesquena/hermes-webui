@@ -466,8 +466,19 @@ function duplicateCurrentCron(){
   _cronPreFormDetail = { ...job };
   _editingCronId = null;
   _cronMode = 'create';
+  _cronIsDuplicate = true;
   _cronSelectedSkills = Array.isArray(job.skills) ? [...job.skills] : [];
-  const dupName = job.name ? job.name + ' (copy)' : '';
+  // Deduplicate name: append "(copy)", "(copy 2)", "(copy 3)" etc.
+  const baseName = job.name || '';
+  let dupName = baseName + ' (copy)';
+  if (_cronList && _cronList.length) {
+    const taken = new Set(_cronList.filter(j => j.name).map(j => j.name));
+    if (taken.has(dupName)) {
+      let n = 2;
+      while (taken.has(baseName + ' (copy ' + n + ')')) n++;
+      dupName = baseName + ' (copy ' + n + ')';
+    }
+  }
   _renderCronForm({
     name: dupName,
     schedule: job.schedule_display || (job.schedule && job.schedule.expression) || '',
@@ -495,6 +506,7 @@ async function deleteCurrentCron(){
 }
 
 let _cronSelectedSkills=[];
+let _cronIsDuplicate = false;
 let _cronSkillsCache=null;
 
 function openCronCreate(){
@@ -502,6 +514,7 @@ function openCronCreate(){
   _cronPreFormDetail = _currentCronDetail ? { ..._currentCronDetail } : null;
   _editingCronId = null;
   _cronMode = 'create';
+  _cronIsDuplicate = false;
   _cronSelectedSkills = [];
   _renderCronForm({ name:'', schedule:'', prompt:'', deliver:'local', isEdit:false });
   _cronSkillsCache = null;
@@ -667,10 +680,12 @@ async function saveCronForm(){
       return;
     }
     const body={schedule,prompt,deliver};
+    if(_cronIsDuplicate) body.enabled=false;
     if(name)body.name=name;
     if(_cronSelectedSkills.length)body.skills=_cronSelectedSkills;
     const res = await api('/api/crons/create',{method:'POST',body:JSON.stringify(body)});
     _cronPreFormDetail = null;
+    _cronIsDuplicate = false;
     showToast(t('cron_job_created'));
     await loadCrons();
     const newId = res && (res.id || (res.job && res.job.id));
