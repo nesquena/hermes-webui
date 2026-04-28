@@ -4,14 +4,36 @@ function _markSessionViewed(sid, messageCount) {
   _setSessionViewedCount(sid, next);
 }
 
-function _isSessionActivelyViewed(sid) {
+function _isDocumentVisibleAndFocused() {
+  if(typeof document!=='undefined' && document.visibilityState && document.visibilityState!=='visible') return false;
+  if(typeof document!=='undefined' && typeof document.hasFocus==='function' && !document.hasFocus()) return false;
+  return true;
+}
+
+function _isSessionCurrentPane(sid) {
   if(!sid || !S.session || S.session.session_id!==sid) return false;
   // During session switching, S.session still points at the previous row until
-  // the next metadata request resolves. Treat that in-flight switch as
-  // background so a just-finished old stream still gets an unread marker.
+  // the next metadata request resolves. Do not let a just-finished old stream
+  // update the chat pane while the user is moving to another session.
   if(typeof _loadingSessionId!=='undefined' && _loadingSessionId && _loadingSessionId!==sid) return false;
   return true;
 }
+
+function _isSessionActivelyViewed(sid) {
+  if(!_isSessionCurrentPane(sid)) return false;
+  if(!_isDocumentVisibleAndFocused()) return false;
+  return true;
+}
+
+function _markActiveSessionViewedOnReturn() {
+  if(!_isDocumentVisibleAndFocused() || !S.session || !S.session.session_id) return;
+  _markSessionViewed(S.session.session_id, S.session.message_count || (S.messages&&S.messages.length) || 0);
+  if(typeof _clearSessionCompletionUnread==='function') _clearSessionCompletionUnread(S.session.session_id);
+  if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+}
+
+document.addEventListener('visibilitychange', _markActiveSessionViewedOnReturn);
+window.addEventListener('focus', _markActiveSessionViewedOnReturn);
 
 async function send(){
   const text=$('msg').value.trim();
@@ -750,6 +772,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _smdEndParser();
       }
       const d=JSON.parse(e.data);
+      const isActiveSession=_isSessionCurrentPane(activeSid);
       const isSessionViewed=_isSessionActivelyViewed(activeSid);
       if(!isSessionViewed && typeof _markSessionCompletionUnread==='function'){
         _markSessionCompletionUnread(activeSid, d.session&&d.session.message_count);
@@ -760,11 +783,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       stopClarifyPolling();
       if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);
       if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true);
-      if(isSessionViewed){
+      if(isActiveSession){
         S.activeStreamId=null;
         const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
       }
-      if(isSessionViewed){
+      if(isActiveSession){
         // Capture previous session totals BEFORE overwriting S.session with the new
         // cumulative values from the done event. prevIn/prevOut are the totals as of
         // the start of this turn; curIn/curOut are the full post-turn totals — the
@@ -819,7 +842,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         S.busy=false;
         // No-reply guard (#373): if agent returned nothing, show inline error
         if(!S.messages.some(m=>m.role==='assistant'&&String(m.content||'').trim())&&!assistantText){removeThinking();S.messages.push({role:'assistant',content:'**No response received.** Check your API key and model selection.'});}
-        _markSessionViewed(activeSid, d.session.message_count ?? S.messages.length);
+        if(isSessionViewed) _markSessionViewed(activeSid, d.session.message_count ?? S.messages.length);
         syncTopbar();renderMessages();loadDir('.');
       }
       _queueDrainSid=activeSid;renderSessionList();setBusy(false);setStatus('');

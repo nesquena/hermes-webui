@@ -6,8 +6,11 @@
 - **Background session completion unread dots** — sidebar unread dots no longer
   depend solely on `message_count` increasing after a stream finishes. Background
   `done` events now set an explicit unread-completion marker, including
-  session-switch races where the old session is no longer the user's intended
-  view, and the marker clears only when that session is opened. (`static/sessions.js`,
+  session-switch races and hidden/unfocused tabs where the old session is no
+  longer being viewed. Session-list polling also marks unread when a session the
+  page previously saw streaming later reports stopped, and the marker clears
+  only when that session is opened or the user returns to the active completed
+  session. (`static/sessions.js`,
   `static/messages.js`, `tests/test_issue856_background_completion_unread.py`)
 - **Auto-title generic fallback** — when the auxiliary title-generation call
   fails and the local fallback can only produce the generic label

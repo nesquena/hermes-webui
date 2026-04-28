@@ -19,6 +19,7 @@ const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
 const SESSION_COMPLETION_UNREAD_KEY = 'hermes-session-completion-unread';
 let _sessionViewedCounts = null;
 let _sessionCompletionUnread = null;
+const _sessionStreamingById = new Map();
 
 function _getSessionViewedCounts() {
   if (_sessionViewedCounts !== null) return _sessionViewedCounts;
@@ -97,6 +98,33 @@ function _hasUnreadForSession(s) {
   }
   if (!Number.isFinite(s.message_count)) return false;
   return s.message_count > Number(counts[s.session_id] || 0);
+}
+
+function _isSessionActivelyViewedForList(sid) {
+  if (!sid || !S.session || S.session.session_id !== sid) return false;
+  if (typeof _loadingSessionId !== 'undefined' && _loadingSessionId && _loadingSessionId !== sid) return false;
+  if (typeof document !== 'undefined' && document.visibilityState && document.visibilityState !== 'visible') return false;
+  if (typeof document !== 'undefined' && typeof document.hasFocus === 'function' && !document.hasFocus()) return false;
+  return true;
+}
+
+function _markPollingCompletionUnreadTransitions(sessions) {
+  if (!Array.isArray(sessions)) return;
+  const seen = new Set();
+  for (const s of sessions) {
+    if (!s || !s.session_id) continue;
+    const sid = s.session_id;
+    seen.add(sid);
+    const wasStreaming = _sessionStreamingById.get(sid);
+    const isStreaming = Boolean(s.is_streaming);
+    if (wasStreaming === true && !isStreaming && !_isSessionActivelyViewedForList(sid)) {
+      _markSessionCompletionUnread(sid, s.message_count);
+    }
+    _sessionStreamingById.set(sid, isStreaming);
+  }
+  for (const sid of Array.from(_sessionStreamingById.keys())) {
+    if (!seen.has(sid)) _sessionStreamingById.delete(sid);
+  }
 }
 
 async function newSession(flash){
@@ -645,6 +673,7 @@ async function renderSessionList(){
     if (typeof sessData.server_tz === 'string') {
       _serverTz = sessData.server_tz;
     }
+    _markPollingCompletionUnreadTransitions(_allSessions);
     const isStreaming = _allSessions.some(s => Boolean(s && s.is_streaming));
     if (isStreaming) {
       startStreamingPoll();
