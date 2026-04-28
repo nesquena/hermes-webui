@@ -2542,7 +2542,7 @@ async function loadProvidersPanel(){
   if(!list) return;
   try{
     const data=await api('/api/providers');
-    const providers=(data.providers||[]).filter(p=>p.configurable);
+    const providers=(data.providers||[]).filter(p=>p.configurable||p.is_oauth);
     list.innerHTML='';
     _providerCardEls.clear();
     if(providers.length===0){
@@ -2564,11 +2564,15 @@ function _buildProviderCard(p){
   const card=document.createElement('div');
   card.className='provider-card';
   card.dataset.provider=p.id;
-  const isOauth=p.key_source==='oauth';
+  // Use the is_oauth flag from the backend — it reflects _OAUTH_PROVIDERS in providers.py.
+  // key_source can be 'oauth' (hermes auth), 'config_yaml' (token in config.yaml), or 'none'.
+  const isOauth=p.is_oauth===true;
   const modelCount=Array.isArray(p.models)?p.models.length:0;
-  const sourceLabel=isOauth
+  const sourceLabel=p.key_source==='oauth'
     ? t('providers_status_oauth')
-    : (p.has_key ? t('providers_status_api_key') : t('providers_status_not_configured_label'));
+    : p.key_source==='config_yaml'
+      ? t('providers_status_configured')||'Configured'
+      : (p.has_key ? t('providers_status_api_key') : t('providers_status_not_configured_label'));
   const metaParts=[];
   if(modelCount>0) metaParts.push(modelCount+(modelCount===1?' model':' models'));
   metaParts.push(sourceLabel);
@@ -2594,7 +2598,17 @@ function _buildProviderCard(p){
   if(isOauth){
     const hint=document.createElement('div');
     hint.className='provider-card-hint';
-    hint.textContent=t('providers_oauth_hint');
+    if(p.key_source==='config_yaml'){
+      hint.textContent=t('providers_oauth_config_yaml_hint')||'Token configured via config.yaml. To update, edit the providers section in your config.yaml or run hermes auth.';
+    } else if(p.auth_error){
+      hint.textContent=p.auth_error;
+      hint.style.color='var(--accent)';
+    } else if(p.has_key){
+      hint.textContent=t('providers_oauth_hint');
+    } else {
+      hint.textContent=t('providers_oauth_not_configured_hint')||'Not authenticated. Run hermes auth in the terminal to configure this provider.';
+      hint.style.color='var(--muted)';
+    }
     body.appendChild(hint);
     card.appendChild(body);
     header.addEventListener('click',()=>card.classList.toggle('open'));

@@ -269,19 +269,33 @@ def get_providers() -> dict[str, Any]:
 
         # Determine key source
         key_source = "none"
+        auth_error = None
         if is_oauth:
             key_source = "oauth"
-            # Check if actually authenticated via hermes_cli
+            # Check if actually authenticated via hermes_cli.
+            # IMPORTANT: do not unconditionally overwrite has_key from _provider_has_key().
+            # A token in config.yaml is a valid credential even when get_auth_status()
+            # returns logged_in=False (e.g. token not in the hermes credential pool,
+            # or refresh token consumed by native Codex CLI / VS Code extension).
             try:
                 from hermes_cli.auth import get_auth_status as _gas
                 status = _gas(pid)
                 if isinstance(status, dict) and status.get("logged_in"):
                     has_key = True
                     key_source = status.get("key_source", "oauth")
+                elif has_key:
+                    # _provider_has_key() found a token in config.yaml — respect it
+                    # rather than hiding a working credential from the Settings UI.
+                    key_source = "config_yaml"
+                    auth_error = status.get("error") if isinstance(status, dict) else None
                 else:
                     has_key = False
+                    auth_error = status.get("error") if isinstance(status, dict) else None
             except Exception:
-                has_key = False
+                # Import failed or auth check errored — don't override a known-good
+                # key just because the hermes_cli auth module is unavailable.
+                logger.debug("hermes_cli auth check failed for %s", pid, exc_info=True)
+                # keep has_key from _provider_has_key()
         elif has_key:
             env_var = _PROVIDER_ENV_VAR.get(pid)
             if env_var:
@@ -312,7 +326,9 @@ def get_providers() -> dict[str, Any]:
             "display_name": display_name,
             "has_key": has_key,
             "configurable": not is_oauth and pid in _PROVIDER_ENV_VAR,
+            "is_oauth": is_oauth,
             "key_source": key_source,
+            "auth_error": auth_error,
             "models": models,
         })
 
