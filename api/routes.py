@@ -1553,6 +1553,11 @@ def handle_post(handler, parsed) -> bool:
             # process_wide=False: don't mutate the process-global _active_profile.
             # Per-client profile is managed via cookie + thread-local (#798).
             result = switch_profile(name, process_wide=False)
+            # Invalidate the models cache so the very next /api/models request
+            # rebuilds from the new profile's config.yaml rather than returning
+            # the old profile's cached model list (#1200 — profile-switch model bug).
+            from api.config import invalidate_models_cache
+            invalidate_models_cache()
             return j(handler, result, extra_headers={
                 'Set-Cookie': build_profile_cookie(name),
             })
