@@ -1423,6 +1423,7 @@ def get_available_models() -> dict:
                 detected_providers.add("anthropic")
             if all_env.get("OPENAI_API_KEY"):
                 detected_providers.add("openai")
+                detected_providers.add("openai-codex")  # same key authenticates both (#1189)
             if all_env.get("OPENROUTER_API_KEY"):
                 detected_providers.add("openrouter")
             if all_env.get("GOOGLE_API_KEY"):
