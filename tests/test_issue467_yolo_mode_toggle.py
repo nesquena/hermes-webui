@@ -6,7 +6,7 @@ Covers:
 - /yolo slash command registration in commands.js
 - YOLO pill HTML element presence in index.html
 - Skip-all button presence in approval card
-- CSS classes for .yolo-pill and .approval-skip-all
+- CSS classes for .yolo-pill and .approval-btn.yolo
 - i18n keys present in all 6 locales
 """
 import os
@@ -169,7 +169,7 @@ class TestYoloCSS:
         assert "#f59e0b" in style_css
 
     def test_approval_skip_all_class(self, style_css):
-        assert ".approval-skip-all{" in style_css or ".approval-skip-all {" in style_css
+        assert ".approval-btn.yolo{" in style_css or ".approval-btn.yolo {" in style_css
 
 
 class TestYoloI18n:
