@@ -1818,6 +1818,26 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
   background:color-mix(in srgb, var(--error) 10%, transparent);
 }
 
+/* ── Provider model tags ── */
+.provider-card-models{
+  margin-bottom:10px;
+  display:flex;flex-direction:column;gap:6px;
+}
+.provider-card-model-tags{
+  display:flex;flex-wrap:wrap;gap:4px;
+}
+.provider-card-model-tag{
+  display:inline-block;
+  padding:2px 8px;
+  font-size:10.5px;font-family:ui-monospace,SFMono-Regular,\"SF Mono\",Menlo,Consolas,monospace;
+  color:var(--muted);
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:5px;
+  line-height:1.5;
+  user-select:all;
+}
+
 /* ── Session pin indicator (inline, only when pinned) ── */
 .session-pin-indicator{
   flex-shrink:0;

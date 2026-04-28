@@ -2636,6 +2636,26 @@ function _buildProviderCard(p){
   field.appendChild(row);
   body.appendChild(field);
 
+  // Model list — show when provider has known models
+  if(modelCount>0){
+    const modelSection=document.createElement('div');
+    modelSection.className='provider-card-models';
+    const modelLabel=document.createElement('div');
+    modelLabel.className='provider-card-label';
+    modelLabel.textContent='Models';
+    modelSection.appendChild(modelLabel);
+    const modelList=document.createElement('div');
+    modelList.className='provider-card-model-tags';
+    for(const m of p.models){
+      const tag=document.createElement('span');
+      tag.className='provider-card-model-tag';
+      tag.textContent=m.id||m.label||m;
+      modelList.appendChild(tag);
+    }
+    modelSection.appendChild(modelList);
+    body.appendChild(modelSection);
+  }
+
   // Refresh models for this provider
   const refreshRow=document.createElement('div');
   refreshRow.className='provider-card-row';

@@ -260,6 +260,36 @@ def get_providers() -> dict[str, Any]:
             "models": models,
         })
 
+    # Scan custom_providers from config.yaml (e.g. glmcode, timicc)
+    custom_providers_cfg = cfg.get("custom_providers", [])
+    if isinstance(custom_providers_cfg, list):
+        for cp in custom_providers_cfg:
+            if not isinstance(cp, dict) or not cp.get("name"):
+                continue
+            cp_name = str(cp["name"]).strip()
+            cp_id = f"custom:{cp_name}"
+            # Collect models from `models` list or `model` single
+            cp_models = []
+            if isinstance(cp.get("models"), list):
+                cp_models = [{"id": str(m), "label": str(m)} for m in cp["models"]]
+            elif cp.get("model"):
+                cp_models = [{"id": cp["model"], "label": cp["model"]}]
+            # Check for env var reference (${VAR_NAME} pattern)
+            cp_api_key = str(cp.get("api_key") or "")
+            cp_has_key = bool(cp_api_key.strip())
+            # Replace env var reference to check actual value
+            if cp_api_key.startswith("${") and cp_api_key.endswith("}"):
+                env_var = cp_api_key[2:-1]
+                cp_has_key = bool(os.getenv(env_var, "").strip())
+            providers.append({
+                "id": cp_id,
+                "display_name": cp_name,
+                "has_key": cp_has_key,
+                "configurable": False,  # custom providers managed via config.yaml
+                "key_source": "config_yaml" if cp_has_key else "none",
+                "models": cp_models,
+            })
+
     # Determine active provider
     active_provider = None
     model_cfg = cfg.get("model", {})
