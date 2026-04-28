@@ -226,20 +226,20 @@ class TestDeepSeekV4Models:
     """Verify DeepSeek V4 models are in the model lists, V3 is removed."""
 
     def test_v4_models_in_provider_models(self):
-        """_PROVIDER_MODELS['deepseek'] should contain v4-flash and v4-pro only."""
+        """_PROVIDER_MODELS['deepseek'] should contain v4 and legacy v3 entries."""
         from api.config import _PROVIDER_MODELS
         ds_models = _PROVIDER_MODELS.get("deepseek", [])
         ids = {m["id"] for m in ds_models}
 
-        assert "deepseek-v4-flash" in ids, f"v4-flash missing from deepseek models: {ids}"
-        assert "deepseek-v4-pro" in ids, f"v4-pro missing from deepseek models: {ids}"
+        assert "deepseek-v4-flash" in ids, f"v4-flash missing: {ids}"
+        assert "deepseek-v4-pro" in ids, f"v4-pro missing: {ids}"
 
-        # V3 / legacy models should be gone
-        assert "deepseek-chat-v3-0324" not in ids, (
-            f"deprecated V3 should not be in model list: {ids}"
+        # Legacy models still present (deprecated 2026-07-24, not yet removed)
+        assert "deepseek-chat-v3-0324" in ids, (
+            f"V3 legacy should remain until deprecation date: {ids}"
         )
-        assert "deepseek-reasoner" not in ids, (
-            f"deprecated reasoner should not be in model list: {ids}"
+        assert "deepseek-reasoner" in ids, (
+            f"Reasoner legacy should remain until deprecation date: {ids}"
         )
 
     def test_zai_models_include_glm_series(self):
@@ -265,7 +265,7 @@ class TestDeepSeekV4Models:
         assert zai["label"] == "Z.AI / GLM (智谱)"
         assert zai["env_var"] == "GLM_API_KEY"
         assert zai["default_model"] == "glm-5.1"
-        assert zai["default_base_url"] == "https://open.bigmodel.cn/api/coding/paas/v4"
+        assert zai["default_base_url"] == "https://open.bigmodel.cn/api/paas/v4"
 
     def test_deepseek_onboarding_default_is_v4(self):
         """DeepSeek onboarding default should be v4-flash, not V3."""

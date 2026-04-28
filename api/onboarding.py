@@ -111,7 +111,7 @@ _SUPPORTED_PROVIDER_SETUPS = {
         "label": "Z.AI / GLM (智谱)",
         "env_var": "GLM_API_KEY",
         "default_model": "glm-5.1",
-        "default_base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+        "default_base_url": "https://open.bigmodel.cn/api/paas/v4",
         "requires_base_url": False,
         "models": list(_PROVIDER_MODELS.get("zai", [])),
         "category": "specialized",
