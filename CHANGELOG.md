@@ -79,7 +79,7 @@
   `resolve_trusted_workspace` and `validate_workspace_to_add` now correctly trusts any
   path under `Path.home()` regardless of where the home directory lives on disk.
   (`api/workspace.py`) (by @frap129, PR #1199)
-## v0.50.236
+## v0.50.236 — 2026-04-28
 
 ### Bug fixes
 - **fix(providers): OAuth provider cards now show "Configured" badge when token is via config.yaml** — `get_providers()` was unconditionally overwriting `has_key=True` (from `_provider_has_key()`) with `has_key=False` when `get_auth_status()` returned `logged_in=False`, discarding valid working tokens in `config.yaml`. Also: the Settings panel was filtering out all OAuth providers entirely (`filter(p=>p.configurable)` — OAuth providers always have `configurable=False`). Fixes surfaced the actionable auth error string (e.g. "refresh token consumed by Codex CLI") in the provider card body. (#1202)
