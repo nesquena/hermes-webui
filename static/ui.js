@@ -3027,12 +3027,17 @@ let _mermaidLoading=false;
 let _mermaidReady=false;
 
 function loadDiffInline(){
+  const DIFF_MAX_SIZE=512*1024; // 512 KB cap for inline diff rendering
   document.querySelectorAll('.diff-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
     fetch('api/media?path='+encodeURIComponent(path))
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
+        if(text.length>DIFF_MAX_SIZE){
+          el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('diff_too_large')}</span></div>`;
+          return;
+        }
         const lines=text.split('\n').map(line=>{
           const e=esc(line);
           if(e.startsWith('@@')) return `<span class="diff-line diff-hunk">${e}</span>`;
@@ -3043,7 +3048,7 @@ function loadDiffInline(){
         el.outerHTML=`<div class="diff-inline"><div class="pre-header">${esc(path.split('/').pop())}</div><pre class="diff-block"><code>${lines}</code></pre></div>`;
       })
       .catch(()=>{
-        el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}</div>`;
+        el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('diff_error')}</span></div>`;
       });
   });
 }

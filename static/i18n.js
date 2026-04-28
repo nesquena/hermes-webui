@@ -27,6 +27,8 @@ const LOCALES = {
     copy_failed: 'Copy failed',
 
     diff_loading: 'Loading diff',
+    diff_error: 'Could not load patch file',
+    diff_too_large: 'Patch file too large to display inline',
     you: 'You',
     thinking: 'Thinking',
     expand_all: 'Expand all',
@@ -699,6 +701,8 @@ const LOCALES = {
     copy_failed: '\u041e\u0448\u0438\u0431\u043a\u0430 \u043a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f',
 
     diff_loading: 'Загрузка diff',
+    diff_error: 'Не удалось загрузить файл патча',
+    diff_too_large: 'Файл патча слишком большой для отображения',
     you: 'Вы',
     thinking: 'Думаю',
     expand_all: 'Развернуть всё',
@@ -1320,6 +1324,8 @@ const LOCALES = {
     copy_failed: 'Error al copiar',
 
     diff_loading: 'Cargando diff',
+    diff_error: 'No se pudo cargar el archivo de parche',
+    diff_too_large: 'Archivo de parche demasiado grande para mostrar',
     you: 'Tú',
     thinking: 'Pensando',
     expand_all: 'Expandir todo',
@@ -1933,6 +1939,8 @@ const LOCALES = {
     copy_failed: 'Kopieren fehlgeschlagen',
 
     diff_loading: 'Lade Diff',
+    diff_error: 'Patch-Datei konnte nicht geladen werden',
+    diff_too_large: 'Patch-Datei zu groß für Inline-Anzeige',
     you: 'Du',
     thinking: 'Nachdenken',
     expand_all: 'Alle ausklappen',
@@ -2320,6 +2328,8 @@ const LOCALES = {
     copy_failed: '\u590d\u5236\u5931\u8d25',
 
     diff_loading: '加载 diff',
+    diff_error: '无法加载 patch 文件',
+    diff_too_large: 'Patch 文件过大，无法内联显示',
     you: '\u4f60',
     thinking: '\u601d\u8003\u8fc7\u7a0b',
     expand_all: '\u5168\u90e8\u5c55\u5f00',
@@ -2931,6 +2941,8 @@ const LOCALES = {
     copy_failed: '\u8907\u88fd\u5931\u6557',
 
     diff_loading: '載入 diff',
+    diff_error: '無法載入 patch 檔案',
+    diff_too_large: 'Patch 檔案過大，無法內聯顯示',
     you: '\u4f60',
     thinking: '\u601d\u8003\u904e\u7a0b',
     expand_all: '\u5168\u90e8\u5c55\u958b',
@@ -3591,6 +3603,8 @@ const LOCALES = {
     copy_failed: '복사 실패',
 
     diff_loading: 'diff 불러오는 중',
+    diff_error: '패치 파일을 로드할 수 없습니다',
+    diff_too_large: '패치 파일이 너무 커서 인라인으로 표시할 수 없습니다',
     you: '나',
     thinking: '생각 중',
     expand_all: '모두 펼치기',
