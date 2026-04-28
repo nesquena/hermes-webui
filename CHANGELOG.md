@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Fixed
+- **Mobile busy-input primary button** — the composer now uses one stateful
+  primary action: red Stop while busy with no draft, normal Queue/Steer/Interrupt
+  affordances while busy with follow-up text/files, and Send while idle. This
+  keeps touch-keyboard users able to queue/interrupt/steer without showing a
+  contradictory separate stop-only control. (`static/ui.js`, `static/boot.js`,
+  `static/style.css`, `tests/test_1062_busy_input_modes.py`)
 - **Auto-title generic fallback** — when the auxiliary title-generation call
   fails and the local fallback can only produce the generic label
   `Conversation topic`, the WebUI now keeps the existing provisional title

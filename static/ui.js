@@ -1188,22 +1188,87 @@ function unlockComposerForClarify(){
   updateSendBtn();
 }
 
+function _composerHasContent(){
+  const msg=$('msg');
+  return !!((msg&&msg.value.trim().length>0)||S.pendingFiles.length>0);
+}
+
+function getComposerPrimaryAction(){
+  const msg=$('msg');
+  const hasContent=_composerHasContent();
+  const locked=!!(msg&&msg.disabled);
+  if(locked) return 'disabled';
+  const compressionRunning=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
+  const isBusy=!!S.busy||compressionRunning;
+  if(!isBusy) return hasContent?'send':'disabled';
+  if(!hasContent){
+    if(S.activeStreamId&&typeof cancelStream==='function') return 'stop';
+    return 'disabled';
+  }
+  const busyMode=window._busyInputMode||'queue';
+  if(busyMode==='steer'){
+    if(S.activeStreamId&&typeof _trySteer==='function') return 'steer';
+    return 'queue';
+  }
+  if(busyMode==='interrupt'){
+    if(S.activeStreamId&&typeof cancelStream==='function') return 'interrupt';
+    return 'queue';
+  }
+  return 'queue';
+}
+
+function _setComposerPrimaryButtonIcon(btn,action){
+  const icons={
+    send:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>',
+    queue:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/><circle cx="18" cy="18" r="3" stroke-width="2"/></svg>',
+    interrupt:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h11"/><polyline points="11 7 16 12 11 17"/><path d="M19 5v14"/></svg>',
+    steer:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h10"/><path d="M10 6l6 6-6 6"/><path d="M18 5v5h-5"/><path d="M18 19v-5h-5"/></svg>',
+    stop:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"></rect></svg>',
+    disabled:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>'
+  };
+  const next=icons[action]||icons.send;
+  if(btn.innerHTML!==next) btn.innerHTML=next;
+}
+
 function updateSendBtn(){
   const btn=$('btnSend');
   if(!btn) return;
-  const msg=$('msg');
-  const hasContent=msg&&msg.value.trim().length>0||S.pendingFiles.length>0;
-  const canSend=hasContent&&!S.busy&&!(msg&&msg.disabled);
-  // Hide while busy (cancel button takes its place); show otherwise
-  btn.style.display=S.busy?'none':'';
-  btn.disabled=!canSend;
-  if(canSend&&!btn.classList.contains('visible')){
+  const action=getComposerPrimaryAction();
+  btn.dataset.action=action;
+  btn.classList.toggle('stop',action==='stop');
+  btn.classList.toggle('queue',action==='queue');
+  btn.classList.toggle('interrupt',action==='interrupt');
+  btn.classList.toggle('steer',action==='steer');
+  btn.title={send:'Send message',queue:'Queue message',interrupt:'Interrupt and send',steer:'Steer current response',stop:'Stop generation',disabled:'Send message'}[action]||'Send message';
+  btn.setAttribute('aria-label',btn.title);
+  _setComposerPrimaryButtonIcon(btn,action);
+  // Single primary action button: while busy/no-draft it becomes the red Stop
+  // action; while busy with a draft it reflects queue/interrupt/steer.
+  btn.style.display='';
+  btn.disabled=action==='disabled';
+  if(action!=='disabled'&&!btn.classList.contains('visible')){
     btn.classList.remove('visible');
     requestAnimationFrame(()=>btn.classList.add('visible'));
-  } else if(!canSend){
+  } else if(action==='disabled'){
     btn.classList.remove('visible');
   }
 }
+
+async function handleComposerPrimaryAction(){
+  if(window._micActive){
+    window._micPendingSend=true;
+    _stopMic();
+    return;
+  }
+  const action=typeof getComposerPrimaryAction==='function'?getComposerPrimaryAction():'send';
+  if(action==='disabled') return;
+  if(action==='stop'){
+    if(typeof cancelStream==='function') await cancelStream();
+    return;
+  }
+  await send();
+}
+
 function setBusy(v){
   S.busy=v;
   updateSendBtn();

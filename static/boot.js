@@ -177,6 +177,7 @@ function mobileSwitchPanel(name){
 }
 
 $('btnSend').onclick=()=>{
+  if(typeof handleComposerPrimaryAction==='function') return handleComposerPrimaryAction();
   if(window._micActive){
     window._micPendingSend=true;
     _stopMic();
