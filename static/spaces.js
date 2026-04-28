@@ -36,23 +36,26 @@
   }
 
   function renderSpacesList(spaces){
+    const activeSpaceId = currentActiveSpaceId();
     const cards = spaces.length ? spaces.map(function(s){
       const spaceId = s.space_id || '';
       const name = s.name || spaceId || 'Untitled';
       const description = s.description || '';
+      const activeLabel = activeSpaceId && activeSpaceId === spaceId ? ' · Active in chat' : '';
       return '<div class="capy-spaces-card" data-space-id="'+escapeHtml(spaceId)+'">' +
         '<div class="capy-spaces-card-row"><div><strong>'+escapeHtml(name)+'</strong>' +
         (description ? '<div class="capy-spaces-muted">'+escapeHtml(description)+'</div>' : '') +
-        '<div class="capy-spaces-muted">Widgets: '+Number(s.widget_count||0)+' · Revision: '+escapeHtml(s.revision_event_id||'none')+'</div></div>' +
+        '<div class="capy-spaces-muted">Widgets: '+Number(s.widget_count||0)+' · Revision: '+escapeHtml(s.revision_event_id||'none')+escapeHtml(activeLabel)+'</div></div>' +
         '<div class="capy-spaces-actions">' +
         '<button type="button" class="capy-spaces-btn" data-capy-action="openSpace" data-space-id="'+escapeHtml(spaceId)+'">Open</button>' +
+        '<button type="button" class="capy-spaces-btn" data-capy-action="activateSpace" data-space-id="'+escapeHtml(spaceId)+'">Use in chat</button>' +
         '<button type="button" class="capy-spaces-btn" data-capy-action="editSpace" data-space-id="'+escapeHtml(spaceId)+'" data-space-name="'+escapeHtml(name)+'" data-space-description="'+escapeHtml(description)+'">Edit</button>' +
         '<button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Manage widgets</button>' +
         '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="deleteSpace" data-space-id="'+escapeHtml(spaceId)+'">Delete</button>' +
         '</div></div>' +
         '</div>';
     }).join('') : '<div class="capy-spaces-card"><strong>No spaces yet</strong><div class="capy-spaces-muted">Create a space below to start adding safe metadata-only widgets.</div></div>';
-    return '<div class="capy-spaces-card"><h3>Capy Spaces</h3><div class="capy-spaces-muted">'+spaces.length+' space(s). Widget management lists metadata only; generated widget renderers are not executed here.</div></div>' +
+    return '<div class="capy-spaces-card"><h3>Capy Spaces</h3><div class="capy-spaces-muted">'+spaces.length+' space(s). Widget management lists metadata only; generated widget code is not executed here.</div></div>' +
       cards + renderSpaceForm();
   }
 
@@ -114,7 +117,7 @@
       '<h3>'+escapeHtml(name)+'</h3>' +
       (description ? '<div class="capy-spaces-muted">'+escapeHtml(description)+'</div>' : '') +
       '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+' · Revision: '+escapeHtml(space.revision_event_id||'none')+'</div>' +
-      '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Manage widgets</button></div>' +
+      '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="activateSpace" data-space-id="'+escapeHtml(spaceId)+'">Use in chat</button><button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Manage widgets</button></div>' +
       '</div><div class="capy-spaces-card"><h3>Widgets</h3><div class="capy-spaces-muted">Metadata-only detail view. Generated widget code is intentionally not displayed or executed.</div><div class="capy-spaces-widget-list">'+widgetRows+'</div></div>' +
       renderRevisionHistory(revisions || []);
   }
@@ -206,6 +209,22 @@
     return root && root.querySelector ? root.querySelector(selector) : null;
   }
 
+  function currentSessionId(){
+    try {
+      return (typeof S !== 'undefined' && S.session && S.session.session_id) ? String(S.session.session_id) : '';
+    } catch (err) {
+      return '';
+    }
+  }
+
+  function currentActiveSpaceId(){
+    try {
+      return (typeof S !== 'undefined' && S.session && S.session.active_space_id) ? String(S.session.active_space_id) : '';
+    } catch (err) {
+      return '';
+    }
+  }
+
   function setSpaceForm(root, spaceId, name, description){
     const idInput = getRootInput(root, '#capySpaceId');
     const nameInput = getRootInput(root, '#capySpaceName');
@@ -244,6 +263,14 @@
     }
     if (action === 'openSpace') {
       await openSpaceDetail(spaceId);
+      return;
+    }
+    if (action === 'activateSpace') {
+      const sessionId = currentSessionId();
+      if (!sessionId) return;
+      const data = await postSpacesJson('api/spaces/activate', {space_id: spaceId, session_id: sessionId});
+      if (data && data.session && typeof S !== 'undefined') S.session = data.session;
+      await loadCapySpaces();
       return;
     }
     if (action === 'reloadSpaces') {

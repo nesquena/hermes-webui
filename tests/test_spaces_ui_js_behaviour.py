@@ -64,6 +64,7 @@ global.window = {
     if (type === 'DOMContentLoaded') this._domReady = fn;
   },
 };
+global.S = { session: { session_id: 'session-123', active_space_id: null } };
 global.document = {
   getElementById: makeElement,
 };
@@ -126,6 +127,9 @@ global.fetch = async function(path, opts = {}) {
   if (path === 'api/spaces/delete') {
     return response({ deleted: true, space_id: 'lab', revision_event_id: 'rev6' });
   }
+  if (path === 'api/spaces/activate') {
+    return response({ ok: true, session: { session_id: 'session-123', active_space_id: 'lab' } });
+  }
   throw new Error('unexpected fetch path: ' + path);
 };
 
@@ -178,6 +182,9 @@ async function click(action, dataset) {
   } else if (scenario === 'openSpaceDetail') {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
+  } else if (scenario === 'activateSpace') {
+    await window.loadCapySpaces();
+    await click('activateSpace', { spaceId: 'lab' });
   } else if (scenario === 'editSpace') {
     await window.loadCapySpaces();
     await click('editSpace', { spaceId: 'lab', spaceName: 'Lab Edited', spaceDescription: 'Updated' });
@@ -332,6 +339,18 @@ def test_spaces_ui_delete_space_posts_to_delete_and_refreshes_spaces(driver_path
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"space_id": "lab"}
     assert out["calls"][-1]["path"] == "api/spaces"
+
+
+def test_spaces_ui_activate_space_posts_current_session_without_widget_code(driver_path):
+    out = _run_spaces_scenario(driver_path, "activateSpace")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/activate")
+
+    assert "Use in chat" in out["rootHtml"]
+    assert "Active in chat" in out["rootHtml"]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"space_id": "lab", "session_id": "session-123"}
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
 
 
 def test_spaces_ui_delete_space_fails_closed_without_shared_dialog(driver_path):

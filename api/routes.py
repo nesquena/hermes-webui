@@ -1689,6 +1689,8 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/spaces/activate":
         from api import spaces as capy_spaces
+        if not capy_spaces.spaces_enabled():
+            return bad(handler, "Capy Spaces is disabled", 403)
         space_id = body.get("space_id")
         session_id = body.get("session_id")
         if not space_id or not session_id:

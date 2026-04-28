@@ -274,6 +274,33 @@ def test_disabled_spaces_get_route_does_not_return_manifest_details(monkeypatch,
     assert "secret" not in json.dumps(body)
 
 
+def test_disabled_spaces_activate_route_does_not_attach_space_to_session(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Disabled Activate"})
+
+    import api.config as config
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path / "sessions")
+    config.SESSION_DIR.mkdir(parents=True, exist_ok=True)
+
+    import api.models as models
+    monkeypatch.setattr(models, "SESSION_DIR", config.SESSION_DIR)
+    models.SESSIONS.clear()
+    session = models.Session(session_id="session-activate", workspace=str(tmp_path))
+    session.save(skip_index=True)
+
+    _load_spaces(monkeypatch, tmp_path, enabled=False)
+
+    handled, status, body = _route_post(
+        "/api/spaces/activate",
+        {"space_id": created["space_id"], "session_id": "session-activate"},
+    )
+
+    assert handled is None
+    assert status == 403
+    assert created["space_id"] not in json.dumps(body)
+    assert session.active_space_id is None
+
+
 def test_widget_upsert_list_read_and_delete_are_revisioned(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Widget Lab"})
