@@ -102,7 +102,8 @@ function _findModelInDropdown(modelId, sel){
   // 1. Exact match
   if(opts.includes(modelId)) return modelId;
   // 2. Normalize: lowercase, strip namespace prefix, replace hyphens→dots
-  const norm=s=>s.toLowerCase().replace(/^[^/]+\//,'').replace(/-/g,'.');
+  // Also strip @provider: prefix from deduplicated model IDs (#1228).
+  const norm=s=>s.toLowerCase().replace(/^[^/]+\//,'').replace(/^@([^:]+:)+/,'').replace(/-/g,'.');
   const target=norm(modelId);
   const exact=opts.find(o=>norm(o)===target);
   if(exact) return exact;

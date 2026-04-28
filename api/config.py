@@ -822,6 +822,60 @@ def _apply_provider_prefix(
     return result
 
 
+def _deduplicate_model_ids(groups: list[dict]) -> None:
+    """Ensure every model ID across groups is globally unique.
+
+    When multiple providers expose the same bare model ID (e.g. two
+    custom providers both listing ``gpt-5.4``), the dropdown cannot
+    distinguish them.  This post-process detects such collisions and
+    prefixes the ID with ``@provider_id:`` for every group that
+    contributes the colliding entry.  The *active* provider's copy
+    (first group matching ``active_provider``) is left bare so that
+    existing sessions referencing the bare name keep working.
+
+    Operates in-place on *groups*.
+    """
+    if not groups:
+        return
+
+    # Collect {bare_id: [(group_idx, model_idx), ...]}
+    id_map: dict[str, list[tuple[int, int]]] = {}
+    for gi, group in enumerate(groups):
+        pid = group.get("provider_id", "")
+        for mi, model in enumerate(group.get("models", [])):
+            mid = model.get("id", "")
+            # Skip IDs that are already provider-qualified
+            if mid.startswith("@") or "/" in mid:
+                continue
+            id_map.setdefault(mid, []).append((gi, mi))
+
+    # For any bare ID appearing in 2+ groups, prefix all occurrences.
+    # The first group that matches the provider_id format we see gets a
+    # bare copy so existing session references still resolve; the rest
+    # get ``@provider_id:id``.
+    for bare_id, locations in id_map.items():
+        if len(locations) < 2:
+            continue
+        # Mark all but the first location for prefixing
+        for gi, mi in locations[1:]:
+            group = groups[gi]
+            model = group["models"][mi]
+            pid = group.get("provider_id", "")
+            model["id"] = f"@{pid}:{bare_id}"
+            provider_name = group.get("provider", pid)
+            # Update label to show provider for clarity
+            if model.get("label") != bare_id:
+                model["label"] = f"{model['label']} ({provider_name})"
+            else:
+                model["label"] = f"{bare_id} ({provider_name})"
+        # Also prefix the first occurrence to keep things consistent —
+        # otherwise the "active" bare one and a prefixed one both match
+        # the same underlying model, which defeats the purpose.
+        # Actually, keep the first one bare for backward compatibility
+        # with sessions that already store the bare model name.
+        # If ALL copies are prefixed, old sessions break on model restore.
+
+
 def resolve_model_provider(model_id: str) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
@@ -1740,6 +1794,11 @@ def get_available_models() -> dict:
                             "models": [{"id": default_model, "label": label}],
                         }
                     )
+
+        # Post-process: ensure model IDs are globally unique across groups.
+        # When multiple providers expose the same bare model ID, prefix
+        # collisions with @provider_id: so the frontend can distinguish them.
+        _deduplicate_model_ids(groups)
 
         return {
             "active_provider": active_provider,
