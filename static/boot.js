@@ -898,11 +898,12 @@ function applyBotName(){
       await loadSession(saved);
       // If the restored session has no messages it is an ephemeral scratch pad —
       // treat the page as a fresh start rather than resuming a blank conversation.
-      // The session stays on disk (it will be cleaned up later) but we don't surface
-      // it or lock the user into it. Clear the stored ID so a true new session is
-      // created the first time the user hits + or sends a message (#1171).
+      // loadSession() already ran, so loadDir() has populated the workspace file tree.
+      // Do NOT remove the session ID from localStorage — keeping it means every
+      // subsequent refresh will also run loadSession() → loadDir() → files stay visible.
+      // Removing it here caused the file tree to go blank on the second refresh
+      // because the "no saved session" path never calls loadDir (#workspace-files).
       if(S.session && (S.session.message_count||0) === 0){
-        localStorage.removeItem('hermes-webui-session');
         S.session=null; S.messages=[];
         S._bootReady=true;
         // Restore panel pref before syncing so the workspace panel stays visible
