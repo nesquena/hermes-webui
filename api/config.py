@@ -515,6 +515,13 @@ _FALLBACK_MODELS = [
     # MiniMax
     {"provider": "MiniMax",   "id": "minimax/MiniMax-M2.7",             "label": "MiniMax M2.7"},
     {"provider": "MiniMax",   "id": "minimax/MiniMax-M2.7-highspeed",   "label": "MiniMax M2.7 Highspeed"},
+    # Z.AI / GLM
+    {"provider": "Z.AI",      "id": "zai/glm-5.1",                      "label": "GLM-5.1"},
+    {"provider": "Z.AI",      "id": "zai/glm-5",                        "label": "GLM-5"},
+    {"provider": "Z.AI",      "id": "zai/glm-5-turbo",                  "label": "GLM-5 Turbo"},
+    {"provider": "Z.AI",      "id": "zai/glm-4.7",                      "label": "GLM-4.7"},
+    {"provider": "Z.AI",      "id": "zai/glm-4.5",                      "label": "GLM-4.5"},
+    {"provider": "Z.AI",      "id": "zai/glm-4.5-flash",                "label": "GLM-4.5 Flash"},
 ]
 
 # Provider display names for known Hermes provider IDs

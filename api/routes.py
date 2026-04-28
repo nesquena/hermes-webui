@@ -33,7 +33,7 @@ _OPENAI_COMPAT_ENDPOINTS = {
     "minimax": "https://api.minimax.chat/v1",
     "mistralai": "https://api.mistral.ai/v1",
     "xai": "https://api.x.ai/v1",
-    "deepseek": "https://api.deepseek.com/v1",
+    "deepseek": "https://api.deepseek.com",
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
 }
 # NOTE: "openai-codex" is excluded because it maps to the same endpoint as
