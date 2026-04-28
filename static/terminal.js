@@ -434,18 +434,24 @@ async function toggleComposerTerminal(force){
       return;
     }
     const {panel,inner}= _terminalEls();
+    const messages=_terminalMessagesEl();
     if(!panel)return;
     clearTimeout(TERMINAL_UI.closeTimer);
     _initTerminalResizeHandle();
     _resetTerminalHeightForViewport();
+    if(messages)messages.classList.add('terminal-expanding-from-dock');
     _setTerminalChromeState('expanded');
+    TERMINAL_UI.open=true;
+    TERMINAL_UI.collapsed=false;
+    _syncTerminalTranscriptSpace(true,{immediate:true});
+    if(messages)void messages.offsetHeight;
     requestAnimationFrame(()=>{
       panel.classList.add('is-open');
       window.setTimeout(_fitTerminal,80);
+      setTimeout(()=>{
+        if(messages)messages.classList.remove('terminal-expanding-from-dock');
+      },120);
     });
-    TERMINAL_UI.open=true;
-    TERMINAL_UI.collapsed=false;
-    _syncTerminalTranscriptSpace(true);
     syncTerminalButton();
     if(!TERMINAL_UI.resizeObserver&&window.ResizeObserver){
       TERMINAL_UI.resizeObserver=new ResizeObserver(()=>_fitTerminal());
