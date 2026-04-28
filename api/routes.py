@@ -710,6 +710,30 @@ def handle_get(handler, parsed) -> bool:
         load_messages = query.get("messages", ["1"])[0] != "0"
         resolve_model_default = "1" if load_messages else "0"
         resolve_model = query.get("resolve_model", [resolve_model_default])[0] != "0"
+        # ── Pagination (Task 1) ────────────────────────────────────────────
+        # Three optional, mutually-coordinated params for windowed loads:
+        #   tail=N       → last N messages
+        #   since_idx=K  → messages[K:]
+        #   limit=M      → cap result size (combine with since_idx)
+        # All params are clamped to [0, total]; out-of-range never errors.
+        # When any of them is set, each returned message gets an `_idx`
+        # field and the response carries a `pagination` object with
+        # {start_idx, end_idx, total}. messages=0 takes precedence and
+        # short-circuits before any windowing happens.
+        def _int_param(name):
+            v = query.get(name, [None])[0]
+            if v is None or v == "":
+                return None
+            try:
+                return int(v)
+            except ValueError:
+                return None
+        tail_n = _int_param("tail")
+        since_idx = _int_param("since_idx")
+        limit_n = _int_param("limit")
+        wants_window = load_messages and (
+            tail_n is not None or since_idx is not None or limit_n is not None
+        )
         try:
             _t1 = _time.monotonic()
             s = get_session(sid, metadata_only=(not load_messages))
@@ -720,14 +744,46 @@ def handle_get(handler, parsed) -> bool:
                 else None
             )
             _t3 = _time.monotonic()
+            # Windowed slice (Task 1) — applied after load, before redact.
+            messages_out = s.messages if load_messages else []
+            pagination_meta = None
+            if wants_window:
+                total = len(s.messages)
+                if tail_n is not None:
+                    tail_n = max(0, tail_n)
+                    start = max(0, total - tail_n)
+                    end = total
+                else:
+                    start = 0 if since_idx is None else max(0, since_idx)
+                    if limit_n is None:
+                        end = total
+                    elif limit_n <= 0:
+                        end = start
+                    else:
+                        end = min(total, start + limit_n)
+                start = min(start, total)
+                end = min(end, total)
+                if end < start:
+                    end = start
+                slice_msgs = s.messages[start:end]
+                # Attach absolute index to each returned message (shallow copy
+                # to avoid mutating the in-memory cache).
+                messages_out = [
+                    {**m, "_idx": start + i} for i, m in enumerate(slice_msgs)
+                ]
+                pagination_meta = {
+                    "start_idx": start, "end_idx": end, "total": total,
+                }
             raw = s.compact() | {
-                "messages": s.messages if load_messages else [],
+                "messages": messages_out,
                 "tool_calls": getattr(s, "tool_calls", []) if load_messages else [],
                 "active_stream_id": getattr(s, "active_stream_id", None),
                 "pending_user_message": getattr(s, "pending_user_message", None),
                 "pending_attachments": getattr(s, "pending_attachments", []) if load_messages else [],
                 "pending_started_at": getattr(s, "pending_started_at", None),
             }
+            if pagination_meta is not None:
+                raw["pagination"] = pagination_meta
             _t4 = _time.monotonic()
             if effective_model:
                 raw["model"] = effective_model
