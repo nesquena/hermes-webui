@@ -1115,56 +1115,23 @@ def _last_resort_sync_from_core(session, stream_id, agent_lock):
     Called from the outer finally block of _run_agent_streaming.
     Must never raise.
     """
+    from api.models import _get_profile_home, _apply_core_sync_or_error_marker
     try:
-        try:
-            from api.profiles import get_hermes_home_for_profile
-            profile_home = get_hermes_home_for_profile(session.profile)
-        except ImportError:
-            profile_home = os.environ.get('HERMES_HOME', '~/.hermes')
+        # Guard: if a cancel was already requested, bail out — cancel_stream() has
+        # already saved partial content and we must not double-append error markers.
+        if stream_id in CANCEL_FLAGS and CANCEL_FLAGS[stream_id].is_set():
+            return
 
-        core_dir = Path(profile_home) / 'sessions'
-        core_path = core_dir / f'session_{session.session_id}.json'
+        profile_home = _get_profile_home(session.profile)
+        core_path = profile_home / 'sessions' / f'session_{session.session_id}.json'
 
         _lock_ctx = agent_lock if agent_lock is not None else contextlib.nullcontext()
         with _lock_ctx:
-            # Re-check under lock — success/except paths may have already cleared these
-            if (getattr(session, 'active_stream_id', None) != stream_id
-                    or not getattr(session, 'pending_user_message', None)):
-                return
-
-            if core_path.exists():
-                with open(core_path, encoding='utf-8') as f:
-                    core = json.load(f)
-                core_messages = core.get('messages', [])
-                if core_messages:
-                    session.messages = core_messages
-                    session.tool_calls = core.get('tool_calls', [])
-                    session.active_stream_id = None
-                    session.pending_user_message = None
-                    session.pending_attachments = []
-                    session.pending_started_at = None
-                    session.save()
-                    logger.info(
-                        "_last_resort_sync_from_core: synced %d messages for session %s",
-                        len(core_messages), session.session_id,
-                    )
-                    return
-
-            # Core missing or empty — clear pending and add error marker
-            session.active_stream_id = None
-            session.pending_user_message = None
-            session.pending_attachments = []
-            session.pending_started_at = None
-            session.messages.append({
-                'role': 'assistant',
-                'content': '**Previous turn did not complete:** the original message has been preserved as a draft.',
-                'timestamp': int(time.time()),
-                '_error': True,
-            })
-            session.save()
-            logger.info(
-                "_last_resort_sync_from_core: no core transcript for session %s, added error marker",
-                session.session_id,
+            _apply_core_sync_or_error_marker(
+                session,
+                core_path,
+                stream_id_for_recheck=stream_id,
+                require_stream_dead=False,
             )
     except Exception:
         logger.exception(
@@ -2167,15 +2134,17 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             _apperror_payload['hint'] = _exc_hint
         put('apperror', _apperror_payload)
     finally:
-        if (s is not None
-                and getattr(s, 'active_stream_id', None) == stream_id
-                and getattr(s, 'pending_user_message', None)):
-            _last_resort_sync_from_core(s, stream_id, _agent_lock)
-        # Stop periodic checkpoint thread if it was started (Issue #765)
+        # Stop the periodic checkpoint thread before the final recovery path.
+        # The checkpoint thread also uses the per-session lock; joining it first
+        # avoids contending with checkpoint writes during stale-pending repair.
         if _checkpoint_stop is not None:
             _checkpoint_stop.set()
         if _ckpt_thread is not None:
             _ckpt_thread.join(timeout=15)
+        if (s is not None
+                and getattr(s, 'active_stream_id', None) == stream_id
+                and getattr(s, 'pending_user_message', None)):
+            _last_resort_sync_from_core(s, stream_id, _agent_lock)
         _clear_thread_env()  # TD1: always clear thread-local context
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)

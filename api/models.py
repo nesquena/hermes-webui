@@ -456,18 +456,153 @@ class Session:
             ) if include_runtime else False,
         }
 
+def _get_profile_home(profile) -> Path:
+    """Resolve the hermes agent home directory for the given profile.
+
+    Prefers the profile-specific helper from api.profiles; falls back to the
+    HERMES_HOME environment variable or ~/.hermes, expanding ~ correctly.
+    """
+    try:
+        from api.profiles import get_hermes_home_for_profile
+        return Path(get_hermes_home_for_profile(profile))
+    except ImportError:
+        return Path(os.environ.get('HERMES_HOME') or '~/.hermes').expanduser()
+
+
+def _apply_core_sync_or_error_marker(
+    session,
+    core_path,
+    stream_id_for_recheck=None,
+    *,
+    require_stream_dead=True,
+) -> bool:
+    """Inner repair logic. Must be called with the per-session lock already held.
+
+    Re-checks session state under the lock, then either syncs messages from the
+    core transcript (if present and non-empty) or restores the pending user
+    message as a recovered user turn and appends an error marker.
+
+    stream_id_for_recheck: when provided, repair bails if session.active_stream_id
+    changed (e.g. context compression rotated it).  The cache-miss repair path
+    also requires the stream to be absent from active streams; the streaming
+    thread's final fallback passes require_stream_dead=False because it runs
+    before its own stream is removed from STREAMS.
+
+    Returns True if repair was applied, False if the re-check bailed out.
+    Must never raise — caller is responsible for exception handling.
+    """
+    sid = session.session_id
+    # Bail if pending is unset — nothing to repair.
+    if not session.pending_user_message:
+        return False
+    if stream_id_for_recheck is not None:
+        # Bail if active_stream_id rotated between the pre-lock check and now.
+        # Cache-miss repair must also skip if the stream is alive again, but the
+        # streaming thread's final fallback runs before removing its own stream
+        # from STREAMS and must be allowed to repair that same active stream.
+        if session.active_stream_id != stream_id_for_recheck:
+            return False
+        if require_stream_dead and session.active_stream_id in _active_stream_ids():
+            return False
+
+    # When messages is already non-empty the core-sync overwrite and recovered
+    # user turn are skipped (we cannot clobber in-memory mutations), but the
+    # stuck pending fields MUST still be cleared and an error marker appended
+    # so the session isn't permanently left in stale-pending state.
+    if len(session.messages) != 0:
+        session.active_stream_id = None
+        session.pending_user_message = None
+        session.pending_attachments = []
+        session.pending_started_at = None
+        session.messages.append({
+            'role': 'assistant',
+            'content': '**Previous turn did not complete.**',
+            'timestamp': int(time.time()),
+            '_error': True,
+        })
+        session.save()
+        logger.info(
+            "Session %s: pending cleared (messages non-empty), added error marker",
+            sid,
+        )
+        return True
+
+    # ── messages *is* empty ─ full repair ─────────────────────────────────
+
+    if core_path.exists():
+        with open(core_path, encoding='utf-8') as f:
+            core = json.load(f)
+        core_messages = core.get('messages', [])
+        if core_messages:
+            session.messages = core_messages
+            session.tool_calls = core.get('tool_calls', [])
+            for field in ('input_tokens', 'output_tokens', 'estimated_cost'):
+                if core.get(field) is not None:
+                    setattr(session, field, core[field])
+            session.active_stream_id = None
+            session.pending_user_message = None
+            session.pending_attachments = []
+            session.pending_started_at = None
+            session.save()
+            logger.info(
+                "Session %s: synced %d messages from core transcript",
+                sid, len(core_messages),
+            )
+            return True
+
+    # Core missing or empty — restore the pending user message as a recovered
+    # user turn (preserving the draft), then append an error marker.
+    if session.pending_user_message:
+        # Use the original send time if available so the recovered turn
+        # appears in the correct chronological position.
+        _recovered_ts = int(time.time())
+        if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
+            _recovered_ts = int(session.pending_started_at)
+        recovered: dict = {
+            'role': 'user',
+            'content': session.pending_user_message,
+            'timestamp': _recovered_ts,
+            '_recovered': True,
+        }
+        if session.pending_attachments:
+            recovered['attachments'] = list(session.pending_attachments)
+        session.messages.append(recovered)
+    session.active_stream_id = None
+    session.pending_user_message = None
+    session.pending_attachments = []
+    session.pending_started_at = None
+    session.messages.append({
+        'role': 'assistant',
+        'content': '**Previous turn did not complete.**',
+        'timestamp': int(time.time()),
+        '_error': True,
+    })
+    session.save()
+    logger.info("Session %s: no core transcript found, added error marker", sid)
+    return True
+
+
 def _repair_stale_pending(session) -> bool:
     """Recover a sidecar stuck with messages=[] and stale pending state.
 
     Fires only when messages is empty, pending_user_message is set,
     active_stream_id is set, and the stream is no longer alive.
+
+    Uses a non-blocking lock acquire so a caller that already holds the
+    per-session lock (e.g. retry_last, undo_last, cancel_stream) cannot
+    deadlock when get_session() triggers this on a cache miss.
+
     Returns True if repair was applied, False otherwise.
     Must never raise — all errors are caught and logged.
     """
+    # Capture the stream id seen at pre-check time; the under-lock re-check in
+    # _apply_core_sync_or_error_marker uses this to detect a rotated active_stream_id
+    # (e.g. context compression) or a stream that came back alive.
+    _seen_stream_id = session.active_stream_id
     if (len(session.messages) != 0
             or not session.pending_user_message
-            or not session.active_stream_id
-            or session.active_stream_id in _active_stream_ids()):
+            or not _seen_stream_id
+            or _seen_stream_id in _active_stream_ids()):
         return False
 
     sid = session.session_id
@@ -475,59 +610,24 @@ def _repair_stale_pending(session) -> bool:
         return False
 
     try:
-        try:
-            from api.profiles import get_hermes_home_for_profile
-            profile_home = get_hermes_home_for_profile(session.profile)
-        except ImportError:
-            profile_home = os.environ.get('HERMES_HOME', '~/.hermes')
+        profile_home = _get_profile_home(session.profile)
+        core_path = profile_home / 'sessions' / f'session_{sid}.json'
 
-        core_dir = Path(profile_home) / 'sessions'
-        core_path = core_dir / f'session_{sid}.json'
-
-        with _get_session_agent_lock(sid):
-            # Re-check under lock — stream may have completed since the pre-lock check
-            if (len(session.messages) != 0
-                    or not session.pending_user_message
-                    or not session.active_stream_id):
-                return False
-
-            if core_path.exists():
-                with open(core_path, encoding='utf-8') as f:
-                    core = json.load(f)
-                core_messages = core.get('messages', [])
-                if core_messages:
-                    session.messages = core_messages
-                    session.tool_calls = core.get('tool_calls', [])
-                    for field in ('input_tokens', 'output_tokens', 'estimated_cost'):
-                        if core.get(field) is not None:
-                            setattr(session, field, core[field])
-                    session.active_stream_id = None
-                    session.pending_user_message = None
-                    session.pending_attachments = []
-                    session.pending_started_at = None
-                    session.save()
-                    logger.info(
-                        "Repaired stale sidecar for session %s: synced %d messages from core",
-                        sid, len(core_messages),
-                    )
-                    return True
-
-            # Core missing or has no messages — clear pending and add error marker
-            session.active_stream_id = None
-            session.pending_user_message = None
-            session.pending_attachments = []
-            session.pending_started_at = None
-            session.messages.append({
-                'role': 'assistant',
-                'content': '**Previous turn did not complete:** the original message has been preserved as a draft.',
-                'timestamp': int(time.time()),
-                '_error': True,
-            })
-            session.save()
-            logger.info(
-                "Repaired stale sidecar for session %s: no core transcript, added error marker", sid,
+        lock = _get_session_agent_lock(sid)
+        # Non-blocking acquire: bail immediately if the caller already holds this
+        # lock (e.g. retry_last, undo_last, cancel_stream). Blocking would deadlock
+        # because _get_session_agent_lock returns a non-reentrant threading.Lock.
+        if not lock.acquire(blocking=False):
+            logger.debug(
+                "_repair_stale_pending: lock contended, skipping repair for session %s", sid,
             )
-            return True
+            return False
+        try:
+            return _apply_core_sync_or_error_marker(
+                session, core_path, stream_id_for_recheck=_seen_stream_id,
+            )
+        finally:
+            lock.release()
     except Exception:
         logger.exception("_repair_stale_pending failed for session %s", sid)
         return False
