@@ -75,18 +75,27 @@ def test_autolink_in_inline_md():
 
 
 def test_autolink_after_safe_tags_pass():
-    """The autolink pass must come AFTER the SAFE_TAGS escape pass (ordering matters)."""
+    """The autolink pass must come AFTER the HTML sanitizer pass (ordering matters).
+
+    The sanitizer was upgraded from a tag-name allowlist (SAFE_TAGS) to a full
+    attribute-stripping sanitizer (_tag).  The ordering invariant still holds:
+    sanitize first, autolink second, paragraph-wrap last.
+    """
     content = read_ui_js()
-    safe_tags_idx = content.find('s=s.replace(/<\\/?[a-z][^>]*>/gi,tag=>SAFE_TAGS.test(tag)?tag:esc(tag));')
+    # Accept either the new _tag() sanitizer or the legacy SAFE_TAGS line so this
+    # test works on both the old and new renderer.
+    sanitizer_idx = content.find('s=s.replace(/<\\/?[a-z][^>]*>/gi,tag=>_tag(tag));')
+    if sanitizer_idx == -1:
+        sanitizer_idx = content.find('s=s.replace(/<\\/?[a-z][^>]*>/gi,tag=>SAFE_TAGS.test(tag)?tag:esc(tag));')
     autolink_idx = content.find('// Autolink: convert plain URLs')
     parts_idx = content.find('const parts=s.split(/\\n{2,}/);')
-    assert safe_tags_idx != -1, "SAFE_TAGS pass not found"
+    assert sanitizer_idx != -1, "HTML sanitizer pass not found (expected _tag() or SAFE_TAGS)"
     assert autolink_idx != -1, "Autolink pass not found"
     assert parts_idx != -1, "Paragraph-wrap parts line not found"
-    assert safe_tags_idx < autolink_idx < parts_idx, (
-        f"Ordering wrong: SAFE_TAGS at {safe_tags_idx}, autolink at {autolink_idx}, "
+    assert sanitizer_idx < autolink_idx < parts_idx, (
+        f"Ordering wrong: sanitizer at {sanitizer_idx}, autolink at {autolink_idx}, "
         f"parts (paragraph wrap) at {parts_idx}. "
-        "Autolink must come between SAFE_TAGS pass and paragraph wrap."
+        "Autolink must come between sanitizer pass and paragraph wrap."
     )
 
 
@@ -106,19 +115,14 @@ def test_autolink_target_blank_and_rel():
 
 
 def test_safe_tags_includes_anchor():
-    """SAFE_TAGS regex must include 'a' so <a> tags from autolink are not escaped."""
+    """The HTML sanitizer must preserve <a> tags from the autolink pass.
+
+    After the sanitizer upgrade from SAFE_TAGS regex to the _tag() function,
+    <a> tags are handled by the explicit 'a' branch in _tag() — they survive
+    with href/target/rel/class/download attributes and their content intact.
+    """
     content = read_ui_js()
-    # Find the SAFE_TAGS definition line — the pattern contains slashes so we
-    # search for the line directly rather than extracting the regex literal.
-    safe_tags_line = None
-    for line in content.splitlines():
-        if 'const SAFE_TAGS=' in line:
-            safe_tags_line = line
-            break
-    assert safe_tags_line is not None, "SAFE_TAGS const definition not found in ui.js"
-    # The pattern should include 'a' as a tag alternative (e.g. |a|)
-    assert '|a|' in safe_tags_line or '|a)' in safe_tags_line, (
-        f"SAFE_TAGS line does not include 'a' tag — "
-        "<a> tags emitted by autolink would be escaped!\n"
-        f"Line: {safe_tags_line}"
+    # The _tag() function must contain an explicit 'a' (anchor) handler.
+    assert "name==='a'" in content or "name === 'a'" in content, (
+        "HTML sanitizer _tag() must have an explicit handler for <a> tags"
     )

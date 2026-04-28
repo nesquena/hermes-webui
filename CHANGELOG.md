@@ -357,6 +357,29 @@
   workspace subtree) and never enumerate blocked system roots. (`api/routes.py`,
   `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
 
+## [v0.50.234] — 2026-04-28
+
+### Fixed
+- **XSS hardening in markdown renderer** — HTML tags in LLM output were filtered by
+  tag name only, allowing event handlers like `onerror` and `onclick` to pass through
+  on `<img>` and other elements. The sanitizer now strips all attributes except a
+  per-tag allowlist and blocks `javascript:`, `data:`, and `vbscript:` URL schemes.
+  Incomplete raw tags (`<img src=x onerror=...//` with no closing `>`) are escaped
+  before paragraph wrapping so they cannot be completed by the renderer's own output.
+  (`static/ui.js`)
+- **Delegated image lightbox** — inline `onclick` handlers on `<img class="msg-media-img">`
+  replaced with a single delegated `document.addEventListener('click')`, eliminating the
+  last source of inline event handler HTML in rendered output. (`static/ui.js`)
+- **Workspace trust for macOS symlink paths** — `/etc` on macOS resolves to `/private/etc`
+  which previously bypassed the blocked-roots check. The new `_is_blocked_workspace_path`
+  helper compares both the raw and resolved path. Also adds `/System` and `/Library` to
+  the blocked roots. (`api/workspace.py`)
+- **Legacy `/api/chat` workspace validation** — the synchronous chat fallback endpoint
+  was not routing through `resolve_trusted_workspace()`, allowing arbitrary paths to be
+  set as workspace. (`api/routes.py`)
+- **`linked_files` type guard** — skill view responses with a `null` or non-dict
+  `linked_files` field no longer crash the skills API. (`api/routes.py`)
+  (by @bschmidy10, PR #1201)
 ## [v0.50.233] — 2026-04-28
 
 ### Fixed

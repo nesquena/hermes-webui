@@ -2212,14 +2212,16 @@ def cancel_stream(stream_id: str) -> bool:
     """
     from api import config as _live_config
 
+    # Use module-level aliases (imported from api.config at startup).
+    # In production these are always the same objects as api.config.STREAMS etc.
+    # The fallback below handles a hypothetical future case where api.config's
+    # state dicts are replaced at runtime (e.g. a future profile-reload path).
+    # No production code currently does this; the fallback is defensive only.
     streams = STREAMS
     cancel_flags = CANCEL_FLAGS
     agent_instances = AGENT_INSTANCES
     partial_texts = STREAM_PARTIAL_TEXT
     streams_lock = STREAMS_LOCK
-    # Some tests and profile reload paths can replace api.config's state maps
-    # after api.streaming has imported aliases.  Pick the live maps when the
-    # requested stream lives there so cancel works across either reference.
     if stream_id not in streams and getattr(_live_config, 'STREAMS', streams) is not streams:
         streams = _live_config.STREAMS
         cancel_flags = _live_config.CANCEL_FLAGS
@@ -2293,11 +2295,12 @@ def cancel_stream(stream_id: str) -> bool:
         # then STREAMS_LOCK, so inverting the order here would cause deadlock.
         _cancel_session_id = getattr(agent, 'session_id', None) if agent else None
         _cancel_partial_text = partial_texts.get(stream_id, '')
-        if not _cancel_partial_text and partial_texts is not STREAM_PARTIAL_TEXT:
-            _cancel_partial_text = STREAM_PARTIAL_TEXT.get(stream_id, '')
-        live_partials = getattr(_live_config, 'STREAM_PARTIAL_TEXT', partial_texts)
-        if not _cancel_partial_text and live_partials is not partial_texts:
-            _cancel_partial_text = live_partials.get(stream_id, '')
+        # Fallback: check the live config's partial text map if we used an alias
+        # and the text wasn't found in the alias (defensive, matches streams fallback above).
+        if not _cancel_partial_text:
+            live_partials = getattr(_live_config, 'STREAM_PARTIAL_TEXT', partial_texts)
+            if live_partials is not partial_texts:
+                _cancel_partial_text = live_partials.get(stream_id, '')
 
     # Session cleanup outside STREAMS_LOCK to preserve lock ordering.
     # Acquire the per-session _agent_lock too, mirroring every other session
