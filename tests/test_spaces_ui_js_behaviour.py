@@ -132,6 +132,11 @@ async function click(action, dataset) {
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
     await window.loadCapySpaces();
     await click('deleteWidget', { spaceId: 'lab', widgetId: 'weather' });
+  } else if (scenario === 'editWidget') {
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('editWidget', { spaceId: 'lab', widgetId: 'weather', widgetTitle: '<Weather>', widgetKind: 'markdown' });
   } else if (scenario === 'createSpace') {
     await window.loadCapySpaces();
     await click('saveSpace', {});
@@ -212,6 +217,17 @@ def test_spaces_ui_delete_widget_posts_to_delete_and_refreshes_widgets(driver_pa
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"space_id": "lab", "widget_id": "weather"}
     assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
+
+
+def test_spaces_ui_edit_widget_prefills_safe_metadata_form_without_fetching_renderer(driver_path):
+    out = _run_spaces_scenario(driver_path, "editWidget")
+
+    assert out["values"]["#capyWidgetId"] == "weather"
+    assert out["values"]["#capyWidgetTitle"] == "<Weather>"
+    assert out["values"]["#capyWidgetKind"] == "markdown"
+    assert not any(call["path"] == "api/spaces/widget?space_id=lab&widget_id=weather" for call in out["calls"])
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
 
 
 def test_spaces_ui_create_space_posts_to_create_and_refreshes_spaces(driver_path):

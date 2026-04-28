@@ -117,11 +117,15 @@
   function renderWidgetManager(spaceId, widgets){
     const widgetCards = widgets.length ? widgets.map(function(w){
       const widgetId = w.id || '';
+      const title = w.title || widgetId || 'Untitled widget';
+      const kind = w.kind || 'custom';
       return '<div class="capy-spaces-widget" data-widget-id="'+escapeHtml(widgetId)+'">' +
-        '<div><strong>'+escapeHtml(w.title||widgetId||'Untitled widget')+'</strong>' +
-        '<div class="capy-spaces-muted">'+escapeHtml(w.kind||'custom')+' · '+escapeHtml(widgetId)+'</div></div>' +
+        '<div><strong>'+escapeHtml(title)+'</strong>' +
+        '<div class="capy-spaces-muted">'+escapeHtml(kind)+' · '+escapeHtml(widgetId)+'</div></div>' +
+        '<div class="capy-spaces-actions">' +
+        '<button type="button" class="capy-spaces-btn" data-capy-action="editWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-title="'+escapeHtml(title)+'" data-widget-kind="'+escapeHtml(kind)+'">Edit</button>' +
         '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="deleteWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Delete</button>' +
-        '</div>';
+        '</div></div>';
     }).join('') : '<div class="capy-spaces-muted">No widgets yet.</div>';
     return '<div class="capy-spaces-card"><button type="button" class="capy-spaces-btn" data-capy-action="reloadSpaces">← Back to spaces</button>' +
       '<h3>Widgets for '+escapeHtml(spaceId)+'</h3>' +
@@ -146,6 +150,15 @@
     if (idInput) idInput.value = spaceId || '';
     if (nameInput) nameInput.value = name || '';
     if (descriptionInput) descriptionInput.value = description || '';
+  }
+
+  function setWidgetForm(root, widgetId, title, kind){
+    const idInput = getRootInput(root, '#capyWidgetId');
+    const titleInput = getRootInput(root, '#capyWidgetTitle');
+    const kindInput = getRootInput(root, '#capyWidgetKind');
+    if (idInput) idInput.value = widgetId || '';
+    if (titleInput) titleInput.value = title || '';
+    if (kindInput) kindInput.value = kind || 'markdown';
   }
 
   async function handleCapySpacesClick(event){
@@ -199,6 +212,11 @@
       if (!ok) return;
       await postSpacesJson('api/spaces/delete', {space_id: spaceId});
       await loadCapySpaces();
+      return;
+    }
+    if (action === 'editWidget') {
+      const root = document.getElementById('capySpacesRoot');
+      setWidgetForm(root, button.dataset.widgetId || '', button.dataset.widgetTitle || '', button.dataset.widgetKind || 'markdown');
       return;
     }
     if (action === 'saveWidget') {
