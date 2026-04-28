@@ -2891,7 +2891,7 @@ function renderMermaidBlocks(){
       script.crossOrigin='anonymous';
       script.onload=()=>{
         if(typeof mermaid!=='undefined'){
-          mermaid.initialize({startOnLoad:false,theme:document.documentElement.classList.contains('dark')?'dark':'default',themeVariables:{
+          mermaid.initialize({startOnLoad:false,suppressErrorRendering:true,theme:document.documentElement.classList.contains('dark')?'dark':'default',themeVariables:{
             fontFamily:'inherit',fontSize:'14px',
             primaryColor:'#4a6fa5',primaryTextColor:'#e2e8f0',lineColor:'#718096',
             secondaryColor:'#2d3748',tertiaryColor:'#1a202c',primaryBorderColor:'#4a5568',
@@ -2908,13 +2908,31 @@ function renderMermaidBlocks(){
     block.dataset.rendered='true';
     const code=block.textContent;
     const id=block.dataset.mermaidId||('m-'+Math.random().toString(36).slice(2));
+    const renderFallback=()=>{
+      block.innerHTML=`<div class="pre-header">mermaid</div><pre><code>${esc(code)}</code></pre>`;
+    };
+    const cleanupOrphanError=()=>{
+      // mermaid 10.x can leak an error SVG into <body> even with suppressErrorRendering;
+      // remove any element whose id matches the render id we passed in.
+      ['d'+id,id,id+'-svg'].forEach(orphanId=>{
+        const o=document.getElementById(orphanId);
+        if(o && !block.contains(o)) o.remove();
+      });
+    };
     try{
+      // Validate first so a syntax error does not trigger mermaid's internal
+      // "Syntax error in text" SVG, which used to be appended to <body> and
+      // take up massive space on screen.
+      if(typeof mermaid.parse==='function'){
+        const ok=await mermaid.parse(code,{suppressErrors:true});
+        if(ok===false){ renderFallback(); cleanupOrphanError(); return; }
+      }
       const {svg}=await mermaid.render(id,code);
       block.innerHTML=svg;
       block.classList.add('mermaid-rendered');
     }catch(e){
-      // Fall back to showing as a code block
-      block.innerHTML=`<div class="pre-header">mermaid</div><pre><code>${esc(code)}</code></pre>`;
+      renderFallback();
+      cleanupOrphanError();
     }
   });
 }
