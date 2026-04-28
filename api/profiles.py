@@ -314,22 +314,24 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     #   1. {home}/webui_state/last_workspace.txt  (previously chosen workspace for this profile)
     #   2. cfg terminal.cwd / workspace / default_workspace keys
     #   3. Boot-time DEFAULT_WORKSPACE constant
+    # Use the module-level ``Path`` (imported at line 17) rather than re-importing
+    # it locally — keeps the exception fallback simple and avoids a latent NameError
+    # if a future refactor moves the inner imports.
     default_workspace = None
     try:
         from api.config import DEFAULT_WORKSPACE as _DW
-        from pathlib import Path as _Path
         lw_file = home / 'webui_state' / 'last_workspace.txt'
         if lw_file.exists():
             _p = lw_file.read_text(encoding='utf-8').strip()
             if _p:
-                _pp = _Path(_p).expanduser()
+                _pp = Path(_p).expanduser()
                 if _pp.is_dir():
                     default_workspace = str(_pp.resolve())
         if default_workspace is None:
             for _key in ('workspace', 'default_workspace'):
                 _v = cfg.get(_key)
                 if _v:
-                    _pp = _Path(str(_v)).expanduser().resolve()
+                    _pp = Path(str(_v)).expanduser().resolve()
                     if _pp.is_dir():
                         default_workspace = str(_pp)
                         break
@@ -338,7 +340,7 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
             if isinstance(_tc, dict):
                 _cwd = _tc.get('cwd', '')
                 if _cwd and str(_cwd) not in ('.', ''):
-                    _pp = _Path(str(_cwd)).expanduser().resolve()
+                    _pp = Path(str(_cwd)).expanduser().resolve()
                     if _pp.is_dir():
                         default_workspace = str(_pp)
         if default_workspace is None:
@@ -348,7 +350,7 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
             from api.config import DEFAULT_WORKSPACE as _DW2
             default_workspace = str(_DW2)
         except Exception:
-            default_workspace = str(_Path.home())
+            default_workspace = str(Path.home())
 
     return {
         'profiles': list_profiles_api(),
