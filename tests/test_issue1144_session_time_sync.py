@@ -203,6 +203,9 @@ def test_session_bucket_uses_server_clock():
     """_sessionTimeBucketLabel uses _serverNowMs() for Today/Yesterday boundaries."""
     result = _run_time_case(
         """
+        // Freeze the client clock at midday UTC so an 8-hour server skew does
+        // not make this regression test depend on the real wall-clock hour.
+        Date.now = () => Date.UTC(2026, 3, 15, 12, 0, 0);
         // Simulate server 8 hours ahead of client
         _serverTimeDelta = -8 * 3600 * 1000;
         const serverNow = _serverNowMs();
