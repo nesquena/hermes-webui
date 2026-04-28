@@ -134,6 +134,51 @@ def test_recovery_snapshot_never_returns_generated_widget_renderers(monkeypatch,
     assert "renderer" not in serialized
 
 
+def test_recovery_disable_widget_marks_safe_metadata_without_deleting_or_leaking_bodies(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Recovery Disable"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "bad-widget",
+            "kind": "html",
+            "title": "Bad Widget",
+            "renderer": "<script>breakNormalRoute()</script>",
+            "html": "<img src=x onerror=stealSecret()>",
+            "data": {"api_key": "SECRET...LEAK"},
+        },
+    )
+
+    disabled = spaces.disable_widget_for_recovery(created["space_id"], "bad-widget", reason="render failure")
+
+    assert disabled["disabled"] is True
+    assert disabled["space_id"] == created["space_id"]
+    assert disabled["widget_id"] == "bad-widget"
+    assert disabled["revision_event_id"]
+    stored = spaces.read_widget(created["space_id"], "bad-widget")
+    assert stored["recovery"]["disabled"] is True
+    assert stored["recovery"]["disabled_reason"] == "render failure"
+    assert stored["renderer"] == "<script>breakNormalRoute()</script>"
+
+    recovery = spaces.recovery_snapshot()
+    serialized = json.dumps(recovery)
+    assert recovery["spaces"][0]["widgets"] == [
+        {
+            "id": "bad-widget",
+            "kind": "html",
+            "title": "Bad Widget",
+            "disabled": True,
+            "disabled_reason": "render failure",
+        }
+    ]
+    assert "breakNormalRoute" not in serialized
+    assert "stealSecret" not in serialized
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in serialized
+    assert "renderer" not in serialized
+    assert "<img" not in serialized
+    assert "onerror" not in serialized
+
+
 def test_delete_space_removes_manifest_but_keeps_global_revision_event(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Disposable"})
@@ -176,6 +221,7 @@ def test_spaces_routes_and_static_shell_are_registered():
 
     assert '"/api/spaces"' in routes_src
     assert '"/api/spaces/recovery"' in routes_src
+    assert '"/api/spaces/recovery/disable-widget"' in routes_src
     assert '"/api/spaces/revisions"' in routes_src
     assert '"/api/spaces/create"' in routes_src
     assert 'static/spaces.js' in index_html
@@ -515,6 +561,27 @@ def test_widget_event_route_validates_widget_and_returns_queued_metadata(monkeyp
     )
     assert handled is None
     assert status == 404
+
+
+def test_recovery_disable_widget_route_marks_widget_disabled(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Route Recovery"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {"id": "broken", "kind": "html", "title": "Broken", "renderer": "<script>bad()</script>"},
+    )
+
+    handled, status, body = _route_post(
+        "/api/spaces/recovery/disable-widget",
+        {"space_id": created["space_id"], "widget_id": "broken", "reason": "safe-mode disable"},
+    )
+
+    assert handled is None
+    assert status == 200
+    assert body["disabled"] is True
+    assert body["widget_id"] == "broken"
+    assert spaces.read_widget(created["space_id"], "broken")["recovery"]["disabled"] is True
+    assert "bad()" not in json.dumps(body)
 
 
 def test_active_space_context_is_compact_and_omits_widget_bodies(monkeypatch, tmp_path):

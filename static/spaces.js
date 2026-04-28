@@ -2,6 +2,7 @@
 // This UI exposes safe metadata and widget management without executing widget renderers.
 (function(){
   var handlersBound = false;
+  var recoveryHandlersBound = false;
 
   async function fetchSpacesJson(path, options){
     const res = await fetch(path, Object.assign({cache: 'no-store'}, options || {}));
@@ -381,18 +382,56 @@
       const spaceId = s.space_id || '';
       const name = s.name || spaceId || 'Untitled';
       const description = s.description || '';
+      const widgets = Array.isArray(s.widgets) ? s.widgets : [];
+      const widgetRows = widgets.length ? '<div class="capy-spaces-widget-list">'+widgets.map(function(w){
+        const widgetId = w && w.id ? String(w.id) : '';
+        const title = w && w.title ? String(w.title) : widgetId || 'Untitled widget';
+        const kind = w && w.kind ? String(w.kind) : 'custom';
+        const disabled = !!(w && w.disabled);
+        const disabledReason = w && w.disabled_reason ? String(w.disabled_reason) : '';
+        return '<div class="capy-spaces-widget" data-widget-id="'+escapeHtml(widgetId)+'"><div><strong>'+escapeHtml(title)+'</strong>' +
+          '<div class="capy-spaces-muted">'+escapeHtml(kind)+' · '+escapeHtml(widgetId)+(disabled ? ' · Disabled'+(disabledReason ? ': '+escapeHtml(disabledReason) : '') : '')+'</div></div>' +
+          '<div class="capy-spaces-actions">' +
+          (disabled ? '<span class="capy-spaces-muted">Disabled</span>' : '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="disableRecoveryWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Disable widget</button>') +
+          '</div></div>';
+      }).join('')+'</div>' : '<div class="capy-spaces-muted">No widget metadata available for this space.</div>';
       return '<div class="capy-spaces-widget" data-space-id="'+escapeHtml(spaceId)+'"><div><strong>'+escapeHtml(name)+'</strong>' +
         (description ? '<div class="capy-spaces-muted">'+escapeHtml(description)+'</div>' : '') +
-        '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+' · Widgets: '+Number(s.widget_count||0)+' · Revision: '+escapeHtml(s.revision_event_id||'none')+'</div></div></div>';
+        '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+' · Widgets: '+Number(s.widget_count||0)+' · Revision: '+escapeHtml(s.revision_event_id||'none')+'</div>' +
+        widgetRows + '</div></div>';
     }).join('') : '<div class="capy-spaces-muted">No spaces found in recovery metadata.</div>';
     return '<div class="capy-spaces-card"><h3>Safe recovery</h3>' +
       '<div class="capy-spaces-muted">Generated widgets rendered: '+String(!!data.generated_widgets_rendered)+'. This panel lists metadata only so broken generated UI cannot execute here.</div>' +
       '<div class="capy-spaces-widget-list">'+rows+'</div></div>';
   }
 
+  async function handleCapySpacesRecoveryClick(event){
+    const button = event.target && event.target.closest ? event.target.closest('[data-capy-action]') : null;
+    if (!button) return;
+    const action = button.dataset.capyAction;
+    if (action !== 'disableRecoveryWidget') return;
+    if (typeof showConfirmDialog !== 'function') return;
+    const spaceId = button.dataset.spaceId || '';
+    const widgetId = button.dataset.widgetId || '';
+    if (!spaceId || !widgetId) return;
+    const ok = await showConfirmDialog({title: 'Disable widget?', message: 'Disable widget "'+widgetId+'" from safe recovery? The source is preserved for repair/rollback.', confirmLabel: 'Disable widget', danger: true, focusCancel: true});
+    if (!ok) return;
+    await postSpacesJson('api/spaces/recovery/disable-widget', {space_id: spaceId, widget_id: widgetId, reason: 'disabled from recovery panel'});
+    await loadCapySpacesRecovery();
+  }
+
+  function ensureCapySpacesRecoveryHandlers(){
+    if (recoveryHandlersBound) return;
+    const root = document.getElementById('capySpacesRecovery');
+    if (!root || !root.addEventListener) return;
+    root.addEventListener('click', handleCapySpacesRecoveryClick);
+    recoveryHandlersBound = true;
+  }
+
   async function loadCapySpacesRecovery(){
     const root = document.getElementById('capySpacesRecovery');
     if (!root) return;
+    ensureCapySpacesRecoveryHandlers();
     try {
       const data = await fetchSpacesJson('api/spaces/recovery');
       root.innerHTML = renderRecoverySnapshot(data);
