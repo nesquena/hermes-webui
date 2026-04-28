@@ -1,15 +1,26 @@
 // Capy Spaces foundation shell.
-// The first implementation slice only exposes safe metadata and recovery state.
+// This UI exposes safe metadata and widget management without executing widget renderers.
 (function(){
-  async function fetchSpacesJson(path){
-    const res = await fetch(path, {cache: 'no-store'});
+  var handlersBound = false;
+
+  async function fetchSpacesJson(path, options){
+    const res = await fetch(path, Object.assign({cache: 'no-store'}, options || {}));
     if (!res.ok) throw new Error('Spaces request failed: '+res.status);
     return res.json();
+  }
+
+  async function postSpacesJson(path, body){
+    return fetchSpacesJson(path, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body || {}),
+    });
   }
 
   async function loadCapySpaces(){
     const root = document.getElementById('capySpacesRoot');
     if (!root) return;
+    ensureCapySpacesHandlers();
     try {
       const data = await fetchSpacesJson('api/spaces');
       if (!data.enabled) {
@@ -17,13 +28,98 @@
         return;
       }
       const spaces = data.spaces || [];
-      root.innerHTML = '<div class="capy-spaces-card"><h3>Capy Spaces</h3><div class="capy-spaces-muted">'+spaces.length+' space(s). Widget rendering is intentionally disabled in the foundation slice.</div></div>' +
-        spaces.map(function(s){
-          return '<div class="capy-spaces-card" data-space-id="'+escapeHtml(s.space_id||'')+'"><strong>'+escapeHtml(s.name||s.space_id||'Untitled')+'</strong><div class="capy-spaces-muted">Widgets: '+(s.widget_count||0)+' · Revision: '+escapeHtml(s.revision_event_id||'none')+'</div></div>';
-        }).join('');
+      root.innerHTML = renderSpacesList(spaces);
     } catch (err) {
       root.innerHTML = '<div class="capy-spaces-card"><h3>Capy Spaces unavailable</h3><div class="capy-spaces-muted">'+escapeHtml(err.message||String(err))+'</div></div>';
     }
+  }
+
+  function renderSpacesList(spaces){
+    const cards = spaces.length ? spaces.map(function(s){
+      const spaceId = s.space_id || '';
+      return '<div class="capy-spaces-card" data-space-id="'+escapeHtml(spaceId)+'">' +
+        '<div class="capy-spaces-card-row"><div><strong>'+escapeHtml(s.name||spaceId||'Untitled')+'</strong>' +
+        '<div class="capy-spaces-muted">Widgets: '+Number(s.widget_count||0)+' · Revision: '+escapeHtml(s.revision_event_id||'none')+'</div></div>' +
+        '<button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Manage widgets</button></div>' +
+        '</div>';
+    }).join('') : '<div class="capy-spaces-card"><strong>No spaces yet</strong><div class="capy-spaces-muted">Create a space through the API or a future creation flow to start adding widgets.</div></div>';
+    return '<div class="capy-spaces-card"><h3>Capy Spaces</h3><div class="capy-spaces-muted">'+spaces.length+' space(s). Widget management lists metadata only; generated widget renderers are not executed here.</div></div>' + cards;
+  }
+
+  async function loadSpaceWidgets(spaceId){
+    const root = document.getElementById('capySpacesRoot');
+    if (!root) return;
+    ensureCapySpacesHandlers();
+    const safeSpaceId = String(spaceId || '').trim();
+    if (!safeSpaceId) return;
+    try {
+      const data = await fetchSpacesJson('api/spaces/widgets?space_id='+encodeURIComponent(safeSpaceId));
+      root.innerHTML = renderWidgetManager(safeSpaceId, data.widgets || []);
+    } catch (err) {
+      root.innerHTML = '<div class="capy-spaces-card"><h3>Widget manager unavailable</h3><div class="capy-spaces-muted">'+escapeHtml(err.message||String(err))+'</div><button type="button" class="capy-spaces-btn" data-capy-action="reloadSpaces">Back to spaces</button></div>';
+    }
+  }
+
+  function renderWidgetManager(spaceId, widgets){
+    const widgetCards = widgets.length ? widgets.map(function(w){
+      const widgetId = w.id || '';
+      return '<div class="capy-spaces-widget" data-widget-id="'+escapeHtml(widgetId)+'">' +
+        '<div><strong>'+escapeHtml(w.title||widgetId||'Untitled widget')+'</strong>' +
+        '<div class="capy-spaces-muted">'+escapeHtml(w.kind||'custom')+' · '+escapeHtml(widgetId)+'</div></div>' +
+        '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="deleteWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Delete</button>' +
+        '</div>';
+    }).join('') : '<div class="capy-spaces-muted">No widgets yet.</div>';
+    return '<div class="capy-spaces-card"><button type="button" class="capy-spaces-btn" data-capy-action="reloadSpaces">← Back to spaces</button>' +
+      '<h3>Widgets for '+escapeHtml(spaceId)+'</h3>' +
+      '<div class="capy-spaces-muted">Safe metadata view. Generated widget code is intentionally not fetched or executed in this list.</div>' +
+      '<div class="capy-spaces-widget-list">'+widgetCards+'</div>' +
+      '<div class="capy-spaces-form" aria-label="Add or update widget">' +
+      '<label>Widget ID<input id="capyWidgetId" type="text" autocomplete="off" placeholder="weather"></label>' +
+      '<label>Title<input id="capyWidgetTitle" type="text" autocomplete="off" placeholder="Weather"></label>' +
+      '<label>Kind<input id="capyWidgetKind" type="text" autocomplete="off" value="markdown"></label>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="saveWidget" data-space-id="'+escapeHtml(spaceId)+'">Save widget</button>' +
+      '</div></div>';
+  }
+
+  async function handleCapySpacesClick(event){
+    const button = event.target && event.target.closest ? event.target.closest('[data-capy-action]') : null;
+    if (!button) return;
+    const action = button.dataset.capyAction;
+    const spaceId = button.dataset.spaceId || '';
+    if (action === 'loadWidgets') {
+      await loadSpaceWidgets(spaceId);
+      return;
+    }
+    if (action === 'reloadSpaces') {
+      await loadCapySpaces();
+      return;
+    }
+    if (action === 'saveWidget') {
+      const root = document.getElementById('capySpacesRoot');
+      const idInput = root && root.querySelector ? root.querySelector('#capyWidgetId') : null;
+      const titleInput = root && root.querySelector ? root.querySelector('#capyWidgetTitle') : null;
+      const kindInput = root && root.querySelector ? root.querySelector('#capyWidgetKind') : null;
+      const widget = {
+        id: idInput ? idInput.value : '',
+        title: titleInput ? titleInput.value : '',
+        kind: kindInput && kindInput.value ? kindInput.value : 'markdown',
+      };
+      await postSpacesJson('api/spaces/widget/upsert', {space_id: spaceId, widget: widget});
+      await loadSpaceWidgets(spaceId);
+      return;
+    }
+    if (action === 'deleteWidget') {
+      await postSpacesJson('api/spaces/widget/delete', {space_id: spaceId, widget_id: button.dataset.widgetId || ''});
+      await loadSpaceWidgets(spaceId);
+    }
+  }
+
+  function ensureCapySpacesHandlers(){
+    if (handlersBound) return;
+    const root = document.getElementById('capySpacesRoot');
+    if (!root || !root.addEventListener) return;
+    root.addEventListener('click', handleCapySpacesClick);
+    handlersBound = true;
   }
 
   async function loadCapySpacesRecovery(){
@@ -47,7 +143,9 @@
 
   window.loadCapySpaces = loadCapySpaces;
   window.loadCapySpacesRecovery = loadCapySpacesRecovery;
+  window.loadSpaceWidgets = loadSpaceWidgets;
   window.addEventListener('DOMContentLoaded', function(){
+    ensureCapySpacesHandlers();
     loadCapySpaces();
     loadCapySpacesRecovery();
   });

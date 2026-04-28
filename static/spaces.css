@@ -27,3 +27,66 @@
 .capy-spaces-recovery {
   border-color: color-mix(in srgb, var(--warning, #f59e0b) 45%, var(--border));
 }
+
+.capy-spaces-card-row,
+.capy-spaces-widget {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.capy-spaces-btn {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--btn-bg, var(--panel-2, transparent));
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  padding: 8px 10px;
+}
+
+.capy-spaces-btn:hover {
+  border-color: var(--accent, var(--border));
+}
+
+.capy-spaces-danger {
+  color: var(--danger, #ef4444);
+}
+
+.capy-spaces-widget-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.capy-spaces-widget {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px;
+}
+
+.capy-spaces-form {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  margin-top: 12px;
+}
+
+.capy-spaces-form label {
+  color: var(--muted);
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+  gap: 4px;
+}
+
+.capy-spaces-form input {
+  background: var(--input-bg, var(--panel));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  font: inherit;
+  padding: 8px 10px;
+}

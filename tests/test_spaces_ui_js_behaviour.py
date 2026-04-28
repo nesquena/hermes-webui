@@ -1,0 +1,161 @@
+"""Behavioural tests for the actual Capy Spaces browser shell in static/spaces.js."""
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).parent.parent.resolve()
+SPACES_JS_PATH = REPO_ROOT / "static" / "spaces.js"
+NODE = shutil.which("node")
+
+pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
+
+
+_DRIVER_SRC = r"""
+const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const scenario = process.argv[3];
+
+const calls = [];
+const values = {
+  '#capyWidgetId': 'notes',
+  '#capyWidgetTitle': 'Notes',
+  '#capyWidgetKind': 'markdown',
+};
+const elements = {};
+function makeElement(id) {
+  return elements[id] || (elements[id] = {
+    id,
+    innerHTML: '',
+    textContent: '',
+    listeners: {},
+    addEventListener(type, fn) { this.listeners[type] = fn; },
+    querySelector(selector) {
+      if (!(selector in values)) return null;
+      return { value: values[selector] };
+    },
+  });
+}
+function response(data) {
+  return { ok: true, status: 200, json: async () => data };
+}
+
+global.window = {
+  addEventListener(type, fn) {
+    if (type === 'DOMContentLoaded') this._domReady = fn;
+  },
+};
+global.document = {
+  getElementById: makeElement,
+};
+global.fetch = async function(path, opts = {}) {
+  calls.push({ path, method: opts.method || 'GET', body: opts.body || '' });
+  if (path === 'api/spaces') {
+    return response({ enabled: true, spaces: [{ space_id: 'lab', name: 'Lab', widget_count: 1, revision_event_id: 'rev1' }] });
+  }
+  if (path === 'api/spaces/recovery') {
+    return response({ enabled: true, generated_widgets_rendered: false });
+  }
+  if (path === 'api/spaces/widgets?space_id=lab') {
+    return response({ widgets: [{ id: 'weather', kind: 'markdown', title: '<Weather>', renderer: '<script>bad()</script>' }] });
+  }
+  if (path === 'api/spaces/widget/upsert') {
+    return response({ space_id: 'lab', widget: { id: 'notes', kind: 'markdown', title: 'Notes' }, revision_event_id: 'rev2' });
+  }
+  if (path === 'api/spaces/widget/delete') {
+    return response({ deleted: true, space_id: 'lab', widget_id: 'weather', revision_event_id: 'rev3' });
+  }
+  throw new Error('unexpected fetch path: ' + path);
+};
+
+vm.runInThisContext(src, { filename: 'spaces.js' });
+const root = makeElement('capySpacesRoot');
+
+async function click(action, dataset) {
+  const listener = root.listeners.click;
+  if (!listener) throw new Error('click listener not registered');
+  await listener({
+    target: {
+      closest(selector) {
+        if (selector !== '[data-capy-action]') return null;
+        return { dataset: Object.assign({ capyAction: action }, dataset || {}) };
+      }
+    }
+  });
+}
+
+(async () => {
+  if (scenario === 'list') {
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+  } else if (scenario === 'save') {
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await click('saveWidget', { spaceId: 'lab' });
+  } else if (scenario === 'delete') {
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await click('deleteWidget', { spaceId: 'lab', widgetId: 'weather' });
+  } else {
+    throw new Error('unknown scenario: ' + scenario);
+  }
+  process.stdout.write(JSON.stringify({ rootHtml: root.innerHTML, calls }));
+})().catch(err => {
+  console.error(err && err.stack || String(err));
+  process.exit(1);
+});
+"""
+
+
+@pytest.fixture(scope="module")
+def driver_path(tmp_path_factory):
+    path = tmp_path_factory.mktemp("spaces_ui_driver") / "driver.js"
+    path.write_text(_DRIVER_SRC, encoding="utf-8")
+    return str(path)
+
+
+def _run_spaces_scenario(driver_path: str, scenario: str) -> dict:
+    result = subprocess.run(
+        [NODE, driver_path, str(SPACES_JS_PATH), scenario],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"node spaces driver failed: {result.stderr}")
+    return json.loads(result.stdout)
+
+
+def test_spaces_ui_lists_widgets_without_rendering_widget_code(driver_path):
+    out = _run_spaces_scenario(driver_path, "list")
+
+    assert "Weather" in out["rootHtml"]
+    assert "&lt;Weather&gt;" in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert {"path": "api/spaces/widgets?space_id=lab", "method": "GET", "body": ""} in out["calls"]
+
+
+def test_spaces_ui_save_widget_posts_to_upsert_and_refreshes_widgets(driver_path):
+    out = _run_spaces_scenario(driver_path, "save")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/upsert")
+
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {
+        "space_id": "lab",
+        "widget": {"id": "notes", "title": "Notes", "kind": "markdown"},
+    }
+    assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
+
+
+def test_spaces_ui_delete_widget_posts_to_delete_and_refreshes_widgets(driver_path):
+    out = _run_spaces_scenario(driver_path, "delete")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/delete")
+
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"space_id": "lab", "widget_id": "weather"}
+    assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
