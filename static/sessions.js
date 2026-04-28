@@ -17,9 +17,12 @@ let _loadingSessionId = null;
 
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
 const SESSION_COMPLETION_UNREAD_KEY = 'hermes-session-completion-unread';
+const SESSION_OBSERVED_STREAMING_KEY = 'hermes-session-observed-streaming';
 let _sessionViewedCounts = null;
 let _sessionCompletionUnread = null;
+let _sessionObservedStreaming = null;
 const _sessionStreamingById = new Map();
+const _sessionListSnapshotById = new Map();
 
 function _getSessionViewedCounts() {
   if (_sessionViewedCounts !== null) return _sessionViewedCounts;
@@ -88,6 +91,44 @@ function _hasSessionCompletionUnread(sid) {
   return Object.prototype.hasOwnProperty.call(_getSessionCompletionUnread(), sid);
 }
 
+function _getSessionObservedStreaming() {
+  if (_sessionObservedStreaming !== null) return _sessionObservedStreaming;
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SESSION_OBSERVED_STREAMING_KEY) || '{}');
+    _sessionObservedStreaming = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_){
+    _sessionObservedStreaming = {};
+  }
+  return _sessionObservedStreaming;
+}
+
+function _saveSessionObservedStreaming() {
+  try {
+    localStorage.setItem(SESSION_OBSERVED_STREAMING_KEY, JSON.stringify(_getSessionObservedStreaming()));
+  } catch (_){
+    // Ignore localStorage write failures.
+  }
+}
+
+function _rememberObservedStreamingSession(s) {
+  if (!s || !s.session_id) return;
+  const observed = _getSessionObservedStreaming();
+  observed[s.session_id] = {
+    message_count: Number(s.message_count || 0),
+    last_message_at: Number(s.last_message_at || 0),
+    observed_at: Date.now(),
+  };
+  _saveSessionObservedStreaming();
+}
+
+function _forgetObservedStreamingSession(sid) {
+  if (!sid) return;
+  const observed = _getSessionObservedStreaming();
+  if (!Object.prototype.hasOwnProperty.call(observed, sid)) return;
+  delete observed[sid];
+  _saveSessionObservedStreaming();
+}
+
 function _hasUnreadForSession(s) {
   if (!s || !s.session_id) return false;
   if (_hasSessionCompletionUnread(s.session_id)) return true;
@@ -124,6 +165,55 @@ function _isSessionEffectivelyStreaming(s) {
 function _rememberRenderedStreamingState(s, isStreaming) {
   if (!s || !s.session_id || !isStreaming) return;
   _sessionStreamingById.set(s.session_id, true);
+  _rememberObservedStreamingSession(s);
+}
+
+function _rememberRenderedSessionSnapshot(s) {
+  if (!s || !s.session_id) return;
+  const previous = _sessionListSnapshotById.get(s.session_id);
+  if (previous) return;
+  _sessionListSnapshotById.set(s.session_id, {
+    message_count: Number(s.message_count || 0),
+    last_message_at: Number(s.last_message_at || 0),
+  });
+}
+
+function _markSessionCompletedInList(session, previousSid = null) {
+  if (!session || !Array.isArray(_allSessions)) return;
+  const finalSid = session.session_id || previousSid;
+  if (!finalSid) return;
+  const idx = _allSessions.findIndex(s => s && (s.session_id === finalSid || s.session_id === previousSid));
+  if (idx < 0) return;
+  const {messages: _messages, tool_calls: _toolCalls, ...sessionMeta} = session;
+  const messageCount = Number(
+    session.message_count != null
+      ? session.message_count
+      : (Array.isArray(session.messages) ? session.messages.length : (_allSessions[idx].message_count || 0))
+  );
+  const lastMessageAt = Number(session.last_message_at || session.updated_at || _allSessions[idx].last_message_at || 0);
+  _allSessions[idx] = {
+    ..._allSessions[idx],
+    ...sessionMeta,
+    session_id: finalSid,
+    message_count: messageCount,
+    last_message_at: lastMessageAt,
+    active_stream_id: null,
+    pending_user_message: null,
+    pending_started_at: null,
+    is_streaming: false,
+  };
+  _sessionStreamingById.set(finalSid, false);
+  _forgetObservedStreamingSession(finalSid);
+  if (previousSid && previousSid !== finalSid) {
+    _sessionStreamingById.delete(previousSid);
+    _forgetObservedStreamingSession(previousSid);
+    _sessionListSnapshotById.delete(previousSid);
+  }
+  _sessionListSnapshotById.set(finalSid, {
+    message_count: messageCount,
+    last_message_at: lastMessageAt,
+  });
+  renderSessionListFromCache();
 }
 
 function _markPollingCompletionUnreadTransitions(sessions) {
@@ -135,13 +225,39 @@ function _markPollingCompletionUnreadTransitions(sessions) {
     seen.add(sid);
     const wasStreaming = _sessionStreamingById.get(sid);
     const isStreaming = _isSessionEffectivelyStreaming(s);
-    if (wasStreaming === true && !isStreaming && !_isSessionActivelyViewedForList(sid)) {
+    const previousSnapshot = _sessionListSnapshotById.get(sid);
+    const observedStreaming = _getSessionObservedStreaming()[sid];
+    const messageCount = Number(s.message_count || 0);
+    const lastMessageAt = Number(s.last_message_at || 0);
+    const completedObservedStream = wasStreaming === true && !isStreaming;
+    const completedWithNewMessages = Boolean(
+      (previousSnapshot || observedStreaming)
+      && !isStreaming
+      && (
+        messageCount > Number((previousSnapshot || observedStreaming).message_count || 0)
+        || lastMessageAt > Number((previousSnapshot || observedStreaming).last_message_at || 0)
+      )
+    );
+    const completedPersistedObservedStream = Boolean(observedStreaming && !isStreaming);
+    if ((completedObservedStream || completedPersistedObservedStream || completedWithNewMessages) && !_isSessionActivelyViewedForList(sid)) {
       _markSessionCompletionUnread(sid, s.message_count);
     }
     _sessionStreamingById.set(sid, isStreaming);
+    if (isStreaming) {
+      _rememberObservedStreamingSession(s);
+    } else {
+      _forgetObservedStreamingSession(sid);
+    }
+    _sessionListSnapshotById.set(sid, {
+      message_count: messageCount,
+      last_message_at: lastMessageAt,
+    });
   }
   for (const sid of Array.from(_sessionStreamingById.keys())) {
     if (!seen.has(sid)) _sessionStreamingById.delete(sid);
+  }
+  for (const sid of Array.from(_sessionListSnapshotById.keys())) {
+    if (!seen.has(sid)) _sessionListSnapshotById.delete(sid);
   }
 }
 
@@ -1123,6 +1239,7 @@ function renderSessionListFromCache(){
     const isActive=S.session&&s.session_id===S.session.session_id;
     const isStreaming=_isSessionEffectivelyStreaming(s);
     _rememberRenderedStreamingState(s, isStreaming);
+    _rememberRenderedSessionSnapshot(s);
     const hasUnread=_hasUnreadForSession(s)&&!isActive;
     el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(isStreaming?' streaming':'')+(hasUnread?' unread':'');
     if(isActive&&S.session&&S.session._flash)delete S.session._flash;

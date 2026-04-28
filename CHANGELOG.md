@@ -10,8 +10,16 @@
   longer being viewed. Session-list polling also marks unread when a session the
   page previously saw streaming later reports stopped, including local
   `INFLIGHT`-only sidebar spinners, cache-rendered visible spinners, and
-  reconnect/settled-stream fallback paths. The marker clears only when that
-  session is opened or the user returns to the active completed session.
+  reconnect/settled-stream fallback paths. Long-running sessions also use a
+  per-session message snapshot fallback and a persisted observed-running marker
+  so a completed background turn still becomes unread if the original
+  SSE/in-memory streaming context was missed or lost during a reload.
+  The `done` event now also updates the sidebar cache immediately before the
+  completion cue plays, so the row flips from spinner to unread without waiting
+  for the next session-list refresh, including auto-compression paths where the
+  final session id differs from the stream's original id.
+  The marker clears only when that session is opened or the user returns to the
+  active completed session.
   (`static/sessions.js`,
   `static/messages.js`, `tests/test_issue856_background_completion_unread.py`)
 - **Auto-title generic fallback** — when the auxiliary title-generation call

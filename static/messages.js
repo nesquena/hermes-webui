@@ -774,11 +774,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const d=JSON.parse(e.data);
       const isActiveSession=_isSessionCurrentPane(activeSid);
       const isSessionViewed=_isSessionActivelyViewed(activeSid);
+      const completedSession=d.session||{session_id:activeSid};
+      const completedSid=completedSession.session_id||activeSid;
       if(!isSessionViewed && typeof _markSessionCompletionUnread==='function'){
-        _markSessionCompletionUnread(activeSid, d.session&&d.session.message_count);
+        _markSessionCompletionUnread(completedSid, completedSession.message_count);
       }
       delete INFLIGHT[activeSid];
       clearInflight();clearInflightState(activeSid);
+      if(typeof _markSessionCompletedInList==='function'){
+        _markSessionCompletedInList(completedSession, activeSid);
+      }
       stopApprovalPolling();
       stopClarifyPolling();
       if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);
@@ -842,7 +847,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         S.busy=false;
         // No-reply guard (#373): if agent returned nothing, show inline error
         if(!S.messages.some(m=>m.role==='assistant'&&String(m.content||'').trim())&&!assistantText){removeThinking();S.messages.push({role:'assistant',content:'**No response received.** Check your API key and model selection.'});}
-        if(isSessionViewed) _markSessionViewed(activeSid, d.session.message_count ?? S.messages.length);
+        if(isSessionViewed) _markSessionViewed(completedSid, completedSession.message_count ?? S.messages.length);
         syncTopbar();renderMessages();loadDir('.');
       }
       _queueDrainSid=activeSid;renderSessionList();setBusy(false);setStatus('');
@@ -1050,8 +1055,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!_approvalSessionId||_approvalSessionId===activeSid) hideApprovalCard(true);
       if(!_clarifySessionId||_clarifySessionId===activeSid) hideClarifyCard(true);
       const isSessionViewed=_isSessionActivelyViewed(activeSid);
+      const completedSid=session.session_id||activeSid;
       if(!isSessionViewed && typeof _markSessionCompletionUnread==='function'){
-        _markSessionCompletionUnread(activeSid, session.message_count);
+        _markSessionCompletionUnread(completedSid, session.message_count);
       }
       if(S.session&&S.session.session_id===activeSid){
         S.activeStreamId=null;const _cbe=$('btnCancel');if(_cbe)_cbe.style.display='none';
@@ -1068,7 +1074,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }else{
           S.toolCalls=[];
         }
-        if(isSessionViewed) _markSessionViewed(activeSid, session.message_count ?? S.messages.length);
+        if(isSessionViewed) _markSessionViewed(completedSid, session.message_count ?? S.messages.length);
         syncTopbar();renderMessages();
       }
       _queueDrainSid=activeSid;renderSessionList();setBusy(false);setComposerStatus('');
