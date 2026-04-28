@@ -23,6 +23,7 @@
 <script>(function(){var fs=localStorage.getItem('hermes-font-size');if(fs&&fs!=='default')document.documentElement.dataset.fontSize=fs;})()</script>
 <script>(function(){try{document.documentElement.dataset.workspacePanel=localStorage.getItem('hermes-webui-workspace-panel')==='open'?'open':'closed';}catch(e){document.documentElement.dataset.workspacePanel='closed';}})()</script>
 <link rel="stylesheet" href="static/style.css">
+<link rel="stylesheet" href="static/spaces.css">
   <!-- KaTeX math rendering CSS (loaded eagerly to prevent layout shift) -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css" integrity="sha384-5TcZemv2l/9On385z///+d7MSYlvIEw9FuZTIdZ14vJLqWphw7e7ZPuOiCHJcFCP" crossorigin="anonymous">
   <!-- streaming-markdown: incremental DOM-building markdown parser for live streams -->
@@ -432,6 +433,15 @@
       </div>
     </div>
     </div><!-- /#mainChat -->
+    <div id="mainCapySpaces" class="main-view" aria-label="Capy Spaces">
+      <div class="main-view-header">
+        <div class="main-view-title">Capy Spaces</div>
+      </div>
+      <div class="capy-spaces-shell">
+        <div id="capySpacesRecovery" class="capy-spaces-card capy-spaces-recovery">Loading safe recovery…</div>
+        <div id="capySpacesRoot" class="capy-spaces-card">Loading Capy Spaces…</div>
+      </div>
+    </div>
     <div id="mainSkills" class="main-view">
       <div class="main-view-header">
         <div class="main-view-title" id="skillDetailTitle"></div>
@@ -825,6 +835,7 @@
 <script src="static/sessions.js" defer></script>
 <script src="static/commands.js" defer></script>
 <script src="static/messages.js" defer></script>
+<script src="static/spaces.js" defer></script>
 <script src="static/panels.js" defer></script>
 <script src="static/onboarding.js" defer></script>
 <script src="static/boot.js" defer></script>

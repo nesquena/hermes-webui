@@ -959,6 +959,28 @@ def handle_get(handler, parsed) -> bool:
             handler, {"workspaces": load_workspaces(), "last": get_last_workspace()}
         )
 
+    if parsed.path == "/api/spaces":
+        from api import spaces as capy_spaces
+        if not capy_spaces.spaces_enabled():
+            return j(handler, {"enabled": False, "spaces": []})
+        return j(handler, {"enabled": True, "spaces": capy_spaces.list_spaces()})
+
+    if parsed.path == "/api/spaces/recovery":
+        from api import spaces as capy_spaces
+        return j(handler, capy_spaces.recovery_snapshot())
+
+    if parsed.path == "/api/spaces/get":
+        from api import spaces as capy_spaces
+        space_id = parse_qs(parsed.query).get("space_id", [""])[0]
+        if not space_id:
+            return bad(handler, "Missing space_id")
+        try:
+            return j(handler, {"space": capy_spaces.read_space(space_id)})
+        except ValueError as e:
+            return bad(handler, str(e))
+        except FileNotFoundError:
+            return bad(handler, "Space not found", 404)
+
     if parsed.path == "/api/workspaces/suggest":
         qs = parse_qs(parsed.query)
         prefix = qs.get("prefix", [""])[0]
@@ -1525,6 +1547,61 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/workspaces/rename":
         return _handle_workspace_rename(handler, body)
+
+    # ── Capy Spaces foundation (POST) ──
+    if parsed.path == "/api/spaces/create":
+        from api import spaces as capy_spaces
+        try:
+            return j(handler, {"space": capy_spaces.create_space(body)})
+        except RuntimeError as e:
+            return bad(handler, str(e), 403)
+        except (ValueError, FileExistsError) as e:
+            return bad(handler, str(e))
+
+    if parsed.path == "/api/spaces/update":
+        from api import spaces as capy_spaces
+        space_id = body.get("space_id")
+        if not space_id:
+            return bad(handler, "Missing space_id")
+        try:
+            return j(handler, {"space": capy_spaces.update_space(space_id, body.get("updates") or body)})
+        except RuntimeError as e:
+            return bad(handler, str(e), 403)
+        except ValueError as e:
+            return bad(handler, str(e))
+        except FileNotFoundError:
+            return bad(handler, "Space not found", 404)
+
+    if parsed.path == "/api/spaces/delete":
+        from api import spaces as capy_spaces
+        space_id = body.get("space_id")
+        if not space_id:
+            return bad(handler, "Missing space_id")
+        try:
+            return j(handler, capy_spaces.delete_space(space_id))
+        except RuntimeError as e:
+            return bad(handler, str(e), 403)
+        except ValueError as e:
+            return bad(handler, str(e))
+        except FileNotFoundError:
+            return bad(handler, "Space not found", 404)
+
+    if parsed.path == "/api/spaces/activate":
+        from api import spaces as capy_spaces
+        space_id = body.get("space_id")
+        session_id = body.get("session_id")
+        if not space_id or not session_id:
+            return bad(handler, "Missing space_id or session_id")
+        try:
+            capy_spaces.read_space(space_id)
+            s = get_session(session_id)
+            s.active_space_id = capy_spaces.validate_space_id(space_id)
+            s.save()
+            return j(handler, {"ok": True, "session": s.compact() | {"messages": s.messages}})
+        except ValueError as e:
+            return bad(handler, str(e))
+        except (FileNotFoundError, KeyError):
+            return bad(handler, "Space or session not found", 404)
 
     # ── Approval (POST) ──
     if parsed.path == "/api/approval/respond":

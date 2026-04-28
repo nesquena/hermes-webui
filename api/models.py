@@ -315,6 +315,7 @@ class Session:
                  pending_user_message: str=None,
                  pending_attachments=None,
                  pending_started_at=None,
+                 active_space_id=None,
                  compression_anchor_visible_idx=None,
                  compression_anchor_message_key=None,
                  **kwargs):
@@ -338,6 +339,7 @@ class Session:
         self.pending_user_message = pending_user_message
         self.pending_attachments = pending_attachments or []
         self.pending_started_at = pending_started_at
+        self.active_space_id = active_space_id
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
         self._metadata_message_count = None
@@ -358,6 +360,7 @@ class Session:
             'input_tokens', 'output_tokens', 'estimated_cost',
             'personality', 'active_stream_id',
             'pending_user_message', 'pending_attachments', 'pending_started_at',
+            'active_space_id',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
@@ -448,6 +451,7 @@ class Session:
             'output_tokens': self.output_tokens,
             'estimated_cost': self.estimated_cost,
             'personality': self.personality,
+            'active_space_id': self.active_space_id,
             'compression_anchor_visible_idx': self.compression_anchor_visible_idx,
             'compression_anchor_message_key': self.compression_anchor_message_key,
             'active_stream_id': self.active_stream_id,
