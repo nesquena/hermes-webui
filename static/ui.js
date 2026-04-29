@@ -92,6 +92,7 @@ const _ARCHIVE_EXTS=/\.(zip|tar|tar\.gz|tgz|tar\.bz2|tbz2|tar\.xz|txz)$/i;
 const _SVG_EXTS=/\.svg$/i;
 const _AUDIO_EXTS=/\.(mp3|ogg|wav|m4a|aac|flac|wma|opus|webm)$/i;
 const _VIDEO_EXTS=/\.(mp4|webm|mkv|mov|avi|ogv|m4v)$/i;
+const _CSV_EXTS=/\.csv$/i;
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
@@ -917,6 +918,16 @@ function renderMd(raw){
         const rawCode=esc(code.replace(/\n$/,''));
         const blockId='tree-'+Math.random().toString(36).slice(2,10);
         _preBlock_stash.push(`<div class="code-tree-wrap" data-raw="${rawCode.replace(/"/g,'&quot;')}" data-lang="${lang}" id="${blockId}">${h}<pre class="tree-raw-view"><code${langAttr}>${rawCode}</code></pre></div>`);
+      // CSV blocks → render as styled table
+      } else if(lang==='csv'){
+        const rows=code.replace(/\n$/,'').split('\n').filter(r=>r.trim());
+        if(rows.length>=2){
+          const headers=rows[0].split(',').map(c=>c.trim());
+          const body=rows.slice(1).map(r=>'<tr>'+r.split(',').map(c=>`<td>${esc(c.trim())}</td>`).join('')+'</tr>').join('');
+          _preBlock_stash.push(`${h}<div class="csv-table-wrap"><table class="csv-table"><thead><tr>${headers.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table></div>`);
+        } else {
+          _preBlock_stash.push(`${h}<pre><code${langAttr}>${esc(code.replace(/\n$/,''))}</code></pre>`);
+        }
       } else {
         _preBlock_stash.push(`${h}<pre><code${langAttr}>${esc(code.replace(/\n$/,''))}</code></pre>`);
       }
@@ -1230,6 +1241,10 @@ function renderMd(raw){
     const fname=esc(ref.split('/').pop()||ref);
     if(/\.(patch|diff)$/i.test(ref)){
       return `<div class="diff-inline-load" data-path="${esc(ref)}">${t('diff_loading')} ${fname}...</div>`;
+    }
+    // CSV files → lazy-load and render as table
+    if(_CSV_EXTS.test(ref)){
+      return `<div class="csv-inline-load" data-path="${esc(ref)}">${t('csv_loading')} ${fname}...</div>`;
     }
     return `<a class="msg-media-link" href="${esc(apiUrl+'&download=1')}" download="${fname}">📎 ${fname}</a>`;
   });
@@ -2531,7 +2546,7 @@ function renderMessages(){
       inner.innerHTML=cached.html;
       _sessionHtmlCacheSid=sid;
       if(S.activeStreamId){scrollIfPinned();}else{scrollToBottom();}
-      requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();renderMermaidBlocks();renderKatexBlocks();});
+      requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();renderMermaidBlocks();renderKatexBlocks();});
       requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();renderMermaidBlocks();renderKatexBlocks();});
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
       return;
@@ -2936,7 +2951,7 @@ function renderMessages(){
     scrollToBottom();
   }
   // Apply syntax highlighting after DOM is built
-  requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();renderMermaidBlocks();renderKatexBlocks();});
+  requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();renderMermaidBlocks();renderKatexBlocks();});
   requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();renderMermaidBlocks();renderKatexBlocks();});
   // Refresh todo panel if it's currently open
   if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){
@@ -3385,6 +3400,38 @@ function loadDiffInline(){
       })
       .catch(()=>{
         el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('diff_error')}</span></div>`;
+      });
+  });
+}
+
+function loadCsvInline(){
+  const CSV_MAX_SIZE=256*1024; // 256 KB cap for inline CSV rendering
+  document.querySelectorAll('.csv-inline-load:not([data-loaded])').forEach(el=>{
+    el.setAttribute('data-loaded','1');
+    const path=el.dataset.path;
+    fetch('api/media?path='+encodeURIComponent(path))
+      .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
+      .then(text=>{
+        if(text.length>CSV_MAX_SIZE){
+          el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('csv_too_large')}</span></div>`;
+          return;
+        }
+        const rows=text.replace(/\r\n/g,'\n').replace(/\r/g,'\n').split('\n').filter(r=>r.trim());
+        if(rows.length<2){
+          el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('csv_no_data')}</span></div>`;
+          return;
+        }
+        // Auto-detect separator (comma, semicolon, tab)
+        const firstLine=rows[0];
+        const separators=[',',';','\t'];
+        let sep=separators.find(s=>firstLine.includes(s))||',';
+        const headers=rows[0].split(sep).map(c=>c.trim().replace(/^["']|["']$/g,''));
+        const bodyRows=rows.slice(1).map(r=>'<tr>'+r.split(sep).map(c=>`<td>${esc(c.trim().replace(/^["']|["']$/g,''))}</td>`).join('')+'</tr>').join('');
+        const headerRow=headers.map(h=>`<th>${esc(h)}</th>`).join('');
+        el.outerHTML=`<div class="csv-table-wrap"><div class="pre-header">${esc(path.split('/').pop())}</div><table class="csv-table"><thead><tr>${headerRow}</tr></thead><tbody>${bodyRows}</tbody></table></div>`;
+      })
+      .catch(()=>{
+        el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('csv_error')}</span></div>`;
       });
   });
 }

@@ -755,6 +755,10 @@ const LOCALES = {
     media_audio_label: 'Audio',
     media_svg_label: 'Diagram',
     media_video_label: 'Video',
+    csv_loading: 'Loading CSV',
+    csv_too_large: 'CSV file too large for inline rendering',
+    csv_no_data: 'CSV file has insufficient data to render as table',
+    csv_error: 'Failed to load CSV file',
   },
 
   ru: {
@@ -1453,6 +1457,10 @@ const LOCALES = {
     media_audio_label: 'Аудио',
     media_svg_label: 'Диаграмма',
     media_video_label: 'Видео',
+    csv_loading: 'Загрузка CSV',
+    csv_too_large: 'CSV-файл слишком большой для встроенного отображения',
+    csv_no_data: 'Недостаточно данных в CSV-файле',
+    csv_error: 'Не удалось загрузить CSV-файл',
   },
 
   es: {
@@ -2145,6 +2153,10 @@ const LOCALES = {
     media_audio_label: 'Audio',
     media_svg_label: 'Diagrama',
     media_video_label: 'Vídeo',
+    csv_loading: 'Cargando CSV',
+    csv_too_large: 'Archivo CSV demasiado grande para mostrar en línea',
+    csv_no_data: 'El archivo CSV no tiene suficientes datos para mostrar como tabla',
+    csv_error: 'Error al cargar el archivo CSV',
   },
 
   de: {
@@ -2612,6 +2624,10 @@ const LOCALES = {
     media_audio_label: 'Audio',
     media_svg_label: 'Diagramm',
     media_video_label: 'Video',
+    csv_loading: 'CSV wird geladen',
+    csv_too_large: 'CSV-Datei zu groß für Inline-Anzeige',
+    csv_no_data: 'CSV-Datei enthält nicht genügend Daten',
+    csv_error: 'CSV-Datei konnte nicht geladen werden',
 },
 
   zh: {
@@ -3301,6 +3317,10 @@ const LOCALES = {
     media_audio_label: '音频',
     media_svg_label: '图表',
     media_video_label: '视频',
+    csv_loading: '加载 CSV',
+    csv_too_large: 'CSV 文件过大，无法内联渲染',
+    csv_no_data: 'CSV 文件数据不足，无法渲染为表格',
+    csv_error: '加载 CSV 文件失败',
   },
 
   // Traditional Chinese (zh-Hant)
@@ -4041,6 +4061,10 @@ const LOCALES = {
     media_audio_label: '音訊',
     media_svg_label: '圖表',
     media_video_label: '影片',
+    csv_loading: '載入 CSV',
+    csv_too_large: 'CSV 檔案過大，無法內嵌渲染',
+    csv_no_data: 'CSV 檔案資料不足，無法渲染為表格',
+    csv_error: '載入 CSV 檔案失敗',
   },
 
 
@@ -5420,6 +5444,10 @@ const LOCALES = {
     media_audio_label: '오디오',
     media_svg_label: '다이어그램',
     media_video_label: '비디오',
+    csv_loading: 'CSV 로딩 중',
+    csv_too_large: 'CSV 파일이 너무 커서 인라인 렌더링할 수 없습니다',
+    csv_no_data: 'CSV 파일에 표시할 데이터가 부족합니다',
+    csv_error: 'CSV 파일을 로드하지 못했습니다',
   },
 };
 

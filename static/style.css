@@ -717,6 +717,15 @@
   .attach-chip--audio,.attach-chip--video{flex-direction:column;gap:4px;align-items:flex-start;padding:8px 10px;}
   .attach-chip--audio audio,.attach-chip--video video{width:100%;max-width:320px;border-radius:4px;}
   .attach-chip-media{font-size:12px;font-weight:600;color:var(--muted);}
+
+  /* ── CSV table rendering ── */
+  .csv-table-wrap{margin:6px 0;overflow-x:auto;border:1px solid var(--border);border-radius:8px;background:var(--surface);}
+  .csv-table{width:100%;border-collapse:collapse;font-size:13px;}
+  .csv-table thead{position:sticky;top:0;z-index:1;}
+  .csv-table th{background:var(--hover-bg);font-weight:600;text-align:left;padding:8px 12px;border-bottom:2px solid var(--border2);white-space:nowrap;user-select:none;}
+  .csv-table td{padding:6px 12px;border-bottom:1px solid var(--border);white-space:nowrap;}
+  .csv-table tbody tr:last-child td{border-bottom:none;}
+  .csv-table tbody tr:hover{background:var(--hover-bg);}
   .thinking{display:flex;align-items:center;gap:5px;color:var(--muted);font-size:13px;padding-left:30px;}
   .dot{width:6px;height:6px;border-radius:50%;background:var(--blue);opacity:.3;animation:pulse 1.4s ease-in-out infinite;}
   .dot:nth-child(2){animation-delay:.22s;}.dot:nth-child(3){animation-delay:.44s;}
