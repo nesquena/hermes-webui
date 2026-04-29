@@ -462,7 +462,7 @@ function _openSessionActionMenu(session, anchorEl){
       try{
         const res=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:session.workspace,model:session.model})});
         if(res.session){
-          await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:res.session.session_id,title:(session.title||'Untitled')+' (copy)'})});
+          await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:res.session.session_id,title:(session.title||'Untitled')+' (copy)',manual:true})});
           await loadSession(res.session.session_id);
           await renderSessionList();
           showToast(t('session_duplicated'));
@@ -1002,7 +1002,7 @@ function renderSessionListFromCache(){
           s.title=newTitle;
           if(S.session&&S.session.session_id===s.session_id){S.session.title=newTitle;syncTopbar();}
           try{
-            await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:s.session_id,title:newTitle})});
+            await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:s.session_id,title:newTitle,manual:true})});
           }
           catch(err){
             // Roll back optimistic update so the UI doesn't lie about persistence

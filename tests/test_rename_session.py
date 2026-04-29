@@ -27,8 +27,9 @@ import time
 import urllib.error
 import urllib.request
 
+from tests.conftest import TEST_BASE
 
-BASE = "http://127.0.0.1:8788"
+BASE = TEST_BASE
 
 
 # ── HTTP helpers ──────────────────────────────────────────────────────────────

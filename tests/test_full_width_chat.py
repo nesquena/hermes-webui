@@ -17,8 +17,11 @@ selectors are checked here.
 
 import pathlib
 import re
+import urllib.request
 
 import pytest
+
+from tests.conftest import TEST_BASE
 
 
 _REPO = pathlib.Path(__file__).resolve().parent.parent
@@ -55,11 +58,18 @@ def _strip_media_blocks(css: str) -> str:
 BASE_CSS = _strip_media_blocks(CSS)
 
 
-@pytest.mark.parametrize("selector", [".messages-inner", ".msg-body"])
+def _selector_bodies(css: str, selector: str) -> list[str]:
+    pattern = re.compile(r"(?:^|})\s*" + re.escape(selector) + r"\s*\{([^}]*)\}", re.S)
+    return [match.group(1).strip() for match in pattern.finditer(css)]
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [".messages-inner", ".msg-body", ".tool-card", ".thinking-card"],
+)
 def test_chat_container_has_no_base_max_width(selector):
     """The base (non-mobile) declaration must not pin a max-width."""
-    pattern = re.escape(selector) + r"\{([^}]*)\}"
-    matches = re.findall(pattern, BASE_CSS)
+    matches = _selector_bodies(BASE_CSS, selector)
     assert matches, f"Selector {selector} not found in style.css base rules"
     for body in matches:
         assert "max-width" not in body, (
@@ -74,7 +84,9 @@ def test_messages_inner_uses_full_width_centering():
     """The base rule for .messages-inner must keep the centred-flex layout
     even after we remove the max-width — width:100% prevents the column
     from collapsing and margin:auto keeps it horizontally aligned."""
-    [body] = re.findall(r"\.messages-inner\{([^}]*)\}", BASE_CSS)
+    matches = _selector_bodies(BASE_CSS, ".messages-inner")
+    assert matches, ".messages-inner must exist in base CSS"
+    body = matches[0]
     assert "width:100%" in body, ".messages-inner must keep width:100%"
     assert "margin:0 auto" in body, ".messages-inner must keep margin:0 auto"
 
@@ -90,3 +102,18 @@ def test_no_desktop_breakpoint_reintroduces_msg_max_width():
             "This was the silent revert from PR #3 — the chat panel must "
             "stay full-width on wide displays."
         )
+
+
+def test_served_css_keeps_chat_output_full_width():
+    """System-level guard: the shipped CSS served by the app must not re-pin
+    the main assistant column or its cards to a fixed desktop width."""
+    with urllib.request.urlopen(TEST_BASE + "/static/style.css", timeout=10) as resp:
+        served_css = resp.read().decode("utf-8")
+    served_base_css = _strip_media_blocks(served_css)
+    for selector in (".messages-inner", ".msg-body", ".tool-card", ".thinking-card"):
+        matches = _selector_bodies(served_base_css, selector)
+        assert matches, f"Served CSS missing selector {selector}"
+        for body in matches:
+            assert "max-width" not in body, (
+                f"Served CSS for {selector} still contains max-width: {body!r}"
+            )

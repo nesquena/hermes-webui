@@ -137,7 +137,7 @@ async function send(){
     syncTopbar();
     // Persist it and refresh the sidebar now -- don't wait for done
     api('/api/session/rename',{method:'POST',body:JSON.stringify({
-      session_id:activeSid, title:provisionalTitle
+      session_id:activeSid, title:provisionalTitle, manual:false
     })}).catch(()=>{});  // fire-and-forget, server refines on done
     renderSessionList();  // session appears in sidebar immediately
   } else {

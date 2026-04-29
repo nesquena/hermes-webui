@@ -340,6 +340,8 @@ class Session:
         self.pending_started_at = pending_started_at
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
+        for key, value in kwargs.items():
+            setattr(self, key, value)
         self._metadata_message_count = None
 
     @property

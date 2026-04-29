@@ -1964,7 +1964,7 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 
 /* ── Unified indent rail — every child of a turn lines up on --msg-rail ── */
 .msg-row { padding: 12px 0; }
-.msg-body { padding-left: var(--msg-rail); padding-top: 8px; max-width: var(--msg-max); }
+.msg-body { padding-left: var(--msg-rail); padding-top: 8px; }
 .msg-body:empty { display: none; }
 .assistant-turn { width: 100%; }
 .assistant-turn-blocks { display: flex; flex-direction: column; }
@@ -1984,8 +1984,8 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 .msg-row[data-role="assistant"]:has(.msg-body:empty) .msg-files { display: none; }
 .msg-files { padding-left: var(--msg-rail); }
 .msg-usage { padding-left: var(--msg-rail); opacity: 1; margin-top: 6px; font-size: 11px; }
-.tool-card { margin-left: var(--msg-rail); max-width: var(--msg-max); }
-.thinking-card { margin-left: var(--msg-rail); max-width: var(--msg-max); }
+.tool-card { margin-left: var(--msg-rail); }
+.thinking-card { margin-left: var(--msg-rail); }
 .tool-cards-toggle { margin-left: var(--msg-rail); }
 .msg-row[data-editing="1"] { width: 100%; }
 .msg-row[data-editing="1"] .msg-edit-area,
@@ -2086,7 +2086,6 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 .assistant-turn .msg-foot {
   justify-content: flex-start;
   padding-left: var(--msg-rail);
-  max-width: var(--msg-max);
   opacity: 0;
   transition: opacity .15s;
 }
@@ -2171,7 +2170,6 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
   border-radius: 8px;
   padding: 10px 14px;
   margin-left: var(--msg-rail);
-  max-width: calc(var(--msg-max) - 40px);
   color: var(--text);
 }
 .msg-row[data-error="1"] .msg-body em,
@@ -2192,10 +2190,7 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 }
 .msg-date-sep::before, .msg-date-sep::after { content: ''; flex: 1; height: 1px; background: var(--border); }
 
-/* ── Widths: collapse messages-inner to match content column ── */
-.messages-inner { max-width: var(--msg-max); }
-@media (min-width: 1400px) { .messages-inner { max-width: calc(var(--msg-max) + 40px); } }
-@media (min-width: 1800px) { .messages-inner { max-width: calc(var(--msg-max) + 80px); } }
+/* ── Widths: keep the message column full-width on desktop ── */
 
 @media (max-width: 700px) {
   .msg-role { margin-bottom: 4px; }

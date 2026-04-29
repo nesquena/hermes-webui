@@ -271,6 +271,36 @@ class TestRunBackgroundTitleRefresh:
             _run_background_title_refresh('sid', 'u', 'a', 'Old Title', put)
         assert not any(name == 'title' for name, _ in events)
 
+    def test_skips_manual_rename_flag_even_if_title_still_looks_provisional(self):
+        """Manual renames must stick even when the chosen text is still a
+        shortened prefix of the first-message placeholder."""
+        put, events = self._make_put_event()
+        with patch('api.streaming.get_session') as mock_get, \
+             patch('api.streaming._aux_title_configured', return_value=True), \
+             patch('api.streaming._generate_llm_session_title_via_aux',
+                   return_value=('Better Final Title', 'llm_ok', 'raw')), \
+             patch('api.streaming.SESSIONS', {}), \
+             patch('api.streaming.LOCK', threading.Lock()):
+            s = self._make_session_obj(title='How to fix')
+            s.user_renamed_title = True
+            s.messages = [
+                _user_msg('How to fix hermes rename persistence after refresh'),
+                _asst_msg('Let me trace the root cause.'),
+            ]
+            mock_get.return_value = s
+            _run_background_title_refresh(
+                'sid',
+                'How to fix hermes rename persistence after refresh',
+                'Let me trace the root cause.',
+                'How to fix',
+                put,
+            )
+        assert not any(name == 'title' for name, _ in events)
+        assert any(
+            name == 'title_status' and data.get('reason') == 'manual_title'
+            for name, data in events
+        )
+
     def test_emits_title_event_on_new_title(self):
         put, events = self._make_put_event()
         s = self._make_session_obj(title='Old Title')

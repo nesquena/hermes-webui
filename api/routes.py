@@ -1242,6 +1242,7 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         new_title = str(body["title"]).strip()[:80] or "Untitled"
+        is_manual_title = bool(body.get("manual", True))
         sid = body["session_id"]
         try:
             s = get_session(sid)
@@ -1267,6 +1268,7 @@ def handle_post(handler, parsed) -> bool:
             }})
         with _get_session_agent_lock(body["session_id"]):
             s.title = new_title
+            s.user_renamed_title = is_manual_title
             s.save()
         # Mirror to state.db so /insights and CLI sidebar listings stay in sync
         try:

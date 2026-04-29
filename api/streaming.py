@@ -273,6 +273,16 @@ def _is_provisional_title(current_title: str, messages) -> bool:
     return current == candidate or candidate.startswith(current)
 
 
+def _has_manual_title_override(session) -> bool:
+    """Return True only for an explicit manual-title marker.
+
+    Tests often use MagicMock sessions, whose missing attributes are truthy
+    mock objects. Checking ``is True`` avoids treating an unset attribute as a
+    real manual override.
+    """
+    return getattr(session, 'user_renamed_title', False) is True
+
+
 def _title_prompts(user_text: str, assistant_text: str) -> tuple[str, list[str]]:
     qa = f"User question:\n{user_text[:500]}\n\nAssistant answer:\n{assistant_text[:500]}"
     prompts = [
@@ -717,6 +727,9 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
             _put_title_status(put_event, session_id, 'skipped', 'already_generated', str(s.title or ''))
             return
         current = str(s.title or '').strip()
+        if _has_manual_title_override(s):
+            _put_title_status(put_event, session_id, 'skipped', 'manual_title', current)
+            return
         still_auto = (
             current == placeholder_title
             or current in ('Untitled', 'New Chat', '')
@@ -753,6 +766,9 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                 with LOCK:
                     s = SESSIONS.get(session_id, s)
                     effective_title = str(s.title or '').strip()
+                    if _has_manual_title_override(s):
+                        _put_title_status(put_event, session_id, 'skipped', 'manual_title', effective_title)
+                        return
                     invalid_existing_now = _looks_invalid_generated_title(s.title)
                     still_auto = (
                         effective_title == placeholder_title
@@ -765,6 +781,7 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                     return
                 if next_title != effective_title:
                     s.title = next_title
+                    s.user_renamed_title = False
                     s.llm_title_generated = True
                     # Keep chronological ordering stable in the sidebar.
                     s.save(touch_updated_at=False)
@@ -798,6 +815,9 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
             return
         # Safety: skip if user manually renamed since the check
         effective = str(s.title or '').strip()
+        if _has_manual_title_override(s):
+            _put_title_status(put_event, session_id, 'skipped', 'manual_title', effective)
+            return
         if effective != current_title:
             _put_title_status(put_event, session_id, 'skipped', 'manual_title', effective)
             return
@@ -825,10 +845,14 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
             with LOCK:
                 s = SESSIONS.get(session_id, s)
                 # Re-check: user may have renamed while we were generating
+                if _has_manual_title_override(s):
+                    _put_title_status(put_event, session_id, 'skipped', 'manual_title', str(s.title or '').strip())
+                    return
                 if str(s.title or '').strip() != current_title:
                     _put_title_status(put_event, session_id, 'skipped', 'manual_title', str(s.title or '').strip())
                     return
                 s.title = next_title
+                s.user_renamed_title = False
                 s.llm_title_generated = True
                 s.save(touch_updated_at=False)
                 effective_title = s.title
