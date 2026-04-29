@@ -1050,6 +1050,53 @@ def test_spaces_deactivate_route_clears_active_space_from_session(monkeypatch, t
     assert loaded.active_space_id is None
 
 
+def test_create_space_from_session_route_creates_metadata_only_active_space(monkeypatch, tmp_path):
+    _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    import api.config as config
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path / "sessions")
+    config.SESSION_DIR.mkdir(parents=True, exist_ok=True)
+
+    import api.models as models
+    monkeypatch.setattr(models, "SESSION_DIR", config.SESSION_DIR)
+    models.SESSIONS.clear()
+    session = models.Session(session_id="session_context", workspace=str(tmp_path / "safe-workspace"))
+    session.title = "Research Chat"
+    session.messages = [
+        {"role": "user", "content": "Use API_KEY=SECRET_VALUE_DO_NOT_LEAK for the weather call"},
+        {"role": "assistant", "content": "I will keep the token hidden."},
+    ]
+    session.save(skip_index=True)
+
+    handled, status, body = _route_post(
+        "/api/spaces/create-from-session",
+        {"session_id": "session_context"},
+    )
+
+    assert handled is None
+    assert status == 200
+    assert body["ok"] is True
+    assert body["space"]["template"] == "chat-context"
+    assert body["space"]["name"] == "Research Chat Space"
+    assert body["space"]["widgets"] == [
+        {
+            "id": "chat-context",
+            "kind": "status",
+            "title": "Linked chat context",
+            "layout": {"x": 0, "y": 0, "w": 8, "h": 4, "minimized": False},
+        }
+    ]
+    assert body["session"]["active_space_id"] == body["space"]["space_id"]
+    assert "messages" not in body["session"]
+    loaded = models.Session.load("session_context")
+    assert loaded.active_space_id == body["space"]["space_id"]
+    serialized = json.dumps(body).lower()
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "token hidden" not in serialized
+    assert "<script" not in serialized
+
+
 def test_widget_upsert_list_read_and_delete_are_revisioned(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Widget Lab"})
