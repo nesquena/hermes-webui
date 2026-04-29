@@ -14,6 +14,7 @@ import tempfile
 import time
 
 from api.config import STATE_DIR, load_settings
+from vendo_sdk import sso as vendo_sso
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +212,23 @@ def parse_cookie(handler) -> str | None:
 
 def check_auth(handler, parsed) -> bool:
     """Check if request is authorized. Returns True if OK.
-    If not authorized, sends 401 (API) or 302 redirect (page) and returns False."""
+    If not authorized, sends 401 (API) or 302 redirect (page) and returns False.
+    """
+    # SSO short-circuit: when running behind Vendo's proxy with vendoAuth on,
+    # trust the verified X-Vendo-* headers it injects. Spec:
+    # docs/superpowers/specs/2026-04-28-hermes-vendo-sso-design.md
+    if vendo_sso.is_enabled():
+        if vendo_sso.identity_from_headers(handler.headers) is not None:
+            return True
+        # Headers missing while VENDO_AUTH=1: proxy misconfigured or
+        # someone bypassed the proxy. 403 (not 302; the proxy already
+        # redirects unauthenticated users at its own layer).
+        handler.send_response(403)
+        handler.send_header('Content-Type', 'application/json')
+        handler.end_headers()
+        handler.wfile.write(b'{"error":"Vendo auth required"}')
+        return False
+
     if not is_auth_enabled():
         return True
     # Public paths don't require auth
