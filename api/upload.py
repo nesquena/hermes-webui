@@ -1,6 +1,7 @@
 """
 Hermes Web UI -- File upload: multipart parser and upload handler.
 """
+import mimetypes
 import re as _re
 import email.parser
 import tempfile
@@ -80,7 +81,14 @@ def handle_upload(handler):
         safe_name = _sanitize_upload_name(filename)
         dest = safe_resolve_ws(workspace, safe_name)
         dest.write_bytes(file_bytes)
-        return j(handler, {'filename': safe_name, 'path': str(dest), 'size': dest.stat().st_size})
+        mime = mimetypes.guess_type(safe_name)[0] or 'application/octet-stream'
+        return j(handler, {
+            'filename': safe_name,
+            'path': str(dest),
+            'size': dest.stat().st_size,
+            'mime': mime,
+            'is_image': mime.startswith('image/'),
+        })
     except ValueError as e:
         return j(handler, {'error': str(e)}, status=400)
     except Exception:

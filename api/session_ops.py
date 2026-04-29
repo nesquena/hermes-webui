@@ -15,6 +15,18 @@ from api.models import get_session, SESSIONS
 logger = logging.getLogger(__name__)
 
 
+def _truncate_at_last_user(messages):
+    history = messages or []
+    last_user_idx = None
+    for i in range(len(history) - 1, -1, -1):
+        if isinstance(history[i], dict) and history[i].get('role') == 'user':
+            last_user_idx = i
+            break
+    if last_user_idx is None:
+        return None
+    return history[:last_user_idx]
+
+
 def retry_last(session_id: str) -> dict[str, Any]:
     """Truncate the session to before the last user message, return its text.
 
@@ -63,6 +75,10 @@ def retry_last(session_id: str) -> dict[str, Any]:
             last_user_text = _extract_text(history[last_user_idx].get('content', ''))
             removed_count = len(history) - last_user_idx
             s.messages = history[:last_user_idx]
+            if isinstance(getattr(s, 'context_messages', None), list) and s.context_messages:
+                truncated_context = _truncate_at_last_user(s.context_messages)
+                if truncated_context is not None:
+                    s.context_messages = truncated_context
         s.save()
     return {'last_user_text': last_user_text, 'removed_count': removed_count}
 
@@ -98,6 +114,10 @@ def undo_last(session_id: str) -> dict[str, Any]:
             removed_text = _extract_text(history[last_user_idx].get('content', ''))
             removed_count = len(history) - last_user_idx
             s.messages = history[:last_user_idx]
+            if isinstance(getattr(s, 'context_messages', None), list) and s.context_messages:
+                truncated_context = _truncate_at_last_user(s.context_messages)
+                if truncated_context is not None:
+                    s.context_messages = truncated_context
         s.save()  # outside LOCK -- save() re-acquires LOCK via _write_session_index()
     preview = (removed_text[:40] + '...') if len(removed_text) > 40 else removed_text
     return {

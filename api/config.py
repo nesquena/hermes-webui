@@ -536,6 +536,7 @@ _PROVIDER_DISPLAY = {
     "kimi-coding": "Kimi / Moonshot",
     "deepseek": "DeepSeek",
     "minimax": "MiniMax",
+    "minimax-cn": "MiniMax (China)",
     "google": "Google",
     "meta-llama": "Meta Llama",
     "huggingface": "HuggingFace",
@@ -581,6 +582,8 @@ _PROVIDER_ALIASES = {
     "claude": "anthropic",
     "claude-code": "anthropic",
     "deep-seek": "deepseek",
+    "minimax-china": "minimax-cn",
+    "minimax_cn": "minimax-cn",
     "opencode": "opencode-zen",
     "grok": "xai",
     "x-ai": "xai",
@@ -687,6 +690,12 @@ _PROVIDER_MODELS = {
         {"id": "MiniMax-M2.5", "label": "MiniMax M2.5"},
         {"id": "MiniMax-M2.5-highspeed", "label": "MiniMax M2.5 Highspeed"},
         {"id": "MiniMax-M2.1", "label": "MiniMax M2.1"},
+    ],
+    "minimax-cn": [
+        {"id": "MiniMax-M2.7", "label": "MiniMax M2.7"},
+        {"id": "MiniMax-M2.5", "label": "MiniMax M2.5"},
+        {"id": "MiniMax-M2.1", "label": "MiniMax M2.1"},
+        {"id": "MiniMax-M2", "label": "MiniMax M2"},
     ],
     # GitHub Copilot — model IDs served via the Copilot API
     "copilot": [
@@ -1574,8 +1583,10 @@ def get_available_models() -> dict:
                 detected_providers.add("zai")
             if all_env.get("KIMI_API_KEY"):
                 detected_providers.add("kimi-coding")
-            if all_env.get("MINIMAX_API_KEY") or all_env.get("MINIMAX_CN_API_KEY"):
+            if all_env.get("MINIMAX_API_KEY"):
                 detected_providers.add("minimax")
+            if all_env.get("MINIMAX_CN_API_KEY"):
+                detected_providers.add("minimax-cn")
             if all_env.get("DEEPSEEK_API_KEY"):
                 detected_providers.add("deepseek")
             if all_env.get("XAI_API_KEY"):
@@ -1660,6 +1671,11 @@ def get_available_models() -> dict:
                 # Build set of hostnames from custom_providers config — these are
                 # user-explicitly configured endpoints and should not be blocked by SSRF.
                 _ssrf_trusted_hosts: set[str] = set()
+                # Also trust the base_url from model config (explicitly configured by user)
+                if cfg_base_url:
+                    _base_parsed = urlparse(cfg_base_url if "://" in cfg_base_url else f"http://{cfg_base_url}")
+                    if _base_parsed.hostname:
+                        _ssrf_trusted_hosts.add(_base_parsed.hostname.lower())
                 _custom_providers_cfg = cfg.get("custom_providers", [])
                 if isinstance(_custom_providers_cfg, list):
                     for _cp in _custom_providers_cfg:
@@ -1978,7 +1994,12 @@ SERVER_START_TIME = time.time()
 # Agent cache: reuse AIAgent across messages in the same WebUI session so that
 # _user_turn_count survives between turns.  This mirrors the gateway's
 # _agent_cache pattern and is required for injectionFrequency: "first-turn".
-SESSION_AGENT_CACHE: dict = {}   # session_id -> (AIAgent, config_sig)
+# LRU cache with size limit to prevent memory bloat.
+# All cache operations (get, set, move_to_end, popitem) are protected by
+# SESSION_AGENT_CACHE_LOCK for thread safety in multi-threaded ASGI servers.
+import collections
+SESSION_AGENT_CACHE: collections.OrderedDict = collections.OrderedDict()  # LRU cache
+SESSION_AGENT_CACHE_MAX = 50  # Maximum cached agents (each holds full conversation history)
 SESSION_AGENT_CACHE_LOCK = threading.Lock()
 
 

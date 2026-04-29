@@ -104,3 +104,6 @@ class TestProviderModelsCompleteness:
     def test_has_openrouter(self):
         # openrouter uses _FALLBACK_MODELS, not _PROVIDER_MODELS
         pass  # intentionally no assertion
+
+    def test_has_minimax_cn(self):
+        assert "minimax-cn" in _PROVIDER_MODELS_KEYS

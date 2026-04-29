@@ -696,6 +696,30 @@ function _syncCtxIndicator(usage){
   }
 }
 
+// ── Touch support: toggle context tooltip on tap (#524) ──
+// On mobile, hover doesn't work — allow tap on the context ring button
+// to toggle the tooltip visibility so the compress affordance is reachable.
+document.addEventListener('DOMContentLoaded',function(){
+  const wrap=document.getElementById('ctxIndicatorWrap');
+  const tooltip=document.getElementById('ctxTooltip');
+  if(!wrap||!tooltip)return;
+  const btn=document.getElementById('ctxIndicator');
+  if(!btn)return;
+  btn.addEventListener('click',function(e){
+    e.stopPropagation();
+    const isOpen=tooltip.classList.contains('ctx-tooltip-active');
+    tooltip.classList.toggle('ctx-tooltip-active',!isOpen);
+    tooltip.setAttribute('aria-hidden',String(isOpen));
+  });
+  // Close on outside tap
+  document.addEventListener('click',function(){
+    tooltip.classList.remove('ctx-tooltip-active');
+    tooltip.setAttribute('aria-hidden','true');
+  },{passive:true});
+  // Prevent tooltip click from closing itself
+  tooltip.addEventListener('click',function(e){e.stopPropagation();});
+});
+
 function scrollIfPinned(){
   if(!_scrollPinned) return;
   const el=$('messages');
@@ -966,7 +990,7 @@ function renderMd(raw){
   s=s.replace(/\*([^*\n]+)\*/g,(_,t)=>`<em>${esc(t)}</em>`);
   s=s.replace(/~~(.+?)~~/g,(_,t)=>`<del>${esc(t)}</del>`);
   s=s.replace(/\x00O(\d+)\x00/g,(_,i)=>_ob_stash[+i]);
-  s=s.replace(/^### (.+)$/gm,(_,t)=>`<h3>${inlineMd(t)}</h3>`).replace(/^## (.+)$/gm,(_,t)=>`<h2>${inlineMd(t)}</h2>`).replace(/^# (.+)$/gm,(_,t)=>`<h1>${inlineMd(t)}</h1>`);
+  s=s.replace(/^###### (.+)$/gm,(_,t)=>`<h6>${inlineMd(t)}</h6>`).replace(/^##### (.+)$/gm,(_,t)=>`<h5>${inlineMd(t)}</h5>`).replace(/^#### (.+)$/gm,(_,t)=>`<h4>${inlineMd(t)}</h4>`).replace(/^### (.+)$/gm,(_,t)=>`<h3>${inlineMd(t)}</h3>`).replace(/^## (.+)$/gm,(_,t)=>`<h2>${inlineMd(t)}</h2>`).replace(/^# (.+)$/gm,(_,t)=>`<h1>${inlineMd(t)}</h1>`);
   s=s.replace(/^---+$/gm,'<hr>');
   // (Blockquotes are handled by the pre-pass at the top of renderMd, before
   // fence_stash. The per-line passes below never see > prefixes.)
@@ -2605,7 +2629,8 @@ function renderMessages(){
     if(m.attachments&&m.attachments.length){
       const _attachSid=(S.session&&S.session.session_id)||'';
       filesHtml=`<div class="msg-files">${m.attachments.map(f=>{
-        const fname=f.split('/').pop()||f;
+        const fLabel=typeof f==='string'?f:(f&&(f.name||f.filename||f.path))||'';
+        const fname=String(fLabel).split('/').pop()||String(fLabel);
         if(_IMAGE_EXTS.test(fname)){
           // Use api/file/raw which resolves filename relative to the session workspace.
           // api/media expects a full absolute path which we don't store on the client side.
@@ -3892,7 +3917,7 @@ async function uploadPendingFiles(){
         names.push({name: data.dest, path: data.dest, extracted: data.extracted});
         if(typeof loadDir==='function')loadDir(S.currentDir||'.');
       }else{
-        names.push({name: data.filename, path: data.path});
+        names.push({name: data.filename, path: data.path, mime: data.mime, size: data.size, is_image: !!data.is_image});
       }
     }catch(e){failures++;setStatus(`\u274c ${t('upload_failed')}${f.name} \u2014 ${e.message}`);}
     bar.style.width=`${Math.round((i+1)/total*100)}%`;

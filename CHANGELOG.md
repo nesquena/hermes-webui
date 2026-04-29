@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+### Fixed
+
+## [v0.50.239] — 2026-04-29
+
+### Fixed
+- **h4–h6 markdown headings now render correctly** — `renderMd()` heading replacers are now applied longest-first (`######` before `#####` before `####` before `###`…), fixing the regression where h4–h6 headings were emitted as literal `#` text. CSS adds correct font sizes and `color:var(--muted)` for h6. (`static/ui.js`, `static/style.css`) @the-own-lab — Closes #1258
+
+## [v0.50.238] — 2026-04-29
+
+### Added
+- **Portuguese (pt-BR) locale** — full i18n coverage for `pt` locale across all UI panels (chat, sessions, commands, settings, cron, workspace, profiles, skills). (`static/i18n.js`) @fecolinhares — Closes #1242
+
+### Fixed
+- **Compaction preserves visible prompts** — WebUI now keeps model-facing compacted context separately from the visible transcript, so automatic context compaction no longer replaces earlier user prompts in the scrollback. (`api/models.py`, `api/streaming.py`, `api/routes.py`) @franksong2702 — Closes #1217
+- **MiniMax China provider visible in model picker** — `MINIMAX_CN_API_KEY` now maps to the `minimax-cn` provider instead of being collapsed into global `minimax`; WebUI includes a static MiniMax (China) model catalog/display label so `providers.minimax-cn: {}` can render a populated picker group. (`api/config.py`, `api/providers.py`) @franksong2702 — Closes #1236
+- **Terminal resize and collapse controls restored** — restores the collapse/expand dock markup and controlled height CSS variable lost during the v0.50.237 batch integration, and reinstates regression coverage for terminal resizing and collapsed-state behavior. (`static/index.html`, `static/style.css`, `static/terminal.js`, `tests/test_embedded_workspace_terminal.py`) @franksong2702
+- **GET `/api/mcp/servers` returned 404** — the route was placed after `handle_get()`'s `return False` sentinel; moved inside the function before the 404 return. (`api/routes.py`) @KingBoyAndGirl — Closes #1251
+- **MCP Servers UI showed Korean labels in English locale** — 26 i18n keys in the English locale block (`en`) were accidentally set to Korean translations from PR #538; replaced with correct English text. (`static/i18n.js`) @bergeouss — Closes #1254
+- **Live model fetch for custom providers** — when `provider=custom`, the live-model endpoint now reads `model.base_url` from config and fetches `/v1/models` from the user's custom OpenAI-compat endpoint. (`api/routes.py`) @KingBoyAndGirl — Closes #1247
+- **Profile terminal env applied in WebUI sessions** — `api/terminal.py` now loads the active profile's env overlay before spawning the PTY shell. (`api/terminal.py`) @dso2ng — Closes #1245
+- **SSRF: custom provider `base_url` trusted** — `_is_ssrf_blocked()` now whitelists user-configured custom provider base URLs, preventing false SSRF blocks for legitimate private-network endpoints. (`api/routes.py`) @KingBoyAndGirl — Closes #1244
+- **SESSION_AGENT_CACHE LRU limit** — unbounded dict replaced with `functools.lru_cache` (cap 256); prevents memory growth in long-running servers with many sessions. (`api/config.py`) @happy5318 — Closes #1250
+- **Native image uploads as multimodal inputs** — image attachments uploaded to the workspace are now forwarded to vision-capable models as OpenAI-style `image_url` data-URL parts instead of text paths. Magic-byte validation rejects non-image files; workspace path validation uses `.resolve()` + `.relative_to()` (symlink-safe); 20 MiB per-image cap. (`api/streaming.py`, `api/routes.py`, `api/upload.py`, `static/ui.js`) @yzp12138 — Closes #1229
+- **`@provider:model` hint preserved when hint matches active provider** — `_resolve_compatible_session_model()` was stripping the `@provider:` prefix when the hint matched the active provider, causing duplicate model IDs from different providers to snap back to the wrong provider on the next render. The hint is now returned unchanged so `resolve_model_provider()` can route correctly. (`api/routes.py`) @nesquena-hermes — Closes #1253
+
 ## [v0.50.237] — 2026-04-29
 
 ### Added

@@ -139,7 +139,7 @@ async function send(){
   catch(e){if(!text){setComposerStatus(`Upload error: ${e.message}`);return;}}
 
   const uploadedNames=uploaded.map(u=>u.name||u);
-  const uploadedPaths=uploaded.map(u=>u.path||u.name||u);
+  const uploadedPaths=uploaded.map(u=>u&&u.is_image?(u.name||u.filename||u):(u.path||u.name||u));
   let msgText=text;
   if(uploaded.length&&!msgText)msgText=`I've uploaded ${uploaded.length} file(s): ${uploadedPaths.join(', ')}`;
   else if(uploaded.length)msgText=`${text}\n\n[Attached files: ${uploadedPaths.join(', ')}]`;
@@ -182,7 +182,7 @@ async function send(){
     const startData=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
       session_id:activeSid,message:msgText,
       model:S.session.model||$('modelSelect').value,workspace:S.session.workspace,
-      attachments:uploaded.length?uploadedNames:undefined
+      attachments:uploaded.length?uploaded:undefined
     })});
     if(startData.effective_model && S.session){
       S.session.model=startData.effective_model;

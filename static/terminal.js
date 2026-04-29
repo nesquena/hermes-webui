@@ -28,6 +28,7 @@ function _terminalEls(){
   return {
     panel:$('composerTerminalPanel'),
     inner:$('composerTerminalPanel')&&$('composerTerminalPanel').querySelector('.composer-terminal-inner'),
+    dock:$('composerTerminalDock'),
     viewport:$('terminalViewport'),
     surface:$('terminalSurface'),
     toggle:$('btnTerminalToggle'),
@@ -201,7 +202,7 @@ function _applyTerminalHeight(height){
     handle.setAttribute('aria-valuemax',String(bounds.max));
     handle.setAttribute('aria-valuenow',String(next));
   }
-  if(TERMINAL_UI.open){
+  if(TERMINAL_UI.open&&!TERMINAL_UI.collapsed){
     _fitTerminal();
     _syncTerminalTranscriptSpace(true);
   }
@@ -280,7 +281,8 @@ function _terminalIsMessagesNearBottom(el){
   return el.scrollHeight-el.scrollTop-el.clientHeight<150;
 }
 
-function _syncTerminalTranscriptSpace(open){
+function _syncTerminalTranscriptSpace(open,opts){
+  opts=opts||{};
   const messages=_terminalMessagesEl();
   if(!messages)return;
   const wasNearBottom=_terminalIsMessagesNearBottom(messages);
@@ -289,17 +291,29 @@ function _syncTerminalTranscriptSpace(open){
     messages.classList.remove('terminal-collapsed');
     messages.classList.remove('terminal-expanding-from-dock');
     messages.style.removeProperty('--terminal-card-height');
+    messages.style.removeProperty('--terminal-dock-height');
     if(wasNearBottom&&typeof scrollToBottom==='function')requestAnimationFrame(scrollToBottom);
     return;
   }
-  messages.classList.add('terminal-open');
+  if(open==='collapsed'){
+    messages.classList.remove('terminal-open');
+    messages.classList.add('terminal-collapsed');
+  }else{
+    messages.classList.add('terminal-open');
+    messages.classList.remove('terminal-collapsed');
+  }
   const measure=()=>{
     if(!TERMINAL_UI.open)return;
-    const {panel,inner}= _terminalEls();
-    const h=(inner||panel)&&((inner||panel).getBoundingClientRect().height);
-    if(h>0)messages.style.setProperty('--terminal-card-height',Math.ceil(h+24)+'px');
+    const {panel,inner,dock}= _terminalEls();
+    const target=open==='collapsed'?(dock||panel):(inner||panel);
+    const h=target&&target.getBoundingClientRect().height;
+    if(h>0){
+      if(open==='collapsed')messages.style.setProperty('--terminal-dock-height',Math.ceil(h+24)+'px');
+      else messages.style.setProperty('--terminal-card-height',Math.ceil(h+24)+'px');
+    }
     if(wasNearBottom&&typeof scrollToBottom==='function')scrollToBottom();
   };
+  if(opts.immediate)measure();
   requestAnimationFrame(measure);
   setTimeout(measure,420);
 }
@@ -317,9 +331,11 @@ function _fitTerminal(){
 
 function _setTerminalChromeState(state){
   const {panel,inner,dock,workspace,dockWorkspace}= _terminalEls();
+  const composerWrap=$('composerWrap');
   if(!panel)return;
   const collapsed=state==='collapsed';
   const expanded=state==='expanded';
+  if(composerWrap)composerWrap.classList.toggle('terminal-dock-visible',collapsed);
   panel.hidden=!(collapsed||expanded);
   panel.classList.toggle('is-open',expanded);
   panel.classList.toggle('is-collapsed',collapsed);
@@ -412,10 +428,15 @@ async function _startComposerTerminal(restart=false){
 async function toggleComposerTerminal(force){
   const next=typeof force==='boolean'?force:!TERMINAL_UI.open;
   if(next){
-    const {panel,inner,workspace}= _terminalEls();
+    if(TERMINAL_UI.open){
+      if(TERMINAL_UI.collapsed)expandComposerTerminal();
+      else focusComposerTerminalInput();
+      return;
+    }
+    const {panel,inner}= _terminalEls();
+    const messages=_terminalMessagesEl();
     if(!panel)return;
     clearTimeout(TERMINAL_UI.closeTimer);
-    panel.hidden=false;
     _initTerminalResizeHandle();
     _resetTerminalHeightForViewport();
     if(messages)messages.classList.add('terminal-expanding-from-dock');
@@ -467,7 +488,6 @@ function expandComposerTerminal(){
   if(messages)void messages.offsetHeight;
   _setTerminalChromeState('expanded');
   _resetTerminalHeightForViewport();
-  _syncTerminalTranscriptSpace(true);
   requestAnimationFrame(()=>{
     _fitTerminal();
     focusComposerTerminalInput();
@@ -502,7 +522,7 @@ async function closeComposerTerminal(sessionId,opts){
   }
   const {panel}= _terminalEls();
   if(panel){
-    panel.classList.remove('is-open');
+    panel.classList.remove('is-open','is-collapsed','is-expanding-from-dock');
     _syncTerminalTranscriptSpace(false);
     clearTimeout(TERMINAL_UI.closeTimer);
     TERMINAL_UI.closeTimer=setTimeout(()=>{
@@ -515,6 +535,8 @@ async function closeComposerTerminal(sessionId,opts){
   }
   TERMINAL_UI.open=false;
   TERMINAL_UI.collapsed=false;
+  const composerWrap=$('composerWrap');
+  if(composerWrap)composerWrap.classList.remove('terminal-dock-visible');
   TERMINAL_UI.sessionId=null;
   TERMINAL_UI.workspace=null;
   syncTerminalButton();
@@ -595,6 +617,10 @@ window.addEventListener('beforeunload',()=>{
 
 window.addEventListener('resize',()=>{
   if(!TERMINAL_UI.open)return;
+  if(TERMINAL_UI.collapsed){
+    _syncTerminalTranscriptSpace('collapsed');
+    return;
+  }
   _resetTerminalHeightForViewport();
 });
 

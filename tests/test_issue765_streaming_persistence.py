@@ -318,8 +318,8 @@ class TestIssue765FollowupHardening:
         )
         stop_idx = src.find("if _checkpoint_stop is not None:\n                _checkpoint_stop.set()")
         join_idx = src.find("if _ckpt_thread is not None:\n                _ckpt_thread.join(timeout=15)")
-        lock_idx = src.find("with _agent_lock:\n                s.messages = _restore_reasoning_metadata(")
-        save_idx = src.find("s.messages = _restore_reasoning_metadata(")
+        lock_idx = src.find("with _agent_lock:\n                _result_messages =")
+        save_idx = src.find("s.context_messages = _next_context_messages")
 
         assert stop_idx != -1, "Success path must stop the checkpoint thread"
         assert join_idx != -1, "Success path must join the checkpoint thread"
@@ -338,7 +338,7 @@ class TestIssue765FollowupHardening:
         src = (Path(__file__).parent.parent / "api" / "streaming.py").read_text(
             encoding="utf-8"
         )
-        outer_lock_idx = src.find("with _agent_lock:\n                s.messages = _restore_reasoning_metadata(")
+        outer_lock_idx = src.find("with _agent_lock:\n                _result_messages =")
         silent_failure_idx = src.find("if not _assistant_added and not _token_sent:")
         inner_lock_idx = src.find("with _agent_lock:", outer_lock_idx + 1)
         compression_idx = src.find("# ── Handle context compression side effects ──")

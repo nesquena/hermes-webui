@@ -158,6 +158,89 @@ def get_hermes_home_for_profile(name: str) -> Path:
     return _DEFAULT_HERMES_HOME
 
 
+_TERMINAL_ENV_MAPPINGS = {
+    'backend': 'TERMINAL_ENV',
+    'env_type': 'TERMINAL_ENV',
+    'cwd': 'TERMINAL_CWD',
+    'timeout': 'TERMINAL_TIMEOUT',
+    'lifetime_seconds': 'TERMINAL_LIFETIME_SECONDS',
+    'modal_mode': 'TERMINAL_MODAL_MODE',
+    'docker_image': 'TERMINAL_DOCKER_IMAGE',
+    'docker_forward_env': 'TERMINAL_DOCKER_FORWARD_ENV',
+    'docker_env': 'TERMINAL_DOCKER_ENV',
+    'docker_mount_cwd_to_workspace': 'TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE',
+    'singularity_image': 'TERMINAL_SINGULARITY_IMAGE',
+    'modal_image': 'TERMINAL_MODAL_IMAGE',
+    'daytona_image': 'TERMINAL_DAYTONA_IMAGE',
+    'container_cpu': 'TERMINAL_CONTAINER_CPU',
+    'container_memory': 'TERMINAL_CONTAINER_MEMORY',
+    'container_disk': 'TERMINAL_CONTAINER_DISK',
+    'container_persistent': 'TERMINAL_CONTAINER_PERSISTENT',
+    'docker_volumes': 'TERMINAL_DOCKER_VOLUMES',
+    'persistent_shell': 'TERMINAL_PERSISTENT_SHELL',
+    'ssh_host': 'TERMINAL_SSH_HOST',
+    'ssh_user': 'TERMINAL_SSH_USER',
+    'ssh_port': 'TERMINAL_SSH_PORT',
+    'ssh_key': 'TERMINAL_SSH_KEY',
+    'ssh_persistent': 'TERMINAL_SSH_PERSISTENT',
+    'local_persistent': 'TERMINAL_LOCAL_PERSISTENT',
+}
+
+
+def _stringify_env_value(value) -> str:
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    if isinstance(value, (list, dict)):
+        return json.dumps(value)
+    return str(value)
+
+
+def get_profile_runtime_env(home: Path) -> dict[str, str]:
+    """Return env vars needed to run an agent turn for a profile home.
+
+    WebUI profile switching is per-client/cookie scoped, so it intentionally
+    does not call ``switch_profile(..., process_wide=True)`` for every browser.
+    Agent/tool code still consumes terminal backend settings through
+    environment variables (matching ``hermes -p <profile>``), so streaming must
+    apply the selected profile's terminal config and ``.env`` for the duration
+    of that run.
+    """
+    home = Path(home).expanduser()
+    env: dict[str, str] = {}
+
+    try:
+        import yaml as _yaml
+
+        cfg_path = home / 'config.yaml'
+        cfg = _yaml.safe_load(cfg_path.read_text(encoding='utf-8')) if cfg_path.exists() else {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+    except Exception:
+        cfg = {}
+
+    terminal_cfg = cfg.get('terminal', {}) if isinstance(cfg, dict) else {}
+    if isinstance(terminal_cfg, dict):
+        for key, env_key in _TERMINAL_ENV_MAPPINGS.items():
+            if key in terminal_cfg and terminal_cfg[key] is not None:
+                env[env_key] = _stringify_env_value(terminal_cfg[key])
+
+    env_path = home / '.env'
+    if env_path.exists():
+        try:
+            for line in env_path.read_text(encoding='utf-8').splitlines():
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    k, v = line.split('=', 1)
+                    k = k.strip()
+                    v = v.strip().strip('"').strip("'")
+                    if k and v:
+                        env[k] = v
+        except Exception:
+            logger.debug("Failed to read runtime env from %s", env_path)
+
+    return env
+
+
 def _set_hermes_home(home: Path):
     """Set HERMES_HOME env var and monkey-patch cached module-level paths."""
     os.environ['HERMES_HOME'] = str(home)
