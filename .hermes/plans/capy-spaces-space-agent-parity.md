@@ -3,8 +3,53 @@
 Created: 2026-04-27 23:28 CDT
 Research targets:
 - Space Agent checkout: `/tmp/space-agent` at `1289793`
+- Local Space Agent reference clone: `/Users/bschmidy10/workspace/space-agent-reference` at `1289793bab727a46e62365992a65ffb3476c4091` (`v0.64`)
 - Hermes WebUI checkout: `/Users/bschmidy10/hermes-webui` at `5720fa5`
 - Hermes Agent checkout: `/Users/bschmidy10/.hermes/hermes-agent` at `e403379b`
+
+## 2026-04-28 Source Recreation Validation
+
+Verdict: Space Agent is practically recreateable from source and useful as a live reference implementation for Capy Spaces parity work.
+
+Validated facts:
+
+- License is MIT, so source use, modification, redistribution, sublicensing, and commercialization are allowed with license/copyright notice preservation.
+- A fresh local reference clone exists at `/Users/bschmidy10/workspace/space-agent-reference`.
+- `npm install --omit=optional` completed successfully under Node `v22.22.2` / npm `10.9.7`.
+- `node space version` prints `v0.64`.
+- A single-user local smoke run succeeded with:
+  - `CUSTOMWARE_PATH=/tmp/space-agent-reference-smoke-customware`
+  - `SINGLE_USER_APP=true`
+  - `HOST=127.0.0.1`
+  - `PORT=39221`
+- Smoke `/api/health` returned `{ "ok": true, "name": "space-agent-server", ... "source": "single-user-app", "username": "user" }`.
+- Root `/` and `/enter` returned `200` during smoke. A guessed `/mod/_core/framework/main.js` path returned `404`, which is not a server boot failure and should be rechecked with actual module asset paths when doing browser QA.
+- `npm audit` still reports one high-severity `lodash` advisory, so do not expose the reference app beyond localhost/Tailscale-gated development without dependency/security review.
+
+Reference run command for future local QA:
+
+```bash
+cd /Users/bschmidy10/workspace/space-agent-reference
+CUSTOMWARE_PATH=/Users/bschmidy10/.space-agent-reference-customware \
+  SINGLE_USER_APP=true \
+  HOST=127.0.0.1 \
+  PORT=39221 \
+  node space serve
+```
+
+Do not push or fork upstream automatically from autonomous Capy Spaces jobs. Treat this clone as read-only reference unless Brendan explicitly asks for direct Space Agent fork development.
+
+## Active Sprint Guidance From Source Review
+
+Scheduled Capy Spaces sprint cycles should now prefer these source-derived slices, in order, unless the repo already contains the slice:
+
+1. Reconcile the current Capy Spaces data model against Space Agent's `~/spaces/<spaceId>/space.yaml` + `widgets/<widgetId>.yaml` schema while preserving Capy's stricter metadata-only/sandbox-first rules.
+2. Add missing safe `space.current` / `space.spaces`-style backend helpers as Capy-native Python APIs and WebUI routes; keep list/detail responses metadata-only.
+3. Add or harden widget patch/reload/revision primitives before any arbitrary widget renderer execution.
+4. Add source-derived prompt/context injection for active space metadata only: id, title, description, instructions, widget summary rows, and revision id. Never inject raw renderer/html/script/data bodies.
+5. Build demo parity templates in safe metadata-only increments: Weather Demo, Research Harness, Kanban, Notes, Browser Surface, Stock Chart, Game, Sequencer, Big Bang onboarding.
+6. Add safe import/export compatibility with Space Agent ZIP/YAML layouts; imported JS renderer strings must be stored as disabled/untrusted artifacts pending explicit sandbox handling.
+7. Add recovery/time-travel UX before enabling any richer generated-widget rendering.
 
 ## Executive Summary
 
