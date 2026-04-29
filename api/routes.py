@@ -18,6 +18,19 @@ from urllib.parse import parse_qs
 
 logger = logging.getLogger(__name__)
 
+# Treat stalled/closed HTTP clients as normal disconnects.  Long-lived SSE
+# connections often end this way when a browser tab sleeps, a phone switches
+# networks, or Tailscale leaves the socket half-closed.  If these bubble to the
+# request handler, the server logs 500s and can leave CLOSE-WAIT sockets around
+# until the OS-level timeout fires.
+_CLIENT_DISCONNECT_ERRORS = (
+    BrokenPipeError,
+    ConnectionResetError,
+    ConnectionAbortedError,
+    TimeoutError,
+    OSError,
+)
+
 # ── Cron run tracking ────────────────────────────────────────────────────────
 # Track job IDs currently being executed so the frontend can poll status.
 _RUNNING_CRON_JOBS: dict[str, float] = {}  # job_id → start_timestamp
@@ -2190,7 +2203,7 @@ def _handle_sse_stream(handler, parsed):
             _sse(handler, event, data)
             if event in ("stream_end", "error", "cancel"):
                 break
-    except (BrokenPipeError, ConnectionResetError):
+    except _CLIENT_DISCONNECT_ERRORS:
         pass
     return True
 
@@ -2392,7 +2405,7 @@ def _handle_gateway_sse_stream(handler, parsed):
             if event_data is None:
                 break  # watcher is stopping
             _sse(handler, event_data.get('type', 'sessions_changed'), event_data)
-    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+    except _CLIENT_DISCONNECT_ERRORS:
         pass
     finally:
         watcher.unsubscribe(q)

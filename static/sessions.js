@@ -938,6 +938,10 @@ function startGatewaySSE(){
       }catch(e){ /* ignore parse errors */ }
     });
     _gatewaySSE.onerror = () => {
+      if(_gatewaySSE){
+        _gatewaySSE.close();
+        _gatewaySSE = null;
+      }
       void probeGatewaySSEStatus();
     };
   }catch(e){
