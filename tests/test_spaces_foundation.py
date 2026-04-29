@@ -1,6 +1,8 @@
+import base64
 import importlib
 import io
 import json
+import zipfile
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -177,6 +179,91 @@ def test_recovery_disable_widget_marks_safe_metadata_without_deleting_or_leaking
     assert "renderer" not in serialized
     assert "<img" not in serialized
     assert "onerror" not in serialized
+
+
+def test_import_space_agent_yaml_package_quarantines_generated_sources(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    imported = spaces.import_space_agent_package(
+        {
+            "space_yaml": """
+id: unsafe-demo
+name: Imported <Space>
+description: Space Agent YAML package
+instructions: Use safe typed APIs only.
+""",
+            "widgets": {
+                "widgets/weather.yaml": """
+id: weather-panel
+title: Weather <Panel>
+type: html
+renderer: "<script>window.SECRET_VALUE_DO_NOT_LEAK=1</script>"
+html: "<img src=x onerror=stealSecret()>"
+data:
+  api_key: SECRET_VALUE_DO_NOT_LEAK
+layout:
+  x: -5
+  y: 2
+  w: 99
+  h: 0
+""",
+            },
+        }
+    )
+
+    assert imported["source"] == "space-agent-yaml"
+    assert imported["space"]["space_id"] == "unsafe-demo"
+    assert imported["space"]["name"] == "Imported <Space>"
+    assert imported["space"]["agent_instructions"] == "Use safe typed APIs only."
+    assert imported["imported_widgets"] == [
+        {
+            "id": "weather-panel",
+            "kind": "html",
+            "title": "Weather <Panel>",
+            "layout": {"x": 0, "y": 2, "w": 24, "h": 1, "minimized": False},
+        }
+    ]
+    stored = spaces.read_widget("unsafe-demo", "weather-panel")
+    assert stored["recovery"]["disabled"] is True
+    assert stored["recovery"]["disabled_reason"] == "imported generated source disabled pending sandbox review"
+    assert stored["untrusted_artifact"]["status"] == "quarantined"
+    assert stored["untrusted_artifact"]["omitted_field_count"] >= 3
+    serialized = json.dumps(imported).lower()
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "untrusted_artifact" not in json.dumps(spaces.read_space_detail("unsafe-demo"))
+
+
+def test_import_space_agent_zip_b64_route_returns_safe_metadata(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    bundle = io.BytesIO()
+    with zipfile.ZipFile(bundle, "w") as zf:
+        zf.writestr("exported/space.yaml", "id: zip-demo\nname: Zip Demo\ndescription: From ZIP\n")
+        zf.writestr(
+            "exported/widgets/chart.yaml",
+            "id: chart\ntitle: Unsafe Chart\ntype: chart\nrenderer: '<script>bad()</script>'\nsource: SECRET_SOURCE\n",
+        )
+    archive_b64 = base64.b64encode(bundle.getvalue()).decode("ascii")
+
+    handled, status, body = _route_post("/api/spaces/import", {"archive_b64": archive_b64})
+
+    assert handled is None
+    assert status == 200
+    assert body["source"] == "space-agent-zip"
+    assert body["space"]["space_id"] == "zip-demo"
+    assert body["space"]["name"] == "Zip Demo"
+    assert body["imported_widgets"] == [
+        {"id": "chart", "kind": "chart", "title": "Unsafe Chart", "layout": {"x": 0, "y": 0, "w": 6, "h": 4, "minimized": False}}
+    ]
+    assert spaces.read_widget("zip-demo", "chart")["recovery"]["disabled"] is True
+    serialized = json.dumps(body).lower()
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "secret_source" not in serialized
+    assert "source" not in serialized.replace('"source": "space-agent-zip"', "")
 
 
 def test_install_weather_template_creates_safe_persistent_weather_widget(monkeypatch, tmp_path):
@@ -656,6 +743,7 @@ def test_spaces_routes_and_static_shell_are_registered():
     assert '"/api/spaces"' in routes_src
     assert '"/api/spaces/recovery"' in routes_src
     assert '"/api/spaces/recovery/disable-widget"' in routes_src
+    assert '"/api/spaces/import"' in routes_src
     assert '"/api/spaces/revisions"' in routes_src
     assert '"/api/spaces/create"' in routes_src
     assert '"/api/spaces/templates/install"' in routes_src

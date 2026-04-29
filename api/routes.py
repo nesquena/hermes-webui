@@ -1649,6 +1649,21 @@ def handle_post(handler, parsed) -> bool:
         except FileNotFoundError:
             return bad(handler, "Space not found", 404)
 
+    if parsed.path == "/api/spaces/import":
+        from api import spaces as capy_spaces
+        try:
+            return j(
+                handler,
+                capy_spaces.import_space_agent_package(
+                    body,
+                    space_id=body.get("space_id") or None,
+                ),
+            )
+        except RuntimeError as e:
+            return bad(handler, str(e), 403)
+        except (ValueError, FileExistsError) as e:
+            return bad(handler, str(e))
+
     if parsed.path == "/api/spaces/widget/upsert":
         from api import spaces as capy_spaces
         space_id = body.get("space_id")

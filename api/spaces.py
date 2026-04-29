@@ -7,12 +7,16 @@ execution arrive later behind stricter permissions.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import io
 import json
 import os
 import re
 import shutil
 import time
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -486,6 +490,156 @@ def delete_space(space_id: str) -> dict[str, Any]:
     event_id = _record_event(sid, "space.deleted")
     shutil.rmtree(path)
     return {"deleted": True, "space_id": sid, "revision_event_id": event_id}
+
+
+def _load_yaml_mapping(text: str, label: str) -> dict[str, Any]:
+    try:
+        import yaml as _yaml
+    except ImportError as exc:  # pragma: no cover - dependency is expected in WebUI envs
+        raise RuntimeError("YAML support is unavailable") from exc
+    try:
+        loaded = _yaml.safe_load(str(text or ""))
+    except Exception as exc:
+        raise ValueError(f"Invalid {label}") from exc
+    if loaded is None:
+        return {}
+    if not isinstance(loaded, dict):
+        raise ValueError(f"{label} must be a mapping")
+    return loaded
+
+
+def _safe_zip_entry_name(name: str) -> str:
+    normalized = str(name or "").replace("\\", "/").strip("/")
+    parts = [part for part in normalized.split("/") if part]
+    if not parts or any(part == ".." for part in parts):
+        raise ValueError("Unsafe ZIP member path")
+    return "/".join(parts)
+
+
+def _space_agent_files_from_package(package: dict[str, Any]) -> tuple[str, str, dict[str, str]]:
+    if not isinstance(package, dict):
+        raise ValueError("package must be an object")
+    if package.get("archive_b64"):
+        try:
+            raw = base64.b64decode(str(package.get("archive_b64") or ""), validate=True)
+        except Exception as exc:
+            raise ValueError("Invalid archive_b64") from exc
+        if len(raw) > 5 * 1024 * 1024:
+            raise ValueError("Space Agent archive is too large")
+        space_yaml = ""
+        widgets: dict[str, str] = {}
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                for info in archive.infolist():
+                    if info.is_dir():
+                        continue
+                    name = _safe_zip_entry_name(info.filename)
+                    lowered = name.lower()
+                    if info.file_size > 512 * 1024:
+                        raise ValueError("Space Agent YAML file is too large")
+                    if lowered.endswith("space.yaml") or lowered.endswith("space.yml"):
+                        space_yaml = archive.read(info).decode("utf-8")
+                    elif "/widgets/" in f"/{lowered}" and (lowered.endswith(".yaml") or lowered.endswith(".yml")):
+                        widgets[name] = archive.read(info).decode("utf-8")
+        except zipfile.BadZipFile as exc:
+            raise ValueError("Invalid Space Agent ZIP archive") from exc
+        if not space_yaml:
+            raise ValueError("Space Agent archive is missing space.yaml")
+        return "space-agent-zip", space_yaml, widgets
+
+    space_yaml = str(package.get("space_yaml") or "")
+    raw_widgets = package.get("widgets_yaml") if isinstance(package.get("widgets_yaml"), dict) else package.get("widgets")
+    widgets = {str(path): str(text or "") for path, text in (raw_widgets or {}).items()} if isinstance(raw_widgets, dict) else {}
+    if not space_yaml:
+        raise ValueError("Missing space_yaml")
+    return "space-agent-yaml", space_yaml, widgets
+
+
+def _widget_id_from_path(path: str) -> str:
+    tail = _safe_zip_entry_name(path).rsplit("/", 1)[-1]
+    stem = tail.rsplit(".", 1)[0] if "." in tail else tail
+    return _slugify(stem)
+
+
+def _unsafe_import_field_count(widget: dict[str, Any]) -> int:
+    return sum(1 for key in widget if not _payload_key_is_safe(str(key)))
+
+
+def _space_agent_widget_from_yaml(path: str, text: str) -> dict[str, Any]:
+    raw = _load_yaml_mapping(text, f"widget YAML {path}")
+    wid = validate_widget_id(raw.get("id") or raw.get("widget_id") or _widget_id_from_path(path))
+    kind = str(raw.get("kind") or raw.get("type") or raw.get("component") or "custom")
+    title = str(raw.get("title") or raw.get("name") or wid)
+    widget: dict[str, Any] = {
+        "id": wid,
+        "kind": kind,
+        "title": title,
+        "layout": _normalize_widget_layout(raw.get("layout") if isinstance(raw.get("layout"), dict) else raw),
+        "imported_from": {"format": "space-agent-yaml"},
+    }
+    omitted_count = _unsafe_import_field_count(raw)
+    if omitted_count:
+        unsafe_payload = {str(key): raw.get(key) for key in raw if not _payload_key_is_safe(str(key))}
+        digest = hashlib.sha256(json.dumps(unsafe_payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+        widget["recovery"] = {
+            "disabled": True,
+            "disabled_reason": "imported generated source disabled pending sandbox review",
+        }
+        widget["untrusted_artifact"] = {
+            "status": "quarantined",
+            "sha256": digest,
+            "omitted_field_count": omitted_count,
+        }
+    return widget
+
+
+def import_space_agent_package(package: dict[str, Any], *, space_id: str | None = None) -> dict[str, Any]:
+    """Import a Space Agent space.yaml/widgets YAML or ZIP package safely.
+
+    This compatibility slice intentionally imports only metadata and quarantine
+    markers. Generated renderer/html/script/data/source bodies and secret-looking
+    fields are not copied into normal widget config or returned by list/detail
+    responses; imported widgets start disabled for recovery/sandbox review.
+    """
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    source_label, space_yaml, widget_files = _space_agent_files_from_package(package)
+    space_doc = _load_yaml_mapping(space_yaml, "space.yaml")
+    name = str(space_doc.get("name") or space_doc.get("title") or space_doc.get("id") or "Imported Space Agent Space")
+    description = str(space_doc.get("description") or "Imported from Space Agent YAML package.")
+    instructions = str(space_doc.get("agent_instructions") or space_doc.get("instructions") or space_doc.get("prompt") or "")
+    base_id = space_doc.get("space_id") or space_doc.get("id") or name
+    target_id = validate_space_id(space_id) if space_id else _unique_space_id(_slugify(str(base_id)))
+    if _manifest_path(target_id).exists():
+        raise FileExistsError("Space already exists")
+    created = create_space(
+        {
+            "space_id": target_id,
+            "name": name,
+            "description": description,
+            "agent_instructions": instructions,
+            "template": "space-agent-import",
+            "layout": space_doc.get("layout") if isinstance(space_doc.get("layout"), dict) else {},
+            "capabilities": {"generated_rendering": "disabled", "import_review": "required"},
+        }
+    )
+    imported_widgets: list[dict[str, Any]] = []
+    for path, text in sorted(widget_files.items()):
+        widget = _space_agent_widget_from_yaml(path, text)
+        result = upsert_widget(created["space_id"], widget)
+        imported_widgets.append(_widget_summary(result["widget"]))
+    saved = read_space(created["space_id"])
+    _write_manifest(
+        saved,
+        "space.imported.space_agent",
+        {"format": source_label, "widget_count": len(imported_widgets), "status": "metadata-only"},
+    )
+    return {
+        "imported": True,
+        "source": source_label,
+        "space": read_space_detail(created["space_id"]),
+        "imported_widgets": imported_widgets,
+    }
 
 
 def _widget_index(space: dict[str, Any], widget_id: str) -> int:
