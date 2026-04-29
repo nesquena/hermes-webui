@@ -642,6 +642,111 @@ def import_space_agent_package(package: dict[str, Any], *, space_id: str | None 
     }
 
 
+def _dump_yaml_mapping(payload: dict[str, Any]) -> str:
+    try:
+        import yaml as _yaml
+    except ImportError as exc:  # pragma: no cover - dependency is expected in WebUI envs
+        raise RuntimeError("YAML support is unavailable") from exc
+    return _yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
+
+
+def _space_agent_widget_export_doc(widget: dict[str, Any]) -> dict[str, Any]:
+    clean = _normalize_widget(widget)
+    doc: dict[str, Any] = {
+        "id": clean["id"],
+        "title": clean["title"],
+        "type": clean["kind"],
+        "layout": clean["layout"],
+    }
+    exportable_keys = {
+        "actions",
+        "attachments",
+        "browser_surface",
+        "cards",
+        "checklist",
+        "columns",
+        "demos",
+        "editing",
+        "event_bridge",
+        "interactions",
+        "links",
+        "market_data",
+        "permissions",
+        "safety",
+        "series",
+        "steps",
+        "weather",
+    }
+    for key in sorted(exportable_keys):
+        if key in widget and _payload_key_is_safe(key):
+            doc[key] = _payload_summary(widget.get(key))
+    recovery = widget.get("recovery") if isinstance(widget.get("recovery"), dict) else {}
+    if recovery.get("disabled"):
+        doc["recovery"] = {
+            "disabled": True,
+            "disabled_reason": _context_value(recovery.get("disabled_reason"), 300),
+        }
+    return doc
+
+
+def _space_agent_yaml_export(space: dict[str, Any]) -> tuple[str, dict[str, str]]:
+    space_doc = {
+        "id": space.get("space_id"),
+        "name": space.get("name") or space.get("space_id"),
+        "description": space.get("description") or "",
+        "instructions": space.get("agent_instructions") or "",
+        "template": None if space.get("template") == "blank" else space.get("template"),
+    }
+    widgets: dict[str, str] = {}
+    for widget in space.get("widgets") or []:
+        if not isinstance(widget, dict):
+            continue
+        doc = _space_agent_widget_export_doc(widget)
+        widgets[f"widgets/{doc['id']}.yaml"] = _dump_yaml_mapping(doc)
+    return _dump_yaml_mapping(space_doc), widgets
+
+
+def _space_agent_zip_b64(space_yaml: str, widgets: dict[str, str]) -> str:
+    bundle = io.BytesIO()
+    with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("space.yaml", space_yaml)
+        for path, text in sorted(widgets.items()):
+            archive.writestr(_safe_zip_entry_name(path), text)
+    return base64.b64encode(bundle.getvalue()).decode("ascii")
+
+
+def export_space_agent_package(space_id: str, *, format: str = "yaml") -> dict[str, Any]:
+    """Export a Capy Space as safe Space Agent-compatible metadata.
+
+    Exports deliberately omit generated renderer/html/script/data/source bodies
+    and secret-looking fields. ZIP output contains only sanitized YAML files.
+    """
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    sid = validate_space_id(space_id)
+    space = read_space(sid)
+    space_yaml, widgets = _space_agent_yaml_export(space)
+    normalized_format = str(format or "yaml").strip().lower()
+    if normalized_format in {"zip", "space-agent-zip"}:
+        return {
+            "source": "capy-space",
+            "format": "space-agent-zip",
+            "space_id": sid,
+            "archive_b64": _space_agent_zip_b64(space_yaml, widgets),
+            "widget_count": len(widgets),
+        }
+    if normalized_format not in {"yaml", "space-agent-yaml"}:
+        raise ValueError("Unsupported export format")
+    return {
+        "source": "capy-space",
+        "format": "space-agent-yaml",
+        "space_id": sid,
+        "space_yaml": space_yaml,
+        "widgets": widgets,
+        "widget_count": len(widgets),
+    }
+
+
 def _widget_index(space: dict[str, Any], widget_id: str) -> int:
     wid = validate_widget_id(widget_id)
     widgets = space.get("widgets") or []
