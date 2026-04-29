@@ -119,9 +119,20 @@
       '<h3>'+escapeHtml(name)+'</h3>' +
       (description ? '<div class="capy-spaces-muted">'+escapeHtml(description)+'</div>' : '') +
       '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+' · Revision: '+escapeHtml(space.revision_event_id||'none')+'</div>' +
-      '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="activateSpace" data-space-id="'+escapeHtml(spaceId)+'">Use in chat</button><button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Manage widgets</button></div>' +
+      '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="activateSpace" data-space-id="'+escapeHtml(spaceId)+'">Use in chat</button><button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Manage widgets</button><button type="button" class="capy-spaces-btn" data-capy-action="exportSpaceYaml" data-space-id="'+escapeHtml(spaceId)+'">Export YAML</button><button type="button" class="capy-spaces-btn" data-capy-action="exportSpaceZip" data-space-id="'+escapeHtml(spaceId)+'">Export ZIP</button></div>' +
       '</div><div class="capy-spaces-card"><h3>Widgets</h3><div class="capy-spaces-muted">Metadata-only detail view. Generated widget code is intentionally not displayed or executed.</div><div class="capy-spaces-widget-list">'+widgetRows+'</div></div>' +
       renderRevisionHistory(revisions || []);
+  }
+
+  function renderSpaceExportResult(spaceId, data){
+    const rawFormat = data && data.format ? String(data.format) : 'yaml';
+    const format = rawFormat.indexOf('zip') >= 0 ? 'zip' : 'yaml';
+    const filename = data && data.filename ? String(data.filename) : String(spaceId || 'space') + '-space-agent.' + (format === 'zip' ? 'zip' : 'yaml');
+    const widgetCount = data && Number.isFinite(Number(data.widget_count)) ? Number(data.widget_count) : 0;
+    return '<div class="capy-spaces-card"><h3>Space Agent export ready</h3>' +
+      '<div class="capy-spaces-muted">Safe metadata package generated. Package contents are intentionally not displayed in this UI.</div>' +
+      '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(filename)+'</strong>' +
+      '<div class="capy-spaces-muted">Format: '+escapeHtml(format)+' · Space ID: '+escapeHtml(spaceId || '')+' · Widgets: '+widgetCount+'</div></div></div></div></div>';
   }
 
   function renderRevisionHistory(revisions){
@@ -273,6 +284,13 @@
       const data = await postSpacesJson('api/spaces/activate', {space_id: spaceId, session_id: sessionId});
       if (data && data.session && typeof S !== 'undefined') S.session = data.session;
       await loadCapySpaces();
+      return;
+    }
+    if (action === 'exportSpaceYaml' || action === 'exportSpaceZip') {
+      const format = action === 'exportSpaceZip' ? 'zip' : 'yaml';
+      const data = await postSpacesJson('api/spaces/export', {space_id: spaceId, format: format});
+      const root = document.getElementById('capySpacesRoot');
+      if (root) root.innerHTML = renderSpaceExportResult(spaceId, data || {}) + root.innerHTML;
       return;
     }
     if (action === 'reloadSpaces') {
