@@ -752,6 +752,9 @@ const LOCALES = {
     composer_disabled_clarify: 'Respond to the clarification request',
     composer_disabled_compression: 'Waiting for compression to finish',
     composer_disabled_empty: 'Type a message to send',
+    media_audio_label: 'Audio',
+    media_svg_label: 'Diagram',
+    media_video_label: 'Video',
   },
 
   ru: {
@@ -1447,6 +1450,9 @@ const LOCALES = {
     composer_disabled_clarify: 'Ответьте на запрос о разъяснении',
     composer_disabled_compression: 'Ожидание завершения сжатия',
     composer_disabled_empty: 'Введите сообщение для отправки',
+    media_audio_label: 'Аудио',
+    media_svg_label: 'Диаграмма',
+    media_video_label: 'Видео',
   },
 
   es: {
@@ -2136,6 +2142,9 @@ const LOCALES = {
     composer_disabled_clarify: 'Responde a la solicitud de aclaración',
     composer_disabled_compression: 'Esperando a que finalice la compresión',
     composer_disabled_empty: 'Escribe un mensaje para enviar',
+    media_audio_label: 'Audio',
+    media_svg_label: 'Diagrama',
+    media_video_label: 'Vídeo',
   },
 
   de: {
@@ -2600,6 +2609,9 @@ const LOCALES = {
     composer_disabled_clarify: 'Auf die Klärungsanfrage antworten',
     composer_disabled_compression: 'Warte auf Abschluss der Komprimierung',
     composer_disabled_empty: 'Nachricht eingeben zum Senden',
+    media_audio_label: 'Audio',
+    media_svg_label: 'Diagramm',
+    media_video_label: 'Video',
 },
 
   zh: {
@@ -3286,6 +3298,9 @@ const LOCALES = {
     composer_disabled_clarify: '请回复上方的澄清请求',
     composer_disabled_compression: '等待压缩完成',
     composer_disabled_empty: '请输入消息后发送',
+    media_audio_label: '音频',
+    media_svg_label: '图表',
+    media_video_label: '视频',
   },
 
   // Traditional Chinese (zh-Hant)
@@ -4023,6 +4038,9 @@ const LOCALES = {
     composer_disabled_clarify: '\u8acb\u56de\u8986\u4e0a\u65b9\u7684\u6f84\u6e05\u8981\u6c42',
     composer_disabled_compression: '\u7b49\u5f85\u58d3\u7e2e\u5b8c\u6210',
     composer_disabled_empty: '\u8acb\u8f38\u5165\u8a0a\u606f\u5f8c\u50b3\u9001',
+    media_audio_label: '音訊',
+    media_svg_label: '圖表',
+    media_video_label: '影片',
   },
 
 
@@ -5399,7 +5417,10 @@ const LOCALES = {
     composer_disabled_clarify: '위의 명확화 요청에 응답하세요',
     composer_disabled_compression: '압축 완료 대기 중',
     composer_disabled_empty: '메시지를 입력하세요',
-  }
+    media_audio_label: '오디오',
+    media_svg_label: '다이어그램',
+    media_video_label: '비디오',
+  },
 };
 
 // Active locale — defaults to English; overridden by loadLocale() at boot.
