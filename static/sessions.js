@@ -1696,9 +1696,8 @@ function renderSessionListFromCache(){
     el.appendChild(actions);
 
     // Use pointerup + manual double-tap detection instead of onclick/ondblclick.
-    // onclick/ondblclick are unreliable on touch devices (iPad Safari especially):
-    // hover-triggered layout shifts, ghost clicks, and 300ms delay all break
-    // single-tap navigation. pointerup fires immediately on both mouse & touch.
+    // onclick/ondblclick are unreliable on touch devices. pointerup fires
+    // immediately on both mouse & touch.
     let _lastTapTime=0;
     let _tapTimer=null;
     el.onpointerup=(e)=>{
@@ -1732,6 +1731,12 @@ function renderSessionListFromCache(){
         await loadSession(s.session_id);renderSessionListFromCache();
         if(typeof closeMobileSidebar==='function')closeMobileSidebar();
       }, 300);
+    };
+    // Right/middle click guard on onclick too (defense in depth)
+    el.onclick=async(e)=>{
+      if(e.pointerType==='mouse' && e.button!==0) return;
+      if(_renamingSid) return; // ignore while any rename is active
+      if(actions.contains(e.target)) return;
     };
     return el;
   }
