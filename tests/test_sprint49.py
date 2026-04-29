@@ -41,8 +41,11 @@ def test_timestamp_footer_stays_on_visible_response_segments():
     assert 'seg.insertAdjacentHTML(\'beforeend\', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);' in UI_JS, (
         "Footer timestamp should stay attached to visible response segments"
     )
-    assert "else if(!thinkingText){" in UI_JS, (
-        "Thinking-only assistant segments should still avoid rendering a footer"
+    assert "assistantThinking.set(rawIdx, thinkingText);" in UI_JS, (
+        "Thinking-only assistant segments should preserve thinking for the shared activity dropdown without rendering a footer"
+    )
+    assert "seg.classList.add('assistant-segment-anchor');" in UI_JS, (
+        "Empty assistant anchor segments should stay footerless while anchoring activity metadata"
     )
 
 

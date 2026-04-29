@@ -624,6 +624,12 @@ window.addEventListener('resize',()=>{
 })();
 
 // ── Appearance helpers (theme = light/dark/system, skin = accent color) ──────
+const _THEMES=[
+  {name:'Light', value:'light', colors:['#FEFCF7','#FAF7F0','#B8860B']},
+  {name:'Dark', value:'dark', colors:['#0D0D1A','#141425','#FFD700']},
+  {name:'System', value:'system', colors:['#FEFCF7','#0D0D1A','#B8860B']},
+  {name:'Calm', value:'calm', colors:['#C6AC8F','#EAE0D5','#22333B']},
+];
 const _SKINS=[
   {name:'Default',  colors:['#FFD700','#FFBF00','#CD7F32']},
   {name:'Ares',     colors:['#FF4444','#CC3333','#992222']},
@@ -633,7 +639,7 @@ const _SKINS=[
   {name:'Sisyphus', colors:['#A78BFA','#8B5CF6','#7C3AED']},
   {name:'Charizard',colors:['#FB923C','#F97316','#EA580C']},
 ];
-const _VALID_THEMES=new Set(['system','dark','light']);
+const _VALID_THEMES=new Set((_THEMES||[]).map(t=>t.value));
 const _VALID_SKINS=new Set((_SKINS||[]).map(s=>s.name.toLowerCase()));
 const _LEGACY_THEME_MAP={
   slate:{theme:'dark',skin:'slate'},
@@ -668,6 +674,7 @@ function _setResolvedTheme(isDark){
 
 function _applyTheme(name){
   const normalized=_normalizeAppearance(name,'default');
+  delete document.documentElement.dataset.theme;
   if(_systemThemeMq&&_onSystemThemeChange){
     _systemThemeMq.removeEventListener('change',_onSystemThemeChange);
     _systemThemeMq=null;
@@ -678,6 +685,11 @@ function _applyTheme(name){
     _onSystemThemeChange=()=>_setResolvedTheme(_systemThemeMq.matches);
     _setResolvedTheme(_systemThemeMq.matches);
     _systemThemeMq.addEventListener('change',_onSystemThemeChange);
+    return;
+  }
+  if(normalized.theme==='calm'){
+    document.documentElement.dataset.theme='calm';
+    _setResolvedTheme(true);
     return;
   }
   _setResolvedTheme(normalized.theme==='dark');
@@ -813,6 +825,7 @@ function applyBotName(){
     window._soundEnabled=!!s.sound_enabled;
     window._notificationsEnabled=!!s.notifications_enabled;
     window._showThinking=s.show_thinking!==false;
+    window._simplifiedToolCalling=s.simplified_tool_calling!==false;
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
     window._busyInputMode=(s.busy_input_mode||'queue');
     window._botName=s.bot_name||'Hermes';
@@ -840,6 +853,7 @@ function applyBotName(){
     window._soundEnabled=false;
     window._notificationsEnabled=false;
     window._showThinking=true;
+    window._simplifiedToolCalling=true;
     window._sidebarDensity='compact';
     window._busyInputMode='queue';
     window._botName='Hermes';

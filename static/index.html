@@ -592,7 +592,7 @@
             </div>
             <div class="settings-field">
               <label data-i18n="settings_label_theme">Theme</label>
-              <div id="themePickerGrid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:4px">
+              <div id="themePickerGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:4px">
                 <button type="button" data-theme-val="light" onclick="_pickTheme('light')" class="theme-pick-btn" style="border:1px solid var(--border2);border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;background:none;transition:all .15s">
                   <div style="width:100%;height:40px;border-radius:6px;background:#fff;border:1px solid rgba(0,0,0,.12);margin-bottom:6px;display:flex;align-items:center;justify-content:center">
                     <svg width="16" height="16" fill="none" stroke="#999" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
@@ -610,6 +610,12 @@
                     <svg width="16" height="16" fill="none" stroke="#888" stroke-width="2" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
                   </div>
                   <span style="font-size:12px;font-weight:500;color:var(--text)">System</span>
+                </button>
+                <button type="button" data-theme-val="calm" onclick="_pickTheme('calm')" class="theme-pick-btn" style="border:1px solid var(--border2);border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;background:none;transition:all .15s">
+                  <div style="width:100%;height:40px;border-radius:6px;background:linear-gradient(135deg,#0A0908,#22333B 55%,#C6AC8F);border:1px solid rgba(198,172,143,.35);margin-bottom:6px;display:flex;align-items:center;justify-content:center">
+                    <svg width="16" height="16" fill="none" stroke="#EAE0D5" stroke-width="2" viewBox="0 0 24 24"><path d="M4 19h16"/><path d="M6 15l4-8 4 8"/><path d="M8 12h4"/><path d="M17 7v8"/></svg>
+                  </div>
+                  <span style="font-size:12px;font-weight:500;color:var(--text)">Calm</span>
                 </button>
               </div>
               <input type="hidden" id="settingsTheme" value="dark">
@@ -696,6 +702,13 @@
                 <span data-i18n="settings_label_token_usage">Show token usage after responses</span>
               </label>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_token_usage">Displays input/output token count below each assistant reply. Also toggled with <code>/usage</code>.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsSimplifiedToolCalling" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span>Compact tool activity</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px">Group thinking and tool calls into one collapsed activity section per assistant turn.</div>
             </div>
             <div class="settings-field">
               <label for="settingsSidebarDensity" data-i18n="settings_label_sidebar_density">Sidebar density</label>
