@@ -160,6 +160,16 @@ global.fetch = async function(path, opts = {}) {
         ],
       });
     }
+    if (body.template === 'notes') {
+      return response({
+        template: 'notes',
+        space: { space_id: 'notes-app', name: 'Notes App', description: 'Metadata-only notes starter', widget_count: 4, revision_event_id: 'rev-notes' },
+        installed_widgets: [
+          { id: 'notes-folders', kind: 'folder-list', title: 'Folders', layout: { x: 0, y: 0, w: 5, h: 10, minimized: false }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+          { id: 'notes-editor', kind: 'rich-text-editor', title: 'Editor', layout: { x: 5, y: 0, w: 11, h: 10, minimized: false } },
+        ],
+      });
+    }
     return response({
       template: 'weather',
       space: { space_id: 'weather-demo', name: 'Weather Demo', description: 'Prague weather starter', widget_count: 1, revision_event_id: 'rev-weather' },
@@ -236,6 +246,9 @@ async function click(action, dataset) {
   } else if (scenario === 'installKanbanBoard') {
     await window.loadCapySpaces();
     await click('installKanbanTemplate', {});
+  } else if (scenario === 'installNotesApp') {
+    await window.loadCapySpaces();
+    await click('installNotesTemplate', {});
   } else if (scenario === 'openSpaceDetail') {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
@@ -443,6 +456,19 @@ def test_spaces_ui_install_kanban_board_posts_template_and_refreshes_without_wid
     assert "Install kanban board" in out["rootHtml"]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"template": "kanban"}
+    assert out["calls"][-1]["path"] == "api/spaces"
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_install_notes_app_posts_template_and_refreshes_without_widget_code(driver_path):
+    out = _run_spaces_scenario(driver_path, "installNotesApp")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/templates/install")
+
+    assert "Install notes app" in out["rootHtml"]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"template": "notes"}
     assert out["calls"][-1]["path"] == "api/spaces"
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]

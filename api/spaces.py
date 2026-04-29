@@ -734,6 +734,48 @@ def _kanban_board_widgets() -> list[dict[str, Any]]:
     ]
 
 
+def _notes_app_widgets() -> list[dict[str, Any]]:
+    """Return safe declarative notes app widget seeds.
+
+    This starter maps the Space Agent notes demo into metadata-only widgets:
+    folders, editor, preview, and attachments. Rich editing and attachment
+    handling are declared as planned capabilities, not executable renderer code.
+    """
+    return [
+        {
+            "id": "notes-folders",
+            "kind": "folder-list",
+            "title": "Folders",
+            "layout": {"x": 0, "y": 0, "w": 5, "h": 10, "minimized": False},
+            "folders": [{"id": "folder-inbox", "title": "Inbox"}],
+            "interaction": {"rename": "planned", "create_folder": "metadata-only"},
+        },
+        {
+            "id": "notes-editor",
+            "kind": "rich-text-editor",
+            "title": "Editor",
+            "layout": {"x": 5, "y": 0, "w": 11, "h": 10, "minimized": False},
+            "editing": {"wysiwyg": "planned", "markdown_mode": "planned", "copy_paste": "metadata-only"},
+            "content_status": "agent-managed-empty",
+        },
+        {
+            "id": "notes-preview",
+            "kind": "markdown",
+            "title": "Markdown preview",
+            "layout": {"x": 16, "y": 0, "w": 8, "h": 10, "minimized": False},
+            "content_status": "agent-managed-empty",
+        },
+        {
+            "id": "notes-attachments",
+            "kind": "attachment-list",
+            "title": "Attachments",
+            "layout": {"x": 0, "y": 10, "w": 24, "h": 4, "minimized": False},
+            "attachments": {"images": "planned", "files": "planned", "storage": "agent-mediated"},
+            "permissions": {"filesystem": "agent-mediated"},
+        },
+    ]
+
+
 def install_template(template: str, *, space_id: str | None = None) -> dict[str, Any]:
     """Install a safe Capy Spaces demo template.
 
@@ -744,7 +786,7 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
     template_name = str(template or "").strip().lower()
-    if template_name not in {"weather", "weather-demo", "research", "research-harness", "dashboard", "daily-dashboard", "kanban", "kanban-board"}:
+    if template_name not in {"weather", "weather-demo", "research", "research-harness", "dashboard", "daily-dashboard", "kanban", "kanban-board", "notes", "notes-app"}:
         raise ValueError("Unsupported template")
 
     if template_name in {"weather", "weather-demo"}:
@@ -795,7 +837,7 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
             )
         widgets = _dashboard_demo_widgets()
         response_template = "dashboard"
-    else:
+    elif template_name in {"kanban", "kanban-board"}:
         target_id = validate_space_id(space_id) if space_id else _unique_space_id("kanban-board")
         if _manifest_path(target_id).exists():
             space = read_space(target_id)
@@ -811,6 +853,22 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
             )
         widgets = _kanban_board_widgets()
         response_template = "kanban"
+    else:
+        target_id = validate_space_id(space_id) if space_id else _unique_space_id("notes-app")
+        if _manifest_path(target_id).exists():
+            space = read_space(target_id)
+        else:
+            space = create_space(
+                {
+                    "space_id": target_id,
+                    "name": "Notes App",
+                    "description": "Metadata-only starter for folders, rich-text editing, markdown preview, and attachments.",
+                    "agent_instructions": "Keep notes widgets declarative. Use typed Capy space APIs for folders, note bodies, and attachments; preserve revision history.",
+                    "template": "notes-app",
+                }
+            )
+        widgets = _notes_app_widgets()
+        response_template = "notes"
 
     for widget in widgets:
         upsert_widget(space["space_id"], widget)

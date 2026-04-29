@@ -385,6 +385,63 @@ def test_kanban_template_install_route_returns_safe_metadata(monkeypatch, tmp_pa
     assert "secret" not in serialized
 
 
+def test_install_notes_template_creates_safe_notes_app_widgets(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    installed = spaces.install_template("notes")
+
+    assert installed["template"] == "notes"
+    assert installed["space"]["template"] == "notes-app"
+    assert installed["space"]["name"] == "Notes App"
+    assert [widget["id"] for widget in installed["installed_widgets"]] == [
+        "notes-folders",
+        "notes-editor",
+        "notes-preview",
+        "notes-attachments",
+    ]
+    assert [widget["kind"] for widget in installed["installed_widgets"]] == [
+        "folder-list",
+        "rich-text-editor",
+        "markdown",
+        "attachment-list",
+    ]
+    editor_widget = spaces.read_widget(installed["space"]["space_id"], "notes-editor")
+    assert editor_widget["editing"] == {
+        "wysiwyg": "planned",
+        "markdown_mode": "planned",
+        "copy_paste": "metadata-only",
+    }
+    attachments_widget = spaces.read_widget(installed["space"]["space_id"], "notes-attachments")
+    assert attachments_widget["attachments"] == {"images": "planned", "files": "planned", "storage": "agent-mediated"}
+    serialized = json.dumps(installed).lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert '"script"' not in serialized
+    assert '"data"' not in serialized
+    assert '"source"' not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
+def test_notes_template_install_route_returns_safe_metadata(monkeypatch, tmp_path):
+    _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    handled, status, body = _route_post("/api/spaces/templates/install", {"template": "notes"})
+
+    assert handled is None
+    assert status == 200
+    assert body["template"] == "notes"
+    assert body["space"]["name"] == "Notes App"
+    assert body["installed_widgets"][0]["id"] == "notes-folders"
+    assert len(body["installed_widgets"]) == 4
+    serialized = json.dumps(body).lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
 def test_delete_space_removes_manifest_but_keeps_global_revision_event(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Disposable"})
