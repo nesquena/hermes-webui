@@ -780,6 +780,17 @@ def read_widget(space_id: str, widget_id: str) -> dict[str, Any]:
     return dict(space["widgets"][idx])
 
 
+def read_widget_detail(space_id: str, widget_id: str) -> dict[str, Any]:
+    """Return safe widget metadata for public detail routes.
+
+    Stored widgets may contain generated renderer/html/script/data bodies or
+    secret-looking payloads for later sandboxed review. Public detail routes must
+    expose the same metadata-only shape as list/detail APIs until an explicit
+    sandboxed viewer exists.
+    """
+    return _widget_summary(read_widget(space_id, widget_id))
+
+
 def upsert_widget(space_id: str, widget: dict[str, Any]) -> dict[str, Any]:
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
@@ -808,6 +819,73 @@ def upsert_widget(space_id: str, widget: dict[str, Any]) -> dict[str, Any]:
         "widget": clean_widget,
         "revision_event_id": saved["revision_event_id"],
     }
+
+
+def patch_widget(space_id: str, widget_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+    """Patch safe widget metadata without rewriting generated/source bodies.
+
+    This is the Capy-native equivalent of a small Space Agent widget patch: it
+    updates allowlisted declarative metadata while preserving any stored
+    renderer/html/script/data/source artifacts for later sandboxed review. Public
+    responses remain metadata-only.
+    """
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    if not isinstance(patch, dict):
+        raise ValueError("patch must be an object")
+    wid = validate_widget_id(widget_id)
+    space = read_space(space_id)
+    idx = _widget_index(space, wid)
+    widgets = list(space.get("widgets") or [])
+    widget = dict(widgets[idx])
+
+    allowed = {
+        "title",
+        "name",
+        "kind",
+        "layout",
+        "description",
+        "metadata",
+        "permissions",
+        "recovery",
+        "event_bridge",
+        "prompt",
+        "status",
+        "weather",
+        "chart",
+        "table",
+        "notes",
+        "browser",
+        "kanban",
+        "markdown",
+    }
+    changed_fields: list[str] = []
+    for key, value in (patch or {}).items():
+        safe_key = str(key or "")
+        if safe_key not in allowed or not _payload_key_is_safe(safe_key):
+            continue
+        if safe_key == "layout":
+            widget["layout"] = _normalize_widget_layout(value)
+        elif safe_key in {"metadata", "permissions", "recovery", "event_bridge", "prompt", "status", "weather", "chart", "table", "notes", "browser", "kanban", "markdown"}:
+            if isinstance(value, dict):
+                widget[safe_key] = _payload_summary(value)
+            else:
+                widget[safe_key] = _payload_summary(value)
+        else:
+            widget[safe_key] = _context_value(value, 500)
+        changed_fields.append(safe_key)
+
+    widget["id"] = wid
+    widget = _normalize_widget(widget)
+    widgets[idx] = widget
+    space["widgets"] = widgets
+    saved = _write_manifest(space, "widget.patched", {"widget_id": wid, "fields": sorted(set(changed_fields))})
+    return {
+        "space_id": saved["space_id"],
+        "widget": _widget_summary(widget),
+        "revision_event_id": saved["revision_event_id"],
+    }
+
 
 
 def delete_widget(space_id: str, widget_id: str) -> dict[str, Any]:

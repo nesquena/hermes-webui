@@ -1021,7 +1021,7 @@ def handle_get(handler, parsed) -> bool:
         if not space_id or not widget_id:
             return bad(handler, "Missing space_id or widget_id")
         try:
-            return j(handler, {"widget": capy_spaces.read_widget(space_id, widget_id)})
+            return j(handler, {"widget": capy_spaces.read_widget_detail(space_id, widget_id)})
         except ValueError as e:
             return bad(handler, str(e))
         except FileNotFoundError:
@@ -1685,13 +1685,31 @@ def handle_post(handler, parsed) -> bool:
         if not space_id:
             return bad(handler, "Missing space_id")
         try:
-            return j(handler, capy_spaces.upsert_widget(space_id, widget))
+            result = capy_spaces.upsert_widget(space_id, widget)
+            result["widget"] = capy_spaces.read_widget_detail(space_id, result["widget"]["id"])
+            return j(handler, result)
         except RuntimeError as e:
             return bad(handler, str(e), 403)
         except ValueError as e:
             return bad(handler, str(e))
         except FileNotFoundError:
             return bad(handler, "Space not found", 404)
+
+    if parsed.path == "/api/spaces/widget/patch":
+        from api import spaces as capy_spaces
+        space_id = body.get("space_id")
+        widget_id = body.get("widget_id")
+        patch = body.get("patch") or body.get("fields") or {}
+        if not space_id or not widget_id:
+            return bad(handler, "Missing space_id or widget_id")
+        try:
+            return j(handler, capy_spaces.patch_widget(space_id, widget_id, patch))
+        except RuntimeError as e:
+            return bad(handler, str(e), 403)
+        except ValueError as e:
+            return bad(handler, str(e))
+        except FileNotFoundError:
+            return bad(handler, "Widget not found", 404)
 
     if parsed.path == "/api/spaces/widget/delete":
         from api import spaces as capy_spaces
