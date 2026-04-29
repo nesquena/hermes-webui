@@ -57,7 +57,7 @@
         '</div>';
     }).join('') : '<div class="capy-spaces-card"><strong>No spaces yet</strong><div class="capy-spaces-muted">Create a space below to start adding safe metadata-only widgets.</div></div>';
     return '<div class="capy-spaces-card"><h3>Capy Spaces</h3><div class="capy-spaces-muted">'+spaces.length+' space(s). Widget management lists metadata only; generated widget code is not executed here.</div>' +
-      '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="installWeatherTemplate">Install weather demo</button><button type="button" class="capy-spaces-btn" data-capy-action="installResearchTemplate">Install research harness</button><button type="button" class="capy-spaces-btn" data-capy-action="installDashboardTemplate">Install dashboard demo</button></div></div>' +
+      '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="installWeatherTemplate">Install weather demo</button><button type="button" class="capy-spaces-btn" data-capy-action="installResearchTemplate">Install research harness</button><button type="button" class="capy-spaces-btn" data-capy-action="installDashboardTemplate">Install dashboard demo</button><button type="button" class="capy-spaces-btn" data-capy-action="installKanbanTemplate">Install kanban board</button></div></div>' +
       cards + renderSpaceForm();
   }
 
@@ -297,6 +297,11 @@
     }
     if (action === 'installDashboardTemplate') {
       await postSpacesJson('api/spaces/templates/install', {template: 'dashboard'});
+      await loadCapySpaces();
+      return;
+    }
+    if (action === 'installKanbanTemplate') {
+      await postSpacesJson('api/spaces/templates/install', {template: 'kanban'});
       await loadCapySpaces();
       return;
     }

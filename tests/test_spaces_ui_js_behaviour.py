@@ -150,6 +150,16 @@ global.fetch = async function(path, opts = {}) {
         ],
       });
     }
+    if (body.template === 'kanban') {
+      return response({
+        template: 'kanban',
+        space: { space_id: 'kanban-board', name: 'Kanban Board', description: 'Colorful board starter', widget_count: 4, revision_event_id: 'rev-kanban' },
+        installed_widgets: [
+          { id: 'kanban-backlog', kind: 'kanban-column', title: 'Backlog', layout: { x: 0, y: 0, w: 8, h: 8, minimized: false }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+          { id: 'kanban-doing', kind: 'kanban-column', title: 'Doing', layout: { x: 8, y: 0, w: 8, h: 8, minimized: false } },
+        ],
+      });
+    }
     return response({
       template: 'weather',
       space: { space_id: 'weather-demo', name: 'Weather Demo', description: 'Prague weather starter', widget_count: 1, revision_event_id: 'rev-weather' },
@@ -223,6 +233,9 @@ async function click(action, dataset) {
   } else if (scenario === 'installDashboardDemo') {
     await window.loadCapySpaces();
     await click('installDashboardTemplate', {});
+  } else if (scenario === 'installKanbanBoard') {
+    await window.loadCapySpaces();
+    await click('installKanbanTemplate', {});
   } else if (scenario === 'openSpaceDetail') {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
@@ -417,6 +430,19 @@ def test_spaces_ui_install_dashboard_demo_posts_template_and_refreshes_without_w
     assert "Install dashboard demo" in out["rootHtml"]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"template": "dashboard"}
+    assert out["calls"][-1]["path"] == "api/spaces"
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_install_kanban_board_posts_template_and_refreshes_without_widget_code(driver_path):
+    out = _run_spaces_scenario(driver_path, "installKanbanBoard")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/templates/install")
+
+    assert "Install kanban board" in out["rootHtml"]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"template": "kanban"}
     assert out["calls"][-1]["path"] == "api/spaces"
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]

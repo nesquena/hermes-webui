@@ -331,6 +331,60 @@ def test_dashboard_template_install_route_returns_safe_metadata(monkeypatch, tmp
     assert "secret" not in serialized
 
 
+def test_install_kanban_template_creates_safe_board_widgets(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    installed = spaces.install_template("kanban")
+
+    assert installed["template"] == "kanban"
+    assert installed["space"]["template"] == "kanban-board"
+    assert installed["space"]["name"] == "Kanban Board"
+    assert [widget["id"] for widget in installed["installed_widgets"]] == [
+        "kanban-backlog",
+        "kanban-doing",
+        "kanban-done",
+        "kanban-notes",
+    ]
+    assert [widget["kind"] for widget in installed["installed_widgets"]] == [
+        "kanban-column",
+        "kanban-column",
+        "kanban-column",
+        "markdown",
+    ]
+    backlog_widget = spaces.read_widget(installed["space"]["space_id"], "kanban-backlog")
+    assert backlog_widget["cards"] == [
+        {"id": "card-plan", "title": "Plan the first task", "status": "todo"},
+    ]
+    assert backlog_widget["interaction"] == {"drag_drop": "planned", "edit_cards": "metadata-only"}
+    serialized = json.dumps(installed).lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert '"script"' not in serialized
+    assert '"data"' not in serialized
+    assert '"source"' not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
+def test_kanban_template_install_route_returns_safe_metadata(monkeypatch, tmp_path):
+    _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    handled, status, body = _route_post("/api/spaces/templates/install", {"template": "kanban"})
+
+    assert handled is None
+    assert status == 200
+    assert body["template"] == "kanban"
+    assert body["space"]["name"] == "Kanban Board"
+    assert body["installed_widgets"][0]["id"] == "kanban-backlog"
+    assert len(body["installed_widgets"]) == 4
+    serialized = json.dumps(body).lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
 def test_delete_space_removes_manifest_but_keeps_global_revision_event(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Disposable"})
