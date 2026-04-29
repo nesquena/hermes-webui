@@ -396,6 +396,44 @@ def create_space(payload: dict[str, Any]) -> dict[str, Any]:
     return _write_manifest(space, "space.created", {"name": name})
 
 
+def _safe_session_title_for_space(title: Any) -> str:
+    text = _context_value(title, 80)
+    if not text or text.lower() == "untitled":
+        return "Chat Context Space"
+    if re.search(r"api[_-]?key|authorization|bearer|cookie|password|secret|token", text, re.IGNORECASE):
+        return "Chat Context Space"
+    text = re.sub(r"[<>]", "", text).strip() or "Chat Context"
+    return text if text.lower().endswith("space") else f"{text} Space"
+
+
+def create_space_from_session_metadata(session: Any) -> dict[str, Any]:
+    """Create a metadata-only Space linked to a trusted chat session.
+
+    The current chat's message bodies are intentionally not copied into the
+    Space manifest or API response. This creates a safe starter surface and the
+    route activates it separately on the session.
+    """
+    title = getattr(session, "title", "")
+    name = _safe_session_title_for_space(title)
+    return create_space(
+        {
+            "name": name,
+            "description": "Trusted starter created from the current chat. Message bodies stay in chat and are not copied into Space metadata.",
+            "template": "chat-context",
+            "layout": {"columns": 24},
+            "widgets": [
+                {
+                    "id": "chat-context",
+                    "kind": "status",
+                    "title": "Linked chat context",
+                    "layout": {"x": 0, "y": 0, "w": 8, "h": 4},
+                }
+            ],
+            "capabilities": {"trusted_session_context": True},
+        }
+    )
+
+
 def read_space(space_id: str) -> dict[str, Any]:
     path = _manifest_path(space_id)
     if not path.exists():

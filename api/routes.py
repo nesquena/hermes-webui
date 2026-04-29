@@ -1604,6 +1604,35 @@ def handle_post(handler, parsed) -> bool:
         except (ValueError, FileExistsError) as e:
             return bad(handler, str(e))
 
+    if parsed.path == "/api/spaces/create-from-session":
+        from api import spaces as capy_spaces
+        if not capy_spaces.spaces_enabled():
+            return bad(handler, "Capy Spaces is disabled", 403)
+        session_id = body.get("session_id")
+        if not session_id:
+            return bad(handler, "Missing session_id")
+        try:
+            s = get_session(session_id)
+            created = capy_spaces.create_space_from_session_metadata(s)
+            space_id = capy_spaces.validate_space_id(created["space_id"])
+            with _get_session_agent_lock(session_id):
+                s.active_space_id = space_id
+                s.save()
+            return j(
+                handler,
+                {
+                    "ok": True,
+                    "space": capy_spaces.read_space_detail(space_id),
+                    "session": s.compact(),
+                },
+            )
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        except RuntimeError as e:
+            return bad(handler, str(e), 403)
+        except (ValueError, FileExistsError) as e:
+            return bad(handler, str(e))
+
     if parsed.path == "/api/spaces/update":
         from api import spaces as capy_spaces
         space_id = body.get("space_id")

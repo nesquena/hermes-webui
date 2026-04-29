@@ -138,6 +138,13 @@ global.fetch = async function(path, opts = {}) {
   if (path === 'api/spaces/create') {
     return response({ space: { space_id: 'ops', name: 'Ops', description: '<b>Operations</b>', widget_count: 0, revision_event_id: 'rev4' } });
   }
+  if (path === 'api/spaces/create-from-session') {
+    return response({
+      ok: true,
+      space: { space_id: 'research-chat-space', name: 'Research Chat Space', description: 'Linked chat starter', widget_count: 1, revision_event_id: 'rev-chat', renderer: '<script>bad()</script>', api_key: 'SECRET' },
+      session: { session_id: 'session-123', active_space_id: 'research-chat-space' },
+    });
+  }
   if (path === 'api/spaces/templates/install') {
     const body = opts.body ? JSON.parse(opts.body) : {};
     if (body.template === 'research') {
@@ -315,6 +322,9 @@ async function click(action, dataset) {
   } else if (scenario === 'createSpace') {
     await window.loadCapySpaces();
     await click('saveSpace', {});
+  } else if (scenario === 'createSpaceFromChat') {
+    await window.loadCapySpaces();
+    await click('createSpaceFromSession', {});
   } else if (scenario === 'installWeatherDemo') {
     await window.loadCapySpaces();
     await click('installWeatherTemplate', {});
@@ -541,6 +551,21 @@ def test_spaces_ui_create_space_posts_to_create_and_refreshes_spaces(driver_path
         "description": "<b>Operations</b>",
     }
     assert out["calls"][-1]["path"] == "api/spaces"
+
+
+def test_spaces_ui_create_space_from_chat_posts_current_session_and_syncs_active_space(driver_path):
+    out = _run_spaces_scenario(driver_path, "createSpaceFromChat")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/create-from-session")
+
+    assert "Create from current chat" in out["rootHtml"]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"session_id": "session-123"}
+    assert out["capySpaceSyncs"] == ["research-chat-space"]
+    assert out["calls"][-1]["path"] == "api/spaces"
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
 
 
 def test_spaces_ui_install_weather_demo_posts_template_and_refreshes_without_widget_code(driver_path):
