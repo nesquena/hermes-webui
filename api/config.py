@@ -1793,8 +1793,9 @@ def get_available_models() -> dict:
             if not _has_unnamed:
                 detected_providers.discard("custom")
 
-        # Filter providers if only_show_configured_providers is set
-        only_show_configured = cfg.get("only_show_configured_providers", False)
+        # Filter providers if providers.only_configured is set
+        providers_cfg = cfg.get("providers", {})
+        only_show_configured = providers_cfg.get("only_configured", False) if isinstance(providers_cfg, dict) else False
         if only_show_configured:
             configured_providers = set()
             if active_provider:
