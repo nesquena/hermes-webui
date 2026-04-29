@@ -688,6 +688,52 @@ def _dashboard_demo_widgets() -> list[dict[str, Any]]:
     ]
 
 
+def _kanban_board_widgets() -> list[dict[str, Any]]:
+    """Return safe declarative Kanban board widget seeds.
+
+    This starter maps the demo's colorful Trello-style board into metadata-only
+    columns and cards. Drag/drop and inline editing are declared as planned
+    interactions, not executable renderer code.
+    """
+    column_interaction = {"drag_drop": "planned", "edit_cards": "metadata-only"}
+    return [
+        {
+            "id": "kanban-backlog",
+            "kind": "kanban-column",
+            "title": "Backlog",
+            "layout": {"x": 0, "y": 0, "w": 8, "h": 8, "minimized": False},
+            "color": "#7dd3fc",
+            "cards": [{"id": "card-plan", "title": "Plan the first task", "status": "todo"}],
+            "interaction": column_interaction,
+        },
+        {
+            "id": "kanban-doing",
+            "kind": "kanban-column",
+            "title": "Doing",
+            "layout": {"x": 8, "y": 0, "w": 8, "h": 8, "minimized": False},
+            "color": "#fbbf24",
+            "cards": [],
+            "interaction": column_interaction,
+        },
+        {
+            "id": "kanban-done",
+            "kind": "kanban-column",
+            "title": "Done",
+            "layout": {"x": 16, "y": 0, "w": 8, "h": 8, "minimized": False},
+            "color": "#86efac",
+            "cards": [],
+            "interaction": column_interaction,
+        },
+        {
+            "id": "kanban-notes",
+            "kind": "markdown",
+            "title": "Board notes",
+            "layout": {"x": 0, "y": 8, "w": 24, "h": 4, "minimized": False},
+            "content_status": "agent-managed-empty",
+        },
+    ]
+
+
 def install_template(template: str, *, space_id: str | None = None) -> dict[str, Any]:
     """Install a safe Capy Spaces demo template.
 
@@ -698,7 +744,7 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
     template_name = str(template or "").strip().lower()
-    if template_name not in {"weather", "weather-demo", "research", "research-harness", "dashboard", "daily-dashboard"}:
+    if template_name not in {"weather", "weather-demo", "research", "research-harness", "dashboard", "daily-dashboard", "kanban", "kanban-board"}:
         raise ValueError("Unsupported template")
 
     if template_name in {"weather", "weather-demo"}:
@@ -733,7 +779,7 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
             )
         widgets = _research_harness_widgets()
         response_template = "research"
-    else:
+    elif template_name in {"dashboard", "daily-dashboard"}:
         target_id = validate_space_id(space_id) if space_id else _unique_space_id("daily-dashboard")
         if _manifest_path(target_id).exists():
             space = read_space(target_id)
@@ -749,6 +795,22 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
             )
         widgets = _dashboard_demo_widgets()
         response_template = "dashboard"
+    else:
+        target_id = validate_space_id(space_id) if space_id else _unique_space_id("kanban-board")
+        if _manifest_path(target_id).exists():
+            space = read_space(target_id)
+        else:
+            space = create_space(
+                {
+                    "space_id": target_id,
+                    "name": "Kanban Board",
+                    "description": "Metadata-only starter for a Trello-style board with persistent columns and cards.",
+                    "agent_instructions": "Keep board updates declarative. Use typed Capy space APIs for cards/columns and preserve revision history.",
+                    "template": "kanban-board",
+                }
+            )
+        widgets = _kanban_board_widgets()
+        response_template = "kanban"
 
     for widget in widgets:
         upsert_widget(space["space_id"], widget)
