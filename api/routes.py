@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import queue
+import shutil
 import sys
 import threading
 import time
@@ -16,6 +17,38 @@ from pathlib import Path
 from urllib.parse import parse_qs
 
 logger = logging.getLogger(__name__)
+
+# ── Cron run tracking ────────────────────────────────────────────────────────
+# Track job IDs currently being executed so the frontend can poll status.
+_RUNNING_CRON_JOBS: dict[str, float] = {}  # job_id → start_timestamp
+_RUNNING_CRON_LOCK = threading.Lock()
+
+
+def _mark_cron_running(job_id: str):
+    with _RUNNING_CRON_LOCK:
+        _RUNNING_CRON_JOBS[job_id] = time.time()
+
+
+def _mark_cron_done(job_id: str):
+    with _RUNNING_CRON_LOCK:
+        _RUNNING_CRON_JOBS.pop(job_id, None)
+
+
+def _is_cron_running(job_id: str) -> tuple[bool, float]:
+    """Return (is_running, elapsed_seconds)."""
+    with _RUNNING_CRON_LOCK:
+        t = _RUNNING_CRON_JOBS.get(job_id)
+        if t is None:
+            return False, 0.0
+        return True, time.time() - t
+
+
+def _run_cron_tracked(job):
+    """Wrapper that tracks running state around cron.scheduler.run_job."""
+    try:
+        run_job(job)
+    finally:
+        _mark_cron_done(job.get("id", ""))
 
 _PROVIDER_ALIASES = {
     "claude": "anthropic",
@@ -33,8 +66,9 @@ _OPENAI_COMPAT_ENDPOINTS = {
     "minimax": "https://api.minimax.chat/v1",
     "mistralai": "https://api.mistral.ai/v1",
     "xai": "https://api.x.ai/v1",
-    "deepseek": "https://api.deepseek.com/v1",
+    "deepseek": "https://api.deepseek.com",
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "nvidia": "https://integrate.api.nvidia.com/v1",
 }
 # NOTE: "openai-codex" is excluded because it maps to the same endpoint as
 # the base "openai" provider (api.openai.com/v1).  When both are configured
@@ -216,6 +250,44 @@ def _normalize_provider_id(value: str | None) -> str:
     return "" 
 
 
+def _catalog_provider_id_sets(catalog: dict) -> tuple[set[str], set[str]]:
+    raw_provider_ids: set[str] = set()
+    normalized_provider_ids: set[str] = set()
+    for group in catalog.get("groups") or []:
+        raw = str(group.get("provider_id") or "").strip().lower()
+        if not raw:
+            continue
+        raw_provider_ids.add(raw)
+        normalized = _normalize_provider_id(raw)
+        if normalized:
+            normalized_provider_ids.add(normalized)
+    return raw_provider_ids, normalized_provider_ids
+
+
+def _catalog_has_provider(
+    provider_raw: str,
+    provider_normalized: str,
+    raw_provider_ids: set[str],
+    normalized_provider_ids: set[str],
+) -> bool:
+    return (
+        provider_raw in raw_provider_ids
+        or (provider_normalized and provider_normalized in raw_provider_ids)
+        or (provider_normalized and provider_normalized in normalized_provider_ids)
+    )
+
+
+def _model_matches_active_provider_family(
+    model: str,
+    active_provider: str,
+) -> bool:
+    model_lower = model.lower()
+    for bare_prefix in ("gpt", "claude", "gemini"):
+        if model_lower.startswith(bare_prefix):
+            return _normalize_provider_id(bare_prefix) == active_provider
+    return False
+
+
 def _resolve_compatible_session_model(model_id: str | None) -> tuple[str, bool]:
     """Return (effective_model, was_normalized) for persisted session models.
 
@@ -239,6 +311,37 @@ def _resolve_compatible_session_model(model_id: str | None) -> tuple[str, bool]:
     # is stale relative to this unknown active provider. (#1023)
     raw_active_provider = str(catalog.get("active_provider") or "").strip().lower()
     if not active_provider and not raw_active_provider:
+        return model, False
+
+    if model.startswith("@") and ":" in model:
+        provider_hint, bare_model = model[1:].split(":", 1)
+        provider_raw = provider_hint.strip().lower()
+        provider_normalized = _normalize_provider_id(provider_raw)
+        bare_model = bare_model.strip()
+        if not provider_raw or not bare_model:
+            return model, False
+
+        raw_provider_ids, normalized_provider_ids = _catalog_provider_id_sets(catalog)
+        hint_matches_active = (
+            provider_raw == raw_active_provider
+            or provider_raw == active_provider
+            or (provider_normalized and provider_normalized == active_provider)
+        )
+        if hint_matches_active:
+            return bare_model, True
+
+        if _catalog_has_provider(
+            provider_raw,
+            provider_normalized,
+            raw_provider_ids,
+            normalized_provider_ids,
+        ):
+            return model, False
+
+        if _model_matches_active_provider_family(bare_model, active_provider):
+            return bare_model, True
+        if default_model:
+            return default_model, True
         return model, False
 
     slash = model.find("/")
@@ -340,9 +443,10 @@ from api.workspace import (
     safe_resolve_ws,
     resolve_trusted_workspace,
     validate_workspace_to_add,
+    _is_blocked_system_path,
     _workspace_blocked_roots,
 )
-from api.upload import handle_upload, handle_transcribe
+from api.upload import handle_upload, handle_upload_extract, handle_transcribe
 from api.streaming import _sse, _run_agent_streaming, cancel_stream
 from api.providers import get_providers, set_provider_key, remove_provider_key
 from api.onboarding import (
@@ -363,6 +467,9 @@ try:
         _lock,
         _permanent_approved,
         resolve_gateway_approval,
+        enable_session_yolo,
+        disable_session_yolo,
+        is_session_yolo_enabled,
     )
 except ImportError:
     _submit_pending_raw = lambda *a, **k: None
@@ -371,6 +478,9 @@ except ImportError:
     save_permanent_allowlist = lambda *a, **k: None
     is_approved = lambda *a, **k: True
     resolve_gateway_approval = lambda *a, **k: 0
+    enable_session_yolo = lambda *a, **k: None
+    disable_session_yolo = lambda *a, **k: None
+    is_session_yolo_enabled = lambda *a, **k: False
     _pending = {}
     _lock = threading.Lock()
     _permanent_approved = set()
@@ -703,6 +813,23 @@ def handle_get(handler, parsed) -> bool:
         load_messages = query.get("messages", ["1"])[0] != "0"
         resolve_model_default = "1" if load_messages else "0"
         resolve_model = query.get("resolve_model", [resolve_model_default])[0] != "0"
+        # ?msg_limit=N returns only the last N messages (tail window).
+        # Used by the frontend for fast session switching — avoids serialising
+        # and sending hundreds of messages when the user only sees the most
+        # recent exchange.  Older messages are loaded on-demand via scrolling.
+        _msg_limit = query.get("msg_limit", [None])[0]
+        try:
+            msg_limit = max(1, int(_msg_limit)) if _msg_limit else None
+        except (ValueError, TypeError):
+            msg_limit = None
+        # ?msg_before=N — 0-based index into the full message array.
+        # Returns messages before this index (for scroll-to-top lazy loading).
+        # Combined with msg_limit for paging.
+        _msg_before = query.get("msg_before", [None])[0]
+        try:
+            msg_before = int(_msg_before) if _msg_before else None
+        except (ValueError, TypeError):
+            msg_before = None
         try:
             _t1 = _time.monotonic()
             s = get_session(sid, metadata_only=(not load_messages))
@@ -713,14 +840,46 @@ def handle_get(handler, parsed) -> bool:
                 else None
             )
             _t3 = _time.monotonic()
+            _all_msgs = s.messages if load_messages else []
+            if load_messages:
+                if msg_before is not None:
+                    # Scroll-to-top paging: msg_before is a 0-based index into
+                    # the full message list. Return the msg_limit messages that
+                    # appear *before* this index (i.e. older messages).
+                    # Using index instead of timestamp avoids issues with
+                    # duplicate/missing timestamps.
+                    _before_idx = max(0, min(int(msg_before), len(_all_msgs)))
+                    _slice = _all_msgs[:_before_idx]
+                    _truncated_msgs = _slice[-msg_limit:] if msg_limit else _slice
+                elif msg_limit and len(_all_msgs) > msg_limit:
+                    _truncated_msgs = _all_msgs[-msg_limit:]
+                else:
+                    _truncated_msgs = _all_msgs
+            else:
+                _truncated_msgs = _all_msgs
             raw = s.compact() | {
-                "messages": s.messages if load_messages else [],
+                "messages": _truncated_msgs,
                 "tool_calls": getattr(s, "tool_calls", []) if load_messages else [],
                 "active_stream_id": getattr(s, "active_stream_id", None),
                 "pending_user_message": getattr(s, "pending_user_message", None),
                 "pending_attachments": getattr(s, "pending_attachments", []) if load_messages else [],
                 "pending_started_at": getattr(s, "pending_started_at", None),
             }
+            # Signal to the frontend that older messages were omitted.
+            # For msg_before paging, compare against the filtered set,
+            # not the full list — otherwise we signal truncation even when
+            # all older messages were returned.
+            if msg_before is not None:
+                _truncated = load_messages and msg_limit is not None and len(_slice) > msg_limit
+            else:
+                _truncated = load_messages and msg_limit is not None and len(_all_msgs) > msg_limit
+            raw["_messages_truncated"] = _truncated
+            # Index of the first returned message in the full message array.
+            # Frontend uses this as cursor for scroll-to-top paging.
+            if msg_before is not None:
+                raw["_messages_offset"] = max(0, _before_idx - len(_truncated_msgs))
+            else:
+                raw["_messages_offset"] = max(0, len(_all_msgs) - len(_truncated_msgs))
             _t4 = _time.monotonic()
             if effective_model:
                 raw["model"] = effective_model
@@ -777,6 +936,12 @@ def handle_get(handler, parsed) -> bool:
         except KeyError:
             return bad(handler, "Session not found", 404)
 
+    if parsed.path == "/api/session/yolo":
+        sid = parse_qs(parsed.query).get("session_id", [""])[0]
+        if not sid:
+            return bad(handler, "Missing session_id")
+        return j(handler, {"yolo_enabled": is_session_yolo_enabled(sid)})
+
     if parsed.path == "/api/session/usage":
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
         if not sid:
@@ -800,7 +965,10 @@ def handle_get(handler, parsed) -> bool:
         if settings.get("show_cli_sessions"):
             cli = get_cli_sessions()
             webui_ids = {s["session_id"] for s in webui_sessions}
-            deduped_cli = [s for s in cli if s["session_id"] not in webui_ids]
+            from api.models import _hide_from_default_sidebar as _cron_hide
+            deduped_cli = [s for s in cli
+                           if s["session_id"] not in webui_ids
+                           and not _cron_hide(s)]
         else:
             deduped_cli = []
         merged = webui_sessions + deduped_cli
@@ -814,7 +982,12 @@ def handle_get(handler, parsed) -> bool:
             if isinstance(item.get("title"), str):
                 item["title"] = _redact_text(item["title"])
             safe_merged.append(item)
-        return j(handler, {"sessions": safe_merged, "cli_count": len(deduped_cli)})
+        return j(handler, {
+            "sessions": safe_merged,
+            "cli_count": len(deduped_cli),
+            "server_time": time.time(),
+            "server_tz": time.strftime("%z"),
+        })
 
     if parsed.path == "/api/projects":
         return j(handler, {"projects": load_projects()})
@@ -933,6 +1106,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/chat/stream":
         return _handle_sse_stream(handler, parsed)
 
+    if parsed.path == "/api/terminal/output":
+        return _handle_terminal_output(handler, parsed)
+
     if parsed.path == '/api/sessions/gateway/stream':
         return _handle_gateway_sse_stream(handler, parsed)
 
@@ -974,6 +1150,9 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/crons/recent":
         return _handle_cron_recent(handler, parsed)
+
+    if parsed.path == "/api/crons/status":
+        return _handle_cron_status(handler, parsed)
 
     # ── Skills API (GET) ──
     if parsed.path == "/api/skills":
@@ -1017,7 +1196,7 @@ def handle_get(handler, parsed) -> bool:
             )
         raw = _skill_view(name)
         data = json.loads(raw) if isinstance(raw, str) else raw
-        if "linked_files" not in data:
+        if not isinstance(data.get("linked_files"), dict):
             data["linked_files"] = {}
         return j(handler, data)
 
@@ -1056,6 +1235,8 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/upload":
         return handle_upload(handler)
+    if parsed.path == "/api/upload/extract":
+        return handle_upload_extract(handler)
 
     if parsed.path == "/api/transcribe":
         return handle_transcribe(handler)
@@ -1215,6 +1396,7 @@ def handle_post(handler, parsed) -> bool:
             s = get_session(body["session_id"])
         except KeyError:
             return bad(handler, "Session not found", 404)
+        old_ws = getattr(s, "workspace", "")
         try:
             new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace)))
         except ValueError as e:
@@ -1223,6 +1405,12 @@ def handle_post(handler, parsed) -> bool:
             s.workspace = new_ws
             s.model = body.get("model", s.model)
             s.save()
+        if str(old_ws or "") != str(new_ws or ""):
+            try:
+                from api.terminal import close_terminal
+                close_terminal(body["session_id"])
+            except Exception:
+                logger.debug("Failed to close workspace terminal after workspace update")
         set_last_workspace(new_ws)
         return j(handler, {"session": s.compact() | {"messages": s.messages}})
 
@@ -1255,6 +1443,11 @@ def handle_post(handler, parsed) -> bool:
             SESSION_INDEX_FILE.unlink(missing_ok=True)
         except Exception:
             logger.debug("Failed to unlink session index")
+        try:
+            from api.terminal import close_terminal
+            close_terminal(sid)
+        except Exception:
+            logger.debug("Failed to close workspace terminal for deleted session %s", sid)
         # Also delete from CLI state.db (for CLI sessions shown in sidebar)
         try:
             from api.models import delete_cli_session
@@ -1333,6 +1526,36 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return j(handler, {"error": str(e)})
 
+    # ── YOLO mode toggle (POST) ──
+    # Session-scoped only — stored in-memory on the server side.
+    # Important lifecycle notes:
+    #   • Page reload: state PERSISTS (frontend re-fetches via GET endpoint)
+    #   • Cross-tab: state is SHARED (same server-side flag per session)
+    #   • Server restart: state is LOST (in-memory only)
+    #   • Cross-session: isolated (each session has its own flag)
+    # Fixes #467
+    if parsed.path == "/api/session/yolo":
+        try:
+            require(body, "session_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        sid = body["session_id"]
+        enabled = bool(body.get("enabled", True))
+        if enabled:
+            enable_session_yolo(sid)
+            # Also resolve any pending approvals for this session so the
+            # agent doesn't stay stuck waiting on an already-dismissed card.
+            try:
+                from tools.approval import _pending as _p, _lock as _l
+                with _l:
+                    _p.pop(sid, None)
+            except Exception:
+                pass
+            resolve_gateway_approval(sid, "once", resolve_all=True)
+        else:
+            disable_session_yolo(sid)
+        return j(handler, {"ok": True, "yolo_enabled": enabled})
+
     if parsed.path == "/api/btw":
         return _handle_btw(handler, body)
 
@@ -1348,6 +1571,18 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/chat/steer":
         from api.streaming import _handle_chat_steer
         return _handle_chat_steer(handler, body)
+
+    if parsed.path == "/api/terminal/start":
+        return _handle_terminal_start(handler, body)
+
+    if parsed.path == "/api/terminal/input":
+        return _handle_terminal_input(handler, body)
+
+    if parsed.path == "/api/terminal/resize":
+        return _handle_terminal_resize(handler, body)
+
+    if parsed.path == "/api/terminal/close":
+        return _handle_terminal_close(handler, body)
 
     # ── Cron API (POST) ──
     if parsed.path == "/api/crons/create":
@@ -1394,6 +1629,22 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/workspaces/rename":
         return _handle_workspace_rename(handler, body)
 
+    if parsed.path == "/api/workspaces/reorder":
+        return _handle_workspace_reorder(handler, body)
+
+    # ── MCP Servers ──
+    if parsed.path == "/api/mcp/servers":
+        return _handle_mcp_servers_list(handler)
+
+    if parsed.path.startswith("/api/mcp/servers/") and parsed.path.count("/") == 4:
+        # DELETE /api/mcp/servers/<name>
+        name = parsed.path.split("/")[-1]
+        if handler.command == "DELETE":
+            return _handle_mcp_server_delete(handler, name)
+        # PUT /api/mcp/servers/<name>
+        if handler.command == "PUT":
+            return _handle_mcp_server_update(handler, name, body)
+
     # ── Approval (POST) ──
     if parsed.path == "/api/approval/respond":
         return _handle_approval_respond(handler, body)
@@ -1426,6 +1677,11 @@ def handle_post(handler, parsed) -> bool:
             # process_wide=False: don't mutate the process-global _active_profile.
             # Per-client profile is managed via cookie + thread-local (#798).
             result = switch_profile(name, process_wide=False)
+            # Invalidate the models cache so the very next /api/models request
+            # rebuilds from the new profile's config.yaml rather than returning
+            # the old profile's cached model list (#1200 — profile-switch model bug).
+            from api.config import invalidate_models_cache
+            invalidate_models_cache()
             return j(handler, result, extra_headers={
                 'Set-Cookie': build_profile_cookie(name),
             })
@@ -1935,6 +2191,126 @@ def _handle_sse_stream(handler, parsed):
             if event in ("stream_end", "error", "cancel"):
                 break
     except (BrokenPipeError, ConnectionResetError):
+        pass
+    return True
+
+
+def _terminal_session_and_workspace(body_or_query):
+    sid = str(body_or_query.get("session_id", "")).strip()
+    if not sid:
+        raise ValueError("session_id required")
+    try:
+        s = get_session(sid)
+    except KeyError:
+        raise KeyError("Session not found")
+    workspace = resolve_trusted_workspace(getattr(s, "workspace", "") or "")
+    return sid, workspace
+
+
+def _handle_terminal_start(handler, body):
+    try:
+        sid, workspace = _terminal_session_and_workspace(body)
+        from api.terminal import start_terminal
+        term = start_terminal(
+            sid,
+            workspace,
+            rows=int(body.get("rows") or 24),
+            cols=int(body.get("cols") or 80),
+            restart=bool(body.get("restart")),
+        )
+        return j(
+            handler,
+            {
+                "ok": True,
+                "session_id": sid,
+                "workspace": term.workspace,
+                "running": term.is_alive(),
+            },
+        )
+    except KeyError as e:
+        return bad(handler, str(e), 404)
+    except ValueError as e:
+        return bad(handler, str(e), 400)
+    except Exception as e:
+        return bad(handler, _sanitize_error(e), 500)
+
+
+def _handle_terminal_input(handler, body):
+    try:
+        require(body, "session_id")
+        data = str(body.get("data", ""))
+        if len(data) > 8192:
+            return bad(handler, "input too large", 413)
+        from api.terminal import write_terminal
+        write_terminal(body["session_id"], data)
+        return j(handler, {"ok": True})
+    except KeyError as e:
+        return bad(handler, str(e), 404)
+    except ValueError as e:
+        return bad(handler, str(e), 400)
+    except Exception as e:
+        return bad(handler, _sanitize_error(e), 500)
+
+
+def _handle_terminal_resize(handler, body):
+    try:
+        require(body, "session_id")
+        from api.terminal import resize_terminal
+        resize_terminal(
+            body["session_id"],
+            rows=int(body.get("rows") or 24),
+            cols=int(body.get("cols") or 80),
+        )
+        return j(handler, {"ok": True})
+    except KeyError as e:
+        return bad(handler, str(e), 404)
+    except ValueError as e:
+        return bad(handler, str(e), 400)
+    except Exception as e:
+        return bad(handler, _sanitize_error(e), 500)
+
+
+def _handle_terminal_close(handler, body):
+    try:
+        require(body, "session_id")
+        from api.terminal import close_terminal
+        closed = close_terminal(body["session_id"])
+        return j(handler, {"ok": True, "closed": closed})
+    except ValueError as e:
+        return bad(handler, str(e), 400)
+
+
+def _handle_terminal_output(handler, parsed):
+    qs = parse_qs(parsed.query)
+    sid = qs.get("session_id", [""])[0]
+    if not sid:
+        return bad(handler, "session_id required")
+    from api.terminal import get_terminal
+    term = get_terminal(sid)
+    if term is None:
+        return j(handler, {"error": "terminal not running"}, status=404)
+
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+    handler.send_header("Cache-Control", "no-cache")
+    handler.send_header("X-Accel-Buffering", "no")
+    handler.send_header("Connection", "keep-alive")
+    handler.end_headers()
+    try:
+        while True:
+            try:
+                event, data = term.output.get(timeout=25)
+            except queue.Empty:
+                handler.wfile.write(b": terminal heartbeat\n\n")
+                handler.wfile.flush()
+                if term.closed.is_set() and term.output.empty():
+                    _sse(handler, "terminal_closed", {"exit_code": term.proc.poll()})
+                    break
+                continue
+            _sse(handler, event, data)
+            if event in ("terminal_closed", "terminal_error"):
+                break
+    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
         pass
     return True
 
@@ -2463,6 +2839,19 @@ def _handle_cron_output(handler, parsed):
     return j(handler, {"job_id": job_id, "outputs": outputs})
 
 
+def _handle_cron_status(handler, parsed):
+    """Return running status for one or all cron jobs."""
+    qs = parse_qs(parsed.query)
+    job_id = qs.get("job_id", [""])[0]
+    if job_id:
+        running, elapsed = _is_cron_running(job_id)
+        return j(handler, {"job_id": job_id, "running": running, "elapsed": round(elapsed, 1)})
+    # Return status for all running jobs
+    with _RUNNING_CRON_LOCK:
+        all_running = {jid: round(time.time() - t, 1) for jid, t in _RUNNING_CRON_JOBS.items()}
+    return j(handler, {"running": all_running})
+
+
 def _handle_cron_recent(handler, parsed):
     """Return cron jobs that have completed since a given timestamp."""
     import datetime
@@ -2754,9 +3143,12 @@ def _handle_chat_sync(handler, body):
     msg = str(body.get("message", "")).strip()
     if not msg:
         return j(handler, {"error": "empty message"}, status=400)
-    workspace = Path(body.get("workspace") or s.workspace).expanduser().resolve()
+    try:
+        workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+    except ValueError as e:
+        return bad(handler, str(e))
     with _get_session_agent_lock(s.session_id):
-        s.workspace = str(workspace)
+        s.workspace = workspace
         s.model = body.get("model") or s.model
     from api.streaming import _ENV_LOCK
 
@@ -2934,8 +3326,14 @@ def _handle_cron_run(handler, body):
     job = get_job(job_id)
     if not job:
         return bad(handler, "Job not found", 404)
-    threading.Thread(target=run_job, args=(job,), daemon=True).start()
-    return j(handler, {"ok": True, "job_id": job_id, "status": "triggered"})
+    # Prevent double-run: reject if the job is already tracked as running
+    already_running, elapsed = _is_cron_running(job_id)
+    if already_running:
+        return j(handler, {"ok": False, "job_id": job_id, "status": "already_running",
+                            "elapsed": round(elapsed, 1)})
+    _mark_cron_running(job_id)
+    threading.Thread(target=_run_cron_tracked, args=(job,), daemon=True).start()
+    return j(handler, {"ok": True, "job_id": job_id, "status": "running"})
 
 
 def _handle_cron_pause(handler, body):
@@ -2976,8 +3374,11 @@ def _handle_file_delete(handler, body):
         if not target.exists():
             return bad(handler, "File not found", 404)
         if target.is_dir():
-            return bad(handler, "Cannot delete directories via this endpoint")
-        target.unlink()
+            if not body.get("recursive"):
+                return bad(handler, "Set recursive=true to delete directories")
+            shutil.rmtree(target)
+        else:
+            target.unlink()
         return j(handler, {"ok": True, "path": body["path"]})
     except (ValueError, PermissionError) as e:
         return bad(handler, _sanitize_error(e))
@@ -3083,13 +3484,12 @@ def _handle_workspace_add(handler, body):
         return bad(handler, "path is required")
     # Validate the path is NOT a blocked system root BEFORE any filesystem mutation.
     # This prevents creating orphan directories on rejected paths (#782 review).
+    # _is_blocked_system_path honours user-tmp carve-outs (e.g. /var/folders on
+    # macOS) so pytest's tmp_path_factory paths and other legit user-tmp dirs
+    # still register cleanly.
     candidate = Path(path_str).expanduser().resolve()
-    for blocked in _workspace_blocked_roots():
-        try:
-            candidate.relative_to(blocked)
-            return bad(handler, f"Path points to a system directory: {candidate}")
-        except ValueError:
-            pass
+    if _is_blocked_system_path(candidate):
+        return bad(handler, f"Path points to a system directory: {candidate}")
     # Now safe to create the directory if requested
     if auto_create:
         try:
@@ -3133,6 +3533,34 @@ def _handle_workspace_rename(handler, body):
         return bad(handler, "Workspace not found", 404)
     save_workspaces(wss)
     return j(handler, {"ok": True, "workspaces": wss})
+
+
+def _handle_workspace_reorder(handler, body):
+    """Reorder workspaces by providing an ordered list of paths.
+
+    Accepts {"paths": ["path1", "path2", ...]}. The workspaces list is
+    rewritten so that entries appear in the given order. Any workspace
+    not included in the request is appended at the end (preserves data).
+    """
+    paths = body.get("paths", [])
+    if not paths or not isinstance(paths, list):
+        return bad(handler, "paths is required and must be a list")
+    wss = load_workspaces()
+    by_path = {w["path"]: w for w in wss}
+    # Build reordered list: given order first, then any omitted entries
+    reordered = []
+    seen = set()
+    for p in paths:
+        p = p.strip()
+        if p in by_path and p not in seen:
+            reordered.append(by_path[p])
+            seen.add(p)
+    # Append any workspaces not mentioned (safety net)
+    for w in wss:
+        if w["path"] not in seen:
+            reordered.append(w)
+    save_workspaces(reordered)
+    return j(handler, {"ok": True, "workspaces": reordered})
 
 
 def _handle_approval_respond(handler, body):
@@ -3640,3 +4068,127 @@ def _handle_session_import(handler, body):
             SESSIONS.popitem(last=False)
     s.save()
     return j(handler, {"ok": True, "session": s.compact() | {"messages": s.messages}})
+
+
+# ── MCP Server helpers ──
+from api.config import get_config, _save_yaml_config_file, _get_config_path, reload_config
+
+def _mask_secrets(obj):
+    """Mask sensitive values in env vars and headers."""
+    if not isinstance(obj, dict):
+        return obj
+    sensitive = ("auth", "token", "key", "secret", "password", "credential")
+    masked = {}
+    for k, v in obj.items():
+        if isinstance(v, str) and any(s in k.lower() for s in sensitive):
+            masked[k] = "••••••"
+        elif isinstance(v, dict):
+            masked[k] = _mask_secrets(v)
+        else:
+            masked[k] = v
+    return masked
+
+
+def _server_summary(name, cfg):
+    """Return a safe summary of an MCP server config."""
+    out = {"name": name}
+    if "url" in cfg:
+        out["transport"] = "http"
+        # Mask auth headers
+        if "headers" in cfg:
+            out["headers"] = _mask_secrets(cfg["headers"])
+        out["url"] = cfg["url"]
+    else:
+        out["transport"] = "stdio"
+        out["command"] = cfg.get("command", "")
+        out["args"] = cfg.get("args", [])
+        if "env" in cfg:
+            out["env"] = _mask_secrets(cfg["env"])
+    out["timeout"] = cfg.get("timeout", 120)
+    return out
+
+
+def _handle_mcp_servers_list(handler):
+    """List all configured MCP servers."""
+    cfg = get_config()
+    servers = cfg.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        servers = {}
+    result = [_server_summary(name, scfg) for name, scfg in servers.items()]
+    return j(handler, {"servers": result})
+
+
+def _handle_mcp_server_delete(handler, name):
+    """Delete an MCP server by name."""
+    from urllib.parse import unquote
+    name = unquote(name)
+    if not name:
+        return bad(handler, "name is required")
+    cfg = get_config()
+    servers = cfg.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        servers = {}
+    if name not in servers:
+        return bad(handler, f"MCP server '{name}' not found", 404)
+    del servers[name]
+    cfg["mcp_servers"] = servers
+    _save_yaml_config_file(_get_config_path(), cfg)
+    reload_config()
+    return j(handler, {"ok": True, "deleted": name})
+
+
+_MASKED_PLACEHOLDER = "••••••"
+
+
+def _strip_masked_values(submitted, existing):
+    """Remove masked placeholder values from submitted dict, keeping originals."""
+    if not isinstance(submitted, dict) or not isinstance(existing, dict):
+        return submitted
+    cleaned = {}
+    for k, v in submitted.items():
+        if isinstance(v, str) and v == _MASKED_PLACEHOLDER:
+            if k in existing and isinstance(existing[k], str):
+                cleaned[k] = existing[k]  # preserve original real value
+                continue
+        elif isinstance(v, dict) and k in existing and isinstance(existing[k], dict):
+            cleaned[k] = _strip_masked_values(v, existing[k])
+        else:
+            cleaned[k] = v
+    return cleaned
+
+
+def _handle_mcp_server_update(handler, name, body):
+    """Add or update an MCP server."""
+    from urllib.parse import unquote
+    name = unquote(name)
+    if not name:
+        return bad(handler, "name is required")
+    # Validate: must have url (http) or command (stdio)
+    server_cfg = {}
+    cfg = get_config()
+    servers = cfg.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        servers = {}
+    existing_cfg = servers.get(name, {})
+    if body.get("url"):
+        server_cfg["url"] = body["url"].strip()
+        if body.get("headers"):
+            server_cfg["headers"] = _strip_masked_values(body["headers"], existing_cfg.get("headers", {}))
+    elif body.get("command"):
+        server_cfg["command"] = body["command"].strip()
+        if body.get("args"):
+            server_cfg["args"] = body["args"] if isinstance(body["args"], list) else [body["args"]]
+        if body.get("env"):
+            server_cfg["env"] = _strip_masked_values(body["env"], existing_cfg.get("env", {}))
+    else:
+        return bad(handler, "url or command is required")
+    if body.get("timeout") is not None:
+        try:
+            server_cfg["timeout"] = int(body["timeout"])
+        except (ValueError, TypeError):
+            pass
+    servers[name] = server_cfg
+    cfg["mcp_servers"] = servers
+    _save_yaml_config_file(_get_config_path(), cfg)
+    reload_config()
+    return j(handler, {"ok": True, "server": _server_summary(name, server_cfg)})

@@ -13,7 +13,7 @@ import api.config as _cfg
 from api.config import (
     SESSION_DIR, SESSION_INDEX_FILE, SESSIONS, SESSIONS_MAX,
     LOCK, STREAMS, STREAMS_LOCK, DEFAULT_WORKSPACE, DEFAULT_MODEL, PROJECTS_FILE, HOME,
-    get_effective_default_model,
+    get_effective_default_model, _get_session_agent_lock,
 )
 from api.workspace import get_last_workspace
 from api.agent_sessions import read_importable_agent_session_rows
@@ -457,6 +457,183 @@ class Session:
             ) if include_runtime else False,
         }
 
+def _get_profile_home(profile) -> Path:
+    """Resolve the hermes agent home directory for the given profile.
+
+    Prefers the profile-specific helper from api.profiles; falls back to the
+    HERMES_HOME environment variable or ~/.hermes, expanding ~ correctly.
+    """
+    try:
+        from api.profiles import get_hermes_home_for_profile
+        return Path(get_hermes_home_for_profile(profile))
+    except ImportError:
+        return Path(os.environ.get('HERMES_HOME') or '~/.hermes').expanduser()
+
+
+def _apply_core_sync_or_error_marker(
+    session,
+    core_path,
+    stream_id_for_recheck=None,
+    *,
+    require_stream_dead=True,
+) -> bool:
+    """Inner repair logic. Must be called with the per-session lock already held.
+
+    Re-checks session state under the lock, then either syncs messages from the
+    core transcript (if present and non-empty) or restores the pending user
+    message as a recovered user turn and appends an error marker.
+
+    stream_id_for_recheck: when provided, repair bails if session.active_stream_id
+    changed (e.g. context compression rotated it).  The cache-miss repair path
+    also requires the stream to be absent from active streams; the streaming
+    thread's final fallback passes require_stream_dead=False because it runs
+    before its own stream is removed from STREAMS.
+
+    Returns True if repair was applied, False if the re-check bailed out.
+    Must never raise — caller is responsible for exception handling.
+    """
+    sid = session.session_id
+    # Bail if pending is unset — nothing to repair.
+    if not session.pending_user_message:
+        return False
+    if stream_id_for_recheck is not None:
+        # Bail if active_stream_id rotated between the pre-lock check and now.
+        # Cache-miss repair must also skip if the stream is alive again, but the
+        # streaming thread's final fallback runs before removing its own stream
+        # from STREAMS and must be allowed to repair that same active stream.
+        if session.active_stream_id != stream_id_for_recheck:
+            return False
+        if require_stream_dead and session.active_stream_id in _active_stream_ids():
+            return False
+
+    # When messages is already non-empty the core-sync overwrite and recovered
+    # user turn are skipped (we cannot clobber in-memory mutations), but the
+    # stuck pending fields MUST still be cleared and an error marker appended
+    # so the session isn't permanently left in stale-pending state.
+    if len(session.messages) != 0:
+        session.active_stream_id = None
+        session.pending_user_message = None
+        session.pending_attachments = []
+        session.pending_started_at = None
+        session.messages.append({
+            'role': 'assistant',
+            'content': '**Previous turn did not complete.**',
+            'timestamp': int(time.time()),
+            '_error': True,
+        })
+        session.save()
+        logger.info(
+            "Session %s: pending cleared (messages non-empty), added error marker",
+            sid,
+        )
+        return True
+
+    # ── messages *is* empty ─ full repair ─────────────────────────────────
+
+    if core_path.exists():
+        with open(core_path, encoding='utf-8') as f:
+            core = json.load(f)
+        core_messages = core.get('messages', [])
+        if core_messages:
+            session.messages = core_messages
+            session.tool_calls = core.get('tool_calls', [])
+            for field in ('input_tokens', 'output_tokens', 'estimated_cost'):
+                if core.get(field) is not None:
+                    setattr(session, field, core[field])
+            session.active_stream_id = None
+            session.pending_user_message = None
+            session.pending_attachments = []
+            session.pending_started_at = None
+            session.save()
+            logger.info(
+                "Session %s: synced %d messages from core transcript",
+                sid, len(core_messages),
+            )
+            return True
+
+    # Core missing or empty — restore the pending user message as a recovered
+    # user turn (preserving the draft), then append an error marker.
+    if session.pending_user_message:
+        # Use the original send time if available so the recovered turn
+        # appears in the correct chronological position.
+        _recovered_ts = int(time.time())
+        if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
+            _recovered_ts = int(session.pending_started_at)
+        recovered: dict = {
+            'role': 'user',
+            'content': session.pending_user_message,
+            'timestamp': _recovered_ts,
+            '_recovered': True,
+        }
+        if session.pending_attachments:
+            recovered['attachments'] = list(session.pending_attachments)
+        session.messages.append(recovered)
+    session.active_stream_id = None
+    session.pending_user_message = None
+    session.pending_attachments = []
+    session.pending_started_at = None
+    session.messages.append({
+        'role': 'assistant',
+        'content': '**Previous turn did not complete.**',
+        'timestamp': int(time.time()),
+        '_error': True,
+    })
+    session.save()
+    logger.info("Session %s: no core transcript found, added error marker", sid)
+    return True
+
+
+def _repair_stale_pending(session) -> bool:
+    """Recover a sidecar stuck with messages=[] and stale pending state.
+
+    Fires only when messages is empty, pending_user_message is set,
+    active_stream_id is set, and the stream is no longer alive.
+
+    Uses a non-blocking lock acquire so a caller that already holds the
+    per-session lock (e.g. retry_last, undo_last, cancel_stream) cannot
+    deadlock when get_session() triggers this on a cache miss.
+
+    Returns True if repair was applied, False otherwise.
+    Must never raise — all errors are caught and logged.
+    """
+    # Capture the stream id seen at pre-check time; the under-lock re-check in
+    # _apply_core_sync_or_error_marker uses this to detect a rotated active_stream_id
+    # (e.g. context compression) or a stream that came back alive.
+    _seen_stream_id = session.active_stream_id
+    if (len(session.messages) != 0
+            or not session.pending_user_message
+            or not _seen_stream_id
+            or _seen_stream_id in _active_stream_ids()):
+        return False
+
+    sid = session.session_id
+    if not sid or not all(c in '0123456789abcdefghijklmnopqrstuvwxyz_' for c in sid):
+        return False
+
+    try:
+        profile_home = _get_profile_home(session.profile)
+        core_path = profile_home / 'sessions' / f'session_{sid}.json'
+
+        lock = _get_session_agent_lock(sid)
+        # Non-blocking acquire: bail immediately if the caller already holds this
+        # lock (e.g. retry_last, undo_last, cancel_stream). Blocking would deadlock
+        # because _get_session_agent_lock returns a non-reentrant threading.Lock.
+        if not lock.acquire(blocking=False):
+            logger.debug(
+                "_repair_stale_pending: lock contended, skipping repair for session %s", sid,
+            )
+            return False
+        try:
+            return _apply_core_sync_or_error_marker(
+                session, core_path, stream_id_for_recheck=_seen_stream_id,
+            )
+        finally:
+            lock.release()
+    except Exception:
+        logger.exception("_repair_stale_pending failed for session %s", sid)
+        return False
+
+
 def get_session(sid, metadata_only=False):
     """Load a session, optionally with metadata only (skipping the messages array).
 
@@ -481,11 +658,41 @@ def get_session(sid, metadata_only=False):
             SESSIONS.move_to_end(sid)
             while len(SESSIONS) > SESSIONS_MAX:
                 SESSIONS.popitem(last=False)  # evict least recently used
+        if not metadata_only:
+            try:
+                repaired = _repair_stale_pending(s)
+                # If repair had to bail because the per-session lock was held,
+                # do not pin the still-stale sidecar in the LRU cache forever.
+                # Leaving it cached would prevent future get_session() calls from
+                # re-entering the cache-miss repair path after the lock holder exits.
+                if not repaired and (len(s.messages) == 0
+                        and s.pending_user_message
+                        and s.active_stream_id
+                        and s.active_stream_id not in _active_stream_ids()):
+                    with LOCK:
+                        if SESSIONS.get(sid) is s:
+                            SESSIONS.pop(sid, None)
+            except Exception:
+                pass  # repair is best-effort
         return s
     raise KeyError(sid)
 
 def new_session(workspace=None, model=None, profile=None):
-    """Create a new in-memory session and persist it.
+    """Create a new in-memory session.
+
+    The session lives in the SESSIONS dict only — no disk write happens until
+    the first message is appended (#1171 follow-up).  This avoids the
+    "ghost Untitled session on disk" pile-up that occurred when users clicked
+    New Conversation, reloaded the page, or completed onboarding without ever
+    sending a message.  Subsequent code paths that populate state immediately
+    (btw / background agent at api/routes.py) call ``s.save()`` themselves
+    after setting title/messages, and ``_handle_chat_start`` saves the
+    session as soon as the user actually sends a message — both are the
+    natural first-write moments for a real session.
+
+    Crash-safety: if the process exits between session creation and first
+    message, the session is lost.  Since it had no messages, there is
+    nothing to lose.
 
     *profile* — when supplied by the caller (e.g. from the request body sent
     by the active browser tab), it is used directly so that concurrent clients
@@ -511,8 +718,14 @@ def new_session(workspace=None, model=None, profile=None):
         SESSIONS.move_to_end(s.session_id)
         while len(SESSIONS) > SESSIONS_MAX:
             SESSIONS.popitem(last=False)
-    s.save()
     return s
+
+def _hide_from_default_sidebar(session: dict) -> bool:
+    """Return True for internal/background sessions hidden from the default list."""
+    sid = str(session.get('session_id') or '')
+    source = session.get('source_tag') or session.get('source')
+    return source == 'cron' or sid.startswith('cron_')
+
 
 def all_sessions():
     active_stream_ids = _active_stream_ids()
@@ -550,14 +763,16 @@ def all_sessions():
                         active_stream_ids=active_stream_ids,
                     )
             result = sorted(index_map.values(), key=lambda s: (s.get('pinned', False), _session_sort_timestamp(s)), reverse=True)
-            # Hide empty Untitled sessions from the UI (created by tests, page refreshes, etc.)
-            # Exempt sessions younger than 60 s so a brand-new session stays visible (#789)
-            _now = time.time()
+            # Hide empty Untitled sessions from the UI entirely — they are ephemeral
+            # scratch pads that only become real once the first message is sent (#1171).
+            # No grace window: a 0-message Untitled session is never shown in the list
+            # regardless of age. This means page refreshes and accidental New Conversation
+            # clicks never leave orphan entries in the sidebar.
             result = [s for s in result if not (
                 s.get('title', 'Untitled') == 'Untitled'
                 and s.get('message_count', 0) == 0
-                and (_now - s.get('updated_at', _now)) > 60
             )]
+            result = [s for s in result if not _hide_from_default_sidebar(s)]
             # Backfill: sessions created before Sprint 22 have no profile tag.
             # Attribute them to 'default' so the client profile filter works correctly.
             for s in result:
@@ -578,12 +793,14 @@ def all_sessions():
     for s in SESSIONS.values():
         if all(s.session_id != x.session_id for x in out): out.append(s)
     out.sort(key=lambda s: (getattr(s, 'pinned', False), _session_sort_timestamp(s)), reverse=True)
-    _now = time.time()
+    # Hide empty Untitled sessions from the UI entirely — kept consistent with the
+    # index-path filter above. No grace window: a 0-message Untitled session is
+    # never shown regardless of age (#1171).
     result = [s.compact(include_runtime=True, active_stream_ids=active_stream_ids) for s in out if not (
         s.title == 'Untitled'
         and len(s.messages) == 0
-        and (_now - s.updated_at) > 60
     )]
+    result = [s for s in result if not _hide_from_default_sidebar(s)]
     for s in result:
         if not s.get('profile'):
             s['profile'] = 'default'
@@ -759,7 +976,7 @@ def get_cli_sessions() -> list:
         _cli_profile = None  # older agent -- fall back to no profile
 
     try:
-        for row in read_importable_agent_session_rows(db_path, limit=200, log=logger):
+        for row in read_importable_agent_session_rows(db_path, limit=200, log=logger, exclude_sources=None):
             sid = row['id']
             raw_ts = row['last_activity'] or row['started_at']
             # Prefer the CLI session's own profile from the DB; fall back to

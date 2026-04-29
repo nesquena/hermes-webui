@@ -293,6 +293,15 @@ def _server_reachable() -> bool:
         return False
 
 
+def _flush_server_config_cache() -> None:
+    # GET /api/personalities always calls reload_config(), giving us a cheap
+    # way to flush cached provider state without restarting the test server.
+    try:
+        _http_get("/api/personalities")
+    except Exception:
+        pass
+
+
 # No collection-time skip guard — conftest.py starts the server via its
 # autouse session fixture BEFORE tests run.  A collection-time check always
 # sees no server and turns every test into a skip.  Server reachability is
@@ -313,19 +322,13 @@ class TestOnboardingGateIntegration:
         hermes_home = _server_hermes_home()
         for rel in ("config.yaml", ".env"):
             (hermes_home / rel).unlink(missing_ok=True)
+        _http_post("/api/settings", {"onboarding_completed": False})
+        _flush_server_config_cache()
         yield
         for rel in ("config.yaml", ".env"):
             (hermes_home / rel).unlink(missing_ok=True)
-        # Force the server to reload its in-memory config after file deletion.
-        # apply_onboarding_setup() calls reload_config() which caches provider
-        # state in the server process.  Deleting files on disk does not clear
-        # that cache — the next test would see provider_configured=True.
-        # GET /api/personalities always calls reload_config(), giving us a
-        # cheap way to flush the cache without a server restart.
-        try:
-            _http_get("/api/personalities")
-        except Exception:
-            pass
+        _http_post("/api/settings", {"onboarding_completed": False})
+        _flush_server_config_cache()
 
     def test_no_config_wizard_fires(self):
         """No config.yaml → completed=False."""

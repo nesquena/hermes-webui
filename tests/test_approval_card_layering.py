@@ -38,3 +38,15 @@ def test_approval_card_visible_outranks_queue_card():
         f"greater than .queue-card z-index ({queue_z}) so approval buttons "
         f"remain clickable when both flyouts are open."
     )
+
+
+def test_approval_card_visible_outranks_terminal_card():
+    terminal_z = _z_index_of(r"\.composer-terminal-panel")
+    approval_visible_z = _z_index_of(r"\.approval-card\.visible")
+    assert terminal_z is not None, ".composer-terminal-panel must declare a z-index"
+    assert approval_visible_z is not None
+    assert approval_visible_z > terminal_z, (
+        f".approval-card.visible z-index ({approval_visible_z}) must stay above "
+        f".composer-terminal-panel z-index ({terminal_z}) so approval controls "
+        f"remain clickable when the terminal flyout is open."
+    )

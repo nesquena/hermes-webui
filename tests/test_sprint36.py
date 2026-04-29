@@ -5,15 +5,15 @@ The old cancelStream() set "Cancelling..." status and then relied on the SSE can
 event to clear it. If the SSE connection was already closed, the event never arrived
 and "Cancelling..." lingered indefinitely.
 
-The fix: cancelStream() now clears status, busy state, activeStreamId, and the cancel
-button directly after the cancel API request completes — regardless of whether the SSE
-cancel event fires. The SSE handler still runs if it arrives (all operations idempotent).
+The fix: cancelStream() now clears status, busy state, and activeStreamId directly after
+the cancel API request completes — regardless of whether the SSE cancel event fires.
+The SSE handler still runs if it arrives (all operations idempotent).
 
 Covers:
   1. cancelStream() clears activeStreamId unconditionally after the fetch
   2. cancelStream() calls setBusy(false) unconditionally
-  3. cancelStream() calls setStatus('') unconditionally
-  4. cancelStream() hides the cancel button unconditionally
+  3. cancelStream() calls setStatus('') / setComposerStatus('') unconditionally
+  4. cancelStream() clears composer status text unconditionally
   5. The catch block no longer calls setStatus(cancel_failed) — cleanup runs even on error
   6. The SSE cancel handler is still present (idempotent path)
   7. cancel_failed i18n key is still defined in all locales (key exists, just not used in
@@ -85,11 +85,12 @@ class TestCancelStreamCleanup:
             "'Cancelling...' can linger if SSE cancel event never arrives"
         )
 
-    def test_hides_cancel_button(self):
-        """cancelStream() must hide the cancel button unconditionally."""
+    def test_clears_composer_status(self):
+        """cancelStream() must clear the composer status text unconditionally."""
         block = self._get_cancel_block()
-        assert "btnCancel" in block, (
-            "cancelStream() does not reference btnCancel — cancel button may stay visible"
+        assert "setComposerStatus" in block or "setStatus" in block, (
+            "cancelStream() does not clear composer/status text — "
+            "'Cancelling…' or stale status can linger if SSE cancel event never arrives"
         )
 
     def test_cleanup_not_inside_try_block(self):

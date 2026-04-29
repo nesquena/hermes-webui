@@ -69,13 +69,22 @@ def test_workspace_panel_restore_sets_browse_mode():
 
 
 def test_workspace_panel_restore_before_sync():
-    """Restore must happen before syncWorkspacePanelState() so the state drives the initial render."""
+    """Restore must happen before syncWorkspacePanelState() so the state drives the initial render.
+
+    The boot IIFE has two paths: one for sessions with messages (restores panel pref before sync)
+    and one for empty/missing sessions (no panel to restore; syncs immediately). The test verifies
+    that in the normal session-restore path, the panel pref read precedes syncWorkspacePanelState().
+    We find the panelPref read (localStorage...workspace-panel-pref) and the LAST
+    syncWorkspacePanelState() call — the final one is always in the normal restore path.
+    """
     iife_idx = BOOT_JS.rfind("(async function")
     if iife_idx < 0:
         iife_idx = BOOT_JS.rfind("(async()=>{")
     iife_body = BOOT_JS[iife_idx:]
-    restore_pos = iife_body.find("hermes-webui-workspace-panel")
-    sync_pos    = iife_body.find("syncWorkspacePanelState()")
+    # workspace-panel-pref is only read in the normal (has-messages) restore path
+    restore_pos = iife_body.find("hermes-webui-workspace-panel-pref")
+    # Use the LAST syncWorkspacePanelState() — this is the one in the normal restore path
+    sync_pos    = iife_body.rfind("syncWorkspacePanelState()")
     assert restore_pos >= 0, "restore read must be present in boot IIFE"
     assert sync_pos >= 0,    "syncWorkspacePanelState call must be present in boot IIFE"
     assert restore_pos < sync_pos, \

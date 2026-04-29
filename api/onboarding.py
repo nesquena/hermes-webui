@@ -23,6 +23,7 @@ from api.config import (
     save_settings,
     verify_hermes_imports,
 )
+from api.providers import _write_env_file  # shared impl with _ENV_LOCK (#1164)
 from api.workspace import get_last_workspace, load_workspaces
 
 logger = logging.getLogger(__name__)
@@ -101,10 +102,28 @@ _SUPPORTED_PROVIDER_SETUPS = {
     "deepseek": {
         "label": "DeepSeek",
         "env_var": "DEEPSEEK_API_KEY",
-        "default_model": "deepseek-chat-v3-0324",
-        "default_base_url": "https://api.deepseek.com/v1",
+        "default_model": "deepseek-v4-flash",
+        "default_base_url": "https://api.deepseek.com",
         "requires_base_url": False,
         "models": list(_PROVIDER_MODELS.get("deepseek", [])),
+        "category": "specialized",
+    },
+    "zai": {
+        "label": "Z.AI / GLM (智谱)",
+        "env_var": "GLM_API_KEY",
+        "default_model": "glm-5.1",
+        "default_base_url": "https://open.bigmodel.cn/api/paas/v4",
+        "requires_base_url": False,
+        "models": list(_PROVIDER_MODELS.get("zai", [])),
+        "category": "specialized",
+    },
+    "nvidia": {
+        "label": "NVIDIA NIM",
+        "env_var": "NVIDIA_API_KEY",
+        "default_model": "nvidia/llama-3.3-nemotron-super-49b-v1.5",
+        "default_base_url": "https://integrate.api.nvidia.com/v1",
+        "requires_base_url": False,
+        "models": list(_PROVIDER_MODELS.get("nvidia", [])),
         "category": "specialized",
     },
     "mistralai": {
@@ -166,26 +185,6 @@ def _load_env_file(env_path: Path) -> dict[str, str]:
         return {}
     return values
 
-
-def _write_env_file(env_path: Path, updates: dict[str, str]) -> None:
-    current = _load_env_file(env_path)
-    for key, value in updates.items():
-        if value is None:
-            current.pop(key, None)
-            os.environ.pop(key, None)
-            continue
-        clean = str(value).strip()
-        if not clean:
-            continue
-        # Reject embedded newlines/carriage returns to prevent .env injection
-        if "\n" in clean or "\r" in clean:
-            raise ValueError("API key must not contain newline characters.")
-        current[key] = clean
-        os.environ[key] = clean
-
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [f"{key}={current[key]}" for key in sorted(current)]
-    env_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
 
 def _load_yaml_config(config_path: Path) -> dict:

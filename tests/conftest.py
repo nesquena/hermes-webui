@@ -57,10 +57,18 @@ TEST_STATE_DIR = pathlib.Path(os.getenv(
 ))
 TEST_WORKSPACE = TEST_STATE_DIR / 'test-workspace'
 
-# Publish at module level so _pytest_port.py (imported at collection time)
-# and any test file using os.environ sees the right values immediately.
-os.environ.setdefault('HERMES_WEBUI_TEST_PORT', str(TEST_PORT))
-os.environ.setdefault('HERMES_WEBUI_TEST_STATE_DIR', str(TEST_STATE_DIR))
+# Publish at module level so api.config, _pytest_port.py, and any test module
+# importing stateful API code during collection see the isolated test paths.
+#
+# Direct assignment is intentional for production-risk paths: tests that import
+# api.config/api.models in the pytest process must never inherit the real
+# ~/.hermes state tree before the server subprocess fixture starts.
+os.environ['HERMES_WEBUI_TEST_PORT'] = str(TEST_PORT)
+os.environ['HERMES_WEBUI_TEST_STATE_DIR'] = str(TEST_STATE_DIR)
+os.environ['HERMES_WEBUI_STATE_DIR'] = str(TEST_STATE_DIR)
+os.environ['HERMES_WEBUI_DEFAULT_WORKSPACE'] = str(TEST_WORKSPACE)
+os.environ['HERMES_HOME'] = str(TEST_STATE_DIR)
+os.environ['HERMES_BASE_HOME'] = str(TEST_STATE_DIR)
 
 # ── Server script: always relative to repo root ───────────────────────────
 SERVER_SCRIPT = REPO_ROOT / 'server.py'

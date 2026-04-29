@@ -11,6 +11,7 @@ const COMMANDS=[
   {name:'compact',   desc:t('cmd_compact_alias'),       fn:cmdCompact, noEcho:true},
   {name:'model',     desc:t('cmd_model'),  fn:cmdModel,     arg:'model_name', subArgs:'models', noEcho:true},
   {name:'workspace', desc:t('cmd_workspace'),            fn:cmdWorkspace, arg:'name',           noEcho:true},
+  {name:'terminal',  desc:t('cmd_terminal'),             fn:cmdTerminal,                        noEcho:true},
   {name:'new',       desc:t('cmd_new'),            fn:cmdNew,       noEcho:true},
   {name:'usage',     desc:t('cmd_usage'),   fn:cmdUsage,     noEcho:true},
   {name:'theme',     desc:t('cmd_theme'), fn:cmdTheme, arg:'name',  noEcho:true},
@@ -28,6 +29,7 @@ const COMMANDS=[
   {name:'status',    desc:t('cmd_status'),   fn:cmdStatus},
   {name:'voice',     desc:t('cmd_voice'),    fn:cmdVoice,     noEcho:true},
   {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|none|minimal|low|medium|high|xhigh', subArgs:['show','hide','none','minimal','low','medium','high','xhigh'], noEcho:true},
+  {name:'yolo', desc:t('cmd_yolo'), fn:cmdYolo, noEcho:true},
 ];
 
 const SLASH_SUBARG_SOURCES={
@@ -261,6 +263,26 @@ async function cmdWorkspace(args){
   }catch(e){showToast(t('workspace_switch_failed')+e.message);}
 }
 
+async function cmdTerminal(){
+  if(!S.session&&typeof newSession==='function'){
+    if(!S._profileSwitchWorkspace&&!S._profileDefaultWorkspace){
+      try{
+        const data=await api('/api/workspaces');
+        const first=(data.workspaces||[])[0];
+        S._profileSwitchWorkspace=data.last||(first&&first.path)||null;
+      }catch(_){}
+    }
+    await newSession();
+    if(typeof renderSessionList==='function') await renderSessionList();
+  }
+  if(!S.session||!S.session.workspace){
+    showToast(t('terminal_no_workspace_title'),2600,'warning');
+    if(typeof syncTerminalButton==='function') syncTerminalButton();
+    return;
+  }
+  if(typeof toggleComposerTerminal==='function') await toggleComposerTerminal(true);
+}
+
 async function cmdNew(){
   if(typeof clearCompressionUi==='function') clearCompressionUi();
   await newSession();
@@ -284,6 +306,7 @@ async function _runManualCompression(focusTopic){
       S.session=live.session;
       S.messages=live.session.messages||[];
       S.toolCalls=live.session.tool_calls||[];
+      if(typeof _messagesTruncated!=='undefined') _messagesTruncated=false;
     }catch(preflightErr){
       if(typeof clearCompressionUi==='function') clearCompressionUi();
       if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
@@ -682,7 +705,7 @@ async function cmdRetry(){
     if(r&&r.error){showToast(r.error);return;}
     if(!S.session||S.session.session_id!==activeSid)return;
     const data=await api('/api/session?session_id='+encodeURIComponent(activeSid));
-    if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();renderMessages();}
+    if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=false;renderMessages();}
     $('msg').value=r.last_user_text||'';if(typeof autoResize==='function')autoResize();await send();
   }catch(e){showToast(t('retry_failed')+e.message);}
 }
@@ -695,7 +718,7 @@ async function cmdUndo(){
     if(r&&r.error){showToast(r.error);return;}
     if(!S.session||S.session.session_id!==activeSid)return;
     const data=await api('/api/session?session_id='+encodeURIComponent(activeSid));
-    if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();renderMessages();}
+    if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=false;renderMessages();}
     showToast(`↩ ${t('undid_n_messages')} ${r.removed_count} ${t('undid_messages_suffix')}`);
   }catch(e){showToast(t('undo_failed')+e.message);}
 }
@@ -734,7 +757,27 @@ async function cmdStatus(){
   try{
     const r=await api('/api/session/status?session_id='+encodeURIComponent(S.session.session_id));
     if(r&&r.error){showToast(r.error);return;}
-    S.messages.push({role:'assistant',content:[`**${t('status_heading')}**`,'',`**${t('status_session_id')}:** \`${r.session_id}\``,`**${t('status_title')}:** ${r.title||t('untitled')}`,`**${t('status_model')}:** ${r.model||t('usage_default_model')}`,`**${t('status_workspace')}:** ${r.workspace}`,`**${t('status_personality')}:** ${r.personality||t('usage_personality_none')}`,`**${t('status_messages')}:** ${r.message_count}`,`**${t('status_agent_running')}:** ${r.agent_running?t('status_yes'):t('status_no')}`,].join('\n')});
+    // Build status card lines matching CLI /status output
+    const provider=window._activeProvider||'';
+    const profile=S.activeProfile||'default';
+    const started=r.created_at?new Date(r.created_at).toLocaleString():t('status_unknown');
+    const fmtNum=n=>typeof n==='number'?n.toLocaleString():'0';
+    const tokens=r.total_tokens?`${fmtNum(r.input_tokens)} in / ${fmtNum(r.output_tokens)} out`:t('status_no_tokens');
+    const cost=r.estimated_cost?` (~$${Number(r.estimated_cost).toFixed(4)})`:'';
+    const lines=[
+      `**${t('status_heading')}**`,'',
+      `\`${r.session_id}\``,'',
+      `**${t('status_title')}:** ${r.title||t('untitled')}`,
+      `**${t('status_model')}:** ${r.model||t('usage_default_model')}${provider?'  ('+provider+')':''}`,
+      `**${t('status_profile')}:** ${profile}`,
+      `**${t('status_workspace')}:** ${r.workspace}`,
+      `**${t('status_personality')}:** ${r.personality||t('usage_personality_none')}`,
+      `**${t('status_started')}:** ${started}`,
+      `**${t('status_tokens')}:** ${tokens}${cost}`,
+      `**${t('status_messages')}:** ${r.message_count}`,
+      `**${t('status_agent_running')}:** ${r.agent_running?t('status_yes'):t('status_no')}`,
+    ];
+    S.messages.push({role:'assistant',content:lines.join('\n')});
     renderMessages();
   }catch(e){showToast(t('status_load_failed')+e.message);}
 }
@@ -794,6 +837,31 @@ function cmdVoice(){
   if(mic&&mic.style.display!=='none'&&!mic.disabled){try{mic.click();return;}catch(_){}}
   showToast(t('cmd_voice_use_mic'));
 }
+
+// ── YOLO mode toggle ──
+// Session-scoped: skips all approval prompts for the current session.
+// Toggles on/off; state is not persisted across page reloads.
+async function cmdYolo(){
+  const sid=S.session&&S.session.session_id;
+  if(!sid){showToast(t('yolo_no_session'));return;}
+  try{
+    // Check current state first to toggle
+    const status=await api('/api/session/yolo?session_id='+encodeURIComponent(sid));
+    const enable=!status.yolo_enabled;
+    await api('/api/session/yolo',{
+      method:'POST',
+      body:JSON.stringify({session_id:sid,enabled:enable}),
+    });
+    _yoloEnabled=enable;
+    _updateYoloPill();
+    showToast(enable?t('yolo_enabled'):t('yolo_disabled'));
+    if(enable){
+      // Dismiss any visible approval card
+      hideApprovalCard(true);
+    }
+  }catch(e){showToast('YOLO: '+e.message);}
+}
+
 let _skillCommandCache=[];
 let _skillCommandLoadPromise=null;
 let _skillCommandCacheReady=false;

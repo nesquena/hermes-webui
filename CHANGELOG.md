@@ -2,7 +2,145 @@
 
 ## [Unreleased]
 
+## [v0.50.237] — 2026-04-29
 
+### Added
+- **Embedded workspace terminal** — `/terminal` slash command opens a compact PTY-backed terminal card anchored above the composer. Supports collapse/expand/dock, resize, restart, clear, copy output, and per-session workspace binding. Env vars are allowlisted so server credentials are not exposed in the shell. (`api/terminal.py`, `static/terminal.js`, `static/commands.js`, `static/i18n.js`) @franksong2702 — Closes #1099
+- **Collapsible JSON/YAML tree viewer** — fenced `json`/`yaml` code blocks get a Tree/Raw toggle. Tree view renders collapsible, type-colored nodes (keys blue, strings green, numbers blue, booleans amber, nulls muted); auto-collapsed beyond depth 2. Default is Tree for blocks with 10+ lines. YAML parsing uses js-yaml loaded lazily via CDN with SRI. (`static/ui.js`, `static/style.css`, `static/i18n.js`) @bergeouss — Closes #484
+- **Inline diff/patch viewer** — fenced `diff`/`patch` blocks render with colored `+`/`-`/`@@` lines. `MEDIA:` links to `.patch`/`.diff` files fetch and render inline with a 50 KB cap. (`static/ui.js`, `static/style.css`, `static/i18n.js`) @bergeouss — Closes #483
+- **MCP server management UI** — Settings › System panel now lists MCP servers with transport badges, and provides add/edit/delete forms. Backend: `GET/PUT/DELETE /api/mcp/servers` with masked secrets (round-trip safe). i18n coverage across 7 locales. (`api/routes.py`, `static/panels.js`, `static/i18n.js`) @bergeouss — Closes #538
+- **Cron run status tracking and watch mode** — after "Run Now", the cron detail view shows a live spinner, running label, and elapsed timer (polls every 3 s). Auto-starts watch when opening an already-running job. `GET /api/crons/status` endpoint. Double-run guard prevents concurrent execution of the same job. (`api/routes.py`, `static/panels.js`, `static/style.css`, `static/i18n.js`) @bergeouss — Closes #526
+- **Duplicate cron job** — Duplicate button in cron detail header pre-fills the create form with the existing job settings, appends "(copy)" to the name (auto-increments on collision), and saves as paused. (`static/panels.js`, `static/i18n.js`) @bergeouss — Closes #528
+- **Upload and extract zip/tar archives into workspace** — zip, tar.gz, tgz, tar.bz2, tar.xz files are auto-extracted into a named subfolder. Zip-slip/tar-slip protection via `is_relative_to()`; zip-bomb protection via 200 MB cumulative extraction limit on actual bytes. (`api/upload.py`, `api/routes.py`, `static/ui.js`, `static/i18n.js`) @bergeouss — Closes #525
+- **Workspace directory CRUD** — right-click context menu on workspace file/dir rows adds Rename and Delete for directories. `shutil.rmtree()` guarded by `safe_resolve()` path validation. Expanded-dir cache updated on rename/delete. (`api/routes.py`, `static/ui.js`, `static/i18n.js`) @bergeouss — Closes #1104
+- **Workspace drag-to-reorder** — drag handles on workspace rows; `PUT /api/workspaces/reorder` persists new order. Reorder is confirmed (not optimistic); unmentioned workspaces are appended. (`api/routes.py`, `static/panels.js`, `static/i18n.js`) @bergeouss — Closes #492
+- **Compress affordance in context ring** — context usage tooltip shows a pre-fill button for `/compress` at ≥50% usage (hint style) and ≥75% (urgent red style). No auto-fire. (`static/ui.js`, `static/index.html`, `static/style.css`, `static/i18n.js`) @bergeouss — Closes #524
+- **DeepSeek V4, Z.AI/GLM provider, model tags** — adds `deepseek-v4-flash` and `deepseek-v4-pro`; keeps V3/R1 as `(legacy)` until 2026-07-24. Adds Z.AI/GLM provider (`glm-5.1`, `glm-5`, `glm-5-turbo`, `glm-4.7`, `glm-4.5`, `glm-4.5-flash`). Provider cards show model names; custom providers from `config.yaml` are scanned. (`api/config.py`, `api/onboarding.py`, `static/panels.js`) @jasonjcwu — Closes #1213
+- **NVIDIA NIM provider** — adds `nvidia` to the provider catalog with display name, aliases, model list, API key mapping, OpenAI-compat endpoint (`https://integrate.api.nvidia.com/v1`), and onboarding entry. (`api/config.py`, `api/providers.py`, `api/routes.py`, `api/onboarding.py`) @JinYue-GitHub — Closes #1220
+
+### Fixed
+- **Background session unread dots** — sidebar unread dots no longer depend solely on `message_count` delta. Explicit completion markers, polling fallback, INFLIGHT/S.busy sidebar spinner tracking, localStorage-persisted observed-running state, and auto-compression session-id rotation all handled. (`static/sessions.js`, `static/messages.js`) @franksong2702 — Closes #856
+- **Clarify draft preserved on timeout** — unsent clarify text is moved to the main composer when the clarify card expires or is dismissed. Countdown indicator shows remaining time; urgent styling for final seconds. (`api/clarify.py`, `static/messages.js`, `static/style.css`, `static/index.html`) @sixianli — Closes #1216
+- **Mobile busy-input composer button** — unified send/stop/queue/interrupt/steer action button so mobile users (tap-only) can queue, interrupt, or steer while the agent is busy. Dynamic icon/label/color. Removes separate cancel button path. (`static/ui.js`, `static/messages.js`, `static/sessions.js`, `static/boot.js`, `static/i18n.js`) @starship-s — Closes #1215
+- **Session sidecar repair hardened** — centralized `_apply_core_sync_or_error_marker()` helper; non-blocking lock acquire to avoid deadlock in cache-miss repair path; streaming-finally and cache-miss repair paths share logic. (`api/models.py`, `api/streaming.py`) @starship-s — Closes #1230
+- **Scroll position preserved when loading older messages** — `_loadOlderMessages` now uses `#messages` (the actual scrollable container) instead of `#msgInner`; resets `_scrollPinned` after restoring position so `scrollToBottom` does not re-fire. (`static/sessions.js`) @jasonjcwu — Closes #1219
+- **Model picker duplicate IDs across providers** — `_deduplicate_model_ids()` detects bare model IDs appearing in 2+ groups and prefixes collisions with `@provider_id:` (deterministic alphabetical tie-break). Frontend `norm()` regex strips `@provider:` prefixes for fuzzy matching. (`api/config.py`, `static/ui.js`) @bergeouss — Closes #1228
+- **`/api/models` cache metadata preserved** — disk and TTL cache now include `active_provider` and `default_model` alongside `groups`. Legacy `groups`-only cache files are rejected and rebuilt. (`api/config.py`) @franksong2702 — Closes #1239
+- **Clarify model scope copy** — composer model-selector dropdown shows "Applies to this conversation from your next message." sticky note; preferences Default Model shows "Used for new conversations." helper text. (`static/ui.js`, `static/boot.js`, `static/i18n.js`) @franksong2702 — Closes #1241
+- **Workspace panel stale after profile switch** — `loadDir('.')` called in `switchToProfile()` Case B so the file tree refreshes to the new profile. (`static/panels.js`) @bergeouss — Closes #1214
+- **OAuth providers show as unconfigured** — expanded `_OAUTH_PROVIDERS` set; live `get_auth_status()` fallback for unknown OAuth providers (gated by pid regex validation and closed `key_source` allowlist). (`api/providers.py`) @bergeouss — Closes #1212
+- **MCP delete button XSS** — replaced `onclick="...esc(s.name)..."` inline handler with `data-mcp-name` attribute + event delegation (absorb fix). (`static/panels.js`)
+- **Zip/tar-slip path traversal** — replaced `startswith` prefix check with `is_relative_to()`; zip-bomb check now tracks actual extracted bytes instead of trusting `member.file_size` (absorb fix). (`api/upload.py`)
+- **Terminal PTY env secret leak** — terminal shell env uses a safe allowlist instead of `os.environ.copy()`, preventing API keys from being visible inside the terminal (absorb fix). (`api/terminal.py`)
+- **Terminal resize handle wired** — `terminalResizeHandle` element added to `index.html`; `_terminalEls()` returns `handle` (absorb fix). (`static/index.html`, `static/terminal.js`)
+
+## [v0.50.235] — 2026-04-28
+
+### Fixed
+- **Profile switch shows correct workspace, model, and chip label immediately** — Three separate
+  bugs caused profile switching to appear broken: (1) `switch_profile(process_wide=False)` returned
+  the old profile's workspace because `get_last_workspace()` routed through thread-local profile
+  context (still pointing at the old profile during the switch); (2) the model dropdown showed stale
+  results because the in-memory models cache wasn't invalidated; (3) the profile chip stayed on the
+  old name because `syncTopbar()` returned early without updating it when no session was active.
+  (`api/profiles.py`, `api/routes.py`, `static/ui.js`,
+  `tests/test_profile_switch_1200.py`) (PR #1203)
+- **Flaky test stabilisation** — `test_server_now_ms_compensates_positive_skew` used exact-ms
+  equality across two `Date.now()` calls; fixed with midpoint averaging and ±5 ms tolerance.
+  (`tests/test_issue1144_session_time_sync.py`)
+## [v0.50.234] — 2026-04-28
+
+### Fixed
+- **XSS hardening in markdown renderer** — HTML tags in LLM output were filtered by
+  tag name only, allowing event handlers like `onerror` and `onclick` to pass through
+  on `<img>` and other elements. The sanitizer now strips all attributes except a
+  per-tag allowlist and blocks `javascript:`, `data:`, and `vbscript:` URL schemes.
+  Incomplete raw tags (`<img src=x onerror=...//` with no closing `>`) are escaped
+  before paragraph wrapping so they cannot be completed by the renderer's own output.
+  (`static/ui.js`)
+- **Delegated image lightbox** — inline `onclick` handlers on `<img class="msg-media-img">`
+  replaced with a single delegated `document.addEventListener('click')`, eliminating the
+  last source of inline event handler HTML in rendered output. (`static/ui.js`)
+- **Workspace trust for macOS symlink paths** — `/etc` on macOS resolves to `/private/etc`
+  which previously bypassed the blocked-roots check. The new `_is_blocked_workspace_path`
+  helper compares both the raw and resolved path. Also adds `/System` and `/Library` to
+  the blocked roots. (`api/workspace.py`)
+- **Legacy `/api/chat` workspace validation** — the synchronous chat fallback endpoint
+  was not routing through `resolve_trusted_workspace()`, allowing arbitrary paths to be
+  set as workspace. (`api/routes.py`)
+- **`linked_files` type guard** — skill view responses with a `null` or non-dict
+  `linked_files` field no longer crash the skills API. (`api/routes.py`)
+  (by @bschmidy10, PR #1201)
+## [v0.50.233] — 2026-04-28
+
+### Fixed
+- **Workspace trust for /var/home paths** — workspaces under `/var/home` (used by
+  systemd-homed on Fedora/RHEL) were incorrectly blocked because `_is_blocked_system_path`
+  flagged `/var` as a system root. The home-directory trust check in both
+  `resolve_trusted_workspace` and `validate_workspace_to_add` now correctly trusts any
+  path under `Path.home()` regardless of where the home directory lives on disk.
+  (`api/workspace.py`) (by @frap129, PR #1199)
+## v0.50.236 — 2026-04-28
+
+### Bug fixes
+- **fix(providers): OAuth provider cards now show "Configured" badge when token is via config.yaml** — `get_providers()` was unconditionally overwriting `has_key=True` (from `_provider_has_key()`) with `has_key=False` when `get_auth_status()` returned `logged_in=False`, discarding valid working tokens in `config.yaml`. Also: the Settings panel was filtering out all OAuth providers entirely (`filter(p=>p.configurable)` — OAuth providers always have `configurable=False`). Fixes surfaced the actionable auth error string (e.g. "refresh token consumed by Codex CLI") in the provider card body. (#1202)
+
+### Improvements
+- **ux(profiles): profile chip shows spinner and name immediately when switching** — The profile chip now gives instant visual feedback on click: the new profile name appears immediately (optimistic update), a small spinner appears on the icon, and the button is disabled to prevent double-clicks. All are cleaned up in a `finally` block so the UI never gets stuck in a loading state. On error, the chip reverts to the previous name. Additionally, the model dropdown fetch and workspace list fetch are now parallelized (`Promise.all`) instead of sequential, cutting switch time roughly in half.
+
+### Features
+- **feat: YOLO mode toggle** — `/yolo` slash command and "Skip all this session" button on approval cards. Enables session-scoped approval bypass. ⚡ amber pill in composer footer shows YOLO is active. (by @bergeouss, PR #1152, closes #467)
+## v0.50.225 — 2026-04-27
+
+### Added
+- **Cron job attention state** — recurring jobs that land in a broken state (`enabled=false`, `state=completed`, `next_run_at=null`) now show an amber "needs attention" badge instead of the misleading "off" badge. Detail panel shows a warning banner with Resume & recalculate, Run once, and Copy diagnostics actions. Korean locale translated. (`static/panels.js`, `static/style.css`, `static/i18n.js`) [#1133 @franksong2702]
+
+### Fixed
+- **Image attachments: composer tray thumbnails** — pasted/dragged images now show as 56×56 thumbnail chips in the composer instead of paperclip pills. Blob URL revoked on remove. (`static/ui.js`, `static/style.css`) [#1135]
+- **Image attachments: chat history inline** — uploaded images in sent messages now load correctly via `api/file/raw?session_id=SID&path=FILENAME` instead of the broken `api/media?path=FILENAME` path. Click any image to open a lightbox overlay (dark backdrop, 90vw/90vh, × or Escape to close). (`static/ui.js`, `static/style.css`) [#1135] Closes #1095
+- **pytest state isolation** — `conftest.py` now uses direct assignment for `HERMES_WEBUI_STATE_DIR` / `HERMES_HOME` / `HERMES_WEBUI_DEFAULT_WORKSPACE` so tests importing `api.config` in the pytest process cannot inherit the real `~/.hermes/webui` state tree. (`tests/conftest.py`) [#1136 @franksong2702]
+
+## v0.50.223 — 2026-04-26
+
+### Added
+- **Drag & drop workspace files into composer** — files and folders in the workspace file tree are now draggable; dropping them into the chat composer inserts an `@path` reference at the cursor with smart spacing. OS file drag-and-drop (attach files) still works as before. (`static/ui.js`, `static/panels.js`) [#1123 @bergeouss] Closes #1097
+- **Composer placeholder reflects active profile** — when a named profile is active (not `default`), the composer placeholder and title bar show the profile name (capitalised) instead of the global `bot_name`; falls back to `bot_name`/Hermes for the default profile. (`static/boot.js`, `static/panels.js`) [#1122 @bergeouss] Closes #1116
+
+### Fixed
+- **Copy buttons — clipboard-write Permissions-Policy** — added `clipboard-write=(self)` to the `Permissions-Policy` header so Firefox allows `navigator.clipboard.writeText()`. Extracted `_fallbackCopy()` with explicit `focus()` before `select()` and correct visible-but-hidden positioning (no more `-9999px` offscreen failure). (`api/helpers.py`, `static/ui.js`) [#1125 @bergeouss] Closes #1096
+- **Model picker shows all configured providers** — `XAI_API_KEY` and `MISTRAL_API_KEY` env vars now map to `x-ai` and `mistralai` respectively. Providers configured in `config.yaml` under `providers:` are also detected and shown in the model picker. (`api/config.py`) [#1126 @bergeouss] Partially closes #604
+- **api() retries on stale keep-alive after idle** — after a long idle period, `fetch()` throws a `TypeError` when the TCP connection has been dropped by a NAT or proxy timeout. `api()` in `workspace.js` now retries up to 3 times on `TypeError` only; 4xx/5xx HTTP errors and 401 redirects are not retried. (`static/workspace.js`) [#1121 @bergeouss] Closes #1118
+- **Google Fonts allowed in CSP** — Mermaid themes inject `@import url(fonts.googleapis.com)` at render time; the CSP `style-src` and `font-src` directives now include `fonts.googleapis.com` and `fonts.gstatic.com`. (`api/helpers.py`) [#1121 @bergeouss] Closes #1112
+
+## v0.50.221 — 2026-04-26
+
+### Fixed
+- **Custom providers model dropdown** — models dict keys in `custom_providers[].models` now all appear in the dropdown; previously only the singular `model` field was read. (`api/config.py`) [#1111 @bergeouss] Closes #1106
+- **Custom providers SSRF false positive** — hostnames from user-configured `custom_providers[].base_url` are now trusted through the SSRF check; local inference servers (llama.cpp, vLLM, TabbyAPI) no longer blocked. (`api/config.py`) [#1113 @bergeouss] Closes #1105
+- **Mobile/iPad session navigation** — tap no longer fails on first touch; replaced hover-triggered layout-shift pattern with `onpointerup` + right/middle-click filter + `touch-action:manipulation`. Desktop hover padding restored via `@media (hover:hover)` so mouse users are unaffected. (`static/sessions.js`, `static/style.css`) [#1110 @sheng-di]
+- **Pasted/dragged images render inline** — image attachments now show as `<img>` with click-to-fullscreen instead of a paperclip badge. Hoisted `_IMAGE_EXTS` to module scope (was causing `ReferenceError` in `renderMessages`); added `avif` support. (`static/ui.js`) [#1109 @bergeouss] Closes #1095
+- **Copy buttons on HTTP** — `_copyText()` helper checks `isSecureContext` and falls back to `execCommand('copy')` for plain-HTTP self-hosted installs. Silent failure in `addCopyButtons` fixed with error feedback. All 6 locales get `copy_failed` key. (`static/ui.js`, `static/i18n.js`) [#1107 @bergeouss] Closes #1096
+
+
+## v0.50.220 — 2026-04-26
+
+### Fixed
+- **Workspace panel collapse priority** — as the right panel narrows, the git badge now disappears first (below 220px), the "Workspace" label second (below 160px), and the icon buttons survive the longest. Previously `.panel-header` used `justify-content:space-between` with no flex-shrink ratios, compressing all three children simultaneously. Fix: declare `.rightpanel` as a `container-type:inline-size` container, replace `space-between` with `gap:6px` + `flex-shrink` ladder (icons=0, label=2, badge=3), and add `@container rightpanel` queries. (`static/style.css`) [#1089]
+- **Project color dot truncated/invisible on long titles** — the colored project marker on session items was appended inside `.session-title` (`overflow:hidden;text-overflow:ellipsis`), so long titles clipped the dot off entirely. Fix: move dot to a flex sibling in `.session-title-row` between title and timestamp; move `.session-time` from `position:absolute` to `margin-left:auto` in flex flow; reduce desktop rest padding-right from 86px to 8px (no longer reserving space for an absolute timestamp); mobile rest padding-right from 86px to 40px (same fix). (`static/sessions.js`, `static/style.css`) [#1089]
+## v0.50.219 — 2026-04-26
+
+### Fixed
+- **Project context menu transparent background** — the right-click menu on project chips no longer bleeds the session list through it. `_showProjectContextMenu` was using `background: var(--panel)`, but `--panel` is not defined in this codebase — CSS fell back to `transparent`. Fix: use `var(--surface)` (same opaque variable used by `.session-action-menu` and other floating popovers). (`static/sessions.js`) [#1086]
+- **Project rename / create input auto-sizing** — the rename and new-project input is no longer fixed at 100px. CSS changed to `min-width:40px; max-width:180px; width:auto`. New `_resizeProjectInput()` helper measures the current value via a hidden span (font properties read from `getComputedStyle`) and updates the pixel width as the user types. Wired into both `_startProjectRename` and `_startProjectCreate`. (`static/sessions.js`, `static/style.css`) [#1086]
+## v0.50.218 — 2026-04-26
+
+### Fixed
+- **Long URL / unbreakable string overflow** — chat bubble boundaries no longer overflow when a message contains very long URLs, file paths, or base64 data. `overflow-wrap: anywhere` added to `.msg-body` and the user-bubble variant so continuous non-whitespace text wraps at the column edge instead of bleeding into adjacent layout areas. (`static/style.css`) Closes #1080 [#1081]
+- **Project chip rename now works** — double-clicking a project chip now reliably triggers the rename input. Root cause: `onclick` was calling `renderSessionListFromCache()` which destroyed the chip DOM node before `ondblclick` could fire. Fixed with a 220ms `_clickTimer` delay on `onclick` (same pattern used by session items), so a double-click cancels the single-click and invokes rename instead. (`static/sessions.js`) Closes #1078 [#1082]
+- **Block-level constructs inside blockquotes** — fenced code blocks, headings, horizontal rules, and ordered lists inside blockquotes now render correctly; `&gt;`-entity-encoded blockquotes from LLM output also render correctly (entity decode moved before the blockquote pre-pass). New pre-pass walks lines fence-aware, strips `>` prefix, recursively renders stripped content with the full pipeline, stashes rendered HTML with `\x00Q` token. (`static/ui.js`, `static/style.css`) [#1083]
+
+### Added
+- **Project color picker** — right-clicking a project chip now shows a context menu with Rename, a row of color swatches, and Delete. Selecting a swatch updates the project color via `/api/projects/rename`. (`static/sessions.js`) Closes #1078 [#1082]
 ## v0.50.217 — 2026-04-26
 
 ### Fixed
@@ -275,6 +413,187 @@
   limited to trusted roots (home, saved workspaces, and the boot default
   workspace subtree) and never enumerate blocked system roots. (`api/routes.py`,
   `api/workspace.py`, `static/panels.js`, `static/style.css`) (partial for #616)
+
+## [v0.50.232] — 2026-04-28
+
+### Fixed
+- **Model chip fuzzy-match false positive** — `_findModelInDropdown()` step-3 fuzzy fallback
+  was stripping the trailing version segment and matching via `startsWith(base) || includes(base)`,
+  causing `gpt-5.5` to resolve to `@nous:openai/gpt-5.4-mini` (both start with `gpt.5`). The fix
+  uses the full normalized target as the prefix when `base.length > 4 && base !== target`, only
+  falling back to the stripped base for bare roots (≤4 chars) where the strip was a no-op.
+  (`static/ui.js`) (#1188)
+- **openai-codex not detected in model picker** — `OPENAI_API_KEY` now also registers the
+  `openai-codex` provider group in the env-var fallback path, so users who have Codex OAuth set up
+  no longer need a manual `config.yaml` edit to see the picker entries. Note: OAuth-authenticated
+  users are already detected via `hermes_cli.auth`; this fixes the env-var-only fallback path.
+  (`api/config.py`) (#1189)
+- **Workspace files blank after second empty-session reload** — the ephemeral-session guard in
+  `boot.js` was calling `localStorage.removeItem('hermes-webui-session')`, which caused the second
+  reload to fall into the no-saved-session path that never calls `loadDir()`. Removing that line
+  keeps the session key so every reload follows the same `loadSession → loadDir` path.
+  (`static/boot.js`) (#1196)
+- **Session timestamps wrong when client and server clocks differ** — the session list's relative
+  time labels and message-footer timestamps now use a server-clock approximation (`_serverNowMs()`)
+  derived from the `server_time` field returned by `/api/sessions`. Fractional-hour timezone offsets
+  (India `+0530`, Nepal `+0545`, etc.) are handled correctly via offset-minutes arithmetic.
+  (`api/routes.py`, `static/sessions.js`) (#1144, @bergeouss)
+
+## [v0.50.231] — 2026-04-28
+
+### Fixed
+- **macOS `/etc` symlink bypass in workspace blocked-roots** — on macOS, `/etc`, `/var`, and
+  `/tmp` are symlinks to `/private/etc` etc. `_workspace_blocked_roots()` now materialises both
+  the literal and `Path.resolve()` forms of every blocked root, and a new `_is_blocked_system_path()`
+  helper applies the check with `/var/folders` and `/var/tmp` carve-outs so pytest `tmp_path_factory`
+  paths and other legitimate per-user tmp dirs remain registerable as workspaces.
+  (`api/workspace.py`, `api/routes.py`) (#1186)
+- **Workspace panel stuck closed after empty-session reload** — a regression from #1182: when a
+  user had the workspace panel open and reloaded the page on an empty/new session, the panel was
+  force-closed and the toggle disabled. `syncWorkspacePanelState()` now only force-closes in
+  `'preview'` mode (which requires a session); `'browse'` mode renders the panel chrome with a
+  no-workspace placeholder. Both boot paths restore the user's localStorage panel preference before
+  the sync call. (`static/boot.js`) (#1187)
+- **Fenced code content leaking into markdown passes** — large tool outputs with diff/patch/log
+  content (lines starting with `-`, `+`, `*`, `#` inside code blocks) were having `<ul>/<li>/<h>` tags
+  injected by the list/heading regexes, breaking `</pre>` closure and corrupting subsequent message
+  rendering. The fix keeps fenced blocks stashed as `\x00P<n>\x00` tokens through ALL markdown
+  passes and restores them AFTER lists/headings/tables, so those regexes never see the rendered HTML.
+  (`static/ui.js`) (#1154, @bergeouss)
+
+## [v0.50.230] — 2026-04-27
+
+### Fixed
+- **No disk write for empty sessions** — `new_session()` no longer eagerly writes an empty
+  JSON file to disk. The session lives in the in-memory `SESSIONS` dict only; the first disk
+  write happens at the natural "this is now a real session" moment (first user message via
+  `/api/chat/start`, or explicit `s.save()` in the btw/background-agent paths). Eliminates
+  orphan `sessions/*.json` files that accumulated on every page reload, New Conversation click,
+  or onboarding pass without sending a message. Crash-safety: if the process exits between
+  create and first message, the session is lost — since it had no messages, there is nothing
+  to lose. (`api/models.py`) (#1171 follow-up, #1184)
+
+## [v0.50.229] — 2026-04-27
+
+### Performance
+- **Session switch parallelization** — directory pre-fetches use `Promise.all()` (N×RTT → 1×RTT);
+  git status/ahead/behind run in parallel via `ThreadPoolExecutor(max_workers=3)`;
+  `loadDir()` and `highlightCode()` overlap on the idle path.
+  (`api/workspace.py`, `static/sessions.js`, `static/workspace.js`) (#1158, @jasonjcwu)
+
+### Fixed
+- **Message pagination for long conversations** — sessions with more than 30 messages load the
+  most-recent 30 on switch; older messages load on scroll-to-top or the "↑ load older" indicator.
+  Stale-response race in `_loadOlderMessages` closed; all undo/retry/compress/done paths reset
+  pagination state. (`api/routes.py`, `static/sessions.js`, `static/ui.js`, `static/commands.js`,
+  `static/i18n.js`) (#1158, @jasonjcwu)
+- **Ephemeral untitled sessions never appear in sidebar** — empty Untitled sessions are now
+  suppressed immediately rather than surfacing for 60 seconds. Both the index-path and full-scan
+  fallback filters are consistent; boot path skips restoring a zero-message session from storage.
+  (`api/models.py`, `static/boot.js`, `static/sessions.js`) (#1182)
+- **iOS Safari auto-zoom on input focus** — inputs, textareas, and selects on touch devices now
+  have a minimum `font-size: max(16px, 1em)` via `@media (hover:none) and (pointer:coarse)`,
+  preventing iOS from zooming in on focus. Accessibility-safe: user's OS font preference is
+  respected when it exceeds 16px. (`static/style.css`) (#1167, #1180)
+
+## [v0.50.229] — 2026-04-27
+
+### Performance
+- **Session switch parallelization** — directory pre-fetches now use `Promise.all()` (N×RTT → 1×RTT);
+  git status/ahead/behind subprocesses run in parallel via `ThreadPoolExecutor(max_workers=3)`;
+  `loadDir()` and `highlightCode()` run concurrently on idle path. Session switches with expanded
+  workspace dirs are measurably faster on high-latency connections.
+  (`api/workspace.py`, `static/sessions.js`, `static/workspace.js`) (#1158, @jasonjcwu)
+
+### Added
+- **Message pagination for long conversations** — sessions with more than 30 messages now load
+  the most-recent 30 on switch; older messages load on scroll-to-top or via the "↑ load older"
+  indicator at the top of the message list. All undo/retry/compression paths reset pagination
+  state correctly. (`api/routes.py`, `static/sessions.js`, `static/ui.js`, `static/commands.js`)
+  (#1158, @jasonjcwu)
+
+## [v0.50.228] — 2026-04-27
+
+### Fixed
+- **Raw `<pre>` blocks preserved in markdown renderer** — the inline `<code>` rewrite
+  pass in `renderMd()` no longer processes content inside raw `<pre>` blocks, preventing
+  multiline HTML code blocks from being degraded to backtick strings.
+  (`static/ui.js`) (#1150, @bsgdigital)
+- **Live model race silently overwrites session model** — `syncTopbar()` now skips
+  the destructive fallback-to-first-model path while a live model fetch is in flight
+  for the active provider; `_addLiveModelsToSelect()` re-applies the session model
+  once the fetch completes, so models only present in the live catalog (e.g. Kimi K2)
+  are never silently replaced. (`static/ui.js`) (#1169)
+- **Tool card output truncated at 220 chars and unscrollable** — JS truncation threshold
+  raised to 800 chars; CSS `overflow:auto` added to `.tool-card.open .tool-card-detail`
+  so the inner `<pre>` scroll works correctly; `<pre>` max-height raised to 360 px.
+  (`static/ui.js`, `static/style.css`) (#1170)
+- **New Conversation creates empty session when already on empty session** — clicking
+  the New Conversation button or pressing Cmd/Ctrl+K when the current session has zero
+  messages now focuses the composer instead of creating another empty Untitled session.
+  (`static/boot.js`) (#1171)
+- **`.env` file corruption from concurrent WebUI and CLI/Telegram writes** — removes
+  the unlocked duplicate `_write_env_file()` in `api/onboarding.py` that bypassed
+  `_ENV_LOCK`; rewrites the shared version to preserve comments, blank lines, and
+  original key order rather than rebuilding from a sorted dict.
+  (`api/onboarding.py`, `api/providers.py`) (#1164, @bergeouss)
+
+## [v0.50.227] — 2026-04-27
+
+### Fixed
+- **Korean locale label and missing Settings descriptions** — `ko._label` normalized to
+  `'한국어'`; ten Settings pane description keys that were falling back to English are
+  now fully translated. (`static/i18n.js`) (#1138)
+- **Workspace trust: alternative home roots** — `resolve_trusted_workspace()` now checks
+  the home-directory allowance before the blocked-roots loop, letting symlinked home paths
+  (e.g. `/var/home/user`) pass through correctly. (`api/workspace.py`) (#1165)
+- **Custom config-file provider models** — the provider-discovery loop now includes entries
+  defined under `providers:` in `config.yaml`, so custom providers no longer silently skip
+  the model list. Shared `_PROVIDER_MODELS` list is deep-copied before mutation to prevent
+  cross-session bleed. (`api/config.py`) (#1161)
+- **Save Settings button missing from System pane** — the System settings pane now has a
+  Save Settings button so password changes and other system fields can actually be
+  submitted. (`static/index.html`) (#1146)
+- **Per-job cron completion dot** — the Tasks panel now shows a pulsing green dot on each
+  cron job that has a new unread completion; the dot clears only when that specific job's
+  detail view is opened, not on any panel-level navigation. (`static/panels.js`,
+  `static/style.css`) (#1145)
+- **Hide cron agent sessions from sidebar by default** — sessions created by the cron
+  scheduler (source `cron` or session_id prefix `cron_`) are now filtered out of the
+  default session list in both the index path and the full-scan path; imported gateway
+  cron sessions are also hidden via `read_importable_agent_session_rows()`.
+  (`api/models.py`, `api/agent_sessions.py`) (#1143)
+- **Symlink cycle detection in workspace file browser** — intentional symlinks within the
+  workspace root are now allowed; only self-referencing or ancestor-pointing symlinks are
+  blocked. Symlink entries render with type, target, and `is_dir`. (`api/workspace.py`)
+  (#1149)
+- **`/status` command enriched** — output now includes session id, profile, model+provider,
+  workspace, personality, start time, per-turn token counts, estimated cost, and agent
+  running state. i18n keys added for all locales. (`api/session_ops.py`,
+  `static/commands.js`, `static/i18n.js`) (#1156)
+- **Per-turn cost display on assistant bubbles** — each assistant message footer now shows
+  the token delta and estimated cost for that turn, computed from the cumulative `done` SSE
+  usage minus the previous turn's total. (`static/messages.js`, `static/ui.js`) (#1159)
+- **Auto-title: skip generic fallback** — when auxiliary title generation fails and the
+  local fallback would only produce `"Conversation topic"`, the existing provisional title
+  is kept instead of persisting the generic placeholder. (`api/streaming.py`) (#1157)
+- **Sidebar session rename first-Enter revert** — double-click inline rename now keeps the
+  new title after the first Enter keypress; `finish()` is idempotent via a guard flag and
+  `_renamingSid` stays locked until the full async path (success, failure, or cancel)
+  completes. (`static/sessions.js`) (#1162)
+- **Auto-compression renders as transient card** — automatic context compression now
+  renders as a collapsible compression card instead of injecting a fake `*[Context was
+  auto-compressed]*` assistant message; preserved task-list user messages also render as
+  sub-cards. (`static/messages.js`, `static/ui.js`, `static/i18n.js`) (#1142)
+
+## [v0.50.226] — 2026-04-27
+
+### Fixed
+- **App titlebar restored to rail-era centered layout** — removes the TPS metering chip
+  from the top bar, centers the title and subtitle, and restores the message count in the
+  subtitle slot. Queue state no longer overrides the titlebar subtitle slot.
+  (`static/index.html`, `static/panels.js`, `static/style.css`, `static/ui.js`,
+  `tests/test_app_titlebar_restore.py`)
 
 ## [v0.50.183] — 2026-04-24
 

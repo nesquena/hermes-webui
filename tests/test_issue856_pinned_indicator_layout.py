@@ -84,15 +84,32 @@ def test_timestamp_hidden_when_attention_state_is_present():
     assert "ts.className='session-time'+(hasAttentionState?' is-hidden':'');" in SESSIONS_JS
     assert "ts.textContent=hasAttentionState?'':_formatRelativeSessionTime(tsMs);" in SESSIONS_JS
     assert ".session-time.is-hidden{display:none;}" in STYLE_CSS
-    assert ".session-item{padding:8px 86px 8px 8px;" in STYLE_CSS
-    assert ".session-item.streaming,.session-item.unread{padding-right:40px;}" in STYLE_CSS
-    assert ".session-item{min-height:44px;padding:10px 86px 10px 12px;}" in STYLE_CSS
+    # padding-right was 86px when the timestamp was position:absolute. Now that
+    # the timestamp lives in the flex flow of .session-title-row, the rest
+    # state needs no right reservation; hover/streaming/unread/menu-open/
+    # focus-within all expand to 40px to make room for the absolute action
+    # button + attention indicator.
+    assert ".session-item{padding:8px 8px;" in STYLE_CSS
+    # PR #1110: :hover removed from the COMBINED padding-right rule (touch layout-shift fix).
+    # Instead, hover padding is restored via @media (hover:hover) which only applies to
+    # devices with a real hover capability (mouse). Touch/iPad devices satisfy hover:none
+    # and skip that block, preventing the layout-reflow mid-tap bug.
+    assert ".session-item.streaming,.session-item.unread,.session-item:focus-within,.session-item.menu-open{padding-right:40px;}" in STYLE_CSS
+    # Desktop hover padding restored via media query (mouse devices only)
+    assert "@media (hover:hover)" in STYLE_CSS
+    assert ".session-item:hover{padding-right:40px;}" in STYLE_CSS
+    assert ".session-item{min-height:44px;padding:10px 40px 10px 12px;}" in STYLE_CSS
+    # Timestamp now uses margin-left:auto inside the flex row instead of
+    # absolute positioning. This stops the title's flex:1 bound from running
+    # underneath the timestamp and lets the project dot sit beside it.
     session_time_block = STYLE_CSS[
         STYLE_CSS.find(".session-time{"):
         STYLE_CSS.find(".session-time.is-hidden")
     ]
-    assert "position:absolute;" in session_time_block
-    assert "right:10px;" in session_time_block
+    assert "position:absolute;" not in session_time_block, (
+        "Timestamp must live in flex flow (margin-left:auto), not absolute"
+    )
+    assert "margin-left:auto;" in session_time_block
     assert ".session-item:hover .session-time" in STYLE_CSS
     assert ".session-item.streaming:not(:hover):not(:focus-within):not(.menu-open) .session-actions" in STYLE_CSS
     assert ".session-item.unread:not(:hover):not(:focus-within):not(.menu-open) .session-actions" in STYLE_CSS
@@ -101,10 +118,11 @@ def test_timestamp_hidden_when_attention_state_is_present():
 def test_sidebar_uses_local_inflight_state_for_immediate_spinner():
     messages_js = (Path(__file__).resolve().parent.parent / "static" / "messages.js").read_text()
 
-    assert "const isLocalStreaming=Boolean(" in SESSIONS_JS
-    assert "(isActive&&S.busy)" in SESSIONS_JS
+    assert "function _isSessionLocallyStreaming(s)" in SESSIONS_JS
+    assert "(isActive && S.busy)" in SESSIONS_JS
     assert "INFLIGHT[s.session_id]" in SESSIONS_JS
-    assert "const isStreaming=Boolean(s.is_streaming||isLocalStreaming);" in SESSIONS_JS
+    assert "function _isSessionEffectivelyStreaming(s)" in SESSIONS_JS
+    assert "const isStreaming=_isSessionEffectivelyStreaming(s);" in SESSIONS_JS
     assert "if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();" in messages_js
 
 
@@ -131,4 +149,15 @@ def test_apperror_path_calls_render_session_list():
     assert "renderSessionList()" in apperror_block, (
         "apperror handler must call renderSessionList() so the streaming indicator "
         "clears immediately on server errors, not after a 5s poll delay"
+    )
+
+
+def test_pointerup_ignores_non_primary_mouse_buttons():
+    """Right-click and middle-click must not trigger session navigation.
+    onpointerup fires for all mouse buttons; we filter to button===0
+    (primary). pointerType==='mouse' scopes the check to mouse only —
+    touch/stylus always report button===0 so they're unaffected."""
+    assert "e.pointerType==='mouse' && e.button!==0" in SESSIONS_JS, (
+        "pointerup handler must filter out non-primary mouse buttons "
+        "(right-click / middle-click must not navigate)"
     )

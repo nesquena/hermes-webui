@@ -703,6 +703,11 @@ def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Option
     return 'Conversation topic'
 
 
+def _is_generic_fallback_title(title: str) -> bool:
+    """Return True for low-information fallback labels that should not be persisted."""
+    return str(title or '').strip().lower() in {'conversation topic'}
+
+
 def _run_background_title_update(session_id: str, user_text: str, assistant_text: str, placeholder_title: str, put_event, agent=None):
     """Generate and publish a better title after `done`, then end the stream."""
     try:
@@ -737,10 +742,13 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
         source = llm_status
         if not next_title:
-            next_title = _fallback_title_from_exchange(user_text, assistant_text)
-            if next_title:
+            fallback_title = _fallback_title_from_exchange(user_text, assistant_text)
+            if fallback_title and not _is_generic_fallback_title(fallback_title):
                 logger.debug("Using local fallback for session title generation")
+                next_title = fallback_title
                 source = 'fallback'
+            elif fallback_title:
+                logger.debug("Skipping generic local fallback for session title generation: %r", fallback_title)
         fallback_reason = (
             f'local_summary:{llm_status}'
             if source == 'fallback' and llm_status
@@ -1099,6 +1107,37 @@ def _sse(handler, event, data):
     payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
     handler.wfile.write(payload.encode('utf-8'))
     handler.wfile.flush()
+
+
+def _last_resort_sync_from_core(session, stream_id, agent_lock):
+    """Final-exit guard: if the stream exits with pending_user_message still set,
+    sync messages from the core transcript or add an error marker.
+    Called from the outer finally block of _run_agent_streaming.
+    Must never raise.
+    """
+    from api.models import _get_profile_home, _apply_core_sync_or_error_marker
+    try:
+        # Guard: if a cancel was already requested, bail out — cancel_stream() has
+        # already saved partial content and we must not double-append error markers.
+        if stream_id in CANCEL_FLAGS and CANCEL_FLAGS[stream_id].is_set():
+            return
+
+        profile_home = _get_profile_home(session.profile)
+        core_path = profile_home / 'sessions' / f'session_{session.session_id}.json'
+
+        _lock_ctx = agent_lock if agent_lock is not None else contextlib.nullcontext()
+        with _lock_ctx:
+            _apply_core_sync_or_error_marker(
+                session,
+                core_path,
+                stream_id_for_recheck=stream_id,
+                require_stream_dead=False,
+            )
+    except Exception:
+        logger.exception(
+            "_last_resort_sync_from_core failed for session %s",
+            getattr(session, 'session_id', '?'),
+        )
 
 
 def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, attachments=None, *, ephemeral=False):
@@ -2095,11 +2134,17 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             _apperror_payload['hint'] = _exc_hint
         put('apperror', _apperror_payload)
     finally:
-        # Stop periodic checkpoint thread if it was started (Issue #765)
+        # Stop the periodic checkpoint thread before the final recovery path.
+        # The checkpoint thread also uses the per-session lock; joining it first
+        # avoids contending with checkpoint writes during stale-pending repair.
         if _checkpoint_stop is not None:
             _checkpoint_stop.set()
         if _ckpt_thread is not None:
             _ckpt_thread.join(timeout=15)
+        if (s is not None
+                and getattr(s, 'active_stream_id', None) == stream_id
+                and getattr(s, 'pending_user_message', None)):
+            _last_resort_sync_from_core(s, stream_id, _agent_lock)
         _clear_thread_env()  # TD1: always clear thread-local context
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
@@ -2140,7 +2185,7 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     "stream_id": str|None}.
     """
     from api.helpers import j, bad
-    from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
+    from api import config as _cfg
 
     sid = str((body or {}).get("session_id", "") or "").strip()
     text = str((body or {}).get("text", "") or "").strip()
@@ -2149,8 +2194,8 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     if not text:
         return bad(handler, "text required")
 
-    with SESSION_AGENT_CACHE_LOCK:
-        cached = SESSION_AGENT_CACHE.get(sid)
+    with _cfg.SESSION_AGENT_CACHE_LOCK:
+        cached = _cfg.SESSION_AGENT_CACHE.get(sid)
     if not cached:
         # No active agent for this session — caller falls back to interrupt
         return j(handler, {"accepted": False, "fallback": "no_cached_agent",
@@ -2173,8 +2218,8 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     if not active_stream_id:
         return j(handler, {"accepted": False, "fallback": "not_running",
                            "stream_id": None})
-    with STREAMS_LOCK:
-        stream_alive = active_stream_id in STREAMS
+    with _cfg.STREAMS_LOCK:
+        stream_alive = active_stream_id in _cfg.STREAMS
     if not stream_alive:
         # Active stream id is stale — stream has ended; caller falls back
         return j(handler, {"accepted": False, "fallback": "stream_dead",
@@ -2202,17 +2247,36 @@ def cancel_stream(stream_id: str) -> bool:
     a safe no-op. Session cleanup runs outside STREAMS_LOCK to preserve lock
     ordering (streaming thread does LOCK → STREAMS_LOCK; inverting would deadlock).
     """
-    with STREAMS_LOCK:
-        if stream_id not in STREAMS:
+    from api import config as _live_config
+
+    # Use module-level aliases (imported from api.config at startup).
+    # In production these are always the same objects as api.config.STREAMS etc.
+    # The fallback below handles a hypothetical future case where api.config's
+    # state dicts are replaced at runtime (e.g. a future profile-reload path).
+    # No production code currently does this; the fallback is defensive only.
+    streams = STREAMS
+    cancel_flags = CANCEL_FLAGS
+    agent_instances = AGENT_INSTANCES
+    partial_texts = STREAM_PARTIAL_TEXT
+    streams_lock = STREAMS_LOCK
+    if stream_id not in streams and getattr(_live_config, 'STREAMS', streams) is not streams:
+        streams = _live_config.STREAMS
+        cancel_flags = _live_config.CANCEL_FLAGS
+        agent_instances = _live_config.AGENT_INSTANCES
+        partial_texts = _live_config.STREAM_PARTIAL_TEXT
+        streams_lock = _live_config.STREAMS_LOCK
+
+    with streams_lock:
+        if stream_id not in streams:
             return False
 
         # Set WebUI layer cancel flag
-        flag = CANCEL_FLAGS.get(stream_id)
+        flag = cancel_flags.get(stream_id)
         if flag:
             flag.set()
 
         # Interrupt the AIAgent instance to stop tool execution
-        agent = AGENT_INSTANCES.get(stream_id)
+        agent = agent_instances.get(stream_id)
         if agent:
             try:
                 agent.interrupt("Cancelled by user")
@@ -2240,7 +2304,7 @@ def cancel_stream(stream_id: str) -> bool:
             logger.debug("Failed to clear clarify prompt during cancel")
 
         # Put a cancel sentinel into the queue so the SSE handler wakes up
-        q = STREAMS.get(stream_id)
+        q = streams.get(stream_id)
         if q:
             try:
                 q.put_nowait(('cancel', {'message': 'Cancelled by user'}))
@@ -2253,9 +2317,9 @@ def cancel_stream(stream_id: str) -> bool:
         # even if the agent thread is still blocked in a C-level syscall.
         # The worker thread's finally block uses .pop(key, None) too, so a
         # double-pop here is safe (no-op).
-        STREAMS.pop(stream_id, None)
-        CANCEL_FLAGS.pop(stream_id, None)
-        AGENT_INSTANCES.pop(stream_id, None)
+        streams.pop(stream_id, None)
+        cancel_flags.pop(stream_id, None)
+        agent_instances.pop(stream_id, None)
         # STREAM_PARTIAL_TEXT is intentionally NOT popped here — the agent thread may
         # still be appending tokens. We capture the snapshot two lines below; the
         # streaming finally block handles the cleanup when the thread exits.
@@ -2267,7 +2331,13 @@ def cancel_stream(stream_id: str) -> bool:
         # get_session() acquires LOCK, and the streaming thread does LOCK first
         # then STREAMS_LOCK, so inverting the order here would cause deadlock.
         _cancel_session_id = getattr(agent, 'session_id', None) if agent else None
-        _cancel_partial_text = STREAM_PARTIAL_TEXT.get(stream_id, '')
+        _cancel_partial_text = partial_texts.get(stream_id, '')
+        # Fallback: check the live config's partial text map if we used an alias
+        # and the text wasn't found in the alias (defensive, matches streams fallback above).
+        if not _cancel_partial_text:
+            live_partials = getattr(_live_config, 'STREAM_PARTIAL_TEXT', partial_texts)
+            if live_partials is not partial_texts:
+                _cancel_partial_text = live_partials.get(stream_id, '')
 
     # Session cleanup outside STREAMS_LOCK to preserve lock ordering.
     # Acquire the per-session _agent_lock too, mirroring every other session

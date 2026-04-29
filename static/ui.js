@@ -51,6 +51,45 @@ function _setCompressionSessionLock(sid){
 }
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
+/* ── Image lightbox — click any .msg-media-img to enlarge ─────────────────── */
+function _openImgLightbox(src, alt) {
+  const lb = document.createElement('div');
+  lb.className = 'img-lightbox';
+  lb.setAttribute('role', 'dialog');
+  lb.setAttribute('aria-label', alt || 'Image');
+  const img = document.createElement('img');
+  img.src = src;
+  img.alt = alt || '';
+  img.onclick = e => e.stopPropagation();
+  const cls = document.createElement('button');
+  cls.className = 'img-lightbox-close';
+  cls.setAttribute('aria-label', 'Close');
+  cls.textContent = '×';
+  cls.onclick = () => _closeImgLightbox(lb);
+  lb.appendChild(img);
+  lb.appendChild(cls);
+  lb.onclick = () => _closeImgLightbox(lb);
+  document.body.appendChild(lb);
+  // Close on Escape
+  lb._escHandler = e => { if(e.key==='Escape') _closeImgLightbox(lb); };
+  document.addEventListener('keydown', lb._escHandler);
+}
+function _closeImgLightbox(lb) {
+  if(!lb || !lb.parentNode) return;
+  document.removeEventListener('keydown', lb._escHandler);
+  lb.style.animation = 'lb-in .12s ease reverse';
+  setTimeout(() => lb.parentNode && lb.parentNode.removeChild(lb), 120);
+}
+
+document.addEventListener('click', e => {
+  const img = e.target && e.target.closest ? e.target.closest('.msg-media-img') : null;
+  if(!img) return;
+  _openImgLightbox(img.src, img.alt);
+});
+
+const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
+const _ARCHIVE_EXTS=/\.(zip|tar|tar\.gz|tgz|tar\.bz2|tbz2|tar\.xz|txz)$/i;
+
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
 
@@ -64,13 +103,19 @@ function _findModelInDropdown(modelId, sel){
   // 1. Exact match
   if(opts.includes(modelId)) return modelId;
   // 2. Normalize: lowercase, strip namespace prefix, replace hyphens→dots
-  const norm=s=>s.toLowerCase().replace(/^[^/]+\//,'').replace(/-/g,'.');
+  // Also strip @provider: prefix from deduplicated model IDs (#1228).
+  const norm=s=>s.toLowerCase().replace(/^[^/]+\//,'').replace(/^@([^:]+:)+/,'').replace(/-/g,'.');
   const target=norm(modelId);
   const exact=opts.find(o=>norm(o)===target);
   if(exact) return exact;
-  // 3. Prefix/substring: target starts with or contains a significant chunk
+  // 3. Prefix/substring: require the candidate to start with the FULL normalized target
+  // (not a truncated base). This avoids false matches like gpt.5.5 → gpt.5.4.mini (#1188).
+  // Only fall back to the shorter base form if target itself is very short (a bare root
+  // like "gpt" or "claude") where stripping would be a no-op anyway.
   const base=target.replace(/\.\d+$/,'');  // strip trailing version number
-  const partial=opts.find(o=>norm(o).startsWith(base)||norm(o).includes(base));
+  const useBase=base.length<=4||base===target; // bare root — stripping changed nothing meaningful
+  const prefixTarget=useBase?base:target;
+  const partial=opts.find(o=>norm(o).startsWith(prefixTarget));
   return partial||null;
 }
 
@@ -133,6 +178,10 @@ async function populateModelDropdown(){
 
 // Cache so we don't re-fetch on every page load
 const _liveModelCache={};
+// Tracks providers for which a live-model fetch is in flight.
+// Used by syncTopbar() to defer model corrections until the fetch completes,
+// preventing premature fallback to the first static model (#1169).
+const _liveModelFetchPending=new Set();
 
 function _addLiveModelsToSelect(provider, models, sel){
   if(!provider||!models||!models.length||!sel) return 0;
@@ -183,6 +232,14 @@ function _addLiveModelsToSelect(provider, models, sel){
     added++;
   }
   if(added>0 && currentVal) _applyModelToDropdown(currentVal, sel);
+  // After live models are added, re-apply the session's model in case it was
+  // absent from the static list and syncTopbar() fired before the live fetch
+  // completed (#1169). This ensures the session model wins over any premature
+  // fallback that may have set sel.value to the first available option.
+  if(S.session && S.session.model && sel.id==='modelSelect'){
+    const reapplied=_applyModelToDropdown(S.session.model, sel);
+    if(reapplied && typeof syncModelChip==='function') syncModelChip();
+  }
   return added;
 }
 
@@ -194,6 +251,7 @@ async function _fetchLiveModels(provider, sel){
     if(added>0 && typeof syncModelChip==='function') syncModelChip();
     return;
   }
+  _liveModelFetchPending.add(provider);
   try{
     const url=new URL('api/models/live',location.href);
     url.searchParams.set('provider',provider);
@@ -209,6 +267,8 @@ async function _fetchLiveModels(provider, sel){
     }
   }catch(e){
     console.debug('[hermes] Live model fetch failed for',provider,e.message);
+  }finally{
+    _liveModelFetchPending.delete(provider);
   }
 }
 
@@ -290,6 +350,9 @@ function renderModelDropdown(){
     }
   }
   // Create search input FIRST before filterModels definition
+  const _scopeNote=document.createElement('div');
+  _scopeNote.className='model-scope-note';
+  _scopeNote.textContent=t('model_scope_advisory')||'Applies to this conversation from your next message.';
   const _searchRow=document.createElement('div');
   _searchRow.className='model-search-row';
   _searchRow.innerHTML=`<input class="model-search-input" type="text" placeholder="${esc(t('model_search_placeholder')||'Search models…')}" spellcheck="false" autocomplete="off"><button class="model-search-clear" title="Clear search">${li('x',10)}</button>`;
@@ -318,6 +381,7 @@ function renderModelDropdown(){
     // Clear and rebuild
     dd.innerHTML='';
     // Add search and custom elements first (CRITICAL: must be before models)
+    dd.appendChild(_scopeNote);
     dd.appendChild(_searchRow);
     dd.appendChild(_custSep);
     dd.appendChild(_custRow);
@@ -365,6 +429,7 @@ function renderModelDropdown(){
   _ci.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();_applyCustom();}if(e.key==='Escape'){closeModelDropdown();}});
   _ci.addEventListener('click',e=>e.stopPropagation());
   // Add search and custom elements to dropdown (initial render)
+  dd.appendChild(_scopeNote);
   dd.appendChild(_searchRow);
   dd.appendChild(_custSep);
   dd.appendChild(_custRow);
@@ -542,6 +607,10 @@ let _scrollPinned=true;
     _scrollPinned=nearBottom;
     const btn=$('scrollToBottomBtn');
     if(btn) btn.style.display=_scrollPinned?'none':'flex';
+    // Load older messages when scrolled near the top
+    if(el.scrollTop<80 && typeof _messagesTruncated!=='undefined' && _messagesTruncated && typeof _loadOlderMessages==='function'){
+      _loadOlderMessages();
+    }
   });
 })();
 function _fmtTokens(n){if(!n||n<0)return'0';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'k';return String(n);}
@@ -577,6 +646,30 @@ function _syncCtxIndicator(usage){
   if(center) center.textContent=hasCtxWindow?String(pct):'\u00b7';
   el.classList.toggle('ctx-mid',pct>50&&pct<=75);
   el.classList.toggle('ctx-high',pct>75);
+  // ── Compress affordance (#524) ──
+  // Show a hint in the tooltip when context usage is high so users
+  // discover /compress without having to know the slash command.
+  const compressWrap=$('ctxTooltipCompress');
+  const compressBtn=$('ctxCompressBtn');
+  if(compressWrap&&compressBtn){
+    if(pct>=75){
+      compressWrap.style.display='';
+      compressBtn.textContent=t('ctx_compress_action');
+      compressBtn.onclick=function(){
+        const ta=$('msg');
+        if(ta){ta.value='/compress ';ta.focus();autoResize();}
+      };
+    }else if(pct>=50){
+      compressWrap.style.display='';
+      compressBtn.textContent=t('ctx_compress_hint');
+      compressBtn.onclick=function(){
+        const ta=$('msg');
+        if(ta){ta.value='/compress ';ta.focus();autoResize();}
+      };
+    }else{
+      compressWrap.style.display='none';
+    }
+  }
   let label=hasCtxWindow?`Context window ${pct}% used`:`${_fmtTokens(totalTok)} tokens used`;
   if(cost) label+=` \u00b7 $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
   el.setAttribute('aria-label',label);
@@ -638,7 +731,7 @@ function getModelLabel(modelId){
   // Check dynamic labels first, then fall back to splitting the ID
   if(_dynamicModelLabels[modelId]) return _dynamicModelLabels[modelId];
   // Static fallback for common models
-  const STATIC_LABELS={'openai/gpt-5.4-mini':'GPT-5.4 Mini','openai/gpt-4o':'GPT-4o','openai/o3':'o3','openai/o4-mini':'o4-mini','anthropic/claude-sonnet-4.6':'Sonnet 4.6','anthropic/claude-sonnet-4-5':'Sonnet 4.5','anthropic/claude-haiku-3-5':'Haiku 3.5','google/gemini-3.1-pro-preview':'Gemini 3.1 Pro','google/gemini-3-flash-preview':'Gemini 3 Flash','google/gemini-3.1-flash-lite-preview':'Gemini 3.1 Flash Lite','google/gemini-2.5-pro':'Gemini 2.5 Pro','google/gemini-2.5-flash':'Gemini 2.5 Flash','deepseek/deepseek-v4-flash':'DeepSeek V4 Flash','deepseek/deepseek-v4-pro':'DeepSeek V4 Pro','deepseek/deepseek-chat-v3-0324':'DeepSeek V3','meta-llama/llama-4-scout':'Llama 4 Scout'};
+  const STATIC_LABELS={'openai/gpt-5.4-mini':'GPT-5.4 Mini','openai/gpt-4o':'GPT-4o','openai/o3':'o3','openai/o4-mini':'o4-mini','anthropic/claude-sonnet-4.6':'Sonnet 4.6','anthropic/claude-sonnet-4-5':'Sonnet 4.5','anthropic/claude-haiku-3-5':'Haiku 3.5','google/gemini-3.1-pro-preview':'Gemini 3.1 Pro','google/gemini-3-flash-preview':'Gemini 3 Flash','google/gemini-3.1-flash-lite-preview':'Gemini 3.1 Flash Lite','google/gemini-2.5-pro':'Gemini 2.5 Pro','google/gemini-2.5-flash':'Gemini 2.5 Flash','deepseek/deepseek-v4-flash':'DeepSeek V4 Flash','deepseek/deepseek-v4-pro':'DeepSeek V4 Pro','deepseek/deepseek-chat-v3-0324':'DeepSeek V3 (legacy)','meta-llama/llama-4-scout':'Llama 4 Scout'};
   if(STATIC_LABELS[modelId]) return STATIC_LABELS[modelId];
   // Safe Ollama-tag fallback formatter before generic split('/').pop()
   let _last = modelId.split('/').pop() || modelId;
@@ -681,11 +774,72 @@ function _sanitizeThinkingDisplayText(text){
 
 function renderMd(raw){
   let s=(raw||'').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+  // ── Entity decode: must run FIRST so &gt; lines become > for the blockquote
+  // pre-pass below. LLMs sometimes emit HTML-entity-encoded output; without this
+  // a blockquote sent as "&gt; text" would never be recognised as a blockquote.
+  s=s.replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;/g,"'");
+  // ── Blockquote pre-pass (must run BEFORE every other markdown pass) ────────
+  // Group consecutive >-prefixed lines, strip the > prefix from each line,
+  // recursively render the stripped content with the full pipeline, and
+  // replace the group with a stash token. This is the only way fenced code,
+  // headings, hr, and ordered lists inside a blockquote can render correctly:
+  // the per-line passes downstream don't know about > prefixes, and by the
+  // time the blockquote handler used to run those passes had already mangled
+  // the >-prefixed lines.
+  //
+  // Walks lines (instead of using a single regex) so >-prefixed lines that
+  // sit inside a non-blockquote fenced block (e.g. a shell prompt in a
+  // ```bash``` example) are not miscaptured as a blockquote.
+  const _bq_stash=[];
+  s=(function _applyBlockquotes(input){
+    const lines=input.split('\n');
+    const out=[];
+    let inFence=false;     // inside a non-blockquote ```...``` fence
+    let bqStart=-1;
+    const flush=(end)=>{
+      if(bqStart<0) return;
+      // Strip "> " prefix (and bare ">" → empty) from each line
+      const stripped=lines.slice(bqStart,end).map(l=>l.replace(/^> ?/,'')).join('\n');
+      // Recursive call: full pipeline on stripped content. Handles fenced
+      // code, headings, hr, ordered/unordered lists, nested blockquotes
+      // (>>) — anything that renderMd handles at the top level.
+      const rendered=renderMd(stripped);
+      _bq_stash.push('<blockquote>'+rendered+'</blockquote>');
+      // Surround the token with blank lines so the paragraph splitter
+      // isolates it as its own chunk (otherwise the token gets wrapped
+      // in <p>...<br> with adjacent text, producing invalid HTML).
+      out.push('');
+      out.push('\x00Q'+(_bq_stash.length-1)+'\x00');
+      out.push('');
+      bqStart=-1;
+    };
+    for(let i=0;i<lines.length;i++){
+      const line=lines[i];
+      if(inFence){
+        out.push(line);
+        if(/^```/.test(line)) inFence=false;
+        continue;
+      }
+      if(/^```/.test(line)){
+        flush(i);
+        out.push(line);
+        inFence=true;
+        continue;
+      }
+      if(/^>/.test(line)){
+        if(bqStart<0) bqStart=i;
+      } else {
+        flush(i);
+        out.push(line);
+      }
+    }
+    flush(lines.length);
+    return out.join('\n');
+  })(s);
   // ── MEDIA: token stash (must run first, before any other processing) ───────
   // Detect MEDIA:<path-or-url> tokens emitted by the agent (e.g. screenshots,
   // generated images) and replace them with inline <img> or download links.
   // Stashed so the path/URL is never processed as markdown.
-  const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico)$/i;
   const media_stash=[];
   s=s.replace(/MEDIA:([^\s\)\]]+)/g,(_,raw_ref)=>{
     media_stash.push(raw_ref);
@@ -701,10 +855,48 @@ function renderMd(raw){
   // Only runs OUTSIDE fenced code blocks and backtick spans (stash + restore).
   // Unsafe tags (anything not in the allowlist) are left as-is and will be
   // HTML-escaped by esc() when they reach an innerHTML assignment -- no XSS risk.
-  // Fence stash: protect code blocks and backtick spans from all further processing
-  // Must run BEFORE math_stash so $..$ inside code spans is not extracted as math
+  // Fence stash: protect code blocks and backtick spans from all further processing.
+  // Must run BEFORE math_stash so $..$ inside code spans is not extracted as math.
+  // Split into fenced blocks (\x00P — kept stashed until after all markdown passes)
+  // and inline backtick spans (\x00F — restored before bold/italic so **`code`** works).
+  // Fenced blocks are converted to <pre><code> here so their content is HTML-escaped
+  // and never exposed to list/heading/table regexes that could corrupt the layout.
+  // Fixes #1154: diff/patch lines inside fenced blocks (e.g. + added, - removed)
+  // were matching the unordered-list regex and injecting <ul>/<li> inside <pre>,
+  // breaking </pre> closure and corrupting all subsequent message rendering.
+  const _preBlock_stash=[];
   const fence_stash=[];
-  s=s.replace(/(```[\s\S]*?```|`[^`\n]+`)/g,m=>{fence_stash.push(m);return '\x00F'+(fence_stash.length-1)+'\x00';});
+  s=s.replace(/```([\s\S]*?)```/g,(_,raw)=>{
+    const m=raw.match(/^(\w[\w+-]*)\n?([\s\S]*)$/);
+    if(m&&m[1].trim().toLowerCase()==='mermaid'){
+      const id='mermaid-'+Math.random().toString(36).slice(2,10);
+      _preBlock_stash.push(`<div class="mermaid-block" data-mermaid-id="${id}">${esc(m[2].trim())}</div>`);
+    } else {
+      const lang=m?(m[1]||'').trim().toLowerCase():'';
+      const code=m?m[2]:raw.replace(/^\n?/,'');
+      const h=lang?`<div class="pre-header">${esc(lang)}</div>`:'';
+      const langAttr=lang?` class="language-${esc(lang)}"`:'';
+      // For diff/patch blocks, wrap each line in a colored span
+      if(lang==='diff'||lang==='patch'){
+        const colored=esc(code.replace(/\n$/,'')).split('\n').map(line=>{
+          if(line.startsWith('@@')) return `<span class="diff-line diff-hunk">${line}</span>`;
+          if(line.startsWith('+')) return `<span class="diff-line diff-plus">${line}</span>`;
+          if(line.startsWith('-')) return `<span class="diff-line diff-minus">${line}</span>`;
+          return `<span class="diff-line">${line}</span>`;
+        }).join('\n');
+        _preBlock_stash.push(`${h}<pre class="diff-block"><code${langAttr}>${colored}</code></pre>`);
+      // For JSON/YAML blocks, add tree-view placeholder with raw data
+      } else if(lang==='json'||lang==='yaml'){
+        const rawCode=esc(code.replace(/\n$/,''));
+        const blockId='tree-'+Math.random().toString(36).slice(2,10);
+        _preBlock_stash.push(`<div class="code-tree-wrap" data-raw="${rawCode.replace(/"/g,'&quot;')}" data-lang="${lang}" id="${blockId}">${h}<pre class="tree-raw-view"><code${langAttr}>${rawCode}</code></pre></div>`);
+      } else {
+        _preBlock_stash.push(`${h}<pre><code${langAttr}>${esc(code.replace(/\n$/,''))}</code></pre>`);
+      }
+    }
+    return '\x00P'+(_preBlock_stash.length-1)+'\x00';
+  });
+  s=s.replace(/`([^`\n]+)`/g,(_,c)=>{fence_stash.push('<code>'+esc(c)+'</code>');return '\x00F'+(fence_stash.length-1)+'\x00';});
   // Math stash: protect $$..$$ and $..$ from markdown processing
   // Runs AFTER fence_stash so backtick code spans protect their dollar-sign contents
   const math_stash=[];
@@ -717,26 +909,21 @@ function renderMd(raw){
   s=s.replace(/\\\\\((.+?)\\\\\)/g,(_,m)=>{math_stash.push({type:'inline',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
   s=s.replace(/\\\\\[(.+?)\\\\\]/gs,(_,m)=>{math_stash.push({type:'display',src:m});return '\x00M'+(math_stash.length-1)+'\x00';});
   // Safe tag → markdown equivalent (these produce the same output as **text** etc.)
+  // Stash raw <pre> blocks so the inline <code> rewrite below does not run
+  // inside them. Running that rewrite in <pre> content can introduce stray
+  // backticks for multiline code and break subsequent code-box rendering.
+  const rawPreStash=[];
+  s=s.replace(/(<pre\b[^>]*>[\s\S]*?<\/pre>)/gi,m=>{rawPreStash.push(m);return `\x00R${rawPreStash.length-1}\x00`;});
   s=s.replace(/<strong>([\s\S]*?)<\/strong>/gi,(_,t)=>'**'+t+'**');
   s=s.replace(/<b>([\s\S]*?)<\/b>/gi,(_,t)=>'**'+t+'**');
   s=s.replace(/<em>([\s\S]*?)<\/em>/gi,(_,t)=>'*'+t+'*');
   s=s.replace(/<i>([\s\S]*?)<\/i>/gi,(_,t)=>'*'+t+'*');
   s=s.replace(/<code>([^<]*?)<\/code>/gi,(_,t)=>'`'+t+'`');
   s=s.replace(/<br\s*\/?>/gi,'\n');
-  // Restore stashed code blocks
+  s=s.replace(/\x00R(\d+)\x00/g,(_,i)=>rawPreStash[+i]);
+  // Inline backtick spans: restore <code> tags produced in the stash callback above.
+  // Must happen BEFORE bold/italic so **`code`** → <strong><code>code</code></strong>.
   s=s.replace(/\x00F(\d+)\x00/g,(_,i)=>fence_stash[+i]);
-  // Mermaid blocks: render as diagram containers (processed after DOM insertion)
-  s=s.replace(/```mermaid\n?([\s\S]*?)```/g,(_,code)=>{
-    const id='mermaid-'+Math.random().toString(36).slice(2,10);
-    return `<div class="mermaid-block" data-mermaid-id="${id}">${esc(code.trim())}</div>`;
-  });
-  s=s.replace(/```([\w+-]*)\n?([\s\S]*?)```/g,(_,lang,code)=>{
-    const normalizedLang=(lang||'').trim().toLowerCase();
-    const h=normalizedLang?`<div class="pre-header">${esc(normalizedLang)}</div>`:'';
-    const langAttr=normalizedLang?` class="language-${esc(normalizedLang)}"`:'';
-    return `${h}<pre><code${langAttr}>${esc(code.replace(/\n$/,''))}</code></pre>`;
-  });
-  s=s.replace(/`([^`\n]+)`/g,(_,c)=>`<code>${esc(c)}</code>`);
   // inlineMd: process bold/italic/code/links within a single line of text.
   // Used inside list items and blockquotes where the text may already contain
   // HTML from the pre-pass → bold pipeline, so we cannot call esc() directly.
@@ -753,7 +940,7 @@ function renderMd(raw){
     // backticks stays protected as a \x00C token and is never rendered as <img>.
     // Must run before _code_stash restore and before _link_stash so the image
     // is not consumed by the [label](url) link regex.
-    t=t.replace(/!\[([^\]]*)\]\((https?:\/\/[^\)]+)\)/g,(_,alt,url)=>`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy" onclick="this.classList.toggle('msg-media-img--full')">`);
+    t=t.replace(/!\[([^\]]*)\]\((https?:\/\/[^\)]+)\)/g,(_,alt,url)=>`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
     // Stash rendered <img> tags so autolink never matches URLs inside src=
     const _img_stash=[];
     t=t.replace(/(<img\b[^>]*>)/g,m=>{_img_stash.push(m);return `\x00G${_img_stash.length-1}\x00`;});
@@ -781,43 +968,8 @@ function renderMd(raw){
   s=s.replace(/\x00O(\d+)\x00/g,(_,i)=>_ob_stash[+i]);
   s=s.replace(/^### (.+)$/gm,(_,t)=>`<h3>${inlineMd(t)}</h3>`).replace(/^## (.+)$/gm,(_,t)=>`<h2>${inlineMd(t)}</h2>`).replace(/^# (.+)$/gm,(_,t)=>`<h1>${inlineMd(t)}</h1>`);
   s=s.replace(/^---+$/gm,'<hr>');
-  // Group consecutive > lines into one <blockquote>.
-  // Handles: blank continuation lines (> alone), nested blockquotes (>>),
-  // lists inside blockquotes (> - item), and inline markdown in quoted text.
-  function _applyBlockquotes(src){
-    return src.replace(/((?:^>[^\n]*(?:\n|$))+)/gm,block=>{
-      const lines=block.split('\n');
-      // Drop trailing bare '>' artifact
-      while(lines.length&&(lines[lines.length-1].trim()==='>'||lines[lines.length-1]===''))
-        {if(lines[lines.length-1].trim()==='>'){lines.pop();break;}lines.pop();}
-      const stripped=lines.map(l=>l.replace(/^>[ \t]?/,''));
-      const innerRaw=stripped.join('\n');
-      let inner;
-      if(/^>/m.test(innerRaw)){
-        // Nested blockquote: recurse so >> → <blockquote><blockquote>
-        inner=_applyBlockquotes(innerRaw);
-      } else if(/(^(?:  )?[-*+] .+)/m.test(innerRaw)){
-        // List inside blockquote: run list pass on stripped inner content
-        inner=innerRaw.replace(/((?:^(?:  )?[-*+] .+\n?)+)/gm,lb=>{
-          const ll=lb.trimEnd().split('\n');let h='<ul>';
-          for(const li of ll){
-            const txt=li.replace(/^ {0,4}[-*+] /,'');
-            let ih;
-            if(/^\[x\] /i.test(txt)) ih='<span class="task-done">✅</span> '+inlineMd(txt.slice(4));
-            else if(/^\[ \] /.test(txt)) ih='<span class="task-todo">☐</span> '+inlineMd(txt.slice(4));
-            else ih=inlineMd(txt);
-            h+=`<li>${ih}</li>`;
-          }
-          return h+'</ul>';
-        });
-      } else {
-        // Plain lines: blank line → <br>, text → inlineMd
-        inner=stripped.map(l=>l.trim()===''?'<br>':inlineMd(l)).join('\n');
-      }
-      return `<blockquote>${inner}</blockquote>`;
-    });
-  }
-  s=_applyBlockquotes(s);
+  // (Blockquotes are handled by the pre-pass at the top of renderMd, before
+  // fence_stash. The per-line passes below never see > prefixes.)
   // B8: improved list handling supporting up to 2 levels of indentation
   s=s.replace(/((?:^(?:  )?[-*+] .+\n?)+)/gm,block=>{
     const lines=block.trimEnd().split('\n');
@@ -867,7 +1019,7 @@ function renderMd(raw){
   // #487: Outer image pass — handles ![alt](url) in plain paragraphs (outside tables/lists).
   // Runs AFTER the table pass (images in table cells are handled by inlineMd() above).
   // Runs BEFORE the outer [label](url) link pass so the image is not consumed as a plain link.
-  s=s.replace(/!\[([^\]]*)\]\((https?:\/\/[^\)]+)\)/g,(_,alt,url)=>`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy" onclick="this.classList.toggle('msg-media-img--full')">`);
+  s=s.replace(/!\[([^\]]*)\]\((https?:\/\/[^\)]+)\)/g,(_,alt,url)=>`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
   // Outer link pass for labeled links in plain paragraphs (outside table cells).
   // Runs AFTER the table pass so table cells are processed by inlineMd() only.
   // Stash existing <a> tags first to avoid re-linking already-linked URLs.
@@ -875,12 +1027,90 @@ function renderMd(raw){
   s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>)/g,m=>{_a_stash.push(m);return `\x00A${_a_stash.length-1}\x00`;});
   s=s.replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g,(_,label,url)=>`<a href="${url.replace(/"/g,'%22')}" target="_blank" rel="noopener">${esc(label)}</a>`);
   s=s.replace(/\x00A(\d+)\x00/g,(_,i)=>_a_stash[+i]);
-  // Escape any remaining HTML tags that are NOT from our own markdown output.
-  // Our pipeline only emits: <strong>,<em>,<code>,<pre>,<h1-6>,<ul>,<ol>,<li>,
-  // <table>,<thead>,<tbody>,<tr>,<th>,<td>,<hr>,<blockquote>,<p>,<br>,<a>,
-  // <div class="..."> (mermaid/pre-header). Everything else is untrusted input.
-  const SAFE_TAGS=/^<\/?(strong|em|del|code|pre|h[1-6]|ul|ol|li|table|thead|tbody|tr|th|td|hr|blockquote|p|br|a|img|div|span)([\s>]|$)/i;
-  s=s.replace(/<\/?[a-z][^>]*>/gi,tag=>SAFE_TAGS.test(tag)?tag:esc(tag));
+  // Sanitize any remaining HTML tags.  The renderer intentionally returns
+  // HTML and inserts it with innerHTML later, so tag names alone are not enough:
+  // raw/model-provided HTML like <img onerror=...> or <a href="javascript:...">
+  // must lose executable attributes and dangerous schemes while preserving the
+  // small set of attributes generated by this markdown pipeline.
+  // Reference only — documents the allowed tag set. Superseded by _tag() allowlists.
+  // Tests verify this list is complete; _tag() enforces it.
+  const SAFE_TAGS=/^<\/?(?:strong|em|del|code|pre|h[1-6]|ul|ol|li|table|thead|tbody|tr|th|td|hr|blockquote|p|br|a|div|span|img)([\s>]|$)/i;
+  function _safeAttrValue(v){
+    return String(v||'').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&').trim();
+  }
+  function _isSafeUrl(v, img){
+    const raw=_safeAttrValue(v);
+    const compact=raw.replace(/[\u0000-\u001f\u007f\s]+/g,'').toLowerCase();
+    if(!compact) return false;
+    if(/^(javascript|data|vbscript):/i.test(compact)) return false;
+    if(/^https?:\/\//i.test(raw)) return true;
+    if(img && /^api\//i.test(raw)) return true;
+    if(!img && (/^api\//i.test(raw) || /^#/.test(raw))) return true;
+    return false;
+  }
+  function _attrs(raw){
+    const out={};
+    String(raw||'').replace(/([a-zA-Z0-9:_-]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>`]+)))?/g,(_,k,dq,sq,bare)=>{
+      out[String(k).toLowerCase()]=dq!==undefined?dq:(sq!==undefined?sq:(bare!==undefined?bare:''));
+      return '';
+    });
+    return out;
+  }
+  function _cls(v, allowed){
+    const got=String(v||'').split(/\s+/).filter(c=>allowed.includes(c));
+    return got.length?` class="${esc(got.join(' '))}"`:'';
+  }
+  function _tag(tag){
+    const m=String(tag||'').match(/^<\s*(\/)?\s*([a-zA-Z][\w:-]*)([\s\S]*?)(\/)?\s*>$/);
+    if(!m) return esc(tag);
+    const closing=!!m[1];
+    const name=m[2].toLowerCase();
+    const rawAttrs=m[3]||'';
+    const plain=['strong','em','del','pre','h1','h2','h3','h4','h5','h6','ul','ol','table','thead','tbody','tr','th','td','blockquote','p','br','hr'];
+    if(closing) return plain.includes(name)||['a','div','span','li','code'].includes(name)?`</${name}>`:'';
+    if(name==='code'){
+      const a=_attrs(rawAttrs);
+      const cls=/^language-[a-z0-9_+-]+$/i.test(a.class||'')?` class="${esc(a.class)}"`:'';
+      return `<code${cls}>`;
+    }
+    if(plain.includes(name)) return `<${name}>`;
+    const a=_attrs(rawAttrs);
+    if(name==='li'){
+      const value=/^\d+$/.test(a.value||'')?` value="${esc(a.value)}"`:'';
+      const style=(a.style||'').replace(/\s+/g,'').toLowerCase()==='margin-left:16px'?` style="margin-left:16px"`:'';
+      return `<li${value}${style}>`;
+    }
+    if(name==='span'){
+      return `<span${_cls(a.class,['task-done','task-todo','katex-inline'])}${a['data-katex']==='inline'?' data-katex="inline"':''}>`;
+    }
+    if(name==='div'){
+      const cls=_cls(a.class,['pre-header','mermaid-block','katex-block']);
+      const mermaid=a['data-mermaid-id']?` data-mermaid-id="${esc(a['data-mermaid-id'])}"`:'';
+      const katex=a['data-katex']==='display'?' data-katex="display"':'';
+      return `<div${cls}${mermaid}${katex}>`;
+    }
+    if(name==='a'){
+      if(!_isSafeUrl(a.href,false)) return '<a>';
+      const target=a.target==='_blank'?' target="_blank"':'';
+      const rel=a.rel==='noopener'?' rel="noopener"':'';
+      const cls=_cls(a.class,['msg-media-link','skill-linked-file','skill-file-back']);
+      const download=a.download?` download="${esc(a.download)}"`:'';
+      return `<a${cls} href="${esc(_safeAttrValue(a.href))}"${target}${rel}${download}>`;
+    }
+    if(name==='img'){
+      if(!_isSafeUrl(a.src,true)) return '';
+      const cls=_cls(a.class,['msg-media-img']);
+      const alt=` alt="${esc(_safeAttrValue(a.alt||''))}"`;
+      const loading=a.loading==='lazy'?' loading="lazy"':'';
+      return `<img${cls} src="${esc(_safeAttrValue(a.src))}"${alt}${loading}>`;
+    }
+    return '';
+  }
+  s=s.replace(/<\/?[a-z][^>]*>/gi,tag=>_tag(tag));
+  // Incomplete raw tags must not survive until paragraph wrapping, where the
+  // renderer's generated </p> could provide a closing ">" and turn them into
+  // executable HTML in innerHTML (for example: <img src=x onerror=...//).
+  s=s.replace(/<[a-zA-Z][\w:-]*[^>\n]*$/gm,tag=>esc(tag));
   // Autolink: convert plain URLs to clickable links.
   // Stash <a>, <img> and <pre> blocks so autolink never runs inside them.
   const _al_stash=[];
@@ -901,6 +1131,11 @@ function renderMd(raw){
     }
     return `<span class="katex-inline" data-katex="inline">${esc(item.src)}</span>`;
   });
+  // Restore fenced block stash (\x00P) → <pre><code> HTML.
+  // Happens AFTER all markdown passes (lists, headings, tables, etc.) so
+  // diff/patch content inside code blocks is never misinterpreted as markdown.
+  // The _pre_stash below then protects these blocks from paragraph splitting.
+  s=s.replace(/\x00P(\d+)\x00/g,(_,i)=>_preBlock_stash[+i]);
   // Stash rendered <pre> blocks (with optional pre-header div) and mermaid/katex
   // divs before paragraph splitting so \n inside code blocks is never replaced
   // with <br>. Token \x00E (next free after B D F G L M C O A).
@@ -911,7 +1146,7 @@ function renderMd(raw){
     return '\x00E'+(_pre_stash.length-1)+'\x00';
   });
   const parts=s.split(/\n{2,}/);
-  s=parts.map(p=>{p=p.trim();if(!p)return '';if(/^<(h[1-6]|ul|ol|pre|hr|blockquote)|^\x00E/.test(p))return p;return `<p>${p.replace(/\n/g,'<br>')}</p>`;}).join('\n');
+  s=parts.map(p=>{p=p.trim();if(!p)return '';if(/^<(h[1-6]|ul|ol|pre|hr|blockquote)|^\x00[EQ]/.test(p))return p;return `<p>${p.replace(/\n/g,'<br>')}</p>`;}).join('\n');
   s=s.replace(/\x00E(\d+)\x00/g,(_,i)=>_pre_stash[+i]);
   // ── Restore MEDIA stash → inline images or download links ─────────────────
   s=s.replace(/\x00D(\d+)\x00/g,(_,i)=>{
@@ -931,20 +1166,28 @@ function renderMd(raw){
       // Render all https:// URLs as <img> — extension check would miss extensionless
       // CDN paths like fal.media content-addressed URLs (closes #853).
       if(_IMAGE_EXTS.test(src.split('?')[0]) || /^https?:\/\//i.test(src)){
-        return `<img class="msg-media-img" src="${esc(src)}" alt="image" loading="lazy" onclick="this.classList.toggle('msg-media-img--full')">`;
+        return `<img class="msg-media-img" src="${esc(src)}" alt="image" loading="lazy">`;
       }
       return `<a href="${esc(src)}" target="_blank" rel="noopener">${esc(src)}</a>`;
     }
     // Local file path
     const apiUrl='api/media?path='+encodeURIComponent(ref);
     if(_IMAGE_EXTS.test(ref)){
-      return `<img class="msg-media-img" src="${esc(apiUrl)}" alt="${esc(ref.split('/').pop())}" loading="lazy" onclick="this.classList.toggle('msg-media-img--full')">`;
+      return `<img class="msg-media-img" src="${esc(apiUrl)}" alt="${esc(ref.split('/').pop())}" loading="lazy">`;
     }
     // Non-image local file — show download link with filename
     const fname=esc(ref.split('/').pop()||ref);
+    // .patch/.diff files → render inline as colored diff instead of download
+    if(/\.(patch|diff)$/i.test(ref)){
+      return `<div class="diff-inline-load" data-path="${esc(ref)}">${t('diff_loading')} ${fname}...</div>`;
+    }
     return `<a class="msg-media-link" href="${esc(apiUrl+'&download=1')}" download="${fname}">📎 ${fname}</a>`;
   });
   // ── End MEDIA restore ──────────────────────────────────────────────────────
+  // Restore blockquote stash. Done last so the inner HTML (already produced
+  // by the recursive renderMd in the pre-pass) is dropped into the final
+  // string verbatim — no further passes can mangle it.
+  s=s.replace(/\x00Q(\d+)\x00/g,(_,i)=>_bq_stash[+i]);
   return s;
 }
 
@@ -996,30 +1239,128 @@ function unlockComposerForClarify(){
   updateSendBtn();
 }
 
+function _composerHasContent(){
+  const msg=$('msg');
+  return !!((msg&&msg.value.trim().length>0)||S.pendingFiles.length>0);
+}
+
+function _getExplicitBusyCommandAction(text){
+  const trimmed=(text||'').trim();
+  if(!trimmed.startsWith('/')) return null;
+  const body=trimmed.slice(1);
+  const name=(body.split(/\s+/)[0]||'').toLowerCase();
+  const args=body.slice(name.length).trim();
+  if(!args) return null;
+  if(name==='queue') return 'queue';
+  if(name==='steer'){
+    if(S.activeStreamId&&typeof _trySteer==='function') return 'steer';
+    return 'queue';
+  }
+  if(name==='interrupt'){
+    if(S.activeStreamId&&typeof cancelStream==='function') return 'interrupt';
+    return 'queue';
+  }
+  return null;
+}
+
+function getComposerPrimaryAction(){
+  const msg=$('msg');
+  const hasContent=_composerHasContent();
+  const locked=!!(msg&&msg.disabled);
+  if(locked) return 'disabled';
+  const compressionRunning=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
+  const isBusy=!!S.busy||compressionRunning;
+  if(!isBusy) return hasContent?'send':'disabled';
+  if(!hasContent){
+    if(S.activeStreamId&&typeof cancelStream==='function') return 'stop';
+    return 'disabled';
+  }
+  const explicitAction=_getExplicitBusyCommandAction(msg&&msg.value);
+  if(explicitAction) return explicitAction;
+  const busyMode=window._busyInputMode||'queue';
+  if(busyMode==='steer'){
+    if(S.activeStreamId&&typeof _trySteer==='function') return 'steer';
+    return 'queue';
+  }
+  if(busyMode==='interrupt'){
+    if(S.activeStreamId&&typeof cancelStream==='function') return 'interrupt';
+    return 'queue';
+  }
+  return 'queue';
+}
+
+function _setComposerPrimaryButtonIcon(btn,action){
+  // Queue/interrupt/steer icons are inline Lucide SVGs (ISC):
+  // https://lucide.dev/icons/
+  const icons={
+    send:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>',
+    queue:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 5H3"/><path d="M16 12H3"/><path d="M9 19H3"/><path d="m16 16-3 3 3 3"/><path d="M21 5v12a2 2 0 0 1-2 2h-6"/></svg>',
+    interrupt:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 4v16"/><path d="M6.029 4.285A2 2 0 0 0 3 6v12a2 2 0 0 0 3.029 1.715l9.997-5.998a2 2 0 0 0 .003-3.432z"/></svg>',
+    steer:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m16.24 7.76-1.804 5.411a2 2 0 0 1-1.265 1.265L7.76 16.24l1.804-5.411a2 2 0 0 1 1.265-1.265z"/></svg>',
+    stop:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"></rect></svg>',
+    disabled:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>'
+  };
+  const next=icons[action]||icons.send;
+  if(btn.innerHTML!==next) btn.innerHTML=next;
+}
+
 function updateSendBtn(){
   const btn=$('btnSend');
   if(!btn) return;
-  const msg=$('msg');
-  const hasContent=msg&&msg.value.trim().length>0||S.pendingFiles.length>0;
-  const canSend=hasContent&&!S.busy&&!(msg&&msg.disabled);
-  // Hide while busy (cancel button takes its place); show otherwise
-  btn.style.display=S.busy?'none':'';
-  btn.disabled=!canSend;
-  if(canSend&&!btn.classList.contains('visible')){
+  const action=getComposerPrimaryAction();
+  btn.dataset.action=action;
+  btn.classList.toggle('stop',action==='stop');
+  btn.classList.toggle('queue',action==='queue');
+  btn.classList.toggle('interrupt',action==='interrupt');
+  btn.classList.toggle('steer',action==='steer');
+  const _tt=(key,fb)=>{if(typeof t!=='function')return fb;const val=t(key);return val===key?fb:(val||fb);};
+  let _btnTitle;
+  if(action==='disabled'){
+    const _dmsg=$('msg');
+    const _dcompr=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
+    if(_dmsg&&_dmsg.disabled) _btnTitle=_tt('composer_disabled_clarify','Respond to the clarification request');
+    else if(_dcompr) _btnTitle=_tt('composer_disabled_compression','Waiting for compression to finish');
+    else _btnTitle=_tt('composer_disabled_empty','Type a message to send');
+  }else{
+    const _tmap={send:'Send message',queue:'Queue message',interrupt:'Interrupt and send',steer:'Steer current response',stop:'Stop generation'};
+    _btnTitle=_tt('composer_'+action,_tmap[action]||'Send message');
+  }
+  btn.title=_btnTitle;
+  btn.setAttribute('aria-label',_btnTitle);
+  _setComposerPrimaryButtonIcon(btn,action);
+  // Single primary action button: while busy/no-draft it becomes the red Stop
+  // action; while busy with a draft it reflects queue/interrupt/steer.
+  btn.style.display='';
+  btn.disabled=action==='disabled';
+  if(action!=='disabled'&&!btn.classList.contains('visible')){
     btn.classList.remove('visible');
     requestAnimationFrame(()=>btn.classList.add('visible'));
-  } else if(!canSend){
+  } else if(action==='disabled'){
     btn.classList.remove('visible');
   }
 }
+
+async function handleComposerPrimaryAction(){
+  if(window._micActive){
+    window._micPendingSend=true;
+    _stopMic();
+    return;
+  }
+  const action=typeof getComposerPrimaryAction==='function'?getComposerPrimaryAction():'send';
+  if(action==='disabled') return;
+  if(action==='stop'){
+    if(typeof cancelStream==='function') await cancelStream();
+    return;
+  }
+  await send();
+}
+
 function setBusy(v){
   S.busy=v;
   updateSendBtn();
   if(!v){
     setStatus('');
     setComposerStatus('');
-    // Always hide Cancel button when not busy
-    const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
     const sid=_queueDrainSid||(S.session&&S.session.session_id);
     _queueDrainSid=null;
     updateQueueBadge(sid);
@@ -1138,10 +1479,10 @@ function _renderQueueChips(sid){
     clearBtn.onclick=()=>{q.length=0;_saveAndRefresh();};
     actions.appendChild(mergeBtn);
     actions.appendChild(clearBtn);
-    // Hide button — collapses flyout entirely; titlebar "N queued" re-shows it
+    // Hide button — collapses flyout entirely; queue pill re-shows it
     const hideBtn=document.createElement('button');
     hideBtn.className='queue-card-icon-btn';
-    hideBtn.title='Hide queue (click the titlebar badge to show again)';
+    hideBtn.title='Hide queue (click the queue pill to show again)';
     hideBtn.setAttribute('aria-label','Hide queue panel');
     hideBtn.innerHTML=li('chevron-down',14);
     hideBtn.onclick=()=>{
@@ -1284,45 +1625,6 @@ function _updateQueuePill(sid,count){
   }
 }
 
-function _syncQueueTitlebar(sid,count){
-  const sub=document.getElementById('appTitlebarSub');
-  if(!sub) return;
-  if(count>0){
-    const label=typeof t==='function'?t('queued_count',count):(count===1?'1 queued':`${count} queued`);
-    sub.textContent=label;
-    sub.hidden=false;
-    sub.setAttribute('role','button');
-    sub.setAttribute('tabindex','0');
-    sub.setAttribute('aria-label',label);
-    sub.style.cursor='pointer';sub.style.color='var(--muted)';sub.style.fontWeight='600';sub.style.fontSize='11px';sub.style.background='var(--hover-bg)';sub.style.padding='2px 6px';sub.style.borderRadius='6px';sub.style.border='1px solid var(--border)';
-    const toggleQueue=()=>{
-      const activeSid=S.session&&S.session.session_id;
-      if(!activeSid) return;
-      const qCard=document.getElementById('queueCard');
-      if(!qCard) return;
-      if(qCard.classList.contains('visible')){
-        qCard.classList.remove('visible');
-        // Show pill since flyout is now hidden
-        const liveCount=_getSessionQueue(activeSid,false).length;
-        _updateQueuePill(activeSid,liveCount);
-      } else {
-        qCard.classList.add('visible');
-        // Hide pill since flyout is now showing
-        _updateQueuePill(activeSid,0);
-        if(typeof scrollToBottom==='function') scrollToBottom();
-      }
-    };
-    sub.onclick=toggleQueue;
-    sub.onkeydown=(e)=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();toggleQueue();}};
-    sub.title='Click to show/hide queue panel';
-  } else {
-    sub.textContent='';sub.hidden=true;
-    sub.removeAttribute('role');sub.removeAttribute('tabindex');sub.removeAttribute('aria-label');
-    sub.style.cssText='';
-    sub.onclick=null;sub.onkeydown=null;
-  }
-}
-
 function updateQueueBadge(sessionId){
   const sid=sessionId||(S.session&&S.session.session_id);
   const count=sid?getQueuedSessionCount(sid):0;
@@ -1347,8 +1649,6 @@ function updateQueueBadge(sessionId){
       _updateQueuePill(sid,0);
     }
   }
-  // Only update titlebar if this is the active session
-  if(!S.session||sid===S.session.session_id) _syncQueueTitlebar(sid,count);
 }
 function showToast(msg,ms,type){const el=$('toast');if(!el)return;const s=String(msg==null?'':msg);let t=type;if(!t){const low=s.toLowerCase();if(/fail|error|denied|invalid|unavailable|no active|no workspace match|no model match|no personalities/.test(low))t='error';else if(/warn|queued|takes effect|skipped|fallback/.test(low))t='warning';else if(/saved|created|imported|restored|switched|set to|updated|duplicated|moved to|renamed|deleted|complete|pinned|archived|cleared|stopped/.test(low))t='success';else t='info';}el.textContent=s;el.className='toast show '+t;clearTimeout(el._t);el._t=setTimeout(()=>{el.classList.remove('show');},ms||2800);}
 
@@ -1495,14 +1795,34 @@ function showPromptDialog(opts={}){
 }
 
 
+function _copyText(text){
+  if(navigator.clipboard && window.isSecureContext){
+    return navigator.clipboard.writeText(text).catch(()=>{
+      // Fallback if clipboard API fails (e.g. permissions)
+      return _fallbackCopy(text);
+    });
+  }
+  return _fallbackCopy(text);
+}
+function _fallbackCopy(text){
+  return new Promise((resolve,reject)=>{
+    const ta=document.createElement('textarea');
+    ta.value=text;ta.style.cssText='position:fixed;left:0;top:0;width:2em;height:2em;padding:0;border:none;outline:none;box-shadow:none;background:transparent;z-index:-1';
+    document.body.appendChild(ta);
+    ta.focus();ta.select();
+    try{document.execCommand('copy');resolve();}
+    catch(e){reject(e);}
+    finally{document.body.removeChild(ta);}
+  });
+}
 function copyMsg(btn){
   const row=btn.closest('[data-raw-text]');
   const text=row?row.dataset.rawText:'';
   if(!text)return;
-  navigator.clipboard.writeText(text).then(()=>{
+  _copyText(text).then(()=>{
     const orig=btn.innerHTML;btn.innerHTML=li('check',13);btn.style.color='var(--blue)';
     setTimeout(()=>{btn.innerHTML=orig;btn.style.color='';},1500);
-  }).catch(()=>showToast('Copy failed'));
+  }).catch(()=>showToast(t('copy_failed')));
 }
 
 // ── Reconnect banner (B4/B5: reload resilience) ──
@@ -1761,6 +2081,7 @@ function syncTopbar(){
     document.title=window._botName||'Hermes';
     if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
     if(typeof syncModelChip==='function') syncModelChip();
+    if(typeof syncTerminalButton==='function') syncTerminalButton();
     if(typeof _syncHermesPanelSessionActions==='function') _syncHermesPanelSessionActions();
     else {
       const sidebarName=$('sidebarWsName');
@@ -1769,6 +2090,9 @@ function syncTopbar(){
       }
     }
     if(typeof syncAppTitlebar==='function') syncAppTitlebar();
+    // Update profile chip even when no session is active (e.g. right after profile switch)
+    const _profileLabel=$('profileChipLabel');
+    if(_profileLabel) _profileLabel.textContent=S.activeProfile||'default';
     return;
   }
   const sessionTitle=S.session.title||t('untitled');
@@ -1777,7 +2101,6 @@ function syncTopbar(){
   const vis=S.messages.filter(m=>m&&m.role&&m.role!=='tool');
   const _topbarMeta=$('topbarMeta');if(_topbarMeta)_topbarMeta.textContent=t('n_messages',vis.length);
   if(typeof syncAppTitlebar==='function') syncAppTitlebar();
-  if(typeof _syncQueueTitlebar==='function'){const _qs=S.session&&S.session.session_id;_syncQueueTitlebar(_qs,_qs?getQueuedSessionCount(_qs):0);}
   // If a profile switch just happened, apply its model rather than the session's stale value.
   // S._pendingProfileModel is set by switchToProfile() and cleared here after one application.
   const modelOverride=S._pendingProfileModel;
@@ -1792,21 +2115,30 @@ function syncTopbar(){
     // first available model so stale values don't pollute the picker (#829).
     if(!applied && currentModel){
       const deferModelCorrection=Boolean(S.session._modelResolutionDeferred);
-      // Stale session model not in the current provider catalog — reset to the
-      // first available model rather than injecting an "(unavailable)" option
-      // that visually appears under the wrong provider group (#829).
-      const modelSel=$('modelSelect');
-      const first=modelSel&&modelSel.querySelector('optgroup > option, option');
-      if(first){
-        modelSel.value=first.value;
-        if(!deferModelCorrection){
-          S.session.model=first.value;
-          // Persist the correction so the session doesn't re-inject on next load.
-          fetch(new URL('api/session/update',location.href).href,{
-            method:'POST',credentials:'include',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({session_id:S.session.id||S.session.session_id,model:first.value})
-          }).catch(()=>{});
+      // Also defer if a live model fetch is still in flight — the model may be
+      // in the list once the fetch completes. Persisting now would corrupt the
+      // session with the wrong model before live models arrive (#1169).
+      const liveStillPending=window._activeProvider&&_liveModelFetchPending.has(window._activeProvider);
+      if(liveStillPending){
+        // Live fetch in flight — don't touch sel.value or S.session.model yet.
+        // _addLiveModelsToSelect() will re-apply S.session.model once done (#1169).
+      } else {
+        // Stale session model not in the current provider catalog — reset to the
+        // first available model rather than injecting an "(unavailable)" option
+        // that visually appears under the wrong provider group (#829).
+        const modelSel=$('modelSelect');
+        const first=modelSel&&modelSel.querySelector('optgroup > option, option');
+        if(first){
+          modelSel.value=first.value;
+          if(!deferModelCorrection){
+            S.session.model=first.value;
+            // Persist the correction so the session doesn't re-inject on next load.
+            fetch(new URL('api/session/update',location.href).href,{
+              method:'POST',credentials:'include',
+              headers:{'Content-Type':'application/json'},
+              body:JSON.stringify({session_id:S.session.id||S.session.session_id,model:first.value})
+            }).catch(()=>{});
+          }
         }
       }
     }
@@ -1818,6 +2150,7 @@ function syncTopbar(){
   if(clearBtn) clearBtn.style.display=(S.messages&&S.messages.filter(msg=>msg.role!=='tool').length>0)?'':'none';
   if(typeof _syncHermesPanelSessionActions==='function') _syncHermesPanelSessionActions();
   if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
+  if(typeof syncTerminalButton==='function') syncTerminalButton();
   // modelSelect already set above
   // Update profile chip label
   const profileLabel=$('profileChipLabel');
@@ -1893,6 +2226,7 @@ function setCompressionUi(state){
 }
 function _compressionCardsHtml(state){
   if(!state) return '';
+  if(state.automatic) return _autoCompressionCardsHtml(state);
   const cmdText=state.commandText||'/compress';
   const focusText=state.focusTopic?`${t('focus_label')}: ${state.focusTopic}`:'';
   const headerText=state.phase==='done'
@@ -1953,6 +2287,22 @@ function _compressionCardsHtml(state){
     </div>
     ${referenceHtml}`;
 }
+function _autoCompressionCardsHtml(state){
+  const fallback='Context auto-compressed to continue the conversation';
+  const detail=String(state.message||fallback).trim()||fallback;
+  const preview=String(state.summary?.headline||detail).trim()||detail;
+  return `
+    <div class="tool-card-row compression-card-row" data-compression-card="1">
+      ${_compressionStatusCardHtml({
+        statusLabel: t('auto_compress_label'),
+        previewText: preview,
+        detail,
+        icon: li('check',13),
+        open: false,
+        variantClass: 'tool-card-compress-complete tool-card-compress-auto',
+      })}
+    </div>`;
+}
 function _compressionCardsNode(state){
   const wrap=document.createElement('div');
   wrap.className='compression-turn';
@@ -1960,9 +2310,20 @@ function _compressionCardsNode(state){
   return wrap;
 }
 function _isContextCompactionMessage(m){
-  if(!m||m.role!=='assistant') return false;
+  if(!m||!m.role||m.role==='tool') return false;
   const text=msgContent(m)||String(m.content||'');
   return /^\s*\[context compaction/i.test(text) || /^\s*context compaction/i.test(text);
+}
+function _isPreservedCompressionTaskListMessage(m){
+  if(!m||m.role!=='user') return false;
+  const text=msgContent(m)||String(m.content||'');
+  return /^\s*\[your active task list was preserved across context compression\]/i.test(text);
+}
+function _preservedCompressionTaskListPreview(text){
+  const body=String(text||'')
+    .replace(/^\s*\[your active task list was preserved across context compression\]\s*/i,'')
+    .trim();
+  return (body.split(/\n+/).map(line=>line.trim()).filter(Boolean).slice(0,2).join(' ') || t('preserved_task_list_label'));
 }
 function _compressionMessageAnchorKey(m){
   if(!m||!m.role||m.role==='tool') return null;
@@ -2016,6 +2377,27 @@ function _compressionReferenceCardHtml(text, open=false){
       
     </div>`;
 }
+function _preservedCompressionTaskListCardHtml(m, open=false){
+  const text=msgContent(m)||String(m.content||'');
+  return `
+    <div class="tool-card-row compression-card-row" data-compression-card="1" data-raw-text="${esc(text)}">
+      ${_compressionStatusCardHtml({
+        statusLabel: t('preserved_task_list_label'),
+        previewText: _preservedCompressionTaskListPreview(text),
+        detail: text,
+        icon: li('list-todo',13),
+        open,
+        variantClass: 'tool-card-compress-reference',
+      })}
+    </div>`;
+}
+function _preservedCompressionTaskListCardsHtml(messages){
+  return (messages||[]).map(m=>_preservedCompressionTaskListCardHtml(m, false)).join('');
+}
+function _latestPreservedCompressionTaskListMessages(messages){
+  const latest=[...(messages||[])].reverse().find(m=>_isPreservedCompressionTaskListMessage(m));
+  return latest?[latest]:[];
+}
 function _isSameLocalDay(dateA, dateB){
   return dateA.getFullYear()===dateB.getFullYear()
     && dateA.getMonth()===dateB.getMonth()
@@ -2025,15 +2407,16 @@ function _formatMessageFooterTimestamp(tsVal){
   if(!tsVal) return '';
   const date=new Date(tsVal*1000);
   const now=new Date();
+  // Use _formatInServerTz when available — it correctly handles fractional-hour
+  // offsets like India +0530 that Etc/GMT cannot express. Falls back to plain
+  // toLocaleString when sessions.js hasn't loaded yet.
+  const fmt=(typeof _formatInServerTz==='function')?_formatInServerTz:null;
   if(_isSameLocalDay(date, now)){
-    return date.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+    const opts={hour:'2-digit', minute:'2-digit'};
+    return fmt?fmt(date,opts):date.toLocaleTimeString([], opts);
   }
-  return date.toLocaleString([], {
-    month:'short',
-    day:'numeric',
-    hour:'numeric',
-    minute:'2-digit',
-  });
+  const opts={month:'short', day:'numeric', hour:'numeric', minute:'2-digit'};
+  return fmt?fmt(date,opts):date.toLocaleString([], opts);
 }
 function _compressionStatusCardHtml({
   statusLabel,
@@ -2060,9 +2443,9 @@ function _compressionStatusCardHtml({
       ${bodyHtml}
     </div>`;
 }
-function _contextCompactionMessageHtml(m, tsTitle=''){
+function _contextCompactionMessageHtml(m, tsTitle='', preservedMessages=[]){
   const text=msgContent(m)||String(m.content||'');
-  return `<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(text, false, tsTitle)}</div></div>`;
+  return `<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(text, false, tsTitle)}${_preservedCompressionTaskListCardsHtml(preservedMessages)}</div></div>`;
 }
 function renderCompressionUi(){
   const el=$('liveCompressionCards');
@@ -2098,7 +2481,8 @@ function renderMessages(){
       inner.innerHTML=cached.html;
       _sessionHtmlCacheSid=sid;
       if(S.activeStreamId){scrollIfPinned();}else{scrollToBottom();}
-      requestAnimationFrame(()=>{highlightCode();addCopyButtons();renderMermaidBlocks();renderKatexBlocks();});
+      requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();renderMermaidBlocks();renderKatexBlocks();});
+      requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();renderMermaidBlocks();renderKatexBlocks();});
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
       return;
     }
@@ -2112,8 +2496,11 @@ function renderMessages(){
   const sessionCompressionAnchorKey=(
     S.session && S.session.compression_anchor_message_key && typeof S.session.compression_anchor_message_key==='object'
   ) ? S.session.compression_anchor_message_key : null;
+  const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);
   const vis=S.messages.filter(m=>{
     if(!m||!m.role||m.role==='tool')return false;
+    if(_isContextCompactionMessage(m)) return false;
+    if(_isPreservedCompressionTaskListMessage(m)) return false;
     if(m.role==='assistant'){
       const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
       const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
@@ -2121,18 +2508,30 @@ function renderMessages(){
     }
     return msgContent(m)||m.attachments?.length;
   });
-  $('emptyState').style.display=vis.length?'none':'';
+  $('emptyState').style.display=(vis.length||preservedCompressionTaskMessages.length)?'none':'';
   inner.innerHTML='';
+  // Show "load older" indicator when older messages are available
+  if(typeof _messagesTruncated!=='undefined' && _messagesTruncated && S.messages.length>0){
+    const indicator=document.createElement('div');
+    indicator.id='loadOlderIndicator';
+    indicator.className='load-older-indicator';
+    indicator.textContent=typeof t==='function'?t('load_older_messages'):'↑ Scroll up or click to load older messages';
+    indicator.onclick=()=>{if(typeof _loadOlderMessages==='function') _loadOlderMessages();};
+    inner.appendChild(indicator);
+  }
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const referenceMessage=S.messages.find(m=>_isContextCompactionMessage(m));
   const referenceText=referenceMessage?msgContent(referenceMessage)||String(referenceMessage.content||''):'';
   const referenceNode=(!compressionState && referenceMessage && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey))
-    ? (()=>{const row=document.createElement('div');row.innerHTML=_compressionReferenceCardHtml(referenceText,false);return row.firstElementChild;})()
+    ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(referenceText,false)}${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
     : null;
+  let preservedCompressionTaskCardsAttached=!!referenceNode;
   const visWithIdx=[];
+  const preservedCompressionRawIdxs=[];
   let rawIdx=0;
   for(const m of S.messages){
     if(!m||!m.role||m.role==='tool'){rawIdx++;continue;}
+    if(_isPreservedCompressionTaskListMessage(m)){preservedCompressionRawIdxs.push(rawIdx);rawIdx++;continue;}
     const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
     const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
     if(msgContent(m)||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)))) visWithIdx.push({m,rawIdx});
@@ -2204,7 +2603,17 @@ function renderMessages(){
     const isLastAssistant=!isUser&&vi===visWithIdx.length-1;
     let filesHtml='';
     if(m.attachments&&m.attachments.length){
-      filesHtml=`<div class="msg-files">${m.attachments.map(f=>`<div class="msg-file-badge">${li('paperclip',12)} ${esc(f)}</div>`).join('')}</div>`;
+      const _attachSid=(S.session&&S.session.session_id)||'';
+      filesHtml=`<div class="msg-files">${m.attachments.map(f=>{
+        const fname=f.split('/').pop()||f;
+        if(_IMAGE_EXTS.test(fname)){
+          // Use api/file/raw which resolves filename relative to the session workspace.
+          // api/media expects a full absolute path which we don't store on the client side.
+          const imgUrl='api/file/raw?session_id='+encodeURIComponent(_attachSid)+'&path='+encodeURIComponent(fname);
+          return `<img class="msg-media-img" src="${esc(imgUrl)}" alt="${esc(fname)}" loading="lazy">`;
+        }
+        return `<div class="msg-file-badge">${li('paperclip',12)} ${esc(fname)}</div>`;
+      }).join('')}</div>`;
     }
     const bodyHtml = isUser ? esc(String(content)).replace(/\n/g,'<br>') : renderMd(_stripXmlToolCallsDisplay(String(content)));
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
@@ -2213,10 +2622,27 @@ function renderMessages(){
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
     const tsVal=m._ts||m.timestamp;
-    const tsTitle=tsVal?new Date(tsVal*1000).toLocaleString():'';
+    // _formatInServerTz handles fractional-hour offsets (India +0530 etc.)
+    // correctly via offset arithmetic; bare toLocaleString is the browser-tz fallback.
+    const _fmtSv=(typeof _formatInServerTz==='function')?_formatInServerTz:null;
+    const tsTitle=tsVal?(_fmtSv?_fmtSv(new Date(tsVal*1000),{}):new Date(tsVal*1000).toLocaleString()):'';
     const tsTime=_formatMessageFooterTimestamp(tsVal);
     const timeHtml = tsTime ? `<span class="msg-time" title="${esc(tsTitle)}">${tsTime}</span>` : '';
     const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${copyBtn}${retryBtn}</span></div>`;
+
+    if(_isContextCompactionMessage(m)){
+      if(compressionState || referenceNode){
+        continue;
+      }else{
+        currentAssistantTurn=null;
+        const row=document.createElement('div');
+        const preservedForThisCard=preservedCompressionTaskCardsAttached?[]:preservedCompressionTaskMessages;
+        row.innerHTML=_contextCompactionMessageHtml(m, tsTitle, preservedForThisCard);
+        if(preservedForThisCard.length) preservedCompressionTaskCardsAttached=true;
+        inner.appendChild(row.firstElementChild);
+        continue;
+      }
+    }
 
     if(isUser){
       currentAssistantTurn=null;
@@ -2229,18 +2655,6 @@ function renderMessages(){
       inner.appendChild(row);
       userRows.set(rawIdx, row);
       continue;
-    }
-
-    if(_isContextCompactionMessage(m)){
-      if(compressionState || referenceNode){
-        continue;
-      }else{
-        currentAssistantTurn=null;
-        const row=document.createElement('div');
-        row.innerHTML=_contextCompactionMessageHtml(m, tsTitle);
-        inner.appendChild(row.firstElementChild);
-        continue;
-      }
     }
 
     if(!currentAssistantTurn){
@@ -2267,10 +2681,11 @@ function renderMessages(){
     assistantSegments.set(rawIdx, seg);
   }
 
-  function _insertCompressionLikeNode(node){
+  function _insertCompressionLikeNode(node, anchorIndex){
     if(!node) return;
-    if(insertionAnchor!==null && visWithIdx[insertionAnchor]){
-      const anchorRawIdx=visWithIdx[insertionAnchor].rawIdx;
+    const anchorIdx=anchorIndex===undefined?insertionAnchor:anchorIndex;
+    if(anchorIdx!==null && visWithIdx[anchorIdx]){
+      const anchorRawIdx=visWithIdx[anchorIdx].rawIdx;
       const anchorSeg=assistantSegments.get(anchorRawIdx);
       if(anchorSeg){
         const turn=anchorSeg.closest('.assistant-turn');
@@ -2288,9 +2703,16 @@ function renderMessages(){
     }
     inner.appendChild(node);
   }
+  const preservedOnlyNode=(!preservedCompressionTaskCardsAttached&&(!referenceMessage||compressionState)&&preservedCompressionTaskMessages.length)
+    ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
+    : null;
+  const preservedOnlyAnchor=preservedCompressionRawIdxs.length
+    ? (()=>{let idx=null;for(let i=0;i<visWithIdx.length;i++){if(visWithIdx[i].rawIdx<preservedCompressionRawIdxs[0]) idx=i;}return idx;})()
+    : null;
 
   _insertCompressionLikeNode(compressionNode);
   _insertCompressionLikeNode(referenceNode);
+  _insertCompressionLikeNode(preservedOnlyNode, preservedOnlyAnchor);
   renderCompressionUi();
   // Insert settled tool call cards (history view only).
   // During live streaming, tool cards are rendered in #liveToolCards by the
@@ -2415,26 +2837,31 @@ function renderMessages(){
       if(anchorRow&&lastInsertedNode) anchorInsertAfter.set(anchorRow, lastInsertedNode);
     }
   }
-  // Render cumulative usage on the last assistant footer row (if enabled).
-  if(window._showTokenUsage&&S.session&&(S.session.input_tokens||S.session.output_tokens)){
-    const rows=inner.querySelectorAll('.assistant-turn');
-    let lastAssist=null;
-    for(let i=rows.length-1;i>=0;i--){lastAssist=rows[i];break;}
-    if(lastAssist){
-      const footerRows=lastAssist.querySelectorAll('.msg-foot');
+  // Render per-turn token usage on each assistant message that has it (#503).
+  // Replaces the old cumulative-total-on-last-bubble approach.
+  if(window._showTokenUsage){
+    const asstRows=inner.querySelectorAll('.assistant-turn');
+    let ai=0; // assistant-only index for DOM rows
+    for(let mi=0;mi<S.messages.length;mi++){
+      const msg=S.messages[mi];
+      if(msg.role!=='assistant'){continue;}
+      if(!msg._turnUsage){ai++;continue;}
+      if(ai>=asstRows.length) continue;
+      const row=asstRows[ai];
+      const footerRows=row.querySelectorAll('.msg-foot');
       const targetFoot=footerRows.length?footerRows[footerRows.length-1]:null;
-      if(targetFoot&&!targetFoot.querySelector('.msg-usage-inline')){
-        const usage=document.createElement('span');
-        usage.className='msg-usage-inline';
-        const inTok=S.session.input_tokens||0;
-        const outTok=S.session.output_tokens||0;
-        const cost=S.session.estimated_cost;
-        let text=`${_fmtTokens(inTok)} in · ${_fmtTokens(outTok)} out`;
-        if(cost) text+=` · ~$${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
-        usage.textContent=text;
-        targetFoot.classList.add('msg-foot-with-usage');
-        targetFoot.insertBefore(usage, targetFoot.firstChild);
-      }
+      if(!targetFoot||targetFoot.querySelector('.msg-usage-inline')){ai++;continue;}
+      const usage=document.createElement('span');
+      usage.className='msg-usage-inline';
+      const inTok=msg._turnUsage.input_tokens||0;
+      const outTok=msg._turnUsage.output_tokens||0;
+      const cost=msg._turnUsage.estimated_cost;
+      let text=`${_fmtTokens(inTok)} in · ${_fmtTokens(outTok)} out`;
+      if(cost) text+=` · ~$${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
+      usage.textContent=text;
+      targetFoot.classList.add('msg-foot-with-usage');
+      targetFoot.insertBefore(usage, targetFoot.firstChild);
+      ai++;
     }
   }
   // Only force-scroll when not actively streaming — mid-stream re-renders
@@ -2446,7 +2873,8 @@ function renderMessages(){
     scrollToBottom();
   }
   // Apply syntax highlighting after DOM is built
-  requestAnimationFrame(()=>{highlightCode();addCopyButtons();renderMermaidBlocks();renderKatexBlocks();});
+  requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();renderMermaidBlocks();renderKatexBlocks();});
+  requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();renderMermaidBlocks();renderKatexBlocks();});
   // Refresh todo panel if it's currently open
   if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){
     loadTodos();
@@ -2494,9 +2922,9 @@ function buildToolCard(tc){
   let displaySnippet='';
   if(tc.snippet){
     const s=tc.snippet;
-    if(s.length<=220){displaySnippet=s;}
+    if(s.length<=800){displaySnippet=s;}
     else{
-      const cutoff=s.slice(0,220);
+      const cutoff=s.slice(0,800);
       const lastBreak=Math.max(cutoff.lastIndexOf('. '),cutoff.lastIndexOf('\n'),cutoff.lastIndexOf('; '));
       displaySnippet=lastBreak>80?s.slice(0,lastBreak+1):cutoff;
     }
@@ -2703,6 +3131,141 @@ function highlightCode(container) {
   Prism.highlightAllUnder(el);
 }
 
+// Lazy load js-yaml for YAML tree view support
+let _jsyamlLoading=false;
+function _loadJsyamlThen(cb){
+  if(typeof jsyaml!=='undefined'){ cb(); return; }
+  if(_jsyamlLoading){ setTimeout(()=>_loadJsyamlThen(cb),100); return; }
+  _jsyamlLoading=true;
+  const s=document.createElement('script');
+  s.src='https://cdnjs.cloudflare.com/ajax/libs/js-yaml/4.1.0/js-yaml.min.js';
+  s.integrity='sha384-8pLvVQkv7pCQqFk7AChLpdEe7gXz9h8GAb7cS0zVeJuKhxR5PU5aEET5pRpHZvxUorzdM';
+  s.crossOrigin='anonymous';
+  s.onload=()=>{ _jsyamlLoading=false; cb(); };
+  s.onerror=()=>{ _jsyamlLoading=false; }; // CDN blocked, fall back to raw
+  document.head.appendChild(s);
+}
+
+function initTreeViews(){
+  document.querySelectorAll('.code-tree-wrap:not([data-tree-init])').forEach(wrap=>{
+    wrap.setAttribute('data-tree-init','1');
+    const rawText=wrap.dataset.raw;
+    const lang=wrap.dataset.lang;
+    let parsed=null;
+    let parseFailed=false;
+    // Try JSON parse
+    try{ parsed=JSON.parse(rawText); }catch(e){ parseFailed=(lang==='json'); }
+    // YAML: lazy-load js-yaml if needed
+    if(!parsed && lang==='yaml'){
+      if(typeof jsyaml!=='undefined'){
+        try{ parsed=jsyaml.load(rawText); }catch(e){ parseFailed=true; }
+      }else{
+        // Trigger async load, leave as raw for now
+        parseFailed=true;
+      }
+    }
+    if(!parsed || typeof parsed!=='object'){
+      if(parseFailed){
+        const hint=wrap.querySelector('.tree-raw-view');
+        if(hint&&!hint.querySelector('.tree-parse-note')){
+          const note=document.createElement('div');
+          note.className='tree-parse-note';
+          note.textContent=t('parse_failed_note')||'parse failed';
+          hint.parentNode.insertBefore(note,hint.nextSibling);
+        }
+      }
+      return; // leave as raw view
+    }
+    const lineCount=rawText.split('\n').length;
+    // Default to raw for short blocks (<10 lines), tree for longer
+    const showTree=lineCount>=10;
+    // Build tree DOM
+    const treeDiv=document.createElement('div');
+    treeDiv.className='tree-view'+(showTree?'':' tree-hidden');
+    treeDiv.appendChild(_buildTreeDOM(parsed, 0));
+    // Toggle button in header
+    const header=wrap.querySelector('.pre-header');
+    if(header){
+      const toggle=document.createElement('button');
+      toggle.className='tree-toggle-btn';
+      toggle.textContent=showTree?t('raw_view'):t('tree_view');
+      toggle.onclick=(e)=>{
+        e.stopPropagation();
+        const isTreeHidden=treeDiv.classList.contains('tree-hidden');
+        treeDiv.classList.toggle('tree-hidden',!isTreeHidden);
+        const rawPre=wrap.querySelector('.tree-raw-view');
+        if(rawPre) rawPre.style.display=isTreeHidden?'none':'';
+        toggle.textContent=isTreeHidden?t('raw_view'):t('tree_view');
+      };
+      header.style.display='flex';
+      header.style.justifyContent='space-between';
+      header.style.alignItems='center';
+      header.appendChild(toggle);
+    }
+    if(!showTree){
+      const rawPre=wrap.querySelector('.tree-raw-view');
+      if(rawPre) rawPre.style.display='';
+    } else {
+      const rawPre=wrap.querySelector('.tree-raw-view');
+      if(rawPre) rawPre.style.display='none';
+    }
+    wrap.appendChild(treeDiv);
+  });
+}
+
+function _buildTreeDOM(val, depth){
+  const el=document.createElement('div');
+  el.className='tree-node';
+  if(val===null){ el.innerHTML=`<span class="tree-val tree-null">null</span>`; return el; }
+  if(typeof val==='boolean'){ el.innerHTML=`<span class="tree-val tree-bool">${val}</span>`; return el; }
+  if(typeof val==='number'){ el.innerHTML=`<span class="tree-val tree-num">${val}</span>`; return el; }
+  if(typeof val==='string'){ el.innerHTML=`<span class="tree-val tree-str">&quot;${esc(val)}&quot;</span>`; return el; }
+  if(Array.isArray(val)){
+    el.classList.add('tree-array');
+    const collapsed=depth>=2;
+    const header=document.createElement('span');
+    header.className='tree-collapsible';
+    header.innerHTML=(collapsed?'▸ ': '▾ ')+`<span class="tree-bracket">[</span><span class="tree-count">${val.length}</span><span class="tree-bracket">]</span>`;
+    const body=document.createElement('div');
+    body.className='tree-children'+(collapsed?' tree-collapsed':'');
+    val.forEach((item,i)=>{
+      const child=document.createElement('div');
+      child.className='tree-item';
+      child.appendChild(_buildTreeDOM(item, depth+1));
+      if(i<val.length-1) child.innerHTML+='<span class="tree-comma">,</span>';
+      body.appendChild(child);
+    });
+    el.appendChild(header);
+    el.appendChild(body);
+    header.onclick=(()=>{const c=body.classList.contains('tree-collapsed'); body.classList.toggle('tree-collapsed'); header.innerHTML=(c?'▾ ':'▸ ')+`<span class="tree-bracket">[</span><span class="tree-count">${val.length}</span><span class="tree-bracket">]</span>`;});
+    return el;
+  }
+  if(typeof val==='object'){
+    el.classList.add('tree-object');
+    const keys=Object.keys(val);
+    const collapsed=depth>=2;
+    const header=document.createElement('span');
+    header.className='tree-collapsible';
+    header.innerHTML=(collapsed?'▸ ': '▾ ')+`<span class="tree-bracket">{</span><span class="tree-count">${keys.length}</span><span class="tree-bracket">}</span>`;
+    const body=document.createElement('div');
+    body.className='tree-children'+(collapsed?' tree-collapsed':'');
+    keys.forEach((key,i)=>{
+      const child=document.createElement('div');
+      child.className='tree-item';
+      child.innerHTML=`<span class="tree-key">&quot;${esc(key)}&quot;</span><span class="tree-colon">: </span>`;
+      child.appendChild(_buildTreeDOM(val[key], depth+1));
+      if(i<keys.length-1) child.innerHTML+='<span class="tree-comma">,</span>';
+      body.appendChild(child);
+    });
+    el.appendChild(header);
+    el.appendChild(body);
+    header.onclick=(()=>{const c=body.classList.contains('tree-collapsed'); body.classList.toggle('tree-collapsed'); header.innerHTML=(c?'▾ ':'▸ ')+`<span class="tree-bracket">{</span><span class="tree-count">${keys.length}</span><span class="tree-bracket">}</span>`;});
+    return el;
+  }
+  el.innerHTML=`<span class="tree-val">${esc(String(val))}</span>`;
+  return el;
+}
+
 function addCopyButtons(container){
   const el=container||$('msgInner');
   if(!el) return;
@@ -2714,10 +3277,10 @@ function addCopyButtons(container){
     btn.textContent=t('copy');
     btn.onclick=(e)=>{
       e.stopPropagation();
-      navigator.clipboard.writeText(codeEl.textContent).then(()=>{
+      _copyText(codeEl.textContent).then(()=>{
         btn.textContent=t('copied');
         setTimeout(()=>{btn.textContent=t('copy');},1500);
-      });
+      }).catch(()=>{btn.textContent=t('copy_failed');setTimeout(()=>{btn.textContent=t('copy');},1500);});
     };
     const header=pre.previousElementSibling;
     if(header&&header.classList.contains('pre-header')){
@@ -2735,6 +3298,33 @@ function addCopyButtons(container){
 
 let _mermaidLoading=false;
 let _mermaidReady=false;
+
+function loadDiffInline(){
+  const DIFF_MAX_SIZE=512*1024; // 512 KB cap for inline diff rendering
+  document.querySelectorAll('.diff-inline-load:not([data-loaded])').forEach(el=>{
+    el.setAttribute('data-loaded','1');
+    const path=el.dataset.path;
+    fetch('api/media?path='+encodeURIComponent(path))
+      .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
+      .then(text=>{
+        if(text.length>DIFF_MAX_SIZE){
+          el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('diff_too_large')}</span></div>`;
+          return;
+        }
+        const lines=text.split('\n').map(line=>{
+          const e=esc(line);
+          if(e.startsWith('@@')) return `<span class="diff-line diff-hunk">${e}</span>`;
+          if(e.startsWith('+')) return `<span class="diff-line diff-plus">${e}</span>`;
+          if(e.startsWith('-')) return `<span class="diff-line diff-minus">${e}</span>`;
+          return `<span class="diff-line">${e}</span>`;
+        }).join('\n');
+        el.outerHTML=`<div class="diff-inline"><div class="pre-header">${esc(path.split('/').pop())}</div><pre class="diff-block"><code>${lines}</code></pre></div>`;
+      })
+      .catch(()=>{
+        el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('diff_error')}</span></div>`;
+      });
+  });
+}
 
 function renderMermaidBlocks(){
   const blocks=document.querySelectorAll('.mermaid-block:not([data-rendered])');
@@ -2977,6 +3567,9 @@ function _renderTreeItems(container, entries, depth){
   for(const item of entries){
     const el=document.createElement('div');el.className='file-item';
     el.style.paddingLeft=(8+depth*16)+'px';
+    el.setAttribute('draggable','true');
+    el.oncontextmenu=(e)=>{e.preventDefault();e.stopPropagation();_showFileContextMenu(e,item);};
+    el.ondragstart=(e)=>{e.dataTransfer.setData('application/ws-path',item.path);e.dataTransfer.setData('application/ws-type',item.type);e.dataTransfer.effectAllowed='copy';};
 
     if(item.type==='dir'){
       // Toggle arrow for directories
@@ -3012,6 +3605,15 @@ function _renderTreeItems(container, entries, depth){
                 session_id:S.session.session_id,path:item.path,new_name:newName
               })});
               showToast(t('renamed_to')+newName);
+              // Update expanded dirs cache key if renaming a directory
+              if(item.type==='dir'&&S._expandedDirs){
+                S._expandedDirs.delete(item.path);
+                const parent=item.path.includes('/')?item.path.substring(0,item.path.lastIndexOf('/')):'.';
+                const newPath=parent==='.'?newName:parent+'/'+newName;
+                S._expandedDirs.add(newPath);
+                if(S._dirCache[item.path]){S._dirCache[newPath]=S._dirCache[item.path];delete S._dirCache[item.path];}
+                if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();
+              }
               // Invalidate cache and re-render
               delete S._dirCache[S.currentDir];
               await loadDir(S.currentDir);
@@ -3042,11 +3644,16 @@ function _renderTreeItems(container, entries, depth){
       el.appendChild(sizeEl);
     }
 
-    // Delete button -- for files
+    // Delete button -- for files and directories
     if(item.type==='file'){
       const del=document.createElement('button');
       del.className='file-del-btn';del.title=t('delete_title');del.textContent='\u00d7';
       del.onclick=async(e)=>{e.stopPropagation();await deleteWorkspaceFile(item.path,item.name);};
+      el.appendChild(del);
+    }else if(item.type==='dir'){
+      const del=document.createElement('button');
+      del.className='file-del-btn';del.title=t('delete_title');del.textContent='\u00d7';
+      del.onclick=async(e)=>{e.stopPropagation();await deleteWorkspaceDir(item.path,item.name);};
       el.appendChild(del);
     }
 
@@ -3091,6 +3698,77 @@ function _renderTreeItems(container, entries, depth){
       }
     }
   }
+}
+
+async function deleteWorkspaceDir(relPath, name){
+  if(!S.session)return;
+  const ok=await showConfirmDialog({title:t('delete_dir_confirm',name),message:'',confirmLabel:'Delete',danger:true,focusCancel:true});
+  if(!ok)return;
+  try{
+    await api('/api/file/delete',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:relPath,recursive:true})});
+    showToast(t('deleted')+name);
+    // Remove from expanded dirs cache
+    if(S._expandedDirs){S._expandedDirs.delete(relPath);if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();}
+    delete S._dirCache[relPath];
+    await loadDir(S.currentDir);
+  }catch(e){setStatus(t('delete_failed')+e.message);}
+}
+
+function _showFileContextMenu(e, item){
+  document.querySelectorAll('.file-ctx-menu').forEach(el=>el.remove());
+  const menu=document.createElement('div');
+  menu.className='file-ctx-menu';
+  menu.style.cssText='position:fixed;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 0;z-index:9999;min-width:140px;box-shadow:0 4px 16px rgba(0,0,0,.35);';
+  // Keep menu within viewport
+  const vw=window.innerWidth,vh=window.innerHeight;
+  menu.style.left=(e.clientX+140>vw?e.clientX-150:e.clientX)+'px';
+  menu.style.top=(e.clientY+100>vh?e.clientY-100:e.clientY)+'px';
+
+  // Rename
+  const renameItem=document.createElement('div');
+  renameItem.textContent=t('rename_title');
+  renameItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+  renameItem.onmouseenter=()=>renameItem.style.background='var(--hover)';
+  renameItem.onmouseleave=()=>renameItem.style.background='';
+  renameItem.onclick=()=>{menu.remove();_inlineRenameFileItem(item);};
+  menu.appendChild(renameItem);
+
+  // Divider + Delete
+  const sep=document.createElement('hr');
+  sep.style.cssText='border:none;border-top:1px solid var(--border);margin:4px 0;';
+  menu.appendChild(sep);
+  const delItem=document.createElement('div');
+  delItem.textContent=t('delete_title');
+  delItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--error,#e94560);';
+  delItem.onmouseenter=()=>delItem.style.background='var(--hover)';
+  delItem.onmouseleave=()=>delItem.style.background='';
+  delItem.onclick=()=>{menu.remove();if(item.type==='dir')deleteWorkspaceDir(item.path,item.name);else deleteWorkspaceFile(item.path,item.name);};
+  menu.appendChild(delItem);
+
+  document.body.appendChild(menu);
+  const dismiss=()=>{menu.remove();document.removeEventListener('click',dismiss);};
+  setTimeout(()=>document.addEventListener('click',dismiss),0);
+}
+
+async function _inlineRenameFileItem(item){
+  if(!S.session)return;
+  const newName=await showPromptDialog({message:t('rename_prompt'),defaultValue:item.name,placeholder:item.name,confirmLabel:t('rename_title')});
+  if(!newName||newName===item.name)return;
+  try{
+    await api('/api/file/rename',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path,new_name:newName})});
+    showToast(t('renamed_to')+newName);
+    // Update expanded dirs cache key if renaming a directory
+    if(item.type==='dir'&&S._expandedDirs){
+      S._expandedDirs.delete(item.path);
+      const parent=item.path.includes('/')?item.path.substring(0,item.path.lastIndexOf('/')):'.';
+      const newPath=parent==='.'?newName:parent+'/'+newName;
+      S._expandedDirs.add(newPath);
+      if(S._dirCache[item.path]){S._dirCache[newPath]=S._dirCache[item.path];delete S._dirCache[item.path];}
+      if(typeof _saveExpandedDirs==='function')_saveExpandedDirs();
+    }
+    delete S._dirCache[S.currentDir];
+    await loadDir(S.currentDir);
+  }catch(err){showToast(t('rename_failed')+err.message);}
 }
 
 async function deleteWorkspaceFile(relPath, name){
@@ -3175,13 +3853,24 @@ function renderTray(){
   updateSendBtn();
   S.pendingFiles.forEach((f,i)=>{
     const chip=document.createElement('div');chip.className='attach-chip';
-    chip.innerHTML=`${li('paperclip',12)} ${esc(f.name)} <button title="${t('remove_title')}">${li('x',12)}</button>`;
-    chip.querySelector('button').onclick=()=>{S.pendingFiles.splice(i,1);renderTray();};
+    // Image files get a thumbnail preview; other files keep the paperclip chip
+    if(_IMAGE_EXTS.test(f.name)){
+      const blobUrl=URL.createObjectURL(f);
+      chip.className='attach-chip attach-chip--image';
+      chip.dataset.blobUrl=blobUrl;
+      chip.innerHTML=`<img class="attach-thumb" src="${esc(blobUrl)}" alt="${esc(f.name)}" title="${esc(f.name)}"><button title="${t('remove_title')}">${li('x',12)}</button>`;
+    } else {
+      chip.innerHTML=`${li('paperclip',12)} ${esc(f.name)} <button title="${t('remove_title')}">${li('x',12)}</button>`;
+    }
+    chip.querySelector('button').onclick=()=>{
+      // Revoke blob URL to avoid memory leak before removing
+      if(chip.dataset.blobUrl) URL.revokeObjectURL(chip.dataset.blobUrl);
+      S.pendingFiles.splice(i,1);renderTray();
+    };
     tray.appendChild(chip);
   });
 }
 function addFiles(files){for(const f of files){if(!S.pendingFiles.find(p=>p.name===f.name))S.pendingFiles.push(f);}renderTray();}
-
 async function uploadPendingFiles(){
   if(!S.pendingFiles.length||!S.session)return[];
   const names=[];let failures=0;
@@ -3192,17 +3881,27 @@ async function uploadPendingFiles(){
     const f=S.pendingFiles[i];const fd=new FormData();
     fd.append('session_id',S.session.session_id);fd.append('file',f,f.name);
     try{
-      const res=await fetch(new URL('api/upload',location.href).href,{method:'POST',credentials:'include',body:fd});
+      const isArchive=_ARCHIVE_EXTS.test(f.name);
+      const url=new URL(isArchive?'api/upload/extract':'api/upload',location.href).href;
+      const res=await fetch(url,{method:'POST',credentials:'include',body:fd});
       if(_redirectIfUnauth(res)) return;
       if(!res.ok){const err=await res.text();throw new Error(err);}
       const data=await res.json();
       if(data.error)throw new Error(data.error);
-      names.push({name: data.filename, path: data.path});
+      if(isArchive){
+        names.push({name: data.dest, path: data.dest, extracted: data.extracted});
+        if(typeof loadDir==='function')loadDir(S.currentDir||'.');
+      }else{
+        names.push({name: data.filename, path: data.path});
+      }
     }catch(e){failures++;setStatus(`\u274c ${t('upload_failed')}${f.name} \u2014 ${e.message}`);}
     bar.style.width=`${Math.round((i+1)/total*100)}%`;
   }
   barWrap.classList.remove('active');bar.style.width='0%';
   S.pendingFiles=[];renderTray();
   if(failures===total&&total>0)throw new Error(t('all_uploads_failed',total));
+  // Show extraction summary
+  const extracted=names.filter(n=>n.extracted);
+  if(extracted.length)showToast(t('archive_extracted',extracted.reduce((s,n)=>s+n.extracted,0),extracted.length));
   return names;
 }

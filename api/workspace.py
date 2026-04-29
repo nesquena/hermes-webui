@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import subprocess
+import concurrent.futures
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -219,22 +220,158 @@ def set_last_workspace(path: str) -> None:
         logger.debug("Failed to set last workspace")
 
 
+def _safe_resolve(p: Path) -> Path:
+    """Path.resolve() that never raises — falls back to the input path on error."""
+    try:
+        return p.resolve()
+    except (OSError, RuntimeError):
+        return p
+
+
+# Per-user temp directories that sit nominally under a "system" prefix but are
+# actually user-writable scratch space.  Workspaces registered here (e.g. by
+# pytest's ``tmp_path_factory`` on macOS, which uses ``/var/folders/<hash>/T/``)
+# must remain accepted even though their parent (``/var``) is blocked.  These
+# carve-outs apply to BOTH workspace registration and runtime file ops so a
+# symlink target inside the carve-out is also reachable.
+_USER_TMP_PREFIXES: tuple[Path, ...] = (
+    Path('/var/folders'),         # macOS per-user tmp (literal form)
+    Path('/private/var/folders'),  # macOS per-user tmp (resolved form)
+    Path('/var/tmp'),               # Linux/macOS system-wide tmp (user-writable)
+    Path('/private/var/tmp'),       # macOS resolved form
+)
+
+
 def _workspace_blocked_roots() -> tuple[Path, ...]:
-    return (
+    """System roots that must never be accepted as workspace candidates.
+
+    Returns both the literal path and its symlink-resolved canonical form,
+    deduped.  This matters on macOS where ``/etc``, ``/var``, and ``/tmp``
+    are symlinks to ``/private/etc`` etc.  Without the resolved forms,
+    callers that pass a ``.resolve()``-d candidate (every caller does)
+    would compare ``/private/etc`` against literal ``Path('/etc')`` and the
+    ``relative_to`` check would miss — letting ``/etc`` through as a
+    registered workspace on macOS.
+
+    Carve-outs for legitimate user-tmp paths nominally under these roots
+    (e.g. ``/var/folders/.../T/`` on macOS) are handled by
+    :func:`_is_blocked_system_path`, not by exclusion from this list.
+    """
+    _raw = (
         # Linux / macOS
-        Path('/etc'),
-        Path('/usr'),
-        Path('/var'),
-        Path('/bin'),
-        Path('/sbin'),
-        Path('/boot'),
-        Path('/proc'),
-        Path('/sys'),
-        Path('/dev'),
-        Path('/lib'),
-        Path('/lib64'),
-        Path('/opt/homebrew'),
+        '/etc',
+        '/usr',
+        '/var',
+        '/bin',
+        '/sbin',
+        '/boot',
+        '/proc',
+        '/sys',
+        '/dev',
+        '/lib',
+        '/lib64',
+        '/opt/homebrew',
+        '/System',
+        '/Library',
     )
+    _seen: set[Path] = set()
+    _out: list[Path] = []
+    for _p in _raw:
+        for _form in (Path(_p), _safe_resolve(Path(_p))):
+            if _form not in _seen:
+                _seen.add(_form)
+                _out.append(_form)
+    return tuple(_out)
+
+
+def _is_blocked_system_path(candidate: Path) -> bool:
+    """Return True if *candidate* falls under a blocked system root.
+
+    Honours :data:`_USER_TMP_PREFIXES` carve-outs so per-user tmp directories
+    nominally under ``/var`` (``/var/folders`` on macOS, ``/var/tmp`` on
+    Linux/macOS) remain valid workspace candidates and reachable file targets.
+    """
+    for tmp in _USER_TMP_PREFIXES:
+        if _is_within(candidate, tmp):
+            return False
+    for blocked in _workspace_blocked_roots():
+        if _is_within(candidate, blocked):
+            return True
+    return False
+
+
+def _workspace_blocked_resolved_subtrees() -> tuple[Path, ...]:
+    roots = list(_workspace_blocked_roots()) + [Path('/private/etc')]
+    resolved: list[Path] = []
+    for root in roots:
+        try:
+            p = root.expanduser().resolve()
+        except Exception:
+            p = root
+        if p not in resolved:
+            resolved.append(p)
+    return tuple(resolved)
+
+
+def _workspace_blocked_exact_roots() -> tuple[Path, ...]:
+    roots = [Path('/'), Path('/private/var')]
+    for root in _workspace_blocked_roots():
+        try:
+            roots.append(root.expanduser().resolve())
+        except Exception:
+            roots.append(root)
+    unique: list[Path] = []
+    for root in roots:
+        if root not in unique:
+            unique.append(root)
+    return tuple(unique)
+
+
+def _is_blocked_workspace_path(candidate: Path, raw_path: str | Path | None = None) -> bool:
+    """Return True when candidate points at a known OS/system directory.
+
+    Compare both the original spelling and the resolved path.  This closes the
+    macOS /etc -> /private/etc bypass without globally banning temporary pytest
+    paths under /private/var/folders.
+    """
+    raw = None
+    if raw_path not in (None, ""):
+        try:
+            raw = Path(raw_path).expanduser()
+        except Exception:
+            raw = None
+
+    exact = _workspace_blocked_exact_roots()
+    if candidate in exact or (raw is not None and raw in _workspace_blocked_roots()):
+        return True
+
+    for tmp in _USER_TMP_PREFIXES:
+        if _is_within(candidate, tmp) or (raw is not None and _is_within(raw, tmp)):
+            return False
+
+    # Raw paths under literal roots (e.g. /etc/ssh, /var/db) are always blocked.
+    if raw is not None:
+        for blocked in _workspace_blocked_roots():
+            if _is_within(raw, blocked):
+                return True
+
+    # Resolved subtree checks catch symlink aliases such as /private/etc.  The
+    # macOS temp root /private/var/folders is intentionally allowed for pytest
+    # and per-user temporary workspaces; other direct /private/var system data
+    # such as /private/var/db and /private/var/log remains blocked.
+    allowed_private_var = (Path('/private/var/folders'), Path('/private/var/tmp'))
+    for blocked in _workspace_blocked_resolved_subtrees():
+        if blocked == Path('/private/var'):
+            if candidate == blocked:
+                return True
+            if any(_is_within(candidate, allowed) for allowed in allowed_private_var):
+                continue
+            if _is_within(candidate, blocked):
+                return True
+            continue
+        if _is_within(candidate, blocked):
+            return True
+    return False
 
 
 def _is_within(path: Path, root: Path) -> bool:
@@ -257,7 +394,7 @@ def _trusted_workspace_roots() -> list[Path]:
             return
         if not p.exists() or not p.is_dir():
             return
-        if any(_is_within(p, blocked) for blocked in _workspace_blocked_roots()):
+        if _is_blocked_workspace_path(p, candidate):
             return
         if p not in roots:
             roots.append(p)
@@ -385,22 +522,19 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
     if not candidate.is_dir():
         raise ValueError(f"Path is not a directory: {candidate}")
 
-    # Block known system roots and their children
-    for blocked in _workspace_blocked_roots():
-        try:
-            candidate.relative_to(blocked)
-            raise ValueError(f"Path points to a system directory: {candidate}")
-        except ValueError as e:
-            if "system directory" in str(e):
-                raise
-            # relative_to raised ValueError = candidate is NOT under blocked = safe
-
     # (A) Trusted if under the user's home directory — cross-platform via Path.home()
-    try:
-        candidate.relative_to(Path.home().resolve())
-        return candidate
-    except ValueError:
-        pass
+    # Must be checked before system roots to allow symlinks like /var/home.
+    _home = Path.home().resolve()
+    if _home != Path("/"):
+        try:
+            candidate.relative_to(_home)
+            return candidate
+        except ValueError:
+            pass
+
+    # Block known system roots and their children.
+    if _is_blocked_workspace_path(candidate, path):
+        raise ValueError(f"Path points to a system directory: {candidate}")
 
     # (B) Trusted if already in the saved workspace list — covers non-home installs
     try:
@@ -449,21 +583,47 @@ def validate_workspace_to_add(path: str) -> Path:
     if not candidate.is_dir():
         raise ValueError(f"Path is not a directory: {candidate}")
 
-    # Block known system roots and their immediate children
-    for blocked in _workspace_blocked_roots():
-        try:
-            candidate.relative_to(blocked)
-            raise ValueError(f"Path points to a system directory: {candidate}")
-        except ValueError as e:
-            if "system directory" in str(e):
-                raise
+    # Home directory is always trusted regardless of where it lives on disk
+    # (e.g. /var/home/... on systemd-homed Fedora/RHEL).
+    _home = Path.home().resolve()
+    if _home != Path("/") and _is_within(candidate, _home):
+        return candidate
+
+    # Block known system roots and their immediate children.
+    if _is_blocked_workspace_path(candidate, path):
+        raise ValueError(f"Path points to a system directory: {candidate}")
 
     return candidate
 
 def safe_resolve_ws(root: Path, requested: str) -> Path:
-    """Resolve a relative path inside a workspace root, raising ValueError on traversal."""
-    resolved = (root / requested).resolve()
-    resolved.relative_to(root.resolve())
+    """Resolve a relative path inside a workspace root, raising ValueError on traversal.
+
+    Symlinks whose *unresolved* path is within the workspace root are allowed —
+    the user placed them there intentionally.  Only raw ``..`` traversal outside
+    the root is blocked.
+    """
+    import os
+    unresolved = root / requested
+    resolved = unresolved.resolve()
+    # Fast path: resolved path is inside root (covers most cases)
+    try:
+        resolved.relative_to(root.resolve())
+        return resolved
+    except ValueError:
+        pass
+    # Symlink path: normalize '..' (without following symlinks) and check
+    # os.path.normpath collapses '..' but does NOT follow symlinks.
+    norm = Path(os.path.normpath(str(unresolved)))
+    try:
+        norm.relative_to(root)
+    except ValueError:
+        raise ValueError(f"Path traversal blocked: {requested}")
+    # Symlink points outside workspace root — additionally block system directories.
+    # Even if the user placed the symlink intentionally, prevent reads from
+    # /etc, /proc, /sys, /dev and other blocked roots (LLM agents can call
+    # read_file_content via tool calls, not just human users).
+    if _is_blocked_system_path(resolved):
+        raise ValueError(f"Path traversal blocked (system dir): {requested}")
     return resolved
 
 
@@ -471,14 +631,60 @@ def list_dir(workspace: Path, rel: str='.'):
     target = safe_resolve_ws(workspace, rel)
     if not target.is_dir():
         raise FileNotFoundError(f"Not a directory: {rel}")
+    ws_resolved = workspace.resolve()
     entries = []
-    for item in sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name.lower())):
-        entries.append({
-            'name': item.name,
-            'path': str(item.relative_to(workspace)),
-            'type': 'dir' if item.is_dir() else 'file',
-            'size': item.stat().st_size if item.is_file() else None,
-        })
+    for item in sorted(target.iterdir(), key=lambda p: (not p.is_symlink(), p.is_file(), p.name.lower())):
+        if item.is_symlink():
+            # Resolve the symlink target and check if it stays within workspace
+            try:
+                link_target = item.resolve()
+            except OSError:
+                continue
+            # Cycle detection: skip if symlink points back to current dir,
+            # workspace root, or any ancestor of current dir.
+            # This must run REGARDLESS of whether target is inside workspace.
+            if (link_target == target.resolve() or link_target == target
+                    or link_target == ws_resolved):
+                continue
+            try:
+                target.resolve().relative_to(link_target)
+                # target is under link_target — link_target is an ancestor → cycle
+                continue
+            except ValueError:
+                pass
+            # Block symlinks that resolve to system directories.
+            if _is_blocked_system_path(link_target):
+                continue
+            is_dir = link_target.is_dir()
+            # Keep the display path relative to workspace (don't follow the link)
+            display_path = str(Path(item.name))
+            if rel and rel != '.':
+                display_path = rel + '/' + display_path
+            entry = {
+                'name': item.name,
+                'path': display_path,
+                'type': 'symlink',
+                'target': str(link_target),
+                'is_dir': is_dir,
+            }
+            if not is_dir:
+                try:
+                    entry['size'] = link_target.stat().st_size
+                except OSError:
+                    entry['size'] = None
+            entries.append(entry)
+        else:
+            # Use rel-based path so entries under symlink targets (outside
+            # the workspace root) still get a valid workspace-relative path.
+            entry_path = item.name
+            if rel and rel != '.':
+                entry_path = rel + '/' + item.name
+            entries.append({
+                'name': item.name,
+                'path': entry_path,
+                'type': 'dir' if item.is_dir() else 'file',
+                'size': item.stat().st_size if item.is_file() else None,
+            })
         if len(entries) >= 200:
             break
     return entries
@@ -516,22 +722,35 @@ def git_info_for_workspace(workspace: Path) -> dict:
     branch = _run_git(['rev-parse', '--abbrev-ref', 'HEAD'], workspace)
     if branch is None:
         return None
-    # Status counts
-    status_out = _run_git(['status', '--porcelain'], workspace) or ''
-    lines = [l for l in status_out.splitlines() if l]
-    # git status --porcelain: XY format where X=index, Y=worktree
-    modified = sum(1 for l in lines if len(l) >= 2 and (l[0] in 'MAR' or l[1] in 'MAR'))
-    untracked = sum(1 for l in lines if l.startswith('??'))
-    dirty = len(lines)
-    # Ahead/behind
-    ahead = _run_git(['rev-list', '--count', '@{u}..HEAD'], workspace)
-    behind = _run_git(['rev-list', '--count', 'HEAD..@{u}'], workspace)
+    # Run the remaining git commands in parallel via threads — they are
+    # independent subprocess calls and together can take 50-200ms when run
+    # serially.  Threading is safe here because each call blocks only on the
+    # subprocess pipe, not on the GIL.
+    def _ahead():
+        r = _run_git(['rev-list', '--count', '@{u}..HEAD'], workspace)
+        return int(r) if r and r.isdigit() else 0
+    def _behind():
+        r = _run_git(['rev-list', '--count', 'HEAD..@{u}'], workspace)
+        return int(r) if r and r.isdigit() else 0
+    def _status():
+        out = _run_git(['status', '--porcelain'], workspace) or ''
+        lines = [l for l in out.splitlines() if l]
+        modified = sum(1 for l in lines if len(l) >= 2 and (l[0] in 'MAR' or l[1] in 'MAR'))
+        untracked = sum(1 for l in lines if l.startswith('??'))
+        return len(lines), modified, untracked
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        f_status = pool.submit(_status)
+        f_ahead  = pool.submit(_ahead)
+        f_behind = pool.submit(_behind)
+        dirty, modified, untracked = f_status.result()
+        ahead  = f_ahead.result()
+        behind = f_behind.result()
     return {
         'branch': branch,
         'dirty': dirty,
         'modified': modified,
         'untracked': untracked,
-        'ahead': int(ahead) if ahead and ahead.isdigit() else 0,
-        'behind': int(behind) if behind and behind.isdigit() else 0,
+        'ahead': ahead,
+        'behind': behind,
         'is_git': True,
     }

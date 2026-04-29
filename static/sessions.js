@@ -16,7 +16,13 @@ const ICONS={
 let _loadingSessionId = null;
 
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
+const SESSION_COMPLETION_UNREAD_KEY = 'hermes-session-completion-unread';
+const SESSION_OBSERVED_STREAMING_KEY = 'hermes-session-observed-streaming';
 let _sessionViewedCounts = null;
+let _sessionCompletionUnread = null;
+let _sessionObservedStreaming = null;
+const _sessionStreamingById = new Map();
+const _sessionListSnapshotById = new Map();
 
 function _getSessionViewedCounts() {
   if (_sessionViewedCounts !== null) return _sessionViewedCounts;
@@ -45,8 +51,87 @@ function _setSessionViewedCount(sid, messageCount = 0) {
   _saveSessionViewedCounts();
 }
 
+function _getSessionCompletionUnread() {
+  if (_sessionCompletionUnread !== null) return _sessionCompletionUnread;
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SESSION_COMPLETION_UNREAD_KEY) || '{}');
+    _sessionCompletionUnread = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_){
+    _sessionCompletionUnread = {};
+  }
+  return _sessionCompletionUnread;
+}
+
+function _saveSessionCompletionUnread() {
+  try {
+    localStorage.setItem(SESSION_COMPLETION_UNREAD_KEY, JSON.stringify(_getSessionCompletionUnread()));
+  } catch (_){
+    // Ignore localStorage write failures.
+  }
+}
+
+function _markSessionCompletionUnread(sid, messageCount = 0) {
+  if (!sid) return;
+  const unread = _getSessionCompletionUnread();
+  const count = Number.isFinite(messageCount) ? Number(messageCount) : 0;
+  unread[sid] = {message_count: count, completed_at: Date.now()};
+  _saveSessionCompletionUnread();
+}
+
+function _clearSessionCompletionUnread(sid) {
+  if (!sid) return;
+  const unread = _getSessionCompletionUnread();
+  if (!Object.prototype.hasOwnProperty.call(unread, sid)) return;
+  delete unread[sid];
+  _saveSessionCompletionUnread();
+}
+
+function _hasSessionCompletionUnread(sid) {
+  if (!sid) return false;
+  return Object.prototype.hasOwnProperty.call(_getSessionCompletionUnread(), sid);
+}
+
+function _getSessionObservedStreaming() {
+  if (_sessionObservedStreaming !== null) return _sessionObservedStreaming;
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SESSION_OBSERVED_STREAMING_KEY) || '{}');
+    _sessionObservedStreaming = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_){
+    _sessionObservedStreaming = {};
+  }
+  return _sessionObservedStreaming;
+}
+
+function _saveSessionObservedStreaming() {
+  try {
+    localStorage.setItem(SESSION_OBSERVED_STREAMING_KEY, JSON.stringify(_getSessionObservedStreaming()));
+  } catch (_){
+    // Ignore localStorage write failures.
+  }
+}
+
+function _rememberObservedStreamingSession(s) {
+  if (!s || !s.session_id) return;
+  const observed = _getSessionObservedStreaming();
+  observed[s.session_id] = {
+    message_count: Number(s.message_count || 0),
+    last_message_at: Number(s.last_message_at || 0),
+    observed_at: Date.now(),
+  };
+  _saveSessionObservedStreaming();
+}
+
+function _forgetObservedStreamingSession(sid) {
+  if (!sid) return;
+  const observed = _getSessionObservedStreaming();
+  if (!Object.prototype.hasOwnProperty.call(observed, sid)) return;
+  delete observed[sid];
+  _saveSessionObservedStreaming();
+}
+
 function _hasUnreadForSession(s) {
   if (!s || !s.session_id) return false;
+  if (_hasSessionCompletionUnread(s.session_id)) return true;
   const counts = _getSessionViewedCounts();
   if (!Object.prototype.hasOwnProperty.call(counts, s.session_id)) {
     _setSessionViewedCount(s.session_id, Number(s.message_count || 0));
@@ -54,6 +139,126 @@ function _hasUnreadForSession(s) {
   }
   if (!Number.isFinite(s.message_count)) return false;
   return s.message_count > Number(counts[s.session_id] || 0);
+}
+
+function _isSessionActivelyViewedForList(sid) {
+  if (!sid || !S.session || S.session.session_id !== sid) return false;
+  if (typeof _loadingSessionId !== 'undefined' && _loadingSessionId && _loadingSessionId !== sid) return false;
+  if (typeof document !== 'undefined' && document.visibilityState && document.visibilityState !== 'visible') return false;
+  if (typeof document !== 'undefined' && typeof document.hasFocus === 'function' && !document.hasFocus()) return false;
+  return true;
+}
+
+function _isSessionLocallyStreaming(s) {
+  if (!s || !s.session_id) return false;
+  const isActive = S.session && s.session_id === S.session.session_id;
+  return Boolean(
+    (isActive && S.busy)
+    || (typeof INFLIGHT === 'object' && INFLIGHT && INFLIGHT[s.session_id])
+  );
+}
+
+function _isSessionEffectivelyStreaming(s) {
+  return Boolean(s && (s.is_streaming || _isSessionLocallyStreaming(s)));
+}
+
+function _rememberRenderedStreamingState(s, isStreaming) {
+  if (!s || !s.session_id || !isStreaming) return;
+  _sessionStreamingById.set(s.session_id, true);
+  _rememberObservedStreamingSession(s);
+}
+
+function _rememberRenderedSessionSnapshot(s) {
+  if (!s || !s.session_id) return;
+  const previous = _sessionListSnapshotById.get(s.session_id);
+  if (previous) return;
+  _sessionListSnapshotById.set(s.session_id, {
+    message_count: Number(s.message_count || 0),
+    last_message_at: Number(s.last_message_at || 0),
+  });
+}
+
+function _markSessionCompletedInList(session, previousSid = null) {
+  if (!session || !Array.isArray(_allSessions)) return;
+  const finalSid = session.session_id || previousSid;
+  if (!finalSid) return;
+  const idx = _allSessions.findIndex(s => s && (s.session_id === finalSid || s.session_id === previousSid));
+  if (idx < 0) return;
+  const {messages: _messages, tool_calls: _toolCalls, ...sessionMeta} = session;
+  const messageCount = Number(
+    session.message_count != null
+      ? session.message_count
+      : (Array.isArray(session.messages) ? session.messages.length : (_allSessions[idx].message_count || 0))
+  );
+  const lastMessageAt = Number(session.last_message_at || session.updated_at || _allSessions[idx].last_message_at || 0);
+  _allSessions[idx] = {
+    ..._allSessions[idx],
+    ...sessionMeta,
+    session_id: finalSid,
+    message_count: messageCount,
+    last_message_at: lastMessageAt,
+    active_stream_id: null,
+    pending_user_message: null,
+    pending_started_at: null,
+    is_streaming: false,
+  };
+  _sessionStreamingById.set(finalSid, false);
+  _forgetObservedStreamingSession(finalSid);
+  if (previousSid && previousSid !== finalSid) {
+    _sessionStreamingById.delete(previousSid);
+    _forgetObservedStreamingSession(previousSid);
+    _sessionListSnapshotById.delete(previousSid);
+  }
+  _sessionListSnapshotById.set(finalSid, {
+    message_count: messageCount,
+    last_message_at: lastMessageAt,
+  });
+  renderSessionListFromCache();
+}
+
+function _markPollingCompletionUnreadTransitions(sessions) {
+  if (!Array.isArray(sessions)) return;
+  const seen = new Set();
+  for (const s of sessions) {
+    if (!s || !s.session_id) continue;
+    const sid = s.session_id;
+    seen.add(sid);
+    const wasStreaming = _sessionStreamingById.get(sid);
+    const isStreaming = _isSessionEffectivelyStreaming(s);
+    const previousSnapshot = _sessionListSnapshotById.get(sid);
+    const observedStreaming = _getSessionObservedStreaming()[sid];
+    const messageCount = Number(s.message_count || 0);
+    const lastMessageAt = Number(s.last_message_at || 0);
+    const completedObservedStream = wasStreaming === true && !isStreaming;
+    const completedWithNewMessages = Boolean(
+      (previousSnapshot || observedStreaming)
+      && !isStreaming
+      && (
+        messageCount > Number((previousSnapshot || observedStreaming).message_count || 0)
+        || lastMessageAt > Number((previousSnapshot || observedStreaming).last_message_at || 0)
+      )
+    );
+    const completedPersistedObservedStream = Boolean(observedStreaming && !isStreaming);
+    if ((completedObservedStream || completedPersistedObservedStream || completedWithNewMessages) && !_isSessionActivelyViewedForList(sid)) {
+      _markSessionCompletionUnread(sid, s.message_count);
+    }
+    _sessionStreamingById.set(sid, isStreaming);
+    if (isStreaming) {
+      _rememberObservedStreamingSession(s);
+    } else {
+      _forgetObservedStreamingSession(sid);
+    }
+    _sessionListSnapshotById.set(sid, {
+      message_count: messageCount,
+      last_message_at: lastMessageAt,
+    });
+  }
+  for (const sid of Array.from(_sessionStreamingById.keys())) {
+    if (!seen.has(sid)) _sessionStreamingById.delete(sid);
+  }
+  for (const sid of Array.from(_sessionListSnapshotById.keys())) {
+    if (!seen.has(sid)) _sessionListSnapshotById.delete(sid);
+  }
 }
 
 async function newSession(flash){
@@ -89,7 +294,6 @@ async function newSession(flash){
   S.busy=false;
   S.activeStreamId=null;
   updateSendBtn();
-  const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
   setStatus('');
   setComposerStatus('');
   updateQueueBadge(S.session.session_id);
@@ -102,6 +306,7 @@ async function loadSession(sid){
   // will overwrite this; stale awaits use the mismatch to bail out (#1060).
   _loadingSessionId = sid;
   stopApprovalPolling();hideApprovalCard();
+  _yoloEnabled=false;_updateYoloPill();
   if(typeof stopClarifyPolling==='function') stopClarifyPolling();
   if(typeof hideClarifyCard==='function') hideClarifyCard();
   // Show loading indicator immediately for responsiveness.
@@ -117,6 +322,9 @@ async function loadSession(sid){
   if (currentSid !== sid) {
     S.messages = [];
     S.toolCalls = [];
+    _messagesTruncated = false;
+    _oldestIdx = 0;
+    _loadingOlder = false;
     const _msgInner = $('msgInner');
     if (_msgInner) _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
   }
@@ -144,6 +352,7 @@ async function loadSession(sid){
   S.session._modelResolutionDeferred=true;
   S.lastUsage={...(data.session.last_usage||{})};
   _setSessionViewedCount(S.session.session_id, Number(data.session.message_count || 0));
+  _clearSessionCompletionUnread(S.session.session_id);
   localStorage.setItem('hermes-webui-session',S.session.session_id);
 
   const activeStreamId=S.session.active_stream_id||null;
@@ -176,8 +385,8 @@ async function loadSession(sid){
     setBusy(true);setComposerStatus('');
     startApprovalPolling(sid);
     if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
+    if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
     S.activeStreamId=activeStreamId;
-    const _cb=$('btnCancel');if(_cb&&activeStreamId)_cb.style.display='inline-flex';
     if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function'){
       INFLIGHT[sid].reattach=false;
       if (_loadingSessionId !== sid) return;
@@ -246,24 +455,28 @@ async function loadSession(sid){
       S.busy=true;
       S.activeStreamId=activeStreamId;
       updateSendBtn();
-      const _cb=$('btnCancel');if(_cb)_cb.style.display='inline-flex';
       setStatus('');
       setComposerStatus('');
       syncTopbar();renderMessages();appendThinking();loadDir('.');
       updateQueueBadge(sid);
       startApprovalPolling(sid);
       if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
+      if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
       if(typeof attachLiveStream==='function') attachLiveStream(sid, activeStreamId, S.session.pending_attachments||[], {reconnecting:true});
       else if(typeof watchInflightSession==='function') watchInflightSession(sid, activeStreamId);
     }else{
       S.busy=false;
       S.activeStreamId=null;
       updateSendBtn();
-      const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
       setStatus('');
       setComposerStatus('');
       updateQueueBadge(sid);
-      syncTopbar();renderMessages();highlightCode();loadDir('.');
+      syncTopbar();renderMessages();
+      // Kick off loadDir first (issues network requests), then highlight code.
+      // The fetch is dispatched before the CPU-bound Prism pass begins.
+      const _dirP=loadDir('.');
+      highlightCode();
+      await _dirP;
     }
   }
 
@@ -302,17 +515,28 @@ function _resolveSessionModelForDisplaySoon(sid){
   },0);
 }
 
+// Tracks whether the current session has older messages that were not
+// loaded during the initial paginated fetch (msg_limit window).
+// When true, scrolling to the top triggers _loadOlderMessages().
+let _messagesTruncated = false;
+
 // Load session messages if not already present.
 // Called after loadSession fetches metadata (messages=0).
 // Idempotent: if messages are already in S.messages, resolves immediately.
 // Handles streaming sessions specially: restores from INFLIGHT cache or API.
+// msg_limit (default 30): only fetch the last N messages for fast switching.
+// Older messages are loaded on-demand via _loadOlderMessages().
+const _INITIAL_MSG_LIMIT = 30;
+
 async function _ensureMessagesLoaded(sid) {
   // Already have messages? (e.g. from INFLIGHT restore path, already set)
   if (S.messages && S.messages.length > 0 && S.messages[0] && S.messages[0].role) {
     return;
   }
-  // Fetch full session with messages
-  const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`);
+  // Fetch session messages with a tail window for fast initial load.
+  const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=${_INITIAL_MSG_LIMIT}`);
+  _messagesTruncated = !!data.session._messages_truncated;
+  _oldestIdx = data.session._messages_offset || 0;
   const msgs = (data.session.messages || []).filter(m => m && m.role);
   // Check for tool-call metadata on messages (for tool-call card rendering)
   const hasMessageToolMetadata = msgs.some(m => {
@@ -332,6 +556,75 @@ async function _ensureMessagesLoaded(sid) {
     S.session.message_count=Number(data.session.message_count || msgs.length);
     S.lastUsage={...(data.session.last_usage||S.lastUsage||{})};
     _setSessionViewedCount(sid, Number(S.session.message_count || msgs.length));
+  }
+}
+
+// Load older messages when the user scrolls to the top of the conversation.
+// Prepends them to S.messages and re-renders, preserving scroll position.
+let _loadingOlder = false;
+// _oldestIdx tracks the index (in the server's full message array) of the
+// oldest message currently loaded in S.messages. Starts at 0 when all
+// messages are loaded, or > 0 when truncated by msg_limit.
+let _oldestIdx = 0;
+
+async function _loadOlderMessages() {
+  if (_loadingOlder || !_messagesTruncated) return;
+  const sid = S.session ? S.session.session_id : null;
+  if (!sid || !S.messages.length) return;
+  if (_oldestIdx <= 0) { _messagesTruncated = false; return; }
+  _loadingOlder = true;
+  try {
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`);
+    // Cancellation guards:
+    //  - response shape sane
+    //  - the active session is still the one we issued the request for.
+    //    Compare against S.session.session_id, NOT _loadingSessionId — the
+    //    latter is null between session loads, leaving a window where a
+    //    stale response could prepend onto the new session's S.messages.
+    if (!data || !data.session) return;
+    if (!S.session || S.session.session_id !== sid) return;
+    if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
+    const olderMsgs = (data.session.messages || []).filter(m => m && m.role);
+    if (!olderMsgs.length) { _messagesTruncated = false; return; }
+    // Prepend older messages
+    // Use $('messages') — the scrollable container (#msgInner is not scrollable).
+    const container = $('messages');
+    const prevScrollH = container ? container.scrollHeight : 0;
+    S.messages = [...olderMsgs, ...S.messages];
+    _messagesTruncated = !!data.session._messages_truncated;
+    _oldestIdx = data.session._messages_offset || 0;
+    renderMessages();
+    // Restore scroll position so the user stays at the same message.
+    // renderMessages() calls scrollToBottom() at the end, so we must
+    // counter-scroll to where the user was before loading older messages.
+    if (container) {
+      const newScrollH = container.scrollHeight;
+      container.scrollTop = newScrollH - prevScrollH;
+    }
+    // renderMessages() called scrollToBottom() which set _scrollPinned=true.
+    // We just restored the user's scroll position, so mark as not pinned.
+    _scrollPinned = false;
+  } catch(e) {
+    console.warn('_loadOlderMessages failed:', e);
+  } finally {
+    // Always clear the loading lock. If the user switched sessions while
+    // this request was in flight, loadSession() already set _loadingOlder=false
+    // (see line ~122), so this is a harmless double-reset.
+    _loadingOlder = false;
+  }
+}
+
+// Ensure the full message history is loaded (for undo, export, etc).
+// If the session was loaded with msg_limit, this fetches all messages.
+async function _ensureAllMessagesLoaded() {
+  if (!_messagesTruncated || !S.session) return;
+  const sid = S.session.session_id;
+  const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0`);
+  const msgs = (data.session.messages || []).filter(m => m && m.role);
+  S.messages = msgs;
+  _messagesTruncated = false;
+  if(S.session && S.session.session_id === sid){
+    S.session.message_count = Number(data.session.message_count || msgs.length);
   }
 }
 
@@ -509,6 +802,17 @@ async function renderSessionList(){
     ]);
     _allSessions = sessData.sessions||[];
     _allProjects = projData.projects||[];
+    // Capture server clock for clock-skew compensation (issue #1144).
+    // server_time is epoch seconds from the server's time.time().
+    // _serverTimeDelta = client - server, so (Date.now() - _serverTimeDelta)
+    // gives an approximation of the current server time.
+    if (typeof sessData.server_time === 'number' && sessData.server_time > 0) {
+      _serverTimeDelta = Date.now() - (sessData.server_time * 1000);
+    }
+    if (typeof sessData.server_tz === 'string') {
+      _serverTz = sessData.server_tz;
+    }
+    _markPollingCompletionUnreadTransitions(_allSessions);
     const isStreaming = _allSessions.some(s => Boolean(s && s.is_streaming));
     if (isStreaming) {
       startStreamingPoll();
@@ -653,6 +957,8 @@ function stopGatewaySSE(){
 
 let _searchDebounceTimer = null;
 let _contentSearchResults = [];  // results from /api/sessions/search content scan
+let _serverTimeDelta = 0;       // ms offset: client clock - server clock (for clock-skew compensation)
+let _serverTz = '';              // server timezone offset string (e.g. "+0800", "+0000", "-0500")
 
 function filterSessions(){
   // Immediate client-side title filter (no flicker)
@@ -676,12 +982,58 @@ function _sessionTimestampMs(session) {
   return Number.isFinite(raw) ? raw * 1000 : 0;
 }
 
+function _serverNowMs() {
+  // Compensate for clock skew between client and server (issue #1144).
+  // Returns an approximation of the current server time in ms.
+  return Date.now() - _serverTimeDelta;
+}
+
+function _serverTzOptions() {
+  // Build a timeZone option from _serverTz (e.g. "+0800" → "Etc/GMT-8").
+  // Falls back to undefined (uses browser timezone) when:
+  //   - _serverTz is not set or is UTC (no offset to apply)
+  //   - _serverTz is malformed
+  //   - _serverTz has a fractional-hour component (India +0530, Iran +0330,
+  //     Newfoundland -0330, Nepal +0545, etc.) — IANA Etc/GMT zones cannot
+  //     express half/quarter-hour offsets; use _formatInServerTz() instead
+  //     for correct fractional-offset formatting.
+  if (!_serverTz || _serverTz === '+0000' || _serverTz === '-0000') return undefined;
+  const m = _serverTz.match(/^([+-])(\d{2})(\d{2})$/);
+  if (!m) return undefined;
+  if (m[3] !== '00') return undefined;  // fractional offset — caller must use _formatInServerTz
+  // IANA Etc/GMT uses inverted sign: UTC+8 → "Etc/GMT-8"
+  const sign = m[1] === '+' ? '-' : '+';
+  return { timeZone: `Etc/GMT${sign}${parseInt(m[2])}` };
+}
+
+function _formatInServerTz(date, options) {
+  // Format `date` in the server's wall-clock timezone, including correct
+  // handling of fractional-hour offsets that Etc/GMT cannot express.
+  //
+  // Strategy: shift the timestamp by the server's offset, then format with
+  // timeZone:'UTC' so no further conversion is applied — the formatted
+  // output reads as the wall-clock time in the server's timezone.
+  //
+  // Falls back to plain `date.toLocaleString(undefined, options)` (browser
+  // timezone) when _serverTz is absent, UTC, or malformed.
+  if (!_serverTz || _serverTz === '+0000' || _serverTz === '-0000') {
+    return date.toLocaleString(undefined, options);
+  }
+  const m = _serverTz.match(/^([+-])(\d{2})(\d{2})$/);
+  if (!m) return date.toLocaleString(undefined, options);
+  const sign = m[1] === '+' ? 1 : -1;
+  const offsetMin = sign * (parseInt(m[2]) * 60 + parseInt(m[3]));
+  const adjusted = new Date(date.getTime() + offsetMin * 60 * 1000);
+  return adjusted.toLocaleString(undefined, { ...options, timeZone: 'UTC' });
+}
+
 function _localDayOrdinal(timestampMs) {
   const date = new Date(timestampMs);
   return Math.floor(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / 86400000);
 }
 
-function _sessionCalendarBoundaries(nowMs = Date.now()) {
+function _sessionCalendarBoundaries(nowMs) {
+  nowMs = nowMs || _serverNowMs();
   const now = new Date(nowMs);
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const startOfYesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
@@ -697,7 +1049,8 @@ function _sessionCalendarBoundaries(nowMs = Date.now()) {
   };
 }
 
-function _formatSessionDate(timestampMs, nowMs = Date.now()) {
+function _formatSessionDate(timestampMs, nowMs) {
+  nowMs = nowMs || _serverNowMs();
   const date = new Date(timestampMs);
   const now = new Date(nowMs);
   const options = {month:'short', day:'numeric'};
@@ -705,8 +1058,9 @@ function _formatSessionDate(timestampMs, nowMs = Date.now()) {
   return date.toLocaleDateString(undefined, options);
 }
 
-function _formatRelativeSessionTime(timestampMs, nowMs = Date.now()) {
+function _formatRelativeSessionTime(timestampMs, nowMs) {
   if (!timestampMs) return t('session_time_unknown');
+  nowMs = nowMs || _serverNowMs();
   const diffMs = Math.max(0, nowMs - timestampMs);
   const minute = 60 * 1000;
   const hour = 60 * minute;
@@ -727,8 +1081,9 @@ function _formatRelativeSessionTime(timestampMs, nowMs = Date.now()) {
   return _formatSessionDate(timestampMs, nowMs);
 }
 
-function _sessionTimeBucketLabel(timestampMs, nowMs = Date.now()) {
+function _sessionTimeBucketLabel(timestampMs, nowMs) {
   if (!timestampMs) return t('session_time_bucket_older');
+  nowMs = nowMs || _serverNowMs();
   const {startOfToday, startOfYesterday, startOfWeek, startOfLastWeek} = _sessionCalendarBoundaries(nowMs);
   if (timestampMs >= startOfToday) return t('session_time_bucket_today');
   if (timestampMs >= startOfYesterday) return t('session_time_bucket_yesterday');
@@ -746,10 +1101,15 @@ function renderSessionListFromCache(){
   // Merge content matches (deduped): content matches appended after title matches
   const titleIds=new Set(titleMatches.map(s=>s.session_id));
   const allMatched=q?[...titleMatches,..._contentSearchResults.filter(s=>!titleIds.has(s.session_id))]:titleMatches;
+  // Never surface ephemeral 0-message sessions in the sidebar — they only become
+  // real once the first message is sent. The server already filters them, but this
+  // guard ensures a brand-new active session doesn't flash into the list while
+  // _allSessions is stale from a prior render (#1171).
+  const withMessages=allMatched.filter(s=>(s.message_count||0)>0 || (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0));
   // Filter by active profile (unless "All profiles" is toggled on)
   // Server backfills profile='default' for legacy sessions, so every session has a profile.
   // Show only sessions tagged to the active profile; 'All profiles' toggle overrides.
-  const profileFiltered=_showAllProfiles?allMatched:allMatched.filter(s=>s.is_cli_session||s.profile===S.activeProfile);
+  const profileFiltered=_showAllProfiles?withMessages:withMessages.filter(s=>s.is_cli_session||s.profile===S.activeProfile);
   // Filter by active project
   const projectFiltered=_activeProject?profileFiltered.filter(s=>s.project_id===_activeProject):profileFiltered;
   // Filter archived unless toggle is on
@@ -779,9 +1139,13 @@ function renderSessionListFromCache(){
       const nameSpan=document.createElement('span');
       nameSpan.textContent=p.name;
       chip.appendChild(nameSpan);
-      chip.onclick=()=>{_activeProject=p.project_id;renderSessionListFromCache();};
-      chip.ondblclick=(e)=>{e.stopPropagation();_startProjectRename(p,chip);};
-      chip.oncontextmenu=(e)=>{e.preventDefault();_confirmDeleteProject(p);};
+      let _pClickTimer=null;
+      chip.onclick=(e)=>{
+        clearTimeout(_pClickTimer);
+        _pClickTimer=setTimeout(()=>{_pClickTimer=null;_activeProject=p.project_id;renderSessionListFromCache();},220);
+      };
+      chip.ondblclick=(e)=>{e.stopPropagation();clearTimeout(_pClickTimer);_pClickTimer=null;_startProjectRename(p,chip);};
+      chip.oncontextmenu=(e)=>{e.preventDefault();_showProjectContextMenu(e,p,chip);};
       bar.appendChild(chip);
     }
     // Create button
@@ -794,7 +1158,7 @@ function renderSessionListFromCache(){
     list.appendChild(bar);
   }
   // Profile filter toggle (show sessions from other profiles)
-  const otherProfileCount=allMatched.filter(s=>s.profile&&s.profile!==S.activeProfile).length;
+  const otherProfileCount=withMessages.filter(s=>s.profile&&s.profile!==S.activeProfile).length;
   if(otherProfileCount>0&&!_showAllProfiles){
     const pfToggle=document.createElement('div');
     pfToggle.style.cssText='font-size:10px;padding:4px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.7;';
@@ -828,7 +1192,7 @@ function renderSessionListFromCache(){
   const pinned=orderedSessions.filter(s=>s.pinned);
   const unpinned=orderedSessions.filter(s=>!s.pinned);
   // Date grouping: Pinned / Today / Yesterday / This week / Last week / Older
-  const now=Date.now();
+  const now=_serverNowMs();
   // Collapse state persisted in localStorage
   let _groupCollapsed={};
   try{_groupCollapsed=JSON.parse(localStorage.getItem('hermes-date-groups-collapsed')||'{}');}catch(e){}
@@ -878,14 +1242,9 @@ function renderSessionListFromCache(){
   function _renderOneSession(s, isPinnedGroup=false){
     const el=document.createElement('div');
     const isActive=S.session&&s.session_id===S.session.session_id;
-    const isLocalStreaming=Boolean(
-      s.session_id
-      && (
-        (isActive&&S.busy)
-        || (typeof INFLIGHT==='object'&&INFLIGHT&&INFLIGHT[s.session_id])
-      )
-    );
-    const isStreaming=Boolean(s.is_streaming||isLocalStreaming);
+    const isStreaming=_isSessionEffectivelyStreaming(s);
+    _rememberRenderedStreamingState(s, isStreaming);
+    _rememberRenderedSessionSnapshot(s);
     const hasUnread=_hasUnreadForSession(s)&&!isActive;
     el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(isStreaming?' streaming':'')+(hasUnread?' unread':'');
     if(isActive&&S.session&&S.session._flash)delete S.session._flash;
@@ -916,6 +1275,21 @@ function renderSessionListFromCache(){
     ts.className='session-time'+(hasAttentionState?' is-hidden':'');
     ts.textContent=hasAttentionState?'':_formatRelativeSessionTime(tsMs);
     titleRow.appendChild(title);
+    // Project color dot: placed BETWEEN title and timestamp, not inside the
+    // title span. Inside the title span it would be clipped by the ellipsis
+    // truncation, becoming invisible exactly when the title is long enough
+    // to need the project marker. As a flex-flow sibling it stays visible
+    // regardless of title length and sits next to the timestamp on the right.
+    if(s.project_id){
+      const proj=_allProjects.find(p=>p.project_id===s.project_id);
+      if(proj){
+        const dot=document.createElement('span');
+        dot.className='session-project-dot';
+        dot.style.background=proj.color||'var(--blue)';
+        dot.title=proj.name;
+        titleRow.appendChild(dot);
+      }
+    }
     titleRow.appendChild(ts);
     sessionText.appendChild(titleRow);
     const density=(window._sidebarDensity==='detailed'?'detailed':'compact');
@@ -951,25 +1325,49 @@ function renderSessionListFromCache(){
     const startRename=()=>{
       closeSessionActionMenu();
       _renamingSid = s.session_id;
+      const oldTitle=s.title||'Untitled';
       const inp=document.createElement('input');
       inp.className='session-title-input';
-      inp.value=s.title||'Untitled';
+      inp.value=oldTitle;
       ['click','mousedown','dblclick','pointerdown'].forEach(ev=>
         inp.addEventListener(ev, e2=>e2.stopPropagation())
       );
+      const applyTitle=(nextTitle, updateDom=true)=>{
+        if(updateDom) title.textContent=nextTitle;
+        s.title=nextTitle;
+        const cached=_allSessions.find(item=>item&&item.session_id===s.session_id);
+        if(cached) cached.title=nextTitle;
+        if(S.session&&S.session.session_id===s.session_id){S.session.title=nextTitle;syncTopbar();}
+      };
+      let finishDone=false;
       const finish=async(save)=>{
-        _renamingSid = null;
-        if(save){
-          const newTitle=inp.value.trim()||'Untitled';
-          title.textContent=newTitle;
-          s.title=newTitle;
-          if(S.session&&S.session.session_id===s.session_id){S.session.title=newTitle;syncTopbar();}
-          try{await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:s.session_id,title:newTitle})});}
-          catch(err){setStatus('Rename failed: '+err.message);}
+        if(finishDone) return;
+        finishDone=true;
+        const releaseRename=()=>{
+          _renamingSid = null;
+          if(inp.isConnected) inp.replaceWith(title);
+          // Allow list re-renders again after DOM cleanup has completed.
+          setTimeout(()=>{ if(_renamingSid===null) renderSessionListFromCache(); },50);
+        };
+        if(!save){
+          applyTitle(oldTitle,false);
+          releaseRename();
+          return;
         }
-        inp.replaceWith(title);
-        // Allow list re-renders again after a short delay
-        setTimeout(()=>{ if(_renamingSid===null) renderSessionListFromCache(); },50);
+        const newTitle=inp.value.trim()||'Untitled';
+        try{
+          if(newTitle!==oldTitle){
+            await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:s.session_id,title:newTitle})});
+          }
+          applyTitle(newTitle);
+        }catch(err){
+          applyTitle(oldTitle,false);
+          const msg='Rename failed: '+(err&&err.message?err.message:String(err));
+          setStatus(msg);
+          if(typeof showToast==='function') showToast(msg,3000,'error');
+        }finally{
+          releaseRename();
+        }
       };
       inp.onkeydown=e2=>{
         if(e2.key==='Enter'){
@@ -986,17 +1384,8 @@ function renderSessionListFromCache(){
       setTimeout(()=>{inp.focus();inp.select();},10);
     };
 
-    // Project indicator: colored dot appended after the title
-    if(s.project_id){
-      const proj=_allProjects.find(p=>p.project_id===s.project_id);
-      if(proj){
-        const dot=document.createElement('span');
-        dot.className='session-project-dot';
-        dot.style.background=proj.color||'var(--blue)';
-        dot.title=proj.name;
-        title.appendChild(dot);
-      }
-    }
+    // (Project dot is appended above, between title and timestamp, so it
+    // sits outside the truncating title span and stays visible.)
     el.appendChild(sessionText);
     const state=document.createElement('span');
     state.className='session-attention-indicator session-state-indicator'+(isStreaming?' is-streaming':(hasUnread?' is-unread':''));
@@ -1020,16 +1409,32 @@ function renderSessionListFromCache(){
     actions.appendChild(menuBtn);
     el.appendChild(actions);
 
-    // Use a click timer to distinguish single-click (navigate) from double-click (rename).
-    // This prevents loadSession from firing on the first click of a double-click,
-    // which would re-render the list and destroy the dblclick target before it fires.
-    let _clickTimer=null;
-    el.onclick=async(e)=>{
-      if(_renamingSid) return; // ignore while any rename is active
+    // Use pointerup + manual double-tap detection instead of onclick/ondblclick.
+    // onclick/ondblclick are unreliable on touch devices (iPad Safari especially):
+    // hover-triggered layout shifts, ghost clicks, and 300ms delay all break
+    // single-tap navigation. pointerup fires immediately on both mouse & touch.
+    let _lastTapTime=0;
+    let _tapTimer=null;
+    el.onpointerup=(e)=>{
+      if(e.pointerType==='mouse' && e.button!==0) return;  // ignore right/middle click
+      if(_renamingSid) return;
       if(actions.contains(e.target)) return;
-      clearTimeout(_clickTimer);
-      _clickTimer=setTimeout(async()=>{
-        _clickTimer=null;
+      const now=Date.now();
+      if(now-_lastTapTime<350){
+        // Double-tap: rename
+        clearTimeout(_tapTimer);
+        _tapTimer=null;
+        _lastTapTime=0;
+        startRename();
+        return;
+      }
+      _lastTapTime=now;
+      // Single tap: wait to ensure it's not the first of a double-tap,
+      // then navigate
+      clearTimeout(_tapTimer);
+      _tapTimer=setTimeout(async()=>{
+        _tapTimer=null;
+        _lastTapTime=0;
         if(_renamingSid) return;
         // For CLI sessions, import into WebUI store first (idempotent)
         if(s.is_cli_session){
@@ -1039,14 +1444,7 @@ function renderSessionListFromCache(){
         }
         await loadSession(s.session_id);renderSessionListFromCache();
         if(typeof closeMobileSidebar==='function')closeMobileSidebar();
-      }, 220);
-    };
-    el.ondblclick=async(e)=>{
-      e.stopPropagation();
-      e.preventDefault();
-      clearTimeout(_clickTimer); // cancel the pending single-click navigation
-      _clickTimer=null;
-      startRename();
+      }, 300);
     };
     return el;
   }
@@ -1178,6 +1576,26 @@ function _showProjectPicker(session, anchorEl){
   setTimeout(()=>document.addEventListener('click',close),0);
 }
 
+// Resize a .project-create-input to fit its current value (or placeholder).
+// Bounded by the CSS min-width:40px / max-width:180px on the same class so
+// the input is never comically tiny nor wider than the project bar.
+// Uses a hidden span sized with the same font/padding to measure text width.
+function _resizeProjectInput(inp){
+  const sizer=document.createElement('span');
+  const cs=getComputedStyle(inp);
+  // Read font from the live element so the sizer stays calibrated if CSS changes.
+  // Horizontal padding only (0 vertical) — we're measuring width, not height.
+  sizer.style.cssText='position:absolute;visibility:hidden;white-space:pre;';
+  sizer.style.fontSize=cs.fontSize;
+  sizer.style.fontFamily=cs.fontFamily;
+  sizer.style.padding='0 '+cs.paddingRight;
+  sizer.textContent=inp.value||inp.placeholder||' ';
+  document.body.appendChild(sizer);
+  const w=Math.min(180,Math.max(40,sizer.offsetWidth+2));
+  document.body.removeChild(sizer);
+  inp.style.width=w+'px';
+}
+
 function _startProjectCreate(bar, addBtn){
   const inp=document.createElement('input');
   inp.className='project-create-input';
@@ -1201,7 +1619,9 @@ function _startProjectCreate(bar, addBtn){
     if(e.key==='Escape'){e.preventDefault();finish(false);}
   };
   inp.onblur=()=>finish(false);
+  inp.addEventListener('input',()=>_resizeProjectInput(inp));
   addBtn.replaceWith(inp);
+  _resizeProjectInput(inp);
   setTimeout(()=>inp.focus(),10);
 }
 
@@ -1228,8 +1648,65 @@ function _startProjectRename(proj, chip){
   };
   inp.onblur=()=>finish(false);
   inp.onclick=(e)=>e.stopPropagation();
+  inp.addEventListener('input',()=>_resizeProjectInput(inp));
   chip.replaceWith(inp);
+  _resizeProjectInput(inp);
   setTimeout(()=>{inp.focus();inp.select();},10);
+}
+
+function _showProjectContextMenu(e, proj, chip){
+  document.querySelectorAll('.project-ctx-menu').forEach(el=>el.remove());
+  const menu=document.createElement('div');
+  menu.className='project-ctx-menu';
+  // background: var(--surface) — fully-opaque theme variable (not var(--panel),
+  // which is undefined in this codebase and falls back to transparent, letting
+  // the session list show through the menu). Same variable used by
+  // .session-action-menu and other floating popovers.
+  menu.style.cssText='position:fixed;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 0;z-index:9999;min-width:140px;box-shadow:0 4px 16px rgba(0,0,0,.35);';
+  menu.style.left=e.clientX+'px';
+  menu.style.top=e.clientY+'px';
+
+  // Rename option
+  const renameItem=document.createElement('div');
+  renameItem.textContent='Rename';
+  renameItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+  renameItem.onmouseenter=()=>renameItem.style.background='var(--hover)';
+  renameItem.onmouseleave=()=>renameItem.style.background='';
+  renameItem.onclick=()=>{menu.remove();_startProjectRename(proj,chip);};
+  menu.appendChild(renameItem);
+
+  // Color picker row
+  const colorRow=document.createElement('div');
+  colorRow.style.cssText='display:flex;gap:5px;padding:7px 14px;align-items:center;';
+  PROJECT_COLORS.forEach(hex=>{
+    const dot=document.createElement('span');
+    dot.style.cssText=`width:16px;height:16px;border-radius:50%;background:${hex};cursor:pointer;display:inline-block;flex-shrink:0;`;
+    if(hex===(proj.color||'')) dot.style.outline='2px solid var(--text)';
+    dot.onclick=async()=>{
+      menu.remove();
+      await api('/api/projects/rename',{method:'POST',body:JSON.stringify({project_id:proj.project_id,name:proj.name,color:hex})});
+      await renderSessionList();
+      showToast('Color updated');
+    };
+    colorRow.appendChild(dot);
+  });
+  menu.appendChild(colorRow);
+
+  // Divider + Delete
+  const sep=document.createElement('hr');
+  sep.style.cssText='border:none;border-top:1px solid var(--border);margin:4px 0;';
+  menu.appendChild(sep);
+  const delItem=document.createElement('div');
+  delItem.textContent='Delete';
+  delItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--error,#e94560);';
+  delItem.onmouseenter=()=>delItem.style.background='var(--hover)';
+  delItem.onmouseleave=()=>delItem.style.background='';
+  delItem.onclick=()=>{menu.remove();_confirmDeleteProject(proj);};
+  menu.appendChild(delItem);
+
+  document.body.appendChild(menu);
+  const dismiss=()=>{menu.remove();document.removeEventListener('click',dismiss);};
+  setTimeout(()=>document.addEventListener('click',dismiss),0);
 }
 
 async function _confirmDeleteProject(proj){

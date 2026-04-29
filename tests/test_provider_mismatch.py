@@ -336,6 +336,123 @@ def test_prefixed_google_session_model_normalizes_to_active_provider_default(mon
     assert effective == "gpt-5.4-mini"
 
 
+def test_legacy_at_provider_session_model_normalizes_when_provider_hidden(monkeypatch):
+    """Old @provider:model session values must not bypass stale-model recovery."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+                },
+            ],
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "@copilot:gpt-5.5"
+    )
+
+    assert changed is True
+    assert effective == "gpt-5.5"
+
+
+def test_active_at_provider_session_model_strips_redundant_hint(monkeypatch):
+    """@active-provider:model is an old persisted form; use the bare model now."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"}],
+                },
+            ],
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "@openai-codex:gpt-5.4-mini"
+    )
+
+    assert changed is True
+    assert effective == "gpt-5.4-mini"
+
+
+def test_routable_non_active_at_provider_session_model_is_preserved(monkeypatch):
+    """Visible cross-provider dropdown selections must keep their provider hint."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+                },
+                {
+                    "provider": "GitHub Copilot",
+                    "provider_id": "copilot",
+                    "models": [{"id": "@copilot:gpt-5.4", "label": "GPT-5.4"}],
+                },
+            ],
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "@copilot:gpt-5.4"
+    )
+
+    assert changed is False
+    assert effective == "@copilot:gpt-5.4"
+
+
+def test_stale_at_provider_model_falls_back_when_family_mismatches(monkeypatch):
+    """Unroutable @provider:model should not invent a bare model for another family."""
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "groups": [
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+                },
+            ],
+        },
+    )
+
+    effective, changed = routes._resolve_compatible_session_model(
+        "@copilot:claude-opus-4.6"
+    )
+
+    assert changed is True
+    assert effective == "gpt-5.5"
+
+
 def test_google_active_provider_keeps_valid_gemini_session_model(monkeypatch):
     """A Google-configured session must keep its Gemini model."""
     import api.routes as routes
@@ -424,6 +541,16 @@ def test_api_session_is_side_effect_free_for_stale_models():
     sid = created["session"]["session_id"]
 
     session_path = TEST_STATE_DIR / "sessions" / f"{sid}.json"
+    # POST /api/session/new no longer eagerly writes empty sessions to disk
+    # (#1171 follow-up). Materialise the file from the API response so the
+    # rest of this test, which checks that GET is side-effect-free against
+    # an on-disk session with a stale model, has a file to work with.
+    if not session_path.exists():
+        session_path.parent.mkdir(parents=True, exist_ok=True)
+        session_path.write_text(
+            json.dumps(created["session"], ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     session_data = json.loads(session_path.read_text(encoding="utf-8"))
     stale_model = "google/gemini-3.1-pro-preview"
     session_data["model"] = stale_model
@@ -449,34 +576,33 @@ def test_api_session_is_side_effect_free_for_stale_models():
 # ── Model switch toast (#419) ─────────────────────────────────────────────────
 
 class TestModelSwitchToast:
-    """Toast appears when user switches model during an active session."""
+    """Toast appears when user switches the current conversation model."""
 
     def test_toast_in_model_select_onchange(self):
-        """modelSelect.onchange must show a toast when S.messages is non-empty."""
+        """modelSelect.onchange must show a scope toast after selecting a model."""
         src = _read("static/boot.js")
         # Find the onchange block
         idx = src.find("modelSelect').onchange")
         assert idx != -1, "modelSelect.onchange not found in boot.js"
         block = src[idx:idx + 1100]
-        assert "Model change takes effect in your next conversation" in block, (
-            "modelSelect.onchange must show a toast when switching model mid-session"
+        assert "model_scope_toast" in block, (
+            "modelSelect.onchange must show that the selected model applies to this conversation"
         )
 
-    def test_toast_guards_on_messages_length(self):
-        """Toast must only fire when there are existing messages (active session)."""
+    def test_toast_is_not_gated_on_messages_length(self):
+        """Toast must fire for every model selection, not only sessions with messages."""
         src = _read("static/boot.js")
-        idx = src.find("Model change takes effect in your next conversation")
+        idx = src.find("model_scope_toast")
         assert idx != -1
-        # Look back 200 chars for the S.messages guard
-        surrounding = src[max(0, idx - 200):idx + 50]
-        assert "S.messages" in surrounding and ".length" in surrounding, (
-            "Model switch toast must be gated on S.messages.length > 0"
+        surrounding = src[max(0, idx - 220):idx + 80]
+        assert not ("S.messages" in surrounding and ".length" in surrounding), (
+            "Model scope toast should not be gated on S.messages.length"
         )
 
     def test_toast_uses_show_toast_not_alert(self):
         """Toast must use showToast(), not alert()."""
         src = _read("static/boot.js")
-        idx = src.find("Model change takes effect in your next conversation")
+        idx = src.find("model_scope_toast")
         assert idx != -1
         surrounding = src[max(0, idx - 50):idx + 100]
         assert "showToast" in surrounding, "Must use showToast() not alert()"
@@ -485,7 +611,7 @@ class TestModelSwitchToast:
     def test_toast_has_typeof_showtoast_guard(self):
         """Toast call must guard typeof showToast to be safe during boot."""
         src = _read("static/boot.js")
-        idx = src.find("Model change takes effect in your next conversation")
+        idx = src.find("model_scope_toast")
         assert idx != -1
         surrounding = src[max(0, idx - 100):idx + 50]
         assert "typeof showToast" in surrounding, (

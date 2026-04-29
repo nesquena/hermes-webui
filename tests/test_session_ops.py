@@ -222,6 +222,15 @@ def test_status_returns_summary(cleanup_test_sessions):
     assert 'created_at' in r
     assert 'updated_at' in r
     assert r['agent_running'] is False  # no active stream
+    # #463 – token usage and cost fields included in status
+    assert 'input_tokens' in r
+    assert 'output_tokens' in r
+    assert 'total_tokens' in r
+    assert 'estimated_cost' in r
+    # Freshly imported session: no tokens yet
+    assert r['input_tokens'] == 0
+    assert r['output_tokens'] == 0
+    assert r['total_tokens'] == 0
 
 
 def test_status_unknown_returns_404():
