@@ -225,6 +225,10 @@ function closeLiveStream(sessionId, streamId){
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
   const reconnecting=!!options.reconnecting;
+  // _meteringSid: the session_id that the sidebar items use as data-session-id.
+  // The metering SSE event carries stream_id as its 'session_id' field,
+  // so we need this local copy to route t/s updates to the right sidebar row.
+  const _meteringSid = activeSid;
   closeLiveStream(activeSid);
   if(!INFLIGHT[activeSid]) INFLIGHT[activeSid]={messages:[...S.messages],uploaded:[...uploaded],toolCalls:[]};
   else {
@@ -828,17 +832,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('metering',e=>{
-      // TPS + HIGH/LOW stats for the header chip — emitted at 1 Hz during a stream,
-      // silenced entirely when no sessions are active (ticker exits when idle).
+      // Rolling 5-second average tps per session — maintained by _updateSessionTpsLabel.
+      // d.session_tps is the per-session TPS (from meter().get_stats(stream_id));
+      // d.tps is the global average across all active sessions.
       try{
         const d=JSON.parse(e.data||'{}');
-        const el=$('tpsStat');
-        if(!el) return;
-        const tps=typeof d.tps==='number'?d.tps.toFixed(1):'0.0';
-        const high=typeof d.high==='number' && d.high>=0?d.high.toFixed(1)+' high':'—';
-        const low=typeof d.low==='number' && d.low>=0?d.low.toFixed(1)+' low':'';
-        el.textContent=`${tps} t/s · ${high}${low?' · '+low:''}`;
-      }catch(_){}
+        if(!d.session_id){ return; }
+        // Use per-session TPS; fall back to global tps if not present.
+        const rawTps = (typeof d.session_tps === 'number' && d.session_tps > 0)
+          ? d.session_tps
+          : (typeof d.tps === 'number' ? d.tps : null);
+        // Use d.session_id directly — the backend now sends the actual session_id,
+        // not stream_id (they differ for resumed/continued sessions).
+        _updateSessionTpsLabel(d.session_id, rawTps);
+      }catch(err){}
     });
 
     source.addEventListener('apperror',e=>{

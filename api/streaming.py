@@ -1306,8 +1306,9 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 if now - _metering_last_emit[0] < 0.1:
                     return
                 _metering_last_emit[0] = now
-                stats = meter().get_stats()
-                stats['session_id'] = stream_id
+                stats = meter().get_stats(stream_id)
+                stats['session_id'] = session_id
+                stats['stream_id'] = stream_id
                 put('metering', stats)
 
             def on_token(text):
@@ -1321,7 +1322,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 put('token', {'text': text})
                 # Update global throughput meter
                 meter().record_token(stream_id, len(STREAM_PARTIAL_TEXT[stream_id]))
-                _emit_metering()
+                _emit_metering()  # must follow record_token so first_token_ts is set
 
             def on_reasoning(text):
                 nonlocal _reasoning_text
@@ -1331,7 +1332,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 put('reasoning', {'text': str(text)})
                 # Track reasoning tokens in the meter so TPS reflects all AI output
                 meter().record_reasoning(stream_id, len(_reasoning_text))
-                _emit_metering()
+                _emit_metering()  # must follow record_reasoning so first_token_ts is set
 
             # Pre-initialise the activity counter here so on_tool (which
             # closes over it) never captures an unbound name even if this
@@ -1362,7 +1363,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                         _reasoning_text += str(reason_text)
                         put('reasoning', {'text': str(reason_text)})
                         meter().record_reasoning(stream_id, len(_reasoning_text))
-                        _emit_metering()
+                        _emit_metering()  # must follow record_reasoning so first_token_ts is set
                     return
 
                 args_snap = {}
