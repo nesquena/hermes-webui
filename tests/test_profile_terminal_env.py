@@ -51,5 +51,30 @@ def test_streaming_applies_profile_runtime_env_to_agent_run():
 
     assert "get_profile_runtime_env" in src
     assert "_profile_runtime_env" in src
+    assert "_set_thread_env(**_agent_run_env)" in src
     assert "old_profile_env" in src
     assert "os.environ.update(_profile_runtime_env)" in src
+
+
+def test_agent_run_env_overrides_profile_terminal_cwd_without_kwarg_collision():
+    from api.config import _clear_thread_env, _set_thread_env
+    from api.streaming import _build_agent_run_env
+
+    env = _build_agent_run_env(
+        {
+            "TERMINAL_CWD": "/profile/default/cwd",
+            "HERMES_HOME": "/profile/env/home",
+            "HERMES_MAX_ITERATIONS": "90",
+        },
+        "/session/workspace",
+        "session-123",
+        "/profile/home",
+    )
+
+    assert env["TERMINAL_CWD"] == "/session/workspace"
+    assert env["HERMES_HOME"] == "/profile/home"
+    assert env["HERMES_SESSION_KEY"] == "session-123"
+    assert env["HERMES_MAX_ITERATIONS"] == "90"
+
+    _set_thread_env(**env)
+    _clear_thread_env()
