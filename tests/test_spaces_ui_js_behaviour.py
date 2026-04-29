@@ -191,6 +191,18 @@ global.fetch = async function(path, opts = {}) {
         ],
       });
     }
+    if (body.template === 'big-bang') {
+      return response({
+        template: 'big-bang',
+        space: { space_id: 'big-bang-onboarding', name: 'Big Bang Onboarding', description: 'Safe first-run tour starter', widget_count: 4, revision_event_id: 'rev-bigbang' },
+        installed_widgets: [
+          { id: 'bigbang-welcome', kind: 'markdown', title: 'Welcome to Capy Spaces', layout: { x: 0, y: 0, w: 12, h: 5, minimized: false }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+          { id: 'bigbang-demo-launcher', kind: 'checklist', title: 'Demo launchers', layout: { x: 12, y: 0, w: 12, h: 5, minimized: false }, source: 'SECRET_SOURCE' },
+          { id: 'bigbang-safety', kind: 'status', title: 'Safety guardrails', layout: { x: 0, y: 5, w: 12, h: 4, minimized: false } },
+          { id: 'bigbang-next-steps', kind: 'checklist', title: 'Next steps', layout: { x: 12, y: 5, w: 12, h: 4, minimized: false } },
+        ],
+      });
+    }
     return response({
       template: 'weather',
       space: { space_id: 'weather-demo', name: 'Weather Demo', description: 'Prague weather starter', widget_count: 1, revision_event_id: 'rev-weather' },
@@ -276,6 +288,9 @@ async function click(action, dataset) {
   } else if (scenario === 'installStockChart') {
     await window.loadCapySpaces();
     await click('installStockTemplate', {});
+  } else if (scenario === 'installBigBangOnboarding') {
+    await window.loadCapySpaces();
+    await click('installBigBangTemplate', {});
   } else if (scenario === 'openSpaceDetail') {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
@@ -522,6 +537,19 @@ def test_spaces_ui_install_stock_chart_posts_template_and_refreshes_without_widg
     assert "Install stock chart" in out["rootHtml"]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"template": "stock"}
+    assert out["calls"][-1]["path"] == "api/spaces"
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_install_big_bang_onboarding_posts_template_and_refreshes_without_widget_code(driver_path):
+    out = _run_spaces_scenario(driver_path, "installBigBangOnboarding")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/templates/install")
+
+    assert "Install Big Bang onboarding" in out["rootHtml"]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"template": "big-bang"}
     assert out["calls"][-1]["path"] == "api/spaces"
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
