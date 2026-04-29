@@ -88,7 +88,7 @@ function syncAppTitlebar() {
           try {
             await api('/api/session/rename', {
               method: 'POST',
-              body: JSON.stringify({ session_id: S.session.session_id, title: newTitle })
+              body: JSON.stringify({ session_id: S.session.session_id, title: newTitle, manual: true })
             });
           } catch (err) {
             if (typeof setStatus === 'function') setStatus('Rename failed: ' + err.message);

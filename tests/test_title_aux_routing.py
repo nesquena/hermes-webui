@@ -269,6 +269,43 @@ class TestReasoningModelTitleGeneration(unittest.TestCase):
         self.assertEqual(title_status[0]['status'], 'fallback')
         self.assertEqual(title_status[0]['reason'], 'local_summary:llm_length_aux')
 
+    @patch('api.streaming._aux_title_configured', return_value=True)
+    @patch('api.streaming._generate_llm_session_title_via_aux')
+    @patch('api.streaming.get_session')
+    def test_manual_rename_flag_blocks_background_title_update_even_for_provisional_like_title(
+        self, mock_get_session, mock_aux_title, mock_configured,
+    ):
+        """Sidebar renames often shorten the provisional title instead of
+        replacing it entirely; that still counts as a manual rename."""
+        from api.streaming import _run_background_title_update
+
+        mock_session = MagicMock()
+        mock_session.title = 'How to fix'
+        mock_session.user_renamed_title = True
+        mock_session.llm_title_generated = False
+        mock_session.messages = [
+            {'role': 'user', 'content': 'How to fix hermes rename persistence after refresh'},
+            {'role': 'assistant', 'content': 'Let me trace the root cause.'},
+        ]
+        mock_get_session.return_value = mock_session
+        mock_aux_title.return_value = ('Better Final Title', 'llm_aux', '')
+        events = []
+
+        _run_background_title_update(
+            session_id='manual-title-session',
+            user_text='How to fix hermes rename persistence after refresh',
+            assistant_text='Let me trace the root cause.',
+            placeholder_title='How to fix hermes rename persistence after refresh',
+            put_event=lambda event_type, data: events.append((event_type, data)),
+            agent=None,
+        )
+
+        self.assertFalse(any(event_type == 'title' for event_type, _ in events))
+        self.assertTrue(any(
+            event_type == 'title_status' and data.get('reason') == 'manual_title'
+            for event_type, data in events
+        ))
+
 
 class TestAuxTitleTimeoutEdgeCases(unittest.TestCase):
     """Comment 4: _aux_title_timeout must reject zero, negative, and non-numeric values."""

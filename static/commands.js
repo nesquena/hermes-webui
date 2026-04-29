@@ -668,7 +668,7 @@ async function cmdTitle(args){
     renderMessages();return;
   }
   try{
-    const r=await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,title:name})});
+    const r=await api('/api/session/rename',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,title:name,manual:true})});
     if(r&&r.error){showToast(r.error);return;}
     S.session.title=(r&&r.session&&r.session.title)||name;
     if(typeof syncTopbar==='function')syncTopbar();
