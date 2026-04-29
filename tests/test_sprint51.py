@@ -18,6 +18,7 @@ from unittest.mock import Mock, patch, MagicMock
 
 from api.streaming import cancel_stream
 from api.config import AGENT_INSTANCES, STREAMS, STREAMS_LOCK, CANCEL_FLAGS
+import api.models  # needed for Session.load patch target
 
 
 class TestCancelStreamEagerRelease:
@@ -91,7 +92,7 @@ class TestCancelStreamEagerRelease:
         CANCEL_FLAGS[stream_id] = threading.Event()
         AGENT_INSTANCES[stream_id] = mock_agent
 
-        with patch('api.streaming.get_session', return_value=mock_session):
+        with patch('api.models.Session.load', return_value=mock_session):
             cancel_stream(stream_id)
 
         assert mock_session.active_stream_id is None, \
@@ -163,7 +164,7 @@ class TestCancelStreamEagerRelease:
         CANCEL_FLAGS[stream_id] = threading.Event()
         AGENT_INSTANCES[stream_id] = mock_agent
 
-        with patch('api.streaming.get_session', side_effect=KeyError("Session not found")):
+        with patch('api.models.Session.load', side_effect=KeyError("Session not found")):
             # Should not raise
             result = cancel_stream(stream_id)
 
