@@ -1229,6 +1229,7 @@ def _load_models_cache_from_disk() -> dict | None:
     """Load /api/models cache from disk if it exists and has current metadata."""
     try:
         import json as _j
+
         if not _models_cache_path.exists():
             return None
         with open(_models_cache_path, encoding="utf-8") as f:
@@ -1257,6 +1258,20 @@ def _save_models_cache_to_disk(cache: dict) -> None:
         os.rename(tmp, str(_models_cache_path))
     except Exception:
         pass  # Non-fatal -- cache will rebuild on next call
+
+
+def _get_fresh_memory_models_cache(now: float) -> dict | None:
+    """Return a valid fresh in-memory /api/models cache, or clear stale shapes."""
+    global _available_models_cache, _available_models_cache_ts
+    if _available_models_cache is None:
+        return None
+    if (now - _available_models_cache_ts) >= _AVAILABLE_MODELS_CACHE_TTL:
+        return None
+    if _is_valid_models_cache(_available_models_cache):
+        return copy.deepcopy(_available_models_cache)
+    _available_models_cache = None
+    _available_models_cache_ts = 0.0
+    return None
 
 
 def invalidate_models_cache():
@@ -1895,19 +1910,22 @@ def get_available_models() -> dict:
                 lambda: not _cache_build_in_progress and _available_models_cache is not None,
                 timeout=60
             )
-            if _available_models_cache is not None and (time.monotonic() - _available_models_cache_ts) < _AVAILABLE_MODELS_CACHE_TTL:
-                return copy.deepcopy(_available_models_cache)
+            cached = _get_fresh_memory_models_cache(time.monotonic())
+            if cached is not None:
+                return cached
 
         # Reload config if changed
         if _cfg_changed:
             reload_config()
             _available_models_cache = None
             _available_models_cache_ts = 0.0
+            disk_groups = None
 
         # Serve from memory cache if fresh
         now = time.monotonic()
-        if _available_models_cache is not None and (now - _available_models_cache_ts) < _AVAILABLE_MODELS_CACHE_TTL:
-            return copy.deepcopy(_available_models_cache)
+        cached = _get_fresh_memory_models_cache(now)
+        if cached is not None:
+            return cached
 
         # Cold path: disk cache hit — use it (fast, no lock contention)
         if disk_groups is not None:
