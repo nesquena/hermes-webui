@@ -23,6 +23,7 @@ const calls = [];
 const dialogs = [];
 const switchedPanels = [];
 const capySpaceSyncs = [];
+let beforeHtml = '';
 const values = {
   '#capyWidgetId': 'notes',
   '#capyWidgetTitle': 'Notes',
@@ -227,6 +228,9 @@ global.fetch = async function(path, opts = {}) {
   if (path === 'api/spaces/activate') {
     return response({ ok: true, session: { session_id: 'session-123', active_space_id: 'lab' } });
   }
+  if (path === 'api/spaces/deactivate') {
+    return response({ ok: true, session: { session_id: 'session-123', active_space_id: null } });
+  }
   if (path === 'api/spaces/export') {
     const body = opts.body ? JSON.parse(opts.body) : {};
     return response({
@@ -352,6 +356,11 @@ async function click(action, dataset) {
   } else if (scenario === 'activateSpace') {
     await window.loadCapySpaces();
     await click('activateSpace', { spaceId: 'lab' });
+  } else if (scenario === 'clearActiveSpace') {
+    global.S.session.active_space_id = 'lab';
+    await window.loadCapySpaces();
+    beforeHtml = root.innerHTML;
+    await click('clearActiveSpace', {});
   } else if (scenario === 'systemWidgetShell') {
     await window.loadCapySpaces();
     await click('openSystemPanel', { systemPanel: 'chat' });
@@ -401,7 +410,7 @@ async function click(action, dataset) {
   } else {
     throw new Error('unknown scenario: ' + scenario);
   }
-  process.stdout.write(JSON.stringify({ rootHtml: root.innerHTML, recoveryHtml: makeElement('capySpacesRecovery').innerHTML, recoveryText: makeElement('capySpacesRecovery').textContent, calls, values, rootDataset: root.dataset, dialogs, switchedPanels, capySpaceSyncs }));
+  process.stdout.write(JSON.stringify({ rootHtml: root.innerHTML, beforeHtml, recoveryHtml: makeElement('capySpacesRecovery').innerHTML, recoveryText: makeElement('capySpacesRecovery').textContent, calls, values, rootDataset: root.dataset, dialogs, switchedPanels, capySpaceSyncs }));
 })().catch(err => {
   console.error(err && err.stack || String(err));
   process.exit(1);
@@ -664,11 +673,26 @@ def test_spaces_ui_activate_space_posts_current_session_without_widget_code(driv
     out = _run_spaces_scenario(driver_path, "activateSpace")
     post = next(call for call in out["calls"] if call["path"] == "api/spaces/activate")
 
-    assert "Use in chat" in out["rootHtml"]
+    assert "Clear from chat" in out["rootHtml"]
     assert "Active in chat" in out["rootHtml"]
     assert out["capySpaceSyncs"] == ["lab"]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"space_id": "lab", "session_id": "session-123"}
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+
+
+def test_spaces_ui_clear_active_space_posts_current_session_and_refreshes_shell(driver_path):
+    out = _run_spaces_scenario(driver_path, "clearActiveSpace")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/deactivate")
+
+    assert "Active in chat" in out["beforeHtml"]
+    assert "Clear from chat" in out["beforeHtml"]
+    assert "Active in chat" not in out["rootHtml"]
+    assert out["capySpaceSyncs"] == [None]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"session_id": "session-123"}
+    assert out["calls"][-1]["path"] == "api/spaces"
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
 

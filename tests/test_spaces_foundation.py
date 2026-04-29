@@ -850,12 +850,14 @@ def test_spaces_routes_and_static_shell_are_registered():
     assert '"/api/spaces/widget/patch"' in routes_src
     assert '"/api/spaces/create"' in routes_src
     assert '"/api/spaces/templates/install"' in routes_src
+    assert '"/api/spaces/deactivate"' in routes_src
     assert 'static/spaces.js' in index_html
     assert 'static/spaces.css' in index_html
     assert 'id="mainCapySpaces"' in index_html
     assert 'id="capySpacesRecovery"' in index_html
     assert 'id="capyActiveSpaceContext"' in index_html
     assert 'id="capyActiveSpaceLabel"' in index_html
+    assert 'id="capyActiveSpaceClear"' in index_html
     assert 'data-panel="capy-spaces"' in index_html
     assert "switchPanel('capy-spaces')" in index_html
     assert "'capy-spaces': 'Capy Spaces'" in panels_js
@@ -863,6 +865,7 @@ def test_spaces_routes_and_static_shell_are_registered():
     assert "loadCapySpaces()" in panels_js
     assert "loadCapySpacesRecovery()" in panels_js
     assert "function syncCapyActiveSpaceContext" in ui_js
+    assert "async function clearCapyActiveSpace" in ui_js
     assert "active_space_id" in ui_js
     assert "capyActiveSpaceLabel" in ui_js
     assert "system.chat" in spaces_js
@@ -1017,6 +1020,34 @@ def test_disabled_spaces_activate_route_does_not_attach_space_to_session(monkeyp
     assert status == 403
     assert created["space_id"] not in json.dumps(body)
     assert session.active_space_id is None
+
+
+def test_spaces_deactivate_route_clears_active_space_from_session(monkeypatch, tmp_path):
+    _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    import api.config as config
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path / "sessions")
+    config.SESSION_DIR.mkdir(parents=True, exist_ok=True)
+
+    import api.models as models
+    monkeypatch.setattr(models, "SESSION_DIR", config.SESSION_DIR)
+    models.SESSIONS.clear()
+    session = models.Session(session_id="session_deactivate", workspace=str(tmp_path))
+    session.active_space_id = "lab"
+    session.save(skip_index=True)
+
+    handled, status, body = _route_post(
+        "/api/spaces/deactivate",
+        {"session_id": "session_deactivate"},
+    )
+
+    assert handled is None
+    assert status == 200
+    assert body["ok"] is True
+    assert body["session"]["active_space_id"] is None
+    assert body["session"]["messages"] == []
+    loaded = models.Session.load("session_deactivate")
+    assert loaded.active_space_id is None
 
 
 def test_widget_upsert_list_read_and_delete_are_revisioned(monkeypatch, tmp_path):

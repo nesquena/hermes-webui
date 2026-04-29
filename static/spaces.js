@@ -43,13 +43,16 @@
       const name = s.name || spaceId || 'Untitled';
       const description = s.description || '';
       const activeLabel = activeSpaceId && activeSpaceId === spaceId ? ' · Active in chat' : '';
+      const activeAction = activeSpaceId && activeSpaceId === spaceId
+        ? '<button type="button" class="capy-spaces-btn" data-capy-action="clearActiveSpace">Clear from chat</button>'
+        : '<button type="button" class="capy-spaces-btn" data-capy-action="activateSpace" data-space-id="'+escapeHtml(spaceId)+'">Use in chat</button>';
       return '<div class="capy-spaces-card" data-space-id="'+escapeHtml(spaceId)+'">' +
         '<div class="capy-spaces-card-row"><div><strong>'+escapeHtml(name)+'</strong>' +
         (description ? '<div class="capy-spaces-muted">'+escapeHtml(description)+'</div>' : '') +
         '<div class="capy-spaces-muted">Widgets: '+Number(s.widget_count||0)+' · Revision: '+escapeHtml(s.revision_event_id||'none')+escapeHtml(activeLabel)+'</div></div>' +
         '<div class="capy-spaces-actions">' +
         '<button type="button" class="capy-spaces-btn" data-capy-action="openSpace" data-space-id="'+escapeHtml(spaceId)+'">Open</button>' +
-        '<button type="button" class="capy-spaces-btn" data-capy-action="activateSpace" data-space-id="'+escapeHtml(spaceId)+'">Use in chat</button>' +
+        activeAction +
         '<button type="button" class="capy-spaces-btn" data-capy-action="editSpace" data-space-id="'+escapeHtml(spaceId)+'" data-space-name="'+escapeHtml(name)+'" data-space-description="'+escapeHtml(description)+'">Edit</button>' +
         '<button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Manage widgets</button>' +
         '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="deleteSpace" data-space-id="'+escapeHtml(spaceId)+'">Delete</button>' +
@@ -342,6 +345,16 @@
       if (!sessionId) return;
       const data = await postSpacesJson('api/spaces/activate', {space_id: spaceId, session_id: sessionId});
       if (data && data.session && typeof S !== 'undefined') S.session = data.session;
+      if (typeof syncCapyActiveSpaceContext === 'function') syncCapyActiveSpaceContext();
+      await loadCapySpaces();
+      return;
+    }
+    if (action === 'clearActiveSpace') {
+      const sessionId = currentSessionId();
+      if (!sessionId) return;
+      const data = await postSpacesJson('api/spaces/deactivate', {session_id: sessionId});
+      if (data && data.session && typeof S !== 'undefined') S.session = data.session;
+      else if (typeof S !== 'undefined' && S.session) S.session.active_space_id = null;
       if (typeof syncCapyActiveSpaceContext === 'function') syncCapyActiveSpaceContext();
       await loadCapySpaces();
       return;

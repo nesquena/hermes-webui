@@ -1792,6 +1792,22 @@ def handle_post(handler, parsed) -> bool:
         except (FileNotFoundError, KeyError):
             return bad(handler, "Space or session not found", 404)
 
+    if parsed.path == "/api/spaces/deactivate":
+        from api import spaces as capy_spaces
+        if not capy_spaces.spaces_enabled():
+            return bad(handler, "Capy Spaces is disabled", 403)
+        session_id = body.get("session_id")
+        if not session_id:
+            return bad(handler, "Missing session_id")
+        try:
+            s = get_session(session_id)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        with _get_session_agent_lock(session_id):
+            s.active_space_id = None
+            s.save()
+        return j(handler, {"ok": True, "session": s.compact() | {"messages": s.messages}})
+
     # ── Approval (POST) ──
     if parsed.path == "/api/approval/respond":
         return _handle_approval_respond(handler, body)
