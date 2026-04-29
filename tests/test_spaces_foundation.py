@@ -872,6 +872,8 @@ def test_spaces_routes_and_static_shell_are_registered():
     assert "system.chat" in spaces_js
     assert "system.settings" in spaces_js
     assert "data-capy-action=\"openSystemPanel\"" in spaces_js
+    assert "data-capy-action=\"moveWidget\"" in spaces_js
+    assert "moveWidgetBy" in spaces_js
 
 
 class _RouteHandler:

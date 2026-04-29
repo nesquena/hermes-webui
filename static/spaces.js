@@ -227,6 +227,10 @@
         '<div class="capy-spaces-muted">'+escapeHtml(kind)+' · '+escapeHtml(widgetId)+' · '+escapeHtml(formatWidgetLayout(layout))+'</div></div>' +
         '<div class="capy-spaces-actions">' +
         '<button type="button" class="capy-spaces-btn" data-capy-action="askWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-title="'+escapeHtml(title)+'">Ask Capy</button>' +
+        renderMoveButton(spaceId, widgetId, layout, -1, 0, 'Move left') +
+        renderMoveButton(spaceId, widgetId, layout, 1, 0, 'Move right') +
+        renderMoveButton(spaceId, widgetId, layout, 0, -1, 'Move up') +
+        renderMoveButton(spaceId, widgetId, layout, 0, 1, 'Move down') +
         '<button type="button" class="capy-spaces-btn" data-capy-action="editWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-title="'+escapeHtml(title)+'" data-widget-kind="'+escapeHtml(kind)+'" data-widget-x="'+escapeHtml(layout.x)+'" data-widget-y="'+escapeHtml(layout.y)+'" data-widget-w="'+escapeHtml(layout.w)+'" data-widget-h="'+escapeHtml(layout.h)+'">Edit</button>' +
         '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="deleteWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Delete</button>' +
         '</div></div>';
@@ -253,6 +257,10 @@
     return Math.max(min, Math.min(max, n));
   }
 
+  function renderMoveButton(spaceId, widgetId, layout, dx, dy, label){
+    return '<button type="button" class="capy-spaces-btn" data-capy-action="moveWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-x="'+escapeHtml(layout.x)+'" data-widget-y="'+escapeHtml(layout.y)+'" data-widget-w="'+escapeHtml(layout.w)+'" data-widget-h="'+escapeHtml(layout.h)+'" data-move-dx="'+escapeHtml(dx)+'" data-move-dy="'+escapeHtml(dy)+'">'+escapeHtml(label)+'</button>';
+  }
+
   function widgetLayout(widget){
     const raw = widget && widget.layout && typeof widget.layout === 'object' ? widget.layout : {};
     return {
@@ -265,11 +273,33 @@
 
   function formLayout(root){
     return {
-      x: layoutNumber((getRootInput(root, '#capyWidgetX') || {}).value, 0, 0, 10000),
-      y: layoutNumber((getRootInput(root, '#capyWidgetY') || {}).value, 0, 0, 10000),
-      w: layoutNumber((getRootInput(root, '#capyWidgetW') || {}).value, 6, 1, 24),
-      h: layoutNumber((getRootInput(root, '#capyWidgetH') || {}).value, 4, 1, 24),
+      x: layoutNumber(getInputValue(root, '#capyWidgetX'), 0, 0, 10000),
+      y: layoutNumber(getInputValue(root, '#capyWidgetY'), 0, 0, 10000),
+      w: layoutNumber(getInputValue(root, '#capyWidgetW'), 6, 1, 24),
+      h: layoutNumber(getInputValue(root, '#capyWidgetH'), 4, 1, 24),
     };
+  }
+
+  function moveWidgetBy(button){
+    const layout = {
+      x: layoutNumber(button.dataset.widgetX, 0, 0, 10000),
+      y: layoutNumber(button.dataset.widgetY, 0, 0, 10000),
+      w: layoutNumber(button.dataset.widgetW, 6, 1, 24),
+      h: layoutNumber(button.dataset.widgetH, 4, 1, 24),
+    };
+    const dx = layoutNumber(button.dataset.moveDx, 0, -24, 24);
+    const dy = layoutNumber(button.dataset.moveDy, 0, -24, 24);
+    return {
+      x: layoutNumber(layout.x + dx, 0, 0, 10000),
+      y: layoutNumber(layout.y + dy, 0, 0, 10000),
+      w: layout.w,
+      h: layout.h,
+    };
+  }
+
+  function getInputValue(root, selector){
+    const input = getRootInput(root, selector);
+    return input ? input.value : '';
   }
 
   function formatWidgetLayout(layout){
@@ -494,6 +524,17 @@
         w: button.dataset.widgetW,
         h: button.dataset.widgetH,
       });
+      return;
+    }
+    if (action === 'moveWidget') {
+      const widgetId = button.dataset.widgetId || '';
+      if (!spaceId || !widgetId) return;
+      await postSpacesJson('api/spaces/widget/patch', {
+        space_id: spaceId,
+        widget_id: widgetId,
+        patch: {layout: moveWidgetBy(button)},
+      });
+      await loadSpaceWidgets(spaceId);
       return;
     }
     if (action === 'askWidget') {

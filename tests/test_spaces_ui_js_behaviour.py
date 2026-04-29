@@ -313,6 +313,12 @@ async function click(action, dataset) {
     values['#capyWidgetW'] = '9';
     values['#capyWidgetH'] = '6';
     await click('saveWidget', { spaceId: 'lab' });
+  } else if (scenario === 'moveWidgetLeft') {
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    beforeHtml = root.innerHTML;
+    await click('moveWidget', { spaceId: 'lab', widgetId: 'weather', widgetX: '12', widgetY: '3', widgetW: '5', widgetH: '4', moveDx: '-1', moveDy: '0' });
   } else if (scenario === 'askWidget') {
     global.showPromptDialog = async function(opts) { dialogs.push(opts); return 'Refresh the weather widget'; };
     await window.loadCapySpaces();
@@ -497,6 +503,26 @@ def test_spaces_ui_edit_widget_uses_patch_route_and_preserves_source_bodies(driv
     assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
+
+
+def test_spaces_ui_move_widget_posts_metadata_only_layout_patch(driver_path):
+    out = _run_spaces_scenario(driver_path, "moveWidgetLeft")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/patch")
+
+    assert "Move left" in out["beforeHtml"]
+    assert "Move right" in out["beforeHtml"]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {
+        "space_id": "lab",
+        "widget_id": "weather",
+        "patch": {"layout": {"x": 11, "y": 3, "w": 5, "h": 4}},
+    }
+    assert not any(call["path"] == "api/spaces/widget/upsert" for call in out["calls"])
+    assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
 
 
 def test_spaces_ui_delete_widget_posts_to_delete_and_refreshes_widgets(driver_path):
