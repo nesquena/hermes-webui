@@ -266,6 +266,104 @@ def test_import_space_agent_zip_b64_route_returns_safe_metadata(monkeypatch, tmp
     assert "source" not in serialized.replace('"source": "space-agent-zip"', "")
 
 
+def test_export_space_agent_yaml_package_omits_generated_sources(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {
+            "space_id": "export-demo",
+            "name": "Export Demo",
+            "description": "Metadata-only export",
+            "agent_instructions": "Use typed APIs.",
+        }
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "chart",
+            "kind": "chart",
+            "title": "Safe Chart",
+            "layout": {"x": 1, "y": 2, "w": 8, "h": 4},
+            "renderer": "<script>window.SECRET_VALUE_DO_NOT_LEAK=1</script>",
+            "html": "<img src=x onerror=stealSecret()>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+            "source": "SECRET_SOURCE",
+            "permissions": {"network": "agent-mediated"},
+        },
+    )
+
+    exported = spaces.export_space_agent_package(created["space_id"])
+
+    assert exported["source"] == "capy-space"
+    assert exported["format"] == "space-agent-yaml"
+    assert exported["space_id"] == "export-demo"
+    assert sorted(exported["widgets"].keys()) == ["widgets/chart.yaml"]
+    import yaml
+    space_doc = yaml.safe_load(exported["space_yaml"])
+    widget_doc = yaml.safe_load(exported["widgets"]["widgets/chart.yaml"])
+    assert space_doc == {
+        "id": "export-demo",
+        "name": "Export Demo",
+        "description": "Metadata-only export",
+        "instructions": "Use typed APIs.",
+        "template": None,
+    }
+    assert widget_doc == {
+        "id": "chart",
+        "title": "Safe Chart",
+        "type": "chart",
+        "layout": {"x": 1, "y": 2, "w": 8, "h": 4, "minimized": False},
+        "permissions": {"network": "agent-mediated"},
+    }
+    serialized = json.dumps(exported).lower()
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "secret_source" not in serialized
+
+
+def test_export_space_agent_zip_b64_route_returns_safe_archive(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "zip-export", "name": "ZIP Export"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "notes",
+            "kind": "markdown",
+            "title": "Notes",
+            "renderer": "<script>bad()</script>",
+            "data": {"token": "SECRET_TOKEN"},
+        },
+    )
+
+    handled, status, body = _route_post("/api/spaces/export", {"space_id": created["space_id"], "format": "zip"})
+
+    assert handled is None
+    assert status == 200
+    assert body["source"] == "capy-space"
+    assert body["format"] == "space-agent-zip"
+    assert body["space_id"] == "zip-export"
+    assert body["archive_b64"]
+    archive_bytes = base64.b64decode(body["archive_b64"])
+    with zipfile.ZipFile(io.BytesIO(archive_bytes)) as zf:
+        assert sorted(zf.namelist()) == ["space.yaml", "widgets/notes.yaml"]
+        space_yaml = zf.read("space.yaml").decode("utf-8")
+        widget_yaml = zf.read("widgets/notes.yaml").decode("utf-8")
+    archive_text = (space_yaml + widget_yaml).lower()
+    assert "zip-export" in archive_text
+    assert "notes" in archive_text
+    assert "renderer" not in archive_text
+    assert "<script" not in archive_text
+    assert "token" not in archive_text
+    assert "secret_token" not in archive_text
+    assert "data" not in archive_text
+    serialized = json.dumps(body).lower()
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "secret_token" not in serialized
+
+
 def test_install_weather_template_creates_safe_persistent_weather_widget(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
@@ -744,6 +842,7 @@ def test_spaces_routes_and_static_shell_are_registered():
     assert '"/api/spaces/recovery"' in routes_src
     assert '"/api/spaces/recovery/disable-widget"' in routes_src
     assert '"/api/spaces/import"' in routes_src
+    assert '"/api/spaces/export"' in routes_src
     assert '"/api/spaces/revisions"' in routes_src
     assert '"/api/spaces/create"' in routes_src
     assert '"/api/spaces/templates/install"' in routes_src
