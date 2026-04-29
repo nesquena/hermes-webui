@@ -45,14 +45,17 @@ _PROVIDER_ENV_VAR: dict[str, str] = {
     "opencode-go": "OPENCODE_GO_API_KEY",
     "ollama": "OLLAMA_API_KEY",
     "ollama-cloud": "OLLAMA_API_KEY",
+    "nvidia": "NVIDIA_API_KEY",
 }
 
 # Providers that use OAuth or token flows — their credentials are managed
 # through the Hermes CLI, not via API keys.  The WebUI cannot set these.
 _OAUTH_PROVIDERS = frozenset({
     "copilot",
-    "openai-codex",
+    "copilot-acp",
     "nous",
+    "openai-codex",
+    "qwen-oauth",
 })
 
 # SECTION: Helper functions
@@ -309,6 +312,31 @@ def get_providers() -> dict[str, Any]:
                     key_source = "config_yaml"
             else:
                 key_source = "config_yaml"
+        elif pid not in _PROVIDER_ENV_VAR:
+            # Fallback: provider is not a known API-key provider and not in
+            # the hardcoded _OAUTH_PROVIDERS set.  It may be a custom or
+            # newly-added OAuth provider (e.g. Anthropic connected via OAuth).
+            # Check live auth status so the Providers tab agrees with the
+            # model picker (#1212).
+            #
+            # IMPORTANT: we skip providers in _PROVIDER_ENV_VAR because they
+            # are pure API-key providers — calling get_auth_status() for every
+            # unconfigured API-key provider would add unnecessary latency
+            # (network round-trip per provider) on the Settings page.
+            # Validate pid looks like a real provider before probing
+            import re as _re
+            if _re.match(r'^[a-z][a-z0-9_-]{0,63}$', pid):
+                try:
+                    from hermes_cli.auth import get_auth_status as _gas
+                    status = _gas(pid)
+                    if isinstance(status, dict) and status.get("logged_in"):
+                        has_key = True
+                        # Constrain key_source to a known-safe closed set
+                        _raw_ks = status.get("key_source", "")
+                        key_source = _raw_ks if _raw_ks in {"oauth", "env", "config", "token"} else "oauth"
+                        is_oauth = True
+                except Exception:
+                    pass
 
         models = _PROVIDER_MODELS.get(pid, [])
         # Also include models from config.yaml providers section
@@ -331,6 +359,36 @@ def get_providers() -> dict[str, Any]:
             "auth_error": auth_error,
             "models": models,
         })
+
+    # Scan custom_providers from config.yaml (e.g. glmcode, timicc)
+    custom_providers_cfg = cfg.get("custom_providers", [])
+    if isinstance(custom_providers_cfg, list):
+        for cp in custom_providers_cfg:
+            if not isinstance(cp, dict) or not cp.get("name"):
+                continue
+            cp_name = str(cp["name"]).strip()
+            cp_id = f"custom:{cp_name}"
+            # Collect models from `models` list or `model` single
+            cp_models = []
+            if isinstance(cp.get("models"), list):
+                cp_models = [{"id": str(m), "label": str(m)} for m in cp["models"]]
+            elif cp.get("model"):
+                cp_models = [{"id": cp["model"], "label": cp["model"]}]
+            # Check for env var reference (${VAR_NAME} pattern)
+            cp_api_key = str(cp.get("api_key") or "")
+            cp_has_key = bool(cp_api_key.strip())
+            # Replace env var reference to check actual value
+            if cp_api_key.startswith("${") and cp_api_key.endswith("}"):
+                env_var = cp_api_key[2:-1]
+                cp_has_key = bool(os.getenv(env_var, "").strip())
+            providers.append({
+                "id": cp_id,
+                "display_name": cp_name,
+                "has_key": cp_has_key,
+                "configurable": False,  # custom providers managed via config.yaml
+                "key_source": "config_yaml" if cp_has_key else "none",
+                "models": cp_models,
+            })
 
     # Determine active provider
     active_provider = None

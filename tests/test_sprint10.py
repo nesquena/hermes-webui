@@ -86,10 +86,10 @@ def test_cancel_nonexistent_stream(cleanup_test_sessions):
     assert data["ok"] is True
     assert data["cancelled"] is False
 
-def test_cancel_button_in_html(cleanup_test_sessions):
+def test_send_button_in_html(cleanup_test_sessions):
     src, _ = get_text("/")
-    assert "btnCancel" in src
-    assert "cancelStream" in src
+    assert "btnSend" in src                   # single primary action button present
+    assert 'id="btnCancel"' not in src        # deprecated composer cancel button removed
 
 def test_cancel_function_in_boot_js(cleanup_test_sessions):
     src, _ = get_text("/static/boot.js")

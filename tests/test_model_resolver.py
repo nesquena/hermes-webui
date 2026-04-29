@@ -458,7 +458,8 @@ def test_custom_endpoint_uses_model_config_api_key_for_model_discovery(monkeypat
     assert captured['ua'] == 'OpenAI/Python 1.0'
     groups = {g['provider']: [m['id'] for m in g['models']] for g in result['groups']}
     assert 'Custom' in groups
-    assert 'gpt-5.2' in groups['Custom']
+    # Model ID may be prefixed with @provider: due to cross-provider dedup (#1228)
+    assert any('gpt-5.2' in m for m in groups['Custom']), f'gpt-5.2 not found in Custom: {groups}'
 
 
 # -- Issue #230: custom provider with slash model name -----------------------

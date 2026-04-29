@@ -15,6 +15,7 @@ ROOT = Path(__file__).parent.parent
 CONFIG_PY = (ROOT / "api" / "config.py").read_text(encoding="utf-8")
 COMMANDS_JS = (ROOT / "static" / "commands.js").read_text(encoding="utf-8")
 MESSAGES_JS = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 BOOT_JS = (ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 INDEX_HTML = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
@@ -145,6 +146,65 @@ class TestSlashCommandHandlers:
         )
         assert "renderTray()" in try_body, (
             "_trySteer must call renderTray() after clearing pendingFiles"
+        )
+
+
+class TestBusySendButton:
+    """The composer send button must remain usable for busy-input actions."""
+
+    def test_update_send_btn_uses_single_primary_action_button(self):
+        idx = UI_JS.find("function updateSendBtn()")
+        assert idx >= 0, "updateSendBtn() not found"
+        body = UI_JS[idx:UI_JS.find("function setBusy", idx)]
+        assert "getComposerPrimaryAction()" in body, (
+            "updateSendBtn must derive icon/color/enabled state from one composer-primary action helper"
+        )
+        assert "btn.dataset.action=action" in body, (
+            "btnSend should expose its current action for CSS, tests, and accessibility"
+        )
+        assert "btn.classList.toggle('stop',action==='stop')" in body, (
+            "busy/no-draft state should turn the single primary button into the red stop action"
+        )
+        assert "btn.style.display=''" in body, (
+            "the single primary button should remain visible while busy; it becomes Stop when there is no draft"
+        )
+
+    def test_composer_primary_action_accounts_for_all_busy_input_modes(self):
+        idx = UI_JS.find("function getComposerPrimaryAction()")
+        assert idx >= 0, "getComposerPrimaryAction() not found"
+        body = UI_JS[idx:UI_JS.find("function _setComposerPrimaryButtonIcon", idx)]
+        assert "return 'stop'" in body, "busy/no-draft + active stream must map to stop"
+        assert "return 'queue'" in body, "queue mode and unavailable steer/interrupt fallbacks must map to queue"
+        assert "return 'interrupt'" in body, "interrupt mode with an active stream must map to interrupt"
+        assert "return 'steer'" in body, "steer mode with active stream support must map to steer"
+        assert "window._busyInputMode||'queue'" in body, "helper must respect the Busy input mode setting"
+        assert "_getExplicitBusyCommandAction(msg&&msg.value)" in body, (
+            "explicit /queue, /interrupt, and /steer drafts must override the Busy input mode for button visuals"
+        )
+
+    def test_explicit_busy_commands_override_button_visual_action(self):
+        idx = UI_JS.find("function _getExplicitBusyCommandAction(")
+        assert idx >= 0, "_getExplicitBusyCommandAction() not found"
+        body = UI_JS[idx:UI_JS.find("function getComposerPrimaryAction", idx)]
+        assert "name==='queue'" in body and "return 'queue'" in body, (
+            "typing /queue <message> should show the queue/list-end button even in another busy mode"
+        )
+        assert "name==='steer'" in body and "return 'steer'" in body, (
+            "typing /steer <message> should show the steer/compass button even when the global mode is queue"
+        )
+        assert "name==='interrupt'" in body and "return 'interrupt'" in body, (
+            "typing /interrupt <message> should show the interrupt/skip-forward button even in another busy mode"
+        )
+        assert "if(!args) return null" in body, (
+            "partial slash commands without a payload should not override the primary button while the user is still typing"
+        )
+
+    def test_send_button_click_uses_primary_action_handler(self):
+        assert "function handleComposerPrimaryAction()" in UI_JS, (
+            "btnSend click should route through a primary action handler so Stop can cancel instead of sending"
+        )
+        assert "handleComposerPrimaryAction" in BOOT_JS, (
+            "boot.js should wire btnSend to handleComposerPrimaryAction(), not directly to send()"
         )
 
 

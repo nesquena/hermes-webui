@@ -501,8 +501,10 @@ _FALLBACK_MODELS = [
     {"provider": "Google",    "id": "google/gemini-2.5-pro",                    "label": "Gemini 2.5 Pro"},
     {"provider": "Google",    "id": "google/gemini-2.5-flash",                  "label": "Gemini 2.5 Flash"},
     # DeepSeek
-    {"provider": "DeepSeek",  "id": "deepseek/deepseek-chat-v3-0324",     "label": "DeepSeek V3"},
-    {"provider": "DeepSeek",  "id": "deepseek/deepseek-r1",               "label": "DeepSeek R1"},
+    {"provider": "DeepSeek",  "id": "deepseek/deepseek-v4-flash",          "label": "DeepSeek V4 Flash"},
+    {"provider": "DeepSeek",  "id": "deepseek/deepseek-v4-pro",            "label": "DeepSeek V4 Pro"},
+    {"provider": "DeepSeek",  "id": "deepseek/deepseek-chat-v3-0324",      "label": "DeepSeek V3 (legacy)"},
+    {"provider": "DeepSeek",  "id": "deepseek/deepseek-r1",                "label": "DeepSeek R1 (legacy)"},
     # Qwen (Alibaba) — strong coding and general models
     {"provider": "Qwen",      "id": "qwen/qwen3-coder",                   "label": "Qwen3 Coder"},
     {"provider": "Qwen",      "id": "qwen/qwen3.6-plus",                  "label": "Qwen3.6 Plus"},
@@ -513,6 +515,13 @@ _FALLBACK_MODELS = [
     # MiniMax
     {"provider": "MiniMax",   "id": "minimax/MiniMax-M2.7",             "label": "MiniMax M2.7"},
     {"provider": "MiniMax",   "id": "minimax/MiniMax-M2.7-highspeed",   "label": "MiniMax M2.7 Highspeed"},
+    # Z.AI / GLM
+    {"provider": "Z.AI",      "id": "zai/glm-5.1",                      "label": "GLM-5.1"},
+    {"provider": "Z.AI",      "id": "zai/glm-5",                        "label": "GLM-5"},
+    {"provider": "Z.AI",      "id": "zai/glm-5-turbo",                  "label": "GLM-5 Turbo"},
+    {"provider": "Z.AI",      "id": "zai/glm-4.7",                      "label": "GLM-4.7"},
+    {"provider": "Z.AI",      "id": "zai/glm-4.5",                      "label": "GLM-4.5"},
+    {"provider": "Z.AI",      "id": "zai/glm-4.5-flash",                "label": "GLM-4.5 Flash"},
 ]
 
 # Provider display names for known Hermes provider IDs
@@ -539,6 +548,7 @@ _PROVIDER_DISPLAY = {
     "mistralai": "Mistral",
     "qwen": "Qwen",
     "x-ai": "xAI",
+    "nvidia": "NVIDIA NIM",
 }
 
 # Provider alias → canonical slug.  Users configure providers using the
@@ -583,6 +593,10 @@ _PROVIDER_ALIASES = {
     "aliyun": "alibaba",
     "dashscope": "alibaba",
     "alibaba-cloud": "alibaba",
+    "nim": "nvidia",
+    "nvidia-nim": "nvidia",
+    "build-nvidia": "nvidia",
+    "nemotron": "nvidia",
 }
 
 
@@ -641,8 +655,10 @@ _PROVIDER_MODELS = {
         {"id": "gemini-2.5-flash",                  "label": "Gemini 2.5 Flash"},
     ],
     "deepseek": [
-        {"id": "deepseek-chat-v3-0324", "label": "DeepSeek V3"},
-        {"id": "deepseek-reasoner", "label": "DeepSeek Reasoner"},
+        {"id": "deepseek-v4-flash", "label": "DeepSeek V4 Flash"},
+        {"id": "deepseek-v4-pro", "label": "DeepSeek V4 Pro"},
+        {"id": "deepseek-chat-v3-0324", "label": "DeepSeek V3 (legacy)"},
+        {"id": "deepseek-reasoner", "label": "DeepSeek Reasoner (legacy)"},
     ],
     "nous": [
         {"id": "@nous:anthropic/claude-opus-4.6",     "label": "Claude Opus 4.6 (via Nous)"},
@@ -751,6 +767,13 @@ _PROVIDER_MODELS = {
         {"id": "qwen3-coder",   "label": "Qwen3 Coder"},
         {"id": "qwen3.6-plus",  "label": "Qwen3.6 Plus"},
     ],
+    # NVIDIA NIM — NVIDIA's inference platform
+    "nvidia": [
+        {"id": "nvidia/nemotron-3-super-120b-a12b", "label": "Nemotron 3 Super 120B"},
+        {"id": "nvidia/nemotron-3-nano-30b-a3b", "label": "Nemotron 3 Nano 30B"},
+        {"id": "nvidia/llama-3.3-nemotron-super-49b-v1.5", "label": "Llama 3.3 Nemotron Super 49B"},
+        {"id": "qwen/qwen3-next-80b-a3b-instruct", "label": "Qwen3 Next 80B"},
+    ],
     # xAI — prefix used in OpenRouter model IDs (x-ai/grok-4-20)
     "x-ai": [
         {"id": "grok-4.20", "label": "Grok 4.20"},
@@ -822,6 +845,77 @@ def _apply_provider_prefix(
     return result
 
 
+def _deduplicate_model_ids(groups: list[dict]) -> None:
+    """Ensure every model ID across groups is globally unique.
+
+    When multiple providers expose the same bare model ID (e.g. two
+    custom providers both listing ``gpt-5.4``), the dropdown cannot
+    distinguish them.  This post-process detects such collisions and
+    prefixes colliding entries with ``@provider_id:`` so the frontend
+    can treat them as distinct options.
+
+    The first occurrence (in group order) is left bare for backward
+    compatibility with sessions that already store the bare model name.
+    If that provider is later removed from the config, the next cache
+    rebuild re-runs dedup — the remaining provider becomes the sole
+    occurrence and is left bare, so the session still matches.
+
+    .. note::
+       The "first occurrence wins" rule means the bare ID is not stable
+       across config changes (adding, removing, or reordering providers).
+       This is acceptable because the dedup runs on every cache rebuild,
+       so sessions always resolve to the current canonical bare ID.
+
+    The ``@provider_id:model`` format is consistent with the existing
+    ``_apply_provider_prefix()`` function and is handled by
+    ``resolve_model_provider()`` (rsplits on the last ``:`` to handle
+    provider_ids that themselves contain ``:``).
+
+    Operates in-place on *groups*.
+    """
+    if not groups:
+        return
+
+    # Collect {bare_id: [(group_idx, model_idx), ...]} in alphabetical
+    # provider_id order so that the "first occurrence stays bare" rule is
+    # deterministic across config edits (adding/removing/reordering providers).
+    sorted_group_indices = sorted(
+        range(len(groups)),
+        key=lambda i: groups[i].get("provider_id", ""),
+    )
+    id_map: dict[str, list[tuple[int, int]]] = {}
+    for gi in sorted_group_indices:
+        group = groups[gi]
+        pid = group.get("provider_id", "")
+        for mi, model in enumerate(group.get("models", [])):
+            mid = model.get("id", "")
+            # Skip IDs that are already provider-qualified
+            if mid.startswith("@") or "/" in mid:
+                continue
+            id_map.setdefault(mid, []).append((gi, mi))
+
+    # For any bare ID appearing in 2+ groups, prefix all but the first
+    # occurrence.  The first stays bare for backward compat; the rest
+    # get ``@provider_id:id`` and a disambiguated label.
+    # This handles N>2 providers correctly: the loop iterates over all
+    # occurrences after the first, prefixing each with its own provider_id.
+    for bare_id, locations in id_map.items():
+        if len(locations) < 2:
+            continue
+        # Prefix all occurrences after the first
+        for gi, mi in locations[1:]:
+            group = groups[gi]
+            model = group["models"][mi]
+            pid = group.get("provider_id", "")
+            model["id"] = f"@{pid}:{bare_id}"
+            provider_name = group.get("provider", pid)
+            # Update label to show provider for clarity
+            if model.get("label") != bare_id:
+                model["label"] = f"{model['label']} ({provider_name})"
+            else:
+                model["label"] = f"{bare_id} ({provider_name})"
+
+
 def resolve_model_provider(model_id: str) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
@@ -871,8 +965,10 @@ def resolve_model_provider(model_id: str) -> tuple:
     # @provider:model format — explicit provider hint from the dropdown.
     # Route through that provider directly (resolve_runtime_provider will
     # resolve credentials in streaming.py).
+    # Use rsplit to handle provider_ids that contain ':' (e.g. custom:my-key).
+    # With rsplit, "@custom:my-key:model" → provider="custom:my-key", model="model".
     if model_id.startswith("@") and ":" in model_id:
-        provider_hint, bare_model = model_id[1:].split(":", 1)
+        provider_hint, bare_model = model_id[1:].rsplit(":", 1)
         return bare_model, provider_hint, None
 
     if "/" in model_id:
@@ -890,7 +986,9 @@ def resolve_model_provider(model_id: str) -> tuple:
         # Nous user whose config.yaml also has a base_url doesn't accidentally
         # fall into the prefix-stripping path (#894: minimax/minimax-m2.7 → bare
         # name sent to Nous → 404 because Nous requires the full namespace path).
-        _PORTAL_PROVIDERS = {"nous", "opencode-zen", "opencode-go"}
+        # NVIDIA NIM also serves models from multiple namespaces (qwen, nvidia, etc.)
+        # and requires the full model path.
+        _PORTAL_PROVIDERS = {"nous", "opencode-zen", "opencode-go", "nvidia"}
         if config_provider in _PORTAL_PROVIDERS:
             return model_id, config_provider, config_base_url
         # If a custom endpoint base_url is configured, don't reroute through OpenRouter
@@ -1120,15 +1218,30 @@ def _delete_models_cache_on_disk() -> None:
         pass  # already absent
 
 
+def _is_valid_models_cache(cache: object) -> bool:
+    """Return True when a disk cache payload has the full /api/models shape."""
+    if not isinstance(cache, dict):
+        return False
+    if not {"active_provider", "default_model", "groups"}.issubset(cache):
+        return False
+    active_provider = cache.get("active_provider")
+    return (
+        (active_provider is None or isinstance(active_provider, str))
+        and isinstance(cache.get("default_model"), str)
+        and isinstance(cache.get("groups"), list)
+    )
+
+
 def _load_models_cache_from_disk() -> dict | None:
-    """Load groups dict from disk cache if it exists and is valid."""
+    """Load /api/models cache from disk if it exists and has current metadata."""
     try:
         import json as _j
+
         if not _models_cache_path.exists():
             return None
         with open(_models_cache_path, encoding="utf-8") as f:
             cache = _j.load(f)
-        return cache if isinstance(cache, dict) and "groups" in cache else None
+        return cache if _is_valid_models_cache(cache) else None
     except Exception:
         return None
 
@@ -1136,13 +1249,36 @@ def _load_models_cache_from_disk() -> dict | None:
 def _save_models_cache_to_disk(cache: dict) -> None:
     """Save cache to disk so it survives server restarts."""
     try:
-        import time as _cache_time
+        if not _is_valid_models_cache(cache):
+            return
         tmp = str(_models_cache_path) + f".{os.getpid()}.tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"groups": cache.get("groups", [])}, f, indent=2)
+            json.dump(
+                {
+                    "active_provider": cache["active_provider"],
+                    "default_model": cache["default_model"],
+                    "groups": cache["groups"],
+                },
+                f,
+                indent=2,
+            )
         os.rename(tmp, str(_models_cache_path))
     except Exception:
         pass  # Non-fatal -- cache will rebuild on next call
+
+
+def _get_fresh_memory_models_cache(now: float) -> dict | None:
+    """Return a valid fresh in-memory /api/models cache, or clear stale shapes."""
+    global _available_models_cache, _available_models_cache_ts
+    if _available_models_cache is None:
+        return None
+    if (now - _available_models_cache_ts) >= _AVAILABLE_MODELS_CACHE_TTL:
+        return None
+    if _is_valid_models_cache(_available_models_cache):
+        return copy.deepcopy(_available_models_cache)
+    _available_models_cache = None
+    _available_models_cache_ts = 0.0
+    return None
 
 
 def invalidate_models_cache():
@@ -1741,6 +1877,11 @@ def get_available_models() -> dict:
                         }
                     )
 
+        # Post-process: ensure model IDs are globally unique across groups.
+        # When multiple providers expose the same bare model ID, prefix
+        # collisions with @provider_id: so the frontend can distinguish them.
+        _deduplicate_model_ids(groups)
+
         return {
             "active_provider": active_provider,
             "default_model": default_model,
@@ -1776,19 +1917,22 @@ def get_available_models() -> dict:
                 lambda: not _cache_build_in_progress and _available_models_cache is not None,
                 timeout=60
             )
-            if _available_models_cache is not None and (time.monotonic() - _available_models_cache_ts) < _AVAILABLE_MODELS_CACHE_TTL:
-                return copy.deepcopy(_available_models_cache)
+            cached = _get_fresh_memory_models_cache(time.monotonic())
+            if cached is not None:
+                return cached
 
         # Reload config if changed
         if _cfg_changed:
             reload_config()
             _available_models_cache = None
             _available_models_cache_ts = 0.0
+            disk_groups = None
 
         # Serve from memory cache if fresh
         now = time.monotonic()
-        if _available_models_cache is not None and (now - _available_models_cache_ts) < _AVAILABLE_MODELS_CACHE_TTL:
-            return copy.deepcopy(_available_models_cache)
+        cached = _get_fresh_memory_models_cache(now)
+        if cached is not None:
+            return cached
 
         # Cold path: disk cache hit — use it (fast, no lock contention)
         if disk_groups is not None:

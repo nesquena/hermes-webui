@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import queue
+import shutil
 import sys
 import threading
 import time
@@ -16,6 +17,38 @@ from pathlib import Path
 from urllib.parse import parse_qs
 
 logger = logging.getLogger(__name__)
+
+# ── Cron run tracking ────────────────────────────────────────────────────────
+# Track job IDs currently being executed so the frontend can poll status.
+_RUNNING_CRON_JOBS: dict[str, float] = {}  # job_id → start_timestamp
+_RUNNING_CRON_LOCK = threading.Lock()
+
+
+def _mark_cron_running(job_id: str):
+    with _RUNNING_CRON_LOCK:
+        _RUNNING_CRON_JOBS[job_id] = time.time()
+
+
+def _mark_cron_done(job_id: str):
+    with _RUNNING_CRON_LOCK:
+        _RUNNING_CRON_JOBS.pop(job_id, None)
+
+
+def _is_cron_running(job_id: str) -> tuple[bool, float]:
+    """Return (is_running, elapsed_seconds)."""
+    with _RUNNING_CRON_LOCK:
+        t = _RUNNING_CRON_JOBS.get(job_id)
+        if t is None:
+            return False, 0.0
+        return True, time.time() - t
+
+
+def _run_cron_tracked(job):
+    """Wrapper that tracks running state around cron.scheduler.run_job."""
+    try:
+        run_job(job)
+    finally:
+        _mark_cron_done(job.get("id", ""))
 
 _PROVIDER_ALIASES = {
     "claude": "anthropic",
@@ -33,8 +66,9 @@ _OPENAI_COMPAT_ENDPOINTS = {
     "minimax": "https://api.minimax.chat/v1",
     "mistralai": "https://api.mistral.ai/v1",
     "xai": "https://api.x.ai/v1",
-    "deepseek": "https://api.deepseek.com/v1",
+    "deepseek": "https://api.deepseek.com",
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "nvidia": "https://integrate.api.nvidia.com/v1",
 }
 # NOTE: "openai-codex" is excluded because it maps to the same endpoint as
 # the base "openai" provider (api.openai.com/v1).  When both are configured
@@ -412,7 +446,7 @@ from api.workspace import (
     _is_blocked_system_path,
     _workspace_blocked_roots,
 )
-from api.upload import handle_upload, handle_transcribe
+from api.upload import handle_upload, handle_upload_extract, handle_transcribe
 from api.streaming import _sse, _run_agent_streaming, cancel_stream
 from api.providers import get_providers, set_provider_key, remove_provider_key
 from api.onboarding import (
@@ -1072,6 +1106,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/chat/stream":
         return _handle_sse_stream(handler, parsed)
 
+    if parsed.path == "/api/terminal/output":
+        return _handle_terminal_output(handler, parsed)
+
     if parsed.path == '/api/sessions/gateway/stream':
         return _handle_gateway_sse_stream(handler, parsed)
 
@@ -1113,6 +1150,9 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/crons/recent":
         return _handle_cron_recent(handler, parsed)
+
+    if parsed.path == "/api/crons/status":
+        return _handle_cron_status(handler, parsed)
 
     # ── Skills API (GET) ──
     if parsed.path == "/api/skills":
@@ -1195,6 +1235,8 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/upload":
         return handle_upload(handler)
+    if parsed.path == "/api/upload/extract":
+        return handle_upload_extract(handler)
 
     if parsed.path == "/api/transcribe":
         return handle_transcribe(handler)
@@ -1354,6 +1396,7 @@ def handle_post(handler, parsed) -> bool:
             s = get_session(body["session_id"])
         except KeyError:
             return bad(handler, "Session not found", 404)
+        old_ws = getattr(s, "workspace", "")
         try:
             new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace)))
         except ValueError as e:
@@ -1362,6 +1405,12 @@ def handle_post(handler, parsed) -> bool:
             s.workspace = new_ws
             s.model = body.get("model", s.model)
             s.save()
+        if str(old_ws or "") != str(new_ws or ""):
+            try:
+                from api.terminal import close_terminal
+                close_terminal(body["session_id"])
+            except Exception:
+                logger.debug("Failed to close workspace terminal after workspace update")
         set_last_workspace(new_ws)
         return j(handler, {"session": s.compact() | {"messages": s.messages}})
 
@@ -1394,6 +1443,11 @@ def handle_post(handler, parsed) -> bool:
             SESSION_INDEX_FILE.unlink(missing_ok=True)
         except Exception:
             logger.debug("Failed to unlink session index")
+        try:
+            from api.terminal import close_terminal
+            close_terminal(sid)
+        except Exception:
+            logger.debug("Failed to close workspace terminal for deleted session %s", sid)
         # Also delete from CLI state.db (for CLI sessions shown in sidebar)
         try:
             from api.models import delete_cli_session
@@ -1518,6 +1572,18 @@ def handle_post(handler, parsed) -> bool:
         from api.streaming import _handle_chat_steer
         return _handle_chat_steer(handler, body)
 
+    if parsed.path == "/api/terminal/start":
+        return _handle_terminal_start(handler, body)
+
+    if parsed.path == "/api/terminal/input":
+        return _handle_terminal_input(handler, body)
+
+    if parsed.path == "/api/terminal/resize":
+        return _handle_terminal_resize(handler, body)
+
+    if parsed.path == "/api/terminal/close":
+        return _handle_terminal_close(handler, body)
+
     # ── Cron API (POST) ──
     if parsed.path == "/api/crons/create":
         return _handle_cron_create(handler, body)
@@ -1562,6 +1628,22 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/workspaces/rename":
         return _handle_workspace_rename(handler, body)
+
+    if parsed.path == "/api/workspaces/reorder":
+        return _handle_workspace_reorder(handler, body)
+
+    # ── MCP Servers ──
+    if parsed.path == "/api/mcp/servers":
+        return _handle_mcp_servers_list(handler)
+
+    if parsed.path.startswith("/api/mcp/servers/") and parsed.path.count("/") == 4:
+        # DELETE /api/mcp/servers/<name>
+        name = parsed.path.split("/")[-1]
+        if handler.command == "DELETE":
+            return _handle_mcp_server_delete(handler, name)
+        # PUT /api/mcp/servers/<name>
+        if handler.command == "PUT":
+            return _handle_mcp_server_update(handler, name, body)
 
     # ── Approval (POST) ──
     if parsed.path == "/api/approval/respond":
@@ -2113,6 +2195,126 @@ def _handle_sse_stream(handler, parsed):
     return True
 
 
+def _terminal_session_and_workspace(body_or_query):
+    sid = str(body_or_query.get("session_id", "")).strip()
+    if not sid:
+        raise ValueError("session_id required")
+    try:
+        s = get_session(sid)
+    except KeyError:
+        raise KeyError("Session not found")
+    workspace = resolve_trusted_workspace(getattr(s, "workspace", "") or "")
+    return sid, workspace
+
+
+def _handle_terminal_start(handler, body):
+    try:
+        sid, workspace = _terminal_session_and_workspace(body)
+        from api.terminal import start_terminal
+        term = start_terminal(
+            sid,
+            workspace,
+            rows=int(body.get("rows") or 24),
+            cols=int(body.get("cols") or 80),
+            restart=bool(body.get("restart")),
+        )
+        return j(
+            handler,
+            {
+                "ok": True,
+                "session_id": sid,
+                "workspace": term.workspace,
+                "running": term.is_alive(),
+            },
+        )
+    except KeyError as e:
+        return bad(handler, str(e), 404)
+    except ValueError as e:
+        return bad(handler, str(e), 400)
+    except Exception as e:
+        return bad(handler, _sanitize_error(e), 500)
+
+
+def _handle_terminal_input(handler, body):
+    try:
+        require(body, "session_id")
+        data = str(body.get("data", ""))
+        if len(data) > 8192:
+            return bad(handler, "input too large", 413)
+        from api.terminal import write_terminal
+        write_terminal(body["session_id"], data)
+        return j(handler, {"ok": True})
+    except KeyError as e:
+        return bad(handler, str(e), 404)
+    except ValueError as e:
+        return bad(handler, str(e), 400)
+    except Exception as e:
+        return bad(handler, _sanitize_error(e), 500)
+
+
+def _handle_terminal_resize(handler, body):
+    try:
+        require(body, "session_id")
+        from api.terminal import resize_terminal
+        resize_terminal(
+            body["session_id"],
+            rows=int(body.get("rows") or 24),
+            cols=int(body.get("cols") or 80),
+        )
+        return j(handler, {"ok": True})
+    except KeyError as e:
+        return bad(handler, str(e), 404)
+    except ValueError as e:
+        return bad(handler, str(e), 400)
+    except Exception as e:
+        return bad(handler, _sanitize_error(e), 500)
+
+
+def _handle_terminal_close(handler, body):
+    try:
+        require(body, "session_id")
+        from api.terminal import close_terminal
+        closed = close_terminal(body["session_id"])
+        return j(handler, {"ok": True, "closed": closed})
+    except ValueError as e:
+        return bad(handler, str(e), 400)
+
+
+def _handle_terminal_output(handler, parsed):
+    qs = parse_qs(parsed.query)
+    sid = qs.get("session_id", [""])[0]
+    if not sid:
+        return bad(handler, "session_id required")
+    from api.terminal import get_terminal
+    term = get_terminal(sid)
+    if term is None:
+        return j(handler, {"error": "terminal not running"}, status=404)
+
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+    handler.send_header("Cache-Control", "no-cache")
+    handler.send_header("X-Accel-Buffering", "no")
+    handler.send_header("Connection", "keep-alive")
+    handler.end_headers()
+    try:
+        while True:
+            try:
+                event, data = term.output.get(timeout=25)
+            except queue.Empty:
+                handler.wfile.write(b": terminal heartbeat\n\n")
+                handler.wfile.flush()
+                if term.closed.is_set() and term.output.empty():
+                    _sse(handler, "terminal_closed", {"exit_code": term.proc.poll()})
+                    break
+                continue
+            _sse(handler, event, data)
+            if event in ("terminal_closed", "terminal_error"):
+                break
+    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+        pass
+    return True
+
+
 def _gateway_sse_probe_payload(settings, watcher):
     enabled = bool(settings.get('show_cli_sessions'))
     # Use the public is_alive() accessor where available (current GatewayWatcher);
@@ -2637,6 +2839,19 @@ def _handle_cron_output(handler, parsed):
     return j(handler, {"job_id": job_id, "outputs": outputs})
 
 
+def _handle_cron_status(handler, parsed):
+    """Return running status for one or all cron jobs."""
+    qs = parse_qs(parsed.query)
+    job_id = qs.get("job_id", [""])[0]
+    if job_id:
+        running, elapsed = _is_cron_running(job_id)
+        return j(handler, {"job_id": job_id, "running": running, "elapsed": round(elapsed, 1)})
+    # Return status for all running jobs
+    with _RUNNING_CRON_LOCK:
+        all_running = {jid: round(time.time() - t, 1) for jid, t in _RUNNING_CRON_JOBS.items()}
+    return j(handler, {"running": all_running})
+
+
 def _handle_cron_recent(handler, parsed):
     """Return cron jobs that have completed since a given timestamp."""
     import datetime
@@ -3111,8 +3326,14 @@ def _handle_cron_run(handler, body):
     job = get_job(job_id)
     if not job:
         return bad(handler, "Job not found", 404)
-    threading.Thread(target=run_job, args=(job,), daemon=True).start()
-    return j(handler, {"ok": True, "job_id": job_id, "status": "triggered"})
+    # Prevent double-run: reject if the job is already tracked as running
+    already_running, elapsed = _is_cron_running(job_id)
+    if already_running:
+        return j(handler, {"ok": False, "job_id": job_id, "status": "already_running",
+                            "elapsed": round(elapsed, 1)})
+    _mark_cron_running(job_id)
+    threading.Thread(target=_run_cron_tracked, args=(job,), daemon=True).start()
+    return j(handler, {"ok": True, "job_id": job_id, "status": "running"})
 
 
 def _handle_cron_pause(handler, body):
@@ -3153,8 +3374,11 @@ def _handle_file_delete(handler, body):
         if not target.exists():
             return bad(handler, "File not found", 404)
         if target.is_dir():
-            return bad(handler, "Cannot delete directories via this endpoint")
-        target.unlink()
+            if not body.get("recursive"):
+                return bad(handler, "Set recursive=true to delete directories")
+            shutil.rmtree(target)
+        else:
+            target.unlink()
         return j(handler, {"ok": True, "path": body["path"]})
     except (ValueError, PermissionError) as e:
         return bad(handler, _sanitize_error(e))
@@ -3309,6 +3533,34 @@ def _handle_workspace_rename(handler, body):
         return bad(handler, "Workspace not found", 404)
     save_workspaces(wss)
     return j(handler, {"ok": True, "workspaces": wss})
+
+
+def _handle_workspace_reorder(handler, body):
+    """Reorder workspaces by providing an ordered list of paths.
+
+    Accepts {"paths": ["path1", "path2", ...]}. The workspaces list is
+    rewritten so that entries appear in the given order. Any workspace
+    not included in the request is appended at the end (preserves data).
+    """
+    paths = body.get("paths", [])
+    if not paths or not isinstance(paths, list):
+        return bad(handler, "paths is required and must be a list")
+    wss = load_workspaces()
+    by_path = {w["path"]: w for w in wss}
+    # Build reordered list: given order first, then any omitted entries
+    reordered = []
+    seen = set()
+    for p in paths:
+        p = p.strip()
+        if p in by_path and p not in seen:
+            reordered.append(by_path[p])
+            seen.add(p)
+    # Append any workspaces not mentioned (safety net)
+    for w in wss:
+        if w["path"] not in seen:
+            reordered.append(w)
+    save_workspaces(reordered)
+    return j(handler, {"ok": True, "workspaces": reordered})
 
 
 def _handle_approval_respond(handler, body):
@@ -3816,3 +4068,127 @@ def _handle_session_import(handler, body):
             SESSIONS.popitem(last=False)
     s.save()
     return j(handler, {"ok": True, "session": s.compact() | {"messages": s.messages}})
+
+
+# ── MCP Server helpers ──
+from api.config import get_config, _save_yaml_config_file, _get_config_path, reload_config
+
+def _mask_secrets(obj):
+    """Mask sensitive values in env vars and headers."""
+    if not isinstance(obj, dict):
+        return obj
+    sensitive = ("auth", "token", "key", "secret", "password", "credential")
+    masked = {}
+    for k, v in obj.items():
+        if isinstance(v, str) and any(s in k.lower() for s in sensitive):
+            masked[k] = "••••••"
+        elif isinstance(v, dict):
+            masked[k] = _mask_secrets(v)
+        else:
+            masked[k] = v
+    return masked
+
+
+def _server_summary(name, cfg):
+    """Return a safe summary of an MCP server config."""
+    out = {"name": name}
+    if "url" in cfg:
+        out["transport"] = "http"
+        # Mask auth headers
+        if "headers" in cfg:
+            out["headers"] = _mask_secrets(cfg["headers"])
+        out["url"] = cfg["url"]
+    else:
+        out["transport"] = "stdio"
+        out["command"] = cfg.get("command", "")
+        out["args"] = cfg.get("args", [])
+        if "env" in cfg:
+            out["env"] = _mask_secrets(cfg["env"])
+    out["timeout"] = cfg.get("timeout", 120)
+    return out
+
+
+def _handle_mcp_servers_list(handler):
+    """List all configured MCP servers."""
+    cfg = get_config()
+    servers = cfg.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        servers = {}
+    result = [_server_summary(name, scfg) for name, scfg in servers.items()]
+    return j(handler, {"servers": result})
+
+
+def _handle_mcp_server_delete(handler, name):
+    """Delete an MCP server by name."""
+    from urllib.parse import unquote
+    name = unquote(name)
+    if not name:
+        return bad(handler, "name is required")
+    cfg = get_config()
+    servers = cfg.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        servers = {}
+    if name not in servers:
+        return bad(handler, f"MCP server '{name}' not found", 404)
+    del servers[name]
+    cfg["mcp_servers"] = servers
+    _save_yaml_config_file(_get_config_path(), cfg)
+    reload_config()
+    return j(handler, {"ok": True, "deleted": name})
+
+
+_MASKED_PLACEHOLDER = "••••••"
+
+
+def _strip_masked_values(submitted, existing):
+    """Remove masked placeholder values from submitted dict, keeping originals."""
+    if not isinstance(submitted, dict) or not isinstance(existing, dict):
+        return submitted
+    cleaned = {}
+    for k, v in submitted.items():
+        if isinstance(v, str) and v == _MASKED_PLACEHOLDER:
+            if k in existing and isinstance(existing[k], str):
+                cleaned[k] = existing[k]  # preserve original real value
+                continue
+        elif isinstance(v, dict) and k in existing and isinstance(existing[k], dict):
+            cleaned[k] = _strip_masked_values(v, existing[k])
+        else:
+            cleaned[k] = v
+    return cleaned
+
+
+def _handle_mcp_server_update(handler, name, body):
+    """Add or update an MCP server."""
+    from urllib.parse import unquote
+    name = unquote(name)
+    if not name:
+        return bad(handler, "name is required")
+    # Validate: must have url (http) or command (stdio)
+    server_cfg = {}
+    cfg = get_config()
+    servers = cfg.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        servers = {}
+    existing_cfg = servers.get(name, {})
+    if body.get("url"):
+        server_cfg["url"] = body["url"].strip()
+        if body.get("headers"):
+            server_cfg["headers"] = _strip_masked_values(body["headers"], existing_cfg.get("headers", {}))
+    elif body.get("command"):
+        server_cfg["command"] = body["command"].strip()
+        if body.get("args"):
+            server_cfg["args"] = body["args"] if isinstance(body["args"], list) else [body["args"]]
+        if body.get("env"):
+            server_cfg["env"] = _strip_masked_values(body["env"], existing_cfg.get("env", {}))
+    else:
+        return bad(handler, "url or command is required")
+    if body.get("timeout") is not None:
+        try:
+            server_cfg["timeout"] = int(body["timeout"])
+        except (ValueError, TypeError):
+            pass
+    servers[name] = server_cfg
+    cfg["mcp_servers"] = servers
+    _save_yaml_config_file(_get_config_path(), cfg)
+    reload_config()
+    return j(handler, {"ok": True, "server": _server_summary(name, server_cfg)})

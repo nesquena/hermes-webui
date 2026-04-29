@@ -19,6 +19,7 @@
 <script>(function(){var fs=localStorage.getItem('hermes-font-size');if(fs&&fs!=='default')document.documentElement.dataset.fontSize=fs;})()</script>
 <script>(function(){try{document.documentElement.dataset.workspacePanel=localStorage.getItem('hermes-webui-workspace-panel')==='open'?'open':'closed';}catch(e){document.documentElement.dataset.workspacePanel='closed';}})()</script>
 <link rel="stylesheet" href="static/style.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" integrity="sha384-LJcOxlx9IMbNXDqJ2axpfEQKkAYbFjJfhXexLfiRJhjDU81mzgkiQq8rkV0j6dVh" crossorigin="anonymous">
   <!-- KaTeX math rendering CSS (loaded eagerly to prevent layout shift) -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css" integrity="sha384-5TcZemv2l/9On385z///+d7MSYlvIEw9FuZTIdZ14vJLqWphw7e7ZPuOiCHJcFCP" crossorigin="anonymous">
   <!-- streaming-markdown: incremental DOM-building markdown parser for live streams -->
@@ -39,6 +40,9 @@
   <link id="prism-theme" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css" crossorigin="anonymous">
   <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-core.min.js" integrity="sha384-MXybTpajaBV0AkcBaCPT4KIvo0FzoCiWXgcihYsw4FUkEz0Pv3JGV6tk2G8vJtDc" crossorigin="anonymous" defer></script>
   <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/plugins/autoloader/prism-autoloader.min.js" integrity="sha384-Uq05+JLko69eOiPr39ta9bh7kld5PKZoU+fF7g0EXTAriEollhZ+DrN8Q/Oi8J2Q" crossorigin="anonymous" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js" integrity="sha384-/nfmYPUzWMS6v2atn8hbljz7NE0EI1iGx34lJaNzyVjWGDzMv+ciUZUeJpKA3Glc" crossorigin="anonymous" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js" integrity="sha384-AQLWHRKAgdTxkolJcLOELg4E9rE89CPE2xMy3tIRFn08NcGKPTsELdvKomqji+DL" crossorigin="anonymous" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js" integrity="sha384-U4fBROT3kCM582gaYiNaOSQiJbXPzd9SfR1598Y7yeGSYVBzikXrNg0XyuU+mOnl" crossorigin="anonymous" defer></script>
   <!-- PWA service worker registration -->
   <script>
     if ('serviceWorker' in navigator) {
@@ -297,6 +301,7 @@
           <div class="clarify-header">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 17h.01"/><path d="M9.09 9a3 3 0 1 1 5.82 1c0 2-3 2-3 4"/><circle cx="12" cy="12" r="10"/></svg>
             <span id="clarifyHeading" data-i18n="clarify_heading">Clarification needed</span>
+            <span class="clarify-countdown" id="clarifyCountdown"></span>
           </div>
           <div class="clarify-question" id="clarifyQuestion"></div>
           <div class="clarify-choices" id="clarifyChoices"></div>
@@ -305,6 +310,27 @@
             <button class="clarify-submit" id="clarifySubmit" onclick="respondClarify()" data-i18n="clarify_send">Send</button>
           </div>
           <div class="clarify-hint" id="clarifyHint" data-i18n="clarify_hint">Pick a choice, or type your own answer below.</div>
+        </div>
+      </div>
+      <div class="composer-terminal-panel" id="composerTerminalPanel" hidden>
+        <div class="composer-terminal-inner">
+          <div class="composer-terminal-resize-handle" id="terminalResizeHandle" role="separator" aria-orientation="horizontal" aria-label="Resize terminal" tabindex="0"></div>
+          <div class="composer-terminal-header">
+            <div class="composer-terminal-title">
+              <span data-i18n="terminal_title">Terminal</span>
+              <span class="composer-terminal-dot" aria-hidden="true">·</span>
+              <span id="terminalWorkspaceLabel"></span>
+            </div>
+            <div class="composer-terminal-actions">
+              <button type="button" class="composer-terminal-action" id="btnTerminalClear" onclick="clearComposerTerminal()" data-i18n="terminal_clear">Clear</button>
+              <button type="button" class="composer-terminal-action" id="btnTerminalCopy" onclick="copyComposerTerminalOutput()" data-i18n="terminal_copy_output">Copy output</button>
+              <button type="button" class="composer-terminal-action" id="btnTerminalRestart" onclick="restartComposerTerminal()" data-i18n="terminal_restart">Restart</button>
+              <button type="button" class="composer-terminal-action" id="btnTerminalClose" onclick="closeComposerTerminal()" data-i18n="terminal_close">Close</button>
+            </div>
+          </div>
+          <div class="composer-terminal-viewport" id="terminalViewport" onclick="focusComposerTerminalInput()">
+            <div class="composer-terminal-surface" id="terminalSurface" aria-label="Workspace terminal"></div>
+          </div>
         </div>
       </div>
       </div>
@@ -323,7 +349,7 @@
         <textarea id="msg" rows="1" placeholder="Message Hermes…"></textarea>
         <div class="composer-footer">
           <div class="composer-left">
-            <input type="file" id="fileInput" multiple accept="image/*,text/*,application/pdf,application/json,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.md,.py,.js,.ts,.yaml,.yml,.toml,.csv,.sh,.txt,.log,.env,.xls,.xlsx,.doc,.docx" style="display:none">
+            <input type="file" id="fileInput" multiple accept="image/*,text/*,application/pdf,application/json,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.md,.py,.js,.ts,.yaml,.yml,.toml,.csv,.sh,.txt,.log,.env,.xls,.xlsx,.doc,.docx,.zip,.tar,.gz,.tgz,.bz2,.xz" style="display:none">
             <button class="icon-btn" id="btnAttach" title="Attach files">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
             </button>
@@ -379,7 +405,9 @@
               <optgroup label="Other">
                 <option value="google/gemini-3.1-pro-preview">Gemini 3.1 Pro Preview</option>
                 <option value="google/gemini-3-flash-preview">Gemini 3 Flash Preview</option>
-                <option value="deepseek/deepseek-chat-v3-0324">DeepSeek V3</option>
+                <option value="deepseek/deepseek-v4-flash">DeepSeek V4 Flash</option>
+                <option value="deepseek/deepseek-v4-pro">DeepSeek V4 Pro</option>
+                <option value="deepseek/deepseek-chat-v3-0324">DeepSeek V3 (legacy)</option>
                 <option value="meta-llama/llama-4-scout">Llama 4 Scout</option>
               </optgroup>
             </select>
@@ -410,11 +438,11 @@
                 <div class="ctx-tooltip-line" id="ctxTooltipTokens"></div>
                 <div class="ctx-tooltip-line" id="ctxTooltipThreshold"></div>
                 <div class="ctx-tooltip-line" id="ctxTooltipCost" style="display:none"></div>
+                <div class="ctx-tooltip-compress" id="ctxTooltipCompress" style="display:none">
+                  <button class="ctx-compress-btn" id="ctxCompressBtn" type="button"></button>
+                </div>
               </div>
             </div>
-            <button class="cancel-btn" id="btnCancel" onclick="cancelStream()" style="display:none" title="Stop generation" aria-label="Stop generation">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"></rect></svg>
-            </button>
             <span class="bg-badge" id="bgBadge" style="display:none" title="Background tasks running">0</span>
             <button class="send-btn" id="btnSend" title="Send message" disabled>
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
@@ -477,6 +505,7 @@
           <button id="btnPauseTaskDetail" class="panel-head-btn" title="Pause" data-i18n-title="cron_pause" onclick="pauseCurrentCron()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg></button>
           <button id="btnResumeTaskDetail" class="panel-head-btn" title="Resume" data-i18n-title="cron_resume" onclick="resumeCurrentCron()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/><line x1="22" y1="4" x2="22" y2="20"/></svg></button>
           <button id="btnEditTaskDetail" class="panel-head-btn" title="Edit" data-i18n-title="edit" onclick="editCurrentCron()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
+          <button id="btnDuplicateTaskDetail" class="panel-head-btn" title="Duplicate" data-i18n-title="cron_duplicate" onclick="duplicateCurrentCron()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
           <button id="btnDeleteTaskDetail" class="panel-head-btn" title="Delete" data-i18n-title="delete_title" onclick="deleteCurrentCron()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
           <button id="btnCancelTaskDetail" class="panel-head-btn" title="Cancel" data-i18n-title="cancel" onclick="cancelCronForm()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
           <button id="btnSaveTaskDetail" class="panel-head-btn primary" title="Save" data-i18n-title="save" onclick="saveCronForm()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></button>
@@ -621,6 +650,7 @@
             <div class="settings-field">
               <label for="settingsModel" data-i18n="settings_label_model">Default Model</label>
               <select id="settingsModel" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px"></select>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_model">Used for new conversations. Existing conversations keep their selected model.</div>
             </div>
             <div class="settings-field">
               <label for="settingsSendKey" data-i18n="settings_label_send_key">Send Key</label>
@@ -742,6 +772,46 @@
             </div>
             <button class="sm-btn" id="btnDisableAuth" onclick="disableAuth()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:#e8a030;border-color:rgba(232,160,48,.3);display:none" data-i18n="disable_auth">Disable Auth</button>
             <button class="sm-btn" id="btnSignOut" onclick="signOut()" style="margin-top:6px;width:100%;padding:8px;font-weight:600;color:var(--accent);border-color:rgba(233,69,96,.3);display:none" data-i18n="sign_out">Sign Out</button>
+            <!-- MCP Servers Section -->
+            <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+              <label data-i18n="mcp_servers_title">MCP Servers</label>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="mcp_servers_desc">Manage Model Context Protocol servers configured in config.yaml.</div>
+              <div id="mcpServerList"></div>
+              <button class="sm-btn" onclick="showMcpAddForm()" style="margin-top:8px;width:100%;padding:7px;font-weight:600" data-i18n="mcp_add_server">+ Add Server</button>
+            </div>
+            <div id="mcpAddFormWrap" style="display:none;margin-top:10px">
+              <div class="settings-field">
+                <label data-i18n="mcp_field_name">Server Name</label>
+                <input type="text" id="mcpName" placeholder="my-server" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+              </div>
+              <div class="settings-field">
+                <label data-i18n="mcp_transport_label">Transport Type</label>
+                <select id="mcpTransport" onchange="mcpTransportChanged()" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+                  <option value="stdio">stdio (local command)</option>
+                  <option value="http">HTTP (remote URL)</option>
+                </select>
+              </div>
+              <div class="settings-field" id="mcpCommandField">
+                <label data-i18n="mcp_field_command">Command</label>
+                <input type="text" id="mcpCommand" placeholder="npx" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+              </div>
+              <div class="settings-field" id="mcpArgsField">
+                <label data-i18n="mcp_field_args">Arguments (comma-separated)</label>
+                <input type="text" id="mcpArgs" placeholder="-y, @modelcontextprotocol/server-filesystem" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+              </div>
+              <div class="settings-field" id="mcpUrlField" style="display:none">
+                <label data-i18n="mcp_field_url">URL</label>
+                <input type="text" id="mcpUrl" placeholder="https://my-mcp-server.example.com/mcp" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+              </div>
+              <div class="settings-field" id="mcpTimeoutField">
+                <label data-i18n="mcp_field_timeout">Timeout (seconds)</label>
+                <input type="number" id="mcpTimeout" value="120" min="10" max="600" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
+              </div>
+              <div style="display:flex;gap:8px;margin-top:8px">
+                <button class="sm-btn" onclick="saveMcpServer()" style="flex:1;padding:7px;font-weight:600" data-i18n="mcp_save">Save</button>
+                <button class="sm-btn" onclick="hideMcpAddForm()" style="flex:1;padding:7px;color:var(--muted)" data-i18n="mcp_cancel">Cancel</button>
+              </div>
+            </div>
             <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600" data-i18n="settings_save_btn">Save Settings</button>
           </div>
       </div>
@@ -826,6 +896,7 @@
 <script src="static/icons.js" defer></script>
 <script src="static/ui.js" defer></script>
 <script src="static/workspace.js" defer></script>
+<script src="static/terminal.js" defer></script>
 <script src="static/sessions.js" defer></script>
 <script src="static/commands.js" defer></script>
 <script src="static/messages.js" defer></script>

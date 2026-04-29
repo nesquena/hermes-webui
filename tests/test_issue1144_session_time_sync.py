@@ -223,6 +223,12 @@ def test_session_bucket_uses_server_clock():
     """_sessionTimeBucketLabel uses _serverNowMs() for Today/Yesterday boundaries."""
     result = _run_time_case(
         """
+        // Pin the client clock away from midnight so this regression test does
+        // not depend on when CI happens to run. With an 8-hour positive server
+        // skew, an unpinned Date.now() near 16:00 UTC makes serverNow cross
+        // midnight and turns "2 hours ago" into the prior calendar day.
+        const fixedClientNow = Date.UTC(2026, 3, 15, 12, 0, 0);
+        Date.now = () => fixedClientNow;
         // Simulate server 8 hours ahead of client
         _serverTimeDelta = -8 * 3600 * 1000;
         const serverNow = _serverNowMs();

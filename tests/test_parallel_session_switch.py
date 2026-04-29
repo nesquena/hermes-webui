@@ -557,3 +557,54 @@ class TestSessionSwitchCancellation:
         assert active_check_idx >= 0 and mutation_idx >= 0 and active_check_idx < mutation_idx, (
             "Active-session guard must run before S.messages mutation."
         )
+
+
+# ── 6. Scroll position preservation ──────────────────────────────────────────
+
+
+class TestScrollPositionPreservation:
+    """When _loadOlderMessages prepends messages, the user's scroll position
+    must be preserved — not snapped to the bottom.
+
+    The scrollable container is #messages (overflow-y:auto), not #msgInner
+    (which is a flex column with no overflow).  Also, renderMessages() calls
+    scrollToBottom() at the end, so _scrollPinned must be reset."""
+
+    def test_uses_correct_scrollable_container(self):
+        """_loadOlderMessages must use $('messages') not $('msgInner')."""
+        SESSIONS_JS = pathlib.Path(__file__).parent.parent / "static" / "sessions.js"
+        src = SESSIONS_JS.read_text(encoding="utf-8")
+
+        fn_start = src.find("async function _loadOlderMessages")
+        fn_end = src.find("\n}", fn_start) + 2
+        fn_body = src[fn_start:fn_end]
+
+        assert "$('messages')" in fn_body, (
+            "_loadOlderMessages should use $('messages') as the scrollable container "
+            "(#messages has overflow-y:auto). #msgInner has no overflow and is not scrollable."
+        )
+        assert "$('msgInner')" not in fn_body, (
+            "_loadOlderMessages must NOT use $('msgInner') for scroll position — "
+            "#msgInner is a flex column with no overflow-y."
+        )
+
+    def test_resets_scroll_pinned_after_restore(self):
+        """_scrollPinned must be set to false after restoring scroll position."""
+        SESSIONS_JS = pathlib.Path(__file__).parent.parent / "static" / "sessions.js"
+        src = SESSIONS_JS.read_text(encoding="utf-8")
+
+        fn_start = src.find("async function _loadOlderMessages")
+        fn_end = src.find("\n}", fn_start) + 2
+        fn_body = src[fn_start:fn_end]
+
+        assert "_scrollPinned = false" in fn_body, (
+            "renderMessages() calls scrollToBottom() which sets _scrollPinned=true. "
+            "After restoring the user's scroll position we must set _scrollPinned=false "
+            "to prevent the next render from snapping back to the bottom."
+        )
+        # _scrollPinned must appear after the scrollTop restore
+        restore_idx = fn_body.find("container.scrollTop = newScrollH - prevScrollH")
+        pinned_idx = fn_body.find("_scrollPinned = false")
+        assert restore_idx >= 0 and pinned_idx >= 0 and restore_idx < pinned_idx, (
+            "_scrollPinned = false must appear AFTER the scrollTop restore."
+        )

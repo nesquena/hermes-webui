@@ -1109,6 +1109,37 @@ def _sse(handler, event, data):
     handler.wfile.flush()
 
 
+def _last_resort_sync_from_core(session, stream_id, agent_lock):
+    """Final-exit guard: if the stream exits with pending_user_message still set,
+    sync messages from the core transcript or add an error marker.
+    Called from the outer finally block of _run_agent_streaming.
+    Must never raise.
+    """
+    from api.models import _get_profile_home, _apply_core_sync_or_error_marker
+    try:
+        # Guard: if a cancel was already requested, bail out — cancel_stream() has
+        # already saved partial content and we must not double-append error markers.
+        if stream_id in CANCEL_FLAGS and CANCEL_FLAGS[stream_id].is_set():
+            return
+
+        profile_home = _get_profile_home(session.profile)
+        core_path = profile_home / 'sessions' / f'session_{session.session_id}.json'
+
+        _lock_ctx = agent_lock if agent_lock is not None else contextlib.nullcontext()
+        with _lock_ctx:
+            _apply_core_sync_or_error_marker(
+                session,
+                core_path,
+                stream_id_for_recheck=stream_id,
+                require_stream_dead=False,
+            )
+    except Exception:
+        logger.exception(
+            "_last_resort_sync_from_core failed for session %s",
+            getattr(session, 'session_id', '?'),
+        )
+
+
 def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, attachments=None, *, ephemeral=False):
     """Run agent in background thread, writing SSE events to STREAMS[stream_id].
 
@@ -2103,11 +2134,17 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             _apperror_payload['hint'] = _exc_hint
         put('apperror', _apperror_payload)
     finally:
-        # Stop periodic checkpoint thread if it was started (Issue #765)
+        # Stop the periodic checkpoint thread before the final recovery path.
+        # The checkpoint thread also uses the per-session lock; joining it first
+        # avoids contending with checkpoint writes during stale-pending repair.
         if _checkpoint_stop is not None:
             _checkpoint_stop.set()
         if _ckpt_thread is not None:
             _ckpt_thread.join(timeout=15)
+        if (s is not None
+                and getattr(s, 'active_stream_id', None) == stream_id
+                and getattr(s, 'pending_user_message', None)):
+            _last_resort_sync_from_core(s, stream_id, _agent_lock)
         _clear_thread_env()  # TD1: always clear thread-local context
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)

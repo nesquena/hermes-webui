@@ -16,7 +16,13 @@ const ICONS={
 let _loadingSessionId = null;
 
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
+const SESSION_COMPLETION_UNREAD_KEY = 'hermes-session-completion-unread';
+const SESSION_OBSERVED_STREAMING_KEY = 'hermes-session-observed-streaming';
 let _sessionViewedCounts = null;
+let _sessionCompletionUnread = null;
+let _sessionObservedStreaming = null;
+const _sessionStreamingById = new Map();
+const _sessionListSnapshotById = new Map();
 
 function _getSessionViewedCounts() {
   if (_sessionViewedCounts !== null) return _sessionViewedCounts;
@@ -45,8 +51,87 @@ function _setSessionViewedCount(sid, messageCount = 0) {
   _saveSessionViewedCounts();
 }
 
+function _getSessionCompletionUnread() {
+  if (_sessionCompletionUnread !== null) return _sessionCompletionUnread;
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SESSION_COMPLETION_UNREAD_KEY) || '{}');
+    _sessionCompletionUnread = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_){
+    _sessionCompletionUnread = {};
+  }
+  return _sessionCompletionUnread;
+}
+
+function _saveSessionCompletionUnread() {
+  try {
+    localStorage.setItem(SESSION_COMPLETION_UNREAD_KEY, JSON.stringify(_getSessionCompletionUnread()));
+  } catch (_){
+    // Ignore localStorage write failures.
+  }
+}
+
+function _markSessionCompletionUnread(sid, messageCount = 0) {
+  if (!sid) return;
+  const unread = _getSessionCompletionUnread();
+  const count = Number.isFinite(messageCount) ? Number(messageCount) : 0;
+  unread[sid] = {message_count: count, completed_at: Date.now()};
+  _saveSessionCompletionUnread();
+}
+
+function _clearSessionCompletionUnread(sid) {
+  if (!sid) return;
+  const unread = _getSessionCompletionUnread();
+  if (!Object.prototype.hasOwnProperty.call(unread, sid)) return;
+  delete unread[sid];
+  _saveSessionCompletionUnread();
+}
+
+function _hasSessionCompletionUnread(sid) {
+  if (!sid) return false;
+  return Object.prototype.hasOwnProperty.call(_getSessionCompletionUnread(), sid);
+}
+
+function _getSessionObservedStreaming() {
+  if (_sessionObservedStreaming !== null) return _sessionObservedStreaming;
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SESSION_OBSERVED_STREAMING_KEY) || '{}');
+    _sessionObservedStreaming = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (_){
+    _sessionObservedStreaming = {};
+  }
+  return _sessionObservedStreaming;
+}
+
+function _saveSessionObservedStreaming() {
+  try {
+    localStorage.setItem(SESSION_OBSERVED_STREAMING_KEY, JSON.stringify(_getSessionObservedStreaming()));
+  } catch (_){
+    // Ignore localStorage write failures.
+  }
+}
+
+function _rememberObservedStreamingSession(s) {
+  if (!s || !s.session_id) return;
+  const observed = _getSessionObservedStreaming();
+  observed[s.session_id] = {
+    message_count: Number(s.message_count || 0),
+    last_message_at: Number(s.last_message_at || 0),
+    observed_at: Date.now(),
+  };
+  _saveSessionObservedStreaming();
+}
+
+function _forgetObservedStreamingSession(sid) {
+  if (!sid) return;
+  const observed = _getSessionObservedStreaming();
+  if (!Object.prototype.hasOwnProperty.call(observed, sid)) return;
+  delete observed[sid];
+  _saveSessionObservedStreaming();
+}
+
 function _hasUnreadForSession(s) {
   if (!s || !s.session_id) return false;
+  if (_hasSessionCompletionUnread(s.session_id)) return true;
   const counts = _getSessionViewedCounts();
   if (!Object.prototype.hasOwnProperty.call(counts, s.session_id)) {
     _setSessionViewedCount(s.session_id, Number(s.message_count || 0));
@@ -54,6 +139,126 @@ function _hasUnreadForSession(s) {
   }
   if (!Number.isFinite(s.message_count)) return false;
   return s.message_count > Number(counts[s.session_id] || 0);
+}
+
+function _isSessionActivelyViewedForList(sid) {
+  if (!sid || !S.session || S.session.session_id !== sid) return false;
+  if (typeof _loadingSessionId !== 'undefined' && _loadingSessionId && _loadingSessionId !== sid) return false;
+  if (typeof document !== 'undefined' && document.visibilityState && document.visibilityState !== 'visible') return false;
+  if (typeof document !== 'undefined' && typeof document.hasFocus === 'function' && !document.hasFocus()) return false;
+  return true;
+}
+
+function _isSessionLocallyStreaming(s) {
+  if (!s || !s.session_id) return false;
+  const isActive = S.session && s.session_id === S.session.session_id;
+  return Boolean(
+    (isActive && S.busy)
+    || (typeof INFLIGHT === 'object' && INFLIGHT && INFLIGHT[s.session_id])
+  );
+}
+
+function _isSessionEffectivelyStreaming(s) {
+  return Boolean(s && (s.is_streaming || _isSessionLocallyStreaming(s)));
+}
+
+function _rememberRenderedStreamingState(s, isStreaming) {
+  if (!s || !s.session_id || !isStreaming) return;
+  _sessionStreamingById.set(s.session_id, true);
+  _rememberObservedStreamingSession(s);
+}
+
+function _rememberRenderedSessionSnapshot(s) {
+  if (!s || !s.session_id) return;
+  const previous = _sessionListSnapshotById.get(s.session_id);
+  if (previous) return;
+  _sessionListSnapshotById.set(s.session_id, {
+    message_count: Number(s.message_count || 0),
+    last_message_at: Number(s.last_message_at || 0),
+  });
+}
+
+function _markSessionCompletedInList(session, previousSid = null) {
+  if (!session || !Array.isArray(_allSessions)) return;
+  const finalSid = session.session_id || previousSid;
+  if (!finalSid) return;
+  const idx = _allSessions.findIndex(s => s && (s.session_id === finalSid || s.session_id === previousSid));
+  if (idx < 0) return;
+  const {messages: _messages, tool_calls: _toolCalls, ...sessionMeta} = session;
+  const messageCount = Number(
+    session.message_count != null
+      ? session.message_count
+      : (Array.isArray(session.messages) ? session.messages.length : (_allSessions[idx].message_count || 0))
+  );
+  const lastMessageAt = Number(session.last_message_at || session.updated_at || _allSessions[idx].last_message_at || 0);
+  _allSessions[idx] = {
+    ..._allSessions[idx],
+    ...sessionMeta,
+    session_id: finalSid,
+    message_count: messageCount,
+    last_message_at: lastMessageAt,
+    active_stream_id: null,
+    pending_user_message: null,
+    pending_started_at: null,
+    is_streaming: false,
+  };
+  _sessionStreamingById.set(finalSid, false);
+  _forgetObservedStreamingSession(finalSid);
+  if (previousSid && previousSid !== finalSid) {
+    _sessionStreamingById.delete(previousSid);
+    _forgetObservedStreamingSession(previousSid);
+    _sessionListSnapshotById.delete(previousSid);
+  }
+  _sessionListSnapshotById.set(finalSid, {
+    message_count: messageCount,
+    last_message_at: lastMessageAt,
+  });
+  renderSessionListFromCache();
+}
+
+function _markPollingCompletionUnreadTransitions(sessions) {
+  if (!Array.isArray(sessions)) return;
+  const seen = new Set();
+  for (const s of sessions) {
+    if (!s || !s.session_id) continue;
+    const sid = s.session_id;
+    seen.add(sid);
+    const wasStreaming = _sessionStreamingById.get(sid);
+    const isStreaming = _isSessionEffectivelyStreaming(s);
+    const previousSnapshot = _sessionListSnapshotById.get(sid);
+    const observedStreaming = _getSessionObservedStreaming()[sid];
+    const messageCount = Number(s.message_count || 0);
+    const lastMessageAt = Number(s.last_message_at || 0);
+    const completedObservedStream = wasStreaming === true && !isStreaming;
+    const completedWithNewMessages = Boolean(
+      (previousSnapshot || observedStreaming)
+      && !isStreaming
+      && (
+        messageCount > Number((previousSnapshot || observedStreaming).message_count || 0)
+        || lastMessageAt > Number((previousSnapshot || observedStreaming).last_message_at || 0)
+      )
+    );
+    const completedPersistedObservedStream = Boolean(observedStreaming && !isStreaming);
+    if ((completedObservedStream || completedPersistedObservedStream || completedWithNewMessages) && !_isSessionActivelyViewedForList(sid)) {
+      _markSessionCompletionUnread(sid, s.message_count);
+    }
+    _sessionStreamingById.set(sid, isStreaming);
+    if (isStreaming) {
+      _rememberObservedStreamingSession(s);
+    } else {
+      _forgetObservedStreamingSession(sid);
+    }
+    _sessionListSnapshotById.set(sid, {
+      message_count: messageCount,
+      last_message_at: lastMessageAt,
+    });
+  }
+  for (const sid of Array.from(_sessionStreamingById.keys())) {
+    if (!seen.has(sid)) _sessionStreamingById.delete(sid);
+  }
+  for (const sid of Array.from(_sessionListSnapshotById.keys())) {
+    if (!seen.has(sid)) _sessionListSnapshotById.delete(sid);
+  }
 }
 
 async function newSession(flash){
@@ -89,7 +294,6 @@ async function newSession(flash){
   S.busy=false;
   S.activeStreamId=null;
   updateSendBtn();
-  const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
   setStatus('');
   setComposerStatus('');
   updateQueueBadge(S.session.session_id);
@@ -148,6 +352,7 @@ async function loadSession(sid){
   S.session._modelResolutionDeferred=true;
   S.lastUsage={...(data.session.last_usage||{})};
   _setSessionViewedCount(S.session.session_id, Number(data.session.message_count || 0));
+  _clearSessionCompletionUnread(S.session.session_id);
   localStorage.setItem('hermes-webui-session',S.session.session_id);
 
   const activeStreamId=S.session.active_stream_id||null;
@@ -182,7 +387,6 @@ async function loadSession(sid){
     if(typeof startClarifyPolling==='function') startClarifyPolling(sid);
     if(typeof _fetchYoloState==='function') _fetchYoloState(sid);
     S.activeStreamId=activeStreamId;
-    const _cb=$('btnCancel');if(_cb&&activeStreamId)_cb.style.display='inline-flex';
     if(INFLIGHT[sid].reattach&&activeStreamId&&typeof attachLiveStream==='function'){
       INFLIGHT[sid].reattach=false;
       if (_loadingSessionId !== sid) return;
@@ -251,7 +455,6 @@ async function loadSession(sid){
       S.busy=true;
       S.activeStreamId=activeStreamId;
       updateSendBtn();
-      const _cb=$('btnCancel');if(_cb)_cb.style.display='inline-flex';
       setStatus('');
       setComposerStatus('');
       syncTopbar();renderMessages();appendThinking();loadDir('.');
@@ -265,7 +468,6 @@ async function loadSession(sid){
       S.busy=false;
       S.activeStreamId=null;
       updateSendBtn();
-      const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
       setStatus('');
       setComposerStatus('');
       updateQueueBadge(sid);
@@ -385,17 +587,23 @@ async function _loadOlderMessages() {
     const olderMsgs = (data.session.messages || []).filter(m => m && m.role);
     if (!olderMsgs.length) { _messagesTruncated = false; return; }
     // Prepend older messages
-    const inner = $('msgInner');
-    const prevScrollH = inner ? inner.scrollHeight : 0;
+    // Use $('messages') — the scrollable container (#msgInner is not scrollable).
+    const container = $('messages');
+    const prevScrollH = container ? container.scrollHeight : 0;
     S.messages = [...olderMsgs, ...S.messages];
     _messagesTruncated = !!data.session._messages_truncated;
     _oldestIdx = data.session._messages_offset || 0;
     renderMessages();
-    // Restore scroll position so the user stays at the same message
-    if (inner) {
-      const newScrollH = inner.scrollHeight;
-      inner.scrollTop = newScrollH - prevScrollH;
+    // Restore scroll position so the user stays at the same message.
+    // renderMessages() calls scrollToBottom() at the end, so we must
+    // counter-scroll to where the user was before loading older messages.
+    if (container) {
+      const newScrollH = container.scrollHeight;
+      container.scrollTop = newScrollH - prevScrollH;
     }
+    // renderMessages() called scrollToBottom() which set _scrollPinned=true.
+    // We just restored the user's scroll position, so mark as not pinned.
+    _scrollPinned = false;
   } catch(e) {
     console.warn('_loadOlderMessages failed:', e);
   } finally {
@@ -604,6 +812,7 @@ async function renderSessionList(){
     if (typeof sessData.server_tz === 'string') {
       _serverTz = sessData.server_tz;
     }
+    _markPollingCompletionUnreadTransitions(_allSessions);
     const isStreaming = _allSessions.some(s => Boolean(s && s.is_streaming));
     if (isStreaming) {
       startStreamingPoll();
@@ -1033,14 +1242,9 @@ function renderSessionListFromCache(){
   function _renderOneSession(s, isPinnedGroup=false){
     const el=document.createElement('div');
     const isActive=S.session&&s.session_id===S.session.session_id;
-    const isLocalStreaming=Boolean(
-      s.session_id
-      && (
-        (isActive&&S.busy)
-        || (typeof INFLIGHT==='object'&&INFLIGHT&&INFLIGHT[s.session_id])
-      )
-    );
-    const isStreaming=Boolean(s.is_streaming||isLocalStreaming);
+    const isStreaming=_isSessionEffectivelyStreaming(s);
+    _rememberRenderedStreamingState(s, isStreaming);
+    _rememberRenderedSessionSnapshot(s);
     const hasUnread=_hasUnreadForSession(s)&&!isActive;
     el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(isStreaming?' streaming':'')+(hasUnread?' unread':'');
     if(isActive&&S.session&&S.session._flash)delete S.session._flash;

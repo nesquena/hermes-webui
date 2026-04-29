@@ -7,7 +7,6 @@ async function cancelStream(){
   // Clear status unconditionally after the cancel request completes.
   // The SSE cancel event may also fire, but if the connection is already
   // closed it won't arrive — so we handle cleanup here as the guaranteed path.
-  const btn=$('btnCancel');if(btn)btn.style.display='none';
   S.activeStreamId=null;
   setBusy(false);
   if(typeof setComposerStatus==='function') setComposerStatus('');
@@ -177,6 +176,7 @@ function mobileSwitchPanel(name){
 }
 
 $('btnSend').onclick=()=>{
+  if(typeof handleComposerPrimaryAction==='function') return handleComposerPrimaryAction();
   if(window._micActive){
     window._micPendingSend=true;
     _stopMic();
@@ -455,9 +455,9 @@ $('modelSelect').onchange=async()=>{
     const warn=_checkProviderMismatch(selectedModel);
     if(warn&&typeof showToast==='function') showToast(warn,4000);
   }
-  // Notify user that model changes only take effect in the next conversation (#419)
-  if(S.messages && S.messages.length > 0 && typeof showToast==='function'){
-    showToast('Model change takes effect in your next conversation', 3000);
+  // Clarify scope: composer model changes are session-local, not the global default.
+  if(typeof showToast==='function'){
+    showToast(t('model_scope_toast')||'Applies to this conversation from your next message.', 3000);
   }
 };
 $('msg').addEventListener('input',()=>{

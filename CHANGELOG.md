@@ -2,36 +2,37 @@
 
 ## [Unreleased]
 
-### Fixed
-- **Auto-title generic fallback** — when the auxiliary title-generation call
-  fails and the local fallback can only produce the generic label
-  `Conversation topic`, the WebUI now keeps the existing provisional title
-  instead of persisting the generic placeholder as a generated title. The
-  `title_status` diagnostic still preserves the underlying LLM failure reason.
-  (`api/streaming.py`, `tests/test_title_aux_routing.py`) Closes #1155.
-- **Recurring cron jobs with no next run need attention** — the Tasks panel now
-  distinguishes anomalous recurring jobs (`enabled=false`, `state=completed`,
-  `next_run_at=null`) from ordinary off jobs, shows a warning with recovery
-  actions, and lets users copy diagnostics for scheduler/runtime failures.
-  (`static/panels.js`, `static/style.css`, `static/i18n.js`,
-  `tests/test_cron_needs_attention.py`)
-- **Auto-compression notification uses compression cards** — automatic context
-  compression now renders as a transient compression card in the transcript
-  instead of adding an italic fake assistant message, and preserved task-list
-  snapshots appended by Hermes Agent render as compression sub-cards instead of
-  ordinary user bubbles. (`static/messages.js`, `static/ui.js`,
-  `static/i18n.js`)
-- **Legacy `@provider:model` session models** — persisted sessions with an
-  old explicit provider hint (for example `@copilot:gpt-5.5`) now pass through
-  the same stale-model compatibility recovery as slash-prefixed session models,
-  so they can continue after the active provider changes. (`api/routes.py`)
-- **Docker Hindsight memory provider dependency** — Docker startup now ensures
-  `hindsight-client` is installed in the WebUI container venv, even on fast
-  restarts where `/app/venv/.deps_installed` already exists. This lets
-  two-container WebUI deployments import Hermes Agent's Hindsight memory
-  provider without a manual container-side install. (`docker_init.bash`,
-  `tests/test_issue926_hindsight_docker_dependency.py`) Closes #926.
+## [v0.50.237] — 2026-04-29
 
+### Added
+- **Embedded workspace terminal** — `/terminal` slash command opens a compact PTY-backed terminal card anchored above the composer. Supports collapse/expand/dock, resize, restart, clear, copy output, and per-session workspace binding. Env vars are allowlisted so server credentials are not exposed in the shell. (`api/terminal.py`, `static/terminal.js`, `static/commands.js`, `static/i18n.js`) @franksong2702 — Closes #1099
+- **Collapsible JSON/YAML tree viewer** — fenced `json`/`yaml` code blocks get a Tree/Raw toggle. Tree view renders collapsible, type-colored nodes (keys blue, strings green, numbers blue, booleans amber, nulls muted); auto-collapsed beyond depth 2. Default is Tree for blocks with 10+ lines. YAML parsing uses js-yaml loaded lazily via CDN with SRI. (`static/ui.js`, `static/style.css`, `static/i18n.js`) @bergeouss — Closes #484
+- **Inline diff/patch viewer** — fenced `diff`/`patch` blocks render with colored `+`/`-`/`@@` lines. `MEDIA:` links to `.patch`/`.diff` files fetch and render inline with a 50 KB cap. (`static/ui.js`, `static/style.css`, `static/i18n.js`) @bergeouss — Closes #483
+- **MCP server management UI** — Settings › System panel now lists MCP servers with transport badges, and provides add/edit/delete forms. Backend: `GET/PUT/DELETE /api/mcp/servers` with masked secrets (round-trip safe). i18n coverage across 7 locales. (`api/routes.py`, `static/panels.js`, `static/i18n.js`) @bergeouss — Closes #538
+- **Cron run status tracking and watch mode** — after "Run Now", the cron detail view shows a live spinner, running label, and elapsed timer (polls every 3 s). Auto-starts watch when opening an already-running job. `GET /api/crons/status` endpoint. Double-run guard prevents concurrent execution of the same job. (`api/routes.py`, `static/panels.js`, `static/style.css`, `static/i18n.js`) @bergeouss — Closes #526
+- **Duplicate cron job** — Duplicate button in cron detail header pre-fills the create form with the existing job settings, appends "(copy)" to the name (auto-increments on collision), and saves as paused. (`static/panels.js`, `static/i18n.js`) @bergeouss — Closes #528
+- **Upload and extract zip/tar archives into workspace** — zip, tar.gz, tgz, tar.bz2, tar.xz files are auto-extracted into a named subfolder. Zip-slip/tar-slip protection via `is_relative_to()`; zip-bomb protection via 200 MB cumulative extraction limit on actual bytes. (`api/upload.py`, `api/routes.py`, `static/ui.js`, `static/i18n.js`) @bergeouss — Closes #525
+- **Workspace directory CRUD** — right-click context menu on workspace file/dir rows adds Rename and Delete for directories. `shutil.rmtree()` guarded by `safe_resolve()` path validation. Expanded-dir cache updated on rename/delete. (`api/routes.py`, `static/ui.js`, `static/i18n.js`) @bergeouss — Closes #1104
+- **Workspace drag-to-reorder** — drag handles on workspace rows; `PUT /api/workspaces/reorder` persists new order. Reorder is confirmed (not optimistic); unmentioned workspaces are appended. (`api/routes.py`, `static/panels.js`, `static/i18n.js`) @bergeouss — Closes #492
+- **Compress affordance in context ring** — context usage tooltip shows a pre-fill button for `/compress` at ≥50% usage (hint style) and ≥75% (urgent red style). No auto-fire. (`static/ui.js`, `static/index.html`, `static/style.css`, `static/i18n.js`) @bergeouss — Closes #524
+- **DeepSeek V4, Z.AI/GLM provider, model tags** — adds `deepseek-v4-flash` and `deepseek-v4-pro`; keeps V3/R1 as `(legacy)` until 2026-07-24. Adds Z.AI/GLM provider (`glm-5.1`, `glm-5`, `glm-5-turbo`, `glm-4.7`, `glm-4.5`, `glm-4.5-flash`). Provider cards show model names; custom providers from `config.yaml` are scanned. (`api/config.py`, `api/onboarding.py`, `static/panels.js`) @jasonjcwu — Closes #1213
+- **NVIDIA NIM provider** — adds `nvidia` to the provider catalog with display name, aliases, model list, API key mapping, OpenAI-compat endpoint (`https://integrate.api.nvidia.com/v1`), and onboarding entry. (`api/config.py`, `api/providers.py`, `api/routes.py`, `api/onboarding.py`) @JinYue-GitHub — Closes #1220
+
+### Fixed
+- **Background session unread dots** — sidebar unread dots no longer depend solely on `message_count` delta. Explicit completion markers, polling fallback, INFLIGHT/S.busy sidebar spinner tracking, localStorage-persisted observed-running state, and auto-compression session-id rotation all handled. (`static/sessions.js`, `static/messages.js`) @franksong2702 — Closes #856
+- **Clarify draft preserved on timeout** — unsent clarify text is moved to the main composer when the clarify card expires or is dismissed. Countdown indicator shows remaining time; urgent styling for final seconds. (`api/clarify.py`, `static/messages.js`, `static/style.css`, `static/index.html`) @sixianli — Closes #1216
+- **Mobile busy-input composer button** — unified send/stop/queue/interrupt/steer action button so mobile users (tap-only) can queue, interrupt, or steer while the agent is busy. Dynamic icon/label/color. Removes separate cancel button path. (`static/ui.js`, `static/messages.js`, `static/sessions.js`, `static/boot.js`, `static/i18n.js`) @starship-s — Closes #1215
+- **Session sidecar repair hardened** — centralized `_apply_core_sync_or_error_marker()` helper; non-blocking lock acquire to avoid deadlock in cache-miss repair path; streaming-finally and cache-miss repair paths share logic. (`api/models.py`, `api/streaming.py`) @starship-s — Closes #1230
+- **Scroll position preserved when loading older messages** — `_loadOlderMessages` now uses `#messages` (the actual scrollable container) instead of `#msgInner`; resets `_scrollPinned` after restoring position so `scrollToBottom` does not re-fire. (`static/sessions.js`) @jasonjcwu — Closes #1219
+- **Model picker duplicate IDs across providers** — `_deduplicate_model_ids()` detects bare model IDs appearing in 2+ groups and prefixes collisions with `@provider_id:` (deterministic alphabetical tie-break). Frontend `norm()` regex strips `@provider:` prefixes for fuzzy matching. (`api/config.py`, `static/ui.js`) @bergeouss — Closes #1228
+- **`/api/models` cache metadata preserved** — disk and TTL cache now include `active_provider` and `default_model` alongside `groups`. Legacy `groups`-only cache files are rejected and rebuilt. (`api/config.py`) @franksong2702 — Closes #1239
+- **Clarify model scope copy** — composer model-selector dropdown shows "Applies to this conversation from your next message." sticky note; preferences Default Model shows "Used for new conversations." helper text. (`static/ui.js`, `static/boot.js`, `static/i18n.js`) @franksong2702 — Closes #1241
+- **Workspace panel stale after profile switch** — `loadDir('.')` called in `switchToProfile()` Case B so the file tree refreshes to the new profile. (`static/panels.js`) @bergeouss — Closes #1214
+- **OAuth providers show as unconfigured** — expanded `_OAUTH_PROVIDERS` set; live `get_auth_status()` fallback for unknown OAuth providers (gated by pid regex validation and closed `key_source` allowlist). (`api/providers.py`) @bergeouss — Closes #1212
+- **MCP delete button XSS** — replaced `onclick="...esc(s.name)..."` inline handler with `data-mcp-name` attribute + event delegation (absorb fix). (`static/panels.js`)
+- **Zip/tar-slip path traversal** — replaced `startswith` prefix check with `is_relative_to()`; zip-bomb check now tracks actual extracted bytes instead of trusting `member.file_size` (absorb fix). (`api/upload.py`)
+- **Terminal PTY env secret leak** — terminal shell env uses a safe allowlist instead of `os.environ.copy()`, preventing API keys from being visible inside the terminal (absorb fix). (`api/terminal.py`)
+- **Terminal resize handle wired** — `terminalResizeHandle` element added to `index.html`; `_terminalEls()` returns `handle` (absorb fix). (`static/index.html`, `static/terminal.js`)
 
 ## [v0.50.235] — 2026-04-28
 

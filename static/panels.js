@@ -371,6 +371,7 @@ function _setCronHeaderButtons(mode, job) {
   const pauseBtn = $('btnPauseTaskDetail');
   const resumeBtn = $('btnResumeTaskDetail');
   const editBtn = $('btnEditTaskDetail');
+  const dupBtn = $('btnDuplicateTaskDetail');
   const delBtn = $('btnDeleteTaskDetail');
   const cancelBtn = $('btnCancelTaskDetail');
   const saveBtn = $('btnSaveTaskDetail');
@@ -385,12 +386,12 @@ function _setCronHeaderButtons(mode, job) {
     );
     if (resumable) { hide(pauseBtn); show(resumeBtn); }
     else { show(pauseBtn); hide(resumeBtn); }
-    show(editBtn); show(delBtn); hide(cancelBtn); hide(saveBtn);
+    show(editBtn); show(dupBtn); show(delBtn); hide(cancelBtn); hide(saveBtn);
   } else if (mode === 'create' || mode === 'edit') {
-    hide(runBtn); hide(pauseBtn); hide(resumeBtn); hide(editBtn); hide(delBtn);
+    hide(runBtn); hide(pauseBtn); hide(resumeBtn); hide(editBtn); hide(dupBtn); hide(delBtn);
     show(cancelBtn); show(saveBtn);
   } else {
-    [runBtn,pauseBtn,resumeBtn,editBtn,delBtn,cancelBtn,saveBtn].forEach(hide);
+    [runBtn,pauseBtn,resumeBtn,editBtn,dupBtn,delBtn,cancelBtn,saveBtn].forEach(hide);
   }
 }
 
@@ -429,12 +430,15 @@ function openCronDetail(id, el){
   if (dot) dot.remove();
   _cronPreFormDetail = null;
   _editingCronId = null;
+  _stopCronWatch();
   _renderCronDetail(job);
+  _checkCronWatchOnDetail(id);
 }
 
 function _clearCronDetail(){
   _currentCronDetail = null;
   _cronMode = 'empty';
+  _stopCronWatch();
   const title = $('taskDetailTitle');
   const body = $('taskDetailBody');
   const empty = $('taskDetailEmpty');
@@ -458,6 +462,39 @@ function editCurrentCron(){
   if (!_currentCronDetail) return;
   openCronEdit(_currentCronDetail);
 }
+function duplicateCurrentCron(){
+  if (!_currentCronDetail) return;
+  const job = _currentCronDetail;
+  if (typeof switchPanel === 'function' && _currentPanel !== 'tasks') switchPanel('tasks');
+  _cronPreFormDetail = { ...job };
+  _editingCronId = null;
+  _cronMode = 'create';
+  _cronIsDuplicate = true;
+  _cronSelectedSkills = Array.isArray(job.skills) ? [...job.skills] : [];
+  // Deduplicate name: append "(copy)", "(copy 2)", "(copy 3)" etc.
+  const baseName = job.name || '';
+  let dupName = baseName + ' (copy)';
+  if (_cronList && _cronList.length) {
+    const taken = new Set(_cronList.filter(j => j.name).map(j => j.name));
+    if (taken.has(dupName)) {
+      let n = 2;
+      while (taken.has(baseName + ' (copy ' + n + ')')) n++;
+      dupName = baseName + ' (copy ' + n + ')';
+    }
+  }
+  _renderCronForm({
+    name: dupName,
+    schedule: job.schedule_display || (job.schedule && job.schedule.expression) || '',
+    prompt: job.prompt || '',
+    deliver: job.deliver || 'local',
+    isEdit: false,
+  });
+  if (!_cronSkillsCache) {
+    api('/api/skills').then(d=>{_cronSkillsCache=d.skills||[]; _bindCronSkillPicker();}).catch(()=>{});
+  } else {
+    _bindCronSkillPicker();
+  }
+}
 async function deleteCurrentCron(){
   if (!_currentCronDetail) return;
   const id = _currentCronDetail.id;
@@ -472,6 +509,7 @@ async function deleteCurrentCron(){
 }
 
 let _cronSelectedSkills=[];
+let _cronIsDuplicate = false;
 let _cronSkillsCache=null;
 
 function openCronCreate(){
@@ -479,6 +517,7 @@ function openCronCreate(){
   _cronPreFormDetail = _currentCronDetail ? { ..._currentCronDetail } : null;
   _editingCronId = null;
   _cronMode = 'create';
+  _cronIsDuplicate = false;
   _cronSelectedSkills = [];
   _renderCronForm({ name:'', schedule:'', prompt:'', deliver:'local', isEdit:false });
   _cronSkillsCache = null;
@@ -644,10 +683,12 @@ async function saveCronForm(){
       return;
     }
     const body={schedule,prompt,deliver};
+    if(_cronIsDuplicate) body.enabled=false;
     if(name)body.name=name;
     if(_cronSelectedSkills.length)body.skills=_cronSelectedSkills;
     const res = await api('/api/crons/create',{method:'POST',body:JSON.stringify(body)});
     _cronPreFormDetail = null;
+    _cronIsDuplicate = false;
     showToast(t('cron_job_created'));
     await loadCrons();
     const newId = res && (res.id || (res.job && res.job.id));
@@ -670,11 +711,83 @@ function _cronOutputSnippet(content) {
   return body.slice(0, 600) || '(empty)';
 }
 
+// ── Cron run watch ────────────────────────────────────────────────────────────
+let _cronWatchInterval = null;
+let _cronWatchStart = null;
+let _cronWatchTimerInterval = null;
+
+function _startCronWatch(jobId) {
+  _stopCronWatch();
+  _cronWatchStart = Date.now();
+  _cronWatchInterval = setInterval(async () => {
+    try {
+      const data = await api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}`);
+      if (!data.running) {
+        _stopCronWatch();
+        if (_currentCronDetail && _currentCronDetail.id === jobId) {
+          _loadCronDetailRuns(jobId);
+        }
+        return;
+      }
+      // Still running — update elapsed
+      if (_currentCronDetail && _currentCronDetail.id === jobId) {
+        const el = $('cronRunningIndicator');
+        if (el) el.querySelector('.cron-watch-elapsed').textContent = _formatElapsed(data.elapsed);
+      }
+    } catch(e) { /* ignore poll errors */ }
+  }, 3000);
+  // Timer update every second
+  _cronWatchTimerInterval = setInterval(() => {
+    if (_currentCronDetail && _cronWatchStart) {
+      const el = $('cronRunningIndicator');
+      if (el) el.querySelector('.cron-watch-elapsed').textContent = _formatElapsed((Date.now() - _cronWatchStart) / 1000);
+    }
+  }, 1000);
+  // Inject running indicator into detail card
+  if (_currentCronDetail && _currentCronDetail.id === jobId) {
+    _injectRunningIndicator();
+  }
+}
+
+function _stopCronWatch() {
+  if (_cronWatchInterval) { clearInterval(_cronWatchInterval); _cronWatchInterval = null; }
+  if (_cronWatchTimerInterval) { clearInterval(_cronWatchTimerInterval); _cronWatchTimerInterval = null; }
+  _cronWatchStart = null;
+  const el = $('cronRunningIndicator');
+  if (el) el.remove();
+}
+
+function _injectRunningIndicator() {
+  const card = $('cronDetailRuns');
+  if (!card || $('cronRunningIndicator')) return;
+  const div = document.createElement('div');
+  div.id = 'cronRunningIndicator';
+  div.className = 'cron-running-indicator';
+  div.innerHTML = `<span class="cron-watch-spinner"></span><span>${esc(t('cron_status_running'))}</span><span class="cron-watch-elapsed">0s</span>`;
+  card.insertAdjacentElement('beforebegin', div);
+}
+
+function _formatElapsed(seconds) {
+  if (seconds < 60) return Math.round(seconds) + 's';
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  return m + 'm ' + s + 's';
+}
+
+function _checkCronWatchOnDetail(jobId) {
+  // When opening a detail view, check if job is running
+  api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}`).then(data => {
+    if (data.running && _currentCronDetail && _currentCronDetail.id === jobId) {
+      _startCronWatch(jobId);
+    }
+  }).catch(() => {});
+}
+
 async function cronRun(id) {
   try {
     await api('/api/crons/run', {method:'POST', body: JSON.stringify({job_id: id})});
     showToast(t('cron_job_triggered'));
-    setTimeout(() => { if (_currentCronDetail && _currentCronDetail.id === id) _loadCronDetailRuns(id); }, 5000);
+    _startCronWatch(id);
   } catch(e) { showToast(t('failed_colon') + e.message, 4000); }
 }
 
@@ -1427,19 +1540,76 @@ function renderWorkspacesPanel(workspaces){
   const panel=$('workspacesPanel');
   panel.innerHTML='';
   const activePath = S.session ? S.session.workspace : '';
-  for(const w of workspaces){
+  for(let i=0;i<workspaces.length;i++){
+    const w=workspaces[i];
     const row=document.createElement('div');
     row.className='ws-row';
     row.dataset.path = w.path;
+    row.draggable=true;
     const isActive = w.path === activePath;
     const activeBadge = isActive ? `<span class="detail-badge active" style="margin-left:6px;font-size:9px;padding:1px 6px">${esc(t('profile_active'))}</span>` : '';
     row.innerHTML=`
+      <span class="ws-drag-handle" title="${esc(t('workspace_drag_hint'))}">${li('grip-vertical',12)}</span>
       <div class="ws-row-info">
         <div class="ws-row-name">${esc(w.name)}${activeBadge}</div>
         <div class="ws-row-path">${esc(w.path)}</div>
       </div>`;
-    row.onclick = () => openWorkspaceDetail(w.path, row);
+    // Click on info area only — not on drag handle
+    const info=row.querySelector('.ws-row-info');
+    if(info) info.onclick = (e) => { e.stopPropagation(); openWorkspaceDetail(w.path, row); };
     if (_currentWorkspaceDetail && _currentWorkspaceDetail.path === w.path) row.classList.add('active');
+
+    // ── Drag-and-drop reorder ──
+    row.addEventListener('dragstart', (e) => {
+      // Only allow drag from the grip handle or the row itself
+      row.classList.add('dragging');
+      e.dataTransfer.effectAllowed='move';
+      e.dataTransfer.setData('text/plain', w.path);
+      // Required for Firefox drag ghost
+      if(e.dataTransfer.setDragImage) e.dataTransfer.setDragImage(row, 0, 0);
+    });
+    row.addEventListener('dragend', () => {
+      row.classList.remove('dragging');
+      panel.querySelectorAll('.ws-row.drag-over').forEach(r => r.classList.remove('drag-over'));
+    });
+    row.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect='move';
+      // Highlight drop target
+      panel.querySelectorAll('.ws-row.drag-over').forEach(r => r.classList.remove('drag-over'));
+      if(!row.classList.contains('dragging')) row.classList.add('drag-over');
+    });
+    row.addEventListener('dragleave', () => {
+      row.classList.remove('drag-over');
+    });
+    row.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      row.classList.remove('drag-over');
+      const fromPath = e.dataTransfer.getData('text/plain');
+      const toPath = w.path;
+      if(fromPath === toPath) return; // Same item, no-op
+      // Compute new order
+      const currentPaths = workspaces.map(ws => ws.path);
+      const fromIdx = currentPaths.indexOf(fromPath);
+      const toIdx = currentPaths.indexOf(toPath);
+      if(fromIdx < 0 || toIdx < 0) return;
+      currentPaths.splice(fromIdx, 1);
+      currentPaths.splice(toIdx, 0, fromPath);
+      try {
+        const res = await api('/api/workspaces/reorder', {
+          method: 'POST',
+          body: JSON.stringify({ paths: currentPaths })
+        });
+        if(res && res.ok){
+          renderWorkspacesPanel(res.workspaces);
+          // Also refresh sidebar dropdown
+          loadWorkspaceList().then(() => {});
+        }
+      } catch(err){
+        showToast(t('workspace_reorder_failed'), 'error');
+      }
+    });
+
     panel.appendChild(row);
   }
   const hint=document.createElement('div');
@@ -2099,6 +2269,9 @@ async function switchToProfile(name) {
       // No messages yet — just refresh the list and topbar in place
       await renderSessionList();
       syncTopbar();
+      // Refresh workspace file tree so the right panel shows the new
+      // profile's workspace, not the previous one (#1214).
+      if (S.session && S.session.workspace) loadDir('.');
       showToast(t('profile_switched', name));
     }
 
@@ -2678,6 +2851,26 @@ function _buildProviderCard(p){
   field.appendChild(row);
   body.appendChild(field);
 
+  // Model list — show when provider has known models
+  if(modelCount>0){
+    const modelSection=document.createElement('div');
+    modelSection.className='provider-card-models';
+    const modelLabel=document.createElement('div');
+    modelLabel.className='provider-card-label';
+    modelLabel.textContent='Models';
+    modelSection.appendChild(modelLabel);
+    const modelList=document.createElement('div');
+    modelList.className='provider-card-model-tags';
+    for(const m of p.models){
+      const tag=document.createElement('span');
+      tag.className='provider-card-model-tag';
+      tag.textContent=m.id||m.label||m;
+      modelList.appendChild(tag);
+    }
+    modelSection.appendChild(modelList);
+    body.appendChild(modelSection);
+  }
+
   // Refresh models for this provider
   const refreshRow=document.createElement('div');
   refreshRow.className='provider-card-row';
@@ -3067,3 +3260,100 @@ function dismissErrorBanner(){
 }
 
 // Event wiring
+
+
+// ── MCP Server Management ──
+function loadMcpServers(){
+  const list=$('mcpServerList');
+  if(!list) return;
+  api('/api/mcp/servers').then(r=>{
+    if(!r||!r.servers) return;
+    if(!r.servers.length){
+      list.innerHTML=`<div style="color:var(--muted);font-size:12px;padding:6px 0">${t('mcp_no_servers')}</div>`;
+      return;
+    }
+    list.innerHTML=r.servers.map(s=>{
+      const transportLabel=s.transport==='http'?'HTTP':s.transport==='stdio'?'stdio':(''+s.transport);
+      const transportClass=s.transport==='http'?'mcp-http':s.transport==='stdio'?'mcp-stdio':'mcp-unknown';
+      const badge=`<span class="mcp-transport-badge ${transportClass}">${esc(transportLabel)}</span>`;
+      const detail=s.transport==='http'?s.url:`${s.command} ${s.args?s.args.join(' '):''}`;
+      const envInfo=s.env?Object.entries(s.env).map(([k,v])=>`${k}=${v}`).join(', '):'';
+      return `<div class="mcp-server-row">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="mcp-server-name">${esc(s.name)}</span>${badge}
+        </div>
+        <div class="mcp-server-detail">${esc(detail)}${envInfo?' | '+esc(envInfo):''}</div>
+        <button class="mcp-delete-btn" data-mcp-name="${esc(s.name)}" title="Delete">&times;</button>
+      </div>`;
+    }).join('');
+  }).catch(()=>{list.innerHTML=`<div style="color:#ef4444;font-size:12px;padding:6px 0">${t('mcp_load_failed')}</div>`});
+  // Delegate delete-button clicks — uses data-mcp-name to avoid inline onclick XSS
+  if(list&&!list._mcpDeleteBound){
+    list._mcpDeleteBound=true;
+    list.addEventListener('click',function(e){
+      const btn=e.target.closest('.mcp-delete-btn');
+      if(!btn) return;
+      const name=btn.getAttribute('data-mcp-name');
+      if(name) deleteMcpServer(name);
+    });
+  }
+}
+
+function showMcpAddForm(){
+  const wrap=$('mcpAddFormWrap');
+  if(wrap) wrap.style.display='block';
+}
+function hideMcpAddForm(){
+  const wrap=$('mcpAddFormWrap');
+  if(wrap) wrap.style.display='none';
+  ['mcpName','mcpCommand','mcpArgs','mcpUrl','mcpTimeout'].forEach(id=>{
+    const el=$(id);if(el)el.value=id==='mcpTimeout'?'120':'';
+  });
+  const tr=$('mcpTransport');if(tr)tr.value='stdio';
+  mcpTransportChanged();
+}
+function mcpTransportChanged(){
+  const tr=$('mcpTransport');
+  const isHttp=tr&&tr.value==='http';
+  const cmdF=$('mcpCommandField');if(cmdF)cmdF.style.display=isHttp?'none':'';
+  const argsF=$('mcpArgsField');if(argsF)argsF.style.display=isHttp?'none':'';
+  const urlF=$('mcpUrlField');if(urlF)urlF.style.display=isHttp?'block':'none';
+}
+function saveMcpServer(){
+  const name=($('mcpName')||{}).value||'';
+  if(!name.trim()){showToast(t('mcp_name_required'));return;}
+  const tr=($('mcpTransport')||{}).value||'stdio';
+  const timeout=parseInt(($('mcpTimeout')||{}).value)||120;
+  const body={timeout};
+  if(tr==='http'){
+    body.url=($('mcpUrl')||{}).value||'';
+    if(!body.url.trim()){showToast(t('mcp_url_required'));return;}
+  }else{
+    body.command=($('mcpCommand')||{}).value||'';
+    if(!body.command.trim()){showToast(t('mcp_command_required'));return;}
+    const argsStr=($('mcpArgs')||{}).value||'';
+    if(argsStr.trim()) body.args=argsStr.split(',').map(a=>a.trim()).filter(Boolean);
+  }
+  const encName=encodeURIComponent(name.trim());
+  api(`/api/mcp/servers/${encName}`,{method:'PUT',body:JSON.stringify(body)})
+    .then(r=>{
+      if(r&&r.ok){showToast(t('mcp_saved'));hideMcpAddForm();loadMcpServers();}
+      else{showToast((r&&r.error)||t('mcp_save_failed'));}
+    }).catch(()=>{showToast(t('mcp_save_failed'));});
+}
+async function deleteMcpServer(name){
+  const _ok=await showConfirmDialog({title:t('mcp_delete_confirm_title'),message:t('mcp_delete_confirm_message',name),confirmLabel:t('delete_title'),danger:true,focusCancel:true});
+  if(!_ok) return;
+  const encName=encodeURIComponent(name);
+  api(`/api/mcp/servers/${encName}`,{method:'DELETE'})
+    .then(r=>{
+      if(r&&r.ok){showToast(t('mcp_deleted'));loadMcpServers();}
+      else{showToast((r&&r.error)||t('mcp_delete_failed'));}
+    }).catch(()=>{showToast(t('mcp_delete_failed'));});
+}
+// Load MCP servers when system settings tab opens
+const _origSwitchSettings=switchSettingsSection;
+switchSettingsSection=function(name){
+  _origSwitchSettings(name);
+  if(name==='system') loadMcpServers();
+};

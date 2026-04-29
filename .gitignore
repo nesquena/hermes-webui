@@ -44,3 +44,5 @@ docs/*
 # Used by Claude during deep reviews; never shared in the repo.
 .local-review/
 graphify-out/
+.graphify_cached.json
+.graphify_uncached.txt

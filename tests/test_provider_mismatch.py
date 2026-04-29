@@ -576,34 +576,33 @@ def test_api_session_is_side_effect_free_for_stale_models():
 # ── Model switch toast (#419) ─────────────────────────────────────────────────
 
 class TestModelSwitchToast:
-    """Toast appears when user switches model during an active session."""
+    """Toast appears when user switches the current conversation model."""
 
     def test_toast_in_model_select_onchange(self):
-        """modelSelect.onchange must show a toast when S.messages is non-empty."""
+        """modelSelect.onchange must show a scope toast after selecting a model."""
         src = _read("static/boot.js")
         # Find the onchange block
         idx = src.find("modelSelect').onchange")
         assert idx != -1, "modelSelect.onchange not found in boot.js"
         block = src[idx:idx + 1100]
-        assert "Model change takes effect in your next conversation" in block, (
-            "modelSelect.onchange must show a toast when switching model mid-session"
+        assert "model_scope_toast" in block, (
+            "modelSelect.onchange must show that the selected model applies to this conversation"
         )
 
-    def test_toast_guards_on_messages_length(self):
-        """Toast must only fire when there are existing messages (active session)."""
+    def test_toast_is_not_gated_on_messages_length(self):
+        """Toast must fire for every model selection, not only sessions with messages."""
         src = _read("static/boot.js")
-        idx = src.find("Model change takes effect in your next conversation")
+        idx = src.find("model_scope_toast")
         assert idx != -1
-        # Look back 200 chars for the S.messages guard
-        surrounding = src[max(0, idx - 200):idx + 50]
-        assert "S.messages" in surrounding and ".length" in surrounding, (
-            "Model switch toast must be gated on S.messages.length > 0"
+        surrounding = src[max(0, idx - 220):idx + 80]
+        assert not ("S.messages" in surrounding and ".length" in surrounding), (
+            "Model scope toast should not be gated on S.messages.length"
         )
 
     def test_toast_uses_show_toast_not_alert(self):
         """Toast must use showToast(), not alert()."""
         src = _read("static/boot.js")
-        idx = src.find("Model change takes effect in your next conversation")
+        idx = src.find("model_scope_toast")
         assert idx != -1
         surrounding = src[max(0, idx - 50):idx + 100]
         assert "showToast" in surrounding, "Must use showToast() not alert()"
@@ -612,7 +611,7 @@ class TestModelSwitchToast:
     def test_toast_has_typeof_showtoast_guard(self):
         """Toast call must guard typeof showToast to be safe during boot."""
         src = _read("static/boot.js")
-        idx = src.find("Model change takes effect in your next conversation")
+        idx = src.find("model_scope_toast")
         assert idx != -1
         surrounding = src[max(0, idx - 100):idx + 50]
         assert "typeof showToast" in surrounding, (
