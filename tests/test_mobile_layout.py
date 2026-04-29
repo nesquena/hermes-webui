@@ -162,6 +162,16 @@ def test_new_conversation_closes_mobile_sidebar():
         "Cmd/Ctrl+K new chat shortcut must closeMobileSidebar() after creating the new session"
 
 
+def test_new_conversation_shortcut_works_while_busy():
+    """Cmd/Ctrl+K should still create a new conversation while the current one is busy."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    shortcut_line = next((ln for ln in boot_js.splitlines() if "e.key==='k'" in ln or "e.key === 'k'" in ln), "")
+    assert shortcut_line, "Cmd/Ctrl+K new chat shortcut missing from static/boot.js"
+    shortcut_block = "\n".join(boot_js.splitlines()[boot_js.splitlines().index(shortcut_line):boot_js.splitlines().index(shortcut_line)+6])
+    assert "S.busy" not in shortcut_block, \
+        "Cmd/Ctrl+K new chat shortcut must not be blocked by the current session busy state"
+
+
 # ── Viewport and scroll safety ────────────────────────────────────────────────
 
 def test_body_overflow_hidden():

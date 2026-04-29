@@ -162,24 +162,26 @@ a plugin library, you work in Python and want the ML/data science ecosystem, you
 deployment that doesn't break between updates, or you want a full web chat UI rather than a
 control dashboard.
 
-| | OpenClaw | Hermes |
-|---|---|---|
-| Persistent memory | Yes | Yes |
-| Scheduled jobs (cron) | Yes | Yes |
-| Messaging app access | Yes (24+ platforms, incl. iMessage/WeChat/LINE) | Yes (many platforms) |
-| Web UI | Chat UI + control dashboard | Full three-panel chat UI |
-| Self-hosted | Yes | Yes |
-| Open source | Yes (MIT) | Yes |
-| Self-improving skills | Partial (AI can generate; not the default loop) | Yes (automatic, first-class) |
-| Browser / computer control | Yes (native Chrome CDP) | Via shell / tools |
-| Voice wake words | Yes (macOS/iOS) | No |
-| Python / ML ecosystem | No (Node.js) | Yes |
-| Orchestrates Claude Code / Codex | No | Yes |
-| Multi-profile support | Via binding-rule routing | Yes (first-class named profiles) |
-| Provider-agnostic | Yes | Yes |
-| Update reliability | Moderate (documented regressions) | High |
-| Memory inspectability | Limited | Yes (markdown files, editable) |
-| Self-hosted autonomous execution | Yes | Yes |
+
+|                                  | OpenClaw                                        | Hermes                           |
+| -------------------------------- | ----------------------------------------------- | -------------------------------- |
+| Persistent memory                | Yes                                             | Yes                              |
+| Scheduled jobs (cron)            | Yes                                             | Yes                              |
+| Messaging app access             | Yes (24+ platforms, incl. iMessage/WeChat/LINE) | Yes (many platforms)             |
+| Web UI                           | Chat UI + control dashboard                     | Full three-panel chat UI         |
+| Self-hosted                      | Yes                                             | Yes                              |
+| Open source                      | Yes (MIT)                                       | Yes                              |
+| Self-improving skills            | Partial (AI can generate; not the default loop) | Yes (automatic, first-class)     |
+| Browser / computer control       | Yes (native Chrome CDP)                         | Via shell / tools                |
+| Voice wake words                 | Yes (macOS/iOS)                                 | No                               |
+| Python / ML ecosystem            | No (Node.js)                                    | Yes                              |
+| Orchestrates Claude Code / Codex | No                                              | Yes                              |
+| Multi-profile support            | Via binding-rule routing                        | Yes (first-class named profiles) |
+| Provider-agnostic                | Yes                                             | Yes                              |
+| Update reliability               | Moderate (documented regressions)               | High                             |
+| Memory inspectability            | Limited                                         | Yes (markdown files, editable)   |
+| Self-hosted autonomous execution | Yes                                             | Yes                              |
+
 
 ### vs. Claude Code (Anthropic)
 
@@ -191,22 +193,22 @@ browser surfaces — and the gap is closing in several areas.
 What Claude Code has that's worth knowing:
 
 - Hooks system — 26 event types (SessionStart, PreToolUse, PostToolUse, Stop, and more) with
-  4 handler types (shell command, HTTP endpoint, LLM prompt, sub-agent); gives deterministic
-  non-LLM control over the agent lifecycle
+4 handler types (shell command, HTTP endpoint, LLM prompt, sub-agent); gives deterministic
+non-LLM control over the agent lifecycle
 - Plugins / Skills — installable via `/plugin install`, hot-reloaded from `~/.claude/skills`,
-  with a marketplace; includes the official ralph-wiggum plugin (`/ralph-loop`) for
-  autonomous iteration toward a completion goal (distinct from `/loop`)
+with a marketplace; includes the official ralph-wiggum plugin (`/ralph-loop`) for
+autonomous iteration toward a completion goal (distinct from `/loop`)
 - `/loop` — a native bundled skill, available in every session without any plugin, that runs
-  a prompt on a repeating schedule within an active CLI session (polling/monitoring use case);
-  session-scoped, dies when the terminal closes
+a prompt on a repeating schedule within an active CLI session (polling/monitoring use case);
+session-scoped, dies when the terminal closes
 - Scheduling — cloud-managed cron (Anthropic infrastructure, minimum 1-hour interval) and
-  desktop app scheduled tasks (run locally while the app is open, minimum 1-minute interval,
-  full local file access); no self-hosted cron
+desktop app scheduled tasks (run locally while the app is open, minimum 1-minute interval,
+full local file access); no self-hosted cron
 - Messaging channels — Telegram, Discord, and iMessage via the Channels feature (research
-  preview, requires Bun runtime); Slack is the most-requested addition and has not yet shipped
+preview, requires Bun runtime); Slack is the most-requested addition and has not yet shipped
 - Memory — CLAUDE.md and MEMORY.md for project-level context; auto-memory since v2.1.59+
 - Claude Cowork — a separate knowledge-worker product connecting 38+ services via MCP
-  including Gmail, Microsoft Teams, Notion, Jira, Salesforce, and more
+including Gmail, Microsoft Teams, Notion, Jira, Salesforce, and more
 
 Claude Code's source was briefly and accidentally made public in March 2026 before being taken
 down. The CLI ships as minified/bundled TypeScript compiled with Bun — it is not open source.
@@ -214,31 +216,33 @@ down. The CLI ships as minified/bundled TypeScript compiled with Bun — it is n
 Key differences that remain:
 
 - Scheduling requires cloud (Anthropic infrastructure, data off your hardware, 1-hour minimum)
-  or the desktop app (runs locally, but the app must stay open — not a headless server process);
-  neither runs as a server daemon the way Hermes cron does
+or the desktop app (runs locally, but the app must stay open — not a headless server process);
+neither runs as a server daemon the way Hermes cron does
 - Memory is project-file-based (CLAUDE.md / MEMORY.md plus rolling auto-memory); it doesn't
-  automatically accumulate a cross-project knowledge graph the way Hermes does
+automatically accumulate a cross-project knowledge graph the way Hermes does
 - Not provider-agnostic — routes through Anthropic, Bedrock, Vertex, or Foundry, but always
-  a Claude model; you can't switch to GPT, Gemini, or a local model
+a Claude model; you can't switch to GPT, Gemini, or a local model
 - Messaging channels are still a research preview, not production
 
 Hermes can use Claude Code as a sub-agent. For large implementation tasks, Hermes can spawn
 Claude Code to handle the heavy lifting and fold the result back into its own memory and history.
 
-| | Claude Code | Hermes |
-|---|---|---|
-| Persistent memory (automatic) | Partial (CLAUDE.md / MEMORY.md + auto-memory v2.1.59+) | Yes |
-| Skills / hooks system | Yes (26-event Hooks + Plugin/Skills marketplace) | Yes (auto-generated from experience) |
-| Scheduled jobs (self-hosted) | No (cloud or desktop-app only) | Yes |
-| Messaging access | Partial (Telegram/Discord/iMessage research preview; Slack not yet) | Yes (many platforms, production) |
-| Cowork connectors (Slack, Gmail, etc.) | Yes (via Claude Cowork, separate product) | Via agent tool use |
-| Web UI | Yes (claude.ai/code, Anthropic-hosted) | Yes (self-hosted) |
-| Provider-agnostic | No (Claude models only) | Yes (any provider) |
-| Self-hosted scheduling | No | Yes |
-| Open source | No | Yes |
-| Background/cloud agent mode | Yes (cloud-scheduled) | Yes (self-hosted cron) |
-| Runs as sub-agent of Hermes | Yes | N/A |
-| Memory inspectability | Partial (CLAUDE.md readable; auto-memory less so) | Yes (markdown files) |
+
+|                                        | Claude Code                                                         | Hermes                               |
+| -------------------------------------- | ------------------------------------------------------------------- | ------------------------------------ |
+| Persistent memory (automatic)          | Partial (CLAUDE.md / MEMORY.md + auto-memory v2.1.59+)              | Yes                                  |
+| Skills / hooks system                  | Yes (26-event Hooks + Plugin/Skills marketplace)                    | Yes (auto-generated from experience) |
+| Scheduled jobs (self-hosted)           | No (cloud or desktop-app only)                                      | Yes                                  |
+| Messaging access                       | Partial (Telegram/Discord/iMessage research preview; Slack not yet) | Yes (many platforms, production)     |
+| Cowork connectors (Slack, Gmail, etc.) | Yes (via Claude Cowork, separate product)                           | Via agent tool use                   |
+| Web UI                                 | Yes (claude.ai/code, Anthropic-hosted)                              | Yes (self-hosted)                    |
+| Provider-agnostic                      | No (Claude models only)                                             | Yes (any provider)                   |
+| Self-hosted scheduling                 | No                                                                  | Yes                                  |
+| Open source                            | No                                                                  | Yes                                  |
+| Background/cloud agent mode            | Yes (cloud-scheduled)                                               | Yes (self-hosted cron)               |
+| Runs as sub-agent of Hermes            | Yes                                                                 | N/A                                  |
+| Memory inspectability                  | Partial (CLAUDE.md readable; auto-memory less so)                   | Yes (markdown files)                 |
+
 
 ### vs. Codex CLI (OpenAI)
 
@@ -255,17 +259,19 @@ living knowledge graph that accumulates across all your projects. No first-party
 integration. The Automations feature in the desktop app covers scheduled local tasks but doesn't
 reach the cross-session, cross-surface continuity Hermes has.
 
-| | Codex CLI | Hermes |
-|---|---|---|
-| Persistent memory | Partial (session history + AGENTS.md) | Yes (automatic, layered) |
-| Scheduled jobs | Partial (desktop app Automations; CLI has none) | Yes |
-| Messaging app access | No | Yes |
-| Web UI | No (CLI + desktop app) | Yes (self-hosted) |
-| Provider-agnostic | Yes (12+ providers) | Yes |
-| Self-hosted | Yes | Yes |
-| Open source | Yes (Apache 2.0) | Yes |
-| Background/cloud agent mode | Yes (Codex Cloud) | Yes (self-hosted cron) |
-| Self-improving skills | No | Yes |
+
+|                             | Codex CLI                                       | Hermes                   |
+| --------------------------- | ----------------------------------------------- | ------------------------ |
+| Persistent memory           | Partial (session history + AGENTS.md)           | Yes (automatic, layered) |
+| Scheduled jobs              | Partial (desktop app Automations; CLI has none) | Yes                      |
+| Messaging app access        | No                                              | Yes                      |
+| Web UI                      | No (CLI + desktop app)                          | Yes (self-hosted)        |
+| Provider-agnostic           | Yes (12+ providers)                             | Yes                      |
+| Self-hosted                 | Yes                                             | Yes                      |
+| Open source                 | Yes (Apache 2.0)                                | Yes                      |
+| Background/cloud agent mode | Yes (Codex Cloud)                               | Yes (self-hosted cron)   |
+| Self-improving skills       | No                                              | Yes                      |
+
 
 ### vs. OpenCode
 
@@ -279,17 +285,19 @@ OpenCode Go ($10/month) and OpenCode Zen (curated model service) are subscriptio
 GitHub Copilot official integration launched January 2026. There is no native scheduling; a
 community background plugin exists. No automatic cross-session semantic memory.
 
-| | OpenCode | Hermes |
-|---|---|---|
-| Persistent memory | Partial (session history + AGENTS.md) | Yes (automatic, layered) |
-| Scheduled jobs | No (community plugin only) | Yes |
-| Messaging app access | Community integrations only (Telegram/Slack/Discord/Teams) | Yes (first-party, many platforms) |
-| Web UI | Yes (embedded + desktop app) | Yes (self-hosted) |
-| Mobile access | No | Yes |
-| Skills / plugins | Yes (30+ community plugins) | Yes (auto-generated, first-party) |
-| Provider-agnostic | Yes (75+ providers) | Yes |
-| Open source | Yes | Yes |
-| Self-hosted autonomous execution | No | Yes |
+
+|                                  | OpenCode                                                   | Hermes                            |
+| -------------------------------- | ---------------------------------------------------------- | --------------------------------- |
+| Persistent memory                | Partial (session history + AGENTS.md)                      | Yes (automatic, layered)          |
+| Scheduled jobs                   | No (community plugin only)                                 | Yes                               |
+| Messaging app access             | Community integrations only (Telegram/Slack/Discord/Teams) | Yes (first-party, many platforms) |
+| Web UI                           | Yes (embedded + desktop app)                               | Yes (self-hosted)                 |
+| Mobile access                    | No                                                         | Yes                               |
+| Skills / plugins                 | Yes (30+ community plugins)                                | Yes (auto-generated, first-party) |
+| Provider-agnostic                | Yes (75+ providers)                                        | Yes                               |
+| Open source                      | Yes                                                        | Yes                               |
+| Self-hosted autonomous execution | No                                                         | Yes                               |
+
 
 ### vs. Cursor
 
@@ -311,20 +319,22 @@ self-hosted scheduling, or deep Python/ML tooling on your own hardware, Cursor's
 architecture is a fundamental mismatch. For teams that want editor-native agents with strong
 IDE integration, Cursor's recent evolution is significant.
 
-| | Cursor | Windsurf | Copilot | Hermes |
-|---|---|---|---|---|
-| In-editor autocomplete | Excellent (Supermaven) | Excellent (Cascade) | Excellent | No |
-| Inline diff / refactor | Yes | Yes | Yes | Via shell |
-| Cross-session memory | Yes (Memories, per-project) | Yes (Cascade Memories, workspace) | Yes (Agentic Memory, repo-scoped, 28-day expiry) | Yes (automatic, persistent) |
-| Scheduled background jobs | Yes (Automations, cloud VM) | No | Via Coding Agent (issue-driven) | Yes (self-hosted cron) |
-| Messaging app / multi-surface | Yes (Slack bot, web app, mobile) | No | Via Copilot CLI / fleet | Yes (many platforms) |
-| Background/cloud agent mode | Yes (Automations on cloud VMs) | No | Yes (Coding Agent, GA Mar 2026) | Yes (self-hosted) |
-| Terminal tool use | Limited | Limited | Limited | Full |
-| Self-hosted | No | No | No | Yes |
-| Self-hosted autonomous execution | No | No | No | Yes |
-| Provider-agnostic | Partial | Partial | No (GitHub models) | Yes |
-| Open source | No | No | No | Yes |
-| Memory inspectability | Partial | Yes (stored locally) | Limited | Yes (markdown files) |
+
+|                                  | Cursor                           | Windsurf                          | Copilot                                          | Hermes                      |
+| -------------------------------- | -------------------------------- | --------------------------------- | ------------------------------------------------ | --------------------------- |
+| In-editor autocomplete           | Excellent (Supermaven)           | Excellent (Cascade)               | Excellent                                        | No                          |
+| Inline diff / refactor           | Yes                              | Yes                               | Yes                                              | Via shell                   |
+| Cross-session memory             | Yes (Memories, per-project)      | Yes (Cascade Memories, workspace) | Yes (Agentic Memory, repo-scoped, 28-day expiry) | Yes (automatic, persistent) |
+| Scheduled background jobs        | Yes (Automations, cloud VM)      | No                                | Via Coding Agent (issue-driven)                  | Yes (self-hosted cron)      |
+| Messaging app / multi-surface    | Yes (Slack bot, web app, mobile) | No                                | Via Copilot CLI / fleet                          | Yes (many platforms)        |
+| Background/cloud agent mode      | Yes (Automations on cloud VMs)   | No                                | Yes (Coding Agent, GA Mar 2026)                  | Yes (self-hosted)           |
+| Terminal tool use                | Limited                          | Limited                           | Limited                                          | Full                        |
+| Self-hosted                      | No                               | No                                | No                                               | Yes                         |
+| Self-hosted autonomous execution | No                               | No                                | No                                               | Yes                         |
+| Provider-agnostic                | Partial                          | Partial                           | No (GitHub models)                               | Yes                         |
+| Open source                      | No                               | No                                | No                                               | Yes                         |
+| Memory inspectability            | Partial                          | Yes (stored locally)              | Limited                                          | Yes (markdown files)        |
+
 
 ### vs. Claude.ai and ChatGPT
 
@@ -351,20 +361,22 @@ history, and agent execution live on their servers, not yours. For many use case
 workflows that require persistent server-side execution on controlled hardware, it's a
 disqualifying constraint.
 
-| | Claude.ai | ChatGPT | Hermes |
-|---|---|---|---|
-| Memory across conversations | Yes (auto-generated from history) | Yes (dual-mode: auto + manual) | Yes (deep, automatic) |
-| Scheduled tasks | Yes (Cowork: hourly/daily/weekly) | Yes (since Jan 2025) | Yes (any cron, self-hosted) |
-| Service connectors / messaging | Yes (50+ via Cowork) | Yes (50+ connectors) | Yes (many platforms, direct) |
-| Runs shell commands | Sandboxed (Cowork VM) | Sandboxed | Yes (full shell) |
-| Code execution | Sandboxed | Sandboxed | Yes (full shell) |
-| Reads / writes files | Sandboxed | Sandboxed | Yes (full filesystem) |
-| Web UI | Yes (Anthropic-hosted) | Yes (OpenAI-hosted) | Yes (self-hosted) |
-| Self-hosted | No | No | Yes |
-| Provider-agnostic | No | No | Yes |
-| Open source | No | No | Yes |
-| Self-hosted autonomous execution | No | No | Yes |
-| Memory inspectability | Limited | Limited | Yes (markdown files) |
+
+|                                  | Claude.ai                         | ChatGPT                        | Hermes                       |
+| -------------------------------- | --------------------------------- | ------------------------------ | ---------------------------- |
+| Memory across conversations      | Yes (auto-generated from history) | Yes (dual-mode: auto + manual) | Yes (deep, automatic)        |
+| Scheduled tasks                  | Yes (Cowork: hourly/daily/weekly) | Yes (since Jan 2025)           | Yes (any cron, self-hosted)  |
+| Service connectors / messaging   | Yes (50+ via Cowork)              | Yes (50+ connectors)           | Yes (many platforms, direct) |
+| Runs shell commands              | Sandboxed (Cowork VM)             | Sandboxed                      | Yes (full shell)             |
+| Code execution                   | Sandboxed                         | Sandboxed                      | Yes (full shell)             |
+| Reads / writes files             | Sandboxed                         | Sandboxed                      | Yes (full filesystem)        |
+| Web UI                           | Yes (Anthropic-hosted)            | Yes (OpenAI-hosted)            | Yes (self-hosted)            |
+| Self-hosted                      | No                                | No                             | Yes                          |
+| Provider-agnostic                | No                                | No                             | Yes                          |
+| Open source                      | No                                | No                             | Yes                          |
+| Self-hosted autonomous execution | No                                | No                             | Yes                          |
+| Memory inspectability            | Limited                           | Limited                        | Yes (markdown files)         |
+
 
 ---
 
@@ -464,24 +476,26 @@ profiles with separate memory, separate skills, and separate history.
 
 ## Quick reference
 
-| | OpenClaw | Claude Code | Codex | OpenCode | Cursor | Copilot | Claude.ai | ChatGPT | Hermes |
-|---|---|---|---|---|---|---|---|---|---|
-| Persistent memory (auto) | Yes | Partial† | Partial | Partial | Yes (per-project) | Yes (repo-scoped‡) | Yes | Yes | Yes |
-| Scheduled / background jobs | Yes | Partial§ | Partial¶ | No | Yes (Automations) | Via Coding Agent | Yes (Cowork) | Yes | Yes (self-hosted) |
-| Messaging / multi-surface | Yes (24+ platforms) | Partial (preview) | No | Community only | Yes (Slack/web/mobile) | Via CLI/fleet | Yes (50+ connectors) | Yes (50+ connectors) | Yes (many platforms) |
-| Web UI | Chat UI + control dashboard | Anthropic-hosted | No | Yes | Yes + mobile | github.com | Yes (Claude Desktop) | Yes | Yes (self-hosted) |
-| Skills system | Yes (ClawHub marketplace) | Yes (Hooks + Plugins) | Partial (Skills) | Community plugins | Yes (marketplace) | No | No | No | Yes (auto-generated) |
-| Self-improving skills | Partial | No | No | No | No | No | No | No | Yes |
-| Browser / computer control | Yes (Chrome CDP) | No | No | No | No | No | No | Yes (CUA) | Via shell |
-| In-editor autocomplete | No | No | Via extension | No | Excellent | Excellent | No | No | No |
-| Orchestrates other agents | No | No | No | No | No | No | No | No | Yes |
-| Provider-agnostic | Yes | No (Claude only) | Yes | Yes | Partial | No | No | No | Yes |
-| Self-hosted | Yes | No | Yes (CLI) | Yes | No | No | No | No | Yes |
-| Self-hosted autonomous execution | Yes | No | No | No | No | No | No | No | Yes |
-| Background/cloud agent mode | Yes | Yes (cloud) | Yes (Codex Cloud) | No | Yes (cloud VMs) | Yes (Coding Agent) | Yes (Cowork VM) | Yes (Agent Mode) | Yes (self-hosted) |
-| Memory inspectability | Limited | Partial | Partial | Partial | Partial | Limited | Limited | Limited | Yes (markdown files) |
-| Open source | Yes (MIT) | No | Yes (Apache 2.0) | Yes | No | No | No | No | Yes |
-| Always-on autonomous execution | Yes | No | No | No | No | No | No | No | Yes |
+
+|                                  | OpenClaw                    | Claude Code           | Codex             | OpenCode          | Cursor                 | Copilot            | Claude.ai            | ChatGPT              | Hermes               |
+| -------------------------------- | --------------------------- | --------------------- | ----------------- | ----------------- | ---------------------- | ------------------ | -------------------- | -------------------- | -------------------- |
+| Persistent memory (auto)         | Yes                         | Partial†              | Partial           | Partial           | Yes (per-project)      | Yes (repo-scoped‡) | Yes                  | Yes                  | Yes                  |
+| Scheduled / background jobs      | Yes                         | Partial§              | Partial¶          | No                | Yes (Automations)      | Via Coding Agent   | Yes (Cowork)         | Yes                  | Yes (self-hosted)    |
+| Messaging / multi-surface        | Yes (24+ platforms)         | Partial (preview)     | No                | Community only    | Yes (Slack/web/mobile) | Via CLI/fleet      | Yes (50+ connectors) | Yes (50+ connectors) | Yes (many platforms) |
+| Web UI                           | Chat UI + control dashboard | Anthropic-hosted      | No                | Yes               | Yes + mobile           | github.com         | Yes (Claude Desktop) | Yes                  | Yes (self-hosted)    |
+| Skills system                    | Yes (ClawHub marketplace)   | Yes (Hooks + Plugins) | Partial (Skills)  | Community plugins | Yes (marketplace)      | No                 | No                   | No                   | Yes (auto-generated) |
+| Self-improving skills            | Partial                     | No                    | No                | No                | No                     | No                 | No                   | No                   | Yes                  |
+| Browser / computer control       | Yes (Chrome CDP)            | No                    | No                | No                | No                     | No                 | No                   | Yes (CUA)            | Via shell            |
+| In-editor autocomplete           | No                          | No                    | Via extension     | No                | Excellent              | Excellent          | No                   | No                   | No                   |
+| Orchestrates other agents        | No                          | No                    | No                | No                | No                     | No                 | No                   | No                   | Yes                  |
+| Provider-agnostic                | Yes                         | No (Claude only)      | Yes               | Yes               | Partial                | No                 | No                   | No                   | Yes                  |
+| Self-hosted                      | Yes                         | No                    | Yes (CLI)         | Yes               | No                     | No                 | No                   | No                   | Yes                  |
+| Self-hosted autonomous execution | Yes                         | No                    | No                | No                | No                     | No                 | No                   | No                   | Yes                  |
+| Background/cloud agent mode      | Yes                         | Yes (cloud)           | Yes (Codex Cloud) | No                | Yes (cloud VMs)        | Yes (Coding Agent) | Yes (Cowork VM)      | Yes (Agent Mode)     | Yes (self-hosted)    |
+| Memory inspectability            | Limited                     | Partial               | Partial           | Partial           | Partial                | Limited            | Limited              | Limited              | Yes (markdown files) |
+| Open source                      | Yes (MIT)                   | No                    | Yes (Apache 2.0)  | Yes               | No                     | No                 | No                   | No                   | Yes                  |
+| Always-on autonomous execution   | Yes                         | No                    | No                | No                | No                     | No                 | No                   | No                   | Yes                  |
+
 
 † Claude Code: CLAUDE.md / MEMORY.md project context plus auto-memory since v2.1.59+; no automatic cross-project accumulation
 ‡ Copilot Agentic Memory: public preview Jan 15, 2026; enabled by default Mar 4, 2026; repo-scoped, auto-expires after 28 days

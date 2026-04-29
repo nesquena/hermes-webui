@@ -529,7 +529,7 @@ document.addEventListener('keydown',async e=>{
     // If the current session has no messages, just focus the composer rather than
     // creating another empty session that will clutter the sidebar list (#1171).
     if(S.session&&(S.session.message_count||0)===0){$('msg').focus();return;}
-    if(!S.busy){await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();}
+    await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
   }
   if(e.key==='Escape'){
     // Close onboarding overlay if open (skip/dismiss the wizard)
