@@ -385,10 +385,9 @@ $('fileInput').onchange=e=>{addFiles(Array.from(e.target.files));e.target.value=
 $('btnNewChat').onclick=async()=>{await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();};
 $('btnDownload').onclick=()=>{
   if(!S.session)return;
-  let url=null,a=null;
+  let a=null;
   try{
-    const blob=new Blob([transcript()],{type:'text/markdown'});
-    url=URL.createObjectURL(blob);
+    const url=`/api/session/export?session_id=${encodeURIComponent(S.session.session_id)}&format=md`;
     a=document.createElement('a');
     a.href=url;
     a.download=`hermes-${S.session.session_id}.md`;
@@ -397,12 +396,10 @@ $('btnDownload').onclick=()=>{
     a.click();
     setTimeout(()=>{
       try{if(a&&a.parentNode)a.parentNode.removeChild(a);}catch(_){}
-      try{if(url)URL.revokeObjectURL(url);}catch(_){}
     },200);
     if(typeof showToast==='function')showToast(t?t('downloading',`hermes-${S.session.session_id}.md`):'Downloading transcript…',1500);
   }catch(err){
     try{if(a&&a.parentNode)a.parentNode.removeChild(a);}catch(_){}
-    try{if(url)URL.revokeObjectURL(url);}catch(_){}
     if(typeof showToast==='function')showToast('Transcript export failed: '+(err&&err.message||err));
     else alert('Transcript export failed: '+(err&&err.message||err));
   }

@@ -909,6 +909,8 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, {"projects": load_projects()})
 
     if parsed.path == "/api/session/export":
+        if parse_qs(parsed.query).get("format", [""])[0] == "md":
+            return _handle_session_export_markdown(handler, parsed)
         return _handle_session_export(handler, parsed)
 
     if parsed.path == "/api/workspaces":
@@ -1934,6 +1936,57 @@ def _serve_static(handler, parsed):
     handler.send_header("Content-Length", str(len(raw)))
     handler.end_headers()
     handler.wfile.write(raw)
+    return True
+
+
+def _build_session_markdown(session) -> str:
+    """Render a session into Markdown, mirroring the JS transcript() function in messages.js.
+
+    Skips tool messages, joins array text blocks, and appends an attachments marker.
+    """
+    sid = getattr(session, 'session_id', '') or ''
+    workspace = getattr(session, 'workspace', '') or ''
+    model = getattr(session, 'model', '') or ''
+    lines = [f"# Hermes session {sid}", "",
+             f"Workspace: {workspace}", f"Model: {model}", ""]
+    messages = getattr(session, 'messages', None) or []
+    for m in messages:
+        if not m or not isinstance(m, dict):
+            continue
+        if m.get('role') == 'tool':
+            continue
+        c = m.get('content', '') or ''
+        if isinstance(c, list):
+            c = '\n'.join(str(p.get('text', '') or '') for p in c if p and isinstance(p, dict) and p.get('type') == 'text')
+        ct = str(c).strip()
+        attachments = m.get('attachments') or []
+        if not ct and not attachments:
+            continue
+        attach = f"\n\n_Files: {', '.join(attachments)}_" if attachments else ''
+        lines.extend([f"## {m.get('role', '')}", '', ct + attach, ''])
+    return '\n'.join(lines)
+
+
+def _handle_session_export_markdown(handler, parsed):
+    sid = parse_qs(parsed.query).get("session_id", [""])[0]
+    if not sid:
+        return bad(handler, "session_id is required")
+    try:
+        s = get_session(sid)
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    safe = redact_session_data(s.__dict__)
+    md = _build_session_markdown(type('S', (), safe)())
+    body = md.encode("utf-8")
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/markdown; charset=utf-8")
+    handler.send_header(
+        "Content-Disposition", f'attachment; filename="hermes-{sid}.md"'
+    )
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Cache-Control", "no-store")
+    handler.end_headers()
+    handler.wfile.write(body)
     return True
 
 
