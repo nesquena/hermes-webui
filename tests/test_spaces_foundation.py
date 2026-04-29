@@ -844,6 +844,7 @@ def test_spaces_routes_and_static_shell_are_registered():
     assert '"/api/spaces/import"' in routes_src
     assert '"/api/spaces/export"' in routes_src
     assert '"/api/spaces/revisions"' in routes_src
+    assert '"/api/spaces/widget/patch"' in routes_src
     assert '"/api/spaces/create"' in routes_src
     assert '"/api/spaces/templates/install"' in routes_src
     assert 'static/spaces.js' in index_html
@@ -1071,6 +1072,90 @@ def test_widget_layout_is_normalized_for_canvas_metadata(monkeypatch, tmp_path):
     assert "renderer" not in json.dumps(listed)
 
 
+def test_widget_patch_updates_fields_preserves_source_and_returns_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Patch Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "weather",
+            "kind": "html",
+            "title": "Weather",
+            "layout": {"x": 1, "y": 2, "w": 7, "h": 3},
+            "renderer": "<script>keepButDoNotExpose()</script>",
+            "data": {"api_key": "SECRET...LEAK", "status": "draft"},
+        },
+    )
+
+    patched = spaces.patch_widget(
+        created["space_id"],
+        "weather",
+        {
+            "title": "Weather patched",
+            "kind": "markdown",
+            "layout": {"x": "4", "y": -9, "w": 99, "h": 0, "minimized": "yes"},
+            "renderer": "<script>attemptedReplacement()</script>",
+            "data": {"api_key": "ATTEMPTED_LEAK"},
+        },
+    )
+
+    assert patched["widget"] == {
+        "id": "weather",
+        "kind": "markdown",
+        "title": "Weather patched",
+        "layout": {"x": 4, "y": 0, "w": 24, "h": 1, "minimized": True},
+    }
+    assert patched["revision_event_id"]
+    stored = spaces.read_widget(created["space_id"], "weather")
+    assert stored["renderer"] == "<script>keepButDoNotExpose()</script>"
+    assert stored["data"] == {"api_key": "SECRET...LEAK", "status": "draft"}
+    assert stored["title"] == "Weather patched"
+    assert stored["kind"] == "markdown"
+    serialized = json.dumps(patched).lower()
+    assert "renderer" not in serialized
+    assert "data" not in serialized
+    assert "secret" not in serialized
+    assert "attemptedreplacement" not in serialized
+
+
+def test_widget_patch_route_updates_metadata_and_omits_generated_fields(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Route Patch"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "card",
+            "kind": "html",
+            "title": "Card",
+            "renderer": "<script>storedSource()</script>",
+            "data": {"token": "SECRET"},
+        },
+    )
+
+    handled, status, body = _route_post(
+        "/api/spaces/widget/patch",
+        {
+            "space_id": created["space_id"],
+            "widget_id": "card",
+            "patch": {"title": "Card patched", "layout": {"x": 3, "y": 4, "w": 5, "h": 6}, "source": "SECRET_SOURCE"},
+        },
+    )
+
+    assert handled is None
+    assert status == 200
+    assert body["widget"] == {
+        "id": "card",
+        "kind": "html",
+        "title": "Card patched",
+        "layout": {"x": 3, "y": 4, "w": 5, "h": 6, "minimized": False},
+    }
+    assert spaces.read_widget(created["space_id"], "card")["renderer"] == "<script>storedSource()</script>"
+    serialized = json.dumps(body).lower()
+    assert "renderer" not in serialized
+    assert "source" not in serialized
+    assert "secret" not in serialized
+
+
 def test_widget_routes_upsert_list_read_and_delete(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Route Widgets"})
@@ -1104,6 +1189,59 @@ def test_widget_routes_upsert_list_read_and_delete(monkeypatch, tmp_path):
     assert status == 200
     assert body["deleted"] is True
     assert spaces.list_widgets(space_id) == []
+
+
+def test_widget_routes_return_metadata_only_even_when_widget_stores_generated_bodies(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Unsafe Route Widget"})
+    space_id = created["space_id"]
+    unsafe_widget = {
+        "id": "custom-card",
+        "kind": "custom",
+        "title": "Custom Card",
+        "layout": {"x": 1, "y": 2, "w": 7, "h": 3},
+        "renderer": "<script>window.SECRET_VALUE_DO_NOT_LEAK='x'</script>",
+        "html": "<img src=x onerror=stealSecret()>",
+        "script": "stealSecret()",
+        "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        "source": "SECRET_SOURCE",
+    }
+
+    handled, status, body = _route_post(
+        "/api/spaces/widget/upsert",
+        {"space_id": space_id, "widget": unsafe_widget},
+    )
+
+    assert handled is None
+    assert status == 200
+    assert body["widget"] == {
+        "id": "custom-card",
+        "kind": "custom",
+        "title": "Custom Card",
+        "layout": {"x": 1, "y": 2, "w": 7, "h": 3, "minimized": False},
+    }
+    assert spaces.read_widget(space_id, "custom-card")["renderer"].startswith("<script>")
+
+    handled, status, body = _route_get(f"/api/spaces/widget?space_id={space_id}&widget_id=custom-card")
+
+    assert handled is None
+    assert status == 200
+    assert body["widget"] == {
+        "id": "custom-card",
+        "kind": "custom",
+        "title": "Custom Card",
+        "layout": {"x": 1, "y": 2, "w": 7, "h": 3, "minimized": False},
+    }
+    serialized = json.dumps(body).lower()
+    assert "secret_value_do_not_leak" not in serialized
+    assert "secret_source" not in serialized
+    assert "stealsecret" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert "script" not in serialized
+    assert "data" not in serialized
+    assert "api_key" not in serialized
 
 
 def test_widget_event_queues_agent_bridge_request_without_widget_bodies_or_secret_values(monkeypatch, tmp_path):
