@@ -789,6 +789,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if((d.session_id||activeSid)!==activeSid) return;
       }catch(_){}
       source.close();
+      // Mirror the drain that done{} performs — stream_end can fire on its
+      // own without a prior done event (e.g. server-sent close, network drop).
+      _queueDrainSid=activeSid;setBusy(false);
     });
 
     source.addEventListener('pending_steer_leftover',e=>{

@@ -1086,10 +1086,10 @@ function setBusy(v){
       // but only for the session currently being viewed.
       const _draftSid=drainSid;
       const _isCurrentView=S.session&&S.session.session_id===_draftSid;
-      const _draft=_isCurrentView&&S._drafts&&S._drafts[_draftSid];
+      const _draft=_isCurrentView&&S.composerDrafts&&S.composerDrafts[_draftSid];
       if(_draft){
         $('msg').value=_draft;
-        delete S._drafts[_draftSid];
+        delete S.composerDrafts[_draftSid];
         autoResize();
         renderTray();
       }
