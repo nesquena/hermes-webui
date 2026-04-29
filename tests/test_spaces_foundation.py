@@ -838,6 +838,7 @@ def test_spaces_routes_and_static_shell_are_registered():
     routes_src = (repo / "api" / "routes.py").read_text(encoding="utf-8")
     index_html = (repo / "static" / "index.html").read_text(encoding="utf-8")
     panels_js = (repo / "static" / "panels.js").read_text(encoding="utf-8")
+    ui_js = (repo / "static" / "ui.js").read_text(encoding="utf-8")
     spaces_js = (repo / "static" / "spaces.js").read_text(encoding="utf-8")
 
     assert '"/api/spaces"' in routes_src
@@ -853,12 +854,17 @@ def test_spaces_routes_and_static_shell_are_registered():
     assert 'static/spaces.css' in index_html
     assert 'id="mainCapySpaces"' in index_html
     assert 'id="capySpacesRecovery"' in index_html
+    assert 'id="capyActiveSpaceContext"' in index_html
+    assert 'id="capyActiveSpaceLabel"' in index_html
     assert 'data-panel="capy-spaces"' in index_html
     assert "switchPanel('capy-spaces')" in index_html
     assert "'capy-spaces': 'Capy Spaces'" in panels_js
     assert "'capy-spaces'" in panels_js
     assert "loadCapySpaces()" in panels_js
     assert "loadCapySpacesRecovery()" in panels_js
+    assert "function syncCapyActiveSpaceContext" in ui_js
+    assert "active_space_id" in ui_js
+    assert "capyActiveSpaceLabel" in ui_js
     assert "system.chat" in spaces_js
     assert "system.settings" in spaces_js
     assert "data-capy-action=\"openSystemPanel\"" in spaces_js

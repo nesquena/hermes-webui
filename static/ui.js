@@ -9628,6 +9628,30 @@ async function checkInflightOnBoot(sid) {
   } catch(e) { clearInflight(); }
 }
 
+function syncCapyActiveSpaceContext(){
+  const wrap=$('capyActiveSpaceContext');
+  if(!wrap) return;
+  const label=$('capyActiveSpaceLabel');
+  const chip=$('capyActiveSpaceChip');
+  const activeId=S&&S.session&&S.session.active_space_id?String(S.session.active_space_id).trim():'';
+  if(!activeId){
+    wrap.style.display='none';
+    if(label) label.textContent='';
+    if(chip){
+      chip.title='No active Capy Space';
+      chip.setAttribute('aria-label','No active Capy Space');
+    }
+    return;
+  }
+  const display=activeId.length>48?activeId.slice(0,45)+'…':activeId;
+  wrap.style.display='';
+  if(label) label.textContent='Space: '+display;
+  if(chip){
+    chip.title='Active Capy Space: '+activeId;
+    chip.setAttribute('aria-label','Active Capy Space '+display);
+  }
+}
+
 function _topbarLoadedMessageCount(){
   const messages=Array.isArray(S.messages)?S.messages:[];
   return messages.filter(m=>m&&m.role&&m.role!=='tool').length;
@@ -9650,6 +9674,7 @@ function syncTopbar(){
   if(!S.session){
     document.title=assistantDisplayName();
     if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
+    if(typeof syncCapyActiveSpaceContext==='function') syncCapyActiveSpaceContext();
     if(typeof _syncWorkspaceHeadingState==='function') _syncWorkspaceHeadingState();
     if(typeof syncModelChip==='function') syncModelChip();
     if(typeof syncTerminalButton==='function') syncTerminalButton();
@@ -9776,6 +9801,7 @@ function syncTopbar(){
   if(clearBtn) clearBtn.style.display=(S.messages&&S.messages.filter(msg=>msg.role!=='tool').length>0)?'':'none';
   if(typeof _syncHermesPanelSessionActions==='function') _syncHermesPanelSessionActions();
   if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
+  if(typeof syncCapyActiveSpaceContext==='function') syncCapyActiveSpaceContext();
   if(typeof syncTerminalButton==='function') syncTerminalButton();
   // modelSelect already set above
   // Update profile chip label.
