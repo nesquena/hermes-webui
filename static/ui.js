@@ -93,6 +93,7 @@ const _SVG_EXTS=/\.svg$/i;
 const _AUDIO_EXTS=/\.(mp3|ogg|wav|m4a|aac|flac|wma|opus|webm)$/i;
 const _VIDEO_EXTS=/\.(mp4|webm|mkv|mov|avi|ogv|m4v)$/i;
 const _CSV_EXTS=/\.csv$/i;
+const _EXCALIDRAW_EXTS=/\.excalidraw$/i;
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
@@ -1245,6 +1246,10 @@ function renderMd(raw){
     // CSV files → lazy-load and render as table
     if(_CSV_EXTS.test(ref)){
       return `<div class="csv-inline-load" data-path="${esc(ref)}">${t('csv_loading')} ${fname}...</div>`;
+    }
+    // Excalidraw files → lazy-load inline embed
+    if(_EXCALIDRAW_EXTS.test(ref)){
+      return `<div class="excalidraw-inline-load" data-path="${esc(ref)}">${t('excalidraw_loading')} ${fname}...</div>`;
     }
     return `<a class="msg-media-link" href="${esc(apiUrl+'&download=1')}" download="${fname}">📎 ${fname}</a>`;
   });
@@ -2546,7 +2551,7 @@ function renderMessages(){
       inner.innerHTML=cached.html;
       _sessionHtmlCacheSid=sid;
       if(S.activeStreamId){scrollIfPinned();}else{scrollToBottom();}
-      requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();renderMermaidBlocks();renderKatexBlocks();});
+      requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();loadExcalidrawInline();renderMermaidBlocks();renderKatexBlocks();});
       requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();renderMermaidBlocks();renderKatexBlocks();});
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
       return;
@@ -2951,7 +2956,7 @@ function renderMessages(){
     scrollToBottom();
   }
   // Apply syntax highlighting after DOM is built
-  requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();renderMermaidBlocks();renderKatexBlocks();});
+  requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();loadExcalidrawInline();renderMermaidBlocks();renderKatexBlocks();});
   requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();renderMermaidBlocks();renderKatexBlocks();});
   // Refresh todo panel if it's currently open
   if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){
@@ -3433,6 +3438,115 @@ function loadCsvInline(){
       .catch(()=>{
         el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('csv_error')}</span></div>`;
       });
+  });
+}
+
+function loadExcalidrawInline(){
+  const EXCALIDRAW_MAX_SIZE=512*1024; // 512 KB cap
+  document.querySelectorAll('.excalidraw-inline-load:not([data-loaded])').forEach(el=>{
+    el.setAttribute('data-loaded','1');
+    const path=el.dataset.path;
+    fetch('api/media?path='+encodeURIComponent(path))
+      .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
+      .then(text=>{
+        if(text.length>EXCALIDRAW_MAX_SIZE){
+          el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('excalidraw_too_large')}</span></div>`;
+          return;
+        }
+        // Validate it looks like Excalidraw JSON
+        let data;
+        try{data=JSON.parse(text);}catch(e){
+          el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('excalidraw_invalid')}</span></div>`;
+          return;
+        }
+        if(!data.type||data.type!=='excalidraw'){
+          el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('excalidraw_invalid')}</span></div>`;
+          return;
+        }
+        const fname=esc(path.split('/').pop());
+        const downloadUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+        el.outerHTML=`<div class="excalidraw-embed-wrap">
+  <div class="msg-artifact-header">
+    <span class="msg-media-label">${t('excalidraw_label')}</span>
+    <a class="excalidraw-open-link" href="${downloadUrl}" download="${fname}">${t('excalidraw_download')} ${fname}</a>
+  </div>
+  <div class="excalidraw-canvas" data-excalidraw='${esc(text)}'></div>
+</div>`;
+        // Lazy-init Excalidraw render after DOM insertion
+        requestAnimationFrame(()=>_renderExcalidrawCanvases());
+      })
+      .catch(()=>{
+        el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('excalidraw_error')}</span></div>`;
+      });
+  });
+}
+
+let _excalidrawScriptLoaded=false;
+function _renderExcalidrawCanvases(){
+  document.querySelectorAll('.excalidraw-canvas:not([data-rendered])').forEach(el=>{
+    el.setAttribute('data-rendered','1');
+    const dataStr=el.getAttribute('data-excalidraw');
+    if(!dataStr) return;
+    // Render a simple SVG preview using the Excalidraw elements
+    try{
+      const data=JSON.parse(dataStr);
+      const elements=data.elements||[];
+      if(!elements.length){el.innerHTML=`<div class="excalidraw-empty">${t('excalidraw_empty')}</div>`;return;}
+      // Calculate bounds
+      let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+      elements.forEach(el=>{
+        const b=[el.x||0,el.y||0,(el.x||0)+(el.width||0),(el.y||0)+(el.height||0)];
+        minX=Math.min(minX,b[0]);minY=Math.min(minY,b[1]);
+        maxX=Math.max(maxX,b[2]);maxY=Math.max(maxY,b[3]);
+      });
+      const pad=20;minX-=pad;minY-=pad;maxX+=pad;maxY+=pad;
+      const w=Math.max(maxX-minX,200);const h=Math.max(maxY-minY,150);
+      const svgParts=[`<svg xmlns="http://www.w3.org/2000/svg" viewBox="${minX} ${minY} ${w} ${h}" class="excalidraw-svg">`];
+      elements.forEach(el=>{
+        const stroke=el.strokeColor||'#1e1e1e';
+        const fill=el.backgroundColor||'transparent';
+        const sw=el.strokeWidth||2;
+        const x=el.x||0,y=el.y||0,w=el.width||0,h=el.height||0;
+        if(el.type==='rectangle'){
+          svgParts.push(`<rect x="${x}" y="${y}" width="${w}" height="${h}" stroke="${stroke}" stroke-width="${sw}" fill="${fill}" rx="${el.roundness?.type===3?8:0}"/>`);
+        }else if(el.type==='diamond'){
+          const cx=x+w/2,cy=y+h/2;
+          svgParts.push(`<polygon points="${cx},${y} ${x+w},${cy} ${cx},${y+h} ${x},${cy}" stroke="${stroke}" stroke-width="${sw}" fill="${fill}"/>`);
+        }else if(el.type==='ellipse'){
+          svgParts.push(`<ellipse cx="${x+w/2}" cy="${y+h/2}" rx="${w/2}" ry="${h/2}" stroke="${stroke}" stroke-width="${sw}" fill="${fill}"/>`);
+        }else if(el.type==='line'){
+          const pts=el.points||[];
+          let d=`M ${x+pts[0][0]} ${y+pts[0][1]}`;
+          for(let i=1;i<pts.length;i++) d+=` L ${x+pts[i][0]} ${y+pts[i][1]}`;
+          svgParts.push(`<path d="${d}" stroke="${stroke}" stroke-width="${sw}" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`);
+        }else if(el.type==='arrow'){
+          const pts=el.points||[];
+          let d=`M ${x+pts[0][0]} ${y+pts[0][1]}`;
+          for(let i=1;i<pts.length;i++) d+=` L ${x+pts[i][0]} ${y+pts[i][1]}`;
+          svgParts.push(`<path d="${d}" stroke="${stroke}" stroke-width="${sw}" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)"/>`);
+        }else if(el.type==='text'){
+          const fontSize=el.fontSize||20;
+          const txt=el.text||'';
+          const lines=txt.split('\n');
+          lines.forEach((line,i)=>{
+            svgParts.push(`<text x="${x}" y="${y+i*fontSize*1.2+fontSize}" fill="${stroke}" font-size="${fontSize}" font-family="Virgil, Segoe UI Emoji, sans-serif">${esc(line)}</text>`);
+          });
+        }else if(el.type==='draw'){
+          const pts=el.points||[];
+          if(pts.length>1){
+            let d=`M ${x+pts[0][0]} ${y+pts[0][1]}`;
+            for(let i=1;i<pts.length;i++) d+=` L ${x+pts[i][0]} ${y+pts[i][1]}`;
+            svgParts.push(`<path d="${d}" stroke="${stroke}" stroke-width="${sw}" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`);
+          }
+        }
+      });
+      // Arrow marker definition
+      svgParts.unshift(`<defs><marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#1e1e1e"/></marker></defs>`);
+      svgParts.push('</svg>');
+      el.innerHTML=svgParts.join('');
+    }catch(e){
+      el.innerHTML=`<div class="excalidraw-empty">${t('excalidraw_render_error')}</div>`;
+    }
   });
 }
 

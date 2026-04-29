@@ -726,6 +726,14 @@
   .csv-table td{padding:6px 12px;border-bottom:1px solid var(--border);white-space:nowrap;}
   .csv-table tbody tr:last-child td{border-bottom:none;}
   .csv-table tbody tr:hover{background:var(--hover-bg);}
+
+  /* ── Excalidraw inline embed ── */
+  .excalidraw-embed-wrap{margin:6px 0;border:1px solid var(--border);border-radius:8px;background:var(--surface);overflow:hidden;}
+  .excalidraw-canvas{padding:12px;overflow:auto;max-height:500px;}
+  .excalidraw-svg{display:block;width:100%;height:auto;max-height:460px;}
+  .excalidraw-empty{color:var(--muted);font-size:13px;padding:20px;text-align:center;}
+  .excalidraw-open-link{font-size:11px;color:var(--accent);text-decoration:none;margin-left:auto;white-space:nowrap;}
+  .excalidraw-open-link:hover{text-decoration:underline;}
   .thinking{display:flex;align-items:center;gap:5px;color:var(--muted);font-size:13px;padding-left:30px;}
   .dot{width:6px;height:6px;border-radius:50%;background:var(--blue);opacity:.3;animation:pulse 1.4s ease-in-out infinite;}
   .dot:nth-child(2){animation-delay:.22s;}.dot:nth-child(3){animation-delay:.44s;}

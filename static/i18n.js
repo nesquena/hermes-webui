@@ -759,6 +759,14 @@ const LOCALES = {
     csv_too_large: 'CSV file too large for inline rendering',
     csv_no_data: 'CSV file has insufficient data to render as table',
     csv_error: 'Failed to load CSV file',
+    excalidraw_loading: 'Loading diagram',
+    excalidraw_too_large: 'Excalidraw file too large for inline rendering',
+    excalidraw_invalid: 'Invalid Excalidraw file format',
+    excalidraw_error: 'Failed to load Excalidraw file',
+    excalidraw_label: 'Diagram',
+    excalidraw_download: 'Download',
+    excalidraw_empty: 'Empty diagram',
+    excalidraw_render_error: 'Failed to render diagram',
   },
 
   ru: {
@@ -1461,6 +1469,14 @@ const LOCALES = {
     csv_too_large: 'CSV-файл слишком большой для встроенного отображения',
     csv_no_data: 'Недостаточно данных в CSV-файле',
     csv_error: 'Не удалось загрузить CSV-файл',
+    excalidraw_loading: 'Загрузка диаграммы',
+    excalidraw_too_large: 'Файл Excalidraw слишком большой для отображения',
+    excalidraw_invalid: 'Неверный формат файла Excalidraw',
+    excalidraw_error: 'Не удалось загрузить файл Excalidraw',
+    excalidraw_label: 'Диаграмма',
+    excalidraw_download: 'Скачать',
+    excalidraw_empty: 'Пустая диаграмма',
+    excalidraw_render_error: 'Не удалось отобразить диаграмму',
   },
 
   es: {
@@ -2157,6 +2173,14 @@ const LOCALES = {
     csv_too_large: 'Archivo CSV demasiado grande para mostrar en línea',
     csv_no_data: 'El archivo CSV no tiene suficientes datos para mostrar como tabla',
     csv_error: 'Error al cargar el archivo CSV',
+    excalidraw_loading: 'Cargando diagrama',
+    excalidraw_too_large: 'Archivo Excalidraw demasiado grande para mostrar en línea',
+    excalidraw_invalid: 'Formato de archivo Excalidraw no válido',
+    excalidraw_error: 'Error al cargar archivo Excalidraw',
+    excalidraw_label: 'Diagrama',
+    excalidraw_download: 'Descargar',
+    excalidraw_empty: 'Diagrama vacío',
+    excalidraw_render_error: 'Error al renderizar el diagrama',
   },
 
   de: {
@@ -2628,6 +2652,14 @@ const LOCALES = {
     csv_too_large: 'CSV-Datei zu groß für Inline-Anzeige',
     csv_no_data: 'CSV-Datei enthält nicht genügend Daten',
     csv_error: 'CSV-Datei konnte nicht geladen werden',
+    excalidraw_loading: 'Diagramm wird geladen',
+    excalidraw_too_large: 'Excalidraw-Datei zu groß für Inline-Anzeige',
+    excalidraw_invalid: 'Ungültiges Excalidraw-Dateiformat',
+    excalidraw_error: 'Excalidraw-Datei konnte nicht geladen werden',
+    excalidraw_label: 'Diagramm',
+    excalidraw_download: 'Herunterladen',
+    excalidraw_empty: 'Leeres Diagramm',
+    excalidraw_render_error: 'Diagramm konnte nicht gerendert werden',
 },
 
   zh: {
@@ -3321,6 +3353,14 @@ const LOCALES = {
     csv_too_large: 'CSV 文件过大，无法内联渲染',
     csv_no_data: 'CSV 文件数据不足，无法渲染为表格',
     csv_error: '加载 CSV 文件失败',
+    excalidraw_loading: '加载图表',
+    excalidraw_too_large: 'Excalidraw 文件过大，无法内联渲染',
+    excalidraw_invalid: '无效的 Excalidraw 文件格式',
+    excalidraw_error: '加载 Excalidraw 文件失败',
+    excalidraw_label: '图表',
+    excalidraw_download: '下载',
+    excalidraw_empty: '空图表',
+    excalidraw_render_error: '渲染图表失败',
   },
 
   // Traditional Chinese (zh-Hant)
@@ -4065,6 +4105,14 @@ const LOCALES = {
     csv_too_large: 'CSV 檔案過大，無法內嵌渲染',
     csv_no_data: 'CSV 檔案資料不足，無法渲染為表格',
     csv_error: '載入 CSV 檔案失敗',
+    excalidraw_loading: '載入圖表',
+    excalidraw_too_large: 'Excalidraw 檔案過大，無法內嵌渲染',
+    excalidraw_invalid: '無效的 Excalidraw 檔案格式',
+    excalidraw_error: '載入 Excalidraw 檔案失敗',
+    excalidraw_label: '圖表',
+    excalidraw_download: '下載',
+    excalidraw_empty: '空圖表',
+    excalidraw_render_error: '渲染圖表失敗',
   },
 
 
@@ -5448,6 +5496,14 @@ const LOCALES = {
     csv_too_large: 'CSV 파일이 너무 커서 인라인 렌더링할 수 없습니다',
     csv_no_data: 'CSV 파일에 표시할 데이터가 부족합니다',
     csv_error: 'CSV 파일을 로드하지 못했습니다',
+    excalidraw_loading: '다이어그램 로딩 중',
+    excalidraw_too_large: 'Excalidraw 파일이 너무 커서 인라인 렌더링할 수 없습니다',
+    excalidraw_invalid: '잘못된 Excalidraw 파일 형식',
+    excalidraw_error: 'Excalidraw 파일을 로드하지 못했습니다',
+    excalidraw_label: '다이어그램',
+    excalidraw_download: '다운로드',
+    excalidraw_empty: '빈 다이어그램',
+    excalidraw_render_error: '다이어그램 렌더링 실패',
   },
 };
 
