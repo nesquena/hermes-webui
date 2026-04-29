@@ -91,6 +91,7 @@
     if (!safeSpaceId) return;
     try {
       const data = await fetchSpacesJson('api/spaces/widgets?space_id='+encodeURIComponent(safeSpaceId));
+      root.dataset.editingWidgetId = '';
       root.innerHTML = renderWidgetManager(safeSpaceId, data.widgets || []);
     } catch (err) {
       root.innerHTML = '<div class="capy-spaces-card"><h3>Widget manager unavailable</h3><div class="capy-spaces-muted">'+escapeHtml(err.message||String(err))+'</div><button type="button" class="capy-spaces-btn" data-capy-action="reloadSpaces">Back to spaces</button></div>';
@@ -282,6 +283,7 @@
   }
 
   function setWidgetForm(root, widgetId, title, kind, layout){
+    if (root && root.dataset) root.dataset.editingWidgetId = widgetId || '';
     const idInput = getRootInput(root, '#capyWidgetId');
     const titleInput = getRootInput(root, '#capyWidgetTitle');
     const kindInput = getRootInput(root, '#capyWidgetKind');
@@ -468,7 +470,12 @@
         kind: kindInput && kindInput.value ? kindInput.value : 'markdown',
         layout: formLayout(root),
       };
-      await postSpacesJson('api/spaces/widget/upsert', {space_id: spaceId, widget: widget});
+      const editingWidgetId = root && root.dataset ? String(root.dataset.editingWidgetId || '').trim() : '';
+      if (editingWidgetId) {
+        await postSpacesJson('api/spaces/widget/patch', {space_id: spaceId, widget_id: editingWidgetId, patch: {title: widget.title, kind: widget.kind, layout: widget.layout}});
+      } else {
+        await postSpacesJson('api/spaces/widget/upsert', {space_id: spaceId, widget: widget});
+      }
       await loadSpaceWidgets(spaceId);
       return;
     }

@@ -118,6 +118,9 @@ global.fetch = async function(path, opts = {}) {
   if (path === 'api/spaces/widget/upsert') {
     return response({ space_id: 'lab', widget: { id: 'notes', kind: 'markdown', title: 'Notes', layout: { x: 2, y: 3, w: 8, h: 5 } }, revision_event_id: 'rev2' });
   }
+  if (path === 'api/spaces/widget/patch') {
+    return response({ space_id: 'lab', widget: { id: 'weather', kind: 'markdown', title: 'Weather patched', layout: { x: 4, y: 5, w: 9, h: 6 } }, revision_event_id: 'rev-patch', renderer: '<script>bad()</script>' });
+  }
   if (path === 'api/spaces/widget/delete') {
     return response({ deleted: true, space_id: 'lab', widget_id: 'weather', revision_event_id: 'rev3' });
   }
@@ -280,6 +283,18 @@ async function click(action, dataset) {
     await window.loadCapySpaces();
     await window.loadSpaceWidgets('lab');
     await click('editWidget', { spaceId: 'lab', widgetId: 'weather', widgetTitle: '<Weather>', widgetKind: 'markdown', widgetX: '12', widgetY: '3', widgetW: '5', widgetH: '4' });
+  } else if (scenario === 'editWidgetSave') {
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('editWidget', { spaceId: 'lab', widgetId: 'weather', widgetTitle: '<Weather>', widgetKind: 'markdown', widgetX: '12', widgetY: '3', widgetW: '5', widgetH: '4' });
+    values['#capyWidgetTitle'] = 'Weather patched';
+    values['#capyWidgetKind'] = 'markdown';
+    values['#capyWidgetX'] = '4';
+    values['#capyWidgetY'] = '5';
+    values['#capyWidgetW'] = '9';
+    values['#capyWidgetH'] = '6';
+    await click('saveWidget', { spaceId: 'lab' });
   } else if (scenario === 'askWidget') {
     global.showPromptDialog = async function(opts) { dialogs.push(opts); return 'Refresh the weather widget'; };
     await window.loadCapySpaces();
@@ -425,7 +440,28 @@ def test_spaces_ui_save_widget_posts_to_upsert_and_refreshes_widgets(driver_path
         "space_id": "lab",
         "widget": {"id": "notes", "title": "Notes", "kind": "markdown", "layout": {"x": 2, "y": 3, "w": 8, "h": 5}},
     }
+    assert not any(call["path"] == "api/spaces/widget/patch" for call in out["calls"])
     assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
+
+
+def test_spaces_ui_edit_widget_uses_patch_route_and_preserves_source_bodies(driver_path):
+    out = _run_spaces_scenario(driver_path, "editWidgetSave")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/patch")
+
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {
+        "space_id": "lab",
+        "widget_id": "weather",
+        "patch": {
+            "title": "Weather patched",
+            "kind": "markdown",
+            "layout": {"x": 4, "y": 5, "w": 9, "h": 6},
+        },
+    }
+    assert not any(call["path"] == "api/spaces/widget/upsert" for call in out["calls"])
+    assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
 
 
 def test_spaces_ui_delete_widget_posts_to_delete_and_refreshes_widgets(driver_path):
