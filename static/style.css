@@ -2520,3 +2520,9 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 @media (hover:none) and (pointer:coarse){
   input,textarea,select{font-size:max(16px,1em)!important;}
 }
+
+/* ── Vendo identity chip (sidebar bottom) ──────────────────────────────── */
+.vendo-identity-chip{display:flex;align-items:center;gap:8px;padding:6px 10px;margin:4px 8px;border-radius:8px;cursor:pointer;font:13px/1.2 system-ui,-apple-system,sans-serif;color:var(--text);}
+.vendo-identity-chip:hover{background:var(--hover-bg);}
+.vendo-identity-chip__avatar{width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:white;flex:0 0 24px;}
+.vendo-identity-chip__name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
