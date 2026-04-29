@@ -555,6 +555,64 @@ def test_stock_chart_template_install_route_returns_safe_metadata(monkeypatch, t
     assert "secret" not in serialized
 
 
+def test_install_big_bang_template_creates_safe_onboarding_widgets(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    installed = spaces.install_template("big-bang")
+
+    assert installed["template"] == "big-bang"
+    assert installed["space"]["template"] == "big-bang-onboarding"
+    assert installed["space"]["name"] == "Big Bang Onboarding"
+    assert [widget["id"] for widget in installed["installed_widgets"]] == [
+        "bigbang-welcome",
+        "bigbang-demo-launcher",
+        "bigbang-safety",
+        "bigbang-next-steps",
+    ]
+    assert [widget["kind"] for widget in installed["installed_widgets"]] == [
+        "markdown",
+        "checklist",
+        "status",
+        "checklist",
+    ]
+    launcher_widget = spaces.read_widget(installed["space"]["space_id"], "bigbang-demo-launcher")
+    assert launcher_widget["demo_templates"] == ["weather", "research", "kanban", "notes", "browser", "stock"]
+    assert launcher_widget["interaction"] == {"install_templates": "agent-mediated", "preview": "metadata-only"}
+    safety_widget = spaces.read_widget(installed["space"]["space_id"], "bigbang-safety")
+    assert safety_widget["safety"] == {
+        "generated_code": "disabled-by-default",
+        "recovery": "available",
+        "rollback": "revision-history-planned",
+    }
+    serialized = json.dumps(installed).lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert '\"script\"' not in serialized
+    assert '\"data\"' not in serialized
+    assert '\"source\"' not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
+def test_big_bang_template_install_route_returns_safe_metadata(monkeypatch, tmp_path):
+    _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    handled, status, body = _route_post("/api/spaces/templates/install", {"template": "big-bang"})
+
+    assert handled is None
+    assert status == 200
+    assert body["template"] == "big-bang"
+    assert body["space"]["name"] == "Big Bang Onboarding"
+    assert body["installed_widgets"][0]["id"] == "bigbang-welcome"
+    assert len(body["installed_widgets"]) == 4
+    serialized = json.dumps(body).lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
 def test_delete_space_removes_manifest_but_keeps_global_revision_event(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Disposable"})

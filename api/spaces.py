@@ -857,6 +857,62 @@ def _browser_surface_widgets() -> list[dict[str, Any]]:
     ]
 
 
+def _big_bang_onboarding_widgets() -> list[dict[str, Any]]:
+    """Return safe declarative Big Bang onboarding widget seeds.
+
+    The first-run space should demonstrate what Capy Spaces can do without
+    enabling generated renderer execution. It links the existing demo templates,
+    documents safety defaults, and gives Capy/user next-step metadata to drive
+    future agent-mediated setup.
+    """
+    return [
+        {
+            "id": "bigbang-welcome",
+            "kind": "markdown",
+            "title": "Welcome to Capy Spaces",
+            "layout": {"x": 0, "y": 0, "w": 12, "h": 5, "minimized": False},
+            "content_status": "curated-metadata",
+            "summary": "First-run tour for persistent, recoverable, metadata-only spaces.",
+        },
+        {
+            "id": "bigbang-demo-launcher",
+            "kind": "checklist",
+            "title": "Demo launchers",
+            "layout": {"x": 12, "y": 0, "w": 12, "h": 5, "minimized": False},
+            "demo_templates": ["weather", "research", "kanban", "notes", "browser", "stock"],
+            "items": [
+                {"id": "try-weather", "title": "Install the Weather Demo", "status": "suggested"},
+                {"id": "try-research", "title": "Open the Research Harness", "status": "suggested"},
+                {"id": "try-browser", "title": "Preview Browser Surface planning", "status": "suggested"},
+            ],
+            "interaction": {"install_templates": "agent-mediated", "preview": "metadata-only"},
+        },
+        {
+            "id": "bigbang-safety",
+            "kind": "status",
+            "title": "Safety guardrails",
+            "layout": {"x": 0, "y": 5, "w": 12, "h": 4, "minimized": False},
+            "safety": {
+                "generated_code": "disabled-by-default",
+                "recovery": "available",
+                "rollback": "revision-history-planned",
+            },
+            "permissions": {"generated_rendering": "disabled", "network": "agent-mediated"},
+        },
+        {
+            "id": "bigbang-next-steps",
+            "kind": "checklist",
+            "title": "Next steps",
+            "layout": {"x": 12, "y": 5, "w": 12, "h": 4, "minimized": False},
+            "items": [
+                {"id": "activate-chat", "title": "Use this space in chat", "status": "ready"},
+                {"id": "ask-capy", "title": "Ask Capy to customize widgets", "status": "ready"},
+                {"id": "review-recovery", "title": "Review recovery and revision history", "status": "planned"},
+            ],
+        },
+    ]
+
+
 def install_template(template: str, *, space_id: str | None = None) -> dict[str, Any]:
     """Install a safe Capy Spaces demo template.
 
@@ -867,7 +923,7 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
     template_name = str(template or "").strip().lower()
-    if template_name not in {"weather", "weather-demo", "research", "research-harness", "dashboard", "daily-dashboard", "kanban", "kanban-board", "notes", "notes-app", "browser", "browser-surface", "stock", "stock-chart", "stocks"}:
+    if template_name not in {"weather", "weather-demo", "research", "research-harness", "dashboard", "daily-dashboard", "kanban", "kanban-board", "notes", "notes-app", "browser", "browser-surface", "stock", "stock-chart", "stocks", "big-bang", "bigbang", "onboarding", "big-bang-onboarding"}:
         raise ValueError("Unsupported template")
 
     if template_name in {"weather", "weather-demo"}:
@@ -966,6 +1022,22 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
             )
         widgets = _stock_chart_widgets()
         response_template = "stock"
+    elif template_name in {"big-bang", "bigbang", "onboarding", "big-bang-onboarding"}:
+        target_id = validate_space_id(space_id) if space_id else _unique_space_id("big-bang-onboarding")
+        if _manifest_path(target_id).exists():
+            space = read_space(target_id)
+        else:
+            space = create_space(
+                {
+                    "space_id": target_id,
+                    "name": "Big Bang Onboarding",
+                    "description": "Metadata-only first-run tour for Capy Spaces demos, safety guardrails, and next steps.",
+                    "agent_instructions": "Use this onboarding space to explain Capy Spaces, install demo templates on request, keep generated code disabled by default, and preserve revision history.",
+                    "template": "big-bang-onboarding",
+                }
+            )
+        widgets = _big_bang_onboarding_widgets()
+        response_template = "big-bang"
     else:
         target_id = validate_space_id(space_id) if space_id else _unique_space_id("notes-app")
         if _manifest_path(target_id).exists():
