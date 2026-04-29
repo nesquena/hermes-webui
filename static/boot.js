@@ -385,9 +385,27 @@ $('fileInput').onchange=e=>{addFiles(Array.from(e.target.files));e.target.value=
 $('btnNewChat').onclick=async()=>{await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();};
 $('btnDownload').onclick=()=>{
   if(!S.session)return;
-  const blob=new Blob([transcript()],{type:'text/markdown'});
-  const a=document.createElement('a');a.href=URL.createObjectURL(blob);
-  a.download=`hermes-${S.session.session_id}.md`;a.click();URL.revokeObjectURL(a.href);
+  let url=null,a=null;
+  try{
+    const blob=new Blob([transcript()],{type:'text/markdown'});
+    url=URL.createObjectURL(blob);
+    a=document.createElement('a');
+    a.href=url;
+    a.download=`hermes-${S.session.session_id}.md`;
+    a.style.display='none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(()=>{
+      try{if(a&&a.parentNode)a.parentNode.removeChild(a);}catch(_){}
+      try{if(url)URL.revokeObjectURL(url);}catch(_){}
+    },200);
+    if(typeof showToast==='function')showToast(t?t('downloading',`hermes-${S.session.session_id}.md`):'Downloading transcript…',1500);
+  }catch(err){
+    try{if(a&&a.parentNode)a.parentNode.removeChild(a);}catch(_){}
+    try{if(url)URL.revokeObjectURL(url);}catch(_){}
+    if(typeof showToast==='function')showToast('Transcript export failed: '+(err&&err.message||err));
+    else alert('Transcript export failed: '+(err&&err.message||err));
+  }
 };
 $('btnExportJSON').onclick=()=>{
   if(!S.session)return;
