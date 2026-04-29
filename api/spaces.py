@@ -776,6 +776,47 @@ def _notes_app_widgets() -> list[dict[str, Any]]:
     ]
 
 
+def _stock_chart_widgets() -> list[dict[str, Any]]:
+    """Return safe declarative stock chart widget seeds.
+
+    This starter maps the Space Agent demo's stock graph into metadata-only
+    chart/watchlist widgets. Live market fetches are agent-mediated later, not
+    embedded as browser-executable renderer code or secret-bearing API config.
+    """
+    return [
+        {
+            "id": "stock-chart",
+            "kind": "chart",
+            "title": "NVDA / AAPL / GOOGL",
+            "layout": {"x": 0, "y": 0, "w": 16, "h": 8, "minimized": False},
+            "series": ["NVDA", "AAPL", "GOOGL"],
+            "market_data": {
+                "provider": "agent-mediated",
+                "status": "ready-for-agent-refresh",
+                "range": "1mo",
+            },
+            "permissions": {"network": "agent-mediated"},
+        },
+        {
+            "id": "stock-watchlist",
+            "kind": "table",
+            "title": "Watchlist",
+            "layout": {"x": 16, "y": 0, "w": 8, "h": 8, "minimized": False},
+            "columns": ["symbol", "last", "change", "notes"],
+            "symbols": ["NVDA", "AAPL", "GOOGL"],
+            "refresh": {"mode": "agent-mediated", "status": "ready-for-agent-refresh"},
+            "permissions": {"network": "agent-mediated"},
+        },
+        {
+            "id": "stock-notes",
+            "kind": "markdown",
+            "title": "Market notes",
+            "layout": {"x": 0, "y": 8, "w": 24, "h": 4, "minimized": False},
+            "content_status": "agent-managed-empty",
+        },
+    ]
+
+
 def _browser_surface_widgets() -> list[dict[str, Any]]:
     """Return safe declarative browser-surface widget seeds.
 
@@ -826,7 +867,7 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
     template_name = str(template or "").strip().lower()
-    if template_name not in {"weather", "weather-demo", "research", "research-harness", "dashboard", "daily-dashboard", "kanban", "kanban-board", "notes", "notes-app", "browser", "browser-surface"}:
+    if template_name not in {"weather", "weather-demo", "research", "research-harness", "dashboard", "daily-dashboard", "kanban", "kanban-board", "notes", "notes-app", "browser", "browser-surface", "stock", "stock-chart", "stocks"}:
         raise ValueError("Unsupported template")
 
     if template_name in {"weather", "weather-demo"}:
@@ -909,6 +950,22 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
             )
         widgets = _browser_surface_widgets()
         response_template = "browser"
+    elif template_name in {"stock", "stock-chart", "stocks"}:
+        target_id = validate_space_id(space_id) if space_id else _unique_space_id("stock-chart")
+        if _manifest_path(target_id).exists():
+            space = read_space(target_id)
+        else:
+            space = create_space(
+                {
+                    "space_id": target_id,
+                    "name": "Stock Chart",
+                    "description": "Metadata-only starter for market chart, watchlist, and notes widgets.",
+                    "agent_instructions": "Keep stock widgets declarative. Refresh market data through agent-mediated typed Capy space APIs, cite sources, and preserve revision history.",
+                    "template": "stock-chart",
+                }
+            )
+        widgets = _stock_chart_widgets()
+        response_template = "stock"
     else:
         target_id = validate_space_id(space_id) if space_id else _unique_space_id("notes-app")
         if _manifest_path(target_id).exists():
