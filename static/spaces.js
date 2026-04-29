@@ -231,6 +231,10 @@
         renderMoveButton(spaceId, widgetId, layout, 1, 0, 'Move right') +
         renderMoveButton(spaceId, widgetId, layout, 0, -1, 'Move up') +
         renderMoveButton(spaceId, widgetId, layout, 0, 1, 'Move down') +
+        renderResizeButton(spaceId, widgetId, layout, 1, 0, 'Wider') +
+        renderResizeButton(spaceId, widgetId, layout, -1, 0, 'Narrower') +
+        renderResizeButton(spaceId, widgetId, layout, 0, 1, 'Taller') +
+        renderResizeButton(spaceId, widgetId, layout, 0, -1, 'Shorter') +
         '<button type="button" class="capy-spaces-btn" data-capy-action="editWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-title="'+escapeHtml(title)+'" data-widget-kind="'+escapeHtml(kind)+'" data-widget-x="'+escapeHtml(layout.x)+'" data-widget-y="'+escapeHtml(layout.y)+'" data-widget-w="'+escapeHtml(layout.w)+'" data-widget-h="'+escapeHtml(layout.h)+'">Edit</button>' +
         '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="deleteWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Delete</button>' +
         '</div></div>';
@@ -259,6 +263,10 @@
 
   function renderMoveButton(spaceId, widgetId, layout, dx, dy, label){
     return '<button type="button" class="capy-spaces-btn" data-capy-action="moveWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-x="'+escapeHtml(layout.x)+'" data-widget-y="'+escapeHtml(layout.y)+'" data-widget-w="'+escapeHtml(layout.w)+'" data-widget-h="'+escapeHtml(layout.h)+'" data-move-dx="'+escapeHtml(dx)+'" data-move-dy="'+escapeHtml(dy)+'">'+escapeHtml(label)+'</button>';
+  }
+
+  function renderResizeButton(spaceId, widgetId, layout, dw, dh, label){
+    return '<button type="button" class="capy-spaces-btn" data-capy-action="resizeWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-x="'+escapeHtml(layout.x)+'" data-widget-y="'+escapeHtml(layout.y)+'" data-widget-w="'+escapeHtml(layout.w)+'" data-widget-h="'+escapeHtml(layout.h)+'" data-resize-dw="'+escapeHtml(dw)+'" data-resize-dh="'+escapeHtml(dh)+'">'+escapeHtml(label)+'</button>';
   }
 
   function widgetLayout(widget){
@@ -294,6 +302,23 @@
       y: layoutNumber(layout.y + dy, 0, 0, 10000),
       w: layout.w,
       h: layout.h,
+    };
+  }
+
+  function resizeWidgetBy(button){
+    const layout = {
+      x: layoutNumber(button.dataset.widgetX, 0, 0, 10000),
+      y: layoutNumber(button.dataset.widgetY, 0, 0, 10000),
+      w: layoutNumber(button.dataset.widgetW, 6, 1, 24),
+      h: layoutNumber(button.dataset.widgetH, 4, 1, 24),
+    };
+    const dw = layoutNumber(button.dataset.resizeDw, 0, -24, 24);
+    const dh = layoutNumber(button.dataset.resizeDh, 0, -24, 24);
+    return {
+      x: layout.x,
+      y: layout.y,
+      w: layoutNumber(layout.w + dw, 6, 1, 24),
+      h: layoutNumber(layout.h + dh, 4, 1, 24),
     };
   }
 
@@ -533,6 +558,17 @@
         space_id: spaceId,
         widget_id: widgetId,
         patch: {layout: moveWidgetBy(button)},
+      });
+      await loadSpaceWidgets(spaceId);
+      return;
+    }
+    if (action === 'resizeWidget') {
+      const widgetId = button.dataset.widgetId || '';
+      if (!spaceId || !widgetId) return;
+      await postSpacesJson('api/spaces/widget/patch', {
+        space_id: spaceId,
+        widget_id: widgetId,
+        patch: {layout: resizeWidgetBy(button)},
       });
       await loadSpaceWidgets(spaceId);
       return;

@@ -319,6 +319,12 @@ async function click(action, dataset) {
     await window.loadSpaceWidgets('lab');
     beforeHtml = root.innerHTML;
     await click('moveWidget', { spaceId: 'lab', widgetId: 'weather', widgetX: '12', widgetY: '3', widgetW: '5', widgetH: '4', moveDx: '-1', moveDy: '0' });
+  } else if (scenario === 'resizeWidgetWider') {
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    beforeHtml = root.innerHTML;
+    await click('resizeWidget', { spaceId: 'lab', widgetId: 'weather', widgetX: '12', widgetY: '3', widgetW: '5', widgetH: '4', resizeDw: '1', resizeDh: '0' });
   } else if (scenario === 'askWidget') {
     global.showPromptDialog = async function(opts) { dialogs.push(opts); return 'Refresh the weather widget'; };
     await window.loadCapySpaces();
@@ -516,6 +522,28 @@ def test_spaces_ui_move_widget_posts_metadata_only_layout_patch(driver_path):
         "space_id": "lab",
         "widget_id": "weather",
         "patch": {"layout": {"x": 11, "y": 3, "w": 5, "h": 4}},
+    }
+    assert not any(call["path"] == "api/spaces/widget/upsert" for call in out["calls"])
+    assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_resize_widget_posts_metadata_only_layout_patch(driver_path):
+    out = _run_spaces_scenario(driver_path, "resizeWidgetWider")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/patch")
+
+    assert "Wider" in out["beforeHtml"]
+    assert "Narrower" in out["beforeHtml"]
+    assert "Taller" in out["beforeHtml"]
+    assert "Shorter" in out["beforeHtml"]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {
+        "space_id": "lab",
+        "widget_id": "weather",
+        "patch": {"layout": {"x": 12, "y": 3, "w": 6, "h": 4}},
     }
     assert not any(call["path"] == "api/spaces/widget/upsert" for call in out["calls"])
     assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
