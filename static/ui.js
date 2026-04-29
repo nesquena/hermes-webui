@@ -1867,33 +1867,42 @@ function setBusy(v){
   if(!v){
     setStatus('');
     setComposerStatus('');
-    const sid=_queueDrainSid||(S.session&&S.session.session_id);
+    // Always hide Cancel button when not busy
+    const _cb=$('btnCancel');if(_cb)_cb.style.display='none';
+    // Queue drain always targets the session that finished (_queueDrainSid),
+    // regardless of which session is currently viewed in the UI.
+    const drainSid=_queueDrainSid||(S.session&&S.session.session_id);
     _queueDrainSid=null;
-    updateQueueBadge(sid);
-    // Drain one queued message for the finished session after UI settles
-    const _isViewedSid=!S.session||sid===S.session.session_id;
-    const next=sid&&_isViewedSid?shiftQueuedSessionMessage(sid):null;
+    // Badge / queue-card updates always target the viewed session (the UI state).
+    const viewedSid=S.session&&S.session.session_id;
+    updateQueueBadge(viewedSid);
+    // Drain one queued message for the finished session after UI settles.
+    // Only restore to the textarea if the finished session IS the viewed one.
+    const _isViewed=drainSid&&viewedSid&&drainSid===viewedSid;
+    const next=drainSid?shiftQueuedSessionMessage(drainSid):null;
     if(next){
-      updateQueueBadge(sid);
+      updateQueueBadge(viewedSid);
       setTimeout(()=>{
-        $('msg').value=next.text||'';
-        S.pendingFiles=Array.isArray(next.files)?[...next.files]:[];
-        // Restore model from queued item (sent in /api/chat/start payload)
-        // Note: profile is NOT restored — full profile switch requires server interaction
-        if(next.model&&S.session&&next.model!==S.session.model){
-          S.session.model=next.model;
-          if(typeof _applyModelToDropdown==='function'&&$('modelSelect')) _applyModelToDropdown(next.model,$('modelSelect'));
-          if(typeof syncModelChip==='function') syncModelChip();
+        if(_isViewed){
+          $('msg').value=next.text||'';
+          S.pendingFiles=Array.isArray(next.files)?[...next.files]:[];
+          // Restore model from queued item (sent in /api/chat/start payload)
+          // Note: profile is NOT restored — full profile switch requires server interaction
+          if(next.model&&S.session&&next.model!==S.session.model){
+            S.session.model=next.model;
+            if(typeof _applyModelToDropdown==='function'&&$('modelSelect')) _applyModelToDropdown(next.model,$('modelSelect'));
+            if(typeof syncModelChip==='function') syncModelChip();
+          }
+          autoResize();
+          renderTray();
         }
-        autoResize();
-        renderTray();
+        // Always send — even for background sessions (server fires the next turn)
         send();
       },120);
     } else {
       // No queued message — restore the draft the user was typing before send(),
-      // but only for the session currently being viewed (sid must match the
-      // viewed session, otherwise the user switched sessions mid-stream).
-      const _draftSid=sid;
+      // but only for the session currently being viewed.
+      const _draftSid=drainSid;
       const _isCurrentView=S.session&&S.session.session_id===_draftSid;
       const _draft=_isCurrentView&&S._drafts&&S._drafts[_draftSid];
       if(_draft){
