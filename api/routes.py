@@ -461,6 +461,7 @@ from api.onboarding import (
     get_onboarding_status,
     complete_onboarding,
 )
+from vendo_sdk import sso as vendo_sso
 
 # Approval system (optional -- graceful fallback if agent not available)
 try:
@@ -769,6 +770,14 @@ def handle_get(handler, parsed) -> bool:
                 "uptime_seconds": round(time.time() - SERVER_START_TIME, 1),
             },
         )
+
+    if parsed.path == vendo_sso.IDENTITY_ENDPOINT_PATH:
+        if not vendo_sso.is_enabled():
+            return j(handler, {"error": "not found"}, status=404)
+        body = vendo_sso.identity_response(handler.headers)
+        if not body:
+            return j(handler, {"error": "not found"}, status=404)
+        return j(handler, body)
 
     if parsed.path == "/api/models":
         return j(handler, get_available_models())
