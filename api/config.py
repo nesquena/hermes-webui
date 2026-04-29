@@ -1660,6 +1660,11 @@ def get_available_models() -> dict:
                 # Build set of hostnames from custom_providers config — these are
                 # user-explicitly configured endpoints and should not be blocked by SSRF.
                 _ssrf_trusted_hosts: set[str] = set()
+                # Also trust the base_url from model config (explicitly configured by user)
+                if cfg_base_url:
+                    _base_parsed = urlparse(cfg_base_url if "://" in cfg_base_url else f"http://{cfg_base_url}")
+                    if _base_parsed.hostname:
+                        _ssrf_trusted_hosts.add(_base_parsed.hostname.lower())
                 _custom_providers_cfg = cfg.get("custom_providers", [])
                 if isinstance(_custom_providers_cfg, list):
                     for _cp in _custom_providers_cfg:
