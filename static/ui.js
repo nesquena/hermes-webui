@@ -139,7 +139,11 @@ async function populateModelDropdown(){
     const _modelsRes=await fetch(new URL('api/models',location.href).href,{credentials:'include'});
     if(_redirectIfUnauth(_modelsRes)) return;
     const data=await _modelsRes.json();
-    if(!data.groups||!data.groups.length) return; // keep HTML defaults
+    if(!data.groups||!data.groups.length){
+      // No static groups — still try live models if we have an active provider
+      if(data.active_provider) _fetchLiveModels(data.active_provider, sel);
+      return; // keep HTML defaults
+    }
     // Store active provider globally so the send path can warn on mismatch
     window._activeProvider=data.active_provider||null;
     // Store default model so newSession() can apply it (#872).
