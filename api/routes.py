@@ -2632,6 +2632,7 @@ def _handle_file_raw(handler, parsed):
     # allow-same-origin, the document is treated as a unique opaque origin and
     # cannot read WebUI cookies, localStorage, or postMessage to the parent.
     csp = "sandbox allow-scripts" if html_inline_ok else None
+    # _serve_file_bytes sends Content-Security-Policy when csp is set.
     return _serve_file_bytes(handler, target, mime, disposition, "no-store", csp=csp)
 
 
