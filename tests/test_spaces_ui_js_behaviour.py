@@ -32,6 +32,8 @@ const values = {
   '#capySpaceId': 'ops',
   '#capySpaceName': 'Ops',
   '#capySpaceDescription': '<b>Operations</b>',
+  '#capySpaceAgentImportSpaceYaml': 'id: imported-lab\nname: Imported Lab\ndescription: Imported safely\n',
+  '#capySpaceAgentImportWidgetsJson': JSON.stringify({'widgets/weather.yaml': 'id: weather\ntitle: Weather\ntype: html\nrenderer: <script>bad()</script>\napi_key: SECRET'}, null, 2),
 };
 const inputs = {};
 const elements = {};
@@ -230,6 +232,17 @@ global.fetch = async function(path, opts = {}) {
       zip_b64: body.format === 'zip' ? 'U0VDUkVUX1pJUF9JTUFHSU5BUlk=' : undefined,
     });
   }
+  if (path === 'api/spaces/import') {
+    const body = opts.body ? JSON.parse(opts.body) : {};
+    return response({
+      ok: true,
+      source: 'space-agent-yaml',
+      space: { space_id: 'imported-lab', name: 'Imported Lab', description: 'Imported safely', widget_count: 1, revision_event_id: 'rev-import' },
+      imported_widgets: [{ id: 'weather', kind: 'html', title: 'Weather', renderer: '<script>bad()</script>', api_key: 'SECRET' }],
+      space_yaml: body.space_yaml,
+      widgets: body.widgets,
+    });
+  }
   throw new Error('unexpected fetch path: ' + path);
 };
 
@@ -314,6 +327,9 @@ async function click(action, dataset) {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
     await click('exportSpaceZip', { spaceId: 'lab' });
+  } else if (scenario === 'importSpaceAgentYaml') {
+    await window.loadCapySpaces();
+    await click('importSpaceAgentYaml', {});
   } else if (scenario === 'activateSpace') {
     await window.loadCapySpaces();
     await click('activateSpace', { spaceId: 'lab' });
@@ -713,4 +729,28 @@ def test_spaces_ui_export_zip_posts_space_id_and_renders_safe_metadata_only(driv
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "token" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_import_yaml_posts_safe_payload_and_renders_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "importSpaceAgentYaml")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/import")
+
+    assert "Import Space Agent YAML" in out["rootHtml"]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {
+        "space_yaml": "id: imported-lab\nname: Imported Lab\ndescription: Imported safely\n",
+        "widgets": {"widgets/weather.yaml": "id: weather\ntitle: Weather\ntype: html\nrenderer: <script>bad()</script>\napi_key: SECRET"},
+    }
+    assert out["calls"][-1]["path"] == "api/spaces"
+    assert "Space Agent import ready" in out["rootHtml"]
+    assert "Imported Lab" in out["rootHtml"]
+    assert "imported-lab" in out["rootHtml"]
+    assert "Weather" in out["rootHtml"]
+    assert "1 widget" in out["rootHtml"]
+    assert "space_yaml" not in out["rootHtml"]
+    assert "widgets/weather.yaml" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
     assert "SECRET" not in out["rootHtml"]

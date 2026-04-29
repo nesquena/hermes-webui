@@ -58,7 +58,17 @@
     }).join('') : '<div class="capy-spaces-card"><strong>No spaces yet</strong><div class="capy-spaces-muted">Create a space below to start adding safe metadata-only widgets.</div></div>';
     return '<div class="capy-spaces-card"><h3>Capy Spaces</h3><div class="capy-spaces-muted">'+spaces.length+' space(s). Widget management lists metadata only; generated widget code is not executed here.</div>' +
       '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="installWeatherTemplate">Install weather demo</button><button type="button" class="capy-spaces-btn" data-capy-action="installResearchTemplate">Install research harness</button><button type="button" class="capy-spaces-btn" data-capy-action="installDashboardTemplate">Install dashboard demo</button><button type="button" class="capy-spaces-btn" data-capy-action="installKanbanTemplate">Install kanban board</button><button type="button" class="capy-spaces-btn" data-capy-action="installNotesTemplate">Install notes app</button><button type="button" class="capy-spaces-btn" data-capy-action="installBrowserTemplate">Install browser surface</button><button type="button" class="capy-spaces-btn" data-capy-action="installStockTemplate">Install stock chart</button><button type="button" class="capy-spaces-btn" data-capy-action="installBigBangTemplate">Install Big Bang onboarding</button></div></div>' +
-      cards + renderSpaceForm();
+      cards + renderSpaceAgentImportForm() + renderSpaceForm();
+  }
+
+  function renderSpaceAgentImportForm(){
+    return '<div class="capy-spaces-card"><h3>Import Space Agent YAML</h3>' +
+      '<div class="capy-spaces-muted">Paste a Space Agent space.yaml and optional widgets JSON map. Imported generated sources are quarantined by the backend; this UI only renders safe metadata.</div>' +
+      '<div class="capy-spaces-form" aria-label="Import Space Agent YAML package">' +
+      '<label>space.yaml<textarea id="capySpaceAgentImportSpaceYaml" rows="5" autocomplete="off" placeholder="Paste Space Agent space metadata here"></textarea></label>' +
+      '<label>Widgets JSON map<textarea id="capySpaceAgentImportWidgetsJson" rows="5" autocomplete="off" placeholder="Paste optional widget YAML map as JSON"></textarea></label>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="importSpaceAgentYaml">Import YAML package</button>' +
+      '</div></div>';
   }
 
   function renderSpaceForm(){
@@ -133,6 +143,30 @@
       '<div class="capy-spaces-muted">Safe metadata package generated. Package contents are intentionally not displayed in this UI.</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(filename)+'</strong>' +
       '<div class="capy-spaces-muted">Format: '+escapeHtml(format)+' · Space ID: '+escapeHtml(spaceId || '')+' · Widgets: '+widgetCount+'</div></div></div></div></div>';
+  }
+
+  function renderSpaceImportResult(data){
+    const space = data && data.space && typeof data.space === 'object' ? data.space : {};
+    const spaceId = space.space_id || data && data.space_id || '';
+    const name = space.name || spaceId || 'Imported space';
+    const widgets = Array.isArray(data && data.imported_widgets) ? data.imported_widgets : [];
+    const widgetRows = widgets.length ? widgets.map(function(w){
+      const widgetId = w && w.id ? String(w.id) : '';
+      const title = w && w.title ? String(w.title) : widgetId || 'Untitled widget';
+      const kind = w && w.kind ? String(w.kind) : (w && w.type ? String(w.type) : 'custom');
+      return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(title)+'</strong>' +
+        '<div class="capy-spaces-muted">'+escapeHtml(kind)+' · '+escapeHtml(widgetId)+'</div></div></div>';
+    }).join('') : '<div class="capy-spaces-muted">No imported widget metadata returned.</div>';
+    const count = widgets.length;
+    return '<div class="capy-spaces-card"><h3>Space Agent import ready</h3>' +
+      '<div class="capy-spaces-muted">Imported package metadata only. Generated widget sources remain quarantined/disabled for review by the backend.</div>' +
+      '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(name)+'</strong>' +
+      '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+' · '+count+' widget'+(count === 1 ? '' : 's')+'</div></div></div>'+widgetRows+'</div></div>';
+  }
+
+  function renderSpaceImportError(message){
+    return '<div class="capy-spaces-card"><h3>Space Agent import blocked</h3>' +
+      '<div class="capy-spaces-muted">'+escapeHtml(message || 'Import payload could not be parsed safely.')+'</div></div>';
   }
 
   function renderRevisionHistory(revisions){
@@ -291,6 +325,26 @@
       const data = await postSpacesJson('api/spaces/export', {space_id: spaceId, format: format});
       const root = document.getElementById('capySpacesRoot');
       if (root) root.innerHTML = renderSpaceExportResult(spaceId, data || {}) + root.innerHTML;
+      return;
+    }
+    if (action === 'importSpaceAgentYaml') {
+      const root = document.getElementById('capySpacesRoot');
+      const spaceYamlInput = getRootInput(root, '#capySpaceAgentImportSpaceYaml');
+      const widgetsInput = getRootInput(root, '#capySpaceAgentImportWidgetsJson');
+      let widgets = {};
+      const widgetsText = widgetsInput && widgetsInput.value ? String(widgetsInput.value).trim() : '';
+      if (widgetsText) {
+        try {
+          widgets = JSON.parse(widgetsText);
+        } catch (err) {
+          if (root) root.innerHTML = renderSpaceImportError('Widgets JSON map is invalid; no import request was sent.') + root.innerHTML;
+          return;
+        }
+      }
+      const data = await postSpacesJson('api/spaces/import', {space_yaml: spaceYamlInput ? spaceYamlInput.value : '', widgets: widgets});
+      await loadCapySpaces();
+      const refreshedRoot = document.getElementById('capySpacesRoot');
+      if (refreshedRoot) refreshedRoot.innerHTML = renderSpaceImportResult(data || {}) + refreshedRoot.innerHTML;
       return;
     }
     if (action === 'reloadSpaces') {
