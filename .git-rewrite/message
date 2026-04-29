@@ -1,0 +1,6 @@
+fix: stop cron watch when clearing cron panel detail view
+
+_stopCronWatch() was only called when switching between cron job details
+but not when the panel was cleared entirely (_clearCronDetail). This could
+leave orphaned polling intervals if the user navigated away or the panel
+was dismissed while a job was running.

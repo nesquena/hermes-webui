@@ -378,7 +378,7 @@
   .session-item:focus-within .session-time-wrapper.is-unread::before,
   .session-item.menu-open .session-time-wrapper.is-unread::before{display:none;}
   /* Hide spinner/TPS on hover so the menu button is easier to click */
-  .session-item:has(.session-actions-trigger:hover) .session-state-indicator.is-streaming,
+  .session-item:hover .session-state-indicator.is-streaming,
   .session-item.menu-open .session-state-indicator.is-streaming{display:none;}
   .session-time-wrapper.is-unread::before{
     content:"";display:inline-block;flex-shrink:0;

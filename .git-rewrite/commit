@@ -1,0 +1,6 @@
+tree 1dca7ce78a411c1ac72c1e4199dbab1fa966fed4
+parent d734efa8af2f4d9054f9e3b550270b7a4e90ddf6
+author bergeouss <bergeouss@users.noreply.github.com> 1777389644 +0000
+committer Hermes Agent <hermes@get-hermes.ai> 1777437120 +0000
+
+fix(i18n): add cron_status_running to de locale and fix es fallback
