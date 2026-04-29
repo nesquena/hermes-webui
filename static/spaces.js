@@ -61,10 +61,10 @@
     }).join('') : '<div class="capy-spaces-card"><strong>No spaces yet</strong><div class="capy-spaces-muted">Create a space below to start adding safe metadata-only widgets.</div></div>';
     return '<div class="capy-spaces-card"><h3>Capy Spaces</h3><div class="capy-spaces-muted">'+spaces.length+' space(s). Widget management lists metadata only; generated widget code is not executed here.</div>' +
       '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="createSpaceFromSession">Create from current chat</button><button type="button" class="capy-spaces-btn" data-capy-action="installWeatherTemplate">Install weather demo</button><button type="button" class="capy-spaces-btn" data-capy-action="installResearchTemplate">Install research harness</button><button type="button" class="capy-spaces-btn" data-capy-action="installDashboardTemplate">Install dashboard demo</button><button type="button" class="capy-spaces-btn" data-capy-action="installKanbanTemplate">Install kanban board</button><button type="button" class="capy-spaces-btn" data-capy-action="installNotesTemplate">Install notes app</button><button type="button" class="capy-spaces-btn" data-capy-action="installBrowserTemplate">Install browser surface</button><button type="button" class="capy-spaces-btn" data-capy-action="installStockTemplate">Install stock chart</button><button type="button" class="capy-spaces-btn" data-capy-action="installBigBangTemplate">Install Big Bang onboarding</button><button type="button" class="capy-spaces-btn" data-capy-action="reloadSpaces">Refresh</button><button type="button" class="capy-spaces-btn" data-capy-action="newSpace">New space</button></div></div>' +
-      renderTrustedSystemWidgets() + cards + renderSpaceAgentImportForm() + renderSpaceForm();
+      renderTrustedSystemWidgets(activeSpaceId) + cards + renderSpaceAgentImportForm() + renderSpaceForm();
   }
 
-  function renderTrustedSystemWidgets(){
+  function renderTrustedSystemWidgets(activeSpaceId){
     const widgets = [
       {id: 'system.chat', panel: 'chat', title: 'Chat', description: 'Conversation surface for the active Capy Space.'},
       {id: 'system.workspaces', panel: 'workspaces', title: 'Spaces', description: 'Trusted workspace/files panel outside generated widgets.'},
@@ -72,10 +72,13 @@
       {id: 'system.memory', panel: 'memory', title: 'Memory', description: 'Durable memory and recall controls.'},
       {id: 'system.settings', panel: 'settings', title: 'Settings', description: 'Provider, profile, sensitive configuration, and recovery controls stay in the trusted shell.'},
     ];
-    const cards = widgets.map(w => '<div class="capy-spaces-system-widget" data-system-widget-id="'+escapeHtml(w.id)+'">' +
-      '<div><strong>'+escapeHtml(w.title)+'</strong><div class="capy-spaces-muted">'+escapeHtml(w.id)+' · trusted WebUI system widget</div><div class="capy-spaces-muted">'+escapeHtml(w.description)+'</div></div>' +
-      '<button type="button" class="capy-spaces-btn" data-capy-action="openSystemPanel" data-system-panel="'+escapeHtml(w.panel)+'">Open '+escapeHtml(w.title)+'</button>' +
-      '</div>').join('');
+    const cards = widgets.map(w => {
+      const addButton = activeSpaceId ? '<button type="button" class="capy-spaces-btn" data-capy-action="addSystemWidget" data-space-id="'+escapeHtml(activeSpaceId)+'" data-system-panel="'+escapeHtml(w.panel)+'">Add to active Space</button>' : '';
+      return '<div class="capy-spaces-system-widget" data-system-widget-id="'+escapeHtml(w.id)+'">' +
+        '<div><strong>'+escapeHtml(w.title)+'</strong><div class="capy-spaces-muted">'+escapeHtml(w.id)+' · trusted WebUI system widget</div><div class="capy-spaces-muted">'+escapeHtml(w.description)+'</div></div>' +
+        '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="openSystemPanel" data-system-panel="'+escapeHtml(w.panel)+'">Open '+escapeHtml(w.title)+'</button>'+addButton+'</div>' +
+        '</div>';
+    }).join('');
     return '<div class="capy-spaces-card capy-spaces-system-shell"><h3>Trusted WebUI system widgets</h3>' +
       '<div class="capy-spaces-muted">Capy Spaces is now the workspace layer. These first-party panels are addressable as system.* widgets, while the auth/settings/recovery shell remains outside generated Space content.</div>' +
       '<div class="capy-spaces-system-grid">'+cards+'</div></div>';
@@ -366,6 +369,14 @@
       if (data && data.session && typeof S !== 'undefined') S.session = data.session;
       if (typeof syncCapyActiveSpaceContext === 'function') syncCapyActiveSpaceContext();
       await loadCapySpaces();
+      return;
+    }
+    if (action === 'addSystemWidget') {
+      const panel = button.dataset.systemPanel || '';
+      if (['chat', 'workspaces', 'tasks', 'memory', 'settings'].indexOf(panel) === -1) return;
+      if (!spaceId) return;
+      await postSpacesJson('api/spaces/system-widget/upsert', {space_id: spaceId, panel: panel, layout: {x: 0, y: 0, w: 12, h: 6}});
+      await loadSpaceWidgets(spaceId);
       return;
     }
     if (action === 'exportSpaceYaml' || action === 'exportSpaceZip') {

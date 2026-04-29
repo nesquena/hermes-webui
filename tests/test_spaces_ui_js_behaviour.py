@@ -126,6 +126,9 @@ global.fetch = async function(path, opts = {}) {
   if (path === 'api/spaces/widget/patch') {
     return response({ space_id: 'lab', widget: { id: 'weather', kind: 'markdown', title: 'Weather patched', layout: { x: 4, y: 5, w: 9, h: 6 } }, revision_event_id: 'rev-patch', renderer: '<script>bad()</script>' });
   }
+  if (path === 'api/spaces/system-widget/upsert') {
+    return response({ space_id: 'lab', widget: { id: 'system-chat', kind: 'system', title: 'Chat', layout: { x: 0, y: 0, w: 12, h: 6, minimized: false }, system_panel: 'chat', renderer: '<script>bad()</script>', api_key: 'SECRET' }, revision_event_id: 'rev-system' });
+  }
   if (path === 'api/spaces/widget/delete') {
     return response({ deleted: true, space_id: 'lab', widget_id: 'weather', revision_event_id: 'rev3' });
   }
@@ -375,6 +378,11 @@ async function click(action, dataset) {
     await window.loadCapySpaces();
     await click('openSystemPanel', { systemPanel: 'chat' });
     await click('openSystemPanel', { systemPanel: 'settings' });
+  } else if (scenario === 'addSystemWidgetToActiveSpace') {
+    global.S.session.active_space_id = 'lab';
+    await window.loadCapySpaces();
+    beforeHtml = root.innerHTML;
+    await click('addSystemWidget', { spaceId: 'lab', systemPanel: 'chat' });
   } else if (scenario === 'editSpace') {
     await window.loadCapySpaces();
     await click('editSpace', { spaceId: 'lab', spaceName: 'Lab Edited', spaceDescription: 'Updated' });
@@ -863,4 +871,22 @@ def test_spaces_ui_renders_trusted_system_widgets_without_generated_content(driv
     assert out["switchedPanels"] == ["chat", "settings"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_adds_trusted_system_widget_to_active_space_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "addSystemWidgetToActiveSpace")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/system-widget/upsert")
+
+    assert "Add to active Space" in out["beforeHtml"]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {
+        "space_id": "lab",
+        "panel": "chat",
+        "layout": {"x": 0, "y": 0, "w": 12, "h": 6},
+    }
+    assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"]
     assert "SECRET" not in out["rootHtml"]

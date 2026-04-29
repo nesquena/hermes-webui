@@ -848,6 +848,7 @@ def test_spaces_routes_and_static_shell_are_registered():
     assert '"/api/spaces/export"' in routes_src
     assert '"/api/spaces/revisions"' in routes_src
     assert '"/api/spaces/widget/patch"' in routes_src
+    assert '"/api/spaces/system-widget/upsert"' in routes_src
     assert '"/api/spaces/create"' in routes_src
     assert '"/api/spaces/templates/install"' in routes_src
     assert '"/api/spaces/deactivate"' in routes_src
@@ -944,6 +945,60 @@ def test_spaces_routes_create_list_get_and_recovery(monkeypatch, tmp_path):
     assert handled is None
     assert status == 200
     assert body["generated_widgets_rendered"] is False
+
+
+def test_system_widget_route_adds_allowlisted_trusted_widget_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "System Widget Lab"})
+
+    handled, status, body = _route_post(
+        "/api/spaces/system-widget/upsert",
+        {
+            "space_id": created["space_id"],
+            "panel": "chat",
+            "layout": {"x": 2, "y": -4, "w": 99, "h": 0, "minimized": False},
+            "renderer": "<script>doNotStore()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    assert handled is None
+    assert status == 200
+    assert body["widget"] == {
+        "id": "system-chat",
+        "kind": "system",
+        "title": "Chat",
+        "layout": {"x": 2, "y": 0, "w": 24, "h": 1, "minimized": False},
+        "system_panel": "chat",
+    }
+    assert body["revision_event_id"]
+    stored = spaces.read_widget(created["space_id"], "system-chat")
+    assert stored["system"] == {"panel": "chat", "trusted": True}
+    assert "renderer" not in stored
+    assert "api_key" not in stored
+
+    detail = spaces.read_space_detail(created["space_id"])
+    assert detail["widgets"] == [body["widget"]]
+    serialized = json.dumps(body).lower() + json.dumps(detail).lower()
+    assert "donotstore" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
+def test_system_widget_route_rejects_unknown_panels(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "System Widget Reject"})
+
+    handled, status, body = _route_post(
+        "/api/spaces/system-widget/upsert",
+        {"space_id": created["space_id"], "panel": "../../settings", "layout": {"x": 0, "y": 0, "w": 12, "h": 6}},
+    )
+
+    assert handled is None
+    assert status == 400
+    assert spaces.read_space_detail(created["space_id"])["widgets"] == []
+    assert "../../settings" not in json.dumps(body)
 
 
 def test_spaces_get_route_returns_metadata_only_widgets(monkeypatch, tmp_path):

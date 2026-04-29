@@ -42,6 +42,13 @@ _OMITTED_PAYLOAD_KEYS = {
     "source",
     "token",
 }
+_TRUSTED_SYSTEM_WIDGETS = {
+    "chat": {"id": "system-chat", "title": "Chat"},
+    "workspaces": {"id": "system-workspaces", "title": "Spaces"},
+    "tasks": {"id": "system-tasks", "title": "Tasks"},
+    "memory": {"id": "system-memory", "title": "Memory"},
+    "settings": {"id": "system-settings", "title": "Settings"},
+}
 
 
 def spaces_enabled() -> bool:
@@ -202,12 +209,17 @@ def _normalize_widget(widget: dict[str, Any]) -> dict[str, Any]:
 
 def _widget_summary(widget: dict[str, Any]) -> dict[str, Any]:
     clean_widget = _normalize_widget(widget)
-    return {
+    summary = {
         "id": clean_widget["id"],
         "kind": clean_widget["kind"],
         "title": clean_widget["title"],
         "layout": clean_widget["layout"],
     }
+    system = widget.get("system") if isinstance(widget.get("system"), dict) else {}
+    panel = str(system.get("panel") or "").strip()
+    if clean_widget["kind"] == "system" and panel in _TRUSTED_SYSTEM_WIDGETS:
+        summary["system_panel"] = panel
+    return summary
 
 
 def _widget_recovery_summary(widget: dict[str, Any]) -> dict[str, Any]:
@@ -856,6 +868,31 @@ def upsert_widget(space_id: str, widget: dict[str, Any]) -> dict[str, Any]:
         "space_id": saved["space_id"],
         "widget": clean_widget,
         "revision_event_id": saved["revision_event_id"],
+    }
+
+
+def upsert_system_widget(space_id: str, panel: str, layout: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Add/update an allowlisted trusted WebUI system widget as safe metadata."""
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    safe_panel = str(panel or "").strip()
+    spec = _TRUSTED_SYSTEM_WIDGETS.get(safe_panel)
+    if spec is None:
+        raise ValueError("Unknown system panel")
+    result = upsert_widget(
+        space_id,
+        {
+            "id": spec["id"],
+            "kind": "system",
+            "title": spec["title"],
+            "layout": layout or {"x": 0, "y": 0, "w": 12, "h": 6},
+            "system": {"panel": safe_panel, "trusted": True},
+        },
+    )
+    return {
+        "space_id": result["space_id"],
+        "widget": _widget_summary(read_widget(result["space_id"], spec["id"])),
+        "revision_event_id": result["revision_event_id"],
     }
 
 
