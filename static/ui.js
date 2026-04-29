@@ -1744,12 +1744,10 @@ function unlockComposerForClarify(){
   }
   updateSendBtn();
 }
-
 function _composerHasContent(){
   const msg=$('msg');
   return !!((msg&&msg.value.trim().length>0)||S.pendingFiles.length>0);
 }
-
 function _getExplicitBusyCommandAction(text){
   const trimmed=(text||'').trim();
   if(!trimmed.startsWith('/')) return null;
@@ -1768,7 +1766,6 @@ function _getExplicitBusyCommandAction(text){
   }
   return null;
 }
-
 function getComposerPrimaryAction(){
   const msg=$('msg');
   const hasContent=_composerHasContent();
@@ -1796,8 +1793,6 @@ function getComposerPrimaryAction(){
 }
 
 function _setComposerPrimaryButtonIcon(btn,action){
-  // Queue/interrupt/steer icons are inline Lucide SVGs (ISC):
-  // https://lucide.dev/icons/
   const icons={
     send:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>',
     queue:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 5H3"/><path d="M16 12H3"/><path d="M9 19H3"/><path d="m16 16-3 3 3 3"/><path d="M21 5v12a2 2 0 0 1-2 2h-6"/></svg>',
@@ -1834,8 +1829,6 @@ function updateSendBtn(){
   btn.title=_btnTitle;
   btn.setAttribute('aria-label',_btnTitle);
   _setComposerPrimaryButtonIcon(btn,action);
-  // Single primary action button: while busy/no-draft it becomes the red Stop
-  // action; while busy with a draft it reflects queue/interrupt/steer.
   btn.style.display='';
   btn.disabled=action==='disabled';
   if(action!=='disabled'&&!btn.classList.contains('visible')){
@@ -1845,7 +1838,6 @@ function updateSendBtn(){
     btn.classList.remove('visible');
   }
 }
-
 async function handleComposerPrimaryAction(){
   if(window._micActive){
     window._micPendingSend=true;
@@ -1860,7 +1852,6 @@ async function handleComposerPrimaryAction(){
   }
   await send();
 }
-
 function setBusy(v){
   S.busy=v;
   updateSendBtn();
