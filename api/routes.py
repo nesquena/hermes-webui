@@ -2220,6 +2220,84 @@ def _content_disposition_value(disposition: str, filename: str) -> str:
     )
 
 
+def _parse_range_header(range_header: str, file_size: int) -> tuple[int, int] | None:
+    """Parse a single HTTP bytes range into inclusive start/end offsets."""
+    if not range_header or not range_header.startswith("bytes=") or file_size < 1:
+        return None
+    spec = range_header.split("=", 1)[1].strip()
+    if "," in spec or "-" not in spec:
+        return None
+    start_s, end_s = spec.split("-", 1)
+    try:
+        if start_s == "":
+            # suffix range: bytes=-500
+            suffix_len = int(end_s)
+            if suffix_len <= 0:
+                return None
+            start = max(0, file_size - suffix_len)
+            end = file_size - 1
+        else:
+            start = int(start_s)
+            end = int(end_s) if end_s else file_size - 1
+            if start < 0:
+                return None
+            end = min(end, file_size - 1)
+        if start > end or start >= file_size:
+            return None
+        return start, end
+    except ValueError:
+        return None
+
+
+def _serve_file_bytes(handler, target: Path, mime: str, disposition: str, cache_control: str, *, csp: str | None = None):
+    """Serve a file with correct MIME/disposition and optional byte-range support."""
+    try:
+        file_size = target.stat().st_size
+    except PermissionError:
+        return bad(handler, "Permission denied", 403)
+    except Exception:
+        return bad(handler, "Could not stat file", 500)
+
+    byte_range = _parse_range_header(handler.headers.get("Range", ""), file_size)
+    if handler.headers.get("Range") and byte_range is None:
+        handler.send_response(416)
+        handler.send_header("Content-Range", f"bytes */{file_size}")
+        handler.send_header("Accept-Ranges", "bytes")
+        _security_headers(handler)
+        handler.end_headers()
+        return True
+
+    start, end = byte_range if byte_range else (0, max(0, file_size - 1))
+    content_length = end - start + 1 if file_size else 0
+    handler.send_response(206 if byte_range else 200)
+    handler.send_header("Content-Type", mime)
+    handler.send_header("Content-Length", str(content_length))
+    handler.send_header("Accept-Ranges", "bytes")
+    if byte_range:
+        handler.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+    handler.send_header("Cache-Control", cache_control)
+    handler.send_header("Content-Disposition", _content_disposition_value(disposition, target.name))
+    if csp:
+        handler.send_header("Content-Security-Policy", csp)
+    _security_headers(handler)
+    handler.end_headers()
+
+    if content_length:
+        try:
+            with target.open("rb") as f:
+                f.seek(start)
+                remaining = content_length
+                while remaining:
+                    chunk = f.read(min(1024 * 1024, remaining))
+                    if not chunk:
+                        break
+                    handler.wfile.write(chunk)
+                    remaining -= len(chunk)
+        except PermissionError:
+            return True
+    return True
+
+
 def _handle_media(handler, parsed):
     """Serve a local file by absolute path for inline display in the chat.
 
@@ -2287,39 +2365,26 @@ def _handle_media(handler, parsed):
     ext = target.suffix.lower()
     mime = MIME_MAP.get(ext, "application/octet-stream")
 
-    # Only serve image types inline; everything else is a download
+    # Only serve safe media/PDF types inline when explicitly requested. Everything
+    # else remains a download. SVG is always a download (XSS risk).
     _INLINE_IMAGE_TYPES = {
         "image/png", "image/jpeg", "image/gif", "image/webp",
         "image/x-icon", "image/bmp",
     }
+    _INLINE_PREVIEW_TYPES = _INLINE_IMAGE_TYPES | {
+        "audio/mpeg", "audio/wav", "audio/x-wav", "audio/mp4", "audio/aac",
+        "audio/ogg", "audio/opus", "audio/flac",
+        "video/mp4", "video/quicktime", "video/webm", "video/ogg",
+        "application/pdf",
+    }
     _DOWNLOAD_TYPES = {"image/svg+xml"}  # SVG: XSS risk, force download
-
-    try:
-        raw_bytes = target.read_bytes()
-    except PermissionError:
-        return bad(handler, "Permission denied", 403)
-    except Exception:
-        return bad(handler, "Could not read file", 500)
-
-    handler.send_response(200)
-    handler.send_header("Content-Type", mime)
-    handler.send_header("Content-Length", str(len(raw_bytes)))
-    handler.send_header("Cache-Control", "private, max-age=3600")
-    _security_headers(handler)
-
-    if mime in _DOWNLOAD_TYPES or mime not in _INLINE_IMAGE_TYPES:
-        handler.send_header(
-            "Content-Disposition",
-            _content_disposition_value("attachment", target.name),
+    inline_preview = qs.get("inline", [""])[0] == "1"
+    disposition = "inline" if (
+        mime not in _DOWNLOAD_TYPES and (
+            mime in _INLINE_IMAGE_TYPES or (inline_preview and mime in _INLINE_PREVIEW_TYPES)
         )
-    else:
-        handler.send_header(
-            "Content-Disposition",
-            _content_disposition_value("inline", target.name),
-        )
-
-    handler.end_headers()
-    handler.wfile.write(raw_bytes)
+    ) else "attachment"
+    return _serve_file_bytes(handler, target, mime, disposition, "private, max-age=3600")
 
 
 def _handle_file_raw(handler, parsed):
@@ -2338,11 +2403,6 @@ def _handle_file_raw(handler, parsed):
         return j(handler, {"error": "not found"}, status=404)
     ext = target.suffix.lower()
     mime = MIME_MAP.get(ext, "application/octet-stream")
-    raw_bytes = target.read_bytes()
-    handler.send_response(200)
-    handler.send_header("Content-Type", mime)
-    handler.send_header("Content-Length", str(len(raw_bytes)))
-    handler.send_header("Cache-Control", "no-store")
     # Security: force download for dangerous MIME types to prevent XSS.
     # Exception: ?inline=1 permits text/html to be served inline for the
     # sandboxed workspace HTML preview iframe (sandbox="allow-scripts" with no
@@ -2350,16 +2410,7 @@ def _handle_file_raw(handler, parsed):
     inline_preview = qs.get("inline", [""])[0] == "1"
     dangerous_types = {"text/html", "application/xhtml+xml", "image/svg+xml"}
     html_inline_ok = inline_preview and mime == "text/html"
-    if force_download or (mime in dangerous_types and not html_inline_ok):
-        handler.send_header(
-            "Content-Disposition",
-            _content_disposition_value("attachment", target.name),
-        )
-    else:
-        handler.send_header(
-            "Content-Disposition",
-            _content_disposition_value("inline", target.name),
-        )
+    disposition = "attachment" if force_download or (mime in dangerous_types and not html_inline_ok) else "inline"
     # Defense-in-depth for ?inline=1 HTML: even though the workspace.js iframe
     # sets sandbox="allow-scripts", a user could be tricked into opening the
     # ?inline=1 URL directly in a top-level tab (e.g. via a chat link), which
@@ -2367,14 +2418,8 @@ def _handle_file_raw(handler, parsed):
     # CSP sandbox directive applies the same isolation server-side: without
     # allow-same-origin, the document is treated as a unique opaque origin and
     # cannot read WebUI cookies, localStorage, or postMessage to the parent.
-    if html_inline_ok:
-        # Match the iframe sandbox="allow-scripts" exactly: scripts allowed,
-        # but no allow-same-origin → unique opaque origin (no cookie/storage
-        # access even when accessed via direct URL outside the iframe).
-        handler.send_header("Content-Security-Policy", "sandbox allow-scripts")
-    handler.end_headers()
-    handler.wfile.write(raw_bytes)
-    return True
+    csp = "sandbox allow-scripts" if html_inline_ok else None
+    return _serve_file_bytes(handler, target, mime, disposition, "no-store", csp=csp)
 
 
 def _handle_file_read(handler, parsed):

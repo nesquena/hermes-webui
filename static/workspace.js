@@ -250,6 +250,7 @@ async function openFile(path){
       wrap.innerHTML=(typeof _mediaPlayerHtml==='function')
         ? _mediaPlayerHtml(mode,url,path.split('/').pop()||path)
         : `<${mode} src="${url.replace(/"/g,'%22')}" controls preload="metadata"></${mode}>`;
+      if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(wrap);
     }
   } else if(PDF_EXTS.has(ext)){
     showPreview('pdf');

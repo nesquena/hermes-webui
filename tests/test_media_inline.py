@@ -23,6 +23,7 @@ from tests._pytest_port import BASE, TEST_STATE_DIR
 
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+WORKSPACE_JS = (REPO_ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
 
 
 # ── Static analysis: renderMd MEDIA stash ────────────────────────────────────
@@ -49,6 +50,10 @@ class TestMediaRenderMdStash(unittest.TestCase):
     def test_media_api_url_pattern(self):
         self.assertIn("api/media?path=", UI_JS,
                       "renderMd must build api/media?path=... URL for local files")
+
+    def test_local_audio_video_media_tokens_request_inline_streaming(self):
+        self.assertIn("apiUrl+'&inline=1'", UI_JS,
+                      "MEDIA: audio/video local paths must request inline streaming")
 
     def test_media_stash_uses_null_byte_token(self):
         self.assertIn("\\x00D", UI_JS,
@@ -137,6 +142,17 @@ class TestInlineAudioVideoEditor(unittest.TestCase):
         self.assertIn("media-speed-btn", UI_JS)
         self.assertIn("aria-pressed", UI_JS)
 
+    def test_playback_speed_preference_persists_in_localstorage(self):
+        self.assertIn("MEDIA_PLAYBACK_STORAGE_KEY", UI_JS)
+        self.assertIn("localStorage.getItem(MEDIA_PLAYBACK_STORAGE_KEY)", UI_JS)
+        self.assertIn("localStorage.setItem(MEDIA_PLAYBACK_STORAGE_KEY", UI_JS)
+        self.assertIn("_applyMediaPlaybackRate", UI_JS)
+        self.assertIn('addEventListener("loadedmetadata"', UI_JS)
+        self.assertIn("MutationObserver", UI_JS)
+        self.assertIn("setTimeout(_initMediaPlaybackObserver,0)", UI_JS)
+        self.assertIn("_applyMediaPlaybackPreferences(inner)", UI_JS)
+        self.assertIn("_applyMediaPlaybackPreferences(wrap)", WORKSPACE_JS)
+
     def test_message_attachments_render_audio_video_instead_of_badges(self):
         self.assertIn("_renderAttachmentHtml", UI_JS)
         self.assertIn("data-media-kind", UI_JS)
@@ -219,6 +235,12 @@ class TestMediaEndpointUnit(unittest.TestCase):
         self.assertIn("_INLINE_IMAGE_TYPES", routes_src,
                       "_INLINE_IMAGE_TYPES whitelist must exist in _handle_media")
 
+    def test_media_endpoints_advertise_byte_range_support(self):
+        routes_src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
+        self.assertIn("Accept-Ranges", routes_src)
+        self.assertIn("Content-Range", routes_src)
+        self.assertIn("206", routes_src)
+
 
 # ── Integration tests: live server on TEST_PORT ───────────────────────────────
 # No collection-time skip guard — conftest.py starts the server via its
@@ -235,9 +257,10 @@ class TestMediaEndpointIntegration(unittest.TestCase):
         except Exception as exc:
             self.fail(f"Test server at {BASE} is not reachable: {exc}")
 
-    def _get(self, path):
+    def _get(self, path, headers=None):
+        req = urllib.request.Request(BASE + path, headers=headers or {})
         try:
-            with urllib.request.urlopen(BASE + path, timeout=10) as r:
+            with urllib.request.urlopen(req, timeout=10) as r:
                 return r.read(), r.status, r.headers
         except urllib.error.HTTPError as e:
             return e.read(), e.code, e.headers
@@ -276,6 +299,33 @@ class TestMediaEndpointIntegration(unittest.TestCase):
             ct = headers.get("Content-Type", "")
             self.assertIn("image/png", ct, f"Expected image/png, got {ct}")
             self.assertEqual(body, png_bytes)
+        finally:
+            pathlib.Path(tmp_path).unlink(missing_ok=True)
+
+    def test_audio_media_endpoint_inline_and_range(self):
+        """MEDIA: audio paths stream inline and support byte ranges for playback."""
+        audio_bytes = b"RIFF" + (b"\x00" * 256)
+        with tempfile.NamedTemporaryFile(
+            suffix=".wav", prefix="hermes_test_", dir="/tmp", delete=False
+        ) as f:
+            f.write(audio_bytes)
+            tmp_path = f.name
+        try:
+            encoded = urllib.request.quote(tmp_path)
+            body, status, headers = self._get(f"/api/media?path={encoded}&inline=1")
+            self.assertEqual(status, 200)
+            self.assertIn("audio/wav", headers.get("Content-Type", ""))
+            self.assertIn("inline", headers.get("Content-Disposition", ""))
+            self.assertEqual(headers.get("Accept-Ranges"), "bytes")
+            self.assertEqual(body, audio_bytes)
+
+            body, status, headers = self._get(
+                f"/api/media?path={encoded}&inline=1",
+                headers={"Range": "bytes=0-3"},
+            )
+            self.assertEqual(status, 206)
+            self.assertEqual(body, b"RIFF")
+            self.assertEqual(headers.get("Content-Range"), f"bytes 0-3/{len(audio_bytes)}")
         finally:
             pathlib.Path(tmp_path).unlink(missing_ok=True)
 
