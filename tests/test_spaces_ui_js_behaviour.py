@@ -21,6 +21,7 @@ const scenario = process.argv[3];
 
 const calls = [];
 const dialogs = [];
+const switchedPanels = [];
 const values = {
   '#capyWidgetId': 'notes',
   '#capyWidgetTitle': 'Notes',
@@ -65,6 +66,7 @@ global.window = {
   },
 };
 global.S = { session: { session_id: 'session-123', active_space_id: null } };
+global.switchPanel = async function(panel) { switchedPanels.push(panel); return true; };
 global.document = {
   getElementById: makeElement,
 };
@@ -332,6 +334,10 @@ async function click(action, dataset) {
   } else if (scenario === 'activateSpace') {
     await window.loadCapySpaces();
     await click('activateSpace', { spaceId: 'lab' });
+  } else if (scenario === 'systemWidgetShell') {
+    await window.loadCapySpaces();
+    await click('openSystemPanel', { systemPanel: 'chat' });
+    await click('openSystemPanel', { systemPanel: 'settings' });
   } else if (scenario === 'editSpace') {
     await window.loadCapySpaces();
     await click('editSpace', { spaceId: 'lab', spaceName: 'Lab Edited', spaceDescription: 'Updated' });
@@ -377,7 +383,7 @@ async function click(action, dataset) {
   } else {
     throw new Error('unknown scenario: ' + scenario);
   }
-  process.stdout.write(JSON.stringify({ rootHtml: root.innerHTML, recoveryHtml: makeElement('capySpacesRecovery').innerHTML, recoveryText: makeElement('capySpacesRecovery').textContent, calls, values, rootDataset: root.dataset, dialogs }));
+  process.stdout.write(JSON.stringify({ rootHtml: root.innerHTML, recoveryHtml: makeElement('capySpacesRecovery').innerHTML, recoveryText: makeElement('capySpacesRecovery').textContent, calls, values, rootDataset: root.dataset, dialogs, switchedPanels }));
 })().catch(err => {
   console.error(err && err.stack || String(err));
   process.exit(1);
@@ -749,4 +755,44 @@ def test_spaces_ui_export_zip_posts_space_id_and_renders_safe_metadata_only(driv
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "token" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_import_yaml_posts_safe_payload_and_renders_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "importSpaceAgentYaml")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/import")
+
+    assert "Import Space Agent YAML" in out["rootHtml"]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {
+        "space_yaml": "id: imported-lab\nname: Imported Lab\ndescription: Imported safely\n",
+        "widgets": {"widgets/weather.yaml": "id: weather\ntitle: Weather\ntype: html\nrenderer: <script>bad()</script>\napi_key: SECRET"},
+    }
+    assert out["calls"][-1]["path"] == "api/spaces"
+    assert "Space Agent import ready" in out["rootHtml"]
+    assert "Imported Lab" in out["rootHtml"]
+    assert "imported-lab" in out["rootHtml"]
+    assert "Weather" in out["rootHtml"]
+    assert "1 widget" in out["rootHtml"]
+    assert "space_yaml" not in out["rootHtml"]
+    assert "widgets/weather.yaml" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_renders_trusted_system_widgets_without_generated_content(driver_path):
+    out = _run_spaces_scenario(driver_path, "systemWidgetShell")
+
+    assert "Trusted WebUI system widgets" in out["rootHtml"]
+    assert "system.chat" in out["rootHtml"]
+    assert "system.workspaces" in out["rootHtml"]
+    assert "system.tasks" in out["rootHtml"]
+    assert "system.memory" in out["rootHtml"]
+    assert "system.settings" in out["rootHtml"]
+    assert "auth/settings/recovery shell remains outside" in out["rootHtml"]
+    assert out["switchedPanels"] == ["chat", "settings"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
     assert "SECRET" not in out["rootHtml"]

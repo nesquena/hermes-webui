@@ -74,6 +74,28 @@
   padding: 10px;
 }
 
+.capy-spaces-system-shell {
+  border-color: color-mix(in srgb, var(--accent, #60a5fa) 40%, var(--border));
+}
+
+.capy-spaces-system-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  margin-top: 14px;
+}
+
+.capy-spaces-system-widget {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  justify-content: space-between;
+  min-height: 120px;
+  padding: 12px;
+}
+
 .capy-spaces-form {
   display: grid;
   gap: 10px;
