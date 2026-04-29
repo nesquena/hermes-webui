@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Fixed
+- **Model scope copy in composer and Preferences** — the composer model picker
+  now explains that a selected model applies to the current conversation from
+  the next message, and the Preferences default-model field now clarifies that
+  it only affects new conversations. This reduces confusion between
+  session-scoped model changes and the Hermes default model. (`static/ui.js`,
+  `static/boot.js`, `static/index.html`, `static/i18n.js`, `static/style.css`)
 - **Auto-title generic fallback** — when the auxiliary title-generation call
   fails and the local fallback can only produce the generic label
   `Conversation topic`, the WebUI now keeps the existing provisional title
