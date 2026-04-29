@@ -22,6 +22,7 @@ const scenario = process.argv[3];
 const calls = [];
 const dialogs = [];
 const switchedPanels = [];
+const capySpaceSyncs = [];
 const values = {
   '#capyWidgetId': 'notes',
   '#capyWidgetTitle': 'Notes',
@@ -69,6 +70,7 @@ global.window = {
 };
 global.S = { session: { session_id: 'session-123', active_space_id: null } };
 global.switchPanel = async function(panel) { switchedPanels.push(panel); return true; };
+global.syncCapyActiveSpaceContext = function() { capySpaceSyncs.push(global.S && global.S.session ? global.S.session.active_space_id : null); };
 global.document = {
   getElementById: makeElement,
 };
@@ -399,7 +401,7 @@ async function click(action, dataset) {
   } else {
     throw new Error('unknown scenario: ' + scenario);
   }
-  process.stdout.write(JSON.stringify({ rootHtml: root.innerHTML, recoveryHtml: makeElement('capySpacesRecovery').innerHTML, recoveryText: makeElement('capySpacesRecovery').textContent, calls, values, rootDataset: root.dataset, dialogs, switchedPanels }));
+  process.stdout.write(JSON.stringify({ rootHtml: root.innerHTML, recoveryHtml: makeElement('capySpacesRecovery').innerHTML, recoveryText: makeElement('capySpacesRecovery').textContent, calls, values, rootDataset: root.dataset, dialogs, switchedPanels, capySpaceSyncs }));
 })().catch(err => {
   console.error(err && err.stack || String(err));
   process.exit(1);
@@ -664,6 +666,7 @@ def test_spaces_ui_activate_space_posts_current_session_without_widget_code(driv
 
     assert "Use in chat" in out["rootHtml"]
     assert "Active in chat" in out["rootHtml"]
+    assert out["capySpaceSyncs"] == ["lab"]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"space_id": "lab", "session_id": "session-123"}
     assert "<script>" not in out["rootHtml"]

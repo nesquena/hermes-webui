@@ -674,6 +674,11 @@
   .composer-workspace-chip.active{color:var(--text);background:var(--accent-bg);}
   .composer-workspace-icon,.composer-workspace-chevron{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;line-height:1;}
   .composer-workspace-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .composer-capy-space-wrap{position:relative;flex:0 1 auto;min-width:0;}
+  .composer-capy-space-chip{display:inline-flex;align-items:center;gap:8px;max-width:220px;padding:8px 10px 8px 12px;border-radius:999px;border:1px solid var(--accent-bg-strong);background:var(--accent-bg);color:var(--accent-text);font-weight:600;cursor:pointer;transition:background-color .15s,border-color .15s,transform .15s;}
+  .composer-capy-space-chip:hover{background:var(--hover-bg);border-color:var(--accent);transform:translateY(-1px);}
+  .composer-capy-space-icon{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;line-height:1;font-size:12px;}
+  .composer-capy-space-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .composer-reasoning-wrap{position:relative;flex:0 1 auto;min-width:0;}
   .composer-reasoning-chip{display:inline-flex;align-items:center;gap:8px;max-width:180px;padding:8px 10px 8px 12px;border-radius:999px;border:1px solid transparent;background-color:transparent;color:var(--muted);font-weight:500;cursor:pointer;transition:color .15s,background-color .15s,border-color .15s;}
   .composer-reasoning-chip.inactive{opacity:.78;}

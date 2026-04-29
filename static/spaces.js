@@ -342,6 +342,7 @@
       if (!sessionId) return;
       const data = await postSpacesJson('api/spaces/activate', {space_id: spaceId, session_id: sessionId});
       if (data && data.session && typeof S !== 'undefined') S.session = data.session;
+      if (typeof syncCapyActiveSpaceContext === 'function') syncCapyActiveSpaceContext();
       await loadCapySpaces();
       return;
     }
