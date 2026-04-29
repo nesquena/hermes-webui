@@ -1419,6 +1419,9 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             _profile_home = os.environ.get('HERMES_HOME', '')
             _profile_runtime_env = {}
 
+        # Remove TERMINAL_CWD from profile env to avoid duplicate kwarg error
+        # (profile may have terminal.cwd set, and we explicitly pass s.workspace)
+        _profile_runtime_env.pop('TERMINAL_CWD', None)
         _set_thread_env(
             **_profile_runtime_env,
             TERMINAL_CWD=str(s.workspace),
