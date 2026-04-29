@@ -55,6 +55,18 @@ const LOCALES = {
     mcp_deleted: 'MCP server deleted.',
     mcp_delete_failed: 'Failed to delete MCP server.',
     mcp_load_failed: 'Failed to load MCP servers.',
+    // PDF preview (#480)
+    pdf_loading: 'Loading PDF {0}…',
+    pdf_too_large: 'PDF too large for inline preview',
+    pdf_no_pages: 'PDF has no pages',
+    pdf_error: 'Failed to render PDF preview',
+    pdf_download: 'Download PDF',
+    // HTML sandbox preview (#482)
+    html_loading: 'Loading HTML preview…',
+    html_too_large: 'HTML too large for inline preview',
+    html_error: 'Failed to render HTML preview',
+    html_open_full: 'Open full page',
+    html_sandbox_label: 'HTML Preview (sandboxed)',
     thinking: 'Thinking',
     expand_all: 'Expand all',
     collapse_all: 'Collapse all',
@@ -1425,6 +1437,17 @@ const LOCALES = {
     composer_disabled_clarify: 'Ответьте на запрос о разъяснении',
     composer_disabled_compression: 'Ожидание завершения сжатия',
     composer_disabled_empty: 'Введите сообщение для отправки',
+
+    pdf_loading: 'Загрузка PDF {0}…',
+    pdf_too_large: 'PDF слишком большой для встроенного просмотра',
+    pdf_no_pages: 'Не удалось отобразить предварительный просмотр PDF',
+    pdf_error: 'Не удалось загрузить PDF',
+    pdf_download: 'Скачать PDF',
+    html_loading: 'Загрузка предпросмотра HTML…',
+    html_too_large: 'HTML слишком большой для встроенного просмотра',
+    html_error: 'Не удалось загрузить предпросмотр HTML',
+    html_open_full: 'Открыть на всю страницу',
+    html_sandbox_label: 'Предпросмотр HTML',
   },
 
   es: {
@@ -2103,6 +2126,17 @@ const LOCALES = {
     composer_disabled_clarify: 'Responde a la solicitud de aclaración',
     composer_disabled_compression: 'Esperando a que finalice la compresión',
     composer_disabled_empty: 'Escribe un mensaje para enviar',
+
+    pdf_loading: 'Cargando PDF {0}…',
+    pdf_too_large: 'PDF demasiado grande para vista previa',
+    pdf_no_pages: 'No se pudo renderizar la vista previa del PDF',
+    pdf_error: 'Error al cargar el PDF',
+    pdf_download: 'Descargar PDF',
+    html_loading: 'Cargando vista previa de HTML…',
+    html_too_large: 'HTML demasiado grande para vista previa',
+    html_error: 'Error al cargar la vista previa de HTML',
+    html_open_full: 'Abrir página completa',
+    html_sandbox_label: 'Vista previa de HTML',
   },
 
   de: {
@@ -2556,6 +2590,17 @@ const LOCALES = {
     composer_disabled_clarify: 'Auf die Klärungsanfrage antworten',
     composer_disabled_compression: 'Warte auf Abschluss der Komprimierung',
     composer_disabled_empty: 'Nachricht eingeben zum Senden',
+
+    pdf_loading: 'PDF wird geladen {0}…',
+    pdf_too_large: 'PDF zu groß für Inline-Vorschau',
+    pdf_no_pages: 'PDF-Vorschau konnte nicht gerendert werden',
+    pdf_error: 'PDF konnte nicht geladen werden',
+    pdf_download: 'PDF herunterladen',
+    html_loading: 'HTML-Vorschau wird geladen…',
+    html_too_large: 'HTML zu groß für Inline-Vorschau',
+    html_error: 'HTML-Vorschau konnte nicht geladen werden',
+    html_open_full: 'Vollständige Seite öffnen',
+    html_sandbox_label: 'HTML-Vorschau',
 },
 
   zh: {
@@ -3231,6 +3276,17 @@ const LOCALES = {
     composer_disabled_clarify: '请回复上方的澄清请求',
     composer_disabled_compression: '等待压缩完成',
     composer_disabled_empty: '请输入消息后发送',
+
+    pdf_loading: '正在加载 PDF {0}…',
+    pdf_too_large: 'PDF 文件过大，无法内联预览',
+    pdf_no_pages: '无法渲染 PDF 预览',
+    pdf_error: 'PDF 加载失败',
+    pdf_download: '下载 PDF',
+    html_loading: '正在加载 HTML 预览…',
+    html_too_large: 'HTML 文件过大，无法内联预览',
+    html_error: 'HTML 预览加载失败',
+    html_open_full: '打开完整页面',
+    html_sandbox_label: 'HTML 预览',
   },
 
   // Traditional Chinese (zh-Hant)
@@ -3957,6 +4013,17 @@ const LOCALES = {
     composer_disabled_clarify: '\u8acb\u56de\u8986\u4e0a\u65b9\u7684\u6f84\u6e05\u8981\u6c42',
     composer_disabled_compression: '\u7b49\u5f85\u58d3\u7e2e\u5b8c\u6210',
     composer_disabled_empty: '\u8acb\u8f38\u5165\u8a0a\u606f\u5f8c\u50b3\u9001',
+
+    pdf_loading: '正在載入 PDF {0}…',
+    pdf_too_large: 'PDF 檔案過大，無法內嵌預覽',
+    pdf_no_pages: '無法渲染 PDF 預覽',
+    pdf_error: 'PDF 載入失敗',
+    pdf_download: '下載 PDF',
+    html_loading: '正在載入 HTML 預覽…',
+    html_too_large: 'HTML 檔案過大，無法內嵌預覽',
+    html_error: 'HTML 預覽載入失敗',
+    html_open_full: '開啟完整頁面',
+    html_sandbox_label: 'HTML 預覽',
   },
 
 
@@ -5322,6 +5389,17 @@ const LOCALES = {
     composer_disabled_clarify: '위의 명확화 요청에 응답하세요',
     composer_disabled_compression: '압축 완료 대기 중',
     composer_disabled_empty: '메시지를 입력하세요',
+
+    pdf_loading: 'PDF {0} 로드 중…',
+    pdf_too_large: 'PDF가 인라인 미리보기에 너무 큼',
+    pdf_no_pages: 'PDF 미리보기를 렌더링할 수 없음',
+    pdf_error: 'PDF 로드 실패',
+    pdf_download: 'PDF 다운로드',
+    html_loading: 'HTML 미리보기 로드 중…',
+    html_too_large: 'HTML이 인라인 미리보기에 너무 큼',
+    html_error: 'HTML 미리보기 로드 실패',
+    html_open_full: '전체 페이지 열기',
+    html_sandbox_label: 'HTML 미리보기',
   }
 };
 
