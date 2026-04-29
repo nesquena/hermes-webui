@@ -9,10 +9,17 @@ jobs:
     if: github.event.pull_request.merged == true && contains(github.event.pull_request.title, '[upstream-tracker]')
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ secrets.UPSTREAM_TRACKER_APP_ID }}
+          private-key: ${{ secrets.UPSTREAM_TRACKER_PRIVATE_KEY }}
+          owner: runvendo
+          repositories: vendo-templates
       - run: |
           gh api repos/runvendo/vendo-templates/dispatches \
             -f event_type='upstream-pr-merged' \
             -F client_payload[repo]='${{ github.repository }}' \
             -F client_payload[pr_number]='${{ github.event.pull_request.number }}'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
