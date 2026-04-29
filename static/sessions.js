@@ -566,6 +566,21 @@ async function loadSession(sid){
   _resolveSessionModelForDisplaySoon(sid);
   // Clear the in-flight session marker now that this load has completed (#1060).
   if (_loadingSessionId === sid) _loadingSessionId = null;
+
+  // Restore draft for this session if one was saved when we switched away.
+  const _draft=S.composerDrafts&&S.composerDrafts[sid];
+  if(_draft){
+    S.pendingFiles=Array.isArray(_draft.files)?_draft.files:[];
+    if(_draft.text){
+      const _ta=$('msg');
+      if(_ta){ _ta.value=_draft.text; autoResize(); }
+    }
+    renderTray();
+    delete S.composerDrafts[sid];
+  }
+  // Always focus the textarea after switching so the user can continue typing.
+  const _ta=$('msg');
+  if(_ta) _ta.focus();
 }
 
 function _resolveSessionModelForDisplaySoon(sid){
