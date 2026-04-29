@@ -1,0 +1,18 @@
+name: fire-cascade
+on:
+  pull_request:
+    types: [closed]
+permissions:
+  contents: read
+jobs:
+  fire:
+    if: github.event.pull_request.merged == true && contains(github.event.pull_request.title, '[upstream-tracker]')
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          gh api repos/runvendo/vendo-templates/dispatches \
+            -f event_type='upstream-pr-merged' \
+            -F client_payload[repo]='${{ github.repository }}' \
+            -F client_payload[pr_number]='${{ github.event.pull_request.number }}'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
