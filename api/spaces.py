@@ -776,6 +776,46 @@ def _notes_app_widgets() -> list[dict[str, Any]]:
     ]
 
 
+def _browser_surface_widgets() -> list[dict[str, Any]]:
+    """Return safe declarative browser-surface widget seeds.
+
+    This starter captures the Space Agent browser panel parity path as metadata
+    only. It declares an inspectable/co-controllable browser surface and planned
+    control primitives without embedding executable page, renderer, or credential
+    material in list/detail responses.
+    """
+    return [
+        {
+            "id": "browser-panel",
+            "kind": "browser-surface",
+            "title": "Shared browser panel",
+            "layout": {"x": 0, "y": 0, "w": 16, "h": 10, "minimized": False},
+            "browser_surface": {
+                "target": "about:blank",
+                "control": "user-and-agent",
+                "inspection": "metadata-only",
+                "bridge": "planned-cdp",
+            },
+            "permissions": {"network": "explicit-approval", "browser_control": "agent-mediated"},
+        },
+        {
+            "id": "browser-controls",
+            "kind": "browser-controls",
+            "title": "Agent controls",
+            "layout": {"x": 16, "y": 0, "w": 8, "h": 5, "minimized": False},
+            "actions": ["open_url", "snapshot", "click_ref", "type_ref"],
+            "permissions": {"network": "explicit-approval", "browser_control": "agent-mediated"},
+        },
+        {
+            "id": "browser-notes",
+            "kind": "markdown",
+            "title": "Browser notes",
+            "layout": {"x": 16, "y": 5, "w": 8, "h": 5, "minimized": False},
+            "content_status": "agent-managed-empty",
+        },
+    ]
+
+
 def install_template(template: str, *, space_id: str | None = None) -> dict[str, Any]:
     """Install a safe Capy Spaces demo template.
 
@@ -786,7 +826,7 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
     template_name = str(template or "").strip().lower()
-    if template_name not in {"weather", "weather-demo", "research", "research-harness", "dashboard", "daily-dashboard", "kanban", "kanban-board", "notes", "notes-app"}:
+    if template_name not in {"weather", "weather-demo", "research", "research-harness", "dashboard", "daily-dashboard", "kanban", "kanban-board", "notes", "notes-app", "browser", "browser-surface"}:
         raise ValueError("Unsupported template")
 
     if template_name in {"weather", "weather-demo"}:
@@ -853,6 +893,22 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
             )
         widgets = _kanban_board_widgets()
         response_template = "kanban"
+    elif template_name in {"browser", "browser-surface"}:
+        target_id = validate_space_id(space_id) if space_id else _unique_space_id("browser-surface")
+        if _manifest_path(target_id).exists():
+            space = read_space(target_id)
+        else:
+            space = create_space(
+                {
+                    "space_id": target_id,
+                    "name": "Browser Surface",
+                    "description": "Metadata-only starter for an inspectable browser panel with planned user and agent co-control.",
+                    "agent_instructions": "Keep browser surfaces declarative. Require explicit approval for navigation/control and preserve revision history.",
+                    "template": "browser-surface",
+                }
+            )
+        widgets = _browser_surface_widgets()
+        response_template = "browser"
     else:
         target_id = validate_space_id(space_id) if space_id else _unique_space_id("notes-app")
         if _manifest_path(target_id).exists():

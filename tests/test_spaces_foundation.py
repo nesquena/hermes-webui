@@ -442,6 +442,63 @@ def test_notes_template_install_route_returns_safe_metadata(monkeypatch, tmp_pat
     assert "secret" not in serialized
 
 
+def test_install_browser_surface_template_creates_safe_browser_widgets(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    installed = spaces.install_template("browser")
+
+    assert installed["template"] == "browser"
+    assert installed["space"]["template"] == "browser-surface"
+    assert installed["space"]["name"] == "Browser Surface"
+    assert [widget["id"] for widget in installed["installed_widgets"]] == [
+        "browser-panel",
+        "browser-controls",
+        "browser-notes",
+    ]
+    assert [widget["kind"] for widget in installed["installed_widgets"]] == [
+        "browser-surface",
+        "browser-controls",
+        "markdown",
+    ]
+    panel_widget = spaces.read_widget(installed["space"]["space_id"], "browser-panel")
+    assert panel_widget["browser_surface"] == {
+        "target": "about:blank",
+        "control": "user-and-agent",
+        "inspection": "metadata-only",
+        "bridge": "planned-cdp",
+    }
+    controls_widget = spaces.read_widget(installed["space"]["space_id"], "browser-controls")
+    assert controls_widget["actions"] == ["open_url", "snapshot", "click_ref", "type_ref"]
+    assert controls_widget["permissions"] == {"network": "explicit-approval", "browser_control": "agent-mediated"}
+    serialized = json.dumps(installed).lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert '\"script\"' not in serialized
+    assert '\"data\"' not in serialized
+    assert '\"source\"' not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
+def test_browser_surface_template_install_route_returns_safe_metadata(monkeypatch, tmp_path):
+    _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    handled, status, body = _route_post("/api/spaces/templates/install", {"template": "browser"})
+
+    assert handled is None
+    assert status == 200
+    assert body["template"] == "browser"
+    assert body["space"]["name"] == "Browser Surface"
+    assert body["installed_widgets"][0]["id"] == "browser-panel"
+    assert len(body["installed_widgets"]) == 3
+    serialized = json.dumps(body).lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
 def test_delete_space_removes_manifest_but_keeps_global_revision_event(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Disposable"})

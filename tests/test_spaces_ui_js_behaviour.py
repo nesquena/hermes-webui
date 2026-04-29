@@ -170,6 +170,16 @@ global.fetch = async function(path, opts = {}) {
         ],
       });
     }
+    if (body.template === 'browser') {
+      return response({
+        template: 'browser',
+        space: { space_id: 'browser-surface', name: 'Browser Surface', description: 'Inspectable browser panel starter', widget_count: 3, revision_event_id: 'rev-browser' },
+        installed_widgets: [
+          { id: 'browser-panel', kind: 'browser-surface', title: 'Shared browser panel', layout: { x: 0, y: 0, w: 16, h: 10, minimized: false }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+          { id: 'browser-controls', kind: 'browser-controls', title: 'Agent controls', layout: { x: 16, y: 0, w: 8, h: 5, minimized: false } },
+        ],
+      });
+    }
     return response({
       template: 'weather',
       space: { space_id: 'weather-demo', name: 'Weather Demo', description: 'Prague weather starter', widget_count: 1, revision_event_id: 'rev-weather' },
@@ -249,6 +259,9 @@ async function click(action, dataset) {
   } else if (scenario === 'installNotesApp') {
     await window.loadCapySpaces();
     await click('installNotesTemplate', {});
+  } else if (scenario === 'installBrowserSurface') {
+    await window.loadCapySpaces();
+    await click('installBrowserTemplate', {});
   } else if (scenario === 'openSpaceDetail') {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
@@ -469,6 +482,19 @@ def test_spaces_ui_install_notes_app_posts_template_and_refreshes_without_widget
     assert "Install notes app" in out["rootHtml"]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"template": "notes"}
+    assert out["calls"][-1]["path"] == "api/spaces"
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_install_browser_surface_posts_template_and_refreshes_without_widget_code(driver_path):
+    out = _run_spaces_scenario(driver_path, "installBrowserSurface")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/templates/install")
+
+    assert "Install browser surface" in out["rootHtml"]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"template": "browser"}
     assert out["calls"][-1]["path"] == "api/spaces"
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
