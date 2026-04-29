@@ -1428,7 +1428,10 @@ def get_available_models() -> dict:
         if active_provider:
             active_provider = _resolve_provider_alias(active_provider)
 
-        # 2. Read auth store (active_provider fallback + credential_pool inspection)
+        # 2. Read auth store (active_provider fallback only)
+        # Note: We only read active_provider from auth store.
+        # Auto-detection from credential_pool/env vars is disabled to respect
+        # the principle: "only show what the user explicitly configured".
         auth_store = {}
         try:
             from api.profiles import get_active_hermes_home as _gah
@@ -1447,165 +1450,21 @@ def get_available_models() -> dict:
                 logger.debug("Failed to load auth store from %s", auth_store_path)
 
         # 3. Detect available providers.
+        # Only use providers explicitly configured in config.yaml.
+        # Auto-detection from credential_pool and env vars has been disabled
+        # to respect the principle: "only show what the user configured".
         detected_providers = set()
         if active_provider:
             detected_providers.add(active_provider)
 
-        try:
-            _pool = auth_store.get("credential_pool", {}) if isinstance(auth_store, dict) else {}
-            if isinstance(_pool, dict) and _pool:
-                try:
-                    from agent.credential_pool import load_pool as _load_pool
-
-                    for _pid in list(_pool.keys()):
-                        try:
-                            _canonical_pid = _resolve_provider_alias(str(_pid))
-                            # Check credential pool cache first
-                            _cached = _CREDENTIAL_POOL_CACHE.get(_pid)
-                            if _cached is not None:
-                                _cp_ts, _cp_pool = _cached
-                                if (time.time() - _cp_ts) < 86400.0:
-                                    _all_entries = _cp_pool.entries()
-                                else:
-                                    _lp_t0 = time.monotonic()
-                                    _cp_pool = _load_pool(_pid)
-                                    _CREDENTIAL_POOL_CACHE[_pid] = (time.time(), _cp_pool)
-                                    _all_entries = _cp_pool.entries()
-                            else:
-                                _lp_t0 = time.monotonic()
-                                _cp_pool = _load_pool(_pid)
-                                _CREDENTIAL_POOL_CACHE[_pid] = (time.time(), _cp_pool)
-                                _all_entries = _cp_pool.entries()
-                            _explicit = [
-                                e for e in _all_entries
-                                if not _is_ambient_gh_cli_entry(
-                                    str(getattr(e, "source", "") or ""),
-                                    str(getattr(e, "label", "") or ""),
-                                    str(getattr(e, "key_source", "") or ""),
-                                )
-                            ]
-                            if _explicit:
-                                detected_providers.add(_canonical_pid)
-                        except Exception:
-                            logger.debug("credential_pool.load_pool(%s) failed", _pid)
-                except ImportError:
-                    for _pid, _entries in _pool.items():
-                        if not isinstance(_entries, list) or len(_entries) == 0:
-                            continue
-                        _has_explicit_cred = any(
-                            isinstance(_entry, dict)
-                            and not _is_ambient_gh_cli_entry(
-                                str(_entry.get("source", "") or ""),
-                                str(_entry.get("label", "") or ""),
-                                str(_entry.get("key_source", "") or ""),
-                            )
-                            for _entry in _entries
-                        )
-                        if _has_explicit_cred:
-                            detected_providers.add(_resolve_provider_alias(str(_pid)))
-        except Exception:
-            logger.debug("Failed to inspect credential_pool from auth store")
-
-        all_env: dict = {}
-
-        _hermes_auth_used = False
-        try:
-            from hermes_cli.models import list_available_providers as _lap
-            from hermes_cli.auth import get_auth_status as _gas
-
-            for _p in _lap():
-                if not _p.get("authenticated"):
-                    continue
-                try:
-                    _src = _gas(_p["id"]).get("key_source", "")
-                    if _src == "gh auth token":
-                        continue
-                except Exception:
-                    logger.debug("Failed to get key source for provider %s", _p.get("id", "unknown"))
-                detected_providers.add(_p["id"])
-            _hermes_auth_used = True
-        except Exception:
-            logger.debug("Failed to detect auth providers from hermes")
-
-        if not _hermes_auth_used:
-            try:
-                from api.profiles import get_active_hermes_home as _gah2
-
-                hermes_env_path = _gah2() / ".env"
-            except ImportError:
-                hermes_env_path = HOME / ".hermes" / ".env"
-            env_keys = {}
-            if hermes_env_path.exists():
-                try:
-                    for line in hermes_env_path.read_text(encoding="utf-8").splitlines():
-                        line = line.strip()
-                        if line and not line.startswith("#") and "=" in line:
-                            k, v = line.split("=", 1)
-                            env_keys[k.strip()] = v.strip().strip('"').strip("'")
-                except Exception:
-                    logger.debug("Failed to parse hermes env file")
-            all_env = {**env_keys}
-            for k in (
-                "ANTHROPIC_API_KEY",
-                "OPENAI_API_KEY",
-                "OPENROUTER_API_KEY",
-                "GOOGLE_API_KEY",
-                "GEMINI_API_KEY",
-                "GLM_API_KEY",
-                "KIMI_API_KEY",
-                "DEEPSEEK_API_KEY",
-                "OPENCODE_ZEN_API_KEY",
-                "OPENCODE_GO_API_KEY",
-                "MINIMAX_API_KEY",
-                "MINIMAX_CN_API_KEY",
-                "XAI_API_KEY",
-                "MISTRAL_API_KEY",
-            ):
-                val = os.getenv(k)
-                if val:
-                    all_env[k] = val
-            if all_env.get("ANTHROPIC_API_KEY"):
-                detected_providers.add("anthropic")
-            if all_env.get("OPENAI_API_KEY"):
-                detected_providers.add("openai")
-                # openai-codex uses ChatGPT OAuth (not OPENAI_API_KEY) for its default endpoint.
-                # Detecting it here lets users who have both credentials configured find it in the
-                # picker without a manual config.yaml edit. Users without Codex OAuth will see
-                # picker entries but hit auth errors at inference time (#1189 known limitation).
-                detected_providers.add("openai-codex")
-            if all_env.get("OPENROUTER_API_KEY"):
-                detected_providers.add("openrouter")
-            if all_env.get("GOOGLE_API_KEY"):
-                detected_providers.add("google")
-            if all_env.get("GEMINI_API_KEY"):
-                detected_providers.add("gemini")
-            if all_env.get("GLM_API_KEY"):
-                detected_providers.add("zai")
-            if all_env.get("KIMI_API_KEY"):
-                detected_providers.add("kimi-coding")
-            if all_env.get("MINIMAX_API_KEY"):
-                detected_providers.add("minimax")
-            if all_env.get("MINIMAX_CN_API_KEY"):
-                detected_providers.add("minimax-cn")
-            if all_env.get("DEEPSEEK_API_KEY"):
-                detected_providers.add("deepseek")
-            if all_env.get("XAI_API_KEY"):
-                detected_providers.add("x-ai")
-            if all_env.get("MISTRAL_API_KEY"):
-                detected_providers.add("mistralai")
-            if all_env.get("OPENCODE_ZEN_API_KEY"):
-                detected_providers.add("opencode-zen")
-            if all_env.get("OPENCODE_GO_API_KEY"):
-                detected_providers.add("opencode-go")
-
         # Also detect providers explicitly listed in config.yaml providers section.
         # A user may configure a provider key via config.yaml providers.<name>.api_key
         # without setting the corresponding env var. (#604)
+        # Only add providers that are actually configured (skip _PROVIDER_MODELS check).
         _cfg_providers = cfg.get("providers", {})
         if isinstance(_cfg_providers, dict):
             for _pid_key in _cfg_providers:
-                if _pid_key in _PROVIDER_MODELS or _pid_key in cfg.get("providers", {}):
-                    detected_providers.add(_pid_key)
+                detected_providers.add(_pid_key)
 
         # 4. Fetch models from custom endpoint if base_url is configured
         auto_detected_models = []
@@ -1794,7 +1653,16 @@ def get_available_models() -> dict:
                 detected_providers.discard("custom")
 
         # 5. Build model groups
+        # Only show models for providers explicitly configured in config.yaml
+        # or the active provider. Skip hardcoded _PROVIDER_MODELS entries
+        # that the user hasn't actually configured.
         if detected_providers:
+            # Filter: only show active_provider and custom providers
+            if active_provider:
+                detected_providers = {
+                    pid for pid in detected_providers
+                    if pid == active_provider or pid.startswith("custom:")
+                }
             for pid in sorted(detected_providers):
                 if pid.startswith("custom:") and pid in _named_custom_groups:
                     _nc_display, _nc_models = _named_custom_groups[pid]
@@ -1834,8 +1702,13 @@ def get_available_models() -> dict:
                                 "models": models,
                             }
                         )
-                elif pid in _PROVIDER_MODELS or pid in cfg.get("providers", {}):
-                    raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
+                elif pid in cfg.get("providers", {}) or pid == active_provider:
+                    # Only show models for providers explicitly configured in config.yaml
+                    # or the active provider. Skip hardcoded _PROVIDER_MODELS
+                    # entries that the user hasn't actually configured.
+                    raw_models = []
+                    if pid in _PROVIDER_MODELS and (pid == active_provider or pid in cfg.get("providers", {})):
+                        raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
 
                     provider_cfg = cfg.get("providers", {}).get(pid, {})
                     if isinstance(provider_cfg, dict) and "models" in provider_cfg:
@@ -1844,14 +1717,18 @@ def get_available_models() -> dict:
                             raw_models = [{"id": k, "label": k} for k in cfg_models.keys()]
                         elif isinstance(cfg_models, list):
                             raw_models = [{"id": k, "label": k} for k in cfg_models]
-                    models = _apply_provider_prefix(raw_models, pid, active_provider)
-                    groups.append(
-                        {
-                            "provider": provider_name,
-                            "provider_id": pid,
-                            "models": models,
-                        }
-                    )
+                    # For custom provider, also include auto-detected live models
+                    if pid == "custom" and auto_detected_models:
+                        raw_models = raw_models + auto_detected_models
+                    if raw_models:
+                        models = _apply_provider_prefix(raw_models, pid, active_provider)
+                        groups.append(
+                            {
+                                "provider": provider_name,
+                                "provider_id": pid,
+                                "models": models,
+                            }
+                        )
                 else:
                     if auto_detected_models:
                         groups.append(
