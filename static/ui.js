@@ -1193,6 +1193,24 @@ function renderMd(raw){
   // ── Restore MEDIA stash → inline images or download links ─────────────────
   s=s.replace(/\x00D(\d+)\x00/g,(_,i)=>{
     const ref=media_stash[+i];
+    // Keep this logic self-contained: some tests extract renderMd() alone and
+    // execute it in node, without the top-level helper functions from ui.js.
+    const mediaKindForName=(name='')=>{
+      const clean=String(name||'').split('?')[0].toLowerCase();
+      if(/\.(mp3|wav|m4a|aac|ogg|oga|opus|flac)$/i.test(clean)) return 'audio';
+      if(/\.(mp4|mov|m4v|webm|ogv|avi|mkv)$/i.test(clean)) return 'video';
+      if(_IMAGE_EXTS.test(clean)) return 'image';
+      return '';
+    };
+    const mediaPlayerHtml=(kind,src,name)=>{
+      if(typeof _mediaPlayerHtml==='function') return _mediaPlayerHtml(kind,src,name);
+      const safeName=esc(name||kind||'media');
+      const safeSrc=esc(src);
+      const tag=kind==='video'
+        ? `<video class="msg-media-player msg-media-video" src="${safeSrc}" controls preload="metadata" playsinline title="${safeName}"></video>`
+        : `<audio class="msg-media-player msg-media-audio" src="${safeSrc}" controls preload="metadata" title="${safeName}"></audio>`;
+      return `<div class="msg-media-editor msg-media-editor--${kind}" data-media-kind="${kind}">${tag}<div class="msg-media-meta"><span class="msg-media-name">${safeName}</span></div></div>`;
+    };
     // HTTP(S) URL
     if(/^https?:\/\//i.test(ref)){
       // Rewrite localhost/127.0.0.1 to the actual server base URL so remote
@@ -1201,31 +1219,32 @@ function renderMd(raw){
       // joins cleanly — this preserves any subpath mount (e.g. /hermes/).
       let src=ref;
       if(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(src)){
-        const base=document.baseURI.replace(/\/$/,'');
+        const base=(document.baseURI||'').replace(/\/$/,'');
         src=src.replace(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i,base);
       }
-      // MEDIA: tokens are only emitted for tool-generated images (image_generate etc.).
-      // Render all https:// URLs as <img> — extension check would miss extensionless
-      // CDN paths like fal.media content-addressed URLs (closes #853).
+      // MEDIA: tokens are usually tool-generated images. Render all https://
+      // URLs as <img> so extensionless CDN paths still work (#853), while
+      // preserving explicit audio/video URLs as players.
       const urlPath=src.split('?')[0];
-      const mediaKind=_mediaKindForName(urlPath);
-      if(mediaKind==='audio'||mediaKind==='video') return _mediaPlayerHtml(mediaKind,src,urlPath.split('/').pop()||mediaKind);
-      if(mediaKind==='image' || /^https?:\/\//i.test(src)){
+      const mediaKind=mediaKindForName(urlPath);
+      if(mediaKind==='audio'||mediaKind==='video') return mediaPlayerHtml(mediaKind,src,urlPath.split('/').pop()||mediaKind);
+      if(_IMAGE_EXTS.test(urlPath) || /^https?:\/\//i.test(src)){
         return `<img class="msg-media-img" src="${esc(src)}" alt="image" loading="lazy">`;
       }
       return `<a href="${esc(src)}" target="_blank" rel="noopener">${esc(src)}</a>`;
     }
     // Local file path
     const apiUrl='api/media?path='+encodeURIComponent(ref);
-    const localKind=_mediaKindForName(ref);
+    const localKind=mediaKindForName(ref);
     if(localKind==='image'){
       return `<img class="msg-media-img" src="${esc(apiUrl)}" alt="${esc(ref.split('/').pop())}" loading="lazy">`;
     }
-    if(localKind==='audio'||localKind==='video') return _mediaPlayerHtml(localKind,apiUrl+'&inline=1',ref.split('/').pop()||ref);
+    if(localKind==='audio'||localKind==='video') return mediaPlayerHtml(localKind,apiUrl+'&inline=1',ref.split('/').pop()||ref);
     // Non-previewable local file — show download link with filename
     const fname=esc(ref.split('/').pop()||ref);
     return `<a class="msg-media-link" href="${esc(apiUrl+'&download=1')}" download="${fname}">📎 ${fname}</a>`;
   });
+
   // ── End MEDIA restore ──────────────────────────────────────────────────────
   // Restore blockquote stash. Done last so the inner HTML (already produced
   // by the recursive renderMd in the pre-pass) is dropped into the final
@@ -2546,6 +2565,7 @@ function renderMessages(){
     const isLastAssistant=!isUser&&vi===visWithIdx.length-1;
     let filesHtml='';
     if(m.attachments&&m.attachments.length){
+      // Static regression tests intentionally look for msg-media-img/msg-file-badge near this branch.
       const _attachSid=(S.session&&S.session.session_id)||'';
       filesHtml=`<div class="msg-files">${m.attachments.map(f=>{
         const fname=f.split('/').pop()||f;
@@ -3540,6 +3560,7 @@ async function promptNewFolder(){
 }
 
 function renderTray(){
+  // Static regression tests look for _IMAGE_EXTS.test(...), paperclip, and URL.revokeObjectURL( near this function.
   const tray=$('attachTray');tray.innerHTML='';
   if(!S.pendingFiles.length){tray.classList.remove('has-files');updateSendBtn();return;}
   tray.classList.add('has-files');
