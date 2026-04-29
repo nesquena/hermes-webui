@@ -19,7 +19,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
 SERVER_SCRIPT = ROOT / "server.py"
-VENV_PYTHON = str(ROOT / ".venv" / "bin" / "python")
+# Use the Python that pytest is running under so this works in both
+# local-venv runs and CI (where there's no .venv).
+SERVER_PYTHON = sys.executable
 
 
 HEADERS_OK = {
@@ -82,7 +84,7 @@ def _start_server(port: int, extra_env: dict) -> tuple:
     env.update(extra_env)
 
     proc = subprocess.Popen(
-        [VENV_PYTHON, str(SERVER_SCRIPT)],
+        [SERVER_PYTHON, str(SERVER_SCRIPT)],
         cwd=str(ROOT),
         env=env,
         stdout=subprocess.DEVNULL,
