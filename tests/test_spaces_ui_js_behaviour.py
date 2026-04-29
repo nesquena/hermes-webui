@@ -218,6 +218,18 @@ global.fetch = async function(path, opts = {}) {
   if (path === 'api/spaces/activate') {
     return response({ ok: true, session: { session_id: 'session-123', active_space_id: 'lab' } });
   }
+  if (path === 'api/spaces/export') {
+    const body = opts.body ? JSON.parse(opts.body) : {};
+    return response({
+      ok: true,
+      space_id: body.space_id || 'lab',
+      format: body.format || 'yaml',
+      filename: (body.format === 'zip') ? 'lab-space-agent.zip' : 'lab-space-agent.yaml',
+      space_yaml: 'id: lab\nname: Lab\nrenderer: <script>bad()</script>\napi_key: SECRET',
+      widgets: {'widgets/weather.yaml': 'id: weather\nscript: <script>bad()</script>\ntoken: SECRET'},
+      zip_b64: body.format === 'zip' ? 'U0VDUkVUX1pJUF9JTUFHSU5BUlk=' : undefined,
+    });
+  }
   throw new Error('unexpected fetch path: ' + path);
 };
 
@@ -294,6 +306,14 @@ async function click(action, dataset) {
   } else if (scenario === 'openSpaceDetail') {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
+  } else if (scenario === 'exportSpaceYaml') {
+    await window.loadCapySpaces();
+    await click('openSpace', { spaceId: 'lab' });
+    await click('exportSpaceYaml', { spaceId: 'lab' });
+  } else if (scenario === 'exportSpaceZip') {
+    await window.loadCapySpaces();
+    await click('openSpace', { spaceId: 'lab' });
+    await click('exportSpaceZip', { spaceId: 'lab' });
   } else if (scenario === 'activateSpace') {
     await window.loadCapySpaces();
     await click('activateSpace', { spaceId: 'lab' });
@@ -649,9 +669,48 @@ def test_spaces_ui_opens_space_detail_without_rendering_widget_code(driver_path)
     assert "Unsafe &lt;detail&gt;" in out["rootHtml"]
     assert "&lt;Weather&gt;" in out["rootHtml"]
     assert "x12 y3 · 5×4" in out["rootHtml"]
+    assert "Export YAML" in out["rootHtml"]
+    assert "Export ZIP" in out["rootHtml"]
     assert "Revision history" in out["rootHtml"]
     assert "widget.updated" in out["rootHtml"]
     assert "space.created" in out["rootHtml"]
     assert "rev2" in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
+
+
+def test_spaces_ui_export_yaml_posts_space_id_and_renders_safe_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "exportSpaceYaml")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/export")
+
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"space_id": "lab", "format": "yaml"}
+    assert "Space Agent export ready" in out["rootHtml"]
+    assert "Format: yaml" in out["rootHtml"]
+    assert "lab-space-agent.yaml" in out["rootHtml"]
+    assert "space_yaml" not in out["rootHtml"]
+    assert "widgets/weather.yaml" not in out["rootHtml"]
+    assert "zip_b64" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_export_zip_posts_space_id_and_renders_safe_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "exportSpaceZip")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/export")
+
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"space_id": "lab", "format": "zip"}
+    assert "Space Agent export ready" in out["rootHtml"]
+    assert "Format: zip" in out["rootHtml"]
+    assert "lab-space-agent.zip" in out["rootHtml"]
+    assert "space_yaml" not in out["rootHtml"]
+    assert "widgets/weather.yaml" not in out["rootHtml"]
+    assert "zip_b64" not in out["rootHtml"]
+    assert "U0VDUkVUX1pJUF9JTUFHSU5BUlk" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "token" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
