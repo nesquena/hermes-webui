@@ -92,6 +92,7 @@ const _ARCHIVE_EXTS=/\.(zip|tar|tar\.gz|tgz|tar\.bz2|tbz2|tar\.xz|txz)$/i;
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
+window._configuredModelBadges=window._configuredModelBadges||{};
 
 // ── Smart model resolver ────────────────────────────────────────────────────
 // Finds the best matching option value in a <select> for a given model ID.
@@ -145,6 +146,7 @@ async function populateModelDropdown(){
     // Store default model so newSession() can apply it (#872).
     // Per-page-load — not synced across browser tabs.
     window._defaultModel=data.default_model||null;
+    window._configuredModelBadges=data.configured_model_badges||{};
     // Clear existing options
     sel.innerHTML='';
     _dynamicModelLabels={};
@@ -306,6 +308,24 @@ function _selectedModelOption(){
   return sel.options[sel.selectedIndex]||null;
 }
 
+function _normalizeConfiguredModelKey(modelId){
+  let s=String(modelId||'').trim().toLowerCase();
+  if(s.startsWith('@')&&s.includes(':')) s=s.substring(s.indexOf(':')+1);
+  if(s.includes('/')) s=s.split('/').pop();
+  return s.replace(/-/g,'.');
+}
+
+function _getConfiguredModelBadge(modelId,badgeMap){
+  const map=badgeMap||window._configuredModelBadges||{};
+  if(!modelId||!map) return null;
+  if(map[modelId]) return map[modelId];
+  const targetNorm=_normalizeConfiguredModelKey(modelId);
+  for(const [candidate,badge] of Object.entries(map)){
+    if(_normalizeConfiguredModelKey(candidate)===targetNorm) return badge;
+  }
+  return null;
+}
+
 function syncModelChip(){
   const sel=$('modelSelect');
   const chip=$('composerModelChip');
@@ -339,14 +359,15 @@ function renderModelDropdown(){
   if(!dd||!sel) return;
   // Store model data for filtering
   const _modelData=[];
+  const _badgeMap=window._configuredModelBadges||{};
   for(const child of Array.from(sel.children)){
     if(child.tagName==='OPTGROUP'){
       for(const opt of Array.from(child.children)){
-        _modelData.push({value:opt.value,name:esc(opt.textContent||getModelLabel(opt.value)),id:esc(opt.value),group:child.label||''});
+        _modelData.push({value:opt.value,name:esc(opt.textContent||getModelLabel(opt.value)),id:esc(opt.value),group:child.label||'',badge:_getConfiguredModelBadge(opt.value,_badgeMap)});
       }
     }
     if(child.tagName==='OPTION'){
-      _modelData.push({value:child.value,name:esc(child.textContent||getModelLabel(child.value)),id:esc(child.value),group:''});
+      _modelData.push({value:child.value,name:esc(child.textContent||getModelLabel(child.value)),id:esc(child.value),group:'',badge:_getConfiguredModelBadge(child.value,_badgeMap)});
     }
   }
   // Create search input FIRST before filterModels definition
@@ -398,7 +419,8 @@ function renderModelDropdown(){
         }
         const row=document.createElement('div');
         row.className='model-opt'+(m.value===sel.value?' active':'');
-        row.innerHTML=`<span class="model-opt-name">${m.name}</span><span class="model-opt-id">${m.id}</span>`;
+        const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
+        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}</div><span class="model-opt-id">${m.id}</span>`;
         row.onclick=()=>selectModelFromDropdown(m.value);
         dd.appendChild(row);
       }

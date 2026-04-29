@@ -1231,12 +1231,13 @@ def _is_valid_models_cache(cache: object) -> bool:
     """Return True when a disk cache payload has the full /api/models shape."""
     if not isinstance(cache, dict):
         return False
-    if not {"active_provider", "default_model", "groups"}.issubset(cache):
+    if not {"active_provider", "default_model", "configured_model_badges", "groups"}.issubset(cache):
         return False
     active_provider = cache.get("active_provider")
     return (
         (active_provider is None or isinstance(active_provider, str))
         and isinstance(cache.get("default_model"), str)
+        and isinstance(cache.get("configured_model_badges"), dict)
         and isinstance(cache.get("groups"), list)
     )
 
@@ -1266,6 +1267,7 @@ def _save_models_cache_to_disk(cache: dict) -> None:
                 {
                     "active_provider": cache["active_provider"],
                     "default_model": cache["default_model"],
+                    "configured_model_badges": cache["configured_model_badges"],
                     "groups": cache["groups"],
                 },
                 f,
@@ -1410,6 +1412,88 @@ def get_available_models() -> dict:
         active_provider = None
         default_model = get_effective_default_model(cfg)
         groups = []
+
+        def _norm_model_id(model_id: str) -> str:
+            s = str(model_id or "").strip().lower()
+            if s.startswith("@") and ":" in s:
+                s = s.split(":", 1)[1]
+            if "/" in s:
+                s = s.split("/", 1)[1]
+            return s.replace("-", ".")
+
+        def _build_configured_model_badges() -> dict[str, dict[str, str]]:
+            configured_entries: list[dict[str, str]] = []
+            if active_provider and default_model:
+                configured_entries.append(
+                    {
+                        "provider": active_provider,
+                        "model": default_model,
+                        "role": "primary",
+                        "label": "Primary",
+                    }
+                )
+            fallback_cfg = cfg.get("fallback_providers", [])
+            if isinstance(fallback_cfg, list):
+                for idx, entry in enumerate(fallback_cfg, start=1):
+                    if not isinstance(entry, dict):
+                        continue
+                    provider = _resolve_provider_alias(entry.get("provider"))
+                    model = str(entry.get("model") or "").strip()
+                    if not provider or not model:
+                        continue
+                    configured_entries.append(
+                        {
+                            "provider": provider,
+                            "model": model,
+                            "role": "fallback",
+                            "label": f"Fallback {idx}",
+                        }
+                    )
+
+            option_ids = [m.get("id", "") for g in groups for m in g.get("models", []) if m.get("id")]
+            option_lookup = {str(opt_id): str(opt_id) for opt_id in option_ids}
+            norm_lookup: dict[str, list[str]] = {}
+            for opt_id in option_ids:
+                norm_lookup.setdefault(_norm_model_id(opt_id), []).append(opt_id)
+
+            badges: dict[str, dict[str, str]] = {}
+            for entry in configured_entries:
+                provider = entry["provider"]
+                model = entry["model"]
+                raw_candidates = []
+                for candidate in (
+                    model,
+                    f"{provider}/{model}",
+                    f"@{provider}:{model}",
+                ):
+                    if candidate and candidate not in raw_candidates:
+                        raw_candidates.append(candidate)
+
+                match_id = None
+                for candidate in raw_candidates:
+                    if candidate in option_lookup:
+                        match_id = option_lookup[candidate]
+                        break
+                if match_id is None:
+                    for candidate in raw_candidates:
+                        normalized = _norm_model_id(candidate)
+                        matches = norm_lookup.get(normalized, [])
+                        if not matches:
+                            continue
+                        provider_match = next(
+                            (m for m in matches if m.startswith(f"@{provider}:") or m.startswith(f"{provider}/")),
+                            None,
+                        )
+                        match_id = provider_match or matches[0]
+                        if match_id:
+                            break
+
+                badge_payload = {"role": entry["role"], "label": entry["label"], "provider": provider}
+                for candidate in raw_candidates:
+                    badges[candidate] = badge_payload
+                if match_id:
+                    badges[match_id] = badge_payload
+            return badges
 
         # 1. Read config.yaml model section
         cfg_base_url = ""  # must be defined before conditional blocks (#117)
@@ -1901,6 +1985,7 @@ def get_available_models() -> dict:
         return {
             "active_provider": active_provider,
             "default_model": default_model,
+            "configured_model_badges": _build_configured_model_badges(),
             "groups": groups,
         }
 
