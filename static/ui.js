@@ -2985,19 +2985,49 @@ function highlightCode(container) {
   Prism.highlightAllUnder(el);
 }
 
+// Lazy load js-yaml for YAML tree view support
+let _jsyamlLoading=false;
+function _loadJsyamlThen(cb){
+  if(typeof jsyaml!=='undefined'){ cb(); return; }
+  if(_jsyamlLoading){ setTimeout(()=>_loadJsyamlThen(cb),100); return; }
+  _jsyamlLoading=true;
+  const s=document.createElement('script');
+  s.src='https://cdnjs.cloudflare.com/ajax/libs/js-yaml/4.1.0/js-yaml.min.js';
+  s.integrity='sha384-8pLvVQkv7pCQqFk7AChLpdEe7gXz9h8GAb7cS0zVeJuKhxR5PU5aEET5pRpHZvxUorzdM';
+  s.crossOrigin='anonymous';
+  s.onload=()=>{ _jsyamlLoading=false; cb(); };
+  s.onerror=()=>{ _jsyamlLoading=false; }; // CDN blocked, fall back to raw
+  document.head.appendChild(s);
+}
+
 function initTreeViews(){
   document.querySelectorAll('.code-tree-wrap:not([data-tree-init])').forEach(wrap=>{
     wrap.setAttribute('data-tree-init','1');
     const rawText=wrap.dataset.raw;
     const lang=wrap.dataset.lang;
     let parsed=null;
+    let parseFailed=false;
     // Try JSON parse
-    try{ parsed=JSON.parse(rawText); }catch(e){}
-    // YAML: try parsing if js-yaml is available
-    if(!parsed && lang==='yaml' && typeof jsyaml!=='undefined'){
-      try{ parsed=jsyaml.load(rawText); }catch(e){}
+    try{ parsed=JSON.parse(rawText); }catch(e){ parseFailed=(lang==='json'); }
+    // YAML: lazy-load js-yaml if needed
+    if(!parsed && lang==='yaml'){
+      if(typeof jsyaml!=='undefined'){
+        try{ parsed=jsyaml.load(rawText); }catch(e){ parseFailed=true; }
+      }else{
+        // Trigger async load, leave as raw for now
+        parseFailed=true;
+      }
     }
     if(!parsed || typeof parsed!=='object'){
+      if(parseFailed){
+        const hint=wrap.querySelector('.tree-raw-view');
+        if(hint&&!hint.querySelector('.tree-parse-note')){
+          const note=document.createElement('div');
+          note.className='tree-parse-note';
+          note.textContent=t('parse_failed_note')||'parse failed';
+          hint.parentNode.insertBefore(note,hint.nextSibling);
+        }
+      }
       return; // leave as raw view
     }
     const lineCount=rawText.split('\n').length;
