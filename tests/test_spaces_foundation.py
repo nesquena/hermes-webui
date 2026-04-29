@@ -499,6 +499,62 @@ def test_browser_surface_template_install_route_returns_safe_metadata(monkeypatc
     assert "secret" not in serialized
 
 
+def test_install_stock_chart_template_creates_safe_market_widgets(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    installed = spaces.install_template("stock")
+
+    assert installed["template"] == "stock"
+    assert installed["space"]["template"] == "stock-chart"
+    assert installed["space"]["name"] == "Stock Chart"
+    assert [widget["id"] for widget in installed["installed_widgets"]] == [
+        "stock-chart",
+        "stock-watchlist",
+        "stock-notes",
+    ]
+    assert [widget["kind"] for widget in installed["installed_widgets"]] == [
+        "chart",
+        "table",
+        "markdown",
+    ]
+    chart_widget = spaces.read_widget(installed["space"]["space_id"], "stock-chart")
+    assert chart_widget["series"] == ["NVDA", "AAPL", "GOOGL"]
+    assert chart_widget["market_data"] == {
+        "provider": "agent-mediated",
+        "status": "ready-for-agent-refresh",
+        "range": "1mo",
+    }
+    watchlist_widget = spaces.read_widget(installed["space"]["space_id"], "stock-watchlist")
+    assert watchlist_widget["columns"] == ["symbol", "last", "change", "notes"]
+    serialized = json.dumps(installed).lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert '\"script\"' not in serialized
+    assert '\"data\"' not in serialized
+    assert '\"source\"' not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
+def test_stock_chart_template_install_route_returns_safe_metadata(monkeypatch, tmp_path):
+    _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    handled, status, body = _route_post("/api/spaces/templates/install", {"template": "stock"})
+
+    assert handled is None
+    assert status == 200
+    assert body["template"] == "stock"
+    assert body["space"]["name"] == "Stock Chart"
+    assert body["installed_widgets"][0]["id"] == "stock-chart"
+    assert len(body["installed_widgets"]) == 3
+    serialized = json.dumps(body).lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
 def test_delete_space_removes_manifest_but_keeps_global_revision_event(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Disposable"})
