@@ -837,6 +837,8 @@ def test_spaces_routes_and_static_shell_are_registered():
     repo = Path(__file__).resolve().parents[1]
     routes_src = (repo / "api" / "routes.py").read_text(encoding="utf-8")
     index_html = (repo / "static" / "index.html").read_text(encoding="utf-8")
+    panels_js = (repo / "static" / "panels.js").read_text(encoding="utf-8")
+    spaces_js = (repo / "static" / "spaces.js").read_text(encoding="utf-8")
 
     assert '"/api/spaces"' in routes_src
     assert '"/api/spaces/recovery"' in routes_src
@@ -851,6 +853,15 @@ def test_spaces_routes_and_static_shell_are_registered():
     assert 'static/spaces.css' in index_html
     assert 'id="mainCapySpaces"' in index_html
     assert 'id="capySpacesRecovery"' in index_html
+    assert 'data-panel="capy-spaces"' in index_html
+    assert "switchPanel('capy-spaces')" in index_html
+    assert "'capy-spaces': 'Capy Spaces'" in panels_js
+    assert "'capy-spaces'" in panels_js
+    assert "loadCapySpaces()" in panels_js
+    assert "loadCapySpacesRecovery()" in panels_js
+    assert "system.chat" in spaces_js
+    assert "system.settings" in spaces_js
+    assert "data-capy-action=\"openSystemPanel\"" in spaces_js
 
 
 class _RouteHandler:

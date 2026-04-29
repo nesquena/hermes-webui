@@ -15,7 +15,7 @@ let _pendingSettingsTargetPanel = null; // destination selected while settings h
 
 // Map of panel names → i18n keys for the app titlebar label.
 const APP_TITLEBAR_KEYS = {
-  chat: 'tab_chat', tasks: 'tab_tasks', skills: 'tab_skills',
+  chat: 'tab_chat', 'capy-spaces': 'Capy Spaces', tasks: 'tab_tasks', skills: 'tab_skills',
   memory: 'tab_memory', workspaces: 'tab_workspaces',
   profiles: 'tab_profiles', todos: 'tab_todos', settings: 'tab_settings',
 };
@@ -159,11 +159,15 @@ async function switchPanel(name, opts = {}) {
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
   if (mainEl) {
-    ['settings','skills','memory','tasks','workspaces','profiles'].forEach(p => {
+    ['settings','capy-spaces','skills','memory','tasks','workspaces','profiles'].forEach(p => {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
   }
   // Lazy-load panel data
+  if (nextPanel === 'capy-spaces') {
+    if (typeof loadCapySpaces === 'function') await loadCapySpaces();
+    if (typeof loadCapySpacesRecovery === 'function') await loadCapySpacesRecovery();
+  }
   if (nextPanel === 'tasks') await loadCrons();
   if (nextPanel === 'skills') await loadSkills();
   if (nextPanel === 'memory') await loadMemory();
