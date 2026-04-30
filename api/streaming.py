@@ -1419,8 +1419,12 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             _profile_home = os.environ.get('HERMES_HOME', '')
             _profile_runtime_env = {}
 
+        _profile_runtime_env_for_run = dict(_profile_runtime_env)
+        for _explicit_env_key in ('TERMINAL_CWD', 'HERMES_EXEC_ASK', 'HERMES_SESSION_KEY', 'HERMES_HOME'):
+            _profile_runtime_env_for_run.pop(_explicit_env_key, None)
+
         _set_thread_env(
-            **_profile_runtime_env,
+            **_profile_runtime_env_for_run,
             TERMINAL_CWD=str(s.workspace),
             HERMES_EXEC_ASK='1',
             HERMES_SESSION_KEY=session_id,
@@ -1431,12 +1435,12 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
         # The finally block re-acquires to restore — keeping critical sections short
         # and preventing a deadlock where the restore would re-enter the same lock.
         with _ENV_LOCK:
-            old_profile_env = {key: os.environ.get(key) for key in _profile_runtime_env}
+            old_profile_env = {key: os.environ.get(key) for key in _profile_runtime_env_for_run}
             old_cwd = os.environ.get('TERMINAL_CWD')
             old_exec_ask = os.environ.get('HERMES_EXEC_ASK')
             old_session_key = os.environ.get('HERMES_SESSION_KEY')
             old_hermes_home = os.environ.get('HERMES_HOME')
-            os.environ.update(_profile_runtime_env)
+            os.environ.update(_profile_runtime_env_for_run)
             os.environ['TERMINAL_CWD'] = str(s.workspace)
             os.environ['HERMES_EXEC_ASK'] = '1'
             os.environ['HERMES_SESSION_KEY'] = session_id

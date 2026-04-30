@@ -52,4 +52,13 @@ def test_streaming_applies_profile_runtime_env_to_agent_run():
     assert "get_profile_runtime_env" in src
     assert "_profile_runtime_env" in src
     assert "old_profile_env" in src
-    assert "os.environ.update(_profile_runtime_env)" in src
+    assert "os.environ.update(_profile_runtime_env_for_run)" in src
+
+
+def test_streaming_removes_explicit_thread_env_keys_from_profile_runtime_env():
+    src = Path("api/streaming.py").read_text(encoding="utf-8")
+
+    assert "_profile_runtime_env_for_run = dict(_profile_runtime_env)" in src
+    assert "for _explicit_env_key in ('TERMINAL_CWD', 'HERMES_EXEC_ASK', 'HERMES_SESSION_KEY', 'HERMES_HOME'):" in src
+    assert "_profile_runtime_env_for_run.pop(_explicit_env_key, None)" in src
+    assert "**_profile_runtime_env_for_run," in src
