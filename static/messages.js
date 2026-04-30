@@ -377,7 +377,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
 
   // ── Shared SSE handler wiring (used for initial connection and reconnect) ──
-  let _reconnectAttempted=false;
+  let _reconnectAttempts=0;
+  const _RECONNECT_MAX=3;
+  const _RECONNECT_DELAYS=[1500,3000,6000];
   let _terminalStateReached=false;
 
   // Bug A fix (#631): track whether the stream has been finalized so any rAF
@@ -984,9 +986,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _closeSource();
         return;
       }
-      // Attempt one reconnect if the stream is still active server-side
-      if(!_reconnectAttempted && streamId){
-        _reconnectAttempted=true;
+      // Retry up to _RECONNECT_MAX times with exponential backoff before giving up
+      if(_reconnectAttempts < _RECONNECT_MAX && streamId){
+        const attempt=_reconnectAttempts++;
+        const delay=_RECONNECT_DELAYS[attempt]||6000;
         setComposerStatus('Reconnecting…');
         setTimeout(async()=>{
           try{
@@ -999,7 +1002,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           }catch(_){}
           if(await _restoreSettledSession()) return;
           _handleStreamError();
-        },1500);
+        },delay);
         return;
       }
       if(await _restoreSettledSession()) return;
