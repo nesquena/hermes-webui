@@ -51,6 +51,43 @@ function _setCompressionSessionLock(sid){
 }
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
+/**
+ * Render fenced code blocks inside user messages.
+ * Extracts ```…``` fences, replaces them with placeholders,
+ * escapes remaining text as plain HTML, then restores code blocks
+ * with the same <pre><code> pipeline used by renderMd().
+ * All non-fenced text stays escaped (no bold/italic/link interpretation).
+ */
+function _renderUserFencedBlocks(text){
+  const stash=[];
+  let s=String(text||'');
+  // Extract fenced code blocks → stash, replace with null-token placeholder
+  s=s.replace(/```([a-zA-Z0-9_+-]*)\n([\s\S]*?)```/g,(_,lang,code)=>{
+    lang=(lang||'').trim().toLowerCase();
+    // Remove one trailing newline if present (the fence consumes its own)
+    if(code.endsWith('\n')) code=code.slice(0,-1);
+    const h=lang?`<div class="pre-header">${esc(lang)}</div>`:'';
+    const langAttr=lang?` class="language-${esc(lang)}"`:'';
+    if(lang==='diff'||lang==='patch'){
+      const colored=esc(code).split('\n').map(line=>{
+        if(line.startsWith('@@')) return `<span class="diff-line diff-hunk">${line}</span>`;
+        if(line.startsWith('+')) return `<span class="diff-line diff-plus">${line}</span>`;
+        if(line.startsWith('-')) return `<span class="diff-line diff-minus">${line}</span>`;
+        return `<span class="diff-line">${line}</span>`;
+      }).join('\n');
+      stash.push(`${h}<pre class="diff-block"><code${langAttr}>${colored}</code></pre>`);
+    } else {
+      stash.push(`${h}<pre><code${langAttr}>${esc(code)}</code></pre>`);
+    }
+    return '\x00UF'+(stash.length-1)+'\x00';
+  });
+  // Escape remaining plain text and convert newlines to <br>
+  s=esc(s).replace(/\n/g,'<br>');
+  // Restore stashed code blocks
+  s=s.replace(/\x00UF(\d+)\x00/g,(_,i)=>stash[+i]);
+  return s;
+}
+
 /* ── Image lightbox — click any .msg-media-img to enlarge ─────────────────── */
 function _openImgLightbox(src, alt) {
   const lb = document.createElement('div');
@@ -2970,7 +3007,7 @@ function renderMessages(){
         return _renderAttachmentHtml(fname,fileUrl);
       }).join('')}</div>`;
     }
-    const bodyHtml = isUser ? esc(String(content)).replace(/\n/g,'<br>') : renderMd(_stripXmlToolCallsDisplay(String(content)));
+    const bodyHtml = isUser ? _renderUserFencedBlocks(content) : renderMd(_stripXmlToolCallsDisplay(String(content)));
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
     const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
