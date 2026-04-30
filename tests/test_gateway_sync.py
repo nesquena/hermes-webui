@@ -645,7 +645,7 @@ def test_gateway_sessions_excluded_when_disabled():
 
 
 def test_gateway_session_has_correct_metadata():
-    """Gateway sessions include source_tag and is_cli_session fields."""
+    """Gateway sessions include legacy source fields and normalized source metadata."""
     conn = _ensure_state_db()
     try:
         _insert_gateway_session(conn, session_id='gw_meta_001', source='telegram', title='Meta Test')
@@ -658,6 +658,9 @@ def test_gateway_session_has_correct_metadata():
         gw = next((s for s in sessions if s['session_id'] == 'gw_meta_001'), None)
         assert gw is not None, "Gateway session not found"
         assert gw.get('source_tag') == 'telegram', f"Expected source_tag=telegram, got {gw.get('source_tag')}"
+        assert gw.get('raw_source') == 'telegram'
+        assert gw.get('session_source') == 'messaging'
+        assert gw.get('source_label') == 'Telegram'
         assert gw.get('is_cli_session') is True, "is_cli_session should be True for agent sessions"
         assert gw.get('title') == 'Meta Test'
     finally:
@@ -667,6 +670,58 @@ def test_gateway_session_has_correct_metadata():
         except Exception:
             pass
         post('/api/settings', {'show_cli_sessions': False})
+
+
+def test_agent_session_source_normalization_contract():
+    """Raw Hermes Agent sources map to stable WebUI source categories."""
+    from api.agent_sessions import normalize_agent_session_source
+
+    cases = {
+        'cli': ('cli', 'CLI'),
+        'weixin': ('messaging', 'Weixin'),
+        'telegram': ('messaging', 'Telegram'),
+        'discord': ('messaging', 'Discord'),
+        'slack': ('messaging', 'Slack'),
+        'cron': ('cron', 'Cron'),
+        'tool': ('tool', 'Tool'),
+        'api_server': ('api', 'API'),
+        'something_new': ('other', 'Something New'),
+        None: ('other', 'Agent'),
+    }
+
+    for raw_source, (session_source, source_label) in cases.items():
+        normalized = normalize_agent_session_source(raw_source)
+        assert normalized['session_source'] == session_source
+        assert normalized['source_label'] == source_label
+        if raw_source:
+            assert normalized['raw_source'] == raw_source
+        else:
+            assert normalized['raw_source'] is None
+
+
+def test_gateway_watcher_uses_normalized_source_metadata(monkeypatch):
+    """SSE snapshots use the same normalized source contract as /api/sessions."""
+    conn = _ensure_state_db()
+    try:
+        _insert_gateway_session(conn, session_id='gw_watcher_source_001', source='weixin', title='Weixin Chat')
+
+        import api.gateway_watcher as gateway_watcher
+
+        monkeypatch.setattr(gateway_watcher, '_get_state_db_path', _get_state_db_path)
+        sessions = gateway_watcher._get_agent_sessions_from_db()
+        gw = next((s for s in sessions if s['session_id'] == 'gw_watcher_source_001'), None)
+
+        assert gw is not None
+        assert gw.get('source') == 'weixin'
+        assert gw.get('raw_source') == 'weixin'
+        assert gw.get('session_source') == 'messaging'
+        assert gw.get('source_label') == 'Weixin'
+    finally:
+        try:
+            _remove_test_sessions(conn, 'gw_watcher_source_001')
+            conn.close()
+        except Exception:
+            pass
 
 
 def test_imported_cron_sessions_hidden_from_sidebar_by_default(cleanup_test_sessions):
