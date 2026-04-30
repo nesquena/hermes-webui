@@ -88,6 +88,8 @@ document.addEventListener('click', e => {
 });
 
 const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
+const _PDF_EXTS=/\.pdf$/i;
+const _HTML_EXTS=/\.(html?|htm)$/i;
 const _ARCHIVE_EXTS=/\.(zip|tar|tar\.gz|tgz|tar\.bz2|tbz2|tar\.xz|txz)$/i;
 const _SVG_EXTS=/\.svg$/i;
 const _AUDIO_EXTS=/\.(mp3|ogg|wav|m4a|aac|flac|wma|opus|webm)$/i;
@@ -1237,6 +1239,15 @@ function renderMd(raw){
     // Video → inline player
     if(_VIDEO_EXTS.test(ref)){
       return `<div class="msg-media-video"><span class="msg-media-label">🎬 ${t('media_video_label')}</span><video controls preload="metadata" src="${esc(apiUrl)}"></video></div>`;
+    }
+    // PDF files → render first page preview with lazy-load
+    if(_PDF_EXTS.test(ref)){
+      const fname=esc(ref.split('/').pop()||ref);
+      return `<div class="pdf-preview-load" data-path="${esc(ref)}"><span class="pdf-preview-spinner">⏳</span> ${t('pdf_loading')} ${fname}...</div>`;
+    }
+    // HTML files → render inline in sandboxed iframe with lazy-load
+    if(_HTML_EXTS.test(ref)){
+      return `<div class="html-preview-load" data-path="${esc(ref)}"><span class="html-preview-spinner">⏳</span> ${t('html_loading')}</div>`;
     }
     // .patch/.diff files → render inline as colored diff instead of download
     const fname=esc(ref.split('/').pop()||ref);
@@ -2586,8 +2597,8 @@ function renderMessages(){
       inner.innerHTML=cached.html;
       _sessionHtmlCacheSid=sid;
       if(S.activeStreamId){scrollIfPinned();}else{scrollToBottom();}
-      requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();loadExcalidrawInline();renderMermaidBlocks();renderKatexBlocks();});
-      requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();renderMermaidBlocks();renderKatexBlocks();});
+      requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();loadExcalidrawInline();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
+      requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
       return;
     }
@@ -2791,7 +2802,7 @@ function renderMessages(){
     if(_ERR_MSG_RE.test(String(content||'').trim())) seg.dataset.error='1';
     if(thinkingText&&window._showThinking!==false){
       if(isSimplifiedToolCalling()) assistantThinking.set(rawIdx, thinkingText);
-      else seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
+      else if(window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
     }
     const hasVisibleBody=!!(String(content||'').trim()||filesHtml);
     if(hasVisibleBody){
@@ -3020,8 +3031,8 @@ function renderMessages(){
     scrollToBottom();
   }
   // Apply syntax highlighting after DOM is built
-  requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();loadExcalidrawInline();renderMermaidBlocks();renderKatexBlocks();});
-  requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();renderMermaidBlocks();renderKatexBlocks();});
+  requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();loadExcalidrawInline();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
+  requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();}); 
   // Refresh todo panel if it's currently open
   if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){
     loadTodos();
@@ -3666,6 +3677,100 @@ function _renderExcalidrawCanvases(){
     }catch(e){
       el.innerHTML=`<div class="excalidraw-empty">${t('excalidraw_render_error')}</div>`;
     }
+  });
+}
+
+// ── PDF inline preview (first page via PDF.js CDN) ──────────────────────────
+let _pdfjsReady=false, _pdfjsLoading=false;
+function loadPdfInline(){
+  const PDF_MAX_SIZE=4*1024*1024; // 4 MB cap for inline PDF preview
+  document.querySelectorAll('.pdf-preview-load:not([data-loaded])').forEach(el=>{
+    el.setAttribute('data-loaded','1');
+    const path=el.dataset.path;
+    const fname=path.split('/').pop()||path;
+    const loadPdf=(pdfjsLib)=>{
+      fetch('api/media?path='+encodeURIComponent(path))
+        .then(r=>{if(!r.ok) throw new Error(r.status); return r.arrayBuffer();})
+        .then(buf=>{
+          if(buf.byteLength>PDF_MAX_SIZE){
+            el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="api/media?path=${encodeURIComponent(path)}&download=1" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_too_large')}</span></div>`;
+            return;
+          }
+          return pdfjsLib.getDocument({data:buf}).promise;
+        })
+        .then(pdf=>{
+          if(!pdf) return;
+          pdf.getPage(1).then(page=>{
+            const canvas=document.createElement('canvas');
+            const scale=1.5;
+            const viewport=page.getViewport({scale});
+            canvas.width=viewport.width;
+            canvas.height=viewport.height;
+            canvas.className='pdf-preview-canvas';
+            page.render({canvasContext:canvas.getContext('2d'),viewport}).promise.then(()=>{
+              const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+              el.outerHTML=`<div class="pdf-preview-wrap"><div class="pdf-preview-header"><span>📄 ${esc(fname)}</span><a href="${dlUrl}" download="${esc(fname)}" class="pdf-download-link">${t('pdf_download')} ↓</a></div><div class="pdf-preview-body">${canvas.outerHTML}</div></div>`;
+            });
+          });
+        })
+        .catch(()=>{
+          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+          el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
+        });
+    };
+    if(_pdfjsReady){
+      loadPdf(window._pdfjsLib);
+    } else if(!_pdfjsLoading){
+      _pdfjsLoading=true;
+      const s=document.createElement('script');
+      s.src='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.min.mjs';
+      s.type='module';
+      s.textContent=`
+        import * as pdfjsLib from '${s.src}';
+        pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.worker.min.mjs';
+        window._pdfjsLib=pdfjsLib;
+        window._pdfjsReady=true;
+        window.dispatchEvent(new Event('pdfjs-ready'));
+      `;
+      document.head.appendChild(s);
+      window.addEventListener('pdfjs-ready',()=>{ _pdfjsReady=true; loadPdf(window._pdfjsLib); },{once:true});
+      setTimeout(()=>{
+        if(!_pdfjsReady){
+          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+          if(el.parentNode){
+            el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
+          }
+        }
+      },15000);
+    } else {
+      window.addEventListener('pdfjs-ready',()=>{ loadPdf(window._pdfjsLib); },{once:true});
+    }
+  });
+}
+
+// ── HTML inline preview (sandboxed iframe) ─────────────────────────────────
+function loadHtmlInline(){
+  const HTML_MAX_SIZE=256*1024; // 256 KB cap for inline HTML preview
+  document.querySelectorAll('.html-preview-load:not([data-loaded])').forEach(el=>{
+    el.setAttribute('data-loaded','1');
+    const path=el.dataset.path;
+    const fname=path.split('/').pop()||path;
+    fetch('api/media?path='+encodeURIComponent(path))
+      .then(r=>{if(!r.ok) throw new Error(r.status); return r.text();})
+      .then(html=>{
+        if(html.length>HTML_MAX_SIZE){
+          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+          el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_too_large')}</span></div>`;
+          return;
+        }
+        const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+        const safeHtml=html.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        el.outerHTML=`<div class="html-preview-wrap"><div class="html-preview-header"><span>${t('html_sandbox_label')}</span><a href="${dlUrl}" download="${esc(fname)}" class="html-open-link">${t('html_open_full')} ↗</a></div><iframe srcdoc="${safeHtml}" sandbox="allow-scripts" class="html-preview-iframe" loading="lazy"></iframe></div>`;
+      })
+      .catch(()=>{
+        const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+        el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_error')}</span></div>`;
+      });
   });
 }
 
