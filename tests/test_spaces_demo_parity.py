@@ -85,7 +85,7 @@ def test_demo_parity_smoke_runner_exposes_tool_adapter_action(monkeypatch, tmp_p
     listed = spaces.run_space_tool("space.demo.list", {})
     ran = spaces.run_space_tool(
         "space.demo.run",
-        {"demo": "demo_weather_widget", "renderer": "<script>bad()</script>", "api_key": "SECRET"},
+        {"demo": "demo_weather_widget", "renderer": "<script>bad()</script>", "api_key": "UNTRUSTED_VALUE"},
     )
 
     assert listed["ok"] is True
@@ -94,3 +94,23 @@ def test_demo_parity_smoke_runner_exposes_tool_adapter_action(monkeypatch, tmp_p
     assert ran["demo"] == "demo_weather_widget"
     assert ran["template"] == "weather"
     _assert_safe_payload({"listed": listed, "ran": ran})
+
+
+def test_demo_parity_smoke_runner_exposes_run_all_tool_action(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    result = spaces.run_space_tool(
+        "space.demo.run_all",
+        {"renderer": "<script>bad()</script>", "api_key": "UNTRUSTED_VALUE"},
+    )
+
+    assert result["ok"] is True
+    assert result["action"] == "space.demo.run_all"
+    assert result["total"] == len(DEMO_NAMES)
+    assert result["passed"] == len(DEMO_NAMES)
+    assert result["failed"] == 0
+    assert [item["demo"] for item in result["results"]] == DEMO_NAMES
+    assert all(item["ok"] is True for item in result["results"])
+    assert all(item["rollback_point"] is True for item in result["results"])
+    assert len(spaces.list_spaces()) == len(DEMO_NAMES)
+    _assert_safe_payload(result)

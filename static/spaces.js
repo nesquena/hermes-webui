@@ -81,7 +81,55 @@
     }).join('') : '<div class="capy-spaces-card"><strong>No spaces yet</strong><div class="capy-spaces-muted">Create a space below to start adding safe metadata-only widgets.</div></div>';
     return '<div class="capy-spaces-card"><h3>Capy Spaces</h3><div class="capy-spaces-muted">'+spaces.length+' space(s). Widget management lists metadata only; generated widget code is not executed here.</div>' +
       '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="createSpaceFromSession">Create from current chat</button><button type="button" class="capy-spaces-btn" data-capy-action="installWeatherTemplate">Install weather demo</button><button type="button" class="capy-spaces-btn" data-capy-action="installResearchTemplate">Install research harness</button><button type="button" class="capy-spaces-btn" data-capy-action="installDashboardTemplate">Install dashboard demo</button><button type="button" class="capy-spaces-btn" data-capy-action="installCameraTemplate">Install camera dashboard</button><button type="button" class="capy-spaces-btn" data-capy-action="installKanbanTemplate">Install kanban board</button><button type="button" class="capy-spaces-btn" data-capy-action="installNotesTemplate">Install notes app</button><button type="button" class="capy-spaces-btn" data-capy-action="installBrowserTemplate">Install browser surface</button><button type="button" class="capy-spaces-btn" data-capy-action="installStockTemplate">Install stock chart</button><button type="button" class="capy-spaces-btn" data-capy-action="installServiceTemplate">Install local service dashboard</button><button type="button" class="capy-spaces-btn" data-capy-action="installModelSetupTemplate">Install model setup</button><button type="button" class="capy-spaces-btn" data-capy-action="installGameTemplate">Install game sandbox</button><button type="button" class="capy-spaces-btn" data-capy-action="installMusicTemplate">Install music sequencer</button><button type="button" class="capy-spaces-btn" data-capy-action="installBigBangTemplate">Install Big Bang onboarding</button><button type="button" class="capy-spaces-btn" data-capy-action="reloadSpaces">Refresh</button><button type="button" class="capy-spaces-btn" data-capy-action="newSpace">New space</button></div></div>' +
-      renderTrustedSystemWidgets(activeSpaceId) + cards + renderSpaceAgentImportForm() + renderSpaceForm();
+      renderDemoSmokeRunner(demos || []) + renderTrustedSystemWidgets(activeSpaceId) + cards + renderSpaceAgentImportForm() + renderSpaceForm();
+  }
+
+  function renderDemoSmokeRunner(demos){
+    const safeDemos = Array.isArray(demos) ? demos : [];
+    const rows = safeDemos.length ? safeDemos.slice(0, 20).map(function(d){
+      const demo = d && d.demo ? String(d.demo) : '';
+      const title = d && d.title ? String(d.title) : demo || 'Demo smoke';
+      const template = d && d.template ? String(d.template) : 'unknown';
+      const mode = d && d.mode ? String(d.mode) : 'metadata-only-smoke';
+      return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(title)+'</strong>' +
+        '<div class="capy-spaces-muted">'+escapeHtml(demo)+' · template: '+escapeHtml(template)+' · '+escapeHtml(mode)+'</div></div>' +
+        '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="runDemoSmoke" data-demo="'+escapeHtml(demo)+'">Run smoke</button></div></div>';
+    }).join('') : '<div class="capy-spaces-muted">No metadata-only demo smokes advertised by the backend.</div>';
+    return '<div class="capy-spaces-card"><h3>Demo parity smoke runner</h3>' +
+      '<div class="capy-spaces-muted">Runs safe Space Agent video-parity fixtures through typed Capy Space APIs only; no generated widget code is executed.</div>' +
+      '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="runAllDemoSmokes">Run all smokes</button></div>' +
+      '<div class="capy-spaces-widget-list">'+rows+'</div></div>';
+  }
+
+  function renderDemoSmokeResult(data){
+    const space = data && data.space && typeof data.space === 'object' ? data.space : {};
+    const demo = data && data.demo ? String(data.demo) : 'demo';
+    const spaceName = space.name || space.space_id || 'Space demo';
+    const widgetCount = Number(data && data.widget_count || 0);
+    const revisionCount = Number(data && data.revision_event_count || 0);
+    const rollbackPoint = data && data.rollback_point ? 'yes' : 'no';
+    return '<div class="capy-spaces-card" role="status"><h3>Demo parity smoke passed</h3>' +
+      '<div class="capy-spaces-muted">'+escapeHtml(demo)+' · '+escapeHtml(data && data.mode || 'metadata-only-smoke')+'</div>' +
+      '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(spaceName)+'</strong>' +
+      '<div class="capy-spaces-muted">Space ID: '+escapeHtml(space.space_id || '')+' · Widgets: '+widgetCount+' · Revisions: '+revisionCount+' · Rollback point: '+escapeHtml(rollbackPoint)+'</div></div></div></div></div>';
+  }
+
+  function renderDemoSmokeSuiteResult(data){
+    const total = Number(data && data.total || 0);
+    const passed = Number(data && data.passed || 0);
+    const failed = Number(data && data.failed || 0);
+    const results = Array.isArray(data && data.results) ? data.results : [];
+    const rows = results.slice(0, 20).map(function(item){
+      const demo = item && item.demo ? String(item.demo) : 'demo';
+      const template = item && item.template ? String(item.template) : 'template';
+      const widgetCount = Number(item && item.widget_count || 0);
+      const rollbackPoint = item && item.rollback_point ? 'yes' : 'no';
+      return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(demo)+'</strong>' +
+        '<div class="capy-spaces-muted">template: '+escapeHtml(template)+' · widgets: '+widgetCount+' · rollback point: '+escapeHtml(rollbackPoint)+'</div></div></div>';
+    }).join('');
+    return '<div class="capy-spaces-card" role="status"><h3>Demo parity smoke suite '+(failed ? 'finished' : 'passed')+'</h3>' +
+      '<div class="capy-spaces-muted">'+passed+' / '+total+' metadata-only smokes passed</div>' +
+      '<div class="capy-spaces-widget-list">'+rows+'</div></div>';
   }
 
   function renderTrustedSystemWidgets(activeSpaceId){
@@ -590,6 +638,22 @@
       await loadCapySpaces();
       const refreshedRoot = document.getElementById('capySpacesRoot');
       if (refreshedRoot) refreshedRoot.innerHTML = renderSpaceImportResult(data || {}) + refreshedRoot.innerHTML;
+      return;
+    }
+    if (action === 'runDemoSmoke') {
+      const demo = button.dataset.demo || '';
+      if (!demo) return;
+      const data = await postSpacesJson('api/spaces/tool', {action: 'space.demo.run', demo: demo});
+      await loadCapySpaces();
+      const refreshedRoot = document.getElementById('capySpacesRoot');
+      if (refreshedRoot) refreshedRoot.innerHTML = renderDemoSmokeResult(data || {}) + refreshedRoot.innerHTML;
+      return;
+    }
+    if (action === 'runAllDemoSmokes') {
+      const data = await postSpacesJson('api/spaces/tool', {action: 'space.demo.run_all'});
+      await loadCapySpaces();
+      const refreshedRoot = document.getElementById('capySpacesRoot');
+      if (refreshedRoot) refreshedRoot.innerHTML = renderDemoSmokeSuiteResult(data || {}) + refreshedRoot.innerHTML;
       return;
     }
     if (action === 'reloadSpaces') {
