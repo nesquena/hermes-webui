@@ -117,7 +117,7 @@ global.fetch = async function(path, opts = {}) {
   }
   if (path === 'api/spaces/revisions?space_id=lab') {
     return response({ revisions: [
-      { event_id: 'rev2', event_type: 'widget.updated', space_id: 'lab', created_at: 1710000000, details: { widget_id: 'weather', renderer: '<script>bad()</script>' } },
+      { event_id: 'rev2', event_type: 'widget.updated', space_id: 'lab', created_at: 1710000000, details: { widget_id: 'weather', fields: ['title', 'layout'], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
       { event_id: 'rev1', event_type: 'space.created', space_id: 'lab', created_at: 1709999900, details: { name: 'Lab <Detail>' } },
     ] });
   }
@@ -951,8 +951,15 @@ def test_spaces_ui_opens_space_detail_without_rendering_widget_code(driver_path)
     assert "widget.updated" in out["rootHtml"]
     assert "space.created" in out["rootHtml"]
     assert "rev2" in out["rootHtml"]
+    assert "widget_id: weather" in out["rootHtml"]
+    assert "fields: title, layout" in out["rootHtml"]
+    assert "name: Lab &lt;Detail&gt;" in out["rootHtml"]
+    assert 'data-capy-action="restoreRevision"' not in out["rootHtml"]
+    assert 'data-capy-action="rollbackRevision"' not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
 
 
 def test_spaces_ui_export_yaml_posts_space_id_and_renders_safe_metadata_only(driver_path):

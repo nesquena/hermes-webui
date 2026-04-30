@@ -198,12 +198,33 @@
     const rows = safeRevisions.length ? safeRevisions.slice(0, 10).map(function(rev){
       const eventId = rev && rev.event_id ? String(rev.event_id) : '';
       const eventType = rev && rev.event_type ? String(rev.event_type) : 'unknown';
+      const detailText = formatRevisionDetails(rev && rev.details);
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(eventType)+'</strong>' +
-        '<div class="capy-spaces-muted">'+escapeHtml(formatRevisionTime(rev && rev.created_at))+' · '+escapeHtml(eventId.slice(0, 12) || 'no-event-id')+'</div></div></div>';
+        '<div class="capy-spaces-muted">'+escapeHtml(formatRevisionTime(rev && rev.created_at))+' · '+escapeHtml(eventId.slice(0, 12) || 'no-event-id')+'</div>' +
+        (detailText ? '<div class="capy-spaces-muted">'+escapeHtml(detailText)+'</div>' : '') +
+        '</div></div>';
     }).join('') : '<div class="capy-spaces-muted">No revision events recorded yet.</div>';
     return '<div class="capy-spaces-card"><h3>Revision history</h3>' +
       '<div class="capy-spaces-muted">Newest safe metadata events. Rollback controls will build on this index; generated widget bodies are not displayed.</div>' +
       '<div class="capy-spaces-widget-list">'+rows+'</div></div>';
+  }
+
+  function formatRevisionDetails(details){
+    if (!details || typeof details !== 'object' || Array.isArray(details)) return '';
+    const unsafeParts = ['renderer', 'html', 'script', 'data', 'source', 'api_key', 'apikey', 'token', 'password', 'secret', 'cookie', 'authorization'];
+    function keyIsSafe(key){
+      const lowered = String(key || '').toLowerCase();
+      return lowered && !unsafeParts.some(part => lowered.indexOf(part) >= 0);
+    }
+    function valueSummary(value){
+      if (Array.isArray(value)) return value.slice(0, 5).map(valueSummary).filter(Boolean).join(', ');
+      if (value && typeof value === 'object') return Object.keys(value).filter(keyIsSafe).slice(0, 5).join(', ');
+      return String(value == null ? '' : value).replace(/\s+/g, ' ').trim().slice(0, 160);
+    }
+    return Object.keys(details).filter(keyIsSafe).slice(0, 6).map(function(key){
+      const value = valueSummary(details[key]);
+      return value ? String(key)+': '+value : String(key);
+    }).filter(Boolean).join(' · ');
   }
 
   function formatRevisionTime(value){
