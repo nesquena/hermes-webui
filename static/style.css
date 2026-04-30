@@ -607,8 +607,10 @@
   .rail .nav-tab{flex:0 0 auto;padding:0;font-size:inherit;border-bottom:none;overflow:visible;}
   .rail .nav-tab:hover::after{content:none;}
   .rail .nav-tab.active::before{content:'';position:absolute;left:-6px;top:50%;bottom:auto;transform:translateY(-50%);width:3px;height:16px;background:var(--accent);border-radius:0 2px 2px 0;}
-  @media(min-width:641px){.rail{display:flex;}.sidebar > .sidebar-nav{display:none;}}
-  /* Sidebar navigation tabs */
+@media(min-width:641px){.rail{display:flex;}.sidebar > .sidebar-nav{display:none;}}
+/* Provider usage icon fill bar */
+.provider-usage-fill{position:absolute;left:0;bottom:0;width:100%;border-radius:0 0 8px 8px;transition:height .3s ease;opacity:.28;pointer-events:none;}
+/* Sidebar navigation tabs */
   .sidebar-nav{display:flex;border-bottom:1px solid var(--border);flex-shrink:0;padding:6px 8px 0;gap:2px;}
   .nav-tab{flex:1;padding:10px 4px 8px;font-size:20px;text-align:center;cursor:pointer;color:var(--muted);border:none;background:none;transition:color .15s;border-bottom:2px solid transparent;white-space:nowrap;overflow:hidden;position:relative;display:flex;align-items:center;justify-content:center;}
   .nav-tab:hover{color:var(--text);}

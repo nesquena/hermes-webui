@@ -792,12 +792,16 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path in ("/", "/index.html"):
         from urllib.parse import quote
         from api.updates import WEBUI_VERSION
+        from api.usage import get_enabled_providers
         version_token = quote(WEBUI_VERSION, safe="")
-        return t(
-            handler,
-            _INDEX_HTML_PATH.read_text(encoding="utf-8").replace("__WEBUI_VERSION__", version_token),
-            content_type="text/html; charset=utf-8",
+        enabled_providers_json = json.dumps(get_enabled_providers())
+        html = _INDEX_HTML_PATH.read_text(encoding="utf-8")
+        html = html.replace("__WEBUI_VERSION__", version_token)
+        html = html.replace(
+            "__ENABLED_PROVIDERS__",
+            enabled_providers_json,
         )
+        return t(handler, html, content_type="text/html; charset=utf-8")
 
     if parsed.path == "/login":
         _settings = load_settings()
@@ -1089,6 +1093,26 @@ def handle_get(handler, parsed) -> bool:
             return j(handler, session_usage(sid))
         except KeyError:
             return bad(handler, "Session not found", 404)
+
+    if parsed.path == "/api/usage/limits":
+        from api.usage import get_usage_limits, get_enabled_providers
+        usage = get_usage_limits()
+        enabled = get_enabled_providers()
+        # Merge: attach usage to each enabled provider; absent usage = zeros
+        usage_by_provider = {u["provider"]: u for u in usage}
+        result = []
+        for provider in enabled:
+            u = usage_by_provider.get(provider, {})
+            result.append({
+                "provider": provider,
+                "limit_5h": u.get("limit_5h", 0),
+                "limit_7d": u.get("limit_7d", 0),
+                "used_5h": u.get("used_5h", 0),
+                "used_7d": u.get("used_7d", 0),
+                "reset_5h_ts": u.get("reset_5h_ts"),
+                "reset_7d_ts": u.get("reset_7d_ts"),
+            })
+        return j(handler, result)
 
     if parsed.path == "/api/background/status":
         sid = parse_qs(parsed.query).get("session_id", [""])[0]

@@ -226,6 +226,104 @@ setTimeout(_initMediaPlaybackObserver,0);
 let _dynamicModelLabels={};
 window._configuredModelBadges=window._configuredModelBadges||{};
 
+// ── Provider usage rail icons ─────────────────────────────────────────────────
+let _providerUsageCache=[];
+
+async function loadProviderUsage(){
+  try{
+    const res=await fetch('/api/usage/limits');
+    if(!res.ok) return;
+    _providerUsageCache=await res.json();
+    renderProviderUsageIcons();
+  }catch(e){console.error('Failed to load provider usage',e);}
+}
+
+function _fmtUsageNum(n){
+  if(n>=1000000) return(n/1000000).toFixed(1)+'M';
+  if(n>=1000) return(n/1000).toFixed(1)+'k';
+  return String(n);
+}
+
+function _providerUsageColor(pct){
+  if(pct>=80) return'var(--warning,#f59e0b)';
+  if(pct>=50) return'var(--accent,#a78bfa)';
+  return'var(--success,#22c55e)';
+}
+
+function renderProviderUsageIcons(){
+  const rail=document.querySelector('.rail');
+  if(!rail) return;
+  // Remove stale icons
+  rail.querySelectorAll('.provider-usage-btn').forEach(el=>el.remove());
+
+  const enabled=window.APP_CONFIG&&window.APP_CONFIG.enabled_providers||[];
+  if(!enabled.length) return;
+
+  const usageMap={};
+  for(const u of _providerUsageCache) usageMap[u.provider]=u;
+
+  const spacer=rail.querySelector('.rail-spacer');
+  const PROVIDER_ICONS={
+    openrouter:'🌐',anthropic:'🧠',openai:'🤖',google:'🧮',
+    minimax:'🔵',groq:'⚡',deepseek:'🔍',mistral:'🌫️',
+    cohere:'🌊',xai:'✖️',zai:'⚡',ollama:'🔧',
+    nvidia:'🟢',gemini:'✨',copilot:'💠',nous:'🧩',
+  };
+  const PROVIDER_LABELS={
+    openrouter:'OpenRouter',anthropic:'Anthropic',openai:'OpenAI',google:'Google',
+    minimax:'MiniMax',groq:'Groq',deepseek:'DeepSeek',mistral:'Mistral',
+    cohere:'Cohere',xai:'xAI',zai:'Z.AI',ollama:'Ollama',
+    nvidia:'NVIDIA',gemini:'Gemini',copilot:'Copilot',nous:'Nous',
+  };
+
+  for(const provider of enabled){
+    const usage=usageMap[provider];
+    const icon=PROVIDER_ICONS[provider]||'📦';
+    const label=PROVIDER_LABELS[provider]||provider;
+    const btn=document.createElement('button');
+    btn.className='rail-btn nav-tab provider-usage-btn';
+    btn.dataset.provider=provider;
+
+    // Tooltip text
+    let tip=label;
+    if(usage&&usage.limit_5h>0){
+      tip=`${label}\n${_fmtUsageNum(usage.used_5h)}/${_fmtUsageNum(usage.limit_5h)} (5h)\n${_fmtUsageNum(usage.used_7d)}/${_fmtUsageNum(usage.limit_7d)} (7d)`;
+    }else if(usage){
+      tip=`${label}: no limit set`;
+    }else{
+      tip=`${label}: no usage data`;
+    }
+    btn.title=tip;
+
+    // Usage fill bar (5h percentage)
+    if(usage&&usage.limit_5h>0){
+      const pct5h=Math.min((usage.used_5h/usage.limit_5h)*100,100);
+      const fill=document.createElement('span');
+      fill.className='provider-usage-fill';
+      fill.style.cssText=`position:absolute;left:0;bottom:0;width:100%;height:${pct5h}%;border-radius:0 0 8px 8px;background:${_providerUsageColor(pct5h)};transition:height .3s ease;pointer-events:none;opacity:.28;`;
+      btn.style.position='relative';
+      btn.style.overflow='hidden';
+      btn.appendChild(fill);
+    }
+
+    const iconSpan=document.createElement('span');
+    iconSpan.textContent=icon;
+    btn.appendChild(iconSpan);
+
+    // Click: jump model selector to this provider
+    btn.addEventListener('click',()=>{
+      const sel=document.getElementById('modelSelect')||document.getElementById('model-select');
+      if(!sel) return;
+      const opts=Array.from(sel.options);
+      const match=opts.find(o=>o.value.toLowerCase().includes(provider.toLowerCase()));
+      if(match){ sel.value=match.value; sel.dispatchEvent(new Event('change')); }
+    });
+
+    if(spacer) rail.insertBefore(btn,spacer);
+    else rail.appendChild(btn);
+  }
+}
+
 // ── Smart model resolver ────────────────────────────────────────────────────
 // Finds the best matching option value in a <select> for a given model ID.
 // Handles mismatches like 'claude-sonnet-4-6' vs 'anthropic/claude-sonnet-4.6'.
