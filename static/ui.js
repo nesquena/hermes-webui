@@ -4814,6 +4814,16 @@ function appendThinking(text=''){
   // The old stream's reasoning events can still fire after switch;
   // without this check they would pollute the new session's DOM.
   if(!S.session||!S.activeStreamId) return;
+  // Guard: if a thinking card from a DIFFERENT session is already in the DOM
+  // (e.g. session switch mid-stream), don't reuse it — create a fresh card for
+  // the current session so content doesn't bleed between chats.
+  const existingTurn=$('liveAssistantTurn');
+  if(existingTurn && existingTurn.dataset.sessionId && existingTurn.dataset.sessionId !== S.session.session_id){
+    removeThinking();
+  } else if(existingTurn && !existingTurn.dataset.sessionId){
+    // Pre-existing turn without session ID — clear it to avoid cross-session bleed.
+    removeThinking();
+  }
   $('emptyState').style.display='none';
   let turn=$('liveAssistantTurn');
   if(!turn){
@@ -4883,6 +4893,10 @@ function appendThinking(text=''){
 }
 function updateThinking(text=''){appendThinking(text);}
 function removeThinking(){
+  // Guard: don't remove thinking if we're viewing a different session.
+  // The thinking card belongs to the stream that created it.
+  const _guardTurn = $('liveAssistantTurn');
+  if(_guardTurn && S.session && _guardTurn.dataset.sessionId !== S.session.session_id) return;
   if(!isSimplifiedToolCalling()){
     const el=$('thinkingRow');
     if(el) el.remove();
