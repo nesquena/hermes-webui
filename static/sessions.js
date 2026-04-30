@@ -1605,6 +1605,22 @@ function renderSessionListFromCache(){
   }
 }
 
+async function _handleActiveSessionStorageEvent(e){
+  if(!e || e.key !== 'hermes-webui-session') return;
+  const sid = e.newValue;
+  if(!sid || (S.session && S.session.session_id === sid)) return;
+  if(S.busy){
+    if(typeof showToast==='function') showToast('Active session changed in another tab. Finish the current turn before switching.',3000);
+    return;
+  }
+  await loadSession(sid);
+  renderSessionListFromCache();
+}
+
+if(typeof window!=='undefined'){
+  window.addEventListener('storage', (e) => { void _handleActiveSessionStorageEvent(e); });
+}
+
 async function deleteSession(sid){
   const ok=await showConfirmDialog({
     message:'Delete this conversation?',
