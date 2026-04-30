@@ -864,7 +864,9 @@ function _syncCtxIndicator(usage){
   }
   if(wrap) wrap.style.display='';
   const hasPromptTok=!!promptTok;
-  const pct=hasPromptTok?Math.min(100,Math.round((promptTok/ctxWindow)*100)):0;
+  const rawPct=hasPromptTok?Math.round((promptTok/ctxWindow)*100):0;
+  const pct=Math.min(100,rawPct);
+  const overflowed=rawPct>100;
   const ring=$('ctxRingValue');
   const center=$('ctxPercent');
   const usageLine=$('ctxTooltipUsage');
@@ -908,7 +910,7 @@ function _syncCtxIndicator(usage){
   if(!hasExplicitCtx&&hasPromptTok) label+=' (est. 128K)';
   if(cost) label+=` \u00b7 $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
   el.setAttribute('aria-label',label);
-  if(usageLine) usageLine.textContent=hasPromptTok?`${pct}% used (${Math.max(0,100-pct)}% left)`:`${_fmtTokens(totalTok)} tokens used`;
+  if(usageLine) usageLine.textContent=hasPromptTok?(overflowed?`${rawPct}% used (context exceeded)`:`${pct}% used (${100-pct}% left)`):`${_fmtTokens(totalTok)} tokens used`;
   if(tokensLine) tokensLine.textContent=hasPromptTok?`${_fmtTokens(promptTok)} / ${_fmtTokens(ctxWindow)} tokens used`:`In: ${_fmtTokens(usage.input_tokens||0)} \u00b7 Out: ${_fmtTokens(usage.output_tokens||0)}`;
   const threshold=usage.threshold_tokens||0;
   if(thresholdLine){

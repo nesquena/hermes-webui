@@ -2241,6 +2241,28 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 usage['context_length'] = getattr(_cc, 'context_length', 0) or 0
                 usage['threshold_tokens'] = getattr(_cc, 'threshold_tokens', 0) or 0
                 usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
+            # Fallback: when the compressor is absent or reports context_length=0,
+            # resolve the model's context window from metadata so the UI indicator
+            # shows the correct percentage rather than overflowing against the 128K
+            # JS default.  Mirrors the session-save fallback above (lines ~2205-2217).
+            if not usage.get('context_length'):
+                try:
+                    from agent.model_metadata import get_model_context_length as _get_cl
+                    _fb_cl = _get_cl(
+                        getattr(agent, 'model', resolved_model or '') or '',
+                        getattr(agent, 'base_url', '') or '',
+                    )
+                    if _fb_cl:
+                        usage['context_length'] = _fb_cl
+                except Exception:
+                    pass
+            # Fallback: when last_prompt_tokens is missing (no compressor), use the
+            # session-persisted value rather than letting the frontend fall back to
+            # the cumulative input_tokens counter, which overflows for long sessions.
+            if not usage.get('last_prompt_tokens'):
+                _sess_lpt = getattr(s, 'last_prompt_tokens', 0) or 0
+                if _sess_lpt:
+                    usage['last_prompt_tokens'] = _sess_lpt
             # (reasoning trace already attached + saved above, before s.save())
             # Leftover-steer delivery: if a /steer was queued (via
             # api/chat/steer) but the agent finished its turn before
