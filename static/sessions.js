@@ -1211,6 +1211,28 @@ function _sessionTimeBucketLabel(timestampMs, nowMs) {
   return t('session_time_bucket_older');
 }
 
+function _sessionLineageKey(s){
+  if(!s||!s.session_id) return null;
+  return s._lineage_root_id || s.lineage_root_id || s.parent_session_id || null;
+}
+
+function _collapseSessionLineageForSidebar(sessions){
+  const result=[];
+  const groups=new Map();
+  for(const s of sessions||[]){
+    const key=_sessionLineageKey(s);
+    if(!key){result.push(s);continue;}
+    if(!groups.has(key)) groups.set(key,[]);
+    groups.get(key).push(s);
+  }
+  for(const items of groups.values()){
+    if(items.length<=1){result.push(items[0]);continue;}
+    const chosen=[...items].sort((a,b)=>_sessionTimestampMs(b)-_sessionTimestampMs(a))[0];
+    result.push({...chosen,_lineage_collapsed_count:items.length});
+  }
+  return result;
+}
+
 function renderSessionListFromCache(){
   // Don't re-render while user is actively renaming a session (would destroy the input)
   if(_renamingSid) return;
@@ -1232,7 +1254,8 @@ function renderSessionListFromCache(){
   // Filter by active project
   const projectFiltered=_activeProject?profileFiltered.filter(s=>s.project_id===_activeProject):profileFiltered;
   // Filter archived unless toggle is on
-  const sessions=_showArchived?projectFiltered:projectFiltered.filter(s=>!s.archived);
+  const sessionsRaw=_showArchived?projectFiltered:projectFiltered.filter(s=>!s.archived);
+  const sessions=_collapseSessionLineageForSidebar(sessionsRaw);
   const archivedCount=projectFiltered.filter(s=>s.archived).length;
   const list=$('sessionList');list.innerHTML='';
   // Batch select bar (when in select mode)
