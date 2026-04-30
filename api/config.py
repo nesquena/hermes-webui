@@ -1793,6 +1793,19 @@ def get_available_models() -> dict:
             if not _has_unnamed:
                 detected_providers.discard("custom")
 
+        # Filter providers if providers.only_configured is set
+        providers_cfg = cfg.get("providers", {})
+        only_show_configured = providers_cfg.get("only_configured", False) if isinstance(providers_cfg, dict) else False
+        if only_show_configured:
+            configured_providers = set()
+            if active_provider:
+                configured_providers.add(active_provider)
+            cfg_providers = cfg.get("providers", {})
+            if isinstance(cfg_providers, dict):
+                configured_providers.update(cfg_providers.keys())
+            # Only show providers that are both detected and configured
+            detected_providers = detected_providers.intersection(configured_providers)
+
         # 5. Build model groups
         if detected_providers:
             for pid in sorted(detected_providers):
