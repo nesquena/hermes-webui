@@ -842,6 +842,7 @@ def test_spaces_routes_and_static_shell_are_registered():
     spaces_js = (repo / "static" / "spaces.js").read_text(encoding="utf-8")
 
     assert '"/api/spaces"' in routes_src
+    assert '"/api/spaces/current"' in routes_src
     assert '"/api/spaces/recovery"' in routes_src
     assert '"/api/spaces/recovery/disable-widget"' in routes_src
     assert '"/api/spaces/import"' in routes_src
@@ -949,6 +950,78 @@ def test_spaces_routes_create_list_get_and_recovery(monkeypatch, tmp_path):
     assert handled is None
     assert status == 200
     assert body["generated_widgets_rendered"] is False
+
+
+def test_current_space_helper_and_route_return_metadata_only_active_space(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {
+            "space_id": "route-current",
+            "name": "Route Current",
+            "description": "Current-space bridge",
+            "agent_instructions": "Patch widgets through typed APIs.",
+        }
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "unsafe-card",
+            "kind": "html",
+            "title": "Unsafe Card",
+            "renderer": "<script>window.SECRET_VALUE_DO_NOT_LEAK=1</script>",
+            "data": {"api_key": "SECRET...LEAK"},
+        },
+    )
+
+    import api.config as config
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path / "sessions")
+    config.SESSION_DIR.mkdir(parents=True, exist_ok=True)
+
+    import api.models as models
+    monkeypatch.setattr(models, "SESSION_DIR", config.SESSION_DIR)
+    models.SESSIONS.clear()
+    session = models.Session(session_id="session_current", workspace=str(tmp_path))
+    session.active_space_id = created["space_id"]
+    session.save(skip_index=True)
+
+    helper_payload = spaces.current_space_for_session(session)
+    assert helper_payload["enabled"] is True
+    assert helper_payload["active_space_id"] == created["space_id"]
+    assert helper_payload["space"]["space_id"] == created["space_id"]
+    assert helper_payload["space"]["widgets"] == [
+        {"id": "unsafe-card", "kind": "html", "title": "Unsafe Card", "layout": {"x": 0, "y": 0, "w": 6, "h": 4, "minimized": False}}
+    ]
+
+    handled, status, body = _route_get("/api/spaces/current?session_id=session_current")
+    assert handled is None
+    assert status == 200
+    assert body == helper_payload
+    serialized = json.dumps(body).lower()
+    assert "renderer" not in serialized
+    assert "data" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+
+
+def test_current_space_route_handles_no_active_space_without_manifest_lookup(monkeypatch, tmp_path):
+    _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    import api.config as config
+    monkeypatch.setattr(config, "SESSION_DIR", tmp_path / "sessions")
+    config.SESSION_DIR.mkdir(parents=True, exist_ok=True)
+
+    import api.models as models
+    monkeypatch.setattr(models, "SESSION_DIR", config.SESSION_DIR)
+    models.SESSIONS.clear()
+    session = models.Session(session_id="session_no_space", workspace=str(tmp_path))
+    session.save(skip_index=True)
+
+    handled, status, body = _route_get("/api/spaces/current?session_id=session_no_space")
+
+    assert handled is None
+    assert status == 200
+    assert body == {"enabled": True, "active_space_id": None, "space": None}
 
 
 def test_system_widget_route_adds_allowlisted_trusted_widget_metadata_only(monkeypatch, tmp_path):
