@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -22,33 +23,167 @@ logger = logging.getLogger(__name__)
 # Track job IDs currently being executed so the frontend can poll status.
 _RUNNING_CRON_JOBS: dict[str, float] = {}  # job_id → start_timestamp
 _RUNNING_CRON_LOCK = threading.Lock()
+_CRON_PROFILE_LOCK = threading.RLock()
 
 
-def _mark_cron_running(job_id: str):
+def _cron_run_key(job_id: str, profile: str | None = None) -> str:
+    return f"{profile}:{job_id}" if profile else job_id
+
+
+def _mark_cron_running(job_id: str, profile: str | None = None):
     with _RUNNING_CRON_LOCK:
-        _RUNNING_CRON_JOBS[job_id] = time.time()
+        _RUNNING_CRON_JOBS[_cron_run_key(job_id, profile)] = time.time()
 
 
-def _mark_cron_done(job_id: str):
+def _mark_cron_done(job_id: str, profile: str | None = None):
     with _RUNNING_CRON_LOCK:
-        _RUNNING_CRON_JOBS.pop(job_id, None)
+        _RUNNING_CRON_JOBS.pop(_cron_run_key(job_id, profile), None)
 
 
-def _is_cron_running(job_id: str) -> tuple[bool, float]:
+def _is_cron_running(job_id: str, profile: str | None = None) -> tuple[bool, float]:
     """Return (is_running, elapsed_seconds)."""
     with _RUNNING_CRON_LOCK:
-        t = _RUNNING_CRON_JOBS.get(job_id)
+        t = _RUNNING_CRON_JOBS.get(_cron_run_key(job_id, profile))
         if t is None:
             return False, 0.0
         return True, time.time() - t
 
 
-def _run_cron_tracked(job):
+def _run_cron_tracked(job, profile: str | None = None, track_profile: str | None = None):
     """Wrapper that tracks running state around cron.scheduler.run_job."""
     try:
-        run_job(job)
+        with _cron_profile_context(profile, include_scheduler=True):
+            from cron.scheduler import run_job
+            from cron.jobs import mark_job_run, save_job_output
+
+            success, output, final_response, error = run_job(job)
+            save_job_output(job.get("id", ""), output)
+            if success and not final_response:
+                success = False
+                error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
+            mark_job_run(job.get("id", ""), success, error)
+    except Exception as e:
+        logger.exception("Manual cron run failed for job %s", job.get("id", ""))
+        try:
+            with _cron_profile_context(profile):
+                from cron.jobs import mark_job_run
+
+                mark_job_run(job.get("id", ""), False, f"{type(e).__name__}: {e}")
+        except Exception:
+            logger.debug("Failed to mark manual cron run failure for %s", job.get("id", ""))
     finally:
-        _mark_cron_done(job.get("id", ""))
+        _mark_cron_done(job.get("id", ""), track_profile)
+
+
+def _active_cron_profile() -> str:
+    try:
+        from api.profiles import get_active_profile_name
+
+        return get_active_profile_name() or "default"
+    except Exception:
+        return "default"
+
+
+def _cron_profile_home(profile: str | None) -> tuple[str, Path]:
+    name = (profile or _active_cron_profile() or "default").strip() or "default"
+    try:
+        from api.profiles import get_hermes_home_for_profile
+
+        home = get_hermes_home_for_profile(name)
+        default_home = get_hermes_home_for_profile("default")
+    except Exception:
+        home = Path.home() / ".hermes"
+        default_home = home
+        name = "default"
+    if name != "default" and home == default_home:
+        # get_hermes_home_for_profile intentionally falls back for unknown or
+        # invalid names. Keep explicit requests from masquerading as a profile.
+        name = "default"
+    return name, home
+
+
+@contextmanager
+def _cron_profile_context(profile: str | None, *, include_scheduler: bool = False):
+    """Point cron module path globals at one profile for a single operation."""
+    name, home = _cron_profile_home(profile)
+    with _CRON_PROFILE_LOCK:
+        import cron.jobs as cron_jobs
+
+        jobs_state = {
+            "HERMES_DIR": cron_jobs.HERMES_DIR,
+            "CRON_DIR": cron_jobs.CRON_DIR,
+            "JOBS_FILE": cron_jobs.JOBS_FILE,
+            "OUTPUT_DIR": cron_jobs.OUTPUT_DIR,
+        }
+        scheduler = None
+        scheduler_state = {}
+
+        cron_dir = home / "cron"
+        cron_jobs.HERMES_DIR = home
+        cron_jobs.CRON_DIR = cron_dir
+        cron_jobs.JOBS_FILE = cron_dir / "jobs.json"
+        cron_jobs.OUTPUT_DIR = cron_dir / "output"
+        if include_scheduler:
+            try:
+                import cron.scheduler as scheduler
+
+                scheduler_state = {
+                    "_hermes_home": scheduler._hermes_home,
+                    "_LOCK_DIR": scheduler._LOCK_DIR,
+                    "_LOCK_FILE": scheduler._LOCK_FILE,
+                }
+            except Exception:
+                scheduler = None
+        if scheduler is not None:
+            scheduler._hermes_home = home
+            scheduler._LOCK_DIR = cron_dir
+            scheduler._LOCK_FILE = cron_dir / ".tick.lock"
+        try:
+            yield name, home
+        finally:
+            for key, value in jobs_state.items():
+                setattr(cron_jobs, key, value)
+            if scheduler is not None:
+                for key, value in scheduler_state.items():
+                    setattr(scheduler, key, value)
+
+
+def _cron_profiles_from_query(parsed) -> list[str]:
+    qs = parse_qs(parsed.query)
+    raw_profiles = qs.get("profiles", [""])[0]
+    names = []
+    if raw_profiles:
+        names.extend(p.strip() for p in raw_profiles.split(",") if p.strip())
+    else:
+        raw_profile = qs.get("profile", [""])[0].strip()
+        if raw_profile:
+            names.append(raw_profile)
+    if not names:
+        names.append(_active_cron_profile())
+    deduped = []
+    for name in names:
+        if name not in deduped:
+            deduped.append(name)
+    return deduped
+
+
+def _annotate_cron_job(job: dict, profile: str) -> dict:
+    annotated = dict(job)
+    annotated["profile"] = profile
+    return annotated
+
+
+def _list_cron_jobs_for_profiles(profiles: list[str]) -> list[dict]:
+    from cron.jobs import list_jobs
+
+    jobs = []
+    for requested in profiles:
+        with _cron_profile_context(requested) as (profile, _home):
+            jobs.extend(
+                _annotate_cron_job(job, profile)
+                for job in list_jobs(include_disabled=True)
+            )
+    return jobs
 
 _PROVIDER_ALIASES = {
     "claude": "anthropic",
@@ -1148,9 +1283,7 @@ def handle_get(handler, parsed) -> bool:
 
     # ── Cron API (GET) ──
     if parsed.path == "/api/crons":
-        from cron.jobs import list_jobs
-
-        return j(handler, {"jobs": list_jobs(include_disabled=True)})
+        return j(handler, {"jobs": _list_cron_jobs_for_profiles(_cron_profiles_from_query(parsed))})
 
     if parsed.path == "/api/crons/output":
         return _handle_cron_output(handler, parsed)
@@ -2859,33 +2992,37 @@ def _handle_live_models(handler, parsed):
 
 
 def _handle_cron_output(handler, parsed):
-    from cron.jobs import OUTPUT_DIR as CRON_OUT
-
     qs = parse_qs(parsed.query)
+    profile = qs.get("profile", [""])[0].strip() or None
     job_id = qs.get("job_id", [""])[0]
     limit = int(qs.get("limit", ["5"])[0])
     if not job_id:
         return j(handler, {"error": "job_id required"}, status=400)
-    out_dir = CRON_OUT / job_id
-    outputs = []
-    if out_dir.exists():
-        files = sorted(out_dir.glob("*.md"), reverse=True)[:limit]
-        for f in files:
-            try:
-                txt = f.read_text(encoding="utf-8", errors="replace")
-                outputs.append({"filename": f.name, "content": txt[:8000]})
-            except Exception:
-                logger.debug("Failed to read cron output file %s", f)
-    return j(handler, {"job_id": job_id, "outputs": outputs})
+    with _cron_profile_context(profile) as (resolved_profile, _home):
+        from cron.jobs import OUTPUT_DIR as CRON_OUT
+
+        out_dir = CRON_OUT / job_id
+        outputs = []
+        if out_dir.exists():
+            files = sorted(out_dir.glob("*.md"), reverse=True)[:limit]
+            for f in files:
+                try:
+                    txt = f.read_text(encoding="utf-8", errors="replace")
+                    outputs.append({"filename": f.name, "content": txt[:8000]})
+                except Exception:
+                    logger.debug("Failed to read cron output file %s", f)
+    return j(handler, {"job_id": job_id, "profile": resolved_profile, "outputs": outputs})
 
 
 def _handle_cron_status(handler, parsed):
     """Return running status for one or all cron jobs."""
     qs = parse_qs(parsed.query)
+    profile = qs.get("profile", [""])[0].strip() or None
     job_id = qs.get("job_id", [""])[0]
     if job_id:
-        running, elapsed = _is_cron_running(job_id)
-        return j(handler, {"job_id": job_id, "running": running, "elapsed": round(elapsed, 1)})
+        resolved_profile, _home = _cron_profile_home(profile)
+        running, elapsed = _is_cron_running(job_id, resolved_profile if profile else None)
+        return j(handler, {"job_id": job_id, "profile": resolved_profile, "running": running, "elapsed": round(elapsed, 1)})
     # Return status for all running jobs
     with _RUNNING_CRON_LOCK:
         all_running = {jid: round(time.time() - t, 1) for jid, t in _RUNNING_CRON_JOBS.items()}
@@ -2899,11 +3036,8 @@ def _handle_cron_recent(handler, parsed):
     qs = parse_qs(parsed.query)
     since = float(qs.get("since", ["0"])[0])
     try:
-        from cron.jobs import list_jobs
-
-        jobs = list_jobs(include_disabled=True)
         completions = []
-        for job in jobs:
+        for job in _list_cron_jobs_for_profiles(_cron_profiles_from_query(parsed)):
             last_run = job.get("last_run_at")
             if not last_run:
                 continue
@@ -2920,6 +3054,7 @@ def _handle_cron_recent(handler, parsed):
                 completions.append(
                     {
                         "job_id": job.get("id", ""),
+                        "profile": job.get("profile", "default"),
                         "name": job.get("name", "Unknown"),
                         "status": job.get("last_status", "unknown"),
                         "completed_at": ts,
@@ -3358,17 +3493,18 @@ def _handle_cron_create(handler, body):
     except ValueError as e:
         return bad(handler, str(e))
     try:
-        from cron.jobs import create_job
+        with _cron_profile_context(body.get("profile") or None) as (profile, _home):
+            from cron.jobs import create_job
 
-        job = create_job(
-            prompt=body["prompt"],
-            schedule=body["schedule"],
-            name=body.get("name") or None,
-            deliver=body.get("deliver") or "local",
-            skills=body.get("skills") or [],
-            model=body.get("model") or None,
-        )
-        return j(handler, {"ok": True, "job": job})
+            job = create_job(
+                prompt=body["prompt"],
+                schedule=body["schedule"],
+                name=body.get("name") or None,
+                deliver=body.get("deliver") or "local",
+                skills=body.get("skills") or [],
+                model=body.get("model") or None,
+            )
+        return j(handler, {"ok": True, "job": _annotate_cron_job(job, profile)})
     except Exception as e:
         return j(handler, {"error": str(e)}, status=400)
 
@@ -3378,13 +3514,14 @@ def _handle_cron_update(handler, body):
         require(body, "job_id")
     except ValueError as e:
         return bad(handler, str(e))
-    from cron.jobs import update_job
+    with _cron_profile_context(body.get("profile") or None) as (profile, _home):
+        from cron.jobs import update_job
 
-    updates = {k: v for k, v in body.items() if k != "job_id" and v is not None}
-    job = update_job(body["job_id"], updates)
+        updates = {k: v for k, v in body.items() if k not in ("job_id", "profile") and v is not None}
+        job = update_job(body["job_id"], updates)
     if not job:
         return bad(handler, "Job not found", 404)
-    return j(handler, {"ok": True, "job": job})
+    return j(handler, {"ok": True, "job": _annotate_cron_job(job, profile)})
 
 
 def _handle_cron_delete(handler, body):
@@ -3392,43 +3529,47 @@ def _handle_cron_delete(handler, body):
         require(body, "job_id")
     except ValueError as e:
         return bad(handler, str(e))
-    from cron.jobs import remove_job
+    with _cron_profile_context(body.get("profile") or None) as (profile, _home):
+        from cron.jobs import remove_job
 
-    ok = remove_job(body["job_id"])
+        ok = remove_job(body["job_id"])
     if not ok:
         return bad(handler, "Job not found", 404)
-    return j(handler, {"ok": True, "job_id": body["job_id"]})
+    return j(handler, {"ok": True, "job_id": body["job_id"], "profile": profile})
 
 
 def _handle_cron_run(handler, body):
     job_id = body.get("job_id", "")
     if not job_id:
         return bad(handler, "job_id required")
-    from cron.jobs import get_job
-    from cron.scheduler import run_job
+    requested_profile = body.get("profile") or None
+    with _cron_profile_context(requested_profile) as (profile, _home):
+        from cron.jobs import get_job
 
-    job = get_job(job_id)
+        job = get_job(job_id)
     if not job:
         return bad(handler, "Job not found", 404)
     # Prevent double-run: reject if the job is already tracked as running
-    already_running, elapsed = _is_cron_running(job_id)
+    track_profile = profile if requested_profile else None
+    already_running, elapsed = _is_cron_running(job_id, track_profile)
     if already_running:
-        return j(handler, {"ok": False, "job_id": job_id, "status": "already_running",
+        return j(handler, {"ok": False, "job_id": job_id, "profile": profile, "status": "already_running",
                             "elapsed": round(elapsed, 1)})
-    _mark_cron_running(job_id)
-    threading.Thread(target=_run_cron_tracked, args=(job,), daemon=True).start()
-    return j(handler, {"ok": True, "job_id": job_id, "status": "running"})
+    _mark_cron_running(job_id, track_profile)
+    threading.Thread(target=_run_cron_tracked, args=(job, profile, track_profile), daemon=True).start()
+    return j(handler, {"ok": True, "job_id": job_id, "profile": profile, "status": "running"})
 
 
 def _handle_cron_pause(handler, body):
     job_id = body.get("job_id", "")
     if not job_id:
         return bad(handler, "job_id required")
-    from cron.jobs import pause_job
+    with _cron_profile_context(body.get("profile") or None) as (profile, _home):
+        from cron.jobs import pause_job
 
-    result = pause_job(job_id, reason=body.get("reason"))
+        result = pause_job(job_id, reason=body.get("reason"))
     if result:
-        return j(handler, {"ok": True, "job": result})
+        return j(handler, {"ok": True, "job": _annotate_cron_job(result, profile)})
     return bad(handler, "Job not found", 404)
 
 
@@ -3436,11 +3577,12 @@ def _handle_cron_resume(handler, body):
     job_id = body.get("job_id", "")
     if not job_id:
         return bad(handler, "job_id required")
-    from cron.jobs import resume_job
+    with _cron_profile_context(body.get("profile") or None) as (profile, _home):
+        from cron.jobs import resume_job
 
-    result = resume_job(job_id)
+        result = resume_job(job_id)
     if result:
-        return j(handler, {"ok": True, "job": result})
+        return j(handler, {"ok": True, "job": _annotate_cron_job(result, profile)})
     return bad(handler, "Job not found", 404)
 
 
