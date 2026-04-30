@@ -1622,9 +1622,53 @@ async function respondClarify(response) {
   } catch(e) { setStatus(t("clarify_responding") + " " + e.message); }
 }
 
+let _clarifyEventSource = null;
+let _clarifySSEHealthTimer = null;
+
 function startClarifyPolling(sid) {
   stopClarifyPolling();
   _clarifyMissingEndpointWarned = false;
+
+  // ── SSE (preferred): long-lived connection, server pushes instantly ──
+  try {
+    const es = new EventSource('/api/clarify/stream?session_id=' + encodeURIComponent(sid));
+    let _fallbackActive = false;
+
+    es.addEventListener('initial', e => {
+      const d = JSON.parse(e.data);
+      if (d.pending) { d.pending._session_id = sid; showClarifyCard(d.pending); }
+      else { hideClarifyCard(false, 'expired'); }
+    });
+
+    es.addEventListener('clarify', e => {
+      const d = JSON.parse(e.data);
+      if (d.pending) { d.pending._session_id = sid; showClarifyCard(d.pending); }
+      else { hideClarifyCard(false, 'expired'); }
+    });
+
+    es.onerror = () => {
+      // SSE failed — fall back to HTTP polling (3s interval)
+      if (_fallbackActive) return;
+      _fallbackActive = true;
+      try { es.close(); } catch(_){}
+      _startClarifyFallbackPoll(sid);
+    };
+
+    // Periodic check: close SSE when the session changes or stops.
+    _clarifySSEHealthTimer = setInterval(() => {
+      if (!S.session || S.session.session_id !== sid) {
+        stopClarifyPolling(); hideClarifyCard(true, 'session');
+      }
+    }, 5000);
+
+    _clarifyEventSource = es;
+  } catch(_e) {
+    // EventSource constructor failed — use polling directly
+    _startClarifyFallbackPoll(sid);
+  }
+}
+
+function _startClarifyFallbackPoll(sid) {
   _clarifyPollTimer = setInterval(async () => {
     if (!S.session || S.session.session_id !== sid) {
       stopClarifyPolling(); hideClarifyCard(true, 'session'); return;
@@ -1643,13 +1687,14 @@ function startClarifyPolling(sid) {
         }
         stopClarifyPolling();
       }
-      // Ignore transient poll errors; SSE clarify event still provides a fast path.
     }
-  }, 1500);
+  }, 3000);  // 3s fallback interval (was 1.5s when it was the primary path)
 }
 
 function stopClarifyPolling() {
   if (_clarifyPollTimer) { clearInterval(_clarifyPollTimer); _clarifyPollTimer = null; }
+  if (_clarifyEventSource) { try { _clarifyEventSource.close(); } catch(_){} _clarifyEventSource = null; }
+  if (_clarifySSEHealthTimer) { clearInterval(_clarifySSEHealthTimer); _clarifySSEHealthTimer = null; }
 }
 
 // ── Notifications and Sound ──────────────────────────────────────────────────
