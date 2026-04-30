@@ -850,9 +850,12 @@ function _syncCtxIndicator(usage){
   const wrap=$('ctxIndicatorWrap');
   const el=$('ctxIndicator');
   if(!el)return;
+  // Use input_tokens as fallback when last_prompt_tokens is not available
   const promptTok=usage.last_prompt_tokens||usage.input_tokens||0;
   const totalTok=(usage.input_tokens||0)+(usage.output_tokens||0);
-  const ctxWindow=usage.context_length||0;
+  // Default context window to 128K when not provided by backend
+  const DEFAULT_CTX=128*1024;
+  const ctxWindow=usage.context_length||DEFAULT_CTX;
   const cost=usage.estimated_cost;
   // Show indicator whenever we have any usage data (tokens or cost)
   if(!promptTok&&!totalTok&&!cost){
@@ -860,8 +863,8 @@ function _syncCtxIndicator(usage){
     return;
   }
   if(wrap) wrap.style.display='';
-  const hasCtxWindow=!!(promptTok&&ctxWindow);
-  const pct=hasCtxWindow?Math.min(100,Math.round((promptTok/ctxWindow)*100)):0;
+  const hasPromptTok=!!promptTok;
+  const pct=hasPromptTok?Math.min(100,Math.round((promptTok/ctxWindow)*100)):0;
   const ring=$('ctxRingValue');
   const center=$('ctxPercent');
   const usageLine=$('ctxTooltipUsage');
@@ -873,7 +876,8 @@ function _syncCtxIndicator(usage){
     ring.style.strokeDasharray=String(circumference);
     ring.style.strokeDashoffset=String(circumference*(1-pct/100));
   }
-  if(center) center.textContent=hasCtxWindow?String(pct):'\u00b7';
+  if(center) center.textContent=hasPromptTok?String(pct):'\u00b7';
+  const hasExplicitCtx=!!usage.context_length;
   el.classList.toggle('ctx-mid',pct>50&&pct<=75);
   el.classList.toggle('ctx-high',pct>75);
   // ── Compress affordance (#524) ──
@@ -900,11 +904,12 @@ function _syncCtxIndicator(usage){
       compressWrap.style.display='none';
     }
   }
-  let label=hasCtxWindow?`Context window ${pct}% used`:`${_fmtTokens(totalTok)} tokens used`;
+  let label=hasPromptTok?`Context window ${pct}% used`:`${_fmtTokens(totalTok)} tokens used`;
+  if(!hasExplicitCtx&&hasPromptTok) label+=' (est. 128K)';
   if(cost) label+=` \u00b7 $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
   el.setAttribute('aria-label',label);
-  if(usageLine) usageLine.textContent=hasCtxWindow?`${pct}% used (${Math.max(0,100-pct)}% left)`:`${_fmtTokens(totalTok)} tokens used`;
-  if(tokensLine) tokensLine.textContent=hasCtxWindow?`${_fmtTokens(promptTok)} / ${_fmtTokens(ctxWindow)} tokens used`:`In: ${_fmtTokens(usage.input_tokens||0)} \u00b7 Out: ${_fmtTokens(usage.output_tokens||0)}`;
+  if(usageLine) usageLine.textContent=hasPromptTok?`${pct}% used (${Math.max(0,100-pct)}% left)`:`${_fmtTokens(totalTok)} tokens used`;
+  if(tokensLine) tokensLine.textContent=hasPromptTok?`${_fmtTokens(promptTok)} / ${_fmtTokens(ctxWindow)} tokens used`:`In: ${_fmtTokens(usage.input_tokens||0)} \u00b7 Out: ${_fmtTokens(usage.output_tokens||0)}`;
   const threshold=usage.threshold_tokens||0;
   if(thresholdLine){
     if(threshold&&ctxWindow){
