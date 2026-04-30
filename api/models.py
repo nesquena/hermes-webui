@@ -344,6 +344,13 @@ class Session:
 
     @property
     def path(self):
+        # Fix #1195: use profile-specific sessions directory when profile is set.
+        if self.profile:
+            try:
+                from api.profiles import _resolve_named_profile_home
+                return _resolve_named_profile_home(self.profile) / 'sessions' / f'{self.session_id}.json'
+            except (ImportError, NameError):
+                pass
         return SESSION_DIR / f'{self.session_id}.json'
 
     def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
