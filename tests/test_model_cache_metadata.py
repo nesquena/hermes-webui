@@ -21,6 +21,7 @@ def test_save_models_cache_to_disk_preserves_response_metadata(tmp_path, monkeyp
     payload = {
         "active_provider": "openai",
         "default_model": "gpt-5.4-mini",
+        "configured_model_badges": {},
         "groups": [
             {
                 "provider": "OpenAI",
@@ -67,6 +68,7 @@ def test_load_models_cache_from_disk_rejects_partial_metadata_cache(
     valid_payload = {
         "active_provider": "openai",
         "default_model": "gpt-5.4-mini",
+        "configured_model_badges": {},
         "groups": [
             {
                 "provider": "OpenAI",
@@ -80,9 +82,11 @@ def test_load_models_cache_from_disk_rejects_partial_metadata_cache(
         {key: value for key, value in valid_payload.items() if key != "active_provider"},
         {key: value for key, value in valid_payload.items() if key != "default_model"},
         {key: value for key, value in valid_payload.items() if key != "groups"},
+        {key: value for key, value in valid_payload.items() if key != "configured_model_badges"},
         {**valid_payload, "active_provider": 123},
         {**valid_payload, "default_model": None},
         {**valid_payload, "groups": {}},
+        {**valid_payload, "configured_model_badges": []},
     ]
 
     for payload in invalid_payloads:
