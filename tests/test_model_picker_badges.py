@@ -106,18 +106,17 @@ def test_ui_renders_model_badges_from_api_payload():
         "A UI precisa de um helper de matching resiliente para religar badges mesmo quando "
         "o update do catálogo mudar prefixos/formas do model ID."
     )
-    assert 'id="composerModelBadge"' in html, (
-        "O chip principal do modelo precisa de um container dedicado para exibir o badge "
-        "do modelo selecionado fora do dropdown."
+    # Chip-projected badge was removed in v0.50.243 (added too much width to the
+    # composer chip; signal value low since the model name is right next to it).
+    # Badges remain in the dropdown rows (model-opt-badge) for picker rows.
+    assert 'id="composerModelBadge"' not in html, (
+        "composer-model-badge chip projection was intentionally removed — "
+        "do not re-add it to the composer chip."
     )
-    assert "composer-model-badge" in css, (
-        "O badge do chip principal precisa de estilo próprio para ficar visível ao lado "
-        "do nome do modelo selecionado."
+    assert "composer-model-badge" not in css, (
+        "composer-model-badge CSS was intentionally removed alongside the chip span."
     )
-    assert "const badge=_getConfiguredModelBadge(sel.value||'',window._configuredModelBadges||{});" in js, (
-        "syncModelChip() deve buscar o badge configurado do modelo selecionado e projetá-lo "
-        "no chip principal da composer."
-    )
-    assert "badgeEl.textContent=badge&&badge.label?badge.label:'';" in js, (
-        "syncModelChip() deve preencher o texto do badge visível no chip principal quando houver metadata configurada."
+    assert "composerModelBadge" not in js, (
+        "syncModelChip() must not reference composerModelBadge — the chip-projected "
+        "badge was removed because it added too much width to the composer chip."
     )

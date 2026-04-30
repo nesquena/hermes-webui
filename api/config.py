@@ -503,6 +503,7 @@ _FALLBACK_MODELS = [
     {"provider": "OpenAI",    "id": "openai/gpt-5.4-mini",                "label": "GPT-5.4 Mini"},
     {"provider": "OpenAI",    "id": "openai/gpt-5.4",                     "label": "GPT-5.4"},
     # Anthropic — 4.6 flagship + 4.5 generation
+    {"provider": "Anthropic", "id": "anthropic/claude-opus-4.7",          "label": "Claude Opus 4.7"},
     {"provider": "Anthropic", "id": "anthropic/claude-opus-4.6",          "label": "Claude Opus 4.6"},
     {"provider": "Anthropic", "id": "anthropic/claude-sonnet-4.6",        "label": "Claude Sonnet 4.6"},
     {"provider": "Anthropic", "id": "anthropic/claude-sonnet-4-5",        "label": "Claude Sonnet 4.5"},
@@ -641,6 +642,7 @@ def _resolve_provider_alias(name: str) -> str:
 # Well-known models per provider (used to populate dropdown for direct API providers)
 _PROVIDER_MODELS = {
     "anthropic": [
+        {"id": "claude-opus-4.7", "label": "Claude Opus 4.7"},
         {"id": "claude-opus-4.6", "label": "Claude Opus 4.6"},
         {"id": "claude-sonnet-4.6", "label": "Claude Sonnet 4.6"},
         {"id": "claude-sonnet-4-5", "label": "Claude Sonnet 4.5"},
@@ -738,6 +740,7 @@ _PROVIDER_MODELS = {
         {"id": "gpt-5", "label": "GPT-5"},
         {"id": "gpt-5-codex", "label": "GPT-5 Codex"},
         {"id": "gpt-5-nano", "label": "GPT-5 Nano"},
+        {"id": "claude-opus-4-7", "label": "Claude Opus 4.7"},
         {"id": "claude-opus-4-6", "label": "Claude Opus 4.6"},
         {"id": "claude-opus-4-5", "label": "Claude Opus 4.5"},
         {"id": "claude-opus-4-1", "label": "Claude Opus 4.1"},

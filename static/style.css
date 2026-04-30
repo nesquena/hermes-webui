@@ -824,10 +824,6 @@
   .composer-model-chip:hover{color:var(--text);background-color:var(--hover-bg);}
   .composer-model-chip.active{color:var(--text);background:var(--accent-bg);border-color:var(--accent-bg);}
   .composer-model-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-  .composer-model-badge{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;padding:2px 7px;border-radius:999px;font-size:10px;font-weight:700;letter-spacing:.02em;text-transform:uppercase;border:1px solid transparent;}
-  .composer-model-badge[hidden]{display:none;}
-  .composer-model-badge--primary{background:rgba(50,184,198,.16);border-color:rgba(50,184,198,.32);color:#8fe7ef;}
-  .composer-model-badge--fallback{background:rgba(255,184,77,.14);border-color:rgba(255,184,77,.28);color:#ffd18a;}
   .composer-model-icon,.composer-model-chevron{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;line-height:1;}
   .composer-model-select{position:absolute!important;left:-9999px!important;width:1px!important;height:1px!important;opacity:0!important;pointer-events:none!important;}
   .composer-right{display:flex;gap:8px;align-items:center;flex-shrink:0;}
