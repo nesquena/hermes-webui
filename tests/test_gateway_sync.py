@@ -724,6 +724,33 @@ def test_gateway_watcher_uses_normalized_source_metadata(monkeypatch):
             pass
 
 
+def test_imported_cli_session_metadata_survives_compact(cleanup_test_sessions):
+    """Imported agent sessions should remain distinguishable in compact sidebar payloads."""
+    from api.models import Session
+
+    sid = 'gw_imported_metadata_001'
+    cleanup_test_sessions.append(sid)
+    s = Session(
+        session_id=sid,
+        title='Imported Telegram Chat',
+        messages=[{'role': 'user', 'content': 'hello from telegram', 'timestamp': time.time()}],
+        model='openai/gpt-5',
+    )
+    s.is_cli_session = True
+    s.source_tag = 'telegram'
+    s.session_source = 'messaging'
+    s.source_label = 'Telegram'
+    s.save(touch_updated_at=False)
+
+    loaded = Session.load_metadata_only(sid)
+    compact = loaded.compact()
+
+    assert compact['is_cli_session'] is True
+    assert compact['source_tag'] == 'telegram'
+    assert compact['session_source'] == 'messaging'
+    assert compact['source_label'] == 'Telegram'
+
+
 def test_imported_cron_sessions_hidden_from_sidebar_by_default(cleanup_test_sessions):
     """Cron sessions already imported into the WebUI store should stay hidden from the sidebar."""
     from api.models import Session

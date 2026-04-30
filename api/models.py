@@ -347,6 +347,10 @@ class Session:
         self.context_length = context_length
         self.threshold_tokens = threshold_tokens
         self.last_prompt_tokens = last_prompt_tokens
+        self.is_cli_session = bool(kwargs.get('is_cli_session', False))
+        self.source_tag = kwargs.get('source_tag')
+        self.session_source = kwargs.get('session_source')
+        self.source_label = kwargs.get('source_label')
         self._metadata_message_count = None
 
     @property
@@ -367,6 +371,7 @@ class Session:
             'pending_user_message', 'pending_attachments', 'pending_started_at',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'context_length', 'threshold_tokens', 'last_prompt_tokens',
+            'is_cli_session', 'source_tag', 'session_source', 'source_label',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         meta['messages'] = self.messages
@@ -462,6 +467,10 @@ class Session:
             'threshold_tokens': self.threshold_tokens,
             'last_prompt_tokens': self.last_prompt_tokens,
             'active_stream_id': self.active_stream_id,
+            'is_cli_session': self.is_cli_session,
+            'source_tag': self.source_tag,
+            'session_source': self.session_source,
+            'source_label': self.source_label,
             'is_streaming': _is_streaming_session(
                 self.active_stream_id, active_stream_ids
             ) if include_runtime else False,
