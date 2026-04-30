@@ -130,30 +130,40 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
             pass
 
 
-def _record_event(space_id: str, event_type: str, details: dict[str, Any] | None = None) -> str:
+def _record_event(
+    space_id: str,
+    event_type: str,
+    details: dict[str, Any] | None = None,
+    *,
+    event_id: str | None = None,
+    snapshot: dict[str, Any] | None = None,
+) -> str:
     _ensure_dirs()
-    event_id = uuid.uuid4().hex
+    safe_event_id = event_id if _event_id_is_safe(event_id) else uuid.uuid4().hex
     event = {
         "schema_version": SCHEMA_VERSION,
-        "event_id": event_id,
+        "event_id": safe_event_id,
         "event_type": event_type,
         "space_id": space_id,
         "created_at": time.time(),
         "details": details or {},
     }
-    _atomic_write_json(events_dir() / f"{event_id}.json", event)
-    return event_id
+    if isinstance(snapshot, dict):
+        event["snapshot"] = json.loads(json.dumps(snapshot, ensure_ascii=False, default=str))
+    _atomic_write_json(events_dir() / f"{safe_event_id}.json", event)
+    return safe_event_id
 
 
 def _write_manifest(space: dict[str, Any], event_type: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
     now = time.time()
     space.setdefault("created_at", now)
     space["updated_at"] = now
-    event_id = _record_event(space["space_id"], event_type, details)
+    event_id = uuid.uuid4().hex
     revisions = list(space.get("revision_events") or [])
     revisions.append(event_id)
     space["revision_events"] = revisions
     space["revision_event_id"] = event_id
+    _record_event(space["space_id"], event_type, details, event_id=event_id, snapshot=space)
     _atomic_write_json(_manifest_path(space["space_id"]), space)
     return dict(space)
 
@@ -583,6 +593,55 @@ def list_revision_events(space_id: str, limit: int = 20) -> list[dict[str, Any]]
         if summary is not None:
             summaries.append(summary)
     return summaries
+
+
+def restore_revision(space_id: str, event_id: str) -> dict[str, Any]:
+    """Restore a space manifest from a stored revision snapshot.
+
+    Revision event files may contain full internal snapshots so rollback can
+    preserve generated/source widget artifacts. Public responses stay
+    metadata-only through read_space_detail(), and list_revision_events() ignores
+    snapshots entirely.
+    """
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    sid = validate_space_id(space_id)
+    safe_event_id = str(event_id or "")
+    if not _event_id_is_safe(safe_event_id):
+        raise ValueError("Invalid event_id")
+    current = read_space(sid)
+    event_path = events_dir() / f"{safe_event_id}.json"
+    if not event_path.exists():
+        raise FileNotFoundError("Revision event not found")
+    event = json.loads(event_path.read_text(encoding="utf-8"))
+    if not isinstance(event, dict) or event.get("space_id") != sid:
+        raise ValueError("Revision event does not belong to this space")
+    snapshot = event.get("snapshot")
+    if not isinstance(snapshot, dict):
+        raise ValueError("Revision snapshot is unavailable")
+    restored = dict(snapshot)
+    restored["space_id"] = sid
+    restored.setdefault("schema_version", SCHEMA_VERSION)
+    restored.setdefault("created_at", current.get("created_at") or time.time())
+    if not isinstance(restored.get("widgets"), list):
+        restored["widgets"] = []
+    normalized_widgets: list[dict[str, Any]] = []
+    for widget in restored.get("widgets") or []:
+        if isinstance(widget, dict):
+            normalized_widgets.append(_normalize_widget(widget))
+    restored["widgets"] = normalized_widgets
+    if not isinstance(restored.get("layout"), dict):
+        restored["layout"] = {}
+    if not isinstance(restored.get("capabilities"), dict):
+        restored["capabilities"] = {}
+    restored["revision_events"] = [str(rev) for rev in (restored.get("revision_events") or []) if _event_id_is_safe(rev)]
+    saved = _write_manifest(restored, "space.restored", {"restored_event_id": safe_event_id})
+    return {
+        "ok": True,
+        "space": read_space_detail(sid),
+        "restored_event_id": safe_event_id,
+        "revision_event_id": saved["revision_event_id"],
+    }
 
 
 def update_space(space_id: str, updates: dict[str, Any]) -> dict[str, Any]:
