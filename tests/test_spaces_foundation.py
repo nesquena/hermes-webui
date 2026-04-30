@@ -1114,6 +1114,73 @@ def test_camera_dashboard_template_install_route_returns_safe_metadata(monkeypat
     assert "secret" not in serialized
 
 
+def test_install_local_service_template_creates_safe_service_dashboard_widgets(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    installed = spaces.install_template("service")
+
+    assert installed["template"] == "service"
+    assert installed["space"]["template"] == "local-service-dashboard"
+    assert installed["space"]["name"] == "Local Service Dashboard"
+    assert [widget["id"] for widget in installed["installed_widgets"]] == [
+        "service-api-chat",
+        "service-browser-panel",
+        "service-health",
+        "service-settings-review",
+    ]
+    assert [widget["kind"] for widget in installed["installed_widgets"]] == [
+        "api-connector",
+        "browser-surface",
+        "status",
+        "table",
+    ]
+    api_widget = spaces.read_widget(installed["space"]["space_id"], "service-api-chat")
+    assert api_widget["connector"] == {
+        "target": "local-service",
+        "auth": "configured-outside-widget",
+        "mode": "agent-mediated",
+    }
+    assert api_widget["permissions"] == {"network": "explicit-approval", "secrets": "never-store-in-widget"}
+    browser_widget = spaces.read_widget(installed["space"]["space_id"], "service-browser-panel")
+    assert browser_widget["browser_surface"] == {
+        "target": "about:blank",
+        "control": "user-and-agent",
+        "inspection": "metadata-only",
+        "bridge": "planned-cdp",
+    }
+    serialized = json.dumps(installed).lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert '\"script\"' not in serialized
+    assert '\"data\"' not in serialized
+    assert '\"source\"' not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "password" not in serialized
+    assert "secret" not in serialized
+
+
+def test_local_service_template_install_route_returns_safe_metadata(monkeypatch, tmp_path):
+    _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    handled, status, body = _route_post("/api/spaces/templates/install", {"template": "service"})
+
+    assert handled is None
+    assert status == 200
+    assert body["template"] == "service"
+    assert body["space"]["name"] == "Local Service Dashboard"
+    assert body["installed_widgets"][0]["id"] == "service-api-chat"
+    assert len(body["installed_widgets"]) == 4
+    serialized = json.dumps(body).lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "password" not in serialized
+    assert "secret" not in serialized
+
+
 def test_delete_space_removes_manifest_but_keeps_global_revision_event(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Disposable"})

@@ -274,6 +274,18 @@ global.fetch = async function(path, opts = {}) {
         ],
       });
     }
+    if (body.template === 'service') {
+      return response({
+        template: 'service',
+        space: { space_id: 'local-service-dashboard', name: 'Local Service Dashboard', description: 'Safe local service/API dashboard starter', widget_count: 4, revision_event_id: 'rev-service' },
+        installed_widgets: [
+          { id: 'service-api-chat', kind: 'api-connector', title: 'Service API chat', layout: { x: 0, y: 0, w: 10, h: 6, minimized: false }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+          { id: 'service-browser-panel', kind: 'browser-surface', title: 'Service browser panel', layout: { x: 10, y: 0, w: 14, h: 8, minimized: false }, source: 'SECRET_SOURCE' },
+          { id: 'service-health', kind: 'status', title: 'Health checks', layout: { x: 0, y: 6, w: 10, h: 4, minimized: false }, token: 'SECRET_TOKEN' },
+          { id: 'service-settings-review', kind: 'table', title: 'Settings review', layout: { x: 10, y: 8, w: 14, h: 4, minimized: false } },
+        ],
+      });
+    }
     return response({
       template: 'weather',
       space: { space_id: 'weather-demo', name: 'Weather Demo', description: 'Prague weather starter', widget_count: 1, revision_event_id: 'rev-weather' },
@@ -458,6 +470,9 @@ async function click(action, dataset) {
   } else if (scenario === 'installMusicSequencer') {
     await window.loadCapySpaces();
     await click('installMusicTemplate', {});
+  } else if (scenario === 'installLocalServiceDashboard') {
+    await window.loadCapySpaces();
+    await click('installServiceTemplate', {});
   } else if (scenario === 'openSpaceDetail') {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
@@ -978,6 +993,20 @@ def test_spaces_ui_install_music_sequencer_posts_template_and_refreshes_without_
     assert out["calls"][-1]["path"] == "api/spaces"
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_install_local_service_dashboard_posts_template_and_refreshes_without_widget_code(driver_path):
+    out = _run_spaces_scenario(driver_path, "installLocalServiceDashboard")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/templates/install")
+
+    assert "Install local service dashboard" in out["rootHtml"]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"template": "service"}
+    assert out["calls"][-1]["path"] == "api/spaces"
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"]
     assert "SECRET" not in out["rootHtml"]
 
 
