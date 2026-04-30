@@ -94,6 +94,7 @@ def _cron_output_content_window(text: str, limit: int = _CRON_OUTPUT_CONTENT_LIM
 
 def _run_cron_tracked(job):
     """Wrapper that tracks running state around cron.scheduler.run_job."""
+    from cron.scheduler import run_job  # import here — runs inside a worker thread
     try:
         run_job(job)
     finally:
@@ -3507,7 +3508,6 @@ def _handle_cron_run(handler, body):
     if not job_id:
         return bad(handler, "job_id required")
     from cron.jobs import get_job
-    from cron.scheduler import run_job
 
     job = get_job(job_id)
     if not job:
