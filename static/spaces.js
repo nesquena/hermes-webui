@@ -36,6 +36,20 @@
     }
   }
 
+  function renderTemplateResetStatus(result){
+    const space = result && result.space ? result.space : {};
+    const widgets = Array.isArray(result && result.installed_widgets) ? result.installed_widgets : [];
+    const widgetItems = widgets.map(function(w){
+      return '<li>'+escapeHtml(w.title || w.id || 'Widget')+'</li>';
+    }).join('');
+    const widgetCount = widgets.length;
+    const widgetLabel = widgetCount === 1 ? '1 widget' : widgetCount+' widgets';
+    return '<div class="capy-spaces-card" role="status"><h3>Big Bang onboarding reset</h3>' +
+      '<div class="capy-spaces-muted">'+escapeHtml(space.name || 'Big Bang Onboarding')+' restored to safe canonical metadata · '+escapeHtml(widgetLabel)+'</div>' +
+      (widgetItems ? '<ul>'+widgetItems+'</ul>' : '') +
+      '</div>';
+  }
+
   function renderSpacesList(spaces){
     const activeSpaceId = currentActiveSpaceId();
     const cards = spaces.length ? spaces.map(function(s){
@@ -46,15 +60,21 @@
       const activeAction = activeSpaceId && activeSpaceId === spaceId
         ? '<button type="button" class="capy-spaces-btn" data-capy-action="clearActiveSpace">Clear from chat</button>'
         : '<button type="button" class="capy-spaces-btn" data-capy-action="activateSpace" data-space-id="'+escapeHtml(spaceId)+'">Use in chat</button>';
+      const widgetCount = Number(s.widget_count||0);
+      const widgetLabel = widgetCount === 1 ? '1 widget' : widgetCount+' widgets';
+      const resetAction = spaceId === 'big-bang-onboarding'
+        ? '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="resetBigBangTemplate" data-space-id="'+escapeHtml(spaceId)+'">Reset Big Bang onboarding</button>'
+        : '';
       return '<div class="capy-spaces-card" data-space-id="'+escapeHtml(spaceId)+'">' +
         '<div class="capy-spaces-card-row"><div><strong>'+escapeHtml(name)+'</strong>' +
         (description ? '<div class="capy-spaces-muted">'+escapeHtml(description)+'</div>' : '') +
-        '<div class="capy-spaces-muted">Widgets: '+Number(s.widget_count||0)+' · Revision: '+escapeHtml(s.revision_event_id||'none')+escapeHtml(activeLabel)+'</div></div>' +
+        '<div class="capy-spaces-muted">'+escapeHtml(widgetLabel)+' · Revision: '+escapeHtml(s.revision_event_id||'none')+escapeHtml(activeLabel)+'</div></div>' +
         '<div class="capy-spaces-actions">' +
         '<button type="button" class="capy-spaces-btn" data-capy-action="openSpace" data-space-id="'+escapeHtml(spaceId)+'">Open</button>' +
         activeAction +
         '<button type="button" class="capy-spaces-btn" data-capy-action="editSpace" data-space-id="'+escapeHtml(spaceId)+'" data-space-name="'+escapeHtml(name)+'" data-space-description="'+escapeHtml(description)+'">Edit</button>' +
         '<button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Manage widgets</button>' +
+        resetAction +
         '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="deleteSpace" data-space-id="'+escapeHtml(spaceId)+'">Delete</button>' +
         '</div></div>' +
         '</div>';
@@ -624,6 +644,16 @@
     if (action === 'installBigBangTemplate') {
       await postSpacesJson('api/spaces/templates/install', {template: 'big-bang'});
       await loadCapySpaces();
+      return;
+    }
+    if (action === 'resetBigBangTemplate') {
+      if (!spaceId || typeof showConfirmDialog !== 'function') return;
+      const ok = await showConfirmDialog({title: 'Reset Big Bang onboarding?', message: 'Reset this onboarding Space to the canonical safe demo metadata? Extra generated widgets will be removed from the active manifest, with revision history preserved.', confirmLabel: 'Reset onboarding', danger: true, focusCancel: true});
+      if (!ok) return;
+      const result = await postSpacesJson('api/spaces/templates/reset', {template: 'big-bang', space_id: spaceId});
+      await loadCapySpaces();
+      const root = document.getElementById('capySpacesRoot');
+      if (root) root.innerHTML = renderTemplateResetStatus(result) + root.innerHTML;
       return;
     }
     if (action === 'editSpace') {

@@ -78,6 +78,9 @@ global.document = {
 global.fetch = async function(path, opts = {}) {
   calls.push({ path, method: opts.method || 'GET', body: opts.body || '' });
   if (path === 'api/spaces') {
+    if (String(scenario || '').startsWith('resetBigBang')) {
+      return response({ enabled: true, spaces: [{ space_id: 'big-bang-onboarding', name: 'Big Bang Onboarding', widget_count: 4, revision_event_id: 'rev-reset-bigbang' }] });
+    }
     return response({ enabled: true, spaces: [{ space_id: 'lab', name: 'Lab', widget_count: 1, revision_event_id: 'rev1' }] });
   }
   if (path === 'api/spaces/recovery') {
@@ -298,6 +301,20 @@ global.fetch = async function(path, opts = {}) {
       installed_widgets: [{ id: 'weather-current', kind: 'weather', title: 'Weather in Prague', layout: { x: 0, y: 0, w: 8, h: 5, minimized: false }, renderer: '<script>bad()</script>' }],
     });
   }
+  if (path === 'api/spaces/templates/reset') {
+    const body = opts.body ? JSON.parse(opts.body) : {};
+    return response({
+      template: body.template || 'big-bang',
+      reset: true,
+      space: { space_id: body.space_id || 'big-bang-onboarding', name: 'Big Bang Onboarding', description: 'Safe reset tour starter', widget_count: 4, revision_event_id: 'rev-reset-bigbang', renderer: '<script>bad()</script>', api_key: 'SECRET' },
+      installed_widgets: [
+        { id: 'bigbang-welcome', kind: 'markdown', title: 'Welcome to Capy Spaces', renderer: '<script>bad()</script>', api_key: 'SECRET' },
+        { id: 'bigbang-demo-launcher', kind: 'checklist', title: 'Demo launchers', source: 'SECRET_SOURCE' },
+        { id: 'bigbang-safety', kind: 'status', title: 'Safety guardrails' },
+        { id: 'bigbang-next-steps', kind: 'checklist', title: 'Next steps' },
+      ],
+    });
+  }
   if (path === 'api/spaces/revision/restore') {
     const body = opts.body ? JSON.parse(opts.body) : {};
     return response({
@@ -470,6 +487,18 @@ async function click(action, dataset) {
   } else if (scenario === 'installBigBangOnboarding') {
     await window.loadCapySpaces();
     await click('installBigBangTemplate', {});
+  } else if (scenario === 'resetBigBangOnboardingConfirmed') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    await window.loadCapySpaces();
+    beforeHtml = root.innerHTML;
+    await click('resetBigBangTemplate', { spaceId: 'big-bang-onboarding' });
+  } else if (scenario === 'resetBigBangOnboardingNoDialog') {
+    await window.loadCapySpaces();
+    await click('resetBigBangTemplate', { spaceId: 'big-bang-onboarding' });
+  } else if (scenario === 'resetBigBangOnboardingCancelled') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return false; };
+    await window.loadCapySpaces();
+    await click('resetBigBangTemplate', { spaceId: 'big-bang-onboarding' });
   } else if (scenario === 'installGameSandbox') {
     await window.loadCapySpaces();
     await click('installGameTemplate', {});
@@ -1274,6 +1303,39 @@ def test_spaces_ui_import_yaml_posts_safe_payload_and_renders_metadata_only(driv
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_reset_big_bang_uses_shared_confirm_and_renders_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "resetBigBangOnboardingConfirmed")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/templates/reset")
+
+    assert "Reset Big Bang onboarding" in out["beforeHtml"]
+    assert out["dialogs"]
+    assert out["dialogs"][0]["danger"] is True
+    assert "Reset" in out["dialogs"][0]["confirmLabel"]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"template": "big-bang", "space_id": "big-bang-onboarding"}
+    assert out["calls"][-1]["path"] == "api/spaces"
+    assert "Big Bang Onboarding" in out["rootHtml"]
+    assert "Welcome to Capy Spaces" in out["rootHtml"]
+    assert "4 widgets" in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_reset_big_bang_fails_closed_without_shared_dialog(driver_path):
+    out = _run_spaces_scenario(driver_path, "resetBigBangOnboardingNoDialog")
+
+    assert not any(call["path"] == "api/spaces/templates/reset" for call in out["calls"])
+
+
+def test_spaces_ui_cancelled_reset_big_bang_does_not_post(driver_path):
+    out = _run_spaces_scenario(driver_path, "resetBigBangOnboardingCancelled")
+
+    assert out["dialogs"]
+    assert not any(call["path"] == "api/spaces/templates/reset" for call in out["calls"])
 
 
 def test_spaces_ui_renders_trusted_system_widgets_without_generated_content(driver_path):
