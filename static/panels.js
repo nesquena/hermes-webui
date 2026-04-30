@@ -870,6 +870,23 @@ async function loadSkills() {
   } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">Error: ${esc(e.message)}</div>`; }
 }
 
+let _collapsedCats = new Set(); // persisted collapsed state across re-renders
+
+function _toggleCatCollapse(cat) {
+  if (_collapsedCats.has(cat)) _collapsedCats.delete(cat);
+  else _collapsedCats.add(cat);
+  // Toggle DOM without full re-render
+  document.querySelectorAll('.skills-category').forEach(sec => {
+    const header = sec.querySelector('.skills-cat-header');
+    if (header && header.dataset.cat === cat) {
+      const collapsed = _collapsedCats.has(cat);
+      sec.classList.toggle('collapsed', collapsed);
+      header.querySelector('.cat-chevron').style.transform = collapsed ? '' : 'rotate(90deg)';
+      sec.querySelectorAll('.skill-item').forEach(el => el.style.display = collapsed ? 'none' : '');
+    }
+  });
+}
+
 function renderSkills(skills) {
   const query = ($('skillsSearch').value || '').toLowerCase();
   const filtered = query ? skills.filter(s =>
@@ -888,12 +905,19 @@ function renderSkills(skills) {
   box.innerHTML = '';
   if (!filtered.length) { box.innerHTML = `<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('skills_no_match'))}</div>`; return; }
   for (const [cat, items] of Object.entries(cats).sort()) {
+    const collapsed = _collapsedCats.has(cat);
     const sec = document.createElement('div');
-    sec.className = 'skills-category';
-    sec.innerHTML = `<div class="skills-cat-header">${li('folder',12)} ${esc(cat)} <span style="opacity:.5">(${items.length})</span></div>`;
+    sec.className = 'skills-category' + (collapsed ? ' collapsed' : '');
+    const hdr = document.createElement('div');
+    hdr.className = 'skills-cat-header';
+    hdr.dataset.cat = cat;
+    hdr.innerHTML = `<span class="cat-chevron" style="display:inline-flex;transition:transform .15s;${collapsed ? '' : 'transform:rotate(90deg)'}">${li('chevron-right',12)}</span> ${esc(cat)} <span style="opacity:.5">(${items.length})</span>`;
+    hdr.onclick = () => _toggleCatCollapse(cat);
+    sec.appendChild(hdr);
     for (const skill of items.sort((a,b) => a.name.localeCompare(b.name))) {
       const el = document.createElement('div');
       el.className = 'skill-item';
+      el.style.display = collapsed ? 'none' : '';
       el.innerHTML = `<span class="skill-name">${esc(skill.name)}</span><span class="skill-desc">${esc(skill.description||'')}</span>`;
       el.onclick = () => openSkill(skill.name, el);
       sec.appendChild(el);
