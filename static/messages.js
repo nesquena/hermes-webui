@@ -1668,10 +1668,56 @@ async function respondClarify(response) {
   } catch(e) { setStatus(t("clarify_responding") + " " + e.message); }
 }
 
+var _clarifyEventSource = null;
+var _clarifyFallbackTimer = null;
+var _clarifyHealthTimer = null;
+
 function startClarifyPolling(sid) {
   stopClarifyPolling();
   _clarifyMissingEndpointWarned = false;
-  _clarifyPollTimer = setInterval(async () => {
+
+  // SSE primary path: long-lived connection pushes events instantly.
+  try {
+    _clarifyEventSource = new EventSource('/api/clarify/stream?session_id=' + encodeURIComponent(sid));
+  } catch(e) {
+    _startClarifyFallbackPoll(sid);
+    return;
+  }
+
+  _clarifyEventSource.addEventListener('initial', function(ev) {
+    try {
+      var d = JSON.parse(ev.data);
+      if (d.pending) { d.pending._session_id = sid; showClarifyCard(d.pending); }
+      else { hideClarifyCard(false, 'expired'); }
+    } catch(e) {}
+  });
+
+  _clarifyEventSource.addEventListener('clarify', function(ev) {
+    try {
+      var d = JSON.parse(ev.data);
+      if (d.pending) { d.pending._session_id = sid; showClarifyCard(d.pending); }
+      else { hideClarifyCard(false, 'expired'); }
+    } catch(e) {}
+  });
+
+  _clarifyEventSource.onerror = function() {
+    stopClarifyPolling();
+    _startClarifyFallbackPoll(sid);
+  };
+
+  // Health timer: if no event received in 60s, reconnect.
+  _clarifyHealthTimer = setInterval(function() {
+    if (_clarifyEventSource) {
+      try { _clarifyEventSource.close(); } catch(_){}
+      _clarifyEventSource = null;
+    }
+    clearInterval(_clarifyHealthTimer); _clarifyHealthTimer = null;
+    startClarifyPolling(sid);
+  }, 60000);
+}
+
+function _startClarifyFallbackPoll(sid) {
+  _clarifyFallbackTimer = setInterval(async () => {
     if (!S.session || S.session.session_id !== sid) {
       stopClarifyPolling(); hideClarifyCard(true, 'session'); return;
     }
@@ -1689,13 +1735,14 @@ function startClarifyPolling(sid) {
         }
         stopClarifyPolling();
       }
-      // Ignore transient poll errors; SSE clarify event still provides a fast path.
     }
-  }, 1500);
+  }, 3000);
 }
 
 function stopClarifyPolling() {
-  if (_clarifyPollTimer) { clearInterval(_clarifyPollTimer); _clarifyPollTimer = null; }
+  if (_clarifyEventSource) { try { _clarifyEventSource.close(); } catch(_){} _clarifyEventSource = null; }
+  if (_clarifyFallbackTimer) { clearInterval(_clarifyFallbackTimer); _clarifyFallbackTimer = null; }
+  if (_clarifyHealthTimer) { clearInterval(_clarifyHealthTimer); _clarifyHealthTimer = null; }
 }
 
 // ── Notifications and Sound ──────────────────────────────────────────────────
