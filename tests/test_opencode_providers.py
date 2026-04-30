@@ -49,7 +49,18 @@ def test_opencode_go_in_provider_models():
     ids = [m["id"] for m in config._PROVIDER_MODELS["opencode-go"]]
     assert "glm-5.1" in ids
     assert "glm-5" in ids
+    assert "kimi-k2.5" in ids
+    assert "kimi-k2.6" in ids
+    assert "deepseek-v4-pro" in ids
+    assert "deepseek-v4-flash" in ids
     assert "mimo-v2-pro" in ids
+    assert "mimo-v2-omni" in ids
+    assert "mimo-v2.5-pro" in ids
+    assert "mimo-v2.5" in ids
+    assert "minimax-m2.7" in ids
+    assert "minimax-m2.5" in ids
+    assert "qwen3.6-plus" in ids
+    assert "qwen3.5-plus" in ids
 
 
 # ── Env-var fallback detection ────────────────────────────────────────
