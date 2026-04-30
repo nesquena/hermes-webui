@@ -34,6 +34,8 @@ def _make_state_db(path, sessions):
         CREATE TABLE messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id TEXT,
+            role TEXT,
+            content TEXT,
             timestamp REAL
         )
     """)
@@ -43,9 +45,11 @@ def _make_state_db(path, sessions):
             "VALUES (?, ?, ?, ?, ?, ?)",
             (sid, title, "gpt-x", 1, 1700000000.0, source),
         )
+        # Stub assistant row keeps the JOIN counter happy; tests that need a
+        # user-content title can append additional rows after fixture setup.
         conn.execute(
-            "INSERT INTO messages (session_id, timestamp) VALUES (?, ?)",
-            (sid, 1700000001.0),
+            "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+            (sid, "assistant", "stub", 1700000001.0),
         )
     conn.commit()
     conn.close()
@@ -145,4 +149,32 @@ def test_non_cron_sessions_unaffected(fake_hermes_home):
 
     sessions = models.get_cli_sessions()
 
+    assert sessions[0]["title"] == "Cli Session"
+
+
+
+def test_non_cron_session_uses_user_message_when_title_missing(fake_hermes_home):
+    """CLI sessions without a title should derive one from the user's message."""
+    _make_state_db(fake_hermes_home / "state.db", [
+        ("cli_abc", None, "cli"),
+    ])
+    conn = sqlite3.connect(str(fake_hermes_home / "state.db"))
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+        ("cli_abc", "user", "Please refactor session rename workflow for clarity", 1700000002.0),
+    )
+    conn.commit()
+    conn.close()
+
+    sessions = models.get_cli_sessions()
+
+    assert sessions[0]["title"] == "Please refactor session rename workflow for clarity"
+
+
+def test_session_title_falls_back_to_source_when_no_user_message(fake_hermes_home):
+    """With no user message, title should still degrade gracefully to the source label."""
+    _make_state_db(fake_hermes_home / "state.db", [
+        ("cli_no_user", None, "cli"),
+    ])
+    sessions = models.get_cli_sessions()
     assert sessions[0]["title"] == "Cli Session"
