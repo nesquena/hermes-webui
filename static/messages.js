@@ -1709,8 +1709,22 @@ function startClarifyPolling(sid) {
     _startClarifyFallbackPoll(sid);
   };
 
-  // Health timer: if no event received in 60s, reconnect.
+  // Stale-detector: track last event timestamp; only reconnect if no event
+  // (initial or clarify) has arrived in 60s. The server sends a keepalive
+  // comment line every 30s but EventSource silently consumes those; we only
+  // bump lastEventAt on actual application events. With no real events for
+  // 60s on a long-lived clarify connection the server is effectively silent
+  // and a reconnect is the safe move.
+  //
+  // Without the lastEventAt gate the original PR force-reconnected every 60s
+  // regardless of activity, which churned one TCP/SSE setup per minute per
+  // active session. (Opus pre-release review of v0.50.249.)
+  let _lastClarifyEventAt = Date.now();
+  const _markClarifyEvent = () => { _lastClarifyEventAt = Date.now(); };
+  _clarifyEventSource.addEventListener('initial', _markClarifyEvent);
+  _clarifyEventSource.addEventListener('clarify', _markClarifyEvent);
   _clarifyHealthTimer = setInterval(function() {
+    if (Date.now() - _lastClarifyEventAt < 60000) return;
     if (_clarifyEventSource) {
       try { _clarifyEventSource.close(); } catch(_){}
       _clarifyEventSource = null;
