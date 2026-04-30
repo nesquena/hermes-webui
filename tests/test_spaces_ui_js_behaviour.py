@@ -109,6 +109,22 @@ global.fetch = async function(path, opts = {}) {
         rollback_point: true,
       });
     }
+    if (body.action === 'space.demo.run_all') {
+      return response({
+        ok: true,
+        action: 'space.demo.run_all',
+        total: 2,
+        passed: 2,
+        failed: 0,
+        mode: 'metadata-only-smoke',
+        results: [
+          { ok: true, demo: 'demo_weather_widget', template: 'weather', mode: 'metadata-only-smoke', space: { space_id: 'demo-weather-widget', name: 'Weather Demo Smoke', renderer: '<script>bad()</script>', api_key: 'UNTRUSTED_VALUE' }, widget_count: 1, rollback_point: true },
+          { ok: true, demo: 'demo_time_travel_restore', template: 'big-bang', mode: 'metadata-only-smoke', space: { space_id: 'demo-time-travel-restore', name: 'Time Travel Smoke', source: 'UNTRUSTED_SOURCE' }, widget_count: 4, rollback_point: true },
+        ],
+        renderer: '<script>bad()</script>',
+        api_key: 'UNTRUSTED_VALUE',
+      });
+    }
   }
   if (path === 'api/spaces/recovery') {
     return response({
@@ -556,6 +572,10 @@ async function click(action, dataset) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('runDemoSmoke', { demo: 'demo_weather_widget' });
+  } else if (scenario === 'runDemoParityAllSmokes') {
+    await window.loadCapySpaces();
+    beforeHtml = root.innerHTML;
+    await click('runAllDemoSmokes', {});
   } else if (scenario === 'openSpaceDetail') {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
@@ -1149,6 +1169,25 @@ def test_spaces_ui_runs_demo_parity_smoke_from_safe_catalog(driver_path):
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()
     assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_runs_all_demo_parity_smokes_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "runDemoParityAllSmokes")
+    run_all_post = next(call for call in out["calls"] if call["path"] == "api/spaces/tool" and json.loads(call["body"]).get("action") == "space.demo.run_all")
+
+    assert "Run all smokes" in out["beforeHtml"]
+    assert run_all_post["method"] == "POST"
+    assert json.loads(run_all_post["body"]) == {"action": "space.demo.run_all"}
+    assert "Demo parity smoke suite passed" in out["rootHtml"]
+    assert "2 / 2 metadata-only smokes passed" in out["rootHtml"]
+    assert "demo_weather_widget" in out["rootHtml"]
+    assert "demo_time_travel_restore" in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+    assert "UNTRUSTED_VALUE" not in out["rootHtml"]
+    assert "UNTRUSTED_SOURCE" not in out["rootHtml"]
 
 
 def test_spaces_ui_edit_space_posts_to_update_without_changing_space_id(driver_path):

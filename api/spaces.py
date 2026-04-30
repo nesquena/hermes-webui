@@ -609,6 +609,22 @@ def space_demo_run(name: str) -> dict[str, Any]:
     return _space_demo_run_summary(demo, template, space_id, action=action)
 
 
+def space_demo_run_all() -> dict[str, Any]:
+    """Run every metadata-only Space Agent video parity smoke fixture."""
+    results = [space_demo_run(item["demo"]) for item in _SPACE_DEMO_RUNS]
+    passed = sum(1 for item in results if item.get("ok") is True)
+    total = len(results)
+    return {
+        "ok": passed == total,
+        "action": "space.demo.run_all",
+        "mode": "metadata-only-smoke",
+        "total": total,
+        "passed": passed,
+        "failed": total - passed,
+        "results": results,
+    }
+
+
 def _space_tool_create_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Return the bounded metadata-only payload accepted by the tool adapter."""
     allowed = {"space_id", "name", "description", "agent_instructions", "instructions", "template"}
@@ -646,6 +662,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {"space.demo.run", "space_demo_run"}:
         demo_name = data.get("demo") or data.get("name") or data.get("demo_name") or ""
         return {"action": name, **space_demo_run(demo_name)}
+    if name in {"space.demo.run_all", "space.demo.run-all", "space_demo_run_all"}:
+        return space_demo_run_all()
     if name in {"space.current", "space.current.get"}:
         current_id = _space_tool_current_id(data)
         if not current_id:
