@@ -36,12 +36,18 @@ class TestPWAAuthRedirect:
             "workspace.js api() must redirect to /login on 401"
 
     def test_workspace_js_401_before_throw(self):
-        """The 401 redirect must come before the generic error throw."""
+        """The 401 redirect must come before any error throw."""
         src = _workspace_js()
         idx_401 = src.find("res.status===401")
+        # api() may throw via `throw new Error(...)` or via the structured
+        # `const err=new Error(...); ... throw err;` pattern that attaches HTTP
+        # context for callers. Either is fine — what matters is the 401 redirect
+        # short-circuits before the generic throw.
         idx_throw = src.find("throw new Error")
+        if idx_throw == -1:
+            idx_throw = src.find("throw err")
         assert idx_401 != -1, "401 guard not found in workspace.js"
-        assert idx_throw != -1, "throw not found in workspace.js"
+        assert idx_throw != -1, "no error throw found in workspace.js"
         assert idx_401 < idx_throw, \
             "401 redirect must appear before the generic throw in workspace.js"
 

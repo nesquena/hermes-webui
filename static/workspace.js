@@ -16,8 +16,15 @@ async function api(path,opts={}){
         const text=await res.text();
         // Parse JSON error body and surface the human-readable message,
         // rather than showing raw JSON like {"error":"Profile 'x' does not exist."}
-        try{const j=JSON.parse(text);throw new Error(j.error||j.message||text);}
-        catch(e){if(e instanceof SyntaxError)throw new Error(text);throw e;}
+        let message=text;
+        try{const j=JSON.parse(text);message=j.error||j.message||text;}catch(e){}
+        // Attach the raw HTTP context so callers can branch on status (404 stale-session
+        // cleanup, 401 redirect, 503 retry, etc.) without re-parsing the message string.
+        const err=new Error(message);
+        err.status=res.status;
+        err.statusText=res.statusText;
+        err.body=text;
+        throw err;
       }
       const ct=res.headers.get('content-type')||'';
       return ct.includes('application/json')?res.json():res.text();

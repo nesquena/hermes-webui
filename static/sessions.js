@@ -338,6 +338,14 @@ async function loadSession(sid){
     if(_msgInner){
       if(e.status===404){
         _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Session not available in web UI.</div>';
+        // If this 404 was for the saved active-session ID (not a click-into request),
+        // wipe the stale localStorage value and rethrow so boot can fall through to
+        // the empty-state instead of sticking to a broken "Session not available" view.
+        if(!currentSid&&localStorage.getItem('hermes-webui-session')===sid){
+          localStorage.removeItem('hermes-webui-session');
+          if (_loadingSessionId === sid) _loadingSessionId = null;
+          throw e;
+        }
       } else {
         _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load session. Try switching sessions or refreshing.</div>';
         if(typeof showToast==='function') showToast('Failed to load session',3000,'error');
