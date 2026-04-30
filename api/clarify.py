@@ -6,6 +6,7 @@ clarification string instead of an approval decision.
 
 from __future__ import annotations
 
+import queue
 import threading
 import time
 from typing import Optional
@@ -16,6 +17,9 @@ _lock = threading.Lock()
 _pending: dict[str, dict] = {}
 _gateway_queues: dict[str, list] = {}
 _gateway_notify_cbs: dict[str, object] = {}
+
+# ── SSE subscribers for real-time clarify push ──────────────────────────────
+_sse_subscribers: dict[str, list[queue.Queue]] = {}
 
 
 class _ClarifyEntry:
@@ -73,6 +77,7 @@ def _with_timeout_metadata(data: dict) -> dict:
 def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
     """Queue a pending clarify request and notify the UI callback if registered."""
     data = _with_timeout_metadata(data)
+    need_sse_notify = False
     with _lock:
         queue = _gateway_queues.setdefault(session_key, [])
         # De-duplicate while unresolved: if the most recent pending clarify is
@@ -93,17 +98,18 @@ def submit_pending(session_key: str, data: dict) -> _ClarifyEntry:
                         cb(dict(entry.data))
                     except Exception:
                         pass
-                return entry
-
-        entry = _ClarifyEntry(data)
-        queue.append(entry)
-        _pending[session_key] = queue[0].data
-        cb = _gateway_notify_cbs.get(session_key)
+                need_sse_notify = True
+        if not need_sse_notify:
+            entry = _ClarifyEntry(data)
+            queue.append(entry)
+            _pending[session_key] = queue[0].data
+            cb = _gateway_notify_cbs.get(session_key)
     if cb:
         try:
             cb(data)
         except Exception:
             pass
+    _sse_notify(session_key)
     return entry
 
 
@@ -140,3 +146,38 @@ def resolve_clarify(session_key: str, response: str, resolve_all: bool = False) 
         entry.event.set()
         count += 1
     return count
+
+
+def sse_subscribe(session_id: str) -> queue.Queue:
+    """Register an SSE subscriber for clarify events on a session."""
+    q = queue.Queue(maxsize=16)
+    with _lock:
+        _sse_subscribers.setdefault(session_id, []).append(q)
+    return q
+
+
+def sse_unsubscribe(session_id: str, q: queue.Queue) -> None:
+    """Remove an SSE subscriber."""
+    with _lock:
+        subs = _sse_subscribers.get(session_id)
+        if subs and q in subs:
+            subs.remove(q)
+            if not subs:
+                _sse_subscribers.pop(session_id, None)
+
+
+def _sse_notify(session_id: str) -> None:
+    """Push a clarify event to all SSE subscribers for a session.
+
+    Sends the current pending state (or null if resolved) so the client
+    can update the UI immediately without waiting for the next poll.
+    """
+    with _lock:
+        q_list = _gateway_queues.get(session_id) or []
+        payload = dict(q_list[0].data) if q_list else None
+        subs = list(_sse_subscribers.get(session_id, []))
+    for sub in subs:
+        try:
+            sub.put_nowait({"pending": payload})
+        except queue.Full:
+            pass
