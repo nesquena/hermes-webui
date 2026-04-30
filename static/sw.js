@@ -64,11 +64,15 @@ self.addEventListener('fetch', (event) => {
   // Never intercept cross-origin requests
   if (url.origin !== self.location.origin) return;
 
-  // API and streaming endpoints — always go to network
+  // API and streaming endpoints — always go to network.
+  // The WebUI may be mounted under a subpath such as /hermes/, so API
+  // requests can look like /hermes/api/sessions rather than /api/sessions.
   if (
     url.pathname.startsWith('/api/') ||
+    url.pathname.includes('/api/') ||
     url.pathname.includes('/stream') ||
-    url.pathname.startsWith('/health')
+    url.pathname.startsWith('/health') ||
+    url.pathname.includes('/health')
   ) {
     return; // let browser handle normally
   }
