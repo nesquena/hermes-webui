@@ -5,6 +5,7 @@ let _cronList = null; // cached cron jobs (array)
 let _currentCronDetail = null; // full cron job object
 let _cronMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _cronPreFormDetail = null; // snapshot of prior selection when entering a form
+const CRON_VISIBLE_PROFILES_KEY = 'hermes-webui:cron:visible_profiles';
 let _currentWorkspaceDetail = null; // { path, name, is_default }
 let _workspaceMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _workspacePreFormDetail = null;
@@ -248,6 +249,7 @@ function _cronStatusMeta(job) {
 
 function _cronDiagnostics(job) {
   const fields = {
+    profile: job.profile || 'default',
     id: job.id,
     name: job.name || null,
     schedule: job.schedule || null,
@@ -265,6 +267,92 @@ function _cronDiagnostics(job) {
   return JSON.stringify(fields, null, 2);
 }
 
+function _readCronVisibleProfiles() {
+  try {
+    const raw = localStorage.getItem(CRON_VISIBLE_PROFILES_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return Array.isArray(parsed) ? parsed.filter(Boolean).map(String) : [];
+  } catch(e) {
+    return [];
+  }
+}
+
+function _writeCronVisibleProfiles(names) {
+  try {
+    localStorage.setItem(CRON_VISIBLE_PROFILES_KEY, JSON.stringify(names || []));
+  } catch(e) {}
+}
+
+function _cronVisibleProfiles(profiles) {
+  const available = new Set((profiles || []).map(p => p.name));
+  const saved = _readCronVisibleProfiles().filter(name => !available.size || available.has(name));
+  if (saved.length) return saved;
+  const active = S.activeProfile || 'default';
+  if (!available.size || available.has(active)) return [active];
+  return ['default'];
+}
+
+function _cronProfileQuery(profiles) {
+  const names = _cronVisibleProfiles(profiles);
+  if (!names.length) return '';
+  const params = new URLSearchParams();
+  names.forEach(name => params.append('profile', name));
+  return `?${params.toString()}`;
+}
+
+function _renderCronProfileFilter(profiles) {
+  const wrap = $('cronProfileFilter');
+  if (!wrap) return;
+  if (!profiles || profiles.length <= 1) {
+    wrap.innerHTML = '';
+    wrap.style.display = 'none';
+    return;
+  }
+  wrap.style.display = '';
+  const selected = new Set(_cronVisibleProfiles(profiles));
+  const activeProfile = S.activeProfile || 'default';
+  const hasVisibleNonActive = [...selected].some(name => name !== activeProfile);
+  const buttons = profiles.map(p => {
+    const active = selected.has(p.name);
+    const gw = p.gateway_running ? '<span class="cron-profile-dot running"></span>' : '<span class="cron-profile-dot"></span>';
+    return `<button type="button" class="cron-profile-toggle${active ? ' active' : ''}" data-profile="${esc(p.name)}">${gw}<span>${esc(p.name)}</span></button>`;
+  }).join('');
+  const hint = hasVisibleNonActive
+    ? `<div class="cron-profile-hint">New jobs use active profile: <strong>${esc(activeProfile)}</strong></div>`
+    : '';
+  wrap.innerHTML = `<div class="cron-profile-buttons">${buttons}</div>${hint}`;
+  wrap.querySelectorAll('.cron-profile-toggle').forEach(btn => {
+    btn.onclick = async () => {
+      const name = btn.dataset.profile;
+      const next = new Set(_cronVisibleProfiles(profiles));
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      _writeCronVisibleProfiles([...next]);
+      _clearCronDetail();
+      await loadCrons(true);
+    };
+  });
+}
+
+async function _loadCronProfilesForFilter() {
+  try {
+    const data = await api('/api/profiles');
+    _renderCronProfileFilter(data.profiles || []);
+    return data.profiles || [];
+  } catch(e) {
+    _renderCronProfileFilter([]);
+    return [];
+  }
+}
+
+function _cronJobProfile(job) {
+  return (job && job.profile) || 'default';
+}
+
+function _cronProfileBadge(job) {
+  return `<span class="cron-profile-label">[${esc(_cronJobProfile(job))}]</span>`;
+}
+
 async function loadCrons(animate) {
   const box = $('cronList');
   const refreshBtn = $('cronRefreshBtn');
@@ -273,7 +361,8 @@ async function loadCrons(animate) {
     refreshBtn.disabled = true;
   }
   try {
-    const data = await api('/api/crons');
+    const profiles = await _loadCronProfilesForFilter();
+    const data = await api('/api/crons' + _cronProfileQuery(profiles));
     _cronList = data.jobs || [];
     if (!_cronList.length) {
       box.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:12px">${esc(t('cron_no_jobs'))}</div>`;
@@ -285,21 +374,23 @@ async function loadCrons(animate) {
       const item = document.createElement('div');
       item.className = 'cron-item';
       item.id = 'cron-' + job.id;
+      item.dataset.profile = _cronJobProfile(job);
       const status = _cronStatusMeta(job);
       const isNewRun = _cronNewJobIds.has(String(job.id));
       item.innerHTML = `
         <div class="cron-header">
           ${isNewRun ? '<span class="cron-new-dot" title="New run"></span>' : ''}
+          ${_cronProfileBadge(job)}
           <span class="cron-name" title="${esc(job.name)}">${esc(job.name)}</span>
           <span class="cron-status ${status.listClass}">${esc(status.label)}</span>
         </div>`;
-      item.onclick = () => openCronDetail(job.id, item);
-      if (_currentCronDetail && _currentCronDetail.id === job.id) item.classList.add('active');
+      item.onclick = () => openCronDetail(job.id, item, job.profile);
+      if (_currentCronDetail && _currentCronDetail.id === job.id && _cronJobProfile(_currentCronDetail) === _cronJobProfile(job)) item.classList.add('active');
       box.appendChild(item);
     }
     // Re-render current detail with fresh data if we have one and we're not in a form
     if (_currentCronDetail && _cronMode !== 'create' && _cronMode !== 'edit') {
-      const refreshed = _cronList.find(j => j.id === _currentCronDetail.id);
+      const refreshed = _cronList.find(j => j.id === _currentCronDetail.id && _cronJobProfile(j) === _cronJobProfile(_currentCronDetail));
       if (refreshed) _renderCronDetail(refreshed);
       else _clearCronDetail();
     }
@@ -320,6 +411,7 @@ function _renderCronDetail(job){
   if (!title || !body) return;
   title.textContent = job.name || job.schedule_display || '(unnamed)';
   const status = _cronStatusMeta(job);
+  const profile = _cronJobProfile(job);
   const nextRun = job.next_run_at ? new Date(job.next_run_at).toLocaleString() : t('not_available');
   const lastRun = job.last_run_at ? new Date(job.last_run_at).toLocaleString() : t('never');
   const schedule = job.schedule_display || (job.schedule && job.schedule.expression) || '';
@@ -346,6 +438,7 @@ function _renderCronDetail(job){
       ${attentionBanner}
       <div class="detail-card">
         <div class="detail-card-title">${esc(t('cron_status_active').replace(/./,c=>c.toUpperCase()))}</div>
+        <div class="detail-row"><div class="detail-row-label">Profile</div><div class="detail-row-value"><span class="detail-badge">${esc(profile)}</span></div></div>
         <div class="detail-row"><div class="detail-row-label">Status</div><div class="detail-row-value"><span class="detail-badge ${status.detailClass}">${esc(status.label)}</span></div></div>
         <div class="detail-row"><div class="detail-row-label">Schedule</div><div class="detail-row-value"><code>${esc(schedule)}</code></div></div>
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_next'))}</div><div class="detail-row-value">${esc(nextRun)}</div></div>
@@ -368,7 +461,7 @@ function _renderCronDetail(job){
   _cronMode = 'read';
   _setCronHeaderButtons('read', job);
   // Load runs asynchronously
-  _loadCronDetailRuns(job.id);
+  _loadCronDetailRuns(job.id, profile);
 }
 
 function _setCronHeaderButtons(mode, job) {
@@ -400,10 +493,11 @@ function _setCronHeaderButtons(mode, job) {
   }
 }
 
-async function _loadCronDetailRuns(jobId){
+async function _loadCronDetailRuns(jobId, profile){
   try {
-    const data = await api(`/api/crons/output?job_id=${encodeURIComponent(jobId)}&limit=20`);
-    if (!_currentCronDetail || _currentCronDetail.id !== jobId) return;
+    const profileParam = profile ? `&profile=${encodeURIComponent(profile)}` : '';
+    const data = await api(`/api/crons/output?job_id=${encodeURIComponent(jobId)}&limit=20${profileParam}`);
+    if (!_currentCronDetail || _currentCronDetail.id !== jobId || _cronJobProfile(_currentCronDetail) !== (profile || 'default')) return;
     const card = $('cronDetailRuns');
     if (!card) return;
     if (!data.outputs || !data.outputs.length) {
@@ -423,11 +517,13 @@ async function _loadCronDetailRuns(jobId){
   } catch(e) { /* ignore */ }
 }
 
-function openCronDetail(id, el){
-  const job = _cronList ? _cronList.find(j => j.id === id) : null;
+function openCronDetail(id, el, profile){
+  const job = _cronList ? _cronList.find(j => j.id === id && (!profile || _cronJobProfile(j) === profile)) : null;
   if (!job) return;
   document.querySelectorAll('.cron-item').forEach(e => e.classList.remove('active'));
-  const target = el || $('cron-' + id);
+  const target = el || (profile
+    ? document.querySelector(`.cron-item[data-profile="${CSS.escape(profile)}"][id="cron-${CSS.escape(id)}"]`)
+    : $('cron-' + id));
   if (target) target.classList.add('active');
   // Remove new-run dot from this job since user is now viewing it
   _clearCronUnreadForJob(id);
@@ -437,7 +533,7 @@ function openCronDetail(id, el){
   _editingCronId = null;
   _stopCronWatch();
   _renderCronDetail(job);
-  _checkCronWatchOnDetail(id);
+  _checkCronWatchOnDetail(id, _cronJobProfile(job));
 }
 
 function _clearCronDetail(){
@@ -453,9 +549,9 @@ function _clearCronDetail(){
   _setCronHeaderButtons('empty');
 }
 
-async function runCurrentCron(){ if (_currentCronDetail) await cronRun(_currentCronDetail.id); }
-async function pauseCurrentCron(){ if (_currentCronDetail) await cronPause(_currentCronDetail.id); }
-async function resumeCurrentCron(){ if (_currentCronDetail) await cronResume(_currentCronDetail.id); }
+async function runCurrentCron(){ if (_currentCronDetail) await cronRun(_currentCronDetail.id, _cronJobProfile(_currentCronDetail)); }
+async function pauseCurrentCron(){ if (_currentCronDetail) await cronPause(_currentCronDetail.id, _cronJobProfile(_currentCronDetail)); }
+async function resumeCurrentCron(){ if (_currentCronDetail) await cronResume(_currentCronDetail.id, _cronJobProfile(_currentCronDetail)); }
 async function copyCurrentCronDiagnostics(){
   if (!_currentCronDetail) return;
   try {
@@ -506,7 +602,7 @@ async function deleteCurrentCron(){
   const _ok = await showConfirmDialog({title:t('cron_delete_confirm_title'),message:t('cron_delete_confirm_message'),confirmLabel:t('delete_title'),danger:true,focusCancel:true});
   if(!_ok) return;
   try {
-    await api('/api/crons/delete', {method:'POST', body: JSON.stringify({job_id: id})});
+    await api('/api/crons/delete', {method:'POST', body: JSON.stringify({job_id: id, profile: _cronJobProfile(_currentCronDetail)})});
     showToast(t('cron_job_deleted'));
     _clearCronDetail();
     await loadCrons();
@@ -675,19 +771,20 @@ async function saveCronForm(){
   if(!prompt){errEl.textContent=t('cron_prompt_required');errEl.style.display='';return;}
   try{
     if (_editingCronId) {
-      const updates = {job_id: _editingCronId, schedule, prompt};
+      const updates = {job_id: _editingCronId, profile: _cronPreFormDetail ? _cronJobProfile(_cronPreFormDetail) : 'default', schedule, prompt};
       if (name) updates.name = name;
       await api('/api/crons/update', {method:'POST', body: JSON.stringify(updates)});
       const editedId = _editingCronId;
+      const editedProfile = updates.profile;
       _editingCronId = null;
       _cronPreFormDetail = null;
       showToast(t('cron_job_updated'));
       await loadCrons();
-      const job = _cronList && _cronList.find(j => j.id === editedId);
-      if (job) openCronDetail(editedId);
+      const job = _cronList && _cronList.find(j => j.id === editedId && _cronJobProfile(j) === editedProfile);
+      if (job) openCronDetail(editedId, null, editedProfile);
       return;
     }
-    const body={schedule,prompt,deliver};
+    const body={schedule,prompt,deliver,profile:S.activeProfile||'default'};
     if(_cronIsDuplicate) body.enabled=false;
     if(name)body.name=name;
     if(_cronSelectedSkills.length)body.skills=_cronSelectedSkills;
@@ -697,8 +794,12 @@ async function saveCronForm(){
     showToast(t('cron_job_created'));
     await loadCrons();
     const newId = res && (res.id || (res.job && res.job.id));
-    if (newId) openCronDetail(newId);
-    else if (_cronList && _cronList.length) openCronDetail(_cronList[_cronList.length - 1].id);
+    const newProfile = (res && res.job && res.job.profile) || body.profile;
+    if (newId) openCronDetail(newId, null, newProfile);
+    else if (_cronList && _cronList.length) {
+      const newest = _cronList[_cronList.length - 1];
+      openCronDetail(newest.id, null, _cronJobProfile(newest));
+    }
   }catch(e){
     errEl.textContent=t('error_prefix')+e.message;errEl.style.display='';
   }
@@ -721,21 +822,22 @@ let _cronWatchInterval = null;
 let _cronWatchStart = null;
 let _cronWatchTimerInterval = null;
 
-function _startCronWatch(jobId) {
+function _startCronWatch(jobId, profile) {
   _stopCronWatch();
   _cronWatchStart = Date.now();
   _cronWatchInterval = setInterval(async () => {
     try {
-      const data = await api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}`);
+      const profileParam = profile ? `&profile=${encodeURIComponent(profile)}` : '';
+      const data = await api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}${profileParam}`);
       if (!data.running) {
         _stopCronWatch();
-        if (_currentCronDetail && _currentCronDetail.id === jobId) {
-          _loadCronDetailRuns(jobId);
+        if (_currentCronDetail && _currentCronDetail.id === jobId && _cronJobProfile(_currentCronDetail) === (profile || 'default')) {
+          _loadCronDetailRuns(jobId, profile);
         }
         return;
       }
       // Still running — update elapsed
-      if (_currentCronDetail && _currentCronDetail.id === jobId) {
+      if (_currentCronDetail && _currentCronDetail.id === jobId && _cronJobProfile(_currentCronDetail) === (profile || 'default')) {
         const el = $('cronRunningIndicator');
         if (el) el.querySelector('.cron-watch-elapsed').textContent = _formatElapsed(data.elapsed);
       }
@@ -749,7 +851,7 @@ function _startCronWatch(jobId) {
     }
   }, 1000);
   // Inject running indicator into detail card
-  if (_currentCronDetail && _currentCronDetail.id === jobId) {
+  if (_currentCronDetail && _currentCronDetail.id === jobId && _cronJobProfile(_currentCronDetail) === (profile || 'default')) {
     _injectRunningIndicator();
   }
 }
@@ -779,34 +881,35 @@ function _formatElapsed(seconds) {
   return m + 'm ' + s + 's';
 }
 
-function _checkCronWatchOnDetail(jobId) {
+function _checkCronWatchOnDetail(jobId, profile) {
   // When opening a detail view, check if job is running
-  api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}`).then(data => {
-    if (data.running && _currentCronDetail && _currentCronDetail.id === jobId) {
-      _startCronWatch(jobId);
+  const profileParam = profile ? `&profile=${encodeURIComponent(profile)}` : '';
+  api(`/api/crons/status?job_id=${encodeURIComponent(jobId)}${profileParam}`).then(data => {
+    if (data.running && _currentCronDetail && _currentCronDetail.id === jobId && _cronJobProfile(_currentCronDetail) === (profile || 'default')) {
+      _startCronWatch(jobId, profile);
     }
   }).catch(() => {});
 }
 
-async function cronRun(id) {
+async function cronRun(id, profile) {
   try {
-    await api('/api/crons/run', {method:'POST', body: JSON.stringify({job_id: id})});
+    await api('/api/crons/run', {method:'POST', body: JSON.stringify({job_id: id, profile})});
     showToast(t('cron_job_triggered'));
-    _startCronWatch(id);
+    _startCronWatch(id, profile);
   } catch(e) { showToast(t('failed_colon') + e.message, 4000); }
 }
 
-async function cronPause(id) {
+async function cronPause(id, profile) {
   try {
-    await api('/api/crons/pause', {method:'POST', body: JSON.stringify({job_id: id})});
+    await api('/api/crons/pause', {method:'POST', body: JSON.stringify({job_id: id, profile})});
     showToast(t('cron_job_paused'));
     await loadCrons();
   } catch(e) { showToast(t('failed_colon') + e.message, 4000); }
 }
 
-async function cronResume(id) {
+async function cronResume(id, profile) {
   try {
-    await api('/api/crons/resume', {method:'POST', body: JSON.stringify({job_id: id})});
+    await api('/api/crons/resume', {method:'POST', body: JSON.stringify({job_id: id, profile})});
     showToast(t('cron_job_resumed'));
     await loadCrons();
   } catch(e) { showToast(t('failed_colon') + e.message, 4000); }
@@ -3422,7 +3525,9 @@ function startCronPolling(){
   _cronPollTimer=setInterval(async()=>{
     if(document.hidden) return;  // don't poll when tab is in background
     try{
-      const data=await api(`/api/crons/recent?since=${_cronPollSince}`);
+      const profiles = await _loadCronProfilesForFilter();
+      const profileQuery = _cronProfileQuery(profiles);
+      const data=await api(`/api/crons/recent${profileQuery}${profileQuery ? '&' : '?'}since=${_cronPollSince}`);
       if(data.completions&&data.completions.length>0){
         for(const c of data.completions){
           showToast(t('cron_completion_status', c.name, c.status==='error' ? t('status_failed') : t('status_completed')),4000);
