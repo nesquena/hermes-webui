@@ -880,23 +880,23 @@ def _apply_provider_prefix(
 def _deduplicate_model_ids(groups: list[dict]) -> None:
     """Ensure every model ID across groups is globally unique.
 
-    When multiple providers expose the same bare model ID (e.g. two
-    custom providers both listing ``gpt-5.4``), the dropdown cannot
-    distinguish them.  This post-process detects such collisions and
-    prefixes colliding entries with ``@provider_id:`` so the frontend
-    can treat them as distinct options.
+    When multiple providers expose the same model ID (either bare names like
+    ``gpt-5.4`` or slash-qualified IDs like ``google/gemma-4-27b``), the
+    dropdown cannot distinguish them. This post-process detects such
+    collisions and prefixes colliding entries with ``@provider_id:`` so the
+    frontend can treat them as distinct options.
 
-    The first occurrence (in group order) is left bare for backward
-    compatibility with sessions that already store the bare model name.
-    If that provider is later removed from the config, the next cache
-    rebuild re-runs dedup — the remaining provider becomes the sole
-    occurrence and is left bare, so the session still matches.
+    The first occurrence (in provider-id order) is left unchanged for backward
+    compatibility with sessions that already store the original bare/slash
+    model name. If that provider is later removed from the config, the next
+    cache rebuild re-runs dedup — the remaining provider becomes the sole
+    occurrence and is left unchanged, so the session still matches.
 
     .. note::
-       The "first occurrence wins" rule means the bare ID is not stable
+       The "first occurrence wins" rule means the unchanged ID is not stable
        across config changes (adding, removing, or reordering providers).
        This is acceptable because the dedup runs on every cache rebuild,
-       so sessions always resolve to the current canonical bare ID.
+       so sessions always resolve to the current canonical unchanged ID.
 
     The ``@provider_id:model`` format is consistent with the existing
     ``_apply_provider_prefix()`` function and is handled by
@@ -908,8 +908,8 @@ def _deduplicate_model_ids(groups: list[dict]) -> None:
     if not groups:
         return
 
-    # Collect {bare_id: [(group_idx, model_idx), ...]} in alphabetical
-    # provider_id order so that the "first occurrence stays bare" rule is
+    # Collect {model_id: [(group_idx, model_idx), ...]} in alphabetical
+    # provider_id order so that the "first occurrence stays unchanged" rule is
     # deterministic across config edits (adding/removing/reordering providers).
     sorted_group_indices = sorted(
         range(len(groups)),
@@ -918,34 +918,29 @@ def _deduplicate_model_ids(groups: list[dict]) -> None:
     id_map: dict[str, list[tuple[int, int]]] = {}
     for gi in sorted_group_indices:
         group = groups[gi]
-        pid = group.get("provider_id", "")
         for mi, model in enumerate(group.get("models", [])):
-            mid = model.get("id", "")
-            # Skip IDs that are already provider-qualified
-            if mid.startswith("@") or "/" in mid:
+            mid = str(model.get("id", "") or "").strip()
+            # Skip IDs that are already provider-qualified.
+            if not mid or mid.startswith("@"):
                 continue
             id_map.setdefault(mid, []).append((gi, mi))
 
-    # For any bare ID appearing in 2+ groups, prefix all but the first
-    # occurrence.  The first stays bare for backward compat; the rest
-    # get ``@provider_id:id`` and a disambiguated label.
+    # For any ID appearing in 2+ groups, prefix all but the first occurrence.
     # This handles N>2 providers correctly: the loop iterates over all
     # occurrences after the first, prefixing each with its own provider_id.
-    for bare_id, locations in id_map.items():
+    for original_id, locations in id_map.items():
         if len(locations) < 2:
             continue
-        # Prefix all occurrences after the first
         for gi, mi in locations[1:]:
             group = groups[gi]
             model = group["models"][mi]
             pid = group.get("provider_id", "")
-            model["id"] = f"@{pid}:{bare_id}"
+            model["id"] = f"@{pid}:{original_id}"
             provider_name = group.get("provider", pid)
-            # Update label to show provider for clarity
-            if model.get("label") != bare_id:
+            if model.get("label") != original_id:
                 model["label"] = f"{model['label']} ({provider_name})"
             else:
-                model["label"] = f"{bare_id} ({provider_name})"
+                model["label"] = f"{original_id} ({provider_name})"
 
 
 def resolve_model_provider(model_id: str) -> tuple:

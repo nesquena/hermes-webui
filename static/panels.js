@@ -2244,7 +2244,7 @@ async function switchToProfile(name) {
     // ── Apply model ────────────────────────────────────────────────────────
     if (data.default_model) {
       const sel = $('modelSelect');
-      const resolved = _applyModelToDropdown(data.default_model, sel);
+      const resolved = _applyModelToDropdown(data.default_model, sel, window._activeProvider||null);
       const modelToUse = resolved || data.default_model;
       S._pendingProfileModel = modelToUse;
       // Only patch the in-memory session model if we're NOT about to replace the session
@@ -2753,7 +2753,7 @@ async function loadSettingsPanel(){
       // picker renders blank for any user whose default was persisted without the
       // @-prefix — CLI-first users, legacy installs, etc.
       if(typeof _applyModelToDropdown==='function'){
-        _applyModelToDropdown(_settingsHermesDefaultModelOnOpen, modelSel);
+        _applyModelToDropdown(_settingsHermesDefaultModelOnOpen, modelSel, (models&&models.active_provider)||window._activeProvider||null);
       }else{
         modelSel.value=_settingsHermesDefaultModelOnOpen;
       }

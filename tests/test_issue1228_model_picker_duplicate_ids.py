@@ -93,11 +93,10 @@ class TestDeduplicateModelIds(unittest.TestCase):
         assert result[1]["models"][0]["id"] == "@beta:gpt-5.4"
         assert result[2]["models"][0]["id"] == "@gamma:gpt-5.4"
 
-    # ── Already-prefixed IDs are skipped ───────────────────────────
+    # ── Already-prefixed IDs / slash IDs ───────────────────────────
 
-    def test_already_prefixed_ids_skipped(self):
-        """Model IDs already starting with @ or containing / are not
-        considered for deduplication."""
+    def test_already_prefixed_ids_and_unique_slash_ids_unchanged(self):
+        """Already-qualified IDs stay untouched; unique slash IDs are still allowed."""
         groups = [
             {"provider": "Anthropic", "provider_id": "anthropic", "models": [
                 {"id": "@anthropic:claude-sonnet-4.6", "label": "Claude Sonnet 4.6"},
@@ -107,9 +106,23 @@ class TestDeduplicateModelIds(unittest.TestCase):
             ]},
         ]
         result = self._call(groups)
-        # Neither should be modified
         assert result[0]["models"][0]["id"] == "@anthropic:claude-sonnet-4.6"
         assert result[1]["models"][0]["id"] == "anthropic/claude-sonnet-4.6"
+
+    def test_two_providers_same_slash_qualified_model_prefixes_second(self):
+        """Slash-qualified duplicates must also be made unique (#1313)."""
+        groups = [
+            {"provider": "Alpha", "provider_id": "custom:alpha", "models": [
+                {"id": "google/gemma-4-27b", "label": "Gemma 4 27B"},
+            ]},
+            {"provider": "Beta", "provider_id": "custom:beta", "models": [
+                {"id": "google/gemma-4-27b", "label": "Gemma 4 27B"},
+            ]},
+        ]
+        result = self._call(groups)
+        assert result[0]["models"][0]["id"] == "google/gemma-4-27b"
+        assert result[1]["models"][0]["id"] == "@custom:beta:google/gemma-4-27b"
+        assert result[1]["models"][0]["label"] == "Gemma 4 27B (Beta)"
 
     # ── Mixed: some unique, some colliding ─────────────────────────
 
@@ -215,6 +228,39 @@ class TestFrontendNormRegex(unittest.TestCase):
         r1 = subprocess.run(["node", "-e", f"console.log(({norm_js})('minimax-m2.7'))"], capture_output=True, text=True)
         r2 = subprocess.run(["node", "-e", f"console.log(({norm_js})('@minimax:MiniMax-M2.7'))"], capture_output=True, text=True)
         assert r1.stdout.strip() == r2.stdout.strip(), f"{r1.stdout.strip()} != {r2.stdout.strip()}"
+
+
+class TestFrontendPreferredProviderMatch(unittest.TestCase):
+    """Frontend: provider-aware rehydration should prefer the saved provider."""
+
+    @staticmethod
+    def _read_js():
+        import pathlib
+        return (pathlib.Path(__file__).parent.parent / "static" / "ui.js").read_text()
+
+    def test_find_model_prefers_matching_provider_for_slash_collision(self):
+        import re
+        import subprocess
+
+        src = self._read_js()
+        helper = re.search(r"function _getOptionProviderId\(opt\)\{.*?\n\}", src, re.S)
+        finder = re.search(r"function _findModelInDropdown\(modelId, sel, preferredProviderId\)\{.*?\n\}", src, re.S)
+        assert helper, "_getOptionProviderId() not found in ui.js"
+        assert finder, "_findModelInDropdown() not found in ui.js"
+
+        script = f"""
+{helper.group(0)}
+{finder.group(0)}
+const sel = {{
+  options: [
+    {{ value: 'google/gemma-4-27b', parentElement: {{ tagName: 'OPTGROUP', dataset: {{ provider: 'custom:alpha' }} }} }},
+    {{ value: '@custom:beta:google/gemma-4-27b', parentElement: {{ tagName: 'OPTGROUP', dataset: {{ provider: 'custom:beta' }} }} }},
+  ]
+}};
+console.log(_findModelInDropdown('google/gemma-4-27b', sel, 'custom:beta') || '');
+"""
+        resolved = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
+        assert resolved.stdout.strip() == "@custom:beta:google/gemma-4-27b"
 
 
 class TestResolveModelProviderColonInProviderId(unittest.TestCase):
