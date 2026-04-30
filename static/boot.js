@@ -531,7 +531,12 @@ document.addEventListener('keydown',async e=>{
     // If the current session has no messages, just focus the composer rather than
     // creating another empty session that will clutter the sidebar list (#1171).
     if(S.session&&(S.session.message_count||0)===0){$('msg').focus();return;}
-    if(!S.busy){await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();}
+    // Cmd/Ctrl+K should always create a new conversation, even while the current
+    // one is still streaming. The old !S.busy guard meant users had to wait for
+    // a long generation to finish before they could start something new — exactly
+    // the moment they want to switch context. newSession() leaves the in-flight
+    // stream running on its own session; the user just gets a fresh blank one.
+    await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
   }
   if(e.key==='Escape'){
     // Close onboarding overlay if open (skip/dismiss the wizard)

@@ -157,9 +157,33 @@ def test_new_conversation_closes_mobile_sidebar():
 
     shortcut_line = next((ln for ln in boot_js.splitlines() if "e.key==='k'" in ln or "e.key === 'k'" in ln), "")
     assert shortcut_line, "Cmd/Ctrl+K new chat shortcut missing from static/boot.js"
-    shortcut_block = "\n".join(boot_js.splitlines()[boot_js.splitlines().index(shortcut_line):boot_js.splitlines().index(shortcut_line)+6])
+    shortcut_block = "\n".join(boot_js.splitlines()[boot_js.splitlines().index(shortcut_line):boot_js.splitlines().index(shortcut_line)+12])
     assert "closeMobileSidebar" in shortcut_block, \
         "Cmd/Ctrl+K new chat shortcut must closeMobileSidebar() after creating the new session"
+
+
+def test_new_conversation_shortcut_works_while_busy():
+    """Cmd/Ctrl+K should still create a new conversation while the current one is busy.
+
+    The previous behavior gated the shortcut on !S.busy, which meant users had
+    to wait for a long generation to finish before they could start something
+    new — the exact moment they want to switch context.
+    """
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    shortcut_line = next((ln for ln in boot_js.splitlines() if "e.key==='k'" in ln or "e.key === 'k'" in ln), "")
+    assert shortcut_line, "Cmd/Ctrl+K new chat shortcut missing from static/boot.js"
+    # Inspect the next 10 lines after the keybinding match — the gating block
+    # would live there if it had been kept.
+    idx = boot_js.splitlines().index(shortcut_line)
+    shortcut_block = "\n".join(boot_js.splitlines()[idx:idx + 10])
+    # Strip the existing message-count guard (which is unrelated and stays) so
+    # we only check for an S.busy gate on the newSession() call itself.
+    assert "if(!S.busy)" not in shortcut_block, (
+        "Cmd/Ctrl+K must not be blocked by the current session's busy state"
+    )
+    assert "if (!S.busy)" not in shortcut_block, (
+        "Cmd/Ctrl+K must not be blocked by the current session's busy state"
+    )
 
 
 # ── Viewport and scroll safety ────────────────────────────────────────────────
