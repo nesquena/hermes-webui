@@ -482,6 +482,21 @@ def read_space_detail(space_id: str) -> dict[str, Any]:
     return detail
 
 
+def current_space_for_session(session: Any) -> dict[str, Any]:
+    """Return the metadata-only active Space envelope for a WebUI session."""
+    if not spaces_enabled():
+        return {"enabled": False, "active_space_id": None, "space": None}
+    active_space_id = str(getattr(session, "active_space_id", "") or "").strip()
+    if not active_space_id:
+        return {"enabled": True, "active_space_id": None, "space": None}
+    sid = validate_space_id(active_space_id)
+    return {
+        "enabled": True,
+        "active_space_id": sid,
+        "space": read_space_detail(sid),
+    }
+
+
 def list_revision_events(space_id: str, limit: int = 20) -> list[dict[str, Any]]:
     """Return newest-first revision event metadata for a space.
 

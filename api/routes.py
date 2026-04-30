@@ -965,6 +965,23 @@ def handle_get(handler, parsed) -> bool:
             return j(handler, {"enabled": False, "spaces": []})
         return j(handler, {"enabled": True, "spaces": capy_spaces.list_spaces()})
 
+    if parsed.path == "/api/spaces/current":
+        from api import spaces as capy_spaces
+        if not capy_spaces.spaces_enabled():
+            return bad(handler, "Capy Spaces is disabled", 403)
+        session_id = parse_qs(parsed.query).get("session_id", [""])[0]
+        if not session_id:
+            return bad(handler, "Missing session_id")
+        try:
+            session = get_session(session_id)
+            return j(handler, capy_spaces.current_space_for_session(session))
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        except ValueError as e:
+            return bad(handler, str(e))
+        except FileNotFoundError:
+            return bad(handler, "Space not found", 404)
+
     if parsed.path == "/api/spaces/recovery":
         from api import spaces as capy_spaces
         return j(handler, capy_spaces.recovery_snapshot())
