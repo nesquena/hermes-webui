@@ -8,6 +8,7 @@ Validates:
   - copy.deepcopy() isolation (mutating returned dict doesn't pollute cache)
   - invalidate_models_cache() direct invalidation
 """
+import json
 import time
 from unittest.mock import patch
 
@@ -157,7 +158,57 @@ def test_mtime_invalidation(tmp_path, monkeypatch):
     _reset_cache()
 
 
-# ── 4. test_deepcopy_isolation ────────────────────────────────────────────
+# ── 4. test_stale_disk_cache_after_restart_ignored ─────────────────────────
+
+def test_stale_disk_cache_after_restart_ignored(tmp_path, monkeypatch):
+    """A stale disk cache from before a config change must not survive restart."""
+    _reset_cache()
+    config_path = tmp_path / "config.yaml"
+    cache_path = tmp_path / "models_cache.json"
+
+    with monkeypatch.context() as m:
+        m.setattr(config, "_get_config_path", lambda: config_path)
+        m.setattr(config, "_models_cache_path", cache_path)
+
+        config_path.write_text(
+            "model:\n  provider: xiaomi\n  default: old-test-model\n",
+            encoding="utf-8",
+        )
+        config.reload_config()
+        old_mtime = config._cfg_mtime
+
+        stale_cache = {
+            "_config_mtime": old_mtime,
+            "active_provider": "xiaomi",
+            "default_model": "old-test-model",
+            "configured_model_badges": {},
+            "groups": [],
+        }
+        cache_path.write_text(json.dumps(stale_cache), encoding="utf-8")
+
+        config_path.write_text(
+            "model:\n  provider: custom:litellm-proxy\n  default: new-test-model\n",
+            encoding="utf-8",
+        )
+        new_mtime = config_path.stat().st_mtime + 2.0
+        config_path.touch()
+        config.os.utime(config_path, (new_mtime, new_mtime))
+
+        # Simulate a fresh server process: config was reloaded before the first
+        # /api/models request, so _cfg_changed is false on entry.
+        config.reload_config()
+        _reset_cache()
+
+        result = config.get_available_models()
+
+        assert result["active_provider"] == "custom:litellm-proxy"
+        assert result["default_model"] == "new-test-model"
+
+    config.reload_config()
+    _reset_cache()
+
+
+# ── 5. test_deepcopy_isolation ────────────────────────────────────────────
 
 def test_deepcopy_isolation():
     """Mutating the returned dict from get_available_models() must not
@@ -200,7 +251,7 @@ def test_deepcopy_isolation():
     _reset_cache()
 
 
-# ── 5. test_invalidate_models_cache_direct ───────────────────────────────
+# ── 6. test_invalidate_models_cache_direct ───────────────────────────────
 
 def test_invalidate_models_cache_direct():
     """Call invalidate_models_cache() after populating the cache.
