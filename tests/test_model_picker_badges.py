@@ -89,7 +89,11 @@ def test_get_available_models_cache_preserves_configured_model_badges(tmp_path, 
 
 
 def test_ui_renders_model_badges_from_api_payload():
-    js = (Path(__file__).resolve().parent.parent / "static" / "ui.js").read_text(encoding="utf-8")
+    root = Path(__file__).resolve().parent.parent
+    js = (root / "static" / "ui.js").read_text(encoding="utf-8")
+    html = (root / "static" / "index.html").read_text(encoding="utf-8")
+    css = (root / "static" / "style.css").read_text(encoding="utf-8")
+
     assert "window._configuredModelBadges=data.configured_model_badges||{};" in js, (
         "populateModelDropdown() deve guardar configured_model_badges do /api/models "
         "para que o dropdown reflita a cadeia configurada atual."
@@ -101,4 +105,19 @@ def test_ui_renders_model_badges_from_api_payload():
     assert "_getConfiguredModelBadge" in js, (
         "A UI precisa de um helper de matching resiliente para religar badges mesmo quando "
         "o update do catálogo mudar prefixos/formas do model ID."
+    )
+    assert 'id="composerModelBadge"' in html, (
+        "O chip principal do modelo precisa de um container dedicado para exibir o badge "
+        "do modelo selecionado fora do dropdown."
+    )
+    assert "composer-model-badge" in css, (
+        "O badge do chip principal precisa de estilo próprio para ficar visível ao lado "
+        "do nome do modelo selecionado."
+    )
+    assert "const badge=_getConfiguredModelBadge(sel.value||'',window._configuredModelBadges||{});" in js, (
+        "syncModelChip() deve buscar o badge configurado do modelo selecionado e projetá-lo "
+        "no chip principal da composer."
+    )
+    assert "badgeEl.textContent=badge&&badge.label?badge.label:'';" in js, (
+        "syncModelChip() deve preencher o texto do badge visível no chip principal quando houver metadata configurada."
     )
