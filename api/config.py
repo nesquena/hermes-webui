@@ -2074,7 +2074,7 @@ _SETTINGS_DEFAULTS = {
     "show_cli_sessions": False,  # merge CLI sessions from state.db into the sidebar
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
     "check_for_updates": True,  # check if webui/agent repos are behind upstream
-    "theme": "dark",  # light | dark | system
+    "theme": "dark",  # light | dark | system | calm
     "skin": "default",  # accent color skin: default | ares | mono | slate | poseidon | sisyphus | charizard
     "language": "en",  # UI locale code; must match a key in static/i18n.js LOCALES
     "bot_name": os.getenv(
@@ -2083,13 +2083,14 @@ _SETTINGS_DEFAULTS = {
     "sound_enabled": False,  # play notification sound when assistant finishes
     "notifications_enabled": False,  # browser notification when tab is in background
     "show_thinking": True,  # show/hide thinking/reasoning blocks in chat view
+    "simplified_tool_calling": True,  # group tools/thinking into one quiet activity disclosure
     "sidebar_density": "compact",  # compact | detailed
     "auto_title_refresh_every": "0",  # adaptive title refresh: 0=off, 5/10/20=every N exchanges
     "busy_input_mode": "queue",  # behavior when sending while agent is running: queue | interrupt | steer
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
 }
 _SETTINGS_LEGACY_DROP_KEYS = {"assistant_language", "bubble_layout", "default_model"}
-_SETTINGS_THEME_VALUES = {"light", "dark", "system"}
+_SETTINGS_THEME_VALUES = {"light", "dark", "system", "calm"}
 _SETTINGS_SKIN_VALUES = {
     "default",
     "ares",
@@ -2198,6 +2199,7 @@ _SETTINGS_BOOL_KEYS = {
     "sound_enabled",
     "notifications_enabled",
     "show_thinking",
+    "simplified_tool_calling",
 }
 # Language codes are validated as short alphanumeric BCP-47-like tags (e.g. 'en', 'zh', 'fr')
 _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8})?$")

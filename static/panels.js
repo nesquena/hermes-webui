@@ -2701,6 +2701,8 @@ async function loadSettingsPanel(){
     }
     const showUsageCb=$('settingsShowTokenUsage');
     if(showUsageCb){showUsageCb.checked=!!settings.show_token_usage;showUsageCb.addEventListener('change',_markSettingsDirty,{once:false});}
+    const simplifiedToolCb=$('settingsSimplifiedToolCalling');
+    if(simplifiedToolCb){simplifiedToolCb.checked=settings.simplified_tool_calling!==false;simplifiedToolCb.addEventListener('change',_markSettingsDirty,{once:false});}
     const showCliCb=$('settingsShowCliSessions');
     if(showCliCb){showCliCb.checked=!!settings.show_cli_sessions;showCliCb.addEventListener('change',_markSettingsDirty,{once:false});}
     const syncCb=$('settingsSyncInsights');
@@ -3003,6 +3005,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._soundEnabled=body.sound_enabled;
   window._notificationsEnabled=body.notifications_enabled;
   window._showThinking=body.show_thinking!==false;
+  window._simplifiedToolCalling=body.simplified_tool_calling!==false;
   window._sidebarDensity=sidebarDensity==='detailed'?'detailed':'compact';
   window._busyInputMode=body.busy_input_mode||'queue';
   window._botName=body.bot_name||'Hermes';
@@ -3023,6 +3026,7 @@ function _applySavedSettingsUi(saved, body, opts){
   _settingsHermesDefaultModelOnOpen=body.default_model||_settingsHermesDefaultModelOnOpen||'';
   // Sync window._defaultModel so newSession() uses the just-saved default without a reload (#908).
   if(body.default_model) window._defaultModel=body.default_model;
+  if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
   renderMessages();
   if(typeof syncTopbar==='function') syncTopbar();
   if(typeof renderSessionList==='function') renderSessionList();
@@ -3094,6 +3098,7 @@ async function saveSettings(andClose){
   body.skin=skin;
   body.language=language;
   body.show_token_usage=showTokenUsage;
+  body.simplified_tool_calling=!!($('settingsSimplifiedToolCalling')||{}).checked;
   body.show_cli_sessions=showCliSessions;
   body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;
   body.check_for_updates=!!($('settingsCheckUpdates')||{}).checked;
