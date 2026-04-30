@@ -1883,6 +1883,10 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 agent.ephemeral_system_prompt = _personality_prompt
             _previous_messages = list(s.messages or [])
             _previous_context_messages = list(_session_context_messages(s))
+            _pre_compression_count = getattr(
+                getattr(agent, 'context_compressor', None),
+                'compression_count', 0,
+            )
 
             # ── Periodic checkpoint during streaming (Issue #765) ──
             # The agent works on an internal copy of s.messages during run_conversation()
@@ -2107,7 +2111,7 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 # Also detect compression via the result dict or compressor state
                 if not _compressed:
                     _compressor = getattr(agent, 'context_compressor', None)
-                    if _compressor and getattr(_compressor, 'compression_count', 0) > 0:
+                    if _compressor and getattr(_compressor, 'compression_count', 0) > _pre_compression_count:
                         _compressed = True
                 # Notify the frontend that compression happened
                 if _compressed:
