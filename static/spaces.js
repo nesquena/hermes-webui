@@ -155,7 +155,7 @@
       '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+' · Revision: '+escapeHtml(space.revision_event_id||'none')+'</div>' +
       '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="activateSpace" data-space-id="'+escapeHtml(spaceId)+'">Use in chat</button><button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Manage widgets</button><button type="button" class="capy-spaces-btn" data-capy-action="exportSpaceYaml" data-space-id="'+escapeHtml(spaceId)+'">Export YAML</button><button type="button" class="capy-spaces-btn" data-capy-action="exportSpaceZip" data-space-id="'+escapeHtml(spaceId)+'">Export ZIP</button></div>' +
       '</div><div class="capy-spaces-card"><h3>Widgets</h3><div class="capy-spaces-muted">Metadata-only detail view. Generated widget code is intentionally not displayed or executed.</div><div class="capy-spaces-widget-list">'+widgetRows+'</div></div>' +
-      renderRevisionHistory(revisions || []);
+      renderRevisionHistory(spaceId, revisions || []);
   }
 
   function renderSpaceExportResult(spaceId, data){
@@ -193,19 +193,20 @@
       '<div class="capy-spaces-muted">'+escapeHtml(message || 'Import payload could not be parsed safely.')+'</div></div>';
   }
 
-  function renderRevisionHistory(revisions){
+  function renderRevisionHistory(spaceId, revisions){
     const safeRevisions = Array.isArray(revisions) ? revisions : [];
     const rows = safeRevisions.length ? safeRevisions.slice(0, 10).map(function(rev){
       const eventId = rev && rev.event_id ? String(rev.event_id) : '';
       const eventType = rev && rev.event_type ? String(rev.event_type) : 'unknown';
       const detailText = formatRevisionDetails(rev && rev.details);
+      const restoreButton = eventId ? '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="restoreRevision" data-space-id="'+escapeHtml(spaceId || '')+'" data-event-id="'+escapeHtml(eventId)+'">Restore</button></div>' : '';
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(eventType)+'</strong>' +
         '<div class="capy-spaces-muted">'+escapeHtml(formatRevisionTime(rev && rev.created_at))+' · '+escapeHtml(eventId.slice(0, 12) || 'no-event-id')+'</div>' +
         (detailText ? '<div class="capy-spaces-muted">'+escapeHtml(detailText)+'</div>' : '') +
-        '</div></div>';
+        '</div>'+restoreButton+'</div>';
     }).join('') : '<div class="capy-spaces-muted">No revision events recorded yet.</div>';
     return '<div class="capy-spaces-card"><h3>Revision history</h3>' +
-      '<div class="capy-spaces-muted">Newest safe metadata events. Rollback controls will build on this index; generated widget bodies are not displayed.</div>' +
+      '<div class="capy-spaces-muted">Newest safe metadata events. Restore rewrites the Space manifest from a stored snapshot; generated widget bodies are not displayed.</div>' +
       '<div class="capy-spaces-widget-list">'+rows+'</div></div>';
   }
 
@@ -599,6 +600,15 @@
       if (!ok) return;
       await postSpacesJson('api/spaces/delete', {space_id: spaceId});
       await loadCapySpaces();
+      return;
+    }
+    if (action === 'restoreRevision') {
+      const eventId = button.dataset.eventId || '';
+      if (!spaceId || !eventId || typeof showConfirmDialog !== 'function') return;
+      const ok = await showConfirmDialog({title: 'Restore Space revision?', message: 'Restore space "'+spaceId+'" to revision '+eventId.slice(0, 12)+'? The current manifest remains in revision history.', confirmLabel: 'Restore revision', danger: true, focusCancel: true});
+      if (!ok) return;
+      await postSpacesJson('api/spaces/revision/restore', {space_id: spaceId, event_id: eventId});
+      await openSpaceDetail(spaceId);
       return;
     }
     if (action === 'editWidget') {
