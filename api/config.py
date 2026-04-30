@@ -2168,6 +2168,7 @@ _SETTINGS_DEFAULTS = {
     "check_for_updates": True,  # check if webui/agent repos are behind upstream
     "theme": "dark",  # light | dark | system | calm
     "skin": "default",  # accent color skin: default | ares | mono | slate | poseidon | sisyphus | charizard
+    "font_size": "default",  # small | default | large
     "language": "en",  # UI locale code; must match a key in static/i18n.js LOCALES
     "bot_name": os.getenv(
         "HERMES_WEBUI_BOT_NAME", "Hermes"
@@ -2279,6 +2280,7 @@ _SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {
 _SETTINGS_ENUM_VALUES = {
     "send_key": {"enter", "ctrl+enter"},
     "sidebar_density": {"compact", "detailed"},
+    "font_size": {"small", "default", "large"},
     "auto_title_refresh_every": {"0", "5", "10", "20"},
     "busy_input_mode": {"queue", "interrupt", "steer"},
 }

@@ -1909,6 +1909,34 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 #mainSettings .settings-btn:hover,
 #mainSettings .sm-btn[onclick^="saveSettings"]:hover{background:var(--accent-hover);border-color:var(--accent-hover);}
 
+/* Appearance autosave status line (in-place feedback while changing theme/skin/font size). */
+#mainSettings .settings-autosave-status{
+  margin-top:10px;
+  min-height:18px;
+  display:flex;
+  align-items:center;
+  gap:6px;
+  font-size:12px;
+  color:var(--muted);
+}
+#mainSettings .settings-autosave-status.is-saving{color:var(--muted);}
+#mainSettings .settings-autosave-status.is-saved{color:var(--success);}
+#mainSettings .settings-autosave-status.is-failed{color:var(--error);}
+#mainSettings .settings-autosave-status button{
+  border:none;
+  background:var(--accent);
+  color:#fff;
+  font-size:11px;
+  font-weight:600;
+  border-radius:6px;
+  padding:4px 10px;
+  cursor:pointer;
+  margin-left:4px;
+}
+#mainSettings .settings-autosave-status button:hover{
+  background:var(--accent-hover);
+}
+
 /* Secondary sm-btn fallback (Sign out / Disable auth) — neutral outline. */
 #mainSettings .sm-btn{border-radius:8px;padding:9px 16px;font-weight:600;font-size:13px;background:var(--surface);border:1px solid var(--border);color:var(--text);cursor:pointer;transition:background .15s,border-color .15s;}
 #mainSettings .sm-btn:hover{background:var(--accent-bg);border-color:var(--accent-bg-strong);}

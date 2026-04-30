@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Fixed
+- **Appearance autosave in Settings**
+  - Theme, skin, and font size in **Appearance** now save inline (`Saving` / `Saved` / `Failed + Retry`) and no longer trigger unsaved preview discard behavior.
+  - `_pickTheme`, `_pickSkin`, and `_pickFontSize` no longer set the global settings dirty state; only unrelated preference/model changes do.
+  - Appearance autosave posts only `{theme, skin, font_size}` to `/api/settings`; full save still includes `font_size`.
+- (`static/boot.js`, `static/panels.js`, `static/index.html`, `static/i18n.js`, `static/style.css`, `tests/test_1003_appearance_autosave.py`) — Refs #1003 (PR1: Appearance autosave only)
 
 ## [v0.50.240] — 2026-04-30
 
