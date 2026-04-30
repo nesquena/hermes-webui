@@ -4275,6 +4275,12 @@ function _thinkingMarkup(text=''){
     : `<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
 }
 function finalizeThinkingCard(){
+  // Guard: only finalize thinking card if we're looking at the session that started it.
+  // Without this check, switching tabs while a stream is running causes finalizeThinkingCard
+  // to remove/modify the thinking card DOM of the wrong session — the card belongs to the
+  // stream that started it, not the session currently displayed.
+  const _guardTurn = $('liveAssistantTurn');
+  if(_guardTurn && S.session && _guardTurn.dataset.sessionId !== S.session.session_id) return;
   if(!isSimplifiedToolCalling()){
     const row=$('thinkingRow');
     if(!row) return;
