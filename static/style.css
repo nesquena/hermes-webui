@@ -2383,6 +2383,7 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 /* ── Message timestamps ── */
 .msg-time{font-size:10px;color:var(--muted);opacity:.6;margin-left:6px;}
 .msg-role:hover .msg-time{opacity:1;}
+.msg-wal-recovered{font-size:10px;color:var(--amber,#f59e0b);opacity:.85;margin-right:6px;font-style:italic;}
 
 /* ── Mermaid diagrams ── */
 .mermaid-block{background:var(--code-bg);border-radius:8px;padding:16px;margin:8px 0;overflow-x:auto;}

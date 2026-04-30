@@ -670,6 +670,7 @@ def _replay_wal_recovery(session) -> None:
         'role': 'assistant',
         'content': assistant_content,
         'timestamp': int(time.time()),
+        '_wal_recovered': True,
     }
     # Restore reasoning/thinking text captured during the interrupted stream.
     if recovered.get('reasoning'):

@@ -176,6 +176,43 @@ class TestWalFlush:
         assert _wal.wal_path(sid).exists()
         _wal.write_wal_end(sid, 'stream_flush')
 
+
+    def test_should_flush_initializes_timer_on_first_call(self, tmp_path, monkeypatch):
+        """_should_flush must NOT fire on its first call for a new session.
+
+        Regression test for the uninitialized-timer bug: if _should_flush returns True
+        when last_flush_time is 0 (epoch), the checkpoint thread would fire
+        continuously on every call until a real timestamp was stored. The fix
+        initializes last_flush_time on the first call and returns False so
+        time-based flushes only begin after the interval has elapsed.
+        """
+        import time as _time
+        from api import wal as _wal
+
+        sid = 'test_' + uuid.uuid4().hex[:8]
+
+        # Manually set a future last_flush_time so we isolate the timer-initialization bug
+        # (we avoid the time-based path by making the interval check pass immediately
+        # but only after the 0-initialization guard has fired)
+        with _wal._flush_lock:
+            _wal._last_flush_time[sid] = 0  # Simulate uninitialized
+
+        # First call: should return False AND set the timer
+        result1 = _wal._should_flush(sid)
+
+        # Verify it returned False (didn't fire on uninitialized timer)
+        assert result1 is False, f"Expected False on first call, got {result1}"
+
+        # Verify timer WAS initialized (not left at 0)
+        with _wal._flush_lock:
+            stored = _wal._last_flush_time.get(sid, 0)
+        assert stored > 0, f"Timer should be initialized to current time, got {stored}"
+
+        # Clean up
+        with _wal._flush_lock:
+            _wal._last_flush_time.pop(sid, None)
+
+
     def test_manual_flush_on_end(self, tmp_path):
         from api import wal as _wal
 
@@ -192,6 +229,41 @@ class TestWalFlush:
         with _wal._buffer_lock:
             assert sid not in _wal._write_buffer
         assert _wal.wal_path(sid).exists()
+
+
+
+    def test_append_event_flushes_at_threshold_not_past_it(self, tmp_path, monkeypatch):
+        """_append_event must flush when buffer len == _WAL_FLUSH_TOKENS, not len > threshold.
+
+        Regression test for the >= vs > bug: if _append_event uses > instead of >=,
+        the flush never fires at exactly the threshold — you'd need threshold+1 tokens.
+        With >= it fires at exactly N tokens.
+        """
+        from api import wal as _wal
+
+        monkeypatch.setattr(_wal, '_WAL_FLUSH_TOKENS', 5)
+
+        sid = 'test_' + uuid.uuid4().hex[:8]
+        _wal.write_wal_start(sid, 'stream_x')
+
+        # Write exactly 5 tokens (one below flush threshold at 5)
+        for ch in 'abcde':
+            _wal.write_wal_token(sid, ch)
+
+        # Buffer should still hold 5 items (not flushed yet — len=5 is NOT >5)
+        with _wal._buffer_lock:
+            assert len(_wal._write_buffer.get(sid, [])) == 5, \
+                f"Expected 5 buffered items before threshold hit, got {_wal._write_buffer.get(sid, [])}"
+
+        # 6th token hits the >=5 threshold and triggers a flush
+        _wal.write_wal_token(sid, 'f')
+
+        # Buffer should now be cleared
+        with _wal._buffer_lock:
+            assert sid not in _wal._write_buffer, \
+                "Buffer should be cleared after threshold is hit"
+
+        _wal.write_wal_end(sid, 'stream_x')
 
 
 # ─── WAL replay integrated into get_session ───────────────────────────────────

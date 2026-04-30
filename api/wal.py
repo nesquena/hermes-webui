@@ -138,7 +138,7 @@ def _append_event(session_id: str, event: dict) -> None:
     line = json.dumps(event, ensure_ascii=False)
     with _buffer_lock:
         _write_buffer.setdefault(session_id, []).append(line)
-        do_flush = len(_write_buffer[session_id]) > _WAL_FLUSH_TOKENS
+        do_flush = len(_write_buffer[session_id]) >= _WAL_FLUSH_TOKENS
     if do_flush:
         _flush_buffer(session_id)
 

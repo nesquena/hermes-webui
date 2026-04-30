@@ -3611,7 +3611,10 @@ function renderMessages(){
     const tsTitle=tsVal?(_fmtSv?_fmtSv(new Date(tsVal*1000),{}):new Date(tsVal*1000).toLocaleString()):'';
     const tsTime=_formatMessageFooterTimestamp(tsVal);
     const timeHtml = tsTime ? `<span class="msg-time" title="${esc(tsTitle)}">${tsTime}</span>` : '';
-    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span></div>`;
+    const recoveredBadge = m._wal_recovered
+      ? `<span class="msg-wal-recovered" title="Recovered from interrupted stream via WAL">Recovered</span>`
+      : '';
+    const footHtml = `<div class="msg-foot">${recoveredBadge}${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span></div>`;
 
     if(_isContextCompactionMessage(m)){
       if(compressionState || referenceNode){
