@@ -72,6 +72,21 @@ def _declarations(rule_body):
     return declarations
 
 
+def _optional_declarations(css, selector):
+    try:
+        return _declarations(_rule_body(css, selector))
+    except AssertionError:
+        return {}
+
+
+def _display_hidden(declarations):
+    return declarations.get("display", "").replace(" ", "") in {"none", "none!important"}
+
+
+def _display_inline_flex(declarations):
+    return declarations.get("display", "").replace(" ", "") in {"inline-flex", "inline-flex!important"}
+
+
 class _ComposerLeftDropdownParser(HTMLParser):
     _VOID_TAGS = {
         "area", "base", "br", "col", "embed", "hr", "img", "input",
@@ -249,7 +264,6 @@ def test_composer_controls_switch_to_icon_only_by_container_width():
     for selector in (
         ".composer-workspace-label",
         ".composer-model-label",
-        ".composer-workspace-chevron",
         ".composer-model-chevron",
         "#composerWorkspaceLabel",
         "#composerModelLabel",
@@ -281,14 +295,19 @@ def test_composer_controls_switch_to_icon_only_by_container_width():
         "#composerWorkspaceLabel",
         "#composerModelLabel",
         "#composerReasoningLabel",
-        ".composer-workspace-chip",
         ".composer-model-chip",
         ".composer-profile-chip",
         ".composer-reasoning-chip",
     ):
         assert selector in compact_520, f"{selector} should be present in the 520px composer compact block"
-    assert "max-width:44px" in compact_520
+    assert "width:44px" in compact_520
     assert "display:none" in compact_520
+    assert ".composer-workspace-chip{display:none!important" in compact_520.replace(" ", ""), \
+        "520px container compact mode must remove the blank workspace switch slot"
+    assert ".composer-left>*{flex-shrink:0" in compact_520.replace(" ", ""), \
+        "520px container compact mode must stop controls from shrinking into each other"
+    assert ".composer-mobile-config-btn" in compact_520 and "display:inline-flex!important" in compact_520, \
+        "520px container compact mode must expose the mobile config button even when viewport is wider than 640px"
 
     # Regression intent:
     # - this container rule should not depend on right-panel open/closed state.
@@ -297,6 +316,23 @@ def test_composer_controls_switch_to_icon_only_by_container_width():
         "composer-footer compact rule should be state-agnostic (left sidebar + closed right panel case included)"
     assert ".layout:not(.workspace-panel-collapsed)" not in compact_520, \
         "composer-footer compact rule should be state-agnostic (left sidebar + closed right panel case included)"
+
+
+def test_composer_700px_workspace_switch_does_not_become_blank_chip():
+    """The 700px container state may hide the workspace label, but needs a switch affordance."""
+    compact_700 = _container_query_block(CSS, "composer-footer (max-width: 700px)")
+    assert compact_700, "Expected composer mid-width compact rules at @container composer-footer (max-width: 700px)"
+
+    workspace_label = _declarations(_rule_body(compact_700, ".composer-workspace-label"))
+    workspace_chip = _optional_declarations(compact_700, ".composer-workspace-chip")
+    workspace_chevron = _optional_declarations(compact_700, ".composer-workspace-chevron")
+    mobile_config = _optional_declarations(compact_700, ".composer-mobile-config-btn")
+
+    assert _display_hidden(workspace_label), \
+        "700px container state should hide the long workspace label before tighter mobile rules"
+    if not _display_hidden(workspace_chip) and not _display_inline_flex(mobile_config):
+        assert not _display_hidden(workspace_chevron), \
+            "700px container state must not leave the visible workspace switch chip without a label or chevron"
 
 
 def test_composer_compact_switch_is_not_viewport_only():
@@ -556,55 +592,287 @@ def test_composer_touch_target_size():
         "style.css must define 44px minimum touch targets for mobile (send button, nav buttons)"
 
 
-def test_mobile_composer_footer_wraps_controls():
-    """Phone composer controls must wrap instead of colliding in one row."""
+def test_mobile_composer_footer_stays_single_row():
+    """Phone composer controls should stay in one footer row."""
     mobile_css = _composer_phone_media_block()
 
     footer = _declarations(_rule_body(mobile_css, ".composer-footer"))
-    assert footer.get("flex-wrap") == "wrap", \
-        "mobile composer footer must enable flex-wrap"
+    assert footer.get("flex-wrap") == "nowrap", \
+        "mobile composer footer must stay visually single-row"
 
     left = _declarations(_rule_body(mobile_css, ".composer-left"))
-    assert left.get("flex") == "1 1 100%", \
-        "mobile composer-left controls must take their own row"
-    assert left.get("width") == "100%", \
-        "mobile composer-left controls must span the row"
-    assert left.get("flex-wrap") == "wrap", \
-        "mobile composer-left controls must wrap"
+    assert left.get("flex") != "1 1 100%", \
+        "mobile composer-left controls must not take their own full-width row"
+    assert left.get("width") != "100%", \
+        "mobile composer-left controls must not span a separate row"
+    assert left.get("flex-wrap") == "nowrap", \
+        "mobile composer-left controls must remain in one row"
 
     right = _declarations(_rule_body(mobile_css, ".composer-right"))
-    assert right.get("flex") == "1 1 100%", \
-        "mobile composer-right actions must take their own row"
-    assert right.get("width") == "100%", \
-        "mobile composer-right actions must span the row"
+    assert right.get("flex") != "1 1 100%", \
+        "mobile composer-right actions must not take their own full-width row"
+    assert right.get("width") != "100%", \
+        "mobile composer-right actions must not span a separate row"
     assert right.get("justify-content") == "flex-end", \
         "mobile composer-right actions must stay end-aligned"
 
 
-def test_mobile_composer_left_has_bounded_overflow():
-    """If many controls are visible, the control row should scroll, not overlap."""
+def test_mobile_composer_left_scrolls_horizontally_without_wrapping():
+    """If many primary controls are visible, the single control row should scroll."""
     left = _declarations(_rule_body(_composer_phone_media_block(), ".composer-left"))
-    assert left.get("overflow-x") == "hidden", \
-        "mobile composer-left must hide horizontal overflow"
-    assert left.get("overflow-y") == "auto", \
-        "mobile composer-left must allow bounded vertical overflow"
-    assert "max-height" in left, \
-        "mobile composer-left must have bounded vertical overflow"
+    assert left.get("overflow-x") == "auto", \
+        "mobile composer-left must allow horizontal overflow in the single row"
+    assert left.get("overflow-y") == "hidden", \
+        "mobile composer-left must not create a second vertical control row"
+    assert left.get("max-height") == "none", \
+        "mobile composer-left must not preserve the old bounded two-row height"
 
 
-def test_mobile_composer_left_controls_keep_touch_friendly_sizing():
-    """Compact left-row composer controls must keep 44px touch targets."""
+def test_mobile_composer_left_children_do_not_shrink_into_each_other():
+    """Phone composer controls must scroll or compact, never shrink/overlap siblings."""
     mobile_css = _composer_phone_media_block()
+    left = _declarations(_rule_body(mobile_css, ".composer-left"))
+    assert left.get("gap") == "10px", \
+        "mobile composer-left needs explicit spacing between 44px touch targets"
+
+    children = _declarations(_rule_body(mobile_css, ".composer-left > *"))
+    assert children.get("flex-shrink") == "0", \
+        "mobile composer-left children must not shrink and visually overlap"
+
     for selector in (
-        ".composer-profile-chip",
-        ".composer-model-chip",
-        ".composer-reasoning-chip",
+        ".composer-profile-wrap",
+        ".composer-ws-wrap",
     ):
         declarations = _declarations(_rule_body(mobile_css, selector))
-        assert declarations.get("min-width") == "44px", \
-            f"{selector} must keep a 44px minimum width on phones"
+        assert declarations.get("flex") == "0 0 auto", \
+            f"{selector} must opt out of flex shrinking on phones"
+
+    workspace_group = _declarations(_rule_body(mobile_css, ".composer-workspace-group"))
+    assert workspace_group.get("flex") == "0 0 44px", \
+        ".composer-workspace-group must reserve exactly one 44px slot on phones"
+
+
+def test_mobile_composer_workspace_switch_does_not_leave_empty_icon_slot():
+    """The phone footer should keep only the useful workspace files button inline."""
+    mobile_css = _composer_phone_media_block()
+    workspace_group = _declarations(_rule_body(mobile_css, ".composer-workspace-group"))
+    workspace_files = _declarations(_rule_body(mobile_css, ".composer-workspace-files-btn"))
+    workspace_chip = _declarations(_rule_body(mobile_css, ".composer-workspace-chip"))
+
+    assert workspace_group.get("max-width") == "44px", \
+        "workspace group should collapse to one 44px files button on phones"
+    assert workspace_group.get("width") == "44px", \
+        "workspace group should have an exact border-box phone width"
+    assert workspace_group.get("box-sizing") == "border-box", \
+        "workspace group must use border-box for its 44px phone slot"
+    assert workspace_group.get("border") == "none", \
+        "workspace files shortcut should not keep the desktop pill/circle border on phones"
+    assert workspace_group.get("background") == "transparent", \
+        "workspace files shortcut should visually match other transparent mobile icon buttons"
+    assert workspace_files.get("max-width") == "44px", \
+        "workspace files button should be the only visible workspace footer target on phones"
+    assert workspace_files.get("width") == "44px", \
+        "workspace files button should have an exact border-box phone width"
+    assert workspace_files.get("box-sizing") == "border-box", \
+        "workspace files button must not grow beyond its 44px phone slot due to padding"
+    assert workspace_chip.get("display") == "none!important", \
+        "workspace switch chip has no visible mobile label/icon and must not consume a blank slot"
+
+
+def test_mobile_composer_overflow_control_present():
+    """Phone composer must expose a compact overflow/settings control."""
+    assert 'id="composerMobileConfigBtn"' in HTML, \
+        "#composerMobileConfigBtn missing from index.html"
+    assert 'id="composerMobileConfigPanel"' in HTML, \
+        "#composerMobileConfigPanel missing from index.html"
+    assert 'aria-controls="composerMobileConfigPanel"' in HTML, \
+        "mobile config button must be associated with its panel"
+    left_start = HTML.index('<div class="composer-left">')
+    left_end = HTML.index('<div class="composer-right">', left_start)
+    assert 'id="composerMobileConfigPanel"' not in HTML[left_start:left_end], \
+        "mobile overflow panel must not be nested inside .composer-left where overflow can clip it"
+    assert "function toggleMobileComposerConfig()" in (REPO / "static" / "ui.js").read_text(encoding="utf-8"), \
+        "toggleMobileComposerConfig() must be defined in static/ui.js"
+
+    mobile_css = _composer_phone_media_block()
+    btn = _declarations(_rule_body(mobile_css, ".composer-mobile-config-btn"))
+    panel = _declarations(_rule_body(CSS, ".composer-mobile-config-panel"))
+    panel_open = _declarations(_rule_body(mobile_css, ".composer-mobile-config-panel.open"))
+    assert btn.get("display") == "inline-flex!important", \
+        "mobile overflow button must be visible at phone width"
+    assert panel.get("display") == "none", \
+        "mobile overflow panel should be closed by default"
+    assert panel.get("position") == "absolute", \
+        "mobile overflow panel should open above the composer footer"
+    assert panel.get("flex-wrap") == "wrap", \
+        "mobile overflow panel must allow the context details row to span below primary actions"
+    assert panel_open.get("display") == "flex", \
+        "mobile overflow panel must become visible when opened"
+
+
+def test_model_and_reasoning_controls_live_in_mobile_overflow_panel():
+    """Model and reasoning controls must remain reachable through the phone overflow."""
+    panel_start = HTML.index('id="composerMobileConfigPanel"')
+    panel_end = HTML.index('<div class="profile-dropdown"', panel_start)
+    panel_html = HTML[panel_start:panel_end]
+    assert 'id="composerMobileModelAction"' in panel_html, \
+        "mobile model action must be inside the overflow panel"
+    assert 'id="composerMobileReasoningAction"' in panel_html, \
+        "mobile reasoning action must be inside the overflow panel"
+    assert 'onclick="toggleModelDropdown()"' in panel_html, \
+        "mobile model action must reuse the existing model dropdown"
+    assert 'onclick="toggleReasoningDropdown()"' in panel_html, \
+        "mobile reasoning action must reuse the existing reasoning dropdown"
+    assert 'id="composerMobileModelLabel"' in panel_html, \
+        "mobile model action must expose the selected model label"
+    assert 'id="composerMobileReasoningLabel"' in panel_html, \
+        "mobile reasoning action must expose the selected reasoning label"
+    ui_js = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+    assert "composerMobileModelAction" in ui_js, \
+        "model dropdown positioning/click handling must know the mobile model action"
+    assert "composerMobileReasoningAction" in ui_js, \
+        "reasoning dropdown positioning/click handling must know the mobile reasoning action"
+
+    mobile_css = _composer_phone_media_block()
+    assert ".composer-left > .composer-model-wrap" in mobile_css, \
+        "phone width must hide the footer model chip behind overflow"
+    assert ".composer-left > .composer-reasoning-wrap" in mobile_css, \
+        "phone width must hide the footer reasoning chip behind overflow"
+    assert ".composer-mobile-config-action" in mobile_css, \
+        "mobile overflow panel must size the model/reasoning actions"
+
+
+def test_context_details_live_in_mobile_overflow_panel():
+    """Context details should be reachable in overflow without adding a composer slot."""
+    panel_start = HTML.index('id="composerMobileConfigPanel"')
+    panel_end = HTML.index('<div class="profile-dropdown"', panel_start)
+    panel_html = HTML[panel_start:panel_end]
+    for element_id in (
+        "composerMobileContextAction",
+        "composerMobileContextUsage",
+        "composerMobileContextTokens",
+        "composerMobileContextThreshold",
+        "composerMobileContextCost",
+        "composerMobileCtxCompressBtn",
+    ):
+        assert f'id="{element_id}"' in panel_html, \
+            f"#{element_id} must be inside the mobile overflow panel"
+
+    right_start = HTML.index('<div class="composer-right">', HTML.index('<div class="composer-footer">'))
+    right_end = HTML.index('<div class="composer-mobile-config-panel"', right_start)
+    right_html = HTML[right_start:right_end]
+    assert 'id="composerMobileContextAction"' not in right_html, \
+        "mobile context details must not live in composer-right as another phone slot"
+    assert 'id="composerMobileCtxBadge"' not in right_html, \
+        "mobile context badge must stay on the config button, not composer-right"
+
+    ui_js = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+    sync_start = ui_js.index("function _syncMobileCtxDisplay(state)")
+    sync_end = ui_js.index("// ── Touch support", sync_start)
+    sync_body = ui_js[sync_start:sync_end]
+    for expected in (
+        "DEFAULT_CTX=128*1024",
+        "hasExplicitCtx",
+        "hasPromptTok",
+        "rawPct",
+        "overflowed",
+        "composerMobileContextUsage",
+        "composerMobileContextTokens",
+        "composerMobileCtxCompressBtn",
+    ):
+        assert expected in sync_body, \
+            f"_syncCtxIndicator must preserve upstream context logic while updating mobile context UI ({expected})"
+
+    mobile_css = _composer_phone_media_block()
+    ctx_wrap = _declarations(_rule_body(mobile_css, ".ctx-indicator-wrap"))
+    assert ctx_wrap.get("display") == "none!important", \
+        "standalone context indicator must remain hidden from the phone composer row"
+
+    context_row = _declarations(_rule_body(CSS, ".composer-mobile-context-action"))
+    assert context_row.get("flex") == "1 0 100%", \
+        "mobile context details should span the overflow panel instead of crowding the action row"
+    context_button = _declarations(_rule_body(CSS, ".composer-mobile-context-compress"))
+    assert context_button.get("width") == "auto", \
+        "mobile compress affordance should be compact inside the context row"
+
+
+def test_workspace_control_lives_in_mobile_overflow_panel():
+    """Workspace switching must stay reachable even when the inline switch chip is hidden."""
+    panel_start = HTML.index('id="composerMobileConfigPanel"')
+    panel_end = HTML.index('<div class="profile-dropdown"', panel_start)
+    panel_html = HTML[panel_start:panel_end]
+    assert 'id="composerMobileWorkspaceAction"' in panel_html, \
+        "mobile workspace action must be inside the overflow panel"
+    assert 'onclick="toggleComposerWsDropdown()"' in panel_html, \
+        "mobile workspace action must reuse the existing workspace dropdown"
+    assert 'id="composerMobileWorkspaceLabel"' in panel_html, \
+        "mobile workspace action must expose the current workspace label"
+
+    mobile_css = _composer_phone_media_block()
+    workspace_chip = _declarations(_rule_body(mobile_css, ".composer-workspace-chip"))
+    assert workspace_chip.get("display") == "none!important", \
+        "inline workspace switch chip must remain hidden on phones"
+
+    panels_js = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
+    pos_start = panels_js.index("function _positionComposerWsDropdown()")
+    pos_end = panels_js.index("function _positionProfileDropdown()", pos_start)
+    position_body = panels_js[pos_start:pos_end]
+    assert "composerMobileWorkspaceAction" in position_body, \
+        "workspace dropdown positioning must know the mobile workspace action"
+    assert "composerMobileConfigPanel" in position_body, \
+        "workspace dropdown positioning must anchor to the mobile panel action while open"
+
+    toggle_start = panels_js.index("function toggleComposerWsDropdown()")
+    toggle_end = panels_js.index("function closeWsDropdown()", toggle_start)
+    toggle_body = panels_js[toggle_start:toggle_end]
+    assert "usingMobileAction" in toggle_body and "chip.disabled" in toggle_body, \
+        "mobile workspace action must bypass only the hidden/disabled desktop chip guard"
+    assert "!e.target.closest('#composerMobileWorkspaceAction')" in panels_js, \
+        "workspace dropdown click-away handling must include the mobile workspace action"
+
+    ui_js = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+    assert "e.target.closest('#composerWsDropdown')" in ui_js, \
+        "mobile overflow click-away handling must allow interaction with the workspace dropdown"
+
+
+def test_mobile_composer_primary_controls_keep_touch_friendly_sizing():
+    """Visible phone composer controls and overflow controls must keep 44px targets."""
+    mobile_css = _composer_phone_media_block()
+    for selector in (
+        ".composer-mobile-config-btn",
+        ".composer-profile-chip",
+        ".composer-mobile-config-action",
+    ):
+        declarations = _declarations(_rule_body(mobile_css, selector))
+        assert declarations.get("box-sizing") == "border-box", \
+            f"{selector} must use border-box so padding/border cannot exceed 44px"
         assert declarations.get("min-height") == "44px", \
             f"{selector} must keep a 44px minimum height on phones"
+        if selector != ".composer-mobile-config-action":
+            assert declarations.get("min-width") == "44px", \
+                f"{selector} must keep a 44px minimum width on phones"
+
+    send = _declarations(_rule_body(mobile_css, ".send-btn"))
+    assert send.get("width") == "44px", ".send-btn must keep 44px width on phones"
+    assert send.get("height") == "44px", ".send-btn must keep 44px height on phones"
+
+    ctx_wrap = _declarations(_rule_body(mobile_css, ".ctx-indicator-wrap"))
+    assert ctx_wrap.get("display") == "none!important", \
+        "context indicator must not add a late-appearing composer-right slot on phones"
+
+    ctx_badge = _declarations(_rule_body(CSS, ".composer-mobile-ctx-badge"))
+    assert ctx_badge.get("position") == "absolute", \
+        "mobile context usage should be shown as a badge on the config button, not a separate slot"
+    assert ctx_badge.get("pointer-events") == "none", \
+        "mobile context badge must not shrink or steal the config button touch target"
+    assert 'id="composerMobileCtxBadge"' in HTML, \
+        "mobile context badge element must exist in the composer config button"
+
+    icon_btn = _declarations(_rule_body(mobile_css, ".icon-btn"))
+    assert icon_btn.get("min-width") == "44px", \
+        ".icon-btn controls such as attach/mic must keep 44px minimum width on phones"
+    assert icon_btn.get("min-height") == "44px", \
+        ".icon-btn controls such as attach/mic must keep 44px minimum height on phones"
 
     if ".composer-workspace-files-btn" in mobile_css:
         files_btn = _declarations(_rule_body(mobile_css, ".composer-workspace-files-btn"))

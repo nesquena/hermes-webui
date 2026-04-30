@@ -893,6 +893,24 @@
   .composer-model-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .composer-model-icon,.composer-model-chevron{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;line-height:1;}
   .composer-model-select{position:absolute!important;left:-9999px!important;width:1px!important;height:1px!important;opacity:0!important;pointer-events:none!important;}
+  .composer-mobile-config-btn{display:none;}
+  .composer-mobile-config-btn.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--text);opacity:1;}
+  .composer-mobile-ctx-badge{position:absolute;right:2px;bottom:2px;display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 3px;border-radius:999px;background:var(--surface);border:1px solid var(--border2);color:var(--muted);font-size:8px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums;box-shadow:0 1px 4px rgba(0,0,0,.28);pointer-events:none;}
+  .composer-mobile-ctx-badge.ctx-mid{color:var(--warning);border-color:var(--warning);}
+  .composer-mobile-ctx-badge.ctx-high{color:var(--error);border-color:var(--error);}
+  .composer-mobile-config-panel{display:none;position:absolute;left:8px;right:8px;bottom:calc(100% + 6px);z-index:180;padding:8px;gap:8px;align-items:stretch;justify-content:flex-start;flex-wrap:wrap;background:var(--surface);border:1px solid var(--border2);border-radius:12px;box-shadow:0 -6px 28px rgba(0,0,0,.35);overflow:visible;}
+  .composer-mobile-config-action{box-sizing:border-box;display:inline-flex;align-items:center;gap:10px;min-width:0;min-height:44px;padding:8px 10px;border-radius:10px;border:1px solid transparent;background:transparent;color:var(--muted);font:inherit;text-align:left;cursor:pointer;overflow:hidden;}
+  .composer-mobile-config-action.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--text);}
+  .composer-mobile-config-copy{display:flex;flex-direction:column;gap:1px;min-width:0;line-height:1.2;}
+  .composer-mobile-config-kicker{font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);}
+  .composer-mobile-config-value{font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .composer-mobile-context-action{flex:1 0 100%;align-items:flex-start;cursor:default;overflow:visible;}
+  .composer-mobile-context-copy{flex:1 1 auto;gap:2px;}
+  .composer-mobile-context-detail{font-size:11px;color:var(--muted);white-space:normal;line-height:1.25;}
+  .composer-mobile-context-compress{flex:0 0 auto;width:auto;max-width:128px;align-self:center;text-align:center;white-space:normal;}
+  .composer-mobile-context-action.ctx-mid .composer-mobile-config-value{color:var(--warning);}
+  .composer-mobile-context-action.ctx-high .composer-mobile-config-value{color:var(--error);}
+  .composer-mobile-context-action.ctx-high .composer-mobile-context-compress{border-color:var(--error);color:var(--error);}
   .composer-right{display:flex;gap:8px;align-items:center;flex-shrink:0;}
   .composer-status{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px;}
   /* Context usage indicator */
@@ -1085,7 +1103,6 @@
        The left sidebar + panel layout can consume width before right panel opens, so this
        must be container-driven and independent of panel state. */
     .composer-workspace-label,
-    .composer-workspace-chevron,
     #composerWorkspaceLabel,
     .composer-model-label,
     .composer-model-chevron,
@@ -1099,7 +1116,12 @@
   }
 
   @container composer-footer (max-width: 520px){
-    /* Stage 2: full icon-only for tighter widths. */
+    /* Stage 2: full icon-only for tighter widths. Container-width compaction is needed
+       when side panels narrow the composer even though the viewport is not a phone. */
+    .composer-left{gap:10px;overflow-x:auto;overflow-y:hidden;}
+    .composer-left > *{flex-shrink:0;}
+    .composer-profile-wrap,
+    .composer-ws-wrap{flex:0 0 auto;}
     .composer-profile-label,
     .composer-workspace-label,
     .composer-model-label,
@@ -1115,16 +1137,23 @@
 
     .composer-profile-chip,
     .composer-model-chip,
-    .composer-reasoning-chip,
-    .composer-workspace-chip{max-width:44px;min-width:44px;min-height:44px;padding:6px;justify-content:center;gap:0;font-size:11px;}
+    .composer-reasoning-chip{box-sizing:border-box;width:44px;height:44px;max-width:44px;min-width:44px;min-height:44px;padding:0;justify-content:center;gap:0;font-size:11px;}
 
-    .composer-workspace-group{min-height:44px;}
-    .composer-workspace-files-btn{min-width:44px;padding:6px 8px;}
-    .composer-workspace-chip{min-width:44px;max-width:44px;padding:6px 8px;gap:0;}
+    .composer-workspace-group{box-sizing:border-box;flex:0 0 44px;width:44px;min-width:44px;max-width:44px;min-height:44px;overflow:hidden;border:none;background:transparent;border-radius:8px;}
+    .composer-workspace-files-btn{box-sizing:border-box;width:44px;min-width:44px;max-width:44px;padding:0;border-radius:8px;}
+    .composer-workspace-chip{display:none!important;}
+    .composer-left > .composer-model-wrap,
+    .composer-left > .composer-reasoning-wrap{display:none!important;}
+    .composer-mobile-config-btn{box-sizing:border-box;position:relative;display:inline-flex!important;width:44px;height:44px;min-width:44px;min-height:44px;flex-shrink:0;}
+    .composer-mobile-config-panel.open{display:flex;}
+    .composer-mobile-config-action{flex:1 1 0;min-height:44px;min-width:0;background:var(--input-bg);border-color:var(--border);}
+    .composer-mobile-context-action{flex:1 0 100%;}
     .composer-divider{display:none;}
   }
 
   @media(max-width:640px){
+    /* Viewport-phone rules handle app chrome and touch sizing; they intentionally
+       overlap the container compact rules for actual phones. */
     /* ── Sidebar: slide-in overlay instead of hidden ── */
     .sidebar{position:fixed;left:-300px;top:0;bottom:0;width:280px;z-index:200;
       transition:left .25s ease;}
@@ -1162,9 +1191,12 @@
     .composer-wrap{padding:8px 10px 12px!important;}
     .composer-box{border-radius:12px;}
     .composer-box textarea{min-height:40px;}
-    .composer-footer{padding:6px 8px 8px!important;gap:8px;flex-wrap:wrap;align-items:flex-end;}
-    .composer-left{flex:1 1 100%;width:100%;flex-wrap:wrap;align-items:center;overflow-x:hidden;overflow-y:auto;max-height:104px;row-gap:4px;-webkit-overflow-scrolling:touch;}
-    .composer-right{flex:1 1 100%;width:100%;justify-content:flex-end;gap:6px;min-width:0;}
+    .composer-footer{padding:6px 8px 8px!important;gap:6px;flex-wrap:nowrap;align-items:center;}
+    .composer-left{flex:1 1 auto;width:auto;flex-wrap:nowrap;align-items:center;gap:10px;overflow-x:auto;overflow-y:hidden;max-height:none;row-gap:0;-webkit-overflow-scrolling:touch;}
+    .composer-left > *{flex-shrink:0;}
+    .composer-profile-wrap,
+    .composer-ws-wrap{flex:0 0 auto;}
+    .composer-right{flex:0 0 auto;width:auto;justify-content:flex-end;gap:6px;min-width:0;}
     /* icon-only composer chips below 640px */
     .composer-profile-label,
     .composer-workspace-label,
@@ -1180,14 +1212,21 @@
     #composerReasoningLabel{display:none;}
     .composer-profile-chip,
     .composer-model-chip,
-    .composer-reasoning-chip{max-width:44px;min-width:44px;min-height:44px;padding:6px;justify-content:center;gap:0;font-size:11px;}
-    .composer-workspace-group{min-height:44px;}
-    .composer-workspace-files-btn{min-width:44px;padding:6px 8px;}
-    .composer-workspace-chip{min-width:44px;max-width:44px;padding:6px 8px;gap:0;}
+    .composer-reasoning-chip{box-sizing:border-box;width:44px;height:44px;max-width:44px;min-width:44px;min-height:44px;padding:0;justify-content:center;gap:0;font-size:11px;}
+    .composer-workspace-group{box-sizing:border-box;flex:0 0 44px;width:44px;min-width:44px;max-width:44px;min-height:44px;overflow:hidden;border:none;background:transparent;border-radius:8px;}
+    .composer-workspace-files-btn{box-sizing:border-box;width:44px;min-width:44px;max-width:44px;padding:0;border-radius:8px;}
+    .composer-workspace-chip{display:none!important;}
+    .composer-left > .composer-model-wrap,
+    .composer-left > .composer-reasoning-wrap{display:none!important;}
+    .composer-mobile-config-btn{box-sizing:border-box;position:relative;display:inline-flex!important;width:44px;height:44px;min-width:44px;min-height:44px;flex-shrink:0;}
+    .composer-mobile-config-panel.open{display:flex;}
+    .composer-mobile-config-action{box-sizing:border-box;flex:1 1 0;min-height:44px;min-width:0;background:var(--input-bg);border-color:var(--border);}
+    .composer-mobile-context-action{flex:1 0 100%;}
     /* icon-only composer chips continue below mobile widths */
     .composer-divider{display:none;}
-    .composer-status{flex:1 1 auto;min-width:0;max-width:none;font-size:10px;text-align:right;}
+    .composer-status{flex:0 1 auto;min-width:0;max-width:96px;font-size:10px;text-align:right;}
     .send-btn{width:44px;height:44px;}
+    .ctx-indicator-wrap{display:none!important;}
     .ctx-indicator{width:44px;height:44px;}
     .ctx-tooltip{right:-4px;min-width:190px;max-width:220px;}
     .composer-terminal-panel{width:calc(100% - 20px);}

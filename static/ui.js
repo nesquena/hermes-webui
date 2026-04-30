@@ -489,26 +489,35 @@ function syncModelChip(){
   const sel=$('modelSelect');
   const chip=$('composerModelChip');
   const label=$('composerModelLabel');
+  const mobileLabel=$('composerMobileModelLabel');
+  const mobileAction=$('composerMobileModelAction');
   const dd=$('composerModelDropdown');
   if(!sel||!chip||!label) return;
   // Don't show a model label until boot has finished loading to prevent flash of wrong default
   if(!S._bootReady){
     label.textContent='';
+    if(mobileLabel) mobileLabel.textContent='';
     chip.title='Conversation model';
     return;
   }
   const opt=_selectedModelOption();
-  label.textContent=opt?opt.textContent:getModelLabel(sel.value||'');
+  const text=opt?opt.textContent:getModelLabel(sel.value||'');
+  label.textContent=text;
+  if(mobileLabel) mobileLabel.textContent=text;
   chip.title=sel.value||'Conversation model';
   chip.classList.toggle('active',!!(dd&&dd.classList.contains('open')));
+  if(mobileAction) mobileAction.classList.toggle('active',!!(dd&&dd.classList.contains('open')));
 }
 
 function _positionModelDropdown(){
   const dd=$('composerModelDropdown');
   const chip=$('composerModelChip');
+  const mobileAction=$('composerMobileModelAction');
   const footer=document.querySelector('.composer-footer');
   if(!dd||!chip||!footer) return;
-  const chipRect=chip.getBoundingClientRect();
+  const panel=$('composerMobileConfigPanel');
+  const anchor=(panel&&panel.classList.contains('open')&&mobileAction)?mobileAction:chip;
+  const chipRect=anchor.getBoundingClientRect();
   const footerRect=footer.getBoundingClientRect();
   let left=chipRect.left-footerRect.left;
   const maxLeft=Math.max(0, footer.clientWidth-dd.offsetWidth);
@@ -701,17 +710,25 @@ function toggleModelDropdown(){
   dd.classList.add('open');
   _positionModelDropdown();
   chip.classList.add('active');
+  const mobileAction=$('composerMobileModelAction');
+  if(mobileAction) mobileAction.classList.add('active');
 }
 
 function closeModelDropdown(){
   const dd=$('composerModelDropdown');
   const chip=$('composerModelChip');
+  const mobileAction=$('composerMobileModelAction');
   if(dd) dd.classList.remove('open');
   if(chip) chip.classList.remove('active');
+  if(mobileAction) mobileAction.classList.remove('active');
 }
 
 document.addEventListener('click',e=>{
-  if(!e.target.closest('#composerModelChip') && !e.target.closest('#composerModelDropdown')) closeModelDropdown();
+  if(
+    !e.target.closest('#composerModelChip') &&
+    !e.target.closest('#composerMobileModelAction') &&
+    !e.target.closest('#composerModelDropdown')
+  ) closeModelDropdown();
 });
 window.addEventListener('resize',()=>{
   const dd=$('composerModelDropdown');
@@ -743,14 +760,20 @@ function _applyReasoningChip(eff){
   const wrap=$('composerReasoningWrap');
   const label=$('composerReasoningLabel');
   const chip=$('composerReasoningChip');
+  const mobileLabel=$('composerMobileReasoningLabel');
+  const mobileAction=$('composerMobileReasoningAction');
   if(!wrap||!label) return;
   wrap.style.display='';
-  label.textContent=_formatReasoningEffortLabel(effort);
+  if(mobileAction) mobileAction.style.display='';
+  const text=_formatReasoningEffortLabel(effort);
+  label.textContent=text;
+  if(mobileLabel) mobileLabel.textContent=text;
   if(chip){
     const inactive=!effort||effort==='none';
     chip.classList.toggle('inactive',inactive);
-    chip.title='Reasoning effort: '+_formatReasoningEffortLabel(effort);
+    chip.title='Reasoning effort: '+text;
   }
+  if(mobileAction) mobileAction.classList.toggle('inactive',!effort||effort==='none');
   _highlightReasoningOption(effort);
 }
 
@@ -786,14 +809,19 @@ function toggleReasoningDropdown(){
   dd.classList.add('open');
   _positionReasoningDropdown();
   chip.classList.add('active');
+  const mobileAction=$('composerMobileReasoningAction');
+  if(mobileAction) mobileAction.classList.add('active');
 }
 
 function _positionReasoningDropdown(){
   const dd=$('composerReasoningDropdown');
   const chip=$('composerReasoningChip');
+  const mobileAction=$('composerMobileReasoningAction');
   const footer=document.querySelector('.composer-footer');
   if(!dd||!chip||!footer) return;
-  const chipRect=chip.getBoundingClientRect();
+  const panel=$('composerMobileConfigPanel');
+  const anchor=(panel&&panel.classList.contains('open')&&mobileAction)?mobileAction:chip;
+  const chipRect=anchor.getBoundingClientRect();
   const footerRect=footer.getBoundingClientRect();
   let left=chipRect.left-footerRect.left;
   const maxLeft=Math.max(0,footer.clientWidth-dd.offsetWidth);
@@ -804,12 +832,18 @@ function _positionReasoningDropdown(){
 function closeReasoningDropdown(){
   const dd=$('composerReasoningDropdown');
   const chip=$('composerReasoningChip');
+  const mobileAction=$('composerMobileReasoningAction');
   if(dd) dd.classList.remove('open');
   if(chip) chip.classList.remove('active');
+  if(mobileAction) mobileAction.classList.remove('active');
 }
 
 document.addEventListener('click',function(e){
-  if(!e.target.closest('#composerReasoningChip')&&!e.target.closest('#composerReasoningDropdown')) closeReasoningDropdown();
+  if(
+    !e.target.closest('#composerReasoningChip') &&
+    !e.target.closest('#composerMobileReasoningAction') &&
+    !e.target.closest('#composerReasoningDropdown')
+  ) closeReasoningDropdown();
   if(e.target.closest('.reasoning-option')){
     const opt=e.target.closest('.reasoning-option');
     const effort=opt&&opt.dataset.effort;
@@ -822,6 +856,58 @@ document.addEventListener('click',function(e){
         .catch(function(){showToast('🧠 Failed to set effort');});
       closeReasoningDropdown();
     }
+  }
+});
+
+function _syncMobileComposerConfigButton(open){
+  const btn=$('composerMobileConfigBtn');
+  if(!btn) return;
+  btn.classList.toggle('active',!!open);
+  btn.setAttribute('aria-expanded',open?'true':'false');
+}
+
+function closeMobileComposerConfig(){
+  const panel=$('composerMobileConfigPanel');
+  if(panel) panel.classList.remove('open');
+  _syncMobileComposerConfigButton(false);
+  if(typeof closeWsDropdown==='function') closeWsDropdown();
+}
+
+function toggleMobileComposerConfig(){
+  const panel=$('composerMobileConfigPanel');
+  if(!panel) return;
+  const open=panel.classList.contains('open');
+  if(open){
+    closeMobileComposerConfig();
+    closeModelDropdown();
+    closeReasoningDropdown();
+    return;
+  }
+  if(typeof closeProfileDropdown==='function') closeProfileDropdown();
+  if(typeof closeWsDropdown==='function') closeWsDropdown();
+  closeModelDropdown();
+  closeReasoningDropdown();
+  panel.classList.add('open');
+  _syncMobileComposerConfigButton(true);
+}
+
+document.addEventListener('click',function(e){
+  if(
+    e.target.closest('#composerMobileConfigBtn') ||
+    e.target.closest('#composerMobileConfigPanel') ||
+    e.target.closest('#composerWsDropdown') ||
+    e.target.closest('#composerModelDropdown') ||
+    e.target.closest('#composerReasoningDropdown')
+  ) return;
+  closeMobileComposerConfig();
+});
+
+window.addEventListener('resize',function(){
+  if(window.matchMedia && !window.matchMedia('(max-width: 640px)').matches){
+    closeMobileComposerConfig();
+    closeModelDropdown();
+    closeReasoningDropdown();
+    if(typeof closeWsDropdown==='function') closeWsDropdown();
   }
 });
 
@@ -845,6 +931,84 @@ let _scrollPinned=true;
 })();
 function _fmtTokens(n){if(!n||n<0)return'0';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'k';return String(n);}
 
+const _MOBILE_CONFIG_BASE_LABEL='Workspace, model, reasoning, and context settings';
+
+function _setCtxCompressButton(btn,text){
+  if(!btn)return;
+  if(text){
+    btn.style.display='';
+    btn.textContent=text;
+    btn.onclick=function(e){
+      if(e)e.stopPropagation();
+      const ta=$('msg');
+      if(ta){ta.value='/compress ';ta.focus();autoResize();}
+    };
+  }else{
+    btn.style.display='none';
+    btn.textContent='';
+    btn.onclick=null;
+  }
+}
+
+function _syncMobileCtxDisplay(state){
+  const badge=$('composerMobileCtxBadge');
+  const mobileConfigBtn=$('composerMobileConfigBtn');
+  const row=$('composerMobileContextAction');
+  const usageLine=$('composerMobileContextUsage');
+  const tokensLine=$('composerMobileContextTokens');
+  const thresholdLine=$('composerMobileContextThreshold');
+  const costLine=$('composerMobileContextCost');
+  const compressBtn=$('composerMobileCtxCompressBtn');
+  if(!state||!state.visible){
+    if(badge)badge.style.display='none';
+    if(row)row.style.display='none';
+    if(mobileConfigBtn){
+      mobileConfigBtn.setAttribute('aria-label',_MOBILE_CONFIG_BASE_LABEL);
+      mobileConfigBtn.setAttribute('title',_MOBILE_CONFIG_BASE_LABEL);
+    }
+    _setCtxCompressButton(compressBtn,'');
+    return;
+  }
+  if(badge){
+    badge.style.display='inline-flex';
+    badge.textContent=state.hasPromptTok?String(state.pct):'\u00b7';
+    badge.classList.toggle('ctx-mid',state.pct>50&&state.pct<=75);
+    badge.classList.toggle('ctx-high',state.pct>75);
+    badge.setAttribute('title',state.label);
+  }
+  if(mobileConfigBtn){
+    mobileConfigBtn.setAttribute('aria-label',`${_MOBILE_CONFIG_BASE_LABEL}; ${state.label}`);
+    mobileConfigBtn.setAttribute('title',`${_MOBILE_CONFIG_BASE_LABEL} \u00b7 ${state.label}`);
+  }
+  if(row){
+    row.style.display='';
+    row.setAttribute('aria-label',state.label);
+    row.classList.toggle('ctx-mid',state.pct>50&&state.pct<=75);
+    row.classList.toggle('ctx-high',state.pct>75);
+  }
+  if(usageLine)usageLine.textContent=state.usageText||'';
+  if(tokensLine)tokensLine.textContent=state.tokensText||'';
+  if(thresholdLine){
+    if(state.thresholdText){
+      thresholdLine.style.display='';
+      thresholdLine.textContent=state.thresholdText;
+    }else{
+      thresholdLine.style.display='none';
+      thresholdLine.textContent='';
+    }
+  }
+  if(costLine){
+    if(state.costText){
+      costLine.style.display='';
+      costLine.textContent=state.costText;
+    }else{
+      costLine.style.display='none';
+      costLine.textContent='';
+    }
+  }
+  _setCtxCompressButton(compressBtn,state.compressText||'');
+}
+
 // Context usage indicator in composer footer
 function _syncCtxIndicator(usage){
   const wrap=$('ctxIndicatorWrap');
@@ -860,6 +1024,7 @@ function _syncCtxIndicator(usage){
   // Show indicator whenever we have any usage data (tokens or cost)
   if(!promptTok&&!totalTok&&!cost){
     if(wrap) wrap.style.display='none';
+    _syncMobileCtxDisplay({visible:false});
     return;
   }
   if(wrap) wrap.style.display='';
@@ -887,50 +1052,51 @@ function _syncCtxIndicator(usage){
   // discover /compress without having to know the slash command.
   const compressWrap=$('ctxTooltipCompress');
   const compressBtn=$('ctxCompressBtn');
-  if(compressWrap&&compressBtn){
-    if(pct>=75){
-      compressWrap.style.display='';
-      compressBtn.textContent=t('ctx_compress_action');
-      compressBtn.onclick=function(){
-        const ta=$('msg');
-        if(ta){ta.value='/compress ';ta.focus();autoResize();}
-      };
-    }else if(pct>=50){
-      compressWrap.style.display='';
-      compressBtn.textContent=t('ctx_compress_hint');
-      compressBtn.onclick=function(){
-        const ta=$('msg');
-        if(ta){ta.value='/compress ';ta.focus();autoResize();}
-      };
-    }else{
-      compressWrap.style.display='none';
-    }
-  }
+  const compressText=pct>=75?t('ctx_compress_action'):(pct>=50?t('ctx_compress_hint'):'');
+  if(compressWrap) compressWrap.style.display=compressText?'':'none';
+  _setCtxCompressButton(compressBtn,compressText);
   let label=hasPromptTok?`Context window ${pct}% used`:`${_fmtTokens(totalTok)} tokens used`;
   if(!hasExplicitCtx&&hasPromptTok) label+=' (est. 128K)';
   if(cost) label+=` \u00b7 $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
   el.setAttribute('aria-label',label);
-  if(usageLine) usageLine.textContent=hasPromptTok?(overflowed?`${rawPct}% used (context exceeded)`:`${pct}% used (${100-pct}% left)`):`${_fmtTokens(totalTok)} tokens used`;
-  if(tokensLine) tokensLine.textContent=hasPromptTok?`${_fmtTokens(promptTok)} / ${_fmtTokens(ctxWindow)} tokens used`:`In: ${_fmtTokens(usage.input_tokens||0)} \u00b7 Out: ${_fmtTokens(usage.output_tokens||0)}`;
+  const usageText=hasPromptTok?(overflowed?`${rawPct}% used (context exceeded)`:`${pct}% used (${100-pct}% left)`):`${_fmtTokens(totalTok)} tokens used`;
+  const tokensText=hasPromptTok?`${_fmtTokens(promptTok)} / ${_fmtTokens(ctxWindow)} tokens used`:`In: ${_fmtTokens(usage.input_tokens||0)} \u00b7 Out: ${_fmtTokens(usage.output_tokens||0)}`;
+  if(usageLine) usageLine.textContent=usageText;
+  if(tokensLine) tokensLine.textContent=tokensText;
   const threshold=usage.threshold_tokens||0;
+  let thresholdText='';
   if(thresholdLine){
     if(threshold&&ctxWindow){
+      thresholdText=`Auto-compress at ${_fmtTokens(threshold)} (${Math.round(threshold/ctxWindow*100)}%)`;
       thresholdLine.style.display='';
-      thresholdLine.textContent=`Auto-compress at ${_fmtTokens(threshold)} (${Math.round(threshold/ctxWindow*100)}%)`;
+      thresholdLine.textContent=thresholdText;
     }else{
       thresholdLine.style.display='none';
       thresholdLine.textContent='';
     }
   }
+  let costText='';
   if(costLine){
     if(cost){
+      costText=`Estimated cost: $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
       costLine.style.display='';
-      costLine.textContent=`Estimated cost: $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}`;
+      costLine.textContent=costText;
     }else{
       costLine.style.display='none';
       costLine.textContent='';
     }
   }
+  _syncMobileCtxDisplay({
+    visible:true,
+    hasPromptTok,
+    pct,
+    label,
+    usageText,
+    tokensText,
+    thresholdText,
+    costText,
+    compressText
+  });
 }
 
 // ── Touch support: toggle context tooltip on tap (#524) ──

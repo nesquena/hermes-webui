@@ -1430,15 +1430,22 @@ function syncWorkspaceDisplays(){
 
   const composerChip=$('composerWorkspaceChip');
   const composerLabel=$('composerWorkspaceLabel');
+  const mobileAction=$('composerMobileWorkspaceAction');
+  const mobileLabel=$('composerMobileWorkspaceLabel');
   const composerDropdown=$('composerWsDropdown');
   if(!hasWorkspace && composerDropdown) composerDropdown.classList.remove('open');
   // Only show workspace label once boot has finished to prevent
   // flash of "No workspace" before the saved session finishes loading.
   if(composerLabel) composerLabel.textContent=S._bootReady?label:'';
+  if(mobileLabel) mobileLabel.textContent=S._bootReady?label:'';
   if(composerChip){
     composerChip.disabled=!hasWorkspace;
     composerChip.title=hasWorkspace?ws:t('no_workspace');
     composerChip.classList.toggle('active',!!(composerDropdown&&composerDropdown.classList.contains('open')));
+  }
+  if(mobileAction){
+    mobileAction.title=hasWorkspace?ws:t('no_workspace');
+    mobileAction.classList.toggle('active',!!(composerDropdown&&composerDropdown.classList.contains('open')));
   }
 }
 
@@ -1462,9 +1469,12 @@ function _renderWorkspaceAction(label, meta, iconSvg, onClick){
 function _positionComposerWsDropdown(){
   const dd=$('composerWsDropdown');
   const chip=$('composerWorkspaceGroup')||$('composerWorkspaceChip');
+  const mobileAction=$('composerMobileWorkspaceAction');
+  const panel=$('composerMobileConfigPanel');
   const footer=document.querySelector('.composer-footer');
-  if(!dd||!chip||!footer)return;
-  const chipRect=chip.getBoundingClientRect();
+  const anchor=(panel&&panel.classList.contains('open')&&mobileAction)?mobileAction:chip;
+  if(!dd||!anchor||!footer)return;
+  const chipRect=anchor.getBoundingClientRect();
   const footerRect=footer.getBoundingClientRect();
   let left=chipRect.left-footerRect.left;
   const maxLeft=Math.max(0, footer.clientWidth-dd.offsetWidth);
@@ -1528,17 +1538,22 @@ function toggleWsDropdown(){
 function toggleComposerWsDropdown(){
   const dd=$('composerWsDropdown');
   const chip=$('composerWorkspaceChip');
-  if(!dd||!chip||chip.disabled)return;
+  const mobileAction=$('composerMobileWorkspaceAction');
+  const panel=$('composerMobileConfigPanel');
+  const usingMobileAction=!!(panel&&panel.classList.contains('open')&&mobileAction);
+  if(!dd||(!usingMobileAction&&(!chip||chip.disabled)))return;
   const open=dd.classList.contains('open');
   if(open){closeWsDropdown();}
   else{
     closeProfileDropdown();
     if(typeof closeModelDropdown==='function') closeModelDropdown();
+    if(typeof closeReasoningDropdown==='function') closeReasoningDropdown();
     loadWorkspaceList().then(data=>{
       renderWorkspaceDropdownInto(dd, data.workspaces, S.session?S.session.workspace:'');
       dd.classList.add('open');
       _positionComposerWsDropdown();
-      chip.classList.add('active');
+      if(chip) chip.classList.add('active');
+      if(mobileAction) mobileAction.classList.add('active');
     });
   }
 }
@@ -1547,13 +1562,16 @@ function closeWsDropdown(){
   const dd=$('wsDropdown');
   const composerDd=$('composerWsDropdown');
   const composerChip=$('composerWorkspaceChip');
+  const mobileAction=$('composerMobileWorkspaceAction');
   if(dd)dd.classList.remove('open');
   if(composerDd)composerDd.classList.remove('open');
   if(composerChip)composerChip.classList.remove('active');
+  if(mobileAction)mobileAction.classList.remove('active');
 }
 document.addEventListener('click',e=>{
   if(
     !e.target.closest('#composerWorkspaceChip') &&
+    !e.target.closest('#composerMobileWorkspaceAction') &&
     !e.target.closest('#composerWsDropdown')
   ) closeWsDropdown();
 });
