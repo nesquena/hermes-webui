@@ -369,6 +369,27 @@
   .session-date-header{display:flex;align-items:center;gap:5px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:8px 10px 4px;cursor:pointer;user-select:none;opacity:.8;transition:opacity .15s;}
   .session-date-header:hover{opacity:1;}
   .session-date-header.pinned{color:var(--accent);}
+
+  /* ── Batch select mode ── */
+  .session-select-toggle{font-size:11px;padding:6px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.6;transition:opacity .15s;user-select:none;margin-top:4px;border-radius:6px;}
+  .session-select-toggle:hover{opacity:1;background:var(--hover-bg);}
+  .session-select-bar{display:flex;align-items:center;gap:6px;padding:6px 10px;margin-bottom:4px;flex-shrink:0;}
+  .batch-exit-btn{width:22px;height:22px;border:none;border-radius:6px;background:transparent;color:var(--muted);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:14px;padding:0;flex-shrink:0;}
+  .batch-exit-btn:hover{background:var(--hover-bg);color:var(--text);}
+  .batch-select-all-btn{font-size:11px;border:none;border-radius:6px;background:transparent;color:var(--accent);cursor:pointer;padding:3px 8px;font-weight:600;}
+  .batch-select-all-btn:hover{background:var(--accent-bg);}
+  .session-select-cb-wrapper{display:flex;align-items:center;flex-shrink:0;padding:2px;}
+  .session-select-cb{width:14px;height:14px;accent-color:var(--accent);cursor:pointer;margin:0;}
+  .session-item.selected{background:var(--accent-bg);color:var(--accent-text);}
+  .session-item.selected .session-title{color:var(--accent-text);}
+  .session-item.selected .session-meta{color:var(--accent-text);opacity:.8;}
+  .batch-action-bar{display:none;position:fixed;bottom:0;left:0;right:0;z-index:998;background:var(--surface);border-top:1px solid var(--border2);box-shadow:0 -2px 12px rgba(0,0,0,.15);padding:10px 16px;align-items:center;gap:10px;font-size:13px;}
+  .batch-count{font-weight:600;color:var(--accent);margin-right:auto;white-space:nowrap;}
+  .batch-action-btn{border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer;padding:6px 14px;font-size:12px;font-weight:500;transition:background .12s,color .12s,border-color .12s;white-space:nowrap;}
+  .batch-action-btn:hover{background:var(--hover-bg);border-color:var(--border2);}
+  .batch-action-btn-danger{color:var(--error,#e94560);border-color:var(--error,#e94560);}
+  .batch-action-btn-danger:hover{background:rgba(233,69,96,.1);}
+  @media(hover:none){.batch-action-bar{padding-bottom:max(10px,env(safe-area-inset-bottom));}}
   .session-date-caret{font-size:9px;transition:transform .2s;flex-shrink:0;display:inline-block;transform:rotate(0deg);}
   .session-date-caret.collapsed{transform:rotate(-90deg);}
   .app-dialog-overlay{position:fixed;inset:0;background:rgba(7,12,19,.62);backdrop-filter:blur(6px);z-index:1100;display:none;align-items:center;justify-content:center;padding:24px;}
@@ -713,6 +734,41 @@
   .img-lightbox-close:hover{background:rgba(255,255,255,.22);}
   .msg-media-link{display:inline-flex;align-items:center;gap:5px;background:var(--accent-bg);border:1px solid var(--accent-bg-strong);border-radius:6px;padding:4px 10px;font-size:13px;color:var(--accent-text);text-decoration:none;}
   .msg-media-link:hover{background:var(--accent-bg-strong);}
+
+  /* ── Inline SVG rendering ── */
+  .msg-media-svg{display:block;max-width:100%;height:auto;border-radius:6px;margin:6px 0;border:1px solid var(--border);background:var(--surface);}
+  .msg-media-label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:4px;user-select:none;}
+
+  /* ── Inline audio player ── */
+  .msg-media-audio{margin:6px 0;padding:8px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;max-width:480px;}
+  .msg-media-audio audio{width:100%;height:36px;border-radius:4px;}
+
+  /* ── Inline video player ── */
+  .msg-media-video{margin:6px 0;background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden;max-width:640px;}
+  .msg-media-video video{width:100%;display:block;border-radius:8px 8px 0 0;}
+
+  /* ── Composer attachment chips for media ── */
+  .attach-thumb--svg{background:var(--surface);padding:2px;border-radius:4px;}
+  .attach-chip--audio,.attach-chip--video{flex-direction:column;gap:4px;align-items:flex-start;padding:8px 10px;}
+  .attach-chip--audio audio,.attach-chip--video video{width:100%;max-width:320px;border-radius:4px;}
+  .attach-chip-media{font-size:12px;font-weight:600;color:var(--muted);}
+
+  /* ── CSV table rendering ── */
+  .csv-table-wrap{margin:6px 0;overflow-x:auto;border:1px solid var(--border);border-radius:8px;background:var(--surface);}
+  .csv-table{width:100%;border-collapse:collapse;font-size:13px;}
+  .csv-table thead{position:sticky;top:0;z-index:1;}
+  .csv-table th{background:var(--hover-bg);font-weight:600;text-align:left;padding:8px 12px;border-bottom:2px solid var(--border2);white-space:nowrap;user-select:none;}
+  .csv-table td{padding:6px 12px;border-bottom:1px solid var(--border);white-space:nowrap;}
+  .csv-table tbody tr:last-child td{border-bottom:none;}
+  .csv-table tbody tr:hover{background:var(--hover-bg);}
+
+  /* ── Excalidraw inline embed ── */
+  .excalidraw-embed-wrap{margin:6px 0;border:1px solid var(--border);border-radius:8px;background:var(--surface);overflow:hidden;}
+  .excalidraw-canvas{padding:12px;overflow:auto;max-height:500px;}
+  .excalidraw-svg{display:block;width:100%;height:auto;max-height:460px;}
+  .excalidraw-empty{color:var(--muted);font-size:13px;padding:20px;text-align:center;}
+  .excalidraw-open-link{font-size:11px;color:var(--accent);text-decoration:none;margin-left:auto;white-space:nowrap;}
+  .excalidraw-open-link:hover{text-decoration:underline;}
   .thinking{display:flex;align-items:center;gap:5px;color:var(--muted);font-size:13px;padding-left:30px;}
   .dot{width:6px;height:6px;border-radius:50%;background:var(--blue);opacity:.3;animation:pulse 1.4s ease-in-out infinite;}
   .dot:nth-child(2){animation-delay:.22s;}.dot:nth-child(3){animation-delay:.44s;}

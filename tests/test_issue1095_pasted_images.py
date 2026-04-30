@@ -43,7 +43,7 @@ class TestComposerTrayThumbnails:
         """Blob URLs must be revoked when a file is removed to prevent memory leaks."""
         ui = _read_js('ui.js')
         idx = ui.find('function renderTray()')
-        body = ui[idx:idx + 1200]
+        body = ui[idx:idx + 2500]
         assert 'URL.revokeObjectURL(' in body, 'renderTray must revoke blob URL when chip is removed'
 
     def test_rendertray_uses_attach_thumb_class(self):
@@ -64,8 +64,9 @@ class TestComposerTrayThumbnails:
         """CSS must define .attach-thumb with width/height/object-fit for the thumbnail."""
         css = _read_css()
         assert '.attach-thumb' in css, '.attach-thumb CSS class must be defined'
-        # Find the rule
-        idx = css.find('.attach-thumb')
+        # Find the rule — use .attach-thumb{ to avoid matching .attach-thumb--svg variant
+        idx = css.find('.attach-thumb{')
+        assert idx >= 0, '.attach-thumb rule not found'
         rule = css[idx:idx + 200]
         assert 'object-fit' in rule, '.attach-thumb must set object-fit to crop image to square'
 
@@ -98,7 +99,7 @@ class TestChatHistoryImageRendering:
         ui = _read_js('ui.js')
         m = re.search(r'm\.attachments&&m\.attachments\.length', ui)
         assert m, 'attachments rendering block not found in ui.js'
-        body = ui[m.start():m.start() + 1200]
+        body = ui[m.start():m.start() + 2000]
         assert 'api/file/raw' in body, (
             'Image attachments in chat history must use api/file/raw endpoint '
             '(resolves filename relative to session workspace). '
@@ -113,7 +114,7 @@ class TestChatHistoryImageRendering:
         """api/file/raw URL must include session_id parameter for workspace resolution."""
         ui = _read_js('ui.js')
         m = re.search(r'm\.attachments&&m\.attachments\.length', ui)
-        body = ui[m.start():m.start() + 1200]
+        body = ui[m.start():m.start() + 2000]
         assert 'session_id' in body, (
             'api/file/raw URL in attachment rendering must include session_id '
             'so the server can resolve the filename against the correct workspace.'
@@ -123,7 +124,7 @@ class TestChatHistoryImageRendering:
         """Image attachments must still render with msg-media-img class for consistent styling."""
         ui = _read_js('ui.js')
         m = re.search(r'm\.attachments&&m\.attachments\.length', ui)
-        body = ui[m.start():m.start() + 1200]
+        body = ui[m.start():m.start() + 2000]
         assert 'msg-media-img' in body, 'Image attachment <img> must use msg-media-img class'
 
     def test_attachment_render_click_to_fullscreen(self):
@@ -132,7 +133,7 @@ class TestChatHistoryImageRendering:
         assert "document.addEventListener('click'" in ui
         assert "closest('.msg-media-img')" in ui
         m = re.search(r'm\.attachments&&m\.attachments\.length', ui)
-        body = ui[m.start():m.start() + 1200]
+        body = ui[m.start():m.start() + 2000]
         img_line = next(line for line in body.splitlines() if 'msg-media-img' in line)
         assert 'onclick' not in img_line, 'Chat history image HTML must not embed inline JS handlers'
 
@@ -140,12 +141,12 @@ class TestChatHistoryImageRendering:
         """Non-image attachments in chat history must still show paperclip badge."""
         ui = _read_js('ui.js')
         m = re.search(r'm\.attachments&&m\.attachments\.length', ui)
-        body = ui[m.start():m.start() + 1200]
+        body = ui[m.start():m.start() + 2000]
         assert 'msg-file-badge' in body, 'Non-image attachments must still use msg-file-badge in chat history'
 
     def test_attachment_render_extracts_filename(self):
         """Filename extraction (.split('/').pop()) must still be present for display."""
         ui = _read_js('ui.js')
         m = re.search(r'm\.attachments&&m\.attachments\.length', ui)
-        body = ui[m.start():m.start() + 1200]
+        body = ui[m.start():m.start() + 2000]
         assert ".split('/').pop()" in body, 'Must extract filename from path for display'

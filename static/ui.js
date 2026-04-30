@@ -89,6 +89,11 @@ document.addEventListener('click', e => {
 
 const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
 const _ARCHIVE_EXTS=/\.(zip|tar|tar\.gz|tgz|tar\.bz2|tbz2|tar\.xz|txz)$/i;
+const _SVG_EXTS=/\.svg$/i;
+const _AUDIO_EXTS=/\.(mp3|ogg|wav|m4a|aac|flac|wma|opus|webm)$/i;
+const _VIDEO_EXTS=/\.(mp4|webm|mkv|mov|avi|ogv|m4v)$/i;
+const _CSV_EXTS=/\.csv$/i;
+const _EXCALIDRAW_EXTS=/\.excalidraw$/i;
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
@@ -914,6 +919,16 @@ function renderMd(raw){
         const rawCode=esc(code.replace(/\n$/,''));
         const blockId='tree-'+Math.random().toString(36).slice(2,10);
         _preBlock_stash.push(`<div class="code-tree-wrap" data-raw="${rawCode.replace(/"/g,'&quot;')}" data-lang="${lang}" id="${blockId}">${h}<pre class="tree-raw-view"><code${langAttr}>${rawCode}</code></pre></div>`);
+      // CSV blocks → render as styled table
+      } else if(lang==='csv'){
+        const rows=code.replace(/\n$/,'').split('\n').filter(r=>r.trim());
+        if(rows.length>=2){
+          const headers=rows[0].split(',').map(c=>c.trim());
+          const body=rows.slice(1).map(r=>'<tr>'+r.split(',').map(c=>`<td>${esc(c.trim())}</td>`).join('')+'</tr>').join('');
+          _preBlock_stash.push(`${h}<div class="csv-table-wrap"><table class="csv-table"><thead><tr>${headers.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table></div>`);
+        } else {
+          _preBlock_stash.push(`${h}<pre><code${langAttr}>${esc(code.replace(/\n$/,''))}</code></pre>`);
+        }
       } else {
         _preBlock_stash.push(`${h}<pre><code${langAttr}>${esc(code.replace(/\n$/,''))}</code></pre>`);
       }
@@ -1186,6 +1201,18 @@ function renderMd(raw){
         const base=document.baseURI.replace(/\/$/,'');
         src=src.replace(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i,base);
       }
+      // SVG URLs → render inline as image (before image catch-all)
+      if(_SVG_EXTS.test(src.split('?')[0])){
+        return `<img class="msg-media-svg" src="${esc(src)}" alt="${t('media_svg_label')}" loading="lazy">`;
+      }
+      // Audio URLs → inline player
+      if(_AUDIO_EXTS.test(src.split('?')[0])){
+        return `<div class="msg-media-audio"><span class="msg-media-label">🎵 ${t('media_audio_label')}</span><audio controls preload="metadata" src="${esc(src)}"></audio></div>`;
+      }
+      // Video URLs → inline player
+      if(_VIDEO_EXTS.test(src.split('?')[0])){
+        return `<div class="msg-media-video"><span class="msg-media-label">🎬 ${t('media_video_label')}</span><video controls preload="metadata" src="${esc(src)}"></video></div>`;
+      }
       // MEDIA: tokens are only emitted for tool-generated images (image_generate etc.).
       // Render all https:// URLs as <img> — extension check would miss extensionless
       // CDN paths like fal.media content-addressed URLs (closes #853).
@@ -1199,11 +1226,30 @@ function renderMd(raw){
     if(_IMAGE_EXTS.test(ref)){
       return `<img class="msg-media-img" src="${esc(apiUrl)}" alt="${esc(ref.split('/').pop())}" loading="lazy">`;
     }
-    // Non-image local file — show download link with filename
-    const fname=esc(ref.split('/').pop()||ref);
+    // SVG → inline image (no download, render directly)
+    if(_SVG_EXTS.test(ref)){
+      return `<img class="msg-media-svg" src="${esc(apiUrl)}" alt="${t('media_svg_label')}" loading="lazy">`;
+    }
+    // Audio → inline player
+    if(_AUDIO_EXTS.test(ref)){
+      return `<div class="msg-media-audio"><span class="msg-media-label">🎵 ${t('media_audio_label')}</span><audio controls preload="metadata" src="${esc(apiUrl)}"></audio></div>`;
+    }
+    // Video → inline player
+    if(_VIDEO_EXTS.test(ref)){
+      return `<div class="msg-media-video"><span class="msg-media-label">🎬 ${t('media_video_label')}</span><video controls preload="metadata" src="${esc(apiUrl)}"></video></div>`;
+    }
     // .patch/.diff files → render inline as colored diff instead of download
+    const fname=esc(ref.split('/').pop()||ref);
     if(/\.(patch|diff)$/i.test(ref)){
       return `<div class="diff-inline-load" data-path="${esc(ref)}">${t('diff_loading')} ${fname}...</div>`;
+    }
+    // CSV files → lazy-load and render as table
+    if(_CSV_EXTS.test(ref)){
+      return `<div class="csv-inline-load" data-path="${esc(ref)}">${t('csv_loading')} ${fname}...</div>`;
+    }
+    // Excalidraw files → lazy-load inline embed
+    if(_EXCALIDRAW_EXTS.test(ref)){
+      return `<div class="excalidraw-inline-load" data-path="${esc(ref)}">${t('excalidraw_loading')} ${fname}...</div>`;
     }
     return `<a class="msg-media-link" href="${esc(apiUrl+'&download=1')}" download="${fname}">📎 ${fname}</a>`;
   });
@@ -2540,7 +2586,7 @@ function renderMessages(){
       inner.innerHTML=cached.html;
       _sessionHtmlCacheSid=sid;
       if(S.activeStreamId){scrollIfPinned();}else{scrollToBottom();}
-      requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();renderMermaidBlocks();renderKatexBlocks();});
+      requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();loadExcalidrawInline();renderMermaidBlocks();renderKatexBlocks();});
       requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();renderMermaidBlocks();renderKatexBlocks();});
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
       return;
@@ -2672,6 +2718,18 @@ function renderMessages(){
           // api/media expects a full absolute path which we don't store on the client side.
           const imgUrl='api/file/raw?session_id='+encodeURIComponent(_attachSid)+'&path='+encodeURIComponent(fname);
           return `<img class="msg-media-img" src="${esc(imgUrl)}" alt="${esc(fname)}" loading="lazy">`;
+        }
+        if(_SVG_EXTS.test(fname)){
+          const svgUrl='api/file/raw?session_id='+encodeURIComponent(_attachSid)+'&path='+encodeURIComponent(fname);
+          return `<img class="msg-media-svg" src="${esc(svgUrl)}" alt="${esc(fname)}" loading="lazy">`;
+        }
+        if(_AUDIO_EXTS.test(fname)){
+          const audioUrl='api/file/raw?session_id='+encodeURIComponent(_attachSid)+'&path='+encodeURIComponent(fname);
+          return `<div class="msg-media-audio"><span class="msg-media-label">🎵 ${esc(fname)}</span><audio controls preload="metadata" src="${esc(audioUrl)}"></audio></div>`;
+        }
+        if(_VIDEO_EXTS.test(fname)){
+          const videoUrl='api/file/raw?session_id='+encodeURIComponent(_attachSid)+'&path='+encodeURIComponent(fname);
+          return `<div class="msg-media-video"><span class="msg-media-label">🎬 ${esc(fname)}</span><video controls preload="metadata" src="${esc(videoUrl)}"></video></div>`;
         }
         return `<div class="msg-file-badge">${li('paperclip',12)} ${esc(fname)}</div>`;
       }).join('')}</div>`;
@@ -2962,7 +3020,7 @@ function renderMessages(){
     scrollToBottom();
   }
   // Apply syntax highlighting after DOM is built
-  requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();renderMermaidBlocks();renderKatexBlocks();});
+  requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();loadExcalidrawInline();renderMermaidBlocks();renderKatexBlocks();});
   requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();renderMermaidBlocks();renderKatexBlocks();});
   // Refresh todo panel if it's currently open
   if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){
@@ -3467,6 +3525,147 @@ function loadDiffInline(){
       .catch(()=>{
         el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('diff_error')}</span></div>`;
       });
+  });
+}
+
+function loadCsvInline(){
+  const CSV_MAX_SIZE=256*1024; // 256 KB cap for inline CSV rendering
+  document.querySelectorAll('.csv-inline-load:not([data-loaded])').forEach(el=>{
+    el.setAttribute('data-loaded','1');
+    const path=el.dataset.path;
+    fetch('api/media?path='+encodeURIComponent(path))
+      .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
+      .then(text=>{
+        if(text.length>CSV_MAX_SIZE){
+          el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('csv_too_large')}</span></div>`;
+          return;
+        }
+        const rows=text.replace(/\r\n/g,'\n').replace(/\r/g,'\n').split('\n').filter(r=>r.trim());
+        if(rows.length<2){
+          el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('csv_no_data')}</span></div>`;
+          return;
+        }
+        // Auto-detect separator (comma, semicolon, tab)
+        const firstLine=rows[0];
+        const separators=[',',';','\t'];
+        let sep=separators.find(s=>firstLine.includes(s))||',';
+        const headers=rows[0].split(sep).map(c=>c.trim().replace(/^["']|["']$/g,''));
+        const bodyRows=rows.slice(1).map(r=>'<tr>'+r.split(sep).map(c=>`<td>${esc(c.trim().replace(/^["']|["']$/g,''))}</td>`).join('')+'</tr>').join('');
+        const headerRow=headers.map(h=>`<th>${esc(h)}</th>`).join('');
+        el.outerHTML=`<div class="csv-table-wrap"><div class="pre-header">${esc(path.split('/').pop())}</div><table class="csv-table"><thead><tr>${headerRow}</tr></thead><tbody>${bodyRows}</tbody></table></div>`;
+      })
+      .catch(()=>{
+        el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('csv_error')}</span></div>`;
+      });
+  });
+}
+
+function loadExcalidrawInline(){
+  const EXCALIDRAW_MAX_SIZE=512*1024; // 512 KB cap
+  document.querySelectorAll('.excalidraw-inline-load:not([data-loaded])').forEach(el=>{
+    el.setAttribute('data-loaded','1');
+    const path=el.dataset.path;
+    fetch('api/media?path='+encodeURIComponent(path))
+      .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
+      .then(text=>{
+        if(text.length>EXCALIDRAW_MAX_SIZE){
+          el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('excalidraw_too_large')}</span></div>`;
+          return;
+        }
+        // Validate it looks like Excalidraw JSON
+        let data;
+        try{data=JSON.parse(text);}catch(e){
+          el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('excalidraw_invalid')}</span></div>`;
+          return;
+        }
+        if(!data.type||data.type!=='excalidraw'){
+          el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('excalidraw_invalid')}</span></div>`;
+          return;
+        }
+        const fname=esc(path.split('/').pop());
+        const downloadUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+        el.outerHTML=`<div class="excalidraw-embed-wrap">
+  <div class="msg-artifact-header">
+    <span class="msg-media-label">${t('excalidraw_label')}</span>
+    <a class="excalidraw-open-link" href="${downloadUrl}" download="${fname}">${t('excalidraw_download')} ${fname}</a>
+  </div>
+  <div class="excalidraw-canvas" data-excalidraw='${esc(text)}'></div>
+</div>`;
+        // Lazy-init Excalidraw render after DOM insertion
+        requestAnimationFrame(()=>_renderExcalidrawCanvases());
+      })
+      .catch(()=>{
+        el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('excalidraw_error')}</span></div>`;
+      });
+  });
+}
+
+let _excalidrawScriptLoaded=false;
+function _renderExcalidrawCanvases(){
+  document.querySelectorAll('.excalidraw-canvas:not([data-rendered])').forEach(el=>{
+    el.setAttribute('data-rendered','1');
+    const dataStr=el.getAttribute('data-excalidraw');
+    if(!dataStr) return;
+    // Render a simple SVG preview using the Excalidraw elements
+    try{
+      const data=JSON.parse(dataStr);
+      const elements=data.elements||[];
+      if(!elements.length){el.innerHTML=`<div class="excalidraw-empty">${t('excalidraw_empty')}</div>`;return;}
+      // Calculate bounds
+      let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+      elements.forEach(el=>{
+        const b=[el.x||0,el.y||0,(el.x||0)+(el.width||0),(el.y||0)+(el.height||0)];
+        minX=Math.min(minX,b[0]);minY=Math.min(minY,b[1]);
+        maxX=Math.max(maxX,b[2]);maxY=Math.max(maxY,b[3]);
+      });
+      const pad=20;minX-=pad;minY-=pad;maxX+=pad;maxY+=pad;
+      const w=Math.max(maxX-minX,200);const h=Math.max(maxY-minY,150);
+      const svgParts=[`<svg xmlns="http://www.w3.org/2000/svg" viewBox="${minX} ${minY} ${w} ${h}" class="excalidraw-svg">`];
+      elements.forEach(el=>{
+        const stroke=el.strokeColor||'#1e1e1e';
+        const fill=el.backgroundColor||'transparent';
+        const sw=el.strokeWidth||2;
+        const x=el.x||0,y=el.y||0,w=el.width||0,h=el.height||0;
+        if(el.type==='rectangle'){
+          svgParts.push(`<rect x="${x}" y="${y}" width="${w}" height="${h}" stroke="${stroke}" stroke-width="${sw}" fill="${fill}" rx="${el.roundness?.type===3?8:0}"/>`);
+        }else if(el.type==='diamond'){
+          const cx=x+w/2,cy=y+h/2;
+          svgParts.push(`<polygon points="${cx},${y} ${x+w},${cy} ${cx},${y+h} ${x},${cy}" stroke="${stroke}" stroke-width="${sw}" fill="${fill}"/>`);
+        }else if(el.type==='ellipse'){
+          svgParts.push(`<ellipse cx="${x+w/2}" cy="${y+h/2}" rx="${w/2}" ry="${h/2}" stroke="${stroke}" stroke-width="${sw}" fill="${fill}"/>`);
+        }else if(el.type==='line'){
+          const pts=el.points||[];
+          let d=`M ${x+pts[0][0]} ${y+pts[0][1]}`;
+          for(let i=1;i<pts.length;i++) d+=` L ${x+pts[i][0]} ${y+pts[i][1]}`;
+          svgParts.push(`<path d="${d}" stroke="${stroke}" stroke-width="${sw}" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`);
+        }else if(el.type==='arrow'){
+          const pts=el.points||[];
+          let d=`M ${x+pts[0][0]} ${y+pts[0][1]}`;
+          for(let i=1;i<pts.length;i++) d+=` L ${x+pts[i][0]} ${y+pts[i][1]}`;
+          svgParts.push(`<path d="${d}" stroke="${stroke}" stroke-width="${sw}" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)"/>`);
+        }else if(el.type==='text'){
+          const fontSize=el.fontSize||20;
+          const txt=el.text||'';
+          const lines=txt.split('\n');
+          lines.forEach((line,i)=>{
+            svgParts.push(`<text x="${x}" y="${y+i*fontSize*1.2+fontSize}" fill="${stroke}" font-size="${fontSize}" font-family="Virgil, Segoe UI Emoji, sans-serif">${esc(line)}</text>`);
+          });
+        }else if(el.type==='draw'){
+          const pts=el.points||[];
+          if(pts.length>1){
+            let d=`M ${x+pts[0][0]} ${y+pts[0][1]}`;
+            for(let i=1;i<pts.length;i++) d+=` L ${x+pts[i][0]} ${y+pts[i][1]}`;
+            svgParts.push(`<path d="${d}" stroke="${stroke}" stroke-width="${sw}" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`);
+          }
+        }
+      });
+      // Arrow marker definition
+      svgParts.unshift(`<defs><marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#1e1e1e"/></marker></defs>`);
+      svgParts.push('</svg>');
+      el.innerHTML=svgParts.join('');
+    }catch(e){
+      el.innerHTML=`<div class="excalidraw-empty">${t('excalidraw_render_error')}</div>`;
+    }
   });
 }
 
@@ -4058,6 +4257,19 @@ function renderTray(){
       chip.className='attach-chip attach-chip--image';
       chip.dataset.blobUrl=blobUrl;
       chip.innerHTML=`<img class="attach-thumb" src="${esc(blobUrl)}" alt="${esc(f.name)}" title="${esc(f.name)}"><button title="${t('remove_title')}">${li('x',12)}</button>`;
+    } else if(_SVG_EXTS.test(f.name)){
+      const blobUrl=URL.createObjectURL(f);
+      chip.className='attach-chip attach-chip--image';
+      chip.dataset.blobUrl=blobUrl;
+      chip.innerHTML=`<img class="attach-thumb attach-thumb--svg" src="${esc(blobUrl)}" alt="${esc(f.name)}" title="${esc(f.name)}"><button title="${t('remove_title')}">${li('x',12)}</button>`;
+    } else if(_AUDIO_EXTS.test(f.name)){
+      const blobUrl=URL.createObjectURL(f);
+      chip.className='attach-chip attach-chip--audio';
+      chip.innerHTML=`<span class="attach-chip-media">🎵 ${esc(f.name)}</span><audio controls preload="metadata" src="${esc(blobUrl)}"></audio><button title="${t('remove_title')}">${li('x',12)}</button>`;
+    } else if(_VIDEO_EXTS.test(f.name)){
+      const blobUrl=URL.createObjectURL(f);
+      chip.className='attach-chip attach-chip--video';
+      chip.innerHTML=`<span class="attach-chip-media">🎬 ${esc(f.name)}</span><video controls preload="metadata" src="${esc(blobUrl)}"></video><button title="${t('remove_title')}">${li('x',12)}</button>`;
     } else {
       chip.innerHTML=`${li('paperclip',12)} ${esc(f.name)} <button title="${t('remove_title')}">${li('x',12)}</button>`;
     }
