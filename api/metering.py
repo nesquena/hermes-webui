@@ -1,9 +1,9 @@
 """
 Hermes Web UI -- Streaming performance metering.
 
-Tracks Tokens Per Second (TPS) across all active WebUI sessions, and the
-HIGH/LOW TPS values observed over the past 60 minutes.  Metering data is
-emitted via SSE events so the header label can update live during a stream.
+Tracks Tokens Per Second (TPS) across all active WebUI sessions.  Metering
+data is emitted via SSE events so the sidebar indicator can update live
+during a stream.
 
 Architecture
 ────────────
@@ -15,13 +15,9 @@ The global tps is the average of all currently active sessions' TPS values.
 This correctly represents the system's real-time capacity regardless of how
 many sessions are running or how long each has been streaming.
 
-For HIGH/LOW tracking, every stats snapshot records the current global tps
-(only when > 0 — idle periods are skipped) into a rolling 60-minute history.
-The max/min of that history gives the peak throughput observed over the past hour.
-
 The ticker in streaming.py calls get_interval() — it returns 1.0 when sessions
-are actively receiving tokens so the header updates at 1 Hz, and 10.0 when idle
-so the ticker exits and no idle readings are emitted.
+are actively receiving tokens so the sidebar updates at 1 Hz, and 10.0 when
+idle so the ticker exits and no idle readings are emitted.
 
 Usage from api/streaming.py
 ─────────────────────────────
@@ -33,10 +29,9 @@ Usage from api/streaming.py
 
 The SSE `metering` event payload:
   {
-    "tps": 47.3,    # average TPS across active sessions (real-time)
-    "high": 52.1,   # highest average TPS observed in the past 60 minutes
-    "low":  31.4,   # lowest average TPS (excl. readings < 1 tps, to ignore idle)
-    "active": 1,    # sessions currently streaming
+    "tps": 47.3,       # average TPS across active sessions (real-time)
+    "active": 1,       # sessions currently streaming
+    "session_tps": ..., # per-session TPS when stream_id is passed to get_stats()
   }
 """
 
