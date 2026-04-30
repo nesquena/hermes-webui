@@ -1,81 +1,116 @@
-"""Tests for issue #1195: sessions must route to the correct profile directory
-even when that profile directory does not exist yet on disk."""
+"""Regression tests for issue #1195.
 
+When the WebUI creates a session for a profile whose directory doesn't exist yet
+(e.g. 'ayan' in ~/.hermes/profiles/ayan/), the session must be routed to that
+profile's sessions dir — NOT to the default ~/.hermes/ dir.  Otherwise sessions
+created in WebUI for 'ayan' appear in TUI under 'awen' or 'default', breaking
+profile isolation.
+"""
+import importlib
 import os
+import sys
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
-
-# ── helpers ──────────────────────────────────────────────────────────────────
-
-def _make_hermes_home(base: Path, profile_name: str | None = None) -> Path:
-    """Create a temp HERMES_HOME (with optional profile dir) and return it."""
-    hermes_home = base / ".hermes"
-    hermes_home.mkdir(parents=True, exist_ok=True)
-    if profile_name:
-        (hermes_home / "profiles" / profile_name).mkdir(parents=True, exist_ok=True)
-    return hermes_home
+REPO_ROOT = Path(__file__).parent.parent.resolve()
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 
-# ── tests ────────────────────────────────────────────────────────────────────
+def _reload_profiles_module(base_home: Path):
+    """Hot-reload api.profiles with a fresh _DEFAULT_HERMES_HOME."""
+    os.environ["HERMES_BASE_HOME"] = str(base_home)
+    os.environ["HERMES_HOME"] = str(base_home)
 
-class TestGetHermesHomeForProfile:
-    """get_hermes_home_for_profile() must return the profile path regardless of
-    whether the directory already exists on disk (#1195)."""
+    # Save and remove so we get a fresh import
+    _saved = {name: sys.modules[name] for name in ["api.config", "api.profiles"]
+              if name in sys.modules}
+    for name in ["api.config", "api.profiles"]:
+        if name in sys.modules:
+            del sys.modules[name]
 
-    @pytest.fixture(autouse=True)
-    def _patch_default_home(self, tmp_path):
-        """Patch _DEFAULT_HERMES_HOME to a temp directory for isolation."""
-        from api.profiles import _DEFAULT_HERMES_HOME as real_default
+    profiles = importlib.import_module("api.profiles")
 
-        fake_home = tmp_path / ".hermes"
-        fake_home.mkdir(parents=True)
-        with patch("api.profiles._DEFAULT_HERMES_HOME", fake_home):
-            yield fake_home, real_default
+    # Restore so other tests aren't broken
+    sys.modules.update(_saved)
+    return profiles
 
-    def test_existing_profile_returns_profile_dir(self, _patch_default_home):
-        fake_home, _ = _patch_default_home
-        from api.profiles import get_hermes_home_for_profile
 
-        # Create an existing profile directory
-        profile_dir = fake_home / "profiles" / "ayan"
+def test_get_hermes_home_routes_to_profile_dir_when_dir_missing():
+    """Issue #1195: get_hermes_home_for_profile should return the profile dir
+    even when that directory does not exist yet.
+
+    WebUI can create sessions for a profile before TUI has ever initialised it.
+    The routing must NOT fallback to default home in that case — otherwise
+    session files end up in the wrong profile directory.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        base.mkdir(parents=True)
+        # Deliberately NO profiles/ayan subdir — simulating a WebUI-only profile
+
+        profiles = _reload_profiles_module(base)
+
+        result = profiles.get_hermes_home_for_profile("ayan")
+        expected = base / "profiles" / "ayan"
+
+        assert result == expected, (
+            f"Expected {expected}, got {result}. "
+            "Sessions for 'ayan' would be saved to the wrong directory!"
+        )
+
+
+def test_get_hermes_home_routes_to_existing_profile_dir():
+    """Existing profile dir should still be returned as-is."""
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        base.mkdir(parents=True)
+        profile_dir = base / "profiles" / "ayan"
         profile_dir.mkdir(parents=True)
 
-        result = get_hermes_home_for_profile("ayan")
+        profiles = _reload_profiles_module(base)
+        result = profiles.get_hermes_home_for_profile("ayan")
+
         assert result == profile_dir
 
-    def test_nonexistent_profile_still_returns_profile_path(self, _patch_default_home):
-        """Core bug fix: profile dir doesn't exist yet but should still route there."""
-        fake_home, _ = _patch_default_home
-        from api.profiles import get_hermes_home_for_profile
 
-        # Do NOT create the profile directory
-        expected = fake_home / "profiles" / "newprofile"
-        assert not expected.exists()  # confirm it doesn't exist
+def test_default_profile_routes_to_default_home():
+    """'default' profile should always route to _DEFAULT_HERMES_HOME."""
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        base.mkdir(parents=True)
 
-        result = get_hermes_home_for_profile("newprofile")
-        assert result == expected, "Should route to profile path even when dir missing"
+        profiles = _reload_profiles_module(base)
+        result = profiles.get_hermes_home_for_profile("default")
 
-    def test_none_returns_default(self, _patch_default_home):
-        fake_home, _ = _patch_default_home
-        from api.profiles import get_hermes_home_for_profile
+        assert result == base
 
-        result = get_hermes_home_for_profile(None)
-        assert result == fake_home
 
-    def test_empty_string_returns_default(self, _patch_default_home):
-        fake_home, _ = _patch_default_home
-        from api.profiles import get_hermes_home_for_profile
+def test_none_empty_profile_routes_to_default_home():
+    """None / empty profile should route to default home."""
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        base.mkdir(parents=True)
 
-        result = get_hermes_home_for_profile("")
-        assert result == fake_home
+        profiles = _reload_profiles_module(base)
 
-    def test_default_string_returns_default(self, _patch_default_home):
-        fake_home, _ = _patch_default_home
-        from api.profiles import get_hermes_home_for_profile
+        for name in [None, "", "default"]:
+            result = profiles.get_hermes_home_for_profile(name)
+            assert result == base, f"Profile {name!r} should route to default home"
 
-        result = get_hermes_home_for_profile("default")
-        assert result == fake_home
+
+def test_path_traversal_still_rejected():
+    """Path traversal attempts must still be rejected (security regression guard)."""
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        base.mkdir(parents=True)
+
+        profiles = _reload_profiles_module(base)
+
+        for malicious in ["../../etc", "../..", "%2e%2e/etc"]:
+            result = profiles.get_hermes_home_for_profile(malicious)
+            assert result == base, (
+                f"Path traversal {malicious!r} should be rejected and fallback to default"
+            )
