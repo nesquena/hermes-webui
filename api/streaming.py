@@ -68,6 +68,23 @@ _API_SAFE_MSG_KEYS = {'role', 'content', 'tool_calls', 'tool_call_id', 'name', '
 _NATIVE_IMAGE_MAX_BYTES = 20 * 1024 * 1024
 
 
+def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, session_id: str, profile_home: str) -> dict:
+    """Build thread-local agent env with per-run values overriding profile defaults.
+
+    Profile runtime env may include TERMINAL_CWD from config.yaml. Passing it as
+    **kwargs alongside an explicit TERMINAL_CWD raises TypeError before the
+    agent starts, so merge into one dict first and let the active workspace win.
+    """
+    env = dict(profile_runtime_env or {})
+    env.update({
+        'TERMINAL_CWD': str(workspace),
+        'HERMES_EXEC_ASK': '1',
+        'HERMES_SESSION_KEY': session_id,
+        'HERMES_HOME': profile_home,
+    })
+    return env
+
+
 def _attachment_name(att) -> str:
     if isinstance(att, dict):
         return str(att.get('name') or att.get('filename') or att.get('path') or '').strip()
@@ -1419,13 +1436,13 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             _profile_home = os.environ.get('HERMES_HOME', '')
             _profile_runtime_env = {}
 
-        _set_thread_env(
-            **_profile_runtime_env,
-            TERMINAL_CWD=str(s.workspace),
-            HERMES_EXEC_ASK='1',
-            HERMES_SESSION_KEY=session_id,
-            HERMES_HOME=_profile_home,
+        _thread_env = _build_agent_thread_env(
+            _profile_runtime_env,
+            str(s.workspace),
+            session_id,
+            _profile_home,
         )
+        _set_thread_env(**_thread_env)
         # Still set process-level env as fallback for tools that bypass thread-local
         # Acquire lock only for the env mutation, then release before the agent runs.
         # The finally block re-acquires to restore — keeping critical sections short
