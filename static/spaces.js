@@ -111,6 +111,12 @@
       '<label>space.yaml<textarea id="capySpaceAgentImportSpaceYaml" rows="5" autocomplete="off" placeholder="Paste Space Agent space metadata here"></textarea></label>' +
       '<label>Widgets JSON map<textarea id="capySpaceAgentImportWidgetsJson" rows="5" autocomplete="off" placeholder="Paste optional widget YAML map as JSON"></textarea></label>' +
       '<button type="button" class="capy-spaces-btn" data-capy-action="importSpaceAgentYaml">Import YAML package</button>' +
+      '</div></div>' +
+      '<div class="capy-spaces-card"><h3>Import Space Agent ZIP</h3>' +
+      '<div class="capy-spaces-muted">Paste a base64-encoded Space Agent ZIP. The archive is sent to the backend for bounded metadata-only import; archive contents are never rendered here.</div>' +
+      '<div class="capy-spaces-form" aria-label="Import Space Agent ZIP package">' +
+      '<label>ZIP archive base64<textarea id="capySpaceAgentImportZipB64" rows="4" autocomplete="off" placeholder="Paste base64 ZIP archive here"></textarea></label>' +
+      '<button type="button" class="capy-spaces-btn" data-capy-action="importSpaceAgentZip">Import ZIP package</button>' +
       '</div></div>';
   }
 
@@ -571,6 +577,16 @@
         }
       }
       const data = await postSpacesJson('api/spaces/import', {space_yaml: spaceYamlInput ? spaceYamlInput.value : '', widgets: widgets});
+      await loadCapySpaces();
+      const refreshedRoot = document.getElementById('capySpacesRoot');
+      if (refreshedRoot) refreshedRoot.innerHTML = renderSpaceImportResult(data || {}) + refreshedRoot.innerHTML;
+      return;
+    }
+    if (action === 'importSpaceAgentZip') {
+      const root = document.getElementById('capySpacesRoot');
+      const archiveInput = getRootInput(root, '#capySpaceAgentImportZipB64');
+      const archiveB64 = archiveInput && archiveInput.value ? String(archiveInput.value).trim() : '';
+      const data = await postSpacesJson('api/spaces/import', {archive_b64: archiveB64});
       await loadCapySpaces();
       const refreshedRoot = document.getElementById('capySpacesRoot');
       if (refreshedRoot) refreshedRoot.innerHTML = renderSpaceImportResult(data || {}) + refreshedRoot.innerHTML;
