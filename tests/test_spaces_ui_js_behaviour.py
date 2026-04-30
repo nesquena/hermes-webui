@@ -249,6 +249,18 @@ global.fetch = async function(path, opts = {}) {
         ],
       });
     }
+    if (body.template === 'music') {
+      return response({
+        template: 'music',
+        space: { space_id: 'music-sequencer', name: 'Music Sequencer', description: 'Safe WebAudio sequencer starter', widget_count: 4, revision_event_id: 'rev-music' },
+        installed_widgets: [
+          { id: 'music-sequencer-grid', kind: 'step-sequencer', title: 'Step sequencer', layout: { x: 0, y: 0, w: 14, h: 8, minimized: false }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+          { id: 'music-synth-controls', kind: 'audio-controls', title: 'Synth controls', layout: { x: 14, y: 0, w: 10, h: 4, minimized: false }, source: 'SECRET_SOURCE' },
+          { id: 'music-piano-roll', kind: 'piano-roll', title: 'Piano roll', layout: { x: 0, y: 8, w: 18, h: 6, minimized: false } },
+          { id: 'music-notes', kind: 'markdown', title: 'Music notes', layout: { x: 18, y: 8, w: 6, h: 6, minimized: false } },
+        ],
+      });
+    }
     return response({
       template: 'weather',
       space: { space_id: 'weather-demo', name: 'Weather Demo', description: 'Prague weather starter', widget_count: 1, revision_event_id: 'rev-weather' },
@@ -408,6 +420,9 @@ async function click(action, dataset) {
   } else if (scenario === 'installGameSandbox') {
     await window.loadCapySpaces();
     await click('installGameTemplate', {});
+  } else if (scenario === 'installMusicSequencer') {
+    await window.loadCapySpaces();
+    await click('installMusicTemplate', {});
   } else if (scenario === 'openSpaceDetail') {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
@@ -861,6 +876,19 @@ def test_spaces_ui_install_game_sandbox_posts_template_and_refreshes_without_wid
     assert "Install game sandbox" in out["rootHtml"]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"template": "game"}
+    assert out["calls"][-1]["path"] == "api/spaces"
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_install_music_sequencer_posts_template_and_refreshes_without_widget_code(driver_path):
+    out = _run_spaces_scenario(driver_path, "installMusicSequencer")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/templates/install")
+
+    assert "Install music sequencer" in out["rootHtml"]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"template": "music"}
     assert out["calls"][-1]["path"] == "api/spaces"
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]

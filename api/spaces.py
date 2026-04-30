@@ -1371,6 +1371,56 @@ def _game_sandbox_widgets() -> list[dict[str, Any]]:
     ]
 
 
+def _music_sequencer_widgets() -> list[dict[str, Any]]:
+    """Return safe declarative music/sequencer widget seeds.
+
+    This starter maps the Space Agent step-sequencer/piano-roll demo into
+    metadata-only Capy widgets. WebAudio, keyboard capture, generated renderer
+    code, and cleanup hooks remain planned until explicit sandbox tests exist.
+    """
+    return [
+        {
+            "id": "music-sequencer-grid",
+            "kind": "step-sequencer",
+            "title": "Step sequencer",
+            "layout": {"x": 0, "y": 0, "w": 14, "h": 8, "minimized": False},
+            "pattern_status": "metadata-only-empty",
+            "audio_policy": {
+                "permission": "explicit-user-gesture",
+                "webaudio": "disabled-until-approved",
+                "cleanup": "planned-on-rerender",
+            },
+            "permissions": {"audio": "explicit-approval", "generated_rendering": "disabled"},
+        },
+        {
+            "id": "music-synth-controls",
+            "kind": "audio-controls",
+            "title": "Synth controls",
+            "layout": {"x": 14, "y": 0, "w": 10, "h": 4, "minimized": False},
+            "controls_status": "metadata-only-defaults",
+            "audio_policy": {"permission": "explicit-user-gesture", "webaudio": "disabled-until-approved"},
+            "permissions": {"audio": "explicit-approval", "generated_rendering": "disabled"},
+        },
+        {
+            "id": "music-piano-roll",
+            "kind": "piano-roll",
+            "title": "Piano roll",
+            "layout": {"x": 0, "y": 8, "w": 18, "h": 6, "minimized": False},
+            "interaction": {"keyboard": "explicit-focus", "editing": "planned-metadata"},
+            "audio_policy": {"permission": "explicit-user-gesture", "cleanup": "planned-on-rerender"},
+            "permissions": {"audio": "explicit-approval", "keyboard": "explicit-focus"},
+        },
+        {
+            "id": "music-notes",
+            "kind": "markdown",
+            "title": "Music notes",
+            "layout": {"x": 18, "y": 8, "w": 6, "h": 6, "minimized": False},
+            "content_status": "agent-managed-empty",
+            "repair_loop": {"resize_cleanup": "planned", "rollback": "revision-history"},
+        },
+    ]
+
+
 def _big_bang_onboarding_widgets() -> list[dict[str, Any]]:
     """Return safe declarative Big Bang onboarding widget seeds.
 
@@ -1437,7 +1487,7 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
     template_name = str(template or "").strip().lower()
-    if template_name not in {"weather", "weather-demo", "research", "research-harness", "dashboard", "daily-dashboard", "camera", "camera-dashboard", "kanban", "kanban-board", "notes", "notes-app", "browser", "browser-surface", "stock", "stock-chart", "stocks", "game", "game-sandbox", "snake", "snake-game", "big-bang", "bigbang", "onboarding", "big-bang-onboarding"}:
+    if template_name not in {"weather", "weather-demo", "research", "research-harness", "dashboard", "daily-dashboard", "camera", "camera-dashboard", "kanban", "kanban-board", "notes", "notes-app", "browser", "browser-surface", "stock", "stock-chart", "stocks", "game", "game-sandbox", "snake", "snake-game", "music", "music-sequencer", "sequencer", "step-sequencer", "synth", "piano-roll", "big-bang", "bigbang", "onboarding", "big-bang-onboarding"}:
         raise ValueError("Unsupported template")
 
     if template_name in {"weather", "weather-demo"}:
@@ -1568,6 +1618,22 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
             )
         widgets = _game_sandbox_widgets()
         response_template = "game"
+    elif template_name in {"music", "music-sequencer", "sequencer", "step-sequencer", "synth", "piano-roll"}:
+        target_id = validate_space_id(space_id) if space_id else _unique_space_id("music-sequencer")
+        if _manifest_path(target_id).exists():
+            space = read_space(target_id)
+        else:
+            space = create_space(
+                {
+                    "space_id": target_id,
+                    "name": "Music Sequencer",
+                    "description": "Metadata-only starter for WebAudio sequencer, synth controls, piano roll, and repair notes.",
+                    "agent_instructions": "Keep music widgets declarative until sandboxed WebAudio is approved. Require explicit audio permission and keyboard focus, preserve revision history, and clean up on rerender.",
+                    "template": "music-sequencer",
+                }
+            )
+        widgets = _music_sequencer_widgets()
+        response_template = "music"
     elif template_name in {"big-bang", "bigbang", "onboarding", "big-bang-onboarding"}:
         target_id = validate_space_id(space_id) if space_id else _unique_space_id("big-bang-onboarding")
         if _manifest_path(target_id).exists():

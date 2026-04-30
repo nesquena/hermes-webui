@@ -897,6 +897,64 @@ def test_game_template_install_route_returns_safe_metadata(monkeypatch, tmp_path
     assert "secret" not in serialized
 
 
+def test_install_music_sequencer_template_creates_safe_audio_widgets(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    installed = spaces.install_template("music")
+
+    assert installed["template"] == "music"
+    assert installed["space"]["template"] == "music-sequencer"
+    assert installed["space"]["name"] == "Music Sequencer"
+    assert [widget["id"] for widget in installed["installed_widgets"]] == [
+        "music-sequencer-grid",
+        "music-synth-controls",
+        "music-piano-roll",
+        "music-notes",
+    ]
+    assert [widget["kind"] for widget in installed["installed_widgets"]] == [
+        "step-sequencer",
+        "audio-controls",
+        "piano-roll",
+        "markdown",
+    ]
+    sequencer_widget = spaces.read_widget(installed["space"]["space_id"], "music-sequencer-grid")
+    assert sequencer_widget["audio_policy"] == {
+        "permission": "explicit-user-gesture",
+        "webaudio": "disabled-until-approved",
+        "cleanup": "planned-on-rerender",
+    }
+    assert sequencer_widget["pattern_status"] == "metadata-only-empty"
+    piano_widget = spaces.read_widget(installed["space"]["space_id"], "music-piano-roll")
+    assert piano_widget["interaction"] == {"keyboard": "explicit-focus", "editing": "planned-metadata"}
+    serialized = json.dumps(installed).lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert '\"script\"' not in serialized
+    assert '\"data\"' not in serialized
+    assert '\"source\"' not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
+def test_music_sequencer_template_install_route_returns_safe_metadata(monkeypatch, tmp_path):
+    _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    handled, status, body = _route_post("/api/spaces/templates/install", {"template": "music"})
+
+    assert handled is None
+    assert status == 200
+    assert body["template"] == "music"
+    assert body["space"]["name"] == "Music Sequencer"
+    assert body["installed_widgets"][0]["id"] == "music-sequencer-grid"
+    assert len(body["installed_widgets"]) == 4
+    serialized = json.dumps(body).lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
 def test_install_camera_dashboard_template_creates_safe_camera_widgets(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
