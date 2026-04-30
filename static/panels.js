@@ -2603,6 +2603,13 @@ function _markSettingsDirty(){
   _settingsDirty = true;
 }
 
+// Apply TTS enabled state: show/hide TTS buttons on all assistant messages
+function _applyTtsEnabled(enabled){
+  document.querySelectorAll('.msg-tts-btn').forEach(btn=>{
+    btn.style.display=enabled?'':'none';
+  });
+}
+
 function _appearancePayloadFromUi(){
   return {
     theme: ($('settingsTheme')||{}).value || localStorage.getItem('hermes-theme') || 'dark',
@@ -2781,6 +2788,46 @@ async function loadSettingsPanel(){
     if(updateCb){updateCb.checked=settings.check_for_updates!==false;updateCb.addEventListener('change',_markSettingsDirty,{once:false});}
     const soundCb=$('settingsSoundEnabled');
     if(soundCb){soundCb.checked=!!settings.sound_enabled;soundCb.addEventListener('change',_markSettingsDirty,{once:false});}
+    // TTS settings (localStorage-only, no server round-trip needed)
+    const ttsEnabledCb=$('settingsTtsEnabled');
+    if(ttsEnabledCb){ttsEnabledCb.checked=localStorage.getItem('hermes-tts-enabled')==='true';ttsEnabledCb.onchange=function(){localStorage.setItem('hermes-tts-enabled',this.checked?'true':'false');_applyTtsEnabled(this.checked);};}
+    const ttsAutoReadCb=$('settingsTtsAutoRead');
+    if(ttsAutoReadCb){ttsAutoReadCb.checked=localStorage.getItem('hermes-tts-auto-read')==='true';ttsAutoReadCb.onchange=function(){localStorage.setItem('hermes-tts-auto-read',this.checked?'true':'false');};}
+    // Populate voice selector from speechSynthesis
+    const ttsVoiceSel=$('settingsTtsVoice');
+    if(ttsVoiceSel&&'speechSynthesis' in window){
+      const populateVoices=()=>{
+        const voices=speechSynthesis.getVoices();
+        const current=localStorage.getItem('hermes-tts-voice')||'';
+        ttsVoiceSel.innerHTML='<option value="">Default system voice</option>';
+        voices.forEach(v=>{
+          const opt=document.createElement('option');
+          opt.value=v.name;opt.textContent=v.name+(v.lang?' ('+v.lang+')':'');
+          if(v.name===current) opt.selected=true;
+          ttsVoiceSel.appendChild(opt);
+        });
+      };
+      populateVoices();
+      speechSynthesis.addEventListener('voiceschanged',populateVoices,{once:true});
+      ttsVoiceSel.onchange=function(){localStorage.setItem('hermes-tts-voice',this.value);};
+    }
+    // TTS rate/pitch sliders
+    const ttsRateSlider=$('settingsTtsRate');
+    const ttsRateValue=$('settingsTtsRateValue');
+    if(ttsRateSlider){
+      const savedRate=localStorage.getItem('hermes-tts-rate');
+      ttsRateSlider.value=savedRate||'1';
+      if(ttsRateValue) ttsRateValue.textContent=parseFloat(ttsRateSlider.value).toFixed(1)+'x';
+      ttsRateSlider.oninput=function(){if(ttsRateValue)ttsRateValue.textContent=parseFloat(this.value).toFixed(1)+'x';localStorage.setItem('hermes-tts-rate',this.value);};
+    }
+    const ttsPitchSlider=$('settingsTtsPitch');
+    const ttsPitchValue=$('settingsTtsPitchValue');
+    if(ttsPitchSlider){
+      const savedPitch=localStorage.getItem('hermes-tts-pitch');
+      ttsPitchSlider.value=savedPitch||'1';
+      if(ttsPitchValue) ttsPitchValue.textContent=parseFloat(ttsPitchSlider.value).toFixed(1);
+      ttsPitchSlider.oninput=function(){if(ttsPitchValue)ttsPitchValue.textContent=parseFloat(this.value).toFixed(1);localStorage.setItem('hermes-tts-pitch',this.value);};
+    }
     const notifCb=$('settingsNotificationsEnabled');
     if(notifCb){notifCb.checked=!!settings.notifications_enabled;notifCb.addEventListener('change',_markSettingsDirty,{once:false});}
     // show_thinking has no settings panel checkbox — controlled via /reasoning show|hide

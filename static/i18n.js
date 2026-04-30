@@ -441,6 +441,17 @@ const LOCALES = {
     // Settings detail
     settings_label_sound: 'Notification sound',
     settings_desc_sound: 'Play a sound when the assistant finishes a response.',
+    // TTS (#499)
+    tts_listen: 'Listen',
+    tts_not_supported: 'Speech synthesis not supported in this browser.',
+    settings_label_tts: 'Text-to-Speech for responses',
+    settings_desc_tts: "Show a speaker button on each assistant message to read it aloud using your browser's speech synthesis.",
+    settings_label_tts_auto_read: 'Auto-read responses aloud',
+    settings_desc_tts_auto_read: 'Automatically speak each new assistant response when it finishes. Pauses when you start typing.',
+    settings_label_tts_voice: 'Voice',
+    settings_desc_tts_voice: "Preferred voice. Populated from your browser's available voices.",
+    settings_label_tts_rate: 'Speech rate',
+    settings_label_tts_pitch: 'Speech pitch',
     settings_label_notifications: 'Browser notifications',
     settings_desc_notifications: 'Show a system notification when a response completes while the app is in the background.',
     settings_desc_token_usage: 'Displays input/output token count below each assistant reply. Also toggled with /usage.',
@@ -1511,6 +1522,17 @@ const LOCALES = {
     html_error: 'Не удалось загрузить предпросмотр HTML',
     html_open_full: 'Открыть на всю страницу',
     html_sandbox_label: 'Предпросмотр HTML',
+    // TTS (#499)
+    tts_listen: 'Прослушать',
+    tts_not_supported: 'Синтез речи не поддерживается',
+    settings_label_tts: 'Синтез речи для ответов',
+    settings_desc_tts: 'Показать кнопку динамика на сообщениях ассистента',
+    settings_label_tts_auto_read: 'Авто-чтение ответов',
+    settings_desc_tts_auto_read: 'Автоматически озвучивать ответы ассистента',
+    settings_label_tts_voice: 'Голос',
+    settings_desc_tts_voice: 'Выберите голос для синтеза речи',
+    settings_label_tts_rate: 'Скорость речи',
+    settings_label_tts_pitch: 'Тон речи',
   },
 
   es: {
@@ -2231,6 +2253,17 @@ const LOCALES = {
     html_error: 'Error al cargar la vista previa de HTML',
     html_open_full: 'Abrir página completa',
     html_sandbox_label: 'Vista previa de HTML',
+    // TTS (#499)
+    tts_listen: 'Escuchar',
+    tts_not_supported: 'Síntesis de voz no disponible',
+    settings_label_tts: 'Texto a voz para respuestas',
+    settings_desc_tts: 'Mostrar botón de altavoz en mensajes del asistente',
+    settings_label_tts_auto_read: 'Leer respuestas automáticamente',
+    settings_desc_tts_auto_read: 'Leer en voz alta las respuestas del asistente automáticamente',
+    settings_label_tts_voice: 'Voz',
+    settings_desc_tts_voice: 'Seleccionar voz para síntesis de voz',
+    settings_label_tts_rate: 'Velocidad de voz',
+    settings_label_tts_pitch: 'Tono de voz',
   },
 
   de: {
@@ -2955,7 +2988,18 @@ const LOCALES = {
     html_error: 'HTML-Vorschau konnte nicht geladen werden',
     html_open_full: 'Vollständige Seite öffnen',
     html_sandbox_label: 'HTML-Vorschau',
-},
+    // TTS (#499)
+    tts_listen: 'Anhören',
+    tts_not_supported: 'Sprachsynthese nicht verfügbar',
+    settings_label_tts: 'Text-zu-Sprache für Antworten',
+    settings_desc_tts: 'Lautsprecher-Symbol auf Assistenten-Nachrichten anzeigen',
+    settings_label_tts_auto_read: 'Antworten automatisch vorlesen',
+    settings_desc_tts_auto_read: 'Assistenten-Antworten automatisch vorlesen',
+    settings_label_tts_voice: 'Stimme',
+    settings_desc_tts_voice: 'Stimme für Sprachsynthese auswählen',
+    settings_label_tts_rate: 'Sprechgeschwindigkeit',
+    settings_label_tts_pitch: 'Tonhöhe',
+  },
 
   zh: {
     _lang: 'zh',
@@ -3673,6 +3717,17 @@ const LOCALES = {
     excalidraw_empty: '空图表',
     excalidraw_render_error: '渲染图表失败',
     excalidraw_simplified: '简化 SVG 预览 — 与 Excalidraw 画布不完全相同',
+    // TTS (#499)
+    tts_listen: '收听',
+    tts_not_supported: '语音合成不可用',
+    settings_label_tts: '回复语音合成',
+    settings_desc_tts: '在助手消息上显示扬声器按钮',
+    settings_label_tts_auto_read: '自动朗读回复',
+    settings_desc_tts_auto_read: '自动朗读助手回复',
+    settings_label_tts_voice: '语音',
+    settings_desc_tts_voice: '选择语音合成声音',
+    settings_label_tts_rate: '语速',
+    settings_label_tts_pitch: '音调',
   },
 
   // Traditional Chinese (zh-Hant)
@@ -4499,6 +4554,17 @@ const LOCALES = {
     html_error: 'HTML 預覽載入失敗',
     html_open_full: '開啟完整頁面',
     html_sandbox_label: 'HTML 預覽',
+    // TTS (#499)
+    tts_listen: '收聽',
+    tts_not_supported: '語音合成無法使用',
+    settings_label_tts: '回覆語音合成',
+    settings_desc_tts: '在助手訊息上顯示喇叭按鈕',
+    settings_label_tts_auto_read: '自動朗讀回覆',
+    settings_desc_tts_auto_read: '自動朗讀助手回覆',
+    settings_label_tts_voice: '語音',
+    settings_desc_tts_voice: '選擇語音合成聲音',
+    settings_label_tts_rate: '語速',
+    settings_label_tts_pitch: '音調',
   },
 
 
@@ -5138,7 +5204,18 @@ const LOCALES = {
     approval_skip: 'Pular',
     approval_skip_title: 'Pular este prompt de aprovação',
     approval_skip_all: 'Pular todos',
-    approval_skip_all_title: 'Pular todos prompts de aprovação nesta sessão'
+    approval_skip_all_title: 'Pular todos prompts de aprovação nesta sessão',
+    // TTS (#499)
+    tts_listen: 'Ouvir',
+    tts_not_supported: 'Síntese de voz não disponível',
+    settings_label_tts: 'Texto para voz nas respostas',
+    settings_desc_tts: 'Mostrar botão de alto-falante nas mensagens do assistente',
+    settings_label_tts_auto_read: 'Ler respostas automaticamente',
+    settings_desc_tts_auto_read: 'Ler automaticamente as respostas do assistente',
+    settings_label_tts_voice: 'Voz',
+    settings_desc_tts_voice: 'Selecionar voz para síntese de voz',
+    settings_label_tts_rate: 'Velocidade da fala',
+    settings_label_tts_pitch: 'Tom da fala',
   },
   ko: {
     _lang: 'ko',
@@ -5911,6 +5988,17 @@ const LOCALES = {
     excalidraw_empty: '빈 다이어그램',
     excalidraw_render_error: '다이어그램 렌더링 실패',
     excalidraw_simplified: '단순화된 SVG 미리보기 — Excalidraw 캔버스와 픽셀 동일하지 않음',
+    // TTS (#499)
+    tts_listen: '듣기',
+    tts_not_supported: '음성 합성을 사용할 수 없습니다',
+    settings_label_tts: '답변 음성 합성',
+    settings_desc_tts: '도움말 메시지에 스피커 버튼 표시',
+    settings_label_tts_auto_read: '답변 자동 읽기',
+    settings_desc_tts_auto_read: '도움말 답변을 자동으로 읽어줌',
+    settings_label_tts_voice: '음성',
+    settings_desc_tts_voice: '음성 합성 음성 선택',
+    settings_label_tts_rate: '말 속도',
+    settings_label_tts_pitch: '말 톤',
   },
 };
 
