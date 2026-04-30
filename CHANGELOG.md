@@ -4,6 +4,16 @@
 
 ### Fixed
 
+## [v0.50.244] — 2026-04-30
+
+### Added
+- **Text-to-Speech playback for agent responses** — Web Speech API powers a per-message 🔊 speaker button on every assistant message, plus an optional auto-read toggle that speaks each response when streaming finishes. Voice / rate / pitch controls are exposed in Settings → Preferences. All TTS preferences are stored in `localStorage` (no server round-trip). Strips markdown, code blocks, and `MEDIA:` paths before speaking; pauses synthesis when the composer is focused. Opt-in — TTS is hidden by default until enabled in Settings. Locale coverage for en, ru, es, de, zh, zh-Hant, pt, ko. (`static/ui.js`, `static/panels.js`, `static/messages.js`, `static/boot.js`, `static/style.css`, `static/index.html`, `static/i18n.js`) @fecolinhares — PR #1303, closes #499
+- **Sienna skin (warm clay & sand earth palette)** — opt-in alongside the existing default/Ares/Mono/Slate/Poseidon/Sisyphus/Charizard set. Full palette rewrite (light + dark variants) with clay accent (`#D97757`) on a soft sand background; neutral tool-card chrome, accent-tinted active session indicator. No forced migration, default skin stays `default` (gold); users opt in via Settings → Skin. (`static/style.css`, `static/boot.js`, `static/index.html`, `tests/test_sienna_skin.py`) — PR #1307 (salvaged from #1084)
+
+### Fixed
+- **Cmd/Ctrl+K new chat works while a conversation is busy** — drops the `!S.busy` guard so users can start a new conversation mid-stream. The in-flight stream keeps running on its own session; the user just gets a fresh blank one. (`static/boot.js`, `tests/test_mobile_layout.py`) — PR #1306 (salvaged from #1084)
+- **Stale saved session 404 cleanup + structured `api()` errors** — when a saved session ID returns 404, `loadSession()` now clears `localStorage.hermes-webui-session` and rethrows so boot can fall through to the empty state instead of sticking on "Session not available in web UI." across reloads. The cleanup is gated on `!currentSid` so click-into-404 doesn't wipe state. The global `api()` helper now attaches `.status` / `.statusText` / `.body` to thrown errors, so callers can branch on HTTP status without re-parsing the message string. (`static/sessions.js`, `static/workspace.js`, `tests/test_stale_empty_session_restore.py`, `tests/test_1038_pwa_auth_redirect.py`) — PR #1304 (salvaged from #1084)
+
 ## [v0.50.243] — 2026-04-30
 
 ### Fixed
