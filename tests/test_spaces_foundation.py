@@ -979,6 +979,93 @@ def test_big_bang_template_install_route_returns_safe_metadata(monkeypatch, tmp_
     assert "secret" not in serialized
 
 
+def test_reset_big_bang_template_restores_canonical_metadata_and_removes_extra_widgets(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    installed = spaces.install_template("big-bang")
+    space_id = installed["space"]["space_id"]
+    spaces.update_space(
+        space_id,
+        {
+            "name": "Broken <script>name</script>",
+            "description": "Contains api_key SECRET",
+            "agent_instructions": "Leaky token SECRET",
+        },
+    )
+    spaces.upsert_widget(
+        space_id,
+        {
+            "id": "custom-generated",
+            "kind": "html",
+            "title": "Custom generated",
+            "renderer": "<script>steal()</script>",
+            "api_key": "SECRET",
+        },
+    )
+
+    reset = spaces.reset_template("big-bang", space_id=space_id)
+
+    assert reset["template"] == "big-bang"
+    assert reset["reset"] is True
+    assert reset["space"]["space_id"] == space_id
+    assert reset["space"]["name"] == "Big Bang Onboarding"
+    assert reset["space"]["template"] == "big-bang-onboarding"
+    assert [widget["id"] for widget in reset["installed_widgets"]] == [
+        "bigbang-welcome",
+        "bigbang-demo-launcher",
+        "bigbang-safety",
+        "bigbang-next-steps",
+    ]
+    assert "custom-generated" not in [widget["id"] for widget in reset["installed_widgets"]]
+    stored = spaces.read_space(space_id)
+    assert stored["name"] == "Big Bang Onboarding"
+    assert stored["description"] == "Metadata-only first-run tour for Capy Spaces demos, safety guardrails, and next steps."
+    assert stored["agent_instructions"].startswith("Use this onboarding space")
+    assert [widget["id"] for widget in stored["widgets"]] == [
+        "bigbang-welcome",
+        "bigbang-demo-launcher",
+        "bigbang-safety",
+        "bigbang-next-steps",
+    ]
+    assert spaces.list_revision_events(space_id)[0]["event_type"] == "template.reset"
+    serialized = json.dumps(reset).lower()
+    assert "custom-generated" not in serialized
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
+def test_big_bang_template_reset_route_returns_safe_metadata(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    installed = spaces.install_template("big-bang")
+    space_id = installed["space"]["space_id"]
+    spaces.upsert_widget(
+        space_id,
+        {"id": "unsafe-extra", "kind": "html", "title": "Unsafe", "renderer": "<script>bad()</script>", "api_key": "SECRET"},
+    )
+
+    handled, status, body = _route_post("/api/spaces/templates/reset", {"template": "big-bang", "space_id": space_id})
+
+    assert handled is None
+    assert status == 200
+    assert body["template"] == "big-bang"
+    assert body["reset"] is True
+    assert body["space"]["name"] == "Big Bang Onboarding"
+    assert [widget["id"] for widget in body["installed_widgets"]] == [
+        "bigbang-welcome",
+        "bigbang-demo-launcher",
+        "bigbang-safety",
+        "bigbang-next-steps",
+    ]
+    serialized = json.dumps(body).lower()
+    assert "unsafe-extra" not in serialized
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
 def test_install_game_template_creates_safe_canvas_game_widgets(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 

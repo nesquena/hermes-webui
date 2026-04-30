@@ -1898,6 +1898,59 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
     }
 
 
+def reset_template(template: str, *, space_id: str | None = None) -> dict[str, Any]:
+    """Reset an installed demo template to its canonical metadata-only state.
+
+    This is intentionally narrower than install_template: reset replaces the
+    target Space metadata and widget list with the trusted template definition,
+    dropping any generated/unsafe extra widgets from the active manifest while
+    preserving normal revision history for rollback/audit.
+    """
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    template_name = str(template or "").strip().lower()
+    if template_name not in {"big-bang", "bigbang", "onboarding", "big-bang-onboarding"}:
+        raise ValueError("Unsupported template")
+
+    sid = validate_space_id(space_id) if space_id else "big-bang-onboarding"
+    now = time.time()
+    if _manifest_path(sid).exists():
+        existing = read_space(sid)
+    else:
+        existing = {"space_id": sid, "created_at": now, "revision_events": []}
+
+    space = dict(existing)
+    space.update(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "space_id": sid,
+            "name": "Big Bang Onboarding",
+            "description": "Metadata-only first-run tour for Capy Spaces demos, safety guardrails, and next steps.",
+            "agent_instructions": "Use this onboarding space to explain Capy Spaces, install demo templates on request, keep generated code disabled by default, and preserve revision history.",
+            "template": "big-bang-onboarding",
+            "layout": {"columns": 24},
+            "capabilities": {
+                "demo_launchers": True,
+                "generated_code": "disabled-by-default",
+                "recovery": "available",
+            },
+            "recovery": {"safe_mode_available": True},
+            "widgets": [_normalize_widget(widget) for widget in _big_bang_onboarding_widgets()],
+        }
+    )
+    space.setdefault("created_at", existing.get("created_at") or now)
+    space["revision_events"] = [
+        str(rev) for rev in (existing.get("revision_events") or []) if _event_id_is_safe(rev)
+    ]
+    _write_manifest(space, "template.reset", {"template": "big-bang"})
+    return {
+        "template": "big-bang",
+        "reset": True,
+        "space": read_space_detail(sid),
+        "installed_widgets": list_widgets(sid),
+    }
+
+
 def disable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = "") -> dict[str, Any]:
     """Mark a widget disabled from safe recovery without deleting its source.
 
