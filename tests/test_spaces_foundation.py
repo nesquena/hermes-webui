@@ -1350,6 +1350,71 @@ def test_local_service_template_install_route_returns_safe_metadata(monkeypatch,
     assert "secret" not in serialized
 
 
+def test_install_model_setup_template_creates_safe_provider_setup_widgets(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    installed = spaces.install_template("model-setup")
+
+    assert installed["template"] == "model-setup"
+    assert installed["space"]["template"] == "model-provider-setup"
+    assert installed["space"]["name"] == "Model Provider Setup"
+    assert [widget["id"] for widget in installed["installed_widgets"]] == [
+        "model-provider-status",
+        "model-local-runtime",
+        "model-settings-review",
+        "model-next-steps",
+    ]
+    assert [widget["kind"] for widget in installed["installed_widgets"]] == [
+        "status",
+        "local-runtime",
+        "table",
+        "checklist",
+    ]
+    status_widget = spaces.read_widget(installed["space"]["space_id"], "model-provider-status")
+    assert status_widget["provider_setup"] == {
+        "mode": "configured-outside-widget",
+        "secret_storage": "never-store-in-widget",
+        "targets": ["Hermes profiles", "LM Studio", "OpenAI-compatible providers"],
+    }
+    runtime_widget = spaces.read_widget(installed["space"]["space_id"], "model-local-runtime")
+    assert runtime_widget["local_runtime"] == {
+        "engine": "LM Studio",
+        "status": "external-service-review",
+        "model_loading": "agent-mediated-with-approval",
+    }
+    serialized = json.dumps(installed).lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert '\"script\"' not in serialized
+    assert '\"data\"' not in serialized
+    assert '\"source\"' not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "password" not in serialized
+    assert "secret" not in serialized
+
+
+def test_model_setup_template_install_route_returns_safe_metadata(monkeypatch, tmp_path):
+    _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    handled, status, body = _route_post("/api/spaces/templates/install", {"template": "model-setup"})
+
+    assert handled is None
+    assert status == 200
+    assert body["template"] == "model-setup"
+    assert body["space"]["name"] == "Model Provider Setup"
+    assert body["installed_widgets"][0]["id"] == "model-provider-status"
+    assert len(body["installed_widgets"]) == 4
+    serialized = json.dumps(body).lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "password" not in serialized
+    assert "secret" not in serialized
+
+
 def test_delete_space_removes_manifest_but_keeps_global_revision_event(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Disposable"})
