@@ -990,7 +990,17 @@ def resolve_model_provider(model_id: str) -> tuple:
             entry_model = (entry.get("model") or "").strip()
             entry_name = (entry.get("name") or "").strip()
             entry_base_url = (entry.get("base_url") or "").strip()
-            if entry_model and entry_name and model_id == entry_model:
+            entry_model_ids = set()
+            if entry_model:
+                entry_model_ids.add(entry_model)
+            entry_models = entry.get("models")
+            if isinstance(entry_models, dict):
+                entry_model_ids.update(
+                    key.strip()
+                    for key in entry_models.keys()
+                    if isinstance(key, str) and key.strip()
+                )
+            if entry_name and model_id in entry_model_ids:
                 provider_hint = "custom:" + entry_name.lower().replace(" ", "-")
                 return model_id, provider_hint, entry_base_url or None
 

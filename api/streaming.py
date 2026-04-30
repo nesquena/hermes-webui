@@ -1701,8 +1701,22 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             _toolsets = _resolve_cli_toolsets(_cfg)
 
             # Fallback model from profile config (e.g. for rate-limit recovery)
-            _fallback = _cfg.get('fallback_model') or None
-            if _fallback:
+            _fallback = _cfg.get('fallback_providers') or _cfg.get('fallback_model') or None
+            if isinstance(_fallback, list):
+                _fallback_resolved = [
+                    {
+                        'model': str(entry.get('model') or '').strip(),
+                        'provider': str(entry.get('provider') or '').strip(),
+                        'base_url': entry.get('base_url'),
+                    }
+                    for entry in _fallback
+                    if isinstance(entry, dict)
+                    and str(entry.get('model') or '').strip()
+                    and str(entry.get('provider') or '').strip()
+                ]
+                if not _fallback_resolved:
+                    _fallback_resolved = None
+            elif isinstance(_fallback, dict):
                 # Resolve the fallback through our provider logic too
                 fb_model = _fallback.get('model', '')
                 fb_provider = _fallback.get('provider', '')
