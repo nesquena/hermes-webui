@@ -779,6 +779,7 @@ const LOCALES = {
     excalidraw_download: 'Download',
     excalidraw_empty: 'Empty diagram',
     excalidraw_render_error: 'Failed to render diagram',
+    excalidraw_simplified: 'Simplified SVG preview — not pixel-identical to Excalidraw canvas',
   },
 
   ru: {
@@ -1489,6 +1490,7 @@ const LOCALES = {
     excalidraw_download: 'Скачать',
     excalidraw_empty: 'Пустая диаграмма',
     excalidraw_render_error: 'Не удалось отобразить диаграмму',
+    excalidraw_simplified: 'Упрощённый предпросмотр SVG — не полностью идентичен оригиналу Excalidraw',
     pdf_loading: 'Загрузка PDF {0}…',
     pdf_too_large: 'PDF слишком большой для встроенного просмотра',
     pdf_no_pages: 'Не удалось отобразить предварительный просмотр PDF',
@@ -2203,6 +2205,7 @@ const LOCALES = {
     excalidraw_download: 'Descargar',
     excalidraw_empty: 'Diagrama vacío',
     excalidraw_render_error: 'Error al renderizar el diagrama',
+    excalidraw_simplified: 'Vista previa SVG simplificada — no es idéntica al lienzo de Excalidraw',
     pdf_loading: 'Cargando PDF {0}…',
     pdf_too_large: 'PDF demasiado grande para vista previa',
     pdf_no_pages: 'No se pudo renderizar la vista previa del PDF',
@@ -2921,6 +2924,7 @@ const LOCALES = {
     excalidraw_download: 'Herunterladen',
     excalidraw_empty: 'Leeres Diagramm',
     excalidraw_render_error: 'Diagramm konnte nicht gerendert werden',
+    excalidraw_simplified: 'Vereinfachte SVG-Vorschau — nicht pixelgenau zum Excalidraw-Canvas',
     pdf_loading: 'PDF wird geladen {0}…',
     pdf_too_large: 'PDF zu groß für Inline-Vorschau',
     pdf_no_pages: 'PDF-Vorschau konnte nicht gerendert werden',
@@ -3643,6 +3647,7 @@ const LOCALES = {
     excalidraw_download: '下载',
     excalidraw_empty: '空图表',
     excalidraw_render_error: '渲染图表失败',
+    excalidraw_simplified: '简化 SVG 预览 — 与 Excalidraw 画布不完全相同',
   },
 
   // Traditional Chinese (zh-Hant)
@@ -4453,6 +4458,7 @@ const LOCALES = {
     excalidraw_download: '下載',
     excalidraw_empty: '空圖表',
     excalidraw_render_error: '渲染圖表失敗',
+    excalidraw_simplified: '簡化 SVG 預覽 — 與 Excalidraw 畫布不完全相同',
     pdf_loading: '正在載入 PDF {0}…',
     pdf_too_large: 'PDF 檔案過大，無法內嵌預覽',
     pdf_no_pages: '無法渲染 PDF 預覽',
@@ -5865,6 +5871,7 @@ const LOCALES = {
     excalidraw_download: '다운로드',
     excalidraw_empty: '빈 다이어그램',
     excalidraw_render_error: '다이어그램 렌더링 실패',
+    excalidraw_simplified: '단순화된 SVG 미리보기 — Excalidraw 캔버스와 픽셀 동일하지 않음',
   },
 };
 
