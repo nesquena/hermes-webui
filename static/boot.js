@@ -698,11 +698,11 @@ function _pickTheme(name){
   _applySkin(appearance.skin);
   _syncThemePicker(appearance.theme);
   _syncSkinPicker(appearance.skin);
-  if(typeof _markSettingsDirty==='function') _markSettingsDirty();
   const hidden=$('settingsTheme');
   if(hidden) hidden.value=appearance.theme;
   const skinHidden=$('settingsSkin');
   if(skinHidden) skinHidden.value=appearance.skin;
+  if(typeof _scheduleAppearanceAutosave==='function') _scheduleAppearanceAutosave();
 }
 
 function _pickSkin(name){
@@ -713,11 +713,11 @@ function _pickSkin(name){
   _applySkin(appearance.skin);
   _syncThemePicker(appearance.theme);
   _syncSkinPicker(appearance.skin);
-  if(typeof _markSettingsDirty==='function') _markSettingsDirty();
   const hidden=$('settingsSkin');
   if(hidden) hidden.value=appearance.skin;
   const themeHidden=$('settingsTheme');
   if(themeHidden) themeHidden.value=appearance.theme;
+  if(typeof _scheduleAppearanceAutosave==='function') _scheduleAppearanceAutosave();
 }
 
 function _syncThemePicker(active){
@@ -748,9 +748,9 @@ function _pickFontSize(size){
   localStorage.setItem('hermes-font-size',size);
   _applyFontSize(size);
   _syncFontSizePicker(size);
-  if(typeof _markSettingsDirty==='function') _markSettingsDirty();
   const hidden=$('settingsFontSize');
   if(hidden) hidden.value=size;
+  if(typeof _scheduleAppearanceAutosave==='function') _scheduleAppearanceAutosave();
 }
 
 function _syncFontSizePicker(active){
@@ -825,6 +825,9 @@ function applyBotName(){
     _applyTheme(appearance.theme);
     localStorage.setItem('hermes-skin',appearance.skin);
     _applySkin(appearance.skin);
+    const fontSize=(s.font_size||localStorage.getItem('hermes-font-size')||'default');
+    localStorage.setItem('hermes-font-size',fontSize);
+    _applyFontSize(fontSize);
     if(typeof setLocale==='function'){
       const _lang=typeof resolvePreferredLocale==='function'
         ? resolvePreferredLocale(s.language, localStorage.getItem('hermes-lang'))

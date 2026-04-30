@@ -119,6 +119,11 @@ function _beginSettingsPanelSession() {
   _settingsSkinOnOpen = localStorage.getItem('hermes-skin') || 'default';
   _settingsFontSizeOnOpen = localStorage.getItem('hermes-font-size') || 'default';
   _pendingSettingsTargetPanel = null;
+  if (_settingsAppearanceAutosaveTimer) {
+    clearTimeout(_settingsAppearanceAutosaveTimer);
+    _settingsAppearanceAutosaveTimer = null;
+  }
+  _settingsAppearanceAutosaveRetryPayload = null;
   _resetSettingsPanelState();
 }
 
@@ -2457,6 +2462,8 @@ let _settingsFontSizeOnOpen = null; // track font size at open time for discard 
 let _settingsHermesDefaultModelOnOpen = '';
 let _settingsSection = 'conversation';
 let _currentSettingsSection = 'conversation';
+let _settingsAppearanceAutosaveTimer = null;
+let _settingsAppearanceAutosaveRetryPayload = null;
 
 function switchSettingsSection(name){
   const section=(name==='appearance'||name==='preferences'||name==='providers'||name==='system')?name:'conversation';
@@ -2513,6 +2520,7 @@ function toggleSettings(){
 function _resetSettingsPanelState(){
   const bar=$('settingsUnsavedBar');
   if(bar) bar.style.display='none';
+  _setAppearanceAutosaveStatus('');
 }
 
 function _hideSettingsPanel(){
@@ -2534,18 +2542,9 @@ function _closeSettingsPanel(){
 
 // Revert live DOM/localStorage to what they were when the panel opened
 function _revertSettingsPreview(){
-  if(_settingsThemeOnOpen){
-    localStorage.setItem('hermes-theme', _settingsThemeOnOpen);
-    if(typeof _applyTheme==='function') _applyTheme(_settingsThemeOnOpen);
-  }
-  if(_settingsSkinOnOpen){
-    localStorage.setItem('hermes-skin', _settingsSkinOnOpen);
-    if(typeof _applySkin==='function') _applySkin(_settingsSkinOnOpen);
-  }
-  if(_settingsFontSizeOnOpen){
-    localStorage.setItem('hermes-font-size', _settingsFontSizeOnOpen);
-    if(typeof _applyFontSize==='function') _applyFontSize(_settingsFontSizeOnOpen);
-  }
+  // Appearance controls autosave immediately. Closing/discarding the settings
+  // panel must not roll back theme, skin, or font-size after the user sees the
+  // inline saved state.
 }
 
 // Show the "Unsaved changes" bar inside the settings panel
@@ -2576,6 +2575,71 @@ function _markSettingsDirty(){
   _settingsDirty = true;
 }
 
+function _appearancePayloadFromUi(){
+  return {
+    theme: ($('settingsTheme')||{}).value || localStorage.getItem('hermes-theme') || 'dark',
+    skin: ($('settingsSkin')||{}).value || localStorage.getItem('hermes-skin') || 'default',
+    font_size: ($('settingsFontSize')||{}).value || localStorage.getItem('hermes-font-size') || 'default',
+  };
+}
+
+function _setAppearanceAutosaveStatus(state){
+  const el=$('settingsAppearanceAutosaveStatus');
+  if(!el) return;
+  el.className='settings-autosave-status';
+  if(!state){
+    el.textContent='';
+    return;
+  }
+  el.classList.add('is-'+state);
+  if(state==='saving'){
+    el.textContent=t('settings_autosave_saving');
+  }else if(state==='saved'){
+    el.textContent=t('settings_autosave_saved');
+  }else if(state==='failed'){
+    el.innerHTML=`<span>${esc(t('settings_autosave_failed'))}</span> <button type="button" onclick="_retryAppearanceAutosave()">${esc(t('settings_autosave_retry'))}</button>`;
+  }
+}
+
+function _rememberAppearanceSaved(payload){
+  if(!payload) return;
+  _settingsThemeOnOpen=payload.theme||localStorage.getItem('hermes-theme')||'dark';
+  _settingsSkinOnOpen=payload.skin||localStorage.getItem('hermes-skin')||'default';
+  _settingsFontSizeOnOpen=payload.font_size||localStorage.getItem('hermes-font-size')||'default';
+}
+
+function _scheduleAppearanceAutosave(){
+  const payload=_appearancePayloadFromUi();
+  // Keep discard/close behavior aligned with the new mental model: appearance
+  // changes are committed immediately instead of treated as preview-only edits.
+  _rememberAppearanceSaved(payload);
+  _settingsAppearanceAutosaveRetryPayload=payload;
+  _setAppearanceAutosaveStatus('saving');
+  if(_settingsAppearanceAutosaveTimer) clearTimeout(_settingsAppearanceAutosaveTimer);
+  _settingsAppearanceAutosaveTimer=setTimeout(()=>_autosaveAppearanceSettings(payload),350);
+}
+
+async function _autosaveAppearanceSettings(payload){
+  try{
+    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+    _settingsAppearanceAutosaveRetryPayload=null;
+    _rememberAppearanceSaved(payload);
+    if(saved&&saved.font_size){
+      localStorage.setItem('hermes-font-size',saved.font_size);
+    }
+    _setAppearanceAutosaveStatus('saved');
+  }catch(e){
+    console.warn('[settings] appearance autosave failed', e);
+    _setAppearanceAutosaveStatus('failed');
+  }
+}
+
+function _retryAppearanceAutosave(){
+  const payload=_settingsAppearanceAutosaveRetryPayload||_appearancePayloadFromUi();
+  _setAppearanceAutosaveStatus('saving');
+  _autosaveAppearanceSettings(payload);
+}
+
 async function loadSettingsPanel(){
   try{
     const settings=await api('/api/settings');
@@ -2593,7 +2657,9 @@ async function loadSettingsPanel(){
     const skinSel=$('settingsSkin');
     if(skinSel) skinSel.value=skinVal;
     if(typeof _buildSkinPicker==='function') _buildSkinPicker(skinVal);
-    const fontSizeVal=localStorage.getItem('hermes-font-size')||'default';
+    const fontSizeVal=settings.font_size||localStorage.getItem('hermes-font-size')||'default';
+    localStorage.setItem('hermes-font-size',fontSizeVal);
+    if(typeof _applyFontSize==='function') _applyFontSize(fontSizeVal);
     const fontSizeSel=$('settingsFontSize');
     if(fontSizeSel) fontSizeSel.value=fontSizeVal;
     if(typeof _syncFontSizePicker==='function') _syncFontSizePicker(fontSizeVal);
@@ -3068,6 +3134,7 @@ async function saveSettings(andClose){
   if(sendKey) body.send_key=sendKey;
   body.theme=theme;
   body.skin=skin;
+  body.font_size=fontSize;
   body.language=language;
   body.show_token_usage=showTokenUsage;
   body.show_cli_sessions=showCliSessions;
