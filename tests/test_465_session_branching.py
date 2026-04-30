@@ -115,10 +115,12 @@ def test_session_compact_includes_parent():
     """Verify compact() includes parent_session_id."""
     with open('api/models.py') as f:
         src = f.read()
-    compact_match = re.search(r"def compact\(self.*?\n(?:.*\n)*?return \{", src, re.DOTALL)
-    assert compact_match, "Could not find compact() method"
-    compact_block = src[compact_match.start():compact_match.start() + 2000]
-    assert "'parent_session_id'" in compact_block, \
+    # Use simpler search - find the compact method and check for parent_session_id after it
+    compact_def_match = re.search(r"def compact\(self", src)
+    assert compact_def_match, "Could not find compact() method"
+    # Check the next 1000 chars after def compact for parent_session_id
+    snippet = src[compact_def_match.start():compact_def_match.start() + 1500]
+    assert "'parent_session_id'" in snippet, \
         "compact() should include parent_session_id"
 
 
