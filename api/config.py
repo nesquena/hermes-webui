@@ -920,8 +920,10 @@ def _deduplicate_model_ids(groups: list[dict]) -> None:
         group = groups[gi]
         for mi, model in enumerate(group.get("models", [])):
             mid = str(model.get("id", "") or "").strip()
-            # Skip IDs that are already provider-qualified.
-            if not mid or mid.startswith("@"):
+            # Skip IDs that are already provider-qualified via @-prefix.
+            # Slash-qualified IDs (e.g. "google/gemma-4-27b") are NOT skipped
+            # because they can collide across providers (#1313).
+            if mid.startswith("@"):
                 continue
             id_map.setdefault(mid, []).append((gi, mi))
 
