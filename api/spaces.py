@@ -1115,6 +1115,51 @@ def _dashboard_demo_widgets() -> list[dict[str, Any]]:
     ]
 
 
+def _camera_dashboard_widgets() -> list[dict[str, Any]]:
+    """Return safe declarative camera dashboard widget seeds.
+
+    This starter maps the Space Agent camera/video dashboard demo into
+    metadata-only widgets. It intentionally starts with no configured streams;
+    private camera URLs and live network access must be supplied later through
+    explicit approval and agent-mediated typed APIs.
+    """
+    return [
+        {
+            "id": "camera-grid",
+            "kind": "camera-grid",
+            "title": "Camera grid",
+            "layout": {"x": 0, "y": 0, "w": 16, "h": 10, "minimized": False},
+            "streams": [],
+            "stream_policy": {
+                "network": "explicit-approval",
+                "private_urls": "approval-required",
+                "mixed_content": "blocked-by-default",
+            },
+            "status": "awaiting-approved-streams",
+        },
+        {
+            "id": "camera-permissions",
+            "kind": "status",
+            "title": "Stream permissions",
+            "layout": {"x": 16, "y": 0, "w": 8, "h": 5, "minimized": False},
+            "permissions": {
+                "network": "explicit-approval",
+                "camera_urls": "agent-mediated",
+            },
+            "review": "No stream URLs are stored by default; add sources only after explicit approval.",
+        },
+        {
+            "id": "camera-incidents",
+            "kind": "table",
+            "title": "Incident notes",
+            "layout": {"x": 16, "y": 5, "w": 8, "h": 5, "minimized": False},
+            "columns": ["time", "camera", "note", "status"],
+            "rows": [],
+            "entry_mode": "metadata-only",
+        },
+    ]
+
+
 def _kanban_board_widgets() -> list[dict[str, Any]]:
     """Return safe declarative Kanban board widget seeds.
 
@@ -1350,7 +1395,7 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
     template_name = str(template or "").strip().lower()
-    if template_name not in {"weather", "weather-demo", "research", "research-harness", "dashboard", "daily-dashboard", "kanban", "kanban-board", "notes", "notes-app", "browser", "browser-surface", "stock", "stock-chart", "stocks", "big-bang", "bigbang", "onboarding", "big-bang-onboarding"}:
+    if template_name not in {"weather", "weather-demo", "research", "research-harness", "dashboard", "daily-dashboard", "camera", "camera-dashboard", "kanban", "kanban-board", "notes", "notes-app", "browser", "browser-surface", "stock", "stock-chart", "stocks", "big-bang", "bigbang", "onboarding", "big-bang-onboarding"}:
         raise ValueError("Unsupported template")
 
     if template_name in {"weather", "weather-demo"}:
@@ -1401,6 +1446,22 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
             )
         widgets = _dashboard_demo_widgets()
         response_template = "dashboard"
+    elif template_name in {"camera", "camera-dashboard"}:
+        target_id = validate_space_id(space_id) if space_id else _unique_space_id("camera-dashboard")
+        if _manifest_path(target_id).exists():
+            space = read_space(target_id)
+        else:
+            space = create_space(
+                {
+                    "space_id": target_id,
+                    "name": "Camera Dashboard",
+                    "description": "Metadata-only starter for reviewing approved camera streams, permissions, and incident notes.",
+                    "agent_instructions": "Keep camera widgets declarative. Do not store or fetch stream URLs without explicit approval; use typed Capy space APIs and preserve revision history.",
+                    "template": "camera-dashboard",
+                }
+            )
+        widgets = _camera_dashboard_widgets()
+        response_template = "camera"
     elif template_name in {"kanban", "kanban-board"}:
         target_id = validate_space_id(space_id) if space_id else _unique_space_id("kanban-board")
         if _manifest_path(target_id).exists():

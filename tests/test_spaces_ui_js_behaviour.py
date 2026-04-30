@@ -215,6 +215,17 @@ global.fetch = async function(path, opts = {}) {
         ],
       });
     }
+    if (body.template === 'camera') {
+      return response({
+        template: 'camera',
+        space: { space_id: 'camera-dashboard', name: 'Camera Dashboard', description: 'Safe stream review starter', widget_count: 3, revision_event_id: 'rev-camera' },
+        installed_widgets: [
+          { id: 'camera-grid', kind: 'camera-grid', title: 'Camera grid', layout: { x: 0, y: 0, w: 16, h: 10, minimized: false }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+          { id: 'camera-permissions', kind: 'status', title: 'Stream permissions', layout: { x: 16, y: 0, w: 8, h: 5, minimized: false }, source: 'SECRET_SOURCE' },
+          { id: 'camera-incidents', kind: 'table', title: 'Incident notes', layout: { x: 16, y: 5, w: 8, h: 5, minimized: false } },
+        ],
+      });
+    }
     if (body.template === 'big-bang') {
       return response({
         template: 'big-bang',
@@ -377,6 +388,9 @@ async function click(action, dataset) {
   } else if (scenario === 'installStockChart') {
     await window.loadCapySpaces();
     await click('installStockTemplate', {});
+  } else if (scenario === 'installCameraDashboard') {
+    await window.loadCapySpaces();
+    await click('installCameraTemplate', {});
   } else if (scenario === 'installBigBangOnboarding') {
     await window.loadCapySpaces();
     await click('installBigBangTemplate', {});
@@ -794,6 +808,19 @@ def test_spaces_ui_install_stock_chart_posts_template_and_refreshes_without_widg
     assert "Install stock chart" in out["rootHtml"]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"template": "stock"}
+    assert out["calls"][-1]["path"] == "api/spaces"
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_install_camera_dashboard_posts_template_and_refreshes_without_widget_code(driver_path):
+    out = _run_spaces_scenario(driver_path, "installCameraDashboard")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/templates/install")
+
+    assert "Install camera dashboard" in out["rootHtml"]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"template": "camera"}
     assert out["calls"][-1]["path"] == "api/spaces"
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
