@@ -1536,6 +1536,63 @@ def _local_service_dashboard_widgets() -> list[dict[str, Any]]:
     ]
 
 
+def _model_provider_setup_widgets() -> list[dict[str, Any]]:
+    """Return safe declarative model/provider setup widget seeds."""
+    return [
+        {
+            "id": "model-provider-status",
+            "kind": "status",
+            "title": "Provider status",
+            "layout": {"x": 0, "y": 0, "w": 10, "h": 5, "minimized": False},
+            "provider_setup": {
+                "mode": "configured-outside-widget",
+                "secret_storage": "never-store-in-widget",
+                "targets": ["Hermes profiles", "LM Studio", "OpenAI-compatible providers"],
+            },
+            "checks": ["profile-selected", "provider-config-present", "runtime-reachable"],
+            "permissions": {"configuration": "trusted-shell", "network": "explicit-approval"},
+        },
+        {
+            "id": "model-local-runtime",
+            "kind": "local-runtime",
+            "title": "Local runtime",
+            "layout": {"x": 10, "y": 0, "w": 14, "h": 5, "minimized": False},
+            "local_runtime": {
+                "engine": "LM Studio",
+                "status": "external-service-review",
+                "model_loading": "agent-mediated-with-approval",
+            },
+            "runtime_checks": ["server-status", "loaded-models", "context-window"],
+            "permissions": {"local_process": "review-only", "model_loading": "approval-required"},
+        },
+        {
+            "id": "model-settings-review",
+            "kind": "table",
+            "title": "Settings review",
+            "layout": {"x": 0, "y": 5, "w": 14, "h": 5, "minimized": False},
+            "columns": ["setting", "status", "notes"],
+            "rows": [
+                {"setting": "profile", "status": "external", "notes": "review in trusted settings"},
+                {"setting": "provider", "status": "external", "notes": "do not copy auth material into widgets"},
+                {"setting": "model", "status": "agent-mediated", "notes": "load only after approval"},
+            ],
+            "entry_mode": "metadata-only",
+        },
+        {
+            "id": "model-next-steps",
+            "kind": "checklist",
+            "title": "Next steps",
+            "layout": {"x": 14, "y": 5, "w": 10, "h": 5, "minimized": False},
+            "items": [
+                {"id": "open-settings", "title": "Open trusted provider settings", "status": "ready"},
+                {"id": "review-runtime", "title": "Check LM Studio runtime", "status": "suggested"},
+                {"id": "test-chat", "title": "Run an approved test prompt", "status": "planned"},
+            ],
+            "interaction": {"setup": "trusted-shell", "runtime_actions": "agent-mediated"},
+        },
+    ]
+
+
 def _game_sandbox_widgets() -> list[dict[str, Any]]:
     """Return safe declarative canvas-game widget seeds.
 
@@ -1708,7 +1765,7 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
     template_name = str(template or "").strip().lower()
-    if template_name not in {"weather", "weather-demo", "research", "research-harness", "dashboard", "daily-dashboard", "camera", "camera-dashboard", "kanban", "kanban-board", "notes", "notes-app", "browser", "browser-surface", "stock", "stock-chart", "stocks", "service", "service-dashboard", "local-service", "local-service-dashboard", "agent-zero", "agent-zero-dashboard", "game", "game-sandbox", "snake", "snake-game", "music", "music-sequencer", "sequencer", "step-sequencer", "synth", "piano-roll", "big-bang", "bigbang", "onboarding", "big-bang-onboarding"}:
+    if template_name not in {"weather", "weather-demo", "research", "research-harness", "dashboard", "daily-dashboard", "camera", "camera-dashboard", "kanban", "kanban-board", "notes", "notes-app", "browser", "browser-surface", "stock", "stock-chart", "stocks", "service", "service-dashboard", "local-service", "local-service-dashboard", "agent-zero", "agent-zero-dashboard", "model", "model-setup", "model-provider", "model-provider-setup", "provider-setup", "game", "game-sandbox", "snake", "snake-game", "music", "music-sequencer", "sequencer", "step-sequencer", "synth", "piano-roll", "big-bang", "bigbang", "onboarding", "big-bang-onboarding"}:
         raise ValueError("Unsupported template")
 
     if template_name in {"weather", "weather-demo"}:
@@ -1839,6 +1896,22 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
             )
         widgets = _local_service_dashboard_widgets()
         response_template = "service"
+    elif template_name in {"model", "model-setup", "model-provider", "model-provider-setup", "provider-setup"}:
+        target_id = validate_space_id(space_id) if space_id else _unique_space_id("model-provider-setup")
+        if _manifest_path(target_id).exists():
+            space = read_space(target_id)
+        else:
+            space = create_space(
+                {
+                    "space_id": target_id,
+                    "name": "Model Provider Setup",
+                    "description": "Metadata-only starter for provider selection, local runtime review, settings checks, and setup next steps.",
+                    "agent_instructions": "Keep provider setup declarative. Configure auth material outside widget manifests, require explicit approval for runtime actions, and preserve revision history.",
+                    "template": "model-provider-setup",
+                }
+            )
+        widgets = _model_provider_setup_widgets()
+        response_template = "model-setup"
     elif template_name in {"game", "game-sandbox", "snake", "snake-game"}:
         target_id = validate_space_id(space_id) if space_id else _unique_space_id("game-sandbox")
         if _manifest_path(target_id).exists():
