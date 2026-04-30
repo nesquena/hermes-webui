@@ -2196,6 +2196,25 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                     s.context_length = getattr(_cc_for_save, 'context_length', 0) or 0
                     s.threshold_tokens = getattr(_cc_for_save, 'threshold_tokens', 0) or 0
                     s.last_prompt_tokens = getattr(_cc_for_save, 'last_prompt_tokens', 0) or 0
+                # Fallback: if the compressor didn't report a context_length
+                # (fresh agent, interrupted stream, or compressor missing the
+                # attribute), resolve it from the model's static metadata so
+                # the indicator can still show a meaningful percentage.
+                # Sourced from PR #1344 (@jasonjcwu) — extracted to a focused
+                # follow-up after PR #1344 was closed as superseded by #1341.
+                if not getattr(s, 'context_length', 0):
+                    try:
+                        from agent.model_metadata import get_model_context_length
+                        _resolved_cl = get_model_context_length(
+                            getattr(agent, 'model', resolved_model or '') or '',
+                            getattr(agent, 'base_url', '') or '',
+                        )
+                        if _resolved_cl:
+                            s.context_length = _resolved_cl
+                    except Exception:
+                        # Older hermes-agent builds may not expose this helper.
+                        # Better to leave context_length=0 than crash the save.
+                        pass
                 s.save()
             # Sync to state.db for /insights (opt-in setting)
             try:
