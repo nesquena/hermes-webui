@@ -103,6 +103,54 @@ def test_space_tool_adapter_create_list_and_get_are_metadata_only(monkeypatch, t
     assert "secret_value_do_not_leak" not in serialized
 
 
+def test_space_tool_adapter_supports_source_style_current_and_spaces_aliases(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {
+            "space_id": "source-style-lab",
+            "name": "Source Style Lab",
+            "description": "Expose Space Agent-style helper aliases safely",
+        }
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "unsafe-widget",
+            "kind": "html",
+            "title": "Unsafe Widget",
+            "renderer": "<script>steal()</script>",
+            "html": "<img src=x onerror=steal()>",
+            "data": {"api_key": "SECRET...LEAK"},
+        },
+    )
+
+    spaces_list = spaces.run_space_tool("space.spaces.list", {"renderer": "<script>ignore()</script>"})
+    current_space = spaces.run_space_tool("space.current.get", {"active_space_id": created["space_id"]})
+    current_widgets = spaces.run_space_tool("space.current.widgets", {"space_id": created["space_id"]})
+    no_current = spaces.run_space_tool("space.current.get", {})
+    serialized = json.dumps(
+        {
+            "spaces_list": spaces_list,
+            "current_space": current_space,
+            "current_widgets": current_widgets,
+            "no_current": no_current,
+        }
+    ).lower()
+
+    assert spaces_list["ok"] is True
+    assert spaces_list["spaces"][0]["space_id"] == created["space_id"]
+    assert current_space["space"]["space_id"] == created["space_id"]
+    assert current_widgets["widgets"][0]["id"] == "unsafe-widget"
+    assert no_current == {"ok": True, "action": "space.current.get", "active_space_id": None, "space": None}
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
 def test_space_id_validation_rejects_traversal_and_unsafe_names(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 

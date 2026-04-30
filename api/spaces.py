@@ -534,6 +534,12 @@ def _space_tool_create_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return clean
 
 
+def _space_tool_current_id(payload: dict[str, Any]) -> str:
+    """Return the optional current-space id from a tool payload."""
+    raw = payload.get("space_id") or payload.get("active_space_id") or payload.get("current_space_id") or ""
+    return str(raw or "").strip()
+
+
 def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     """Dispatch a safe, Hermes-tool-shaped Capy Spaces action.
 
@@ -547,8 +553,17 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     name = str(action or "").strip().lower()
     data = payload if isinstance(payload, dict) else {}
 
-    if name == "space.list":
+    if name in {"space.list", "space.spaces", "space.spaces.list"}:
         return {"ok": True, "action": name, "spaces": list_spaces()}
+    if name in {"space.current", "space.current.get"}:
+        current_id = _space_tool_current_id(data)
+        if not current_id:
+            return {"ok": True, "action": name, "active_space_id": None, "space": None}
+        space_id = validate_space_id(current_id)
+        return {"ok": True, "action": name, "active_space_id": space_id, "space": read_space_detail(space_id)}
+    if name in {"space.current.widgets", "space.current.widget.list"}:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        return {"ok": True, "action": name, "active_space_id": space_id, "widgets": list_widgets(space_id)}
     if name == "space.create":
         created = create_space(_space_tool_create_payload(data))
         space = read_space_detail(created["space_id"])
