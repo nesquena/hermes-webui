@@ -441,6 +441,17 @@ const LOCALES = {
     // Settings detail
     settings_label_sound: 'Notification sound',
     settings_desc_sound: 'Play a sound when the assistant finishes a response.',
+    // TTS (#499)
+    tts_listen: 'Listen',
+    tts_not_supported: 'Speech synthesis not supported in this browser.',
+    settings_label_tts: 'Text-to-Speech for responses',
+    settings_desc_tts: "Show a speaker button on each assistant message to read it aloud using your browser's speech synthesis.",
+    settings_label_tts_auto_read: 'Auto-read responses aloud',
+    settings_desc_tts_auto_read: 'Automatically speak each new assistant response when it finishes. Pauses when you start typing.',
+    settings_label_tts_voice: 'Voice',
+    settings_desc_tts_voice: "Preferred voice. Populated from your browser's available voices.",
+    settings_label_tts_rate: 'Speech rate',
+    settings_label_tts_pitch: 'Speech pitch',
     settings_label_notifications: 'Browser notifications',
     settings_desc_notifications: 'Show a system notification when a response completes while the app is in the background.',
     settings_desc_token_usage: 'Displays input/output token count below each assistant reply. Also toggled with /usage.',

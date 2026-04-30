@@ -686,6 +686,41 @@
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsTtsEnabled" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_tts">Text-to-Speech for responses</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_tts">Show a speaker button on each assistant message to read it aloud using your browser's speech synthesis.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsTtsAutoRead" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_tts_auto_read">Auto-read responses aloud</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_tts_auto_read">Automatically speak each new assistant response when it finishes. Pauses when you start typing.</div>
+            </div>
+            <div class="settings-field">
+              <label for="settingsTtsVoice" data-i18n="settings_label_tts_voice">Voice</label>
+              <select id="settingsTtsVoice" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                <option value="">Default system voice</option>
+              </select>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_tts_voice">Preferred voice. Populated from your browser's available voices.</div>
+            </div>
+            <div class="settings-field">
+              <label for="settingsTtsRate" data-i18n="settings_label_tts_rate">Speech rate</label>
+              <div style="display:flex;align-items:center;gap:12px;margin-top:4px">
+                <input type="range" id="settingsTtsRate" min="0.5" max="2" step="0.1" value="1" style="flex:1;accent-color:var(--accent)">
+                <span id="settingsTtsRateValue" style="font-size:12px;color:var(--muted);min-width:32px;text-align:right">1.0x</span>
+              </div>
+            </div>
+            <div class="settings-field">
+              <label for="settingsTtsPitch" data-i18n="settings_label_tts_pitch">Speech pitch</label>
+              <div style="display:flex;align-items:center;gap:12px;margin-top:4px">
+                <input type="range" id="settingsTtsPitch" min="0" max="2" step="0.1" value="1" style="flex:1;accent-color:var(--accent)">
+                <span id="settingsTtsPitchValue" style="font-size:12px;color:var(--muted);min-width:32px;text-align:right">1.0</span>
+              </div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsNotificationsEnabled" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_notifications">Browser notifications</span>
               </label>

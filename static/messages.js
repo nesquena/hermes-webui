@@ -34,6 +34,10 @@ function _markActiveSessionViewedOnReturn() {
 
 document.addEventListener('visibilitychange', _markActiveSessionViewedOnReturn);
 window.addEventListener('focus', _markActiveSessionViewedOnReturn);
+// TTS: pause speech synthesis when user focuses the composer (#499)
+const _msgEl=document.getElementById('msg');
+if(_msgEl) _msgEl.addEventListener('focus', ()=>{ if('speechSynthesis' in window && speechSynthesis.speaking) speechSynthesis.pause(); });
+if(_msgEl) _msgEl.addEventListener('blur', ()=>{ if('speechSynthesis' in window && speechSynthesis.paused) speechSynthesis.resume(); });
 
 async function send(){
   const text=$('msg').value.trim();
@@ -846,6 +850,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(!S.messages.some(m=>m.role==='assistant'&&String(m.content||'').trim())&&!assistantText){removeThinking();S.messages.push({role:'assistant',content:'**No response received.** Check your API key and model selection.'});}
         if(isSessionViewed) _markSessionViewed(completedSid, completedSession.message_count ?? S.messages.length);
         syncTopbar();renderMessages();loadDir('.');
+        // TTS auto-read: speak the last assistant response if enabled (#499)
+        if(typeof autoReadLastAssistant==='function') setTimeout(()=>autoReadLastAssistant(), 300);
       }
       _queueDrainSid=activeSid;renderSessionList();setBusy(false);setStatus('');
       setComposerStatus('');
