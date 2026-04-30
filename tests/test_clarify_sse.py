@@ -70,7 +70,8 @@ class TestClarifySSEStaticAnalysis:
 
     def test_sse_handler_subscribe_before_loop(self):
         """SSE handler must subscribe before entering the event loop."""
-        assert "clarify_sse_subscribe(" in ROUTES_SRC
+        # The handler subscribes inline under _clarify_lock (not via clarify_sse_subscribe helper)
+        assert "_clarify_subs[sid].append(q)" in ROUTES_SRC
 
     # --- api/clarify.py ---
 

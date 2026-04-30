@@ -567,43 +567,16 @@ def _approval_sse_unsubscribe(session_id: str, q: queue.Queue) -> None:
                 _approval_sse_subscribers.pop(session_id, None)
 
 
-def _approval_sse_notify_locked(session_id: str, head: dict | None, total: int) -> None:
-    """Push an approval event to all SSE subscribers for a session.
-
-    CALLER MUST HOLD `_lock`. Snapshots the subscriber list under the held
-    lock and then calls `q.put_nowait()` on each (which is itself thread-safe).
-
-    `head` is the approval entry currently at the head of the queue (the one
-    the UI should display) — NOT the just-appended entry. With multiple
-    parallel approvals (#527), the just-appended entry is at the TAIL, but
-    `/api/approval/pending` always returns the HEAD, so SSE must match.
-
-    `total` is the total number of pending approvals.
-
-    Pass `head=None` and `total=0` when the queue has just been emptied (e.g.
-    `_handle_approval_respond` popped the last entry) so the client knows to
-    hide its approval card.
-    """
-    payload = {"pending": dict(head) if head else None, "pending_count": total}
-    subs = _approval_sse_subscribers.get(session_id, ())
+def _approval_sse_notify(session_id: str, entry: dict, total: int) -> None:
+    """Push an approval event to all SSE subscribers for a session."""
+    payload = {"pending": dict(entry), "pending_count": total}
+    with _lock:
+        subs = list(_approval_sse_subscribers.get(session_id, []))
     for q in subs:
         try:
             q.put_nowait(payload)
         except queue.Full:
-            pass  # drop if subscriber is slow (bounded queue prevents memory leak)
-
-
-def _approval_sse_notify(session_id: str, head: dict | None, total: int) -> None:
-    """Convenience wrapper that takes `_lock` itself.
-
-    Use only from contexts that don't already hold `_lock`. Production call
-    sites (submit_pending, _handle_approval_respond) MUST hold the lock and
-    call `_approval_sse_notify_locked` directly to avoid a notify-ordering
-    race where a later append's notify can fire before an earlier append's
-    notify (resulting in stale `pending_count`).
-    """
-    with _lock:
-        _approval_sse_notify_locked(session_id, head, total)
+            pass  # drop if subscriber is slow
 
 
 def submit_pending(session_key: str, approval: dict) -> None:
@@ -619,23 +592,20 @@ def submit_pending(session_key: str, approval: dict) -> None:
     entry = dict(approval)
     entry.setdefault("approval_id", uuid.uuid4().hex)
     with _lock:
-        queue_list = _pending.setdefault(session_key, [])
+        queue = _pending.setdefault(session_key, [])
         # Replace a legacy non-list value if the agent version uses the old pattern.
-        if not isinstance(queue_list, list):
-            _pending[session_key] = [queue_list]
-            queue_list = _pending[session_key]
-        queue_list.append(entry)
-        total = len(queue_list)
-        head = queue_list[0]  # /api/approval/pending always returns head
-        # Push to SSE subscribers from inside _lock so two parallel
-        # submit_pending calls can't deliver out-of-order (T2's later
-        # notify arriving before T1's earlier notify with a stale count).
-        _approval_sse_notify_locked(session_key, head, total)
+        if not isinstance(queue, list):
+            _pending[session_key] = [queue]
+            queue = _pending[session_key]
+        queue.append(entry)
+        total = len(queue)
     # NOTE: We do NOT call _submit_pending_raw here — that function overwrites
     # _pending[session_key] with a single dict, which would undo the list we just
     # built. The gateway blocking path uses _gateway_queues (a separate mechanism
     # managed by check_all_command_guards / register_gateway_notify), which is
     # unaffected by _pending. The _pending dict is only used for UI polling.
+    # Push to SSE subscribers so long-connected clients get notified instantly.
+    _approval_sse_notify(session_key, entry, total)
 
 # Clarify prompts (optional -- graceful fallback if agent not available)
 try:
@@ -2809,17 +2779,13 @@ def _handle_approval_sse_stream(handler, parsed):
     if not sid:
         return bad(handler, "session_id is required")
 
-    # Subscribe AND snapshot atomically under a single _lock acquisition so a
-    # submit_pending() that fires between the two cannot be lost. If we
-    # snapshot first then subscribe (the naive ordering), an approval that
-    # arrives in the gap is appended to _pending (after our snapshot) AND
-    # notified to subscribers (before we joined) — leaving the client unaware
-    # until the next event arrives.
-    q = queue.Queue(maxsize=16)
-    initial_pending = None
-    initial_count = 0
+    # Subscribe AND read snapshot under the same lock so that a concurrent
+    # submit_pending() cannot slip into the gap between snapshot and subscribe
+    # (which would cause the notify to be silently dropped).
     with _lock:
-        _approval_sse_subscribers.setdefault(sid, []).append(q)
+        _approval_sse_subscribers.setdefault(sid, [])
+        q = queue.Queue(maxsize=16)
+        _approval_sse_subscribers[sid].append(q)
         q_list = _pending.get(sid)
         if isinstance(q_list, list):
             initial_pending = dict(q_list[0]) if q_list else None
@@ -2827,6 +2793,9 @@ def _handle_approval_sse_stream(handler, parsed):
         elif q_list:
             initial_pending = dict(q_list)
             initial_count = 1
+        else:
+            initial_pending = None
+            initial_count = 0
 
     handler.send_response(200)
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
@@ -2834,8 +2803,6 @@ def _handle_approval_sse_stream(handler, parsed):
     handler.send_header('X-Accel-Buffering', 'no')
     handler.send_header('Connection', 'keep-alive')
     handler.end_headers()
-
-    from api.streaming import _sse
 
     # Push initial state immediately so the client doesn't miss anything.
     _sse(handler, 'initial', {"pending": initial_pending, "pending_count": initial_count})
@@ -2920,8 +2887,15 @@ def _handle_clarify_sse_stream(handler, parsed):
     if not sid:
         return bad(handler, "session_id is required")
 
-    # Send initial snapshot — any clarify already queued before SSE connected.
-    initial_pending = get_clarify_pending(sid)
+    # Subscribe AND read snapshot under the same lock so that a concurrent
+    # submit_pending() cannot slip into the gap between snapshot and subscribe.
+    from api.clarify import _lock as _clarify_lock, _gateway_queues as _clarify_queues, _sse_subscribers as _clarify_subs
+    with _clarify_lock:
+        _clarify_subs.setdefault(sid, [])
+        q = queue.Queue(maxsize=16)
+        _clarify_subs[sid].append(q)
+        q_list = _clarify_queues.get(sid) or []
+        initial_pending = dict(q_list[0].data) if q_list else None
 
     handler.send_response(200)
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
@@ -2930,11 +2904,8 @@ def _handle_clarify_sse_stream(handler, parsed):
     handler.send_header('Connection', 'keep-alive')
     handler.end_headers()
 
-    from api.streaming import _sse
-
     _sse(handler, 'initial', {"pending": initial_pending})
 
-    q = clarify_sse_subscribe(sid)
     try:
         while True:
             try:
@@ -3967,16 +3938,6 @@ def _handle_approval_respond(handler, body):
         elif queue:
             # Legacy single-dict value.
             pending = _pending.pop(sid, None)
-        # Notify SSE subscribers of the new head (or empty state) so the UI
-        # surfaces any trailing approvals that were queued behind this one
-        # without waiting for the next submit_pending. Without this, a parallel
-        # tool-call scenario (#527) would leave the second approval invisible
-        # in the SSE path until the next event ever fired (the agent thread
-        # would be parked indefinitely from the user's perspective).
-        if isinstance(_pending.get(sid), list) and _pending[sid]:
-            _approval_sse_notify_locked(sid, _pending[sid][0], len(_pending[sid]))
-        else:
-            _approval_sse_notify_locked(sid, None, 0)
 
     if pending:
         keys = pending.get("pattern_keys") or [pending.get("pattern_key", "")]
