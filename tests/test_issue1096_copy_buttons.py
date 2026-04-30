@@ -88,11 +88,27 @@ class TestCodeCopyButton:
         # Find addCopyButtons function
         m = re.search(r"function addCopyButtons", src)
         assert m, "addCopyButtons must exist"
-        fn = src[m.start():m.start() + 800]
+        fn = src[m.start():m.start() + 1000]
         assert "_copyText" in fn, \
             "Code copy button must use _copyText function"
         assert "codeEl.textContent" in fn, \
             "Code copy must copy the code element's textContent"
+
+    def test_code_copy_button_is_idempotent_for_header_blocks(self):
+        """Repeated post-render passes must not append duplicate header buttons.
+
+        addCopyButtons() can be called multiple times after render/cache/streaming
+        updates.  For fenced blocks with a language header, the copy button is
+        appended to the sibling .pre-header, not inside <pre>, so the duplicate
+        guard must check the header as well as the <pre>.
+        """
+        src = _src("ui.js")
+        m = re.search(r"function addCopyButtons", src)
+        assert m, "addCopyButtons must exist"
+        fn = src[m.start():m.start() + 1200]
+        assert "const header=pre.previousElementSibling;" in fn
+        assert "header.querySelector('.code-copy-btn')" in fn
+        assert fn.index("header.querySelector('.code-copy-btn')") < fn.index("document.createElement('button')")
 
 class TestCopyFailedI18n:
 

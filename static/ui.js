@@ -3712,7 +3712,8 @@ function addCopyButtons(container){
   if(!el) return;
   el.querySelectorAll('pre > code').forEach(codeEl=>{
     const pre=codeEl.parentElement;
-    if(pre.querySelector('.code-copy-btn')) return;
+    const header=pre.previousElementSibling;
+    if(pre.querySelector('.code-copy-btn')||(header&&header.classList.contains('pre-header')&&header.querySelector('.code-copy-btn'))) return;
     const btn=document.createElement('button');
     btn.className='code-copy-btn';
     btn.textContent=t('copy');
@@ -3723,7 +3724,6 @@ function addCopyButtons(container){
         setTimeout(()=>{btn.textContent=t('copy');},1500);
       }).catch(()=>{btn.textContent=t('copy_failed');setTimeout(()=>{btn.textContent=t('copy');},1500);});
     };
-    const header=pre.previousElementSibling;
     if(header&&header.classList.contains('pre-header')){
       header.style.display='flex';
       header.style.justifyContent='space-between';
