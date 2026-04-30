@@ -1612,6 +1612,20 @@ def handle_post(handler, parsed) -> bool:
         return _handle_workspace_rename(handler, body)
 
     # ── Capy Spaces foundation (POST) ──
+    if parsed.path == "/api/spaces/tool":
+        from api import spaces as capy_spaces
+        action = body.get("action")
+        if not action:
+            return bad(handler, "Missing action")
+        try:
+            return j(handler, capy_spaces.run_space_tool(action, body))
+        except RuntimeError as e:
+            return bad(handler, str(e), 403)
+        except ValueError as e:
+            return bad(handler, str(e))
+        except FileNotFoundError:
+            return bad(handler, "Space or widget not found", 404)
+
     if parsed.path == "/api/spaces/create":
         from api import spaces as capy_spaces
         try:

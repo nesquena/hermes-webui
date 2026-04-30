@@ -52,6 +52,57 @@ def test_create_read_list_space_with_schema_version_and_revision_event(monkeypat
     assert event["space_id"] == "research-harness"
 
 
+def test_space_tool_adapter_create_list_and_get_are_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    created = spaces.run_space_tool(
+        "space.create",
+        {
+            "space_id": "tool-lab",
+            "name": "Tool Lab",
+            "description": "Created through Hermes tool adapter",
+            "widgets": [
+                {
+                    "id": "unsafe",
+                    "title": "Unsafe body",
+                    "renderer": "<script>steal()</script>",
+                    "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                }
+            ],
+        },
+    )
+
+    assert created["ok"] is True
+    assert created["action"] == "space.create"
+    assert created["space"]["space_id"] == "tool-lab"
+    assert created["space"]["widget_count"] == 0
+    assert spaces.read_space("tool-lab")["widgets"] == []
+
+    spaces.upsert_widget(
+        "tool-lab",
+        {
+            "id": "unsafe",
+            "kind": "html",
+            "title": "Unsafe body",
+            "renderer": "<script>steal()</script>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    listed = spaces.run_space_tool("space.list", {})
+    loaded = spaces.run_space_tool("space.get", {"space_id": "tool-lab"})
+    serialized = json.dumps({"listed": listed, "loaded": loaded}).lower()
+
+    assert listed["ok"] is True
+    assert listed["spaces"][0]["space_id"] == "tool-lab"
+    assert loaded["space"]["widgets"][0]["id"] == "unsafe"
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
 def test_space_id_validation_rejects_traversal_and_unsafe_names(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
@@ -1166,6 +1217,50 @@ def test_spaces_routes_create_list_get_and_recovery(monkeypatch, tmp_path):
     assert handled is None
     assert status == 200
     assert body["generated_widgets_rendered"] is False
+
+
+def test_space_tool_route_patches_widget_metadata_without_leaking_sources(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Tool Route"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "unsafe-widget",
+            "kind": "html",
+            "title": "Original",
+            "renderer": "<script>persistButDoNotReturn()</script>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    handled, status, body = _route_post(
+        "/api/spaces/tool",
+        {
+            "action": "widget.patch",
+            "space_id": created["space_id"],
+            "widget_id": "unsafe-widget",
+            "patch": {
+                "title": "Patched safely",
+                "renderer": "<script>newLeak()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+        },
+    )
+
+    assert handled is None
+    assert status == 200
+    assert body["ok"] is True
+    assert body["action"] == "widget.patch"
+    assert body["widget"]["title"] == "Patched safely"
+    stored = spaces.read_widget(created["space_id"], "unsafe-widget")
+    assert stored["renderer"] == "<script>persistButDoNotReturn()</script>"
+    serialized = json.dumps(body).lower()
+    assert "persistbutdonotreturn" not in serialized
+    assert "newleak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
 
 
 def test_recovery_enable_widget_route_restores_widget_metadata_only(monkeypatch, tmp_path):
