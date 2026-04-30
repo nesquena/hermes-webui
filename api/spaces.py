@@ -54,6 +54,23 @@ _TRUSTED_SYSTEM_WIDGETS = {
     "memory": {"id": "system-memory", "title": "Memory"},
     "settings": {"id": "system-settings", "title": "Settings"},
 }
+_SPACE_DEMO_RUNS = [
+    {"demo": "demo_weather_widget", "template": "weather", "title": "Weather widget"},
+    {"demo": "demo_daily_dashboard", "template": "dashboard", "title": "Daily dashboard"},
+    {"demo": "demo_notes_app", "template": "notes", "title": "Notes app"},
+    {"demo": "demo_camera_dashboard", "template": "camera", "title": "Camera dashboard"},
+    {"demo": "demo_local_agent_control_dashboard", "template": "service", "title": "Local service dashboard"},
+    {"demo": "demo_browser_cocontrol_google_or_test_site", "template": "browser", "title": "Browser co-control"},
+    {"demo": "demo_research_harness_pdf_export", "template": "research", "title": "Research harness"},
+    {"demo": "demo_kanban_board", "template": "kanban", "title": "Kanban board"},
+    {"demo": "demo_stock_chart", "template": "stock", "title": "Stock chart"},
+    {"demo": "demo_snake_iterative_repair", "template": "game", "title": "Snake repair loop"},
+    {"demo": "demo_step_sequencer_piano_roll", "template": "music", "title": "Step sequencer"},
+    {"demo": "demo_big_bang_onboarding", "template": "big-bang", "title": "Big Bang onboarding"},
+    {"demo": "demo_time_travel_restore", "template": "weather", "title": "Time travel restore"},
+    {"demo": "demo_safe_admin_recovery", "template": "weather", "title": "Admin recovery"},
+]
+_SPACE_DEMO_RUN_BY_NAME = {item["demo"]: item for item in _SPACE_DEMO_RUNS}
 
 
 def spaces_enabled() -> bool:
@@ -523,6 +540,75 @@ def current_space_for_session(session: Any) -> dict[str, Any]:
     }
 
 
+def list_space_demo_runs() -> list[dict[str, Any]]:
+    """Return the metadata-only scripted video-demo parity smoke catalog."""
+    if not spaces_enabled():
+        return []
+    return [
+        {
+            "demo": item["demo"],
+            "template": item["template"],
+            "title": item["title"],
+            "mode": "metadata-only-smoke",
+        }
+        for item in _SPACE_DEMO_RUNS
+    ]
+
+
+def _space_demo_run_summary(demo: str, template: str, space_id: str, *, action: str) -> dict[str, Any]:
+    widgets = list_widgets(space_id)
+    revisions = list_revision_events(space_id)
+    return {
+        "ok": True,
+        "demo": demo,
+        "template": template,
+        "mode": "metadata-only-smoke",
+        "action": action,
+        "space": read_space_detail(space_id),
+        "widgets": widgets,
+        "widget_count": len(widgets),
+        "revision_event_count": len(revisions),
+        "rollback_point": bool(revisions),
+    }
+
+
+def space_demo_run(name: str) -> dict[str, Any]:
+    """Run one safe metadata-only smoke for a Space Agent video demo fixture.
+
+    This is intentionally not a renderer executor. It launches the matching
+    declarative Capy template, proves there is a persistent widget set and a
+    revision anchor, and uses existing recovery/restore primitives for the two
+    parity demos that specifically exercise those paths.
+    """
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    demo = str(name or "").strip()
+    spec = _SPACE_DEMO_RUN_BY_NAME.get(demo)
+    if spec is None:
+        raise ValueError("Unsupported demo")
+
+    template = spec["template"]
+    space_id = validate_space_id(_slugify(demo))
+    installed = install_template(template, space_id=space_id)
+    action = "installed"
+
+    if demo == "demo_time_travel_restore":
+        before_patch = str(read_space(space_id).get("revision_event_id") or "")
+        widgets = installed.get("installed_widgets") or []
+        if widgets and before_patch:
+            first = widgets[0]
+            patch_widget(space_id, first["id"], {"title": f"{first['title']} smoke patch"})
+            restore_revision(space_id, before_patch)
+            action = "restored"
+    elif demo == "demo_safe_admin_recovery":
+        widgets = installed.get("installed_widgets") or []
+        if widgets:
+            disable_widget_for_recovery(space_id, widgets[0]["id"], reason="demo smoke recovery")
+            action = "recovery-disabled"
+
+    return _space_demo_run_summary(demo, template, space_id, action=action)
+
+
 def _space_tool_create_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Return the bounded metadata-only payload accepted by the tool adapter."""
     allowed = {"space_id", "name", "description", "agent_instructions", "instructions", "template"}
@@ -555,6 +641,11 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
 
     if name in {"space.list", "space.spaces", "space.spaces.list"}:
         return {"ok": True, "action": name, "spaces": list_spaces()}
+    if name in {"space.demo.list", "space.demo.runs"}:
+        return {"ok": True, "action": name, "demos": list_space_demo_runs()}
+    if name in {"space.demo.run", "space_demo_run"}:
+        demo_name = data.get("demo") or data.get("name") or data.get("demo_name") or ""
+        return {"action": name, **space_demo_run(demo_name)}
     if name in {"space.current", "space.current.get"}:
         current_id = _space_tool_current_id(data)
         if not current_id:

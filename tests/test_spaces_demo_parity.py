@@ -1,0 +1,96 @@
+import importlib
+import json
+
+
+DEMO_NAMES = [
+    "demo_weather_widget",
+    "demo_daily_dashboard",
+    "demo_notes_app",
+    "demo_camera_dashboard",
+    "demo_local_agent_control_dashboard",
+    "demo_browser_cocontrol_google_or_test_site",
+    "demo_research_harness_pdf_export",
+    "demo_kanban_board",
+    "demo_stock_chart",
+    "demo_snake_iterative_repair",
+    "demo_step_sequencer_piano_roll",
+    "demo_big_bang_onboarding",
+    "demo_time_travel_restore",
+    "demo_safe_admin_recovery",
+]
+
+
+UNSAFE_MARKERS = [
+    "renderer",
+    "<script",
+    "</script",
+    "javascript:",
+    "onerror",
+    "api_key",
+    "token",
+    "password",
+    "secret",
+    "authorization",
+    "bearer",
+    "cookie",
+]
+
+
+def _load_spaces(monkeypatch, tmp_path, enabled=True):
+    import api.config as config
+
+    monkeypatch.setattr(config, "STATE_DIR", tmp_path / "state")
+    if enabled:
+        monkeypatch.setenv("HERMES_WEBUI_SPACES_ENABLED", "1")
+    else:
+        monkeypatch.delenv("HERMES_WEBUI_SPACES_ENABLED", raising=False)
+    import api.spaces as spaces
+
+    return importlib.reload(spaces)
+
+
+def _assert_safe_payload(payload):
+    serialized = json.dumps(payload, sort_keys=True).lower()
+    for marker in UNSAFE_MARKERS:
+        assert marker not in serialized
+
+
+def test_demo_parity_catalog_covers_video_named_smokes(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    catalog = spaces.list_space_demo_runs()
+
+    assert [item["demo"] for item in catalog] == DEMO_NAMES
+    assert {item["mode"] for item in catalog} == {"metadata-only-smoke"}
+    _assert_safe_payload(catalog)
+
+
+def test_demo_parity_smoke_runner_launches_each_demo_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    results = [spaces.space_demo_run(name) for name in DEMO_NAMES]
+
+    assert [result["demo"] for result in results] == DEMO_NAMES
+    assert all(result["ok"] is True for result in results)
+    assert all(result["space"]["space_id"] for result in results)
+    assert all(result["widget_count"] >= 1 for result in results)
+    assert all(result["rollback_point"] for result in results)
+    assert len(spaces.list_spaces()) == len(DEMO_NAMES)
+    _assert_safe_payload(results)
+
+
+def test_demo_parity_smoke_runner_exposes_tool_adapter_action(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    listed = spaces.run_space_tool("space.demo.list", {})
+    ran = spaces.run_space_tool(
+        "space.demo.run",
+        {"demo": "demo_weather_widget", "renderer": "<script>bad()</script>", "api_key": "SECRET"},
+    )
+
+    assert listed["ok"] is True
+    assert listed["demos"][0]["demo"] == "demo_weather_widget"
+    assert ran["ok"] is True
+    assert ran["demo"] == "demo_weather_widget"
+    assert ran["template"] == "weather"
+    _assert_safe_payload({"listed": listed, "ran": ran})
