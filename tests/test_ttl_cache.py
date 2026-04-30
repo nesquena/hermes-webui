@@ -108,41 +108,52 @@ def test_ttl_expiry():
 
 # ── 3. test_mtime_invalidation ───────────────────────────────────────────
 
-def test_mtime_invalidation():
+def test_mtime_invalidation(tmp_path, monkeypatch):
     """Populate the cache, then change _cfg_mtime to simulate a config file
     change on disk. The next call should invalidate the cache and re-scan.
     """
     _reset_cache()
+    config_path = tmp_path / "config.yaml"
+    cache_path = tmp_path / "models_cache.json"
 
-    # Ensure _cfg_mtime matches file so first call doesn't re-scan due to mtime
-    try:
-        real_mtime = config.Path(config._get_config_path()).stat().st_mtime
-    except OSError:
-        real_mtime = 0.0
-    config._cfg_mtime = real_mtime
+    with monkeypatch.context() as m:
+        m.setattr(config, "_get_config_path", lambda: config_path)
+        m.setattr(config, "_models_cache_path", cache_path)
 
-    # First call populates cache
-    result1 = config.get_available_models()
-    assert config._available_models_cache is not None
+        config_path.write_text(
+            "model:\n  provider: openai\n  default: old-test-model\n",
+            encoding="utf-8",
+        )
+        config.reload_config()
+        config.invalidate_models_cache()
 
-    # Simulate config.yaml changed on disk by setting _cfg_mtime to 0
-    # (which won't match the actual file mtime)
-    config._cfg_mtime = 0.0
+        result1 = config.get_available_models()
+        assert result1["default_model"] == "old-test-model"
+        assert config._available_models_cache is not None
 
-    # The next call should detect mtime mismatch, reload, and invalidate cache
-    old_cache = config._available_models_cache
-    old_ts = config._available_models_cache_ts
+        old_cache = config._available_models_cache
 
-    result2 = config.get_available_models()
+        # Simulate an external edit to config.yaml. This is the path that the
+        # WebUI hits when a user edits the file outside /api/default-model.
+        config_path.write_text(
+            "model:\n  provider: openai\n  default: new-test-model\n",
+            encoding="utf-8",
+        )
+        new_mtime = config_path.stat().st_mtime + 2.0
+        config_path.touch()
+        config.os.utime(config_path, (new_mtime, new_mtime))
 
-    # Cache must have been refreshed — timestamp advanced since we reset it
-    # to 0.0 on invalidation.
-    assert config._available_models_cache_ts > 0.0, (
-        "Cache timestamp should be updated after invalidation + rebuild"
-    )
+        result2 = config.get_available_models()
 
-    # Restore
-    config._cfg_mtime = real_mtime
+        assert result2["default_model"] == "new-test-model"
+        assert config._available_models_cache is not old_cache, (
+            "Cache object should be replaced after config mtime invalidation"
+        )
+        assert config._available_models_cache_ts > 0.0, (
+            "Cache timestamp should be updated after invalidation + rebuild"
+        )
+
+    config.reload_config()
     _reset_cache()
 
 

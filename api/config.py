@@ -1428,6 +1428,7 @@ def get_available_models() -> dict:
         _current_mtime = 0.0
     if _current_mtime != _cfg_mtime:
         reload_config()
+        invalidate_models_cache()
     # ── COLD PATH helper ─────────────────────────────────────────────────────
     # Extracted so it runs inside _available_models_cache_lock (RLock) to
     # prevent thundering-herd: only one thread rebuilds while others wait.
