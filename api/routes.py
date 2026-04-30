@@ -591,7 +591,6 @@ def submit_pending(session_key: str, approval: dict) -> None:
     """
     entry = dict(approval)
     entry.setdefault("approval_id", uuid.uuid4().hex)
-    total = 0
     with _lock:
         queue = _pending.setdefault(session_key, [])
         # Replace a legacy non-list value if the agent version uses the old pattern.
@@ -2780,10 +2779,13 @@ def _handle_approval_sse_stream(handler, parsed):
     if not sid:
         return bad(handler, "session_id is required")
 
-    # Send initial snapshot (any approval already queued before SSE connected).
-    initial_pending = None
-    initial_count = 0
+    # Subscribe AND read snapshot under the same lock so that a concurrent
+    # submit_pending() cannot slip into the gap between snapshot and subscribe
+    # (which would cause the notify to be silently dropped).
     with _lock:
+        _approval_sse_subscribers.setdefault(sid, [])
+        q = queue.Queue(maxsize=16)
+        _approval_sse_subscribers[sid].append(q)
         q_list = _pending.get(sid)
         if isinstance(q_list, list):
             initial_pending = dict(q_list[0]) if q_list else None
@@ -2791,6 +2793,9 @@ def _handle_approval_sse_stream(handler, parsed):
         elif q_list:
             initial_pending = dict(q_list)
             initial_count = 1
+        else:
+            initial_pending = None
+            initial_count = 0
 
     handler.send_response(200)
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
@@ -2799,12 +2804,9 @@ def _handle_approval_sse_stream(handler, parsed):
     handler.send_header('Connection', 'keep-alive')
     handler.end_headers()
 
-    from api.streaming import _sse
-
     # Push initial state immediately so the client doesn't miss anything.
     _sse(handler, 'initial', {"pending": initial_pending, "pending_count": initial_count})
 
-    q = _approval_sse_subscribe(sid)
     try:
         while True:
             try:
@@ -2885,8 +2887,15 @@ def _handle_clarify_sse_stream(handler, parsed):
     if not sid:
         return bad(handler, "session_id is required")
 
-    # Send initial snapshot — any clarify already queued before SSE connected.
-    initial_pending = get_clarify_pending(sid)
+    # Subscribe AND read snapshot under the same lock so that a concurrent
+    # submit_pending() cannot slip into the gap between snapshot and subscribe.
+    from api.clarify import _lock as _clarify_lock, _gateway_queues as _clarify_queues, _sse_subscribers as _clarify_subs
+    with _clarify_lock:
+        _clarify_subs.setdefault(sid, [])
+        q = queue.Queue(maxsize=16)
+        _clarify_subs[sid].append(q)
+        q_list = _clarify_queues.get(sid) or []
+        initial_pending = dict(q_list[0].data) if q_list else None
 
     handler.send_response(200)
     handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
@@ -2895,11 +2904,8 @@ def _handle_clarify_sse_stream(handler, parsed):
     handler.send_header('Connection', 'keep-alive')
     handler.end_headers()
 
-    from api.streaming import _sse
-
     _sse(handler, 'initial', {"pending": initial_pending})
 
-    q = clarify_sse_subscribe(sid)
     try:
         while True:
             try:
