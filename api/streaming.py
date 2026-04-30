@@ -2199,6 +2199,27 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 usage['context_length'] = getattr(_cc, 'context_length', 0) or 0
                 usage['threshold_tokens'] = getattr(_cc, 'threshold_tokens', 0) or 0
                 usage['last_prompt_tokens'] = getattr(_cc, 'last_prompt_tokens', 0) or 0
+            # Fallback: resolve context_length from model metadata when compressor
+            # didn't provide it (e.g. fresh agent, interrupted stream, or missing attr)
+            if not usage.get('context_length'):
+                try:
+                    from agent.model_metadata import get_model_context_length
+                    _resolved_cl = get_model_context_length(
+                        getattr(agent, 'model', resolved_model or ''),
+                        getattr(agent, 'base_url', None),
+                    )
+                    if _resolved_cl:
+                        usage['context_length'] = _resolved_cl
+                except Exception:
+                    pass
+            # Persist to session so context indicator survives reloads
+            if usage.get('context_length'):
+                s.context_length = usage['context_length']
+            if usage.get('threshold_tokens'):
+                s.threshold_tokens = usage['threshold_tokens']
+            if usage.get('last_prompt_tokens'):
+                s.last_prompt_tokens = usage['last_prompt_tokens']
+            s.save()
             # (reasoning trace already attached + saved above, before s.save())
             # Leftover-steer delivery: if a /steer was queued (via
             # api/chat/steer) but the agent finished its turn before
