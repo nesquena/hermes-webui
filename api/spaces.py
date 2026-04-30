@@ -1329,6 +1329,48 @@ def _browser_surface_widgets() -> list[dict[str, Any]]:
     ]
 
 
+def _game_sandbox_widgets() -> list[dict[str, Any]]:
+    """Return safe declarative canvas-game widget seeds.
+
+    This starter maps the Space Agent snake/game demo into metadata-only Capy
+    widgets. Executable game renderer code stays disabled until a sandboxed
+    viewer, keyboard focus isolation, cleanup hooks, and rollback tests exist.
+    """
+    return [
+        {
+            "id": "game-canvas",
+            "kind": "canvas-game",
+            "title": "Snake game sandbox",
+            "layout": {"x": 0, "y": 0, "w": 16, "h": 10, "minimized": False},
+            "game": "snake",
+            "input_policy": {
+                "keyboard_focus": "explicit-click",
+                "global_keys": "blocked",
+                "cleanup": "planned",
+            },
+            "rendering": {"mode": "metadata-only", "sandbox": "planned"},
+            "permissions": {"generated_rendering": "disabled", "keyboard": "explicit-focus"},
+        },
+        {
+            "id": "game-controls",
+            "kind": "status",
+            "title": "Game controls",
+            "layout": {"x": 16, "y": 0, "w": 8, "h": 5, "minimized": False},
+            "actions": ["start", "pause", "reset", "report-bug"],
+            "interaction": {"controls": "planned-metadata", "bug_reports": "agent-mediated"},
+            "permissions": {"generated_rendering": "disabled"},
+        },
+        {
+            "id": "game-repair-notes",
+            "kind": "markdown",
+            "title": "Repair notes",
+            "layout": {"x": 16, "y": 5, "w": 8, "h": 5, "minimized": False},
+            "content_status": "agent-managed-empty",
+            "repair_loop": {"iterative_patch": "planned", "rollback": "revision-history"},
+        },
+    ]
+
+
 def _big_bang_onboarding_widgets() -> list[dict[str, Any]]:
     """Return safe declarative Big Bang onboarding widget seeds.
 
@@ -1351,7 +1393,7 @@ def _big_bang_onboarding_widgets() -> list[dict[str, Any]]:
             "kind": "checklist",
             "title": "Demo launchers",
             "layout": {"x": 12, "y": 0, "w": 12, "h": 5, "minimized": False},
-            "demo_templates": ["weather", "research", "kanban", "notes", "browser", "stock"],
+            "demo_templates": ["weather", "research", "kanban", "notes", "browser", "stock", "game"],
             "items": [
                 {"id": "try-weather", "title": "Install the Weather Demo", "status": "suggested"},
                 {"id": "try-research", "title": "Open the Research Harness", "status": "suggested"},
@@ -1395,7 +1437,7 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
     template_name = str(template or "").strip().lower()
-    if template_name not in {"weather", "weather-demo", "research", "research-harness", "dashboard", "daily-dashboard", "camera", "camera-dashboard", "kanban", "kanban-board", "notes", "notes-app", "browser", "browser-surface", "stock", "stock-chart", "stocks", "big-bang", "bigbang", "onboarding", "big-bang-onboarding"}:
+    if template_name not in {"weather", "weather-demo", "research", "research-harness", "dashboard", "daily-dashboard", "camera", "camera-dashboard", "kanban", "kanban-board", "notes", "notes-app", "browser", "browser-surface", "stock", "stock-chart", "stocks", "game", "game-sandbox", "snake", "snake-game", "big-bang", "bigbang", "onboarding", "big-bang-onboarding"}:
         raise ValueError("Unsupported template")
 
     if template_name in {"weather", "weather-demo"}:
@@ -1510,6 +1552,22 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
             )
         widgets = _stock_chart_widgets()
         response_template = "stock"
+    elif template_name in {"game", "game-sandbox", "snake", "snake-game"}:
+        target_id = validate_space_id(space_id) if space_id else _unique_space_id("game-sandbox")
+        if _manifest_path(target_id).exists():
+            space = read_space(target_id)
+        else:
+            space = create_space(
+                {
+                    "space_id": target_id,
+                    "name": "Game Sandbox",
+                    "description": "Metadata-only starter for the snake/canvas game demo with explicit keyboard focus and recovery planning.",
+                    "agent_instructions": "Keep game widgets declarative until sandboxed rendering is approved. Require explicit keyboard focus, preserve revision history, and use bug-report events for iterative repair.",
+                    "template": "game-sandbox",
+                }
+            )
+        widgets = _game_sandbox_widgets()
+        response_template = "game"
     elif template_name in {"big-bang", "bigbang", "onboarding", "big-bang-onboarding"}:
         target_id = validate_space_id(space_id) if space_id else _unique_space_id("big-bang-onboarding")
         if _manifest_path(target_id).exists():

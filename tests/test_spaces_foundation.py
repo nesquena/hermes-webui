@@ -805,7 +805,7 @@ def test_install_big_bang_template_creates_safe_onboarding_widgets(monkeypatch, 
         "checklist",
     ]
     launcher_widget = spaces.read_widget(installed["space"]["space_id"], "bigbang-demo-launcher")
-    assert launcher_widget["demo_templates"] == ["weather", "research", "kanban", "notes", "browser", "stock"]
+    assert launcher_widget["demo_templates"] == ["weather", "research", "kanban", "notes", "browser", "stock", "game"]
     assert launcher_widget["interaction"] == {"install_templates": "agent-mediated", "preview": "metadata-only"}
     safety_widget = spaces.read_widget(installed["space"]["space_id"], "bigbang-safety")
     assert safety_widget["safety"] == {
@@ -834,6 +834,61 @@ def test_big_bang_template_install_route_returns_safe_metadata(monkeypatch, tmp_
     assert body["space"]["name"] == "Big Bang Onboarding"
     assert body["installed_widgets"][0]["id"] == "bigbang-welcome"
     assert len(body["installed_widgets"]) == 4
+    serialized = json.dumps(body).lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
+def test_install_game_template_creates_safe_canvas_game_widgets(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    installed = spaces.install_template("game")
+
+    assert installed["template"] == "game"
+    assert installed["space"]["template"] == "game-sandbox"
+    assert installed["space"]["name"] == "Game Sandbox"
+    assert [widget["id"] for widget in installed["installed_widgets"]] == [
+        "game-canvas",
+        "game-controls",
+        "game-repair-notes",
+    ]
+    assert [widget["kind"] for widget in installed["installed_widgets"]] == [
+        "canvas-game",
+        "status",
+        "markdown",
+    ]
+    canvas_widget = spaces.read_widget(installed["space"]["space_id"], "game-canvas")
+    assert canvas_widget["game"] == "snake"
+    assert canvas_widget["input_policy"] == {
+        "keyboard_focus": "explicit-click",
+        "global_keys": "blocked",
+        "cleanup": "planned",
+    }
+    assert canvas_widget["permissions"] == {"generated_rendering": "disabled", "keyboard": "explicit-focus"}
+    serialized = json.dumps(installed).lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert '\"script\"' not in serialized
+    assert '\"data\"' not in serialized
+    assert '\"source\"' not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
+def test_game_template_install_route_returns_safe_metadata(monkeypatch, tmp_path):
+    _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    handled, status, body = _route_post("/api/spaces/templates/install", {"template": "game"})
+
+    assert handled is None
+    assert status == 200
+    assert body["template"] == "game"
+    assert body["space"]["name"] == "Game Sandbox"
+    assert body["installed_widgets"][0]["id"] == "game-canvas"
+    assert len(body["installed_widgets"]) == 3
     serialized = json.dumps(body).lower()
     assert "renderer" not in serialized
     assert "html" not in serialized
