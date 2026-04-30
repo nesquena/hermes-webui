@@ -92,19 +92,24 @@ def test_cron_profile_context_scopes_agent_cron_paths_without_mutating_env(tmp_p
     cron_scheduler._hermes_home = default_home
     cron_scheduler._LOCK_DIR = default_home / "cron"
     cron_scheduler._LOCK_FILE = default_home / "cron" / ".tick.lock"
+    hermes_state = types.ModuleType("hermes_state")
+    hermes_state.DEFAULT_DB_PATH = default_home / "state.db"
 
     monkeypatch.setitem(sys.modules, "cron", cron_pkg)
     monkeypatch.setitem(sys.modules, "cron.jobs", cron_jobs)
     monkeypatch.setitem(sys.modules, "cron.scheduler", cron_scheduler)
+    monkeypatch.setitem(sys.modules, "hermes_state", hermes_state)
 
     with routes._cron_profile_context("foo", include_scheduler=True):
         assert cron_jobs.HERMES_DIR == foo_home
         assert cron_jobs.OUTPUT_DIR == foo_home / "cron" / "output"
         assert cron_scheduler._hermes_home == foo_home
+        assert hermes_state.DEFAULT_DB_PATH == foo_home / "state.db"
         assert os.environ["HERMES_HOME"] == "/should/not/change"
 
     assert cron_jobs.HERMES_DIR == default_home
     assert cron_scheduler._hermes_home == default_home
+    assert hermes_state.DEFAULT_DB_PATH == default_home / "state.db"
     assert os.environ["HERMES_HOME"] == "/should/not/change"
 
 

@@ -171,6 +171,8 @@ def _cron_profile_context(profile: str | None, *, include_scheduler: bool = Fals
         }
         scheduler = None
         scheduler_state = {}
+        hermes_state = None
+        hermes_state_state = {}
 
         cron_dir = home / "cron"
         cron_jobs.HERMES_DIR = home
@@ -188,10 +190,20 @@ def _cron_profile_context(profile: str | None, *, include_scheduler: bool = Fals
                 }
             except Exception:
                 scheduler = None
+            try:
+                import hermes_state
+
+                hermes_state_state = {
+                    "DEFAULT_DB_PATH": hermes_state.DEFAULT_DB_PATH,
+                }
+            except Exception:
+                hermes_state = None
         if scheduler is not None:
             scheduler._hermes_home = home
             scheduler._LOCK_DIR = cron_dir
             scheduler._LOCK_FILE = cron_dir / ".tick.lock"
+        if hermes_state is not None:
+            hermes_state.DEFAULT_DB_PATH = home / "state.db"
         try:
             yield name, home
         finally:
@@ -200,6 +212,9 @@ def _cron_profile_context(profile: str | None, *, include_scheduler: bool = Fals
             if scheduler is not None:
                 for key, value in scheduler_state.items():
                     setattr(scheduler, key, value)
+            if hermes_state is not None:
+                for key, value in hermes_state_state.items():
+                    setattr(hermes_state, key, value)
 
 
 def _cron_profiles_from_query(parsed) -> list[str]:
