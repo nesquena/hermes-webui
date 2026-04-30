@@ -428,15 +428,24 @@ function _normalizeConfiguredModelKey(modelId){
   return s.replace(/-/g,'.');
 }
 
-function _getConfiguredModelBadge(modelId,badgeMap){
+function _getConfiguredModelBadge(modelId,badgeMap,providerId){
   const map=badgeMap||window._configuredModelBadges||{};
   if(!modelId||!map) return null;
-  if(map[modelId]) return map[modelId];
+  const provider=String(providerId||'').toLowerCase();
+  const exact=map[modelId];
+  if(exact && (!provider || !exact.provider || String(exact.provider).toLowerCase()===provider)) return exact;
   const targetNorm=_normalizeConfiguredModelKey(modelId);
+  const matches=[];
   for(const [candidate,badge] of Object.entries(map)){
-    if(_normalizeConfiguredModelKey(candidate)===targetNorm) return badge;
+    if(_normalizeConfiguredModelKey(candidate)===targetNorm) matches.push(badge);
   }
-  return null;
+  if(!matches.length) return null;
+  if(provider){
+    const providerMatch=matches.find(badge=>String(badge&&badge.provider||'').toLowerCase()===provider);
+    if(providerMatch) return providerMatch;
+    return matches.length===1 ? matches[0] : null;
+  }
+  return matches[0];
 }
 
 function syncModelChip(){
@@ -479,8 +488,9 @@ function renderModelDropdown(){
   const _badgeMap=window._configuredModelBadges||{};
   for(const child of Array.from(sel.children)){
     if(child.tagName==='OPTGROUP'){
+      const providerId=child.dataset&&child.dataset.provider?child.dataset.provider:'';
       for(const opt of Array.from(child.children)){
-        _modelData.push({value:opt.value,name:esc(opt.textContent||getModelLabel(opt.value)),id:esc(opt.value),group:child.label||'',badge:_getConfiguredModelBadge(opt.value,_badgeMap)});
+        _modelData.push({value:opt.value,name:esc(opt.textContent||getModelLabel(opt.value)),id:esc(opt.value),group:child.label||'',badge:_getConfiguredModelBadge(opt.value,_badgeMap,providerId)});
       }
     }
     if(child.tagName==='OPTION'){

@@ -1470,6 +1470,12 @@ def get_available_models() -> dict:
 
             option_ids = [m.get("id", "") for g in groups for m in g.get("models", []) if m.get("id")]
             option_lookup = {str(opt_id): str(opt_id) for opt_id in option_ids}
+            option_provider_lookup = {
+                str(m.get("id")): str(g.get("provider_id") or "")
+                for g in groups
+                for m in g.get("models", [])
+                if m.get("id")
+            }
             norm_lookup: dict[str, list[str]] = {}
             for opt_id in option_ids:
                 norm_lookup.setdefault(_norm_model_id(opt_id), []).append(opt_id)
@@ -1488,8 +1494,9 @@ def get_available_models() -> dict:
                         raw_candidates.append(candidate)
 
                 match_id = None
+                exact_match = next((option_lookup[c] for c in raw_candidates if c in option_lookup), None)
                 for candidate in raw_candidates:
-                    if candidate in option_lookup:
+                    if candidate in option_lookup and option_provider_lookup.get(candidate) == provider:
                         match_id = option_lookup[candidate]
                         break
                 if match_id is None:
@@ -1499,15 +1506,18 @@ def get_available_models() -> dict:
                         if not matches:
                             continue
                         provider_match = next(
-                            (m for m in matches if m.startswith(f"@{provider}:") or m.startswith(f"{provider}/")),
+                            (m for m in matches if option_provider_lookup.get(m) == provider),
                             None,
                         )
-                        match_id = provider_match or matches[0]
+                        match_id = provider_match or exact_match or matches[0]
                         if match_id:
                             break
 
                 badge_payload = {"role": entry["role"], "label": entry["label"], "provider": provider}
                 for candidate in raw_candidates:
+                    candidate_provider = option_provider_lookup.get(candidate)
+                    if candidate_provider and candidate_provider != provider:
+                        continue
                     badges[candidate] = badge_payload
                 if match_id:
                     badges[match_id] = badge_payload
