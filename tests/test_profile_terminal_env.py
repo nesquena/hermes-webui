@@ -46,6 +46,29 @@ def test_profile_runtime_env_includes_terminal_config_and_dotenv(tmp_path):
     assert env["HERMES_MAX_ITERATIONS"] == "90"
 
 
+def test_streaming_runtime_env_merges_without_duplicate_terminal_cwd():
+    from api.streaming import _build_agent_runtime_env
+
+    env = _build_agent_runtime_env(
+        {
+            "TERMINAL_ENV": "ssh",
+            "TERMINAL_CWD": "/profile/cwd",
+            "TERMINAL_TIMEOUT": "60",
+        },
+        workspace="/session/workspace",
+        session_id="sess-123",
+        hermes_home="/tmp/hermes-home",
+    )
+
+    assert env["TERMINAL_ENV"] == "ssh"
+    assert env["TERMINAL_TIMEOUT"] == "60"
+    assert env["TERMINAL_CWD"] == "/session/workspace"
+    assert env["HERMES_EXEC_ASK"] == "1"
+    assert env["HERMES_SESSION_KEY"] == "sess-123"
+    assert env["HERMES_HOME"] == "/tmp/hermes-home"
+    assert list(env).count("TERMINAL_CWD") == 1
+
+
 def test_streaming_applies_profile_runtime_env_to_agent_run():
     src = Path("api/streaming.py").read_text(encoding="utf-8")
 

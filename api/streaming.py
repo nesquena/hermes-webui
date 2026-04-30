@@ -41,6 +41,27 @@ try:
 except ImportError:
     AIAgent = None
 
+
+def _build_agent_runtime_env(
+    profile_runtime_env: dict[str, str] | None,
+    *,
+    workspace: str,
+    session_id: str,
+    hermes_home: str,
+) -> dict[str, str]:
+    """Merge profile runtime env with per-session overrides.
+
+    A profile may define TERMINAL_CWD, but a WebUI chat run must always execute
+    in the session workspace. Returning a single merged mapping avoids passing
+    duplicate kwargs to _set_thread_env(**env).
+    """
+    env = dict(profile_runtime_env or {})
+    env["TERMINAL_CWD"] = str(workspace)
+    env["HERMES_EXEC_ASK"] = "1"
+    env["HERMES_SESSION_KEY"] = session_id
+    env["HERMES_HOME"] = hermes_home
+    return env
+
 def _get_ai_agent():
     """Return AIAgent class, retrying the import if the initial attempt failed.
 
@@ -1419,13 +1440,13 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             _profile_home = os.environ.get('HERMES_HOME', '')
             _profile_runtime_env = {}
 
-        _set_thread_env(
-            **_profile_runtime_env,
-            TERMINAL_CWD=str(s.workspace),
-            HERMES_EXEC_ASK='1',
-            HERMES_SESSION_KEY=session_id,
-            HERMES_HOME=_profile_home,
+        _runtime_env = _build_agent_runtime_env(
+            _profile_runtime_env,
+            workspace=str(s.workspace),
+            session_id=session_id,
+            hermes_home=_profile_home,
         )
+        _set_thread_env(**_runtime_env)
         # Still set process-level env as fallback for tools that bypass thread-local
         # Acquire lock only for the env mutation, then release before the agent runs.
         # The finally block re-acquires to restore — keeping critical sections short
