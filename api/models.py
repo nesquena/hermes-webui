@@ -846,6 +846,40 @@ def save_projects(projects) -> None:
     PROJECTS_FILE.write_text(json.dumps(projects, ensure_ascii=False, indent=2), encoding='utf-8')
 
 
+CRON_PROJECT_NAME = 'Cron Jobs'
+_CRON_PROJECT_LOCK = threading.Lock()
+
+
+def ensure_cron_project() -> str:
+    """Return the project_id of the system "Cron Jobs" project, creating it if needed.
+
+    Thread-safe and idempotent.  Returns a 12-char hex project_id string.
+    """
+    with _CRON_PROJECT_LOCK:
+        for p in load_projects():
+            if p.get('name') == CRON_PROJECT_NAME:
+                return p['project_id']
+        project_id = uuid.uuid4().hex[:12]
+        projects = load_projects()
+        projects.append({
+            'project_id': project_id,
+            'name': CRON_PROJECT_NAME,
+            'color': '#6366f1',
+            'created_at': time.time(),
+        })
+        save_projects(projects)
+        return project_id
+
+
+def is_cron_session(session_id: str, source_tag: str = None) -> bool:
+    """Return True if a session originates from a cron job."""
+    if source_tag == 'cron':
+        return True
+    sid = str(session_id or '')
+    return sid.startswith('cron_')
+
+
+
 def import_cli_session(
     session_id: str,
     title: str,
@@ -948,7 +982,7 @@ def get_cli_sessions() -> list:
                 'updated_at': raw_ts,
                 'pinned': False,
                 'archived': False,
-                'project_id': None,
+                'project_id': ensure_cron_project() if is_cron_session(sid, _source) else None,
                 'profile': profile,
                 'source_tag': _source,
                 'raw_source': row.get('raw_source'),

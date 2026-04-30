@@ -488,6 +488,8 @@ from api.models import (
     import_cli_session,
     get_cli_sessions,
     get_cli_session_messages,
+    ensure_cron_project,
+    is_cron_session,
 )
 from api.workspace import (
     load_workspaces,
@@ -4186,6 +4188,7 @@ def _handle_session_import_cli(handler, body):
     created_at = None
     updated_at = None
     cli_title = None
+    cli_source_tag = None
     for cs in get_cli_sessions():
         if cs["session_id"] == sid:
             profile = cs.get("profile")
@@ -4193,10 +4196,16 @@ def _handle_session_import_cli(handler, body):
             created_at = cs.get("created_at")
             updated_at = cs.get("updated_at")
             cli_title = cs.get("title")
+            cli_source_tag = cs.get("source_tag")
             break
 
     # Use the CLI session title if available (e.g., cron job name), otherwise derive from messages
     title = cli_title or title_from(msgs, "CLI Session")
+
+    # Auto-assign cron sessions to the dedicated "Cron Jobs" project (#1079)
+    cron_project_id = None
+    if is_cron_session(sid, cli_source_tag):
+        cron_project_id = ensure_cron_project()
 
     s = import_cli_session(
         sid,
@@ -4207,6 +4216,8 @@ def _handle_session_import_cli(handler, body):
         created_at=created_at,
         updated_at=updated_at,
     )
+    if cron_project_id:
+        s.project_id = cron_project_id
     s.is_cli_session = True
     s._cli_origin = sid
     s.save(touch_updated_at=False)
