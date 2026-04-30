@@ -630,7 +630,6 @@ const _THEMES=[
   {name:'Light', value:'light', colors:['#FEFCF7','#FAF7F0','#B8860B']},
   {name:'Dark', value:'dark', colors:['#0D0D1A','#141425','#FFD700']},
   {name:'System', value:'system', colors:['#FEFCF7','#0D0D1A','#B8860B']},
-  {name:'Calm', value:'calm', colors:['#C6AC8F','#EAE0D5','#22333B']},
 ];
 const _SKINS=[
   {name:'Default',  colors:['#FFD700','#FFBF00','#CD7F32']},
@@ -687,11 +686,6 @@ function _applyTheme(name){
     _onSystemThemeChange=()=>_setResolvedTheme(_systemThemeMq.matches);
     _setResolvedTheme(_systemThemeMq.matches);
     _systemThemeMq.addEventListener('change',_onSystemThemeChange);
-    return;
-  }
-  if(normalized.theme==='calm'){
-    document.documentElement.dataset.theme='calm';
-    _setResolvedTheme(true);
     return;
   }
   _setResolvedTheme(normalized.theme==='dark');

@@ -4,6 +4,12 @@
 
 ### Fixed
 
+## [v0.50.242] — 2026-04-30
+
+### Reverted
+- **Assistant message serif font (Georgia)** — Reverted the global `.assistant-turn .msg-body { font-family: var(--font-assistant) }` rule introduced in v0.50.240 (PR #1282). Assistant responses now render in the same system sans-serif stack as the rest of the UI, matching pre-v0.50.240 behavior. The `--font-assistant` CSS token has been removed. (`static/style.css`)
+- **Calm Console theme** — Removed the `data-theme="calm"` palette and its associated picker entry, theme-apply branch, and server-side enum value. The theme was the only consumer of the assistant serif rule and was not pulling its weight as a third theme option. Users who selected `calm` will fall back to the default theme on next page load (the server settings validator now rejects `calm` and resets to `dark`). (`static/style.css`, `static/boot.js`, `static/index.html`, `api/config.py`, `tests/test_ui_tool_call_cleanup.py`)
+
 ## [v0.50.241] — 2026-04-30
 
 ### Added

@@ -13,7 +13,6 @@
     --space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;
     --font-size-xs:11px;--font-size-sm:12px;--font-size-md:14px;
     --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
-    --font-assistant:Georgia,"Times New Roman",serif;
     --surface-subtle:rgba(0,0,0,.025);--surface-subtle-hover:rgba(0,0,0,.045);
     --border-subtle:rgba(0,0,0,.08);--border-muted:rgba(0,0,0,.12);
     font-family:var(--font-ui);font-size:14px;line-height:1.6;
@@ -78,31 +77,6 @@
     --error:#EF5350;--success:#4CAF50;--warning:#FFA726;--info:#4DD0E1;
     --surface-subtle:rgba(255,255,255,.025);--surface-subtle-hover:rgba(255,255,255,.045);
     --border-subtle:rgba(255,255,255,.075);--border-muted:rgba(255,255,255,.12);
-  }
-  /* ── Custom Theme: Calm Console (Coolors earth/slate palette) ── */
-  :root[data-theme="calm"] {
-    --bg:#EAE0D5;--sidebar:#F4EEE7;--border:#C6AC8F;--border2:rgba(10,9,8,0.13);
-    --text:#0A0908;--muted:#5B4B3B;--accent:#22333B;--blue:#22333B;--gold:#C6AC8F;--code-bg:#D8C8B7;
-    --surface:#F4EEE7;--topbar-bg:rgba(244,238,231,.96);--main-bg:rgba(234,224,213,0.72);
-    --focus-ring:rgba(34,51,59,.28);--focus-glow:rgba(34,51,59,.08);
-    --input-bg:rgba(10,9,8,.035);--hover-bg:rgba(10,9,8,.055);
-    --strong:#0A0908;--em:#3B3028;--code-text:#22333B;--code-inline-bg:rgba(10,9,8,.06);--pre-text:#0A0908;
-    --accent-hover:#0A0908;--accent-bg:rgba(34,51,59,0.08);--accent-bg-strong:rgba(34,51,59,0.15);--accent-text:#22333B;
-    --error:#B42318;--success:#2F6B3F;--warning:#8A5A18;--info:#22333B;
-    --surface-subtle:rgba(10,9,8,.025);--surface-subtle-hover:rgba(10,9,8,.045);
-    --border-subtle:rgba(10,9,8,.08);--border-muted:rgba(10,9,8,.12);
-  }
-  :root.dark[data-theme="calm"] {
-    --bg:#0A0908;--sidebar:#22333B;--border:#3B4A50;--border2:rgba(234,224,213,0.16);
-    --text:#EAE0D5;--muted:#C6AC8F;--accent:#C6AC8F;--blue:#C6AC8F;--gold:#C6AC8F;--code-bg:#11100E;
-    --surface:#22333B;--topbar-bg:rgba(34,51,59,.96);--main-bg:rgba(10,9,8,0.72);
-    --focus-ring:rgba(198,172,143,.28);--focus-glow:rgba(198,172,143,.08);
-    --input-bg:rgba(234,224,213,.035);--hover-bg:rgba(234,224,213,.055);
-    --strong:#F7F0E8;--em:#D8C6B2;--code-text:#C6AC8F;--code-inline-bg:rgba(234,224,213,.07);--pre-text:#EAE0D5;
-    --accent-hover:#EAE0D5;--accent-bg:rgba(198,172,143,0.08);--accent-bg-strong:rgba(198,172,143,0.14);--accent-text:#C6AC8F;
-    --error:#F87171;--success:#86C08B;--warning:#E0B15D;--info:#C6AC8F;
-    --surface-subtle:rgba(234,224,213,.025);--surface-subtle-hover:rgba(234,224,213,.045);
-    --border-subtle:rgba(234,224,213,.075);--border-muted:rgba(234,224,213,.12);
   }
   /* ── Skin: Default (gold — matches base) ── */
   /* No overrides needed — :root and .dark already use gold accent */
@@ -2264,11 +2238,9 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 /* ── Unified indent rail — every child of a turn lines up on --msg-rail ── */
 .msg-row { padding: 12px 0; }
 .msg-body { padding-left: var(--msg-rail); padding-top: 8px; max-width: var(--msg-max); }
-.assistant-turn .msg-body { font-family: var(--font-assistant); font-size: 15px; line-height: 1.68; letter-spacing: .003em; }
-.assistant-turn .msg-body code,
-.assistant-turn .msg-body pre,
-.assistant-turn .msg-body table { font-family: 'SF Mono', ui-monospace, monospace; }
-.msg-row[data-role="user"] .msg-body { font-family: var(--font-ui); }
+.msg-body code,
+.msg-body pre,
+.msg-body table { font-family: 'SF Mono', ui-monospace, monospace; }
 .msg-body:empty { display: none; }
 .assistant-turn { width: 100%; }
 .assistant-turn-blocks { display: flex; flex-direction: column; }
