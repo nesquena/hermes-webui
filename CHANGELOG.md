@@ -4,6 +4,13 @@
 
 ### Fixed
 
+## [v0.50.243] — 2026-04-30
+
+### Fixed
+- **Chip composer model badge — removed the `PRIMARY` projection** — The chip-projected configured-model badge added in #1287 was eating ≈30% of chip width (235px → 164px) without adding signal, since the model name is already right next to it. The dropdown rows still show `Primary` / `Fallback N` badges where they actually help distinguish picker entries. Backend `_build_configured_model_badges()` and the `configured_model_badges` payload on `/api/models` are preserved for the dropdown to consume. (`static/index.html`, `static/ui.js`, `static/style.css`, `tests/test_model_picker_badges.py`) — PR #1301
+- **Claude Opus 4.7 label rendering** — Adds explicit label entries for `anthropic/claude-opus-4.7`, `claude-opus-4.7`, and `claude-opus-4-7` so the picker no longer renders "Claude Opus 4 **7**" (missing dot) when the dashed-form model ID falls through to the generic dash-replace formatter. (`api/config.py`) — PR #1301
+- **Cron output snippet preserves the `## Response` section** — `/api/crons/output` returned `txt[:8000]` which could drop the useful response section when a large skill dump appeared in the prompt context. Now: if `## Response` exists, preserves a short header plus the response section; if no marker exists, returns the file tail rather than the head. (`api/routes.py`, `tests/test_sprint10.py`) @franksong2702 — PR #1297, fixes #1295
+
 ## [v0.50.242] — 2026-04-30
 
 ### Reverted
