@@ -769,9 +769,16 @@ def all_sessions():
             # No grace window: a 0-message Untitled session is never shown in the list
             # regardless of age. This means page refreshes and accidental New Conversation
             # clicks never leave orphan entries in the sidebar.
+            #
+            # Exception: sessions with active_stream_id set are actively streaming (#1327).
+            # #1184 deferred the first save() until the first message, so during the
+            # initial streaming turn the session still looks like Untitled+0-messages.
+            # Without this exemption, navigating away during a long first turn causes
+            # the session to vanish from the sidebar.
             result = [s for s in result if not (
                 s.get('title', 'Untitled') == 'Untitled'
                 and s.get('message_count', 0) == 0
+                and not s.get('active_stream_id')
             )]
             result = [s for s in result if not _hide_from_default_sidebar(s)]
             # Backfill: sessions created before Sprint 22 have no profile tag.
@@ -796,10 +803,12 @@ def all_sessions():
     out.sort(key=lambda s: (getattr(s, 'pinned', False), _session_sort_timestamp(s)), reverse=True)
     # Hide empty Untitled sessions from the UI entirely — kept consistent with the
     # index-path filter above. No grace window: a 0-message Untitled session is
-    # never shown regardless of age (#1171).
+    # never shown regardless of age (#1171).  Same streaming exemption as above (#1327).
     result = [s.compact(include_runtime=True, active_stream_ids=active_stream_ids) for s in out if not (
         s.title == 'Untitled'
         and len(s.messages) == 0
+        and not s.active_stream_id
+        and not s.pending_user_message
     )]
     result = [s for s in result if not _hide_from_default_sidebar(s)]
     for s in result:
