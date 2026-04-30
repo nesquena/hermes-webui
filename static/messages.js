@@ -1314,6 +1314,50 @@ async function respondApproval(choice) {
 
 function startApprovalPolling(sid) {
   stopApprovalPolling();
+  // ── SSE (preferred): long-lived connection, server pushes instantly ──
+  try {
+    const es = new EventSource('/api/approval/stream?session_id=' + encodeURIComponent(sid));
+    let _fallbackActive = false;
+
+    es.addEventListener('initial', e => {
+      const d = JSON.parse(e.data);
+      if (d.pending) { d.pending._session_id = sid; showApprovalCard(d.pending, d.pending_count || 1); }
+      else { hideApprovalCard(); }
+    });
+
+    es.addEventListener('approval', e => {
+      const d = JSON.parse(e.data);
+      if (d.pending) { d.pending._session_id = sid; showApprovalCard(d.pending, d.pending_count || 1); }
+      else { hideApprovalCard(); }
+    });
+
+    es.onerror = () => {
+      // SSE failed — fall back to HTTP polling (3s interval)
+      if (_fallbackActive) return;
+      _fallbackActive = true;
+      try { es.close(); } catch(_){}
+      _startApprovalFallbackPoll(sid);
+    };
+
+    // If the session changes or stops being busy, close the SSE.
+    // We detect this via a periodic check (cheap — no network request).
+    _approvalSSEHealthTimer = setInterval(() => {
+      if (!S.busy || !S.session || S.session.session_id !== sid) {
+        stopApprovalPolling(); hideApprovalCard(true);
+      }
+    }, 5000);
+
+    _approvalEventSource = es;
+  } catch(_e) {
+    // EventSource constructor failed — use polling directly
+    _startApprovalFallbackPoll(sid);
+  }
+}
+
+let _approvalEventSource = null;
+let _approvalSSEHealthTimer = null;
+
+function _startApprovalFallbackPoll(sid) {
   _approvalPollTimer = setInterval(async () => {
     if (!S.busy || !S.session || S.session.session_id !== sid) {
       stopApprovalPolling(); hideApprovalCard(true); return;
@@ -1323,11 +1367,13 @@ function startApprovalPolling(sid) {
       if (data.pending) { data.pending._session_id=sid; showApprovalCard(data.pending, data.pending_count||1); }
       else { hideApprovalCard(); }
     } catch(e) { /* ignore poll errors */ }
-  }, 1500);
+  }, 3000);  // 3s fallback interval (was 1.5s when it was the primary path)
 }
 
 function stopApprovalPolling() {
   if (_approvalPollTimer) { clearInterval(_approvalPollTimer); _approvalPollTimer = null; }
+  if (_approvalEventSource) { try { _approvalEventSource.close(); } catch(_){} _approvalEventSource = null; }
+  if (_approvalSSEHealthTimer) { clearInterval(_approvalSSEHealthTimer); _approvalSSEHealthTimer = null; }
 }
 
 // ── Clarify polling ──

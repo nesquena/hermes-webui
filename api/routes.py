@@ -545,6 +545,40 @@ except ImportError:
     _permanent_approved = set()
 
 
+# ── Approval SSE subscribers (long-connection push) ──────────────────────────
+_approval_sse_subscribers: dict[str, list[queue.Queue]] = {}
+
+
+def _approval_sse_subscribe(session_id: str) -> queue.Queue:
+    """Register an SSE subscriber for approval events on a given session."""
+    q = queue.Queue(maxsize=16)
+    with _lock:
+        _approval_sse_subscribers.setdefault(session_id, []).append(q)
+    return q
+
+
+def _approval_sse_unsubscribe(session_id: str, q: queue.Queue) -> None:
+    """Remove an SSE subscriber."""
+    with _lock:
+        subs = _approval_sse_subscribers.get(session_id)
+        if subs and q in subs:
+            subs.remove(q)
+            if not subs:
+                _approval_sse_subscribers.pop(session_id, None)
+
+
+def _approval_sse_notify(session_id: str, entry: dict, total: int) -> None:
+    """Push an approval event to all SSE subscribers for a session."""
+    payload = {"pending": dict(entry), "pending_count": total}
+    with _lock:
+        subs = list(_approval_sse_subscribers.get(session_id, []))
+    for q in subs:
+        try:
+            q.put_nowait(payload)
+        except queue.Full:
+            pass  # drop if subscriber is slow
+
+
 def submit_pending(session_key: str, approval: dict) -> None:
     """Append a pending approval to the per-session queue.
 
@@ -553,9 +587,11 @@ def submit_pending(session_key: str, approval: dict) -> None:
       a specific entry even when multiple approvals are queued simultaneously.
     - Change the storage from a single overwriting dict value to a list, so
       parallel tool calls each get their own approval slot (fixes #527).
+    - Notify any connected SSE subscribers immediately.
     """
     entry = dict(approval)
     entry.setdefault("approval_id", uuid.uuid4().hex)
+    total = 0
     with _lock:
         queue = _pending.setdefault(session_key, [])
         # Replace a legacy non-list value if the agent version uses the old pattern.
@@ -563,11 +599,14 @@ def submit_pending(session_key: str, approval: dict) -> None:
             _pending[session_key] = [queue]
             queue = _pending[session_key]
         queue.append(entry)
+        total = len(queue)
     # NOTE: We do NOT call _submit_pending_raw here — that function overwrites
     # _pending[session_key] with a single dict, which would undo the list we just
     # built. The gateway blocking path uses _gateway_queues (a separate mechanism
     # managed by check_all_command_guards / register_gateway_notify), which is
     # unaffected by _pending. The _pending dict is only used for UI polling.
+    # Push to SSE subscribers so long-connected clients get notified instantly.
+    _approval_sse_notify(session_key, entry, total)
 
 # Clarify prompts (optional -- graceful fallback if agent not available)
 try:
@@ -1190,6 +1229,9 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/approval/pending":
         return _handle_approval_pending(handler, parsed)
+
+    if parsed.path == "/api/approval/stream":
+        return _handle_approval_sse_stream(handler, parsed)
 
     if parsed.path == "/api/approval/inject_test":
         # Loopback-only: used by automated tests; blocked from any remote client
@@ -2718,6 +2760,60 @@ def _handle_approval_pending(handler, parsed):
     if p:
         return j(handler, {"pending": dict(p), "pending_count": total})
     return j(handler, {"pending": None, "pending_count": 0})
+
+
+def _handle_approval_sse_stream(handler, parsed):
+    """SSE endpoint for real-time approval notifications.
+
+    Long-lived connection that pushes approval events the moment they arrive,
+    replacing the 1.5s polling loop.  The frontend uses EventSource and falls
+    back to HTTP polling if the connection fails.
+    """
+    sid = parse_qs(parsed.query).get("session_id", [""])[0]
+    if not sid:
+        return bad(handler, "session_id is required")
+
+    # Send initial snapshot (any approval already queued before SSE connected).
+    initial_pending = None
+    initial_count = 0
+    with _lock:
+        q_list = _pending.get(sid)
+        if isinstance(q_list, list):
+            initial_pending = dict(q_list[0]) if q_list else None
+            initial_count = len(q_list)
+        elif q_list:
+            initial_pending = dict(q_list)
+            initial_count = 1
+
+    handler.send_response(200)
+    handler.send_header('Content-Type', 'text/event-stream; charset=utf-8')
+    handler.send_header('Cache-Control', 'no-cache')
+    handler.send_header('X-Accel-Buffering', 'no')
+    handler.send_header('Connection', 'keep-alive')
+    handler.end_headers()
+
+    from api.streaming import _sse
+
+    # Push initial state immediately so the client doesn't miss anything.
+    _sse(handler, 'initial', {"pending": initial_pending, "pending_count": initial_count})
+
+    q = _approval_sse_subscribe(sid)
+    try:
+        while True:
+            try:
+                payload = q.get(timeout=30)
+            except queue.Empty:
+                # Keepalive — SSE comment line prevents proxy/CDN timeout.
+                handler.wfile.write(b': keepalive\n\n')
+                handler.wfile.flush()
+                continue
+            if payload is None:
+                break  # signal to close
+            _sse(handler, 'approval', payload)
+    except _CLIENT_DISCONNECT_ERRORS:
+        pass  # client went away — normal for long-lived connections
+    finally:
+        _approval_sse_unsubscribe(sid, q)
 
 
 def _handle_approval_inject(handler, parsed):
