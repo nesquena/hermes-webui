@@ -497,6 +497,63 @@ def current_space_for_session(session: Any) -> dict[str, Any]:
     }
 
 
+def _space_tool_create_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the bounded metadata-only payload accepted by the tool adapter."""
+    allowed = {"space_id", "name", "description", "agent_instructions", "instructions", "template"}
+    clean = {key: payload[key] for key in allowed if key in payload}
+    if isinstance(payload.get("layout"), dict):
+        clean["layout"] = _payload_summary(payload["layout"])
+    if isinstance(payload.get("capabilities"), dict):
+        clean["capabilities"] = _payload_summary(payload["capabilities"])
+    return clean
+
+
+def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Dispatch a safe, Hermes-tool-shaped Capy Spaces action.
+
+    This adapter gives future Hermes Agent tools and API callers a single small
+    allowlist while preserving the current safety model: list/get responses are
+    metadata-only, create ignores supplied widget/generated bodies, and widget
+    mutation delegates to the existing metadata-only patch/event primitives.
+    """
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    name = str(action or "").strip().lower()
+    data = payload if isinstance(payload, dict) else {}
+
+    if name == "space.list":
+        return {"ok": True, "action": name, "spaces": list_spaces()}
+    if name == "space.create":
+        created = create_space(_space_tool_create_payload(data))
+        space = read_space_detail(created["space_id"])
+        space["widget_count"] = len(space.get("widgets") or [])
+        return {"ok": True, "action": name, "space": space}
+    if name == "space.get":
+        space_id = validate_space_id(data.get("space_id"))
+        return {"ok": True, "action": name, "space": read_space_detail(space_id)}
+    if name == "widget.list":
+        space_id = validate_space_id(data.get("space_id"))
+        return {"ok": True, "action": name, "widgets": list_widgets(space_id)}
+    if name == "widget.patch":
+        space_id = validate_space_id(data.get("space_id"))
+        widget_id = validate_widget_id(data.get("widget_id"))
+        result = patch_widget(space_id, widget_id, data.get("patch") if isinstance(data.get("patch"), dict) else {})
+        return {"ok": True, "action": name, **result}
+    if name == "widget.event":
+        space_id = validate_space_id(data.get("space_id"))
+        widget_id = validate_widget_id(data.get("widget_id"))
+        result = queue_widget_event(
+            space_id,
+            widget_id,
+            data.get("event_name") or "agent.prompt",
+            data.get("payload") if isinstance(data.get("payload"), dict) else {},
+            prompt=data.get("prompt") or "",
+            session_id=data.get("session_id") or "",
+        )
+        return {"ok": True, "action": name, **result}
+    raise ValueError("Unsupported Capy Spaces tool action")
+
+
 def list_revision_events(space_id: str, limit: int = 20) -> list[dict[str, Any]]:
     """Return newest-first revision event metadata for a space.
 
