@@ -160,10 +160,11 @@ def pytest_collection_modifyitems(config, items):
     -m integration is explicitly passed.
     """
     # Integration tests: require a live server, skip unless -m integration
-    if 'integration' not in config.markers:
-        # Marker not registered yet; register it now so we can use it
-        config.addinivalue_line("markers", "integration: integration tests that require a running server")
-    if not config.getoption("-m", default=None) == "integration":
+    try:
+        markers_opt = config.getoption("-m", default="")
+    except Exception:
+        markers_opt = ""
+    if markers_opt != "integration":
         skip_marker = pytest.mark.skip(reason="integration test (run with -m integration to enable)")
         for item in items:
             if item.get_closest_marker("integration"):
