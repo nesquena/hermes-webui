@@ -426,16 +426,18 @@ $('importFileInput').onchange=async(e)=>{
 };
 // btnRefreshFiles is now panel-icon-btn in header (see HTML)
 function clearPreview(){
+  // Restore directory breadcrumb after closing file preview
+  if(typeof renderBreadcrumb==='function') renderBreadcrumb();
   const closePanelAfter=_workspacePanelMode==='preview';
   const pa=$('previewArea');if(pa)pa.classList.remove('visible');
   const pi=$('previewImg');if(pi){pi.onerror=null;pi.src='';}
+  const pdf=$('previewPdfFrame');if(pdf)pdf.src='';
+  const html=$('previewHtmlIframe');if(html)html.src='';
   const pm=$('previewMd');if(pm)pm.innerHTML='';
   const pc=$('previewCode');if(pc)pc.textContent='';
   const pp=$('previewPathText');if(pp)pp.textContent='';
   const ft=$('fileTree');if(ft)ft.style.display='';
   _previewCurrentPath='';_previewCurrentMode='';_previewDirty=false;
-  // Restore directory breadcrumb after closing file preview
-  if(typeof renderBreadcrumb==='function') renderBreadcrumb();
   if(closePanelAfter)closeWorkspacePanel();
   else syncWorkspacePanelUI();
 }
