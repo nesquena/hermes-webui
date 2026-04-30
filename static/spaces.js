@@ -250,6 +250,7 @@
         '<div class="capy-spaces-actions">' +
         '<button type="button" class="capy-spaces-btn" data-capy-action="askWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-title="'+escapeHtml(title)+'">Ask Capy</button>' +
         '<button type="button" class="capy-spaces-btn" data-capy-action="refreshWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-title="'+escapeHtml(title)+'">Refresh</button>' +
+        '<button type="button" class="capy-spaces-btn" data-capy-action="viewWidgetDetails" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'">View details</button>' +
         renderMoveButton(spaceId, widgetId, layout, -1, 0, 'Move left') +
         renderMoveButton(spaceId, widgetId, layout, 1, 0, 'Move right') +
         renderMoveButton(spaceId, widgetId, layout, 0, -1, 'Move up') +
@@ -277,6 +278,23 @@
       '<label>H<input id="capyWidgetH" type="number" min="1" max="24" step="1" value="4"></label>' +
       '<button type="button" class="capy-spaces-btn" data-capy-action="saveWidget" data-space-id="'+escapeHtml(spaceId)+'">Save widget</button>' +
       '</div></div>';
+  }
+
+  function renderWidgetDetailPanel(spaceId, widget){
+    const safeWidget = widget && typeof widget === 'object' ? widget : {};
+    const widgetId = safeWidget.id || '';
+    const title = safeWidget.title || widgetId || 'Untitled widget';
+    const kind = safeWidget.kind || 'custom';
+    const layout = widgetLayout(safeWidget);
+    const recovery = safeWidget.recovery && typeof safeWidget.recovery === 'object' ? safeWidget.recovery : {};
+    const recoveryText = recovery.disabled ? 'Recovery: disabled' : 'Recovery: enabled';
+    const revision = safeWidget.revision_event_id ? ' · Revision: '+escapeHtml(safeWidget.revision_event_id) : '';
+    return '<div class="capy-spaces-card" data-widget-detail-id="'+escapeHtml(widgetId)+'"><h3>Widget details</h3>' +
+      '<div class="capy-spaces-muted">Metadata-only detail. Generated bodies are not displayed or executed.</div>' +
+      '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(title)+'</strong>' +
+      '<div class="capy-spaces-muted">'+escapeHtml(kind)+' · '+escapeHtml(widgetId)+' · '+escapeHtml(formatWidgetLayout(layout))+'</div>' +
+      '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId || '')+' · '+escapeHtml(recoveryText)+revision+'</div>' +
+      '</div></div></div></div>';
   }
 
   function layoutNumber(value, fallback, min, max){
@@ -609,6 +627,14 @@
       if (!ok) return;
       await postSpacesJson('api/spaces/revision/restore', {space_id: spaceId, event_id: eventId});
       await openSpaceDetail(spaceId);
+      return;
+    }
+    if (action === 'viewWidgetDetails') {
+      const widgetId = button.dataset.widgetId || '';
+      const root = document.getElementById('capySpacesRoot');
+      if (!spaceId || !widgetId || !root) return;
+      const data = await fetchSpacesJson('api/spaces/widget?space_id='+encodeURIComponent(spaceId)+'&widget_id='+encodeURIComponent(widgetId));
+      root.innerHTML = renderWidgetDetailPanel(spaceId, data && data.widget) + root.innerHTML;
       return;
     }
     if (action === 'editWidget') {

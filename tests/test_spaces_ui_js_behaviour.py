@@ -104,6 +104,19 @@ global.fetch = async function(path, opts = {}) {
     const minimized = scenario === 'restoreWidget';
     return response({ widgets: [{ id: 'weather', kind: 'markdown', title: '<Weather>', layout: { x: 12, y: 3, w: 5, h: 4, minimized: minimized }, renderer: '<script>bad()</script>' }] });
   }
+  if (path === 'api/spaces/widget?space_id=lab&widget_id=weather') {
+    return response({ widget: {
+      id: 'weather',
+      kind: 'markdown',
+      title: '<Weather>',
+      layout: { x: 12, y: 3, w: 5, h: 4, minimized: false },
+      recovery: { disabled: false },
+      revision_event_id: 'rev-weather',
+      renderer: '<script>bad()</script>',
+      html: '<img src=x onerror=bad()>',
+      data: { api_key: 'SECRET' },
+    } });
+  }
   if (path === 'api/spaces/get?space_id=lab') {
     return response({ space: {
       space_id: 'lab',
@@ -350,6 +363,12 @@ async function click(action, dataset) {
     await window.loadCapySpaces();
     await window.loadSpaceWidgets('lab');
     await click('editWidget', { spaceId: 'lab', widgetId: 'weather', widgetTitle: '<Weather>', widgetKind: 'markdown', widgetX: '12', widgetY: '3', widgetW: '5', widgetH: '4' });
+  } else if (scenario === 'viewWidgetDetails') {
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    beforeHtml = root.innerHTML;
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
   } else if (scenario === 'editWidgetSave') {
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
     await window.loadCapySpaces();
@@ -730,6 +749,22 @@ def test_spaces_ui_edit_widget_prefills_safe_metadata_form_without_fetching_rend
     assert not any(call["path"] == "api/spaces/widget?space_id=lab&widget_id=weather" for call in out["calls"])
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
+
+
+def test_spaces_ui_view_widget_details_fetches_and_renders_safe_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "viewWidgetDetails")
+
+    assert "View details" in out["beforeHtml"]
+    assert {"path": "api/spaces/widget?space_id=lab&widget_id=weather", "method": "GET", "body": ""} in out["calls"]
+    assert "Widget details" in out["rootHtml"]
+    assert "&lt;Weather&gt;" in out["rootHtml"]
+    assert "markdown" in out["rootHtml"]
+    assert "x12 y3 · 5×4" in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "onerror" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
 
 
 def test_spaces_ui_ask_widget_uses_shared_prompt_and_queues_agent_event(driver_path):
