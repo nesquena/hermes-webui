@@ -1445,6 +1445,66 @@ def _browser_surface_widgets() -> list[dict[str, Any]]:
     ]
 
 
+def _local_service_dashboard_widgets() -> list[dict[str, Any]]:
+    """Return safe declarative local-service dashboard widget seeds.
+
+    This starter maps the Space Agent local-agent/service dashboard demo into
+    metadata-only widgets: an API connector, a shared browser panel, health
+    checks, and a settings review table. Local URLs, auth headers, API keys, and
+    provider secrets must be configured outside widget metadata and used only
+    through explicit approval / typed agent mediation.
+    """
+    return [
+        {
+            "id": "service-api-chat",
+            "kind": "api-connector",
+            "title": "Service API chat",
+            "layout": {"x": 0, "y": 0, "w": 10, "h": 6, "minimized": False},
+            "connector": {
+                "target": "local-service",
+                "auth": "configured-outside-widget",
+                "mode": "agent-mediated",
+            },
+            "actions": ["send_message", "inspect_status", "summarize_response"],
+            "permissions": {"network": "explicit-approval", "secrets": "never-store-in-widget"},
+        },
+        {
+            "id": "service-browser-panel",
+            "kind": "browser-surface",
+            "title": "Service browser panel",
+            "layout": {"x": 10, "y": 0, "w": 14, "h": 8, "minimized": False},
+            "browser_surface": {
+                "target": "about:blank",
+                "control": "user-and-agent",
+                "inspection": "metadata-only",
+                "bridge": "planned-cdp",
+            },
+            "permissions": {"network": "explicit-approval", "browser_control": "agent-mediated"},
+        },
+        {
+            "id": "service-health",
+            "kind": "status",
+            "title": "Health checks",
+            "layout": {"x": 0, "y": 6, "w": 10, "h": 4, "minimized": False},
+            "checks": ["/health", "api/status", "browser-root"],
+            "refresh": {"mode": "agent-mediated", "status": "awaiting-approved-service"},
+            "permissions": {"network": "explicit-approval"},
+        },
+        {
+            "id": "service-settings-review",
+            "kind": "table",
+            "title": "Settings review",
+            "layout": {"x": 10, "y": 8, "w": 14, "h": 4, "minimized": False},
+            "columns": ["setting", "status", "notes"],
+            "rows": [
+                {"setting": "endpoint", "status": "not-configured", "notes": "add after explicit approval"},
+                {"setting": "auth", "status": "external", "notes": "never store secrets in widgets"},
+            ],
+            "entry_mode": "metadata-only",
+        },
+    ]
+
+
 def _game_sandbox_widgets() -> list[dict[str, Any]]:
     """Return safe declarative canvas-game widget seeds.
 
@@ -1617,7 +1677,7 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
     template_name = str(template or "").strip().lower()
-    if template_name not in {"weather", "weather-demo", "research", "research-harness", "dashboard", "daily-dashboard", "camera", "camera-dashboard", "kanban", "kanban-board", "notes", "notes-app", "browser", "browser-surface", "stock", "stock-chart", "stocks", "game", "game-sandbox", "snake", "snake-game", "music", "music-sequencer", "sequencer", "step-sequencer", "synth", "piano-roll", "big-bang", "bigbang", "onboarding", "big-bang-onboarding"}:
+    if template_name not in {"weather", "weather-demo", "research", "research-harness", "dashboard", "daily-dashboard", "camera", "camera-dashboard", "kanban", "kanban-board", "notes", "notes-app", "browser", "browser-surface", "stock", "stock-chart", "stocks", "service", "service-dashboard", "local-service", "local-service-dashboard", "agent-zero", "agent-zero-dashboard", "game", "game-sandbox", "snake", "snake-game", "music", "music-sequencer", "sequencer", "step-sequencer", "synth", "piano-roll", "big-bang", "bigbang", "onboarding", "big-bang-onboarding"}:
         raise ValueError("Unsupported template")
 
     if template_name in {"weather", "weather-demo"}:
@@ -1732,6 +1792,22 @@ def install_template(template: str, *, space_id: str | None = None) -> dict[str,
             )
         widgets = _stock_chart_widgets()
         response_template = "stock"
+    elif template_name in {"service", "service-dashboard", "local-service", "local-service-dashboard", "agent-zero", "agent-zero-dashboard"}:
+        target_id = validate_space_id(space_id) if space_id else _unique_space_id("local-service-dashboard")
+        if _manifest_path(target_id).exists():
+            space = read_space(target_id)
+        else:
+            space = create_space(
+                {
+                    "space_id": target_id,
+                    "name": "Local Service Dashboard",
+                    "description": "Metadata-only starter for local service API chat, browser review, health checks, and settings review.",
+                    "agent_instructions": "Keep service widgets declarative. Configure auth outside widget manifests, require explicit network approval, and preserve revision history.",
+                    "template": "local-service-dashboard",
+                }
+            )
+        widgets = _local_service_dashboard_widgets()
+        response_template = "service"
     elif template_name in {"game", "game-sandbox", "snake", "snake-game"}:
         target_id = validate_space_id(space_id) if space_id else _unique_space_id("game-sandbox")
         if _manifest_path(target_id).exists():
