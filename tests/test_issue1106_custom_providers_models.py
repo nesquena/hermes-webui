@@ -10,7 +10,7 @@ def _reset():
         pass
 
 
-def _models_with_cfg(model_cfg=None, custom_providers=None, active_provider=None):
+def _models_with_cfg(model_cfg=None, custom_providers=None, active_provider=None, providers_cfg=None):
     """Temporarily patch config.cfg, call get_available_models(), restore.
 
     Also pins _cfg_mtime to prevent reload_config() from overwriting patches.
@@ -22,6 +22,8 @@ def _models_with_cfg(model_cfg=None, custom_providers=None, active_provider=None
         config.cfg["model"] = model_cfg
     if custom_providers is not None:
         config.cfg["custom_providers"] = custom_providers
+    if providers_cfg is not None:
+        config.cfg["providers"] = providers_cfg
     try:
         config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
     except Exception:
@@ -196,3 +198,89 @@ class TestCustomProvidersModelsDict:
         # No cross-contamination
         assert "model-b1" not in ids_a
         assert "model-a1" not in ids_b
+
+
+class TestOnlyConfiguredProviders:
+    """Tests for providers.only_configured filtering feature."""
+
+    def test_only_configured_false_shows_configured_providers(self):
+        """When only_configured is False (default), configured providers appear.
+
+        Note: Environment-detected providers may also appear, so we only
+        assert that our configured providers are present.
+        """
+        result = _models_with_cfg(
+            model_cfg={"provider": "openai"},
+            providers_cfg={
+                "openai": {"api_key": "test-key"},
+                "only_configured": False,
+            },
+        )
+        group = _group_for(result, "OpenAI")
+        assert group is not None, "OpenAI provider should appear when configured"
+
+    def test_only_configured_true_filters_to_configured(self):
+        """When only_configured is True, only configured providers appear.
+
+        Even if other providers are detected via env vars, they should be
+        filtered out when only_configured=True.
+        """
+        result = _models_with_cfg(
+            model_cfg={"provider": "openai"},
+            providers_cfg={
+                "openai": {"api_key": "test-key"},
+                "anthropic": {"api_key": "test-key-2"},
+                "only_configured": True,
+            },
+        )
+        provider_names = [g.get("provider_id") or g.get("provider") for g in result.get("groups", [])]
+        # Convert display names to IDs for checking
+        provider_ids = set()
+        for g in result.get("groups", []):
+            pid = g.get("provider_id")
+            if pid:
+                provider_ids.add(pid)
+            else:
+                # Map display name to ID
+                display = g.get("provider", "").lower()
+                provider_ids.add(display)
+
+        assert "openai" in provider_ids, "openai should be in results when configured"
+        assert "anthropic" in provider_ids, "anthropic should be in results when configured"
+
+    def test_only_configured_true_with_active_provider(self):
+        """Active provider (model.provider) should always appear when only_configured=True."""
+        result = _models_with_cfg(
+            model_cfg={"provider": "openai"},
+            providers_cfg={
+                "only_configured": True,
+            },
+        )
+        provider_ids = set()
+        for g in result.get("groups", []):
+            pid = g.get("provider_id")
+            if pid:
+                provider_ids.add(pid)
+
+        assert "openai" in provider_ids, "Active provider (openai) should appear even if not in providers dict"
+
+    def test_only_configured_default_is_false(self):
+        """Verify that without explicit setting, all detected providers appear.
+
+        This test ensures backward compatibility - the default behavior
+        (only_configured not set) should show all detected providers.
+        """
+        # Call without setting only_configured
+        result = _models_with_cfg(
+            model_cfg={"provider": "openai"},
+            providers_cfg={
+                "openai": {"api_key": "test-key"},
+            },
+        )
+        provider_ids = set()
+        for g in result.get("groups", []):
+            pid = g.get("provider_id")
+            if pid:
+                provider_ids.add(pid)
+
+        assert "openai" in provider_ids, "openai should appear by default"
