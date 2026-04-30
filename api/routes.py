@@ -659,16 +659,6 @@ button:hover{background:rgba(124,185,255,.25)}
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
 
-    if parsed.path == "/setup":
-        from api.fitb_onboarding import serve_setup_page
-
-        return serve_setup_page(handler)
-
-    if parsed.path == "/api/setup/tailscale/status":
-        from api.fitb_onboarding import get_tailscale_state
-
-        return j(handler, get_tailscale_state())
-
     if parsed.path in ("/", "/index.html"):
         return t(
             handler,
@@ -1239,14 +1229,6 @@ def handle_get(handler, parsed) -> bool:
 
 def handle_post(handler, parsed) -> bool:
     """Handle all POST routes. Returns True if handled, False for 404."""
-    if parsed.path.startswith("/api/setup/"):
-        if not _check_csrf(handler):
-            return j(handler, {"error": "Cross-origin request rejected"}, status=403)
-        body = read_body(handler)
-        from api.fitb_onboarding import handle_fitb_setup_post
-
-        return handle_fitb_setup_post(handler, parsed, body)
-
     # CSRF: reject cross-origin browser requests
     if not _check_csrf(handler):
         return j(handler, {"error": "Cross-origin request rejected"}, status=403)

@@ -1,300 +1,240 @@
-/** Fox in the Box — onboarding wizard */
-const state = {
-  currentStep: 1,
-  totalSteps: 4,
-  tailscaleConnected: false,
-  tailnetUrl: null,
-  pollInterval: null,
-};
-const NAMES = ["Welcome", "OpenRouter API Key", "Tailscale", "Done"];
-function el(tag, cls, text) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text != null) e.textContent = text;
-  return e;
-}
-function updateProgress(step) {
-  const bar = document.getElementById("progress-bar");
-  if (!bar) return;
-  const dots = el("div", "progress-dots");
-  for (let i = 1; i <= state.totalSteps; i++) {
-    const d = el("span");
-    if (i < step) d.classList.add("done");
-    if (i === step) d.classList.add("active");
-    dots.appendChild(d);
-  }
-  const lab = el("div", "progress-label", `${step} / ${state.totalSteps}  ${NAMES[step - 1]}`);
-  bar.replaceChildren(dots, lab);
-}
-function stopPoll() {
-  if (state.pollInterval) {
-    clearInterval(state.pollInterval);
-    state.pollInterval = null;
-  }
-}
-async function jsonFetch(path, init) {
-  const res = await fetch(path, init || {});
-  let data = {};
-  try {
-    data = JSON.parse(await res.text() || "{}");
-  } catch {}
-  return { ok: res.ok, data };
-}
-async function postJson(path, body) {
-  return jsonFetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-}
-async function getJson(path) {
-  return jsonFetch(path);
-}
-function advance(n) {
-  state.currentStep = n;
-  renderStep(n);
-  updateProgress(n);
-}
+/**
+ * Fox in the Box — Setup wizard
+ *
+ * Drives a 3-step onboarding flow:
+ *   1. OpenRouter API key validation + save
+ *   2. Tailscale connect (optional)
+ *   3. Complete → redirect to /
+ */
+(function () {
+  'use strict';
 
-function renderStep(n) {
-  const c = document.getElementById("step-container");
-  if (!c) return;
-  c.replaceChildren();
-  [render1, render2, render3, render4][n - 1](c);
-}
-function render1(c) {
-  const k = el("div", "step-card");
-  k.appendChild(el("h1", null, "\uD83E\uDD8A Fox in the Box"));
-  k.appendChild(el("p", "description", "Let's get you set up."));
-  k.appendChild(el("label", "field-label", "Language"));
-  const s = el("select");
-  s.disabled = true;
-  s.title = "More languages coming soon";
-  s.innerHTML = "<option value=\"en\">English</option>";
-  k.appendChild(s);
-  k.appendChild(el("p", "lang-note", "More languages coming soon."));
-  const act = el("div", "row-actions");
-  const nx = el("button", "btn btn-primary", "Next \u2192");
-  nx.type = "button";
-  nx.addEventListener("click", () => advance(2));
-  act.appendChild(nx);
-  k.appendChild(act);
-  c.appendChild(k);
-}
+  // ── DOM refs ────────────────────────────────────────────────────────────────
 
-function render2(c) {
-  const k = el("div", "step-card");
-  k.appendChild(el("h1", null, "OpenRouter API Key"));
-  k.appendChild(el("p", "description", "Fox uses OpenRouter to access AI models."));
-  k.appendChild(el("label", "field-label", "API key")).htmlFor = "api-key-input";
-  const inp = el("input");
-  inp.type = "password";
-  inp.id = "api-key-input";
-  inp.autocomplete = "off";
-  const err = el("div", "error-msg");
-  err.setAttribute("role", "alert");
-  const show = el("button", "btn btn-secondary", "Show");
-  show.type = "button";
-  show.addEventListener("click", () => {
-    const on = inp.type === "password";
-    inp.type = on ? "text" : "password";
-    show.textContent = on ? "Hide" : "Show";
-  });
-  k.appendChild(inp);
-  k.appendChild(show);
-  k.appendChild(err);
-  const hint = el("p", "kbd-hint");
-  const a = el("a");
-  a.href = "https://openrouter.ai";
-  a.target = "_blank";
-  a.rel = "noopener noreferrer";
-  a.textContent = "Get your free key at openrouter.ai ↗";
-  hint.appendChild(a);
-  k.appendChild(hint);
-  const act = el("div", "row-actions row-actions--split");
-  const bk = el("button", "btn btn-secondary", "\u2190 Back");
-  bk.type = "button";
-  bk.addEventListener("click", () => advance(1));
-  const nx = el("button", "btn btn-primary", "Next \u2192");
-  nx.type = "button";
-  async function go() {
-    err.textContent = "";
-    inp.classList.remove("input-error");
-    const v = inp.value.trim();
-    if (!v) {
-      inp.classList.add("input-error");
-      err.textContent = "Enter your API key.";
-      return;
-    }
-    if (!v.startsWith("sk-")) {
-      inp.classList.add("input-error");
-      err.textContent = "Key must start with sk-.";
-      return;
-    }
-    nx.disabled = true;
-    const sp = el("span", "spinner");
-    nx.prepend(sp);
-    const { ok, data } = await postJson("/api/setup/openrouter", { key: v });
-    nx.removeChild(sp);
-    nx.disabled = false;
-    if (ok && data.ok) advance(3);
-    else {
-      inp.classList.add("input-error");
-      err.textContent = typeof data.error === "string" ? data.error : "Could not save key.";
-    }
+  const steps     = document.querySelectorAll('.steps-nav .step');
+  const cards     = {
+    1: document.getElementById('step-1'),
+    2: document.getElementById('step-2'),
+    3: document.getElementById('step-3'),
+  };
+
+  // Step 1
+  const apiKeyInput    = document.getElementById('api-key-input');
+  const btnSaveKey     = document.getElementById('btn-save-key');
+  const keyError       = document.getElementById('key-error');
+
+  // Step 2
+  const btnTsConnect   = document.getElementById('btn-ts-connect');
+  const btnTsSkip      = document.getElementById('btn-ts-skip');
+  const tsAuthBox      = document.getElementById('ts-auth-box');
+  const tsAuthUrl      = document.getElementById('ts-auth-url');
+  const tsStatusEl     = document.getElementById('ts-status');
+  const tsStatusText   = document.getElementById('ts-status-text');
+  const tsSpinner      = document.getElementById('ts-spinner');
+  const tsError        = document.getElementById('ts-error');
+
+  // Step 3
+  const doneDesc       = document.getElementById('done-desc');
+  const btnOpenApp     = document.getElementById('btn-open-app');
+
+  // ── State ───────────────────────────────────────────────────────────────────
+
+  let tsConnected = false;
+  let tsPollTimer = null;
+
+  // ── Helpers ─────────────────────────────────────────────────────────────────
+
+  function showError(el, msg) {
+    el.textContent = msg;
+    el.classList.remove('hidden');
   }
-  nx.addEventListener("click", go);
-  act.appendChild(bk);
-  act.appendChild(nx);
-  k.appendChild(act);
-  c.appendChild(k);
-}
 
-function tsPoll(ui) {
-  stopPoll();
-  state.pollInterval = setInterval(async () => {
-    const { ok, data } = await getJson("/api/setup/tailscale/status");
-    if (!ok) return;
-    ui.status.replaceChildren();
-    ui.link.replaceChildren();
-    ui.qr.replaceChildren();
-    ui.retry.hidden = true;
-    ui.cont.hidden = true;
-    const st = data.status;
-    if (st === "waiting") ui.status.textContent = "Waiting for Tailscale…";
-    else if (st === "url_ready" && data.login_url) {
-      ui.status.textContent = "Open this link to sign in:";
-      const lk = el("a", "tailscale-link", data.login_url);
-      lk.href = data.login_url;
-      lk.target = "_blank";
-      lk.rel = "noopener noreferrer";
-      ui.link.appendChild(lk);
-      const cv = document.createElement("canvas");
-      cv.setAttribute("role", "img");
-      cv.setAttribute("aria-label", "Tailscale login QR");
-      ui.qr.appendChild(cv);
-      if (window.QRCode && QRCode.toCanvas) QRCode.toCanvas(cv, data.login_url, { width: 200 });
-    } else if (st === "connected") {
-      stopPoll();
-      state.tailscaleConnected = true;
-      state.tailnetUrl = data.tailnet_url || null;
-      const okp = el("p", "success", "Connected to Tailscale.");
-      ui.status.appendChild(okp);
-      if (data.tailnet_url) {
-        const lk = el("a", "tailscale-link", data.tailnet_url);
-        lk.href = data.tailnet_url;
-        lk.target = "_blank";
-        lk.rel = "noopener noreferrer";
-        ui.link.appendChild(lk);
+  function hideError(el) {
+    el.classList.add('hidden');
+    el.textContent = '';
+  }
+
+  function setStep(n) {
+    // Update step nav
+    steps.forEach((el, i) => {
+      const stepN = i * 2 + 1; // indices 0,2,4 → steps 1,2,3 (there are dividers)
+      // steps-nav contains .step and .step-divider; only .step elements matter
+    });
+    document.querySelectorAll('.steps-nav .step').forEach((el) => {
+      const s = parseInt(el.dataset.step, 10);
+      el.classList.remove('active', 'done');
+      if (s < n)  el.classList.add('done');
+      if (s === n) el.classList.add('active');
+    });
+
+    // Show/hide cards
+    Object.entries(cards).forEach(([k, card]) => {
+      if (parseInt(k, 10) === n) {
+        card.classList.remove('hidden');
+      } else {
+        card.classList.add('hidden');
       }
-      ui.cont.hidden = false;
-    } else if (st === "error") {
-      stopPoll();
-      ui.status.textContent = data.error || "Tailscale error.";
-      ui.retry.hidden = false;
+    });
+  }
+
+  async function postJSON(path, body) {
+    const res = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    return { status: res.status, data };
+  }
+
+  // ── Step 1: Save API key ────────────────────────────────────────────────────
+
+  btnSaveKey.addEventListener('click', async () => {
+    const key = apiKeyInput.value.trim();
+    hideError(keyError);
+
+    if (!key) {
+      showError(keyError, 'Please enter your OpenRouter API key.');
+      return;
     }
-  }, 2000);
-}
+    if (!key.startsWith('sk-')) {
+      showError(keyError, 'API key must start with "sk-". Check your key and try again.');
+      return;
+    }
 
-function render3(c) {
-  stopPoll();
-  state.tailscaleConnected = false;
-  state.tailnetUrl = null;
-  const k = el("div", "step-card");
-  k.appendChild(el("h1", null, "Secure Remote Access (optional)"));
-  k.appendChild(el("p", "description", "Tailscale gives you HTTPS access from anywhere — required for mobile / PWA use."));
-  const status = el("div");
-  status.setAttribute("aria-live", "polite");
-  const link = el("div");
-  const qr = el("div");
-  qr.id = "qr-canvas-wrap";
-  const retry = el("button", "btn btn-secondary", "Try again");
-  retry.type = "button";
-  retry.hidden = true;
-  const cont = el("button", "btn btn-primary", "Continue \u2192");
-  cont.type = "button";
-  cont.hidden = true;
-  cont.addEventListener("click", () => advance(4));
-  const ui = { status, link, qr, retry, cont };
-  retry.addEventListener("click", () => {
-    stopPoll();
-    status.replaceChildren();
-    link.replaceChildren();
-    qr.replaceChildren();
-    retry.hidden = true;
-    startTs();
+    btnSaveKey.disabled = true;
+    btnSaveKey.textContent = 'Saving…';
+
+    try {
+      const { status, data } = await postJSON('/api/setup/openrouter', { key });
+      if (status === 200 && data.ok) {
+        setStep(2);
+      } else {
+        showError(keyError, data.error || 'Something went wrong. Please try again.');
+      }
+    } catch (e) {
+      showError(keyError, 'Network error — is the server running?');
+    } finally {
+      btnSaveKey.disabled = false;
+      btnSaveKey.textContent = 'Save & Continue';
+    }
   });
-  const act = el("div", "row-actions row-actions--split");
-  const bk = el("button", "btn btn-secondary", "\u2190 Back");
-  bk.type = "button";
-  bk.addEventListener("click", () => {
-    stopPoll();
-    advance(2);
+
+  // Allow Enter to submit the key
+  apiKeyInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') btnSaveKey.click();
   });
-  const go = el("button", "btn btn-primary", "Set up Tailscale");
-  go.type = "button";
-  async function startTs() {
-    go.disabled = true;
-    const r = await postJson("/api/setup/tailscale/start", {});
-    go.disabled = false;
-    if (r.ok && r.data.ok) tsPoll(ui);
+
+  // ── Step 2: Tailscale ───────────────────────────────────────────────────────
+
+  btnTsConnect.addEventListener('click', async () => {
+    btnTsConnect.disabled = true;
+    btnTsSkip.disabled    = true;
+    hideError(tsError);
+
+    try {
+      const { status, data } = await postJSON('/api/setup/tailscale/start', {});
+      if (status !== 200 || !data.ok) {
+        showError(tsError, data.error || 'Failed to start Tailscale.');
+        btnTsConnect.disabled = false;
+        btnTsSkip.disabled    = false;
+        return;
+      }
+    } catch (e) {
+      showError(tsError, 'Network error — could not reach setup API.');
+      btnTsConnect.disabled = false;
+      btnTsSkip.disabled    = false;
+      return;
+    }
+
+    tsStatusEl.classList.remove('hidden');
+    tsStatusText.textContent = 'Waiting for Tailscale…';
+    startTsPoll();
+  });
+
+  btnTsSkip.addEventListener('click', () => {
+    stopTsPoll();
+    complete(false);
+  });
+
+  function startTsPoll() {
+    stopTsPoll();
+    tsPollTimer = setInterval(pollTsStatus, 1500);
+    pollTsStatus(); // immediate first hit
   }
-  go.addEventListener("click", startTs);
-  act.appendChild(bk);
-  act.appendChild(go);
-  const skip = el("button", "link-skip", "Skip for now \u2192");
-  skip.type = "button";
-  skip.addEventListener("click", () => {
-    stopPoll();
-    state.tailscaleConnected = false;
-    state.tailnetUrl = null;
-    advance(4);
-  });
-  k.appendChild(status);
-  k.appendChild(link);
-  k.appendChild(qr);
-  k.appendChild(retry);
-  k.appendChild(cont);
-  k.appendChild(act);
-  k.appendChild(skip);
-  c.appendChild(k);
-}
 
-function render4(c) {
-  const k = el("div", "step-card");
-  k.appendChild(el("h1", null, "\uD83E\uDD8A Fox is ready!"));
-  k.appendChild(el("p", "description", "Access Fox at:"));
-  const ul = el("ul", "access-list");
-  const o = window.location.origin || `http://${window.location.hostname}:8787`;
-  ul.appendChild(el("li", null, o));
-  if (state.tailscaleConnected && state.tailnetUrl) {
-    const li = el("li");
-    const a = el("a", null, state.tailnetUrl);
-    a.href = state.tailnetUrl;
-    a.target = "_blank";
-    a.rel = "noopener noreferrer";
-    li.appendChild(a);
-    ul.appendChild(li);
+  function stopTsPoll() {
+    if (tsPollTimer) { clearInterval(tsPollTimer); tsPollTimer = null; }
   }
-  k.appendChild(ul);
-  const msg = el("p", "description", "Restarting…");
-  msg.hidden = true;
-  msg.setAttribute("aria-live", "polite");
-  const act = el("div", "row-actions");
-  const btn = el("button", "btn btn-primary", "Open Fox");
-  btn.type = "button";
-  btn.addEventListener("click", async () => {
-    btn.disabled = true;
-    const d = await postJson("/api/setup/complete", { tailscale_connected: state.tailscaleConnected });
-    if (d.ok && d.data.ok) await postJson("/api/setup/restart", {});
-    msg.hidden = false;
-    setTimeout(() => {
-      window.location.href = "/";
-    }, 3000);
-  });
-  act.appendChild(btn);
-  k.appendChild(msg);
-  k.appendChild(act);
-  c.appendChild(k);
-}
 
-document.addEventListener("DOMContentLoaded", () => {
-  renderStep(1);
-  updateProgress(1);
-});
+  async function pollTsStatus() {
+    let data;
+    try {
+      const res = await fetch('/api/setup/tailscale/status');
+      data = await res.json();
+    } catch (e) {
+      return; // transient error — keep polling
+    }
+
+    const status = data.status || 'waiting';
+
+    if (status === 'url_ready' && data.login_url) {
+      tsAuthUrl.href = data.login_url;
+      tsAuthUrl.textContent = data.login_url;
+      tsAuthBox.classList.remove('hidden');
+      tsStatusText.textContent = 'Waiting for you to authorise in your browser…';
+    }
+
+    if (status === 'connected') {
+      stopTsPoll();
+      tsSpinner.style.display = 'none';
+      tsStatusText.textContent = '✓ Tailscale connected!';
+      tsStatusText.style.color = 'var(--success)';
+      tsConnected = true;
+      // Brief pause so user sees the success state, then move on
+      setTimeout(() => complete(true, data.tailnet_url), 1200);
+    }
+
+    if (status === 'error') {
+      stopTsPoll();
+      showError(tsError, data.error || 'Tailscale login failed.');
+      tsStatusEl.classList.add('hidden');
+      btnTsConnect.disabled = false;
+      btnTsSkip.disabled    = false;
+    }
+  }
+
+  // ── Step 3: Complete ────────────────────────────────────────────────────────
+
+  async function complete(tailscaleOk, tailnetUrl) {
+    try {
+      await postJSON('/api/setup/complete', { tailscale_connected: tailscaleOk });
+    } catch (e) {
+      // Non-fatal: the onboarding file couldn't be written — log and continue
+      console.error('[setup] complete call failed', e);
+    }
+
+    if (tailscaleOk && tailnetUrl) {
+      doneDesc.innerHTML =
+        `Your Tailscale URL: <strong><a href="${tailnetUrl}" target="_blank" rel="noopener">${tailnetUrl}</a></strong><br>` +
+        'Fox is running and reachable from anywhere on your Tailnet.';
+    } else if (tailscaleOk) {
+      doneDesc.textContent =
+        'Fox is running. You can connect Tailscale later from Settings if you need remote access.';
+    } else {
+      doneDesc.textContent =
+        'Fox is running. You can connect Tailscale later from Settings if you need remote access.';
+    }
+
+    setStep(3);
+  }
+
+  btnOpenApp.addEventListener('click', () => {
+    window.location.href = '/';
+  });
+
+  // ── Init ────────────────────────────────────────────────────────────────────
+
+  setStep(1);
+
+})();

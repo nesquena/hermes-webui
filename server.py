@@ -15,12 +15,23 @@ logger = logging.getLogger(__name__)
 
 from api.auth import check_auth
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
-from api.fitb_onboarding import onboarding_complete, onboarding_exempt
 from api.helpers import j, get_profile_cookie
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_get, handle_post
+from api.setup import (
+    onboarding_complete,
+    handle_get_setup,
+    handle_post_openrouter,
+    handle_post_tailscale_start,
+    handle_get_tailscale_status,
+    handle_post_complete,
+    handle_post_restart,
+)
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
+
+# Paths exempt from the onboarding redirect check
+_SETUP_EXEMPT_PREFIXES = ("/setup", "/api/setup/", "/static/", "/favicon", "/health", "/login")
 
 
 class QuietHTTPServer(ThreadingHTTPServer):
@@ -72,13 +83,21 @@ class Handler(BaseHTTPRequestHandler):
             set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
-            if not onboarding_exempt(parsed.path) and not onboarding_complete():
+            # ── Onboarding redirect (checked at request time) ──────────────────
+            if not onboarding_complete() and not any(
+                parsed.path.startswith(p) for p in _SETUP_EXEMPT_PREFIXES
+            ):
                 self.send_response(302)
                 self.send_header("Location", "/setup")
                 self.end_headers()
                 return
-            if not check_auth(self, parsed):
-                return
+            # ── Setup routes ───────────────────────────────────────────────────
+            if parsed.path == "/setup":
+                return handle_get_setup(self)
+            if parsed.path == "/api/setup/tailscale/status":
+                return handle_get_tailscale_status(self)
+            # ── Auth + normal routing ──────────────────────────────────────────
+            if not check_auth(self, parsed): return
             result = handle_get(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
@@ -96,13 +115,27 @@ class Handler(BaseHTTPRequestHandler):
             set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
-            if not onboarding_exempt(parsed.path) and not onboarding_complete():
+            # ── Onboarding redirect (checked at request time) ──────────────────
+            if not onboarding_complete() and not any(
+                parsed.path.startswith(p) for p in _SETUP_EXEMPT_PREFIXES
+            ):
                 self.send_response(302)
                 self.send_header("Location", "/setup")
                 self.end_headers()
                 return
-            if not check_auth(self, parsed):
-                return
+            # ── Setup routes ───────────────────────────────────────────────────
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length) if content_length else b""
+            if parsed.path == "/api/setup/openrouter":
+                return handle_post_openrouter(self, body)
+            if parsed.path == "/api/setup/tailscale/start":
+                return handle_post_tailscale_start(self)
+            if parsed.path == "/api/setup/complete":
+                return handle_post_complete(self, body)
+            if parsed.path == "/api/setup/restart":
+                return handle_post_restart(self)
+            # ── Auth + normal routing ──────────────────────────────────────────
+            if not check_auth(self, parsed): return
             result = handle_post(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)

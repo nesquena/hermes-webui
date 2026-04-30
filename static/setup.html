@@ -1,19 +1,105 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Fox in the Box — Setup</title>
-  <link rel="stylesheet" href="/static/setup.css">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fox in the Box · Setup</title>
+  <link rel="stylesheet" href="/static/setup.css" />
 </head>
 <body>
-  <!-- TODO: replace with SVG logo -->
-  <div id="wizard">
-    <div id="progress-bar" aria-live="polite"></div>
-    <div id="step-container"></div>
-  </div>
-  <!-- qrcode@1.5.3 browser UMD bundle (jsdelivr prebuilt path 404s; vendored via browserify -s QRCode). -->
-  <script src="/static/qrcode.min.js"></script>
+  <div class="setup-shell">
+
+    <header class="setup-header">
+      <div class="logo-row">
+        <span class="logo-emoji">🦊</span>
+        <span class="logo-name">Fox in the Box</span>
+      </div>
+      <p class="tagline">Let's get your AI assistant ready.</p>
+    </header>
+
+    <!-- Step indicators -->
+    <nav class="steps-nav" aria-label="Setup steps">
+      <div class="step active" data-step="1">
+        <span class="step-num">1</span>
+        <span class="step-label">AI Model</span>
+      </div>
+      <div class="step-divider"></div>
+      <div class="step" data-step="2">
+        <span class="step-num">2</span>
+        <span class="step-label">Network</span>
+      </div>
+      <div class="step-divider"></div>
+      <div class="step" data-step="3">
+        <span class="step-num">3</span>
+        <span class="step-label">Done</span>
+      </div>
+    </nav>
+
+    <!-- ── Step 1: OpenRouter API key ── -->
+    <section class="setup-card" id="step-1">
+      <h2>Connect your AI model</h2>
+      <p class="card-desc">
+        Fox uses <strong>OpenRouter</strong> to access language models.
+        Your key is stored locally — it never leaves this device.
+      </p>
+      <label for="api-key-input" class="field-label">OpenRouter API key</label>
+      <input
+        id="api-key-input"
+        type="password"
+        class="field-input"
+        placeholder="sk-or-v1-…"
+        autocomplete="off"
+        spellcheck="false"
+      />
+      <p class="field-hint">
+        Get a free key at
+        <a href="https://openrouter.ai/keys" target="_blank" rel="noopener">openrouter.ai/keys</a>.
+      </p>
+      <div class="error-banner hidden" id="key-error" role="alert"></div>
+      <button class="btn-primary" id="btn-save-key">Save &amp; Continue</button>
+    </section>
+
+    <!-- ── Step 2: Tailscale ── -->
+    <section class="setup-card hidden" id="step-2">
+      <h2>Secure remote access <span class="badge-optional">optional</span></h2>
+      <p class="card-desc">
+        Tailscale gives you a private URL so you can reach Fox from anywhere —
+        no open ports, no VPN config.
+      </p>
+      <div class="ts-actions">
+        <button class="btn-primary" id="btn-ts-connect">Connect Tailscale</button>
+        <button class="btn-ghost" id="btn-ts-skip">Skip for now</button>
+      </div>
+
+      <!-- auth URL card (shown after tailscale login starts) -->
+      <div class="ts-auth-box hidden" id="ts-auth-box">
+        <p class="ts-auth-label">Open this link to authorise:</p>
+        <a class="ts-auth-url" id="ts-auth-url" href="#" target="_blank" rel="noopener">
+          waiting…
+        </a>
+      </div>
+
+      <!-- status strip -->
+      <div class="ts-status hidden" id="ts-status">
+        <span class="spinner" id="ts-spinner"></span>
+        <span id="ts-status-text">Connecting…</span>
+      </div>
+
+      <div class="error-banner hidden" id="ts-error" role="alert"></div>
+    </section>
+
+    <!-- ── Step 3: Done ── -->
+    <section class="setup-card hidden" id="step-3">
+      <div class="done-icon">🎉</div>
+      <h2>You're all set!</h2>
+      <p class="card-desc" id="done-desc">
+        Fox is ready to go. Click below to open the main interface.
+      </p>
+      <button class="btn-primary" id="btn-open-app">Open Fox in the Box</button>
+    </section>
+
+  </div><!-- /.setup-shell -->
+
   <script src="/static/setup.js"></script>
 </body>
 </html>

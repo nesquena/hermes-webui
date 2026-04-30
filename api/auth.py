@@ -21,7 +21,6 @@ logger = logging.getLogger(__name__)
 PUBLIC_PATHS = frozenset({
     '/login', '/health', '/favicon.ico',
     '/api/auth/login', '/api/auth/status',
-    '/setup',
 })
 
 COOKIE_NAME = 'hermes_session'
@@ -217,10 +216,6 @@ def check_auth(handler, parsed) -> bool:
         return True
     # Public paths don't require auth
     if parsed.path in PUBLIC_PATHS or parsed.path.startswith('/static/'):
-        return True
-    if parsed.path.startswith('/setup/'):
-        return True
-    if parsed.path.startswith('/api/setup/'):
         return True
     # Check session cookie
     cookie_val = parse_cookie(handler)
