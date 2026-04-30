@@ -77,6 +77,7 @@ def _isolate_models_session_dir(tmp_path, monkeypatch):
 
 # ─── Tests ───────────────────────────────────────────────────────────────────
 
+@pytest.mark.integration
 class TestWALLiveRecovery:
     """End-to-end WAL crash-recovery tests."""
 
