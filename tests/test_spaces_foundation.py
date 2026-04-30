@@ -168,6 +168,40 @@ def test_list_revision_events_returns_safe_metadata_newest_first(monkeypatch, tm
     assert "secret" not in serialized
 
 
+def test_revision_and_widget_event_summaries_redact_secret_looking_values(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Secret Revision Lab"})
+    spaces.upsert_widget(created["space_id"], {"id": "run", "kind": "button", "title": "Run"})
+
+    queued = spaces.queue_widget_event(
+        created["space_id"],
+        "run",
+        "agent.prompt",
+        {
+            "safe_note": "refresh weather",
+            "operator_note": "Authorization: Bearer SECRET_VALUE_DO_NOT_LEAK",
+            "nested": {"safe": "ok", "comment": "token=SECRET_VALUE_DO_NOT_LEAK"},
+            "items": ["ok", "api_key=SECRET_VALUE_DO_NOT_LEAK"],
+        },
+        prompt="Use token SECRET_VALUE_DO_NOT_LEAK to refresh the widget",
+        session_id="session-123",
+    )
+
+    assert queued["payload_summary"]["safe_note"] == "refresh weather"
+    assert queued["payload_summary"]["operator_note"] == "[REDACTED]"
+    assert queued["payload_summary"]["nested"]["safe"] == "ok"
+    assert queued["payload_summary"]["nested"]["comment"] == "[REDACTED]"
+    assert queued["payload_summary"]["items"] == ["ok", "[REDACTED]"]
+    assert queued["prompt_preview"] == "[REDACTED]"
+
+    revisions = spaces.list_revision_events(created["space_id"])
+    serialized = json.dumps({"queued": queued, "revisions": revisions})
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in serialized
+    assert "Bearer" not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized.lower()
+
+
 def test_restore_revision_reverts_to_safe_snapshot_without_leaking_sources(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Rollback Lab"})
