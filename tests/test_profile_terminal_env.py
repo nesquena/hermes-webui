@@ -53,3 +53,6 @@ def test_streaming_applies_profile_runtime_env_to_agent_run():
     assert "_profile_runtime_env" in src
     assert "old_profile_env" in src
     assert "os.environ.update(_profile_runtime_env)" in src
+    assert "_thread_env = dict(_profile_runtime_env)" in src
+    assert "_set_thread_env(**_thread_env)" in src
+    assert "**_profile_runtime_env,\n            TERMINAL_CWD=str(s.workspace)" not in src

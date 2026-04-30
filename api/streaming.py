@@ -1419,13 +1419,14 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             _profile_home = os.environ.get('HERMES_HOME', '')
             _profile_runtime_env = {}
 
-        _set_thread_env(
-            **_profile_runtime_env,
-            TERMINAL_CWD=str(s.workspace),
-            HERMES_EXEC_ASK='1',
-            HERMES_SESSION_KEY=session_id,
-            HERMES_HOME=_profile_home,
-        )
+        _thread_env = dict(_profile_runtime_env)
+        _thread_env.update({
+            'TERMINAL_CWD': str(s.workspace),
+            'HERMES_EXEC_ASK': '1',
+            'HERMES_SESSION_KEY': session_id,
+            'HERMES_HOME': _profile_home,
+        })
+        _set_thread_env(**_thread_env)
         # Still set process-level env as fallback for tools that bypass thread-local
         # Acquire lock only for the env mutation, then release before the agent runs.
         # The finally block re-acquires to restore — keeping critical sections short
