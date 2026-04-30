@@ -324,3 +324,36 @@ class TestI18nKeys:
             block = self._find_locale_block(loc)
             missing = [k for k in self.HTML_KEYS if f'{k}:' not in block]
             assert not missing, f'{loc} locale missing HTML keys: {missing}'
+
+
+class TestPdfCanvasAttachmentNotSerialized:
+    """Regression: canvas.outerHTML serializes only the <canvas> element wrapper,
+    NOT the rendered bitmap. Interpolating ${canvas.outerHTML} into a template
+    string produces a fresh empty <canvas> when parsed back into the DOM, so the
+    PDF preview renders as a blank rectangle.
+
+    The PDF preview must attach the canvas via appendChild / replaceWith so the
+    rendered DOM node carries its bitmap state across the swap.
+    """
+
+    def _pdf_block(self):
+        ui = _read_js('ui.js')
+        start = ui.find('// ── PDF inline preview')
+        end = ui.find('// ── HTML inline preview', start)
+        assert start != -1 and end != -1, 'PDF preview block not found in ui.js'
+        return ui[start:end]
+
+    def test_pdf_does_not_serialize_canvas_via_outerhtml(self):
+        block = self._pdf_block()
+        assert '${canvas.outerHTML}' not in block, (
+            'canvas.outerHTML loses the rendered bitmap when interpolated; '
+            'attach the canvas via appendChild or replaceWith instead'
+        )
+
+    def test_pdf_attaches_canvas_as_dom_node(self):
+        block = self._pdf_block()
+        attaches_dom = 'appendChild(canvas)' in block or '.replaceWith(' in block
+        assert attaches_dom, (
+            'PDF preview must attach the rendered canvas as a DOM node '
+            '(appendChild / replaceWith), not interpolate it as a string'
+        )

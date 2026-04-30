@@ -3631,12 +3631,17 @@ function _renderExcalidrawCanvases(){
       });
       const pad=20;minX-=pad;minY-=pad;maxX+=pad;maxY+=pad;
       const w=Math.max(maxX-minX,200);const h=Math.max(maxY-minY,150);
-      const svgParts=[`<svg xmlns="http://www.w3.org/2000/svg" viewBox="${minX} ${minY} ${w} ${h}" class="excalidraw-svg">`];
+      // SVG attributes are rendered via innerHTML below, so attacker-controlled
+      // values from JSON (e.g. strokeColor='red"/><script>...') would break out
+      // of the attribute. Escape strings; coerce numerics.
+      const _sa=v=>String(v==null?'':v).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      const _num=(v,fb)=>{const n=Number(v);return Number.isFinite(n)?n:fb;};
+      const svgParts=[`<svg xmlns="http://www.w3.org/2000/svg" viewBox="${_num(minX,0)} ${_num(minY,0)} ${_num(w,200)} ${_num(h,150)}" class="excalidraw-svg">`];
       elements.forEach(el=>{
-        const stroke=el.strokeColor||'#1e1e1e';
-        const fill=el.backgroundColor||'transparent';
-        const sw=el.strokeWidth||2;
-        const x=el.x||0,y=el.y||0,w=el.width||0,h=el.height||0;
+        const stroke=_sa(el.strokeColor||'#1e1e1e');
+        const fill=_sa(el.backgroundColor||'transparent');
+        const sw=_num(el.strokeWidth,2);
+        const x=_num(el.x,0),y=_num(el.y,0),w=_num(el.width,0),h=_num(el.height,0);
         if(el.type==='rectangle'){
           svgParts.push(`<rect x="${x}" y="${y}" width="${w}" height="${h}" stroke="${stroke}" stroke-width="${sw}" fill="${fill}" rx="${el.roundness?.type===3?8:0}"/>`);
         }else if(el.type==='diamond'){
@@ -3645,27 +3650,29 @@ function _renderExcalidrawCanvases(){
         }else if(el.type==='ellipse'){
           svgParts.push(`<ellipse cx="${x+w/2}" cy="${y+h/2}" rx="${w/2}" ry="${h/2}" stroke="${stroke}" stroke-width="${sw}" fill="${fill}"/>`);
         }else if(el.type==='line'){
-          const pts=el.points||[];
-          let d=`M ${x+pts[0][0]} ${y+pts[0][1]}`;
-          for(let i=1;i<pts.length;i++) d+=` L ${x+pts[i][0]} ${y+pts[i][1]}`;
+          const pts=(el.points||[]).filter(p=>Array.isArray(p)&&p.length>=2);
+          if(!pts.length) return;
+          let d=`M ${_num(x+_num(pts[0][0],0),0)} ${_num(y+_num(pts[0][1],0),0)}`;
+          for(let i=1;i<pts.length;i++) d+=` L ${_num(x+_num(pts[i][0],0),0)} ${_num(y+_num(pts[i][1],0),0)}`;
           svgParts.push(`<path d="${d}" stroke="${stroke}" stroke-width="${sw}" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`);
         }else if(el.type==='arrow'){
-          const pts=el.points||[];
-          let d=`M ${x+pts[0][0]} ${y+pts[0][1]}`;
-          for(let i=1;i<pts.length;i++) d+=` L ${x+pts[i][0]} ${y+pts[i][1]}`;
+          const pts=(el.points||[]).filter(p=>Array.isArray(p)&&p.length>=2);
+          if(!pts.length) return;
+          let d=`M ${_num(x+_num(pts[0][0],0),0)} ${_num(y+_num(pts[0][1],0),0)}`;
+          for(let i=1;i<pts.length;i++) d+=` L ${_num(x+_num(pts[i][0],0),0)} ${_num(y+_num(pts[i][1],0),0)}`;
           svgParts.push(`<path d="${d}" stroke="${stroke}" stroke-width="${sw}" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)"/>`);
         }else if(el.type==='text'){
-          const fontSize=el.fontSize||20;
-          const txt=el.text||'';
+          const fontSize=_num(el.fontSize,20);
+          const txt=String(el.text==null?'':el.text);
           const lines=txt.split('\n');
           lines.forEach((line,i)=>{
             svgParts.push(`<text x="${x}" y="${y+i*fontSize*1.2+fontSize}" fill="${stroke}" font-size="${fontSize}" font-family="Virgil, Segoe UI Emoji, sans-serif">${esc(line)}</text>`);
           });
         }else if(el.type==='draw'){
-          const pts=el.points||[];
+          const pts=(el.points||[]).filter(p=>Array.isArray(p)&&p.length>=2);
           if(pts.length>1){
-            let d=`M ${x+pts[0][0]} ${y+pts[0][1]}`;
-            for(let i=1;i<pts.length;i++) d+=` L ${x+pts[i][0]} ${y+pts[i][1]}`;
+            let d=`M ${_num(x+_num(pts[0][0],0),0)} ${_num(y+_num(pts[0][1],0),0)}`;
+            for(let i=1;i<pts.length;i++) d+=` L ${_num(x+_num(pts[i][0],0),0)} ${_num(y+_num(pts[i][1],0),0)}`;
             svgParts.push(`<path d="${d}" stroke="${stroke}" stroke-width="${sw}" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`);
           }
         }
@@ -3708,8 +3715,15 @@ function loadPdfInline(){
             canvas.height=viewport.height;
             canvas.className='pdf-preview-canvas';
             page.render({canvasContext:canvas.getContext('2d'),viewport}).promise.then(()=>{
+              // Canvas bitmap is runtime state, not part of HTML serialization.
+              // Attach the canvas as a DOM node — interpolating its serialized
+              // form into a template string parses back as an empty canvas.
               const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
-              el.outerHTML=`<div class="pdf-preview-wrap"><div class="pdf-preview-header"><span>📄 ${esc(fname)}</span><a href="${dlUrl}" download="${esc(fname)}" class="pdf-download-link">${t('pdf_download')} ↓</a></div><div class="pdf-preview-body">${canvas.outerHTML}</div></div>`;
+              const wrap=document.createElement('div');
+              wrap.className='pdf-preview-wrap';
+              wrap.innerHTML=`<div class="pdf-preview-header"><span>📄 ${esc(fname)}</span><a href="${dlUrl}" download="${esc(fname)}" class="pdf-download-link">${t('pdf_download')} ↓</a></div><div class="pdf-preview-body"></div>`;
+              wrap.querySelector('.pdf-preview-body').appendChild(canvas);
+              el.replaceWith(wrap);
             });
           });
         })
