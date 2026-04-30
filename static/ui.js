@@ -88,7 +88,14 @@ document.addEventListener('click', e => {
 });
 
 const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
+const _PDF_EXTS=/\.pdf$/i;
+const _HTML_EXTS=/\.(html?|htm)$/i;
 const _ARCHIVE_EXTS=/\.(zip|tar|tar\.gz|tgz|tar\.bz2|tbz2|tar\.xz|txz)$/i;
+const _SVG_EXTS=/\.svg$/i;
+const _AUDIO_EXTS=/\.(mp3|ogg|wav|m4a|aac|flac|wma|opus|webm)$/i;
+const _VIDEO_EXTS=/\.(mp4|webm|mkv|mov|avi|ogv|m4v)$/i;
+const _CSV_EXTS=/\.csv$/i;
+const _EXCALIDRAW_EXTS=/\.excalidraw$/i;
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
@@ -696,6 +703,30 @@ function _syncCtxIndicator(usage){
   }
 }
 
+// ── Touch support: toggle context tooltip on tap (#524) ──
+// On mobile, hover doesn't work — allow tap on the context ring button
+// to toggle the tooltip visibility so the compress affordance is reachable.
+document.addEventListener('DOMContentLoaded',function(){
+  const wrap=document.getElementById('ctxIndicatorWrap');
+  const tooltip=document.getElementById('ctxTooltip');
+  if(!wrap||!tooltip)return;
+  const btn=document.getElementById('ctxIndicator');
+  if(!btn)return;
+  btn.addEventListener('click',function(e){
+    e.stopPropagation();
+    const isOpen=tooltip.classList.contains('ctx-tooltip-active');
+    tooltip.classList.toggle('ctx-tooltip-active',!isOpen);
+    tooltip.setAttribute('aria-hidden',String(isOpen));
+  });
+  // Close on outside tap
+  document.addEventListener('click',function(){
+    tooltip.classList.remove('ctx-tooltip-active');
+    tooltip.setAttribute('aria-hidden','true');
+  },{passive:true});
+  // Prevent tooltip click from closing itself
+  tooltip.addEventListener('click',function(e){e.stopPropagation();});
+});
+
 function scrollIfPinned(){
   if(!_scrollPinned) return;
   const el=$('messages');
@@ -890,6 +921,16 @@ function renderMd(raw){
         const rawCode=esc(code.replace(/\n$/,''));
         const blockId='tree-'+Math.random().toString(36).slice(2,10);
         _preBlock_stash.push(`<div class="code-tree-wrap" data-raw="${rawCode.replace(/"/g,'&quot;')}" data-lang="${lang}" id="${blockId}">${h}<pre class="tree-raw-view"><code${langAttr}>${rawCode}</code></pre></div>`);
+      // CSV blocks → render as styled table
+      } else if(lang==='csv'){
+        const rows=code.replace(/\n$/,'').split('\n').filter(r=>r.trim());
+        if(rows.length>=2){
+          const headers=rows[0].split(',').map(c=>c.trim());
+          const body=rows.slice(1).map(r=>'<tr>'+r.split(',').map(c=>`<td>${esc(c.trim())}</td>`).join('')+'</tr>').join('');
+          _preBlock_stash.push(`${h}<div class="csv-table-wrap"><table class="csv-table"><thead><tr>${headers.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table></div>`);
+        } else {
+          _preBlock_stash.push(`${h}<pre><code${langAttr}>${esc(code.replace(/\n$/,''))}</code></pre>`);
+        }
       } else {
         _preBlock_stash.push(`${h}<pre><code${langAttr}>${esc(code.replace(/\n$/,''))}</code></pre>`);
       }
@@ -966,7 +1007,7 @@ function renderMd(raw){
   s=s.replace(/\*([^*\n]+)\*/g,(_,t)=>`<em>${esc(t)}</em>`);
   s=s.replace(/~~(.+?)~~/g,(_,t)=>`<del>${esc(t)}</del>`);
   s=s.replace(/\x00O(\d+)\x00/g,(_,i)=>_ob_stash[+i]);
-  s=s.replace(/^### (.+)$/gm,(_,t)=>`<h3>${inlineMd(t)}</h3>`).replace(/^## (.+)$/gm,(_,t)=>`<h2>${inlineMd(t)}</h2>`).replace(/^# (.+)$/gm,(_,t)=>`<h1>${inlineMd(t)}</h1>`);
+  s=s.replace(/^###### (.+)$/gm,(_,t)=>`<h6>${inlineMd(t)}</h6>`).replace(/^##### (.+)$/gm,(_,t)=>`<h5>${inlineMd(t)}</h5>`).replace(/^#### (.+)$/gm,(_,t)=>`<h4>${inlineMd(t)}</h4>`).replace(/^### (.+)$/gm,(_,t)=>`<h3>${inlineMd(t)}</h3>`).replace(/^## (.+)$/gm,(_,t)=>`<h2>${inlineMd(t)}</h2>`).replace(/^# (.+)$/gm,(_,t)=>`<h1>${inlineMd(t)}</h1>`);
   s=s.replace(/^---+$/gm,'<hr>');
   // (Blockquotes are handled by the pre-pass at the top of renderMd, before
   // fence_stash. The per-line passes below never see > prefixes.)
@@ -1162,6 +1203,18 @@ function renderMd(raw){
         const base=document.baseURI.replace(/\/$/,'');
         src=src.replace(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i,base);
       }
+      // SVG URLs → render inline as image (before image catch-all)
+      if(_SVG_EXTS.test(src.split('?')[0])){
+        return `<img class="msg-media-svg" src="${esc(src)}" alt="${t('media_svg_label')}" loading="lazy">`;
+      }
+      // Audio URLs → inline player
+      if(_AUDIO_EXTS.test(src.split('?')[0])){
+        return `<div class="msg-media-audio"><span class="msg-media-label">🎵 ${t('media_audio_label')}</span><audio controls preload="metadata" src="${esc(src)}"></audio></div>`;
+      }
+      // Video URLs → inline player
+      if(_VIDEO_EXTS.test(src.split('?')[0])){
+        return `<div class="msg-media-video"><span class="msg-media-label">🎬 ${t('media_video_label')}</span><video controls preload="metadata" src="${esc(src)}"></video></div>`;
+      }
       // MEDIA: tokens are only emitted for tool-generated images (image_generate etc.).
       // Render all https:// URLs as <img> — extension check would miss extensionless
       // CDN paths like fal.media content-addressed URLs (closes #853).
@@ -1175,11 +1228,39 @@ function renderMd(raw){
     if(_IMAGE_EXTS.test(ref)){
       return `<img class="msg-media-img" src="${esc(apiUrl)}" alt="${esc(ref.split('/').pop())}" loading="lazy">`;
     }
-    // Non-image local file — show download link with filename
-    const fname=esc(ref.split('/').pop()||ref);
+    // SVG → inline image (no download, render directly)
+    if(_SVG_EXTS.test(ref)){
+      return `<img class="msg-media-svg" src="${esc(apiUrl)}" alt="${t('media_svg_label')}" loading="lazy">`;
+    }
+    // Audio → inline player
+    if(_AUDIO_EXTS.test(ref)){
+      return `<div class="msg-media-audio"><span class="msg-media-label">🎵 ${t('media_audio_label')}</span><audio controls preload="metadata" src="${esc(apiUrl)}"></audio></div>`;
+    }
+    // Video → inline player
+    if(_VIDEO_EXTS.test(ref)){
+      return `<div class="msg-media-video"><span class="msg-media-label">🎬 ${t('media_video_label')}</span><video controls preload="metadata" src="${esc(apiUrl)}"></video></div>`;
+    }
+    // PDF files → render first page preview with lazy-load
+    if(_PDF_EXTS.test(ref)){
+      const fname=esc(ref.split('/').pop()||ref);
+      return `<div class="pdf-preview-load" data-path="${esc(ref)}"><span class="pdf-preview-spinner">⏳</span> ${t('pdf_loading')} ${fname}...</div>`;
+    }
+    // HTML files → render inline in sandboxed iframe with lazy-load
+    if(_HTML_EXTS.test(ref)){
+      return `<div class="html-preview-load" data-path="${esc(ref)}"><span class="html-preview-spinner">⏳</span> ${t('html_loading')}</div>`;
+    }
     // .patch/.diff files → render inline as colored diff instead of download
+    const fname=esc(ref.split('/').pop()||ref);
     if(/\.(patch|diff)$/i.test(ref)){
       return `<div class="diff-inline-load" data-path="${esc(ref)}">${t('diff_loading')} ${fname}...</div>`;
+    }
+    // CSV files → lazy-load and render as table
+    if(_CSV_EXTS.test(ref)){
+      return `<div class="csv-inline-load" data-path="${esc(ref)}">${t('csv_loading')} ${fname}...</div>`;
+    }
+    // Excalidraw files → lazy-load inline embed
+    if(_EXCALIDRAW_EXTS.test(ref)){
+      return `<div class="excalidraw-inline-load" data-path="${esc(ref)}">${t('excalidraw_loading')} ${fname}...</div>`;
     }
     return `<a class="msg-media-link" href="${esc(apiUrl+'&download=1')}" download="${fname}">📎 ${fname}</a>`;
   });
@@ -2000,6 +2081,7 @@ async function forceUpdate(btn){
 // blind setTimeout(reload, 2500) that race-lost against slow hardware or
 // reverse proxies that 502 immediately when the upstream socket closes (#874).
 async function _waitForServerThenReload(opts){
+  // Polls the /health endpoint; implementation uses a relative URL so subpath mounts keep working.
   opts=opts||{};
   const interval=opts.interval||500;
   const maxMs=opts.maxMs||15000;
@@ -2199,6 +2281,36 @@ function _assistantTurnBlocks(turn){
 function _thinkingCardHtml(text){
   const clean=_sanitizeThinkingDisplayText(text);
   return `<div class="thinking-card"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
+}
+function isSimplifiedToolCalling(){
+  return window._simplifiedToolCalling!==false;
+}
+function _thinkingActivityNode(text){
+  const row=document.createElement('div');
+  row.className='agent-activity-thinking';
+  row.innerHTML=_thinkingCardHtml(text);
+  return row;
+}
+function ensureActivityGroup(inner, opts){
+  opts=opts||{};
+  if(!inner) return null;
+  const live=!!opts.live;
+  const selector=live?'.tool-call-group[data-live-tool-call-group="1"]':'.tool-call-group[data-agent-activity-group="1"]';
+  let group=inner.querySelector(selector);
+  if(!group){
+    group=document.createElement('div');
+    const collapsed=opts.collapsed!==false;
+    group.className='tool-call-group agent-activity-group'+(collapsed?' tool-call-group-collapsed':'');
+    group.setAttribute('data-tool-call-group','1');
+    group.setAttribute('data-agent-activity-group','1');
+    if(live) group.setAttribute('data-live-tool-call-group','1');
+    group.innerHTML=`<button type="button" class="tool-call-group-summary" aria-expanded="${collapsed?'false':'true'}" onclick="const g=this.closest('.tool-call-group');const c=g.classList.toggle('tool-call-group-collapsed');this.setAttribute('aria-expanded',String(!c));"><span class="tool-call-group-chevron">${li('chevron-right',12)}</span><span class="tool-call-group-label">Activity</span><span class="tool-call-group-list">tools / thinking</span><span class="tool-call-group-count">0</span></button><div class="tool-call-group-body"></div>`;
+    const anchor=opts.anchor||null;
+    if(anchor&&anchor.parentElement===inner) anchor.insertAdjacentElement('afterend', group);
+    else inner.appendChild(group);
+  }
+  _syncToolCallGroupSummary(group);
+  return group;
 }
 function _compressionStateForCurrentSession(){
   const state=window._compressionUi;
@@ -2464,6 +2576,10 @@ function renderCompressionUi(){
 // for the common read-only back-navigation case; not suitable as a general cache.
 const _sessionHtmlCache=new Map();
 let _sessionHtmlCacheSid=null; // session_id currently rendered in the DOM
+function clearMessageRenderCache(){
+  _sessionHtmlCache.clear();
+  _sessionHtmlCacheSid=null;
+}
 
 function renderMessages(){
   const inner=$('msgInner');
@@ -2481,8 +2597,8 @@ function renderMessages(){
       inner.innerHTML=cached.html;
       _sessionHtmlCacheSid=sid;
       if(S.activeStreamId){scrollIfPinned();}else{scrollToBottom();}
-      requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();renderMermaidBlocks();renderKatexBlocks();});
-      requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();renderMermaidBlocks();renderKatexBlocks();});
+      requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();loadExcalidrawInline();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
+      requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
       return;
     }
@@ -2554,6 +2670,7 @@ function renderMessages(){
   let _prevSepKey=null;
   let currentAssistantTurn=null;
   const assistantSegments=new Map();
+  const assistantThinking=new Map();
   const userRows=new Map();
   for(let vi=0;vi<visWithIdx.length;vi++){
     const {m,rawIdx}=visWithIdx[vi];
@@ -2605,12 +2722,25 @@ function renderMessages(){
     if(m.attachments&&m.attachments.length){
       const _attachSid=(S.session&&S.session.session_id)||'';
       filesHtml=`<div class="msg-files">${m.attachments.map(f=>{
-        const fname=f.split('/').pop()||f;
+        const fLabel=typeof f==='string'?f:(f&&(f.name||f.filename||f.path))||'';
+        const fname=String(fLabel).split('/').pop()||String(fLabel);
         if(_IMAGE_EXTS.test(fname)){
           // Use api/file/raw which resolves filename relative to the session workspace.
           // api/media expects a full absolute path which we don't store on the client side.
           const imgUrl='api/file/raw?session_id='+encodeURIComponent(_attachSid)+'&path='+encodeURIComponent(fname);
           return `<img class="msg-media-img" src="${esc(imgUrl)}" alt="${esc(fname)}" loading="lazy">`;
+        }
+        if(_SVG_EXTS.test(fname)){
+          const svgUrl='api/file/raw?session_id='+encodeURIComponent(_attachSid)+'&path='+encodeURIComponent(fname);
+          return `<img class="msg-media-svg" src="${esc(svgUrl)}" alt="${esc(fname)}" loading="lazy">`;
+        }
+        if(_AUDIO_EXTS.test(fname)){
+          const audioUrl='api/file/raw?session_id='+encodeURIComponent(_attachSid)+'&path='+encodeURIComponent(fname);
+          return `<div class="msg-media-audio"><span class="msg-media-label">🎵 ${esc(fname)}</span><audio controls preload="metadata" src="${esc(audioUrl)}"></audio></div>`;
+        }
+        if(_VIDEO_EXTS.test(fname)){
+          const videoUrl='api/file/raw?session_id='+encodeURIComponent(_attachSid)+'&path='+encodeURIComponent(fname);
+          return `<div class="msg-media-video"><span class="msg-media-label">🎬 ${esc(fname)}</span><video controls preload="metadata" src="${esc(videoUrl)}"></video></div>`;
         }
         return `<div class="msg-file-badge">${li('paperclip',12)} ${esc(fname)}</div>`;
       }).join('')}</div>`;
@@ -2670,11 +2800,14 @@ function renderMessages(){
       seg.setAttribute('data-live-assistant','1');
     }
     if(_ERR_MSG_RE.test(String(content||'').trim())) seg.dataset.error='1';
-    if(thinkingText&&window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
+    if(thinkingText&&window._showThinking!==false){
+      if(isSimplifiedToolCalling()) assistantThinking.set(rawIdx, thinkingText);
+      else if(window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
+    }
     const hasVisibleBody=!!(String(content||'').trim()||filesHtml);
     if(hasVisibleBody){
       seg.insertAdjacentHTML('beforeend', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
-    }else if(!thinkingText){
+    }else if(!(thinkingText&&window._showThinking!==false&&!isSimplifiedToolCalling())){
       seg.classList.add('assistant-segment-anchor');
     }
     _assistantTurnBlocks(currentAssistantTurn).appendChild(seg);
@@ -2788,53 +2921,78 @@ function renderMessages(){
     });
     if(derived.length) S.toolCalls=derived;
   }
-  if(!S.busy && S.toolCalls && S.toolCalls.length){
-    inner.querySelectorAll('.tool-card-row:not([data-compression-card])').forEach(el=>el.remove());
+  if(!S.busy){
+    inner.querySelectorAll('.tool-call-group:not([data-compression-card]),.tool-card-row:not([data-compression-card])').forEach(el=>el.remove());
     const byAssistant = {};
-    for(const tc of S.toolCalls){
+    for(const tc of (S.toolCalls||[])){
       const key = tc.assistant_msg_idx !== undefined ? tc.assistant_msg_idx : -1;
       if(!byAssistant[key]) byAssistant[key] = [];
       byAssistant[key].push(tc);
     }
     const assistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);
     const anchorInsertAfter = new Map();
-    for(const [key, cards] of Object.entries(byAssistant)){
-      const aIdx = parseInt(key);
-      let anchorRow=assistantSegments.get(aIdx)||null;
-      if(!anchorRow&&assistantIdxs.length){
-        const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
-        anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
+    if(isSimplifiedToolCalling()){
+      const activityIdxs=[...new Set([...Object.keys(byAssistant).map(k=>parseInt(k)), ...assistantThinking.keys()])].sort((a,b)=>a-b);
+      for(const aIdx of activityIdxs){
+        const cards=byAssistant[aIdx]||[];
+        let anchorRow=assistantSegments.get(aIdx)||null;
+        if(!anchorRow&&assistantIdxs.length){
+          const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
+          anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
+        }
+        if(!anchorRow) continue;
+        const anchorParent=anchorRow.parentElement;
+        const insertAfterNode = anchorInsertAfter.get(anchorRow) || anchorRow;
+        const group=ensureActivityGroup(anchorParent,{collapsed:true,anchor:insertAfterNode});
+        const body=group&&group.querySelector('.tool-call-group-body');
+        if(!body) continue;
+        const thinkingText=assistantThinking.get(aIdx);
+        if(thinkingText) body.appendChild(_thinkingActivityNode(thinkingText));
+        for(const tc of cards){
+          body.appendChild(buildToolCard(tc));
+        }
+        _syncToolCallGroupSummary(group);
+        if(anchorRow) anchorInsertAfter.set(anchorRow, group);
       }
-      if(!anchorRow) continue;
-      const anchorParent=anchorRow.parentElement;
-      const frag=document.createDocumentFragment();
-      let lastInsertedNode=null;
-      for(const tc of cards){
-        const card=buildToolCard(tc);
-        frag.appendChild(card);
-        lastInsertedNode=card;
+    }else if(S.toolCalls && S.toolCalls.length){
+      for(const [key, cards] of Object.entries(byAssistant)){
+        const aIdx = parseInt(key);
+        let anchorRow=assistantSegments.get(aIdx)||null;
+        if(!anchorRow&&assistantIdxs.length){
+          const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
+          anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
+        }
+        if(!anchorRow) continue;
+        const anchorParent=anchorRow.parentElement;
+        const frag=document.createDocumentFragment();
+        let lastInsertedNode=null;
+        for(const tc of cards){
+          const card=buildToolCard(tc);
+          frag.appendChild(card);
+          lastInsertedNode=card;
+        }
+        // Add expand/collapse toggle for groups with 2+ cards
+        if(cards.length>=2){
+          const toggle=document.createElement('div');
+          toggle.className='tool-cards-toggle';
+          // Collect card elements before they get moved to DOM
+          const cardEls=Array.from(frag.querySelectorAll('.tool-card'));
+          const expandBtn=document.createElement('button');
+          expandBtn.textContent=t('expand_all');
+          expandBtn.onclick=()=>cardEls.forEach(c=>c.classList.add('open'));
+          const collapseBtn=document.createElement('button');
+          collapseBtn.textContent=t('collapse_all');
+          collapseBtn.onclick=()=>cardEls.forEach(c=>c.classList.remove('open'));
+          toggle.appendChild(expandBtn);
+          toggle.appendChild(collapseBtn);
+          frag.insertBefore(toggle,frag.firstChild);
+        }
+        const insertAfterNode = anchorInsertAfter.get(anchorRow) || anchorRow;
+        const refNode = insertAfterNode ? insertAfterNode.nextSibling : null;
+        if(refNode) anchorParent.insertBefore(frag,refNode);
+        else anchorParent.appendChild(frag);
+        if(anchorRow&&lastInsertedNode) anchorInsertAfter.set(anchorRow, lastInsertedNode);
       }
-      // Add expand/collapse toggle for groups with 2+ cards
-      if(cards.length>=2){
-        const toggle=document.createElement('div');
-        toggle.className='tool-cards-toggle';
-        // Collect card elements before they get moved to DOM
-        const cardEls=Array.from(frag.querySelectorAll('.tool-card'));
-        const expandBtn=document.createElement('button');
-        expandBtn.textContent=t('expand_all');
-        expandBtn.onclick=()=>cardEls.forEach(c=>c.classList.add('open'));
-        const collapseBtn=document.createElement('button');
-        collapseBtn.textContent=t('collapse_all');
-        collapseBtn.onclick=()=>cardEls.forEach(c=>c.classList.remove('open'));
-        toggle.appendChild(expandBtn);
-        toggle.appendChild(collapseBtn);
-        frag.insertBefore(toggle,frag.firstChild);
-      }
-      const insertAfterNode = anchorInsertAfter.get(anchorRow) || anchorRow;
-      const refNode = insertAfterNode ? insertAfterNode.nextSibling : null;
-      if(refNode) anchorParent.insertBefore(frag,refNode);
-      else anchorParent.appendChild(frag);
-      if(anchorRow&&lastInsertedNode) anchorInsertAfter.set(anchorRow, lastInsertedNode);
     }
   }
   // Render per-turn token usage on each assistant message that has it (#503).
@@ -2873,8 +3031,8 @@ function renderMessages(){
     scrollToBottom();
   }
   // Apply syntax highlighting after DOM is built
-  requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();renderMermaidBlocks();renderKatexBlocks();});
-  requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();renderMermaidBlocks();renderKatexBlocks();});
+  requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();loadExcalidrawInline();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
+  requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();}); 
   // Refresh todo panel if it's currently open
   if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){
     loadTodos();
@@ -2891,6 +3049,12 @@ function renderMessages(){
   }
 }
 
+function _toolDisplayName(tc){
+  const name=(tc&&tc.name)||'tool';
+  if(name==='subagent_progress') return 'Subagent';
+  if(name==='delegate_task') return 'Delegate task';
+  return name;
+}
 function toolIcon(name){
   const icons={
     terminal:        li('terminal'),
@@ -2935,9 +3099,7 @@ function buildToolCard(tc){
   const isDelegation=tc.name==='delegate_task';
   const cardClass='tool-card'+(tc.done===false?' tool-card-running':'')+(isSubagent?' tool-card-subagent':'');
   // Clean up legacy subagent prefixes since the Lucide icon already shows it
-  let displayName=tc.name;
-  if(isSubagent) displayName='Subagent';
-  if(isDelegation) displayName='Delegate task';
+  let displayName=_toolDisplayName(tc);
   let previewText=tc.preview||displaySnippet||'';
   if(isSubagent) previewText=previewText.replace(/^(?:\u{1F500}|↳)\s*/u,'');
   row.innerHTML=`
@@ -2962,6 +3124,33 @@ function buildToolCard(tc){
   return row;
 }
 
+function _syncToolCallGroupSummary(group){
+  if(!group) return;
+  const cards=Array.from(group.querySelectorAll('.tool-card-row .tool-card'));
+  const toolCount=cards.length;
+  const thinkingCount=group.querySelectorAll('.agent-activity-thinking .thinking-card').length;
+  const names=cards.map(card=>{
+    const el=card.querySelector('.tool-card-name');
+    return el?String(el.textContent||'').trim():'';
+  }).filter(Boolean);
+  const uniqueNames=[...new Set(names)];
+  const label=group.querySelector('.tool-call-group-label');
+  const list=group.querySelector('.tool-call-group-list');
+  const badge=group.querySelector('.tool-call-group-count');
+  const parts=[];
+  if(thinkingCount) parts.push('thinking');
+  if(uniqueNames.length) parts.push(uniqueNames.slice(0,5).join(', ')+(uniqueNames.length>5?'…':''));
+  const total=toolCount+thinkingCount;
+  if(label){
+    if(thinkingCount&&toolCount) label.textContent=`Activity: thinking + ${toolCount} tool${toolCount===1?'':'s'}`;
+    else if(thinkingCount) label.textContent='Activity: thinking';
+    else if(toolCount) label.textContent=`Activity: ${toolCount} tool${toolCount===1?'':'s'}`;
+    else label.textContent='Activity';
+  }
+  if(list) list.textContent=parts.join(' · ')||'tools / thinking';
+  if(badge) badge.textContent=String(total);
+}
+
 // ── Live tool card helpers (called during SSE streaming) ──
 // Live cards are inserted INLINE inside #msgInner (tagged with data-live-tid)
 // so the streaming layout matches the settled layout produced by renderMessages
@@ -2975,52 +3164,76 @@ function appendLiveToolCard(tc){
   if(!S.session||!S.activeStreamId) return;
   let turn=$('liveAssistantTurn');
   if(!turn){
-    appendThinking();
-    turn=$('liveAssistantTurn');
+    turn=_createAssistantTurn();
+    turn.id='liveAssistantTurn';
+    $('msgInner').appendChild(turn);
   }
   const inner=_assistantTurnBlocks(turn);
   if(!inner) return;
   const tid=tc.tid||'';
+  if(!isSimplifiedToolCalling()){
+    // Update existing card in place (tool_complete after tool_start)
+    if(tid){
+      const existing=inner.querySelector(`.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`);
+      if(existing){
+        const replacement=buildToolCard(tc);
+        replacement.dataset.liveTid=tid;
+        existing.replaceWith(replacement);
+        // Keep #toolRunningRow alive — dots stay until text starts streaming
+        // or the next tool fires (which replaces them). Removing here caused
+        // a gap between tool completion and the first text token arriving.
+        return;
+      }
+    }
+    const row=buildToolCard(tc);
+    if(tid) row.dataset.liveTid=tid;
+    // Insert after whichever comes last: the current live assistant segment or
+    // the last tool card. This handles both cases:
+    //   text → tool1 → tool2  (no text between tools: anchor is card1)
+    //   text1 → tool1 → text2 → tool2  (text between tools: anchor is text2)
+    const children=Array.from(inner.children);
+    // Include .thinking-card-row so tool cards land AFTER a finalized thinking
+    // card, not between the text segment and thinking.
+    const anchor=children.filter(el=>el.matches('[data-live-assistant="1"],.tool-card-row,.thinking-card-row')).pop();
+    if(anchor) anchor.insertAdjacentElement('afterend', row);
+    else inner.appendChild(row);
+    // Add a 3-dot waiting indicator below the tool card so there's visual
+    // feedback while the tool is running. Removed when text starts streaming
+    // (ensureAssistantRow) or when tool_complete fires.
+    const oldWait=$('toolRunningRow');if(oldWait)oldWait.remove();
+    const waitRow=document.createElement('div');
+    waitRow.id='toolRunningRow';
+    waitRow.className='assistant-segment';
+    waitRow.innerHTML='<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';
+    row.insertAdjacentElement('afterend', waitRow);
+    if(typeof scrollIfPinned==='function') scrollIfPinned();
+    return;
+  }
+  const children=Array.from(inner.children);
+  const anchor=children.filter(el=>el.matches('[data-live-assistant="1"],.tool-call-group,.tool-card-row,.agent-activity-thinking')).pop();
+  const group=ensureActivityGroup(inner,{live:true,collapsed:false,anchor});
+  const body=group.querySelector('.tool-call-group-body');
   // Update existing card in place (tool_complete after tool_start)
   if(tid){
-    const existing=inner.querySelector(`.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`);
+    const existing=body.querySelector(`.tool-card-row[data-live-tid="${CSS.escape(tid)}"]`);
     if(existing){
       const replacement=buildToolCard(tc);
       replacement.dataset.liveTid=tid;
       existing.replaceWith(replacement);
-      // Keep #toolRunningRow alive — dots stay until text starts streaming
-      // or the next tool fires (which replaces them). Removing here caused
-      // a gap between tool completion and the first text token arriving.
+      _syncToolCallGroupSummary(group);
       return;
     }
   }
   const row=buildToolCard(tc);
   if(tid) row.dataset.liveTid=tid;
-  // Insert after whichever comes last: the current live assistant segment or
-  // the last tool card. This handles both cases:
-  //   text → tool1 → tool2  (no text between tools: anchor is card1)
-  //   text1 → tool1 → text2 → tool2  (text between tools: anchor is text2)
-  const children=Array.from(inner.children);
-  // Include .thinking-card-row so tool cards land AFTER a finalized thinking
-  // card, not between the text segment and thinking.
-  const anchor=children.filter(el=>el.matches('[data-live-assistant="1"],.tool-card-row,.thinking-card-row')).pop();
-  if(anchor) anchor.insertAdjacentElement('afterend', row);
-  else inner.appendChild(row);
-  // Add a 3-dot waiting indicator below the tool card so there's visual
-  // feedback while the tool is running. Removed when text starts streaming
-  // (ensureAssistantRow) or when tool_complete fires.
-  const oldWait=$('toolRunningRow');if(oldWait)oldWait.remove();
-  const waitRow=document.createElement('div');
-  waitRow.id='toolRunningRow';
-  waitRow.className='assistant-segment';
-  waitRow.innerHTML='<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>';
-  row.insertAdjacentElement('afterend', waitRow);
+  body.appendChild(row);
+  _syncToolCallGroupSummary(group);
   if(typeof scrollIfPinned==='function') scrollIfPinned();
 }
 
 function clearLiveToolCards(){
   const inner=_assistantTurnBlocks($('liveAssistantTurn'));
-  if(inner) inner.querySelectorAll('.tool-card-row[data-live-tid]').forEach(el=>el.remove());
+  if(inner) inner.querySelectorAll('.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid]').forEach(el=>el.remove());
   // Legacy #liveToolCards container cleanup — kept for safety in case any
   // leftover cards were inserted there before this refactor took effect.
   const container=$('liveToolCards');
@@ -3326,6 +3539,266 @@ function loadDiffInline(){
   });
 }
 
+function loadCsvInline(){
+  const CSV_MAX_SIZE=256*1024; // 256 KB cap for inline CSV rendering
+  document.querySelectorAll('.csv-inline-load:not([data-loaded])').forEach(el=>{
+    el.setAttribute('data-loaded','1');
+    const path=el.dataset.path;
+    fetch('api/media?path='+encodeURIComponent(path))
+      .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
+      .then(text=>{
+        if(text.length>CSV_MAX_SIZE){
+          el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('csv_too_large')}</span></div>`;
+          return;
+        }
+        const rows=text.replace(/\r\n/g,'\n').replace(/\r/g,'\n').split('\n').filter(r=>r.trim());
+        if(rows.length<2){
+          el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('csv_no_data')}</span></div>`;
+          return;
+        }
+        // Auto-detect separator (comma, semicolon, tab)
+        // Heuristic: uses the first separator found in the header row. Edge case:
+        // quoted fields containing commas without non-quoted commas in the header
+        // could cause misdetection — acceptable trade-off for a preview renderer.
+        const firstLine=rows[0];
+        const separators=[',',';','\t'];
+        let sep=separators.find(s=>firstLine.includes(s))||',';
+        const headers=rows[0].split(sep).map(c=>c.trim().replace(/^["']|["']$/g,''));
+        const bodyRows=rows.slice(1).map(r=>'<tr>'+r.split(sep).map(c=>`<td>${esc(c.trim().replace(/^["']|["']$/g,''))}</td>`).join('')+'</tr>').join('');
+        const headerRow=headers.map(h=>`<th>${esc(h)}</th>`).join('');
+        el.outerHTML=`<div class="csv-table-wrap"><div class="pre-header">${esc(path.split('/').pop())} <span style="opacity:.5;font-size:11px">${t('csv_header_note')}</span></div><table class="csv-table"><thead><tr>${headerRow}</tr></thead><tbody>${bodyRows}</tbody></table></div>`;
+      })
+      .catch(()=>{
+        el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('csv_error')}</span></div>`;
+      });
+  });
+}
+
+function loadExcalidrawInline(){
+  const EXCALIDRAW_MAX_SIZE=512*1024; // 512 KB cap
+  document.querySelectorAll('.excalidraw-inline-load:not([data-loaded])').forEach(el=>{
+    el.setAttribute('data-loaded','1');
+    const path=el.dataset.path;
+    fetch('api/media?path='+encodeURIComponent(path))
+      .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
+      .then(text=>{
+        if(text.length>EXCALIDRAW_MAX_SIZE){
+          el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('excalidraw_too_large')}</span></div>`;
+          return;
+        }
+        // Validate it looks like Excalidraw JSON
+        let data;
+        try{data=JSON.parse(text);}catch(e){
+          el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('excalidraw_invalid')}</span></div>`;
+          return;
+        }
+        if(!data.type||data.type!=='excalidraw'){
+          el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('excalidraw_invalid')}</span></div>`;
+          return;
+        }
+        const fname=esc(path.split('/').pop());
+        const downloadUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+        el.outerHTML=`<div class="excalidraw-embed-wrap" title="${t('excalidraw_simplified')}">
+  <div class="msg-artifact-header">
+    <span class="msg-media-label">${t('excalidraw_label')}</span>
+    <a class="excalidraw-open-link" href="${downloadUrl}" download="${fname}">${t('excalidraw_download')} ${fname}</a>
+  </div>
+  <div class="excalidraw-canvas" data-excalidraw='${esc(text)}'></div>
+</div>`;
+        // Lazy-init Excalidraw render after DOM insertion
+        requestAnimationFrame(()=>_renderExcalidrawCanvases());
+      })
+      .catch(()=>{
+        el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('excalidraw_error')}</span></div>`;
+      });
+  });
+}
+
+let _excalidrawScriptLoaded=false;
+function _renderExcalidrawCanvases(){
+  document.querySelectorAll('.excalidraw-canvas:not([data-rendered])').forEach(el=>{
+    el.setAttribute('data-rendered','1');
+    const dataStr=el.getAttribute('data-excalidraw');
+    if(!dataStr) return;
+    // Render a simple SVG preview using the Excalidraw elements
+    try{
+      const data=JSON.parse(dataStr);
+      const elements=data.elements||[];
+      if(!elements.length){el.innerHTML=`<div class="excalidraw-empty">${t('excalidraw_empty')}</div>`;return;}
+      // Calculate bounds
+      let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+      elements.forEach(el=>{
+        const b=[el.x||0,el.y||0,(el.x||0)+(el.width||0),(el.y||0)+(el.height||0)];
+        minX=Math.min(minX,b[0]);minY=Math.min(minY,b[1]);
+        maxX=Math.max(maxX,b[2]);maxY=Math.max(maxY,b[3]);
+      });
+      const pad=20;minX-=pad;minY-=pad;maxX+=pad;maxY+=pad;
+      const w=Math.max(maxX-minX,200);const h=Math.max(maxY-minY,150);
+      // SVG attributes are rendered via innerHTML below, so attacker-controlled
+      // values from JSON (e.g. strokeColor='red"/><script>...') would break out
+      // of the attribute. Escape strings; coerce numerics.
+      const _sa=v=>String(v==null?'':v).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      const _num=(v,fb)=>{const n=Number(v);return Number.isFinite(n)?n:fb;};
+      const svgParts=[`<svg xmlns="http://www.w3.org/2000/svg" viewBox="${_num(minX,0)} ${_num(minY,0)} ${_num(w,200)} ${_num(h,150)}" class="excalidraw-svg">`];
+      elements.forEach(el=>{
+        const stroke=_sa(el.strokeColor||'#1e1e1e');
+        const fill=_sa(el.backgroundColor||'transparent');
+        const sw=_num(el.strokeWidth,2);
+        const x=_num(el.x,0),y=_num(el.y,0),w=_num(el.width,0),h=_num(el.height,0);
+        if(el.type==='rectangle'){
+          svgParts.push(`<rect x="${x}" y="${y}" width="${w}" height="${h}" stroke="${stroke}" stroke-width="${sw}" fill="${fill}" rx="${el.roundness?.type===3?8:0}"/>`);
+        }else if(el.type==='diamond'){
+          const cx=x+w/2,cy=y+h/2;
+          svgParts.push(`<polygon points="${cx},${y} ${x+w},${cy} ${cx},${y+h} ${x},${cy}" stroke="${stroke}" stroke-width="${sw}" fill="${fill}"/>`);
+        }else if(el.type==='ellipse'){
+          svgParts.push(`<ellipse cx="${x+w/2}" cy="${y+h/2}" rx="${w/2}" ry="${h/2}" stroke="${stroke}" stroke-width="${sw}" fill="${fill}"/>`);
+        }else if(el.type==='line'){
+          const pts=(el.points||[]).filter(p=>Array.isArray(p)&&p.length>=2);
+          if(!pts.length) return;
+          let d=`M ${_num(x+_num(pts[0][0],0),0)} ${_num(y+_num(pts[0][1],0),0)}`;
+          for(let i=1;i<pts.length;i++) d+=` L ${_num(x+_num(pts[i][0],0),0)} ${_num(y+_num(pts[i][1],0),0)}`;
+          svgParts.push(`<path d="${d}" stroke="${stroke}" stroke-width="${sw}" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`);
+        }else if(el.type==='arrow'){
+          const pts=(el.points||[]).filter(p=>Array.isArray(p)&&p.length>=2);
+          if(!pts.length) return;
+          let d=`M ${_num(x+_num(pts[0][0],0),0)} ${_num(y+_num(pts[0][1],0),0)}`;
+          for(let i=1;i<pts.length;i++) d+=` L ${_num(x+_num(pts[i][0],0),0)} ${_num(y+_num(pts[i][1],0),0)}`;
+          svgParts.push(`<path d="${d}" stroke="${stroke}" stroke-width="${sw}" fill="none" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrowhead)"/>`);
+        }else if(el.type==='text'){
+          const fontSize=_num(el.fontSize,20);
+          const txt=String(el.text==null?'':el.text);
+          const lines=txt.split('\n');
+          lines.forEach((line,i)=>{
+            svgParts.push(`<text x="${x}" y="${y+i*fontSize*1.2+fontSize}" fill="${stroke}" font-size="${fontSize}" font-family="Virgil, Segoe UI Emoji, sans-serif">${esc(line)}</text>`);
+          });
+        }else if(el.type==='draw'){
+          const pts=(el.points||[]).filter(p=>Array.isArray(p)&&p.length>=2);
+          if(pts.length>1){
+            let d=`M ${_num(x+_num(pts[0][0],0),0)} ${_num(y+_num(pts[0][1],0),0)}`;
+            for(let i=1;i<pts.length;i++) d+=` L ${_num(x+_num(pts[i][0],0),0)} ${_num(y+_num(pts[i][1],0),0)}`;
+            svgParts.push(`<path d="${d}" stroke="${stroke}" stroke-width="${sw}" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`);
+          }
+        }
+        // Unknown element types (e.g. image, frame, group, freedraw) are
+        // silently skipped to avoid breaking the render. This is a simplified
+        // SVG preview, not a pixel-identical Excalidraw canvas reproduction.
+      });
+      // Arrow marker definition
+      svgParts.unshift(`<defs><marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#1e1e1e"/></marker></defs>`);
+      svgParts.push('</svg>');
+      el.innerHTML=svgParts.join('');
+    }catch(e){
+      el.innerHTML=`<div class="excalidraw-empty">${t('excalidraw_render_error')}</div>`;
+    }
+  });
+}
+
+// ── PDF inline preview (first page) ────────────────────────────────────────
+// NOTE: PDF.js is loaded from CDN (jsdelivr). Offline/air-gapped deployments
+// will not get inline previews; the 15 s fallback timeout degrades to a
+// download link in that case. The 4 MB size cap is checked client-side after
+// the full buffer is received — ideally the server would enforce it before
+// streaming (out of scope for this client-side PR).
+let _pdfjsReady=false, _pdfjsLoading=false;
+function loadPdfInline(){
+  const PDF_MAX_SIZE=4*1024*1024; // 4 MB cap for inline PDF preview
+  document.querySelectorAll('.pdf-preview-load:not([data-loaded])').forEach(el=>{
+    el.setAttribute('data-loaded','1');
+    const path=el.dataset.path;
+    const fname=path.split('/').pop()||path;
+    const loadPdf=(pdfjsLib)=>{
+      fetch('api/media?path='+encodeURIComponent(path))
+        .then(r=>{if(!r.ok) throw new Error(r.status); return r.arrayBuffer();})
+        .then(buf=>{
+          if(buf.byteLength>PDF_MAX_SIZE){
+            el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="api/media?path=${encodeURIComponent(path)}&download=1" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_too_large')}</span></div>`;
+            return;
+          }
+          return pdfjsLib.getDocument({data:buf}).promise;
+        })
+        .then(pdf=>{
+          if(!pdf) return;
+          pdf.getPage(1).then(page=>{
+            const canvas=document.createElement('canvas');
+            const scale=1.5;
+            const viewport=page.getViewport({scale});
+            canvas.width=viewport.width;
+            canvas.height=viewport.height;
+            canvas.className='pdf-preview-canvas';
+            page.render({canvasContext:canvas.getContext('2d'),viewport}).promise.then(()=>{
+              // Canvas bitmap is runtime state, not part of HTML serialization.
+              // Attach the canvas as a DOM node — interpolating its serialized
+              // form into a template string parses back as an empty canvas.
+              const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+              const wrap=document.createElement('div');
+              wrap.className='pdf-preview-wrap';
+              wrap.innerHTML=`<div class="pdf-preview-header"><span>📄 ${esc(fname)}</span><a href="${dlUrl}" download="${esc(fname)}" class="pdf-download-link">${t('pdf_download')} ↓</a></div><div class="pdf-preview-body"></div>`;
+              wrap.querySelector('.pdf-preview-body').appendChild(canvas);
+              el.replaceWith(wrap);
+            });
+          });
+        })
+        .catch(()=>{
+          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+          el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
+        });
+    };
+    if(_pdfjsReady){
+      loadPdf(window._pdfjsLib);
+    } else if(!_pdfjsLoading){
+      _pdfjsLoading=true;
+      const s=document.createElement('script');
+      s.src='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.min.mjs';
+      s.type='module';
+      s.textContent=`
+        import * as pdfjsLib from '${s.src}';
+        pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdn.jsdelivr.net/npm/pdfjs-dist@4.9.155/build/pdf.worker.min.mjs';
+        window._pdfjsLib=pdfjsLib;
+        window._pdfjsReady=true;
+        window.dispatchEvent(new Event('pdfjs-ready'));
+      `;
+      document.head.appendChild(s);
+      window.addEventListener('pdfjs-ready',()=>{ _pdfjsReady=true; loadPdf(window._pdfjsLib); },{once:true});
+      setTimeout(()=>{
+        if(!_pdfjsReady){
+          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+          if(el.parentNode){
+            el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
+          }
+        }
+      },15000);
+    } else {
+      window.addEventListener('pdfjs-ready',()=>{ loadPdf(window._pdfjsLib); },{once:true});
+    }
+  });
+}
+
+// ── HTML inline preview (sandboxed iframe) ─────────────────────────────────
+function loadHtmlInline(){
+  const HTML_MAX_SIZE=256*1024; // 256 KB cap for inline HTML preview
+  document.querySelectorAll('.html-preview-load:not([data-loaded])').forEach(el=>{
+    el.setAttribute('data-loaded','1');
+    const path=el.dataset.path;
+    const fname=path.split('/').pop()||path;
+    fetch('api/media?path='+encodeURIComponent(path))
+      .then(r=>{if(!r.ok) throw new Error(r.status); return r.text();})
+      .then(html=>{
+        if(html.length>HTML_MAX_SIZE){
+          const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+          el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_too_large')}</span></div>`;
+          return;
+        }
+        const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+        const safeHtml=html.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        el.outerHTML=`<div class="html-preview-wrap"><div class="html-preview-header"><span>${t('html_sandbox_label')}</span><a href="${dlUrl}" download="${esc(fname)}" class="html-open-link">${t('html_open_full')} ↗</a></div><iframe srcdoc="${safeHtml}" sandbox="allow-scripts" class="html-preview-iframe" loading="lazy"></iframe></div>`;
+      })
+      .catch(()=>{
+        const dlUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
+        el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_error')}</span></div>`;
+      });
+  });
+}
+
 function renderMermaidBlocks(){
   const blocks=document.querySelectorAll('.mermaid-block:not([data-rendered])');
   if(!blocks.length) return;
@@ -3409,30 +3882,44 @@ function renderKatexBlocks(){
 
 function _thinkingMarkup(text=''){
   const clean=_sanitizeThinkingDisplayText(text);
+  const openClass=isSimplifiedToolCalling()?'':' open';
   return (clean&&String(clean).trim())
-    ? `<div class="thinking-card open"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(clean).trim())}</pre></div></div>`
+    ? `<div class="thinking-card${openClass}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(clean).trim())}</pre></div></div>`
     : `<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
 }
 function finalizeThinkingCard(){
-  const row=$('thinkingRow');
-  if(!row) return;
-  // If the row is still just a spinner (no thinking content rendered),
-  // remove it entirely — it's the initial waiting dots.
-  const hasContent=row.querySelector('.thinking-card') || row.classList.contains('thinking-card-row');
-  if(!hasContent && row.getAttribute('data-thinking-active')==='1'){
-    row.remove();
+  if(!isSimplifiedToolCalling()){
+    const row=$('thinkingRow');
+    if(!row) return;
+    // If the row is still just a spinner (no thinking content rendered),
+    // remove it entirely — it's the initial waiting dots.
+    const hasContent=row.querySelector('.thinking-card') || row.classList.contains('thinking-card-row');
+    if(!hasContent && row.getAttribute('data-thinking-active')==='1'){
+      row.remove();
+      return;
+    }
+    // If the user was watching (scroll pinned = at bottom), scroll the thinking
+    // card back to the top so the completed response is visible underneath without
+    // the thinking content blocking it. If they scrolled up to read history,
+    // leave their scroll position intact.
+    if(_scrollPinned){
+      const body=row&&row.querySelector('.thinking-card-body');
+      if(body) body.scrollTop=0;
+    }
+    row.removeAttribute('id');
+    row.removeAttribute('data-thinking-active');
     return;
   }
-  // If the user was watching (scroll pinned = at bottom), scroll the thinking
-  // card back to the top so the completed response is visible underneath without
-  // the thinking content blocking it. If they scrolled up to read history,
-  // leave their scroll position intact.
-  if(_scrollPinned){
-    const body=row&&row.querySelector('.thinking-card-body');
-    if(body) body.scrollTop=0;
+  const turn=$('liveAssistantTurn');
+  const group=turn&&turn.querySelector('.tool-call-group[data-live-tool-call-group="1"]');
+  if(group){
+    group.classList.add('tool-call-group-collapsed');
+    const summary=group.querySelector('.tool-call-group-summary');
+    if(summary) summary.setAttribute('aria-expanded','false');
+    const active=group.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
+    if(active) active.removeAttribute('data-thinking-active');
+    _syncToolCallGroupSummary(group);
   }
-  row.removeAttribute('id');
-  row.removeAttribute('data-thinking-active');
 }
 function appendThinking(text=''){
   // Guard: ignore if session was switched during an async SSE stream.
@@ -3447,40 +3934,81 @@ function appendThinking(text=''){
     $('msgInner').appendChild(turn);
   }
   const blocks=_assistantTurnBlocks(turn);
-  let row=$('thinkingRow');
+  if(!blocks) return;
+  if(!isSimplifiedToolCalling()){
+    let row=$('thinkingRow');
+    if(!row){
+      row=document.createElement('div');
+      row.className='assistant-segment';
+      row.id='thinkingRow';
+      row.setAttribute('data-thinking-active','1');
+      // Insert after whichever comes last: a live assistant segment or a tool card.
+      // This mirrors appendLiveToolCard's anchor logic so thinking always appears
+      // in the right position in the interleaved sequence.
+      // Also skip #toolRunningRow (dots) — thinking should go before dots, not after.
+      const allChildren=Array.from(blocks.children);
+      const anchor=allChildren.filter(el=>
+        el.id!=='toolRunningRow' &&
+        el.matches('[data-live-assistant="1"],.tool-card-row')
+      ).pop();
+      if(anchor) anchor.insertAdjacentElement('afterend', row);
+      else blocks.appendChild(row);
+    }
+    row.className=(text&&String(text).trim())?'assistant-segment thinking-card-row':'assistant-segment';
+    row.innerHTML=_thinkingMarkup(text);
+    scrollIfPinned();
+    // Auto-scroll the thinking card body to bottom if the user is watching
+    // (scroll pinned). If the user scrolled up to read history, leave it alone.
+    if(_scrollPinned){
+      const body=row&&row.querySelector('.thinking-card-body');
+      if(body) body.scrollTop=body.scrollHeight;
+    }
+    return;
+  }
+  if(!String(text||'').trim()){
+    scrollIfPinned();
+    return;
+  }
+  const allChildren=Array.from(blocks.children);
+  const anchor=allChildren.filter(el=>
+    el.id!=='toolRunningRow' &&
+    el.matches('[data-live-assistant="1"],.tool-call-group,.tool-card-row,.agent-activity-thinking')
+  ).pop();
+  const group=ensureActivityGroup(blocks,{live:true,collapsed:true,anchor});
+  const body=group&&group.querySelector('.tool-call-group-body');
+  if(!body) return;
+  let row=body.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
   if(!row){
     row=document.createElement('div');
-    row.className='assistant-segment';
-    row.id='thinkingRow';
+    row.className='agent-activity-thinking';
     row.setAttribute('data-thinking-active','1');
-    // Insert after whichever comes last: a live assistant segment or a tool card.
-    // This mirrors appendLiveToolCard's anchor logic so thinking always appears
-    // in the right position in the interleaved sequence.
-    // Also skip #toolRunningRow (dots) — thinking should go before dots, not after.
-    const allChildren=Array.from(blocks.children);
-    const anchor=allChildren.filter(el=>
-      el.id!=='toolRunningRow' &&
-      el.matches('[data-live-assistant="1"],.tool-card-row')
-    ).pop();
-    if(anchor) anchor.insertAdjacentElement('afterend', row);
-    else blocks.appendChild(row);
+    body.insertBefore(row, body.firstChild);
   }
-  row.className=(text&&String(text).trim())?'assistant-segment thinking-card-row':'assistant-segment';
   row.innerHTML=_thinkingMarkup(text);
+  _syncToolCallGroupSummary(group);
   scrollIfPinned();
-  // Auto-scroll the thinking card body to bottom if the user is watching
-  // (scroll pinned). If the user scrolled up to read history, leave it alone.
   if(_scrollPinned){
-    const body=row&&row.querySelector('.thinking-card-body');
-    if(body) body.scrollTop=body.scrollHeight;
+    const thinkingBody=row&&row.querySelector('.thinking-card-body');
+    if(thinkingBody) thinkingBody.scrollTop=thinkingBody.scrollHeight;
   }
 }
 function updateThinking(text=''){appendThinking(text);}
 function removeThinking(){
-  const el=$('thinkingRow');
-  if(el) el.remove();
+  if(!isSimplifiedToolCalling()){
+    const el=$('thinkingRow');
+    if(el) el.remove();
+    const turn=$('liveAssistantTurn');
+    const blocks=_assistantTurnBlocks(turn);
+    if(turn&&blocks&&!blocks.children.length) turn.remove();
+    return;
+  }
   const turn=$('liveAssistantTurn');
   const blocks=_assistantTurnBlocks(turn);
+  if(blocks) blocks.querySelectorAll('.agent-activity-thinking').forEach(el=>el.remove());
+  if(blocks) blocks.querySelectorAll('.tool-call-group[data-agent-activity-group="1"]').forEach(group=>{
+    _syncToolCallGroupSummary(group);
+    if(!group.querySelector('.tool-card-row,.agent-activity-thinking')) group.remove();
+  });
   if(turn&&blocks&&!blocks.children.length) turn.remove();
 }
 
@@ -3859,6 +4387,19 @@ function renderTray(){
       chip.className='attach-chip attach-chip--image';
       chip.dataset.blobUrl=blobUrl;
       chip.innerHTML=`<img class="attach-thumb" src="${esc(blobUrl)}" alt="${esc(f.name)}" title="${esc(f.name)}"><button title="${t('remove_title')}">${li('x',12)}</button>`;
+    } else if(_SVG_EXTS.test(f.name)){
+      const blobUrl=URL.createObjectURL(f);
+      chip.className='attach-chip attach-chip--image';
+      chip.dataset.blobUrl=blobUrl;
+      chip.innerHTML=`<img class="attach-thumb attach-thumb--svg" src="${esc(blobUrl)}" alt="${esc(f.name)}" title="${esc(f.name)}"><button title="${t('remove_title')}">${li('x',12)}</button>`;
+    } else if(_AUDIO_EXTS.test(f.name)){
+      const blobUrl=URL.createObjectURL(f);
+      chip.className='attach-chip attach-chip--audio';
+      chip.innerHTML=`<span class="attach-chip-media">🎵 ${esc(f.name)}</span><audio controls preload="metadata" src="${esc(blobUrl)}"></audio><button title="${t('remove_title')}">${li('x',12)}</button>`;
+    } else if(_VIDEO_EXTS.test(f.name)){
+      const blobUrl=URL.createObjectURL(f);
+      chip.className='attach-chip attach-chip--video';
+      chip.innerHTML=`<span class="attach-chip-media">🎬 ${esc(f.name)}</span><video controls preload="metadata" src="${esc(blobUrl)}"></video><button title="${t('remove_title')}">${li('x',12)}</button>`;
     } else {
       chip.innerHTML=`${li('paperclip',12)} ${esc(f.name)} <button title="${t('remove_title')}">${li('x',12)}</button>`;
     }
@@ -3892,7 +4433,7 @@ async function uploadPendingFiles(){
         names.push({name: data.dest, path: data.dest, extracted: data.extracted});
         if(typeof loadDir==='function')loadDir(S.currentDir||'.');
       }else{
-        names.push({name: data.filename, path: data.path});
+        names.push({name: data.filename, path: data.path, mime: data.mime, size: data.size, is_image: !!data.is_image});
       }
     }catch(e){failures++;setStatus(`\u274c ${t('upload_failed')}${f.name} \u2014 ${e.message}`);}
     bar.style.width=`${Math.round((i+1)/total*100)}%`;

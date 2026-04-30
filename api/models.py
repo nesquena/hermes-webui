@@ -316,6 +316,7 @@ class Session:
                  pending_user_message: str=None,
                  pending_attachments=None,
                  pending_started_at=None,
+                 context_messages=None,
                  compression_anchor_visible_idx=None,
                  compression_anchor_message_key=None,
                  **kwargs):
@@ -339,6 +340,7 @@ class Session:
         self.pending_user_message = pending_user_message
         self.pending_attachments = pending_attachments or []
         self.pending_started_at = pending_started_at
+        self.context_messages = context_messages if isinstance(context_messages, list) else []
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
         self._metadata_message_count = None

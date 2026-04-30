@@ -636,12 +636,119 @@ async function _ensureAllMessagesLoaded() {
 let _allSessions = [];  // cached for search filter
 let _renamingSid = null;  // session_id currently being renamed (blocks list re-renders)
 let _showArchived = false;  // toggle to show archived sessions
+let _sessionSelectMode = false;  // batch select mode
+const _selectedSessions = new Set();  // selected session IDs
 let _allProjects = [];  // cached project list
 let _activeProject = null;  // project_id filter (null = show all)
 let _showAllProfiles = false;  // false = filter to active profile only
 let _sessionActionMenu = null;
 let _sessionActionAnchor = null;
 let _sessionActionSessionId = null;
+
+// ── Batch select mode ──
+function toggleSessionSelectMode(){
+  _sessionSelectMode=!_sessionSelectMode;
+  _selectedSessions.clear();
+  renderSessionListFromCache();
+}
+function exitSessionSelectMode(){
+  _sessionSelectMode=false;
+  _selectedSessions.clear();
+  const bar=$('batchActionBar');
+  if(bar) bar.style.display='none';
+  renderSessionListFromCache();
+}
+function toggleSessionSelect(sid){
+  if(_selectedSessions.has(sid)) _selectedSessions.delete(sid);
+  else _selectedSessions.add(sid);
+  _updateBatchActionBar();
+  const cb=document.querySelector('.session-select-cb[data-sid="'+sid+'"]');
+  const item=cb?cb.closest('.session-item'):null;
+  if(item){item.classList.toggle('selected',_selectedSessions.has(sid));if(cb)cb.checked=_selectedSessions.has(sid);}
+}
+function selectAllSessions(){
+  _selectedSessions.clear();
+  document.querySelectorAll('.session-select-cb').forEach(cb=>{
+    const sid=cb.dataset.sid;
+    if(sid){_selectedSessions.add(sid);cb.checked=true;const item=cb.closest('.session-item');if(item)item.classList.add('selected');}
+  });
+  _updateBatchActionBar();
+}
+function deselectAllSessions(){
+  _selectedSessions.clear();
+  document.querySelectorAll('.session-select-cb').forEach(cb=>{cb.checked=false;const item=cb.closest('.session-item');if(item)item.classList.remove('selected');});
+  _updateBatchActionBar();
+}
+function _updateBatchActionBar(){
+  const bar=$('batchActionBar');if(!bar)return;
+  const count=_selectedSessions.size;
+  bar.style.display=count>0?'':'none';
+  const badge=bar.querySelector('.batch-count');
+  if(badge) badge.textContent=t('session_selected_count',count);
+}
+function _renderBatchActionBar(){
+  const bar=$('batchActionBar');if(!bar)return;
+  bar.innerHTML='';bar.style.display=_selectedSessions.size>0?'':'none';
+  const countBadge=document.createElement('span');countBadge.className='batch-count';
+  countBadge.textContent=t('session_selected_count',_selectedSessions.size);bar.appendChild(countBadge);
+  // Archive
+  const archiveBtn=document.createElement('button');archiveBtn.className='batch-action-btn';
+  archiveBtn.textContent=t('session_batch_archive');
+  archiveBtn.onclick=async()=>{
+    const ids=[..._selectedSessions];
+    const ok=await showConfirmDialog({message:t('session_batch_archive_confirm',ids.length),confirmLabel:t('session_batch_archive'),danger:true});
+    if(!ok)return;
+    try{await Promise.all(ids.map(sid=>api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:sid,archived:true})})));
+      showToast(t('session_archived'));exitSessionSelectMode();await renderSessionList();
+    }catch(e){showToast('Archive failed: '+(e.message||e));}
+  };bar.appendChild(archiveBtn);
+  // Move
+  const moveBtn=document.createElement('button');moveBtn.className='batch-action-btn';
+  moveBtn.textContent=t('session_batch_move');
+  moveBtn.onclick=()=>{_showBatchProjectPicker();};bar.appendChild(moveBtn);
+  // Delete
+  const deleteBtn=document.createElement('button');deleteBtn.className='batch-action-btn batch-action-btn-danger';
+  deleteBtn.textContent=t('session_batch_delete');
+  deleteBtn.onclick=async()=>{
+    const ids=[..._selectedSessions];
+    const ok=await showConfirmDialog({message:t('session_batch_delete_confirm',ids.length),confirmLabel:t('delete_title'),danger:true});
+    if(!ok)return;
+    try{await Promise.all(ids.map(sid=>api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})})));
+      if(S.session&&ids.includes(S.session.session_id)){
+        S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
+        const remaining=await api('/api/sessions');
+        if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
+        else{$('msgInner').innerHTML='';$('emptyState').style.display='';}
+      }
+      showToast(t('session_delete')+' ('+ids.length+')');exitSessionSelectMode();await renderSessionList();
+    }catch(e){showToast('Delete failed: '+(e.message||e));}
+  };bar.appendChild(deleteBtn);
+}
+function _showBatchProjectPicker(){
+  const ids=[..._selectedSessions];if(!ids.length)return;
+  document.querySelectorAll('.project-picker').forEach(p=>p.remove());
+  const picker=document.createElement('div');picker.className='project-picker';
+  const none=document.createElement('div');none.className='project-picker-item';none.textContent='No project';
+  none.onclick=async()=>{picker.remove();
+    try{await Promise.all(ids.map(sid=>api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:sid,project_id:null})})));
+      showToast('Removed from project');exitSessionSelectMode();await renderSessionList();
+    }catch(e){showToast('Move failed: '+(e.message||e));}
+  };picker.appendChild(none);
+  for(const p of(_allProjects||[])){
+    const item=document.createElement('div');item.className='project-picker-item';
+    if(p.color){const dot=document.createElement('span');dot.className='color-dot';
+      dot.style.cssText='width:6px;height:6px;border-radius:50%;background:'+p.color+';flex-shrink:0;';item.appendChild(dot);}
+    const name=document.createElement('span');name.textContent=p.name;item.appendChild(name);
+    item.onclick=async()=>{picker.remove();
+      try{await Promise.all(ids.map(sid=>api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:sid,project_id:p.project_id})})));
+        showToast('Moved to '+p.name);exitSessionSelectMode();await renderSessionList();
+      }catch(e){showToast('Move failed: '+(e.message||e));}
+    };picker.appendChild(item);
+  }
+  document.body.appendChild(picker);picker.style.cssText='position:fixed;bottom:60px;left:50%;transform:translateX(-50%);z-index:999;';
+  const close=(e)=>{if(!picker.contains(e.target)){picker.remove();document.removeEventListener('click',close);}};
+  setTimeout(()=>document.addEventListener('click',close),0);
+}
 
 function closeSessionActionMenu(){
   if(_sessionActionMenu){
@@ -943,6 +1050,10 @@ function startGatewaySSE(){
       }catch(e){ /* ignore parse errors */ }
     });
     _gatewaySSE.onerror = () => {
+      if(_gatewaySSE){
+        _gatewaySSE.close();
+        _gatewaySSE = null;
+      }
       void probeGatewaySSEStatus();
     };
   }catch(e){
@@ -1121,6 +1232,24 @@ function renderSessionListFromCache(){
   const sessions=_showArchived?projectFiltered:projectFiltered.filter(s=>!s.archived);
   const archivedCount=projectFiltered.filter(s=>s.archived).length;
   const list=$('sessionList');list.innerHTML='';
+  // Batch select bar (when in select mode)
+  if(_sessionSelectMode){
+    const selectBar=document.createElement('div');selectBar.className='session-select-bar';
+    const exitBtn=document.createElement('button');exitBtn.className='batch-exit-btn';
+    exitBtn.textContent='\u2715';exitBtn.title='Exit select mode';
+    exitBtn.onclick=(e)=>{e.stopPropagation();exitSessionSelectMode();};
+    selectBar.appendChild(exitBtn);
+    const selectAllBtn=document.createElement('button');selectAllBtn.className='batch-select-all-btn';
+    selectAllBtn.textContent=t('session_select_all');
+    selectAllBtn.onclick=(e)=>{e.stopPropagation();selectAllSessions();};
+    selectBar.appendChild(selectAllBtn);
+    list.appendChild(selectBar);
+  }
+  // Ensure batch action bar exists in DOM
+  let batchBar=$('batchActionBar');
+  if(!batchBar){batchBar=document.createElement('div');batchBar.id='batchActionBar';batchBar.className='batch-action-bar';document.body.appendChild(batchBar);}
+  if(_sessionSelectMode&&_selectedSessions.size>0){batchBar.style.display='';_renderBatchActionBar();}
+  else{batchBar.style.display='none';}
   // Project filter bar (only when projects exist)
   if(_allProjects.length>0){
     const bar=document.createElement('div');
@@ -1242,7 +1371,13 @@ function renderSessionListFromCache(){
     wrapper.appendChild(body);
     list.appendChild(wrapper);
   }
-  // ── Render session items (extracted for group body use) ──
+  // Select mode toggle button (only when NOT in select mode)
+  if(!_sessionSelectMode){
+    const toggleBtn=document.createElement('div');toggleBtn.className='session-select-toggle';
+    toggleBtn.textContent=t('session_select_mode');
+    toggleBtn.onclick=(e)=>{e.stopPropagation();toggleSessionSelectMode();};
+    list.appendChild(toggleBtn);
+  }
   // Note: declared after the groups loop but available via function hoisting.
   function _renderOneSession(s, isPinnedGroup=false){
     const el=document.createElement('div');
@@ -1259,6 +1394,17 @@ function renderSessionListFromCache(){
     // Guard: system prompt content must never surface as a visible session title
     if(cleanTitle.startsWith('[SYSTEM:')){
       cleanTitle='Session';
+    }
+    // Checkbox for batch select mode
+    if(_sessionSelectMode){
+      const cbWrapper=document.createElement('label');cbWrapper.className='session-select-cb-wrapper';
+      const cb=document.createElement('input');cb.type='checkbox';cb.className='session-select-cb';
+      cb.dataset.sid=s.session_id;cb.checked=_selectedSessions.has(s.session_id);
+      cb.onchange=(e)=>{e.stopPropagation();toggleSessionSelect(s.session_id);};
+      cb.onclick=(e)=>{e.stopPropagation();};
+      cbWrapper.appendChild(cb);
+      el.classList.toggle('selected',_selectedSessions.has(s.session_id));
+      el.appendChild(cbWrapper);
     }
     const sessionText=document.createElement('div');
     sessionText.className='session-text';
@@ -1424,6 +1570,7 @@ function renderSessionListFromCache(){
       if(e.pointerType==='mouse' && e.button!==0) return;  // ignore right/middle click
       if(_renamingSid) return;
       if(actions.contains(e.target)) return;
+      if(_sessionSelectMode){e.stopPropagation();toggleSessionSelect(s.session_id);return;}
       const now=Date.now();
       if(now-_lastTapTime<350){
         // Double-tap: rename
@@ -1726,3 +1873,8 @@ async function _confirmDeleteProject(proj){
   await renderSessionList();
   showToast('Project deleted');
 }
+
+// Global Escape handler for batch select mode
+document.addEventListener('keydown',(e)=>{
+  if(e.key==='Escape'&&_sessionSelectMode) exitSessionSelectMode();
+});

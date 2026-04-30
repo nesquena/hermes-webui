@@ -2,6 +2,50 @@
 
 ## [Unreleased]
 
+### Fixed
+
+## [v0.50.240] — 2026-04-30
+
+### Added
+- **Compact tool activity mode (`simplified_tool_calling`)** — new setting (default on) groups tool calls and thinking traces into a single collapsed "Activity" disclosure card per assistant turn instead of showing every step as a separate visible row. Keeps long agent runs readable while keeping full transparency a click away. Also adds a **Calm Console** theme (`calm`) with earth/slate palette and serif assistant prose. (`api/config.py`, `static/ui.js`, `static/panels.js`, `static/boot.js`, `static/style.css`, `DESIGN.md`) @Michaelyklam — PR #1282
+- **PDF first-page preview** — `MEDIA:` links to `.pdf` files now lazy-load a canvas preview of page 1 via PDF.js CDN (4 MB cap, download fallback). **HTML sandbox iframe** — `.html`/`.htm` files render inline in a sandboxed `<iframe srcdoc>` with `allow-scripts` only (256 KB cap). 10 new i18n keys × 7 locales. (`static/ui.js`, `static/style.css`, `static/i18n.js`) @bergeouss — PR #1280, closes #480 #482
+- **Inline Excalidraw diagram preview** — `.excalidraw` files render as a pure-SVG diagram inline (no external deps; supports rectangles, ellipses, diamonds, text, lines, arrows, freehand; 512 KB cap). (`static/ui.js`, `static/i18n.js`) @bergeouss — PR #1279, closes #479
+- **Inline CSV table rendering** — fenced `csv` blocks and `MEDIA:` CSV files render as scrollable HTML tables with auto-separator detection (comma/semicolon/tab) and quote stripping. (`static/ui.js`, `static/i18n.js`) @bergeouss — PR #1277, closes #485
+- **Inline SVG, audio, and video rendering** — SVG files render as `<img>`, audio files as `<audio controls>`, video files as `<video controls>`. File attachment previews in the composer also get inline display. (`static/ui.js`, `static/i18n.js`) @bergeouss — PR #1276, closes #481
+- **Batch session select mode** — a new select-mode toggle in the session list lets users choose multiple sessions and perform bulk Archive, Delete, or Move to Project actions. 11 new i18n keys × 7 locales. (`static/sessions.js`, `static/i18n.js`) @bergeouss — PR #1275, closes #568
+- **Collapsible skill category headers** — clicking a category header in the Skills panel collapses or expands its contents without a full re-render; collapsed state persists across filter cycles. (`static/panels.js`, `static/style.css`) @bergeouss — PR #1281
+- **`providers.only_configured` setting** — opt-in config flag that restricts the model picker to providers explicitly configured in `config.yaml`. Default false (existing behavior unchanged). (`api/config.py`) @KingBoyAndGirl — PR #1268
+- **OpenCode Go model catalog updated** — adds 7 new models: Kimi K2.6, DeepSeek V4 Pro/Flash, MiMo V2.5/Pro, Qwen3.6/3.5 Plus. (`api/config.py`) @nesquena-hermes — PR #1284, closes #1269
+
+### Fixed
+- **Profile `TERMINAL_CWD` no longer causes TypeError** — `_build_agent_thread_env()` merges all thread-local env keys into one dict before passing to `_set_thread_env()`, so a `terminal.cwd` entry in `config.yaml` can no longer conflict with the per-session workspace path. (`api/streaming.py`) @hi-friday — PR #1266
+- **Service worker no longer caches subpath API routes** — the SW cache-bypass regex now matches `/api/*` under any mount prefix (e.g. `/hermes/api/*`), fixing stale session lists when running behind a subpath reverse proxy. (`static/sw.js`) @Michaelyklam — PR #1278
+- **SSE client disconnect leaks resolved** — `TimeoutError` and `OSError` are now treated as normal disconnects; `QuietHTTPServer` suppresses them silently. Server backlog raised to 64 and handler threads daemonized. Session list renders before saved-session restore so a client-side boot error can no longer leave the sidebar empty. (`api/routes.py`, `server.py`, `static/boot.js`, `static/sessions.js`) @KayZz69 — PR #1267
+- **i18n: Korean and Chinese MCP keys corrected, missing locale keys added** — 23 Korean MCP strings that had English text replaced with correct Korean; 23 Chinese (zh) strings that had Spanish text replaced with Chinese; 41 missing keys added to zh-Hant; 229 missing keys added to de. (`static/i18n.js`) @bergeouss — PR #1274, closes #1273
+
+## [v0.50.239] — 2026-04-29
+
+### Fixed
+- **h4–h6 markdown headings now render correctly** — `renderMd()` heading replacers are now applied longest-first (`######` before `#####` before `####` before `###`…), fixing the regression where h4–h6 headings were emitted as literal `#` text. CSS adds correct font sizes and `color:var(--muted)` for h6. (`static/ui.js`, `static/style.css`) @the-own-lab — Closes #1258
+
+## [v0.50.238] — 2026-04-29
+
+### Added
+- **Portuguese (pt-BR) locale** — full i18n coverage for `pt` locale across all UI panels (chat, sessions, commands, settings, cron, workspace, profiles, skills). (`static/i18n.js`) @fecolinhares — Closes #1242
+
+### Fixed
+- **Compaction preserves visible prompts** — WebUI now keeps model-facing compacted context separately from the visible transcript, so automatic context compaction no longer replaces earlier user prompts in the scrollback. (`api/models.py`, `api/streaming.py`, `api/routes.py`) @franksong2702 — Closes #1217
+- **MiniMax China provider visible in model picker** — `MINIMAX_CN_API_KEY` now maps to the `minimax-cn` provider instead of being collapsed into global `minimax`; WebUI includes a static MiniMax (China) model catalog/display label so `providers.minimax-cn: {}` can render a populated picker group. (`api/config.py`, `api/providers.py`) @franksong2702 — Closes #1236
+- **Terminal resize and collapse controls restored** — restores the collapse/expand dock markup and controlled height CSS variable lost during the v0.50.237 batch integration, and reinstates regression coverage for terminal resizing and collapsed-state behavior. (`static/index.html`, `static/style.css`, `static/terminal.js`, `tests/test_embedded_workspace_terminal.py`) @franksong2702
+- **GET `/api/mcp/servers` returned 404** — the route was placed after `handle_get()`'s `return False` sentinel; moved inside the function before the 404 return. (`api/routes.py`) @KingBoyAndGirl — Closes #1251
+- **MCP Servers UI showed Korean labels in English locale** — 26 i18n keys in the English locale block (`en`) were accidentally set to Korean translations from PR #538; replaced with correct English text. (`static/i18n.js`) @bergeouss — Closes #1254
+- **Live model fetch for custom providers** — when `provider=custom`, the live-model endpoint now reads `model.base_url` from config and fetches `/v1/models` from the user's custom OpenAI-compat endpoint. (`api/routes.py`) @KingBoyAndGirl — Closes #1247
+- **Profile terminal env applied in WebUI sessions** — `api/terminal.py` now loads the active profile's env overlay before spawning the PTY shell. (`api/terminal.py`) @dso2ng — Closes #1245
+- **SSRF: custom provider `base_url` trusted** — `_is_ssrf_blocked()` now whitelists user-configured custom provider base URLs, preventing false SSRF blocks for legitimate private-network endpoints. (`api/routes.py`) @KingBoyAndGirl — Closes #1244
+- **SESSION_AGENT_CACHE LRU limit** — unbounded dict replaced with `functools.lru_cache` (cap 256); prevents memory growth in long-running servers with many sessions. (`api/config.py`) @happy5318 — Closes #1250
+- **Native image uploads as multimodal inputs** — image attachments uploaded to the workspace are now forwarded to vision-capable models as OpenAI-style `image_url` data-URL parts instead of text paths. Magic-byte validation rejects non-image files; workspace path validation uses `.resolve()` + `.relative_to()` (symlink-safe); 20 MiB per-image cap. (`api/streaming.py`, `api/routes.py`, `api/upload.py`, `static/ui.js`) @yzp12138 — Closes #1229
+- **`@provider:model` hint preserved when hint matches active provider** — `_resolve_compatible_session_model()` was stripping the `@provider:` prefix when the hint matched the active provider, causing duplicate model IDs from different providers to snap back to the wrong provider on the next render. The hint is now returned unchanged so `resolve_model_provider()` can route correctly. (`api/routes.py`) @nesquena-hermes — Closes #1253
+
 ## [v0.50.237] — 2026-04-29
 
 ### Added

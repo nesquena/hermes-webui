@@ -536,6 +536,7 @@ _PROVIDER_DISPLAY = {
     "kimi-coding": "Kimi / Moonshot",
     "deepseek": "DeepSeek",
     "minimax": "MiniMax",
+    "minimax-cn": "MiniMax (China)",
     "google": "Google",
     "meta-llama": "Meta Llama",
     "huggingface": "HuggingFace",
@@ -581,6 +582,8 @@ _PROVIDER_ALIASES = {
     "claude": "anthropic",
     "claude-code": "anthropic",
     "deep-seek": "deepseek",
+    "minimax-china": "minimax-cn",
+    "minimax_cn": "minimax-cn",
     "opencode": "opencode-zen",
     "grok": "xai",
     "x-ai": "xai",
@@ -688,6 +691,12 @@ _PROVIDER_MODELS = {
         {"id": "MiniMax-M2.5-highspeed", "label": "MiniMax M2.5 Highspeed"},
         {"id": "MiniMax-M2.1", "label": "MiniMax M2.1"},
     ],
+    "minimax-cn": [
+        {"id": "MiniMax-M2.7", "label": "MiniMax M2.7"},
+        {"id": "MiniMax-M2.5", "label": "MiniMax M2.5"},
+        {"id": "MiniMax-M2.1", "label": "MiniMax M2.1"},
+        {"id": "MiniMax-M2", "label": "MiniMax M2"},
+    ],
     # GitHub Copilot — model IDs served via the Copilot API
     "copilot": [
         {"id": "gpt-5.5", "label": "GPT-5.5"},
@@ -739,13 +748,20 @@ _PROVIDER_MODELS = {
     ],
     # OpenCode Go — flat-rate models via opencode.ai/go ($10/month)
     "opencode-go": [
-        {"id": "glm-5.1", "label": "GLM-5.1"},
-        {"id": "glm-5", "label": "GLM-5"},
-        {"id": "kimi-k2.5", "label": "Kimi K2.5"},
-        {"id": "mimo-v2-pro", "label": "MiMo V2 Pro"},
-        {"id": "mimo-v2-omni", "label": "MiMo V2 Omni"},
-        {"id": "minimax-m2.7", "label": "MiniMax M2.7"},
-        {"id": "minimax-m2.5", "label": "MiniMax M2.5"},
+        {"id": "glm-5.1",          "label": "GLM-5.1"},
+        {"id": "glm-5",            "label": "GLM-5"},
+        {"id": "kimi-k2.5",        "label": "Kimi K2.5"},
+        {"id": "kimi-k2.6",        "label": "Kimi K2.6"},
+        {"id": "deepseek-v4-pro",  "label": "DeepSeek V4 Pro"},
+        {"id": "deepseek-v4-flash","label": "DeepSeek V4 Flash"},
+        {"id": "mimo-v2-pro",      "label": "MiMo V2 Pro"},
+        {"id": "mimo-v2-omni",     "label": "MiMo V2 Omni"},
+        {"id": "mimo-v2.5-pro",    "label": "MiMo V2.5 Pro"},
+        {"id": "mimo-v2.5",        "label": "MiMo V2.5"},
+        {"id": "minimax-m2.7",     "label": "MiniMax M2.7"},
+        {"id": "minimax-m2.5",     "label": "MiniMax M2.5"},
+        {"id": "qwen3.6-plus",     "label": "Qwen3.6 Plus"},
+        {"id": "qwen3.5-plus",     "label": "Qwen3.5 Plus"},
     ],
     # 'gemini' is the hermes_cli provider ID for Google AI Studio
     # Model IDs are bare — sent directly to:
@@ -1574,8 +1590,10 @@ def get_available_models() -> dict:
                 detected_providers.add("zai")
             if all_env.get("KIMI_API_KEY"):
                 detected_providers.add("kimi-coding")
-            if all_env.get("MINIMAX_API_KEY") or all_env.get("MINIMAX_CN_API_KEY"):
+            if all_env.get("MINIMAX_API_KEY"):
                 detected_providers.add("minimax")
+            if all_env.get("MINIMAX_CN_API_KEY"):
+                detected_providers.add("minimax-cn")
             if all_env.get("DEEPSEEK_API_KEY"):
                 detected_providers.add("deepseek")
             if all_env.get("XAI_API_KEY"):
@@ -1660,6 +1678,11 @@ def get_available_models() -> dict:
                 # Build set of hostnames from custom_providers config — these are
                 # user-explicitly configured endpoints and should not be blocked by SSRF.
                 _ssrf_trusted_hosts: set[str] = set()
+                # Also trust the base_url from model config (explicitly configured by user)
+                if cfg_base_url:
+                    _base_parsed = urlparse(cfg_base_url if "://" in cfg_base_url else f"http://{cfg_base_url}")
+                    if _base_parsed.hostname:
+                        _ssrf_trusted_hosts.add(_base_parsed.hostname.lower())
                 _custom_providers_cfg = cfg.get("custom_providers", [])
                 if isinstance(_custom_providers_cfg, list):
                     for _cp in _custom_providers_cfg:
@@ -1776,6 +1799,19 @@ def get_available_models() -> dict:
             )
             if not _has_unnamed:
                 detected_providers.discard("custom")
+
+        # Filter providers if providers.only_configured is set
+        providers_cfg = cfg.get("providers", {})
+        only_show_configured = providers_cfg.get("only_configured", False) if isinstance(providers_cfg, dict) else False
+        if only_show_configured:
+            configured_providers = set()
+            if active_provider:
+                configured_providers.add(active_provider)
+            cfg_providers = cfg.get("providers", {})
+            if isinstance(cfg_providers, dict):
+                configured_providers.update(cfg_providers.keys())
+            # Only show providers that are both detected and configured
+            detected_providers = detected_providers.intersection(configured_providers)
 
         # 5. Build model groups
         if detected_providers:
@@ -1978,7 +2014,12 @@ SERVER_START_TIME = time.time()
 # Agent cache: reuse AIAgent across messages in the same WebUI session so that
 # _user_turn_count survives between turns.  This mirrors the gateway's
 # _agent_cache pattern and is required for injectionFrequency: "first-turn".
-SESSION_AGENT_CACHE: dict = {}   # session_id -> (AIAgent, config_sig)
+# LRU cache with size limit to prevent memory bloat.
+# All cache operations (get, set, move_to_end, popitem) are protected by
+# SESSION_AGENT_CACHE_LOCK for thread safety in multi-threaded ASGI servers.
+import collections
+SESSION_AGENT_CACHE: collections.OrderedDict = collections.OrderedDict()  # LRU cache
+SESSION_AGENT_CACHE_MAX = 50  # Maximum cached agents (each holds full conversation history)
 SESSION_AGENT_CACHE_LOCK = threading.Lock()
 
 
@@ -2040,7 +2081,7 @@ _SETTINGS_DEFAULTS = {
     "show_cli_sessions": False,  # merge CLI sessions from state.db into the sidebar
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
     "check_for_updates": True,  # check if webui/agent repos are behind upstream
-    "theme": "dark",  # light | dark | system
+    "theme": "dark",  # light | dark | system | calm
     "skin": "default",  # accent color skin: default | ares | mono | slate | poseidon | sisyphus | charizard
     "language": "en",  # UI locale code; must match a key in static/i18n.js LOCALES
     "bot_name": os.getenv(
@@ -2049,13 +2090,14 @@ _SETTINGS_DEFAULTS = {
     "sound_enabled": False,  # play notification sound when assistant finishes
     "notifications_enabled": False,  # browser notification when tab is in background
     "show_thinking": True,  # show/hide thinking/reasoning blocks in chat view
+    "simplified_tool_calling": True,  # group tools/thinking into one quiet activity disclosure
     "sidebar_density": "compact",  # compact | detailed
     "auto_title_refresh_every": "0",  # adaptive title refresh: 0=off, 5/10/20=every N exchanges
     "busy_input_mode": "queue",  # behavior when sending while agent is running: queue | interrupt | steer
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
 }
 _SETTINGS_LEGACY_DROP_KEYS = {"assistant_language", "bubble_layout", "default_model"}
-_SETTINGS_THEME_VALUES = {"light", "dark", "system"}
+_SETTINGS_THEME_VALUES = {"light", "dark", "system", "calm"}
 _SETTINGS_SKIN_VALUES = {
     "default",
     "ares",
@@ -2164,6 +2206,7 @@ _SETTINGS_BOOL_KEYS = {
     "sound_enabled",
     "notifications_enabled",
     "show_thinking",
+    "simplified_tool_calling",
 }
 # Language codes are validated as short alphanumeric BCP-47-like tags (e.g. 'en', 'zh', 'fr')
 _SETTINGS_LANG_RE = __import__("re").compile(r"^[a-zA-Z]{2,10}(-[a-zA-Z0-9]{2,8})?$")

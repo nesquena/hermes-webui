@@ -364,8 +364,15 @@ def test_legacy_at_provider_session_model_normalizes_when_provider_hidden(monkey
     assert effective == "gpt-5.5"
 
 
-def test_active_at_provider_session_model_strips_redundant_hint(monkeypatch):
-    """@active-provider:model is an old persisted form; use the bare model now."""
+def test_active_at_provider_session_model_preserved_with_hint(monkeypatch):
+    """@active-provider:model must be preserved — stripping the prefix breaks duplicate-ID routing.
+
+    Before #1253 was fixed, this path stripped the @provider: prefix and returned
+    the bare model ID. That caused the picker to snap to the first matching provider
+    (not the explicitly selected one) on the next send, and the agent to run on the
+    wrong provider. The fix returns the full @provider:model unchanged so
+    resolve_model_provider() can route through the correct provider.
+    """
     import api.routes as routes
 
     monkeypatch.setattr(
@@ -388,8 +395,10 @@ def test_active_at_provider_session_model_strips_redundant_hint(monkeypatch):
         "@openai-codex:gpt-5.4-mini"
     )
 
-    assert changed is True
-    assert effective == "gpt-5.4-mini"
+    # Must preserve the full @provider:model so resolve_model_provider() routes
+    # through openai-codex, not through whatever provider happens to be first.
+    assert changed is False
+    assert effective == "@openai-codex:gpt-5.4-mini"
 
 
 def test_routable_non_active_at_provider_session_model_is_preserved(monkeypatch):
@@ -423,6 +432,55 @@ def test_routable_non_active_at_provider_session_model_is_preserved(monkeypatch)
 
     assert changed is False
     assert effective == "@copilot:gpt-5.4"
+
+
+def test_issue1253_duplicate_model_id_active_provider_hint_preserved(monkeypatch):
+    """@provider:model where hint matches active provider must survive _resolve_compatible_session_model.
+
+    Regression test for #1253: when two providers both expose the same bare model ID
+    (e.g. both custom:edith and openai both expose 'gpt-5.4'), the picker stores the
+    selection as @custom:gpt-5.4. On chat/start that value must be returned unchanged
+    so resolve_model_provider() routes to 'custom', not to the default provider.
+
+    Before the fix, hint_matches_active=True caused the prefix to be stripped:
+      '@custom:gpt-5.4' → ('gpt-5.4', True)
+    which then got written back to disk and sent as effective_model, snapping the
+    picker to the first (wrong) provider.
+    """
+    import api.routes as routes
+
+    monkeypatch.setattr(
+        routes,
+        "get_available_models",
+        lambda: {
+            "active_provider": "custom",
+            "default_model": "gpt-5.4",
+            "groups": [
+                {
+                    "provider": "Custom",
+                    "provider_id": "custom",
+                    "models": [{"id": "@custom:edith", "label": "Edith"}],
+                },
+                {
+                    "provider": "OpenAI Codex",
+                    "provider_id": "openai-codex",
+                    "models": [{"id": "gpt-5.4", "label": "GPT-5.4"}],
+                },
+            ],
+        },
+    )
+
+    # User selected the custom:edith model — explicit @provider:model form.
+    effective, changed = routes._resolve_compatible_session_model("@custom:edith")
+
+    # Must NOT be stripped to 'edith' — that would route to the default provider.
+    assert changed is False, (
+        f"_resolve_compatible_session_model must not strip @custom:edith "
+        f"(got effective='{effective}', changed={changed})"
+    )
+    assert effective == "@custom:edith", (
+        f"expected '@custom:edith', got '{effective}'"
+    )
 
 
 def test_stale_at_provider_model_falls_back_when_family_mismatches(monkeypatch):

@@ -37,6 +37,9 @@ global.document = { createElement: () => ({ innerHTML: '', textContent: '' }) };
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => (
   {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
+const _SVG_EXTS=/\.svg$/i;
+const _AUDIO_EXTS=/\.(mp3|ogg|wav|m4a|aac|flac|wma|opus|webm)$/i;
+const _VIDEO_EXTS=/\.(mp4|webm|mkv|mov|avi|ogv|m4v)$/i;
 
 function extractFunc(name) {
   const re = new RegExp('function\\s+' + name + '\\s*\\(');
@@ -525,3 +528,32 @@ class TestRawPreCodePreservation:
             f"<code> content inside <pre> must not be rewritten to backticks: {out!r}"
         )
         assert "After paragraph." in out and "Done." in out
+
+
+class TestHeadingLevelsH1ThroughH6:
+    """Issue #1258 — `####`, `#####`, `######` previously fell through the
+    heading pass and emitted as literal text starting with `#`.  Pin all six
+    levels so a future edit cannot silently regress h4–h6 again."""
+
+    def test_all_six_heading_levels_render(self, driver_path):
+        src = "# H1\n## H2\n### H3\n#### H4\n##### H5\n###### H6"
+        out = _render(driver_path, src)
+        assert "<h1>H1</h1>" in out, f"h1 missing: {out!r}"
+        assert "<h2>H2</h2>" in out, f"h2 missing: {out!r}"
+        assert "<h3>H3</h3>" in out, f"h3 missing: {out!r}"
+        assert "<h4>H4</h4>" in out, f"h4 missing: {out!r}"
+        assert "<h5>H5</h5>" in out, f"h5 missing: {out!r}"
+        assert "<h6>H6</h6>" in out, f"h6 missing: {out!r}"
+
+    def test_h6_does_not_partial_match_as_lower_level(self, driver_path):
+        """Replacers must run longest-first; otherwise `###### H6` could be
+        captured by the `^### ` rule and emit `<h3>### H6</h3>`."""
+        out = _render(driver_path, "###### H6")
+        assert "<h6>H6</h6>" in out, f"h6 must not be partial-matched: {out!r}"
+        assert "<h3>" not in out and "###" not in out
+
+    def test_h4_inline_markdown_still_processes(self, driver_path):
+        out = _render(driver_path, "#### **bold** in h4")
+        assert "<h4><strong>bold</strong> in h4</h4>" in out, (
+            f"inline markdown inside h4 must still render: {out!r}"
+        )

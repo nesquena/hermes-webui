@@ -24,20 +24,22 @@ from api.updates import WEBUI_VERSION
 
 class QuietHTTPServer(ThreadingHTTPServer):
     """Custom HTTP server that silently handles common network errors."""
+    daemon_threads = True
+    request_queue_size = 64
     
     def handle_error(self, request, client_address):
         """Override to suppress logging for common client disconnect errors."""
         exc_type, exc_value, _ = sys.exc_info()
         
         # Silently ignore common connection errors caused by client disconnects
-        if exc_type in (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
+        if exc_type in (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, TimeoutError):
             return
         
         # Also handle socket errors that indicate client disconnect
-        if exc_type is socket.error:
+        if issubclass(exc_type, OSError):
             # errno 54 is Connection reset by peer on macOS/BSD
             # errno 104 is Connection reset by peer on Linux
-            if exc_value.errno in (54, 104, 32):  # ECONNRESET, EPIPE
+            if getattr(exc_value, 'errno', None) in (32, 54, 104, 110):  # EPIPE, ECONNRESET, ETIMEDOUT
                 return
         
         # For other errors, use default logging

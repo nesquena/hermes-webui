@@ -39,6 +39,7 @@ _PROVIDER_ENV_VAR: dict[str, str] = {
     "kimi-coding": "KIMI_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
     "minimax": "MINIMAX_API_KEY",
+    "minimax-cn": "MINIMAX_CN_API_KEY",
     "mistralai": "MISTRAL_API_KEY",
     "x-ai": "XAI_API_KEY",
     "opencode-zen": "OPENCODE_ZEN_API_KEY",

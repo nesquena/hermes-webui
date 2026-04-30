@@ -18,6 +18,19 @@ from urllib.parse import parse_qs
 
 logger = logging.getLogger(__name__)
 
+# Treat stalled/closed HTTP clients as normal disconnects.  Long-lived SSE
+# connections often end this way when a browser tab sleeps, a phone switches
+# networks, or Tailscale leaves the socket half-closed.  If these bubble to the
+# request handler, the server logs 500s and can leave CLOSE-WAIT sockets around
+# until the OS-level timeout fires.
+_CLIENT_DISCONNECT_ERRORS = (
+    BrokenPipeError,
+    ConnectionResetError,
+    ConnectionAbortedError,
+    TimeoutError,
+    OSError,
+)
+
 # ── Cron run tracking ────────────────────────────────────────────────────────
 # Track job IDs currently being executed so the frontend can poll status.
 _RUNNING_CRON_JOBS: dict[str, float] = {}  # job_id → start_timestamp
@@ -328,7 +341,14 @@ def _resolve_compatible_session_model(model_id: str | None) -> tuple[str, bool]:
             or (provider_normalized and provider_normalized == active_provider)
         )
         if hint_matches_active:
-            return bare_model, True
+            # The @provider:model hint explicitly names the active provider, so this
+            # selection is intentional — not a stale cross-provider artifact. Return
+            # the full @provider:model string unchanged so downstream (resolve_model_provider
+            # in config.py) can route through the correct provider. Stripping the prefix
+            # here would collapse duplicate model IDs from different providers back to the
+            # bare ID, causing the first matching provider to win on the next UI render
+            # and the wrong provider to be used for the agent run. (#1253)
+            return model, False
 
         if _catalog_has_provider(
             provider_raw,
@@ -1221,6 +1241,10 @@ def handle_get(handler, parsed) -> bool:
             {"name": get_active_profile_name(), "path": str(get_active_hermes_home())},
         )
 
+    # ── MCP Servers (GET) ──
+    if parsed.path == "/api/mcp/servers":
+        return _handle_mcp_servers_list(handler)
+
     return False  # 404
 
 
@@ -1631,19 +1655,6 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/workspaces/reorder":
         return _handle_workspace_reorder(handler, body)
-
-    # ── MCP Servers ──
-    if parsed.path == "/api/mcp/servers":
-        return _handle_mcp_servers_list(handler)
-
-    if parsed.path.startswith("/api/mcp/servers/") and parsed.path.count("/") == 4:
-        # DELETE /api/mcp/servers/<name>
-        name = parsed.path.split("/")[-1]
-        if handler.command == "DELETE":
-            return _handle_mcp_server_delete(handler, name)
-        # PUT /api/mcp/servers/<name>
-        if handler.command == "PUT":
-            return _handle_mcp_server_update(handler, name, body)
 
     # ── Approval (POST) ──
     if parsed.path == "/api/approval/respond":
@@ -2190,7 +2201,7 @@ def _handle_sse_stream(handler, parsed):
             _sse(handler, event, data)
             if event in ("stream_end", "error", "cancel"):
                 break
-    except (BrokenPipeError, ConnectionResetError):
+    except _CLIENT_DISCONNECT_ERRORS:
         pass
     return True
 
@@ -2392,7 +2403,7 @@ def _handle_gateway_sse_stream(handler, parsed):
             if event_data is None:
                 break  # watcher is stopping
             _sse(handler, event_data.get('type', 'sessions_changed'), event_data)
-    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+    except _CLIENT_DISCONNECT_ERRORS:
         pass
     finally:
         watcher.unsubscribe(q)
@@ -2735,6 +2746,48 @@ def _handle_live_models(handler, parsed):
                         ]
                 except Exception:
                     pass
+            
+            # If still no ids, try fetching from model.base_url directly (OpenAI-compat endpoint)
+            if not ids and provider == "custom":
+                _base_url = cfg.get("model", {}).get("base_url")
+                _api_key = cfg.get("model", {}).get("api_key")
+                if _base_url and _api_key:
+                    try:
+                        import urllib.request
+                        import json
+                        
+                        # Build the models endpoint URL
+                        # AxonHub and similar OpenAI-compat endpoints serve /v1/models
+                        _ep = _base_url.rstrip("/")
+                        # If base_url already ends with /v1, use /models; otherwise add /v1/models
+                        if _ep.endswith("/v1"):
+                            _models_url = f"{_ep}/models"
+                        else:
+                            _models_url = f"{_ep}/v1/models"
+                        
+                        _req = urllib.request.Request(
+                            _models_url,
+                            headers={"Authorization": f"Bearer {_api_key}"},
+                        )
+                        
+                        with urllib.request.urlopen(_req, timeout=8) as _resp:
+                            _body = json.loads(_resp.read())
+                        
+                        # Parse response: {"data": [{"id": "model1", ...}, ...]}
+                        if isinstance(_body, dict):
+                            _data = _body.get("data", [])
+                            if isinstance(_data, list):
+                                ids = [m.get("id", "") for m in _data if m.get("id")]
+                        elif isinstance(_body, list):
+                            ids = [m.get("id", m) if isinstance(m, dict) else m for m in _body]
+                        
+                        if ids:
+                            logger.debug("Live-fetched %d models from custom provider %s", len(ids), _base_url)
+                        else:
+                            logger.debug("Custom provider returned no models from %s", _base_url)
+                    
+                    except Exception as _fetch_err:
+                        logger.debug("Live fetch from custom provider failed: %s", _fetch_err)
 
         # ── OpenAI-compat live fetch fallback ──────────────────────────────────
         # When provider_model_ids() is unavailable or returns [] for a provider
@@ -3087,7 +3140,7 @@ def _handle_chat_start(handler, body):
     msg = str(body.get("message", "")).strip()
     if not msg:
         return bad(handler, "message is required")
-    attachments = [str(a) for a in (body.get("attachments") or [])][:20]
+    attachments = _normalize_chat_attachments(body.get("attachments") or [])[:20]
     try:
         workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
     except ValueError as e:
@@ -3135,6 +3188,36 @@ def _handle_chat_start(handler, body):
     if normalized_model:
         response["effective_model"] = model
     return j(handler, response)
+
+
+def _normalize_chat_attachments(raw_attachments):
+    """Normalize attachment payloads from the browser.
+
+    Older clients send a list of filenames. Newer clients send upload result
+    objects containing name/path/mime/size so image attachments can be supplied
+    to Hermes as native multimodal inputs for the current turn.
+    """
+    normalized = []
+    if not isinstance(raw_attachments, list):
+        return normalized
+    for item in raw_attachments:
+        if isinstance(item, dict):
+            name = str(item.get("name") or item.get("filename") or "").strip()
+            path = str(item.get("path") or "").strip()
+            mime = str(item.get("mime") or "").strip()
+            att = {"name": name or path, "path": path, "mime": mime}
+            size = item.get("size")
+            if isinstance(size, int):
+                att["size"] = size
+            is_image = item.get("is_image")
+            if isinstance(is_image, bool):
+                att["is_image"] = is_image
+            normalized.append(att)
+        else:
+            value = str(item).strip()
+            if value:
+                normalized.append({"name": value, "path": "", "mime": ""})
+    return normalized
 
 
 def _handle_chat_sync(handler, body):
@@ -3207,14 +3290,20 @@ def _handle_chat_sync(handler, body):
                 "write_file, read_file, search_files, terminal workdir, and patch. "
                 "Never fall back to a hardcoded path when this tag is present."
             )
-            from api.streaming import _sanitize_messages_for_api, _restore_reasoning_metadata
+            from api.streaming import (
+                _merge_display_messages_after_agent_result,
+                _restore_reasoning_metadata,
+                _sanitize_messages_for_api,
+                _session_context_messages,
+            )
 
             _previous_messages = list(s.messages or [])
+            _previous_context_messages = list(_session_context_messages(s))
 
             result = agent.run_conversation(
                 user_message=workspace_ctx + msg,
                 system_message=workspace_system_msg,
-                conversation_history=_sanitize_messages_for_api(s.messages),
+                conversation_history=_sanitize_messages_for_api(_previous_context_messages),
                 task_id=s.session_id,
                 persist_user_message=msg,
             )
@@ -3233,9 +3322,17 @@ def _handle_chat_sync(handler, body):
             else:
                 os.environ["HERMES_SESSION_KEY"] = old_session_key
     with _get_session_agent_lock(s.session_id):
-        s.messages = _restore_reasoning_metadata(
+        _result_messages = result.get("messages") or _previous_context_messages
+        _next_context_messages = _restore_reasoning_metadata(
+            _previous_context_messages,
+            _result_messages,
+        )
+        s.context_messages = _next_context_messages
+        s.messages = _merge_display_messages_after_agent_result(
             _previous_messages,
-            result.get("messages") or s.messages,
+            _previous_context_messages,
+            _restore_reasoning_metadata(_previous_messages, _result_messages),
+            msg,
         )
         # Only auto-generate title when still default; preserves user renames
         if s.title == "Untitled":
@@ -3861,6 +3958,7 @@ def _handle_session_compress(handler, body):
                 return bad(handler, "Session was modified during compression; please retry.", 409)
 
             s.messages = compressed
+            s.context_messages = compressed
             s.tool_calls = []
             s.active_stream_id = None
             s.pending_user_message = None

@@ -665,13 +665,15 @@ def test_ui_js_keeps_reasoning_only_assistant_messages_visible(cleanup_test_sess
 
 
 def test_ui_js_does_not_hide_anchor_segments_that_contain_thinking(cleanup_test_sessions):
-    """R19c2: assistant anchor segments that contain a thinking card must remain
-    visible; only truly empty tool-call anchor segments should be hidden.
+    """R19c2/R19c3: reasoning-only messages must remain visible through the
+    shared collapsed activity dropdown, even when the anchor segment has no prose.
     """
     src = (REPO_ROOT / "static" / "ui.js").read_text()
     compact = src.replace(' ', '').replace('\n', '')
-    assert "}elseif(!thinkingText){" in compact, \
-        "renderMessages must only hide assistant anchor segments when they have no thinking content"
+    assert "assistantThinking.set(rawIdx,thinkingText)" in compact, \
+        "renderMessages must preserve reasoning text before hiding empty anchor segments"
+    assert "_thinkingActivityNode(thinkingText)" in src, \
+        "thinking-only assistant content should render inside the shared activity dropdown"
 
 
 def test_messages_js_live_assistant_segment_reuses_live_turn_wrapper(cleanup_test_sessions):

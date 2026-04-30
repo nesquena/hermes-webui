@@ -866,8 +866,29 @@ async function loadSkills() {
   try {
     const data = await api('/api/skills');
     _skillsData = data.skills || [];
+    // Prune collapsed state to only keep categories present in fresh data,
+    // avoiding stale keys when categories are renamed or removed server-side.
+    const liveCats = new Set(_skillsData.map(s => s.category || '(general)'));
+    for (const c of _collapsedCats) { if (!liveCats.has(c)) _collapsedCats.delete(c); }
     renderSkills(_skillsData);
   } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">Error: ${esc(e.message)}</div>`; }
+}
+
+let _collapsedCats = new Set(); // persisted collapsed state across re-renders
+
+function _toggleCatCollapse(cat) {
+  if (_collapsedCats.has(cat)) _collapsedCats.delete(cat);
+  else _collapsedCats.add(cat);
+  // Toggle DOM without full re-render
+  document.querySelectorAll('.skills-category').forEach(sec => {
+    const header = sec.querySelector('.skills-cat-header');
+    if (header && header.dataset.cat === cat) {
+      const collapsed = _collapsedCats.has(cat);
+      sec.classList.toggle('collapsed', collapsed);
+      header.querySelector('.cat-chevron').style.transform = collapsed ? '' : 'rotate(90deg)';
+      sec.querySelectorAll('.skill-item').forEach(el => el.style.display = collapsed ? 'none' : '');
+    }
+  });
 }
 
 function renderSkills(skills) {
@@ -888,12 +909,19 @@ function renderSkills(skills) {
   box.innerHTML = '';
   if (!filtered.length) { box.innerHTML = `<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('skills_no_match'))}</div>`; return; }
   for (const [cat, items] of Object.entries(cats).sort()) {
+    const collapsed = _collapsedCats.has(cat);
     const sec = document.createElement('div');
-    sec.className = 'skills-category';
-    sec.innerHTML = `<div class="skills-cat-header">${li('folder',12)} ${esc(cat)} <span style="opacity:.5">(${items.length})</span></div>`;
+    sec.className = 'skills-category' + (collapsed ? ' collapsed' : '');
+    const hdr = document.createElement('div');
+    hdr.className = 'skills-cat-header';
+    hdr.dataset.cat = cat;
+    hdr.innerHTML = `<span class="cat-chevron" style="display:inline-flex;transition:transform .15s;${collapsed ? '' : 'transform:rotate(90deg)'}">${li('chevron-right',12)}</span> ${esc(cat)} <span style="opacity:.5">(${items.length})</span>`;
+    hdr.onclick = () => _toggleCatCollapse(cat);
+    sec.appendChild(hdr);
     for (const skill of items.sort((a,b) => a.name.localeCompare(b.name))) {
       const el = document.createElement('div');
       el.className = 'skill-item';
+      el.style.display = collapsed ? 'none' : '';
       el.innerHTML = `<span class="skill-name">${esc(skill.name)}</span><span class="skill-desc">${esc(skill.description||'')}</span>`;
       el.onclick = () => openSkill(skill.name, el);
       sec.appendChild(el);
@@ -2677,6 +2705,8 @@ async function loadSettingsPanel(){
     }
     const showUsageCb=$('settingsShowTokenUsage');
     if(showUsageCb){showUsageCb.checked=!!settings.show_token_usage;showUsageCb.addEventListener('change',_markSettingsDirty,{once:false});}
+    const simplifiedToolCb=$('settingsSimplifiedToolCalling');
+    if(simplifiedToolCb){simplifiedToolCb.checked=settings.simplified_tool_calling!==false;simplifiedToolCb.addEventListener('change',_markSettingsDirty,{once:false});}
     const showCliCb=$('settingsShowCliSessions');
     if(showCliCb){showCliCb.checked=!!settings.show_cli_sessions;showCliCb.addEventListener('change',_markSettingsDirty,{once:false});}
     const syncCb=$('settingsSyncInsights');
@@ -2979,6 +3009,7 @@ function _applySavedSettingsUi(saved, body, opts){
   window._soundEnabled=body.sound_enabled;
   window._notificationsEnabled=body.notifications_enabled;
   window._showThinking=body.show_thinking!==false;
+  window._simplifiedToolCalling=body.simplified_tool_calling!==false;
   window._sidebarDensity=sidebarDensity==='detailed'?'detailed':'compact';
   window._busyInputMode=body.busy_input_mode||'queue';
   window._botName=body.bot_name||'Hermes';
@@ -2999,6 +3030,7 @@ function _applySavedSettingsUi(saved, body, opts){
   _settingsHermesDefaultModelOnOpen=body.default_model||_settingsHermesDefaultModelOnOpen||'';
   // Sync window._defaultModel so newSession() uses the just-saved default without a reload (#908).
   if(body.default_model) window._defaultModel=body.default_model;
+  if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
   renderMessages();
   if(typeof syncTopbar==='function') syncTopbar();
   if(typeof renderSessionList==='function') renderSessionList();
@@ -3070,6 +3102,7 @@ async function saveSettings(andClose){
   body.skin=skin;
   body.language=language;
   body.show_token_usage=showTokenUsage;
+  body.simplified_tool_calling=!!($('settingsSimplifiedToolCalling')||{}).checked;
   body.show_cli_sessions=showCliSessions;
   body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;
   body.check_for_updates=!!($('settingsCheckUpdates')||{}).checked;
