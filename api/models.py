@@ -1025,6 +1025,9 @@ def get_cli_sessions() -> list:
                 'project_id': None,
                 'profile': profile,
                 'source_tag': _source,
+                'raw_source': row.get('raw_source'),
+                'session_source': row.get('session_source'),
+                'source_label': row.get('source_label'),
                 'is_cli_session': True,
             })
     except Exception as _cli_err:

@@ -6,6 +6,66 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
+MESSAGING_SOURCES = {
+    'discord',
+    'slack',
+    'telegram',
+    'weixin',
+}
+
+SOURCE_LABELS = {
+    'api_server': 'API',
+    'cli': 'CLI',
+    'cron': 'Cron',
+    'discord': 'Discord',
+    'slack': 'Slack',
+    'telegram': 'Telegram',
+    'tool': 'Tool',
+    'webui': 'WebUI',
+    'weixin': 'Weixin',
+}
+
+
+def normalize_agent_session_source(raw_source: str | None) -> dict:
+    """Return stable source metadata for Hermes Agent session rows.
+
+    ``sessions.source`` is an Agent-level raw value. WebUI needs a smaller,
+    durable contract so routes, SSE snapshots, and future sidebar policies do
+    not each reimplement raw-source checks.
+    """
+    raw = str(raw_source or '').strip().lower() or 'unknown'
+
+    if raw == 'webui':
+        session_source = 'webui'
+    elif raw == 'cli':
+        session_source = 'cli'
+    elif raw in MESSAGING_SOURCES:
+        session_source = 'messaging'
+    elif raw == 'cron':
+        session_source = 'cron'
+    elif raw == 'tool':
+        session_source = 'tool'
+    elif raw == 'api_server':
+        session_source = 'api'
+    else:
+        session_source = 'other'
+
+    label = SOURCE_LABELS.get(raw)
+    if not label:
+        label = raw.replace('_', ' ').title() if raw != 'unknown' else 'Agent'
+
+    return {
+        'raw_source': None if raw == 'unknown' else raw,
+        'session_source': session_source,
+        'source_label': label,
+    }
+
+
+def _with_normalized_source(row: dict) -> dict:
+    normalized = normalize_agent_session_source(row.get('source'))
+    return {**row, **normalized}
+
+
 def _optional_col(name: str, columns: set[str], fallback: str = "NULL") -> str:
     return f"s.{name}" if name in columns else f"{fallback} AS {name}"
 
@@ -211,6 +271,7 @@ def read_importable_agent_session_rows(
             params,
         )
         projected = _project_agent_session_rows([dict(row) for row in cur.fetchall()])
+        projected = [_with_normalized_source(row) for row in projected]
         if limit is None:
             return projected
         return projected[:max(0, int(limit))]

@@ -69,8 +69,8 @@ def test_all_settings_panes_have_save_button():
     )
 
     for pane_id, pane_html in panes:
-        # Providers pane doesn't need a Save button (has per-provider save)
-        if pane_id == 'settingsPaneProviders':
+        # Providers pane has per-provider controls; Appearance pane is autosave-only.
+        if pane_id in ('settingsPaneProviders', 'settingsPaneAppearance'):
             continue
         # Check if pane has any input fields (not just buttons)
         has_inputs = bool(re.search(r'<input|<select|<textarea', pane_html))

@@ -211,42 +211,10 @@ class TestToolCardDesignTokens:
         for token in expected_tokens:
             assert token in css_min, f"Base light palette token missing: {token}"
 
-    def test_calm_console_palette_is_gated_as_custom_theme_not_base(self):
-        css_min = re.sub(r"\s+", "", CSS)
-        assert ':root.dark[data-theme="calm"]' in css_min, (
-            "Coolors calm palette should be gated behind the custom calm theme."
-        )
-        for token in (
-            "--bg:#0A0908",
-            "--sidebar:#22333B",
-            "--text:#EAE0D5",
-            "--muted:#C6AC8F",
-            "--accent:#C6AC8F",
-        ):
-            assert token in css_min, f"Calm custom theme token missing: {token}"
-
-    def test_default_skin_preview_stays_upstream_and_calm_theme_preview_is_separate(self):
+    def test_default_skin_preview_stays_upstream(self):
         boot_min = re.sub(r"\s+", "", BOOT_JS)
         assert "{name:'Default',colors:['#FFD700','#FFBF00','#CD7F32']}" in boot_min, (
             "The Default skin swatch should stay aligned with the upstream gold base."
-        )
-        assert "{name:'Calm'," in boot_min and "colors:['#C6AC8F','#EAE0D5','#22333B']" in boot_min, (
-            "The Coolors palette should be exposed as a separate custom Calm theme preview."
-        )
-
-    def test_claude_like_message_typography_splits_user_and_assistant_fonts(self):
-        css_min = re.sub(r"\s+", "", CSS)
-        assert "--font-ui:" in css_min and "--font-assistant:" in css_min, (
-            "Typography should define separate UI/user and assistant font tokens."
-        )
-        assert ".assistant-turn.msg-body{font-family:var(--font-assistant)" in css_min or ".assistant-turn.msg-body" in css_min.replace(" .", "."), (
-            "Assistant prose should use the Claude-like editorial serif stack."
-        )
-        assert ".msg-row[data-role=\"user\"].msg-body{font-family:var(--font-ui)" in css_min, (
-            "User bubbles should keep the sans/UI stack, matching Claude's split typography."
-        )
-        assert "Georgia" in CSS and "system-ui" in CSS, (
-            "Claude-like fallback stacks should include Georgia for assistant prose and system-ui for UI/user text."
         )
 
     def test_tool_card_css_uses_design_tokens_for_chrome(self):

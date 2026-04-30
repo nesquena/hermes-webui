@@ -426,16 +426,18 @@ $('importFileInput').onchange=async(e)=>{
 };
 // btnRefreshFiles is now panel-icon-btn in header (see HTML)
 function clearPreview(){
+  // Restore directory breadcrumb after closing file preview
+  if(typeof renderBreadcrumb==='function') renderBreadcrumb();
   const closePanelAfter=_workspacePanelMode==='preview';
   const pa=$('previewArea');if(pa)pa.classList.remove('visible');
   const pi=$('previewImg');if(pi){pi.onerror=null;pi.src='';}
+  const pdf=$('previewPdfFrame');if(pdf)pdf.src='';
+  const html=$('previewHtmlIframe');if(html)html.src='';
   const pm=$('previewMd');if(pm)pm.innerHTML='';
   const pc=$('previewCode');if(pc)pc.textContent='';
   const pp=$('previewPathText');if(pp)pp.textContent='';
   const ft=$('fileTree');if(ft)ft.style.display='';
   _previewCurrentPath='';_previewCurrentMode='';_previewDirty=false;
-  // Restore directory breadcrumb after closing file preview
-  if(typeof renderBreadcrumb==='function') renderBreadcrumb();
   if(closePanelAfter)closeWorkspacePanel();
   else syncWorkspacePanelUI();
 }
@@ -628,7 +630,6 @@ const _THEMES=[
   {name:'Light', value:'light', colors:['#FEFCF7','#FAF7F0','#B8860B']},
   {name:'Dark', value:'dark', colors:['#0D0D1A','#141425','#FFD700']},
   {name:'System', value:'system', colors:['#FEFCF7','#0D0D1A','#B8860B']},
-  {name:'Calm', value:'calm', colors:['#C6AC8F','#EAE0D5','#22333B']},
 ];
 const _SKINS=[
   {name:'Default',  colors:['#FFD700','#FFBF00','#CD7F32']},
@@ -688,11 +689,6 @@ function _applyTheme(name){
     _systemThemeMq.addEventListener('change',_onSystemThemeChange);
     return;
   }
-  if(normalized.theme==='calm'){
-    document.documentElement.dataset.theme='calm';
-    _setResolvedTheme(true);
-    return;
-  }
   _setResolvedTheme(normalized.theme==='dark');
 }
 
@@ -711,11 +707,11 @@ function _pickTheme(name){
   _applySkin(appearance.skin);
   _syncThemePicker(appearance.theme);
   _syncSkinPicker(appearance.skin);
-  if(typeof _markSettingsDirty==='function') _markSettingsDirty();
   const hidden=$('settingsTheme');
   if(hidden) hidden.value=appearance.theme;
   const skinHidden=$('settingsSkin');
   if(skinHidden) skinHidden.value=appearance.skin;
+  if(typeof _scheduleAppearanceAutosave==='function') _scheduleAppearanceAutosave();
 }
 
 function _pickSkin(name){
@@ -726,11 +722,11 @@ function _pickSkin(name){
   _applySkin(appearance.skin);
   _syncThemePicker(appearance.theme);
   _syncSkinPicker(appearance.skin);
-  if(typeof _markSettingsDirty==='function') _markSettingsDirty();
   const hidden=$('settingsSkin');
   if(hidden) hidden.value=appearance.skin;
   const themeHidden=$('settingsTheme');
   if(themeHidden) themeHidden.value=appearance.theme;
+  if(typeof _scheduleAppearanceAutosave==='function') _scheduleAppearanceAutosave();
 }
 
 function _syncThemePicker(active){
@@ -761,9 +757,9 @@ function _pickFontSize(size){
   localStorage.setItem('hermes-font-size',size);
   _applyFontSize(size);
   _syncFontSizePicker(size);
-  if(typeof _markSettingsDirty==='function') _markSettingsDirty();
   const hidden=$('settingsFontSize');
   if(hidden) hidden.value=size;
+  if(typeof _scheduleAppearanceAutosave==='function') _scheduleAppearanceAutosave();
 }
 
 function _syncFontSizePicker(active){
@@ -839,6 +835,9 @@ function applyBotName(){
     _applyTheme(appearance.theme);
     localStorage.setItem('hermes-skin',appearance.skin);
     _applySkin(appearance.skin);
+    const fontSize=(s.font_size||localStorage.getItem('hermes-font-size')||'default');
+    localStorage.setItem('hermes-font-size',fontSize);
+    _applyFontSize(fontSize);
     if(typeof setLocale==='function'){
       const _lang=typeof resolvePreferredLocale==='function'
         ? resolvePreferredLocale(s.language, localStorage.getItem('hermes-lang'))

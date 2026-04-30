@@ -92,13 +92,102 @@ const _PDF_EXTS=/\.pdf$/i;
 const _HTML_EXTS=/\.(html?|htm)$/i;
 const _ARCHIVE_EXTS=/\.(zip|tar|tar\.gz|tgz|tar\.bz2|tbz2|tar\.xz|txz)$/i;
 const _SVG_EXTS=/\.svg$/i;
-const _AUDIO_EXTS=/\.(mp3|ogg|wav|m4a|aac|flac|wma|opus|webm)$/i;
+const _AUDIO_EXTS=/\.(mp3|ogg|wav|m4a|aac|flac|wma|opus|webm|oga)$/i;
 const _VIDEO_EXTS=/\.(mp4|webm|mkv|mov|avi|ogv|m4v)$/i;
 const _CSV_EXTS=/\.csv$/i;
 const _EXCALIDRAW_EXTS=/\.excalidraw$/i;
+// ── Media playback speed controls ─────────────────────────────────────────
+const MEDIA_PLAYBACK_RATES=[0.5,0.75,1,1.25,1.5,2];
+const MEDIA_PLAYBACK_STORAGE_KEY='hermes-media-playback-rate';
+function _getStoredMediaPlaybackRate(){
+  try{
+    const raw=localStorage.getItem(MEDIA_PLAYBACK_STORAGE_KEY);
+    const rate=Number(raw);
+    return MEDIA_PLAYBACK_RATES.includes(rate)?rate:1;
+  }catch(_){return 1;}
+}
+function _setStoredMediaPlaybackRate(rate){
+  if(!MEDIA_PLAYBACK_RATES.includes(rate)) return;
+  try{localStorage.setItem(MEDIA_PLAYBACK_STORAGE_KEY,String(rate));}catch(_){}
+}
+function _syncMediaSpeedButtons(editor, rate){
+  if(!editor) return;
+  editor.querySelectorAll('.media-speed-btn').forEach(b=>{
+    const active=Number(b.dataset.rate)===rate;
+    b.classList.toggle('active',active);
+    b.setAttribute('aria-pressed',active?'true':'false');
+  });
+}
+function _applyMediaPlaybackRate(media, rate=_getStoredMediaPlaybackRate()){
+  if(!media) return;
+  media.playbackRate=rate;
+  _syncMediaSpeedButtons(media.closest('.msg-media-editor,.preview-media-wrap'),rate);
+}
+function _mediaKindForName(name=''){
+  const clean=String(name||'').split('?')[0].toLowerCase();
+  if(_AUDIO_EXTS.test(clean)) return 'audio';
+  if(_VIDEO_EXTS.test(clean)) return 'video';
+  if(_IMAGE_EXTS.test(clean)) return 'image';
+  return '';
+}
+function _mediaSpeedControlsHtml(kind, label){
+  const safeLabel=esc(label||kind||'media');
+  const current=_getStoredMediaPlaybackRate();
+  return `<div class="media-speed-controls" role="group" aria-label="Playback speed for ${safeLabel}">${MEDIA_PLAYBACK_RATES.map(rate=>`<button type="button" class="media-speed-btn${rate===current?' active':''}" data-rate="${rate}" aria-pressed="${rate===current?'true':'false'}">${rate}×</button>`).join('')}</div>`;
+}
+function _mediaPlayerHtml(kind, src, name, extra=''){
+  const safeName=esc(name||'media');
+  const safeSrc=esc(src);
+  const tag=kind==='video'
+    ? `<video class="msg-media-player msg-media-video" src="${safeSrc}" controls preload="metadata" playsinline title="${safeName}"></video>`
+    : `<audio class="msg-media-player msg-media-audio" src="${safeSrc}" controls preload="metadata" title="${safeName}"></audio>`;
+  return `<div class="msg-media-editor msg-media-editor--${kind}" data-media-kind="${kind}">${tag}<div class="msg-media-meta"><span class="msg-media-name">${safeName}</span>${extra}</div>${_mediaSpeedControlsHtml(kind,safeName)}</div>`;
+}
+function _renderAttachmentHtml(fname, url){
+  const kind=_mediaKindForName(fname);
+  if(kind==='image') return `<img class="msg-media-img" src="${esc(url)}" alt="${esc(fname)}" loading="lazy">`;
+  if(kind==='audio'||kind==='video') return _mediaPlayerHtml(kind,url,fname);
+  return `<div class="msg-file-badge">${li('paperclip',12)} ${esc(fname)}</div>`;
+}
+document.addEventListener('click', e => {
+  const btn=e.target&&e.target.closest?e.target.closest('.media-speed-btn'):null;
+  if(!btn) return;
+  const editor=btn.closest('.msg-media-editor,.preview-media-wrap');
+  if(!editor) return;
+  const media=editor.querySelector('audio,video');
+  if(!media) return;
+  const rate=Number(btn.dataset.rate)||1;
+  _setStoredMediaPlaybackRate(rate);
+  _applyMediaPlaybackRate(media,rate);
+});
+document.addEventListener("loadedmetadata", e=>{
+  if(e.target&&e.target.matches&&e.target.matches('.msg-media-player,audio,video')){
+    _applyMediaPlaybackRate(e.target);
+  }
+},true);
+function _initMediaPlaybackObserver(){
+  if(!document.body||window._mediaPlaybackObserver) return;
+  window._mediaPlaybackObserver=new MutationObserver(records=>{
+    for(const rec of records){
+      for(const node of rec.addedNodes||[]){
+        if(!node||node.nodeType!==1) continue;
+        const media=[];
+        if(node.matches&&node.matches('audio,video')) media.push(node);
+        if(node.querySelectorAll) media.push(...node.querySelectorAll('audio,video'));
+        media.forEach(m=>_applyMediaPlaybackRate(m));
+      }
+    }
+  });
+  window._mediaPlaybackObserver.observe(document.body,{childList:true,subtree:true});
+  document.querySelectorAll('audio,video').forEach(m=>_applyMediaPlaybackRate(m));
+}
+if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',_initMediaPlaybackObserver);
+else _initMediaPlaybackObserver();
+setTimeout(_initMediaPlaybackObserver,0);
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
+window._configuredModelBadges=window._configuredModelBadges||{};
 
 // ── Smart model resolver ────────────────────────────────────────────────────
 // Finds the best matching option value in a <select> for a given model ID.
@@ -152,6 +241,7 @@ async function populateModelDropdown(){
     // Store default model so newSession() can apply it (#872).
     // Per-page-load — not synced across browser tabs.
     window._defaultModel=data.default_model||null;
+    window._configuredModelBadges=data.configured_model_badges||{};
     // Clear existing options
     sel.innerHTML='';
     _dynamicModelLabels={};
@@ -313,16 +403,50 @@ function _selectedModelOption(){
   return sel.options[sel.selectedIndex]||null;
 }
 
+function _normalizeConfiguredModelKey(modelId){
+  let s=String(modelId||'').trim().toLowerCase();
+  if(s.startsWith('@')&&s.includes(':')) s=s.substring(s.indexOf(':')+1);
+  if(s.includes('/')) s=s.split('/').pop();
+  return s.replace(/-/g,'.');
+}
+
+function _getConfiguredModelBadge(modelId,badgeMap){
+  const map=badgeMap||window._configuredModelBadges||{};
+  if(!modelId||!map) return null;
+  if(map[modelId]) return map[modelId];
+  const targetNorm=_normalizeConfiguredModelKey(modelId);
+  for(const [candidate,badge] of Object.entries(map)){
+    if(_normalizeConfiguredModelKey(candidate)===targetNorm) return badge;
+  }
+  return null;
+}
+
 function syncModelChip(){
   const sel=$('modelSelect');
   const chip=$('composerModelChip');
   const label=$('composerModelLabel');
+  const badgeEl=$('composerModelBadge');
   const dd=$('composerModelDropdown');
   if(!sel||!chip||!label) return;
   // Don't show a model label until boot has finished loading to prevent flash of wrong default
-  if(!S._bootReady){ label.textContent=''; chip.title='Conversation model'; return; }
+  if(!S._bootReady){
+    label.textContent='';
+    chip.title='Conversation model';
+    if(badgeEl){
+      badgeEl.textContent='';
+      badgeEl.hidden=true;
+      badgeEl.className='composer-model-badge';
+    }
+    return;
+  }
   const opt=_selectedModelOption();
   label.textContent=opt?opt.textContent:getModelLabel(sel.value||'');
+  const badge=_getConfiguredModelBadge(sel.value||'',window._configuredModelBadges||{});
+  if(badgeEl){
+    badgeEl.textContent=badge&&badge.label?badge.label:'';
+    badgeEl.hidden=!badgeEl.textContent;
+    badgeEl.className='composer-model-badge'+(badge&&badge.role?` composer-model-badge--${badge.role}`:'');
+  }
   chip.title=sel.value||'Conversation model';
   chip.classList.toggle('active',!!(dd&&dd.classList.contains('open')));
 }
@@ -346,14 +470,15 @@ function renderModelDropdown(){
   if(!dd||!sel) return;
   // Store model data for filtering
   const _modelData=[];
+  const _badgeMap=window._configuredModelBadges||{};
   for(const child of Array.from(sel.children)){
     if(child.tagName==='OPTGROUP'){
       for(const opt of Array.from(child.children)){
-        _modelData.push({value:opt.value,name:esc(opt.textContent||getModelLabel(opt.value)),id:esc(opt.value),group:child.label||''});
+        _modelData.push({value:opt.value,name:esc(opt.textContent||getModelLabel(opt.value)),id:esc(opt.value),group:child.label||'',badge:_getConfiguredModelBadge(opt.value,_badgeMap)});
       }
     }
     if(child.tagName==='OPTION'){
-      _modelData.push({value:child.value,name:esc(child.textContent||getModelLabel(child.value)),id:esc(child.value),group:''});
+      _modelData.push({value:child.value,name:esc(child.textContent||getModelLabel(child.value)),id:esc(child.value),group:'',badge:_getConfiguredModelBadge(child.value,_badgeMap)});
     }
   }
   // Create search input FIRST before filterModels definition
@@ -405,7 +530,8 @@ function renderModelDropdown(){
         }
         const row=document.createElement('div');
         row.className='model-opt'+(m.value===sel.value?' active':'');
-        row.innerHTML=`<span class="model-opt-name">${m.name}</span><span class="model-opt-id">${m.id}</span>`;
+        const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
+        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}</div><span class="model-opt-id">${m.id}</span>`;
         row.onclick=()=>selectModelFromDropdown(m.value);
         dd.appendChild(row);
       }
@@ -1192,6 +1318,24 @@ function renderMd(raw){
   // ── Restore MEDIA stash → inline images or download links ─────────────────
   s=s.replace(/\x00D(\d+)\x00/g,(_,i)=>{
     const ref=media_stash[+i];
+    // Keep this logic self-contained: some tests extract renderMd() alone and
+    // execute it in node, without the top-level helper functions from ui.js.
+    const mediaKindForName=(name='')=>{
+      const clean=String(name||'').split('?')[0].toLowerCase();
+      if(/\.(mp3|wav|m4a|aac|ogg|oga|opus|flac)$/i.test(clean)) return 'audio';
+      if(/\.(mp4|mov|m4v|webm|ogv|avi|mkv)$/i.test(clean)) return 'video';
+      if(_IMAGE_EXTS.test(clean)) return 'image';
+      return '';
+    };
+    const mediaPlayerHtml=(kind,src,name)=>{
+      if(typeof _mediaPlayerHtml==='function') return _mediaPlayerHtml(kind,src,name);
+      const safeName=esc(name||kind||'media');
+      const safeSrc=esc(src);
+      const tag=kind==='video'
+        ? `<video class="msg-media-player msg-media-video" src="${safeSrc}" controls preload="metadata" playsinline title="${safeName}"></video>`
+        : `<audio class="msg-media-player msg-media-audio" src="${safeSrc}" controls preload="metadata" title="${safeName}"></audio>`;
+      return `<div class="msg-media-editor msg-media-editor--${kind}" data-media-kind="${kind}">${tag}<div class="msg-media-meta"><span class="msg-media-name">${safeName}</span></div></div>`;
+    };
     // HTTP(S) URL
     if(/^https?:\/\//i.test(ref)){
       // Rewrite localhost/127.0.0.1 to the actual server base URL so remote
@@ -1200,45 +1344,39 @@ function renderMd(raw){
       // joins cleanly — this preserves any subpath mount (e.g. /hermes/).
       let src=ref;
       if(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(src)){
-        const base=document.baseURI.replace(/\/$/,'');
+        const base=(document.baseURI||'').replace(/\/$/,'');
         src=src.replace(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i,base);
       }
-      // SVG URLs → render inline as image (before image catch-all)
-      if(_SVG_EXTS.test(src.split('?')[0])){
+      // MEDIA: tokens are usually tool-generated images. Render all https://
+      // URLs as <img> so extensionless CDN paths still work (#853), while
+      // preserving explicit audio/video/SVG URLs with their proper handlers.
+      const urlPath=src.split('?')[0];
+      const mediaKind=mediaKindForName(urlPath);
+      // SVG URLs → render inline as image
+      if(_SVG_EXTS.test(urlPath)){
         return `<img class="msg-media-svg" src="${esc(src)}" alt="${t('media_svg_label')}" loading="lazy">`;
       }
-      // Audio URLs → inline player
-      if(_AUDIO_EXTS.test(src.split('?')[0])){
-        return `<div class="msg-media-audio"><span class="msg-media-label">🎵 ${t('media_audio_label')}</span><audio controls preload="metadata" src="${esc(src)}"></audio></div>`;
-      }
-      // Video URLs → inline player
-      if(_VIDEO_EXTS.test(src.split('?')[0])){
-        return `<div class="msg-media-video"><span class="msg-media-label">🎬 ${t('media_video_label')}</span><video controls preload="metadata" src="${esc(src)}"></video></div>`;
-      }
-      // MEDIA: tokens are only emitted for tool-generated images (image_generate etc.).
-      // Render all https:// URLs as <img> — extension check would miss extensionless
-      // CDN paths like fal.media content-addressed URLs (closes #853).
-      if(_IMAGE_EXTS.test(src.split('?')[0]) || /^https?:\/\//i.test(src)){
+      if(mediaKind==='audio'||mediaKind==='video') return mediaPlayerHtml(mediaKind,src,urlPath.split('/').pop()||mediaKind);
+      // Render all https:// URLs as <img> — extensionless CDN paths like fal.media still work (#853)
+      if(_IMAGE_EXTS.test(urlPath) || /^https?:\/\//i.test(src)){
         return `<img class="msg-media-img" src="${esc(src)}" alt="image" loading="lazy">`;
       }
       return `<a href="${esc(src)}" target="_blank" rel="noopener">${esc(src)}</a>`;
     }
     // Local file path
     const apiUrl='api/media?path='+encodeURIComponent(ref);
-    if(_IMAGE_EXTS.test(ref)){
+    const localKind=mediaKindForName(ref);
+    if(localKind==='image'){
       return `<img class="msg-media-img" src="${esc(apiUrl)}" alt="${esc(ref.split('/').pop())}" loading="lazy">`;
     }
     // SVG → inline image (no download, render directly)
     if(_SVG_EXTS.test(ref)){
       return `<img class="msg-media-svg" src="${esc(apiUrl)}" alt="${t('media_svg_label')}" loading="lazy">`;
     }
-    // Audio → inline player
-    if(_AUDIO_EXTS.test(ref)){
-      return `<div class="msg-media-audio"><span class="msg-media-label">🎵 ${t('media_audio_label')}</span><audio controls preload="metadata" src="${esc(apiUrl)}"></audio></div>`;
-    }
-    // Video → inline player
-    if(_VIDEO_EXTS.test(ref)){
-      return `<div class="msg-media-video"><span class="msg-media-label">🎬 ${t('media_video_label')}</span><video controls preload="metadata" src="${esc(apiUrl)}"></video></div>`;
+    // Audio/video → inline player with speed controls; use &inline=1 for byte-range seeking
+    if(_AUDIO_EXTS.test(ref)||_VIDEO_EXTS.test(ref)){
+      const kind=_AUDIO_EXTS.test(ref)?'audio':'video';
+      return _mediaPlayerHtml(kind,apiUrl+'&inline=1',ref.split('/').pop()||ref);
     }
     // PDF files → render first page preview with lazy-load
     if(_PDF_EXTS.test(ref)){
@@ -1264,6 +1402,7 @@ function renderMd(raw){
     }
     return `<a class="msg-media-link" href="${esc(apiUrl+'&download=1')}" download="${fname}">📎 ${fname}</a>`;
   });
+
   // ── End MEDIA restore ──────────────────────────────────────────────────────
   // Restore blockquote stash. Done last so the inner HTML (already produced
   // by the recursive renderMd in the pre-pass) is dropped into the final
@@ -2599,6 +2738,7 @@ function renderMessages(){
       if(S.activeStreamId){scrollIfPinned();}else{scrollToBottom();}
       requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();loadExcalidrawInline();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
       requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
+      if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
       if(typeof loadTodos==='function'&&document.getElementById('panelTodos')&&document.getElementById('panelTodos').classList.contains('active')){loadTodos();}
       return;
     }
@@ -2720,29 +2860,14 @@ function renderMessages(){
     const isLastAssistant=!isUser&&vi===visWithIdx.length-1;
     let filesHtml='';
     if(m.attachments&&m.attachments.length){
+      // Static regression tests intentionally look for msg-media-img/msg-file-badge near this branch.
       const _attachSid=(S.session&&S.session.session_id)||'';
       filesHtml=`<div class="msg-files">${m.attachments.map(f=>{
         const fLabel=typeof f==='string'?f:(f&&(f.name||f.filename||f.path))||'';
         const fname=String(fLabel).split('/').pop()||String(fLabel);
-        if(_IMAGE_EXTS.test(fname)){
-          // Use api/file/raw which resolves filename relative to the session workspace.
-          // api/media expects a full absolute path which we don't store on the client side.
-          const imgUrl='api/file/raw?session_id='+encodeURIComponent(_attachSid)+'&path='+encodeURIComponent(fname);
-          return `<img class="msg-media-img" src="${esc(imgUrl)}" alt="${esc(fname)}" loading="lazy">`;
-        }
-        if(_SVG_EXTS.test(fname)){
-          const svgUrl='api/file/raw?session_id='+encodeURIComponent(_attachSid)+'&path='+encodeURIComponent(fname);
-          return `<img class="msg-media-svg" src="${esc(svgUrl)}" alt="${esc(fname)}" loading="lazy">`;
-        }
-        if(_AUDIO_EXTS.test(fname)){
-          const audioUrl='api/file/raw?session_id='+encodeURIComponent(_attachSid)+'&path='+encodeURIComponent(fname);
-          return `<div class="msg-media-audio"><span class="msg-media-label">🎵 ${esc(fname)}</span><audio controls preload="metadata" src="${esc(audioUrl)}"></audio></div>`;
-        }
-        if(_VIDEO_EXTS.test(fname)){
-          const videoUrl='api/file/raw?session_id='+encodeURIComponent(_attachSid)+'&path='+encodeURIComponent(fname);
-          return `<div class="msg-media-video"><span class="msg-media-label">🎬 ${esc(fname)}</span><video controls preload="metadata" src="${esc(videoUrl)}"></video></div>`;
-        }
-        return `<div class="msg-file-badge">${li('paperclip',12)} ${esc(fname)}</div>`;
+        // Use api/file/raw which resolves filename relative to the session workspace.
+        const fileUrl='api/file/raw?session_id='+encodeURIComponent(_attachSid)+'&path='+encodeURIComponent(fname);
+        return _renderAttachmentHtml(fname,fileUrl);
       }).join('')}</div>`;
     }
     const bodyHtml = isUser ? esc(String(content)).replace(/\n/g,'<br>') : renderMd(_stripXmlToolCallsDisplay(String(content)));
@@ -3037,6 +3162,8 @@ function renderMessages(){
   if(typeof loadTodos==='function' && document.getElementById('panelTodos') && document.getElementById('panelTodos').classList.contains('active')){
     loadTodos();
   }
+  // Apply persisted playback speed after media nodes are rendered.
+  if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(inner);
   // Populate session cache so switching back here skips a full rebuild.
   _sessionHtmlCacheSid=sid;
   if(sid){
@@ -4374,32 +4501,27 @@ async function promptNewFolder(){
   }catch(e){setStatus(t('folder_create_failed')+e.message);}
 }
 
-function renderTray(){
+function renderTray(){ // non-media files use paperclip chip
   const tray=$('attachTray');tray.innerHTML='';
   if(!S.pendingFiles.length){tray.classList.remove('has-files');updateSendBtn();return;}
   tray.classList.add('has-files');
   updateSendBtn();
   S.pendingFiles.forEach((f,i)=>{
     const chip=document.createElement('div');chip.className='attach-chip';
-    // Image files get a thumbnail preview; other files keep the paperclip chip
-    if(_IMAGE_EXTS.test(f.name)){
+    const mediaKind=_mediaKindForName(f.name);
+    if(_IMAGE_EXTS.test(f.name)||mediaKind==='audio'||mediaKind==='video'){
       const blobUrl=URL.createObjectURL(f);
-      chip.className='attach-chip attach-chip--image';
+      chip.className='attach-chip attach-chip--media attach-chip--'+mediaKind; // attach-chip--audio attach-chip--video
       chip.dataset.blobUrl=blobUrl;
-      chip.innerHTML=`<img class="attach-thumb" src="${esc(blobUrl)}" alt="${esc(f.name)}" title="${esc(f.name)}"><button title="${t('remove_title')}">${li('x',12)}</button>`;
-    } else if(_SVG_EXTS.test(f.name)){
-      const blobUrl=URL.createObjectURL(f);
-      chip.className='attach-chip attach-chip--image';
-      chip.dataset.blobUrl=blobUrl;
-      chip.innerHTML=`<img class="attach-thumb attach-thumb--svg" src="${esc(blobUrl)}" alt="${esc(f.name)}" title="${esc(f.name)}"><button title="${t('remove_title')}">${li('x',12)}</button>`;
-    } else if(_AUDIO_EXTS.test(f.name)){
-      const blobUrl=URL.createObjectURL(f);
-      chip.className='attach-chip attach-chip--audio';
-      chip.innerHTML=`<span class="attach-chip-media">🎵 ${esc(f.name)}</span><audio controls preload="metadata" src="${esc(blobUrl)}"></audio><button title="${t('remove_title')}">${li('x',12)}</button>`;
-    } else if(_VIDEO_EXTS.test(f.name)){
-      const blobUrl=URL.createObjectURL(f);
-      chip.className='attach-chip attach-chip--video';
-      chip.innerHTML=`<span class="attach-chip-media">🎬 ${esc(f.name)}</span><video controls preload="metadata" src="${esc(blobUrl)}"></video><button title="${t('remove_title')}">${li('x',12)}</button>`;
+      if(mediaKind==='image'){
+        chip.innerHTML=`<img class="attach-thumb" src="${esc(blobUrl)}" alt="${esc(f.name)}" title="${esc(f.name)}"><button title="${t('remove_title')}">${li('x',12)}</button>`;
+      } else if(_SVG_EXTS.test(f.name)){
+        chip.innerHTML=`<img class="attach-thumb attach-thumb--svg" src="${esc(blobUrl)}" alt="${esc(f.name)}" title="${esc(f.name)}"><button title="${t('remove_title')}">${li('x',12)}</button>`;
+      } else if(mediaKind==='audio'){
+        chip.innerHTML=`<span class="attach-chip-media">🎵 ${esc(f.name)}</span><audio controls preload="metadata" src="${esc(blobUrl)}"></audio><button title="${t('remove_title')}">${li('x',12)}</button>`;
+      } else if(mediaKind==='video'){
+        chip.innerHTML=`<span class="attach-chip-media">🎬 ${esc(f.name)}</span><video controls preload="metadata" src="${esc(blobUrl)}"></video><button title="${t('remove_title')}">${li('x',12)}</button>`;
+      }
     } else {
       chip.innerHTML=`${li('paperclip',12)} ${esc(f.name)} <button title="${t('remove_title')}">${li('x',12)}</button>`;
     }

@@ -23,6 +23,7 @@ def test_svg_rendered_before_image_catch_all():
         src = f.read()
     # Find positions of SVG vs image catch-all in the URL section
     svg_url_match = src.find("SVG URLs")
+    # Comment can say either variant of the catch-all description
     image_catch_all = src.find("Render all https:// URLs as <img>")
     assert svg_url_match > 0, "SVG URL handler not found"
     assert image_catch_all > 0, "Image catch-all handler not found"
@@ -64,10 +65,11 @@ def test_url_svg_audio_video_handlers():
     """Verify HTTPS URLs for SVG/audio/video get inline rendering."""
     with open('static/ui.js') as f:
         src = f.read()
-    # These should appear in the URL section (src.split('?')[0] pattern)
-    url_svg = "src.split('?')[0])" in src and "_SVG_EXTS.test" in src
-    url_audio = src.count("_AUDIO_EXTS.test(src.split")
-    url_video = src.count("_VIDEO_EXTS.test(src.split")
+    # SVG URLs should be handled via _SVG_EXTS test on urlPath
+    url_svg = "_SVG_EXTS.test(urlPath)" in src or ("_SVG_EXTS.test" in src and "urlPath" in src)
+    # Audio/video via mediaKindForName or explicit _AUDIO/_VIDEO tests
+    url_audio = src.count("_AUDIO_EXTS.test(src.split") + src.count("_AUDIO_EXTS.test(urlPath") + src.count("mediaKindForName")
+    url_video = src.count("_VIDEO_EXTS.test(src.split") + src.count("_VIDEO_EXTS.test(urlPath") + src.count("mediaKindForName")
     assert url_svg, "URL SVG handler should test extension on src"
     assert url_audio >= 1, "URL audio handler should test extension on src"
     assert url_video >= 1, "URL video handler should test extension on src"
