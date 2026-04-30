@@ -35,6 +35,24 @@ from api.metering import meter
 # save/restore around the entire agent run.
 _ENV_LOCK = threading.Lock()
 
+
+def _build_agent_thread_env(profile_runtime_env, workspace, session_id, profile_home):
+    """Build thread-local env for an agent run.
+
+    Profile runtime env can include TERMINAL_CWD from config.yaml or .env, but
+    WebUI runs should execute from the session workspace. Merge into one dict so
+    explicit WebUI values override profile/global values without passing duplicate
+    keyword arguments to _set_thread_env().
+    """
+    env = dict(profile_runtime_env or {})
+    env.update({
+        'TERMINAL_CWD': str(workspace),
+        'HERMES_EXEC_ASK': '1',
+        'HERMES_SESSION_KEY': session_id,
+        'HERMES_HOME': profile_home,
+    })
+    return env
+
 # Lazy import to avoid circular deps -- hermes-agent is on sys.path via api/config.py
 try:
     from run_agent import AIAgent
@@ -1419,13 +1437,13 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             _profile_home = os.environ.get('HERMES_HOME', '')
             _profile_runtime_env = {}
 
-        _set_thread_env(
-            **_profile_runtime_env,
-            TERMINAL_CWD=str(s.workspace),
-            HERMES_EXEC_ASK='1',
-            HERMES_SESSION_KEY=session_id,
-            HERMES_HOME=_profile_home,
+        _thread_env = _build_agent_thread_env(
+            _profile_runtime_env,
+            workspace=s.workspace,
+            session_id=session_id,
+            profile_home=_profile_home,
         )
+        _set_thread_env(**_thread_env)
         # Still set process-level env as fallback for tools that bypass thread-local
         # Acquire lock only for the env mutation, then release before the agent runs.
         # The finally block re-acquires to restore — keeping critical sections short

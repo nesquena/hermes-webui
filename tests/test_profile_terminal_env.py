@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 
 import yaml
@@ -53,3 +54,34 @@ def test_streaming_applies_profile_runtime_env_to_agent_run():
     assert "_profile_runtime_env" in src
     assert "old_profile_env" in src
     assert "os.environ.update(_profile_runtime_env)" in src
+
+
+def test_streaming_thread_env_workspace_overrides_profile_terminal_cwd():
+    src = Path("api/streaming.py").read_text(encoding="utf-8")
+    match = re.search(
+        r"(def _build_agent_thread_env\(.*?)\n(?=\ndef |\nclass )",
+        src,
+        re.DOTALL,
+    )
+    assert match, "_build_agent_thread_env not found in api/streaming.py"
+
+    ns: dict = {}
+    exec(compile(match.group(1), "<streaming_extract>", "exec"), ns)
+    build_env = ns["_build_agent_thread_env"]
+
+    env = build_env(
+        {
+            "TERMINAL_ENV": "local",
+            "TERMINAL_CWD": "/profile/cwd",
+            "HERMES_HOME": "/profile/home-from-env",
+        },
+        workspace="/workspace/session",
+        session_id="session-123",
+        profile_home="/profile/home",
+    )
+
+    assert env["TERMINAL_ENV"] == "local"
+    assert env["TERMINAL_CWD"] == "/workspace/session"
+    assert env["HERMES_EXEC_ASK"] == "1"
+    assert env["HERMES_SESSION_KEY"] == "session-123"
+    assert env["HERMES_HOME"] == "/profile/home"
