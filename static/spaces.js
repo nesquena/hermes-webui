@@ -213,14 +213,19 @@
   function formatRevisionDetails(details){
     if (!details || typeof details !== 'object' || Array.isArray(details)) return '';
     const unsafeParts = ['renderer', 'html', 'script', 'data', 'source', 'api_key', 'apikey', 'token', 'password', 'secret', 'cookie', 'authorization'];
+    const unsafeValuePattern = /(api[_-]?key|apikey|authorization|bearer|cookie|password|secret|token|<script|<\/script|javascript:|onerror|onload)/i;
     function keyIsSafe(key){
       const lowered = String(key || '').toLowerCase();
       return lowered && !unsafeParts.some(part => lowered.indexOf(part) >= 0);
     }
+    function textValueSummary(value){
+      const text = String(value == null ? '' : value).replace(/\s+/g, ' ').trim().slice(0, 160);
+      return text && unsafeValuePattern.test(text) ? '[REDACTED]' : text;
+    }
     function valueSummary(value){
       if (Array.isArray(value)) return value.slice(0, 5).map(valueSummary).filter(Boolean).join(', ');
       if (value && typeof value === 'object') return Object.keys(value).filter(keyIsSafe).slice(0, 5).join(', ');
-      return String(value == null ? '' : value).replace(/\s+/g, ' ').trim().slice(0, 160);
+      return textValueSummary(value);
     }
     return Object.keys(details).filter(keyIsSafe).slice(0, 6).map(function(key){
       const value = valueSummary(details[key]);

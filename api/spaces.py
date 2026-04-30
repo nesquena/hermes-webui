@@ -42,6 +42,11 @@ _OMITTED_PAYLOAD_KEYS = {
     "source",
     "token",
 }
+_SECRET_LIKE_VALUE_RE = re.compile(
+    r"\b(api[_-]?key|apikey|authorization|bearer|cookie|password|secret|token)\b",
+    re.IGNORECASE,
+)
+_EXECUTABLE_VALUE_MARKERS = ("<script", "</script", "javascript:", "onerror", "onload")
 _TRUSTED_SYSTEM_WIDGETS = {
     "chat": {"id": "system-chat", "title": "Chat"},
     "workspaces": {"id": "system-workspaces", "title": "Spaces"},
@@ -259,6 +264,17 @@ def _payload_key_is_safe(key: str) -> bool:
     return not any(part in lowered for part in _OMITTED_PAYLOAD_KEYS)
 
 
+def _payload_text_summary(value: Any, limit: int = 500) -> str:
+    text = _context_value(value, limit)
+    lowered = text.lower()
+    if text and (
+        _SECRET_LIKE_VALUE_RE.search(text)
+        or any(marker in lowered for marker in _EXECUTABLE_VALUE_MARKERS)
+    ):
+        return "[REDACTED]"
+    return text
+
+
 def _payload_summary(value: Any, depth: int = 0) -> Any:
     """Return a bounded, metadata-safe widget event payload summary.
 
@@ -280,8 +296,8 @@ def _payload_summary(value: Any, depth: int = 0) -> Any:
     if isinstance(value, list):
         return [_payload_summary(child, depth + 1) for child in value[:20]]
     if isinstance(value, (str, int, float, bool)) or value is None:
-        return _context_value(value, 500)
-    return _context_value(type(value).__name__, 80)
+        return _payload_text_summary(value, 500)
+    return _payload_text_summary(type(value).__name__, 80)
 
 
 def _event_id_is_safe(event_id: Any) -> bool:
@@ -1957,7 +1973,7 @@ def queue_widget_event(
         raise ValueError("payload must be an object")
     space = read_space(sid)
     _widget_index(space, wid)
-    prompt_preview = _context_value(prompt, 1000)
+    prompt_preview = _payload_text_summary(prompt, 1000)
     payload_summary = _payload_summary(payload or {})
     event_id = _record_event(
         sid,

@@ -130,7 +130,7 @@ global.fetch = async function(path, opts = {}) {
   }
   if (path === 'api/spaces/revisions?space_id=lab') {
     return response({ revisions: [
-      { event_id: 'rev2', event_type: 'widget.updated', space_id: 'lab', created_at: 1710000000, details: { widget_id: 'weather', fields: ['title', 'layout'], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
+      { event_id: 'rev2', event_type: 'widget.updated', space_id: 'lab', created_at: 1710000000, details: { widget_id: 'weather', fields: ['title', 'layout'], note: 'Authorization: Bearer SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET' } },
       { event_id: 'rev1', event_type: 'space.created', space_id: 'lab', created_at: 1709999900, details: { name: 'Lab <Detail>' } },
     ] });
   }
@@ -1150,6 +1150,7 @@ def test_spaces_ui_opens_space_detail_without_rendering_widget_code(driver_path)
     assert "rev2" in out["rootHtml"]
     assert "widget_id: weather" in out["rootHtml"]
     assert "fields: title, layout" in out["rootHtml"]
+    assert "note: [REDACTED]" in out["rootHtml"]
     assert "name: Lab &lt;Detail&gt;" in out["rootHtml"]
     assert 'data-capy-action="restoreRevision"' in out["rootHtml"]
     assert "Restore" in out["rootHtml"]
