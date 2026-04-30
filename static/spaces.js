@@ -248,6 +248,7 @@
         '<div class="capy-spaces-muted">'+escapeHtml(kind)+' · '+escapeHtml(widgetId)+' · '+escapeHtml(formatWidgetLayout(layout))+'</div></div>' +
         '<div class="capy-spaces-actions">' +
         '<button type="button" class="capy-spaces-btn" data-capy-action="askWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-title="'+escapeHtml(title)+'">Ask Capy</button>' +
+        '<button type="button" class="capy-spaces-btn" data-capy-action="refreshWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-title="'+escapeHtml(title)+'">Refresh</button>' +
         renderMoveButton(spaceId, widgetId, layout, -1, 0, 'Move left') +
         renderMoveButton(spaceId, widgetId, layout, 1, 0, 'Move right') +
         renderMoveButton(spaceId, widgetId, layout, 0, -1, 'Move up') +
@@ -659,6 +660,18 @@
         event_name: 'agent.prompt',
         prompt: promptText,
         payload: {source: 'widget-manager', widget_title: widgetTitle},
+      });
+      await loadSpaceWidgets(spaceId);
+      return;
+    }
+    if (action === 'refreshWidget') {
+      const widgetId = button.dataset.widgetId || '';
+      if (!spaceId || !widgetId) return;
+      await postSpacesJson('api/spaces/widget/event', {
+        space_id: spaceId,
+        widget_id: widgetId,
+        event_name: 'widget.refresh',
+        payload: {source: 'widget-manager', action: 'refresh'},
       });
       await loadSpaceWidgets(spaceId);
       return;

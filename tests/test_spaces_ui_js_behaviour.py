@@ -384,6 +384,11 @@ async function click(action, dataset) {
     await window.loadCapySpaces();
     await window.loadSpaceWidgets('lab');
     await click('askWidget', { spaceId: 'lab', widgetId: 'weather', widgetTitle: '<Weather>' });
+  } else if (scenario === 'refreshWidget') {
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    beforeHtml = root.innerHTML;
+    await click('refreshWidget', { spaceId: 'lab', widgetId: 'weather', widgetTitle: '<Weather>' });
   } else if (scenario === 'createSpace') {
     await window.loadCapySpaces();
     await click('saveSpace', {});
@@ -724,6 +729,26 @@ def test_spaces_ui_ask_widget_fails_closed_without_shared_prompt(driver_path):
     out = _run_spaces_scenario(driver_path, "askWidgetNoPrompt")
 
     assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
+
+
+def test_spaces_ui_refresh_widget_queues_metadata_only_refresh_event(driver_path):
+    out = _run_spaces_scenario(driver_path, "refreshWidget")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/event")
+
+    assert "Refresh" in out["beforeHtml"]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {
+        "space_id": "lab",
+        "widget_id": "weather",
+        "event_name": "widget.refresh",
+        "payload": {"source": "widget-manager", "action": "refresh"},
+    }
+    assert out["dialogs"] == []
+    assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
 
 
 def test_spaces_ui_create_space_posts_to_create_and_refreshes_spaces(driver_path):
