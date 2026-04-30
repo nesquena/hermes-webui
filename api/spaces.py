@@ -1522,6 +1522,32 @@ def disable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = 
     }
 
 
+def enable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = "") -> dict[str, Any]:
+    """Re-enable a widget from safe recovery without exposing or executing its source."""
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    wid = validate_widget_id(widget_id)
+    space = read_space(space_id)
+    idx = _widget_index(space, wid)
+    widgets = list(space.get("widgets") or [])
+    widget = dict(widgets[idx])
+    recovery = widget.get("recovery") if isinstance(widget.get("recovery"), dict) else {}
+    recovery = dict(recovery)
+    recovery["disabled"] = False
+    recovery["disabled_reason"] = ""
+    widget["recovery"] = recovery
+    widgets[idx] = widget
+    space["widgets"] = widgets
+    detail_reason = _context_value(reason or "enabled from recovery", 300)
+    saved = _write_manifest(space, "widget.recovery_enabled", {"widget_id": wid, "reason": detail_reason})
+    return {
+        "disabled": False,
+        "space_id": saved["space_id"],
+        "widget_id": wid,
+        "revision_event_id": saved["revision_event_id"],
+    }
+
+
 def queue_widget_event(
     space_id: str,
     widget_id: str,
