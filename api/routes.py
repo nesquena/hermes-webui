@@ -95,10 +95,28 @@ def _cron_output_content_window(text: str, limit: int = _CRON_OUTPUT_CONTENT_LIM
 def _run_cron_tracked(job):
     """Wrapper that tracks running state around cron.scheduler.run_job."""
     from cron.scheduler import run_job  # import here — runs inside a worker thread
+    from cron.jobs import mark_job_run, save_job_output
+
+    job_id = job.get("id", "")
     try:
-        run_job(job)
+        success, output, final_response, error = run_job(job)
+        save_job_output(job_id, output)
+
+        # Match the scheduled cron path: an apparently successful run with no
+        # final response should not leave the job looking healthy.
+        if success and not final_response:
+            success = False
+            error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
+
+        mark_job_run(job_id, success, error)
+    except Exception as e:
+        logger.exception("Manual cron run failed for job %s", job_id)
+        try:
+            mark_job_run(job_id, False, str(e))
+        except Exception:
+            logger.debug("Failed to mark manual cron run failure for %s", job_id)
     finally:
-        _mark_cron_done(job.get("id", ""))
+        _mark_cron_done(job_id)
 
 _PROVIDER_ALIASES = {
     "claude": "anthropic",
