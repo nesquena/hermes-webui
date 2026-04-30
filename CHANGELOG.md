@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Fixed
+- **Stop/Cancel during streaming no longer wipes the user's typed message (data-loss bug)** — When a user clicked Stop while the agent was streaming, `cancel_stream()` cleared `pending_user_message` before the streaming thread had merged the user turn into `s.messages`, persisting a session with neither the pending field nor a corresponding message. The user's typed text was permanently lost from the session JSON, not just the in-memory client copy. Now `cancel_stream()` synthesizes a user turn into `s.messages` from `pending_user_message` (with attachments preserved) when the most recent user message isn't already that turn — guards against double-append by content-matching against the last user message. (`api/streaming.py`, `tests/test_issue1298_cancel_and_activity.py`) — fixes #1298 (issue 2)
+- **Activity panel no longer auto-collapses when new tool/thinking events arrive** — Both `ensureActivityGroup()` (which re-creates the group with `tool-call-group-collapsed` on every destroy/recreate) and `finalizeThinkingCard()` (which force-adds the collapsed class on every tool boundary) ignored the user's manual expand. Tracks the user's last explicit toggle on the live activity group in a per-turn singleton (`_liveActivityUserExpanded`), restored on re-create and respected by the finalize path. Cleared between turns by `clearLiveToolCards()`. (`static/ui.js`, `tests/test_issue1298_cancel_and_activity.py`) — fixes #1298 (issue 1)
 
 ## [v0.50.244] — 2026-04-30
 

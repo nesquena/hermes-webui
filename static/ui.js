@@ -2530,6 +2530,30 @@ function _thinkingActivityNode(text){
   row.innerHTML=_thinkingCardHtml(text);
   return row;
 }
+// ── Activity-group user expand intent (#1298) ──────────────────────────────
+// When the user manually expands the live "Activity" dropdown during streaming,
+// preserve that intent across the destroy/recreate cycle that fires on every
+// thinking/tool event. Without this, ensureActivityGroup() re-creates the group
+// with the default collapsed state and finalizeThinkingCard() force-collapses
+// it whenever the assistant transitions from thinking → tool → thinking, so
+// the panel snaps shut every few seconds while the user is trying to read it.
+//
+// The tracker is a singleton boolean: there is at most one live activity group
+// at a time (selector .tool-call-group[data-live-tool-call-group="1"]). It is
+// set to true when the user clicks the summary to expand, false when they
+// click to collapse, and cleared back to undefined when the live group is
+// finalized into a settled assistant turn (the live attribute is removed in
+// _convertLiveActivityGroupToSettled / when liveAssistantTurn loses its id).
+let _liveActivityUserExpanded;
+function _onLiveActivityToggle(group){
+  if(!group) return;
+  // Only track explicit user clicks on the live group, not programmatic toggles.
+  if(group.getAttribute('data-live-tool-call-group')!=='1') return;
+  _liveActivityUserExpanded = !group.classList.contains('tool-call-group-collapsed');
+}
+function _clearLiveActivityUserIntent(){
+  _liveActivityUserExpanded = undefined;
+}
 function ensureActivityGroup(inner, opts){
   opts=opts||{};
   if(!inner) return null;
@@ -2538,12 +2562,16 @@ function ensureActivityGroup(inner, opts){
   let group=inner.querySelector(selector);
   if(!group){
     group=document.createElement('div');
-    const collapsed=opts.collapsed!==false;
+    let collapsed=opts.collapsed!==false;
+    // Restore the user's explicit expand intent when recreating the live
+    // activity group within the same turn (#1298).
+    if(live && _liveActivityUserExpanded === true) collapsed=false;
+    else if(live && _liveActivityUserExpanded === false) collapsed=true;
     group.className='tool-call-group agent-activity-group'+(collapsed?' tool-call-group-collapsed':'');
     group.setAttribute('data-tool-call-group','1');
     group.setAttribute('data-agent-activity-group','1');
     if(live) group.setAttribute('data-live-tool-call-group','1');
-    group.innerHTML=`<button type="button" class="tool-call-group-summary" aria-expanded="${collapsed?'false':'true'}" onclick="const g=this.closest('.tool-call-group');const c=g.classList.toggle('tool-call-group-collapsed');this.setAttribute('aria-expanded',String(!c));"><span class="tool-call-group-chevron">${li('chevron-right',12)}</span><span class="tool-call-group-label">Activity</span><span class="tool-call-group-list">tools / thinking</span><span class="tool-call-group-count">0</span></button><div class="tool-call-group-body"></div>`;
+    group.innerHTML=`<button type="button" class="tool-call-group-summary" aria-expanded="${collapsed?'false':'true'}" onclick="const g=this.closest('.tool-call-group');const c=g.classList.toggle('tool-call-group-collapsed');this.setAttribute('aria-expanded',String(!c));if(typeof _onLiveActivityToggle==='function')_onLiveActivityToggle(g);"><span class="tool-call-group-chevron">${li('chevron-right',12)}</span><span class="tool-call-group-label">Activity</span><span class="tool-call-group-list">tools / thinking</span><span class="tool-call-group-count">0</span></button><div class="tool-call-group-body"></div>`;
     const anchor=opts.anchor||null;
     if(anchor&&anchor.parentElement===inner) anchor.insertAdjacentElement('afterend', group);
     else inner.appendChild(group);
@@ -3462,6 +3490,9 @@ function appendLiveToolCard(tc){
 function clearLiveToolCards(){
   const inner=_assistantTurnBlocks($('liveAssistantTurn'));
   if(inner) inner.querySelectorAll('.tool-call-group[data-live-tool-call-group],.tool-card-row[data-live-tid]').forEach(el=>el.remove());
+  // Reset the per-turn user expand intent so the next turn starts at the
+  // default collapsed state (#1298).
+  if(typeof _clearLiveActivityUserIntent==='function') _clearLiveActivityUserIntent();
   // Legacy #liveToolCards container cleanup — kept for safety in case any
   // leftover cards were inserted there before this refactor took effect.
   const container=$('liveToolCards');
@@ -4141,9 +4172,15 @@ function finalizeThinkingCard(){
   const turn=$('liveAssistantTurn');
   const group=turn&&turn.querySelector('.tool-call-group[data-live-tool-call-group="1"]');
   if(group){
-    group.classList.add('tool-call-group-collapsed');
-    const summary=group.querySelector('.tool-call-group-summary');
-    if(summary) summary.setAttribute('aria-expanded','false');
+    // Respect the user's explicit expand intent (#1298) — only force-collapse
+    // when the user has not manually expanded this turn's activity group, or
+    // has manually collapsed it. Otherwise the panel snaps shut whenever new
+    // activity arrives, even mid-read.
+    if(_liveActivityUserExpanded !== true){
+      group.classList.add('tool-call-group-collapsed');
+      const summary=group.querySelector('.tool-call-group-summary');
+      if(summary) summary.setAttribute('aria-expanded','false');
+    }
     const active=group.querySelector('.agent-activity-thinking[data-thinking-active="1"]');
     if(active) active.removeAttribute('data-thinking-active');
     _syncToolCallGroupSummary(group);
