@@ -113,9 +113,15 @@
     const safeSpaceId = String(spaceId || '').trim();
     if (!safeSpaceId) return;
     try {
+      let eventsData = {events: []};
+      try {
+        eventsData = await fetchSpacesJson('api/spaces/widget/events?space_id='+encodeURIComponent(safeSpaceId));
+      } catch (eventErr) {
+        eventsData = {events: []};
+      }
       const data = await fetchSpacesJson('api/spaces/widgets?space_id='+encodeURIComponent(safeSpaceId));
       root.dataset.editingWidgetId = '';
-      root.innerHTML = renderWidgetManager(safeSpaceId, data.widgets || []);
+      root.innerHTML = renderWidgetManager(safeSpaceId, data.widgets || [], eventsData.events || []);
     } catch (err) {
       root.innerHTML = '<div class="capy-spaces-card"><h3>Widget manager unavailable</h3><div class="capy-spaces-muted">'+escapeHtml(err.message||String(err))+'</div><button type="button" class="capy-spaces-btn" data-capy-action="reloadSpaces">Back to spaces</button></div>';
     }
@@ -243,7 +249,26 @@
     }
   }
 
-  function renderWidgetManager(spaceId, widgets){
+  function renderWidgetEventInbox(events){
+    const safeEvents = Array.isArray(events) ? events.slice(0, 10) : [];
+    const rows = safeEvents.length ? safeEvents.map(function(event){
+      const eventName = event && event.event_name ? String(event.event_name) : 'widget.event';
+      const widgetId = event && event.widget_id ? String(event.widget_id) : '';
+      const status = event && event.status ? String(event.status) : 'queued';
+      const details = Object.assign({}, event && event.payload_summary && typeof event.payload_summary === 'object' && !Array.isArray(event.payload_summary) ? event.payload_summary : {});
+      if (event && event.prompt_preview) details.prompt = event.prompt_preview;
+      const detailText = formatRevisionDetails(details);
+      return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(eventName)+'</strong>' +
+        '<div class="capy-spaces-muted">'+escapeHtml(widgetId)+' · '+escapeHtml(status)+'</div>' +
+        (detailText ? '<div class="capy-spaces-muted">'+escapeHtml(detailText)+'</div>' : '') +
+        '</div></div>';
+    }).join('') : '<div class="capy-spaces-muted">No queued widget events.</div>';
+    return '<div class="capy-spaces-card"><h3>Queued widget events</h3>' +
+      '<div class="capy-spaces-muted">Metadata-only event inbox. Prompts and payload summaries are redacted before display.</div>' +
+      '<div class="capy-spaces-widget-list">'+rows+'</div></div>';
+  }
+
+  function renderWidgetManager(spaceId, widgets, events){
     const widgetCards = widgets.length ? widgets.map(function(w){
       const widgetId = w.id || '';
       const title = w.title || widgetId || 'Untitled widget';
@@ -273,6 +298,7 @@
       '<h3>Widgets for '+escapeHtml(spaceId)+'</h3>' +
       '<div class="capy-spaces-muted">Safe metadata view. Generated widget code is intentionally not fetched or executed in this list.</div>' +
       '<div class="capy-spaces-widget-list">'+widgetCards+'</div>' +
+      renderWidgetEventInbox(events || []) +
       '<div class="capy-spaces-form" aria-label="Add or update widget">' +
       '<label>Widget ID<input id="capyWidgetId" type="text" autocomplete="off" placeholder="weather"></label>' +
       '<label>Title<input id="capyWidgetTitle" type="text" autocomplete="off" placeholder="Weather"></label>' +

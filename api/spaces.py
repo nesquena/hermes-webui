@@ -1955,6 +1955,60 @@ def enable_widget_for_recovery(space_id: str, widget_id: str, *, reason: str = "
     }
 
 
+def _widget_event_summary(event: dict[str, Any], sid: str, widget_id: str | None = None) -> dict[str, Any] | None:
+    event_id = str(event.get("event_id") or "")
+    if not _event_id_is_safe(event_id) or event.get("space_id") != sid:
+        return None
+    if _context_value(event.get("event_type"), 120) != "widget.event.queued":
+        return None
+    details = _payload_summary(event.get("details") or {})
+    if not isinstance(details, dict):
+        return None
+    wid = _context_value(details.get("widget_id"), 120)
+    if not wid or (widget_id and wid != widget_id):
+        return None
+    payload_summary = details.get("payload_summary") if isinstance(details.get("payload_summary"), dict) else {}
+    return {
+        "schema_version": event.get("schema_version", SCHEMA_VERSION),
+        "event_id": event_id,
+        "space_id": sid,
+        "widget_id": wid,
+        "event_name": _context_value(details.get("event_name"), 120),
+        "status": _context_value(details.get("status") or "queued", 80),
+        "prompt_preview": _payload_text_summary(details.get("prompt_preview"), 1000),
+        "payload_summary": payload_summary,
+        "created_at": event.get("created_at"),
+    }
+
+
+def list_widget_events(space_id: str, widget_id: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+    """Return newest-first metadata-only queued widget events for a space/widget."""
+    if not spaces_enabled():
+        return []
+    sid = validate_space_id(space_id)
+    space = read_space(sid)
+    wid = validate_widget_id(widget_id) if widget_id else None
+    if wid:
+        _widget_index(space, wid)
+    max_events = _clamped_int(limit, 20, 1, 100)
+    summaries: list[dict[str, Any]] = []
+    _ensure_dirs()
+    for event_path in sorted(events_dir().glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+        if len(summaries) >= max_events:
+            break
+        try:
+            event = json.loads(event_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(event, dict):
+            continue
+        summary = _widget_event_summary(event, sid, wid)
+        if summary is not None:
+            summaries.append(summary)
+    summaries.sort(key=lambda event: float(event.get("created_at") or 0), reverse=True)
+    return summaries[:max_events]
+
+
 def queue_widget_event(
     space_id: str,
     widget_id: str,

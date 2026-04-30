@@ -1028,6 +1028,22 @@ def handle_get(handler, parsed) -> bool:
         except FileNotFoundError:
             return bad(handler, "Space not found", 404)
 
+    if parsed.path == "/api/spaces/widget/events":
+        from api import spaces as capy_spaces
+        if not capy_spaces.spaces_enabled():
+            return bad(handler, "Capy Spaces is disabled", 403)
+        qs = parse_qs(parsed.query)
+        space_id = qs.get("space_id", [""])[0]
+        widget_id = qs.get("widget_id", [""])[0]
+        if not space_id:
+            return bad(handler, "Missing space_id")
+        try:
+            return j(handler, {"events": capy_spaces.list_widget_events(space_id, widget_id=widget_id or None)})
+        except ValueError as e:
+            return bad(handler, str(e))
+        except FileNotFoundError:
+            return bad(handler, "Space or widget not found", 404)
+
     if parsed.path == "/api/spaces/widget":
         from api import spaces as capy_spaces
         if not capy_spaces.spaces_enabled():

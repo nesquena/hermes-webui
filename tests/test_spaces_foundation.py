@@ -1266,6 +1266,7 @@ def test_spaces_routes_and_static_shell_are_registered():
     assert '"/api/spaces/import"' in routes_src
     assert '"/api/spaces/export"' in routes_src
     assert '"/api/spaces/revisions"' in routes_src
+    assert '"/api/spaces/widget/events"' in routes_src
     assert '"/api/spaces/revision/restore"' in routes_src
     assert '"/api/spaces/widget/patch"' in routes_src
     assert '"/api/spaces/system-widget/upsert"' in routes_src
@@ -2057,6 +2058,54 @@ def test_widget_event_route_validates_widget_and_returns_queued_metadata(monkeyp
     )
     assert handled is None
     assert status == 404
+
+
+def test_list_widget_events_and_route_return_safe_newest_first_inbox(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Event Inbox"})
+    spaces.upsert_widget(created["space_id"], {"id": "weather", "kind": "markdown", "title": "Weather"})
+    spaces.upsert_widget(created["space_id"], {"id": "notes", "kind": "markdown", "title": "Notes"})
+
+    first = spaces.queue_widget_event(
+        created["space_id"],
+        "weather",
+        "agent.prompt",
+        {"query": "forecast", "note": "token=SECRET_VALUE_DO_NOT_LEAK"},
+        prompt="Use Authorization Bearer SECRET_VALUE_DO_NOT_LEAK",
+        session_id="session-123",
+    )
+    second = spaces.queue_widget_event(
+        created["space_id"],
+        "notes",
+        "widget.refresh",
+        {"action": "refresh", "renderer": "<script>bad()</script>"},
+        session_id="session-123",
+    )
+
+    events = spaces.list_widget_events(created["space_id"])
+
+    assert [event["event_id"] for event in events] == [second["event_id"], first["event_id"]]
+    assert events[0]["widget_id"] == "notes"
+    assert events[0]["event_name"] == "widget.refresh"
+    assert events[0]["status"] == "queued"
+    assert events[1]["widget_id"] == "weather"
+    assert events[1]["payload_summary"]["query"] == "forecast"
+    assert events[1]["payload_summary"]["note"] == "[REDACTED]"
+    assert events[1]["prompt_preview"] == "[REDACTED]"
+
+    weather_events = spaces.list_widget_events(created["space_id"], widget_id="weather")
+    assert [event["event_id"] for event in weather_events] == [first["event_id"]]
+
+    handled, status, body = _route_get(f"/api/spaces/widget/events?space_id={created['space_id']}&widget_id=weather")
+    assert handled is None
+    assert status == 200
+    assert [event["event_id"] for event in body["events"]] == [first["event_id"]]
+    serialized = json.dumps(body).lower()
+    assert "secret_value_do_not_leak" not in serialized
+    assert "authorization" not in serialized
+    assert "bearer" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
 
 
 def test_recovery_disable_widget_route_marks_widget_disabled(monkeypatch, tmp_path):

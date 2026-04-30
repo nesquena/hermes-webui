@@ -104,6 +104,12 @@ global.fetch = async function(path, opts = {}) {
     const minimized = scenario === 'restoreWidget';
     return response({ widgets: [{ id: 'weather', kind: 'markdown', title: '<Weather>', layout: { x: 12, y: 3, w: 5, h: 4, minimized: minimized }, renderer: '<script>bad()</script>' }] });
   }
+  if (path === 'api/spaces/widget/events?space_id=lab') {
+    return response({ events: [
+      { event_id: 'evt-refresh', event_name: 'widget.refresh', widget_id: 'weather', status: 'queued', created_at: 1710000100, payload_summary: { action: 'refresh', note: 'Authorization: Bearer SECRET_VALUE_DO_NOT_LEAK' }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+      { event_id: 'evt-agent', event_name: 'agent.prompt', widget_id: 'weather', status: 'queued', created_at: 1710000000, prompt_preview: 'Use token SECRET_VALUE_DO_NOT_LEAK', payload_summary: { query: 'forecast' } },
+    ] });
+  }
   if (path === 'api/spaces/widget?space_id=lab&widget_id=weather') {
     return response({ widget: {
       id: 'weather',
@@ -626,6 +632,24 @@ def test_spaces_ui_lists_widgets_without_rendering_widget_code(driver_path):
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert {"path": "api/spaces/widgets?space_id=lab", "method": "GET", "body": ""} in out["calls"]
+
+
+def test_spaces_ui_widget_manager_shows_safe_queued_event_inbox(driver_path):
+    out = _run_spaces_scenario(driver_path, "list")
+
+    assert {"path": "api/spaces/widget/events?space_id=lab", "method": "GET", "body": ""} in out["calls"]
+    assert "Queued widget events" in out["rootHtml"]
+    assert "widget.refresh" in out["rootHtml"]
+    assert "agent.prompt" in out["rootHtml"]
+    assert "weather · queued" in out["rootHtml"]
+    assert "action: refresh" in out["rootHtml"]
+    assert "note: [REDACTED]" in out["rootHtml"]
+    assert "prompt: [REDACTED]" in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET_VALUE_DO_NOT_LEAK" not in out["rootHtml"]
+    assert "Bearer" not in out["rootHtml"]
 
 
 def test_spaces_ui_save_widget_posts_to_upsert_and_refreshes_widgets(driver_path):
