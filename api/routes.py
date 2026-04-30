@@ -920,6 +920,9 @@ def handle_get(handler, parsed) -> bool:
                 "pending_user_message": getattr(s, "pending_user_message", None),
                 "pending_attachments": getattr(s, "pending_attachments", []) if load_messages else [],
                 "pending_started_at": getattr(s, "pending_started_at", None),
+                "context_length": getattr(s, "context_length", 0) or 0,
+                "threshold_tokens": getattr(s, "threshold_tokens", 0) or 0,
+                "last_prompt_tokens": getattr(s, "last_prompt_tokens", 0) or 0,
             }
             # Signal to the frontend that older messages were omitted.
             # For msg_before paging, compare against the filtered set,

@@ -318,6 +318,8 @@ class Session:
                  context_messages=None,
                  compression_anchor_visible_idx=None,
                  compression_anchor_message_key=None,
+                 context_length=None, threshold_tokens=None,
+                 last_prompt_tokens=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
@@ -342,6 +344,9 @@ class Session:
         self.context_messages = context_messages if isinstance(context_messages, list) else []
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
+        self.context_length = context_length
+        self.threshold_tokens = threshold_tokens
+        self.last_prompt_tokens = last_prompt_tokens
         self._metadata_message_count = None
 
     @property
@@ -361,6 +366,7 @@ class Session:
             'personality', 'active_stream_id',
             'pending_user_message', 'pending_attachments', 'pending_started_at',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
+            'context_length', 'threshold_tokens', 'last_prompt_tokens',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         meta['messages'] = self.messages
@@ -452,6 +458,9 @@ class Session:
             'personality': self.personality,
             'compression_anchor_visible_idx': self.compression_anchor_visible_idx,
             'compression_anchor_message_key': self.compression_anchor_message_key,
+            'context_length': self.context_length,
+            'threshold_tokens': self.threshold_tokens,
+            'last_prompt_tokens': self.last_prompt_tokens,
             'active_stream_id': self.active_stream_id,
             'is_streaming': _is_streaming_session(
                 self.active_stream_id, active_stream_ids
