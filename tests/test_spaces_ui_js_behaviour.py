@@ -238,6 +238,17 @@ global.fetch = async function(path, opts = {}) {
         ],
       });
     }
+    if (body.template === 'game') {
+      return response({
+        template: 'game',
+        space: { space_id: 'game-sandbox', name: 'Game Sandbox', description: 'Safe snake/canvas starter', widget_count: 3, revision_event_id: 'rev-game' },
+        installed_widgets: [
+          { id: 'game-canvas', kind: 'canvas-game', title: 'Snake game sandbox', layout: { x: 0, y: 0, w: 16, h: 10, minimized: false }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+          { id: 'game-controls', kind: 'status', title: 'Game controls', layout: { x: 16, y: 0, w: 8, h: 5, minimized: false }, source: 'SECRET_SOURCE' },
+          { id: 'game-repair-notes', kind: 'markdown', title: 'Repair notes', layout: { x: 16, y: 5, w: 8, h: 5, minimized: false } },
+        ],
+      });
+    }
     return response({
       template: 'weather',
       space: { space_id: 'weather-demo', name: 'Weather Demo', description: 'Prague weather starter', widget_count: 1, revision_event_id: 'rev-weather' },
@@ -394,6 +405,9 @@ async function click(action, dataset) {
   } else if (scenario === 'installBigBangOnboarding') {
     await window.loadCapySpaces();
     await click('installBigBangTemplate', {});
+  } else if (scenario === 'installGameSandbox') {
+    await window.loadCapySpaces();
+    await click('installGameTemplate', {});
   } else if (scenario === 'openSpaceDetail') {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
@@ -834,6 +848,19 @@ def test_spaces_ui_install_big_bang_onboarding_posts_template_and_refreshes_with
     assert "Install Big Bang onboarding" in out["rootHtml"]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"template": "big-bang"}
+    assert out["calls"][-1]["path"] == "api/spaces"
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_install_game_sandbox_posts_template_and_refreshes_without_widget_code(driver_path):
+    out = _run_spaces_scenario(driver_path, "installGameSandbox")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/templates/install")
+
+    assert "Install game sandbox" in out["rootHtml"]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"template": "game"}
     assert out["calls"][-1]["path"] == "api/spaces"
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
