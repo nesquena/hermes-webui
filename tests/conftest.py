@@ -147,6 +147,7 @@ requires_agent_modules = pytest.mark.skipif(
 def pytest_configure(config):
     config.addinivalue_line("markers", "requires_agent: skip when hermes-agent dir is not found")
     config.addinivalue_line("markers", "requires_agent_modules: skip when hermes-agent Python modules are not importable")
+    config.addinivalue_line("markers", "integration: integration tests that require a running server")
 
 def pytest_collection_modifyitems(config, items):
     """Auto-skip agent-dependent tests when hermes-agent is not available.
@@ -155,7 +156,19 @@ def pytest_collection_modifyitems(config, items):
     test names to known categories that depend on hermes-agent modules.
     This keeps the test files clean and ensures new cron/skills tests
     get auto-skipped without manual annotation.
+    Integration tests (requiring a live server) are also skipped unless
+    -m integration is explicitly passed.
     """
+    # Integration tests: require a live server, skip unless -m integration
+    if 'integration' not in config.markers:
+        # Marker not registered yet; register it now so we can use it
+        config.addinivalue_line("markers", "integration: integration tests that require a running server")
+    if not config.getoption("-m", default=None) == "integration":
+        skip_marker = pytest.mark.skip(reason="integration test (run with -m integration to enable)")
+        for item in items:
+            if item.get_closest_marker("integration"):
+                item.add_marker(skip_marker)
+
     if AGENT_MODULES_AVAILABLE:
         return  # everything available, run all tests
 
