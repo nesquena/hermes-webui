@@ -106,6 +106,18 @@ def test_ui_renders_model_badges_from_api_payload():
         "A UI precisa de um helper de matching resiliente para religar badges mesmo quando "
         "o update do catálogo mudar prefixos/formas do model ID."
     )
+    assert "model_group_configured" in js, (
+        "renderModelDropdown() deve expor uma seção Configured no topo para destacar a "
+        "cadeia primária + fallback antes dos providers completos."
+    )
+    assert "configuredRank" in js, (
+        "A UI deve calcular uma prioridade estável (primary -> fallback 1 -> fallback N) "
+        "para renderizar os modelos configurados no topo do dropdown."
+    )
+    assert "Object.entries(_badgeMap)" in js and "_normalizeConfiguredModelKey(existing.value)" in js, (
+        "renderModelDropdown() deve sintetizar entradas para modelos configurados ausentes "
+        "do catálogo atual, senão fallbacks locais/Ollama desaparecem da seção Configured."
+    )
     # Chip-projected badge was removed in v0.50.243 (added too much width to the
     # composer chip; signal value low since the model name is right next to it).
     # Badges remain in the dropdown rows (model-opt-badge) for picker rows.

@@ -469,6 +469,18 @@ function renderModelDropdown(){
       _modelData.push({value:child.value,name:esc(child.textContent||getModelLabel(child.value)),id:esc(child.value),group:'',badge:_getConfiguredModelBadge(child.value,_badgeMap)});
     }
   }
+  const _existingConfiguredKeys=new Set(_modelData.map(existing=>_normalizeConfiguredModelKey(existing.value)));
+  for(const [modelId,badge] of Object.entries(_badgeMap)){
+    if(_existingConfiguredKeys.has(_normalizeConfiguredModelKey(modelId))) continue;
+    _modelData.push({
+      value:modelId,
+      name:esc(getModelLabel(modelId)),
+      id:esc(modelId),
+      group:'',
+      badge,
+    });
+    _existingConfiguredKeys.add(_normalizeConfiguredModelKey(modelId));
+  }
   // Create search input FIRST before filterModels definition
   const _scopeNote=document.createElement('div');
   _scopeNote.className='model-scope-note';
@@ -487,6 +499,15 @@ function renderModelDropdown(){
   _custRow.innerHTML=`<input class="model-custom-input" type="text" placeholder="${esc(t('model_custom_placeholder')||'e.g. openai/gpt-5.4')}" spellcheck="false" autocomplete="off"><button class="model-custom-btn" title="Use this model">${li('plus',12)}</button>`;
   const _ci=_custRow.querySelector('.model-custom-input');
   const _cb=_custRow.querySelector('.model-custom-btn');
+  const _configuredRank=(badge)=>{
+    if(!badge) return Number.POSITIVE_INFINITY;
+    if(badge.role==='primary') return 0;
+    if(badge.role==='fallback'){
+      const m=String(badge.label||'').match(/fallback\s+(\d+)/i);
+      return m?Number(m[1]):999;
+    }
+    return 500;
+  };
   // Filter function (defined AFTER _searchRow and _cust* are created)
   const _filterModels=(term)=>{
     term=term.trim().toLowerCase();
@@ -498,6 +519,16 @@ function renderModelDropdown(){
         found.add(m.value);
       }
     }
+    const matches=(m)=>!term||found.has(m.value);
+    const configuredModels=_modelData
+      .filter(m=>m.badge&&matches(m))
+      .sort((a,b)=>{
+        const configuredRankA=_configuredRank(a.badge);
+        const configuredRankB=_configuredRank(b.badge);
+        if(configuredRankA!==configuredRankB) return configuredRankA-configuredRankB;
+        return a.name.localeCompare(b.name);
+      });
+    const configuredIds=new Set(configuredModels.map(m=>m.value));
     // Clear and rebuild
     dd.innerHTML='';
     // Add search and custom elements first (CRITICAL: must be before models)
@@ -505,17 +536,12 @@ function renderModelDropdown(){
     dd.appendChild(_searchRow);
     dd.appendChild(_custSep);
     dd.appendChild(_custRow);
-    // Add models matching filter
-    let _lastGroup=null;
-    for(const m of _modelData){
-      if(!term||found.has(m.value)){
-        if(m.group&&m.group!==_lastGroup){
-          const heading=document.createElement('div');
-          heading.className='model-group';
-          heading.textContent=m.group;
-          dd.appendChild(heading);
-          _lastGroup=m.group;
-        }
+    if(configuredModels.length){
+      const configuredHeading=document.createElement('div');
+      configuredHeading.className='model-group';
+      configuredHeading.textContent=t('model_group_configured')||'Configured';
+      dd.appendChild(configuredHeading);
+      for(const m of configuredModels){
         const row=document.createElement('div');
         row.className='model-opt'+(m.value===sel.value?' active':'');
         const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
@@ -523,6 +549,24 @@ function renderModelDropdown(){
         row.onclick=()=>selectModelFromDropdown(m.value);
         dd.appendChild(row);
       }
+    }
+    // Add remaining models matching filter
+    let _lastGroup=null;
+    for(const m of _modelData){
+      if(configuredIds.has(m.value)||!matches(m)) continue;
+      if(m.group&&m.group!==_lastGroup){
+        const heading=document.createElement('div');
+        heading.className='model-group';
+        heading.textContent=m.group;
+        dd.appendChild(heading);
+        _lastGroup=m.group;
+      }
+      const row=document.createElement('div');
+      row.className='model-opt'+(m.value===sel.value?' active':'');
+      const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
+      row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}</div><span class="model-opt-id">${m.id}</span>`;
+      row.onclick=()=>selectModelFromDropdown(m.value);
+      dd.appendChild(row);
     }
     // Show "No results" if filtered and nothing matched
     if(term&&found.size===0){
