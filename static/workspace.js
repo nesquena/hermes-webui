@@ -66,21 +66,40 @@ async function loadDir(path){
       _restoreExpandedDirs();  // restore per-workspace expanded state on root load
     }
     S.currentDir=path||'.';
+    // Show loading indicator before the API call
+    const tree=$('fileTree');const empty=$('wsEmptyState');
+    if(tree)tree.innerHTML='<div class="file-loading"><span class="file-loading-spin"></span> Loading...</div>';
+    if(empty)empty.style.display='none';
     const data=await api(`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(path)}`);
     S.entries=data.entries||[];renderBreadcrumb();renderFileTree();
-    // Pre-fetch contents of restored expanded dirs so they render without a second click
+    // Pre-fetch contents of restored expanded dirs so they render without a second click.
+    // Only fetch paths whose top-level directory still exists in the root listing.
+    // If a path 404s, remove it from expanded state so we don't retry next time.
     // (parallelized — avoids serial waterfall when multiple dirs are expanded)
     if(!path||path==='.'){
+      const topDirs=new Set(S.entries.filter(e=>e.type==='dir').map(e=>e.name));
       const expanded=S._expandedDirs||new Set();
-      const pending=[...expanded].filter(dirPath=>!S._dirCache[dirPath]);
+      let cleaned=false;
+      const pending=[...expanded].filter(dirPath=>{
+        // Skip if the top-level component doesn't exist in the root listing
+        const topLevel=dirPath.split('/')[0];
+        if(!topDirs.has(topLevel)){expanded.delete(dirPath);cleaned=true;return false;}
+        return !S._dirCache[dirPath];
+      });
       if(pending.length){
         const results=await Promise.all(pending.map(dirPath=>
           api(`/api/list?session_id=${encodeURIComponent(S.session.session_id)}&path=${encodeURIComponent(dirPath)}`)
             .then(dc=>({dirPath,entries:dc.entries||[]}))
-            .catch(()=>({dirPath,entries:[]}))
+            .catch(()=>{
+              // Path no longer exists — remove from expanded state so it won't be retried
+              expanded.delete(dirPath);
+              cleaned=true;
+              return {dirPath,entries:[]};
+            })
         ));
         for(const {dirPath,entries} of results) S._dirCache[dirPath]=entries;
       }
+      if(cleaned&&typeof _saveExpandedDirs==='function')_saveExpandedDirs();
       if(expanded.size>0)renderFileTree();
     }
     if(typeof clearPreview==='function'){

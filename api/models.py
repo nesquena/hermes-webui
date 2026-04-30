@@ -3,6 +3,7 @@ import collections
 import json
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -281,6 +282,39 @@ def _read_metadata_json_prefix(path, max_prefix_bytes=65536):
     return None
 
 
+def _read_json_tail_fields(path, fields, tail_bytes=4096):
+    """Read the last N bytes of a session JSON file and extract specific fields.
+
+    Used by load_metadata_only to pick up fields (e.g. context_length) that
+    were written after the messages array in legacy session files.
+    Returns a dict with whatever fields were found.
+    """
+    try:
+        size = path.stat().st_size
+        read_size = min(tail_bytes, size)
+        with open(path, 'r', encoding='utf-8') as f:
+            f.seek(max(0, size - read_size))
+            tail = f.read(read_size)
+        # Find the last closing brace and extract key-value pairs
+        result = {}
+        for field in fields:
+            # Match "field_name": <value> patterns (int, null, float, string)
+            m = re.search(rf'"{re.escape(field)}"\s*:\s*(-?\d+(?:\.\d+)?|null|"[^"]*")', tail)
+            if m:
+                val = m.group(1)
+                if val == 'null':
+                    result[field] = None
+                elif val.startswith('"'):
+                    result[field] = val[1:-1]
+                elif '.' in val:
+                    result[field] = float(val)
+                else:
+                    result[field] = int(val)
+        return result
+    except Exception:
+        return {}
+
+
 def _lookup_index_message_count(session_id):
     """Return the indexed message count without loading the full session file."""
     try:
@@ -318,6 +352,8 @@ class Session:
                  context_messages=None,
                  compression_anchor_visible_idx=None,
                  compression_anchor_message_key=None,
+                 context_length=None, threshold_tokens=None,
+                 last_prompt_tokens=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
@@ -342,6 +378,9 @@ class Session:
         self.context_messages = context_messages if isinstance(context_messages, list) else []
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
+        self.context_length = context_length
+        self.threshold_tokens = threshold_tokens
+        self.last_prompt_tokens = last_prompt_tokens
         self._metadata_message_count = None
 
     @property
@@ -361,6 +400,7 @@ class Session:
             'personality', 'active_stream_id',
             'pending_user_message', 'pending_attachments', 'pending_started_at',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
+            'context_length', 'threshold_tokens', 'last_prompt_tokens',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         meta['messages'] = self.messages
@@ -403,6 +443,8 @@ class Session:
         Session JSON files have metadata fields (session_id, title, model, etc.)
         at the top level, before the large messages array. Read only up to the
         top-level "messages" field and synthesize a small metadata-only object.
+        For legacy files where context_length/threshold_tokens/last_prompt_tokens
+        were written after messages, also reads the file tail to pick those up.
         Falls back to load() for legacy or unexpected file layouts.
         """
         if not sid or not all(c in '0123456789abcdefghijklmnopqrstuvwxyz_' for c in sid):
@@ -418,6 +460,11 @@ class Session:
             needed = {'session_id', 'title', 'created_at', 'updated_at'}
             if not needed.issubset(parsed.keys()):
                 return cls.load(sid)
+            # For legacy files: if context_length etc. are missing from prefix
+            # (they were written after messages), read the file tail to find them.
+            _tail_fields = {'context_length', 'threshold_tokens', 'last_prompt_tokens'}
+            if not _tail_fields.issubset(parsed.keys()):
+                parsed.update(_read_json_tail_fields(p, _tail_fields - parsed.keys()))
             parsed['messages'] = []
             parsed['tool_calls'] = []
             session = cls(**parsed)
@@ -452,6 +499,9 @@ class Session:
             'personality': self.personality,
             'compression_anchor_visible_idx': self.compression_anchor_visible_idx,
             'compression_anchor_message_key': self.compression_anchor_message_key,
+            'context_length': self.context_length,
+            'threshold_tokens': self.threshold_tokens,
+            'last_prompt_tokens': self.last_prompt_tokens,
             'active_stream_id': self.active_stream_id,
             'is_streaming': _is_streaming_session(
                 self.active_stream_id, active_stream_ids

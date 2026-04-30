@@ -17,7 +17,7 @@ async function cancelStream(){
 let _workspacePanelMode='closed'; // 'closed' | 'browse' | 'preview'
 
 function _isCompactWorkspaceViewport(){
-  return window.matchMedia('(max-width: 900px)').matches;
+  return window.matchMedia('(max-width: 1100px)').matches;
 }
 
 function _workspacePanelEls(){
@@ -920,6 +920,17 @@ function applyBotName(){
   const saved=localStorage.getItem('hermes-webui-session');
   if(saved){
     try{
+      // Open workspace panel before loadSession so the loading indicator is visible
+      // during the (sometimes slow) session restore and initial file tree load.
+      const panelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
+        || localStorage.getItem('hermes-webui-workspace-panel')==='open';
+      if(panelPref){
+        _workspacePanelMode='browse';
+        _setWorkspacePanelMode('browse');
+        const tree=$('fileTree');const empty=$('wsEmptyState');
+        if(tree)tree.innerHTML='<div class="file-loading"><span class="file-loading-spin"></span> Loading...</div>';
+        if(empty)empty.style.display='none';
+      }
       await loadSession(saved);
       // If the restored session has no messages it is an ephemeral scratch pad —
       // treat the page as a fresh start rather than resuming a blank conversation.
@@ -944,8 +955,6 @@ function applyBotName(){
       // Restore the panel from localStorage when the session has a workspace.
       // Preference key takes priority over runtime state so that closing
       // the panel via toolbar X doesn't suppress the "keep open" setting.
-      const panelPref=localStorage.getItem('hermes-webui-workspace-panel-pref')==='open'
-        || localStorage.getItem('hermes-webui-workspace-panel')==='open';
       if(S.session&&S.session.workspace&&panelPref){
         _workspacePanelMode='browse';
       }

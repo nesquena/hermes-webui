@@ -822,7 +822,22 @@
   .suggestion:hover{background:var(--accent-bg);color:var(--text);border-color:var(--accent-bg);transform:translateX(2px);}
   /* ── Composer ── */
   .composer-wrap{padding:12px 20px 16px;background:var(--bg);flex-shrink:0;}
-  .composer-box{max-width:780px;margin:0 auto;background:linear-gradient(var(--input-bg),var(--input-bg)),var(--bg);border:1px solid var(--border2);border-radius:16px;display:flex;flex-direction:column;transition:border-color .2s,box-shadow .2s;position:relative;z-index:2;}
+  .composer-box{max-width:780px;margin:0 auto;background:linear-gradient(var(--input-bg),var(--input-bg)),var(--bg);border:1px solid var(--border2);border-radius:16px;display:flex;flex-direction:column;transition:border-color .2s,box-shadow .2s;position:relative;z-index:2;container-type:inline-size;container-name:composer;}
+  /* When the composer is narrow (sidebar + rightpanel active), collapse chip labels */
+  @container composer (max-width: 550px){
+    .composer-profile-label,.composer-workspace-label,.composer-model-label,.composer-reasoning-label,
+    .composer-profile-chevron,.composer-workspace-chevron,.composer-model-chevron,.composer-reasoning-chevron{display:none;}
+    .composer-profile-chip,.composer-workspace-chip,.composer-model-chip,.composer-reasoning-chip{padding:8px;}
+    .composer-workspace-group{max-width:none;border-radius:999px;}
+    .composer-workspace-chip{border-left:none;padding:8px;}
+  }
+  /* Very narrow composer: wrap footer so buttons don't crush textarea */
+  @container composer (max-width: 380px){
+    .composer-footer{flex-wrap:wrap;gap:6px;}
+    .composer-left{order:2;flex:1 1 100%;justify-content:center;padding-top:2px;}
+    .composer-right{order:1;flex:0 0 auto;margin-left:auto;}
+    .composer-divider{display:none;}
+  }
   .composer-box:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg);}
   .composer-wrap.drag-over .composer-box{border-color:var(--accent-text);background:var(--accent-bg);}
   .drop-hint{display:none;position:absolute;inset:0;align-items:center;justify-content:center;background:var(--accent-bg);border:2px dashed var(--accent);border-radius:14px;font-size:14px;color:var(--accent-text);pointer-events:none;z-index:10;flex-direction:column;gap:8px;}
@@ -1011,6 +1026,9 @@
   .file-tree-toggle{font-size:10px;color:var(--muted);flex-shrink:0;width:10px;text-align:center;line-height:1;}
   .file-item.file-empty{color:var(--muted);opacity:.5;font-style:italic;cursor:default;font-size:11px;}
   .file-item.file-empty:hover{background:none;color:var(--muted);}
+  .file-loading{display:flex;align-items:center;gap:8px;padding:24px 16px;color:var(--muted);font-size:12px;justify-content:center;}
+  .file-loading-spin{display:inline-block;width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:fl-spin .6s linear infinite;}
+  @keyframes fl-spin{to{transform:rotate(360deg);}}
   .preview-area{flex:1;overflow:auto;padding:14px;flex-direction:column;gap:8px;display:none;opacity:0;transition:opacity .15s;}
   .preview-area.visible{display:flex;opacity:1;}
   .preview-path{font-size:11px;color:var(--muted);padding-bottom:8px;border-bottom:1px solid var(--border);flex-shrink:0;}
@@ -1061,17 +1079,59 @@
   .mobile-files-btn{display:none!important;}
   .mobile-overlay{display:none;}
 
-  @media(min-width:901px){
+  @media(min-width:1101px){
     html[data-workspace-panel="closed"] .rightpanel{width:0 !important;opacity:0;transform:translateX(14px);border-left-color:transparent;pointer-events:none;}
     .layout.workspace-panel-collapsed .rightpanel{width:0 !important;opacity:0;transform:translateX(14px);border-left-color:transparent;pointer-events:none;}
   }
 
-  @media(max-width:900px){
+  /* ── Intermediate: rightpanel becomes overlay to protect main area ── */
+  @media(max-width:1100px) and (min-width:769px){
+    .rightpanel{position:fixed!important;right:-320px;top:0;bottom:0;
+      width:300px!important;z-index:200;transition:right .25s ease;
+      box-shadow:-4px 0 24px rgba(0,0,0,.4);display:flex!important;}
+    .rightpanel.mobile-open{right:0;}
+    .rightpanel .resize-handle{display:none;}
+    .workspace-toggle-btn,.mobile-files-btn{display:inline-flex!important;}
+    .mobile-close-btn{display:flex;}
+    .mobile-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);
+      z-index:199;-webkit-tap-highlight-color:transparent;}
+    .mobile-overlay.visible{display:block;}
+  }
+
+  /* Narrow sidebar progressively between 769-1100px to keep it visible */
+  @media(max-width:1100px) and (min-width:951px){
+    .sidebar{width:260px;}
+  }
+  @media(max-width:950px) and (min-width:769px){
+    .sidebar{width:220px;}
+  }
+
+  @media(max-width:768px){
+    /* Sidebar: slide-in overlay to prevent main area from collapsing */
+    .sidebar{position:fixed;/*left:-300px;*/top:0;bottom:0;width:280px;z-index:200;
+      transition:left .25s ease;}
+    .sidebar.mobile-open{left:0;}
+    .sidebar .resize-handle{display:none;}
+    /* Show hamburger in titlebar */
+    .app-titlebar{justify-content:space-between;}
+    .app-titlebar-hamburger,.app-titlebar-spacer{display:flex;}
+    .app-titlebar-inner{flex:1 1 auto;}
+    /* Overlay backdrop */
+    .mobile-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);
+      z-index:199;-webkit-tap-highlight-color:transparent;}
+    .mobile-overlay.visible{display:block;}
+    /* Hide side panels inline, use overlays instead */
     .rightpanel{display:none}
     .workspace-toggle-btn,.mobile-files-btn{display:inline-flex!important;}
     .mobile-close-btn{display:flex;}
     .close-preview{display:none;}
     #btnCollapseWorkspacePanel{display:none;}
+    /* Chat area fills full width when sidebar is overlay */
+    .messages-inner{padding:12px 10px 20px;}
+    .msg-body{padding-left:0;max-width:100%;}
+    .topbar{padding:8px 12px;gap:8px;}
+    .topbar-title{font-size:14px;}
+    .topbar-meta{display:none;}
   }
 
   @media(max-width:640px){
@@ -1092,7 +1152,7 @@
     .workspace-toggle-btn,.mobile-files-btn{display:inline-flex!important;}
     /* Right panel: slide-over from right */
     .rightpanel{display:flex!important;position:fixed;right:-320px;top:0;bottom:0;
-      width:300px;z-index:200;transition:right .25s ease;
+      width:300px!important;z-index:200;transition:right .25s ease;
       box-shadow:-4px 0 24px rgba(0,0,0,.4);}
     .rightpanel.mobile-open{right:0;}
     .rightpanel .resize-handle{display:none;}

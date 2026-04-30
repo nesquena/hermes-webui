@@ -298,6 +298,8 @@ async function newSession(flash){
   setComposerStatus('');
   updateQueueBadge(S.session.session_id);
   syncTopbar();renderMessages();loadDir('.');
+  // Reset context indicator for the new session (no usage data yet)
+  if(typeof _syncCtxIndicator==='function') _syncCtxIndicator(S.lastUsage||{});
   // don't call renderSessionList here - callers do it when needed
 }
 
@@ -309,6 +311,11 @@ async function loadSession(sid){
   _yoloEnabled=false;_updateYoloPill();
   if(typeof stopClarifyPolling==='function') stopClarifyPolling();
   if(typeof hideClarifyCard==='function') hideClarifyCard();
+  // Show loading indicator in the workspace file tree while messages load.
+  // loadDir will overwrite this later with actual file tree content.
+  const _ft=$('fileTree');const _we=$('wsEmptyState');
+  if(_ft)_ft.innerHTML='<div class="file-loading"><span class="file-loading-spin"></span> Loading...</div>';
+  if(_we)_we.style.display='none';
   // Show loading indicator immediately for responsiveness.
   // Cleared by renderMessages() once full session data arrives.
   const currentSid = S.session ? S.session.session_id : null;
