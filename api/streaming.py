@@ -1701,19 +1701,25 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             _toolsets = _resolve_cli_toolsets(_cfg)
 
             # Fallback model from profile config (e.g. for rate-limit recovery)
-            _fallback = _cfg.get('fallback_model') or None
+            _fallback = _cfg.get('fallback_model') or _cfg.get('fallback_providers') or None
+            _fallback_resolved = None
             if _fallback:
-                # Resolve the fallback through our provider logic too
-                fb_model = _fallback.get('model', '')
-                fb_provider = _fallback.get('provider', '')
-                fb_base_url = _fallback.get('base_url')
-                _fallback_resolved = {
-                    'model': fb_model,
-                    'provider': fb_provider,
-                    'base_url': fb_base_url,
-                }
-            else:
-                _fallback_resolved = None
+                # Normalize: support both single dict (legacy) and list (chained fallback).
+                # Use the first valid entry as the fallback passed to AIAgent.
+                _fb_entry = None
+                if isinstance(_fallback, list):
+                    for _entry in _fallback:
+                        if isinstance(_entry, dict) and _entry.get('model'):
+                            _fb_entry = _entry
+                            break
+                elif isinstance(_fallback, dict) and _fallback.get('model'):
+                    _fb_entry = _fallback
+                if _fb_entry:
+                    _fallback_resolved = {
+                        'model': _fb_entry.get('model', ''),
+                        'provider': _fb_entry.get('provider', ''),
+                        'base_url': _fb_entry.get('base_url'),
+                    }
 
             # Build kwargs defensively — guard newer params so the WebUI
             # degrades gracefully when run against an older hermes-agent build.
