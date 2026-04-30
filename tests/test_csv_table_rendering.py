@@ -86,7 +86,7 @@ def test_csv_error_handling():
     """Verify CSV error and empty data handling."""
     with open('static/ui.js') as f:
         src = f.read()
-    csv_section = src[src.find('function loadCsvInline()'):src.find('function loadCsvInline()') + 2000]
+    csv_section = src[src.find('function loadCsvInline()'):src.find('function loadCsvInline()') + 2500]
     assert 'csv_error' in csv_section, "Should use csv_error i18n on fetch failure"
     assert 'csv_no_data' in csv_section, "Should use csv_no_data i18n for insufficient data"
 

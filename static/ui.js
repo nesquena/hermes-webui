@@ -3557,13 +3557,16 @@ function loadCsvInline(){
           return;
         }
         // Auto-detect separator (comma, semicolon, tab)
+        // Heuristic: uses the first separator found in the header row. Edge case:
+        // quoted fields containing commas without non-quoted commas in the header
+        // could cause misdetection — acceptable trade-off for a preview renderer.
         const firstLine=rows[0];
         const separators=[',',';','\t'];
         let sep=separators.find(s=>firstLine.includes(s))||',';
         const headers=rows[0].split(sep).map(c=>c.trim().replace(/^["']|["']$/g,''));
         const bodyRows=rows.slice(1).map(r=>'<tr>'+r.split(sep).map(c=>`<td>${esc(c.trim().replace(/^["']|["']$/g,''))}</td>`).join('')+'</tr>').join('');
         const headerRow=headers.map(h=>`<th>${esc(h)}</th>`).join('');
-        el.outerHTML=`<div class="csv-table-wrap"><div class="pre-header">${esc(path.split('/').pop())}</div><table class="csv-table"><thead><tr>${headerRow}</tr></thead><tbody>${bodyRows}</tbody></table></div>`;
+        el.outerHTML=`<div class="csv-table-wrap"><div class="pre-header">${esc(path.split('/').pop())} <span style="opacity:.5;font-size:11px">${t('csv_header_note')}</span></div><table class="csv-table"><thead><tr>${headerRow}</tr></thead><tbody>${bodyRows}</tbody></table></div>`;
       })
       .catch(()=>{
         el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('csv_error')}</span></div>`;
