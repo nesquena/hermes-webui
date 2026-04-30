@@ -2,7 +2,7 @@
 Sprint 9 Tests: app.js module split verification, tool cards, todo panel.
 Run: python -m pytest tests/test_sprint9.py -v
 """
-import json, pathlib, urllib.error, urllib.request
+import json, pathlib, re, urllib.error, urllib.request
 
 from tests._pytest_port import BASE
 
@@ -71,6 +71,9 @@ def test_app_js_no_longer_referenced_in_html(cleanup_test_sessions):
     # All split modules must be present with the server-injected cache-busting version query.
     for module in ["ui.js", "workspace.js", "sessions.js", "messages.js", "panels.js", "boot.js"]:
         assert f'src="static/{module}?v=' in html, f"Missing versioned {module} in index.html"
+    # All 6 modules must be present (versioned filenames are fine)
+    for module in ["ui.js", "workspace.js", "sessions.js", "messages.js", "panels.js", "boot.js"]:
+        assert re.search(rf'src="static/{re.escape(module)}(?:\?[^"]+)?"', html), f"Missing {module} in index.html"
 
 def test_module_load_order_correct(cleanup_test_sessions):
     """ui.js must appear before sessions.js which must appear before boot.js."""
@@ -81,6 +84,16 @@ def test_module_load_order_correct(cleanup_test_sessions):
     msg_pos = html.find('src="static/messages.js?v=')
     panels_pos = html.find('src="static/panels.js?v=')
     boot_pos = html.find('src="static/boot.js?v=')
+    # Use regex to find module refs that may have version query params
+    def mod_pos(module):
+        m = re.search(rf'src="static/{re.escape(module)}(?:\?[^"]+)?"', html)
+        return m.start() if m else -1
+    ui_pos = mod_pos("ui.js")
+    ws_pos = mod_pos("workspace.js")
+    sess_pos = mod_pos("sessions.js")
+    msg_pos = mod_pos("messages.js")
+    panels_pos = mod_pos("panels.js")
+    boot_pos = mod_pos("boot.js")
     assert ui_pos < ws_pos < sess_pos < msg_pos < panels_pos < boot_pos
 
 def test_no_duplicate_function_definitions(cleanup_test_sessions):
