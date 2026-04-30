@@ -235,6 +235,7 @@
         renderResizeButton(spaceId, widgetId, layout, -1, 0, 'Narrower') +
         renderResizeButton(spaceId, widgetId, layout, 0, 1, 'Taller') +
         renderResizeButton(spaceId, widgetId, layout, 0, -1, 'Shorter') +
+        renderMinimizeButton(spaceId, widgetId, layout) +
         '<button type="button" class="capy-spaces-btn" data-capy-action="editWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-title="'+escapeHtml(title)+'" data-widget-kind="'+escapeHtml(kind)+'" data-widget-x="'+escapeHtml(layout.x)+'" data-widget-y="'+escapeHtml(layout.y)+'" data-widget-w="'+escapeHtml(layout.w)+'" data-widget-h="'+escapeHtml(layout.h)+'">Edit</button>' +
         '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="deleteWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Delete</button>' +
         '</div></div>';
@@ -261,12 +262,22 @@
     return Math.max(min, Math.min(max, n));
   }
 
+  function layoutBoolean(value){
+    if (value === true) return true;
+    return ['1', 'true', 'yes', 'on'].indexOf(String(value || '').trim().toLowerCase()) !== -1;
+  }
+
   function renderMoveButton(spaceId, widgetId, layout, dx, dy, label){
     return '<button type="button" class="capy-spaces-btn" data-capy-action="moveWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-x="'+escapeHtml(layout.x)+'" data-widget-y="'+escapeHtml(layout.y)+'" data-widget-w="'+escapeHtml(layout.w)+'" data-widget-h="'+escapeHtml(layout.h)+'" data-move-dx="'+escapeHtml(dx)+'" data-move-dy="'+escapeHtml(dy)+'">'+escapeHtml(label)+'</button>';
   }
 
   function renderResizeButton(spaceId, widgetId, layout, dw, dh, label){
     return '<button type="button" class="capy-spaces-btn" data-capy-action="resizeWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-x="'+escapeHtml(layout.x)+'" data-widget-y="'+escapeHtml(layout.y)+'" data-widget-w="'+escapeHtml(layout.w)+'" data-widget-h="'+escapeHtml(layout.h)+'" data-resize-dw="'+escapeHtml(dw)+'" data-resize-dh="'+escapeHtml(dh)+'">'+escapeHtml(label)+'</button>';
+  }
+
+  function renderMinimizeButton(spaceId, widgetId, layout){
+    const label = layout.minimized ? 'Restore' : 'Minimize';
+    return '<button type="button" class="capy-spaces-btn" data-capy-action="toggleWidgetMinimized" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-x="'+escapeHtml(layout.x)+'" data-widget-y="'+escapeHtml(layout.y)+'" data-widget-w="'+escapeHtml(layout.w)+'" data-widget-h="'+escapeHtml(layout.h)+'" data-widget-minimized="'+escapeHtml(layout.minimized ? 'true' : 'false')+'">'+escapeHtml(label)+'</button>';
   }
 
   function widgetLayout(widget){
@@ -276,6 +287,7 @@
       y: layoutNumber(raw.y, 0, 0, 10000),
       w: layoutNumber(raw.w, 6, 1, 24),
       h: layoutNumber(raw.h, 4, 1, 24),
+      minimized: layoutBoolean(raw.minimized),
     };
   }
 
@@ -322,13 +334,24 @@
     };
   }
 
+  function toggleWidgetMinimized(button){
+    return {
+      x: layoutNumber(button.dataset.widgetX, 0, 0, 10000),
+      y: layoutNumber(button.dataset.widgetY, 0, 0, 10000),
+      w: layoutNumber(button.dataset.widgetW, 6, 1, 24),
+      h: layoutNumber(button.dataset.widgetH, 4, 1, 24),
+      minimized: !layoutBoolean(button.dataset.widgetMinimized),
+    };
+  }
+
   function getInputValue(root, selector){
     const input = getRootInput(root, selector);
     return input ? input.value : '';
   }
 
   function formatWidgetLayout(layout){
-    return 'x'+layout.x+' y'+layout.y+' · '+layout.w+'×'+layout.h;
+    const state = layout.minimized ? ' · minimized' : '';
+    return 'x'+layout.x+' y'+layout.y+' · '+layout.w+'×'+layout.h+state;
   }
 
   function getRootInput(root, selector){
@@ -569,6 +592,17 @@
         space_id: spaceId,
         widget_id: widgetId,
         patch: {layout: resizeWidgetBy(button)},
+      });
+      await loadSpaceWidgets(spaceId);
+      return;
+    }
+    if (action === 'toggleWidgetMinimized') {
+      const widgetId = button.dataset.widgetId || '';
+      if (!spaceId || !widgetId) return;
+      await postSpacesJson('api/spaces/widget/patch', {
+        space_id: spaceId,
+        widget_id: widgetId,
+        patch: {layout: toggleWidgetMinimized(button)},
       });
       await loadSpaceWidgets(spaceId);
       return;

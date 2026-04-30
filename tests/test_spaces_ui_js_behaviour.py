@@ -101,7 +101,8 @@ global.fetch = async function(path, opts = {}) {
     });
   }
   if (path === 'api/spaces/widgets?space_id=lab') {
-    return response({ widgets: [{ id: 'weather', kind: 'markdown', title: '<Weather>', layout: { x: 12, y: 3, w: 5, h: 4, minimized: false }, renderer: '<script>bad()</script>' }] });
+    const minimized = scenario === 'restoreWidget';
+    return response({ widgets: [{ id: 'weather', kind: 'markdown', title: '<Weather>', layout: { x: 12, y: 3, w: 5, h: 4, minimized: minimized }, renderer: '<script>bad()</script>' }] });
   }
   if (path === 'api/spaces/get?space_id=lab') {
     return response({ space: {
@@ -325,6 +326,18 @@ async function click(action, dataset) {
     await window.loadSpaceWidgets('lab');
     beforeHtml = root.innerHTML;
     await click('resizeWidget', { spaceId: 'lab', widgetId: 'weather', widgetX: '12', widgetY: '3', widgetW: '5', widgetH: '4', resizeDw: '1', resizeDh: '0' });
+  } else if (scenario === 'minimizeWidget') {
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    beforeHtml = root.innerHTML;
+    await click('toggleWidgetMinimized', { spaceId: 'lab', widgetId: 'weather', widgetX: '12', widgetY: '3', widgetW: '5', widgetH: '4', widgetMinimized: 'false' });
+  } else if (scenario === 'restoreWidget') {
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    beforeHtml = root.innerHTML;
+    await click('toggleWidgetMinimized', { spaceId: 'lab', widgetId: 'weather', widgetX: '12', widgetY: '3', widgetW: '5', widgetH: '4', widgetMinimized: 'true' });
   } else if (scenario === 'askWidget') {
     global.showPromptDialog = async function(opts) { dialogs.push(opts); return 'Refresh the weather widget'; };
     await window.loadCapySpaces();
@@ -544,6 +557,45 @@ def test_spaces_ui_resize_widget_posts_metadata_only_layout_patch(driver_path):
         "space_id": "lab",
         "widget_id": "weather",
         "patch": {"layout": {"x": 12, "y": 3, "w": 6, "h": 4}},
+    }
+    assert not any(call["path"] == "api/spaces/widget/upsert" for call in out["calls"])
+    assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_minimize_widget_posts_metadata_only_layout_patch(driver_path):
+    out = _run_spaces_scenario(driver_path, "minimizeWidget")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/patch")
+
+    assert "Minimize" in out["beforeHtml"]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {
+        "space_id": "lab",
+        "widget_id": "weather",
+        "patch": {"layout": {"x": 12, "y": 3, "w": 5, "h": 4, "minimized": True}},
+    }
+    assert not any(call["path"] == "api/spaces/widget/upsert" for call in out["calls"])
+    assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_restore_widget_posts_metadata_only_layout_patch(driver_path):
+    out = _run_spaces_scenario(driver_path, "restoreWidget")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/patch")
+
+    assert "Restore" in out["beforeHtml"]
+    assert "minimized" in out["beforeHtml"]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {
+        "space_id": "lab",
+        "widget_id": "weather",
+        "patch": {"layout": {"x": 12, "y": 3, "w": 5, "h": 4, "minimized": False}},
     }
     assert not any(call["path"] == "api/spaces/widget/upsert" for call in out["calls"])
     assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"

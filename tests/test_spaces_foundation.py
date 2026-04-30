@@ -877,6 +877,8 @@ def test_spaces_routes_and_static_shell_are_registered():
     assert "moveWidgetBy" in spaces_js
     assert "data-capy-action=\"resizeWidget\"" in spaces_js
     assert "resizeWidgetBy" in spaces_js
+    assert "data-capy-action=\"toggleWidgetMinimized\"" in spaces_js
+    assert "toggleWidgetMinimized" in spaces_js
 
 
 class _RouteHandler:
