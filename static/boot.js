@@ -879,9 +879,12 @@ function applyBotName(){
     if(S.session) syncTopbar();
   }).catch(()=>{});
   window._modelDropdownReady=_modelDropdownReady;
-  // Pre-load workspace list so sidebar name is correct from first render
+  // Pre-load workspace list so sidebar name is correct from first render.
+  // Render the session list before restoring the saved conversation so a stale
+  // saved-session/client-side boot error cannot leave the sidebar empty forever.
   await loadWorkspaceList();
   await loadOnboardingWizard();
+  await renderSessionList();
   _initResizePanels();
   // Workspace panel restore happens AFTER loadSession so we know if
   // the session has a workspace — prevents the snap-open-then-closed flash (#576).
@@ -941,7 +944,14 @@ function applyBotName(){
   await renderSessionList();
   // Start real-time gateway session sync if setting is enabled
   if(typeof startGatewaySSE==='function') startGatewaySSE();
-})();
+})().catch(e=>{
+  console.error('[hermes] boot failed', e);
+  try{S._bootReady=true;}catch(_){}
+  try{syncTopbar();}catch(_){}
+  try{syncWorkspacePanelState();}catch(_){}
+  try{$('emptyState').style.display='';}catch(_){}
+  try{if(typeof renderSessionList==='function') void renderSessionList();}catch(_){}
+});
 
 // Fix #822 (bfcache path): when the browser restores the page from the
 // back-forward cache, the async boot IIFE above does NOT re-run, but the
