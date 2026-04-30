@@ -2463,7 +2463,17 @@ function renderMessages(){
         return `<div class="msg-file-badge">${li('paperclip',12)} ${esc(fname)}</div>`;
       }).join('')}</div>`;
     }
-    const bodyHtml = isUser ? esc(String(content)).replace(/\n/g,'<br>') : renderMd(_stripXmlToolCallsDisplay(String(content)));
+    const _renderUserContent = (content) => {
+        const escaped = esc(String(content));
+        // Check if content contains fenced code block markers
+        if (/^```/m.test(escaped)) {
+            // renderMd will process the markdown code blocks and escape any raw HTML
+            return renderMd(escaped);
+        }
+        // Default: plain text with <br> for line breaks
+        return escaped.replace(/\n/g, '<br>');
+    };
+    const bodyHtml = isUser ? _renderUserContent(content) : renderMd(_stripXmlToolCallsDisplay(String(content)));
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
     const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
