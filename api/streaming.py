@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 from api.config import (
     STREAMS, STREAMS_LOCK, CANCEL_FLAGS, AGENT_INSTANCES, STREAM_PARTIAL_TEXT,
+    STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS,
     LOCK, SESSIONS, SESSION_DIR,
     _get_session_agent_lock, _set_thread_env, _clear_thread_env,
     SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK,
@@ -1373,6 +1374,8 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
     with STREAMS_LOCK:
         CANCEL_FLAGS[stream_id] = cancel_event
         STREAM_PARTIAL_TEXT[stream_id] = ''  # start accumulating partial text (#893)
+        STREAM_REASONING_TEXT[stream_id] = ''  # start accumulating reasoning trace (#1361 §A)
+        STREAM_LIVE_TOOL_CALLS[stream_id] = []  # start accumulating tool calls (#1361 §B)
 
     # Register this stream with the global streaming meter
     meter().begin_session(stream_id)
@@ -1575,6 +1578,9 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 if text is None:
                     return
                 _reasoning_text += str(text)
+                # Mirror to shared dict so cancel_stream() can persist it (#1361 §A)
+                if stream_id in STREAM_REASONING_TEXT:
+                    STREAM_REASONING_TEXT[stream_id] += str(text)
                 put('reasoning', {'text': str(text)})
                 # Track reasoning tokens in the meter so TPS reflects all AI output
                 meter().record_reasoning(stream_id, len(_reasoning_text))
@@ -1607,6 +1613,9 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                     reason_text = preview if event_type == 'reasoning.available' else name
                     if reason_text:
                         _reasoning_text += str(reason_text)
+                        # Mirror to shared dict so cancel_stream() can persist it (#1361 §A)
+                        if stream_id in STREAM_REASONING_TEXT:
+                            STREAM_REASONING_TEXT[stream_id] += str(reason_text)
                         put('reasoning', {'text': str(reason_text)})
                         meter().record_reasoning(stream_id, len(_reasoning_text))
                         _emit_metering()
@@ -1623,6 +1632,13 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                         'name': name,
                         'args': args if isinstance(args, dict) else {},
                     })
+                    # Mirror to shared dict so cancel_stream() can persist it (#1361 §B)
+                    if stream_id in STREAM_LIVE_TOOL_CALLS:
+                        STREAM_LIVE_TOOL_CALLS[stream_id].append({
+                            'name': name,
+                            'args': args if isinstance(args, dict) else {},
+                            'done': False,
+                        })
                     put('tool', {
                         'event_type': event_type or 'tool.started',
                         'name': name,
@@ -1651,6 +1667,16 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                             live_tc['duration'] = cb_kwargs.get('duration')
                             live_tc['is_error'] = bool(cb_kwargs.get('is_error', False))
                             break
+                    # Mirror done state to shared dict (#1361 §B)
+                    if stream_id in STREAM_LIVE_TOOL_CALLS:
+                        for shared_tc in reversed(STREAM_LIVE_TOOL_CALLS[stream_id]):
+                            if shared_tc.get('done'):
+                                continue
+                            if not name or shared_tc.get('name') == name:
+                                shared_tc['done'] = True
+                                shared_tc['duration'] = cb_kwargs.get('duration')
+                                shared_tc['is_error'] = bool(cb_kwargs.get('is_error', False))
+                                break
                     # Signal the checkpoint thread that new work has completed (Issue #765).
                     # Each completed tool call is a meaningful unit of progress worth persisting.
                     _checkpoint_activity[0] += 1
@@ -2443,6 +2469,8 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             CANCEL_FLAGS.pop(stream_id, None)
             AGENT_INSTANCES.pop(stream_id, None)  # Clean up agent instance reference
             STREAM_PARTIAL_TEXT.pop(stream_id, None)  # Clean up partial text buffer (#893)
+            STREAM_REASONING_TEXT.pop(stream_id, None)  # Clean up reasoning trace (#1361 §A)
+            STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)  # Clean up tool calls (#1361 §B)
 
 # ============================================================
 # SECTION: HTTP Request Handler
@@ -2630,6 +2658,17 @@ def cancel_stream(stream_id: str) -> bool:
             live_partials = getattr(_live_config, 'STREAM_PARTIAL_TEXT', partial_texts)
             if live_partials is not partial_texts:
                 _cancel_partial_text = live_partials.get(stream_id, '')
+        # Capture reasoning trace and live tool calls (#1361 §A + §B)
+        _cancel_reasoning = STREAM_REASONING_TEXT.get(stream_id, '')
+        if not _cancel_reasoning:
+            live_reasoning = getattr(_live_config, 'STREAM_REASONING_TEXT', STREAM_REASONING_TEXT)
+            if live_reasoning is not STREAM_REASONING_TEXT:
+                _cancel_reasoning = live_reasoning.get(stream_id, '')
+        _cancel_tool_calls = STREAM_LIVE_TOOL_CALLS.get(stream_id, [])
+        if not _cancel_tool_calls:
+            live_tools = getattr(_live_config, 'STREAM_LIVE_TOOL_CALLS', STREAM_LIVE_TOOL_CALLS)
+            if live_tools is not STREAM_LIVE_TOOL_CALLS:
+                _cancel_tool_calls = live_tools.get(stream_id, [])
 
     # Session cleanup outside STREAMS_LOCK to preserve lock ordering.
     # Acquire the per-session _agent_lock too, mirroring every other session
@@ -2708,7 +2747,13 @@ def cancel_stream(stream_id: str) -> bool:
                 # content IS kept in the history sent to the agent on the next user
                 # message, letting the model continue from where it was cut off.
                 # See the inner comment on the append call below for the rationale.
+                #
+                # #1361: Also persist reasoning trace and live tool calls that were
+                # accumulated in thread-local variables but invisible to the cancel path.
+                # This prevents paid-token data loss when cancelling mid-reasoning or
+                # mid-tool-execution.
                 partial_text = _cancel_partial_text.strip() if _cancel_partial_text else ''
+                _stripped = ''
                 if partial_text:
                     import re as _re
                     # Strip thinking/reasoning markup from partial content before saving.
@@ -2721,17 +2766,24 @@ def cancel_stream(stream_id: str) -> bool:
                     _stripped = _re.sub(r'<think(?:ing)?\b[^>]*>.*',
                                         '', _stripped,
                                         flags=_re.DOTALL | _re.IGNORECASE).strip()
-                    if _stripped:
-                        # Mark _partial=True for session/UI identification only.
-                        # Deliberately NOT _error=True — the partial content is real model
-                        # output and should be visible in conversation history so the model
-                        # can continue from it on the next turn (#893).
-                        _cs.messages.append({
-                            'role': 'assistant',
-                            'content': _stripped,
-                            '_partial': True,
-                            'timestamp': int(time.time()),
-                        })
+                # Determine whether there is anything to preserve beyond just the
+                # cancel marker.  Content text, reasoning trace, or tool calls all
+                # count (#1361 §C — previously only _stripped was checked, so a
+                # reasoning-only or tool-only stream produced NO partial message).
+                _has_reasoning = bool(_cancel_reasoning and _cancel_reasoning.strip())
+                _has_tools = bool(_cancel_tool_calls)
+                if _stripped or _has_reasoning or _has_tools:
+                    _partial_msg: dict = {
+                        'role': 'assistant',
+                        'content': _stripped,  # may be empty for reasoning/tool-only turns
+                        '_partial': True,
+                        'timestamp': int(time.time()),
+                    }
+                    if _has_reasoning:
+                        _partial_msg['reasoning'] = _cancel_reasoning.strip()
+                    if _has_tools:
+                        _partial_msg['tool_calls'] = list(_cancel_tool_calls)
+                    _cs.messages.append(_partial_msg)
                 # Cancel marker — flagged _error=True so it is stripped from conversation
                 # history on the next turn (prevents model from seeing "Task cancelled."
                 # as a prior assistant reply).
