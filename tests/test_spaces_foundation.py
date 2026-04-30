@@ -897,7 +897,18 @@ def test_install_big_bang_template_creates_safe_onboarding_widgets(monkeypatch, 
         "checklist",
     ]
     launcher_widget = spaces.read_widget(installed["space"]["space_id"], "bigbang-demo-launcher")
-    assert launcher_widget["demo_templates"] == ["weather", "research", "kanban", "notes", "browser", "stock", "game"]
+    assert launcher_widget["demo_templates"] == [
+        "weather",
+        "research",
+        "dashboard",
+        "camera",
+        "kanban",
+        "notes",
+        "browser",
+        "stock",
+        "game",
+        "music",
+    ]
     assert launcher_widget["interaction"] == {"install_templates": "agent-mediated", "preview": "metadata-only"}
     safety_widget = spaces.read_widget(installed["space"]["space_id"], "bigbang-safety")
     assert safety_widget["safety"] == {
