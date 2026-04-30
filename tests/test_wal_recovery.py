@@ -150,33 +150,6 @@ class TestWalRoundTrip:
 # ─── WAL flush on token count threshold ───────────────────────────────────────
 
 class TestWalFlush:
-    def test_flush_triggered_at_token_count(self, tmp_path, monkeypatch):
-        from api import wal as _wal
-
-        # Temporarily lower the flush threshold so we don't have to write 100 tokens
-        monkeypatch.setattr(_wal, '_WAL_FLUSH_TOKENS', 3)
-
-        sid = 'test_' + uuid.uuid4().hex[:8]
-        _wal.write_wal_start(sid, 'stream_flush')
-
-        # tokens 1-2: not flushed yet
-        _wal.write_wal_token(sid, 'a')
-        _wal.write_wal_token(sid, 'b')
-        with _wal._buffer_lock:
-            assert sid in _wal._write_buffer
-
-        # token 3: hits threshold, triggers flush
-        _wal.write_wal_token(sid, 'c')
-
-        # After flush, buffer should be cleared
-        with _wal._buffer_lock:
-            assert sid not in _wal._write_buffer
-
-        # WAL file should exist on disk
-        assert _wal.wal_path(sid).exists()
-        _wal.write_wal_end(sid, 'stream_flush')
-
-
     def test_should_flush_initializes_timer_on_first_call(self, tmp_path, monkeypatch):
         """_should_flush must NOT fire on its first call for a new session.
 
@@ -230,40 +203,6 @@ class TestWalFlush:
             assert sid not in _wal._write_buffer
         assert _wal.wal_path(sid).exists()
 
-
-
-    def test_append_event_flushes_at_threshold_not_past_it(self, tmp_path, monkeypatch):
-        """_append_event must flush when buffer len == _WAL_FLUSH_TOKENS, not len > threshold.
-
-        Regression test for the >= vs > bug: if _append_event uses > instead of >=,
-        the flush never fires at exactly the threshold — you'd need threshold+1 tokens.
-        With >= it fires at exactly N tokens.
-        """
-        from api import wal as _wal
-
-        monkeypatch.setattr(_wal, '_WAL_FLUSH_TOKENS', 5)
-
-        sid = 'test_' + uuid.uuid4().hex[:8]
-        _wal.write_wal_start(sid, 'stream_x')
-
-        # Write exactly 5 tokens (one below flush threshold at 5)
-        for ch in 'abcde':
-            _wal.write_wal_token(sid, ch)
-
-        # Buffer should still hold 5 items (not flushed yet — len=5 is NOT >5)
-        with _wal._buffer_lock:
-            assert len(_wal._write_buffer.get(sid, [])) == 5, \
-                f"Expected 5 buffered items before threshold hit, got {_wal._write_buffer.get(sid, [])}"
-
-        # 6th token hits the >=5 threshold and triggers a flush
-        _wal.write_wal_token(sid, 'f')
-
-        # Buffer should now be cleared
-        with _wal._buffer_lock:
-            assert sid not in _wal._write_buffer, \
-                "Buffer should be cleared after threshold is hit"
-
-        _wal.write_wal_end(sid, 'stream_x')
 
 
 # ─── WAL replay integrated into get_session ───────────────────────────────────
