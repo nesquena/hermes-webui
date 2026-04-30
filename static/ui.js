@@ -3693,7 +3693,12 @@ function _renderExcalidrawCanvases(){
   });
 }
 
-// ── PDF inline preview (first page via PDF.js CDN) ──────────────────────────
+// ── PDF inline preview (first page) ────────────────────────────────────────
+// NOTE: PDF.js is loaded from CDN (jsdelivr). Offline/air-gapped deployments
+// will not get inline previews; the 15 s fallback timeout degrades to a
+// download link in that case. The 4 MB size cap is checked client-side after
+// the full buffer is received — ideally the server would enforce it before
+// streaming (out of scope for this client-side PR).
 let _pdfjsReady=false, _pdfjsLoading=false;
 function loadPdfInline(){
   const PDF_MAX_SIZE=4*1024*1024; // 4 MB cap for inline PDF preview
