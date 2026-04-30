@@ -115,6 +115,40 @@ def test_cron_output_snippet_helper(cleanup_test_sessions):
     src, _ = get_text("/static/panels.js")
     assert "_cronOutputSnippet" in src
 
+
+def test_cron_output_window_preserves_response_after_large_prompt(cleanup_test_sessions):
+    """Large skill dumps before ## Response must not hide the useful output."""
+    from api.routes import _cron_output_content_window
+
+    content = (
+        "Job metadata\n"
+        "## Prompt\n"
+        + ("skill dump\n" * 1200)
+        + "user prompt\n"
+        "## Response\n"
+        "actual useful cron result\n"
+    )
+
+    window = _cron_output_content_window(content, limit=8000)
+
+    assert len(window) <= 8000
+    assert "## Response" in window
+    assert "actual useful cron result" in window
+    assert "Job metadata" in window
+
+
+def test_cron_output_window_without_response_uses_tail(cleanup_test_sessions):
+    """Without a response marker, keep the newest tail rather than old prompt text."""
+    from api.routes import _cron_output_content_window
+
+    content = "old prompt\n" + ("x" * 9000) + "tail result"
+
+    window = _cron_output_content_window(content, limit=8000)
+
+    assert len(window) == 8000
+    assert window.endswith("tail result")
+    assert "old prompt" not in window
+
 # ── Tool card polish ───────────────────────────────────────────────────────
 
 def test_tool_card_running_dot_in_css(cleanup_test_sessions):

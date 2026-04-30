@@ -35,6 +35,8 @@ _CLIENT_DISCONNECT_ERRORS = (
 # Track job IDs currently being executed so the frontend can poll status.
 _RUNNING_CRON_JOBS: dict[str, float] = {}  # job_id → start_timestamp
 _RUNNING_CRON_LOCK = threading.Lock()
+_CRON_OUTPUT_CONTENT_LIMIT = 8000
+_CRON_OUTPUT_HEADER_CONTEXT = 200
 
 
 def _mark_cron_running(job_id: str):
@@ -54,6 +56,40 @@ def _is_cron_running(job_id: str) -> tuple[bool, float]:
         if t is None:
             return False, 0.0
         return True, time.time() - t
+
+
+def _cron_response_marker_index(text: str) -> int:
+    """Return the start index of a markdown Response heading, if present."""
+    candidates = []
+    for heading in ("## Response", "# Response"):
+        if text.startswith(heading):
+            candidates.append(0)
+        idx = text.find(f"\n{heading}")
+        if idx >= 0:
+            candidates.append(idx + 1)
+    return min(candidates) if candidates else -1
+
+
+def _cron_output_content_window(text: str, limit: int = _CRON_OUTPUT_CONTENT_LIMIT) -> str:
+    """Return a bounded cron output window that preserves useful response text.
+
+    Cron output files can contain large skill dumps in the Prompt section. The
+    UI already extracts ``## Response`` when present, so keep that section in
+    the API payload instead of blindly returning the first ``limit`` chars.
+    """
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+
+    response_idx = _cron_response_marker_index(text)
+    if response_idx >= 0:
+        header = text[:min(_CRON_OUTPUT_HEADER_CONTEXT, response_idx)].rstrip()
+        response = text[response_idx:].lstrip("\n")
+        content = f"{header}\n...\n{response}" if header else response
+        return content[:limit]
+
+    return text[-limit:]
 
 
 def _run_cron_tracked(job):
@@ -2886,7 +2922,7 @@ def _handle_cron_output(handler, parsed):
         for f in files:
             try:
                 txt = f.read_text(encoding="utf-8", errors="replace")
-                outputs.append({"filename": f.name, "content": txt[:8000]})
+                outputs.append({"filename": f.name, "content": _cron_output_content_window(txt)})
             except Exception:
                 logger.debug("Failed to read cron output file %s", f)
     return j(handler, {"job_id": job_id, "outputs": outputs})
