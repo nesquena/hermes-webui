@@ -4,6 +4,25 @@
 
 ### Fixed
 
+## [v0.50.240] — 2026-04-30
+
+### Added
+- **Compact tool activity mode (`simplified_tool_calling`)** — new setting (default on) groups tool calls and thinking traces into a single collapsed "Activity" disclosure card per assistant turn instead of showing every step as a separate visible row. Keeps long agent runs readable while keeping full transparency a click away. Also adds a **Calm Console** theme (`calm`) with earth/slate palette and serif assistant prose. (`api/config.py`, `static/ui.js`, `static/panels.js`, `static/boot.js`, `static/style.css`, `DESIGN.md`) @Michaelyklam — PR #1282
+- **PDF first-page preview** — `MEDIA:` links to `.pdf` files now lazy-load a canvas preview of page 1 via PDF.js CDN (4 MB cap, download fallback). **HTML sandbox iframe** — `.html`/`.htm` files render inline in a sandboxed `<iframe srcdoc>` with `allow-scripts` only (256 KB cap). 10 new i18n keys × 7 locales. (`static/ui.js`, `static/style.css`, `static/i18n.js`) @bergeouss — PR #1280, closes #480 #482
+- **Inline Excalidraw diagram preview** — `.excalidraw` files render as a pure-SVG diagram inline (no external deps; supports rectangles, ellipses, diamonds, text, lines, arrows, freehand; 512 KB cap). (`static/ui.js`, `static/i18n.js`) @bergeouss — PR #1279, closes #479
+- **Inline CSV table rendering** — fenced `csv` blocks and `MEDIA:` CSV files render as scrollable HTML tables with auto-separator detection (comma/semicolon/tab) and quote stripping. (`static/ui.js`, `static/i18n.js`) @bergeouss — PR #1277, closes #485
+- **Inline SVG, audio, and video rendering** — SVG files render as `<img>`, audio files as `<audio controls>`, video files as `<video controls>`. File attachment previews in the composer also get inline display. (`static/ui.js`, `static/i18n.js`) @bergeouss — PR #1276, closes #481
+- **Batch session select mode** — a new select-mode toggle in the session list lets users choose multiple sessions and perform bulk Archive, Delete, or Move to Project actions. 11 new i18n keys × 7 locales. (`static/sessions.js`, `static/i18n.js`) @bergeouss — PR #1275, closes #568
+- **Collapsible skill category headers** — clicking a category header in the Skills panel collapses or expands its contents without a full re-render; collapsed state persists across filter cycles. (`static/panels.js`, `static/style.css`) @bergeouss — PR #1281
+- **`providers.only_configured` setting** — opt-in config flag that restricts the model picker to providers explicitly configured in `config.yaml`. Default false (existing behavior unchanged). (`api/config.py`) @KingBoyAndGirl — PR #1268
+- **OpenCode Go model catalog updated** — adds 7 new models: Kimi K2.6, DeepSeek V4 Pro/Flash, MiMo V2.5/Pro, Qwen3.6/3.5 Plus. (`api/config.py`) @nesquena-hermes — PR #1284, closes #1269
+
+### Fixed
+- **Profile `TERMINAL_CWD` no longer causes TypeError** — `_build_agent_thread_env()` merges all thread-local env keys into one dict before passing to `_set_thread_env()`, so a `terminal.cwd` entry in `config.yaml` can no longer conflict with the per-session workspace path. (`api/streaming.py`) @hi-friday — PR #1266
+- **Service worker no longer caches subpath API routes** — the SW cache-bypass regex now matches `/api/*` under any mount prefix (e.g. `/hermes/api/*`), fixing stale session lists when running behind a subpath reverse proxy. (`static/sw.js`) @Michaelyklam — PR #1278
+- **SSE client disconnect leaks resolved** — `TimeoutError` and `OSError` are now treated as normal disconnects; `QuietHTTPServer` suppresses them silently. Server backlog raised to 64 and handler threads daemonized. Session list renders before saved-session restore so a client-side boot error can no longer leave the sidebar empty. (`api/routes.py`, `server.py`, `static/boot.js`, `static/sessions.js`) @KayZz69 — PR #1267
+- **i18n: Korean and Chinese MCP keys corrected, missing locale keys added** — 23 Korean MCP strings that had English text replaced with correct Korean; 23 Chinese (zh) strings that had Spanish text replaced with Chinese; 41 missing keys added to zh-Hant; 229 missing keys added to de. (`static/i18n.js`) @bergeouss — PR #1274, closes #1273
+
 ## [v0.50.239] — 2026-04-29
 
 ### Fixed
