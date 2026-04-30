@@ -30,6 +30,7 @@ const COMMANDS=[
   {name:'voice',     desc:t('cmd_voice'),    fn:cmdVoice,     noEcho:true},
   {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|none|minimal|low|medium|high|xhigh', subArgs:['show','hide','none','minimal','low','medium','high','xhigh'], noEcho:true},
   {name:'yolo', desc:t('cmd_yolo'), fn:cmdYolo, noEcho:true},
+  {name:'branch', desc:t('cmd_branch'), fn:cmdBranch, arg:'[name]', noEcho:true},
 ];
 
 const SLASH_SUBARG_SOURCES={
@@ -860,6 +861,49 @@ async function cmdYolo(){
       hideApprovalCard(true);
     }
   }catch(e){showToast('YOLO: '+e.message);}
+}
+
+// ── Branch / fork command ──
+// Forks the current conversation into a new session (#465).
+// /branch           → full history copy
+// /branch My Name   → full history copy with custom title
+async function cmdBranch(args){
+  if(!S.session){showToast(t('no_active_session'));return;}
+  const customTitle=(args||'').trim()||null;
+  try{
+    const data=await api('/api/session/branch',{
+      method:'POST',
+      body:JSON.stringify({
+        session_id:S.session.session_id,
+        title:customTitle||undefined,
+      }),
+    });
+    if(data&&data.session_id){
+      await loadSession(data.session_id);
+      if(typeof renderSessionList==='function') await renderSessionList();
+      showToast(t('branch_forked'));
+    }
+  }catch(e){showToast(t('branch_failed')+e.message);}
+}
+
+// ── Fork from a specific message point ──
+// Called from the "Fork from here" button on message hover actions.
+async function forkFromMessage(msgIdx){
+  if(!S.session||S.busy)return;
+  try{
+    const data=await api('/api/session/branch',{
+      method:'POST',
+      body:JSON.stringify({
+        session_id:S.session.session_id,
+        keep_count:msgIdx,
+      }),
+    });
+    if(data&&data.session_id){
+      await loadSession(data.session_id);
+      if(typeof renderSessionList==='function') await renderSessionList();
+      showToast(t('branch_forked'));
+    }
+  }catch(e){showToast(t('branch_failed')+e.message);}
 }
 
 let _skillCommandCache=[];

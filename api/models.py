@@ -320,6 +320,7 @@ class Session:
                  compression_anchor_message_key=None,
                  context_length=None, threshold_tokens=None,
                  last_prompt_tokens=None,
+                 parent_session_id: str=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
@@ -347,6 +348,7 @@ class Session:
         self.context_length = context_length
         self.threshold_tokens = threshold_tokens
         self.last_prompt_tokens = last_prompt_tokens
+        self.parent_session_id = parent_session_id
         self.is_cli_session = bool(kwargs.get('is_cli_session', False))
         self.source_tag = kwargs.get('source_tag')
         self.session_source = kwargs.get('session_source')
@@ -371,6 +373,7 @@ class Session:
             'pending_user_message', 'pending_attachments', 'pending_started_at',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'context_length', 'threshold_tokens', 'last_prompt_tokens',
+            'parent_session_id',
             'is_cli_session', 'source_tag', 'session_source', 'source_label',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
@@ -466,6 +469,7 @@ class Session:
             'context_length': self.context_length,
             'threshold_tokens': self.threshold_tokens,
             'last_prompt_tokens': self.last_prompt_tokens,
+            'parent_session_id': self.parent_session_id,
             'active_stream_id': self.active_stream_id,
             'is_cli_session': self.is_cli_session,
             'source_tag': self.source_tag,

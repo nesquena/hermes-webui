@@ -1442,6 +1442,19 @@ function renderSessionListFromCache(){
       pinInd.innerHTML=ICONS.pin;
       titleRow.appendChild(pinInd);
     }
+    // Parent session indicator for forked/branched sessions (#465)
+    if(s.parent_session_id){
+      const branchInd=document.createElement('span');
+      branchInd.className='session-branch-indicator';
+      branchInd.textContent='\u2482'; // ⑂
+      branchInd.title=(typeof t==='function'?t('forked_from'):'Forked from')+' '+s.parent_session_id;
+      branchInd.style.cursor='pointer';
+      branchInd.onclick=(e)=>{
+        e.stopPropagation();
+        if(typeof loadSession==='function') loadSession(s.parent_session_id);
+      };
+      titleRow.appendChild(branchInd);
+    }
     const title=document.createElement('span');
     title.className='session-title';
     title.textContent=cleanTitle||'Untitled';
