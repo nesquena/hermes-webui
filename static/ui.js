@@ -337,12 +337,28 @@ function syncModelChip(){
   const sel=$('modelSelect');
   const chip=$('composerModelChip');
   const label=$('composerModelLabel');
+  const badgeEl=$('composerModelBadge');
   const dd=$('composerModelDropdown');
   if(!sel||!chip||!label) return;
   // Don't show a model label until boot has finished loading to prevent flash of wrong default
-  if(!S._bootReady){ label.textContent=''; chip.title='Conversation model'; return; }
+  if(!S._bootReady){
+    label.textContent='';
+    chip.title='Conversation model';
+    if(badgeEl){
+      badgeEl.textContent='';
+      badgeEl.hidden=true;
+      badgeEl.className='composer-model-badge';
+    }
+    return;
+  }
   const opt=_selectedModelOption();
   label.textContent=opt?opt.textContent:getModelLabel(sel.value||'');
+  const badge=_getConfiguredModelBadge(sel.value||'',window._configuredModelBadges||{});
+  if(badgeEl){
+    badgeEl.textContent=badge&&badge.label?badge.label:'';
+    badgeEl.hidden=!badgeEl.textContent;
+    badgeEl.className='composer-model-badge'+(badge&&badge.role?` composer-model-badge--${badge.role}`:'');
+  }
   chip.title=sel.value||'Conversation model';
   chip.classList.toggle('active',!!(dd&&dd.classList.contains('open')));
 }
