@@ -333,6 +333,9 @@ def test_compression_chain_collapses_to_latest_tip_in_sidebar():
         # bubbles to the top by true recency, not by the root's stale activity.
         # tip messages are at t0+201 and t0+202, so last_activity = t0 + 202.
         assert abs(tip.get('updated_at') - (t0 + 202)) < 0.01
+        assert tip.get('_lineage_root_id') == 'chain_root_001'
+        assert tip.get('_lineage_tip_id') == 'chain_tip_001'
+        assert tip.get('_compression_segment_count') == 3
 
         from api.agent_sessions import read_importable_agent_session_rows
 

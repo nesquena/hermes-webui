@@ -15,7 +15,7 @@ from api.config import (
     get_effective_default_model, _get_session_agent_lock,
 )
 from api.workspace import get_last_workspace
-from api.agent_sessions import read_importable_agent_session_rows
+from api.agent_sessions import read_importable_agent_session_rows, read_session_lineage_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -746,6 +746,31 @@ def _hide_from_default_sidebar(session: dict) -> bool:
     return source == 'cron' or sid.startswith('cron_')
 
 
+def _active_state_db_path() -> Path:
+    """Return state.db for the active Hermes profile, degrading to HERMES_HOME."""
+    try:
+        from api.profiles import get_active_hermes_home
+        hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
+    except Exception:
+        hermes_home = Path(os.getenv('HERMES_HOME', str(HOME / '.hermes'))).expanduser().resolve()
+    return hermes_home / 'state.db'
+
+
+def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
+    """Attach state.db compression lineage metadata used by sidebar collapse."""
+    try:
+        metadata = read_session_lineage_metadata(
+            _active_state_db_path(),
+            {s.get('session_id') for s in sessions},
+        )
+    except Exception:
+        return
+    for session in sessions:
+        sid = session.get('session_id')
+        if sid in metadata:
+            session.update(metadata[sid])
+
+
 def all_sessions():
     active_stream_ids = _active_stream_ids()
     # Phase C: try index first for O(1) read; fall back to full scan
@@ -804,6 +829,7 @@ def all_sessions():
             for s in result:
                 if not s.get('profile'):
                     s['profile'] = 'default'
+            _enrich_sidebar_lineage_metadata(result)
             return result
         except Exception:
             logger.debug("Failed to load session index, falling back to full scan")
@@ -832,6 +858,7 @@ def all_sessions():
     for s in result:
         if not s.get('profile'):
             s['profile'] = 'default'
+    _enrich_sidebar_lineage_metadata(result)
     return result
 
 
@@ -1015,6 +1042,10 @@ def get_cli_sessions() -> list:
                 'raw_source': row.get('raw_source'),
                 'session_source': row.get('session_source'),
                 'source_label': row.get('source_label'),
+                'parent_session_id': row.get('parent_session_id'),
+                '_lineage_root_id': row.get('_lineage_root_id'),
+                '_lineage_tip_id': row.get('_lineage_tip_id'),
+                '_compression_segment_count': row.get('_compression_segment_count'),
                 'is_cli_session': True,
             })
     except Exception as _cli_err:

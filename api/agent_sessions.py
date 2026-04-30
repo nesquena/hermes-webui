@@ -255,3 +255,68 @@ def read_importable_agent_session_rows(
         if limit is None:
             return projected
         return projected[:max(0, int(limit))]
+
+
+
+def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[str]) -> dict[str, dict]:
+    """Return compression-lineage metadata for known WebUI sidebar sessions.
+
+    WebUI sessions are persisted as JSON files, but Hermes Agent also mirrors
+    them into ``state.db.sessions`` for insights/session history. Compression
+    and cross-surface continuation create parent chains there. ``/api/sessions``
+    needs to surface that lineage to the sidebar so client-side collapse can
+    group logical continuations without mutating or deleting any session files.
+
+    Missing DBs, old schemas, or incomplete rows degrade to an empty mapping.
+    """
+    wanted = {str(sid) for sid in (session_ids or []) if sid}
+    db_path = Path(db_path)
+    if not wanted or not db_path.exists():
+        return {}
+
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(sessions)")
+            session_cols = {row[1] for row in cur.fetchall()}
+            if 'parent_session_id' not in session_cols or 'end_reason' not in session_cols:
+                return {}
+            cur.execute("SELECT id, parent_session_id, end_reason FROM sessions")
+            rows = {row['id']: dict(row) for row in cur.fetchall()}
+    except Exception:
+        return {}
+
+    metadata: dict[str, dict] = {}
+    for sid in wanted:
+        row = rows.get(sid)
+        if not row:
+            continue
+
+        parent_id = row.get('parent_session_id')
+        if parent_id:
+            metadata.setdefault(sid, {})['parent_session_id'] = parent_id
+
+        root_id = sid
+        current_id = sid
+        segment_count = 1
+        seen = {sid}
+        while True:
+            current = rows.get(current_id)
+            parent_id = current.get('parent_session_id') if current else None
+            parent = rows.get(parent_id) if parent_id else None
+            if not parent or parent_id in seen:
+                break
+            if parent.get('end_reason') not in {'compression', 'cli_close'}:
+                break
+            root_id = parent_id
+            current_id = parent_id
+            seen.add(parent_id)
+            segment_count += 1
+
+        if root_id != sid:
+            entry = metadata.setdefault(sid, {})
+            entry['_lineage_root_id'] = root_id
+            entry['_compression_segment_count'] = segment_count
+
+    return metadata
