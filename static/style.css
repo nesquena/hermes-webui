@@ -98,6 +98,67 @@
   /* ── Skin: Charizard (orange) ── */
   :root[data-skin="charizard"]{--accent:#EA580C;--accent-hover:#C2410C;--accent-bg:rgba(234,88,12,0.08);--accent-bg-strong:rgba(234,88,12,0.15);--accent-text:#C2410C;}
   :root.dark[data-skin="charizard"]{--accent:#FB923C;--accent-hover:#F97316;--accent-bg:rgba(251,146,60,0.08);--accent-bg-strong:rgba(251,146,60,0.15);--accent-text:#FB923C;}
+  /* ── Skin: Sienna (warm clay & sand earth palette) ──
+     Full palette rewrite (not just --accent): warm off-white surface,
+     soft sand sidebar, clay accent. Sets --user-bubble-* for the redesigned
+     user bubble block, mutes tool-card chrome to neutral, and bumps the
+     reading column to a serif body for long-form prose. Opt-in via the
+     Settings → Skin picker; default skin stays "default" (gold). */
+  :root[data-skin="sienna"]{
+    --bg:#FAF9F5;--sidebar:#F0EEE6;--surface:#FFFFFF;
+    --border:#E7E4DB;--border2:#D7D3C7;
+    --text:#1F1E1C;--muted:#6B6A63;--strong:#141311;--em:#3E3D39;
+    --accent:#D97757;--accent-hover:#BF6545;--accent-text:#A55237;
+    --accent-bg:rgba(217,119,87,0.09);--accent-bg-strong:rgba(217,119,87,0.18);
+    --code-bg:#F5F3EC;--code-inline-bg:rgba(20,19,17,0.06);--code-text:#8A3E1A;--pre-text:#1F1E1C;
+    --topbar-bg:rgba(250,249,245,0.96);--main-bg:rgba(250,249,245,0.55);
+    --input-bg:rgba(20,19,17,0.035);--hover-bg:rgba(20,19,17,0.05);
+    --focus-ring:rgba(217,119,87,0.3);--focus-glow:rgba(217,119,87,0.1);
+    --blue:#2E6F9E;--gold:#A55237;
+    --user-bubble-bg:#ECE9DF;--user-bubble-border:#DED9CC;
+    --user-bubble-text:#1F1E1C;--user-bubble-placeholder:#6B6A63;
+    --user-selection-bg:rgba(217,119,87,0.28);--user-selection-text:#1F1E1C;
+  }
+  :root.dark[data-skin="sienna"]{
+    --bg:#1F1E1C;--sidebar:#262522;--surface:#2C2B28;
+    --border:#3A3935;--border2:#4A4843;
+    --text:#EDEBE3;--muted:#A3A197;--strong:#F7F5ED;--em:#C9C6BC;
+    --accent:#E0896D;--accent-hover:#D97757;--accent-text:#E6A88A;
+    --accent-bg:rgba(224,137,109,0.12);--accent-bg-strong:rgba(224,137,109,0.22);
+    --code-bg:#2A2926;--code-inline-bg:rgba(255,255,255,0.07);--code-text:#F0B593;--pre-text:#EDEBE3;
+    --topbar-bg:rgba(38,37,34,0.96);--main-bg:rgba(31,30,28,0.55);
+    --input-bg:rgba(255,255,255,0.045);--hover-bg:rgba(255,255,255,0.07);
+    --focus-ring:rgba(224,137,109,0.35);--focus-glow:rgba(224,137,109,0.1);
+    --blue:#8BB8D6;--gold:#E6A88A;
+    --user-bubble-bg:#34322E;--user-bubble-border:#42403B;
+    --user-bubble-text:#EDEBE3;--user-bubble-placeholder:#A3A197;
+    --user-selection-bg:rgba(224,137,109,0.3);--user-selection-text:#F7F5ED;
+  }
+  /* Specificity boosted to beat the :root:not(.dark) .new-chat-btn rule that
+     sets color:var(--accent-text) — without this, the solid-accent background
+     would collide with the inherited text color, producing clay-on-clay text. */
+  :root[data-skin="sienna"]:not(.dark) .new-chat-btn,
+  :root.dark[data-skin="sienna"] .new-chat-btn{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600;box-shadow:0 1px 2px rgba(20,19,17,0.08);}
+  :root[data-skin="sienna"]:not(.dark) .new-chat-btn:hover,
+  :root.dark[data-skin="sienna"] .new-chat-btn:hover{background:var(--accent-hover);border-color:var(--accent-hover);color:#fff;}
+  /* Tool / thinking cards: mute the blue-ish Hermes highlights to neutral */
+  :root[data-skin="sienna"] .tool-card{background:rgba(20,19,17,0.025);border-color:var(--border);border-radius:10px;}
+  :root[data-skin="sienna"] .tool-card:hover{border-color:var(--border2);}
+  :root[data-skin="sienna"] .tool-card-running{background:var(--accent-bg);border-color:var(--accent-bg-strong);}
+  :root[data-skin="sienna"] .tool-card-name{color:var(--muted);font-weight:500;}
+  :root[data-skin="sienna"] .tool-arg-key{color:var(--accent-text);}
+  :root[data-skin="sienna"] .tool-card-more{color:var(--accent-text);}
+  :root[data-skin="sienna"] .tool-card-running-dot{background:var(--accent);}
+  :root.dark[data-skin="sienna"] .tool-card{background:rgba(255,255,255,0.03);}
+  /* User bubble: soft sand pill, not a saturated accent fill */
+  :root[data-skin="sienna"] .msg-row[data-role="user"] .msg-body{border-radius:16px;padding:12px 16px;}
+  :root[data-skin="sienna"] .msg-row[data-role="user"] .msg-body code{color:var(--user-bubble-text);background:rgba(20,19,17,0.08);}
+  /* Send button pop and active session indicator */
+  :root[data-skin="sienna"] button.send-btn {box-shadow:0 1px 3px rgba(217,119,87,0.3);}
+  :root[data-skin="sienna"] button.send-btn:hover {box-shadow:0 2px 8px rgba(217,119,87,0.45);}
+  :root[data-skin="sienna"] .session-item.active{border-left:2px solid var(--accent);}
+  :root[data-skin="sienna"] .composer-box{border-radius:18px;}
+
   /* #594: app-dialog light mode overrides — base styles use hardcoded dark gradients */
   :root:not(.dark) .app-dialog{
     background:linear-gradient(180deg,rgba(240,237,232,.99),rgba(228,224,216,.99));
