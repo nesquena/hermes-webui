@@ -3465,7 +3465,7 @@ function loadExcalidrawInline(){
         }
         const fname=esc(path.split('/').pop());
         const downloadUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
-        el.outerHTML=`<div class="excalidraw-embed-wrap">
+        el.outerHTML=`<div class="excalidraw-embed-wrap" title="${t('excalidraw_simplified')}">
   <div class="msg-artifact-header">
     <span class="msg-media-label">${t('excalidraw_label')}</span>
     <a class="excalidraw-open-link" href="${downloadUrl}" download="${fname}">${t('excalidraw_download')} ${fname}</a>
@@ -3539,6 +3539,9 @@ function _renderExcalidrawCanvases(){
             svgParts.push(`<path d="${d}" stroke="${stroke}" stroke-width="${sw}" fill="none" stroke-linecap="round" stroke-linejoin="round"/>`);
           }
         }
+        // Unknown element types (e.g. image, frame, group, freedraw) are
+        // silently skipped to avoid breaking the render. This is a simplified
+        // SVG preview, not a pixel-identical Excalidraw canvas reproduction.
       });
       // Arrow marker definition
       svgParts.unshift(`<defs><marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#1e1e1e"/></marker></defs>`);

@@ -767,6 +767,7 @@ const LOCALES = {
     excalidraw_download: 'Download',
     excalidraw_empty: 'Empty diagram',
     excalidraw_render_error: 'Failed to render diagram',
+    excalidraw_simplified: 'Simplified SVG preview — not pixel-identical to Excalidraw canvas',
   },
 
   ru: {
@@ -1477,6 +1478,7 @@ const LOCALES = {
     excalidraw_download: 'Скачать',
     excalidraw_empty: 'Пустая диаграмма',
     excalidraw_render_error: 'Не удалось отобразить диаграмму',
+    excalidraw_simplified: 'Упрощённый предпросмотр SVG — не полностью идентичен оригиналу Excalidraw',
   },
 
   es: {
@@ -2181,6 +2183,7 @@ const LOCALES = {
     excalidraw_download: 'Descargar',
     excalidraw_empty: 'Diagrama vacío',
     excalidraw_render_error: 'Error al renderizar el diagrama',
+    excalidraw_simplified: 'Vista previa SVG simplificada — no es idéntica al lienzo de Excalidraw',
   },
 
   de: {
@@ -2660,6 +2663,7 @@ const LOCALES = {
     excalidraw_download: 'Herunterladen',
     excalidraw_empty: 'Leeres Diagramm',
     excalidraw_render_error: 'Diagramm konnte nicht gerendert werden',
+    excalidraw_simplified: 'Vereinfachte SVG-Vorschau — nicht pixelgenau zum Excalidraw-Canvas',
 },
 
   zh: {
@@ -3361,6 +3365,7 @@ const LOCALES = {
     excalidraw_download: '下载',
     excalidraw_empty: '空图表',
     excalidraw_render_error: '渲染图表失败',
+    excalidraw_simplified: '简化 SVG 预览 — 与 Excalidraw 画布不完全相同',
   },
 
   // Traditional Chinese (zh-Hant)
@@ -4113,6 +4118,7 @@ const LOCALES = {
     excalidraw_download: '下載',
     excalidraw_empty: '空圖表',
     excalidraw_render_error: '渲染圖表失敗',
+    excalidraw_simplified: '簡化 SVG 預覽 — 與 Excalidraw 畫布不完全相同',
   },
 
 
@@ -5504,6 +5510,7 @@ const LOCALES = {
     excalidraw_download: '다운로드',
     excalidraw_empty: '빈 다이어그램',
     excalidraw_render_error: '다이어그램 렌더링 실패',
+    excalidraw_simplified: '단순화된 SVG 미리보기 — Excalidraw 캔버스와 픽셀 동일하지 않음',
   },
 };
 

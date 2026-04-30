@@ -95,7 +95,7 @@ def test_excalidraw_empty_elements():
     """Verify empty diagrams show a message."""
     with open('static/ui.js') as f:
         src = f.read()
-    render = src[src.find('function _renderExcalidrawCanvases()'):src.find('function _renderExcalidrawCanvases()') + 4000]
+    render = src[src.find('function _renderExcalidrawCanvases()'):src.find('function _renderExcalidrawCanvases()') + 4500]
     assert 'excalidraw_empty' in render, "Should handle empty diagrams"
     assert 'excalidraw_render_error' in render, "Should handle render errors"
 
