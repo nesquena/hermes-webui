@@ -124,6 +124,16 @@ class TestPWARoutes:
             "sw.js route must import and use WEBUI_VERSION for cache busting"
         )
 
+    def test_sw_route_url_encodes_cache_version(self):
+        src = ROUTES.read_text(encoding="utf-8")
+        idx = src.find('"/sw.js"')
+        assert idx != -1, "routes.py must handle /sw.js"
+        block = src[idx:idx + 1200]
+        assert "quote(WEBUI_VERSION, safe=\"\")" in block, (
+            "sw.js route must URL-encode the injected cache version so unusual git tags "
+            "cannot break the JavaScript string literal"
+        )
+
     def test_sw_route_sets_service_worker_allowed(self):
         src = ROUTES.read_text(encoding="utf-8")
         idx = src.find('"/sw.js"')
@@ -143,6 +153,21 @@ class TestIndexHtmlIntegration:
         src = INDEX.read_text(encoding="utf-8")
         assert "serviceWorker" in src and "register" in src, (
             "index.html must register the service worker"
+        )
+
+    def test_index_uses_version_placeholders_for_static_assets(self):
+        src = INDEX.read_text(encoding="utf-8")
+        assert "sw.js?v=__WEBUI_VERSION__" in src
+        assert "static/ui.js?v=__WEBUI_VERSION__" in src
+
+    def test_index_route_url_encodes_asset_version(self):
+        src = ROUTES.read_text(encoding="utf-8")
+        idx = src.find('parsed.path in ("/", "/index.html")')
+        assert idx != -1, "routes.py must handle / and /index.html"
+        block = src[idx:idx + 800]
+        assert "quote(WEBUI_VERSION, safe=\"\")" in block, (
+            "index route must URL-encode the cache-busting version token before "
+            "injecting it into script src attributes and service worker registration"
         )
 
     def test_index_has_ios_pwa_meta_tags(self):

@@ -29,3 +29,9 @@ def test_service_worker_excludes_subpath_mounted_health_routes_from_cache():
 def test_service_worker_documents_api_routes_are_never_cached():
     assert "API and streaming endpoints" in SW_SRC
     assert "always go to network" in SW_SRC
+
+
+def test_service_worker_does_not_intercept_its_own_script():
+    assert "url.pathname.endsWith('/sw.js')" in SW_SRC, (
+        "service worker must bypass /sw.js so a stale cached worker cannot block cache-version updates"
+    )

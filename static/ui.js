@@ -1013,12 +1013,17 @@ function renderMd(raw){
   const fence_stash=[];
   s=s.replace(/```([\s\S]*?)```/g,(_,raw)=>{
     const m=raw.match(/^(\w[\w+-]*)\n?([\s\S]*)$/);
-    if(m&&m[1].trim().toLowerCase()==='mermaid'){
+    const lang=m?(m[1]||'').trim().toLowerCase():'';
+    const code=m?m[2]:raw.replace(/^\n?/,'');
+    const codeLines=code.split('\n');
+    const firstCodeLine=codeLines.find(line=>line.trim())||'';
+    const firstMermaidLine=codeLines.map(line=>line.trim()).find(line=>line&&!line.startsWith('%%'))||'';
+    const looksLikeLineNumberedToolOutput=/^\s*\d+\|/.test(firstCodeLine);
+    const looksLikeMermaidStart=firstMermaidLine==='---'||/^(graph|flowchart|sequenceDiagram|classDiagram|classDiagram-v2|stateDiagram|stateDiagram-v2|erDiagram|journey|gantt|pie|gitGraph|mindmap|timeline|quadrantChart|requirementDiagram|C4Context|C4Container|C4Component|C4Dynamic|c4Context|c4Container|c4Component|c4Dynamic|sankey-beta|block-beta|packet-beta|xychart-beta|kanban|architecture-beta)\b/.test(firstMermaidLine);
+    if(lang==='mermaid'&&!looksLikeLineNumberedToolOutput&&looksLikeMermaidStart){
       const id='mermaid-'+Math.random().toString(36).slice(2,10);
-      _preBlock_stash.push(`<div class="mermaid-block" data-mermaid-id="${id}">${esc(m[2].trim())}</div>`);
+      _preBlock_stash.push(`<div class="mermaid-block" data-mermaid-id="${id}">${esc(code.trim())}</div>`);
     } else {
-      const lang=m?(m[1]||'').trim().toLowerCase():'';
-      const code=m?m[2]:raw.replace(/^\n?/,'');
       const h=lang?`<div class="pre-header">${esc(lang)}</div>`:'';
       const langAttr=lang?` class="language-${esc(lang)}"`:'';
       // For diff/patch blocks, wrap each line in a colored span
@@ -4058,10 +4063,17 @@ function renderMermaidBlocks(){
     const id=block.dataset.mermaidId||('m-'+Math.random().toString(36).slice(2));
     try{
       const {svg}=await mermaid.render(id,code);
+      const tmp=document.getElementById('d'+id);
+      if(tmp) tmp.remove();
       block.innerHTML=svg;
       block.classList.add('mermaid-rendered');
     }catch(e){
-      // Fall back to showing as a code block
+      const tmp=document.getElementById('d'+id);
+      if(tmp) tmp.remove();
+      // Fall back to showing as a code block. Remove the mermaid marker so a
+      // later render pass cannot retry this already-failed block.
+      block.classList.remove('mermaid-block');
+      block.classList.add('prewrap');
       block.innerHTML=`<div class="pre-header">mermaid</div><pre><code>${esc(code)}</code></pre>`;
     }
   });

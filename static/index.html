@@ -47,7 +47,7 @@
   <script>
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', function() {
-        navigator.serviceWorker.register('sw.js').catch(function(err) {
+        navigator.serviceWorker.register('sw.js?v=__WEBUI_VERSION__').catch(function(err) {
           console.warn('[pwa] Service worker registration failed:', err);
         });
       });
@@ -951,16 +951,16 @@
   </div>
 </div>
 <div class="toast" id="toast"></div>
-<script src="static/i18n.js" defer></script>
-<script src="static/icons.js" defer></script>
-<script src="static/ui.js" defer></script>
-<script src="static/workspace.js" defer></script>
-<script src="static/terminal.js" defer></script>
-<script src="static/sessions.js" defer></script>
-<script src="static/commands.js" defer></script>
-<script src="static/messages.js" defer></script>
-<script src="static/panels.js" defer></script>
-<script src="static/onboarding.js" defer></script>
-<script src="static/boot.js" defer></script>
+<script src="static/i18n.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/icons.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/ui.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/workspace.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/terminal.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/sessions.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/commands.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/messages.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/boot.js?v=__WEBUI_VERSION__" defer></script>
 </body>
 </html>

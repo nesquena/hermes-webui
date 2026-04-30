@@ -716,9 +716,12 @@ def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
 
     if parsed.path in ("/", "/index.html"):
+        from urllib.parse import quote
+        from api.updates import WEBUI_VERSION
+        version_token = quote(WEBUI_VERSION, safe="")
         return t(
             handler,
-            _INDEX_HTML_PATH.read_text(encoding="utf-8"),
+            _INDEX_HTML_PATH.read_text(encoding="utf-8").replace("__WEBUI_VERSION__", version_token),
             content_type="text/html; charset=utf-8",
         )
 
@@ -775,9 +778,11 @@ def handle_get(handler, parsed) -> bool:
         if sw_path.exists():
             # Inject the current git-derived version as the cache name so the
             # service worker cache busts automatically on every new deploy.
+            from urllib.parse import quote
             from api.updates import WEBUI_VERSION
+            version_token = quote(WEBUI_VERSION, safe="")
             text = sw_path.read_text(encoding="utf-8").replace(
-                "__CACHE_VERSION__", WEBUI_VERSION
+                "__CACHE_VERSION__", version_token
             )
             data = text.encode("utf-8")
             handler.send_response(200)

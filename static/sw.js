@@ -64,6 +64,10 @@ self.addEventListener('fetch', (event) => {
   // Never intercept cross-origin requests
   if (url.origin !== self.location.origin) return;
 
+  // Never intercept the service worker script itself. Returning a cached sw.js
+  // prevents the browser from seeing a new cache version after local patches.
+  if (url.pathname.endsWith('/sw.js')) return;
+
   // API and streaming endpoints — always go to network.
   // The WebUI may be mounted under a subpath such as /hermes/, so API
   // requests can look like /hermes/api/sessions rather than /api/sessions.

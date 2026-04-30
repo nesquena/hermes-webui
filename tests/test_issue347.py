@@ -105,6 +105,21 @@ def test_render_katex_blocks_wired_into_raf():
         'renderKatexBlocks() not found in any requestAnimationFrame call — math will not render'
 
 
+def test_mermaid_render_failure_removes_temporary_error_dom():
+    """Failed Mermaid renders must not leave Mermaid's body-level syntax-error SVG visible."""
+    fn_start = UI_JS.find('function renderMermaidBlocks()')
+    assert fn_start != -1, 'renderMermaidBlocks() function not found in ui.js'
+    fn = UI_JS[fn_start:fn_start + 2200]
+    cleanup = "const tmp=document.getElementById('d'+id);\n      if(tmp) tmp.remove();"
+    assert cleanup in fn, (
+        "renderMermaidBlocks() must remove Mermaid's temporary d<id> container; "
+        "otherwise rejected renders leave a visible 'Syntax error in text' SVG in every tab."
+    )
+    assert fn.count(cleanup) >= 2, (
+        "Mermaid temporary DOM cleanup must run after both successful and failed renders."
+    )
+
+
 # ── index.html ────────────────────────────────────────────────────────────────
 
 def test_katex_css_in_index_html():

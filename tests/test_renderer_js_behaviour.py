@@ -503,6 +503,51 @@ class TestBlockquoteEntityEncodedInput:
         assert "<pre>" in out, f"Fenced code inside entity-encoded blockquote must render: {out!r}"
 
 
+class TestMermaidToolOutputGuard:
+    """Line-numbered tool excerpts must not be auto-rendered as Mermaid."""
+
+    def test_line_numbered_mermaid_fence_renders_as_code_block(self, driver_path):
+        src = "```mermaid\n23|flowchart TB\n24|    A --> B\n```"
+        out = _render(driver_path, src)
+        assert 'class="mermaid-block"' not in out, (
+            f"Line-numbered read_file excerpts are not valid Mermaid and must not auto-render: {out!r}"
+        )
+        assert '<div class="pre-header">mermaid</div>' in out
+        assert '<pre><code class="language-mermaid">' in out
+        assert '23|flowchart TB' in out
+
+    def test_valid_mermaid_fence_still_creates_mermaid_block(self, driver_path):
+        out = _render(driver_path, "```mermaid\nflowchart TB\n    A --> B\n```")
+        assert 'class="mermaid-block"' in out, (
+            f"Valid Mermaid fences should still be queued for Mermaid rendering: {out!r}"
+        )
+        assert 'flowchart TB' in out
+
+    def test_valid_mermaid_c4_fence_still_creates_mermaid_block(self, driver_path):
+        out = _render(driver_path, "```mermaid\nC4Context\n    title System Context\n```")
+        assert 'class="mermaid-block"' in out, (
+            f"Valid C4 Mermaid fences should still be queued for Mermaid rendering: {out!r}"
+        )
+        assert 'C4Context' in out
+
+    def test_valid_mermaid_frontmatter_fence_still_creates_mermaid_block(self, driver_path):
+        out = _render(driver_path, "```mermaid\n---\ntitle: Demo\n---\nflowchart TB\n    A --> B\n```")
+        assert 'class="mermaid-block"' in out, (
+            f"Valid Mermaid fences with frontmatter should still be queued for Mermaid rendering: {out!r}"
+        )
+        assert 'title: Demo' in out
+
+    def test_prose_mention_of_mermaid_fence_renders_as_code_block(self, driver_path):
+        src = "```mermaid\n` fence should not be auto-rendered too aggressively.\n\nSome prose, not a diagram.\n```"
+        out = _render(driver_path, src)
+        assert 'class="mermaid-block"' not in out, (
+            f"Prose captured by a mermaid fence is not valid Mermaid and must not auto-render: {out!r}"
+        )
+        assert '<div class="pre-header">mermaid</div>' in out
+        assert '<pre><code class="language-mermaid">' in out
+        assert 'Some prose, not a diagram.' in out
+
+
 class TestRawPreCodePreservation:
     """Raw <pre><code> HTML from model output should remain structurally intact."""
 
