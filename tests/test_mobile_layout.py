@@ -49,9 +49,181 @@ def test_rightpanel_mobile_slide_over_css():
         "style.css must have position:fixed for rightpanel mobile slide-over"
     assert ".rightpanel.mobile-open{right:0" in CSS or ".rightpanel.mobile-open {right:0" in CSS, \
         ".rightpanel.mobile-open must set right:0 to slide panel in from right"
-    assert "right:-320px" in CSS or "right: -320px" in CSS, \
-        "rightpanel must start off-screen (right:-320px) on mobile"
+    assert "min(300px, 100vw)" in CSS or "min(300px,100vw)" in CSS, \
+        "rightpanel mobile width should be capped defensively with 100vw"
+    assert "var(--mobile-rightpanel-width)" in CSS, \
+        "mobile rightpanel width variable should be used in compact mode rules"
+    assert "calc(-1 * var(--mobile-rightpanel-width))" in CSS, \
+        "closed mobile rightpanel should be off-canvas using a width-based negative offset"
+    mobile_640 = re.search(r'@media\(max-width:640px\)\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}', CSS, re.DOTALL)
+    assert mobile_640, "@media(max-width:640px) block missing from style.css"
+    rightpanel_block = mobile_640.group(1)
+    assert re.search(r'\.rightpanel\{[^}]*width:\s*var\(--mobile-rightpanel-width\)\s*!important',
+                     rightpanel_block, re.DOTALL), \
+        ".rightpanel width must use var(--mobile-rightpanel-width) with !important in mobile block"
+    assert re.search(r'\.rightpanel\.mobile-open\{[^}]*right:\s*0\s*!important',
+                     rightpanel_block, re.DOTALL), \
+        "mobile-open mobile rightpanel must force right:0 with !important"
+    assert re.search(r'\.rightpanel\{[^}]*box-shadow:\s*none\s*!important',
+                     rightpanel_block, re.DOTALL), \
+        "closed mobile rightpanel should have no shadow to avoid right-edge bleed"
+    assert re.search(r'\.rightpanel\.mobile-open\{[^}]*box-shadow:\s*-4px 0 24px rgba\(0,\s*0,\s*0,\s*\.?4\)',
+                     rightpanel_block, re.DOTALL), \
+        "open mobile rightpanel should keep the edge shadow"
 
+
+def test_workspace_panel_inline_width_is_desktop_only():
+    """Persisted rightpanel width must only be restored above compact/mobile breakpoints."""
+    boot_js = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    assert "function _syncWorkspacePanelInlineWidth()" in boot_js, \
+        "_syncWorkspacePanelInlineWidth() must exist to keep panel width mobile-safe"
+    assert "_syncWorkspacePanelInlineWidth();" in boot_js, \
+        "_syncWorkspacePanelInlineWidth() must be called when viewport changes"
+    assert "localStorage.getItem('hermes-panel-w')" in boot_js, \
+        "Panel width helper must source hermes-panel-w from localStorage"
+    assert "_workspacePanelEls();" in boot_js and "style.removeProperty('width')" in boot_js, \
+        "Panel helper must clear inline width while in compact/mobile viewport"
+
+
+def _container_query_block(css: str, container_query: str):
+    query_pattern = re.compile(
+        rf'@container\s+{re.escape(container_query)}\s*\{{',
+        re.DOTALL,
+    )
+    for match in query_pattern.finditer(css):
+        start = match.end() - 1
+        end = css.find("@container", start + 1)
+        if end == -1:
+            end = css.find("@media", start + 1)
+        if end == -1:
+            end = len(css)
+        block = css[start + 1:end]
+        return block
+    return ""
+
+
+def _container_media_block(css: str, media_query: str):
+    query_pattern = re.compile(
+        rf'@media\s*\(\s*max-width:\s*{re.escape(media_query)}\s*\)\s*\{{',
+        re.DOTALL,
+    )
+
+    def _media_block_end(css_text: str, open_brace_idx: int) -> int:
+        depth = 0
+        for idx in range(open_brace_idx, len(css_text)):
+            if css_text[idx] == "{":
+                depth += 1
+            elif css_text[idx] == "}":
+                depth -= 1
+                if depth == 0:
+                    return idx
+        return -1
+
+    def _strip_nested_media(block: str) -> str:
+        parts = []
+        cursor = 0
+        while True:
+            nested = block.find("@media", cursor)
+            if nested == -1:
+                parts.append(block[cursor:])
+                break
+            parts.append(block[cursor:nested])
+            nested_open = block.find("{", nested)
+            if nested_open == -1:
+                break
+            nested_close = _media_block_end(block, nested_open)
+            if nested_close == -1:
+                break
+            cursor = nested_close + 1
+        return "".join(parts)
+
+    for match in query_pattern.finditer(css):
+        start = match.end() - 1
+        end = _media_block_end(css, start)
+        if end == -1:
+            continue
+        block = css[start + 1:end]
+        block = _strip_nested_media(block)
+        if ".composer-profile-label" in block or ".composer-profile-chip" in block:
+            return block
+    return ""
+
+
+def test_composer_controls_switch_to_icon_only_by_container_width():
+    """Composer controls should progressively compact based on footer width."""
+    assert re.search(r'\.composer-footer\s*\{[^}]*container-type:inline-size[^}]*container-name:composer-footer[^}]*\}', CSS), \
+        ".composer-footer should define container-type:inline-size and container-name:composer-footer"
+    compact_700 = _container_query_block(CSS, "composer-footer (max-width: 700px)")
+    assert compact_700, "Expected composer mid-width compact rules at @container composer-footer (max-width: 700px)"
+    for selector in (
+        ".composer-workspace-label",
+        ".composer-model-label",
+        ".composer-workspace-chevron",
+        ".composer-model-chevron",
+        "#composerWorkspaceLabel",
+        "#composerModelLabel",
+        ".composer-workspace-chip",
+        ".composer-model-chip",
+        ".composer-divider",
+    ):
+        assert selector in compact_700, f"{selector} should be present in the 700px composer compact block"
+    assert "display:none" in compact_700
+    assert "max-width:52px" in compact_700
+    # Ensure this first stage does not prematurely remove profile/reasoning labels.
+    assert ".composer-profile-label" not in compact_700
+    assert ".composer-reasoning-label" not in compact_700
+    assert ".composer-profile-chevron" not in compact_700
+    assert ".composer-reasoning-chevron" not in compact_700
+
+    compact_520 = _container_query_block(CSS, "composer-footer (max-width: 520px)")
+    assert compact_520, "Expected full composer icon-only rules at @container composer-footer (max-width: 520px)"
+    for selector in (
+        ".composer-profile-label",
+        ".composer-workspace-label",
+        ".composer-model-label",
+        ".composer-reasoning-label",
+        ".composer-profile-chevron",
+        ".composer-workspace-chevron",
+        ".composer-model-chevron",
+        ".composer-reasoning-chevron",
+        "#composerProfileLabel",
+        "#composerWorkspaceLabel",
+        "#composerModelLabel",
+        "#composerReasoningLabel",
+        ".composer-workspace-chip",
+        ".composer-model-chip",
+        ".composer-profile-chip",
+        ".composer-reasoning-chip",
+    ):
+        assert selector in compact_520, f"{selector} should be present in the 520px composer compact block"
+    assert "max-width:44px" in compact_520
+    assert "display:none" in compact_520
+
+    # Regression intent:
+    # - this container rule should not depend on right-panel open/closed state.
+    # - left-sidebar-only constriction must still collapse composer controls together.
+    assert ".layout:not(.workspace-panel-collapsed)" not in compact_700, \
+        "composer-footer compact rule should be state-agnostic (left sidebar + closed right panel case included)"
+    assert ".layout:not(.workspace-panel-collapsed)" not in compact_520, \
+        "composer-footer compact rule should be state-agnostic (left sidebar + closed right panel case included)"
+
+
+def test_composer_compact_switch_is_not_viewport_only():
+    """Compact controls should be container-triggered, not bound to viewport width alone."""
+    assert "composer-footer (max-width: 700px)" in CSS, \
+        "Container-query breakpoint should track composer footer width"
+    assert "composer-footer (max-width: 520px)" in CSS, \
+        "Container-query second-stage breakpoint should track composer footer width"
+    assert re.search(r'@container\s+composer-footer\s*\(max-width:\s*860px\)', CSS) is None, \
+        "Full icon-only should not be tied to a 860px threshold any more"
+    assert re.search(r'@container\s+composer-footer\s*\(max-width:\s*1000px\)', CSS) is None, \
+        "Full icon-only/first-stage container gate should not be tied to 1000px"
+    media_860 = _container_media_block(CSS, "860px")
+    assert media_860 == "", \
+        "Composer compact breakpoint should not be a dedicated 860px viewport media query"
+    media_900 = _container_media_block(CSS, "900px")
+    assert media_900 == "", \
+        "Composer compact breakpoint should use container queries, not viewport media at 900px"
 
 def test_mobile_overlay_present():
     """Mobile overlay element must exist for tap-to-close sidebar behavior."""

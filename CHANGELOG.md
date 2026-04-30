@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- **Compact/mobile workspace panel and composer layout** — prevents a saved desktop workspace-panel width from leaking into compact layouts, so mobile-width browsers no longer show a right-edge workspace sliver or closed-panel shadow. Composer footer controls now compact progressively based on the footer's own width, avoiding intermediate icon/text overlap when sidebars constrain the chat column. (`static/boot.js`, `static/style.css`, `tests/test_mobile_layout.py`) — fixes #1300
 
 ## [v0.50.244] — 2026-04-30
 

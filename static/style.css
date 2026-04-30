@@ -840,7 +840,7 @@
   .attach-thumb{width:56px;height:56px;object-fit:cover;border-radius:4px;display:block;cursor:default;}
   textarea#msg{width:100%;background:transparent;border:none;outline:none;color:var(--text);font-size:16px;line-height:1.65;padding:12px 16px 6px;resize:none;min-height:44px;max-height:200px;font-family:inherit;}
   textarea#msg::placeholder{color:var(--muted);}
-  .composer-footer{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 10px 10px;position:relative;}
+  .composer-footer{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 10px 10px;position:relative;container-type:inline-size;container-name:composer-footer;}
   .composer-left{display:flex;align-items:center;gap:4px;min-width:0;flex:1;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;}
   .composer-left::-webkit-scrollbar{display:none;}
   .composer-divider{width:1px;height:16px;background:var(--border);margin:0 3px;flex-shrink:0;}
@@ -1074,6 +1074,50 @@
     #btnCollapseWorkspacePanel{display:none;}
   }
 
+  @container composer-footer (max-width: 700px){
+    /* Stage 1: remove long workspace/model text first to avoid clipping.
+       The left sidebar + panel layout can consume width before right panel opens, so this
+       must be container-driven and independent of panel state. */
+    .composer-workspace-label,
+    .composer-workspace-chevron,
+    #composerWorkspaceLabel,
+    .composer-model-label,
+    .composer-model-chevron,
+    #composerModelLabel{display:none;}
+
+    .composer-workspace-chip,
+    .composer-model-chip{max-width:52px;min-width:44px;min-height:44px;padding:6px;justify-content:center;gap:0;font-size:11px;}
+    .composer-workspace-group{min-height:44px;}
+    .composer-workspace-files-btn{min-width:44px;padding:6px 8px;}
+    .composer-divider{display:none;}
+  }
+
+  @container composer-footer (max-width: 520px){
+    /* Stage 2: full icon-only for tighter widths. */
+    .composer-profile-label,
+    .composer-workspace-label,
+    .composer-model-label,
+    .composer-reasoning-label,
+    .composer-profile-chevron,
+    .composer-workspace-chevron,
+    .composer-model-chevron,
+    .composer-reasoning-chevron,
+    #composerProfileLabel,
+    #composerWorkspaceLabel,
+    #composerModelLabel,
+    #composerReasoningLabel{display:none;}
+
+    .composer-profile-chip,
+    .composer-model-chip,
+    .composer-reasoning-chip,
+    .composer-workspace-chip{max-width:44px;min-width:44px;min-height:44px;padding:6px;justify-content:center;gap:0;font-size:11px;}
+
+    .composer-workspace-group{min-height:44px;}
+    .composer-workspace-files-btn{min-width:44px;padding:6px 8px;}
+    .composer-workspace-chip{min-width:44px;max-width:44px;padding:6px 8px;gap:0;}
+    .composer-divider{display:none;}
+  }
+
   @media(max-width:640px){
     /* ── Sidebar: slide-in overlay instead of hidden ── */
     .sidebar{position:fixed;left:-300px;top:0;bottom:0;width:280px;z-index:200;
@@ -1091,10 +1135,12 @@
     /* Files button in topbar */
     .workspace-toggle-btn,.mobile-files-btn{display:inline-flex!important;}
     /* Right panel: slide-over from right */
-    .rightpanel{display:flex!important;position:fixed;right:-320px;top:0;bottom:0;
-      width:300px;z-index:200;transition:right .25s ease;
-      box-shadow:-4px 0 24px rgba(0,0,0,.4);}
-    .rightpanel.mobile-open{right:0;}
+    .rightpanel{display:flex!important;position:fixed;
+      --mobile-rightpanel-width:min(300px, 100vw);
+      right:calc(-1 * var(--mobile-rightpanel-width))!important;
+      top:0;bottom:0;width:var(--mobile-rightpanel-width)!important;max-width:100vw!important;z-index:200;transition:right .25s ease;
+      box-shadow:none!important;}
+    .rightpanel.mobile-open{right:0!important;box-shadow:-4px 0 24px rgba(0,0,0,.4)!important;}
     .rightpanel .resize-handle{display:none;}
     /* Topbar adjustments */
     .topbar{padding:8px 12px;gap:8px;}
@@ -1111,21 +1157,25 @@
     .composer-box{border-radius:12px;}
     .composer-box textarea{min-height:40px;}
     .composer-footer{padding:6px 8px 8px!important;gap:8px;}
-    /* icon-only composer chips below 768px */
     .composer-profile-label,
     .composer-workspace-label,
     .composer-model-label,
     .composer-reasoning-label,
     .composer-profile-chevron,
+    .composer-workspace-chevron,
     .composer-model-chevron,
-    .composer-reasoning-chevron{display:none;}
+    .composer-reasoning-chevron,
+    #composerProfileLabel,
+    #composerWorkspaceLabel,
+    #composerModelLabel,
+    #composerReasoningLabel{display:none;}
     .composer-profile-chip,
     .composer-model-chip,
     .composer-reasoning-chip{max-width:44px;min-width:44px;min-height:44px;padding:6px;justify-content:center;gap:0;font-size:11px;}
-    /* Workspace group: keep split layout on mobile — files icon + chevron-only picker */
     .composer-workspace-group{min-height:44px;}
     .composer-workspace-files-btn{min-width:44px;padding:6px 8px;}
-    .composer-workspace-chip{min-width:32px;padding:6px 8px;gap:0;}
+    .composer-workspace-chip{min-width:44px;max-width:44px;padding:6px 8px;gap:0;}
+    /* icon-only composer chips continue below mobile widths */
     .composer-divider{display:none;}
     .composer-status{max-width:96px;font-size:10px;}
     .send-btn{width:32px;height:32px;}

@@ -20,6 +20,23 @@ function _isCompactWorkspaceViewport(){
   return window.matchMedia('(max-width: 900px)').matches;
 }
 
+function _syncWorkspacePanelInlineWidth(){
+  const {panel}= _workspacePanelEls();
+  if(!panel) return;
+
+  const isCompact = _isCompactWorkspaceViewport();
+  if(isCompact){
+    if(panel.style.width) panel.style.removeProperty('width');
+    return;
+  }
+
+  const saved = localStorage.getItem('hermes-panel-w');
+  if(!saved) return;
+  const parsed = parseInt(saved, 10);
+  if(Number.isNaN(parsed) || parsed <= 0) return;
+  panel.style.width = `${parsed}px`;
+}
+
 function _workspacePanelEls(){
   return {
     layout: document.querySelector('.layout'),
@@ -578,6 +595,7 @@ document.querySelectorAll('.suggestion').forEach(btn=>{
 });
 
 window.addEventListener('resize',()=>{
+  _syncWorkspacePanelInlineWidth();
   syncWorkspacePanelState();
 });
 
@@ -592,8 +610,12 @@ window.addEventListener('resize',()=>{
     if(!handle || !targetEl) return;
 
     // Restore saved width
-    const saved = localStorage.getItem(storageKey);
-    if(saved) targetEl.style.width = saved + 'px';
+    if(storageKey === 'hermes-panel-w'){
+      _syncWorkspacePanelInlineWidth();
+    }else{
+      const saved = localStorage.getItem(storageKey);
+      if(saved) targetEl.style.width = saved + 'px';
+    }
 
     let startX=0, startW=0;
 
