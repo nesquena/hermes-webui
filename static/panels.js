@@ -2492,6 +2492,8 @@ let _settingsSection = 'conversation';
 let _currentSettingsSection = 'conversation';
 let _settingsAppearanceAutosaveTimer = null;
 let _settingsAppearanceAutosaveRetryPayload = null;
+let _settingsPreferencesAutosaveTimer = null;
+let _settingsPreferencesAutosaveRetryPayload = null;
 
 function switchSettingsSection(name){
   const section=(name==='appearance'||name==='preferences'||name==='providers'||name==='system')?name:'conversation';
@@ -2675,6 +2677,92 @@ function _retryAppearanceAutosave(){
   _autosaveAppearanceSettings(payload);
 }
 
+// ── Phase 2: Preferences autosave (Issue #1003) ───────────────────────
+
+function _preferencesPayloadFromUi(){
+  const payload={};
+  const sendKeySel=$('settingsSendKey');
+  if(sendKeySel) payload.send_key=sendKeySel.value;
+  const langSel=$('settingsLanguage');
+  if(langSel) payload.language=langSel.value;
+  const showUsageCb=$('settingsShowTokenUsage');
+  if(showUsageCb) payload.show_token_usage=showUsageCb.checked;
+  const simplifiedToolCb=$('settingsSimplifiedToolCalling');
+  if(simplifiedToolCb) payload.simplified_tool_calling=simplifiedToolCb.checked;
+  const showCliCb=$('settingsShowCliSessions');
+  if(showCliCb) payload.show_cli_sessions=showCliCb.checked;
+  const syncCb=$('settingsSyncInsights');
+  if(syncCb) payload.sync_to_insights=syncCb.checked;
+  const updateCb=$('settingsCheckUpdates');
+  if(updateCb) payload.check_for_updates=updateCb.checked;
+  const soundCb=$('settingsSoundEnabled');
+  if(soundCb) payload.sound_enabled=soundCb.checked;
+  const notifCb=$('settingsNotificationsEnabled');
+  if(notifCb) payload.notifications_enabled=notifCb.checked;
+  const sidebarDensitySel=$('settingsSidebarDensity');
+  if(sidebarDensitySel) payload.sidebar_density=sidebarDensitySel.value;
+  const autoTitleRefreshSel=$('settingsAutoTitleRefresh');
+  if(autoTitleRefreshSel) payload.auto_title_refresh_every=parseInt(autoTitleRefreshSel.value,10);
+  const busyInputModeSel=$('settingsBusyInputMode');
+  if(busyInputModeSel) payload.busy_input_mode=busyInputModeSel.value;
+  const botNameField=$('settingsBotName');
+  if(botNameField) payload.bot_name=botNameField.value;
+  return payload;
+}
+
+function _setPreferencesAutosaveStatus(state){
+  const el=$('settingsPreferencesAutosaveStatus');
+  if(!el) return;
+  el.className='settings-autosave-status';
+  if(!state){
+    el.textContent='';
+    return;
+  }
+  el.classList.add('is-'+state);
+  if(state==='saving'){
+    el.textContent=t('settings_autosave_saving');
+  }else if(state==='saved'){
+    el.textContent=t('settings_autosave_saved');
+  }else if(state==='failed'){
+    el.innerHTML=`<span>${esc(t('settings_autosave_failed'))}</span> <button type=\"button\" onclick=\"_retryPreferencesAutosave()\">${esc(t('settings_autosave_retry'))}</button>`;
+  }
+}
+
+function _rememberPreferencesSaved(payload){
+  if(!payload) return;
+  if(payload.send_key!==undefined) localStorage.setItem('hermes-pref-send_key',payload.send_key);
+  if(payload.language!==undefined) localStorage.setItem('hermes-pref-language',payload.language);
+}
+
+function _schedulePreferencesAutosave(){
+  const payload=_preferencesPayloadFromUi();
+  _rememberPreferencesSaved(payload);
+  _settingsPreferencesAutosaveRetryPayload=payload;
+  _setPreferencesAutosaveStatus('saving');
+  if(_settingsPreferencesAutosaveTimer) clearTimeout(_settingsPreferencesAutosaveTimer);
+  _settingsPreferencesAutosaveTimer=setTimeout(()=>_autosavePreferencesSettings(payload),350);
+}
+
+async function _autosavePreferencesSettings(payload){
+  try{
+    await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+    _settingsPreferencesAutosaveRetryPayload=null;
+    _setPreferencesAutosaveStatus('saved');
+    _settingsDirty=false;
+    const bar=$('settingsUnsavedBar');
+    if(bar) bar.style.display='none';
+  }catch(e){
+    console.warn('[settings] preferences autosave failed', e);
+    _setPreferencesAutosaveStatus('failed');
+  }
+}
+
+function _retryPreferencesAutosave(){
+  const payload=_settingsPreferencesAutosaveRetryPayload||_preferencesPayloadFromUi();
+  _setPreferencesAutosaveStatus('saving');
+  _autosavePreferencesSettings(payload);
+}
+
 async function loadSettingsPanel(){
   try{
     const settings=await api('/api/settings');
@@ -2761,7 +2849,7 @@ async function loadSettingsPanel(){
     }
     // Send key preference
     const sendKeySel=$('settingsSendKey');
-    if(sendKeySel){sendKeySel.value=settings.send_key||'enter';sendKeySel.addEventListener('change',_markSettingsDirty,{once:false});}
+    if(sendKeySel){sendKeySel.value=settings.send_key||'enter';sendKeySel.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     // Language preference — populate from LOCALES bundle
     const langSel=$('settingsLanguage');
     if(langSel){
@@ -2774,20 +2862,20 @@ async function loadSettingsPanel(){
         }
       }
       langSel.value=resolvedLanguage;
-      langSel.addEventListener('change',_markSettingsDirty,{once:false});
+      langSel.addEventListener('change',_schedulePreferencesAutosave,{once:false});
     }
     const showUsageCb=$('settingsShowTokenUsage');
-    if(showUsageCb){showUsageCb.checked=!!settings.show_token_usage;showUsageCb.addEventListener('change',_markSettingsDirty,{once:false});}
+    if(showUsageCb){showUsageCb.checked=!!settings.show_token_usage;showUsageCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const simplifiedToolCb=$('settingsSimplifiedToolCalling');
-    if(simplifiedToolCb){simplifiedToolCb.checked=settings.simplified_tool_calling!==false;simplifiedToolCb.addEventListener('change',_markSettingsDirty,{once:false});}
+    if(simplifiedToolCb){simplifiedToolCb.checked=settings.simplified_tool_calling!==false;simplifiedToolCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const showCliCb=$('settingsShowCliSessions');
-    if(showCliCb){showCliCb.checked=!!settings.show_cli_sessions;showCliCb.addEventListener('change',_markSettingsDirty,{once:false});}
+    if(showCliCb){showCliCb.checked=!!settings.show_cli_sessions;showCliCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const syncCb=$('settingsSyncInsights');
-    if(syncCb){syncCb.checked=!!settings.sync_to_insights;syncCb.addEventListener('change',_markSettingsDirty,{once:false});}
+    if(syncCb){syncCb.checked=!!settings.sync_to_insights;syncCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const updateCb=$('settingsCheckUpdates');
-    if(updateCb){updateCb.checked=settings.check_for_updates!==false;updateCb.addEventListener('change',_markSettingsDirty,{once:false});}
+    if(updateCb){updateCb.checked=settings.check_for_updates!==false;updateCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const soundCb=$('settingsSoundEnabled');
-    if(soundCb){soundCb.checked=!!settings.sound_enabled;soundCb.addEventListener('change',_markSettingsDirty,{once:false});}
+    if(soundCb){soundCb.checked=!!settings.sound_enabled;soundCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     // TTS settings (localStorage-only, no server round-trip needed)
     const ttsEnabledCb=$('settingsTtsEnabled');
     if(ttsEnabledCb){ttsEnabledCb.checked=localStorage.getItem('hermes-tts-enabled')==='true';ttsEnabledCb.onchange=function(){localStorage.setItem('hermes-tts-enabled',this.checked?'true':'false');_applyTtsEnabled(this.checked);};}
@@ -2829,29 +2917,36 @@ async function loadSettingsPanel(){
       ttsPitchSlider.oninput=function(){if(ttsPitchValue)ttsPitchValue.textContent=parseFloat(this.value).toFixed(1);localStorage.setItem('hermes-tts-pitch',this.value);};
     }
     const notifCb=$('settingsNotificationsEnabled');
-    if(notifCb){notifCb.checked=!!settings.notifications_enabled;notifCb.addEventListener('change',_markSettingsDirty,{once:false});}
+    if(notifCb){notifCb.checked=!!settings.notifications_enabled;notifCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     // show_thinking has no settings panel checkbox — controlled via /reasoning show|hide
     const sidebarDensitySel=$('settingsSidebarDensity');
     if(sidebarDensitySel){
       sidebarDensitySel.value=settings.sidebar_density==='detailed'?'detailed':'compact';
-      sidebarDensitySel.addEventListener('change',_markSettingsDirty,{once:false});
+      sidebarDensitySel.addEventListener('change',_schedulePreferencesAutosave,{once:false});
     }
     const autoTitleRefreshSel=$('settingsAutoTitleRefresh');
     if(autoTitleRefreshSel){
       const val=String(settings.auto_title_refresh_every||'0');
       autoTitleRefreshSel.value=['0','5','10','20'].includes(val)?val:'0';
-      autoTitleRefreshSel.addEventListener('change',_markSettingsDirty,{once:false});
+      autoTitleRefreshSel.addEventListener('change',_schedulePreferencesAutosave,{once:false});
     }
     // Busy input mode
     const busyInputModeSel=$('settingsBusyInputMode');
     if(busyInputModeSel){
       const val=String(settings.busy_input_mode||'queue');
       busyInputModeSel.value=['queue','interrupt','steer'].includes(val)?val:'queue';
-      busyInputModeSel.addEventListener('change',_markSettingsDirty,{once:false});
+      busyInputModeSel.addEventListener('change',_schedulePreferencesAutosave,{once:false});
     }
-    // Bot name
+    // Bot name — debounced autosave (text input)
     const botNameField=$('settingsBotName');
-    if(botNameField){botNameField.value=settings.bot_name||'Hermes';botNameField.addEventListener('input',_markSettingsDirty,{once:false});}
+    if(botNameField){
+      botNameField.value=settings.bot_name||'Hermes';
+      let botNameTimer=null;
+      botNameField.addEventListener('input',()=>{
+        if(botNameTimer) clearTimeout(botNameTimer);
+        botNameTimer=setTimeout(_schedulePreferencesAutosave,500);
+      },{once:false});
+    }
     // Password field: always blank (we don't send hash back)
     const pwField=$('settingsPassword');
     if(pwField){pwField.value='';pwField.addEventListener('input',_markSettingsDirty,{once:false});}
