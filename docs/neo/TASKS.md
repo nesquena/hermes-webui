@@ -32,7 +32,7 @@
 | Sprint | Tema | HUs | Implementadas no worktree | Concluídas por DoD | Status |
 |---|---:|---:|---:|---:|---|
 | Sprint 1 | Rebrand visual/textual + locale pt-BR | 11 | 9 parciais | 0 | em fechamento |
-| Sprint 2 | Dashboard + sidebar/topbar Neo | 11 | 0 | 0 | próxima |
+| Sprint 2 | Dashboard + sidebar/topbar Neo | 11 | 2 parciais | 0 | em andamento |
 | Sprint 3 | Projetos/Kanban 4 colunas | 10 | 0 | 0 | aguardando Sprint 2 |
 | Sprint 4 | Ações rápidas + Finanças shell visual | 13 | 0 | 0 | aguardando Sprint 3 |
 | Transversal | Qualidade, testes e evidências | 5 | 0 | 0 | em andamento contínuo |
@@ -55,6 +55,9 @@ Estado registrado em 2026-05-01:
     (`10 passed in 1.20s`)
 - HU-01.2 e HU-01.5 foram implementadas após o merge da Sprint 1 com assets de
   marca, favicon/PWA e teste `tests/test_neo_branding_assets.py`.
+- Sprint 2 iniciada em `develop` com HU-03.1/HU-03.2 implementadas como corte
+  inicial: painel Dashboard, `static/dashboard.js`, `?panel=dashboard` e
+  `settings.default_panel`/`HERMES_WEBUI_DEFAULT_PANEL`.
 - A DoD ainda não está fechada para nenhuma HU porque faltam evidências visuais
   e homologação manual registrada.
 
@@ -300,29 +303,33 @@ ações rápidas, sidebar fixa de 240px e topbar contextual de 56px.
 
 ### HU-03.1 — Painel "Dashboard" na sidebar
 
-**Status:** disponível
+**Status:** implementada sem DoD
 
 **Tasks**
 
-- [ ] Adicionar item Dashboard na sidebar de 9 itens.
-- [ ] Criar painel `dashboard` sem quebrar painel `chat` upstream.
-- [ ] Criar `static/dashboard.js`.
-- [ ] Carregar `loadDashboard()` por feature detection.
+- [x] Adicionar item Dashboard na sidebar de 9 itens.
+- [x] Criar painel `dashboard` sem quebrar painel `chat` upstream.
+- [x] Criar `static/dashboard.js`.
+- [x] Carregar `loadDashboard()` por feature detection.
+- [x] Registrar evidência técnica em `docs/neo/evidencias/HU-03.1/`.
+- [ ] Anexar screenshots/homologação manual em runtime.
 
 ### HU-03.2 — Dashboard como painel inicial
 
-**Status:** disponível
+**Status:** implementada sem DoD
 
 **Tasks**
 
-- [ ] Suportar `?panel=dashboard`.
-- [ ] Adicionar `settings.default_panel`.
-- [ ] Ler `HERMES_WEBUI_DEFAULT_PANEL` como default inicial quando não houver escolha local.
-- [ ] Preservar default upstream (`chat`) sem env/setting.
+- [x] Suportar `?panel=dashboard`.
+- [x] Adicionar `settings.default_panel`.
+- [x] Ler `HERMES_WEBUI_DEFAULT_PANEL` como default inicial quando não houver escolha local.
+- [x] Preservar default upstream (`chat`) sem env/setting.
+- [x] Registrar evidência técnica em `docs/neo/evidencias/HU-03.2/`.
+- [ ] Anexar screenshots/homologação manual em runtime.
 
 ### HU-03.3 — Hero avatar humanoide + saudação
 
-**Status:** aguardando HU-03.1
+**Status:** disponível
 
 **Tasks**
 

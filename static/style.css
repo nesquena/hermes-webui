@@ -1954,13 +1954,15 @@ body.resizing{user-select:none;cursor:col-resize;}
    main.main.showing-<name> > #main<Name> { display:flex } rule. */
 .main-view{flex:1;min-height:0;min-width:0;display:flex;flex-direction:column;background:var(--bg);}
 main.main > #mainChat,
+main.main > #mainDashboard,
 main.main > #mainSettings,
 main.main > #mainSkills,
 main.main > #mainMemory,
 main.main > #mainTasks,
 main.main > #mainWorkspaces,
 main.main > #mainProfiles{display:none;}
-main.main:not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-workspaces):not(.showing-profiles) > #mainChat{display:flex;}
+main.main:not(.showing-dashboard):not(.showing-settings):not(.showing-skills):not(.showing-memory):not(.showing-tasks):not(.showing-workspaces):not(.showing-profiles) > #mainChat{display:flex;}
+main.main.showing-dashboard > #mainDashboard{display:flex;}
 main.main.showing-settings > #mainSettings{display:flex;overflow-y:auto;}
 main.main.showing-skills > #mainSkills{display:flex;}
 main.main.showing-memory > #mainMemory{display:flex;}
@@ -2642,6 +2644,17 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 .main-view-actions{display:flex;align-items:center;gap:4px;flex-shrink:0;}
 .main-view-body{flex:1;min-height:0;overflow-y:auto;padding:24px 32px;}
 .main-view-content{max-width:960px;margin:0 auto;width:100%;}
+.dashboard-shell{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(260px,.8fr);gap:16px;align-items:stretch;}
+.dashboard-panel{border:1px solid var(--border);background:var(--surface);border-radius:8px;padding:18px;min-height:180px;}
+.dashboard-panel h2{font-size:18px;line-height:1.3;margin:0 0 8px;color:var(--text);}
+.dashboard-panel p{font-size:13px;line-height:1.55;margin:0;color:var(--muted);}
+.dashboard-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:14px;color:var(--muted);font-size:12px;}
+.dashboard-actions{display:grid;grid-template-columns:1fr;gap:8px;margin-top:14px;}
+.dashboard-action{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:13px;cursor:pointer;}
+.dashboard-action:hover{border-color:var(--accent-bg-strong);background:var(--accent-bg);}
+@media (max-width: 900px){
+  .dashboard-shell{grid-template-columns:1fr;}
+}
 .main-view-empty{
   flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
   gap:12px;padding:40px 24px;color:var(--muted);text-align:center;

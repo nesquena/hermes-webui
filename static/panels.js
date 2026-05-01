@@ -15,9 +15,19 @@ let _pendingSettingsTargetPanel = null; // destination selected while settings h
 
 // Map of panel names → i18n keys for the app titlebar label.
 const APP_TITLEBAR_KEYS = {
-  chat: 'tab_chat', tasks: 'tab_tasks', skills: 'tab_skills',
+  chat: 'tab_chat', dashboard: 'tab_dashboard', tasks: 'tab_tasks', skills: 'tab_skills',
   memory: 'tab_memory', workspaces: 'tab_workspaces',
   profiles: 'tab_profiles', todos: 'tab_todos', settings: 'tab_settings',
+};
+
+const MAIN_VIEW_CLASS_BY_PANEL = {
+  dashboard: 'showing-dashboard',
+  settings: 'showing-settings',
+  skills: 'showing-skills',
+  memory: 'showing-memory',
+  tasks: 'showing-tasks',
+  workspaces: 'showing-workspaces',
+  profiles: 'showing-profiles',
 };
 
 /**
@@ -164,11 +174,12 @@ async function switchPanel(name, opts = {}) {
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
   if (mainEl) {
-    ['settings','skills','memory','tasks','workspaces','profiles'].forEach(p => {
-      mainEl.classList.toggle('showing-' + p, nextPanel === p);
+    Object.entries(MAIN_VIEW_CLASS_BY_PANEL).forEach(([p, cls]) => {
+      mainEl.classList.toggle(cls, nextPanel === p);
     });
   }
   // Lazy-load panel data
+  if (nextPanel === 'dashboard' && typeof loadDashboard === 'function') await loadDashboard();
   if (nextPanel === 'tasks') await loadCrons();
   if (nextPanel === 'skills') await loadSkills();
   if (nextPanel === 'memory') await loadMemory();
@@ -2683,6 +2694,8 @@ function _preferencesPayloadFromUi(){
   const payload={};
   const sendKeySel=$('settingsSendKey');
   if(sendKeySel) payload.send_key=sendKeySel.value;
+  const defaultPanelSel=$('settingsDefaultPanel');
+  if(defaultPanelSel) payload.default_panel=defaultPanelSel.value;
   const langSel=$('settingsLanguage');
   if(langSel) payload.language=langSel.value;
   const showUsageCb=$('settingsShowTokenUsage');
@@ -2863,6 +2876,12 @@ async function loadSettingsPanel(){
     // Send key preference
     const sendKeySel=$('settingsSendKey');
     if(sendKeySel){sendKeySel.value=settings.send_key||'enter';sendKeySel.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const defaultPanelSel=$('settingsDefaultPanel');
+    if(defaultPanelSel){
+      const val=String(settings.default_panel||'chat');
+      defaultPanelSel.value=['chat','dashboard'].includes(val)?val:'chat';
+      defaultPanelSel.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+    }
     // Language preference — populate from LOCALES bundle
     const langSel=$('settingsLanguage');
     if(langSel){
@@ -3307,6 +3326,7 @@ async function saveSettings(andClose){
   const model=($('settingsModel')||{}).value;
   const modelChanged=(model||'')!==(_settingsHermesDefaultModelOnOpen||'');
   const sendKey=($('settingsSendKey')||{}).value;
+  const defaultPanel=($('settingsDefaultPanel')||{}).value||'chat';
   const showTokenUsage=!!($('settingsShowTokenUsage')||{}).checked;
   const showCliSessions=!!($('settingsShowCliSessions')||{}).checked;
   const pw=($('settingsPassword')||{}).value;
@@ -3319,6 +3339,7 @@ async function saveSettings(andClose){
   const body={};
 
   if(sendKey) body.send_key=sendKey;
+  body.default_panel=defaultPanel;
   body.theme=theme;
   body.skin=skin;
   body.font_size=fontSize;

@@ -2181,10 +2181,19 @@ def _get_session_agent_lock(session_id: str) -> threading.Lock:
 
 # ── Settings persistence ─────────────────────────────────────────────────────
 
+_SETTINGS_PANEL_VALUES = {"chat", "dashboard"}
+
+
+def _default_panel_from_env() -> str:
+    value = os.getenv("HERMES_WEBUI_DEFAULT_PANEL", "chat")
+    return value if value in _SETTINGS_PANEL_VALUES else "chat"
+
+
 _SETTINGS_DEFAULTS = {
     "default_workspace": str(DEFAULT_WORKSPACE),
     "onboarding_completed": False,
     "send_key": "enter",  # 'enter' or 'ctrl+enter'
+    "default_panel": _default_panel_from_env(),  # chat | dashboard
     "show_token_usage": False,  # show input/output token badge below assistant messages
     "show_cli_sessions": False,  # merge CLI sessions from state.db into the sidebar
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
@@ -2307,6 +2316,7 @@ _SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {
 }
 _SETTINGS_ENUM_VALUES = {
     "send_key": {"enter", "ctrl+enter"},
+    "default_panel": _SETTINGS_PANEL_VALUES,
     "sidebar_density": {"compact", "detailed"},
     "font_size": {"small", "default", "large"},
     "auto_title_refresh_every": {"0", "5", "10", "20"},

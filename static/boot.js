@@ -839,6 +839,14 @@ function applyBotName(){
   if(msg) msg.placeholder='Message '+name+'\u2026';
 }
 
+function _resolveInitialPanel(settings){
+  const allowed=new Set(['chat','dashboard']);
+  const queryPanel=new URLSearchParams(location.search).get('panel');
+  if(allowed.has(queryPanel)) return queryPanel;
+  const defaultPanel=settings&&settings.default_panel;
+  return allowed.has(defaultPanel)?defaultPanel:'chat';
+}
+
 (async()=>{
   // Load send key preference
   let _bootSettings={};
@@ -899,6 +907,7 @@ function applyBotName(){
     applyBotName();
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
   }
+  const _initialPanel=_resolveInitialPanel(_bootSettings);
   // Non-blocking update check (fire-and-forget, once per tab session)
   // ?test_updates=1 in URL forces banner display for testing (bypasses sessionStorage guards)
   const _testUpdates=new URLSearchParams(location.search).get('test_updates')==='1';
@@ -963,6 +972,7 @@ function applyBotName(){
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
         await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();
+        await switchPanel(_initialPanel);
         return;
       }
       // Restore the panel from localStorage when the session has a workspace.
@@ -974,7 +984,7 @@ function applyBotName(){
         _workspacePanelMode='browse';
       }
       S._bootReady=true;
-      syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);return;}
+      syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await switchPanel(_initialPanel);await checkInflightOnBoot(saved);return;}
     catch(e){localStorage.removeItem('hermes-webui-session');}
   }
   // no saved session - show empty state, wait for user to hit +
@@ -988,6 +998,7 @@ function applyBotName(){
   syncWorkspacePanelState();
   $('emptyState').style.display='';
   await renderSessionList();
+  await switchPanel(_initialPanel);
   // Start real-time gateway session sync if setting is enabled
   if(typeof startGatewaySSE==='function') startGatewaySSE();
 })().catch(e=>{
