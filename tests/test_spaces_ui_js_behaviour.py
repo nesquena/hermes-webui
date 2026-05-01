@@ -902,6 +902,8 @@ def test_spaces_ui_view_widget_details_fetches_and_renders_safe_metadata_only(dr
     assert "View details" in out["beforeHtml"]
     assert {"path": "api/spaces/widget?space_id=lab&widget_id=weather", "method": "GET", "body": ""} in out["calls"]
     assert "Widget details" in out["rootHtml"]
+    assert "Back to widgets" in out["rootHtml"]
+    assert "data-capy-action=\"loadWidgets\"" in out["rootHtml"]
     assert "&lt;Weather&gt;" in out["rootHtml"]
     assert "markdown" in out["rootHtml"]
     assert "x12 y3 · 5×4" in out["rootHtml"]
