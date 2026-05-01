@@ -653,6 +653,26 @@ def read_shared_data_slot(space_id: str, key: str) -> dict[str, Any]:
     raise FileNotFoundError("Data slot not found")
 
 
+def delete_shared_data_slot(space_id: str, key: str) -> dict[str, Any]:
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    sid = validate_space_id(space_id)
+    data_key = validate_data_key(key)
+    space = read_space(sid)
+    shared_data = space.get("shared_data") if isinstance(space.get("shared_data"), dict) else {}
+    if data_key not in shared_data:
+        raise FileNotFoundError("Data slot not found")
+    shared_data.pop(data_key, None)
+    space["shared_data"] = shared_data
+    saved = _write_manifest(space, "space.data.delete", {"key": data_key})
+    return {
+        "space_id": sid,
+        "key": data_key,
+        "deleted": True,
+        "revision_event_id": saved.get("revision_event_id"),
+    }
+
+
 def current_space_for_session(session: Any) -> dict[str, Any]:
     """Return the metadata-only active Space envelope for a WebUI session."""
     if not spaces_enabled():
@@ -865,6 +885,10 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         space_id = validate_space_id(_space_tool_current_id(data))
         data_key = validate_data_key(data.get("key"))
         return {"ok": True, "action": name, "space_id": space_id, "item": read_shared_data_slot(space_id, data_key)}
+    if name in {"space.data.delete", "space.current.data.delete"}:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        result = delete_shared_data_slot(space_id, data.get("key"))
+        return {"ok": True, "action": name, **result}
     if name in {"space.revisions", "space.revision.list", "space.history"}:
         space_id = validate_space_id(data.get("space_id"))
         return {"ok": True, "action": name, "revisions": list_revision_events(space_id, data.get("limit", 20))}

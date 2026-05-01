@@ -245,11 +245,11 @@
       '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+' · Revision: '+escapeHtml(space.revision_event_id||'none')+'</div>' +
       '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="activateSpace" data-space-id="'+escapeHtml(spaceId)+'">Use in chat</button><button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Manage widgets</button><button type="button" class="capy-spaces-btn" data-capy-action="exportSpaceYaml" data-space-id="'+escapeHtml(spaceId)+'">Export YAML</button><button type="button" class="capy-spaces-btn" data-capy-action="exportSpaceZip" data-space-id="'+escapeHtml(spaceId)+'">Export ZIP</button></div>' +
       '</div><div class="capy-spaces-card"><h3>Widgets</h3><div class="capy-spaces-muted">Metadata-only detail view. Generated widget code is intentionally not displayed or executed.</div><div class="capy-spaces-widget-list">'+widgetRows+'</div></div>' +
-      renderSharedDataSlots(space.shared_data || []) +
+      renderSharedDataSlots(spaceId, space.shared_data || []) +
       renderRevisionHistory(spaceId, revisions || []);
   }
 
-  function renderSharedDataSlots(slots){
+  function renderSharedDataSlots(spaceId, slots){
     const safeSlots = Array.isArray(slots) ? slots.slice(0, 10) : [];
     if (!safeSlots.length) return '';
     const rows = safeSlots.map(function(slot){
@@ -260,7 +260,7 @@
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(key)+'</strong>' +
         (valueText ? '<div class="capy-spaces-muted">'+escapeHtml(valueText)+'</div>' : '') +
         (metadataText ? '<div class="capy-spaces-muted">Metadata: '+escapeHtml(metadataText)+'</div>' : '') +
-        '</div></div>';
+        '</div><div class="capy-spaces-widget-actions"><button type="button" class="capy-spaces-btn" data-capy-action="deleteSharedData" data-space-id="'+escapeHtml(spaceId || '')+'" data-data-key="'+escapeHtml(key)+'">Delete data slot</button></div></div>';
     }).filter(Boolean).join('');
     if (!rows) return '';
     return '<div class="capy-spaces-card"><h3>Shared data</h3>' +
@@ -846,6 +846,15 @@
       const ok = await showConfirmDialog({title: 'Restore Space revision?', message: 'Restore space "'+spaceId+'" to revision '+eventId.slice(0, 12)+'? The current manifest remains in revision history.', confirmLabel: 'Restore revision', danger: true, focusCancel: true});
       if (!ok) return;
       await postSpacesJson('api/spaces/revision/restore', {space_id: spaceId, event_id: eventId});
+      await openSpaceDetail(spaceId);
+      return;
+    }
+    if (action === 'deleteSharedData') {
+      const dataKey = safeSharedDataKey(button.dataset.dataKey || '');
+      if (!spaceId || !dataKey || typeof showConfirmDialog !== 'function') return;
+      const ok = await showConfirmDialog({title: 'Delete shared data slot?', message: 'Delete shared data slot "'+dataKey+'" from space "'+spaceId+'"? Raw data is not displayed in this UI.', confirmLabel: 'Delete data slot', danger: true, focusCancel: true});
+      if (!ok) return;
+      await postSpacesJson('api/spaces/data/delete', {space_id: spaceId, key: dataKey});
       await openSpaceDetail(spaceId);
       return;
     }

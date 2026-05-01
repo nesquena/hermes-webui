@@ -225,6 +225,9 @@ global.fetch = async function(path, opts = {}) {
   if (path === 'api/spaces/widget/delete') {
     return response({ deleted: true, space_id: 'lab', widget_id: 'weather', revision_event_id: 'rev3' });
   }
+  if (path === 'api/spaces/data/delete') {
+    return response({ deleted: true, space_id: 'lab', key: 'research-summary', revision_event_id: 'rev-data-delete', renderer: '<script>bad()</script>', api_key: 'SECRET' });
+  }
   if (path === 'api/spaces/widget/event') {
     return response({ queued: true, space_id: 'lab', widget_id: 'weather', event_name: 'agent.prompt', event_id: 'evt1' });
   }
@@ -629,6 +632,23 @@ async function click(action, dataset) {
   } else if (scenario === 'openSpaceDetail') {
     await window.loadCapySpaces();
     await click('openSpace', { spaceId: 'lab' });
+  } else if (scenario === 'deleteSharedDataNoDialog') {
+    await window.loadCapySpaces();
+    await click('openSpace', { spaceId: 'lab' });
+    beforeHtml = root.innerHTML;
+    await click('deleteSharedData', { spaceId: 'lab', dataKey: 'research-summary' });
+  } else if (scenario === 'deleteSharedDataCancelled') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return false; };
+    await window.loadCapySpaces();
+    await click('openSpace', { spaceId: 'lab' });
+    beforeHtml = root.innerHTML;
+    await click('deleteSharedData', { spaceId: 'lab', dataKey: 'research-summary' });
+  } else if (scenario === 'deleteSharedDataConfirmed') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    await window.loadCapySpaces();
+    await click('openSpace', { spaceId: 'lab' });
+    beforeHtml = root.innerHTML;
+    await click('deleteSharedData', { spaceId: 'lab', dataKey: 'research-summary' });
   } else if (scenario === 'restoreRevisionConfirmed') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
     await window.loadCapySpaces();
@@ -1519,6 +1539,7 @@ def test_spaces_ui_opens_space_detail_without_rendering_widget_code(driver_path)
     assert "Export ZIP" in out["rootHtml"]
     assert "Shared data" in out["rootHtml"]
     assert "research-summary" in out["rootHtml"]
+    assert "Delete data slot" in out["rootHtml"]
     assert "title: Safe research findings" in out["rootHtml"]
     assert "notes: ready for widget cooperation" in out["rootHtml"]
     assert "source_widget: weather" in out["rootHtml"]
@@ -1533,6 +1554,39 @@ def test_spaces_ui_opens_space_detail_without_rendering_widget_code(driver_path)
     assert 'data-capy-action="restoreRevision"' in out["rootHtml"]
     assert "Restore" in out["rootHtml"]
     assert 'data-capy-action="rollbackRevision"' not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"]
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_delete_shared_data_fails_closed_without_shared_confirm(driver_path):
+    out = _run_spaces_scenario(driver_path, "deleteSharedDataNoDialog")
+
+    assert "Delete data slot" in out["beforeHtml"]
+    assert not any(call["path"] == "api/spaces/data/delete" for call in out["calls"])
+    assert out["dialogs"] == []
+
+
+def test_spaces_ui_delete_shared_data_cancel_does_not_send_delete(driver_path):
+    out = _run_spaces_scenario(driver_path, "deleteSharedDataCancelled")
+
+    assert out["dialogs"]
+    assert out["dialogs"][0]["title"] == "Delete shared data slot?"
+    assert not any(call["path"] == "api/spaces/data/delete" for call in out["calls"])
+
+
+def test_spaces_ui_delete_shared_data_confirm_posts_key_only_and_refreshes_detail(driver_path):
+    out = _run_spaces_scenario(driver_path, "deleteSharedDataConfirmed")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/data/delete")
+
+    assert out["dialogs"]
+    assert out["dialogs"][0]["title"] == "Delete shared data slot?"
+    assert out["dialogs"][0]["confirmLabel"] == "Delete data slot"
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"space_id": "lab", "key": "research-summary"}
+    assert out["calls"][-2]["path"] == "api/spaces/get?space_id=lab"
+    assert out["calls"][-1]["path"] == "api/spaces/revisions?space_id=lab"
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"]

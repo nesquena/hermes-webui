@@ -1882,6 +1882,21 @@ def handle_post(handler, parsed) -> bool:
         except FileNotFoundError:
             return bad(handler, "Widget not found", 404)
 
+    if parsed.path == "/api/spaces/data/delete":
+        from api import spaces as capy_spaces
+        space_id = body.get("space_id")
+        key = body.get("key")
+        if not space_id or not key:
+            return bad(handler, "Missing space_id or key")
+        try:
+            return j(handler, capy_spaces.delete_shared_data_slot(space_id, key))
+        except RuntimeError as e:
+            return bad(handler, str(e), 403)
+        except ValueError as e:
+            return bad(handler, str(e))
+        except FileNotFoundError:
+            return bad(handler, "Data slot not found", 404)
+
     if parsed.path == "/api/spaces/widget/event":
         from api import spaces as capy_spaces
         space_id = body.get("space_id")

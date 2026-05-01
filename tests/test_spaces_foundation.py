@@ -374,6 +374,67 @@ def test_space_tool_adapter_shared_data_slots_are_metadata_only(monkeypatch, tmp
     assert "secret_value_do_not_leak" not in serialized
 
 
+def test_space_tool_adapter_deletes_shared_data_slots_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "shared-data-delete-lab", "name": "Shared Data Delete Lab"})
+    spaces.set_shared_data_slot(
+        created["space_id"],
+        "research-summary",
+        {"title": "Safe findings", "renderer": "<script>steal()</script>", "api_key": "SECRET...LEAK"},
+        {"source_widget": "research-summary", "authorization": "Bearer SECRET_VALUE_DO_NOT_LEAK"},
+    )
+
+    deleted = spaces.run_space_tool(
+        "space.data.delete",
+        {"space_id": created["space_id"], "key": "research-summary", "renderer": "<script>ignore()</script>"},
+    )
+    listed = spaces.run_space_tool("space.data.list", {"space_id": created["space_id"]})
+    serialized = json.dumps({"deleted": deleted, "listed": listed}).lower()
+
+    assert deleted["ok"] is True
+    assert deleted["action"] == "space.data.delete"
+    assert deleted["deleted"] is True
+    assert deleted["key"] == "research-summary"
+    assert deleted["space_id"] == created["space_id"]
+    assert deleted["revision_event_id"]
+    assert listed["items"] == []
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "authorization" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
+def test_spaces_data_delete_route_removes_slot_without_echoing_raw_payload(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "shared-data-route-lab", "name": "Shared Data Route Lab"})
+    spaces.set_shared_data_slot(
+        created["space_id"],
+        "research-summary",
+        {"title": "Safe findings", "renderer": "<script>steal()</script>", "api_key": "SECRET...LEAK"},
+        {"source_widget": "research-summary", "authorization": "Bearer SECRET_VALUE_DO_NOT_LEAK"},
+    )
+
+    handled, status, body = _route_post(
+        "/api/spaces/data/delete",
+        {"space_id": created["space_id"], "key": "research-summary", "api_key": "SECRET...LEAK"},
+    )
+    serialized = json.dumps(body).lower()
+
+    assert handled is None
+    assert status == 200
+    assert body["deleted"] is True
+    assert body["key"] == "research-summary"
+    assert spaces.list_shared_data_slots(created["space_id"]) == []
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "authorization" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
 def test_space_tool_adapter_installs_templates_as_safe_metadata(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
