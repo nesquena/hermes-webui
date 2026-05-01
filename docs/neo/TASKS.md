@@ -265,18 +265,18 @@ sem regressão das capacidades upstream.
 
 ### HU-02.4 — Traduções novas de Dashboard, Kanban e Finanças
 
-**Status:** disponível
+**Status:** implementada com testes
 **Prioridade:** P0
 **Épico:** EP-02
 **Dependências:** Sprints 2-4
 
 **Tasks**
 
-- [ ] Adicionar chaves `dashboard_*`.
-- [ ] Adicionar chaves `sidebar_*` e `topbar_*`.
-- [ ] Adicionar chaves `projects_*`.
-- [ ] Adicionar chaves `finance_*`.
-- [ ] Garantir que strings novas usem `t(...)` ou `data-i18n`.
+- [x] Adicionar chaves `dashboard_*`.
+- [x] Adicionar chaves `sidebar_*` e `topbar_*`.
+- [x] Adicionar chaves `projects_*`.
+- [x] Adicionar chaves `finance_*`.
+- [x] Garantir que strings novas usem `t(...)` ou `data-i18n`.
 
 ### HU-02.5 — Erros e toasts em pt-BR
 
