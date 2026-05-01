@@ -151,6 +151,70 @@ def test_space_tool_adapter_supports_source_style_current_and_spaces_aliases(mon
     assert "secret" not in serialized
 
 
+def test_space_tool_adapter_supports_space_agent_widget_aliases_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "widget-alias-lab", "name": "Widget Alias Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "research-card",
+            "kind": "markdown",
+            "title": "Research <Card>",
+            "layout": {"x": 2, "y": 3, "w": 6, "h": 4},
+            "renderer": "<script>steal()</script>",
+            "html": "<img src=x onerror=steal()>",
+            "data": {"api_key": "SECRET...LEAK"},
+        },
+    )
+
+    listed = spaces.run_space_tool("space.widget.list", {"space_id": created["space_id"]})
+    read = spaces.run_space_tool(
+        "space.widget.read",
+        {"space_id": created["space_id"], "widget_id": "research-card", "renderer": "<script>ignore()</script>"},
+    )
+    patched = spaces.run_space_tool(
+        "space.current.widget.patch",
+        {
+            "active_space_id": created["space_id"],
+            "widget_id": "research-card",
+            "patch": {
+                "title": "Research Patched",
+                "layout": {"x": 4, "y": 5, "w": 8, "h": 5},
+                "renderer": "<script>bad()</script>",
+                "data": {"api_key": "SHOULD_NOT_LEAK"},
+            },
+        },
+    )
+    queued = spaces.run_space_tool(
+        "space.widget.event",
+        {
+            "space_id": created["space_id"],
+            "widget_id": "research-card",
+            "event_name": "agent.prompt",
+            "prompt": "summarize this widget",
+            "payload": {"query": "Claude Mythos", "renderer": "<script>bad()</script>", "api_key": "SECRET"},
+        },
+    )
+    serialized = json.dumps({"listed": listed, "read": read, "patched": patched, "queued": queued}).lower()
+
+    assert listed["ok"] is True
+    assert listed["action"] == "space.widget.list"
+    assert listed["widgets"][0]["id"] == "research-card"
+    assert read["ok"] is True
+    assert read["widget"]["id"] == "research-card"
+    assert patched["widget"]["title"] == "Research Patched"
+    assert patched["widget"]["layout"] == {"x": 4, "y": 5, "w": 8, "h": 5, "minimized": False}
+    assert queued["queued"] is True
+    assert queued["payload_summary"] == {"query": "Claude Mythos"}
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
 def test_space_tool_adapter_exposes_metadata_only_current_context(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space(

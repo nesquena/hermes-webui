@@ -681,6 +681,13 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {"space.current.widgets", "space.current.widget.list"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         return {"ok": True, "action": name, "active_space_id": space_id, "widgets": list_widgets(space_id)}
+    if name in {"space.widget.list", "space.widgets.list", "space.current.widgets.list"}:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        return {"ok": True, "action": name, "active_space_id": space_id, "widgets": list_widgets(space_id)}
+    if name in {"space.widget.read", "space.widget.get", "space.current.widget.read", "space.current.widget.get"}:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
+        return {"ok": True, "action": name, "active_space_id": space_id, "widget": read_widget_detail(space_id, widget_id)}
     if name in {"space.template.install", "space.templates.install", "template.install"}:
         template_name = data.get("template") or data.get("name") or data.get("template_name") or "weather"
         result = install_template(template_name, space_id=data.get("space_id") or None)
@@ -704,14 +711,18 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name == "widget.list":
         space_id = validate_space_id(data.get("space_id"))
         return {"ok": True, "action": name, "widgets": list_widgets(space_id)}
-    if name == "widget.patch":
+    if name in {"widget.read", "widget.get"}:
         space_id = validate_space_id(data.get("space_id"))
-        widget_id = validate_widget_id(data.get("widget_id"))
+        widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
+        return {"ok": True, "action": name, "widget": read_widget_detail(space_id, widget_id)}
+    if name in {"widget.patch", "space.widget.patch", "space.current.widget.patch"}:
+        space_id = validate_space_id(_space_tool_current_id(data) if name == "space.current.widget.patch" else data.get("space_id"))
+        widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
         result = patch_widget(space_id, widget_id, data.get("patch") if isinstance(data.get("patch"), dict) else {})
         return {"ok": True, "action": name, **result}
-    if name == "widget.event":
-        space_id = validate_space_id(data.get("space_id"))
-        widget_id = validate_widget_id(data.get("widget_id"))
+    if name in {"widget.event", "space.widget.event", "space.current.widget.event"}:
+        space_id = validate_space_id(_space_tool_current_id(data) if name == "space.current.widget.event" else data.get("space_id"))
+        widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
         result = queue_widget_event(
             space_id,
             widget_id,
