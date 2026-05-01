@@ -693,6 +693,14 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name == "space.get":
         space_id = validate_space_id(data.get("space_id"))
         return {"ok": True, "action": name, "space": read_space_detail(space_id)}
+    if name in {"space.revisions", "space.revision.list", "space.history"}:
+        space_id = validate_space_id(data.get("space_id"))
+        return {"ok": True, "action": name, "revisions": list_revision_events(space_id, data.get("limit", 20))}
+    if name in {"space.revision.restore", "space.rollback", "space.restore"}:
+        space_id = validate_space_id(data.get("space_id"))
+        event_id = str(data.get("event_id") or data.get("revision_event_id") or "")
+        result = restore_revision(space_id, event_id)
+        return {"action": name, **result}
     if name == "widget.list":
         space_id = validate_space_id(data.get("space_id"))
         return {"ok": True, "action": name, "widgets": list_widgets(space_id)}

@@ -225,6 +225,49 @@ def test_space_tool_adapter_installs_templates_as_safe_metadata(monkeypatch, tmp
     assert "secret" not in serialized
 
 
+def test_space_tool_adapter_lists_and_restores_revisions_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "tool-rollback", "name": "Tool Rollback"})
+    original_event_id = created["revision_event_id"]
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "unsafe-card",
+            "kind": "html",
+            "title": "Unsafe Card",
+            "renderer": "<script>steal()</script>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+    spaces.update_space(created["space_id"], {"description": "Updated for restore"})
+
+    listed = spaces.run_space_tool("space.revisions", {"space_id": created["space_id"], "limit": 5})
+    restored = spaces.run_space_tool(
+        "space.revision.restore",
+        {"space_id": created["space_id"], "event_id": original_event_id, "renderer": "<script>ignore()</script>"},
+    )
+    serialized = json.dumps({"listed": listed, "restored": restored}).lower()
+
+    assert listed["ok"] is True
+    assert listed["action"] == "space.revisions"
+    assert [event["event_type"] for event in listed["revisions"]][:3] == [
+        "space.updated",
+        "widget.created",
+        "space.created",
+    ]
+    assert restored["ok"] is True
+    assert restored["action"] == "space.revision.restore"
+    assert restored["restored_event_id"] == original_event_id
+    assert restored["space"]["space_id"] == created["space_id"]
+    assert restored["space"]["widgets"] == []
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
 def test_space_id_validation_rejects_traversal_and_unsafe_names(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
