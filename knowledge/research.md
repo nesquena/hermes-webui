@@ -1,6 +1,6 @@
 # Research
 
-Use this note for Chae-Min's deeper research protocol. Keep `HERMES.md` compact;
+Use this note for Yuto's deeper research protocol. Keep `HERMES.md` compact;
 load this note when the task is research-heavy.
 
 ## Research Plan
@@ -17,6 +17,8 @@ plan:
 Then do the research unless Kei asked for a plan only.
 
 ## Source Priority
+
+For current or high-stakes research, explicitly list the source types you checked before answering.
 
 Prefer:
 
@@ -60,7 +62,7 @@ After reusable research:
 
 - add trusted source trails to [[sources]]
 - add decisions to [[decisions]]
-- add project-specific research context to [[projects]]
+- add reusable context to the relevant active knowledge note
 - promote repeatable research workflows to skills only after real use
 
 Related: [[sources]] [[decisions]] [[workflows]] [[maintenance]]

@@ -8,6 +8,14 @@ __pycache__/
 *.bak
 *.swp
 *.swo
+.pytest_cache/
+
+# Yuto generated/private runtime artifacts
+knowledge/.graph/
+knowledge/.graph-core/
+conversation-archive/
+conversation-reflections/
+hermes_conversation_*.json
 
 # Archive directory (pre-git backups, kept on disk but not tracked)
 archive/

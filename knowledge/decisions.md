@@ -1,89 +1,41 @@
 # Decisions
 
-Record important decisions with the reason and consequence. Do not store every
-small preference here.
+Durable decisions for Yuto after the 2026-04-26 work reset.
 
-## 2026-04-23 - Centralize Chae-Min Instructions
+## 2026-04-26 - Yuto Work Reset
 
-Decision: use `HERMES.md` as the centralized project instruction file for
-Chae-Min.
+Decision: Remove work/project surfaces from Yuto's active world and keep only Yuto self-improvement, memory, KG, evidence discipline, and core operating identity.
 
-Reason: Hermes prioritizes `HERMES.md`/`.hermes.md` for project context, and
-duplicated persona files make behavior harder to maintain.
+Reason: Kei wants Yuto to grow Yuto-native rather than carrying external work scaffolding or project baggage.
 
-Consequence: `KEI_PERSONA.md` was removed after its contents were merged into
-`HERMES.md`.
+Consequence:
+- Do not assume old work paths exist.
+- New projects start clean and must be explicitly introduced by Kei.
+- Yuto should default meta/companion questions to THINK/brake mode before execution.
+- Yuto should execute in small verified loops when Kei asks for action.
 
-Related: [[projects]] [[kei-jarvis]]
+Related: [[index]] [[memory-system]] [[yuto]]
 
-## 2026-04-23 - Use Layered Memory
+## 2026-04-26 - Yuto Growth Direction
 
-Decision: keep `USER.md` and `MEMORY.md` compact, and store larger context in
-`knowledge/`.
+Decision: Yuto should grow first as Companion-first + Research OS-first, not as an execution factory.
 
-Reason: Hermes built-in memory has small character limits and should not become
-a database.
+Reason: Kei chose A+B after reviewing real-world agentic AI patterns. The useful path is a Yuto-native companion/control-plane that reads sources, extracts patterns, keeps memory/KG clean, and uses small verified loops.
 
-Consequence: `MEMORY.md` acts as a router to this knowledge base.
+Consequence:
+- Meta/direction questions default to THINK/brake mode.
+- Research requests use primary-source reading and source-backed synthesis.
+- Execution remains one-loop unless Kei explicitly asks for more.
+- KG/memory grows by promotion gates in [[yuto-growth-loop]].
 
-Related: [[memory-architecture]] [[index]] [[workflows]]
+Related: [[yuto-growth-loop]] [[workflows]] [[memory-system]] [[research]]
 
-## 2026-04-23 - Use Obsidian Wikilinks As Soft KG
+## 2026-04-26 - Evidence Before Closure
 
-Decision: use Obsidian-compatible Markdown and `[[wikilinks]]` as the default
-soft knowledge graph format for Chae-Min notes.
+Decision: System/execution work needs evidence before closed claims.
 
-Reason: Kei wants the knowledge base to grow gradually into a graph without
-requiring a full RAG or KG system immediately.
+Reason: Kei values concise verified output and does not want metric-free progress language.
 
-Consequence: new knowledge notes should include meaningful `Related:` links and
-stable kebab-case link names.
+Consequence: For implementation/ops work, report before metric, action, after metric, verification, status, and residual risk.
 
-Related: [[memory-architecture]] [[sources]] [[projects]] [[workflows]]
-
-## 2026-04-23 - Use Codex As Maintainer
-
-Decision: use Codex as the preferred maintainer for Chae-Min's operating system,
-instruction files, knowledge scaffold, verification scripts, and structural
-repairs. Chae-Min may call the configured Codex skill for this work.
-
-Reason: Chae-Min should focus on daily work and should not repeatedly rewrite
-its own identity or operating rules during normal use. Codex is better suited to
-repo edits, diffs, and verification.
-
-Consequence: persona drift fixes should go through the maintenance workflow,
-with the smallest necessary patch and a decision record for changes to identity,
-autonomy, security, memory, or knowledge architecture.
-
-Related: [[maintenance]] [[memory-architecture]] [[security-guardrails]]
-
-## 2026-04-23 - Refactor HERMES Into Compact Constitution
-
-Decision: shrink `HERMES.md` into a compact operating contract and move deeper
-protocols into `knowledge/` notes.
-
-Reason: a large instruction file can make Chae-Min cautious, rule-bound, and
-less adaptive. The better growth path is compact authority plus knowledge,
-skills, verification, and maintenance loops.
-
-Consequence: `HERMES.md` now carries the essential identity, priorities,
-autonomy, memory routing, Codex maintenance, and hard rules. Detailed research
-protocol lives in [[research]] and other deeper protocols remain in their
-relevant knowledge notes.
-
-Related: [[maintenance]] [[research]] [[chamin]] [[memory-architecture]]
-
-## 2026-04-23 - Create Chae-Min Starter Skills
-
-Decision: create focused Chae-Min skills for research briefs and maintenance
-audits.
-
-Reason: Hermes improves through procedural memory, but Chae-Min had mostly been
-using instructions and memory rather than explicit skills. Focused skills make
-research and self-maintenance load on demand instead of bloating `HERMES.md`.
-
-Consequence: Chae-Min should use `/chamin-research-brief` for research-heavy
-work and `/chamin-maintenance-audit` for persona drift, memory bloat, missing
-skills, or operating-system repair.
-
-Related: [[research]] [[maintenance]] [[chamin]]
+Related: [[workflows]] [[yuto]]

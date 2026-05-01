@@ -1,6 +1,6 @@
 # Security
 
-Use this note for Chae-Min security assumptions, hardening notes, reviews, and
+Use this note for Yuto security assumptions, hardening notes, reviews, and
 follow-up risks.
 
 ## Standing Guardrails
