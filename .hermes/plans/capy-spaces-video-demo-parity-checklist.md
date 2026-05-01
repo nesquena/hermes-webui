@@ -3,6 +3,26 @@
 Video reviewed: https://www.youtube.com/watch?v=F3ZzNgf-R7Y
 Transcript duration: 46:51
 Created: 2026-04-27
+Last implementation-status update: 2026-05-01
+
+## Current parity implementation notes
+
+Capy Spaces now has implemented foundation slices, so this checklist is no longer purely architectural. Keep status conservative: metadata-only demo smokes and UI affordances are useful progress, but they are not full Space Agent video parity until the acceptance criteria below pass end-to-end on Brendan's Mac Studio.
+
+Recently landed:
+
+- Recovery/safe-mode tool actions are exposed through safe metadata-only aliases.
+- Demo smoke routes exist and the Spaces UI uses direct `/api/spaces/demo/*` routes instead of generic demo tool actions.
+- Metadata shared data slots exist, show safe details, and can be deleted safely.
+- Queued widget events show safe event anchors and UTC timestamps in the UI.
+- Screenshot QA artifacts are expected for visually relevant Spaces work.
+
+Next checkpoint emphasis:
+
+1. Safe admin/recovery and rollback/time-travel before richer generated widgets or local-service dashboards.
+2. Research Harness as the preferred vertical demo: widget event → Capy run → live progress widgets → markdown artifact → PDF/export patch → rollback.
+3. Explicit sandbox/postMessage/event contract before trusted generated UI expands.
+4. Demo parity matrix in `capy-spaces-space-agent-parity.md` must stay current with fixture, route, UI-test, screenshot, and security status.
 
 ## Bottom line
 
@@ -16,7 +36,7 @@ The demo does **not** introduce a new product direction beyond the existing Capy
 - UI widgets must be persistent and reconstructible after reload.
 - Git/checkpoint rollback and a safe recovery/admin surface are not optional.
 
-I cannot honestly claim these examples would work **perfectly today**, because Capy Spaces is still a plan, not an implemented subsystem. I can say they are all architecturally feasible in Capy/Hermes, and the target architecture should be adjusted to explicitly test each demo example before declaring Space Agent parity.
+Capy Spaces is now partially implemented, but I cannot honestly claim these examples work **perfectly today**. The target architecture should continue to explicitly test each demo example before declaring Space Agent parity.
 
 ## Demo examples observed
 

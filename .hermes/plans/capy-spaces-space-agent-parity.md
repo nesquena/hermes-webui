@@ -7,6 +7,41 @@ Research targets:
 - Hermes WebUI checkout: `/Users/bschmidy10/hermes-webui` at `5720fa5`
 - Hermes Agent checkout: `/Users/bschmidy10/.hermes/hermes-agent` at `e403379b`
 
+## Current Implementation Status
+
+Last updated: 2026-05-01 16:51 CDT on branch `feat/capy-spaces-foundation`.
+
+Current latest known code commit: `8078b38 feat(spaces): show queued widget event anchors`. This plan update itself is committed as `docs(spaces): update parity execution plan`; use `git log -1 --oneline` for the exact self-hash because amending this line changes the hash.
+
+Recent completed slices:
+
+- `852cc03 feat(spaces): expose recovery tool actions`
+  - Added safe recovery/safe-mode Space tool-adapter aliases.
+  - Validation at completion: focused recovery test passed, related recovery tests passed, broader Spaces tests passed, full WebUI suite passed.
+- `a474570 feat(spaces): expose demo smoke routes`
+  - Added direct demo smoke API routes used by later demo parity tooling.
+- `e2499e4 feat(spaces): add metadata shared data slots`
+- `b381e21 feat(spaces): show safe shared data details`
+- `577f224 feat(spaces): delete shared data slots safely`
+- `b344b83 feat(spaces): use direct demo smoke routes`
+  - Spaces demo smoke UI uses `GET /api/spaces/demo/runs`, `POST /api/spaces/demo/run`, and `POST /api/spaces/demo/run-all` instead of generic `space.demo*` tool-adapter calls.
+  - Screenshot QA artifact: `/tmp/capy-screenshots/spaces-demo-direct-routes.png`.
+- `8078b38 feat(spaces): show queued widget event anchors`
+  - Widget event inbox shows safe `Event: <event_id>` anchors plus UTC timestamps while keeping prompt/payload details redacted and bounded.
+  - Screenshot QA artifact: `/tmp/capy-screenshots/spaces-queued-event-anchors.png`.
+
+Last known validation bundle:
+
+- Focused queued-event UI behavior test: passed.
+- Broader Spaces/UI/demo tests: passed (`163 passed`).
+- Full WebUI suite: passed (`2948 passed`, `1 warning`, `8 subtests passed`).
+- `git diff --check`: passed.
+- WebUI local and tailnet health: `status: ok`, zero active sessions/streams at last check.
+
+Known warning: unknown `pytest.mark.integration` in `tests/test_onboarding_network.py`.
+
+Keep this section current after each Capy Spaces sprint slice so future agents can compare plan intent, branch state, tests, screenshots, and remaining gates without relying on chat history.
+
 ## 2026-04-28 Source Recreation Validation
 
 Verdict: Space Agent is practically recreateable from source and useful as a live reference implementation for Capy Spaces parity work.
@@ -43,13 +78,17 @@ Do not push or fork upstream automatically from autonomous Capy Spaces jobs. Tre
 
 Scheduled Capy Spaces sprint cycles should now prefer these source-derived slices, in order, unless the repo already contains the slice:
 
-1. Reconcile the current Capy Spaces data model against Space Agent's `~/spaces/<spaceId>/space.yaml` + `widgets/<widgetId>.yaml` schema while preserving Capy's stricter metadata-only/sandbox-first rules.
-2. Add missing safe `space.current` / `space.spaces`-style backend helpers as Capy-native Python APIs and WebUI routes; keep list/detail responses metadata-only.
-3. Add or harden widget patch/reload/revision primitives before any arbitrary widget renderer execution.
-4. Add source-derived prompt/context injection for active space metadata only: id, title, description, instructions, widget summary rows, and revision id. Never inject raw renderer/html/script/data bodies.
-5. Build demo parity templates in safe metadata-only increments: Weather Demo, Research Harness, Kanban, Notes, Browser Surface, Stock Chart, Game, Sequencer, Big Bang onboarding.
-6. Add safe import/export compatibility with Space Agent ZIP/YAML layouts; imported JS renderer strings must be stored as disabled/untrusted artifacts pending explicit sandbox handling.
-7. Add recovery/time-travel UX before enabling any richer generated-widget rendering.
+0. Keep this plan's current-status section updated after every sprint slice: branch, latest commit, tests, service health, screenshot artifacts, and known warnings.
+1. Promote safe admin/recovery plus rollback/time-travel to the next hard gate. Do not enable powerful generated/script widgets, local-service dashboards, agent-created modules, hosted sharing, or broad import trust until recovery/rollback can disable or restore broken spaces/widgets without rendering generated content.
+2. Reconcile the current Capy Spaces data model against Space Agent's `~/spaces/<spaceId>/space.yaml` + `widgets/<widgetId>.yaml` schema while preserving Capy's stricter metadata-only/sandbox-first rules.
+3. Add or harden missing safe `space.current` / `space.spaces`-style backend helpers as Capy-native Python APIs and WebUI routes; keep list/detail responses metadata-only.
+4. Add or harden widget patch/reload/revision primitives before any arbitrary widget renderer execution.
+5. Add source-derived prompt/context injection for active space metadata only: id, title, description, instructions, widget summary rows, event anchors, and revision id. Never inject raw renderer/html/script/data bodies.
+6. Use one vertical demo as the next north star before expanding every demo horizontally. Preferred next vertical: Research Harness — widget event → scoped Capy prompt → live progress widgets → markdown artifact → PDF/export patch → rollback recovery → screenshot QA.
+7. Define and test the sandbox/postMessage contract before richer widgets: allowed widget kinds, iframe/same-origin boundaries, event schemas, URL/network policy, approval points, and redaction rules.
+8. Build demo parity templates in safe metadata-only increments and track them in the demo parity matrix: Weather Demo, Research Harness, Kanban, Notes, Browser Surface, Stock Chart, Game, Sequencer, Big Bang onboarding.
+9. Add safe import/export compatibility with Space Agent ZIP/YAML layouts; imported JS renderer strings must be stored as disabled/untrusted artifacts pending explicit sandbox handling.
+10. Defer hosted/public sharing until a threat model review. Local metadata-only export and explicit Telegram send/share can come first; hosted share requires sandbox, approval, and URL/data exposure tests.
 
 ## Executive Summary
 
@@ -533,6 +572,12 @@ Do not start with Electron. Capy already runs as WebUI + Telegram + launchd on M
 
 Sequencing rule from the video review: **do not enable powerful generated/script widgets, local-service dashboards, or agent-created modules for normal use until rollback and safe recovery exist.** Space Agent can rely on admin mode after a broken UI; Capy Spaces needs the same escape hatch before we expose similar power.
 
+2026-05-01 sequencing update: treat recovery/rollback as the next major product gate, not a late polish phase. Import/export, richer widgets, local-service dashboards, and hosted sharing may continue only as metadata-only/safe-mode-compatible slices until rollback and safe admin recovery can restore or disable broken spaces/widgets.
+
+UI-facing acceptance update: every user-visible Capy Spaces slice should include automated tests plus browser/screenshot QA when visually relevant. Reports should include the screenshot artifact, visible pass/fail state, obvious layout issues, and confirmation that no raw renderer/source/script/secret-like values are visible.
+
+Execution update: use one vertical demo as the near-term north star. Prefer the Research Harness until it works end-to-end: widget-origin prompt, scoped Capy event, live planning/source/notes/summary widgets, markdown artifact, PDF/export patch, revision events, rollback, and screenshot QA.
+
 ### Phase 0 — Safety and foundations
 
 - Create `api/spaces.py` with schema validation, atomic writes, and path containment.
@@ -591,6 +636,21 @@ Acceptance:
 
 - From WebUI or Telegram, user can ask “create a daily research dashboard” and Capy creates a space/widgets using tools.
 - Tool calls are visible, reversible, and scoped.
+- Active-space context injected into prompts is metadata-only: id, title, description, instructions, safe widget summary rows, event anchors, and revision IDs. Raw renderer/html/script/data bodies are never injected by default.
+
+### Phase 3.5 — Sandbox and Widget Event Contract
+
+- Define the allowed widget kinds and their execution boundary: declarative renderers first, sandboxed HTML second, trusted/same-origin JS only behind explicit per-space approval.
+- Define the widget-to-Capy `postMessage`/event schema: event type, widget id, space id, bounded payload summary, created timestamp, correlation id, and approval requirements.
+- Define URL/network policy for widgets: blocked/private URLs by default, explicit allowlists for local services and cameras, and user approval for risky destinations.
+- Define redaction rules for prompts, payloads, headers, tokens, cookies, API keys, connection strings, source strings, renderer bodies, and DOM/script-like values.
+- Add contract tests before adding richer generated widgets.
+
+Acceptance:
+
+- Unsafe or oversized widget event payloads are rejected or summarized without leaking raw content.
+- Widget event UI shows actionable metadata anchors while redacting prompt/payload bodies.
+- Richer widget rendering cannot bypass the safe recovery route.
 
 ### Phase 4 — Data/Assets/Scripts
 
@@ -826,7 +886,42 @@ Video-demo parity suite:
 12. `demo_time_travel_restore`: roll back last widget edit and restore present state if supported.
 13. `demo_safe_admin_recovery`: broken widget cannot prevent recovery route from loading and disabling it.
 
-Completion rule: Capy Spaces is not “Space Agent demo parity complete” until the above suite passes locally on the Mac Studio and at least the critical security tests pass in CI/local pytest.
+### Demo Parity Matrix
+
+Keep this matrix current as fixtures, routes, UI tests, screenshot harnesses, and security assertions land. Status values should be one of: `not started`, `metadata smoke`, `partial`, `blocked`, or `complete`.
+
+- `demo_weather_widget`
+  - Required route/API coverage: typed demo smoke route plus widget create/read/update APIs.
+  - Required UI test: blank-space prompt-to-widget flow or equivalent fake-DOM behavior test.
+  - Required screenshot: weather widget visible after reload.
+  - Required security assertions: no raw renderer/source/script leakage; blocked/rate-limited weather data shows useful fallback.
+  - Current status: metadata smoke.
+- `demo_research_harness_pdf_export`
+  - Required route/API coverage: widget event queue, active-space context, artifact write, widget patch, export/PDF action, revision event creation.
+  - Required UI test: event submission renders progress/source/notes/summary updates and bounded event metadata.
+  - Required screenshot: research harness shows prompt, progress, sources, notes, summary, artifact, and export action.
+  - Required security assertions: prompt/payload/source bodies redacted where appropriate; generated export patch is reversible; rollback restores pre-run state.
+  - Current status: partial; this is the preferred next vertical demo.
+- `demo_time_travel_restore`
+  - Required route/API coverage: revision list, diff/preview, rollback widget, rollback full space, recovery-mode rollback.
+  - Required UI test: rollback controls visible and do not render generated widget bodies.
+  - Required screenshot: before/after rollback state plus recovery route if normal UI is broken.
+  - Required security assertions: rollback cannot escape space root and records a new revision event.
+  - Current status: metadata smoke.
+- `demo_safe_admin_recovery`
+  - Required route/API coverage: recovery snapshot, disable/enable space, disable/enable widget/module, repair prompt entry, rollback from safe mode.
+  - Required UI test: deliberately broken widget cannot prevent recovery operations.
+  - Required screenshot: recovery route lists safe metadata and actions without executing widget code.
+  - Required security assertions: no renderer/html/script/data bodies; repair prompt is scoped to metadata and requires approval for risky actions.
+  - Current status: partial.
+- `demo_notes_app`, `demo_kanban_board`, `demo_stock_chart`, `demo_browser_cocontrol`, `demo_camera_dashboard`, `demo_local_agent_control_dashboard`, `demo_snake_iterative_repair`, `demo_step_sequencer_piano_roll`, `demo_big_bang_onboarding`
+  - Required route/API coverage: to be filled when each demo enters active implementation.
+  - Required UI test: one fake-DOM behavior test plus one smoke route or golden fixture test.
+  - Required screenshot: visual pass state on Mac Studio.
+  - Required security assertions: no secret/raw source leakage; explicit approval for network/audio/camera/browser-control risk.
+  - Current status: not started or metadata-only fixture coverage, depending on existing tests.
+
+Completion rule: Capy Spaces is not “Space Agent demo parity complete” until the above suite passes locally on the Mac Studio, the matrix marks every row `complete`, screenshot/browser QA artifacts exist for UI-facing demos, and at least the critical security tests pass in CI/local pytest.
 
 ## Update Compatibility Contract
 
@@ -853,12 +948,12 @@ Capy Spaces must remain durable across future Hermes WebUI and Hermes Agent upda
 
 5. **Compatibility tests are mandatory**
    - Every Spaces PR must add/update pytest coverage for the new behavior.
-   - Every WebUI/Hermes update or rebase must run the full WebUI suite plus Spaces-focused tests:
+   - Every WebUI/Hermes update or rebase must run the full WebUI suite plus Spaces-focused tests with Brendan's Hermes agent virtualenv Python on the Mac Studio:
      ```bash
-     python3 -m pytest tests -q
-     python3 -m pytest tests/test_spaces*.py -q
+     /Users/bschmidy10/.hermes/hermes-agent/venv/bin/python -m pytest tests -q
+     /Users/bschmidy10/.hermes/hermes-agent/venv/bin/python -m pytest tests/test_spaces_foundation.py tests/test_spaces_demo_parity.py tests/test_spaces_ui_js_behaviour.py -q
      ```
-   - Baseline before Spaces implementation: `2785 passed`, `8 subtests passed`, `1 warning` locally on Brendan's Mac Studio.
+   - Latest known Capy Spaces validation after the queued event anchor slice: full WebUI suite `2948 passed`, `1 warning`, `8 subtests passed`; broader Spaces/UI/demo tests `163 passed`. Older baseline before Spaces implementation was `2785 passed`, `8 subtests passed`, `1 warning` locally on Brendan's Mac Studio.
 
 6. **Safe failure and recovery**
    - The safe recovery route/panel must not render generated widgets.
@@ -880,20 +975,18 @@ No direct migration from Space Agent data is required initially. If later useful
   - Preserve `assets/`, `data/`, and `scripts/` under import root.
   - Add import warnings for unsupported APIs such as `space.current.*` calls.
 
-## Recommended First PR
+## Recommended Next Sprint
 
-Implement Phase 0 + a thin Phase 1 skeleton:
+The original Phase 0 + thin Phase 1 skeleton has landed enough that the next sprint should focus on the revised gates:
 
-1. `api/spaces.py` with storage and validation.
-2. Routes for list/create/read/update/delete.
-3. `Session.active_space_id` field.
-4. Minimal `static/spaces.js/css` page showing spaces and empty canvas.
-5. Minimal safe recovery route that does not render widgets.
-6. Revision-event ID creation on each mutation.
-7. Tests for path safety, CRUD, recovery route, and revision-event creation.
-8. Feature flag off by default or dev-only.
+1. Update this plan's current-status section at the start/end of each slice.
+2. Expand safe recovery/admin UI so it can inspect metadata, disable/enable spaces/widgets/modules, launch a scoped repair prompt, and later roll back without rendering generated content.
+3. Add rollback/time-travel MVP: revision list, diff/preview, widget rollback, full-space rollback, and recovery-mode rollback.
+4. Drive the Research Harness vertical demo end-to-end using strict TDD.
+5. Define the sandbox/postMessage contract before adding richer generated or trusted widget rendering.
+6. Maintain screenshot/browser QA artifacts for UI-facing slices.
 
-This gives a safe spine that future widget/tool/browser/share work can attach to without reworking the data model.
+This gives a safe spine that future widget/tool/browser/share work can attach to without reworking the data model or expanding trust before recovery exists.
 
 ## Open Design Questions
 
