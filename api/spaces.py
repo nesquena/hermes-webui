@@ -681,6 +681,10 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {"space.current.widgets", "space.current.widget.list"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         return {"ok": True, "action": name, "active_space_id": space_id, "widgets": list_widgets(space_id)}
+    if name in {"space.template.install", "space.templates.install", "template.install"}:
+        template_name = data.get("template") or data.get("name") or data.get("template_name") or "weather"
+        result = install_template(template_name, space_id=data.get("space_id") or None)
+        return {"ok": True, "action": name, **result}
     if name == "space.create":
         created = create_space(_space_tool_create_payload(data))
         space = read_space_detail(created["space_id"])

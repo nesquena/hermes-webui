@@ -191,6 +191,40 @@ def test_space_tool_adapter_exposes_metadata_only_current_context(monkeypatch, t
     assert "unsafe_marker_do_not_leak" not in serialized
 
 
+def test_space_tool_adapter_installs_templates_as_safe_metadata(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    result = spaces.run_space_tool(
+        "space.template.install",
+        {
+            "template": "game",
+            "space_id": "tool-game-demo",
+            "renderer": "<script>steal()</script>",
+            "api_key": "credential_marker_do_not_leak",
+            "widgets": [{"id": "unsafe", "html": "<img src=x onerror=steal()>"}],
+        },
+    )
+    serialized = json.dumps(result).lower()
+
+    assert result["ok"] is True
+    assert result["action"] == "space.template.install"
+    assert result["template"] == "game"
+    assert result["space"]["space_id"] == "tool-game-demo"
+    assert result["space"]["name"] == "Game Sandbox"
+    assert [widget["id"] for widget in result["installed_widgets"]] == [
+        "game-canvas",
+        "game-controls",
+        "game-repair-notes",
+    ]
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "credential_marker_do_not_leak" not in serialized
+    assert "secret" not in serialized
+
+
 def test_space_id_validation_rejects_traversal_and_unsafe_names(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
