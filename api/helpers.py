@@ -110,14 +110,10 @@ MAX_BODY_BYTES = 20 * 1024 * 1024  # 20MB limit for non-upload POST bodies
 # ── Credential redaction ──────────────────────────────────────────────────────
 
 def _build_redact_fn():
-    """Return redact_sensitive_text from hermes-agent if available, else a fallback."""
-    try:
-        from agent.redact import redact_sensitive_text
-        return redact_sensitive_text
-    except ImportError:
-        pass
-
-    # Minimal fallback covering the most common credential prefixes
+    """Return a redactor backed by hermes-agent plus local fallback patterns."""
+    # Minimal fallback covering the most common credential prefixes.
+    # Keep this active even when hermes-agent is importable so API responses do
+    # not regress if the agent redactor misses a token shape.
     _CRED_RE = _re.compile(
         r"(?<![A-Za-z0-9_-])("
         r"sk-[A-Za-z0-9_-]{10,}"          # OpenAI / Anthropic / OpenRouter
@@ -156,7 +152,17 @@ def _build_redact_fn():
         text = _PRIVKEY_RE.sub("[REDACTED PRIVATE KEY]", text)
         return text
 
-    return _fallback_redact
+    try:
+        from agent.redact import redact_sensitive_text
+    except ImportError:
+        return _fallback_redact
+
+    def _combined_redact(text: str) -> str:
+        if not isinstance(text, str) or not text:
+            return text
+        return _fallback_redact(redact_sensitive_text(text))
+
+    return _combined_redact
 
 
 _redact_text = _build_redact_fn()
