@@ -965,6 +965,12 @@ def handle_get(handler, parsed) -> bool:
             return j(handler, {"enabled": False, "spaces": []})
         return j(handler, {"enabled": True, "spaces": capy_spaces.list_spaces()})
 
+    if parsed.path == "/api/spaces/demo/runs":
+        from api import spaces as capy_spaces
+        if not capy_spaces.spaces_enabled():
+            return j(handler, {"enabled": False, "demos": []})
+        return j(handler, {"enabled": True, "demos": capy_spaces.list_space_demo_runs()})
+
     if parsed.path == "/api/spaces/current":
         from api import spaces as capy_spaces
         if not capy_spaces.spaces_enabled():
@@ -1638,6 +1644,31 @@ def handle_post(handler, parsed) -> bool:
         except RuntimeError as e:
             return bad(handler, str(e), 403)
         except PermissionError as e:
+            return bad(handler, str(e), 403)
+        except ValueError as e:
+            return bad(handler, str(e))
+        except FileNotFoundError:
+            return bad(handler, "Space or widget not found", 404)
+
+    if parsed.path == "/api/spaces/demo/run":
+        from api import spaces as capy_spaces
+        demo = body.get("demo") or body.get("name") or body.get("demo_name")
+        if not demo:
+            return bad(handler, "Missing demo")
+        try:
+            return j(handler, capy_spaces.space_demo_run(demo))
+        except RuntimeError as e:
+            return bad(handler, str(e), 403)
+        except ValueError as e:
+            return bad(handler, str(e))
+        except FileNotFoundError:
+            return bad(handler, "Space or widget not found", 404)
+
+    if parsed.path == "/api/spaces/demo/run-all":
+        from api import spaces as capy_spaces
+        try:
+            return j(handler, capy_spaces.space_demo_run_all())
+        except RuntimeError as e:
             return bad(handler, str(e), 403)
         except ValueError as e:
             return bad(handler, str(e))

@@ -2123,6 +2123,50 @@ def _route_post(path, body):
     return handled, handler.status, handler.json_body()
 
 
+def test_spaces_demo_smoke_routes_are_metadata_only(monkeypatch, tmp_path):
+    _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    handled, status, body = _route_get("/api/spaces/demo/runs")
+    assert handled is None
+    assert status == 200
+    assert body["enabled"] is True
+    assert body["demos"][0]["demo"] == "demo_weather_widget"
+    assert body["demos"][0]["mode"] == "metadata-only-smoke"
+
+    handled, status, body = _route_post(
+        "/api/spaces/demo/run",
+        {
+            "demo": "demo_weather_widget",
+            "renderer": "<script>steal()</script>",
+            "api_key": "SECRET...LEAK",
+        },
+    )
+    assert handled is None
+    assert status == 200
+    assert body["ok"] is True
+    assert body["demo"] == "demo_weather_widget"
+    assert body["mode"] == "metadata-only-smoke"
+    assert body["widget_count"] >= 1
+    assert body["persistence_checked"] is True
+    assert body["rollback_point"] is True
+
+    handled, status, suite = _route_post("/api/spaces/demo/run-all", {"renderer": "<script>ignore()</script>"})
+    assert handled is None
+    assert status == 200
+    assert suite["ok"] is True
+    assert suite["action"] == "space.demo.run_all"
+    assert suite["mode"] == "metadata-only-smoke"
+    assert suite["passed"] == suite["total"]
+    assert suite["total"] >= 13
+
+    serialized = json.dumps({"list": body, "suite": suite}).lower()
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
 def test_spaces_routes_create_list_get_and_recovery(monkeypatch, tmp_path):
     _load_spaces(monkeypatch, tmp_path, enabled=True)
 
