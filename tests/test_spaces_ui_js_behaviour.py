@@ -456,6 +456,16 @@ async function click(action, dataset) {
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
     await window.loadCapySpaces();
     await click('deleteWidget', { spaceId: 'lab', widgetId: 'weather' });
+  } else if (scenario === 'deleteWidgetConfirmed') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await click('deleteWidget', { spaceId: 'lab', widgetId: 'weather' });
+  } else if (scenario === 'deleteWidgetCancelled') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return false; };
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await click('deleteWidget', { spaceId: 'lab', widgetId: 'weather' });
   } else if (scenario === 'editWidget') {
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
     await window.loadCapySpaces();
@@ -872,10 +882,28 @@ def test_spaces_ui_restore_widget_posts_metadata_only_layout_patch(driver_path):
     assert "SECRET" not in out["rootHtml"]
 
 
-def test_spaces_ui_delete_widget_posts_to_delete_and_refreshes_widgets(driver_path):
+def test_spaces_ui_delete_widget_fails_closed_without_shared_confirm(driver_path):
     out = _run_spaces_scenario(driver_path, "delete")
+
+    assert not any(call["path"] == "api/spaces/widget/delete" for call in out["calls"])
+    assert out["dialogs"] == []
+
+
+def test_spaces_ui_delete_widget_cancel_does_not_send_delete(driver_path):
+    out = _run_spaces_scenario(driver_path, "deleteWidgetCancelled")
+
+    assert out["dialogs"]
+    assert out["dialogs"][0]["title"] == "Delete widget?"
+    assert not any(call["path"] == "api/spaces/widget/delete" for call in out["calls"])
+
+
+def test_spaces_ui_delete_widget_confirm_posts_to_delete_and_refreshes_widgets(driver_path):
+    out = _run_spaces_scenario(driver_path, "deleteWidgetConfirmed")
     post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/delete")
 
+    assert out["dialogs"]
+    assert out["dialogs"][0]["title"] == "Delete widget?"
+    assert out["dialogs"][0]["confirmLabel"] == "Delete widget"
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"space_id": "lab", "widget_id": "weather"}
     assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"

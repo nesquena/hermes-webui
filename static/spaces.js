@@ -895,7 +895,11 @@
       return;
     }
     if (action === 'deleteWidget') {
-      await postSpacesJson('api/spaces/widget/delete', {space_id: spaceId, widget_id: button.dataset.widgetId || ''});
+      const widgetId = button.dataset.widgetId || '';
+      if (!spaceId || !widgetId || typeof showConfirmDialog !== 'function') return;
+      const ok = await showConfirmDialog({title: 'Delete widget?', message: 'Delete widget "'+widgetId+'"? This removes it from the active Space manifest, with revision history preserved.', confirmLabel: 'Delete widget', danger: true, focusCancel: true});
+      if (!ok) return;
+      await postSpacesJson('api/spaces/widget/delete', {space_id: spaceId, widget_id: widgetId});
       await loadSpaceWidgets(spaceId);
     }
   }
