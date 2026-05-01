@@ -12,12 +12,11 @@ def test_app_titlebar_no_longer_contains_tps_chip():
     assert 'id="tpsStat"' not in INDEX_HTML
 
 
-def test_app_titlebar_returns_to_space_between_layout():
-    # TPS branch uses space-between so the titlebar-left (hamburger) and
-    # titlebar-right (TPS chip slot) can sit on opposite ends while the
-    # title stays centered within the inner flex.
-    assert ".app-titlebar{display:flex;align-items:center;justify-content:space-between;" in STYLE_CSS
-    assert ".app-titlebar-inner{display:flex;align-items:center;gap:8px;min-width:0;max-width:100%;flex:1 1 auto;justify-content:space-between;}" in STYLE_CSS
+def test_app_titlebar_uses_center_layout():
+    # The TPS chip moved to the sidebar (per-conversation indicator).
+    # The titlebar itself is centred, matching master's safe-area work.
+    assert ".app-titlebar{display:flex;align-items:center;justify-content:center;" in STYLE_CSS
+    assert ".app-titlebar-inner{display:flex;align-items:center;gap:8px;min-width:0;max-width:100%;justify-content:center;}" in STYLE_CSS
 
 
 def test_app_titlebar_subtitle_shows_message_count_again():
