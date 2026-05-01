@@ -4,6 +4,7 @@ Extracted from server.py (Sprint 11) so server.py is a thin shell.
 """
 
 import html as _html
+import copy
 import json
 import logging
 import os
@@ -143,9 +144,45 @@ _OPENAI_COMPAT_ENDPOINTS = {
 # the openai provider is already wired through provider_model_ids(); codex-
 # specific model filtering happens downstream in hermes_cli.
 #
-# TODO: Add TTL-based caching (e.g. 60s) so repeated model-list requests
-# don't hit provider APIs.  The frontend already caches via _liveModelCache
-# but the backend re-fetches on every /api/models/live call.
+_LIVE_MODELS_CACHE_TTL = 60.0
+_LIVE_MODELS_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
+_LIVE_MODELS_CACHE_LOCK = threading.RLock()
+
+
+def _active_profile_for_live_models_cache() -> str:
+    try:
+        from api.profiles import get_active_profile_name
+
+        return get_active_profile_name() or "default"
+    except Exception:
+        return "default"
+
+
+def _live_models_cache_key(provider: str) -> tuple[str, str]:
+    return (_active_profile_for_live_models_cache(), provider)
+
+
+def _get_cached_live_models(key: tuple[str, str]) -> dict | None:
+    now = time.monotonic()
+    with _LIVE_MODELS_CACHE_LOCK:
+        cached = _LIVE_MODELS_CACHE.get(key)
+        if not cached:
+            return None
+        ts, payload = cached
+        if now - ts >= _LIVE_MODELS_CACHE_TTL:
+            _LIVE_MODELS_CACHE.pop(key, None)
+            return None
+        return copy.deepcopy(payload)
+
+
+def _set_cached_live_models(key: tuple[str, str], payload: dict) -> None:
+    with _LIVE_MODELS_CACHE_LOCK:
+        _LIVE_MODELS_CACHE[key] = (time.monotonic(), copy.deepcopy(payload))
+
+
+def _clear_live_models_cache() -> None:
+    with _LIVE_MODELS_CACHE_LOCK:
+        _LIVE_MODELS_CACHE.clear()
 
 from api.config import (
     STATE_DIR,
@@ -3033,6 +3070,15 @@ def _handle_live_models(handler, parsed):
         from api.config import _resolve_provider_alias
         provider = _resolve_provider_alias(provider)
 
+        cache_key = _live_models_cache_key(provider)
+        cached = _get_cached_live_models(cache_key)
+        if cached is not None:
+            return j(handler, cached)
+
+        def _finish(payload: dict):
+            _set_cached_live_models(cache_key, payload)
+            return j(handler, payload)
+
         # Delegate to the agent's live-fetch + fallback resolver.
         # provider_model_ids() tries live endpoints first and falls back to
         # the static _PROVIDER_MODELS list — it never raises.
@@ -3150,7 +3196,7 @@ def _handle_live_models(handler, parsed):
             from api.config import _PROVIDER_MODELS as _pm
             ids = [m["id"] for m in _pm.get(provider, [])]
         if not ids:
-            return j(handler, {"provider": provider, "models": [], "count": 0})
+            return _finish({"provider": provider, "models": [], "count": 0})
 
         # Normalise to {id, label} — provider_model_ids() returns plain string IDs.
         # For ollama-cloud use the shared Ollama formatter (handles `:variant` suffix).
@@ -3183,8 +3229,8 @@ def _handle_live_models(handler, parsed):
             return label
 
         models_out = [{"id": mid, "label": _make_label(mid)} for mid in ids if mid]
-        return j(handler, {"provider": provider, "models": models_out,
-                           "count": len(models_out)})
+        return _finish({"provider": provider, "models": models_out,
+                        "count": len(models_out)})
 
     except Exception as _e:
         logger.debug("_handle_live_models failed for %s: %s", provider, _e)
