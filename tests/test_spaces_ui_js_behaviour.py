@@ -84,6 +84,48 @@ global.fetch = async function(path, opts = {}) {
     }
     return response({ enabled: true, spaces: [{ space_id: 'lab', name: 'Lab', widget_count: 1, revision_event_id: 'rev1' }] });
   }
+  if (path === 'api/spaces/demo/runs') {
+    return response({
+      ok: true,
+      demos: [
+        { demo: 'demo_weather_widget', template: 'weather', title: 'Weather answer → persistent widget', mode: 'metadata-only-smoke', renderer: '<script>bad()</script>', api_key: 'SECRET' },
+        { demo: 'demo_time_travel_restore', template: 'big-bang', title: 'Time travel rollback', mode: 'metadata-only-smoke', source: 'SECRET_SOURCE' },
+      ],
+    });
+  }
+  if (path === 'api/spaces/demo/run') {
+    const body = opts.body ? JSON.parse(opts.body) : {};
+    return response({
+      ok: true,
+      action: 'space.demo.run',
+      demo: body.demo || 'demo_weather_widget',
+      template: 'weather',
+      mode: 'metadata-only-smoke',
+      space: { space_id: 'demo-weather-widget', name: 'Weather Demo Smoke', widget_count: 1, revision_event_id: 'rev-demo', renderer: '<script>bad()</script>', api_key: 'SECRET' },
+      widgets: [{ id: 'weather-current', kind: 'weather', title: 'Weather in Prague', renderer: '<script>bad()</script>', api_key: 'SECRET' }],
+      widget_count: 1,
+      persisted_widget_count: 1,
+      persistence_checked: true,
+      revision_event_count: 2,
+      rollback_point: true,
+    });
+  }
+  if (path === 'api/spaces/demo/run-all') {
+    return response({
+      ok: true,
+      action: 'space.demo.run_all',
+      total: 2,
+      passed: 2,
+      failed: 0,
+      mode: 'metadata-only-smoke',
+      results: [
+        { ok: true, demo: 'demo_weather_widget', template: 'weather', mode: 'metadata-only-smoke', space: { space_id: 'demo-weather-widget', name: 'Weather Demo Smoke', renderer: '<script>bad()</script>', api_key: 'UNTRUSTED_VALUE' }, widget_count: 1, persisted_widget_count: 1, rollback_point: true, persistence_checked: true },
+        { ok: true, demo: 'demo_time_travel_restore', template: 'big-bang', mode: 'metadata-only-smoke', space: { space_id: 'demo-time-travel-restore', name: 'Time Travel Smoke', source: 'UNTRUSTED_SOURCE' }, widget_count: 4, persisted_widget_count: 4, rollback_point: true, persistence_checked: true },
+      ],
+      renderer: '<script>bad()</script>',
+      api_key: 'UNTRUSTED_VALUE',
+    });
+  }
   if (path === 'api/spaces/tool') {
     const body = opts.body ? JSON.parse(opts.body) : {};
     if (body.action === 'space.demo.list') {
@@ -1317,15 +1359,19 @@ def test_spaces_ui_install_model_setup_posts_template_and_refreshes_without_widg
 
 def test_spaces_ui_runs_demo_parity_smoke_from_safe_catalog(driver_path):
     out = _run_spaces_scenario(driver_path, "runDemoParitySmoke")
-    list_post = next(call for call in out["calls"] if call["path"] == "api/spaces/tool" and json.loads(call["body"]).get("action") == "space.demo.list")
-    run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/tool" and json.loads(call["body"]).get("action") == "space.demo.run")
+    list_get = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/runs")
+    run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
 
-    assert list_post["method"] == "POST"
+    assert list_get["method"] == "GET"
     assert "Demo parity smoke runner" in out["beforeHtml"]
     assert "Weather answer → persistent widget" in out["beforeHtml"]
     assert "Time travel rollback" in out["beforeHtml"]
     assert run_post["method"] == "POST"
-    assert json.loads(run_post["body"]) == {"action": "space.demo.run", "demo": "demo_weather_widget"}
+    assert json.loads(run_post["body"]) == {"demo": "demo_weather_widget"}
+    assert not any(
+        call["path"] == "api/spaces/tool" and json.loads(call["body"] or "{}").get("action", "").startswith("space.demo")
+        for call in out["calls"]
+    )
     assert "Demo parity smoke passed" in out["rootHtml"]
     assert "demo_weather_widget" in out["rootHtml"]
     assert "Weather Demo Smoke" in out["rootHtml"]
@@ -1340,11 +1386,15 @@ def test_spaces_ui_runs_demo_parity_smoke_from_safe_catalog(driver_path):
 
 def test_spaces_ui_runs_all_demo_parity_smokes_metadata_only(driver_path):
     out = _run_spaces_scenario(driver_path, "runDemoParityAllSmokes")
-    run_all_post = next(call for call in out["calls"] if call["path"] == "api/spaces/tool" and json.loads(call["body"]).get("action") == "space.demo.run_all")
+    run_all_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run-all")
 
     assert "Run all smokes" in out["beforeHtml"]
     assert run_all_post["method"] == "POST"
-    assert json.loads(run_all_post["body"]) == {"action": "space.demo.run_all"}
+    assert json.loads(run_all_post["body"]) == {}
+    assert not any(
+        call["path"] == "api/spaces/tool" and json.loads(call["body"] or "{}").get("action", "").startswith("space.demo")
+        for call in out["calls"]
+    )
     assert "Demo parity smoke suite passed" in out["rootHtml"]
     assert "2 / 2 metadata-only smokes passed" in out["rootHtml"]
     assert "demo_weather_widget" in out["rootHtml"]

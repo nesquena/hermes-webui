@@ -25,7 +25,7 @@
     try {
       let demoData = {demos: []};
       try {
-        demoData = await postSpacesJson('api/spaces/tool', {action: 'space.demo.list'});
+        demoData = await fetchSpacesJson('api/spaces/demo/runs');
       } catch (demoErr) {
         demoData = {demos: []};
       }
@@ -712,14 +712,14 @@
     if (action === 'runDemoSmoke') {
       const demo = button.dataset.demo || '';
       if (!demo) return;
-      const data = await postSpacesJson('api/spaces/tool', {action: 'space.demo.run', demo: demo});
+      const data = await postSpacesJson('api/spaces/demo/run', {demo: demo});
       await loadCapySpaces();
       const refreshedRoot = document.getElementById('capySpacesRoot');
       if (refreshedRoot) refreshedRoot.innerHTML = renderDemoSmokeResult(data || {}) + refreshedRoot.innerHTML;
       return;
     }
     if (action === 'runAllDemoSmokes') {
-      const data = await postSpacesJson('api/spaces/tool', {action: 'space.demo.run_all'});
+      const data = await postSpacesJson('api/spaces/demo/run-all', {});
       await loadCapySpaces();
       const refreshedRoot = document.getElementById('capySpacesRoot');
       if (refreshedRoot) refreshedRoot.innerHTML = renderDemoSmokeSuiteResult(data || {}) + refreshedRoot.innerHTML;
