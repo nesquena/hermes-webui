@@ -192,10 +192,14 @@ def test_space_tool_adapter_supports_space_agent_widget_aliases_metadata_only(mo
             "widget_id": "research-card",
             "event_name": "agent.prompt",
             "prompt": "summarize this widget",
-            "payload": {"query": "Claude Mythos", "renderer": "<script>bad()</script>", "api_key": "SECRET"},
+            "payload": {"query": "Claude Mythos", "renderer": "<script>bad()</script>", "api_key": "***"},
         },
     )
-    serialized = json.dumps({"listed": listed, "read": read, "patched": patched, "queued": queued}).lower()
+    event_list = spaces.run_space_tool(
+        "space.widget.events",
+        {"space_id": created["space_id"], "widget_id": "research-card", "limit": 5},
+    )
+    serialized = json.dumps({"listed": listed, "read": read, "patched": patched, "queued": queued, "event_list": event_list}).lower()
 
     assert listed["ok"] is True
     assert listed["action"] == "space.widget.list"
@@ -206,6 +210,11 @@ def test_space_tool_adapter_supports_space_agent_widget_aliases_metadata_only(mo
     assert patched["widget"]["layout"] == {"x": 4, "y": 5, "w": 8, "h": 5, "minimized": False}
     assert queued["queued"] is True
     assert queued["payload_summary"] == {"query": "Claude Mythos"}
+    assert event_list["ok"] is True
+    assert event_list["action"] == "space.widget.events"
+    assert event_list["events"][0]["widget_id"] == "research-card"
+    assert event_list["events"][0]["event_name"] == "agent.prompt"
+    assert event_list["events"][0]["payload_summary"] == {"query": "Claude Mythos"}
     assert "steal" not in serialized
     assert "<script" not in serialized
     assert "onerror" not in serialized
