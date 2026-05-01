@@ -9,9 +9,9 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-01 17:20 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-01 18:26 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: safe recovery repair prompt entry for broken widgets. Use `git log -1 --oneline` for the exact commit hash; this status line intentionally avoids self-referential hashes because committing it changes the hash.
+Current latest known completed code slice: provider/local-model setup metadata-only demo smoke coverage. Use `git log -1 --oneline` for the exact commit hash; this status line intentionally avoids self-referential hashes because committing it changes the hash.
 
 Recent completed slices:
 
@@ -32,15 +32,17 @@ Recent completed slices:
 - `feat(spaces): queue recovery repair prompts`
   - Safe recovery panel now offers an “Ask Capy to repair” widget action that queues a metadata-only `agent.repair` event without rendering generated widget bodies.
   - Fails closed when the shared prompt dialog is unavailable.
+- `feat(spaces): include provider setup in demo smokes`
+  - Added the model/provider setup template to the metadata-only Space Agent demo smoke catalog as `demo_provider_setup`.
+  - Validation at completion: focused demo-smoke route test passed, full Spaces foundation suite passed (`95 passed`), `py_compile` and `git diff --check` passed.
 
 Last known validation bundle:
 
-- Focused recovery repair UI behavior tests: passed (`3 passed`, `64 deselected`).
-- Capy Spaces UI JS behavior suite: passed (`67 passed`).
-- Capy Spaces foundation suite: passed (`94 passed`).
-- Full WebUI suite: passed (`2950 passed`, `1 warning`, `8 subtests passed`).
+- Focused provider/demo-smoke route test: passed (`1 passed`).
+- Capy Spaces foundation suite: passed (`95 passed`).
+- `py_compile api/spaces.py tests/test_spaces_foundation.py`: passed.
 - `git diff --check`: passed.
-- WebUI local and tailnet health: `status: ok`, zero active sessions/streams at last check.
+- WebUI local and tailnet health: pending final post-restart check for this cycle.
 
 Known warning: unknown `pytest.mark.integration` in `tests/test_onboarding_network.py`.
 

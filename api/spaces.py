@@ -70,6 +70,7 @@ _SPACE_DEMO_RUNS = [
     {"demo": "demo_stock_chart", "template": "stock", "title": "Stock chart"},
     {"demo": "demo_snake_iterative_repair", "template": "game", "title": "Snake repair loop"},
     {"demo": "demo_step_sequencer_piano_roll", "template": "music", "title": "Step sequencer"},
+    {"demo": "demo_provider_setup", "template": "model-setup", "title": "Provider setup"},
     {"demo": "demo_big_bang_onboarding", "template": "big-bang", "title": "Big Bang onboarding"},
     {"demo": "demo_time_travel_restore", "template": "weather", "title": "Time travel restore"},
     {"demo": "demo_safe_admin_recovery", "template": "weather", "title": "Admin recovery"},

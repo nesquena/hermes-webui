@@ -2308,13 +2308,15 @@ def test_spaces_demo_smoke_routes_are_metadata_only(monkeypatch, tmp_path):
     assert body["enabled"] is True
     assert body["demos"][0]["demo"] == "demo_weather_widget"
     assert body["demos"][0]["mode"] == "metadata-only-smoke"
+    demo_names = {demo["demo"] for demo in body["demos"]}
+    assert "demo_provider_setup" in demo_names
 
     handled, status, body = _route_post(
         "/api/spaces/demo/run",
         {
             "demo": "demo_weather_widget",
             "renderer": "<script>steal()</script>",
-            "api_key": "SECRET...LEAK",
+            "api_key": "***",
         },
     )
     assert handled is None
@@ -2325,6 +2327,24 @@ def test_spaces_demo_smoke_routes_are_metadata_only(monkeypatch, tmp_path):
     assert body["widget_count"] >= 1
     assert body["persistence_checked"] is True
     assert body["rollback_point"] is True
+
+    handled, status, provider_body = _route_post(
+        "/api/spaces/demo/run",
+        {
+            "demo": "demo_provider_setup",
+            "renderer": "<script>stealProvider()</script>",
+            "api_key": "***",
+        },
+    )
+    assert handled is None
+    assert status == 200
+    assert provider_body["ok"] is True
+    assert provider_body["demo"] == "demo_provider_setup"
+    assert provider_body["template"] == "model-setup"
+    assert provider_body["space"]["template"] == "model-provider-setup"
+    assert provider_body["widget_count"] >= 4
+    assert provider_body["persistence_checked"] is True
+    assert provider_body["rollback_point"] is True
 
     handled, status, suite = _route_post("/api/spaces/demo/run-all", {"renderer": "<script>ignore()</script>"})
     assert handled is None

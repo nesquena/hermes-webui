@@ -15,6 +15,7 @@ Recently landed:
 - Demo smoke routes exist and the Spaces UI uses direct `/api/spaces/demo/*` routes instead of generic demo tool actions.
 - Metadata shared data slots exist, show safe details, and can be deleted safely.
 - Queued widget events show safe event anchors and UTC timestamps in the UI.
+- Model/provider setup now appears in the metadata-only demo smoke catalog as `demo_provider_setup`, backed by the safe Model Provider Setup template.
 - Screenshot QA artifacts are expected for visually relevant Spaces work.
 
 Next checkpoint emphasis:
