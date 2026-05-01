@@ -1637,6 +1637,8 @@ def handle_post(handler, parsed) -> bool:
             return j(handler, capy_spaces.run_space_tool(action, body))
         except RuntimeError as e:
             return bad(handler, str(e), 403)
+        except PermissionError as e:
+            return bad(handler, str(e), 403)
         except ValueError as e:
             return bad(handler, str(e))
         except FileNotFoundError:

@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import ipaddress
 import json
 import os
 import re
@@ -19,6 +20,7 @@ import uuid
 import zipfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import api.config as config
 
@@ -701,6 +703,10 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             session_id=data.get("session_id") or "",
         )
         return {"ok": True, "action": name, **result}
+    if name in {"space.camera.add_stream", "camera.add_stream"}:
+        space_id = validate_space_id(data.get("space_id"))
+        result = add_camera_stream(space_id, data)
+        return {"ok": True, "action": name, **result}
     raise ValueError("Unsupported Capy Spaces tool action")
 
 
@@ -1138,6 +1144,97 @@ def upsert_widget(space_id: str, widget: dict[str, Any]) -> dict[str, Any]:
     return {
         "space_id": saved["space_id"],
         "widget": clean_widget,
+        "revision_event_id": saved["revision_event_id"],
+    }
+
+
+def _stream_title(value: Any) -> str:
+    text = _context_value(value, 120)
+    text = re.sub(r"<[^>]*>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text or _payload_text_summary(text, 120) == "[REDACTED]":
+        return "Camera stream"
+    return text
+
+
+def _camera_stream_url_metadata(raw_url: Any) -> dict[str, Any]:
+    url = str(raw_url or "").strip()
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
+        raise ValueError("Camera stream URL must be http(s) with a host")
+    if parsed.username or parsed.password:
+        raise ValueError("Camera stream URL must not embed credentials")
+
+    host = parsed.hostname.strip("[]").lower()
+    host_class = "public"
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            host_class = "private"
+    except ValueError:
+        if host in {"localhost"} or host.endswith((".local", ".lan", ".internal")) or "." not in host:
+            host_class = "private"
+
+    normalized = parsed._replace(fragment="").geturl()
+    return {
+        "scheme": scheme,
+        "host_class": host_class,
+        "mixed_content": scheme == "http",
+        "url_digest": hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24],
+    }
+
+
+def add_camera_stream(space_id: str, stream: dict[str, Any]) -> dict[str, Any]:
+    """Append an approved camera-stream reference as metadata only.
+
+    Raw camera URLs can contain private hosts, credentials, and connection
+    details. This foundation slice validates the URL and stores only a digest and
+    coarse policy metadata so recovery/detail surfaces remain safe until a later
+    approved stream-secret/ref store exists.
+    """
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    if not isinstance(stream, dict):
+        raise ValueError("stream must be an object")
+
+    sid = validate_space_id(space_id)
+    url_meta = _camera_stream_url_metadata(stream.get("url"))
+    approval_id = _payload_text_summary(stream.get("approval_id"), 120)
+    approved = _truthy_bool(stream.get("approved")) or bool(approval_id and approval_id != "[REDACTED]")
+    if not approved:
+        raise PermissionError("Camera stream URLs require explicit approval")
+
+    space = read_space(sid)
+    idx = _widget_index(space, "camera-grid")
+    widgets = list(space.get("widgets") or [])
+    grid = dict(widgets[idx])
+    existing = grid.get("streams") if isinstance(grid.get("streams"), list) else []
+    stream_id = validate_widget_id(f"stream-{url_meta['url_digest'][:12]}")
+    safe_stream = {
+        "id": stream_id,
+        "title": _stream_title(stream.get("title")),
+        "scheme": url_meta["scheme"],
+        "host_class": url_meta["host_class"],
+        "mixed_content": url_meta["mixed_content"],
+        "approved": True,
+        "status": "approved-metadata-only",
+        "url_digest": url_meta["url_digest"],
+    }
+    if approval_id and approval_id != "[REDACTED]":
+        safe_stream["approval_id"] = approval_id
+
+    streams = [item for item in existing if not (isinstance(item, dict) and item.get("id") == stream_id)]
+    streams.append(safe_stream)
+    grid["streams"] = streams
+    grid["status"] = "approved-stream-metadata-ready"
+    widgets[idx] = _normalize_widget(grid)
+    space["widgets"] = widgets
+    saved = _write_manifest(space, "camera.stream.added", {"widget_id": "camera-grid", "stream_id": stream_id})
+    return {
+        "space_id": saved["space_id"],
+        "stream": safe_stream,
+        "widget": _widget_summary(widgets[idx]),
         "revision_event_id": saved["revision_event_id"],
     }
 

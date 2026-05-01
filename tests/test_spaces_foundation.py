@@ -1283,6 +1283,102 @@ def test_camera_dashboard_template_install_route_returns_safe_metadata(monkeypat
     assert "secret" not in serialized
 
 
+def test_camera_stream_tool_rejects_private_urls_without_approval_and_does_not_store_them(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    installed = spaces.install_template("camera")
+    space_id = installed["space"]["space_id"]
+
+    with pytest.raises(PermissionError, match="explicit approval"):
+        spaces.run_space_tool(
+            "space.camera.add_stream",
+            {
+                "space_id": space_id,
+                "title": "Garage",
+                "url": "http://192.168.1.55:8080/live?token=SECRET_VALUE_DO_NOT_LEAK",
+            },
+        )
+
+    grid_widget = spaces.read_widget(space_id, "camera-grid")
+    assert grid_widget["streams"] == []
+
+
+def test_camera_stream_tool_rejects_secret_like_approval_id_as_approval(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    installed = spaces.install_template("camera")
+    space_id = installed["space"]["space_id"]
+
+    with pytest.raises(PermissionError, match="explicit approval"):
+        spaces.run_space_tool(
+            "space.camera.add_stream",
+            {
+                "space_id": space_id,
+                "title": "Garage",
+                "url": "http://192.168.1.55:8080/live?token=SECRET_VALUE_DO_NOT_LEAK",
+                "approval_id": "token=SECRET_VALUE_DO_NOT_LEAK",
+            },
+        )
+
+    assert spaces.read_widget(space_id, "camera-grid")["streams"] == []
+
+
+def test_camera_stream_tool_records_approved_private_stream_as_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    installed = spaces.install_template("camera")
+    space_id = installed["space"]["space_id"]
+
+    result = spaces.run_space_tool(
+        "space.camera.add_stream",
+        {
+            "space_id": space_id,
+            "title": "Garage <script>ignored</script>",
+            "url": "http://192.168.1.55:8080/live?token=SECRET_VALUE_DO_NOT_LEAK",
+            "approved": True,
+            "approval_id": "approval-123",
+            "renderer": "<script>steal()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    assert result["ok"] is True
+    assert result["action"] == "space.camera.add_stream"
+    assert result["stream"]["title"] == "Garage ignored"
+    assert result["stream"]["host_class"] == "private"
+    assert result["stream"]["approved"] is True
+    assert result["stream"]["url_digest"]
+    assert spaces.read_widget(space_id, "camera-grid")["streams"] == [result["stream"]]
+    serialized = json.dumps(result).lower()
+    assert "192.168.1.55" not in serialized
+    assert "8080" not in serialized
+    assert "token" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+
+
+def test_camera_stream_tool_route_rejects_unapproved_url_with_403(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    installed = spaces.install_template("camera")
+
+    handled, status, body = _route_post(
+        "/api/spaces/tool",
+        {
+            "action": "space.camera.add_stream",
+            "space_id": installed["space"]["space_id"],
+            "title": "Garage",
+            "url": "http://192.168.1.55:8080/live?token=SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+
+    assert handled is None
+    assert status == 403
+    assert "explicit approval" in body["error"]
+    serialized = json.dumps(body).lower()
+    assert "192.168.1.55" not in serialized
+    assert "token" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
 def test_install_local_service_template_creates_safe_service_dashboard_widgets(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
