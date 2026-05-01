@@ -404,8 +404,11 @@
     const recovery = safeWidget.recovery && typeof safeWidget.recovery === 'object' ? safeWidget.recovery : {};
     const recoveryText = recovery.disabled ? 'Recovery: disabled' : 'Recovery: enabled';
     const revision = safeWidget.revision_event_id ? ' · Revision: '+escapeHtml(safeWidget.revision_event_id) : '';
-    const metadataText = formatRevisionDetails(safeWidget.metadata || {});
+    const metadata = safeWidget.metadata && typeof safeWidget.metadata === 'object' && !Array.isArray(safeWidget.metadata) ? safeWidget.metadata : {};
+    const metadataText = formatRevisionDetails(metadata || {});
     const metadataRow = metadataText ? '<div class="capy-spaces-muted">Metadata: '+escapeHtml(metadataText)+'</div>' : '';
+    const exportMeta = metadata.export && typeof metadata.export === 'object' && !Array.isArray(metadata.export) ? metadata.export : {};
+    const pdfExportAction = exportMeta.pdf ? '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="requestWidgetPdfExport" data-space-id="'+escapeHtml(spaceId || '')+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-title="'+escapeHtml(title)+'">Request PDF export</button></div>' : '';
     return '<div class="capy-spaces-card" data-widget-detail-id="'+escapeHtml(widgetId)+'">' +
       '<button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId || '')+'">← Back to widgets</button>' +
       '<h3>Widget details</h3>' +
@@ -414,7 +417,7 @@
       '<div class="capy-spaces-muted">'+escapeHtml(kind)+' · '+escapeHtml(widgetId)+' · '+escapeHtml(formatWidgetLayout(layout))+'</div>' +
       '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId || '')+' · '+escapeHtml(recoveryText)+revision+'</div>' +
       metadataRow +
-      '</div></div></div></div>';
+      '</div>'+pdfExportAction+'</div></div></div>';
   }
 
   function layoutNumber(value, fallback, min, max){
@@ -874,6 +877,19 @@
         widget_id: widgetId,
         event_name: 'widget.refresh',
         payload: {source: 'widget-manager', action: 'refresh'},
+      });
+      await loadSpaceWidgets(spaceId);
+      return;
+    }
+    if (action === 'requestWidgetPdfExport') {
+      const widgetId = button.dataset.widgetId || '';
+      const widgetTitle = button.dataset.widgetTitle || widgetId;
+      if (!spaceId || !widgetId) return;
+      await postSpacesJson('api/spaces/widget/event', {
+        space_id: spaceId,
+        widget_id: widgetId,
+        event_name: 'widget.export.pdf',
+        payload: {source: 'widget-detail', action: 'export_pdf', widget_title: widgetTitle},
       });
       await loadSpaceWidgets(spaceId);
       return;

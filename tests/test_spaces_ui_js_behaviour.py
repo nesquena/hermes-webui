@@ -500,6 +500,13 @@ async function click(action, dataset) {
     await window.loadSpaceWidgets('lab');
     beforeHtml = root.innerHTML;
     await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+  } else if (scenario === 'requestWidgetPdfExport') {
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
+    beforeHtml = root.innerHTML;
+    await click('requestWidgetPdfExport', { spaceId: 'lab', widgetId: 'weather', widgetTitle: '<Weather>' });
   } else if (scenario === 'editWidgetSave') {
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
     await window.loadCapySpaces();
@@ -1017,6 +1024,26 @@ def test_spaces_ui_view_widget_details_fetches_and_renders_safe_metadata_only(dr
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "onerror" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_widget_detail_can_request_pdf_export_as_metadata_event(driver_path):
+    out = _run_spaces_scenario(driver_path, "requestWidgetPdfExport")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/event")
+
+    assert "Request PDF export" in out["beforeHtml"]
+    assert out["dialogs"] == []
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {
+        "space_id": "lab",
+        "widget_id": "weather",
+        "event_name": "widget.export.pdf",
+        "payload": {"source": "widget-detail", "action": "export_pdf", "widget_title": "<Weather>"},
+    }
+    assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()
     assert "SECRET" not in out["rootHtml"]
 
