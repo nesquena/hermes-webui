@@ -132,6 +132,18 @@ async function send(){
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
     }
+    if(_parsedCmd&&!_cmd){
+      const _agentCmd=typeof getAgentCommandMetadata==='function'
+        ? await getAgentCommandMetadata(_parsedCmd.name)
+        : null;
+      if(_agentCmd&&_agentCmd.cli_only){
+        if(!S.session){await newSession();await renderSessionList();}
+        S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+        S.messages.push({role:'assistant',content:cliOnlyCommandResponse(_parsedCmd.name,_agentCmd),_ts:Date.now()/1000});
+        renderMessages();
+        $('msg').value='';autoResize();hideCmdDropdown();return;
+      }
+    }
   }
   if(!S.session){await newSession();await renderSessionList();}
 
