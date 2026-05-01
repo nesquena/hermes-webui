@@ -245,7 +245,58 @@
       '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+' · Revision: '+escapeHtml(space.revision_event_id||'none')+'</div>' +
       '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="activateSpace" data-space-id="'+escapeHtml(spaceId)+'">Use in chat</button><button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(spaceId)+'">Manage widgets</button><button type="button" class="capy-spaces-btn" data-capy-action="exportSpaceYaml" data-space-id="'+escapeHtml(spaceId)+'">Export YAML</button><button type="button" class="capy-spaces-btn" data-capy-action="exportSpaceZip" data-space-id="'+escapeHtml(spaceId)+'">Export ZIP</button></div>' +
       '</div><div class="capy-spaces-card"><h3>Widgets</h3><div class="capy-spaces-muted">Metadata-only detail view. Generated widget code is intentionally not displayed or executed.</div><div class="capy-spaces-widget-list">'+widgetRows+'</div></div>' +
+      renderSharedDataSlots(space.shared_data || []) +
       renderRevisionHistory(spaceId, revisions || []);
+  }
+
+  function renderSharedDataSlots(slots){
+    const safeSlots = Array.isArray(slots) ? slots.slice(0, 10) : [];
+    if (!safeSlots.length) return '';
+    const rows = safeSlots.map(function(slot){
+      const key = safeSharedDataKey(slot && slot.key);
+      if (!key) return '';
+      const valueText = formatSharedDataSummary(slot && slot.value_summary);
+      const metadataText = formatSharedDataSummary(slot && slot.metadata_summary);
+      return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(key)+'</strong>' +
+        (valueText ? '<div class="capy-spaces-muted">'+escapeHtml(valueText)+'</div>' : '') +
+        (metadataText ? '<div class="capy-spaces-muted">Metadata: '+escapeHtml(metadataText)+'</div>' : '') +
+        '</div></div>';
+    }).filter(Boolean).join('');
+    if (!rows) return '';
+    return '<div class="capy-spaces-card"><h3>Shared data</h3>' +
+      '<div class="capy-spaces-muted">Metadata-only per-space data slots for widget cooperation. Raw values and secrets are not displayed.</div>' +
+      '<div class="capy-spaces-widget-list">'+rows+'</div></div>';
+  }
+
+  function safeSharedDataKey(value){
+    const text = String(value || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+    if (!text) return '';
+    const unsafeValuePattern = /(api[_-]?key|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token|<script|<\/script|javascript:|onerror|onload|renderer|html|script|source)/i;
+    return unsafeValuePattern.test(text) ? '' : text;
+  }
+
+  function formatSharedDataSummary(details){
+    if (!details || typeof details !== 'object' || Array.isArray(details)) return '';
+    const unsafeParts = ['renderer', 'html', 'script', 'data', 'source', 'api_key', 'apikey', 'token', 'password', 'secret', 'credential', 'credentials', 'cookie', 'authorization'];
+    const unsafeValuePattern = /(api[_-]?key|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token|<script|<\/script|javascript:|onerror|onload)/i;
+    function keyIsSafe(key){
+      const lowered = String(key || '').toLowerCase();
+      if (lowered === 'source_widget') return true;
+      return lowered && !unsafeParts.some(part => lowered.indexOf(part) >= 0);
+    }
+    function textValueSummary(value){
+      const text = String(value == null ? '' : value).replace(/\s+/g, ' ').trim().slice(0, 160);
+      return text && unsafeValuePattern.test(text) ? '' : text;
+    }
+    function valueSummary(value){
+      if (Array.isArray(value)) return value.slice(0, 5).map(valueSummary).filter(Boolean).join(', ');
+      if (value && typeof value === 'object') return Object.keys(value).filter(keyIsSafe).slice(0, 5).join(', ');
+      return textValueSummary(value);
+    }
+    return Object.keys(details).filter(keyIsSafe).slice(0, 6).map(function(key){
+      const value = valueSummary(details[key]);
+      return value ? String(key)+': '+value : '';
+    }).filter(Boolean).join(' · ');
   }
 
   function renderSpaceExportResult(spaceId, data){

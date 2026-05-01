@@ -300,6 +300,40 @@ def test_space_tool_adapter_exposes_metadata_only_current_context(monkeypatch, t
     assert "unsafe_marker_do_not_leak" not in serialized
 
 
+def test_space_detail_includes_shared_data_slots_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "shared-detail-lab", "name": "Shared Detail Lab"})
+
+    spaces.set_shared_data_slot(
+        created["space_id"],
+        "research-summary",
+        {
+            "title": "Safe research findings",
+            "notes": ["ready for widget cooperation"],
+            "renderer": "<script>steal()</script>",
+            "api_key": "SECRET...LEAK",
+        },
+        {"source_widget": "research-summary", "authorization": "Bearer SECRET_VALUE_DO_NOT_LEAK"},
+    )
+
+    detail = spaces.read_space_detail(created["space_id"])
+    serialized = json.dumps(detail).lower()
+
+    assert detail["shared_data"] == [
+        {
+            "key": "research-summary",
+            "value_summary": {"title": "Safe research findings", "notes": ["ready for widget cooperation"]},
+            "metadata_summary": {"source_widget": "research-summary"},
+        }
+    ]
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "authorization" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
 def test_space_tool_adapter_shared_data_slots_are_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "shared-data-lab", "name": "Shared Data Lab"})

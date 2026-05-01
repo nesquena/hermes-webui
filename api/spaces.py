@@ -608,6 +608,9 @@ def read_space_detail(space_id: str) -> dict[str, Any]:
         "recovery": {"safe_mode_available": True},
         "widgets": [],
     }
+    shared_data = _data_slot_summaries(space)
+    if shared_data:
+        detail["shared_data"] = shared_data
     widgets = space.get("widgets") or []
     if isinstance(widgets, list):
         detail["widgets"] = [_widget_summary(widget) for widget in widgets if isinstance(widget, dict)]

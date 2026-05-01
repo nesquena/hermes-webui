@@ -201,6 +201,10 @@ global.fetch = async function(path, opts = {}) {
       widgets: [{ id: 'weather', kind: 'markdown', title: '<Weather>', layout: { x: 12, y: 3, w: 5, h: 4, minimized: false }, renderer: '<script>bad()</script>' }],
       capabilities: { toolsets: ['web'] },
       recovery: { safe_mode_available: true },
+      shared_data: [
+        { key: 'research-summary', value_summary: { title: 'Safe research findings', notes: ['ready for widget cooperation'], renderer: '<script>bad()</script>', api_key: 'SECRET' }, metadata_summary: { source_widget: 'weather', authorization: 'Bearer SECRET_VALUE_DO_NOT_LEAK' } },
+        { key: 'api_key', value_summary: { note: 'SECRET_VALUE_DO_NOT_LEAK' }, metadata_summary: { renderer: '<script>bad()</script>' } },
+      ],
     } });
   }
   if (path === 'api/spaces/revisions?space_id=lab') {
@@ -1513,6 +1517,11 @@ def test_spaces_ui_opens_space_detail_without_rendering_widget_code(driver_path)
     assert "x12 y3 · 5×4" in out["rootHtml"]
     assert "Export YAML" in out["rootHtml"]
     assert "Export ZIP" in out["rootHtml"]
+    assert "Shared data" in out["rootHtml"]
+    assert "research-summary" in out["rootHtml"]
+    assert "title: Safe research findings" in out["rootHtml"]
+    assert "notes: ready for widget cooperation" in out["rootHtml"]
+    assert "source_widget: weather" in out["rootHtml"]
     assert "Revision history" in out["rootHtml"]
     assert "widget.updated" in out["rootHtml"]
     assert "space.created" in out["rootHtml"]
