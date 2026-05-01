@@ -387,6 +387,60 @@ def test_space_tool_adapter_resets_big_bang_onboarding_metadata_only(monkeypatch
     assert "secret" not in serialized
 
 
+def test_space_tool_adapter_imports_and_exports_space_agent_packages_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    imported = spaces.run_space_tool(
+        "space.import",
+        {
+            "space_yaml": """
+id: tool-import-demo
+name: Tool Import Demo
+description: Imported through the Hermes tool adapter
+instructions: Patch through safe Capy APIs only.
+""",
+            "widgets": {
+                "widgets/panel.yaml": """
+id: unsafe-panel
+title: Unsafe Panel
+type: html
+renderer: "<script>window.SECRET_VALUE_DO_NOT_LEAK=***</script>"
+source: SECRET_SOURCE_VALUE_DO_NOT_LEAK
+data:
+  api_key: SECRET_VALUE_DO_NOT_LEAK
+layout:
+  x: 1
+  y: 2
+  w: 5
+  h: 4
+""",
+            },
+        },
+    )
+    exported = spaces.run_space_tool("space.export", {"space_id": "tool-import-demo", "format": "yaml"})
+    serialized = json.dumps({"imported": imported, "exported": exported}).lower()
+
+    assert imported["ok"] is True
+    assert imported["action"] == "space.import"
+    assert imported["source"] == "space-agent-yaml"
+    assert imported["space"]["space_id"] == "tool-import-demo"
+    assert imported["imported_widgets"] == [
+        {"id": "unsafe-panel", "kind": "html", "title": "Unsafe Panel", "layout": {"x": 1, "y": 2, "w": 5, "h": 4, "minimized": False}}
+    ]
+    assert spaces.read_widget("tool-import-demo", "unsafe-panel")["recovery"]["disabled"] is True
+    assert exported["ok"] is True
+    assert exported["action"] == "space.export"
+    assert exported["source"] == "capy-space"
+    assert exported["format"] == "space-agent-yaml"
+    assert "tool-import-demo" in exported["space_yaml"]
+    assert sorted(exported["widgets"].keys()) == ["widgets/unsafe-panel.yaml"]
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "secret_source_value_do_not_leak" not in serialized
+
+
 def test_space_tool_adapter_lists_and_restores_revisions_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "tool-rollback", "name": "Tool Rollback"})

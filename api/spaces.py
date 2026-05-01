@@ -730,6 +730,14 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         template_name = data.get("template") or data.get("name") or data.get("template_name") or "big-bang"
         result = reset_template(template_name, space_id=data.get("space_id") or None)
         return {"ok": True, "action": name, **result}
+    if name in {"space.import", "space.package.import", "space.agent.import"}:
+        result = import_space_agent_package(data, space_id=data.get("space_id") or None)
+        return {"ok": True, "action": name, **result}
+    if name in {"space.export", "space.package.export", "space.agent.export", "space.export.yaml", "space.export.zip"}:
+        space_id = validate_space_id(data.get("space_id"))
+        export_format = "zip" if name == "space.export.zip" else data.get("format") or "yaml"
+        result = export_space_agent_package(space_id, format=export_format)
+        return {"ok": True, "action": name, **result}
     if name == "space.create":
         created = create_space(_space_tool_create_payload(data))
         space = read_space_detail(created["space_id"])
