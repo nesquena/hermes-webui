@@ -264,7 +264,7 @@ def test_space_tool_adapter_installs_templates_as_safe_metadata(monkeypatch, tmp
             "template": "game",
             "space_id": "tool-game-demo",
             "renderer": "<script>steal()</script>",
-            "api_key": "credential_marker_do_not_leak",
+            "api_key": "unsafe-value-marker",
             "widgets": [{"id": "unsafe", "html": "<img src=x onerror=steal()>"}],
         },
     )
@@ -285,7 +285,60 @@ def test_space_tool_adapter_installs_templates_as_safe_metadata(monkeypatch, tmp
     assert "onerror" not in serialized
     assert "renderer" not in serialized
     assert "api_key" not in serialized
-    assert "credential_marker_do_not_leak" not in serialized
+    assert "unsafe-value-marker" not in serialized
+    assert "secret" not in serialized
+
+
+def test_space_tool_adapter_resets_big_bang_onboarding_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    installed = spaces.install_template("big-bang", space_id="big-bang-onboarding")
+    spaces.upsert_widget(
+        installed["space"]["space_id"],
+        {
+            "id": "unsafe-extra",
+            "kind": "html",
+            "title": "Unsafe extra",
+            "renderer": "<script>steal()</script>",
+            "api_key": "unsafe-extra-value-marker",
+        },
+    )
+
+    result = spaces.run_space_tool(
+        "space.template.reset",
+        {
+            "template": "big-bang",
+            "space_id": "big-bang-onboarding",
+            "renderer": "<script>ignore()</script>",
+            "api_key": "unsafe-reset-value-marker",
+        },
+    )
+    serialized = json.dumps(result).lower()
+
+    assert result["ok"] is True
+    assert result["action"] == "space.template.reset"
+    assert result["template"] == "big-bang"
+    assert result["reset"] is True
+    assert result["space"]["space_id"] == "big-bang-onboarding"
+    assert result["space"]["name"] == "Big Bang Onboarding"
+    assert [widget["id"] for widget in result["installed_widgets"]] == [
+        "bigbang-welcome",
+        "bigbang-demo-launcher",
+        "bigbang-safety",
+        "bigbang-next-steps",
+    ]
+    assert [widget["id"] for widget in spaces.list_widgets("big-bang-onboarding")] == [
+        "bigbang-welcome",
+        "bigbang-demo-launcher",
+        "bigbang-safety",
+        "bigbang-next-steps",
+    ]
+    assert "unsafe-extra" not in serialized
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "unsafe-reset-value-marker" not in serialized
+    assert "unsafe-extra-value-marker" not in serialized
     assert "secret" not in serialized
 
 

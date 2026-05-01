@@ -717,6 +717,10 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         template_name = data.get("template") or data.get("name") or data.get("template_name") or "weather"
         result = install_template(template_name, space_id=data.get("space_id") or None)
         return {"ok": True, "action": name, **result}
+    if name in {"space.template.reset", "space.templates.reset", "template.reset"}:
+        template_name = data.get("template") or data.get("name") or data.get("template_name") or "big-bang"
+        result = reset_template(template_name, space_id=data.get("space_id") or None)
+        return {"ok": True, "action": name, **result}
     if name == "space.create":
         created = create_space(_space_tool_create_payload(data))
         space = read_space_detail(created["space_id"])
