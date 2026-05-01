@@ -208,6 +208,7 @@ const LOCALES = {
   status_messages:'Messages',
   status_agent_running:'Agent running',
     status_profile: 'Profile',
+    status_hermes_home: 'Hermes home',
     status_started: 'Started',
     status_tokens: 'Tokens',
     status_no_tokens: 'No tokens used',

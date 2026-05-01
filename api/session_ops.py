@@ -137,10 +137,18 @@ def session_status(session_id: str) -> dict[str, Any]:
     s = get_session(session_id)
     inp = int(s.input_tokens or 0)
     out = int(s.output_tokens or 0)
+    profile = getattr(s, 'profile', None) or 'default'
+    try:
+        from api.profiles import get_hermes_home_for_profile
+        hermes_home = str(get_hermes_home_for_profile(profile))
+    except Exception:
+        hermes_home = ''
     return {
         'session_id': s.session_id,
         'title': s.title,
         'model': s.model,
+        'profile': profile,
+        'hermes_home': hermes_home,
         'workspace': s.workspace,
         'personality': s.personality,
         'message_count': len(s.messages or []),

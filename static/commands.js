@@ -759,7 +759,7 @@ async function cmdStatus(){
     if(r&&r.error){showToast(r.error);return;}
     // Build status card lines matching CLI /status output
     const provider=window._activeProvider||'';
-    const profile=S.activeProfile||'default';
+    const profile=r.profile||S.activeProfile||'default';
     const started=r.created_at?new Date(r.created_at).toLocaleString():t('status_unknown');
     const fmtNum=n=>typeof n==='number'?n.toLocaleString():'0';
     const tokens=r.total_tokens?`${fmtNum(r.input_tokens)} in / ${fmtNum(r.output_tokens)} out`:t('status_no_tokens');
@@ -770,6 +770,7 @@ async function cmdStatus(){
       `**${t('status_title')}:** ${r.title||t('untitled')}`,
       `**${t('status_model')}:** ${r.model||t('usage_default_model')}${provider?'  ('+provider+')':''}`,
       `**${t('status_profile')}:** ${profile}`,
+      `**${t('status_hermes_home')}:** ${r.hermes_home||t('status_unknown')}`,
       `**${t('status_workspace')}:** ${r.workspace}`,
       `**${t('status_personality')}:** ${r.personality||t('usage_personality_none')}`,
       `**${t('status_started')}:** ${started}`,
