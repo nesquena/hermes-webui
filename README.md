@@ -320,6 +320,9 @@ Full list of environment variables:
 | `HERMES_WEBUI_DEFAULT_WORKSPACE` | `~/workspace` | Default workspace |
 | `HERMES_WEBUI_DEFAULT_MODEL` | `openai/gpt-5.4-mini` | Default model |
 | `HERMES_WEBUI_PASSWORD` | *(unset)* | Set to enable password authentication |
+| `HERMES_WEBUI_EXTENSION_DIR` | *(unset)* | Optional local directory served at `/extensions/`; must point to an existing directory before extension injection is enabled |
+| `HERMES_WEBUI_EXTENSION_SCRIPT_URLS` | *(unset)* | Optional comma-separated same-origin script URLs to inject; see [WebUI Extensions](docs/EXTENSIONS.md) |
+| `HERMES_WEBUI_EXTENSION_STYLESHEET_URLS` | *(unset)* | Optional comma-separated same-origin stylesheet URLs to inject; see [WebUI Extensions](docs/EXTENSIONS.md) |
 | `HERMES_HOME` | `~/.hermes` | Base directory for Hermes state (affects all paths) |
 | `HERMES_CONFIG_PATH` | `~/.hermes/config.yaml` | Path to Hermes config file |
 

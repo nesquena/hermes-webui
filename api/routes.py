@@ -852,9 +852,12 @@ def handle_get(handler, parsed) -> bool:
         from urllib.parse import quote
         from api.updates import WEBUI_VERSION
         version_token = quote(WEBUI_VERSION, safe="")
+        from api.extensions import inject_extension_tags
+
+        html = _INDEX_HTML_PATH.read_text(encoding="utf-8").replace("__WEBUI_VERSION__", version_token)
         return t(
             handler,
-            _INDEX_HTML_PATH.read_text(encoding="utf-8").replace("__WEBUI_VERSION__", version_token),
+            inject_extension_tags(html),
             content_type="text/html; charset=utf-8",
         )
 
@@ -988,6 +991,11 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/onboarding/status":
         return j(handler, get_onboarding_status())
+
+    if parsed.path.startswith("/extensions/"):
+        from api.extensions import serve_extension_static
+
+        return serve_extension_static(handler, parsed)
 
     if parsed.path.startswith("/static/"):
         return _serve_static(handler, parsed)
