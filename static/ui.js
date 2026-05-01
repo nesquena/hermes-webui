@@ -827,13 +827,13 @@ document.addEventListener('click',function(e){
 
 // ── Scroll pinning ──────────────────────────────────────────────────────────
 // When streaming, auto-scroll only if the user hasn't manually scrolled up.
-// Once the user scrolls back to within 150px of the bottom, re-pin.
+// Once the user scrolls back to within 250px of the bottom, re-pin.
 let _scrollPinned=true;
 (function(){
   const el=document.getElementById('messages');
   if(!el) return;
   el.addEventListener('scroll',()=>{
-    const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<150;
+    const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<250;
     _scrollPinned=nearBottom;
     const btn=$('scrollToBottomBtn');
     if(btn) btn.style.display=_scrollPinned?'none':'flex';
@@ -1757,7 +1757,8 @@ function _renderQueueChips(sid){
       if(!card.classList.contains('visible')) return;
       const h=card.getBoundingClientRect().height;
       if(h>0) _msgs.style.setProperty('--queue-card-height', h+'px');
-      if(typeof scrollToBottom==='function') scrollToBottom();
+      if(S.activeStreamId&&typeof scrollIfPinned==='function') scrollIfPinned();
+      else if(!S.activeStreamId&&typeof scrollToBottom==='function') scrollToBottom();
     }, 360);
   }
 
@@ -1946,7 +1947,8 @@ function _updateQueuePill(sid,count){
         }, 360);
       }
       if(pillOuter) pillOuter.classList.remove('show');
-      if(typeof scrollToBottom==='function') scrollToBottom();
+      if(S.activeStreamId&&typeof scrollIfPinned==='function') scrollIfPinned();
+      else if(!S.activeStreamId&&typeof scrollToBottom==='function') scrollToBottom();
     };
   } else {
     if(pillOuter) pillOuter.classList.remove('show');
