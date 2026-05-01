@@ -35,6 +35,8 @@ _OMITTED_PAYLOAD_KEYS = {
     "auth",
     "authorization",
     "cookie",
+    "credential",
+    "credentials",
     "data",
     "html",
     "password",
@@ -45,7 +47,7 @@ _OMITTED_PAYLOAD_KEYS = {
     "token",
 }
 _SECRET_LIKE_VALUE_RE = re.compile(
-    r"\b(api[_-]?key|apikey|authorization|bearer|cookie|password|secret|token)\b",
+    r"\b(api[_-]?key|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token)\b",
     re.IGNORECASE,
 )
 _EXECUTABLE_VALUE_MARKERS = ("<script", "</script", "javascript:", "onerror", "onload")
@@ -73,6 +75,17 @@ _SPACE_DEMO_RUNS = [
     {"demo": "demo_safe_admin_recovery", "template": "weather", "title": "Admin recovery"},
 ]
 _SPACE_DEMO_RUN_BY_NAME = {item["demo"]: item for item in _SPACE_DEMO_RUNS}
+_WIDGET_DETAIL_METADATA_FIELDS = (
+    "content_status",
+    "status",
+    "export",
+    "interaction",
+    "permissions",
+    "capabilities",
+    "audio_policy",
+    "browser_surface",
+    "network",
+)
 
 
 def spaces_enabled() -> bool:
@@ -254,6 +267,18 @@ def _widget_summary(widget: dict[str, Any]) -> dict[str, Any]:
     if clean_widget["kind"] == "system" and panel in _TRUSTED_SYSTEM_WIDGETS:
         summary["system_panel"] = panel
     return summary
+
+
+def _widget_detail_metadata(widget: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    for field in _WIDGET_DETAIL_METADATA_FIELDS:
+        if field not in widget:
+            continue
+        summary = _payload_summary(widget.get(field))
+        if summary in ({}, [], ""):
+            continue
+        metadata[field] = summary
+    return metadata
 
 
 def _widget_recovery_summary(widget: dict[str, Any]) -> dict[str, Any]:
@@ -1144,7 +1169,17 @@ def read_widget_detail(space_id: str, widget_id: str) -> dict[str, Any]:
     expose the same metadata-only shape as list/detail APIs until an explicit
     sandboxed viewer exists.
     """
-    return _widget_summary(read_widget(space_id, widget_id))
+    widget = read_widget(space_id, widget_id)
+    detail = _widget_summary(widget)
+    metadata = _widget_detail_metadata(widget)
+    if metadata:
+        detail["metadata"] = metadata
+    recovery = widget.get("recovery") if isinstance(widget.get("recovery"), dict) else {}
+    if recovery:
+        detail["recovery"] = _payload_summary(recovery)
+    if widget.get("revision_event_id"):
+        detail["revision_event_id"] = _payload_text_summary(widget.get("revision_event_id"), 120)
+    return detail
 
 
 def upsert_widget(space_id: str, widget: dict[str, Any]) -> dict[str, Any]:

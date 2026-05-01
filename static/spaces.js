@@ -298,8 +298,8 @@
 
   function formatRevisionDetails(details){
     if (!details || typeof details !== 'object' || Array.isArray(details)) return '';
-    const unsafeParts = ['renderer', 'html', 'script', 'data', 'source', 'api_key', 'apikey', 'token', 'password', 'secret', 'cookie', 'authorization'];
-    const unsafeValuePattern = /(api[_-]?key|apikey|authorization|bearer|cookie|password|secret|token|<script|<\/script|javascript:|onerror|onload)/i;
+    const unsafeParts = ['renderer', 'html', 'script', 'data', 'source', 'api_key', 'apikey', 'token', 'password', 'secret', 'credential', 'credentials', 'cookie', 'authorization'];
+    const unsafeValuePattern = /(api[_-]?key|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token|<script|<\/script|javascript:|onerror|onload)/i;
     function keyIsSafe(key){
       const lowered = String(key || '').toLowerCase();
       return lowered && !unsafeParts.some(part => lowered.indexOf(part) >= 0);
@@ -400,11 +400,14 @@
     const recovery = safeWidget.recovery && typeof safeWidget.recovery === 'object' ? safeWidget.recovery : {};
     const recoveryText = recovery.disabled ? 'Recovery: disabled' : 'Recovery: enabled';
     const revision = safeWidget.revision_event_id ? ' · Revision: '+escapeHtml(safeWidget.revision_event_id) : '';
+    const metadataText = formatRevisionDetails(safeWidget.metadata || {});
+    const metadataRow = metadataText ? '<div class="capy-spaces-muted">Metadata: '+escapeHtml(metadataText)+'</div>' : '';
     return '<div class="capy-spaces-card" data-widget-detail-id="'+escapeHtml(widgetId)+'"><h3>Widget details</h3>' +
       '<div class="capy-spaces-muted">Metadata-only detail. Generated bodies are not displayed or executed.</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(title)+'</strong>' +
       '<div class="capy-spaces-muted">'+escapeHtml(kind)+' · '+escapeHtml(widgetId)+' · '+escapeHtml(formatWidgetLayout(layout))+'</div>' +
       '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId || '')+' · '+escapeHtml(recoveryText)+revision+'</div>' +
+      metadataRow +
       '</div></div></div></div>';
   }
 

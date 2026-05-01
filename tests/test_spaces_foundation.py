@@ -2251,6 +2251,44 @@ def test_widget_upsert_list_read_and_delete_are_revisioned(monkeypatch, tmp_path
     assert spaces.list_widgets(created["space_id"]) == []
 
 
+def test_widget_detail_includes_allowlisted_declarative_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Detail Metadata Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "research-summary",
+            "kind": "markdown",
+            "title": "Research Summary",
+            "layout": {"x": 1, "y": 2, "w": 7, "h": 5},
+            "content_status": "agent-managed-empty",
+            "status": "draft",
+            "export": {"pdf": "planned", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+            "interaction": {"refresh": "agent-mediated", "dangerous_html": "<script>bad()</script>"},
+            "permissions": {"network": "agent-mediated", "token": "SECRET...LEAK", "credential": "SECRET...LEAK"},
+            "renderer": "<script>steal()</script>",
+            "html": "<img src=x onerror=steal()>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    detail = spaces.read_widget_detail(created["space_id"], "research-summary")
+    serialized = json.dumps(detail).lower()
+
+    assert detail["metadata"]["content_status"] == "agent-managed-empty"
+    assert detail["metadata"]["status"] == "draft"
+    assert detail["metadata"]["export"] == {"pdf": "planned"}
+    assert detail["metadata"]["interaction"] == {"refresh": "agent-mediated"}
+    assert detail["metadata"]["permissions"] == {"network": "agent-mediated"}
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "credential" not in serialized
+    assert "secret" not in serialized
+
+
 def test_widget_validation_rejects_pathlike_ids_and_non_object_specs(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Widget Validation"})

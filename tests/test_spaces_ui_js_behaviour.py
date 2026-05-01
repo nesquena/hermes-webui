@@ -164,6 +164,12 @@ global.fetch = async function(path, opts = {}) {
       layout: { x: 12, y: 3, w: 5, h: 4, minimized: false },
       recovery: { disabled: false },
       revision_event_id: 'rev-weather',
+      metadata: {
+        content_status: 'agent-managed-empty',
+        export: { pdf: 'planned' },
+        interaction: { refresh: 'agent-mediated', dangerous_html: '<script>bad()</script>' },
+        permissions: { network: 'agent-mediated', token: 'SECRET_VALUE_DO_NOT_LEAK', credential: 'SECRET_VALUE_DO_NOT_LEAK' },
+      },
       renderer: '<script>bad()</script>',
       html: '<img src=x onerror=bad()>',
       data: { api_key: 'SECRET' },
@@ -899,6 +905,11 @@ def test_spaces_ui_view_widget_details_fetches_and_renders_safe_metadata_only(dr
     assert "&lt;Weather&gt;" in out["rootHtml"]
     assert "markdown" in out["rootHtml"]
     assert "x12 y3 · 5×4" in out["rootHtml"]
+    assert "content_status: agent-managed-empty" in out["rootHtml"]
+    assert "export: pdf" in out["rootHtml"]
+    assert "interaction: refresh" in out["rootHtml"]
+    assert "permissions: network" in out["rootHtml"]
+    assert "credential" not in out["rootHtml"].lower()
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "onerror" not in out["rootHtml"]
