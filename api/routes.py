@@ -4434,6 +4434,7 @@ def _handle_session_import_cli(handler, body):
     updated_at = None
     cli_title = None
     cli_source_tag = None
+    model = "unknown"
     for cs in get_cli_sessions():
         if cs["session_id"] == sid:
             profile = cs.get("profile")
