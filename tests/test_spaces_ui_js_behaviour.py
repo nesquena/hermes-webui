@@ -856,6 +856,32 @@ async function click(action, dataset) {
         }
       }
     });
+  } else if (scenario === 'repairRecoveryWidget') {
+    global.showPromptDialog = async function(opts) { dialogs.push(opts); return 'Patch the broken renderer without exposing secrets'; };
+    await window.loadCapySpacesRecovery();
+    const listener = makeElement('capySpacesRecovery').listeners.click;
+    if (!listener) throw new Error('recovery click listener not registered');
+    beforeHtml = makeElement('capySpacesRecovery').innerHTML;
+    await listener({
+      target: {
+        closest(selector) {
+          if (selector !== '[data-capy-action]') return null;
+          return { dataset: { capyAction: 'repairRecoveryWidget', spaceId: 'broken', widgetId: 'bad-widget', widgetTitle: 'Bad <Widget>' } };
+        }
+      }
+    });
+  } else if (scenario === 'repairRecoveryWidgetNoPrompt') {
+    await window.loadCapySpacesRecovery();
+    const listener = makeElement('capySpacesRecovery').listeners.click;
+    if (!listener) throw new Error('recovery click listener not registered');
+    await listener({
+      target: {
+        closest(selector) {
+          if (selector !== '[data-capy-action]') return null;
+          return { dataset: { capyAction: 'repairRecoveryWidget', spaceId: 'broken', widgetId: 'bad-widget', widgetTitle: 'Bad <Widget>' } };
+        }
+      }
+    });
   } else {
     throw new Error('unknown scenario: ' + scenario);
   }
@@ -1490,6 +1516,7 @@ def test_spaces_ui_recovery_panel_lists_safe_space_metadata_without_widget_code(
     assert "Enable space" in out["recoveryHtml"]
     assert "Disable widget" in out["recoveryHtml"]
     assert "Enable widget" in out["recoveryHtml"]
+    assert "Ask Capy to repair" in out["recoveryHtml"]
     assert "Disabled: render failed" in out["recoveryHtml"]
     assert "Generated widgets rendered: false" in out["recoveryHtml"]
     assert "<script>" not in out["recoveryHtml"]
@@ -1513,6 +1540,34 @@ def test_spaces_ui_recovery_disable_widget_fails_closed_without_shared_dialog(dr
     out = _run_spaces_scenario(driver_path, "disableRecoveryWidgetNoDialog")
 
     assert not any(call["path"] == "api/spaces/recovery/disable-widget" for call in out["calls"])
+
+
+def test_spaces_ui_recovery_repair_widget_queues_agent_event_from_safe_panel(driver_path):
+    out = _run_spaces_scenario(driver_path, "repairRecoveryWidget")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/event")
+    body = json.loads(post["body"])
+
+    assert "Ask Capy to repair" in out["beforeHtml"]
+    assert out["dialogs"]
+    assert out["dialogs"][0]["title"] == "Ask Capy to repair widget"
+    assert post["method"] == "POST"
+    assert body == {
+        "space_id": "broken",
+        "widget_id": "bad-widget",
+        "event_name": "agent.repair",
+        "prompt": "Patch the broken renderer without exposing secrets",
+        "payload": {"source": "recovery-panel", "action": "repair", "widget_title": "Bad <Widget>"},
+    }
+    assert out["calls"][-1]["path"] == "api/spaces/recovery"
+    assert "<script>" not in out["recoveryHtml"]
+    assert "renderer" not in out["recoveryHtml"]
+    assert "SECRET" not in out["recoveryHtml"]
+
+
+def test_spaces_ui_recovery_repair_widget_fails_closed_without_shared_prompt(driver_path):
+    out = _run_spaces_scenario(driver_path, "repairRecoveryWidgetNoPrompt")
+
+    assert not any(call["path"] == "api/spaces/widget/event" for call in out["calls"])
 
 
 def test_spaces_ui_recovery_disable_space_uses_shared_confirm_and_refreshes(driver_path):

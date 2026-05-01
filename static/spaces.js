@@ -1023,6 +1023,7 @@
         return '<div class="capy-spaces-widget" data-widget-id="'+escapeHtml(widgetId)+'"><div><strong>'+escapeHtml(title)+'</strong>' +
           '<div class="capy-spaces-muted">'+escapeHtml(kind)+' · '+escapeHtml(widgetId)+(disabled ? ' · Disabled'+(disabledReason ? ': '+escapeHtml(disabledReason) : '') : '')+'</div></div>' +
           '<div class="capy-spaces-actions">' +
+          '<button type="button" class="capy-spaces-btn" data-capy-action="repairRecoveryWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-title="'+escapeHtml(title)+'">Ask Capy to repair</button>' +
           (disabled ? '<button type="button" class="capy-spaces-btn" data-capy-action="enableRecoveryWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Enable widget</button>' : '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="disableRecoveryWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Disable widget</button>') +
           '</div></div>';
       }).join('')+'</div>' : '<div class="capy-spaces-muted">No widget metadata available for this space.</div>';
@@ -1042,10 +1043,31 @@
     const button = event.target && event.target.closest ? event.target.closest('[data-capy-action]') : null;
     if (!button) return;
     const action = button.dataset.capyAction;
-    if (action !== 'disableRecoveryWidget' && action !== 'enableRecoveryWidget' && action !== 'disableRecoverySpace' && action !== 'enableRecoverySpace') return;
-    if (typeof showConfirmDialog !== 'function') return;
+    if (action !== 'disableRecoveryWidget' && action !== 'enableRecoveryWidget' && action !== 'disableRecoverySpace' && action !== 'enableRecoverySpace' && action !== 'repairRecoveryWidget') return;
     const spaceId = button.dataset.spaceId || '';
     if (!spaceId) return;
+    if (action === 'repairRecoveryWidget') {
+      if (typeof showPromptDialog !== 'function') return;
+      const widgetId = button.dataset.widgetId || '';
+      const widgetTitle = button.dataset.widgetTitle || widgetId;
+      if (!widgetId) return;
+      const promptText = await showPromptDialog({
+        title: 'Ask Capy to repair widget',
+        placeholder: 'Describe what is broken in '+widgetTitle,
+        confirmLabel: 'Queue repair',
+      });
+      if (!promptText) return;
+      await postSpacesJson('api/spaces/widget/event', {
+        space_id: spaceId,
+        widget_id: widgetId,
+        event_name: 'agent.repair',
+        prompt: promptText,
+        payload: {source: 'recovery-panel', action: 'repair', widget_title: widgetTitle},
+      });
+      await loadCapySpacesRecovery();
+      return;
+    }
+    if (typeof showConfirmDialog !== 'function') return;
     if (action === 'disableRecoverySpace') {
       const ok = await showConfirmDialog({title: 'Disable space?', message: 'Disable Space "'+spaceId+'" from safe recovery? The manifest and widgets are preserved for repair/rollback.', confirmLabel: 'Disable space', danger: true, focusCancel: true});
       if (!ok) return;

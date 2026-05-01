@@ -9,9 +9,9 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-01 16:51 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-01 17:20 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known code commit: `8078b38 feat(spaces): show queued widget event anchors`. This plan update itself is committed as `docs(spaces): update parity execution plan`; use `git log -1 --oneline` for the exact self-hash because amending this line changes the hash.
+Current latest known completed code slice: safe recovery repair prompt entry for broken widgets. Use `git log -1 --oneline` for the exact commit hash; this status line intentionally avoids self-referential hashes because committing it changes the hash.
 
 Recent completed slices:
 
@@ -29,12 +29,16 @@ Recent completed slices:
 - `8078b38 feat(spaces): show queued widget event anchors`
   - Widget event inbox shows safe `Event: <event_id>` anchors plus UTC timestamps while keeping prompt/payload details redacted and bounded.
   - Screenshot QA artifact: `/tmp/capy-screenshots/spaces-queued-event-anchors.png`.
+- `feat(spaces): queue recovery repair prompts`
+  - Safe recovery panel now offers an “Ask Capy to repair” widget action that queues a metadata-only `agent.repair` event without rendering generated widget bodies.
+  - Fails closed when the shared prompt dialog is unavailable.
 
 Last known validation bundle:
 
-- Focused queued-event UI behavior test: passed.
-- Broader Spaces/UI/demo tests: passed (`163 passed`).
-- Full WebUI suite: passed (`2948 passed`, `1 warning`, `8 subtests passed`).
+- Focused recovery repair UI behavior tests: passed (`3 passed`, `64 deselected`).
+- Capy Spaces UI JS behavior suite: passed (`67 passed`).
+- Capy Spaces foundation suite: passed (`94 passed`).
+- Full WebUI suite: passed (`2950 passed`, `1 warning`, `8 subtests passed`).
 - `git diff --check`: passed.
 - WebUI local and tailnet health: `status: ok`, zero active sessions/streams at last check.
 
