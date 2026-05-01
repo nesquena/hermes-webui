@@ -107,6 +107,7 @@ const LOCALES = {
     model_custom_placeholder: 'e.g. openai/gpt-5.4',
     model_search_placeholder: 'Search models…',
     model_search_no_results: 'No models found',
+    model_group_configured: 'Configured',
     model_scope_advisory: 'Applies to this conversation from your next message.',
     model_scope_toast: 'Applies to this conversation from your next message.',
     // commands.js
@@ -960,6 +961,7 @@ const LOCALES = {
     preserved_task_list_label: 'Сохранённый список задач',
     focus_label: 'Фокус',
     model_search_no_results: 'Модели не найдены',
+    model_group_configured: 'Настроенные',
     model_search_placeholder: 'Поиск моделей…',
     model_scope_advisory: 'Применяется к этой беседе со следующего сообщения.',
     model_scope_toast: 'Применяется к этой беседе со следующего сообщения.',
@@ -1652,6 +1654,7 @@ const LOCALES = {
     model_custom_placeholder: 'p. ej. openai/gpt-5.4',
     model_search_placeholder: 'Buscar modelos…',
     model_search_no_results: 'No se encontraron modelos',
+    model_group_configured: 'Configurados',
     model_scope_advisory: 'Se aplica a esta conversación desde tu próximo mensaje.',
     model_scope_toast: 'Se aplica a esta conversación desde tu próximo mensaje.',
     // commands.js
@@ -2786,6 +2789,7 @@ const LOCALES = {
     model_custom_placeholder: 'z.B. openai/gpt-5.4',
     model_search_placeholder: 'Modelle suchen…',
     model_search_no_results: 'Keine Modelle gefunden',
+    model_group_configured: 'Konfiguriert',
     session_time_unknown: 'Unbekannt',
     session_time_minutes_ago: 'Vor {n} Minuten',
     session_time_hours_ago: 'Vor {n} Stunden',
@@ -3144,6 +3148,7 @@ const LOCALES = {
     model_custom_placeholder: '\u4f8b\u5982 openai/gpt-5.4',
     model_search_placeholder: '\u641c\u7d22\u6a21\u578b\u2026',
     model_search_no_results: '\u672a\u627e\u5230\u6a21\u578b',
+    model_group_configured: '已配置',
     model_scope_advisory: '\u4ece\u4e0b\u4e00\u6761\u6d88\u606f\u8d77\u5e94\u7528\u4e8e\u5f53\u524d\u5bf9\u8bdd\u3002',
     model_scope_toast: '\u4ece\u4e0b\u4e00\u6761\u6d88\u606f\u8d77\u5e94\u7528\u4e8e\u5f53\u524d\u5bf9\u8bdd\u3002',
     // commands.js
@@ -4300,6 +4305,7 @@ const LOCALES = {
     model_custom_label: '\u81ea\u8a02\u6a21\u578b ID',
     model_custom_placeholder: '\u4f8b\u5982 openai/gpt-5.4',
     model_search_no_results: '\u627e\u4e0d\u5230\u6a21\u578b',
+    model_group_configured: '已設定',
     model_search_placeholder: '\u641c\u5c0b\u6a21\u578b\u2026',
     model_scope_advisory: '\u5f9e\u4e0b\u4e00\u5247\u8a0a\u606f\u8d77\u9069\u7528\u65bc\u6b64\u6703\u8a71\u3002',
     model_scope_toast: '\u5f9e\u4e0b\u4e00\u5247\u8a0a\u606f\u8d77\u9069\u7528\u65bc\u6b64\u6703\u8a71\u3002',
@@ -4711,6 +4717,7 @@ const LOCALES = {
     model_custom_placeholder: 'ex: openai/gpt-5.4',
     model_search_placeholder: 'Buscar modelos…',
     model_search_no_results: 'Nenhum modelo encontrado',
+    model_group_configured: 'Configurados',
     // commands.js
     cmd_clear: 'Limpar mensagens da conversa',
     cmd_compress: 'Comprimir manualmente o contexto (uso: /compress [tópico])',
@@ -5397,6 +5404,7 @@ const LOCALES = {
     model_custom_placeholder: 'e.g. openai/gpt-5.4',
     model_search_placeholder: 'Search models…',
     model_search_no_results: 'No models found',
+    model_group_configured: '구성됨',
     model_scope_advisory: '다음 메시지부터 이 대화에 적용됩니다.',
     model_scope_toast: '다음 메시지부터 이 대화에 적용됩니다.',
     // commands.js

@@ -97,6 +97,19 @@ def test_ui_badge_lookup_prefers_row_provider_for_duplicate_model_ids():
     assert "const providerMatch=matches.find(badge=>String(badge&&badge.provider||'').toLowerCase()===provider);" in js
 
 
+def test_configured_model_group_label_has_i18n_key():
+    """The Configured model group must not render the raw i18n key."""
+    root = Path(__file__).resolve().parent.parent
+    i18n = (root / "static" / "i18n.js").read_text(encoding="utf-8")
+
+    locale_count = i18n.count("_lang:")
+    key_count = i18n.count("model_group_configured:")
+    assert key_count == locale_count, (
+        "model_group_configured must be present in every locale block so "
+        "t('model_group_configured') never falls back to the raw key."
+    )
+
+
 def test_get_available_models_cache_preserves_configured_model_badges(tmp_path, monkeypatch):
     cache_path = tmp_path / "models_cache.json"
     old_cfg = config.cfg
