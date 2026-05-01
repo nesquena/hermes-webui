@@ -141,7 +141,7 @@ sem regressão das capacidades upstream.
 
 ### HU-01.3 — Skin "neo" selecionável
 
-**Status:** implementada sem DoD
+**Status:** implementada com testes
 **Prioridade:** P0
 **Épico:** EP-01
 
@@ -153,15 +153,16 @@ sem regressão das capacidades upstream.
 - [x] Adicionar `Neo` ao array `_SKINS` em `static/boot.js`.
 - [x] Adicionar `neo` a `_SETTINGS_SKIN_VALUES` em `api/config.py`.
 - [x] Adicionar/confirmar opção no seletor de Settings se `_SKINS` não for suficiente.
-- [ ] Ajustar `--font-ui` para Inter conforme PRD RNF-10 e Design Spec §3.
+- [x] Ajustar `--font-ui` para Inter conforme PRD RNF-10 e Design Spec §3.
 - [x] Rodar testes de skin ou criar `tests/test_neo_sprint1.py`.
+- [x] Criar `tests/test_neo_font_ui_inter.py` para validar fonte Inter.
 - [ ] Anexar evidência antes/depois.
 
 **Evidência técnica:** [`docs/neo/evidencias/HU-01.3/README.md`](./evidencias/HU-01.3/README.md)
 
 ### HU-01.4 — Skin "neo" default via env
 
-**Status:** implementada sem DoD
+**Status:** implementada com testes
 **Prioridade:** P0
 **Épico:** EP-01
 **Dependências:** HU-01.3
@@ -171,8 +172,8 @@ sem regressão das capacidades upstream.
 - [x] Ler `HERMES_WEBUI_DEFAULT_SKIN` em `api/config.py`.
 - [x] Injetar `__NEO_DEFAULT_SKIN__` em `api/routes.py`.
 - [x] Aplicar default no early boot de `static/index.html` quando `localStorage.hermes-skin` estiver vazio.
+- [x] Criar teste automatizado para placeholder injetado / allowlist.
 - [ ] Testar `localStorage.clear()` + reload com e sem env.
-- [ ] Criar teste automatizado para placeholder injetado / allowlist.
 - [ ] Anexar evidências.
 
 ### HU-01.5 — Favicon e PWA icons Neo
@@ -195,7 +196,7 @@ sem regressão das capacidades upstream.
 
 ### HU-01.6 — `/skin neo` aplica skin ao vivo
 
-**Status:** implementada sem DoD
+**Status:** implementada com testes
 **Prioridade:** P1 no Backlog, tratado como P0 operacional por RF-02
 **Épico:** EP-01
 **Dependências:** HU-01.3
@@ -205,6 +206,7 @@ sem regressão das capacidades upstream.
 - [x] Confirmar que `Neo` em `_SKINS` torna o skin disponível para o fluxo comum.
 - [x] Verificar se `static/commands.js` usa `_SKINS` dinamicamente ou lista própria.
 - [x] Se houver lista própria, adicionar `neo` explicitamente.
+- [x] Criar testes automatizados para persistência localStorage/settings.
 - [ ] Testar autocomplete e persistência em `localStorage` + `settings.json`.
 - [ ] Anexar screencast curto.
 
@@ -246,7 +248,7 @@ sem regressão das capacidades upstream.
 
 ### HU-02.3 — Teste de paridade pt-BR vs en
 
-**Status:** implementada sem DoD
+**Status:** implementada com testes
 **Prioridade:** P0
 **Épico:** EP-02 / EP-07
 
@@ -255,7 +257,9 @@ sem regressão das capacidades upstream.
 - [x] Criar `tests/test_locale_parity_pt_br.py`.
 - [x] Falhar se qualquer chave de `en` não existir em `pt-BR`.
 - [x] Falhar se houver chave extra órfã sem justificativa.
-- [ ] Adicionar comando de execução ao checklist de PR.
+- [x] Criar testes adicionais: font UI Inter, localStorage persistence.
+- [x] Criar checklist de PR em `.claude/PR-CHECKLIST-neo.md`.
+- [ ] Rodar checklist de PR e anexar screenshots.
 
 **Evidência técnica:** [`docs/neo/evidencias/HU-02.3/README.md`](./evidencias/HU-02.3/README.md)
 
