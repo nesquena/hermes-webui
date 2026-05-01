@@ -163,11 +163,12 @@ def _cron_profile_context(profile: str | None, *, include_scheduler: bool = Fals
     with _CRON_PROFILE_LOCK:
         import cron.jobs as cron_jobs
 
+        missing = object()
         jobs_state = {
-            "HERMES_DIR": cron_jobs.HERMES_DIR,
-            "CRON_DIR": cron_jobs.CRON_DIR,
-            "JOBS_FILE": cron_jobs.JOBS_FILE,
-            "OUTPUT_DIR": cron_jobs.OUTPUT_DIR,
+            "HERMES_DIR": getattr(cron_jobs, "HERMES_DIR", missing),
+            "CRON_DIR": getattr(cron_jobs, "CRON_DIR", missing),
+            "JOBS_FILE": getattr(cron_jobs, "JOBS_FILE", missing),
+            "OUTPUT_DIR": getattr(cron_jobs, "OUTPUT_DIR", missing),
         }
         scheduler = None
         scheduler_state = {}
@@ -184,9 +185,9 @@ def _cron_profile_context(profile: str | None, *, include_scheduler: bool = Fals
                 import cron.scheduler as scheduler
 
                 scheduler_state = {
-                    "_hermes_home": scheduler._hermes_home,
-                    "_LOCK_DIR": scheduler._LOCK_DIR,
-                    "_LOCK_FILE": scheduler._LOCK_FILE,
+                    "_hermes_home": getattr(scheduler, "_hermes_home", missing),
+                    "_LOCK_DIR": getattr(scheduler, "_LOCK_DIR", missing),
+                    "_LOCK_FILE": getattr(scheduler, "_LOCK_FILE", missing),
                 }
             except Exception:
                 scheduler = None
@@ -194,7 +195,7 @@ def _cron_profile_context(profile: str | None, *, include_scheduler: bool = Fals
                 import hermes_state
 
                 hermes_state_state = {
-                    "DEFAULT_DB_PATH": hermes_state.DEFAULT_DB_PATH,
+                    "DEFAULT_DB_PATH": getattr(hermes_state, "DEFAULT_DB_PATH", missing),
                 }
             except Exception:
                 hermes_state = None
@@ -208,13 +209,31 @@ def _cron_profile_context(profile: str | None, *, include_scheduler: bool = Fals
             yield name, home
         finally:
             for key, value in jobs_state.items():
-                setattr(cron_jobs, key, value)
+                if value is missing:
+                    try:
+                        delattr(cron_jobs, key)
+                    except AttributeError:
+                        pass
+                else:
+                    setattr(cron_jobs, key, value)
             if scheduler is not None:
                 for key, value in scheduler_state.items():
-                    setattr(scheduler, key, value)
+                    if value is missing:
+                        try:
+                            delattr(scheduler, key)
+                        except AttributeError:
+                            pass
+                    else:
+                        setattr(scheduler, key, value)
             if hermes_state is not None:
                 for key, value in hermes_state_state.items():
-                    setattr(hermes_state, key, value)
+                    if value is missing:
+                        try:
+                            delattr(hermes_state, key)
+                        except AttributeError:
+                            pass
+                    else:
+                        setattr(hermes_state, key, value)
 
 
 def _cron_profiles_from_query(parsed) -> list[str]:
