@@ -926,6 +926,12 @@
       const name = s.name || spaceId || 'Untitled';
       const description = s.description || '';
       const widgets = Array.isArray(s.widgets) ? s.widgets : [];
+      const spaceDisabled = !!s.disabled;
+      const spaceDisabledReason = s.disabled_reason ? String(s.disabled_reason) : '';
+      const spaceStatus = spaceDisabled ? '<div class="capy-spaces-muted">Space disabled'+(spaceDisabledReason ? ': '+escapeHtml(spaceDisabledReason) : '')+'</div>' : '';
+      const spaceAction = spaceDisabled
+        ? '<button type="button" class="capy-spaces-btn" data-capy-action="enableRecoverySpace" data-space-id="'+escapeHtml(spaceId)+'">Enable space</button>'
+        : '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="disableRecoverySpace" data-space-id="'+escapeHtml(spaceId)+'">Disable space</button>';
       const widgetRows = widgets.length ? '<div class="capy-spaces-widget-list">'+widgets.map(function(w){
         const widgetId = w && w.id ? String(w.id) : '';
         const title = w && w.title ? String(w.title) : widgetId || 'Untitled widget';
@@ -940,7 +946,9 @@
       }).join('')+'</div>' : '<div class="capy-spaces-muted">No widget metadata available for this space.</div>';
       return '<div class="capy-spaces-widget" data-space-id="'+escapeHtml(spaceId)+'"><div><strong>'+escapeHtml(name)+'</strong>' +
         (description ? '<div class="capy-spaces-muted">'+escapeHtml(description)+'</div>' : '') +
+        spaceStatus +
         '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+' · Widgets: '+Number(s.widget_count||0)+' · Revision: '+escapeHtml(s.revision_event_id||'none')+'</div>' +
+        '<div class="capy-spaces-actions">'+spaceAction+'</div>' +
         widgetRows + '</div></div>';
     }).join('') : '<div class="capy-spaces-muted">No spaces found in recovery metadata.</div>';
     return '<div class="capy-spaces-card"><h3>Safe recovery</h3>' +
@@ -952,11 +960,26 @@
     const button = event.target && event.target.closest ? event.target.closest('[data-capy-action]') : null;
     if (!button) return;
     const action = button.dataset.capyAction;
-    if (action !== 'disableRecoveryWidget' && action !== 'enableRecoveryWidget') return;
+    if (action !== 'disableRecoveryWidget' && action !== 'enableRecoveryWidget' && action !== 'disableRecoverySpace' && action !== 'enableRecoverySpace') return;
     if (typeof showConfirmDialog !== 'function') return;
     const spaceId = button.dataset.spaceId || '';
+    if (!spaceId) return;
+    if (action === 'disableRecoverySpace') {
+      const ok = await showConfirmDialog({title: 'Disable space?', message: 'Disable Space "'+spaceId+'" from safe recovery? The manifest and widgets are preserved for repair/rollback.', confirmLabel: 'Disable space', danger: true, focusCancel: true});
+      if (!ok) return;
+      await postSpacesJson('api/spaces/recovery/disable-space', {space_id: spaceId, reason: 'disabled from recovery panel'});
+      await loadCapySpacesRecovery();
+      return;
+    }
+    if (action === 'enableRecoverySpace') {
+      const ok = await showConfirmDialog({title: 'Enable space?', message: 'Re-enable Space "'+spaceId+'" from safe recovery? Generated widgets are still not rendered in recovery.', confirmLabel: 'Enable space', danger: true, focusCancel: true});
+      if (!ok) return;
+      await postSpacesJson('api/spaces/recovery/enable-space', {space_id: spaceId, reason: 'enabled from recovery panel'});
+      await loadCapySpacesRecovery();
+      return;
+    }
     const widgetId = button.dataset.widgetId || '';
-    if (!spaceId || !widgetId) return;
+    if (!widgetId) return;
     if (action === 'disableRecoveryWidget') {
       const ok = await showConfirmDialog({title: 'Disable widget?', message: 'Disable widget "'+widgetId+'" from safe recovery? The source is preserved for repair/rollback.', confirmLabel: 'Disable widget', danger: true, focusCancel: true});
       if (!ok) return;

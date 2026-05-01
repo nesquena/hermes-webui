@@ -211,6 +211,7 @@ def _write_manifest(space: dict[str, Any], event_type: str, details: dict[str, A
 
 def _summary(space: dict[str, Any]) -> dict[str, Any]:
     widgets = space.get("widgets") or []
+    recovery = space.get("recovery") if isinstance(space.get("recovery"), dict) else {}
     return {
         "schema_version": space.get("schema_version", SCHEMA_VERSION),
         "space_id": space.get("space_id"),
@@ -220,6 +221,8 @@ def _summary(space: dict[str, Any]) -> dict[str, Any]:
         "updated_at": space.get("updated_at"),
         "revision_event_id": space.get("revision_event_id"),
         "widget_count": len(widgets) if isinstance(widgets, list) else 0,
+        "disabled": bool(recovery.get("disabled")),
+        "disabled_reason": _context_value(recovery.get("disabled_reason"), 300),
     }
 
 
@@ -2337,6 +2340,45 @@ def reset_template(template: str, *, space_id: str | None = None) -> dict[str, A
         "reset": True,
         "space": read_space_detail(sid),
         "installed_widgets": list_widgets(sid),
+    }
+
+
+def disable_space_for_recovery(space_id: str, *, reason: str = "") -> dict[str, Any]:
+    """Mark an entire Space disabled from safe recovery without deleting its manifest."""
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    space = read_space(space_id)
+    recovery = space.get("recovery") if isinstance(space.get("recovery"), dict) else {}
+    recovery = dict(recovery)
+    recovery["safe_mode_available"] = True
+    recovery["disabled"] = True
+    recovery["disabled_reason"] = _context_value(reason or "disabled from recovery", 300)
+    space["recovery"] = recovery
+    saved = _write_manifest(space, "space.recovery_disabled", {"reason": recovery["disabled_reason"]})
+    return {
+        "disabled": True,
+        "space_id": saved["space_id"],
+        "revision_event_id": saved["revision_event_id"],
+    }
+
+
+def enable_space_for_recovery(space_id: str, *, reason: str = "") -> dict[str, Any]:
+    """Re-enable an entire Space from safe recovery without exposing widget bodies."""
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    space = read_space(space_id)
+    recovery = space.get("recovery") if isinstance(space.get("recovery"), dict) else {}
+    recovery = dict(recovery)
+    recovery["safe_mode_available"] = True
+    recovery["disabled"] = False
+    recovery["disabled_reason"] = ""
+    space["recovery"] = recovery
+    detail_reason = _context_value(reason or "enabled from recovery", 300)
+    saved = _write_manifest(space, "space.recovery_enabled", {"reason": detail_reason})
+    return {
+        "disabled": False,
+        "space_id": saved["space_id"],
+        "revision_event_id": saved["revision_event_id"],
     }
 
 

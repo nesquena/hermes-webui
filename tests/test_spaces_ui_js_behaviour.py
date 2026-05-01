@@ -139,10 +139,25 @@ global.fetch = async function(path, opts = {}) {
           description: 'Recover without <script>running</script>',
           widget_count: 2,
           revision_event_id: 'rev-broken',
+          disabled: false,
+          disabled_reason: '',
           renderer: '<script>bad()</script>',
           widgets: [
             { id: 'bad-widget', kind: 'html', title: 'Bad <Widget>', disabled: false, renderer: '<script>bad()</script>' },
             { id: 'disabled-widget', kind: 'markdown', title: 'Disabled Widget', disabled: true, disabled_reason: 'render failed' },
+          ],
+        },
+        {
+          space_id: 'disabled-space',
+          name: 'Disabled <Space>',
+          description: 'Whole space disabled safely',
+          widget_count: 1,
+          revision_event_id: 'rev-disabled-space',
+          disabled: true,
+          disabled_reason: 'shell crash <script>ignored</script>',
+          renderer: '<script>bad()</script>',
+          widgets: [
+            { id: 'still-listed', kind: 'markdown', title: 'Still Listed', disabled: false, renderer: '<script>bad()</script>' },
           ],
         }
       ],
@@ -214,6 +229,12 @@ global.fetch = async function(path, opts = {}) {
   }
   if (path === 'api/spaces/recovery/enable-widget') {
     return response({ disabled: false, space_id: 'broken', widget_id: 'disabled-widget', revision_event_id: 'rev-enable', renderer: '<script>bad()</script>', api_key: 'SECRET' });
+  }
+  if (path === 'api/spaces/recovery/disable-space') {
+    return response({ disabled: true, space_id: 'broken', revision_event_id: 'rev-disable-space', renderer: '<script>bad()</script>', api_key: 'SECRET' });
+  }
+  if (path === 'api/spaces/recovery/enable-space') {
+    return response({ disabled: false, space_id: 'disabled-space', revision_event_id: 'rev-enable-space', renderer: '<script>bad()</script>', api_key: 'SECRET' });
   }
   if (path === 'api/spaces/create') {
     return response({ space: { space_id: 'ops', name: 'Ops', description: '<b>Operations</b>', widget_count: 0, revision_event_id: 'rev4' } });
@@ -685,6 +706,31 @@ async function click(action, dataset) {
         }
       }
     });
+  } else if (scenario === 'disableRecoverySpace') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    await window.loadCapySpacesRecovery();
+    const listener = makeElement('capySpacesRecovery').listeners.click;
+    if (!listener) throw new Error('recovery click listener not registered');
+    await listener({
+      target: {
+        closest(selector) {
+          if (selector !== '[data-capy-action]') return null;
+          return { dataset: { capyAction: 'disableRecoverySpace', spaceId: 'broken' } };
+        }
+      }
+    });
+  } else if (scenario === 'disableRecoverySpaceNoDialog') {
+    await window.loadCapySpacesRecovery();
+    const listener = makeElement('capySpacesRecovery').listeners.click;
+    if (!listener) throw new Error('recovery click listener not registered');
+    await listener({
+      target: {
+        closest(selector) {
+          if (selector !== '[data-capy-action]') return null;
+          return { dataset: { capyAction: 'disableRecoverySpace', spaceId: 'broken' } };
+        }
+      }
+    });
   } else if (scenario === 'enableRecoveryWidget') {
     global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
     await window.loadCapySpacesRecovery();
@@ -695,6 +741,32 @@ async function click(action, dataset) {
         closest(selector) {
           if (selector !== '[data-capy-action]') return null;
           return { dataset: { capyAction: 'enableRecoveryWidget', spaceId: 'broken', widgetId: 'disabled-widget' } };
+        }
+      }
+    });
+  } else if (scenario === 'enableRecoverySpace') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return true; };
+    await window.loadCapySpacesRecovery();
+    const listener = makeElement('capySpacesRecovery').listeners.click;
+    if (!listener) throw new Error('recovery click listener not registered');
+    await listener({
+      target: {
+        closest(selector) {
+          if (selector !== '[data-capy-action]') return null;
+          return { dataset: { capyAction: 'enableRecoverySpace', spaceId: 'disabled-space' } };
+        }
+      }
+    });
+  } else if (scenario === 'enableRecoverySpaceCancelled') {
+    global.showConfirmDialog = async function(opts) { dialogs.push(opts); return false; };
+    await window.loadCapySpacesRecovery();
+    const listener = makeElement('capySpacesRecovery').listeners.click;
+    if (!listener) throw new Error('recovery click listener not registered');
+    await listener({
+      target: {
+        closest(selector) {
+          if (selector !== '[data-capy-action]') return null;
+          return { dataset: { capyAction: 'enableRecoverySpace', spaceId: 'disabled-space' } };
         }
       }
     });
@@ -1309,6 +1381,10 @@ def test_spaces_ui_recovery_panel_lists_safe_space_metadata_without_widget_code(
     assert "Widgets: 2" in out["recoveryHtml"]
     assert "Bad &lt;Widget&gt;" in out["recoveryHtml"]
     assert "Disabled Widget" in out["recoveryHtml"]
+    assert "Disabled &lt;Space&gt;" in out["recoveryHtml"]
+    assert "Space disabled: shell crash &lt;script&gt;ignored&lt;/script&gt;" in out["recoveryHtml"]
+    assert "Disable space" in out["recoveryHtml"]
+    assert "Enable space" in out["recoveryHtml"]
     assert "Disable widget" in out["recoveryHtml"]
     assert "Enable widget" in out["recoveryHtml"]
     assert "Disabled: render failed" in out["recoveryHtml"]
@@ -1336,6 +1412,25 @@ def test_spaces_ui_recovery_disable_widget_fails_closed_without_shared_dialog(dr
     assert not any(call["path"] == "api/spaces/recovery/disable-widget" for call in out["calls"])
 
 
+def test_spaces_ui_recovery_disable_space_uses_shared_confirm_and_refreshes(driver_path):
+    out = _run_spaces_scenario(driver_path, "disableRecoverySpace")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/recovery/disable-space")
+
+    assert out["dialogs"]
+    assert out["dialogs"][0]["danger"] is True
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"space_id": "broken", "reason": "disabled from recovery panel"}
+    assert out["calls"][-1]["path"] == "api/spaces/recovery"
+    assert "<script>" not in out["recoveryHtml"]
+    assert "renderer" not in out["recoveryHtml"]
+
+
+def test_spaces_ui_recovery_disable_space_fails_closed_without_shared_dialog(driver_path):
+    out = _run_spaces_scenario(driver_path, "disableRecoverySpaceNoDialog")
+
+    assert not any(call["path"] == "api/spaces/recovery/disable-space" for call in out["calls"])
+
+
 def test_spaces_ui_recovery_enable_widget_uses_shared_confirm_and_refreshes(driver_path):
     out = _run_spaces_scenario(driver_path, "enableRecoveryWidget")
     post = next(call for call in out["calls"] if call["path"] == "api/spaces/recovery/enable-widget")
@@ -1356,6 +1451,28 @@ def test_spaces_ui_recovery_enable_widget_cancel_does_not_post(driver_path):
 
     assert out["dialogs"]
     assert not any(call["path"] == "api/spaces/recovery/enable-widget" for call in out["calls"])
+
+
+def test_spaces_ui_recovery_enable_space_uses_shared_confirm_and_refreshes(driver_path):
+    out = _run_spaces_scenario(driver_path, "enableRecoverySpace")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/recovery/enable-space")
+
+    assert out["dialogs"]
+    assert out["dialogs"][0]["danger"] is True
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {"space_id": "disabled-space", "reason": "enabled from recovery panel"}
+    assert out["calls"][-1]["path"] == "api/spaces/recovery"
+    assert "<script>" not in out["recoveryHtml"]
+    assert "renderer" not in out["recoveryHtml"]
+    assert "api_key" not in out["recoveryHtml"]
+    assert "SECRET" not in out["recoveryHtml"]
+
+
+def test_spaces_ui_recovery_enable_space_cancel_does_not_post(driver_path):
+    out = _run_spaces_scenario(driver_path, "enableRecoverySpaceCancelled")
+
+    assert out["dialogs"]
+    assert not any(call["path"] == "api/spaces/recovery/enable-space" for call in out["calls"])
 
 
 def test_spaces_ui_opens_space_detail_without_rendering_widget_code(driver_path):

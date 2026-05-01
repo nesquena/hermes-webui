@@ -1876,6 +1876,46 @@ def handle_post(handler, parsed) -> bool:
         except FileNotFoundError:
             return bad(handler, "Widget not found", 404)
 
+    if parsed.path == "/api/spaces/recovery/disable-space":
+        from api import spaces as capy_spaces
+        space_id = body.get("space_id")
+        if not space_id:
+            return bad(handler, "Missing space_id")
+        try:
+            return j(
+                handler,
+                capy_spaces.disable_space_for_recovery(
+                    space_id,
+                    reason=body.get("reason") or "disabled from recovery",
+                ),
+            )
+        except RuntimeError as e:
+            return bad(handler, str(e), 403)
+        except ValueError as e:
+            return bad(handler, str(e))
+        except FileNotFoundError:
+            return bad(handler, "Space not found", 404)
+
+    if parsed.path == "/api/spaces/recovery/enable-space":
+        from api import spaces as capy_spaces
+        space_id = body.get("space_id")
+        if not space_id:
+            return bad(handler, "Missing space_id")
+        try:
+            return j(
+                handler,
+                capy_spaces.enable_space_for_recovery(
+                    space_id,
+                    reason=body.get("reason") or "enabled from recovery",
+                ),
+            )
+        except RuntimeError as e:
+            return bad(handler, str(e), 403)
+        except ValueError as e:
+            return bad(handler, str(e))
+        except FileNotFoundError:
+            return bad(handler, "Space not found", 404)
+
     if parsed.path == "/api/spaces/recovery/disable-widget":
         from api import spaces as capy_spaces
         space_id = body.get("space_id")

@@ -732,6 +732,73 @@ def test_recovery_enable_widget_restores_safe_metadata_without_rendering_bodies(
     assert "onerror" not in serialized
 
 
+def test_recovery_disable_space_marks_manifest_without_deleting_or_leaking_widgets(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Broken Space"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "bad-widget",
+            "kind": "html",
+            "title": "Bad Widget",
+            "renderer": "<script>breakSpace()</script>",
+            "data": {"api_key": "***"},
+        },
+    )
+
+    disabled = spaces.disable_space_for_recovery(created["space_id"], reason="space shell failed")
+
+    assert disabled["disabled"] is True
+    assert disabled["space_id"] == created["space_id"]
+    assert disabled["revision_event_id"]
+    stored = spaces.read_space(created["space_id"])
+    assert stored["recovery"]["disabled"] is True
+    assert stored["recovery"]["disabled_reason"] == "space shell failed"
+    assert stored["widgets"][0]["renderer"] == "<script>breakSpace()</script>"
+
+    recovery = spaces.recovery_snapshot()
+    serialized = json.dumps(recovery).lower()
+    assert recovery["spaces"][0]["disabled"] is True
+    assert recovery["spaces"][0]["disabled_reason"] == "space shell failed"
+    assert "breakspace" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "<script" not in serialized
+
+
+def test_recovery_enable_space_restores_safe_metadata_without_rendering_widgets(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Disabled Space"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "bad-widget",
+            "kind": "html",
+            "title": "Bad Widget",
+            "renderer": "<script>breakSpace()</script>",
+            "data": {"api_key": "***"},
+        },
+    )
+    spaces.disable_space_for_recovery(created["space_id"], reason="space shell failed")
+
+    enabled = spaces.enable_space_for_recovery(created["space_id"])
+
+    assert enabled["disabled"] is False
+    assert enabled["space_id"] == created["space_id"]
+    stored = spaces.read_space(created["space_id"])
+    assert stored["recovery"]["disabled"] is False
+    assert stored["recovery"]["disabled_reason"] == ""
+    assert stored["widgets"][0]["renderer"] == "<script>breakSpace()</script>"
+    recovery = spaces.recovery_snapshot()
+    serialized = json.dumps(recovery).lower()
+    assert recovery["spaces"][0]["disabled"] is False
+    assert recovery["spaces"][0]["disabled_reason"] == ""
+    assert "breakspace" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "<script" not in serialized
+
+
 def test_import_space_agent_yaml_package_quarantines_generated_sources(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
@@ -1890,6 +1957,8 @@ def test_spaces_routes_and_static_shell_are_registered():
     assert '"/api/spaces"' in routes_src
     assert '"/api/spaces/current"' in routes_src
     assert '"/api/spaces/recovery"' in routes_src
+    assert '"/api/spaces/recovery/disable-space"' in routes_src
+    assert '"/api/spaces/recovery/enable-space"' in routes_src
     assert '"/api/spaces/recovery/disable-widget"' in routes_src
     assert '"/api/spaces/recovery/enable-widget"' in routes_src
     assert '"/api/spaces/import"' in routes_src
@@ -2086,6 +2155,48 @@ def test_recovery_enable_widget_route_restores_widget_metadata_only(monkeypatch,
     assert stored["recovery"]["disabled"] is False
     recovery = spaces.recovery_snapshot()
     serialized = json.dumps(recovery).lower()
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "<script" not in serialized
+
+
+def test_recovery_disable_enable_space_routes_return_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Route Space Recovery"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "bad-widget",
+            "kind": "html",
+            "title": "Bad Widget",
+            "renderer": "<script>breakRouteSpace()</script>",
+            "data": {"api_key": "***"},
+        },
+    )
+
+    handled, status, body = _route_post(
+        "/api/spaces/recovery/disable-space",
+        {"space_id": created["space_id"], "reason": "safe-mode disable"},
+    )
+
+    assert handled is None
+    assert status == 200
+    assert body["disabled"] is True
+    assert body["space_id"] == created["space_id"]
+    assert spaces.read_space(created["space_id"])["recovery"]["disabled"] is True
+    assert "breakRouteSpace" not in json.dumps(body)
+
+    handled, status, body = _route_post(
+        "/api/spaces/recovery/enable-space",
+        {"space_id": created["space_id"]},
+    )
+
+    assert handled is None
+    assert status == 200
+    assert body["disabled"] is False
+    assert body["space_id"] == created["space_id"]
+    assert spaces.read_space(created["space_id"])["recovery"]["disabled"] is False
+    serialized = json.dumps(spaces.recovery_snapshot()).lower()
     assert "renderer" not in serialized
     assert "api_key" not in serialized
     assert "<script" not in serialized
