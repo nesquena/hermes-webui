@@ -1250,6 +1250,20 @@
     .empty-state p{font-size:13px;}
     .suggestion-grid{max-width:100%!important;}
     .suggestion{font-size:12px;padding:10px 12px;}
+  }
+
+  @media (max-width: 340px){
+    /* Extreme legacy-phone widths (e.g. 320px) cannot fit five 44px
+       left-side touch targets plus the fixed send button with the normal
+       phone spacing. Keep the single-row hierarchy and 44px targets, but
+       tighten only the inter-button gutters so the config button remains
+       fully visible instead of sliding under the send button. */
+    .composer-wrap{padding-left:8px!important;padding-right:8px!important;}
+    .composer-footer{gap:4px;}
+    .composer-left{gap:2px;}
+  }
+
+  @media (max-width: 640px){
     /* Approval card */
     .approval-card{padding-left:10px;padding-right:10px;}
     .approval-btns{gap:6px;}

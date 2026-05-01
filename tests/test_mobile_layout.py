@@ -652,6 +652,28 @@ def test_mobile_composer_left_children_do_not_shrink_into_each_other():
         ".composer-workspace-group must reserve exactly one 44px slot on phones"
 
 
+def test_legacy_320px_composer_tightens_spacing_without_shrinking_targets():
+    """At 320px, keep 44px controls but use smaller gutters so config stays visible."""
+    narrow_blocks = [block for block in _max_width_media_blocks(340) if ".composer-left" in block]
+    assert narrow_blocks, "Missing 320px/legacy-phone composer spacing override"
+    narrow_css = narrow_blocks[0]
+
+    footer = _declarations(_rule_body(narrow_css, ".composer-footer"))
+    left = _declarations(_rule_body(narrow_css, ".composer-left"))
+    wrap = _declarations(_rule_body(narrow_css, ".composer-wrap"))
+
+    assert footer.get("gap") == "4px", \
+        "320px footer should tighten only the gutter between left controls and send"
+    assert left.get("gap") == "2px", \
+        "320px left controls need compact gutters to fit config before the fixed send button"
+    assert wrap.get("padding-left") == "8px!important", \
+        "320px composer should reclaim a little side padding without shrinking touch targets"
+    assert ".send-btn{width:44px;height:44px;" in _composer_phone_media_block(), \
+        "narrow spacing override must not shrink the 44px send button"
+    assert ".composer-mobile-config-btn{box-sizing:border-box;position:relative;display:inline-flex!important;width:44px;height:44px" in _composer_phone_media_block(), \
+        "narrow spacing override must not shrink the 44px mobile config button"
+
+
 def test_mobile_composer_workspace_switch_does_not_leave_empty_icon_slot():
     """The phone footer should keep only the useful workspace files button inline."""
     mobile_css = _composer_phone_media_block()
