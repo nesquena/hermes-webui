@@ -277,7 +277,7 @@ def test_space_tool_adapter_exposes_metadata_only_current_context(monkeypatch, t
             "kind": "markdown",
             "title": "Summary",
             "renderer": "<script>steal()</script>",
-            "data": {"api_key": "unsafe_marker_do_not_leak"},
+            "data": {"api_key": "unsafe...leak"},
         },
     )
 
@@ -298,6 +298,46 @@ def test_space_tool_adapter_exposes_metadata_only_current_context(monkeypatch, t
     assert "renderer" not in serialized
     assert "api_key" not in serialized
     assert "unsafe_marker_do_not_leak" not in serialized
+
+
+def test_space_tool_adapter_shared_data_slots_are_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "shared-data-lab", "name": "Shared Data Lab"})
+
+    written = spaces.run_space_tool(
+        "space.data.set",
+        {
+            "space_id": created["space_id"],
+            "key": "research-summary",
+            "value": {
+                "title": "Research findings",
+                "notes": ["safe note"],
+                "renderer": "<script>steal()</script>",
+                "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+            },
+            "metadata": {"source_widget": "research-summary", "token_hint": "token=SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+    listed = spaces.run_space_tool("space.data.list", {"space_id": created["space_id"]})
+    read = spaces.run_space_tool("space.data.get", {"space_id": created["space_id"], "key": "research-summary"})
+    context = spaces.run_space_tool("space.current.context", {"active_space_id": created["space_id"]})
+    serialized = json.dumps({"written": written, "listed": listed, "read": read, "context": context}).lower()
+
+    assert written["ok"] is True
+    assert written["action"] == "space.data.set"
+    assert written["item"]["key"] == "research-summary"
+    assert written["item"]["value_summary"] == {"title": "Research findings", "notes": ["safe note"]}
+    assert written["item"]["metadata_summary"] == {"source_widget": "research-summary"}
+    assert listed["items"] == [written["item"]]
+    assert read["item"] == written["item"]
+    assert "shared data keys:" in context["context"]
+    assert "research-summary" in context["context"]
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
 
 
 def test_space_tool_adapter_installs_templates_as_safe_metadata(monkeypatch, tmp_path):

@@ -135,6 +135,13 @@ def validate_widget_id(widget_id: str) -> str:
     return wid
 
 
+def validate_data_key(key: str) -> str:
+    data_key = str(key or "").strip()
+    if not _WIDGET_ID_RE.fullmatch(data_key):
+        raise ValueError("Invalid data key")
+    return data_key
+
+
 def validate_event_name(event_name: str) -> str:
     name = str(event_name or "agent.prompt").strip() or "agent.prompt"
     if not _EVENT_NAME_RE.fullmatch(name):
@@ -300,6 +307,47 @@ def _widget_recovery_summary(widget: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _data_slot_summary(slot: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        key = validate_data_key(slot.get("key"))
+    except ValueError:
+        return None
+    value_summary = _payload_summary(slot.get("value_summary") if "value_summary" in slot else slot.get("value"))
+    metadata_summary = _data_slot_metadata_summary(
+        slot.get("metadata_summary") if "metadata_summary" in slot else slot.get("metadata")
+    )
+    return {
+        "key": key,
+        "value_summary": value_summary,
+        "metadata_summary": metadata_summary,
+    }
+
+
+def _data_slot_metadata_summary(value: Any) -> dict[str, Any]:
+    summary = _payload_summary(value if isinstance(value, dict) else {})
+    if not isinstance(summary, dict):
+        summary = {}
+    if isinstance(value, dict) and "source_widget" in value:
+        try:
+            summary["source_widget"] = validate_widget_id(value.get("source_widget"))
+        except ValueError:
+            pass
+    return summary
+
+
+def _data_slot_summaries(space: dict[str, Any]) -> list[dict[str, Any]]:
+    slots = space.get("shared_data") if isinstance(space.get("shared_data"), dict) else {}
+    items: list[dict[str, Any]] = []
+    for key in sorted(slots):
+        raw = slots.get(key)
+        if not isinstance(raw, dict):
+            continue
+        summary = _data_slot_summary({"key": key, **raw})
+        if summary is not None:
+            items.append(summary)
+    return items
+
+
 def _context_value(value: Any, limit: int = 500) -> str:
     """Return a single-line value safe for compact agent context."""
     text = re.sub(r"\s+", " ", str(value or "")).strip()
@@ -421,6 +469,13 @@ def build_agent_context(space_id: str | None) -> str:
             lines.append(f"- … {len(summaries) - 25} more widget(s) omitted")
     else:
         lines.append("- none")
+    shared_data = _data_slot_summaries(space)
+    if shared_data:
+        lines.append("shared data keys:")
+        for item in shared_data[:25]:
+            lines.append(f"- {_context_value(item['key'], 80)}")
+        if len(shared_data) > 25:
+            lines.append(f"- … {len(shared_data) - 25} more data slot(s) omitted")
     revision = _context_value(space.get("revision_event_id"), 120)
     if revision:
         lines.append(f"revision_event_id: {revision}")
@@ -557,6 +612,42 @@ def read_space_detail(space_id: str) -> dict[str, Any]:
     if isinstance(widgets, list):
         detail["widgets"] = [_widget_summary(widget) for widget in widgets if isinstance(widget, dict)]
     return detail
+
+
+def set_shared_data_slot(space_id: str, key: str, value: Any, metadata: Any | None = None) -> dict[str, Any]:
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    sid = validate_space_id(space_id)
+    data_key = validate_data_key(key)
+    space = read_space(sid)
+    shared_data = space.get("shared_data") if isinstance(space.get("shared_data"), dict) else {}
+    item = {
+        "key": data_key,
+        "value_summary": _payload_summary(value),
+        "metadata_summary": _data_slot_metadata_summary(metadata if isinstance(metadata, dict) else {}),
+    }
+    shared_data[data_key] = dict(item)
+    space["shared_data"] = shared_data
+    saved = _write_manifest(space, "space.data.set", {"key": data_key})
+    return {"space_id": sid, "item": read_shared_data_slot(saved["space_id"], data_key)}
+
+
+def list_shared_data_slots(space_id: str) -> list[dict[str, Any]]:
+    if not spaces_enabled():
+        return []
+    sid = validate_space_id(space_id)
+    return _data_slot_summaries(read_space(sid))
+
+
+def read_shared_data_slot(space_id: str, key: str) -> dict[str, Any]:
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    sid = validate_space_id(space_id)
+    data_key = validate_data_key(key)
+    for item in _data_slot_summaries(read_space(sid)):
+        if item["key"] == data_key:
+            return item
+    raise FileNotFoundError("Data slot not found")
 
 
 def current_space_for_session(session: Any) -> dict[str, Any]:
@@ -760,6 +851,17 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name == "space.get":
         space_id = validate_space_id(data.get("space_id"))
         return {"ok": True, "action": name, "space": read_space_detail(space_id)}
+    if name in {"space.data.set", "space.current.data.set"}:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        result = set_shared_data_slot(space_id, data.get("key"), data.get("value"), data.get("metadata"))
+        return {"ok": True, "action": name, **result}
+    if name in {"space.data.list", "space.current.data.list"}:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        return {"ok": True, "action": name, "space_id": space_id, "items": list_shared_data_slots(space_id)}
+    if name in {"space.data.get", "space.current.data.get"}:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        data_key = validate_data_key(data.get("key"))
+        return {"ok": True, "action": name, "space_id": space_id, "item": read_shared_data_slot(space_id, data_key)}
     if name in {"space.revisions", "space.revision.list", "space.history"}:
         space_id = validate_space_id(data.get("space_id"))
         return {"ok": True, "action": name, "revisions": list_revision_events(space_id, data.get("limit", 20))}
