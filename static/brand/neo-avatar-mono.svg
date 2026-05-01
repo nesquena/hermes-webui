@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="neo-avatar-mono-title neo-avatar-mono-desc">
+  <title id="neo-avatar-mono-title">Neo mono avatar</title>
+  <desc id="neo-avatar-mono-desc">Compact monochrome Neo humanoid wireframe mark.</desc>
+  <defs>
+    <filter id="neo-mono-glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="1.8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#04101A"/>
+  <path d="M32 7c9 0 16 7 16 16 0 7-4 13-10 15 10 2 17 8 21 18H5c4-10 11-16 21-18-6-2-10-8-10-15 0-9 7-16 16-16z" fill="none" stroke="currentColor" stroke-width="2.2" color="#00E5FF" filter="url(#neo-mono-glow)"/>
+  <path d="M32 8 23 22l9 13 9-13zm-9 14-5 15 14-2 14 2-5-15M16 52l16-17 16 17M32 35v18" fill="none" stroke="#B8F7FF" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" opacity="0.82"/>
+  <circle cx="32" cy="8" r="2" fill="#00E5FF" filter="url(#neo-mono-glow)"/>
+  <circle cx="23" cy="22" r="1.6" fill="#00E5FF"/>
+  <circle cx="41" cy="22" r="1.6" fill="#00E5FF"/>
+  <text x="32" y="50" text-anchor="middle" font-family="Inter, system-ui, sans-serif" font-size="7" font-weight="700" fill="#E8FBFF" letter-spacing="1">NEO</text>
+</svg>

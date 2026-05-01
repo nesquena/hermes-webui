@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" role="img" aria-labelledby="neo-mark-title neo-mark-desc">
+  <title id="neo-mark-title">Neo mark</title>
+  <desc id="neo-mark-desc">Compact cyan Neo orb and humanoid wireframe mark.</desc>
+  <defs>
+    <radialGradient id="neo-mark-bg" cx="48%" cy="34%" r="70%">
+      <stop offset="0%" stop-color="#5EE9FF"/>
+      <stop offset="55%" stop-color="#00B8D4"/>
+      <stop offset="100%" stop-color="#04101A"/>
+    </radialGradient>
+    <filter id="neo-mark-glow" x="-45%" y="-45%" width="190%" height="190%">
+      <feGaussianBlur stdDeviation="1.6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <rect width="40" height="40" rx="10" fill="#04101A"/>
+  <circle cx="20" cy="20" r="16" fill="url(#neo-mark-bg)" opacity="0.32" filter="url(#neo-mark-glow)"/>
+  <path d="M20 6c6 0 10 4 10 10 0 4-2 8-6 9 6 1 11 5 13 11H3c2-6 7-10 13-11-4-1-6-5-6-9 0-6 4-10 10-10z" fill="none" stroke="#00E5FF" stroke-width="1.6" filter="url(#neo-mark-glow)"/>
+  <path d="M20 7 14 17l6 8 6-8zm-6 10-3 10 9-2 9 2-3-10M20 25v9" fill="none" stroke="#B8F7FF" stroke-width="0.9" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="20" y="34" text-anchor="middle" font-family="Inter, system-ui, sans-serif" font-size="6" font-weight="700" fill="#E8FBFF" letter-spacing=".8">NEO</text>
+</svg>

@@ -1,20 +1,23 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="12" fill="#1a1a1a"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="neo-favicon-title neo-favicon-desc">
+  <title id="neo-favicon-title">Neo favicon</title>
+  <desc id="neo-favicon-desc">Cyan Neo WebUI icon.</desc>
   <defs>
-    <linearGradient id="g" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" style="stop-color:#F5C542;stop-opacity:1"/>
-      <stop offset="100%" style="stop-color:#D4961C;stop-opacity:1"/>
-    </linearGradient>
+    <radialGradient id="neo-favicon-bg" cx="48%" cy="34%" r="70%">
+      <stop offset="0%" stop-color="#5EE9FF"/>
+      <stop offset="52%" stop-color="#00E5FF"/>
+      <stop offset="100%" stop-color="#04101A"/>
+    </radialGradient>
+    <filter id="neo-favicon-glow" x="-35%" y="-35%" width="170%" height="170%">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
   </defs>
-  <rect x="30" y="10" width="4" height="46" rx="2" fill="url(#g)"/>
-  <path d="M30 18 C24 14, 14 14, 10 18 C14 16, 22 16, 28 20" fill="#F5C542" opacity="0.9"/>
-  <path d="M30 22 C26 19, 18 19, 14 22 C18 20, 24 20, 28 24" fill="#D4961C" opacity="0.8"/>
-  <path d="M34 18 C40 14, 50 14, 54 18 C50 16, 42 16, 36 20" fill="#F5C542" opacity="0.9"/>
-  <path d="M34 22 C38 19, 46 19, 50 22 C46 20, 40 20, 36 24" fill="#D4961C" opacity="0.8"/>
-  <path d="M32 48 C22 44, 20 38, 26 34 C20 36, 18 42, 24 46 C18 40, 22 30, 30 28 C24 32, 22 38, 28 42"
-        fill="none" stroke="#F5C542" stroke-width="2.5" stroke-linecap="round"/>
-  <path d="M32 48 C42 44, 44 38, 38 34 C44 36, 46 42, 40 46 C46 40, 42 30, 34 28 C40 32, 42 38, 36 42"
-        fill="none" stroke="#D4961C" stroke-width="2.5" stroke-linecap="round"/>
-  <circle cx="32" cy="10" r="4" fill="#F5C542"/>
-  <circle cx="32" cy="10" r="2" fill="#FFF8E1" opacity="0.7"/>
+  <rect width="64" height="64" rx="14" fill="#04101A"/>
+  <circle cx="32" cy="32" r="25" fill="url(#neo-favicon-bg)" opacity="0.32" filter="url(#neo-favicon-glow)"/>
+  <path d="M32 8c9 0 16 7 16 16 0 7-4 13-10 15 10 2 17 8 21 18H5c4-10 11-16 21-18-6-2-10-8-10-15 0-9 7-16 16-16z" fill="none" stroke="#00E5FF" stroke-width="2.2" filter="url(#neo-favicon-glow)"/>
+  <path d="M32 9 23 24l9 13 9-13zm-9 15-5 15 14-2 14 2-5-15M16 54l16-17 16 17M32 37v16" fill="none" stroke="#B8F7FF" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="32" y="52" text-anchor="middle" font-family="Inter, system-ui, sans-serif" font-size="7" font-weight="700" fill="#E8FBFF" letter-spacing="1">NEO</text>
 </svg>

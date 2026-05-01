@@ -7,7 +7,8 @@
 
 **Atualizado em:** 2026-05-01
 **Versão alvo MVP:** `neo-webui-v0.1` ao final da Sprint 4
-**Branch atual registrada no handoff:** `neo/sprint-1` sem commits
+**Branch de desenvolvimento atual:** `develop`
+**Branch de produção:** `main`
 
 ---
 
@@ -30,8 +31,8 @@
 
 | Sprint | Tema | HUs | Implementadas no worktree | Concluídas por DoD | Status |
 |---|---:|---:|---:|---:|---|
-| Sprint 1 | Rebrand visual/textual + locale pt-BR | 11 | 7 parciais | 0 | em andamento |
-| Sprint 2 | Dashboard + sidebar/topbar Neo | 11 | 0 | 0 | aguardando Sprint 1 |
+| Sprint 1 | Rebrand visual/textual + locale pt-BR | 11 | 9 parciais | 0 | em fechamento |
+| Sprint 2 | Dashboard + sidebar/topbar Neo | 11 | 0 | 0 | próxima |
 | Sprint 3 | Projetos/Kanban 4 colunas | 10 | 0 | 0 | aguardando Sprint 2 |
 | Sprint 4 | Ações rápidas + Finanças shell visual | 13 | 0 | 0 | aguardando Sprint 3 |
 | Transversal | Qualidade, testes e evidências | 5 | 0 | 0 | em andamento contínuo |
@@ -39,25 +40,23 @@
 
 ### Estado atual do worktree
 
-Arquivos modificados e não commitados nesta análise:
+Estado registrado em 2026-05-01:
 
-- `.gitignore`
-- `api/config.py`
-- `api/routes.py`
-- `static/boot.js`
-- `static/index.html`
-- `static/style.css`
-
-Achados do worktree:
-
-- `static/style.css`, `static/index.html`, `static/boot.js`, `api/config.py` e
-  `api/routes.py` já têm parte da implementação de `skin=neo` e defaults via
-  `HERMES_WEBUI_DEFAULT_SKIN` / `HERMES_WEBUI_LOCALE`.
-- Não há alterações em `static/i18n.js`, `static/commands.js`,
-  `static/manifest.json`, favicons, assets `static/brand/*`, testes Neo ou
-  scripts de lint.
-- A DoD ainda não está fechada para nenhuma HU porque não há execução de testes,
-  evidências anexadas ou homologação registrada neste arquivo.
+- Branch local ativa: `develop`, rastreando `origin/develop`.
+- Sprint 1 foi incorporada em `develop` por fast-forward a partir de
+  `neo/sprint-1`.
+- `main` permanece como branch de produção e ainda não recebeu a Sprint 1.
+- `docs/neo/` e testes Neo estão versionados; `.gitignore` não ignora mais a
+  documentação Neo.
+- Validação recente do merge em `develop`:
+  - `node --check static/i18n.js`
+  - `bash -n neo.sh`
+  - `pytest tests/test_locale_parity_pt_br.py tests/test_neo_skin.py`
+    (`10 passed in 1.20s`)
+- HU-01.2 e HU-01.5 foram implementadas após o merge da Sprint 1 com assets de
+  marca, favicon/PWA e teste `tests/test_neo_branding_assets.py`.
+- A DoD ainda não está fechada para nenhuma HU porque faltam evidências visuais
+  e homologação manual registrada.
 
 ---
 
@@ -72,7 +71,7 @@ Achados do worktree:
 | I-05 | PRD RF-08 exige `POST /api/projects/{id}`, enquanto o upstream atual já tem rotas `/api/projects/create`, `/rename`, `/delete`. | Implementar rota Neo compatível com RF-08 ou documentar adapter; não reutilizar somente `/rename` para mudança de status. |
 | I-06 | PRD RF-15 pede persistência financeira em `finance.json`, enquanto o texto de não-objetivos fala em "backend financeiro real pós-MVP". | Interpretação: `finance.json` + endpoints locais são P0 do MVP; integrações bancárias/FinanPy/OFX são pós-MVP. |
 | I-07 | `DESIGN-SPEC.md §13` listava "Backlog no Kanban" como pendência para atualizar RF-06, mas o PRD já está atualizado com 4 colunas. | Pendência removida do Design Spec em 2026-05-01; PRD/Backlog/TASKS permanecem em 4 colunas. |
-| I-08 | `.gitignore` modificado passa a ignorar `docs/neo/`, mas PRD §5 inclui documentação técnica completa em `docs/neo/` como entrega. | Se estes docs devem entrar no repositório, remover `docs/neo/` do `.gitignore` ou usar `git add -f` deliberadamente. |
+| I-08 | A análise inicial indicava risco de `docs/neo/` ignorado no `.gitignore`. | Resolvido na Sprint 1: `docs/neo/` está versionado e `.gitignore` não ignora a documentação Neo. |
 | I-09 | UPSTREAM-SYNC lista `HERMES_WEBUI_DEFAULT_PANEL`, mas PRD RF-04 fala em `settings.default_panel="dashboard"` e `?panel=dashboard`. | Sprint 2 deve suportar ambos: setting persistido e env como default inicial quando não houver escolha local. |
 | I-10 | O checklist anterior citava `localStorage.hermes-locale`, mas o upstream usa `localStorage['hermes-lang']` em `static/i18n.js`, `static/boot.js` e `static/panels.js`. | Manter `hermes-lang` para preservar compatibilidade e preferências já salvas; documentação operacional passa a citar essa chave. |
 
@@ -98,9 +97,9 @@ sem regressão das capacidades upstream.
 
 **Pré-condições**
 
-- [ ] Confirmar branch de trabalho (`git status --short`, `git branch --show-current`).
-- [ ] Decidir se `docs/neo/` será versionado apesar do `.gitignore` atual.
-- [ ] Rodar baseline de testes relevante antes do commit.
+- [x] Confirmar branch de trabalho (`develop`).
+- [x] Decidir se `docs/neo/` será versionado apesar do `.gitignore` atual.
+- [x] Rodar baseline de testes relevante antes do commit/merge da Sprint 1.
 
 ### HU-01.1 — Topbar, título e notificações exibem "Neo"
 
@@ -112,25 +111,28 @@ sem regressão das capacidades upstream.
 
 - [x] Confirmar suporte upstream a `bot_name` / `HERMES_WEBUI_BOT_NAME`.
 - [x] Registrar no handoff que `.env` local usa `HERMES_WEBUI_BOT_NAME=Neo`.
-- [ ] Verificar topbar, `<title>`, placeholder do composer e notificações em runtime.
-- [ ] Atualizar `static/manifest.json` para `name` e `short_name` Neo, se ainda fizer parte desta HU.
-- [ ] Anexar screenshots em `docs/neo/evidencias/HU-01.1/`.
-- [ ] Rodar teste/lint relevante.
+- [x] Verificar topbar, `<title>` e placeholder inicial do composer por contrato estático.
+- [x] Atualizar `static/manifest.json` para `name` e `short_name` Neo.
+- [x] Registrar evidência técnica em `docs/neo/evidencias/HU-01.1/`.
+- [x] Rodar teste/lint relevante.
+- [ ] Anexar screenshots/homologação manual em runtime.
 
 ### HU-01.2 — Logo "NEO" e avatar/mark humanoide
 
-**Status:** disponível
+**Status:** implementada sem DoD
 **Prioridade:** P0
 **Épico:** EP-01
 **Dependências:** DESIGN-SPEC §9
 
 **Tasks**
 
-- [ ] Criar `static/brand/neo-avatar.svg` conforme wireframe humanoide do Design Spec.
-- [ ] Criar `static/brand/neo-avatar-mono.svg`.
-- [ ] Criar `static/brand/neo-mark.svg` para sidebar/topbar.
-- [ ] Trocar caduceu por asset Neo via hook mínimo em `static/boot.js` ou módulo Neo-only.
-- [ ] Garantir `aria-label` e `<title>` nos SVGs.
+- [x] Criar `static/brand/neo-avatar.svg` conforme wireframe humanoide do Design Spec.
+- [x] Criar `static/brand/neo-avatar-mono.svg`.
+- [x] Criar `static/brand/neo-mark.svg` para sidebar/topbar.
+- [x] Trocar caduceu inicial por asset Neo em `static/index.html`.
+- [x] Garantir acessibilidade e `<title>` nos SVGs.
+- [x] Criar teste automatizado de presença/acessibilidade dos assets.
+- [x] Registrar evidência técnica em `docs/neo/evidencias/HU-01.2/`.
 - [ ] Testar legibilidade em dark/light.
 - [ ] Anexar screenshots.
 
@@ -172,18 +174,20 @@ sem regressão das capacidades upstream.
 
 ### HU-01.5 — Favicon e PWA icons Neo
 
-**Status:** disponível
+**Status:** implementada sem DoD
 **Prioridade:** P0
 **Épico:** EP-01
 **Dependências:** HU-01.2
 
 **Tasks**
 
-- [ ] Substituir `static/favicon.svg`.
-- [ ] Substituir `static/favicon-32.png`.
-- [ ] Substituir `static/favicon.ico`.
-- [ ] Criar/atualizar `static/apple-touch-icon.png`, se o arquivo existir no projeto.
-- [ ] Atualizar `static/manifest.json`.
+- [x] Substituir `static/favicon.svg`.
+- [x] Substituir `static/favicon-32.png`.
+- [x] Substituir `static/favicon.ico`.
+- [x] Criar/atualizar `static/apple-touch-icon.png`.
+- [x] Atualizar `static/manifest.json`.
+- [x] Criar teste automatizado para manifest e assinaturas dos ícones.
+- [x] Registrar evidência técnica em `docs/neo/evidencias/HU-01.5/`.
 - [ ] Validar aba do navegador e PWA instalada.
 
 ### HU-01.6 — `/skin neo` aplica skin ao vivo
@@ -282,7 +286,7 @@ sem regressão das capacidades upstream.
 ### Encerramento Sprint 1
 
 - [ ] HU-01.1 a HU-02.5 concluídas por DoD.
-- [ ] `pytest tests/test_neo_sprint1.py tests/test_locale_parity_pt_br.py -v` passa.
+- [ ] `pytest tests/test_neo_branding_assets.py tests/test_neo_skin.py tests/test_locale_parity_pt_br.py -v` passa.
 - [ ] Suíte relevante upstream passa.
 - [ ] Evidências anexadas.
 - [ ] Commit limpo sem `.env`.
@@ -296,7 +300,7 @@ ações rápidas, sidebar fixa de 240px e topbar contextual de 56px.
 
 ### HU-03.1 — Painel "Dashboard" na sidebar
 
-**Status:** aguardando Sprint 1
+**Status:** disponível
 
 **Tasks**
 
@@ -307,7 +311,7 @@ ações rápidas, sidebar fixa de 240px e topbar contextual de 56px.
 
 ### HU-03.2 — Dashboard como painel inicial
 
-**Status:** aguardando Sprint 1
+**Status:** disponível
 
 **Tasks**
 
@@ -318,7 +322,7 @@ ações rápidas, sidebar fixa de 240px e topbar contextual de 56px.
 
 ### HU-03.3 — Hero avatar humanoide + saudação
 
-**Status:** aguardando HU-01.2
+**Status:** aguardando HU-03.1
 
 **Tasks**
 

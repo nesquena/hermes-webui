@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 220" role="img" aria-labelledby="neo-avatar-title neo-avatar-desc">
+  <title id="neo-avatar-title">Neo humanoid avatar</title>
+  <desc id="neo-avatar-desc">Holographic cyan humanoid wireframe avatar for Neo WebUI.</desc>
+  <defs>
+    <radialGradient id="neo-avatar-core" cx="50%" cy="32%" r="70%">
+      <stop offset="0%" stop-color="#5EE9FF" stop-opacity="0.96"/>
+      <stop offset="48%" stop-color="#00B8D4" stop-opacity="0.68"/>
+      <stop offset="100%" stop-color="#04101A" stop-opacity="0.98"/>
+    </radialGradient>
+    <linearGradient id="neo-avatar-line" x1="0" y1="0" x2="240" y2="220">
+      <stop offset="0%" stop-color="#B8F7FF"/>
+      <stop offset="48%" stop-color="#00E5FF"/>
+      <stop offset="100%" stop-color="#00B8D4"/>
+    </linearGradient>
+    <filter id="neo-avatar-glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <clipPath id="neo-avatar-clip">
+      <path d="M120 22c30 0 52 23 52 54 0 26-13 45-34 53 37 8 65 32 76 67H26c11-35 39-59 76-67-21-8-34-27-34-53 0-31 22-54 52-54z"/>
+    </clipPath>
+  </defs>
+  <rect width="240" height="220" fill="none"/>
+  <ellipse cx="120" cy="119" rx="82" ry="94" fill="#00E5FF" opacity="0.08" filter="url(#neo-avatar-glow)"/>
+  <path d="M120 22c30 0 52 23 52 54 0 26-13 45-34 53 37 8 65 32 76 67H26c11-35 39-59 76-67-21-8-34-27-34-53 0-31 22-54 52-54z" fill="url(#neo-avatar-core)" stroke="url(#neo-avatar-line)" stroke-width="1.5" filter="url(#neo-avatar-glow)"/>
+  <g clip-path="url(#neo-avatar-clip)" fill="none" stroke="currentColor" stroke-width="1" opacity="0.72">
+    <path d="M120 22 92 47 72 83 101 104 120 74 140 104 168 83 148 47z"/>
+    <path d="M92 47h56M72 83h96M101 104h38M88 130l32-56 32 56M63 159l58-29 56 29M45 196l75-66 75 66"/>
+    <path d="M72 83 88 130 63 159M168 83 152 130 177 159M101 104 74 196M139 104l27 92M120 74v122"/>
+    <path d="M88 130h64M63 159h114M55 178h130"/>
+  </g>
+  <g opacity="0.26" stroke="#B8F7FF" stroke-width="1">
+    <path d="M49 65h142M38 93h164M31 121h178M39 149h162M55 177h130"/>
+  </g>
+  <g fill="#00E5FF" filter="url(#neo-avatar-glow)">
+    <circle cx="120" cy="22" r="2.6"/>
+    <circle cx="92" cy="47" r="2"/>
+    <circle cx="148" cy="47" r="2"/>
+    <circle cx="72" cy="83" r="2"/>
+    <circle cx="168" cy="83" r="2"/>
+    <circle cx="101" cy="104" r="2"/>
+    <circle cx="139" cy="104" r="2"/>
+    <circle cx="88" cy="130" r="2"/>
+    <circle cx="152" cy="130" r="2"/>
+    <circle cx="63" cy="159" r="2"/>
+    <circle cx="177" cy="159" r="2"/>
+  </g>
+  <text x="120" y="156" text-anchor="middle" font-family="Inter, system-ui, sans-serif" font-size="14" font-weight="700" fill="#E8FBFF" letter-spacing="2" filter="url(#neo-avatar-glow)">NEO</text>
+</svg>

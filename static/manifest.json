@@ -1,11 +1,11 @@
 {
-  "name": "Hermes",
-  "short_name": "Hermes",
-  "description": "Hermes AI Agent Web UI",
+  "name": "Neo WebUI",
+  "short_name": "Neo",
+  "description": "Neo AI Agent Web UI",
   "start_url": "./",
   "display": "standalone",
-  "background_color": "#1a1a1a",
-  "theme_color": "#1a1a1a",
+  "background_color": "#04101A",
+  "theme_color": "#00E5FF",
   "orientation": "portrait-primary",
   "icons": [
     {
@@ -17,6 +17,11 @@
     {
       "src": "static/favicon-32.png",
       "sizes": "32x32",
+      "type": "image/png"
+    },
+    {
+      "src": "static/apple-touch-icon.png",
+      "sizes": "180x180",
       "type": "image/png"
     }
   ]
