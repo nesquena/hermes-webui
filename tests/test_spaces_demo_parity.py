@@ -75,6 +75,8 @@ def test_demo_parity_smoke_runner_launches_each_demo_metadata_only(monkeypatch, 
     assert all(result["space"]["space_id"] for result in results)
     assert all(result["widget_count"] >= 1 for result in results)
     assert all(result["rollback_point"] for result in results)
+    assert all(result["persistence_checked"] is True for result in results)
+    assert all(result["persisted_widget_count"] == result["widget_count"] for result in results)
     assert len(spaces.list_spaces()) == len(DEMO_NAMES)
     _assert_safe_payload(results)
 
@@ -112,5 +114,7 @@ def test_demo_parity_smoke_runner_exposes_run_all_tool_action(monkeypatch, tmp_p
     assert [item["demo"] for item in result["results"]] == DEMO_NAMES
     assert all(item["ok"] is True for item in result["results"])
     assert all(item["rollback_point"] is True for item in result["results"])
+    assert all(item["persistence_checked"] is True for item in result["results"])
+    assert all(item["persisted_widget_count"] == item["widget_count"] for item in result["results"])
     assert len(spaces.list_spaces()) == len(DEMO_NAMES)
     _assert_safe_payload(result)

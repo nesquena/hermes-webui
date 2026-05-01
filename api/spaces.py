@@ -589,15 +589,20 @@ def list_space_demo_runs() -> list[dict[str, Any]]:
 def _space_demo_run_summary(demo: str, template: str, space_id: str, *, action: str) -> dict[str, Any]:
     widgets = list_widgets(space_id)
     revisions = list_revision_events(space_id)
+    persisted_space = read_space_detail(space_id)
+    persisted_widgets = list_widgets(space_id)
+    persistence_checked = persisted_space.get("space_id") == space_id and len(persisted_widgets) == len(widgets)
     return {
         "ok": True,
         "demo": demo,
         "template": template,
         "mode": "metadata-only-smoke",
         "action": action,
-        "space": read_space_detail(space_id),
+        "space": persisted_space,
         "widgets": widgets,
         "widget_count": len(widgets),
+        "persisted_widget_count": len(persisted_widgets),
+        "persistence_checked": persistence_checked,
         "revision_event_count": len(revisions),
         "rollback_point": bool(revisions),
     }

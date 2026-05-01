@@ -112,12 +112,14 @@
     const demo = data && data.demo ? String(data.demo) : 'demo';
     const spaceName = space.name || space.space_id || 'Space demo';
     const widgetCount = Number(data && data.widget_count || 0);
+    const persistedWidgetCount = Number(data && data.persisted_widget_count || 0);
+    const persistence = data && data.persistence_checked ? 'checked' : 'not checked';
     const revisionCount = Number(data && data.revision_event_count || 0);
     const rollbackPoint = data && data.rollback_point ? 'yes' : 'no';
     return '<div class="capy-spaces-card" role="status"><h3>Demo parity smoke passed</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(demo)+' · '+escapeHtml(data && data.mode || 'metadata-only-smoke')+'</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(spaceName)+'</strong>' +
-      '<div class="capy-spaces-muted">Space ID: '+escapeHtml(space.space_id || '')+' · Widgets: '+widgetCount+' · Revisions: '+revisionCount+' · Rollback point: '+escapeHtml(rollbackPoint)+'</div></div></div></div></div>';
+      '<div class="capy-spaces-muted">Space ID: '+escapeHtml(space.space_id || '')+' · Widgets: '+widgetCount+' · Persisted widgets: '+persistedWidgetCount+' · Persistence: '+escapeHtml(persistence)+' · Revisions: '+revisionCount+' · Rollback point: '+escapeHtml(rollbackPoint)+'</div></div></div></div></div>';
   }
 
   function renderDemoSmokeSuiteResult(data){
@@ -129,9 +131,11 @@
       const demo = item && item.demo ? String(item.demo) : 'demo';
       const template = item && item.template ? String(item.template) : 'template';
       const widgetCount = Number(item && item.widget_count || 0);
+      const persistedWidgetCount = Number(item && item.persisted_widget_count || 0);
+      const persistence = item && item.persistence_checked ? 'checked' : 'not checked';
       const rollbackPoint = item && item.rollback_point ? 'yes' : 'no';
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(demo)+'</strong>' +
-        '<div class="capy-spaces-muted">template: '+escapeHtml(template)+' · widgets: '+widgetCount+' · rollback point: '+escapeHtml(rollbackPoint)+'</div></div></div>';
+        '<div class="capy-spaces-muted">template: '+escapeHtml(template)+' · widgets: '+widgetCount+' · persisted: '+persistedWidgetCount+' · persistence: '+escapeHtml(persistence)+' · rollback point: '+escapeHtml(rollbackPoint)+'</div></div></div>';
     }).join('');
     return '<div class="capy-spaces-card" role="status"><h3>Demo parity smoke suite '+(failed ? 'finished' : 'passed')+'</h3>' +
       '<div class="capy-spaces-muted">'+passed+' / '+total+' metadata-only smokes passed</div>' +

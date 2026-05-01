@@ -105,6 +105,8 @@ global.fetch = async function(path, opts = {}) {
         space: { space_id: 'demo-weather-widget', name: 'Weather Demo Smoke', widget_count: 1, revision_event_id: 'rev-demo', renderer: '<script>bad()</script>', api_key: 'SECRET' },
         widgets: [{ id: 'weather-current', kind: 'weather', title: 'Weather in Prague', renderer: '<script>bad()</script>', api_key: 'SECRET' }],
         widget_count: 1,
+        persisted_widget_count: 1,
+        persistence_checked: true,
         revision_event_count: 2,
         rollback_point: true,
       });
@@ -118,8 +120,8 @@ global.fetch = async function(path, opts = {}) {
         failed: 0,
         mode: 'metadata-only-smoke',
         results: [
-          { ok: true, demo: 'demo_weather_widget', template: 'weather', mode: 'metadata-only-smoke', space: { space_id: 'demo-weather-widget', name: 'Weather Demo Smoke', renderer: '<script>bad()</script>', api_key: 'UNTRUSTED_VALUE' }, widget_count: 1, rollback_point: true },
-          { ok: true, demo: 'demo_time_travel_restore', template: 'big-bang', mode: 'metadata-only-smoke', space: { space_id: 'demo-time-travel-restore', name: 'Time Travel Smoke', source: 'UNTRUSTED_SOURCE' }, widget_count: 4, rollback_point: true },
+          { ok: true, demo: 'demo_weather_widget', template: 'weather', mode: 'metadata-only-smoke', space: { space_id: 'demo-weather-widget', name: 'Weather Demo Smoke', renderer: '<script>bad()</script>', api_key: 'UNTRUSTED_VALUE' }, widget_count: 1, persisted_widget_count: 1, rollback_point: true, persistence_checked: true },
+          { ok: true, demo: 'demo_time_travel_restore', template: 'big-bang', mode: 'metadata-only-smoke', space: { space_id: 'demo-time-travel-restore', name: 'Time Travel Smoke', source: 'UNTRUSTED_SOURCE' }, widget_count: 4, persisted_widget_count: 4, rollback_point: true, persistence_checked: true },
         ],
         renderer: '<script>bad()</script>',
         api_key: 'UNTRUSTED_VALUE',
@@ -1205,6 +1207,7 @@ def test_spaces_ui_runs_demo_parity_smoke_from_safe_catalog(driver_path):
     assert "demo_weather_widget" in out["rootHtml"]
     assert "Weather Demo Smoke" in out["rootHtml"]
     assert "Widgets: 1" in out["rootHtml"]
+    assert "Persistence: checked" in out["rootHtml"]
     assert "Rollback point: yes" in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
@@ -1223,6 +1226,7 @@ def test_spaces_ui_runs_all_demo_parity_smokes_metadata_only(driver_path):
     assert "2 / 2 metadata-only smokes passed" in out["rootHtml"]
     assert "demo_weather_widget" in out["rootHtml"]
     assert "demo_time_travel_restore" in out["rootHtml"]
+    assert "persistence: checked" in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()
