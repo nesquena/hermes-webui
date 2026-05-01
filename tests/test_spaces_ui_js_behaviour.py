@@ -905,6 +905,8 @@ def test_spaces_ui_widget_manager_shows_safe_queued_event_inbox(driver_path):
     assert "widget.refresh" in out["rootHtml"]
     assert "agent.prompt" in out["rootHtml"]
     assert "weather · queued" in out["rootHtml"]
+    assert "Event: evt-refresh" in out["rootHtml"]
+    assert "2024-03-09 16:01:40 UTC" in out["rootHtml"]
     assert "action: refresh" in out["rootHtml"]
     assert "note: [REDACTED]" in out["rootHtml"]
     assert "prompt: [REDACTED]" in out["rootHtml"]

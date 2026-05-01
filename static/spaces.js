@@ -390,11 +390,17 @@
       const eventName = event && event.event_name ? String(event.event_name) : 'widget.event';
       const widgetId = event && event.widget_id ? String(event.widget_id) : '';
       const status = event && event.status ? String(event.status) : 'queued';
+      const eventId = event && event.event_id ? String(event.event_id) : '';
+      const eventTime = event && event.created_at ? formatRevisionTime(event.created_at) : '';
+      const eventMeta = eventId || eventTime
+        ? '<div class="capy-spaces-muted">'+escapeHtml((eventId ? 'Event: '+eventId : 'Event: unknown') + (eventTime ? ' · '+eventTime : ''))+'</div>'
+        : '';
       const details = Object.assign({}, event && event.payload_summary && typeof event.payload_summary === 'object' && !Array.isArray(event.payload_summary) ? event.payload_summary : {});
       if (event && event.prompt_preview) details.prompt = event.prompt_preview;
       const detailText = formatRevisionDetails(details);
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(eventName)+'</strong>' +
         '<div class="capy-spaces-muted">'+escapeHtml(widgetId)+' · '+escapeHtml(status)+'</div>' +
+        eventMeta +
         (detailText ? '<div class="capy-spaces-muted">'+escapeHtml(detailText)+'</div>' : '') +
         '</div></div>';
     }).join('') : '<div class="capy-spaces-muted">No queued widget events.</div>';
