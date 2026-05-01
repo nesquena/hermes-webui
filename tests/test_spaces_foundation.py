@@ -215,6 +215,42 @@ def test_space_tool_adapter_supports_space_agent_widget_aliases_metadata_only(mo
     assert "secret" not in serialized
 
 
+def test_widget_detail_exposes_typed_template_metadata_without_generated_or_secret_fields(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "typed-detail-lab", "name": "Typed Detail Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "dashboard-weather",
+            "kind": "weather",
+            "title": "Weather Detail",
+            "weather": {"location": "Prague", "unit": "celsius", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+            "chart": {"series": ["NVDA", "AAPL"], "refresh": "agent-mediated"},
+            "table": {"columns": ["title", "url", "notes"], "token": "SECRET_VALUE_DO_NOT_LEAK"},
+            "notes": {"folders": ["Inbox"], "mode": "metadata-only"},
+            "renderer": "<script>steal()</script>",
+            "html": "<img src=x onerror=steal()>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    detail = spaces.read_widget_detail(created["space_id"], "dashboard-weather")
+    serialized = json.dumps(detail).lower()
+
+    assert detail["metadata"]["weather"] == {"location": "Prague", "unit": "celsius"}
+    assert detail["metadata"]["chart"] == {"series": ["NVDA", "AAPL"], "refresh": "agent-mediated"}
+    assert detail["metadata"]["table"] == {"columns": ["title", "url", "notes"]}
+    assert detail["metadata"]["notes"] == {"folders": ["Inbox"], "mode": "metadata-only"}
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
 def test_space_tool_adapter_exposes_metadata_only_current_context(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space(

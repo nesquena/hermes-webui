@@ -85,6 +85,10 @@ _WIDGET_DETAIL_METADATA_FIELDS = (
     "audio_policy",
     "browser_surface",
     "network",
+    "weather",
+    "chart",
+    "table",
+    "notes",
 )
 
 
