@@ -2709,6 +2709,7 @@ def recovery_snapshot() -> dict[str, Any]:
             summary = _summary(space)
             widgets = space.get("widgets") if isinstance(space.get("widgets"), list) else []
             summary["widgets"] = [_widget_recovery_summary(widget) for widget in widgets if isinstance(widget, dict)]
+            summary["revisions"] = list_revision_events(summary["space_id"], 5)
             spaces.append(summary)
         except Exception:
             continue

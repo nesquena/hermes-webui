@@ -998,6 +998,21 @@
     handlersBound = true;
   }
 
+  function renderRecoveryRevisionRows(spaceId, revisions){
+    const safeRevisions = Array.isArray(revisions) ? revisions.slice(0, 5) : [];
+    if (!safeRevisions.length) return '<div class="capy-spaces-muted">No recovery rollback points yet.</div>';
+    return safeRevisions.map(function(rev){
+      const eventId = rev && rev.event_id ? String(rev.event_id) : '';
+      const eventType = rev && rev.event_type ? String(rev.event_type) : 'revision';
+      const detailText = formatRevisionDetails(rev && rev.details);
+      const restoreButton = eventId ? '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="restoreRecoveryRevision" data-space-id="'+escapeHtml(spaceId)+'" data-event-id="'+escapeHtml(eventId)+'">Restore revision</button>' : '';
+      return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(eventType)+'</strong>' +
+        '<div class="capy-spaces-muted">'+escapeHtml(formatRevisionTime(rev && rev.created_at))+' · '+escapeHtml(eventId.slice(0, 12) || 'no-event-id')+'</div>' +
+        (detailText ? '<div class="capy-spaces-muted">'+escapeHtml(detailText)+'</div>' : '') +
+        '</div><div class="capy-spaces-actions">'+restoreButton+'</div></div>';
+    }).join('');
+  }
+
   function renderRecoverySnapshot(data){
     if (!data || !data.enabled) {
       return '<div class="capy-spaces-card"><h3>Capy Spaces recovery disabled</h3><div class="capy-spaces-muted">Capy Spaces recovery is disabled because Spaces are disabled.</div></div>';
@@ -1027,12 +1042,15 @@
           (disabled ? '<button type="button" class="capy-spaces-btn" data-capy-action="enableRecoveryWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Enable widget</button>' : '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="disableRecoveryWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Disable widget</button>') +
           '</div></div>';
       }).join('')+'</div>' : '<div class="capy-spaces-muted">No widget metadata available for this space.</div>';
-      return '<div class="capy-spaces-widget" data-space-id="'+escapeHtml(spaceId)+'"><div><strong>'+escapeHtml(name)+'</strong>' +
+      const recoveryRows = renderRecoveryRevisionRows(spaceId, s.revisions || []);
+      return '<div class="capy-spaces-card"><h3>'+escapeHtml(name)+'</h3>' +
         (description ? '<div class="capy-spaces-muted">'+escapeHtml(description)+'</div>' : '') +
         spaceStatus +
         '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+' · Widgets: '+Number(s.widget_count||0)+' · Revision: '+escapeHtml(s.revision_event_id||'none')+'</div>' +
         '<div class="capy-spaces-actions">'+spaceAction+'</div>' +
-        widgetRows + '</div></div>';
+        widgetRows +
+        '<div class="capy-spaces-card"><h4>Recovery rollback</h4><div class="capy-spaces-muted">Restore safe metadata snapshots without rendering generated widget bodies.</div><div class="capy-spaces-widget-list">'+recoveryRows+'</div></div>' +
+        '</div></div>';
     }).join('') : '<div class="capy-spaces-muted">No spaces found in recovery metadata.</div>';
     return '<div class="capy-spaces-card"><h3>Safe recovery</h3>' +
       '<div class="capy-spaces-muted">Generated widgets rendered: '+String(!!data.generated_widgets_rendered)+'. This panel lists metadata only so broken generated UI cannot execute here.</div>' +
@@ -1043,7 +1061,7 @@
     const button = event.target && event.target.closest ? event.target.closest('[data-capy-action]') : null;
     if (!button) return;
     const action = button.dataset.capyAction;
-    if (action !== 'disableRecoveryWidget' && action !== 'enableRecoveryWidget' && action !== 'disableRecoverySpace' && action !== 'enableRecoverySpace' && action !== 'repairRecoveryWidget') return;
+    if (action !== 'disableRecoveryWidget' && action !== 'enableRecoveryWidget' && action !== 'disableRecoverySpace' && action !== 'enableRecoverySpace' && action !== 'repairRecoveryWidget' && action !== 'restoreRecoveryRevision') return;
     const spaceId = button.dataset.spaceId || '';
     if (!spaceId) return;
     if (action === 'repairRecoveryWidget') {
@@ -1068,6 +1086,15 @@
       return;
     }
     if (typeof showConfirmDialog !== 'function') return;
+    if (action === 'restoreRecoveryRevision') {
+      const eventId = button.dataset.eventId || '';
+      if (!eventId) return;
+      const ok = await showConfirmDialog({title: 'Restore recovery revision?', message: 'Restore Space "'+spaceId+'" to revision '+eventId.slice(0, 12)+' from safe recovery? The current manifest remains in revision history, and generated widget bodies are not displayed here.', confirmLabel: 'Restore revision', danger: true, focusCancel: true});
+      if (!ok) return;
+      await postSpacesJson('api/spaces/revision/restore', {space_id: spaceId, event_id: eventId});
+      await loadCapySpacesRecovery();
+      return;
+    }
     if (action === 'disableRecoverySpace') {
       const ok = await showConfirmDialog({title: 'Disable space?', message: 'Disable Space "'+spaceId+'" from safe recovery? The manifest and widgets are preserved for repair/rollback.', confirmLabel: 'Disable space', danger: true, focusCancel: true});
       if (!ok) return;

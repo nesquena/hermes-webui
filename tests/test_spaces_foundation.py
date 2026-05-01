@@ -810,6 +810,47 @@ def test_recovery_snapshot_never_returns_generated_widget_renderers(monkeypatch,
     assert "renderer" not in serialized
 
 
+def test_recovery_snapshot_includes_safe_revision_restore_metadata(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Recovery Rollback"})
+    original_revision = created["revision_event_id"]
+    spaces.update_space(
+        created["space_id"],
+        {
+            "description": "Broken generated shell",
+            "widgets": [
+                {
+                    "id": "bad-widget",
+                    "kind": "html",
+                    "title": "Bad Widget",
+                    "renderer": "<script>breakRecovery()</script>",
+                    "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+                }
+            ],
+        },
+    )
+    spaces.disable_widget_for_recovery(created["space_id"], "bad-widget", reason="render failure")
+
+    recovery = spaces.recovery_snapshot()
+    space = recovery["spaces"][0]
+    serialized = json.dumps(recovery).lower()
+
+    assert space["space_id"] == created["space_id"]
+    assert [rev["event_type"] for rev in space["revisions"][:3]] == [
+        "widget.recovery_disabled",
+        "space.updated",
+        "space.created",
+    ]
+    assert any(rev["event_id"] == original_revision for rev in space["revisions"])
+    assert all("snapshot" not in rev for rev in space["revisions"])
+    assert "bad-widget" in serialized
+    assert "breakrecovery" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+
+
 def test_recovery_disable_widget_marks_safe_metadata_without_deleting_or_leaking_bodies(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Recovery Disable"})
