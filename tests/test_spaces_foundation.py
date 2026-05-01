@@ -387,6 +387,38 @@ def test_space_tool_adapter_resets_big_bang_onboarding_metadata_only(monkeypatch
     assert "secret" not in serialized
 
 
+def test_space_tool_adapter_current_export_alias_uses_active_space_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "current-export-demo", "name": "Current Export Demo"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "summary",
+            "kind": "markdown",
+            "title": "Summary",
+            "renderer": "<script>window.SECRET_VALUE_DO_NOT_LEAK='***'</script>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    exported = spaces.run_space_tool(
+        "space.current.export",
+        {"active_space_id": created["space_id"], "format": "zip", "renderer": "<script>ignore()</script>"},
+    )
+    serialized = json.dumps(exported).lower()
+
+    assert exported["ok"] is True
+    assert exported["action"] == "space.current.export"
+    assert exported["source"] == "capy-space"
+    assert exported["format"] == "space-agent-zip"
+    assert exported["space_id"] == created["space_id"]
+    assert exported["archive_b64"]
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
 def test_space_tool_adapter_imports_and_exports_space_agent_packages_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 

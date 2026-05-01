@@ -736,9 +736,20 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {"space.import", "space.package.import", "space.agent.import"}:
         result = import_space_agent_package(data, space_id=data.get("space_id") or None)
         return {"ok": True, "action": name, **result}
-    if name in {"space.export", "space.package.export", "space.agent.export", "space.export.yaml", "space.export.zip"}:
-        space_id = validate_space_id(data.get("space_id"))
-        export_format = "zip" if name == "space.export.zip" else data.get("format") or "yaml"
+    if name in {
+        "space.export",
+        "space.package.export",
+        "space.agent.export",
+        "space.export.yaml",
+        "space.export.zip",
+        "space.current.export",
+        "space.current.package.export",
+        "space.current.agent.export",
+        "space.current.export.yaml",
+        "space.current.export.zip",
+    }:
+        space_id = validate_space_id(_space_tool_current_id(data) if name.startswith("space.current.") else data.get("space_id"))
+        export_format = "zip" if name.endswith(".zip") else "yaml" if name.endswith(".yaml") else data.get("format") or "yaml"
         result = export_space_agent_package(space_id, format=export_format)
         return {"ok": True, "action": name, **result}
     if name == "space.create":
