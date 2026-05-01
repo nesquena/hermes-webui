@@ -120,7 +120,7 @@ def test_space_tool_adapter_supports_source_style_current_and_spaces_aliases(mon
             "title": "Unsafe Widget",
             "renderer": "<script>steal()</script>",
             "html": "<img src=x onerror=steal()>",
-            "data": {"api_key": "SECRET...LEAK"},
+            "data": {"api_key": "***"},
         },
     )
 
@@ -149,6 +149,46 @@ def test_space_tool_adapter_supports_source_style_current_and_spaces_aliases(mon
     assert '"html":' not in serialized
     assert "api_key" not in serialized
     assert "secret" not in serialized
+
+
+def test_space_tool_adapter_exposes_metadata_only_current_context(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {
+            "space_id": "context-lab",
+            "name": "Context Lab",
+            "description": "Agent prompt context bridge",
+            "agent_instructions": "Patch widgets through typed APIs only.",
+        }
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "research-summary",
+            "kind": "markdown",
+            "title": "Summary",
+            "renderer": "<script>steal()</script>",
+            "data": {"api_key": "unsafe_marker_do_not_leak"},
+        },
+    )
+
+    result = spaces.run_space_tool("space.current.context", {"active_space_id": created["space_id"]})
+    no_current = spaces.run_space_tool("space.current.context", {})
+    serialized = json.dumps(result).lower()
+
+    assert result["ok"] is True
+    assert result["action"] == "space.current.context"
+    assert result["active_space_id"] == created["space_id"]
+    assert result["context"].startswith("## Active Capy Space")
+    assert "id: context-lab" in result["context"]
+    assert "research-summary|Summary|markdown" in result["context"]
+    assert "Patch widgets through typed APIs only." in result["context"]
+    assert no_current == {"ok": True, "action": "space.current.context", "active_space_id": None, "context": ""}
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "unsafe_marker_do_not_leak" not in serialized
 
 
 def test_space_id_validation_rejects_traversal_and_unsafe_names(monkeypatch, tmp_path):

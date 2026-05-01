@@ -672,6 +672,12 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             return {"ok": True, "action": name, "active_space_id": None, "space": None}
         space_id = validate_space_id(current_id)
         return {"ok": True, "action": name, "active_space_id": space_id, "space": read_space_detail(space_id)}
+    if name in {"space.current.context", "space.context", "space.current.prompt_context"}:
+        current_id = _space_tool_current_id(data)
+        if not current_id:
+            return {"ok": True, "action": name, "active_space_id": None, "context": ""}
+        space_id = validate_space_id(current_id)
+        return {"ok": True, "action": name, "active_space_id": space_id, "context": build_agent_context(space_id)}
     if name in {"space.current.widgets", "space.current.widget.list"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         return {"ok": True, "action": name, "active_space_id": space_id, "widgets": list_widgets(space_id)}
