@@ -159,6 +159,43 @@
   :root[data-skin="sienna"] .session-item.active{border-left:2px solid var(--accent);}
   :root[data-skin="sienna"] .composer-box{border-radius:18px;}
 
+  /* NEO: skin "neo" — cyan / azul-noite, espelhando o mockup neo_agent_web_ui.png.
+     Fork do nesquena/hermes-webui adaptado como WebUI do agente Neo (segundo
+     cérebro do Júnior Melo). Reescrita full de paleta no estilo "sienna":
+     fundo navy profundo, accent ciano, glow sutil. Light mode usa um azul
+     acinzentado para legibilidade fora do dark. */
+  :root[data-skin="neo"]{
+    --bg:#F2F6FB;--sidebar:#E8EEF7;--surface:#FFFFFF;
+    --border:#D6E1EE;--border2:#B9C9DD;
+    --text:#0B1726;--muted:#54637A;--strong:#06101C;--em:#3A4A60;
+    --accent:#0288A8;--accent-hover:#016B85;--accent-text:#016B85;
+    --accent-bg:rgba(2,136,168,0.08);--accent-bg-strong:rgba(2,136,168,0.18);
+    --code-bg:#EAF1FA;--code-inline-bg:rgba(2,136,168,0.10);--code-text:#016B85;--pre-text:#0B1726;
+    --topbar-bg:rgba(242,246,251,0.96);--main-bg:rgba(242,246,251,0.55);
+    --input-bg:rgba(2,136,168,0.04);--hover-bg:rgba(2,136,168,0.07);
+    --focus-ring:rgba(2,136,168,0.30);--focus-glow:rgba(2,136,168,0.10);
+    --blue:#0288A8;--gold:#016B85;
+  }
+  :root.dark[data-skin="neo"]{
+    --bg:#070B17;--sidebar:#0E1426;--surface:#121A2E;
+    --border:#1F2A44;--border2:#2C3A5A;
+    --text:#E6F4FF;--muted:#8AA0BD;--strong:#FFFFFF;--em:#B7CBE6;
+    --accent:#00E5FF;--accent-hover:#00B8D4;--accent-text:#5EE9FF;
+    --accent-bg:rgba(0,229,255,0.08);--accent-bg-strong:rgba(0,229,255,0.18);
+    --code-bg:#0B1224;--code-inline-bg:rgba(0,229,255,0.10);--code-text:#7DE6FF;--pre-text:#E6F4FF;
+    --topbar-bg:rgba(14,20,38,0.96);--main-bg:rgba(7,11,23,0.55);
+    --input-bg:rgba(0,229,255,0.05);--hover-bg:rgba(0,229,255,0.08);
+    --focus-ring:rgba(0,229,255,0.32);--focus-glow:rgba(0,229,255,0.12);
+    --blue:#00E5FF;--gold:#5EE9FF;
+  }
+  :root[data-skin="neo"] .new-chat-btn,
+  :root.dark[data-skin="neo"] .new-chat-btn{background:var(--accent);border-color:var(--accent);color:#04101A;font-weight:600;}
+  :root[data-skin="neo"] .new-chat-btn:hover,
+  :root.dark[data-skin="neo"] .new-chat-btn:hover{background:var(--accent-hover);border-color:var(--accent-hover);color:#04101A;}
+  :root.dark[data-skin="neo"] button.send-btn{box-shadow:0 0 12px rgba(0,229,255,0.35);}
+  :root.dark[data-skin="neo"] button.send-btn:hover{box-shadow:0 0 18px rgba(0,229,255,0.55);}
+  :root.dark[data-skin="neo"] .session-item.active{border-left:2px solid var(--accent);}
+
   /* #594: app-dialog light mode overrides — base styles use hardcoded dark gradients */
   :root:not(.dark) .app-dialog{
     background:linear-gradient(180deg,rgba(240,237,232,.99),rgba(228,224,216,.99));

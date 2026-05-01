@@ -2190,9 +2190,11 @@ _SETTINGS_DEFAULTS = {
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
     "check_for_updates": True,  # check if webui/agent repos are behind upstream
     "theme": "dark",  # light | dark | system
-    "skin": "default",  # accent color skin: default | ares | mono | slate | poseidon | sisyphus | charizard
+    # NEO: HERMES_WEBUI_DEFAULT_SKIN configura o skin default na VPS Neo (e.g. "neo")
+    "skin": os.getenv("HERMES_WEBUI_DEFAULT_SKIN", "default"),  # accent color skin
     "font_size": "default",  # small | default | large
-    "language": "en",  # UI locale code; must match a key in static/i18n.js LOCALES
+    # NEO: HERMES_WEBUI_LOCALE configura o locale default ("pt-BR" no deploy do Neo)
+    "language": os.getenv("HERMES_WEBUI_LOCALE", "en"),  # UI locale code; must match a key in static/i18n.js LOCALES
     "bot_name": os.getenv(
         "HERMES_WEBUI_BOT_NAME", "Hermes"
     ),  # display name for the assistant
@@ -2215,6 +2217,9 @@ _SETTINGS_SKIN_VALUES = {
     "poseidon",
     "sisyphus",
     "charizard",
+    "sienna",
+    # NEO: skin "neo" — cyan/azul-noite (fork Neo WebUI)
+    "neo",
 }
 _SETTINGS_LEGACY_THEME_MAP = {
     # Legacy full themes now map onto the closest supported theme + accent skin pair.

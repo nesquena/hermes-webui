@@ -811,9 +811,20 @@ def handle_get(handler, parsed) -> bool:
         from urllib.parse import quote
         from api.updates import WEBUI_VERSION
         version_token = quote(WEBUI_VERSION, safe="")
+        # NEO: injeta defaults de skin/locale no boot script para evitar flicker
+        # de primeiro paint quando localStorage do visitante está vazio.
+        _neo_defaults = load_settings()
+        _neo_skin = (_neo_defaults.get("skin") or "default").replace("'", "")
+        _neo_locale = (_neo_defaults.get("language") or "en").replace("'", "")
+        _index_html = (
+            _INDEX_HTML_PATH.read_text(encoding="utf-8")
+            .replace("__WEBUI_VERSION__", version_token)
+            .replace("__NEO_DEFAULT_SKIN__", _neo_skin)
+            .replace("__NEO_DEFAULT_LOCALE__", _neo_locale)
+        )
         return t(
             handler,
-            _INDEX_HTML_PATH.read_text(encoding="utf-8").replace("__WEBUI_VERSION__", version_token),
+            _index_html,
             content_type="text/html; charset=utf-8",
         )
 

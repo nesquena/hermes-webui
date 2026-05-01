@@ -1,48 +1,87 @@
-# Python cache
+# =============================================================================
+# Neo WebUI — .gitignore
+# Fork de nesquena/hermes-webui com customizações para o agente Neo.
+# Organizado por categoria. Manter alfabético dentro de cada seção.
+# =============================================================================
+
+# ─── Python ──────────────────────────────────────────────────────────────────
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.egg-info/
+*.eggs/
+dist/
+build/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
 
-# Backup and temporary files
-*.bak
-*.swp
-*.swo
+# ─── Virtual environments ────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+.python-version
 
-# Archive directory (pre-git backups, kept on disk but not tracked)
-archive/
-
-# Local environment and secrets (but keep the example template)
+# ─── Environment and secrets ─────────────────────────────────────────────────
+# Keep the example template; ignore everything else.
 .env
 .env.*
 !.env.example
+
+# ─── AI coding assistants / IDE agent configs ────────────────────────────────
 .claude/
 CLAUDE.md
 AGENTS.md
 .cursorrules
+.cursor/
 .windsurfrules
 .aider*
 copilot-instructions.md
+.continue/
+.codeium/
 
-# Generated screenshots and transient artifacts
+# ─── Editors and IDEs ────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.code-workspace
+*.sublime-project
+*.sublime-workspace
+
+# ─── OS files ────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+
+# ─── Generated / build artifacts ────────────────────────────────────────────
+api/_version.py
+
+# ─── Design mockups and screenshots (reference only, not served) ─────────────
+static/neo_agent_web_ui.png
 screenshot-*.png
 full-UI.png
 
-# Version file written by Docker/CI build — generated, never committed
-api/_version.py
+# ─── Archive and backups ─────────────────────────────────────────────────────
+archive/
+*.bak
+*.orig
 
-# OS files
-.DS_Store
-Thumbs.db
-
-# Local reference clones — never committed (except tracked design/UI-UX reference pages)
-docs/*
-!docs/ui-ux/
-!docs/ui-ux/**
-
-# Local-only PR review harness: rendering drivers, sample bank, fixtures.
-# Used by Claude during deep reviews; never shared in the repo.
+# ─── Local-only PR review harness ────────────────────────────────────────────
 .local-review/
 graphify-out/
 .graphify_cached.json
 .graphify_uncached.txt
+
+# ─── Node.js (for MCP servers / bridge dev) ──────────────────────────────────
+node_modules/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+.npm/
+
+# ─── Docker (local dev) ──────────────────────────────────────────────────────
+.docker/
