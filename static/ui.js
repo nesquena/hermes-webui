@@ -706,6 +706,7 @@ function toggleModelDropdown(){
   if(typeof closeProfileDropdown==='function') closeProfileDropdown();
   if(typeof closeWsDropdown==='function') closeWsDropdown();
   if(typeof closeReasoningDropdown==='function') closeReasoningDropdown();
+  if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
   renderModelDropdown();
   dd.classList.add('open');
   _positionModelDropdown();
@@ -805,6 +806,7 @@ function toggleReasoningDropdown(){
   if(typeof closeProfileDropdown==='function') closeProfileDropdown();
   if(typeof closeWsDropdown==='function') closeWsDropdown();
   closeModelDropdown();
+  if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
   _highlightReasoningOption(_currentReasoningEffort);
   dd.classList.add('open');
   _positionReasoningDropdown();
@@ -859,6 +861,164 @@ document.addEventListener('click',function(e){
   }
 });
 
+// ── Session toolsets chip (#493) ───────────────────────────────────────────
+let _currentSessionToolsets = null; // null = global, array = custom list
+
+function _applyToolsetsChip(toolsets) {
+  _currentSessionToolsets = toolsets;
+  const wrap = $('composerToolsetsWrap');
+  const label = $('composerToolsetsLabel');
+  const chip = $('composerToolsetsChip');
+  if (!wrap || !label) return;
+  wrap.style.display = '';
+  const hasCustom = Array.isArray(toolsets) && toolsets.length > 0;
+  if (hasCustom) {
+    label.textContent = toolsets.join(', ');
+    chip.classList.add('has-custom');
+    chip.title = t('session_toolsets') + ': ' + toolsets.join(', ');
+  } else {
+    label.textContent = t('session_toolsets_global');
+    chip.classList.remove('has-custom');
+    chip.title = t('session_toolsets');
+  }
+}
+
+function _syncToolsetsChip() {
+  if (typeof S === 'undefined' || !S || !S.session) {
+    _applyToolsetsChip(null);
+    return;
+  }
+  _applyToolsetsChip(S.session.enabled_toolsets || null);
+}
+
+function syncToolsetsChip() {
+  _syncToolsetsChip();
+}
+
+function _populateToolsetsDropdown() {
+  const desc = $('toolsetsDropdownDesc');
+  const state = $('toolsetsDropdownState');
+  const input = $('toolsetsInput');
+  const applyBtn = $('toolsetsApplyBtn');
+  const clearBtn = $('toolsetsClearBtn');
+  if (!desc || !state || !input) return;
+  desc.textContent = t('session_toolsets_desc');
+  if (applyBtn) applyBtn.textContent = t('session_toolsets_apply');
+  if (clearBtn) clearBtn.textContent = t('session_toolsets_clear');
+  input.placeholder = t('session_toolsets_placeholder');
+  // Escape key handler for toolsets input
+  input.onkeydown = function(e) { if(e.key === 'Escape') closeToolsetsDropdown(); };
+  const hasCustom = Array.isArray(_currentSessionToolsets) && _currentSessionToolsets.length > 0;
+  if (hasCustom) {
+    state.textContent = '🔧 ' + _currentSessionToolsets.join(', ');
+    input.value = _currentSessionToolsets.join(', ');
+  } else {
+    state.textContent = '🌍 ' + t('session_toolsets_global');
+    input.value = '';
+  }
+}
+
+function _positionToolsetsDropdown() {
+  const dd = $('composerToolsetsDropdown');
+  const chip = $('composerToolsetsChip');
+  const footer = document.querySelector('.composer-footer');
+  if (!dd || !chip || !footer) return;
+  const chipRect = chip.getBoundingClientRect();
+  const footerRect = footer.getBoundingClientRect();
+  let left = chipRect.left - footerRect.left;
+  const maxLeft = Math.max(0, footer.clientWidth - dd.offsetWidth);
+  left = Math.max(0, Math.min(left, maxLeft));
+  dd.style.left = left + 'px';
+}
+
+function toggleToolsetsDropdown() {
+  const dd = $('composerToolsetsDropdown');
+  const chip = $('composerToolsetsChip');
+  if (!dd || !chip) return;
+  if (typeof S === 'undefined' || !S || !S.session) return;
+  const open = dd.classList.contains('open');
+  if (open) { closeToolsetsDropdown(); return; }
+  if (typeof closeProfileDropdown === 'function') closeProfileDropdown();
+  if (typeof closeWsDropdown === 'function') closeWsDropdown();
+  closeModelDropdown();
+  if (typeof closeReasoningDropdown === 'function') closeReasoningDropdown();
+  _syncToolsetsChip();
+  _populateToolsetsDropdown();
+  dd.classList.add('open');
+  _positionToolsetsDropdown();
+  chip.classList.add('active');
+  // Focus the input after a tick so the layout has settled
+  setTimeout(() => { const inp = $('toolsetsInput'); if (inp) inp.focus(); }, 50);
+}
+
+function closeToolsetsDropdown() {
+  const dd = $('composerToolsetsDropdown');
+  const chip = $('composerToolsetsChip');
+  if (dd) dd.classList.remove('open');
+  if (chip) chip.classList.remove('active');
+}
+
+function _applySessionToolsets(toolsets) {
+  if (typeof S === 'undefined' || !S || !S.session) return;
+  const sid = S.session.session_id;
+  api('/api/session/toolsets', {
+    method: 'POST',
+    body: JSON.stringify({ session_id: sid, toolsets: toolsets })
+  })
+    .then(function(r) {
+      if (r && r.ok) {
+        S.session.enabled_toolsets = r.enabled_toolsets || null;
+        _applyToolsetsChip(r.enabled_toolsets || null);
+        if (r.enabled_toolsets && r.enabled_toolsets.length) {
+          showToast('🔧 ' + t('session_toolsets_applied') + ': ' + r.enabled_toolsets.join(', '));
+        } else {
+          showToast('🌍 ' + t('session_toolsets_cleared'));
+        }
+      } else {
+        showToast(t('session_toolsets_failed') + (r && r.error ? r.error : 'Unknown error'), 3000, 'error');
+      }
+    })
+    .catch(function(err) {
+      showToast(t('session_toolsets_failed') + (err.message || err), 3000, 'error');
+    });
+}
+
+// Click-outside handler for toolsets dropdown
+document.addEventListener('click', function(e) {
+  if (
+    !e.target.closest('#composerToolsetsChip') &&
+    !e.target.closest('#composerToolsetsDropdown')
+  ) closeToolsetsDropdown();
+  // Apply button
+  if (e.target.closest('#toolsetsApplyBtn')) {
+    const input = $('toolsetsInput');
+    if (!input) return;
+    const raw = input.value.trim();
+    if (!raw) {
+      showToast(t('session_toolsets_desc'), 2000);
+      return;
+    }
+    const toolsets = raw.split(',').map(s => s.trim()).filter(Boolean);
+    if (toolsets.length === 0) {
+      showToast(t('session_toolsets_desc'), 2000);
+      return;
+    }
+    _applySessionToolsets(toolsets);
+    closeToolsetsDropdown();
+  }
+  // Clear button
+  if (e.target.closest('#toolsetsClearBtn')) {
+    _applySessionToolsets(null);
+    closeToolsetsDropdown();
+  }
+});
+
+// Position toolsets dropdown on resize
+window.addEventListener('resize', () => {
+  const dd = $('composerToolsetsDropdown');
+  if (dd && dd.classList.contains('open')) _positionToolsetsDropdown();
+});
+
 function _syncMobileComposerConfigButton(open){
   const btn=$('composerMobileConfigBtn');
   if(!btn) return;
@@ -881,12 +1041,14 @@ function toggleMobileComposerConfig(){
     closeMobileComposerConfig();
     closeModelDropdown();
     closeReasoningDropdown();
+    if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
     return;
   }
   if(typeof closeProfileDropdown==='function') closeProfileDropdown();
   if(typeof closeWsDropdown==='function') closeWsDropdown();
   closeModelDropdown();
   closeReasoningDropdown();
+  if(typeof closeToolsetsDropdown==='function') closeToolsetsDropdown();
   panel.classList.add('open');
   _syncMobileComposerConfigButton(true);
 }
@@ -2766,6 +2928,7 @@ function syncTopbar(){
   }
   if(typeof syncModelChip==='function') syncModelChip();
   if(typeof syncReasoningChip==='function') syncReasoningChip();
+  if(typeof syncToolsetsChip==='function') syncToolsetsChip();
   // Show Clear button only when session has messages
   const clearBtn=$('btnClearConv');
   if(clearBtn) clearBtn.style.display=(S.messages&&S.messages.filter(msg=>msg.role!=='tool').length>0)?'':'none';

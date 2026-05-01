@@ -320,8 +320,9 @@ class Session:
                  compression_anchor_message_key=None,
                  context_length=None, threshold_tokens=None,
                  last_prompt_tokens=None,
-                 parent_session_id: str=None,
-                 **kwargs):
+                parent_session_id: str=None,
+                enabled_toolsets=None,
+                **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
         self.workspace = str(Path(workspace).expanduser().resolve())
@@ -353,6 +354,7 @@ class Session:
         self.source_tag = kwargs.get('source_tag')
         self.session_source = kwargs.get('session_source')
         self.source_label = kwargs.get('source_label')
+        self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
         self._metadata_message_count = None
 
     @property
@@ -375,6 +377,7 @@ class Session:
             'context_length', 'threshold_tokens', 'last_prompt_tokens',
             'parent_session_id',
             'is_cli_session', 'source_tag', 'session_source', 'source_label',
+            'enabled_toolsets',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         meta['messages'] = self.messages
@@ -477,6 +480,7 @@ class Session:
             'source_tag': self.source_tag,
             'session_source': self.session_source,
             'source_label': self.source_label,
+            'enabled_toolsets': self.enabled_toolsets,
             'is_streaming': _is_streaming_session(
                 self.active_stream_id, active_stream_ids
             ) if include_runtime else False,

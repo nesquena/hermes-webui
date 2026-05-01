@@ -1726,6 +1726,18 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             from api.config import _resolve_cli_toolsets
             _toolsets = _resolve_cli_toolsets(_cfg)
 
+            # Per-session toolset override (#493): if the session has
+            # enabled_toolsets set, use that instead of the global config.
+            try:
+                from api.models import Session, SESSION_DIR
+                _session_path = SESSION_DIR / f"{session_id}.json"
+                if _session_path.exists():
+                    _session_meta = Session.load_metadata_only(session_id)
+                    if _session_meta and _session_meta.get('enabled_toolsets'):
+                        _toolsets = _session_meta['enabled_toolsets']
+            except Exception as _ts_err:
+                print(f"[webui] WARNING: failed to read per-session toolsets for {session_id}: {_ts_err}", flush=True)
+
             # Fallback model from profile config (e.g. for rate-limit recovery)
             _fallback = _cfg.get('fallback_model') or _cfg.get('fallback_providers') or None
             _fallback_resolved = None

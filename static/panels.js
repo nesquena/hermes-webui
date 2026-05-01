@@ -402,25 +402,66 @@ function _setCronHeaderButtons(mode, job) {
 
 async function _loadCronDetailRuns(jobId){
   try {
-    const data = await api(`/api/crons/output?job_id=${encodeURIComponent(jobId)}&limit=20`);
+    const data = await api(`/api/crons/history?job_id=${encodeURIComponent(jobId)}&limit=50`);
     if (!_currentCronDetail || _currentCronDetail.id !== jobId) return;
     const card = $('cronDetailRuns');
     if (!card) return;
-    if (!data.outputs || !data.outputs.length) {
+    if (!data.runs || !data.runs.length) {
       card.innerHTML = `<div class="detail-card-title">${esc(t('cron_last_output'))}</div><div style="color:var(--muted);font-size:12px">${esc(t('cron_no_runs_yet'))}</div>`;
       return;
     }
-    const rows = data.outputs.map((out, i) => {
-      const ts = out.filename.replace('.md','').replace(/_/g,' ');
-      const snippet = _cronOutputSnippet(out.content);
+    const rows = data.runs.map((run, i) => {
+      const ts = run.filename.replace('.md','').replace(/_/g,' ');
+      const sizeStr = run.size > 1024 ? (run.size/1024).toFixed(1)+' KB' : run.size+' B';
+      const dateStr = new Date(run.modified * 1000).toLocaleString();
       const rid = `cron-det-run-${jobId}-${i}`;
       return `<div class="detail-run-item" id="${rid}">
-        <div class="detail-run-head" onclick="document.getElementById('${rid}').classList.toggle('open')"><span>${esc(ts)}</span><span style="opacity:.6">▸</span></div>
-        <div class="detail-run-body">${esc(snippet)}</div>
+        <div class="detail-run-head" onclick="_loadRunContent('${esc(jobId)}','${esc(run.filename)}','${rid}')">
+          <span><span style="opacity:.7">${esc(ts)}</span> <span style="opacity:.4;font-size:11px">${esc(sizeStr)}</span></span>
+          <span style="opacity:.6">▸</span>
+        </div>
+        <div class="detail-run-body" style="color:var(--muted);font-size:12px">${esc(t('loading'))}</div>
       </div>`;
     }).join('');
-    card.innerHTML = `<div class="detail-card-title">${esc(t('cron_last_output'))}</div>${rows}`;
+    const countLabel = data.total > 50 ? ` (${data.total} runs, showing latest 50)` : ` (${data.total} runs)`;
+    card.innerHTML = `<div class="detail-card-title">${esc(t('cron_last_output'))}${countLabel}</div>${rows}`;
   } catch(e) { /* ignore */ }
+}
+
+async function _loadRunContent(jobId, filename, runId){
+  const body = document.querySelector(`#${runId} .detail-run-body`);
+  if (!body) return;
+  const item = document.getElementById(runId);
+  if (!item.classList.contains('open')) {
+    item.classList.add('open');
+  }
+  body.innerHTML = `<span style="opacity:.5">${esc(t('loading'))}</span>`;
+  try {
+    const data = await api(`/api/crons/run?job_id=${encodeURIComponent(jobId)}&filename=${encodeURIComponent(filename)}`);
+    if (data.error) {
+      body.textContent = data.error;
+      return;
+    }
+    // Render markdown content using the same renderer as chat messages
+    if (typeof renderMd === 'function') {
+      body.innerHTML = renderMd(data.snippet || data.content);
+    } else {
+      body.textContent = data.snippet || data.content;
+    }
+    // Show "View full output" button if content was truncated
+    if (data.content && data.snippet && data.content.length > data.snippet.length) {
+      const btn = document.createElement('button');
+      btn.style.cssText = 'margin-top:8px;padding:4px 12px;border-radius:var(--radius-btn);border:1px solid var(--border-subtle);background:var(--surface-subtle);color:var(--text-secondary);cursor:pointer;font-size:12px';
+      btn.textContent = t('cron_view_full_output') || 'View full output';
+      btn.onclick = () => {
+        body.innerHTML = renderMd ? renderMd(data.content) : '';
+        btn.remove();
+      };
+      body.appendChild(btn);
+    }
+  } catch(e) {
+    body.textContent = 'Error: ' + e.message;
+  }
 }
 
 function openCronDetail(id, el){

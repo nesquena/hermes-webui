@@ -1342,6 +1342,39 @@ def handle_get(handler, parsed) -> bool:
             return j(handler, {"error": "not found"}, status=404)
         return _handle_clarify_inject(handler, parsed)
 
+    # ── OAuth (Codex device-code) ──
+    if parsed.path == "/api/oauth/codex/start":
+        """Start Codex device-code OAuth flow. Returns user_code + verification_uri."""
+        try:
+            from api.oauth import start_codex_device_code
+            result = start_codex_device_code()
+            return j(handler, result)
+        except Exception as e:
+            return j(handler, {"error": str(e)}, status=500)
+
+    if parsed.path == "/api/oauth/codex/poll":
+        """SSE endpoint for polling Codex OAuth token."""
+        qs = parse_qs(parsed.query)
+        device_code = qs.get("device_code", [""])[0]
+        if not device_code:
+            return j(handler, {"error": "device_code required"}, status=400)
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream")
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("Connection", "keep-alive")
+        handler.end_headers()
+        try:
+            from api.oauth import poll_codex_token
+            for event in poll_codex_token(device_code):
+                handler.wfile.write(f"data: {json.dumps(event)}\n\n".encode())
+                handler.wfile.flush()
+                if event.get("status") in ("success", "error"):
+                    break
+        except Exception as e:
+            handler.wfile.write(f"data: {json.dumps({'status': 'error', 'error': str(e)})}\n\n".encode())
+            handler.wfile.flush()
+        return  # SSE handled, no JSON response
+
     # ── Cron API (GET) ──
     if parsed.path == "/api/crons":
         from cron.jobs import list_jobs
@@ -1350,6 +1383,12 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/crons/output":
         return _handle_cron_output(handler, parsed)
+
+    if parsed.path == "/api/crons/history":
+        return _handle_cron_history(handler, parsed)
+
+    if parsed.path == "/api/crons/run":
+        return _handle_cron_run_detail(handler, parsed)
 
     if parsed.path == "/api/crons/recent":
         return _handle_cron_recent(handler, parsed)
@@ -1593,6 +1632,33 @@ def handle_post(handler, parsed) -> bool:
             s.personality = name if name else None
             s.save()
         return j(handler, {"ok": True, "personality": s.personality, "prompt": prompt})
+
+    if parsed.path == "/api/session/toolsets":
+        """Set or clear per-session toolset override (#493).
+
+        POST body: { session_id, toolsets: [...] | null }
+        - toolsets: list of toolset names to restrict the session to, or null to clear.
+        """
+        try:
+            require(body, "session_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        sid = body["session_id"]
+        toolsets = body.get("toolsets")
+        # Validate: if not None, must be a non-empty list of strings
+        if toolsets is not None:
+            if not isinstance(toolsets, list) or not toolsets:
+                return bad(handler, "toolsets must be a non-empty list or null")
+            if not all(isinstance(t, str) and t for t in toolsets):
+                return bad(handler, "each toolset must be a non-empty string")
+        try:
+            s = get_session(sid)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        with _get_session_agent_lock(sid):
+            s.enabled_toolsets = toolsets
+            s.save()
+        return j(handler, {"ok": True, "enabled_toolsets": s.enabled_toolsets})
 
     if parsed.path == "/api/session/update":
         try:
@@ -3314,6 +3380,76 @@ def _handle_live_models(handler, parsed):
     except Exception as _e:
         logger.debug("_handle_live_models failed for %s: %s", provider, _e)
         return j(handler, {"error": str(_e), "models": []})
+
+
+def _handle_cron_history(handler, parsed):
+    """List cron run output files with metadata (no content).
+
+    Returns lightweight file listing so the frontend can render a run history
+    without fetching full output for every run.
+    """
+    from cron.jobs import OUTPUT_DIR as CRON_OUT
+
+    qs = parse_qs(parsed.query)
+    job_id = qs.get("job_id", [""])[0]
+    offset = int(qs.get("offset", ["0"])[0])
+    limit = int(qs.get("limit", ["50"])[0])
+    if not job_id:
+        return j(handler, {"error": "job_id required"}, status=400)
+    out_dir = CRON_OUT / job_id
+    runs = []
+    total = 0
+    if out_dir.exists():
+        all_files = sorted(out_dir.glob("*.md"), reverse=True)
+        total = len(all_files)
+        page = all_files[offset:offset + limit]
+        for f in page:
+            try:
+                st = f.stat()
+                runs.append({
+                    "filename": f.name,
+                    "size": st.st_size,
+                    "modified": st.st_mtime,
+                })
+            except OSError:
+                logger.debug("Failed to stat cron output file %s", f)
+    return j(handler, {"job_id": job_id, "runs": runs, "total": total, "offset": offset})
+
+
+def _handle_cron_run_detail(handler, parsed):
+    """Return full content of a single cron run output file."""
+    from cron.jobs import OUTPUT_DIR as CRON_OUT
+
+    qs = parse_qs(parsed.query)
+    job_id = qs.get("job_id", [""])[0]
+    filename = qs.get("filename", [""])[0]
+    if not job_id or not filename:
+        return j(handler, {"error": "job_id and filename required"}, status=400)
+    # Prevent path traversal
+    if "/" in filename or "\\" in filename or ".." in filename:
+        return j(handler, {"error": "invalid filename"}, status=400)
+    fpath = CRON_OUT / job_id / filename
+    if not fpath.exists():
+        return j(handler, {"error": "run not found"}, status=404)
+    try:
+        content = fpath.read_text(encoding="utf-8", errors="replace")
+        snippet = _cron_output_snippet(content)
+        return j(handler, {"job_id": job_id, "filename": filename,
+                           "content": content, "snippet": snippet})
+    except Exception as e:
+        return j(handler, {"error": str(e)}, status=500)
+
+
+def _cron_output_snippet(text: str, limit: int = 600) -> str:
+    """Extract the response body from a cron output .md file for preview."""
+    lines = text.split("\n")
+    response_idx = -1
+    for i, line in enumerate(lines):
+        if line.startswith("## Response") or line.startswith("# Response"):
+            response_idx = i
+            break
+    body = ("\n".join(lines[response_idx + 1:]) if response_idx >= 0 else "\n".join(lines)).strip()
+    return body[:limit] or "(empty)"
 
 
 def _handle_cron_output(handler, parsed):
