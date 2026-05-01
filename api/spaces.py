@@ -768,6 +768,26 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         event_id = str(data.get("event_id") or data.get("revision_event_id") or "")
         result = restore_revision(space_id, event_id)
         return {"action": name, **result}
+    if name in {"space.recovery", "space.recovery.snapshot", "space.safe_mode", "space.safe_mode.snapshot"}:
+        return {"ok": True, "action": name, "recovery": recovery_snapshot()}
+    if name in {"space.recovery.disable", "space.recovery.disable_space", "space.safe_mode.disable"}:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        result = disable_space_for_recovery(space_id, reason=_payload_text_summary(data.get("reason") or "disabled from recovery", 300))
+        return {"ok": True, "action": name, **result}
+    if name in {"space.recovery.enable", "space.recovery.enable_space", "space.safe_mode.enable"}:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        result = enable_space_for_recovery(space_id, reason=_payload_text_summary(data.get("reason") or "enabled from recovery", 300))
+        return {"ok": True, "action": name, **result}
+    if name in {"space.recovery.disable_widget", "space.widget.recovery.disable", "widget.recovery.disable"}:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
+        result = disable_widget_for_recovery(space_id, widget_id, reason=_payload_text_summary(data.get("reason") or "disabled from recovery", 300))
+        return {"ok": True, "action": name, **result}
+    if name in {"space.recovery.enable_widget", "space.widget.recovery.enable", "widget.recovery.enable"}:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
+        result = enable_widget_for_recovery(space_id, widget_id, reason=_payload_text_summary(data.get("reason") or "enabled from recovery", 300))
+        return {"ok": True, "action": name, **result}
     if name == "widget.list":
         space_id = validate_space_id(data.get("space_id"))
         return {"ok": True, "action": name, "widgets": list_widgets(space_id)}

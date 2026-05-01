@@ -831,6 +831,56 @@ def test_recovery_enable_space_restores_safe_metadata_without_rendering_widgets(
     assert "<script" not in serialized
 
 
+def test_space_tool_adapter_recovery_actions_return_safe_metadata(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "tool-recovery", "name": "Tool Recovery"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "bad-widget",
+            "kind": "html",
+            "title": "Bad Widget",
+            "renderer": "<script>window.SECRET_VALUE_DO_NOT_LEAK='***'</script>",
+            "html": "<img src=x onerror=stealSecret()>",
+            "data": {"api_key": "SECRET...LEAK"},
+        },
+    )
+
+    disabled = spaces.run_space_tool(
+        "space.recovery.disable_widget",
+        {
+            "space_id": created["space_id"],
+            "widget_id": "bad-widget",
+            "reason": "render failed <script>ignore()</script>",
+        },
+    )
+    snapshot = spaces.run_space_tool("space.recovery.snapshot", {"renderer": "<script>ignore()</script>"})
+    enabled = spaces.run_space_tool(
+        "space.recovery.enable_widget",
+        {"space_id": created["space_id"], "widget_id": "bad-widget"},
+    )
+    serialized = json.dumps({"disabled": disabled, "snapshot": snapshot, "enabled": enabled}).lower()
+
+    assert disabled["ok"] is True
+    assert disabled["action"] == "space.recovery.disable_widget"
+    assert disabled["disabled"] is True
+    assert disabled["space_id"] == created["space_id"]
+    assert disabled["widget_id"] == "bad-widget"
+    assert snapshot["ok"] is True
+    assert snapshot["action"] == "space.recovery.snapshot"
+    assert snapshot["recovery"]["generated_widgets_rendered"] is False
+    assert snapshot["recovery"]["spaces"][0]["widgets"][0]["disabled"] is True
+    assert enabled["ok"] is True
+    assert enabled["action"] == "space.recovery.enable_widget"
+    assert enabled["disabled"] is False
+    assert "stealsecret" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "api_key" not in serialized
+
+
 def test_import_space_agent_yaml_package_quarantines_generated_sources(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
