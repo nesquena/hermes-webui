@@ -44,6 +44,12 @@ async function send(){
   if(!text&&!S.pendingFiles.length)return;
   // Don't send while an inline message edit is active
   if(document.querySelector('.msg-edit-area'))return;
+
+  // Dismiss handoff hint when user sends a message (resets seen_at).
+  if(S.session&&S.session.session_id&&typeof _dismissHandoffHint==='function'){
+    _dismissHandoffHint(S.session.session_id);
+  }
+
   const compressionRunning=typeof isCompressionUiRunning==='function'&&isCompressionUiRunning();
   // If busy or a manual compression is still running, handle based on busy_input_mode
   if(S.busy||compressionRunning){

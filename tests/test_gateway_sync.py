@@ -754,6 +754,154 @@ def test_imported_cli_session_metadata_survives_compact(cleanup_test_sessions):
     assert compact['source_label'] == 'Telegram'
 
 
+def test_import_cli_preserves_messaging_source_metadata(cleanup_test_sessions):
+    """Importing a messaging agent session should keep source metadata for WebUI policy."""
+    conn = _ensure_state_db()
+    sid = 'gw_import_weixin_meta_001'
+    cleanup_test_sessions.append(sid)
+    try:
+        _insert_gateway_session(conn, session_id=sid, source='weixin', title='Weixin Session')
+
+        data, status = post('/api/session/import_cli', {'session_id': sid})
+        assert status == 200
+        session = data.get('session', {})
+        assert session.get('is_cli_session') is True
+        assert session.get('source_tag') == 'weixin'
+        assert session.get('raw_source') == 'weixin'
+        assert session.get('session_source') == 'messaging'
+        assert session.get('source_label') == 'Weixin'
+    finally:
+        try:
+            _remove_test_sessions(conn, sid)
+            conn.close()
+        except Exception:
+            pass
+
+
+def test_sessions_response_backfills_imported_messaging_source_metadata(cleanup_test_sessions):
+    """Old imported messaging sessions should still expose source metadata in /api/sessions."""
+    from api.models import Session
+
+    conn = _ensure_state_db()
+    sid = 'gw_legacy_import_weixin_001'
+    cleanup_test_sessions.append(sid)
+    try:
+        _insert_gateway_session(conn, session_id=sid, source='weixin', title='Weixin Session')
+        s = Session(
+            session_id=sid,
+            title='Legacy Imported Weixin',
+            messages=[{'role': 'user', 'content': 'hello', 'timestamp': time.time()}],
+            model='openai/gpt-5',
+        )
+        s.is_cli_session = True
+        s.save(touch_updated_at=False)
+        post('/api/settings', {'show_cli_sessions': True})
+
+        data, status = get('/api/sessions')
+        assert status == 200
+        session = next(item for item in data.get('sessions', []) if item.get('session_id') == sid)
+        assert session.get('source_tag') == 'weixin'
+        assert session.get('raw_source') == 'weixin'
+        assert session.get('session_source') == 'messaging'
+        assert session.get('source_label') == 'Weixin'
+    finally:
+        try:
+            post('/api/settings', {'show_cli_sessions': False})
+            _remove_test_sessions(conn, sid)
+            conn.close()
+        except Exception:
+            pass
+
+
+def test_sessions_response_keeps_only_latest_messaging_session_per_source(cleanup_test_sessions):
+    """Sidebar should expose only the newest session for each messaging source."""
+    from api.models import Session
+
+    conn = _ensure_state_db()
+    old_sid = 'gw_old_weixin_visible_001'
+    new_sid = 'gw_new_weixin_visible_001'
+    cleanup_test_sessions.extend([old_sid, new_sid])
+    try:
+        _insert_gateway_session(conn, session_id=old_sid, source='weixin', title='Old Weixin', started_at=time.time() - 100)
+        _insert_gateway_session(conn, session_id=new_sid, source='weixin', title='New Weixin', started_at=time.time())
+
+        old = Session(
+            session_id=old_sid,
+            title='Old Imported Weixin',
+            messages=[{'role': 'user', 'content': 'old', 'timestamp': time.time() - 100}],
+            model='openai/gpt-5',
+        )
+        old.is_cli_session = True
+        old.save(touch_updated_at=False)
+        post('/api/settings', {'show_cli_sessions': True})
+
+        data, status = get('/api/sessions')
+        assert status == 200
+        ids = {item.get('session_id') for item in data.get('sessions', [])}
+        assert new_sid in ids
+        assert old_sid not in ids
+    finally:
+        try:
+            post('/api/settings', {'show_cli_sessions': False})
+            _remove_test_sessions(conn, old_sid, new_sid)
+            conn.close()
+        except Exception:
+            pass
+
+
+def test_archiving_raw_messaging_session_imports_without_erasing_agent_memory(cleanup_test_sessions):
+    """Archive should be the safe hide path for raw messaging sessions."""
+    conn = _ensure_state_db()
+    sid = 'gw_archive_weixin_001'
+    cleanup_test_sessions.append(sid)
+    try:
+        _insert_gateway_session(conn, session_id=sid, source='weixin', title='Weixin Session')
+
+        data, status = post('/api/session/archive', {'session_id': sid, 'archived': True})
+        assert status == 200
+        session = data.get('session', {})
+        assert session.get('archived') is True
+        assert session.get('session_source') == 'messaging'
+
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ?",
+            (sid,),
+        ).fetchone()[0]
+        assert remaining == 2
+    finally:
+        try:
+            _remove_test_sessions(conn, sid)
+            conn.close()
+        except Exception:
+            pass
+
+
+def test_delete_imported_messaging_session_preserves_agent_memory(cleanup_test_sessions):
+    """WebUI delete must not delete Hermes Agent memory for external channels."""
+    conn = _ensure_state_db()
+    sid = 'gw_delete_weixin_safe_001'
+    cleanup_test_sessions.append(sid)
+    try:
+        _insert_gateway_session(conn, session_id=sid, source='weixin', title='Weixin Session')
+        _, import_status = post('/api/session/import_cli', {'session_id': sid})
+        assert import_status == 200
+
+        _, delete_status = post('/api/session/delete', {'session_id': sid})
+        assert delete_status == 200
+
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ?",
+            (sid,),
+        ).fetchone()[0]
+        assert remaining == 2
+    finally:
+        try:
+            _remove_test_sessions(conn, sid)
+            conn.close()
+        except Exception:
+            pass
+
+
 def test_imported_cron_sessions_hidden_from_sidebar_by_default(cleanup_test_sessions):
     """Cron sessions already imported into the WebUI store should stay hidden from the sidebar."""
     from api.models import Session

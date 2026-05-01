@@ -355,6 +355,7 @@ class Session:
         self.parent_session_id = parent_session_id
         self.is_cli_session = bool(kwargs.get('is_cli_session', False))
         self.source_tag = kwargs.get('source_tag')
+        self.raw_source = kwargs.get('raw_source')
         self.session_source = kwargs.get('session_source')
         self.source_label = kwargs.get('source_label')
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
@@ -379,7 +380,7 @@ class Session:
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'context_length', 'threshold_tokens', 'last_prompt_tokens',
             'parent_session_id',
-            'is_cli_session', 'source_tag', 'session_source', 'source_label',
+            'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label',
             'enabled_toolsets',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
@@ -483,6 +484,7 @@ class Session:
             'pending_user_message': self.pending_user_message,
             'is_cli_session': self.is_cli_session,
             'source_tag': self.source_tag,
+            'raw_source': self.raw_source,
             'session_source': self.session_source,
             'source_label': self.source_label,
             'enabled_toolsets': self.enabled_toolsets,
@@ -1131,6 +1133,95 @@ def get_cli_session_messages(sid) -> list:
     except Exception:
         return []
     return msgs
+
+
+def count_conversation_rounds(sid: str, since: float | None = None) -> int:
+    """Count conversation rounds for a session from state.db.
+
+    A "round" = one user message + one agent reply.  Consecutive user
+    messages are merged into a single round so that multi-part questions
+    don't inflate the count.
+
+    Parameters
+    ----------
+    sid : str
+        Gateway session ID (e.g. ``20260430_151231_7209a0``).
+    since : float | None
+        Unix timestamp.  If provided, only messages **after** this
+        timestamp are counted.
+
+    Returns
+    -------
+    int
+        Number of complete conversation rounds.
+    """
+    import os, sqlite3, datetime
+
+    try:
+        from api.profiles import get_active_hermes_home
+        hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
+    except Exception:
+        hermes_home = Path(os.getenv('HERMES_HOME', str(HOME / '.hermes'))).expanduser().resolve()
+    db_path = hermes_home / 'state.db'
+    if not db_path.exists():
+        return 0
+
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT role, timestamp FROM messages WHERE session_id = ? ORDER BY timestamp ASC",
+                (sid,),
+            )
+            rows = cur.fetchall()
+    except Exception:
+        return 0
+
+    rounds = 0
+    seen_user = False          # have we seen a user msg in the current round?
+    seen_agent_after_user = False  # have we seen an agent reply after that user msg?
+
+    for row in rows:
+        role = (row['role'] or '').strip().lower()
+        ts_raw = row['timestamp']
+
+        # Parse timestamp and apply the ``since`` filter.
+        if since is not None and ts_raw is not None:
+            try:
+                if isinstance(ts_raw, (int, float)):
+                    ts_val = float(ts_raw)
+                else:
+                    # ISO-8601 string
+                    ts_val = datetime.datetime.fromisoformat(
+                        str(ts_raw).replace('Z', '+00:00')
+                    ).timestamp()
+                if ts_val <= since:
+                    continue
+            except Exception:
+                pass
+
+        if role == 'user':
+            if seen_user and not seen_agent_after_user:
+                # Consecutive user message — merge into current round.
+                pass
+            elif seen_user and seen_agent_after_user:
+                # Previous round completed, starting a new one.
+                rounds += 1
+                seen_agent_after_user = False
+            seen_user = True
+        elif role == 'assistant':
+            if seen_user:
+                seen_agent_after_user = True
+
+    # Close the last round if it was completed.
+    if seen_user and seen_agent_after_user:
+        rounds += 1
+
+    return rounds
+
+
+CONVERSATION_ROUND_THRESHOLD = 10
 
 
 def delete_cli_session(sid) -> bool:

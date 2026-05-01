@@ -528,6 +528,230 @@ async function loadSession(sid){
   _resolveSessionModelForDisplaySoon(sid);
   // Clear the in-flight session marker now that this load has completed (#1060).
   if (_loadingSessionId === sid) _loadingSessionId = null;
+
+  // ── Cross-channel handoff hint ──
+  // After session fully loaded, check if this is a messaging session with
+  // enough conversation rounds to warrant a handoff hint bar.
+  if (S.session && _isMessagingSession(S.session)) {
+    _checkAndShowHandoffHint(sid);
+  } else {
+    _hideHandoffHint();
+  }
+}
+
+// ── Handoff hint logic ──────────────────────────────────────────────────────
+
+const _HANDOFF_THRESHOLD = 10;  // conversation rounds
+const _HANDOFF_STORAGE_PREFIX = 'handoff:';
+
+function _isMessagingSession(session) {
+  if (!session) return false;
+  // session_source is set by PR #1294 source normalization
+  if (session.session_source === 'messaging') return true;
+  // Fallback: check raw_source directly
+  const raw = (session.raw_source || session.source_tag || session.source || '').toLowerCase();
+  return ['weixin', 'telegram', 'discord', 'slack'].includes(raw);
+}
+
+function _handoffStorageKey(sid) {
+  return _HANDOFF_STORAGE_PREFIX + sid + ':dismissed_at';
+}
+
+function _getHandoffDismissedAt(sid) {
+  try {
+    const val = localStorage.getItem(_handoffStorageKey(sid));
+    return val ? parseFloat(val) : null;
+  } catch { return null; }
+}
+
+function _setHandoffDismissedAt(sid, ts) {
+  try {
+    localStorage.setItem(_handoffStorageKey(sid), String(ts));
+  } catch {}
+}
+
+function _handoffMessagesEl() {
+  return document.getElementById('messages');
+}
+
+function _handoffIsMessagesNearBottom(el) {
+  if (!el) return false;
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 150;
+}
+
+function _syncHandoffDockSpace(open) {
+  const messages = _handoffMessagesEl();
+  if (!messages) return;
+  const wasNearBottom = _handoffIsMessagesNearBottom(messages);
+  if (!open) {
+    messages.classList.remove('handoff-dock-visible');
+    messages.style.removeProperty('--handoff-dock-height');
+    if (wasNearBottom && typeof scrollToBottom === 'function') requestAnimationFrame(scrollToBottom);
+    return;
+  }
+  messages.classList.add('handoff-dock-visible');
+  const measure = () => {
+    const container = $('handoffHintContainer');
+    const h = container && container.getBoundingClientRect().height;
+    if (h > 0) messages.style.setProperty('--handoff-dock-height', Math.ceil(h + 24) + 'px');
+    if (wasNearBottom && typeof scrollToBottom === 'function') scrollToBottom();
+  };
+  requestAnimationFrame(measure);
+  setTimeout(measure, 360);
+}
+
+function _getChannelLabel(session) {
+  if (!session) return '';
+  // Use source_label from PR #1294 if available
+  if (session.source_label) return session.source_label;
+  const raw = (session.raw_source || session.source_tag || session.source || '').toLowerCase();
+  const labels = { weixin: 'WeChat', telegram: 'Telegram', discord: 'Discord', slack: 'Slack' };
+  return labels[raw] || raw || '';
+}
+
+async function _checkAndShowHandoffHint(sid) {
+  try {
+    const since = _getHandoffDismissedAt(sid);
+    const body = { session_id: sid };
+    if (since != null) body.since = since;
+
+    const result = await api('/api/session/conversation-rounds', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+
+    // Stale? Session switched while we were fetching.
+    if (!S.session || S.session.session_id !== sid) return;
+
+    if (result && result.ok && result.should_show) {
+      _showHandoffHint(sid, result.rounds);
+    } else {
+      _hideHandoffHint();
+    }
+  } catch (e) {
+    console.warn('Handoff hint check failed:', e);
+    _hideHandoffHint();
+  }
+}
+
+function _showHandoffHint(sid, rounds) {
+  const container = $('handoffHintContainer');
+  if (!container) return;
+
+  // Clear any existing content.
+  container.innerHTML = '';
+  container.style.display = '';
+  container.classList.add('is-visible');
+
+  const channel = _getChannelLabel(S.session);
+  const hintText = channel
+    ? `${channel} has ${rounds} new conversation rounds — click to view summary`
+    : `${rounds} new conversation rounds — click to view summary`;
+
+  const bar = document.createElement('div');
+  bar.className = 'handoff-hint-bar';
+  bar.id = 'handoffHintBar';
+  bar.innerHTML = `
+    <div class="handoff-hint-text">
+      <span class="handoff-hint-icon">${li('arrow-left', 18)}</span>
+      <span>${esc(hintText)}</span>
+    </div>
+    <button class="handoff-hint-dismiss" onclick="event.stopPropagation(); _dismissHandoffHint('${esc(sid)}')" title="Dismiss">
+      ${li('x', 14)}
+    </button>
+  `;
+
+  // Click on the bar (not the dismiss button) triggers summary generation.
+  bar.addEventListener('click', (e) => {
+    if (e.target.closest('.handoff-hint-dismiss')) return;
+    _generateHandoffSummary(sid, rounds);
+  });
+
+  container.appendChild(bar);
+  _syncHandoffDockSpace(true);
+}
+
+function _hideHandoffHint() {
+  const container = $('handoffHintContainer');
+  if (container) {
+    container.innerHTML = '';
+    container.style.display = 'none';
+    container.classList.remove('is-visible');
+  }
+  _syncHandoffDockSpace(false);
+}
+
+function _dismissHandoffHint(sid) {
+  _setHandoffDismissedAt(sid, Date.now() / 1000);
+  _hideHandoffHint();
+}
+
+async function _generateHandoffSummary(sid, rounds) {
+  // Treat handoff like a slash-command result: the composer dock entry
+  // disappears and the transient summary card renders in the transcript.
+  _hideHandoffHint();
+  const channel = _getChannelLabel(S.session);
+  if (typeof setHandoffUi === 'function') {
+    setHandoffUi({
+      sessionId: sid,
+      phase: 'running',
+      channel,
+      rounds,
+    });
+  }
+
+  try {
+    const since = _getHandoffDismissedAt(sid);
+    const body = { session_id: sid };
+    if (since != null) body.since = since;
+
+    const result = await api('/api/session/handoff-summary', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+
+    // Stale?
+    if (!S.session || S.session.session_id !== sid) return;
+
+    if (result && result.ok && result.summary) {
+      const summaryText = result.summary;
+      if (typeof setHandoffUi === 'function') {
+        setHandoffUi({
+          sessionId: sid,
+          phase: 'done',
+          channel,
+          rounds: result.rounds || rounds,
+          summary: summaryText,
+          fallback: !!result.fallback,
+        });
+      }
+    } else {
+      if (typeof setHandoffUi === 'function') {
+        setHandoffUi({
+          sessionId: sid,
+          phase: 'error',
+          channel,
+          rounds,
+          errorText: 'Could not generate summary. Please try again.',
+        });
+      }
+    }
+  } catch (e) {
+    console.warn('Handoff summary failed:', e);
+    if (S.session && S.session.session_id === sid && typeof setHandoffUi === 'function') {
+      setHandoffUi({
+        sessionId: sid,
+        phase: 'error',
+        channel,
+        rounds,
+        errorText: 'Summary generation failed: ' + e.message,
+      });
+    }
+  }
+
+  // Generating a summary should not dismiss the handoff entry point. Only the
+  // explicit X button suppresses it until enough newer external-channel rounds
+  // arrive.
 }
 
 function _resolveSessionModelForDisplaySoon(sid){
@@ -885,6 +1109,7 @@ function _openSessionActionMenu(session, anchorEl){
     return;
   }
   closeSessionActionMenu();
+  const isMessagingSession = _isMessagingSession(session);
   const menu=document.createElement('div');
   menu.className='session-action-menu open';
   menu.appendChild(_buildSessionAction(
@@ -927,22 +1152,24 @@ function _openSessionActionMenu(session, anchorEl){
       }catch(err){showToast(t('session_archive_failed')+err.message);}
     }
   ));
-  menu.appendChild(_buildSessionAction(
-    t('session_duplicate'),
-    t('session_duplicate_desc'),
-    ICONS.dup,
-    async()=>{
-      closeSessionActionMenu();
-      try{
-        const res=await api('/api/session/duplicate',{method:'POST',body:JSON.stringify({session_id:session.session_id})});
-        if(res.session){
-          await loadSession(res.session.session_id);
-          await renderSessionList();
-          showToast(t('session_duplicated'));
-        }
-      }catch(err){showToast(t('session_duplicate_failed')+err.message);}
-    }
-  ));
+  if(!isMessagingSession){
+    menu.appendChild(_buildSessionAction(
+      t('session_duplicate'),
+      t('session_duplicate_desc'),
+      ICONS.dup,
+      async()=>{
+        closeSessionActionMenu();
+        try{
+          const res=await api('/api/session/duplicate',{method:'POST',body:JSON.stringify({session_id:session.session_id})});
+          if(res.session){
+            await loadSession(res.session.session_id);
+            await renderSessionList();
+            showToast(t('session_duplicated'));
+          }
+        }catch(err){showToast(t('session_duplicate_failed')+err.message);}
+      }
+    ));
+  }
   if(session.active_stream_id){
     menu.appendChild(_buildSessionAction(
       t('session_stop_response'),
@@ -955,16 +1182,18 @@ function _openSessionActionMenu(session, anchorEl){
       }
     ));
   }
-  menu.appendChild(_buildSessionAction(
-    t('session_delete'),
-    t('session_delete_desc'),
-    ICONS.trash,
-    async()=>{
-      closeSessionActionMenu();
-      await deleteSession(session.session_id);
-    },
-    'danger'
-  ));
+  if(!isMessagingSession){
+    menu.appendChild(_buildSessionAction(
+      t('session_delete'),
+      t('session_delete_desc'),
+      ICONS.trash,
+      async()=>{
+        closeSessionActionMenu();
+        await deleteSession(session.session_id);
+      },
+      'danger'
+    ));
+  }
   document.body.appendChild(menu);
   _sessionActionMenu = menu;
   _sessionActionAnchor = anchorEl;
