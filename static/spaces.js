@@ -340,10 +340,12 @@
       const eventId = rev && rev.event_id ? String(rev.event_id) : '';
       const eventType = rev && rev.event_type ? String(rev.event_type) : 'unknown';
       const detailText = formatRevisionDetails(rev && rev.details);
+      const previewText = formatRestorePreview(rev && rev.restore_preview);
       const restoreButton = eventId ? '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="restoreRevision" data-space-id="'+escapeHtml(spaceId || '')+'" data-event-id="'+escapeHtml(eventId)+'">Restore</button></div>' : '';
       return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(eventType)+'</strong>' +
         '<div class="capy-spaces-muted">'+escapeHtml(formatRevisionTime(rev && rev.created_at))+' · '+escapeHtml(eventId.slice(0, 12) || 'no-event-id')+'</div>' +
         (detailText ? '<div class="capy-spaces-muted">'+escapeHtml(detailText)+'</div>' : '') +
+        (previewText ? '<div class="capy-spaces-muted">'+escapeHtml(previewText)+'</div>' : '') +
         '</div>'+restoreButton+'</div>';
     }).join('') : '<div class="capy-spaces-muted">No revision events recorded yet.</div>';
     return '<div class="capy-spaces-card"><h3>Revision history</h3>' +
@@ -372,6 +374,20 @@
       const value = valueSummary(details[key]);
       return value ? String(key)+': '+value : String(key);
     }).filter(Boolean).join(' · ');
+  }
+
+  function formatRestorePreview(preview){
+    if (!preview || typeof preview !== 'object' || Array.isArray(preview)) return '';
+    const name = String(preview.name || preview.space_id || 'unnamed snapshot');
+    const count = Number(preview.widget_count || 0);
+    const countLabel = count === 1 ? '1 widget' : count+' widgets';
+    const widgets = Array.isArray(preview.widgets) ? preview.widgets.slice(0, 5).map(function(widget){
+      if (!widget || typeof widget !== 'object' || Array.isArray(widget)) return '';
+      return [widget.id, widget.title, widget.kind].map(function(part){
+        return String(part || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+      }).filter(Boolean).join(' / ');
+    }).filter(Boolean) : [];
+    return 'Preview: '+name+' · '+countLabel+(widgets.length ? ' · Widgets: '+widgets.join(', ') : '');
   }
 
   function formatRevisionTime(value){

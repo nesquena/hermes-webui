@@ -9,12 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-01 23:21 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-02 00:16 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the safe recovery panel now includes metadata-only queued widget event status (`queued_event_count` plus `event_id|event_name|status`) for broken widgets, so Brendan/Capy can see whether a recovery repair request is already queued without exposing prompt text, payload summaries, generated renderer/html/script/data, or secret-looking values. Use `git log -1 --oneline` for the exact commit hash after commit; this status line intentionally avoids self-referential hashes because committing it changes the hash.
+Current latest known completed code slice: revision history now includes safe metadata-only restore previews derived from stored snapshots (`name`, `widget_count`, and bounded widget id/title/kind summaries), allowing Brendan/Capy to inspect rollback targets before restoring without exposing generated renderer/html/script/data/source fields or secret-looking values. Use `git log -1 --oneline` for the exact commit hash after commit; this status line intentionally avoids self-referential hashes because committing it changes the hash.
 
 Recent completed slices:
 
+- `feat(spaces): preview revision restore targets`
+  - Added RED/GREEN backend and real-`static/spaces.js` UI regressions proving revision history exposes safe restore-preview metadata from snapshots while omitting generated renderer/script/source/data fields and secret-looking values.
+  - Validation at completion: focused RED tests failed as expected before implementation; focused GREEN tests passed (`2 passed`), full Spaces foundation + UI behavior suites passed (`167 passed`), relevant combined Spaces suites passed (`171 passed`), `node --check`, `py_compile`, and `git diff --check` passed, local WebUI health OK, mock-state browser QA screenshot captured at `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_4f53c64e33054c35bd9efaddef629a04.png` with empty harness errors and no DOM leak.
 - `feat(spaces): show recovery event status`
   - Added RED/GREEN backend and real-`static/spaces.js` UI regressions proving recovery metadata shows queued repair/event status while omitting prompt text, payload summaries, renderer/script fields, and secret-looking values.
   - Fixed the stale demo parity catalog test so the provider setup smoke added in the previous slice is counted in full-suite validation.
@@ -55,17 +58,15 @@ Recent completed slices:
 
 Last known validation bundle:
 
-- RED check for recovery queued-event status: backend and UI tests failed as expected before implementation.
-- Focused recovery event-status regressions: passed (`2 passed`).
-- Full Spaces UI JS behavior suite: passed (`69 passed`).
-- Full Spaces foundation suite: passed (`97 passed`).
-- Demo parity suite: passed (`4 passed`).
-- Relevant combined Spaces suites: passed (`170 passed`).
-- Full WebUI suite: passed (`2955 passed`, `1 warning`, `8 subtests passed`).
-- `py_compile api/spaces.py tests/test_spaces_foundation.py tests/test_spaces_ui_js_behaviour.py tests/test_spaces_demo_parity.py`: passed.
+- RED check for revision restore preview: backend and UI tests failed as expected before implementation.
+- Focused revision restore-preview regressions: passed (`2 passed`).
+- Full Spaces foundation + UI JS behavior suites: passed (`167 passed`).
+- Relevant combined Spaces suites (`test_spaces_foundation.py`, `test_spaces_ui_js_behaviour.py`, `test_spaces_demo_parity.py`): passed (`171 passed`).
+- `node --check static/spaces.js`: passed.
+- `py_compile api/spaces.py tests/test_spaces_foundation.py tests/test_spaces_ui_js_behaviour.py`: passed.
 - `git diff --check`: passed.
 - WebUI local health: OK at `http://127.0.0.1:8787/health`.
-- Browser QA: localhost browser automation still fails with `net::ERR_FAILED`, but a file-based mock-state QA page using real `static/spaces.js` rendered the recovery queued event status without console errors. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_06929de070ff48259a55e5a87a173289.png`.
+- Browser QA: mock-state HTTP harness using real checked-out `static/spaces.js` rendered safe revision restore previews, `window.__harnessErrors` was empty, and DOM leak regex for `<script>|renderer|SECRET|api_key|token` was false. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_4f53c64e33054c35bd9efaddef629a04.png`.
 
 Known warning: unknown `pytest.mark.integration` in `tests/test_onboarding_network.py`.
 

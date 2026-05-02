@@ -817,6 +817,50 @@ def test_revision_and_widget_event_summaries_redact_secret_looking_values(monkey
     assert "token" not in serialized.lower()
 
 
+def test_revision_events_include_safe_restore_preview_without_leaking_sources(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Rollback Preview"})
+    original = spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "weather",
+            "kind": "html",
+            "title": "Weather original",
+            "renderer": "<script>keptButNeverReturned()</script>",
+            "source": "SECRET_SOURCE_DO_NOT_LEAK",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+    spaces.patch_widget(created["space_id"], "weather", {"title": "Weather patched"})
+
+    revisions = spaces.list_revision_events(created["space_id"])
+    original_revision = next(rev for rev in revisions if rev["event_id"] == original["revision_event_id"])
+
+    assert original_revision["restore_preview"] == {
+        "space_id": created["space_id"],
+        "name": "Rollback Preview",
+        "description": "",
+        "widget_count": 1,
+        "widgets": [
+            {
+                "id": "weather",
+                "kind": "html",
+                "title": "Weather original",
+                "layout": {"x": 0, "y": 0, "w": 6, "h": 4, "minimized": False},
+            }
+        ],
+    }
+    serialized = json.dumps(original_revision).lower()
+    assert "keptbutneverreturned" not in serialized
+    assert "secret_source_do_not_leak" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "source" not in serialized
+
+
+
 def test_restore_revision_reverts_to_safe_snapshot_without_leaking_sources(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Rollback Lab"})

@@ -412,13 +412,36 @@ def _event_summary(event: dict[str, Any], sid: str) -> dict[str, Any] | None:
     details = _payload_summary(event.get("details") or {})
     if not isinstance(details, dict):
         details = {}
-    return {
+    summary = {
         "schema_version": event.get("schema_version", SCHEMA_VERSION),
         "event_id": event_id,
         "event_type": _context_value(event.get("event_type"), 120),
         "space_id": sid,
         "created_at": event.get("created_at"),
         "details": details,
+    }
+    snapshot = event.get("snapshot")
+    if isinstance(snapshot, dict):
+        summary["restore_preview"] = _restore_preview_summary(snapshot, sid)
+    return summary
+
+
+def _restore_preview_summary(snapshot: dict[str, Any], sid: str) -> dict[str, Any]:
+    widgets = snapshot.get("widgets") if isinstance(snapshot.get("widgets"), list) else []
+    widget_summaries: list[dict[str, Any]] = []
+    for widget in widgets[:5]:
+        if not isinstance(widget, dict):
+            continue
+        try:
+            widget_summaries.append(_widget_summary(widget))
+        except ValueError:
+            continue
+    return {
+        "space_id": sid,
+        "name": _context_value(snapshot.get("name") or sid, 160),
+        "description": _payload_text_summary(snapshot.get("description") or "", 240),
+        "widget_count": len(widgets),
+        "widgets": widget_summaries,
     }
 
 

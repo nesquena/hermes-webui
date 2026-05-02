@@ -256,8 +256,8 @@ global.fetch = async function(path, opts = {}) {
   }
   if (path === 'api/spaces/revisions?space_id=lab') {
     return response({ revisions: [
-      { event_id: 'rev2', event_type: 'widget.updated', space_id: 'lab', created_at: 1710000000, details: { widget_id: 'weather', fields: ['title', 'layout'], note: 'Authorization: Bearer SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET' } },
-      { event_id: 'rev1', event_type: 'space.created', space_id: 'lab', created_at: 1709999900, details: { name: 'Lab <Detail>' } },
+      { event_id: 'rev2', event_type: 'widget.updated', space_id: 'lab', created_at: 1710000000, details: { widget_id: 'weather', fields: ['title', 'layout'], note: 'Authorization Bearer SECRET_VALUE_DO_NOT_LEAK', renderer: '<script>bad()</script>', api_key: 'SECRET' }, restore_preview: { name: 'Lab patched', widget_count: 1, widgets: [{ id: 'weather', title: 'Weather patched', kind: 'markdown', renderer: '<script>bad()</script>', api_key: 'SECRET' }], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
+      { event_id: 'rev1', event_type: 'space.created', space_id: 'lab', created_at: 1709999900, details: { name: 'Lab <Detail>' }, restore_preview: { name: 'Lab <Detail>', widget_count: 1, widgets: [{ id: 'weather', title: '<Weather>', kind: 'markdown', renderer: '<script>bad()</script>', api_key: 'SECRET' }], renderer: '<script>bad()</script>', api_key: 'SECRET' } },
     ] });
   }
   if (path === 'api/spaces/widget/upsert') {
@@ -1719,6 +1719,10 @@ def test_spaces_ui_opens_space_detail_without_rendering_widget_code(driver_path)
     assert "widget_id: weather" in out["rootHtml"]
     assert "fields: title, layout" in out["rootHtml"]
     assert "note: [REDACTED]" in out["rootHtml"]
+    assert "Preview: Lab patched · 1 widget" in out["rootHtml"]
+    assert "Widgets: weather / Weather patched / markdown" in out["rootHtml"]
+    assert "Preview: Lab &lt;Detail&gt; · 1 widget" in out["rootHtml"]
+    assert "Widgets: weather / &lt;Weather&gt; / markdown" in out["rootHtml"]
     assert "name: Lab &lt;Detail&gt;" in out["rootHtml"]
     assert 'data-capy-action="restoreRevision"' in out["rootHtml"]
     assert "Restore" in out["rootHtml"]
