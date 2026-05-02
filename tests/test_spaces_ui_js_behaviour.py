@@ -112,6 +112,7 @@ global.fetch = async function(path, opts = {}) {
         revision_event_count: 2,
         rollback_point: true,
         queued_event_count: isResearchPdfDemo ? 1 : 0,
+        research_rollback_check: isResearchPdfDemo ? { verified: true, restored_event_id: 'rev-before-export', restored_widget_count: 5, replayed_after_restore: true, renderer: '<script>bad()</script>', api_key: '***' } : undefined,
       });
     }
     if (body.action === 'space.demo.run_all') {
@@ -1192,6 +1193,7 @@ def test_spaces_ui_research_demo_smoke_shows_pdf_export_progress_metadata_only(d
     assert "Research Harness" in out["rootHtml"]
     assert "Action: pdf-export-requested" in out["rootHtml"]
     assert "Queued events: 1" in out["rootHtml"]
+    assert "Rollback verified: yes" in out["rootHtml"]
     assert "Widgets: 5" in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]

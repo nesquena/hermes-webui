@@ -82,7 +82,7 @@ def test_demo_parity_smoke_runner_launches_each_demo_metadata_only(monkeypatch, 
     _assert_safe_payload(results)
 
 
-def test_research_demo_smoke_advances_progress_artifact_and_pdf_export(monkeypatch, tmp_path):
+def test_research_demo_smoke_advances_progress_artifact_pdf_export_and_rollback_check(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
     result = spaces.space_demo_run("demo_research_harness_pdf_export")
@@ -92,6 +92,10 @@ def test_research_demo_smoke_advances_progress_artifact_and_pdf_export(monkeypat
     assert result["queued_event_count"] == 1
     assert result["research_progress"]["widgets"]["plan"]["metadata"]["status"]["phase"] == "summary"
     assert result["research_artifact"]["artifact"]["metadata_summary"]["export_pdf"] == "ready-for-user-request"
+    assert result["research_rollback_check"]["verified"] is True
+    assert result["research_rollback_check"]["restored_event_id"]
+    assert result["research_rollback_check"]["replayed_after_restore"] is True
+    assert result["research_rollback_check"]["restored_widget_count"] == 5
     assert events[0]["event_name"] == "widget.export.pdf"
     assert events[0]["status"] == "queued"
     assert events[0]["widget_id"] == "research-summary"
