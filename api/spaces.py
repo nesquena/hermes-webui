@@ -28,6 +28,7 @@ SCHEMA_VERSION = 1
 _SPACE_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 _WIDGET_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 _EVENT_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,79}$")
+_SPACE_AGENT_UNSUPPORTED_API_RE = re.compile(r"\bspace\.current\.[a-zA-Z0-9_.:-]+")
 _TRUTHY = {"1", "true", "yes", "on", "enabled"}
 _OMITTED_PAYLOAD_KEYS = {
     "api_key",
@@ -1449,6 +1450,34 @@ def _space_agent_widget_from_yaml(path: str, text: str) -> dict[str, Any]:
     return widget
 
 
+def _space_agent_import_warnings(space_yaml: str, widget_files: dict[str, str]) -> list[dict[str, str]]:
+    warnings: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add_from_text(label: str, text: str) -> None:
+        for match in _SPACE_AGENT_UNSUPPORTED_API_RE.findall(str(text or "")):
+            api_name = match.rstrip(".,;:)]}'\"")
+            if not api_name:
+                continue
+            key = (label, api_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            warnings.append(
+                {
+                    "type": "unsupported_space_agent_api",
+                    "file": label,
+                    "api": api_name,
+                    "message": "Unsupported Space Agent API reference omitted during import.",
+                }
+            )
+
+    add_from_text("space.yaml", space_yaml)
+    for path, text in sorted(widget_files.items()):
+        add_from_text(_safe_zip_entry_name(path), text)
+    return warnings
+
+
 def import_space_agent_package(package: dict[str, Any], *, space_id: str | None = None) -> dict[str, Any]:
     """Import a Space Agent space.yaml/widgets YAML or ZIP package safely.
 
@@ -1460,6 +1489,7 @@ def import_space_agent_package(package: dict[str, Any], *, space_id: str | None 
     if not spaces_enabled():
         raise RuntimeError("Capy Spaces is disabled")
     source_label, space_yaml, widget_files = _space_agent_files_from_package(package)
+    warnings = _space_agent_import_warnings(space_yaml, widget_files)
     space_doc = _load_yaml_mapping(space_yaml, "space.yaml")
     name = str(space_doc.get("name") or space_doc.get("title") or space_doc.get("id") or "Imported Space Agent Space")
     description = str(space_doc.get("description") or "Imported from Space Agent YAML package.")
@@ -1495,6 +1525,7 @@ def import_space_agent_package(package: dict[str, Any], *, space_id: str | None 
         "source": source_label,
         "space": read_space_detail(created["space_id"]),
         "imported_widgets": imported_widgets,
+        "warnings": warnings,
     }
 
 

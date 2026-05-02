@@ -516,6 +516,7 @@ global.fetch = async function(path, opts = {}) {
       source: isZip ? 'space-agent-zip' : 'space-agent-yaml',
       space: { space_id: isZip ? 'imported-zip-lab' : 'imported-lab', name: isZip ? 'Imported ZIP Lab' : 'Imported Lab', description: 'Imported safely', widget_count: 1, revision_event_id: 'rev-import' },
       imported_widgets: [{ id: 'weather', kind: 'html', title: 'Weather', renderer: '<script>bad()</script>', api_key: 'SECRET' }],
+      warnings: [{ type: 'unsupported_space_agent_api', file: 'widgets/weather.yaml', api: 'space.current.widget.patch', message: 'Unsupported Space Agent API reference omitted during import.', renderer: '<script>bad()</script>', api_key: 'SECRET' }],
       space_yaml: body.space_yaml,
       widgets: body.widgets,
       archive_b64: body.archive_b64,
@@ -1904,6 +1905,8 @@ def test_spaces_ui_import_yaml_posts_safe_payload_and_renders_metadata_only(driv
     assert "imported-lab" in out["rootHtml"]
     assert "Weather" in out["rootHtml"]
     assert "1 widget" in out["rootHtml"]
+    assert "Import warnings" in out["rootHtml"]
+    assert "space.current.widget.patch" in out["rootHtml"]
     assert "space_yaml" not in out["rootHtml"]
     assert "widgets/weather.yaml" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"]
@@ -1926,6 +1929,8 @@ def test_spaces_ui_import_zip_posts_archive_only_and_renders_metadata_only(drive
     assert "Imported ZIP Lab" in out["rootHtml"]
     assert "imported-zip-lab" in out["rootHtml"]
     assert "1 widget" in out["rootHtml"]
+    assert "Import warnings" in out["rootHtml"]
+    assert "space.current.widget.patch" in out["rootHtml"]
     assert "archive_b64" not in out["rootHtml"]
     assert "UEsDBBQ" not in out["rootHtml"]
     assert "space_yaml" not in out["rootHtml"]

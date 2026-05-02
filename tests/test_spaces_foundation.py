@@ -878,12 +878,16 @@ id: tool-import-demo
 name: Tool Import Demo
 description: Imported through the Hermes tool adapter
 instructions: Patch through safe Capy APIs only.
+actions:
+  repair: space.current.widget.read
 """,
             "widgets": {
                 "widgets/panel.yaml": """
 id: unsafe-panel
 title: Unsafe Panel
 type: html
+actions:
+  refresh: space.current.widget.patch
 renderer: "<script>window.SECRET_VALUE_DO_NOT_LEAK=***</script>"
 source: SECRET_SOURCE_VALUE_DO_NOT_LEAK
 data:
@@ -904,6 +908,20 @@ layout:
     assert imported["action"] == "space.import"
     assert imported["source"] == "space-agent-yaml"
     assert imported["space"]["space_id"] == "tool-import-demo"
+    assert imported["warnings"] == [
+        {
+            "type": "unsupported_space_agent_api",
+            "file": "space.yaml",
+            "api": "space.current.widget.read",
+            "message": "Unsupported Space Agent API reference omitted during import.",
+        },
+        {
+            "type": "unsupported_space_agent_api",
+            "file": "widgets/panel.yaml",
+            "api": "space.current.widget.patch",
+            "message": "Unsupported Space Agent API reference omitted during import.",
+        },
+    ]
     assert imported["imported_widgets"] == [
         {"id": "unsafe-panel", "kind": "html", "title": "Unsafe Panel", "layout": {"x": 1, "y": 2, "w": 5, "h": 4, "minimized": False}}
     ]
@@ -917,6 +935,7 @@ layout:
     assert "renderer" not in serialized
     assert "<script" not in serialized
     assert "api_key" not in serialized
+    assert "actions" not in serialized
     assert "secret_value_do_not_leak" not in serialized
     assert "secret_source_value_do_not_leak" not in serialized
 

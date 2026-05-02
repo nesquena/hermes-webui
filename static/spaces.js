@@ -334,10 +334,19 @@
         '<div class="capy-spaces-muted">'+escapeHtml(kind)+' · '+escapeHtml(widgetId)+'</div></div></div>';
     }).join('') : '<div class="capy-spaces-muted">No imported widget metadata returned.</div>';
     const count = widgets.length;
+    const warnings = Array.isArray(data && data.warnings) ? data.warnings : [];
+    const warningRows = warnings.length ? '<div class="capy-spaces-card"><h3>Import warnings</h3>' +
+      '<div class="capy-spaces-muted">Unsupported Space Agent API calls were not imported. Recreate them through safe Capy tools after review.</div>' +
+      '<div class="capy-spaces-widget-list">' + warnings.slice(0, 8).map(function(w){
+        const api = w && w.api ? String(w.api) : 'unsupported API';
+        const message = w && w.message ? String(w.message) : 'Unsupported Space Agent API reference omitted during import.';
+        return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(api)+'</strong>' +
+          '<div class="capy-spaces-muted">'+escapeHtml(message)+'</div></div></div>';
+      }).join('') + '</div></div>' : '';
     return '<div class="capy-spaces-card"><h3>Space Agent import ready</h3>' +
       '<div class="capy-spaces-muted">Imported package metadata only. Generated widget sources remain quarantined/disabled for review by the backend.</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(name)+'</strong>' +
-      '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+' · '+count+' widget'+(count === 1 ? '' : 's')+'</div></div></div>'+widgetRows+'</div></div>';
+      '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId)+' · '+count+' widget'+(count === 1 ? '' : 's')+'</div></div></div>'+widgetRows+'</div></div>' + warningRows;
   }
 
   function renderSpaceImportError(message){

@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-02 09:38 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-02 10:50 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Widget runtime contract details now include metadata-only network policy and approval checkpoints, making the generated-code-disabled sandbox/postMessage envelope more explicit without rendering widget bodies or leaking secret-like fields. Use `git log -1 --oneline` for the exact commit hash after commit.
+Current latest known completed code slice: Space Agent package imports now surface safe warnings for unsupported `space.current.*` API references so imported YAML can be reviewed without copying generated bodies, raw source text, action maps, or secret-like fields into public responses or the DOM. Use `git log -1 --oneline` for the exact commit hash after commit.
 
 Recent completed slices:
+
+- `feat(spaces): warn on unsupported import APIs`
+  - Added RED/GREEN backend and real-`static/spaces.js` coverage proving imports report metadata-only warnings for unsupported `space.current.*` references and render the warnings without exposing raw YAML, widget paths, generated renderer/script fields, action maps, or credential-like values.
+  - Validation at completion: focused RED tests failed before implementation due to missing `warnings` / UI warning rendering; focused GREEN tests passed (`3 passed`), Spaces foundation + UI behavior suites passed (`174 passed`), `node --check static/spaces.js`, `py_compile api/spaces.py tests/test_spaces_foundation.py tests/test_spaces_ui_js_behaviour.py`, and `git diff --check` passed. Mock-state browser QA showed the import warning card with empty `window.__harnessErrors` and DOM leak check false; screenshot artifact `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_010aabc8cd1740d8b2258687167c3632.png`.
 
 - `feat(spaces): extend widget runtime contract policy`
   - Added RED/GREEN backend and real-`static/spaces.js` coverage proving the runtime-contract tool route exposes `network_policy` and `approval_required_for` metadata and the widget detail view renders only sanitized policy/checkpoint text.
