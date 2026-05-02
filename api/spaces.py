@@ -711,6 +711,56 @@ def delete_shared_data_slot(space_id: str, key: str) -> dict[str, Any]:
     }
 
 
+def set_research_artifact(space_id: str, title: Any, markdown: Any) -> dict[str, Any]:
+    """Record a Research Harness markdown artifact as safe metadata.
+
+    This is an incremental bridge toward the Space Agent research demo: agent
+    runs can mark the summary report ready for export without returning raw
+    markdown, generated renderer bodies, or secret-looking payloads through
+    public Spaces APIs.
+    """
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    sid = validate_space_id(space_id)
+    text = str(markdown or "")
+    safe_title = _payload_text_summary(title or "Research report", 160)
+    if not safe_title or safe_title == "[REDACTED]":
+        safe_title = "Research report"
+    artifact_value = {
+        "title": safe_title,
+        "format": "markdown",
+        "status": "ready",
+        "char_count": len(text),
+        "line_count": len(text.splitlines()),
+        "word_count": len(re.findall(r"\S+", text)),
+        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+    }
+    artifact = set_shared_data_slot(
+        sid,
+        "research-summary",
+        artifact_value,
+        {
+            "source_widget": "research-summary",
+            "artifact_kind": "markdown",
+            "export_pdf": "ready-for-user-request",
+        },
+    )["item"]
+    widget_result = patch_widget(
+        sid,
+        "research-summary",
+        {
+            "status": {"artifact": "ready"},
+            "export": {"pdf": "ready-for-user-request", "artifact_key": "research-summary"},
+        },
+    )
+    return {
+        "space_id": sid,
+        "artifact": artifact,
+        "widget": widget_result["widget"],
+        "revision_event_id": widget_result["revision_event_id"],
+    }
+
+
 def current_space_for_session(session: Any) -> dict[str, Any]:
     """Return the metadata-only active Space envelope for a WebUI session."""
     if not spaces_enabled():
@@ -926,6 +976,10 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {"space.data.delete", "space.current.data.delete"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         result = delete_shared_data_slot(space_id, data.get("key"))
+        return {"ok": True, "action": name, **result}
+    if name in {"space.research.artifact.set", "space.current.research.artifact.set", "space.research.report.set", "space.current.research.report.set"}:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        result = set_research_artifact(space_id, data.get("title") or data.get("name"), data.get("markdown") or data.get("content") or "")
         return {"ok": True, "action": name, **result}
     if name in {"space.revisions", "space.revision.list", "space.history", "space.current.revisions", "space.current.revision.list", "space.current.history"}:
         is_current = name.startswith("space.current.")
@@ -1606,6 +1660,7 @@ def patch_widget(space_id: str, widget_id: str, patch: dict[str, Any]) -> dict[s
         "browser",
         "kanban",
         "markdown",
+        "export",
     }
     changed_fields: list[str] = []
     for key, value in (patch or {}).items():
@@ -1614,7 +1669,7 @@ def patch_widget(space_id: str, widget_id: str, patch: dict[str, Any]) -> dict[s
             continue
         if safe_key == "layout":
             widget["layout"] = _normalize_widget_layout(value)
-        elif safe_key in {"metadata", "permissions", "recovery", "event_bridge", "prompt", "status", "weather", "chart", "table", "notes", "browser", "kanban", "markdown"}:
+        elif safe_key in {"metadata", "permissions", "recovery", "event_bridge", "prompt", "status", "weather", "chart", "table", "notes", "browser", "kanban", "markdown", "export"}:
             if isinstance(value, dict):
                 widget[safe_key] = _payload_summary(value)
             else:

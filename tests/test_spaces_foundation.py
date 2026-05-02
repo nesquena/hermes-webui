@@ -441,6 +441,41 @@ def test_space_tool_adapter_shared_data_slots_are_metadata_only(monkeypatch, tmp
     assert "secret_value_do_not_leak" not in serialized
 
 
+def test_space_tool_adapter_research_artifact_marks_summary_export_ready(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    installed = spaces.install_template("research", space_id="research-artifact-lab")
+
+    result = spaces.run_space_tool(
+        "space.research.artifact.set",
+        {
+            "space_id": installed["space"]["space_id"],
+            "title": "Claude Mythos findings",
+            "markdown": "# Findings\nUseful public notes.\napi_key=SECRET_VALUE_DO_NOT_LEAK\n<script>bad()</script>",
+            "renderer": "<script>steal()</script>",
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    detail = spaces.read_widget_detail(installed["space"]["space_id"], "research-summary")
+    data_slot = spaces.read_shared_data_slot(installed["space"]["space_id"], "research-summary")
+    serialized = json.dumps({"result": result, "detail": detail, "data_slot": data_slot}).lower()
+
+    assert result["ok"] is True
+    assert result["action"] == "space.research.artifact.set"
+    assert result["artifact"]["key"] == "research-summary"
+    assert result["artifact"]["value_summary"]["title"] == "Claude Mythos findings"
+    assert result["artifact"]["value_summary"]["format"] == "markdown"
+    assert result["artifact"]["value_summary"]["status"] == "ready"
+    assert result["artifact"]["value_summary"]["sha256"]
+    assert result["widget"]["id"] == "research-summary"
+    assert detail["metadata"]["export"]["pdf"] == "ready-for-user-request"
+    assert data_slot == result["artifact"]
+    assert "findings useful public notes" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+
+
 def test_space_tool_adapter_deletes_shared_data_slots_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "shared-data-delete-lab", "name": "Shared Data Delete Lab"})
