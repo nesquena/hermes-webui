@@ -353,33 +353,38 @@ ações rápidas, sidebar fixa de 240px e topbar contextual de 56px.
 
 ### HU-03.4 — 4 KPI cards com deltas
 
-**Status:** aguardando Sprint 1
+**Status:** implementada com testes
 
 **Tasks**
 
-- [ ] Criar `api/dashboard.py`.
-- [ ] Criar `GET /api/dashboard/summary`.
-- [ ] Agregar Projetos Ativos, Tarefas em Andamento, Concluídas, Agentes Online.
-- [ ] Renderizar grid 2x2 responsivo.
-- [ ] Clicar em card navega para painel correspondente.
+- [x] Criar `api/dashboard.py`.
+- [x] Criar `GET /api/dashboard/summary`.
+- [x] Agregar Projetos Ativos, Tarefas em Andamento, Concluídas, Agentes Online.
+- [x] Renderizar grid 2x2 responsivo.
+- [x] Clicar em card navega para painel correspondente.
+- [x] Criar teste automatizado para resumo, rota, HTML, JS, CSS e i18n.
+- [x] Registrar evidência técnica em `docs/neo/evidencias/HU-03.4/`.
+- [ ] Anexar screenshots/homologação manual em runtime.
+
+**Evidência técnica:** [`docs/neo/evidencias/HU-03.4/README.md`](./evidencias/HU-03.4/README.md)
 
 ### HU-03.5 — Chat central no Dashboard
 
-**Status:** aguardando Sprint 1
+**Status:** em andamento
 
 **Tasks**
 
-- [ ] Embutir o mesmo SSE da sessão ativa.
-- [ ] Reutilizar a lista de mensagens upstream, preservando renderização de markdown, arquivos, tool calls e estados de streaming.
-- [ ] Reutilizar o composer/toolstrip completo upstream; não criar um segundo composer paralelo em `dashboard.js`.
-- [ ] Preservar anexos e fluxo de upload/preview.
-- [ ] Preservar microfone/voz quando disponível no ambiente.
-- [ ] Preservar seletor de profile ativo.
-- [ ] Preservar seletor de workspace ativo.
-- [ ] Preservar seletor de modelo configurado.
-- [ ] Preservar seletor de reasoning/effort.
-- [ ] Preservar menus auxiliares e demais controles já existentes no rodapé do chat.
-- [ ] Aplicar apenas adaptação visual Neo ao container/composer: fundo, borda, radius, espaçamento, botão enviar cyan e responsividade.
+- [x] Embutir o mesmo SSE da sessão ativa.
+- [x] Reutilizar a lista de mensagens upstream, preservando renderização de markdown, arquivos, tool calls e estados de streaming.
+- [x] Reutilizar o composer/toolstrip completo upstream; não criar um segundo composer paralelo em `dashboard.js`.
+- [x] Preservar anexos e fluxo de upload/preview.
+- [x] Preservar microfone/voz quando disponível no ambiente.
+- [x] Preservar seletor de profile ativo.
+- [x] Preservar seletor de workspace ativo.
+- [x] Preservar seletor de modelo configurado.
+- [x] Preservar seletor de reasoning/effort.
+- [x] Preservar menus auxiliares e demais controles já existentes no rodapé do chat.
+- [x] Aplicar apenas adaptação visual Neo ao container/composer: fundo, borda, radius, espaçamento, botão enviar cyan e responsividade.
 - [ ] Manter painel `chat` direto funcional.
 - [ ] Focar composer ao abrir Dashboard.
 - [ ] Testar troca de modelo, workspace, profile e effort dentro do Dashboard.
@@ -388,39 +393,39 @@ ações rápidas, sidebar fixa de 240px e topbar contextual de 56px.
 
 ### HU-03.6 — Topbar contextual
 
-**Status:** aguardando Sprint 1
+**Status:** em andamento com testes
 
 **Tasks**
 
-- [ ] Criar `GET /api/health/system`.
-- [ ] Exibir VPS Status, Uptime, Região, Versão.
-- [ ] Adicionar botão Terminal SSH.
+- [x] Criar `GET /api/health/system`.
+- [x] Exibir VPS Status, Uptime, Região, Versão.
+- [x] Adicionar botão Terminal SSH.
 - [ ] Adicionar busca/notificações/help/admin dropdown.
-- [ ] Poll a cada 30s com cache.
+- [x] Poll a cada 30s com cache.
 
 ### HU-03.7 — Ações rápidas grid 2x3
 
-**Status:** aguardando Sprint 1
+**Status:** implementada com testes
 
 **Tasks**
 
-- [ ] Renderizar Novo Projeto.
-- [ ] Renderizar Novo Documento.
-- [ ] Renderizar Novo Componente.
-- [ ] Renderizar Abrir Terminal.
-- [ ] Renderizar Gerar Relatório.
-- [ ] Renderizar Deploy Projeto.
-- [ ] Definir comportamento de placeholders sem backend.
+- [x] Renderizar Novo Projeto.
+- [x] Renderizar Novo Documento.
+- [x] Renderizar Novo Componente.
+- [x] Renderizar Abrir Terminal.
+- [x] Renderizar Gerar Relatório.
+- [x] Renderizar Deploy Projeto.
+- [x] Definir comportamento de placeholders sem backend.
 
 ### HU-03.8 — Card de status Neo na sidebar
 
-**Status:** aguardando Sprint 1
+**Status:** implementada com testes
 
 **Tasks**
 
-- [ ] Exibir mark/avatar Neo.
-- [ ] Exibir status ONLINE.
-- [ ] Botão "Conversar agora" navega para Dashboard e foca composer.
+- [x] Exibir mark/avatar Neo.
+- [x] Exibir status ONLINE.
+- [x] Botão "Conversar agora" navega para Dashboard e foca composer.
 
 ### HU-03.9 — Admin dropdown
 
@@ -445,13 +450,13 @@ ações rápidas, sidebar fixa de 240px e topbar contextual de 56px.
 
 ### HU-03.11 — Recursos VPS na sidebar
 
-**Status:** aguardando Sprint 1
+**Status:** em andamento com testes
 
 **Tasks**
 
-- [ ] Criar `GET /api/health/vps`.
-- [ ] Exibir CPU/RAM/Disco/Rede com barras.
-- [ ] Poll a cada 30s.
+- [x] Criar `GET /api/health/vps`.
+- [x] Exibir CPU/RAM/Disco/Rede com barras.
+- [x] Poll a cada 30s.
 - [ ] Validar leitura no host/container.
 
 ---

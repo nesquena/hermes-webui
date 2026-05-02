@@ -60,7 +60,7 @@
     }
   </script>
 </head>
-<body>
+<body class="dashboard-shell-mode">
 <header class="app-titlebar" role="banner">
   <button class="app-titlebar-hamburger" id="btnHamburger" onclick="toggleMobileSidebar()" type="button" title="Menu" aria-label="Menu">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
@@ -76,8 +76,8 @@
 </header>
 <div class="layout">
   <nav class="rail" aria-label="Primary navigation">
-    <button class="rail-btn nav-tab" data-panel="dashboard" onclick="switchPanel('dashboard')" title="Dashboard" data-i18n-title="tab_dashboard" aria-label="Dashboard"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg></button>
-    <button class="rail-btn nav-tab active" data-panel="chat" onclick="switchPanel('chat')" title="Chat" data-i18n-title="tab_chat" aria-label="Chat"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>
+    <button class="rail-btn nav-tab active" data-panel="dashboard" onclick="switchPanel('dashboard')" title="Dashboard" data-i18n-title="tab_dashboard" aria-label="Dashboard"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg></button>
+    <button class="rail-btn nav-tab" data-panel="chat" onclick="switchPanel('chat')" title="Chat" data-i18n-title="tab_chat" aria-label="Chat"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>
     <button class="rail-btn nav-tab" data-panel="tasks" onclick="switchPanel('tasks')" title="Tasks" data-i18n-title="tab_tasks" aria-label="Tasks"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
     <button class="rail-btn nav-tab" data-panel="skills" onclick="switchPanel('skills')" title="Skills" data-i18n-title="tab_skills" aria-label="Skills"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></button>
     <button class="rail-btn nav-tab" data-panel="memory" onclick="switchPanel('memory')" title="Memory" data-i18n-title="tab_memory" aria-label="Memory"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2z"/></svg></button>
@@ -90,8 +90,8 @@
   <aside class="sidebar">
 
     <div class="sidebar-nav">
-      <button class="nav-tab" data-panel="dashboard" data-label="Dashboard" onclick="switchPanel('dashboard')" title="Dashboard" data-i18n-title="tab_dashboard"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg></button>
-      <button class="nav-tab active" data-panel="chat" data-label="Chat" onclick="switchPanel('chat')" title="Chat" data-i18n-title="tab_chat"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>
+      <button class="nav-tab active" data-panel="dashboard" data-label="Dashboard" onclick="switchPanel('dashboard')" title="Dashboard" data-i18n-title="tab_dashboard"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg></button>
+      <button class="nav-tab" data-panel="chat" data-label="Chat" onclick="switchPanel('chat')" title="Chat" data-i18n-title="tab_chat"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>
       <button class="nav-tab" data-panel="tasks" data-label="Tasks" onclick="switchPanel('tasks')" title="Tasks" data-i18n-title="tab_tasks"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
       <button class="nav-tab" data-panel="skills" data-label="Skills" onclick="switchPanel('skills')" title="Skills" data-i18n-title="tab_skills"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></button>
       <button class="nav-tab" data-panel="memory" data-label="Memory" onclick="switchPanel('memory')" title="Memory" data-i18n-title="tab_memory"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2z"/></svg></button>
@@ -102,17 +102,40 @@
       <button class="nav-tab" data-panel="settings" onclick="switchPanel('settings')" title="Settings" data-i18n-title="tab_settings"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
     </div>
     <!-- Dashboard panel -->
-    <div class="panel-view" id="panelDashboard">
-      <div class="panel-head">
-        <span data-i18n="tab_dashboard">Dashboard</span>
+    <div class="panel-view active" id="panelDashboard">
+      <div class="neo-dashboard-brand">
+        <img src="static/brand/neo-avatar.svg" alt="" width="44" height="44">
+        <div>
+          <strong>NEO</strong>
+          <span>AGENTE 24/7</span>
+        </div>
       </div>
-      <div style="padding:12px;color:var(--muted);font-size:12px;line-height:1.5">
-        <div>Neo WebUI</div>
-        <div data-dashboard-updated-at>--:--</div>
+      <div class="neo-dashboard-menu">
+        <button class="neo-dashboard-menu-item active" onclick="switchPanel('dashboard')"><span>⌘</span><span data-i18n="tab_dashboard">Dashboard</span></button>
+        <button class="neo-dashboard-menu-item" onclick="switchPanel('projects')"><span>□</span><span data-i18n="tab_projects">Projetos</span></button>
+        <button class="neo-dashboard-menu-item" onclick="switchPanel('tasks')"><span>☑</span><span data-i18n="tab_tasks">Tarefas</span></button>
+        <button class="neo-dashboard-menu-item" onclick="switchPanel('profiles')"><span>♙</span><span data-i18n="tab_profiles">Pessoal</span></button>
+        <button class="neo-dashboard-menu-item" onclick="switchPanel('skills')"><span>⚙</span><span data-i18n="tab_skills">Skills</span></button>
+        <button class="neo-dashboard-menu-item" onclick="switchPanel('settings')"><span>⚙</span><span data-i18n="tab_settings">Configurações</span></button>
+      </div>
+      <div class="neo-sidebar-status">
+        <div class="neo-sidebar-status-head">
+          <img src="static/brand/neo-avatar-mono.svg" alt="" width="30" height="30">
+          <div><strong>NEO</strong><span><i></i> ONLINE</span></div>
+        </div>
+        <p>Ativo 24/7<br>Respondendo e executando tarefas.</p>
+        <button class="neo-sidebar-talk" id="neoSidebarTalkNow" onclick="focusDashboardComposer()">Conversar agora</button>
+      </div>
+      <div class="neo-vps-card">
+        <h3>RECURSOS VPS</h3>
+        <div class="neo-vps-row" data-vps-metric="cpu"><span>CPU</span><b>0%</b><div class="neo-vps-bar"><i></i></div></div>
+        <div class="neo-vps-row" data-vps-metric="ram"><span>RAM</span><b>0%</b><div class="neo-vps-bar"><i></i></div></div>
+        <div class="neo-vps-row" data-vps-metric="disk"><span>DISCO</span><b>0%</b><div class="neo-vps-bar"><i></i></div></div>
+        <div class="neo-vps-row" data-vps-metric="network"><span>REDE</span><b>0%</b><div class="neo-vps-bar"><i></i></div></div>
       </div>
     </div>
     <!-- Chat panel -->
-    <div class="panel-view active" id="panelChat">
+    <div class="panel-view" id="panelChat">
       <div class="panel-head">
         <span data-i18n="tab_chat">Chat</span>
         <div class="panel-head-actions">
@@ -211,11 +234,25 @@
     </div>
   <div class="resize-handle" id="sidebarResize"></div>
   </aside>
-  <main class="main">
+  <main class="main showing-dashboard">
     <div id="mainDashboard" class="main-view">
       <div class="main-view-header">
-        <div class="main-view-title" data-i18n="tab_dashboard">Dashboard</div>
-        <div class="main-view-actions">
+        <div class="dashboard-topbar">
+          <div class="dashboard-topbar-status"><span>VPS STATUS:</span> <b id="dashboardSystemStatus">Root</b> <em>● ONLINE</em></div>
+          <div class="dashboard-topbar-status"><span>UPTIME:</span> <b id="dashboardSystemUptime">--</b></div>
+          <div class="dashboard-topbar-status"><span>REGIÃO:</span> <b id="dashboardSystemRegion">--</b></div>
+          <div class="dashboard-topbar-status"><span>VERSÃO:</span> <b id="dashboardSystemVersion">--</b></div>
+        </div>
+        <div class="main-view-actions dashboard-topbar-actions">
+          <button class="dashboard-terminal-btn" id="dashboardTerminalBtn" type="button" onclick="openComposerTerminal()"><span aria-hidden="true">&gt;_</span><span data-i18n="topbar_terminal_ssh">Terminal SSH</span></button>
+          <button class="dashboard-topbar-icon" id="dashboardSearchBtn" type="button" onclick="handleDashboardTopbarAction('search')" title="Search" data-i18n-title="topbar_search" aria-label="Search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></button>
+          <button class="dashboard-topbar-icon" id="dashboardNotificationsBtn" type="button" onclick="handleDashboardTopbarAction('notifications')" title="Notifications" data-i18n-title="topbar_notifications" aria-label="Notifications"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 7h18s-3 0-3-7"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg></button>
+          <button class="dashboard-topbar-icon" id="dashboardHelpBtn" type="button" onclick="handleDashboardTopbarAction('help')" title="Help" data-i18n-title="topbar_help" aria-label="Help"><svg viewBox="0 0 24 24"><path d="M12 21V3"/><path d="m5 8 7-5 7 5"/><path d="M5 16l7 5 7-5"/></svg></button>
+          <button class="dashboard-admin-btn" id="dashboardAdminBtn" type="button" onclick="handleDashboardTopbarAction('admin')" title="Admin" data-i18n-title="topbar_admin">
+            <span class="dashboard-admin-avatar" aria-hidden="true"></span>
+            <span data-i18n="topbar_admin">Admin</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
           <button class="panel-head-btn" title="Refresh" aria-label="Refresh" onclick="loadDashboard()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
         </div>
       </div>
@@ -224,22 +261,14 @@
           <!-- NEO: Dashboard grid — central column (chat placeholder) + right column (hero/KPIs) -->
           <div class="dashboard-grid">
             <div class="dashboard-center">
-              <section class="dashboard-panel" aria-labelledby="dashboardOverviewTitle">
-                <h2 id="dashboardOverviewTitle" data-i18n="dashboard_overview_title">Neo WebUI</h2>
-                <p data-i18n="dashboard_overview_desc">Console operacional para acompanhar contexto, tarefas e espaços de trabalho.</p>
-                <div class="dashboard-meta">
-                  <span data-i18n="dashboard_updated">Atualizado</span>
-                  <span data-dashboard-updated-at>--:--</span>
+              <!-- NEO HU-03.5: Dashboard hosts the existing chat DOM; no duplicate composer or SSE. -->
+              <section class="dashboard-chat-panel" id="dashboardChatPanel" aria-labelledby="dashboardChatTitle">
+                <div class="dashboard-chat-header">
+                  <div class="dashboard-chat-title" id="dashboardChatTitle" data-i18n="dashboard_chat_title">Chat com Neo</div>
+                  <div class="dashboard-chat-online"><span aria-hidden="true"></span><span data-i18n="dashboard_chat_online">Online</span></div>
                 </div>
-              </section>
-              <section class="dashboard-panel" aria-labelledby="dashboardActionsTitle">
-                <h2 id="dashboardActionsTitle" data-i18n="dashboard_shortcuts_title">Atalhos</h2>
-                <p data-i18n="dashboard_shortcuts_desc">Acesso direto aos painéis principais sem alterar o fluxo do chat.</p>
-                <div class="dashboard-actions">
-                  <button class="dashboard-action" onclick="switchPanel('chat')"><span>Chat</span><span>-&gt;</span></button>
-                  <button class="dashboard-action" onclick="switchPanel('tasks')"><span>Tasks</span><span>-&gt;</span></button>
-                  <button class="dashboard-action" onclick="switchPanel('workspaces')"><span>Spaces</span><span>-&gt;</span></button>
-                </div>
+                <div class="dashboard-chat-body" id="dashboardChatMessagesSlot"></div>
+                <div class="dashboard-chat-composer" id="dashboardChatComposerSlot"></div>
               </section>
             </div>
             <aside class="dashboard-right">
@@ -257,6 +286,38 @@
                 <div class="hero-greeting-welcome" data-i18n="greeting_welcome_back">Bem-vindo de volta! 👋</div>
                 <div class="hero-greeting-summary" data-i18n="greeting_summary">Aqui está o resumo do que está acontecendo com seus projetos.</div>
               </div>
+              <!-- NEO HU-03.4: KPI summary cards -->
+              <div class="dashboard-kpi-grid" id="dashboardKpiGrid" aria-live="polite"></div>
+              <!-- NEO HU-03.7: Operational quick actions. Backend-less items use explicit placeholders. -->
+              <section class="dashboard-quick-actions" id="dashboardQuickActions" aria-labelledby="dashboardQuickActionsTitle">
+                <h3 id="dashboardQuickActionsTitle" data-i18n="dashboard_quick_actions">Ações Rápidas</h3>
+                <div class="dashboard-quick-action-grid">
+                  <button class="dashboard-quick-action" type="button" data-dashboard-action="new_project" onclick="handleDashboardQuickAction('new_project')">
+                    <span class="dashboard-quick-action-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span>
+                    <span data-i18n="action_new_project">Novo Projeto</span>
+                  </button>
+                  <button class="dashboard-quick-action" type="button" data-dashboard-action="new_document" onclick="handleDashboardQuickAction('new_document')">
+                    <span class="dashboard-quick-action-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7z"/><path d="M14 2v5h5"/></svg></span>
+                    <span data-i18n="action_new_document">Novo Documento</span>
+                  </button>
+                  <button class="dashboard-quick-action" type="button" data-dashboard-action="new_component" onclick="handleDashboardQuickAction('new_component')">
+                    <span class="dashboard-quick-action-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m12 2 8 4v12l-8 4-8-4V6z"/><path d="M12 22V12M20 6l-8 6-8-6"/></svg></span>
+                    <span data-i18n="action_new_component">Novo Componente</span>
+                  </button>
+                  <button class="dashboard-quick-action" type="button" data-dashboard-action="open_terminal" onclick="handleDashboardQuickAction('open_terminal')">
+                    <span class="dashboard-quick-action-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m4 17 6-6-6-6"/><path d="M12 19h8"/></svg></span>
+                    <span data-i18n="action_open_terminal">Abrir Terminal</span>
+                  </button>
+                  <button class="dashboard-quick-action" type="button" data-dashboard-action="generate_report" onclick="handleDashboardQuickAction('generate_report')">
+                    <span class="dashboard-quick-action-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 19V5"/><path d="M9 19v-8"/><path d="M14 19v-5"/><path d="M19 19V8"/></svg></span>
+                    <span data-i18n="action_generate_report">Gerar Relatório</span>
+                  </button>
+                  <button class="dashboard-quick-action" type="button" data-dashboard-action="deploy_project" onclick="handleDashboardQuickAction('deploy_project')">
+                    <span class="dashboard-quick-action-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 8 5-5 5 5"/><path d="M5 21h14"/></svg></span>
+                    <span data-i18n="action_deploy_project">Deploy Projeto</span>
+                  </button>
+                </div>
+              </section>
             </aside>
           </div>
         </div>

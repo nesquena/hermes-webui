@@ -844,7 +844,7 @@ function _resolveInitialPanel(settings){
   const queryPanel=new URLSearchParams(location.search).get('panel');
   if(allowed.has(queryPanel)) return queryPanel;
   const defaultPanel=settings&&settings.default_panel;
-  return allowed.has(defaultPanel)?defaultPanel:'chat';
+  return allowed.has(defaultPanel)?defaultPanel:'dashboard';
 }
 
 (async()=>{

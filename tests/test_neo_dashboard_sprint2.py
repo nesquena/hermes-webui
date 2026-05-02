@@ -19,7 +19,9 @@ def test_dashboard_panel_is_registered_in_rail_and_sidebar():
 
 
 def test_dashboard_has_panel_and_main_view_shell():
-    assert 'id="panelDashboard"' in INDEX_HTML
+    assert '<body class="dashboard-shell-mode">' in INDEX_HTML
+    assert '<main class="main showing-dashboard">' in INDEX_HTML
+    assert 'class="panel-view active" id="panelDashboard"' in INDEX_HTML
     assert 'id="mainDashboard"' in INDEX_HTML
     assert 'static/dashboard.js' in INDEX_HTML
     assert 'loadDashboard()' in INDEX_HTML or 'function loadDashboard' in (REPO / "static" / "dashboard.js").read_text(encoding="utf-8")
@@ -37,9 +39,14 @@ def test_boot_supports_dashboard_query_and_default_setting():
     assert "default_panel" in BOOT_JS
     assert "dashboard" in BOOT_JS
     assert "switchPanel(_initialPanel" in BOOT_JS
+    assert "allowed.has(defaultPanel)?defaultPanel:'dashboard'" in BOOT_JS
 
 
-def test_backend_default_panel_setting_uses_env_with_chat_fallback():
+def test_backend_default_panel_setting_uses_env_with_dashboard_fallback():
     assert "HERMES_WEBUI_DEFAULT_PANEL" in CONFIG_PY
     assert '"default_panel"' in CONFIG_PY
-    assert '"chat"' in CONFIG_PY
+    assert '"default_panel_user_set"' in CONFIG_PY
+    assert 'os.getenv("HERMES_WEBUI_DEFAULT_PANEL", "dashboard")' in CONFIG_PY
+    assert 'else "dashboard"' in CONFIG_PY
+    assert 'stored.get("default_panel") == "chat"' in CONFIG_PY
+    assert 'settings["default_panel"] = "dashboard"' in CONFIG_PY

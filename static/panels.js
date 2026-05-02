@@ -164,6 +164,7 @@ async function switchPanel(name, opts = {}) {
   if (!opts.bypassSettingsGuard && !_beforePanelSwitch(nextPanel)) return false;
   if (prevPanel !== 'settings' && nextPanel === 'settings') _beginSettingsPanelSession();
   _currentPanel = nextPanel;
+  if (document.body) document.body.classList.toggle('dashboard-shell-mode', nextPanel === 'dashboard');
   // Update nav tabs (rail + mobile sidebar-nav share data-panel)
   document.querySelectorAll('[data-panel]').forEach(t => t.classList.toggle('active', t.dataset.panel === nextPanel));
   // Update panel views
@@ -178,6 +179,7 @@ async function switchPanel(name, opts = {}) {
       mainEl.classList.toggle(cls, nextPanel === p);
     });
   }
+  if (nextPanel !== 'dashboard' && typeof restoreDashboardChat === 'function') restoreDashboardChat();
   // Lazy-load panel data
   if (nextPanel === 'dashboard' && typeof loadDashboard === 'function') await loadDashboard();
   if (nextPanel === 'tasks') await loadCrons();
@@ -2878,8 +2880,8 @@ async function loadSettingsPanel(){
     if(sendKeySel){sendKeySel.value=settings.send_key||'enter';sendKeySel.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const defaultPanelSel=$('settingsDefaultPanel');
     if(defaultPanelSel){
-      const val=String(settings.default_panel||'chat');
-      defaultPanelSel.value=['chat','dashboard'].includes(val)?val:'chat';
+      const val=String(settings.default_panel||'dashboard');
+      defaultPanelSel.value=['chat','dashboard'].includes(val)?val:'dashboard';
       defaultPanelSel.addEventListener('change',_schedulePreferencesAutosave,{once:false});
     }
     // Language preference — populate from LOCALES bundle
@@ -3326,7 +3328,7 @@ async function saveSettings(andClose){
   const model=($('settingsModel')||{}).value;
   const modelChanged=(model||'')!==(_settingsHermesDefaultModelOnOpen||'');
   const sendKey=($('settingsSendKey')||{}).value;
-  const defaultPanel=($('settingsDefaultPanel')||{}).value||'chat';
+  const defaultPanel=($('settingsDefaultPanel')||{}).value||'dashboard';
   const showTokenUsage=!!($('settingsShowTokenUsage')||{}).checked;
   const showCliSessions=!!($('settingsShowCliSessions')||{}).checked;
   const pw=($('settingsPassword')||{}).value;

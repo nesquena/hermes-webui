@@ -2185,8 +2185,8 @@ _SETTINGS_PANEL_VALUES = {"chat", "dashboard"}
 
 
 def _default_panel_from_env() -> str:
-    value = os.getenv("HERMES_WEBUI_DEFAULT_PANEL", "chat")
-    return value if value in _SETTINGS_PANEL_VALUES else "chat"
+    value = os.getenv("HERMES_WEBUI_DEFAULT_PANEL", "dashboard")
+    return value if value in _SETTINGS_PANEL_VALUES else "dashboard"
 
 
 _SETTINGS_DEFAULTS = {
@@ -2194,6 +2194,7 @@ _SETTINGS_DEFAULTS = {
     "onboarding_completed": False,
     "send_key": "enter",  # 'enter' or 'ctrl+enter'
     "default_panel": _default_panel_from_env(),  # chat | dashboard
+    "default_panel_user_set": False,  # preserves explicit user choice after Neo dashboard migration
     "show_token_usage": False,  # show input/output token badge below assistant messages
     "show_cli_sessions": False,  # merge CLI sessions from state.db into the sidebar
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
@@ -2306,6 +2307,13 @@ def load_settings() -> dict:
         stored.get("theme") if isinstance(stored, dict) else settings.get("theme"),
         stored.get("skin") if isinstance(stored, dict) else settings.get("skin"),
     )
+    if (
+        isinstance(stored, dict)
+        and stored.get("default_panel") == "chat"
+        and not stored.get("default_panel_user_set")
+        and not os.getenv("HERMES_WEBUI_DEFAULT_PANEL")
+    ):
+        settings["default_panel"] = "dashboard"
     settings["default_model"] = get_effective_default_model()
     return settings
 
@@ -2324,6 +2332,7 @@ _SETTINGS_ENUM_VALUES = {
 }
 _SETTINGS_BOOL_KEYS = {
     "onboarding_completed",
+    "default_panel_user_set",
     "show_token_usage",
     "show_cli_sessions",
     "sync_to_insights",
@@ -2378,6 +2387,8 @@ def save_settings(settings: dict) -> dict:
             if k in _SETTINGS_BOOL_KEYS:
                 v = bool(v)
             current[k] = v
+            if k == "default_panel":
+                current["default_panel_user_set"] = True
     theme_value = pending_theme
     skin_value = pending_skin
     if theme_was_explicit and not skin_was_explicit:

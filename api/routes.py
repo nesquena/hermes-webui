@@ -1144,6 +1144,18 @@ def handle_get(handler, parsed) -> bool:
         from api.background import get_results
         return j(handler, {"results": get_results(sid)})
 
+    if parsed.path == "/api/dashboard/summary":
+        from api.dashboard import build_dashboard_summary
+        return j(handler, build_dashboard_summary())
+
+    if parsed.path == "/api/health/system":
+        from api.health import build_system_health
+        return j(handler, build_system_health())
+
+    if parsed.path == "/api/health/vps":
+        from api.health import build_vps_health
+        return j(handler, build_vps_health())
+
     if parsed.path == "/api/sessions":
         webui_sessions = all_sessions()
         settings = load_settings()
