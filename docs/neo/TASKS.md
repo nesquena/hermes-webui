@@ -31,16 +31,16 @@
 
 | Sprint | Tema | HUs | Implementadas no worktree | Concluídas por DoD | Status |
 |---|---:|---:|---:|---:|---|
-| Sprint 1 | Rebrand visual/textual + locale pt-BR | 11 | 9 parciais | 0 | em fechamento |
-| Sprint 2 | Dashboard + sidebar/topbar Neo | 11 | 2 parciais | 0 | em andamento |
+| Sprint 1 | Rebrand visual/textual + locale pt-BR | 11 | 10 + 1 parcial | 0 | aguardando evidências/homologação |
+| Sprint 2 | Dashboard + sidebar/topbar Neo | 11 | 9 + 2 parciais | 2 | em fechamento técnico |
 | Sprint 3 | Projetos/Kanban 4 colunas | 10 | 0 | 0 | aguardando Sprint 2 |
 | Sprint 4 | Ações rápidas + Finanças shell visual | 13 | 0 | 0 | aguardando Sprint 3 |
-| Transversal | Qualidade, testes e evidências | 5 | 0 | 0 | em andamento contínuo |
+| Transversal | Qualidade, testes e evidências | 5 | 2 parciais | 0 | em andamento contínuo |
 | Sprint 5+ | Painel Agentes futuro | 5 | 0 | 0 | depende de PoC |
 
 ### Estado atual do worktree
 
-Estado registrado em 2026-05-01:
+Estado registrado em 2026-05-02:
 
 - Branch local ativa: `develop`, rastreando `origin/develop`.
 - Sprint 1 foi incorporada em `develop` por fast-forward a partir de
@@ -48,18 +48,25 @@ Estado registrado em 2026-05-01:
 - `main` permanece como branch de produção e ainda não recebeu a Sprint 1.
 - `docs/neo/` e testes Neo estão versionados; `.gitignore` não ignora mais a
   documentação Neo.
-- Validação recente do merge em `develop`:
-  - `node --check static/i18n.js`
-  - `bash -n neo.sh`
-  - `pytest tests/test_locale_parity_pt_br.py tests/test_neo_skin.py`
-    (`10 passed in 1.20s`)
+- Worktree estava limpo antes desta atualização documental.
+- Validação recente em `develop`:
+  - `node --check static/dashboard.js`
+  - `.venv/bin/python -m py_compile api/dashboard.py api/health.py api/routes.py api/config.py`
+  - `.venv/bin/pytest tests/test_neo_font_ui_inter.py tests/test_neo_dashboard_kpis.py tests/test_neo_skin.py tests/test_neo_branding_assets.py tests/test_neo_pt_br_toasts.py tests/test_neo_dashboard_sprint2.py tests/test_neo_skin_localstorage_persistence.py tests/test_neo_hero_greeting.py tests/test_neo_dashboard_chat_embed.py tests/test_neo_dashboard_shell_visual.py tests/test_neo_dashboard_quick_actions.py tests/test_locale_parity_pt_br.py -q`
+    (`60 passed in 1.82s`)
 - HU-01.2 e HU-01.5 foram implementadas após o merge da Sprint 1 com assets de
   marca, favicon/PWA e teste `tests/test_neo_branding_assets.py`.
-- Sprint 2 iniciada em `develop` com HU-03.1/HU-03.2 implementadas como corte
-  inicial: painel Dashboard, `static/dashboard.js`, `?panel=dashboard` e
-  `settings.default_panel`/`HERMES_WEBUI_DEFAULT_PANEL`.
-- A DoD ainda não está fechada para nenhuma HU porque faltam evidências visuais
-  e homologação manual registrada.
+- Sprint 2 avançou além do corte inicial: HU-03.1, HU-03.2, HU-03.3, HU-03.4,
+  HU-03.5, HU-03.7, HU-03.8, HU-03.9 e HU-03.10 têm implementação/testes focados; HU-03.6 e
+  HU-03.11 seguem parciais com pendências específicas.
+- Homologação visual manual de HU-03.1, HU-03.2, HU-03.3, HU-03.4, HU-03.5,
+  HU-03.6, HU-03.7, HU-03.8 e HU-03.11 foi informada em 2026-05-02; anexos de
+  screenshot permanecem como evidência complementar quando exigidos pelo release.
+- Próximos bloqueios de Sprint 2: busca/notificações/help com comportamento
+  final e validação real dos recursos VPS no host/container.
+- HU-03.9 e HU-03.10 foram homologadas visualmente e fechadas por DoD em
+  2026-05-02; demais HUs seguem com pendências de evidência visual/runtime ou
+  validação operacional específica.
 
 ---
 
@@ -370,7 +377,7 @@ ações rápidas, sidebar fixa de 240px e topbar contextual de 56px.
 
 ### HU-03.5 — Chat central no Dashboard
 
-**Status:** em andamento
+**Status:** implementada com testes
 
 **Tasks**
 
@@ -432,24 +439,28 @@ ações rápidas, sidebar fixa de 240px e topbar contextual de 56px.
 
 ### HU-03.9 — Admin dropdown
 
-**Status:** aguardando Sprint 1
+**Status:** concluída
 **Prioridade:** P1
 
 **Tasks**
 
-- [ ] Menu Perfil / Configurações / Logout.
-- [ ] Reusar handlers existentes quando disponíveis.
+- [x] Menu Perfil / Configurações / Logout.
+- [x] Reusar handlers existentes quando disponíveis.
+
+**Evidência técnica:** [`docs/neo/evidencias/HU-03.9/README.md`](./evidencias/HU-03.9/README.md)
 
 ### HU-03.10 — Painel mínimo "Pessoal"
 
-**Status:** aguardando Sprint 2
+**Status:** concluída
 **Prioridade:** P1
 
 **Tasks**
 
-- [ ] Criar placeholder útil com perfil + preferências.
-- [ ] Linkar Settings.
-- [ ] Definir escopo futuro de notas pessoais.
+- [x] Criar placeholder útil com perfil + preferências.
+- [x] Linkar Settings.
+- [x] Definir escopo futuro de notas pessoais.
+
+**Evidência técnica:** [`docs/neo/evidencias/HU-03.10/README.md`](./evidencias/HU-03.10/README.md)
 
 ### HU-03.11 — Recursos VPS na sidebar
 
@@ -740,7 +751,7 @@ shell visual completo, SVG vanilla e persistência local.
 ### HU-07.1 — Testes por sprint
 
 - [ ] Criar `tests/test_neo_sprint1.py`.
-- [ ] Criar `tests/test_neo_sprint2.py`.
+- [x] Criar cobertura focada da Sprint 2 em `tests/test_neo_dashboard_sprint2.py` e testes Neo complementares.
 - [ ] Criar `tests/test_neo_sprint3.py`.
 - [ ] Criar `tests/test_neo_sprint4.py`.
 
@@ -758,7 +769,7 @@ shell visual completo, SVG vanilla e persistência local.
 
 ### HU-07.4 — Paridade pt-BR
 
-- [ ] Implementar junto com HU-02.3.
+- [x] Implementar junto com HU-02.3.
 - [ ] Rodar em PRs Neo.
 
 ### HU-07.5 — CI / suíte completa

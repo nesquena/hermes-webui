@@ -186,7 +186,10 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel === 'skills') await loadSkills();
   if (nextPanel === 'memory') await loadMemory();
   if (nextPanel === 'workspaces') await loadWorkspacesPanel();
-  if (nextPanel === 'profiles') await loadProfilesPanel();
+  if (nextPanel === 'profiles') {
+    await loadProfilesPanel();
+    if (typeof renderNeoPersonalPanel === 'function') renderNeoPersonalPanel();
+  }
   if (nextPanel === 'todos') loadTodos();
   if (nextPanel === 'settings') {
     switchSettingsSection(_currentSettingsSection);

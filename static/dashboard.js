@@ -156,12 +156,77 @@ function openComposerTerminal() {
   handleDashboardQuickAction('open_terminal');
 }
 
-function handleDashboardTopbarAction(action) {
-  if (action === 'admin') {
-    if (typeof switchPanel === 'function') switchPanel('settings');
+function toggleDashboardAdminMenu(open) {
+  const btn = document.getElementById('dashboardAdminBtn');
+  const menu = document.getElementById('dashboardAdminMenu');
+  if (!btn || !menu) return;
+  const next = typeof open === 'boolean' ? open : menu.hidden;
+  menu.hidden = !next;
+  btn.setAttribute('aria-expanded', next ? 'true' : 'false');
+}
+
+function handleDashboardAdminMenu(action) {
+  toggleDashboardAdminMenu(false);
+  if (action === 'profiles') {
+    if (typeof switchPanel === 'function') switchPanel('profiles');
     return;
   }
+  if (action === 'settings') {
+    if (typeof switchPanel === 'function') switchPanel('settings');
+    setTimeout(() => {
+      if (typeof switchSettingsSection === 'function') switchSettingsSection('preferences');
+    }, 0);
+    return;
+  }
+  if (action === 'logout' && typeof signOut === 'function') signOut();
+}
+
+function handleDashboardTopbarAction(action) {
+  if (action === 'admin') {
+    toggleDashboardAdminMenu();
+    return;
+  }
+  toggleDashboardAdminMenu(false);
   if (typeof showToast === 'function') showToast(_t('dashboard_topbar_placeholder'), 2400, 'info');
+}
+
+function bindDashboardAdminMenu() {
+  if (window.__neoDashboardAdminBound) return;
+  window.__neoDashboardAdminBound = true;
+  document.addEventListener('click', event => {
+    const menu = document.getElementById('dashboardAdminMenu');
+    const btn = document.getElementById('dashboardAdminBtn');
+    if (!menu || !btn || menu.hidden) return;
+    if (menu.contains(event.target) || btn.contains(event.target)) return;
+    toggleDashboardAdminMenu(false);
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape') toggleDashboardAdminMenu(false);
+  });
+}
+
+function renderNeoPersonalPanel() {
+  const root = document.getElementById('neoPersonalOverview');
+  if (!root) return;
+  const activeProfile = (typeof S === 'object' && S && S.activeProfile) || 'default';
+  const language = localStorage.getItem('hermes-lang') || 'pt-BR';
+  const theme = localStorage.getItem('hermes-theme') || 'dark';
+  const skin = localStorage.getItem('hermes-skin') || 'neo';
+  const defaultPanelEl = document.getElementById('settingsDefaultPanel');
+  const defaultPanel = defaultPanelEl && defaultPanelEl.value ? defaultPanelEl.value : 'dashboard';
+  const profileEl = document.getElementById('neoPersonalProfileName');
+  const languageEl = document.getElementById('neoPersonalLanguage');
+  const defaultPanelTextEl = document.getElementById('neoPersonalDefaultPanel');
+  const themeSkinEl = document.getElementById('neoPersonalThemeSkin');
+  if (profileEl) profileEl.textContent = activeProfile;
+  if (languageEl) languageEl.textContent = language;
+  if (defaultPanelTextEl) defaultPanelTextEl.textContent = defaultPanel === 'dashboard' ? 'Dashboard' : 'Chat';
+  if (themeSkinEl) themeSkinEl.textContent = `${theme} / ${skin}`;
+}
+
+async function openNeoPersonalSettings() {
+  if (typeof switchPanel === 'function') await switchPanel('settings');
+  if (typeof switchSettingsSection === 'function') switchSettingsSection('preferences');
 }
 
 function renderDashboardSystemHealth(data) {
@@ -230,6 +295,7 @@ async function loadDashboard() {
   await loadDashboardSummary();
   await loadDashboardHealth();
   startDashboardHealthPolling();
+  bindDashboardAdminMenu();
 
   if (_dashboardLoaded) return;
   _dashboardLoaded = true;

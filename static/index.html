@@ -248,11 +248,18 @@
           <button class="dashboard-topbar-icon" id="dashboardSearchBtn" type="button" onclick="handleDashboardTopbarAction('search')" title="Search" data-i18n-title="topbar_search" aria-label="Search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></button>
           <button class="dashboard-topbar-icon" id="dashboardNotificationsBtn" type="button" onclick="handleDashboardTopbarAction('notifications')" title="Notifications" data-i18n-title="topbar_notifications" aria-label="Notifications"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 7h18s-3 0-3-7"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg></button>
           <button class="dashboard-topbar-icon" id="dashboardHelpBtn" type="button" onclick="handleDashboardTopbarAction('help')" title="Help" data-i18n-title="topbar_help" aria-label="Help"><svg viewBox="0 0 24 24"><path d="M12 21V3"/><path d="m5 8 7-5 7 5"/><path d="M5 16l7 5 7-5"/></svg></button>
-          <button class="dashboard-admin-btn" id="dashboardAdminBtn" type="button" onclick="handleDashboardTopbarAction('admin')" title="Admin" data-i18n-title="topbar_admin">
-            <span class="dashboard-admin-avatar" aria-hidden="true"></span>
-            <span data-i18n="topbar_admin">Admin</span>
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
-          </button>
+          <div class="dashboard-admin-wrap">
+            <button class="dashboard-admin-btn" id="dashboardAdminBtn" type="button" onclick="handleDashboardTopbarAction('admin')" title="Admin" data-i18n-title="topbar_admin" aria-haspopup="menu" aria-expanded="false" aria-controls="dashboardAdminMenu">
+              <span class="dashboard-admin-avatar" aria-hidden="true"></span>
+              <span data-i18n="topbar_admin">Admin</span>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+            </button>
+            <div class="dashboard-admin-menu" id="dashboardAdminMenu" role="menu" hidden>
+              <button class="dashboard-admin-menu-item" type="button" role="menuitem" data-admin-action="profiles" onclick="handleDashboardAdminMenu('profiles')"><span data-i18n="tab_profiles">Perfil</span></button>
+              <button class="dashboard-admin-menu-item" type="button" role="menuitem" data-admin-action="settings" onclick="handleDashboardAdminMenu('settings')"><span data-i18n="tab_settings">Configurações</span></button>
+              <button class="dashboard-admin-menu-item danger" type="button" role="menuitem" data-admin-action="logout" onclick="handleDashboardAdminMenu('logout')"><span data-i18n="sign_out">Sair</span></button>
+            </div>
+          </div>
           <button class="panel-head-btn" title="Refresh" aria-label="Refresh" onclick="loadDashboard()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
         </div>
       </div>
@@ -661,6 +668,20 @@
           <button id="btnSaveProfileDetail" class="panel-head-btn primary" title="Save" data-i18n-title="save" onclick="saveProfileForm()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></button>
         </div>
       </div>
+      <section class="neo-personal-overview" id="neoPersonalOverview" aria-labelledby="neoPersonalTitle">
+        <div>
+          <div class="neo-personal-kicker" data-i18n="tab_profiles">Pessoal</div>
+          <h2 id="neoPersonalTitle">Perfil e preferências</h2>
+          <p>Resumo rápido do perfil ativo e dos padrões de uso do Neo.</p>
+        </div>
+        <div class="neo-personal-grid">
+          <div class="neo-personal-card"><span>Perfil ativo</span><strong id="neoPersonalProfileName">default</strong></div>
+          <div class="neo-personal-card"><span>Idioma</span><strong id="neoPersonalLanguage">pt-BR</strong></div>
+          <div class="neo-personal-card"><span>Painel inicial</span><strong id="neoPersonalDefaultPanel">Dashboard</strong></div>
+          <div class="neo-personal-card"><span>Tema / skin</span><strong id="neoPersonalThemeSkin">dark / neo</strong></div>
+        </div>
+        <button class="neo-personal-settings-link" type="button" onclick="openNeoPersonalSettings()"><span data-i18n="tab_settings">Configurações</span></button>
+      </section>
       <div class="main-view-body" id="profileDetailBody" style="display:none"></div>
       <div class="main-view-empty" id="profileDetailEmpty">
         <svg class="main-view-empty-icon" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
