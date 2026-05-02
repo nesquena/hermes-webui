@@ -189,7 +189,7 @@ global.fetch = async function(path, opts = {}) {
             { event_id: 'rev-before-break', event_type: 'space.updated', space_id: 'broken', created_at: 1710000100, details: { fields: ['widgets'], note: 'safe checkpoint' } },
           ],
           widgets: [
-            { id: 'bad-widget', kind: 'html', title: 'Bad <Widget>', disabled: false, renderer: '<script>bad()</script>' },
+            { id: 'bad-widget', kind: 'html', title: 'Bad <Widget>', disabled: false, renderer: '<script>bad()</script>', queued_event_count: 1, latest_queued_event: { event_id: 'evt-repair', event_name: 'agent.repair', status: 'queued', prompt_preview: 'SECRET_VALUE_DO_NOT_LEAK', payload_summary: { api_key: 'SECRET' } } },
             { id: 'disabled-widget', kind: 'markdown', title: 'Disabled Widget', disabled: true, disabled_reason: 'render failed' },
           ],
         },
@@ -1548,6 +1548,9 @@ def test_spaces_ui_recovery_panel_lists_safe_space_metadata_without_widget_code(
     assert "Disable widget" in out["recoveryHtml"]
     assert "Enable widget" in out["recoveryHtml"]
     assert "Ask Capy to repair" in out["recoveryHtml"]
+    assert "Queued events: 1" in out["recoveryHtml"]
+    assert "agent.repair · queued" in out["recoveryHtml"]
+    assert "Event: evt-repair" in out["recoveryHtml"]
     assert "Restore revision" in out["recoveryHtml"]
     assert "widget.recovery_disabled" in out["recoveryHtml"]
     assert "space.updated" in out["recoveryHtml"]

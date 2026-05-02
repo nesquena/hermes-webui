@@ -2732,7 +2732,26 @@ def recovery_snapshot() -> dict[str, Any]:
             space = json.loads(manifest.read_text(encoding="utf-8"))
             summary = _summary(space)
             widgets = space.get("widgets") if isinstance(space.get("widgets"), list) else []
-            summary["widgets"] = [_widget_recovery_summary(widget) for widget in widgets if isinstance(widget, dict)]
+            widget_summaries = [_widget_recovery_summary(widget) for widget in widgets if isinstance(widget, dict)]
+            queued_events_by_widget: dict[str, list[dict[str, Any]]] = {}
+            for event in list_widget_events(summary["space_id"], limit=100):
+                wid = _context_value(event.get("widget_id"), 120)
+                if not wid:
+                    continue
+                queued_events_by_widget.setdefault(wid, []).append(event)
+            for widget_summary in widget_summaries:
+                wid = _context_value(widget_summary.get("id"), 120)
+                widget_events = queued_events_by_widget.get(wid) or []
+                if not widget_events:
+                    continue
+                latest = widget_events[0]
+                widget_summary["queued_event_count"] = len(widget_events)
+                widget_summary["latest_queued_event"] = {
+                    "event_id": _context_value(latest.get("event_id"), 120),
+                    "event_name": _context_value(latest.get("event_name"), 120),
+                    "status": _context_value(latest.get("status") or "queued", 80),
+                }
+            summary["widgets"] = widget_summaries
             summary["revisions"] = list_revision_events(summary["space_id"], 5)
             spaces.append(summary)
         except Exception:

@@ -877,6 +877,49 @@ def test_recovery_snapshot_never_returns_generated_widget_renderers(monkeypatch,
     assert "renderer" not in serialized
 
 
+def test_recovery_snapshot_includes_safe_widget_event_status_without_prompt_or_payload(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"name": "Recovery Event Status"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "bad-widget",
+            "kind": "html",
+            "title": "Bad Widget",
+            "renderer": "<script>breakRecovery()</script>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+    queued = spaces.queue_widget_event(
+        created["space_id"],
+        "bad-widget",
+        "agent.repair",
+        {"source": "recovery-panel", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        prompt="Repair without exposing Authorization: Bearer SECRET_VALUE_DO_NOT_LEAK or <script>bad()</script>",
+    )
+
+    recovery = spaces.recovery_snapshot()
+    widget = recovery["spaces"][0]["widgets"][0]
+    serialized = json.dumps(recovery).lower()
+
+    assert widget["queued_event_count"] == 1
+    assert widget["latest_queued_event"] == {
+        "event_id": queued["event_id"],
+        "event_name": "agent.repair",
+        "status": "queued",
+    }
+    assert "prompt_preview" not in serialized
+    assert "payload_summary" not in serialized
+    assert "authorization" not in serialized
+    assert "bearer" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "breakrecovery" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "<script" not in serialized
+
+
+
 def test_recovery_snapshot_includes_safe_revision_restore_metadata(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"name": "Recovery Rollback"})
