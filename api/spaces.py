@@ -28,7 +28,7 @@ SCHEMA_VERSION = 1
 _SPACE_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 _WIDGET_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 _EVENT_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,79}$")
-_SPACE_AGENT_UNSUPPORTED_API_RE = re.compile(r"\bspace\.current\.[a-zA-Z0-9_.:-]+")
+_SPACE_AGENT_UNSUPPORTED_API_RE = re.compile(r"\bspace\.(?:current|spaces)\.[a-zA-Z0-9_.:-]+")
 _TRUTHY = {"1", "true", "yes", "on", "enabled"}
 _OMITTED_PAYLOAD_KEYS = {
     "api_key",

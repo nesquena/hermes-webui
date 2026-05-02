@@ -11,9 +11,13 @@ Research targets:
 
 Last updated: 2026-05-02 10:50 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Space Agent package imports now surface safe warnings for unsupported `space.current.*` API references so imported YAML can be reviewed without copying generated bodies, raw source text, action maps, or secret-like fields into public responses or the DOM. Use `git log -1 --oneline` for the exact commit hash after commit.
+Current latest known completed code slice: Space Agent package imports now surface safe warnings for unsupported `space.spaces.*` API references in addition to `space.current.*`, so imported YAML can be reviewed without copying generated bodies, raw source text, action maps, or secret-like fields into public responses or the DOM. Use `git log -1 --oneline` for the exact commit hash after commit.
 
 Recent completed slices:
+
+- `feat(spaces): warn on imported space.spaces APIs`
+  - Added RED/GREEN backend coverage proving imports report metadata-only warnings for unsupported Space Agent `space.spaces.*` references such as `space.spaces.create` and `space.spaces.list`, while preserving the existing `space.current.*` warning behavior and continuing to omit raw action maps, generated renderer/source fields, and credential-like values from import/export responses.
+  - Validation at completion: focused RED failed before implementation because only `space.current.*` APIs were warned on; focused GREEN passed (`1 passed`), full Spaces foundation suite passed (`104 passed`), `py_compile api/spaces.py tests/test_spaces_foundation.py`, and `git diff --check` passed. Backend-only screenshot/status QA showed the new warning coverage with empty browser console and no visible secrets; screenshot artifact `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_db61eb3123424489ada3cb4213c553d1.png`.
 
 - `feat(spaces): warn on unsupported import APIs`
   - Added RED/GREEN backend and real-`static/spaces.js` coverage proving imports report metadata-only warnings for unsupported `space.current.*` references and render the warnings without exposing raw YAML, widget paths, generated renderer/script fields, action maps, or credential-like values.

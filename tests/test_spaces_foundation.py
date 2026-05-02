@@ -880,6 +880,7 @@ description: Imported through the Hermes tool adapter
 instructions: Patch through safe Capy APIs only.
 actions:
   repair: space.current.widget.read
+  create_sibling: space.spaces.create
 """,
             "widgets": {
                 "widgets/panel.yaml": """
@@ -888,6 +889,7 @@ title: Unsafe Panel
 type: html
 actions:
   refresh: space.current.widget.patch
+  list_spaces: space.spaces.list
 renderer: "<script>window.SECRET_VALUE_DO_NOT_LEAK=***</script>"
 source: SECRET_SOURCE_VALUE_DO_NOT_LEAK
 data:
@@ -917,8 +919,20 @@ layout:
         },
         {
             "type": "unsupported_space_agent_api",
+            "file": "space.yaml",
+            "api": "space.spaces.create",
+            "message": "Unsupported Space Agent API reference omitted during import.",
+        },
+        {
+            "type": "unsupported_space_agent_api",
             "file": "widgets/panel.yaml",
             "api": "space.current.widget.patch",
+            "message": "Unsupported Space Agent API reference omitted during import.",
+        },
+        {
+            "type": "unsupported_space_agent_api",
+            "file": "widgets/panel.yaml",
+            "api": "space.spaces.list",
             "message": "Unsupported Space Agent API reference omitted during import.",
         },
     ]
