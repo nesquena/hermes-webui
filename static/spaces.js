@@ -464,6 +464,9 @@
     const metadata = safeWidget.metadata && typeof safeWidget.metadata === 'object' && !Array.isArray(safeWidget.metadata) ? safeWidget.metadata : {};
     const metadataText = formatRevisionDetails(metadata || {});
     const metadataRow = metadataText ? '<div class="capy-spaces-muted">Metadata: '+escapeHtml(metadataText)+'</div>' : '';
+    const eventBridge = safeWidget.event_bridge && typeof safeWidget.event_bridge === 'object' && !Array.isArray(safeWidget.event_bridge) ? safeWidget.event_bridge : {};
+    const eventBridgeText = formatRevisionDetails({event_bridge: eventBridge});
+    const eventBridgeRow = eventBridgeText ? '<div class="capy-spaces-muted">'+escapeHtml(eventBridgeText)+'</div>' : '';
     const exportMeta = metadata.export && typeof metadata.export === 'object' && !Array.isArray(metadata.export) ? metadata.export : {};
     const pdfExportAction = exportMeta.pdf ? '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="requestWidgetPdfExport" data-space-id="'+escapeHtml(spaceId || '')+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-title="'+escapeHtml(title)+'">Request PDF export</button></div>' : '';
     return '<div class="capy-spaces-card" data-widget-detail-id="'+escapeHtml(widgetId)+'">' +
@@ -474,6 +477,7 @@
       '<div class="capy-spaces-muted">'+escapeHtml(kind)+' · '+escapeHtml(widgetId)+' · '+escapeHtml(formatWidgetLayout(layout))+'</div>' +
       '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId || '')+' · '+escapeHtml(recoveryText)+revision+'</div>' +
       metadataRow +
+      eventBridgeRow +
       '</div>'+pdfExportAction+'</div></div></div>';
   }
 

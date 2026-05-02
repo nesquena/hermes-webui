@@ -233,6 +233,7 @@ global.fetch = async function(path, opts = {}) {
         interaction: { refresh: 'agent-mediated', dangerous_html: '<script>bad()</script>' },
         permissions: { network: 'agent-mediated', token: 'SECRET_VALUE_DO_NOT_LEAK', credential: 'SECRET_VALUE_DO_NOT_LEAK' },
       },
+      event_bridge: { event_name: 'agent.prompt', status: 'ready-for-user-confirmation', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
       renderer: '<script>bad()</script>',
       html: '<img src=x onerror=bad()>',
       data: { api_key: 'SECRET' },
@@ -1143,6 +1144,7 @@ def test_spaces_ui_view_widget_details_fetches_and_renders_safe_metadata_only(dr
     assert "export: pdf" in out["rootHtml"]
     assert "interaction: refresh" in out["rootHtml"]
     assert "permissions: network" in out["rootHtml"]
+    assert "event_bridge: event_name, status" in out["rootHtml"]
     assert "credential" not in out["rootHtml"].lower()
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
