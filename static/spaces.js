@@ -901,6 +901,33 @@
     handlersBound = true;
   }
 
+  function renderRecoveryRevisionRows(spaceId, revisions){
+    const safeRevisions = Array.isArray(revisions) ? revisions.slice(0, 5) : [];
+    if (!safeRevisions.length) return '<div class="capy-spaces-muted">No recovery rollback points yet.</div>';
+    return safeRevisions.map(function(rev){
+      const eventId = rev && rev.event_id ? String(rev.event_id) : '';
+      const eventType = rev && rev.event_type ? String(rev.event_type) : 'revision';
+      const detailText = formatRevisionDetails(rev && rev.details);
+      const restoreButton = eventId ? '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="restoreRecoveryRevision" data-space-id="'+escapeHtml(spaceId)+'" data-event-id="'+escapeHtml(eventId)+'">Restore revision</button>' : '';
+      return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(eventType)+'</strong>' +
+        '<div class="capy-spaces-muted">'+escapeHtml(formatRevisionTime(rev && rev.created_at))+' · '+escapeHtml(eventId.slice(0, 12) || 'no-event-id')+'</div>' +
+        (detailText ? '<div class="capy-spaces-muted">'+escapeHtml(detailText)+'</div>' : '') +
+        '</div><div class="capy-spaces-actions">'+restoreButton+'</div></div>';
+    }).join('');
+  }
+
+  function renderRecoveryWidgetEventStatus(widget){
+    const count = Number(widget && widget.queued_event_count || 0);
+    if (!count) return '';
+    const latest = widget && widget.latest_queued_event && typeof widget.latest_queued_event === 'object' ? widget.latest_queued_event : {};
+    const parts = ['Queued events: '+count];
+    const eventName = latest.event_name ? String(latest.event_name) : '';
+    const status = latest.status ? String(latest.status) : '';
+    if (eventName || status) parts.push([eventName, status].filter(Boolean).join(' · '));
+    if (latest.event_id) parts.push('Event: '+String(latest.event_id).slice(0, 12));
+    return '<div class="capy-spaces-muted">'+escapeHtml(parts.join(' · '))+'</div>';
+  }
+
   function renderRecoverySnapshot(data){
     if (!data || !data.enabled) {
       return '<div class="capy-spaces-card"><h3>Capy Spaces recovery disabled</h3><div class="capy-spaces-muted">Capy Spaces recovery is disabled because Spaces are disabled.</div></div>';
@@ -918,7 +945,9 @@
         const disabled = !!(w && w.disabled);
         const disabledReason = w && w.disabled_reason ? String(w.disabled_reason) : '';
         return '<div class="capy-spaces-widget" data-widget-id="'+escapeHtml(widgetId)+'"><div><strong>'+escapeHtml(title)+'</strong>' +
-          '<div class="capy-spaces-muted">'+escapeHtml(kind)+' · '+escapeHtml(widgetId)+(disabled ? ' · Disabled'+(disabledReason ? ': '+escapeHtml(disabledReason) : '') : '')+'</div></div>' +
+          '<div class="capy-spaces-muted">'+escapeHtml(kind)+' · '+escapeHtml(widgetId)+(disabled ? ' · Disabled'+(disabledReason ? ': '+escapeHtml(disabledReason) : '') : '')+'</div>' +
+          renderRecoveryWidgetEventStatus(w || {}) +
+          '</div>' +
           '<div class="capy-spaces-actions">' +
           (disabled ? '<button type="button" class="capy-spaces-btn" data-capy-action="enableRecoveryWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Enable widget</button>' : '<button type="button" class="capy-spaces-btn capy-spaces-danger" data-capy-action="disableRecoveryWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'">Disable widget</button>') +
           '</div></div>';

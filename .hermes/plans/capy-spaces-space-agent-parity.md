@@ -7,6 +7,70 @@ Research targets:
 - Hermes WebUI checkout: `/Users/bschmidy10/hermes-webui` at `5720fa5`
 - Hermes Agent checkout: `/Users/bschmidy10/.hermes/hermes-agent` at `e403379b`
 
+## Current Implementation Status
+
+Last updated: 2026-05-01 23:21 CDT on branch `feat/capy-spaces-foundation`.
+
+Current latest known completed code slice: the safe recovery panel now includes metadata-only queued widget event status (`queued_event_count` plus `event_id|event_name|status`) for broken widgets, so Brendan/Capy can see whether a recovery repair request is already queued without exposing prompt text, payload summaries, generated renderer/html/script/data, or secret-looking values. Use `git log -1 --oneline` for the exact commit hash after commit; this status line intentionally avoids self-referential hashes because committing it changes the hash.
+
+Recent completed slices:
+
+- `feat(spaces): show recovery event status`
+  - Added RED/GREEN backend and real-`static/spaces.js` UI regressions proving recovery metadata shows queued repair/event status while omitting prompt text, payload summaries, renderer/script fields, and secret-looking values.
+  - Fixed the stale demo parity catalog test so the provider setup smoke added in the previous slice is counted in full-suite validation.
+  - Validation at completion: focused recovery event-status tests passed (`2 passed`), Spaces UI JS behavior suite passed (`69 passed`), Spaces foundation suite passed (`97 passed`), demo parity suite passed (`4 passed`), relevant combined suite passed (`170 passed`), full WebUI suite passed (`2955 passed`, `1 warning`, `8 subtests passed`), `py_compile` and `git diff --check` passed, WebUI health OK, mock-state browser QA screenshot captured.
+- `feat(spaces): include queued event anchors in context`
+  - Added a RED/GREEN backend regression proving `space.current.context` includes queued widget event anchors while omitting prompt text, renderer/script fields, and secret-looking payloads.
+  - Validation at completion: focused context test passed, full Spaces foundation suite passed (`96 passed`), `py_compile` and `git diff --check` passed.
+- `feat(spaces): show event bridge details in widget UI`
+  - Added a RED/GREEN real-`static/spaces.js` regression proving widget detail fetches top-level `event_bridge` metadata, renders only safe key summaries, and omits `api_key`, secrets, generated renderer/html/data fields, and script/error markers.
+  - Mock-state browser QA artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_6ed20107db85488d8f127e9a22a1efb4.png`.
+- `feat(spaces): expose event bridge metadata in details`
+  - Added `event_bridge` to the allowlisted widget detail metadata keys after a RED/GREEN backend regression test.
+  - Keeps `api_key` and generated renderer/html/data fields omitted from serialized widget detail responses.
+  - Screenshot QA artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_9def59eab69b4b5083b264b36ee476c3.png`.
+- `852cc03 feat(spaces): expose recovery tool actions`
+  - Added safe recovery/safe-mode Space tool-adapter aliases.
+  - Validation at completion: focused recovery test passed, related recovery tests passed, broader Spaces tests passed, full WebUI suite passed.
+- `a474570 feat(spaces): expose demo smoke routes`
+  - Added direct demo smoke API routes used by later demo parity tooling.
+- `e2499e4 feat(spaces): add metadata shared data slots`
+- `b381e21 feat(spaces): show safe shared data details`
+- `577f224 feat(spaces): delete shared data slots safely`
+- `b344b83 feat(spaces): use direct demo smoke routes`
+  - Spaces demo smoke UI uses `GET /api/spaces/demo/runs`, `POST /api/spaces/demo/run`, and `POST /api/spaces/demo/run-all` instead of generic `space.demo*` tool-adapter calls.
+  - Screenshot QA artifact: `/tmp/capy-screenshots/spaces-demo-direct-routes.png`.
+- `8078b38 feat(spaces): show queued widget event anchors`
+  - Widget event inbox shows safe `Event: <event_id>` anchors plus UTC timestamps while keeping prompt/payload details redacted and bounded.
+  - Screenshot QA artifact: `/tmp/capy-screenshots/spaces-queued-event-anchors.png`.
+- `feat(spaces): queue recovery repair prompts`
+  - Safe recovery panel now offers an “Ask Capy to repair” widget action that queues a metadata-only `agent.repair` event without rendering generated widget bodies.
+  - Fails closed when the shared prompt dialog is unavailable.
+- `feat(spaces): include provider setup in demo smokes`
+  - Added the model/provider setup template to the metadata-only Space Agent demo smoke catalog as `demo_provider_setup`.
+  - Validation at completion: focused demo-smoke route test passed, full Spaces foundation suite passed (`95 passed`), `py_compile` and `git diff --check` passed.
+- `feat(spaces): use active space for revision tool aliases`
+  - Added `space.current.revisions` / `space.current.history` and `space.current.rollback` / `space.current.restore` aliases so Hermes-style tool calls can list and restore revision snapshots from the active Space without raw generated bodies.
+  - Validation at completion: focused active-space rollback adapter test passed, full Spaces foundation suite passed (`96 passed`), `py_compile` and `git diff --check` passed.
+
+Last known validation bundle:
+
+- RED check for recovery queued-event status: backend and UI tests failed as expected before implementation.
+- Focused recovery event-status regressions: passed (`2 passed`).
+- Full Spaces UI JS behavior suite: passed (`69 passed`).
+- Full Spaces foundation suite: passed (`97 passed`).
+- Demo parity suite: passed (`4 passed`).
+- Relevant combined Spaces suites: passed (`170 passed`).
+- Full WebUI suite: passed (`2955 passed`, `1 warning`, `8 subtests passed`).
+- `py_compile api/spaces.py tests/test_spaces_foundation.py tests/test_spaces_ui_js_behaviour.py tests/test_spaces_demo_parity.py`: passed.
+- `git diff --check`: passed.
+- WebUI local health: OK at `http://127.0.0.1:8787/health`.
+- Browser QA: localhost browser automation still fails with `net::ERR_FAILED`, but a file-based mock-state QA page using real `static/spaces.js` rendered the recovery queued event status without console errors. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_06929de070ff48259a55e5a87a173289.png`.
+
+Known warning: unknown `pytest.mark.integration` in `tests/test_onboarding_network.py`.
+
+Keep this section current after each Capy Spaces sprint slice so future agents can compare plan intent, branch state, tests, screenshots, and remaining gates without relying on chat history.
+
 ## 2026-04-28 Source Recreation Validation
 
 Verdict: Space Agent is practically recreateable from source and useful as a live reference implementation for Capy Spaces parity work.

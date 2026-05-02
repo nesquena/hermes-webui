@@ -14,6 +14,7 @@ DEMO_NAMES = [
     "demo_stock_chart",
     "demo_snake_iterative_repair",
     "demo_step_sequencer_piano_roll",
+    "demo_provider_setup",
     "demo_big_bang_onboarding",
     "demo_time_travel_restore",
     "demo_safe_admin_recovery",
