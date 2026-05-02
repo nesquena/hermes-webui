@@ -237,6 +237,11 @@ def test_widget_detail_exposes_typed_template_metadata_without_generated_or_secr
             "chart": {"series": ["NVDA", "AAPL"], "refresh": "agent-mediated"},
             "table": {"columns": ["title", "url", "notes"], "token": "SECRET_VALUE_DO_NOT_LEAK"},
             "notes": {"folders": ["Inbox"], "mode": "metadata-only"},
+            "event_bridge": {
+                "event_name": "agent.prompt",
+                "status": "ready-for-user-confirmation",
+                "api_key": "SECRET...LEAK",
+            },
             "renderer": "<script>steal()</script>",
             "html": "<img src=x onerror=steal()>",
             "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
@@ -250,6 +255,10 @@ def test_widget_detail_exposes_typed_template_metadata_without_generated_or_secr
     assert detail["metadata"]["chart"] == {"series": ["NVDA", "AAPL"], "refresh": "agent-mediated"}
     assert detail["metadata"]["table"] == {"columns": ["title", "url", "notes"]}
     assert detail["metadata"]["notes"] == {"folders": ["Inbox"], "mode": "metadata-only"}
+    assert detail["metadata"]["event_bridge"] == {
+        "event_name": "agent.prompt",
+        "status": "ready-for-user-confirmation",
+    }
     assert "steal" not in serialized
     assert "<script" not in serialized
     assert "onerror" not in serialized

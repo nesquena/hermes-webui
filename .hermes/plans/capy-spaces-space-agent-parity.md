@@ -9,12 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-01 19:35 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-01 20:46 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: current-active-space revision history and rollback tool aliases for safer Space Agent-style time-travel flows. Use `git log -1 --oneline` for the exact commit hash; this status line intentionally avoids self-referential hashes because committing it changes the hash.
+Current latest known completed code slice: event bridge metadata is now exposed through safe widget detail metadata so prompt widgets can advertise `agent.prompt` readiness without returning generated renderer/html/script/data bodies. Use `git log -1 --oneline` for the exact commit hash; this status line intentionally avoids self-referential hashes because committing it changes the hash.
 
 Recent completed slices:
 
+- `feat(spaces): expose event bridge metadata in details`
+  - Added `event_bridge` to the allowlisted widget detail metadata keys after a RED/GREEN backend regression test.
+  - Keeps `api_key` and generated renderer/html/data fields omitted from serialized widget detail responses.
+  - Screenshot QA artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_9def59eab69b4b5083b264b36ee476c3.png`.
 - `852cc03 feat(spaces): expose recovery tool actions`
   - Added safe recovery/safe-mode Space tool-adapter aliases.
   - Validation at completion: focused recovery test passed, related recovery tests passed, broader Spaces tests passed, full WebUI suite passed.
@@ -41,10 +45,11 @@ Recent completed slices:
 
 Last known validation bundle:
 
-- Focused active-space rollback adapter test: passed (`1 passed`).
+- Focused event-bridge widget detail metadata test: passed (`1 passed`).
 - Capy Spaces foundation suite: passed (`96 passed`).
 - `py_compile api/spaces.py tests/test_spaces_foundation.py`: passed.
 - `git diff --check`: passed.
+- Mock-state browser QA harness loaded the checked-out `static/spaces.js`, showed `event_bridge: event_name, status` in widget details, and reported no console/harness errors or DOM leaks for renderer/script/secret-like markers.
 - WebUI local and tailnet health: passed after `com.capy.webui` restart (`/health` ok locally and through Tailscale).
 
 Known warning: unknown `pytest.mark.integration` in `tests/test_onboarding_network.py`.

@@ -81,6 +81,7 @@ _WIDGET_DETAIL_METADATA_FIELDS = (
     "status",
     "export",
     "interaction",
+    "event_bridge",
     "permissions",
     "capabilities",
     "audio_policy",
