@@ -9,9 +9,9 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-01 18:26 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-01 19:35 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: provider/local-model setup metadata-only demo smoke coverage. Use `git log -1 --oneline` for the exact commit hash; this status line intentionally avoids self-referential hashes because committing it changes the hash.
+Current latest known completed code slice: current-active-space revision history and rollback tool aliases for safer Space Agent-style time-travel flows. Use `git log -1 --oneline` for the exact commit hash; this status line intentionally avoids self-referential hashes because committing it changes the hash.
 
 Recent completed slices:
 
@@ -35,14 +35,17 @@ Recent completed slices:
 - `feat(spaces): include provider setup in demo smokes`
   - Added the model/provider setup template to the metadata-only Space Agent demo smoke catalog as `demo_provider_setup`.
   - Validation at completion: focused demo-smoke route test passed, full Spaces foundation suite passed (`95 passed`), `py_compile` and `git diff --check` passed.
+- `feat(spaces): use active space for revision tool aliases`
+  - Added `space.current.revisions` / `space.current.history` and `space.current.rollback` / `space.current.restore` aliases so Hermes-style tool calls can list and restore revision snapshots from the active Space without raw generated bodies.
+  - Validation at completion: focused active-space rollback adapter test passed, full Spaces foundation suite passed (`96 passed`), `py_compile` and `git diff --check` passed.
 
 Last known validation bundle:
 
-- Focused provider/demo-smoke route test: passed (`1 passed`).
-- Capy Spaces foundation suite: passed (`95 passed`).
+- Focused active-space rollback adapter test: passed (`1 passed`).
+- Capy Spaces foundation suite: passed (`96 passed`).
 - `py_compile api/spaces.py tests/test_spaces_foundation.py`: passed.
 - `git diff --check`: passed.
-- WebUI local and tailnet health: pending final post-restart check for this cycle.
+- WebUI local and tailnet health: passed after `com.capy.webui` restart (`/health` ok locally and through Tailscale).
 
 Known warning: unknown `pytest.mark.integration` in `tests/test_onboarding_network.py`.
 

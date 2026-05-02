@@ -890,13 +890,22 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         space_id = validate_space_id(_space_tool_current_id(data))
         result = delete_shared_data_slot(space_id, data.get("key"))
         return {"ok": True, "action": name, **result}
-    if name in {"space.revisions", "space.revision.list", "space.history"}:
-        space_id = validate_space_id(data.get("space_id"))
-        return {"ok": True, "action": name, "revisions": list_revision_events(space_id, data.get("limit", 20))}
-    if name in {"space.revision.restore", "space.rollback", "space.restore"}:
-        space_id = validate_space_id(data.get("space_id"))
+    if name in {"space.revisions", "space.revision.list", "space.history", "space.current.revisions", "space.current.revision.list", "space.current.history"}:
+        is_current = name.startswith("space.current.")
+        space_id = validate_space_id(_space_tool_current_id(data) if is_current else data.get("space_id"))
+        result = {"ok": True, "action": name, "revisions": list_revision_events(space_id, data.get("limit", 20))}
+        if is_current:
+            result["active_space_id"] = space_id
+        else:
+            result["space_id"] = space_id
+        return result
+    if name in {"space.revision.restore", "space.rollback", "space.restore", "space.current.revision.restore", "space.current.rollback", "space.current.restore"}:
+        is_current = name.startswith("space.current.")
+        space_id = validate_space_id(_space_tool_current_id(data) if is_current else data.get("space_id"))
         event_id = str(data.get("event_id") or data.get("revision_event_id") or "")
         result = restore_revision(space_id, event_id)
+        if is_current:
+            result["active_space_id"] = space_id
         return {"action": name, **result}
     if name in {"space.recovery", "space.recovery.snapshot", "space.safe_mode", "space.safe_mode.snapshot"}:
         return {"ok": True, "action": name, "recovery": recovery_snapshot()}

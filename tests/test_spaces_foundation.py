@@ -277,7 +277,7 @@ def test_space_tool_adapter_exposes_metadata_only_current_context(monkeypatch, t
             "kind": "markdown",
             "title": "Summary",
             "renderer": "<script>steal()</script>",
-            "data": {"api_key": "unsafe...leak"},
+            "data": {"api_key": "***"},
         },
     )
 
@@ -298,6 +298,53 @@ def test_space_tool_adapter_exposes_metadata_only_current_context(monkeypatch, t
     assert "renderer" not in serialized
     assert "api_key" not in serialized
     assert "unsafe_marker_do_not_leak" not in serialized
+
+
+def test_space_tool_adapter_current_revisions_and_rollback_use_active_space_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "current-rollback-lab", "name": "Current Rollback Lab"})
+    original = spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "summary",
+            "kind": "markdown",
+            "title": "Original summary",
+            "renderer": "<script>doNotExpose()</script>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+    spaces.patch_widget(
+        created["space_id"],
+        "summary",
+        {"title": "Patched summary", "renderer": "<script>bad()</script>", "api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+    )
+
+    revisions = spaces.run_space_tool(
+        "space.current.revisions",
+        {"active_space_id": created["space_id"], "limit": 5, "renderer": "<script>ignore()</script>"},
+    )
+    restored = spaces.run_space_tool(
+        "space.current.rollback",
+        {
+            "active_space_id": created["space_id"],
+            "event_id": original["revision_event_id"],
+            "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+        },
+    )
+    serialized = json.dumps({"revisions": revisions, "restored": restored}).lower()
+
+    assert revisions["ok"] is True
+    assert revisions["action"] == "space.current.revisions"
+    assert revisions["active_space_id"] == created["space_id"]
+    assert revisions["revisions"][0]["event_type"] == "widget.patched"
+    assert restored["ok"] is True
+    assert restored["action"] == "space.current.rollback"
+    assert restored["space"]["widgets"][0]["title"] == "Original summary"
+    assert "donotexpose" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
 
 
 def test_space_detail_includes_shared_data_slots_metadata_only(monkeypatch, tmp_path):
