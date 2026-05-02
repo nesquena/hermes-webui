@@ -35,7 +35,7 @@ def test_attach_live_stream_reuses_existing_same_stream_transport():
     therefore reuse the existing transport.
     """
     body = _function_body(MESSAGES_JS, "attachLiveStream")
-    close_pos = body.find("closeLiveStream(activeSid)")
+    close_pos = body.find("\n  closeLiveStream(activeSid);\n")
     reuse_pos = body.find("const existingLive=LIVE_STREAMS[activeSid]")
     assert reuse_pos != -1, "attachLiveStream() should check for an existing live stream"
     assert close_pos != -1, "attachLiveStream() should still close stale/different streams"
@@ -43,6 +43,32 @@ def test_attach_live_stream_reuses_existing_same_stream_transport():
     assert "existingLive.streamId===streamId" in body
     assert "existingLive.source.readyState!==EventSource.CLOSED" in body
     assert "return" in body[reuse_pos:close_pos]
+
+
+def test_attach_live_stream_updates_uploads_before_same_stream_reuse():
+    """Reusing transport must not skip per-session uploaded attachment state."""
+    body = _function_body(MESSAGES_JS, "attachLiveStream")
+    upload_pos = body.find("if(uploaded.length) INFLIGHT[activeSid].uploaded=[...uploaded]")
+    reuse_pos = body.find("const existingLive=LIVE_STREAMS[activeSid]")
+    close_pos = body.find("\n  closeLiveStream(activeSid);\n")
+    assert upload_pos != -1
+    assert reuse_pos != -1
+    assert close_pos != -1
+    assert upload_pos < reuse_pos < close_pos
+
+
+def test_attach_live_stream_different_stream_still_reopens_transport():
+    """A new stream id for the same session must not reuse the old transport."""
+    body = _function_body(MESSAGES_JS, "attachLiveStream")
+    reuse_pos = body.find("const existingLive=LIVE_STREAMS[activeSid]")
+    close_pos = body.find("\n  closeLiveStream(activeSid);\n")
+    assert reuse_pos != -1
+    assert close_pos != -1
+    reuse_block = body[reuse_pos:close_pos]
+    assert "existingLive.streamId===streamId" in reuse_block
+    assert "existingLive.streamId!==streamId" not in reuse_block
+    assert "return" in reuse_block
+    assert reuse_pos < close_pos
 
 
 def test_load_session_reattach_path_uses_attach_live_stream_for_running_sessions():

@@ -291,6 +291,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   const existingLive=LIVE_STREAMS[activeSid];
   if(
     existingLive&&existingLive.streamId===streamId&&existingLive.source&&
+    // A same-stream transport can be reused unless the browser has already
+    // marked it closed; closed streams must still fall through to reopen.
     (typeof EventSource==='undefined'||existingLive.source.readyState!==EventSource.CLOSED)
   ){
     return;
