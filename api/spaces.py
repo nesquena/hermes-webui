@@ -478,6 +478,19 @@ def build_agent_context(space_id: str | None) -> str:
             lines.append(f"- {_context_value(item['key'], 80)}")
         if len(shared_data) > 25:
             lines.append(f"- … {len(shared_data) - 25} more data slot(s) omitted")
+    widget_events = list_widget_events(sid, limit=10)
+    if widget_events:
+        lines.append("queued widget events (event_id|widget_id|event_name|status):")
+        for event in widget_events[:10]:
+            lines.append(
+                "- "
+                f"{_context_value(event.get('event_id'), 120)}|"
+                f"{_context_value(event.get('widget_id'), 80)}|"
+                f"{_context_value(event.get('event_name'), 120)}|"
+                f"{_context_value(event.get('status'), 80)}"
+            )
+        if len(widget_events) > 10:
+            lines.append(f"- … {len(widget_events) - 10} more queued widget event(s) omitted")
     revision = _context_value(space.get("revision_event_id"), 120)
     if revision:
         lines.append(f"revision_event_id: {revision}")

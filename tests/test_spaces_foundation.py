@@ -289,6 +289,14 @@ def test_space_tool_adapter_exposes_metadata_only_current_context(monkeypatch, t
             "data": {"api_key": "***"},
         },
     )
+    queued = spaces.queue_widget_event(
+        created["space_id"],
+        "research-summary",
+        "agent.prompt",
+        {"api_key": "SECRET_VALUE_DO_NOT_LEAK", "renderer": "<script>bad()</script>"},
+        prompt="Investigate SECRET_VALUE_DO_NOT_LEAK with <script>bad()</script>",
+        session_id="webui-session-123",
+    )
 
     result = spaces.run_space_tool("space.current.context", {"active_space_id": created["space_id"]})
     no_current = spaces.run_space_tool("space.current.context", {})
@@ -301,7 +309,10 @@ def test_space_tool_adapter_exposes_metadata_only_current_context(monkeypatch, t
     assert "id: context-lab" in result["context"]
     assert "research-summary|Summary|markdown" in result["context"]
     assert "Patch widgets through typed APIs only." in result["context"]
+    assert "queued widget events (event_id|widget_id|event_name|status):" in result["context"]
+    assert f"{queued['event_id']}|research-summary|agent.prompt|queued" in result["context"]
     assert no_current == {"ok": True, "action": "space.current.context", "active_space_id": None, "context": ""}
+    assert "investigate secret_value_do_not_leak" not in serialized
     assert "steal" not in serialized
     assert "<script" not in serialized
     assert "renderer" not in serialized
