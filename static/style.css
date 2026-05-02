@@ -2644,7 +2644,10 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 .main-view-actions{display:flex;align-items:center;gap:4px;flex-shrink:0;}
 .main-view-body{flex:1;min-height:0;overflow-y:auto;padding:24px 32px;}
 .main-view-content{max-width:960px;margin:0 auto;width:100%;}
-.dashboard-shell{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(260px,.8fr);gap:16px;align-items:stretch;}
+.dashboard-shell{display:flex;flex-direction:column;gap:0;}
+.dashboard-grid{display:grid;grid-template-columns:1fr 320px;gap:24px;align-items:start;}
+.dashboard-center{display:flex;flex-direction:column;gap:16px;}
+.dashboard-right{display:flex;flex-direction:column;gap:16px;}
 .dashboard-panel{border:1px solid var(--border);background:var(--surface);border-radius:8px;padding:18px;min-height:180px;}
 .dashboard-panel h2{font-size:18px;line-height:1.3;margin:0 0 8px;color:var(--text);}
 .dashboard-panel p{font-size:13px;line-height:1.55;margin:0;color:var(--muted);}
@@ -2652,8 +2655,31 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 .dashboard-actions{display:grid;grid-template-columns:1fr;gap:8px;margin-top:14px;}
 .dashboard-action{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:13px;cursor:pointer;}
 .dashboard-action:hover{border-color:var(--accent-bg-strong);background:var(--accent-bg);}
+
+/* NEO HU-03.3: Hero card — avatar + status pill */
+.hero-card{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;height:220px;border:1px solid var(--border);border-radius:12px;padding:16px;overflow:hidden;background:var(--surface);}
+.hero-card::before{content:'';position:absolute;inset:0;background:radial-gradient(circle at 50% 32%,rgba(0,229,255,0.08),var(--surface) 60%,transparent);pointer-events:none;}
+.hero-card-stars{position:absolute;inset:0;pointer-events:none;
+  box-shadow:18px 12px 4px rgba(0,229,255,0.25),42px 38px 4px rgba(0,229,255,0.18),78px 24px 4px rgba(0,229,255,0.22),120px 50px 4px rgba(0,229,255,0.15),160px 18px 4px rgba(0,229,255,0.2),200px 42px 4px rgba(0,229,255,0.17),30px 70px 4px rgba(0,229,255,0.2),90px 62px 4px rgba(0,229,255,0.22),140px 76px 4px rgba(0,229,255,0.15),180px 68px 4px rgba(0,229,255,0.18),55px 90px 4px rgba(0,229,255,0.2),110px 85px 4px rgba(0,229,255,0.16),170px 94px 4px rgba(0,229,255,0.22),20px 100px 4px rgba(0,229,255,0.18),130px 105px 4px rgba(0,229,255,0.2);}
+.hero-avatar-wrap{position:relative;z-index:1;animation:hover-float 4s ease-in-out infinite;}
+.hero-avatar{display:block;width:140px;height:auto;filter:drop-shadow(0 0 6px var(--accent));animation:pulse-glow 3s ease-in-out infinite;}
+.hero-status-pill{position:relative;z-index:1;font-size:9px;font-weight:600;text-transform:uppercase;letter-spacing:0.2em;padding:4px 12px;border:1px solid var(--accent);border-radius:999px;color:var(--accent);background:color-mix(in srgb,var(--bg) 70%,transparent);}
+
+/* NEO HU-03.3: Greeting */
+.hero-greeting{display:flex;flex-direction:column;gap:4px;}
+.hero-greeting-time{font-size:18px;font-weight:600;color:var(--text);}
+.hero-greeting-welcome{font-size:18px;font-weight:600;color:var(--strong);}
+.hero-greeting-summary{font-size:12px;font-weight:400;color:var(--muted);line-height:1.5;}
+
+@keyframes hover-float{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}
+@keyframes pulse-glow{0%,100%{filter:drop-shadow(0 0 6px var(--accent))}50%{filter:drop-shadow(0 0 14px var(--accent))}}
+
+@media(prefers-reduced-motion:reduce){
+  .hero-avatar-wrap,.hero-avatar{animation:none;}
+}
+
 @media (max-width: 900px){
-  .dashboard-shell{grid-template-columns:1fr;}
+  .dashboard-grid{grid-template-columns:1fr;}
 }
 .main-view-empty{
   flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;

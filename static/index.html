@@ -221,23 +221,44 @@
       </div>
       <div class="main-view-body">
         <div class="main-view-content dashboard-shell">
-          <section class="dashboard-panel" aria-labelledby="dashboardOverviewTitle">
-            <h2 id="dashboardOverviewTitle" data-i18n="dashboard_overview_title">Neo WebUI</h2>
-            <p data-i18n="dashboard_overview_desc">Console operacional para acompanhar contexto, tarefas e espaços de trabalho.</p>
-            <div class="dashboard-meta">
-              <span data-i18n="dashboard_updated">Atualizado</span>
-              <span data-dashboard-updated-at>--:--</span>
+          <!-- NEO: Dashboard grid — central column (chat placeholder) + right column (hero/KPIs) -->
+          <div class="dashboard-grid">
+            <div class="dashboard-center">
+              <section class="dashboard-panel" aria-labelledby="dashboardOverviewTitle">
+                <h2 id="dashboardOverviewTitle" data-i18n="dashboard_overview_title">Neo WebUI</h2>
+                <p data-i18n="dashboard_overview_desc">Console operacional para acompanhar contexto, tarefas e espaços de trabalho.</p>
+                <div class="dashboard-meta">
+                  <span data-i18n="dashboard_updated">Atualizado</span>
+                  <span data-dashboard-updated-at>--:--</span>
+                </div>
+              </section>
+              <section class="dashboard-panel" aria-labelledby="dashboardActionsTitle">
+                <h2 id="dashboardActionsTitle" data-i18n="dashboard_shortcuts_title">Atalhos</h2>
+                <p data-i18n="dashboard_shortcuts_desc">Acesso direto aos painéis principais sem alterar o fluxo do chat.</p>
+                <div class="dashboard-actions">
+                  <button class="dashboard-action" onclick="switchPanel('chat')"><span>Chat</span><span>-&gt;</span></button>
+                  <button class="dashboard-action" onclick="switchPanel('tasks')"><span>Tasks</span><span>-&gt;</span></button>
+                  <button class="dashboard-action" onclick="switchPanel('workspaces')"><span>Spaces</span><span>-&gt;</span></button>
+                </div>
+              </section>
             </div>
-          </section>
-          <section class="dashboard-panel" aria-labelledby="dashboardActionsTitle">
-            <h2 id="dashboardActionsTitle" data-i18n="dashboard_shortcuts_title">Atalhos</h2>
-            <p data-i18n="dashboard_shortcuts_desc">Acesso direto aos painéis principais sem alterar o fluxo do chat.</p>
-            <div class="dashboard-actions">
-              <button class="dashboard-action" onclick="switchPanel('chat')"><span>Chat</span><span>-&gt;</span></button>
-              <button class="dashboard-action" onclick="switchPanel('tasks')"><span>Tasks</span><span>-&gt;</span></button>
-              <button class="dashboard-action" onclick="switchPanel('workspaces')"><span>Spaces</span><span>-&gt;</span></button>
-            </div>
-          </section>
+            <aside class="dashboard-right">
+              <!-- NEO HU-03.3: Hero card — avatar + status pill -->
+              <div class="hero-card" aria-label="Neo agent status">
+                <div class="hero-card-stars"></div>
+                <div class="hero-avatar-wrap">
+                  <img src="static/brand/neo-avatar.svg" alt="Neo humanoid avatar" class="hero-avatar" width="160" height="160">
+                </div>
+                <div class="hero-status-pill" data-i18n="hero_status_online">STATUS: OPERACIONAL</div>
+              </div>
+              <!-- NEO HU-03.3: Greeting -->
+              <div class="hero-greeting">
+                <div class="hero-greeting-time" id="heroGreetingTime"></div>
+                <div class="hero-greeting-welcome" data-i18n="greeting_welcome_back">Bem-vindo de volta! 👋</div>
+                <div class="hero-greeting-summary" data-i18n="greeting_summary">Aqui está o resumo do que está acontecendo com seus projetos.</div>
+              </div>
+            </aside>
+          </div>
         </div>
       </div>
     </div>
