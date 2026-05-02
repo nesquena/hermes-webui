@@ -8,6 +8,7 @@ Validates:
   - copy.deepcopy() isolation (mutating returned dict doesn't pollute cache)
   - invalidate_models_cache() direct invalidation
 """
+import json
 import time
 from unittest.mock import patch
 
@@ -108,45 +109,106 @@ def test_ttl_expiry():
 
 # ── 3. test_mtime_invalidation ───────────────────────────────────────────
 
-def test_mtime_invalidation():
+def test_mtime_invalidation(tmp_path, monkeypatch):
     """Populate the cache, then change _cfg_mtime to simulate a config file
     change on disk. The next call should invalidate the cache and re-scan.
     """
     _reset_cache()
+    config_path = tmp_path / "config.yaml"
+    cache_path = tmp_path / "models_cache.json"
 
-    # Ensure _cfg_mtime matches file so first call doesn't re-scan due to mtime
-    try:
-        real_mtime = config.Path(config._get_config_path()).stat().st_mtime
-    except OSError:
-        real_mtime = 0.0
-    config._cfg_mtime = real_mtime
+    with monkeypatch.context() as m:
+        m.setattr(config, "_get_config_path", lambda: config_path)
+        m.setattr(config, "_models_cache_path", cache_path)
 
-    # First call populates cache
-    result1 = config.get_available_models()
-    assert config._available_models_cache is not None
+        config_path.write_text(
+            "model:\n  provider: openai\n  default: old-test-model\n",
+            encoding="utf-8",
+        )
+        config.reload_config()
+        config.invalidate_models_cache()
 
-    # Simulate config.yaml changed on disk by setting _cfg_mtime to 0
-    # (which won't match the actual file mtime)
-    config._cfg_mtime = 0.0
+        result1 = config.get_available_models()
+        assert result1["default_model"] == "old-test-model"
+        assert config._available_models_cache is not None
 
-    # The next call should detect mtime mismatch, reload, and invalidate cache
-    old_cache = config._available_models_cache
-    old_ts = config._available_models_cache_ts
+        old_cache = config._available_models_cache
 
-    result2 = config.get_available_models()
+        # Simulate an external edit to config.yaml. This is the path that the
+        # WebUI hits when a user edits the file outside /api/default-model.
+        config_path.write_text(
+            "model:\n  provider: openai\n  default: new-test-model\n",
+            encoding="utf-8",
+        )
+        new_mtime = config_path.stat().st_mtime + 2.0
+        config_path.touch()
+        config.os.utime(config_path, (new_mtime, new_mtime))
 
-    # Cache must have been refreshed — timestamp advanced since we reset it
-    # to 0.0 on invalidation.
-    assert config._available_models_cache_ts > 0.0, (
-        "Cache timestamp should be updated after invalidation + rebuild"
-    )
+        result2 = config.get_available_models()
 
-    # Restore
-    config._cfg_mtime = real_mtime
+        assert result2["default_model"] == "new-test-model"
+        assert config._available_models_cache is not old_cache, (
+            "Cache object should be replaced after config mtime invalidation"
+        )
+        assert config._available_models_cache_ts > 0.0, (
+            "Cache timestamp should be updated after invalidation + rebuild"
+        )
+
+    config.reload_config()
     _reset_cache()
 
 
-# ── 4. test_deepcopy_isolation ────────────────────────────────────────────
+# ── 4. test_stale_disk_cache_after_restart_ignored ─────────────────────────
+
+def test_stale_disk_cache_after_restart_ignored(tmp_path, monkeypatch):
+    """A stale disk cache from before a config change must not survive restart."""
+    _reset_cache()
+    config_path = tmp_path / "config.yaml"
+    cache_path = tmp_path / "models_cache.json"
+
+    with monkeypatch.context() as m:
+        m.setattr(config, "_get_config_path", lambda: config_path)
+        m.setattr(config, "_models_cache_path", cache_path)
+
+        config_path.write_text(
+            "model:\n  provider: xiaomi\n  default: old-test-model\n",
+            encoding="utf-8",
+        )
+        config.reload_config()
+        old_mtime = config._cfg_mtime
+
+        stale_cache = {
+            "_config_mtime": old_mtime,
+            "active_provider": "xiaomi",
+            "default_model": "old-test-model",
+            "configured_model_badges": {},
+            "groups": [],
+        }
+        cache_path.write_text(json.dumps(stale_cache), encoding="utf-8")
+
+        config_path.write_text(
+            "model:\n  provider: custom:litellm-proxy\n  default: new-test-model\n",
+            encoding="utf-8",
+        )
+        new_mtime = config_path.stat().st_mtime + 2.0
+        config_path.touch()
+        config.os.utime(config_path, (new_mtime, new_mtime))
+
+        # Simulate a fresh server process: config was reloaded before the first
+        # /api/models request, so _cfg_changed is false on entry.
+        config.reload_config()
+        _reset_cache()
+
+        result = config.get_available_models()
+
+        assert result["active_provider"] == "custom:litellm-proxy"
+        assert result["default_model"] == "new-test-model"
+
+    config.reload_config()
+    _reset_cache()
+
+
+# ── 5. test_deepcopy_isolation ────────────────────────────────────────────
 
 def test_deepcopy_isolation():
     """Mutating the returned dict from get_available_models() must not
@@ -189,7 +251,7 @@ def test_deepcopy_isolation():
     _reset_cache()
 
 
-# ── 5. test_invalidate_models_cache_direct ───────────────────────────────
+# ── 6. test_invalidate_models_cache_direct ───────────────────────────────
 
 def test_invalidate_models_cache_direct():
     """Call invalidate_models_cache() after populating the cache.

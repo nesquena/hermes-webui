@@ -1333,8 +1333,8 @@ def _is_valid_models_cache(cache: object) -> bool:
     )
 
 
-def _load_models_cache_from_disk() -> dict | None:
-    """Load /api/models cache from disk if it exists and has current metadata."""
+def _load_models_cache_from_disk(config_mtime: float | None = None) -> dict | None:
+    """Load /api/models cache from disk if it matches the current config."""
     try:
         import json as _j
 
@@ -1342,7 +1342,21 @@ def _load_models_cache_from_disk() -> dict | None:
             return None
         with open(_models_cache_path, encoding="utf-8") as f:
             cache = _j.load(f)
-        return cache if _is_valid_models_cache(cache) else None
+        if not _is_valid_models_cache(cache):
+            return None
+        expected_mtime = _cfg_mtime if config_mtime is None else config_mtime
+        try:
+            cached_mtime = float(cache.get("_config_mtime"))
+        except (TypeError, ValueError):
+            return None
+        if cached_mtime != float(expected_mtime):
+            return None
+        return {
+            "active_provider": cache["active_provider"],
+            "default_model": cache["default_model"],
+            "configured_model_badges": cache["configured_model_badges"],
+            "groups": cache["groups"],
+        }
     except Exception:
         return None
 
@@ -1356,6 +1370,7 @@ def _save_models_cache_to_disk(cache: dict) -> None:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(
                 {
+                    "_config_mtime": _cfg_mtime,
                     "active_provider": cache["active_provider"],
                     "default_model": cache["default_model"],
                     "configured_model_badges": cache["configured_model_badges"],
@@ -1496,6 +1511,7 @@ def get_available_models() -> dict:
         _current_mtime = 0.0
     if _current_mtime != _cfg_mtime:
         reload_config()
+        invalidate_models_cache()
     # ── COLD PATH helper ─────────────────────────────────────────────────────
     # Extracted so it runs inside _available_models_cache_lock (RLock) to
     # prevent thundering-herd: only one thread rebuilds while others wait.
@@ -2134,7 +2150,7 @@ def get_available_models() -> dict:
     # so only one thread rebuilds while others wait.
     disk_groups = None
     if _available_models_cache is None:
-        disk_groups = _load_models_cache_from_disk()
+        disk_groups = _load_models_cache_from_disk(_current_mtime)
 
     with _available_models_cache_lock:
         # If another thread is already building, wait for its result instead
