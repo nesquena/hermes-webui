@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-02 17:38 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-02 18:45 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: source-style Space Agent example installer aliases now route `space.spaces.installExampleSpace` / `installTemplate` through Capy's safe template installer, including conservative mappings for bundled Space Agent examples such as `retro-arcade` → `game`, while omitting raw source paths, generated renderer/html/script bodies, and credential-like fields from responses. Use `git log -1 --oneline` for the exact commit hash after commit.
+Current latest known completed code slice: source-style Space Agent widget upsert aliases now route `space.spaces.upsertWidget` / `upsertWidgets` through Capy's safe metadata-only widget upsert path, mapping Space Agent `type` to Capy `kind` while omitting generated/executable widget bodies and credential-like payloads from stored adapter metadata and serialized results. Use `git log -1 --oneline` for the exact commit hash after commit.
 
 Recent completed slices:
+
+- `feat(spaces): support source widget upsert aliases`
+  - Added RED/GREEN backend coverage proving `space.spaces.upsertWidget` and `space.spaces.upsertWidgets` accept Space Agent-style widget payloads, preserve bounded declarative metadata such as layout/weather/notes, map `type` to `kind`, and omit generated/executable bodies plus credential-like markers from stored adapter metadata and serialized results.
+  - Validation at completion: focused RED failed before implementation with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`), full Spaces foundation suite passed (`108 passed`), `py_compile api/spaces.py tests/test_spaces_foundation.py`, and `git diff --check` passed. Mock/status screenshot QA captured the alias status with empty browser console and a clean sensitive-marker DOM check; screenshot artifact `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_604553d15ed443c7aebd2c458972a494.png`.
 
 - `feat(spaces): support source example installer alias`
   - Added RED/GREEN backend coverage proving `space.spaces.installExampleSpace` accepts a Space Agent-style `{id, sourcePath}` payload for the `retro-arcade` example, maps it to Capy's safe metadata-only Game Sandbox template, and omits raw `sourcePath`, generated widget bodies, event handlers, and credential-like markers from serialized results.

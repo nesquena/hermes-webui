@@ -1035,6 +1035,36 @@ def _space_tool_create_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return clean
 
 
+def _space_tool_widget_payload(widget: dict[str, Any]) -> dict[str, Any]:
+    """Return a source-widget payload stripped to safe Capy metadata fields."""
+    if not isinstance(widget, dict):
+        raise ValueError("widget must be an object")
+    clean: dict[str, Any] = {}
+    if widget.get("id") or widget.get("widget_id"):
+        clean["id"] = widget.get("id") or widget.get("widget_id")
+    if widget.get("kind") or widget.get("type"):
+        clean["kind"] = widget.get("kind") or widget.get("type")
+    if widget.get("title") or widget.get("name"):
+        clean["title"] = widget.get("title") or widget.get("name")
+    if isinstance(widget.get("layout"), dict):
+        clean["layout"] = widget["layout"]
+    for field in _WIDGET_DETAIL_METADATA_FIELDS:
+        if field not in widget:
+            continue
+        summary = _payload_summary(widget.get(field))
+        if summary in ({}, [], ""):
+            continue
+        clean[field] = summary
+    return clean
+
+
+def _space_tool_widgets_payload(payload: dict[str, Any], *, bulk: bool) -> list[dict[str, Any]]:
+    raw_widgets = payload.get("widgets") if bulk else [payload.get("widget") if isinstance(payload.get("widget"), dict) else payload]
+    if bulk and not isinstance(raw_widgets, list):
+        raise ValueError("widgets must be a list")
+    return [_space_tool_widget_payload(widget) for widget in raw_widgets]
+
+
 def _space_tool_current_id(payload: dict[str, Any]) -> str:
     """Return the optional current-space id from a tool payload."""
     raw = payload.get("space_id") or payload.get("active_space_id") or payload.get("current_space_id") or ""
@@ -1156,6 +1186,27 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {"space.get", "space.spaces.get", "space.spaces.read", "space.spaces.getspace", "space.spaces.readspace", "space.spaces.openspace"}:
         space_id = validate_space_id(data.get("space_id"))
         return {"ok": True, "action": name, "space": read_space_detail(space_id)}
+    if name in {"space.spaces.upsertwidget", "space.spaces.upsertwidgets"}:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        widgets = _space_tool_widgets_payload(data, bulk=name.endswith("upsertwidgets"))
+        saved_widgets: list[dict[str, Any]] = []
+        revision_event_ids: list[str] = []
+        for widget in widgets:
+            result = upsert_widget(space_id, widget)
+            saved_widgets.append(read_widget_detail(space_id, result["widget"]["id"]))
+            revision_event_ids.append(result["revision_event_id"])
+        response: dict[str, Any] = {
+            "ok": True,
+            "action": name,
+            "space_id": space_id,
+            "widgets": saved_widgets,
+            "widget_count": len(saved_widgets),
+            "revision_event_ids": revision_event_ids,
+        }
+        if name.endswith("upsertwidget") and saved_widgets:
+            response["widget"] = saved_widgets[0]
+            response["revision_event_id"] = revision_event_ids[-1]
+        return response
     if name in {"space.data.set", "space.current.data.set"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         result = set_shared_data_slot(space_id, data.get("key"), data.get("value"), data.get("metadata"))

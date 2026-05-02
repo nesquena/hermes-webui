@@ -219,6 +219,74 @@ def test_space_tool_adapter_supports_source_camelcase_space_helpers(monkeypatch,
     assert "secret" not in serialized
 
 
+def test_space_tool_adapter_supports_source_widget_upsert_helpers_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "source-widget-lab", "name": "Source Widget Lab"})
+
+    single = spaces.run_space_tool(
+        "space.spaces.upsertWidget",
+        {
+            "space_id": created["space_id"],
+            "widget": {
+                "id": "weather-card",
+                "type": "weather",
+                "title": "Weather <Prague>",
+                "layout": {"x": 3, "y": 2, "w": 7, "h": 4},
+                "weather": {"location": "Prague", "api_key": "SECRET...LEAK"},
+                "renderer": "<script>steal()</script>",
+                "html": "<img src=x onerror=steal()>",
+                "script": "steal()",
+                "data": {"token": "SECRET...LEAK"},
+                "source": "SECRET_SOURCE",
+            },
+        },
+    )
+    bulk = spaces.run_space_tool(
+        "space.spaces.upsertWidgets",
+        {
+            "space_id": created["space_id"],
+            "widgets": [
+                {
+                    "id": "research-notes",
+                    "kind": "markdown",
+                    "name": "Research Notes",
+                    "notes": {"body": "Safe summary", "token": "SECRET...LEAK"},
+                    "renderer": "<script>ignore()</script>",
+                }
+            ],
+        },
+    )
+    stored_weather = spaces.read_widget(created["space_id"], "weather-card")
+    stored_notes = spaces.read_widget(created["space_id"], "research-notes")
+    serialized = json.dumps(
+        {"single": single, "bulk": bulk, "stored_weather": stored_weather, "stored_notes": stored_notes}
+    ).lower()
+
+    assert single["ok"] is True
+    assert single["action"] == "space.spaces.upsertwidget"
+    assert single["widget"]["id"] == "weather-card"
+    assert single["widget"]["kind"] == "weather"
+    assert single["widget"]["metadata"]["weather"] == {"location": "Prague"}
+    assert bulk["ok"] is True
+    assert bulk["action"] == "space.spaces.upsertwidgets"
+    assert bulk["widget_count"] == 1
+    assert bulk["widgets"][0]["id"] == "research-notes"
+    assert stored_weather["kind"] == "weather"
+    assert stored_weather["weather"] == {"location": "Prague"}
+    assert stored_notes["notes"] == {"body": "Safe summary"}
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert '"script":' not in serialized
+    assert '"data":' not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+    assert '"source":' not in serialized
+
+
 def test_space_tool_adapter_exposes_widget_runtime_contract_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "runtime-lab", "name": "Runtime Lab"})
