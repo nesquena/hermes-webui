@@ -384,7 +384,7 @@ def _payload_summary(value: Any, depth: int = 0) -> Any:
     or obvious secret-bearing fields. Full payload delivery can be added later
     behind explicit capability and sandbox checks.
     """
-    if depth > 2:
+    if depth > 3:
         return "[omitted]"
     if isinstance(value, dict):
         summary: dict[str, Any] = {}
@@ -711,6 +711,93 @@ def delete_shared_data_slot(space_id: str, key: str) -> dict[str, Any]:
     }
 
 
+def _research_source_rows(sources: Any) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    if not isinstance(sources, list):
+        return rows
+    for item in sources[:20]:
+        if isinstance(item, dict):
+            title = _payload_text_summary(item.get("title") or item.get("name") or "Source", 160)
+            url = _payload_text_summary(item.get("url") or item.get("href") or "", 240)
+            notes = _payload_text_summary(item.get("notes") or item.get("summary") or "", 240)
+        else:
+            title = _payload_text_summary(item, 160)
+            url = ""
+            notes = ""
+        if not title or title == "[REDACTED]":
+            title = "Source"
+        rows.append({"title": title, "url": url, "notes": notes})
+    return rows
+
+
+def _research_note_items(notes: Any) -> list[str]:
+    if isinstance(notes, list):
+        raw_items = notes[:20]
+    elif notes is None:
+        raw_items = []
+    else:
+        raw_items = [notes]
+    return [_payload_text_summary(item, 300) for item in raw_items]
+
+
+def set_research_progress(
+    space_id: str,
+    *,
+    phase: Any,
+    message: Any,
+    sources: Any | None = None,
+    notes: Any | None = None,
+) -> dict[str, Any]:
+    """Update Research Harness live-progress widgets as safe metadata.
+
+    This is the next incremental bridge toward the Space Agent research demo:
+    agent runs can advance plan/source/note widgets without exposing raw report
+    bodies, generated renderers, executable HTML/script, or secret-looking values
+    through public Spaces APIs.
+    """
+    if not spaces_enabled():
+        raise RuntimeError("Capy Spaces is disabled")
+    sid = validate_space_id(space_id)
+    safe_phase = _payload_text_summary(phase or "working", 120)
+    safe_message = _payload_text_summary(message or "Research progress updated.", 240)
+    if not safe_phase or safe_phase == "[REDACTED]":
+        safe_phase = "working"
+    if not safe_message:
+        safe_message = "Research progress updated."
+
+    plan_result = patch_widget(
+        sid,
+        "research-plan",
+        {"status": {"phase": safe_phase, "message": safe_message, "progress": "updated"}},
+    )
+    source_rows = _research_source_rows(sources)
+    sources_result = patch_widget(
+        sid,
+        "research-sources",
+        {"table": {"columns": ["title", "url", "notes"], "rows": source_rows, "source_count": len(source_rows)}},
+    )
+    note_items = _research_note_items(notes)
+    notes_result = patch_widget(
+        sid,
+        "research-notes",
+        {"notes": {"status": "updated", "items": note_items, "item_count": len(note_items)}},
+    )
+    return {
+        "space_id": sid,
+        "widgets": {
+            "plan": read_widget_detail(sid, "research-plan"),
+            "sources": read_widget_detail(sid, "research-sources"),
+            "notes": read_widget_detail(sid, "research-notes"),
+        },
+        "revision_event_id": notes_result["revision_event_id"],
+        "updated_revision_event_ids": [
+            plan_result["revision_event_id"],
+            sources_result["revision_event_id"],
+            notes_result["revision_event_id"],
+        ],
+    }
+
+
 def set_research_artifact(space_id: str, title: Any, markdown: Any) -> dict[str, Any]:
     """Record a Research Harness markdown artifact as safe metadata.
 
@@ -980,6 +1067,24 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {"space.research.artifact.set", "space.current.research.artifact.set", "space.research.report.set", "space.current.research.report.set"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         result = set_research_artifact(space_id, data.get("title") or data.get("name"), data.get("markdown") or data.get("content") or "")
+        return {"ok": True, "action": name, **result}
+    if name in {
+        "space.research.progress.set",
+        "space.research.progress.update",
+        "space.current.research.progress.set",
+        "space.current.research.progress.update",
+    }:
+        is_current = name.startswith("space.current.")
+        space_id = validate_space_id(_space_tool_current_id(data) if is_current else data.get("space_id"))
+        result = set_research_progress(
+            space_id,
+            phase=data.get("phase") or data.get("status") or "working",
+            message=data.get("message") or data.get("summary") or "Research progress updated.",
+            sources=data.get("sources"),
+            notes=data.get("notes"),
+        )
+        if is_current:
+            result["active_space_id"] = space_id
         return {"ok": True, "action": name, **result}
     if name in {"space.revisions", "space.revision.list", "space.history", "space.current.revisions", "space.current.revision.list", "space.current.history"}:
         is_current = name.startswith("space.current.")

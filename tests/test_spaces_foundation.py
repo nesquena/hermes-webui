@@ -441,6 +441,78 @@ def test_space_tool_adapter_shared_data_slots_are_metadata_only(monkeypatch, tmp
     assert "secret_value_do_not_leak" not in serialized
 
 
+def test_set_research_progress_updates_harness_widgets_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    installed = spaces.install_template("research", space_id="research-progress-lab")
+
+    result = spaces.set_research_progress(
+        installed["space"]["space_id"],
+        phase="gathering sources",
+        message="Found public background material",
+        sources=[
+            {"title": "Public source", "url": "https://example.com/report", "notes": "useful overview"},
+            {"title": "Secret source", "url": "https://example.com/?token=SECRET_VALUE_DO_NOT_LEAK", "notes": "api_key=SECRET_VALUE_DO_NOT_LEAK"},
+        ],
+        notes=["Summarize safe facts", "<script>bad()</script> api_key=SECRET_VALUE_DO_NOT_LEAK"],
+    )
+
+    plan_detail = spaces.read_widget_detail(installed["space"]["space_id"], "research-plan")
+    sources_detail = spaces.read_widget_detail(installed["space"]["space_id"], "research-sources")
+    notes_detail = spaces.read_widget_detail(installed["space"]["space_id"], "research-notes")
+    serialized = json.dumps({"result": result, "plan": plan_detail, "sources": sources_detail, "notes": notes_detail}).lower()
+
+    assert result["space_id"] == installed["space"]["space_id"]
+    assert result["widgets"]["plan"]["metadata"]["status"] == {
+        "phase": "gathering sources",
+        "message": "Found public background material",
+        "progress": "updated",
+    }
+    assert sources_detail["metadata"]["table"]["columns"] == ["title", "url", "notes"]
+    assert sources_detail["metadata"]["table"]["rows"][0] == {
+        "title": "Public source",
+        "url": "https://example.com/report",
+        "notes": "useful overview",
+    }
+    assert notes_detail["metadata"]["notes"]["items"] == ["Summarize safe facts", "[REDACTED]"]
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "token=" not in serialized
+
+
+def test_space_tool_adapter_research_progress_uses_active_space_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    installed = spaces.install_template("research", space_id="current-research-progress")
+
+    result = spaces.run_space_tool(
+        "space.current.research.progress.set",
+        {
+            "active_space_id": installed["space"]["space_id"],
+            "phase": "writing summary",
+            "message": "Drafting artifact from public notes",
+            "sources": [{"title": "Ref", "url": "https://example.org", "renderer": "<script>bad()</script>"}],
+            "notes": ["ready for summary", "authorization: Bearer SECRET_VALUE_DO_NOT_LEAK"],
+        },
+    )
+    serialized = json.dumps(result).lower()
+
+    assert result["ok"] is True
+    assert result["action"] == "space.current.research.progress.set"
+    assert result["active_space_id"] == installed["space"]["space_id"]
+    assert result["widgets"]["plan"]["metadata"]["status"]["phase"] == "writing summary"
+    assert result["widgets"]["sources"]["metadata"]["table"]["rows"][0] == {
+        "title": "Ref",
+        "url": "https://example.org",
+        "notes": "",
+    }
+    assert result["widgets"]["notes"]["metadata"]["notes"]["items"] == ["ready for summary", "[REDACTED]"]
+    assert "renderer" not in serialized
+    assert "<script" not in serialized
+    assert "authorization" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+
+
 def test_space_tool_adapter_research_artifact_marks_summary_export_ready(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     installed = spaces.install_template("research", space_id="research-artifact-lab")
