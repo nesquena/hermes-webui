@@ -548,6 +548,84 @@ def test_space_tool_adapter_research_artifact_marks_summary_export_ready(monkeyp
     assert "api_key" not in serialized
 
 
+def test_spaces_research_progress_route_updates_harness_widgets_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    installed = spaces.install_template("research", space_id="research-progress-route")
+
+    handled, status, body = _route_post(
+        "/api/spaces/research/progress",
+        {
+            "space_id": installed["space"]["space_id"],
+            "phase": "source review",
+            "message": "Checking public references",
+            "sources": [
+                {"title": "Safe source", "url": "https://example.com/source", "notes": "public note"},
+                {"title": "Unsafe source", "url": "javascript:alert(1)", "notes": "token=SECRET_VALUE_DO_NOT_LEAK"},
+            ],
+            "notes": ["Keep citation list bounded", "<script>bad()</script> api_key=SECRET_VALUE_DO_NOT_LEAK"],
+            "renderer": "<script>steal()</script>",
+            "api_key": "SECRET...LEAK",
+        },
+    )
+    serialized = json.dumps(body).lower()
+
+    assert handled is None
+    assert status == 200
+    assert body["space_id"] == installed["space"]["space_id"]
+    assert body["widgets"]["plan"]["metadata"]["status"]["phase"] == "source review"
+    assert body["widgets"]["sources"]["metadata"]["table"]["rows"][0] == {
+        "title": "Safe source",
+        "url": "https://example.com/source",
+        "notes": "public note",
+    }
+    assert body["widgets"]["notes"]["metadata"]["notes"]["items"] == [
+        "Keep citation list bounded",
+        "[REDACTED]",
+    ]
+    assert "javascript:" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "token=" not in serialized
+
+
+def test_spaces_research_artifact_route_marks_summary_export_ready_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    installed = spaces.install_template("research", space_id="research-artifact-route")
+
+    handled, status, body = _route_post(
+        "/api/spaces/research/artifact",
+        {
+            "space_id": installed["space"]["space_id"],
+            "title": "Exportable public brief",
+            "markdown": "# Brief\nPublic facts only.\npassword=SECRET_VALUE_DO_NOT_LEAK\n<script>bad()</script>",
+            "renderer": "<script>steal()</script>",
+            "api_key": "SECRET...LEAK",
+        },
+    )
+    detail = spaces.read_widget_detail(installed["space"]["space_id"], "research-summary")
+    data_slot = spaces.read_shared_data_slot(installed["space"]["space_id"], "research-summary")
+    serialized = json.dumps({"body": body, "detail": detail, "data_slot": data_slot}).lower()
+
+    assert handled is None
+    assert status == 200
+    assert body["space_id"] == installed["space"]["space_id"]
+    assert body["artifact"]["key"] == "research-summary"
+    assert body["artifact"]["value_summary"]["title"] == "Exportable public brief"
+    assert body["artifact"]["value_summary"]["format"] == "markdown"
+    assert body["artifact"]["value_summary"]["status"] == "ready"
+    assert body["artifact"]["value_summary"]["sha256"]
+    assert detail["metadata"]["export"]["pdf"] == "ready-for-user-request"
+    assert data_slot == body["artifact"]
+    assert "public facts only" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "password" not in serialized
+
+
 def test_space_tool_adapter_deletes_shared_data_slots_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "shared-data-delete-lab", "name": "Shared Data Delete Lab"})

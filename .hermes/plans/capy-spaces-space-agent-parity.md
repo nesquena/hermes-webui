@@ -9,13 +9,20 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-02 00:16 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-02 03:44 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: revision history now includes safe metadata-only restore previews derived from stored snapshots (`name`, `widget_count`, and bounded widget id/title/kind summaries), allowing Brendan/Capy to inspect rollback targets before restoring without exposing generated renderer/html/script/data/source fields or secret-looking values. Use `git log -1 --oneline` for the exact commit hash after commit; this status line intentionally avoids self-referential hashes because committing it changes the hash.
+Current latest known completed code slice: Research Harness now has direct metadata-only WebUI API routes for live progress updates and markdown artifact export readiness: `POST /api/spaces/research/progress` updates the plan/source/notes widgets, and `POST /api/spaces/research/artifact` marks the summary widget export-ready without returning raw report bodies or unsafe/generated/credential-like fields. Use `git log -1 --oneline` for the exact commit hash after commit; this status line intentionally avoids self-referential hashes because committing it changes the hash.
 
 Recent completed slices:
 
-- `feat(spaces): preview revision restore targets`
+- `feat(spaces): expose research run routes`
+  - Added RED/GREEN route regressions proving direct Research Harness progress/artifact HTTP routes update typed Capy Space metadata while omitting raw markdown, executable/generated fields, and credential-like values.
+  - Validation at completion: focused RED route tests failed as expected before implementation; focused GREEN route tests passed (`2 passed`), Spaces foundation + demo parity suites passed (`107 passed`), `py_compile api/spaces.py api/routes.py tests/test_spaces_foundation.py` and `git diff --check` passed. Mock/status screenshot QA had empty `window.__harnessErrors` and no sensitive leak regex matches; artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_97724956191744c7bf5a81959b8968b3.png`.
+- `2f1f731 feat(spaces): update research harness progress`
+  - Added safe metadata-only helpers/tool actions for updating Research Harness plan/source/notes widgets from agent progress events without exposing generated or credential-like payloads.
+- `c3897f6 feat(spaces): mark research artifacts export-ready`
+  - Added safe markdown artifact metadata summaries and PDF-export readiness markers for the Research Harness summary widget.
+- `addd152 feat(spaces): preview revision restore targets`
   - Added RED/GREEN backend and real-`static/spaces.js` UI regressions proving revision history exposes safe restore-preview metadata from snapshots while omitting generated renderer/script/source/data fields and secret-looking values.
   - Validation at completion: focused RED tests failed as expected before implementation; focused GREEN tests passed (`2 passed`), full Spaces foundation + UI behavior suites passed (`167 passed`), relevant combined Spaces suites passed (`171 passed`), `node --check`, `py_compile`, and `git diff --check` passed, local WebUI health OK, mock-state browser QA screenshot captured at `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_4f53c64e33054c35bd9efaddef629a04.png` with empty harness errors and no DOM leak.
 - `feat(spaces): show recovery event status`
@@ -58,15 +65,13 @@ Recent completed slices:
 
 Last known validation bundle:
 
-- RED check for revision restore preview: backend and UI tests failed as expected before implementation.
-- Focused revision restore-preview regressions: passed (`2 passed`).
-- Full Spaces foundation + UI JS behavior suites: passed (`167 passed`).
-- Relevant combined Spaces suites (`test_spaces_foundation.py`, `test_spaces_ui_js_behaviour.py`, `test_spaces_demo_parity.py`): passed (`171 passed`).
-- `node --check static/spaces.js`: passed.
-- `py_compile api/spaces.py tests/test_spaces_foundation.py tests/test_spaces_ui_js_behaviour.py`: passed.
+- RED check for research direct routes: progress/artifact route tests failed as expected before implementation (missing routes produced no JSON response).
+- Focused research route regressions: passed (`2 passed`).
+- Spaces foundation + demo parity suites: passed (`107 passed`).
+- `py_compile api/spaces.py api/routes.py tests/test_spaces_foundation.py`: passed.
 - `git diff --check`: passed.
-- WebUI local health: OK at `http://127.0.0.1:8787/health`.
-- Browser QA: mock-state HTTP harness using real checked-out `static/spaces.js` rendered safe revision restore previews, `window.__harnessErrors` was empty, and DOM leak regex for `<script>|renderer|SECRET|api_key|token` was false. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_4f53c64e33054c35bd9efaddef629a04.png`.
+- Browser QA: mock/status screenshot page rendered the two new routes and validation status, `window.__harnessErrors` was empty, and leak regex for `<script>|renderer|SECRET|api_key|token` against visible text was false. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_97724956191744c7bf5a81959b8968b3.png`.
+- WebUI local/tailnet health: verify after commit and LaunchAgent restart.
 
 Known warning: unknown `pytest.mark.integration` in `tests/test_onboarding_network.py`.
 

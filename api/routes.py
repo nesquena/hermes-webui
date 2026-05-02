@@ -1804,6 +1804,50 @@ def handle_post(handler, parsed) -> bool:
         except FileNotFoundError:
             return bad(handler, "Space not found", 404)
 
+    if parsed.path == "/api/spaces/research/progress":
+        from api import spaces as capy_spaces
+        space_id = body.get("space_id")
+        if not space_id:
+            return bad(handler, "Missing space_id")
+        try:
+            return j(
+                handler,
+                capy_spaces.set_research_progress(
+                    space_id,
+                    phase=body.get("phase") or body.get("status") or "working",
+                    message=body.get("message") or body.get("summary") or "Research progress updated.",
+                    sources=body.get("sources"),
+                    notes=body.get("notes"),
+                ),
+            )
+        except RuntimeError as e:
+            return bad(handler, str(e), 403)
+        except ValueError as e:
+            return bad(handler, str(e))
+        except FileNotFoundError:
+            return bad(handler, "Space or widget not found", 404)
+
+    if parsed.path == "/api/spaces/research/artifact":
+        from api import spaces as capy_spaces
+        space_id = body.get("space_id")
+        if not space_id:
+            return bad(handler, "Missing space_id")
+        try:
+            return j(
+                handler,
+                capy_spaces.set_research_artifact(
+                    space_id,
+                    body.get("title") or body.get("name") or "Research report",
+                    body.get("markdown") or body.get("content") or "",
+                ),
+            )
+        except RuntimeError as e:
+            return bad(handler, str(e), 403)
+        except ValueError as e:
+            return bad(handler, str(e))
+        except FileNotFoundError:
+            return bad(handler, "Space or widget not found", 404)
+
     if parsed.path == "/api/spaces/revision/restore":
         from api import spaces as capy_spaces
         space_id = body.get("space_id")
