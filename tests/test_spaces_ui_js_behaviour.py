@@ -182,6 +182,8 @@ global.fetch = async function(path, opts = {}) {
           execution: 'generated-code-disabled',
           allowed_messages: ['capy:ready', 'capy:resize', 'capy:agent:prompt'],
           blocked_messages: ['capy:raw:eval', 'capy:data:put'],
+          network_policy: { default: 'deny', allowed_schemes: ['https'], agent_mediated: true, renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' },
+          approval_required_for: ['external-navigation', 'network-fetch', 'generated-code-enable', '<script>bad()</script>'],
           renderer: '<script>bad()</script>',
           api_key: 'SECRET_VALUE_DO_NOT_LEAK',
         },
@@ -1177,6 +1179,8 @@ def test_spaces_ui_view_widget_details_fetches_and_renders_safe_metadata_only(dr
     assert "Execution: generated-code-disabled" in out["rootHtml"]
     assert "Allowed messages: capy:ready, capy:resize, capy:agent:prompt" in out["rootHtml"]
     assert "Blocked messages: capy:raw:eval, capy:data:put" in out["rootHtml"]
+    assert "Network policy: deny · schemes: https · agent-mediated" in out["rootHtml"]
+    assert "Approval required: external-navigation, network-fetch, generated-code-enable" in out["rootHtml"]
     assert "credential" not in out["rootHtml"].lower()
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]

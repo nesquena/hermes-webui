@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-02 08:30 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-02 09:38 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Widget details now fetch and display the safe runtime sandbox contract from the Hermes-style Spaces tool route, making the generated-code-disabled/postMessage draft visible without rendering widget bodies or leaking secret-like fields. Use `git log -1 --oneline` for the exact commit hash after commit.
+Current latest known completed code slice: Widget runtime contract details now include metadata-only network policy and approval checkpoints, making the generated-code-disabled sandbox/postMessage envelope more explicit without rendering widget bodies or leaking secret-like fields. Use `git log -1 --oneline` for the exact commit hash after commit.
 
 Recent completed slices:
+
+- `feat(spaces): extend widget runtime contract policy`
+  - Added RED/GREEN backend and real-`static/spaces.js` coverage proving the runtime-contract tool route exposes `network_policy` and `approval_required_for` metadata and the widget detail view renders only sanitized policy/checkpoint text.
+  - Validation at completion: focused RED tests failed before implementation due to missing network/approval fields; focused GREEN tests passed (`2 passed`), Spaces foundation + UI behavior suites passed (`174 passed`), `node --check static/spaces.js`, `py_compile api/spaces.py tests/test_spaces_foundation.py tests/test_spaces_ui_js_behaviour.py`, and `git diff --check` passed. Mock-state browser QA rendered policy/approval fields with `window.__harnessErrors=[]` and DOM leak check false; screenshot artifact `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_effa90c9933142d598b521d4c395ccc7.png`.
 
 - `feat(spaces): show widget runtime contract in details`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the widget detail flow calls `space.widget.runtime_contract`, renders the metadata-only mode/execution/allowed/blocked message contract, and continues to omit generated renderer/html/data fields plus credential-like values from DOM.

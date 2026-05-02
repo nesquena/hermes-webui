@@ -312,6 +312,16 @@ def _widget_runtime_contract_summary(widget: dict[str, Any]) -> dict[str, Any]:
         "execution": "generated-code-disabled",
         "allowed_messages": ["capy:ready", "capy:resize", "capy:agent:prompt"],
         "blocked_messages": ["capy:raw:eval", "capy:data:put"],
+        "network_policy": {
+            "default": "deny",
+            "allowed_schemes": ["https"],
+            "agent_mediated": True,
+        },
+        "approval_required_for": [
+            "external-navigation",
+            "network-fetch",
+            "generated-code-enable",
+        ],
     }
 
 

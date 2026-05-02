@@ -490,13 +490,31 @@
         return /^capy:[a-z0-9:._-]+$/i.test(text) ? text : '';
       }).filter(Boolean).join(', ');
     }
+    function safeTokenList(values){
+      if (!Array.isArray(values)) return '';
+      return values.slice(0, 8).map(function(value){
+        const text = String(value || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+        return /^[a-z0-9:._-]+$/i.test(text) ? text : '';
+      }).filter(Boolean).join(', ');
+    }
     const allowed = safeMessageList(safeContract.allowed_messages);
     const blocked = safeMessageList(safeContract.blocked_messages);
-    if (!mode && !execution && !allowed && !blocked) return '';
+    const policy = safeContract.network_policy && typeof safeContract.network_policy === 'object' && !Array.isArray(safeContract.network_policy) ? safeContract.network_policy : {};
+    const policyDefault = /^(deny|agent-mediated)$/i.test(String(policy.default || '')) ? String(policy.default || '').toLowerCase() : '';
+    const schemes = safeTokenList(policy.allowed_schemes);
+    const networkParts = [];
+    if (policyDefault) networkParts.push(policyDefault);
+    if (schemes) networkParts.push('schemes: '+schemes);
+    if (policy.agent_mediated === true) networkParts.push('agent-mediated');
+    const network = networkParts.join(' · ');
+    const approvals = safeTokenList(safeContract.approval_required_for);
+    if (!mode && !execution && !allowed && !blocked && !network && !approvals) return '';
     return '<div class="capy-spaces-widget capy-spaces-runtime-contract"><div><strong>Runtime contract: '+escapeHtml(mode || 'metadata-only')+'</strong>' +
       (execution ? '<div class="capy-spaces-muted">Execution: '+escapeHtml(execution)+'</div>' : '') +
       (allowed ? '<div class="capy-spaces-muted">Allowed messages: '+escapeHtml(allowed)+'</div>' : '') +
       (blocked ? '<div class="capy-spaces-muted">Blocked messages: '+escapeHtml(blocked)+'</div>' : '') +
+      (network ? '<div class="capy-spaces-muted">Network policy: '+escapeHtml(network)+'</div>' : '') +
+      (approvals ? '<div class="capy-spaces-muted">Approval required: '+escapeHtml(approvals)+'</div>' : '') +
       '</div></div>';
   }
 

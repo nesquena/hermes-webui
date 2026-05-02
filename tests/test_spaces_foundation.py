@@ -192,6 +192,16 @@ def test_space_tool_adapter_exposes_widget_runtime_contract_metadata_only(monkey
         "capy:agent:prompt",
     ]
     assert explicit["contract"]["blocked_messages"] == ["capy:raw:eval", "capy:data:put"]
+    assert explicit["contract"]["network_policy"] == {
+        "default": "deny",
+        "allowed_schemes": ["https"],
+        "agent_mediated": True,
+    }
+    assert explicit["contract"]["approval_required_for"] == [
+        "external-navigation",
+        "network-fetch",
+        "generated-code-enable",
+    ]
     assert current["contract"] == explicit["contract"]
     assert "capy:raw:eval" in serialized
     assert "steal" not in serialized
