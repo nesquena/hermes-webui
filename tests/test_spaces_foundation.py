@@ -151,6 +151,57 @@ def test_space_tool_adapter_supports_source_style_current_and_spaces_aliases(mon
     assert "secret" not in serialized
 
 
+def test_space_tool_adapter_exposes_widget_runtime_contract_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "runtime-lab", "name": "Runtime Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "unsafe-html",
+            "kind": "html",
+            "title": "Unsafe HTML",
+            "runtime_contract": {
+                "allowed_messages": ["capy:raw:eval", "capy:agent:prompt"],
+                "token": "SECRET_VALUE_DO_NOT_LEAK",
+                "renderer": "<script>bad()</script>",
+            },
+            "renderer": "<script>steal()</script>",
+            "source": "SECRET_SOURCE",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    detail = spaces.read_widget_detail(created["space_id"], "unsafe-html")
+    explicit = spaces.run_space_tool(
+        "space.widget.runtime_contract",
+        {"space_id": created["space_id"], "widget_id": "unsafe-html", "renderer": "<script>ignore()</script>"},
+    )
+    current = spaces.run_space_tool(
+        "space.current.widget.runtime_contract",
+        {"active_space_id": created["space_id"], "widget_id": "unsafe-html", "api_key": "***"},
+    )
+    serialized = json.dumps({"detail": detail, "explicit": explicit, "current": current}).lower()
+
+    assert "runtime_contract" not in detail
+    assert explicit["contract"]["mode"] == "sandbox-contract-draft"
+    assert explicit["contract"]["widget_id"] == "unsafe-html"
+    assert explicit["contract"]["execution"] == "generated-code-disabled"
+    assert explicit["contract"]["allowed_messages"] == [
+        "capy:ready",
+        "capy:resize",
+        "capy:agent:prompt",
+    ]
+    assert explicit["contract"]["blocked_messages"] == ["capy:raw:eval", "capy:data:put"]
+    assert current["contract"] == explicit["contract"]
+    assert "capy:raw:eval" in serialized
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "source" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
 def test_space_tool_adapter_supports_space_agent_widget_aliases_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "widget-alias-lab", "name": "Widget Alias Lab"})

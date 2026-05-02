@@ -297,6 +297,24 @@ def _widget_detail_metadata(widget: dict[str, Any]) -> dict[str, Any]:
     return metadata
 
 
+def _widget_runtime_contract_summary(widget: dict[str, Any]) -> dict[str, Any]:
+    """Return the safe, metadata-only draft runtime contract for a widget.
+
+    Generated widget source remains disabled until a sandboxed viewer/runtime is
+    explicitly implemented. This contract gives Spaces tools and detail views a
+    stable handshake shape without echoing stored renderer/html/script/data
+    bodies or user-supplied secret-looking runtime config.
+    """
+    clean_widget = _normalize_widget(widget)
+    return {
+        "mode": "sandbox-contract-draft",
+        "widget_id": clean_widget["id"],
+        "execution": "generated-code-disabled",
+        "allowed_messages": ["capy:ready", "capy:resize", "capy:agent:prompt"],
+        "blocked_messages": ["capy:raw:eval", "capy:data:put"],
+    }
+
+
 def _widget_recovery_summary(widget: dict[str, Any]) -> dict[str, Any]:
     clean_widget = _normalize_widget(widget)
     recovery = widget.get("recovery") if isinstance(widget.get("recovery"), dict) else {}
@@ -1056,6 +1074,11 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
         return {"ok": True, "action": name, "active_space_id": space_id, "widget": read_widget_detail(space_id, widget_id)}
+    if name in {"space.widget.runtime_contract", "space.current.widget.runtime_contract", "widget.runtime_contract"}:
+        space_id = validate_space_id(_space_tool_current_id(data) if name.startswith("space.current.") else data.get("space_id"))
+        widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
+        widget = read_widget(space_id, widget_id)
+        return {"ok": True, "action": name, "active_space_id": space_id, "contract": _widget_runtime_contract_summary(widget)}
     if name in {"space.template.install", "space.templates.install", "template.install"}:
         template_name = data.get("template") or data.get("name") or data.get("template_name") or "weather"
         result = install_template(template_name, space_id=data.get("space_id") or None)
