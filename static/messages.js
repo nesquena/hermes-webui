@@ -90,7 +90,7 @@ async function send(){
           showToast(t('busy_interrupt_confirm'),2000);
           await cancelStream();
         } else {
-          showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
+          showToast(t('chat_queued_toast', text.slice(0,40)+(text.length>40?'…':'')),2000);
         }
       } else {
         // Default: queue mode (current behavior). Also the fallback for
@@ -99,7 +99,7 @@ async function send(){
         $('msg').value='';autoResize();
         S.pendingFiles=[];renderTray();
         updateQueueBadge(S.session.session_id);
-        showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
+        showToast(t('chat_queued_toast', text.slice(0,40)+(text.length>40?'…':'')),2000);
       }
     }
     return;
@@ -137,10 +137,10 @@ async function send(){
 
   const activeSid=S.session.session_id;
 
-  setComposerStatus(S.pendingFiles&&S.pendingFiles.length?'Uploading…':'');
+  setComposerStatus(S.pendingFiles&&S.pendingFiles.length?t('chat_uploading'):'');
   let uploaded=[];
   try{uploaded=await uploadPendingFiles();}
-  catch(e){if(!text){setComposerStatus(`Upload error: ${e.message}`);return;}}
+  catch(e){if(!text){setComposerStatus(t('chat_upload_error_prefix')+e.message);return;}}
   // Clear the uploading status now that upload is done — if we don't clear here
   // it stays visible for the entire duration of the agent stream, since
   // setComposerStatus('') is only called in setBusy(false), not setBusy(true).
@@ -151,7 +151,7 @@ async function send(){
   let msgText=text;
   if(uploaded.length&&!msgText)msgText=`I've uploaded ${uploaded.length} file(s): ${uploadedPaths.join(', ')}`;
   else if(uploaded.length)msgText=`${text}\n\n[Attached files: ${uploadedPaths.join(', ')}]`;
-  if(!msgText){setComposerStatus('Nothing to send');return;}
+  if(!msgText){setComposerStatus(t('chat_nothing_to_send'));return;}
 
   $('msg').value='';autoResize();
   const displayText=text||(uploaded.length?`Uploaded: ${uploadedNames.join(', ')}`:'(file upload)');
@@ -223,7 +223,7 @@ async function send(){
       // Keep the user's attempted turn by queueing it for after the current run.
       queueSessionMessage(activeSid,{text:msgText,files:[],model:S.session&&S.session.model||($('modelSelect')&&$('modelSelect').value)||'',profile:S.activeProfile||'default'});
       updateQueueBadge(activeSid);
-      showToast('Current session is still running. Reconnected and queued your message.',2600);
+      showToast(t('chat_session_reconnected_queued'),2600);
       try{
         await loadSession(activeSid);
         setComposerStatus('');
@@ -239,8 +239,8 @@ async function send(){
     // Only hide approval card if it belongs to the session that just finished
     if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);removeThinking();
     if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
-    S.messages.push({role:'assistant',content:`**Error:** ${errMsg}`});
-    _queueDrainSid=activeSid;renderMessages();setBusy(false);setComposerStatus(`Error: ${errMsg}`);
+    S.messages.push({role:'assistant',content:`**${t('chat_error_label')}:** ${errMsg}`});
+    _queueDrainSid=activeSid;renderMessages();setBusy(false);setComposerStatus(t('error_prefix')+errMsg);
     return;
   }
 
@@ -851,7 +851,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         clearLiveToolCards();
         S.busy=false;
         // No-reply guard (#373): if agent returned nothing, show inline error
-        if(!S.messages.some(m=>m.role==='assistant'&&String(m.content||'').trim())&&!assistantText){removeThinking();S.messages.push({role:'assistant',content:'**No response received.** Check your API key and model selection.'});}
+        if(!S.messages.some(m=>m.role==='assistant'&&String(m.content||'').trim())&&!assistantText){removeThinking();S.messages.push({role:'assistant',content:`**${t('chat_no_response_received')}.** ${t('chat_check_api_key_model')}`});}
         if(isSessionViewed) _markSessionViewed(completedSid, completedSession.message_count ?? S.messages.length);
         syncTopbar();renderMessages();loadDir('.');
         // TTS auto-read: speak the last assistant response if enabled (#499)
@@ -901,7 +901,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!S.session||S.session.session_id!==activeSid) return;
       let d={};
       try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }
-      const message=String(d.message||'Context auto-compressed to continue the conversation').trim();
+      const message=String(d.message||t('chat_context_compressed')).trim();
       if(typeof setCompressionUi==='function'){
         setCompressionUi({
           sessionId:activeSid,
@@ -913,7 +913,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
       if(!S.busy&&typeof renderMessages==='function') renderMessages();
-      showToast(message||'Context compressed');
+      showToast(message||t('chat_context_compressed'));
     });
 
     source.addEventListener('metering',e=>{
@@ -953,18 +953,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const isAuthMismatch=d.type==='auth_mismatch';
           const isModelNotFound=d.type==='model_not_found';
           const isNoResponse=d.type==='no_response';
-          const label=isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isModelNotFound?(typeof t==='function'?t('model_not_found_label'):'Model not found'):isNoResponse?'No response received':'Error';
+          const label=isQuotaExhausted?t('chat_out_of_credits'):isRateLimit?t('chat_rate_limit_reached'):isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isModelNotFound?(typeof t==='function'?t('model_not_found_label'):'Model not found'):isNoResponse?t('chat_no_response_received'):t('chat_error_label');
           const hint=d.hint?`\n\n*${d.hint}*`:'';
           S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`});
         }catch(_){
-          S.messages.push({role:'assistant',content:'**Error:** An error occurred. Check server logs.'});
+          S.messages.push({role:'assistant',content:`**${t('chat_error_label')}:** ${t('chat_error_generic')}`});
         }
         _markSessionViewed(activeSid, S.messages.length);
         renderMessages();
       }else if(typeof trackBackgroundError==='function'){
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
-        try{const d=JSON.parse(e.data);trackBackgroundError(activeSid,_errTitle,d.message||'Error');}
-        catch(_){trackBackgroundError(activeSid,_errTitle,'Error');}
+        try{const d=JSON.parse(e.data);trackBackgroundError(activeSid,_errTitle,d.message||t('chat_error_label'));}
+        catch(_){trackBackgroundError(activeSid,_errTitle,t('chat_error_label'));}
       }
       if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setComposerStatus('');}
       renderSessionList(); // clear streaming indicator immediately on apperror
@@ -976,7 +976,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{
         const d=JSON.parse(e.data);
         // Show as a small inline notice, not a full error
-        setComposerStatus(`${d.message||'Warning'}`);
+        setComposerStatus(`${d.message||t('chat_warning_label')}`);
         // If it's a fallback notice, show it briefly then clear
         if(d.type==='fallback') setTimeout(()=>setComposerStatus(''),4000);
       }catch(_){}
@@ -991,12 +991,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Attempt one reconnect if the stream is still active server-side
       if(!_reconnectAttempted && streamId){
         _reconnectAttempted=true;
-        setComposerStatus('Reconnecting…');
+        setComposerStatus(t('chat_reconnecting'));
         setTimeout(async()=>{
           try{
             const st=await api(`/api/chat/stream/status?stream_id=${encodeURIComponent(streamId)}`);
             if(st.active){
-              setComposerStatus('Reconnected');
+              setComposerStatus(t('chat_reconnected'));
               _wireSSE(new EventSource(new URL(`api/chat/stream?stream_id=${encodeURIComponent(streamId)}`,location.href).href,{withCredentials:true}));
               return;
             }
@@ -1110,12 +1110,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(S.session&&S.session.session_id===activeSid){
       S.activeStreamId=null;
       clearLiveToolCards();if(!assistantText)removeThinking();
-      S.messages.push({role:'assistant',content:'**Error:** Connection lost'});renderMessages();
+      S.messages.push({role:'assistant',content:`**${t('chat_error_label')}:** ${t('chat_connection_lost')}`});renderMessages();
       _markSessionViewed(activeSid, S.messages.length);
     }else{
       if(typeof trackBackgroundError==='function'){
         const _errTitle=(typeof _allSessions!=='undefined'&&_allSessions.find(s=>s.session_id===activeSid)||{}).title||null;
-        trackBackgroundError(activeSid,_errTitle,'Connection lost');
+        trackBackgroundError(activeSid,_errTitle,t('chat_connection_lost'));
       }
     }
     if(!S.session||!INFLIGHT[S.session.session_id]){setBusy(false);setComposerStatus('');}
@@ -1752,9 +1752,9 @@ function _startClarifyFallbackPoll(sid) {
       const msg = String((e && e.message) || "");
       if (!_clarifyMissingEndpointWarned && /(^|\b)(404|not found)(\b|$)/i.test(msg)) {
         _clarifyMissingEndpointWarned = true;
-        setComposerStatus("Clarify unavailable on current server build. Restart server.");
+        setComposerStatus(t('clarify_unavailable_status'));
         if (typeof showToast === "function") {
-          showToast("Clarify endpoint unavailable. Please restart server.", 5000);
+          showToast(t('clarify_unavailable_toast'), 5000);
         }
         stopClarifyPolling();
       }

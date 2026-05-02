@@ -127,7 +127,7 @@ function _ensureXterm(){
   if(!surface)return null;
   if(TERMINAL_UI.term)return TERMINAL_UI.term;
   if(!_xtermReady()){
-    surface.textContent='Terminal library failed to load. Check network access to cdn.jsdelivr.net.';
+    surface.textContent=t('terminal_library_failed');
     return null;
   }
   const term=new window.Terminal({

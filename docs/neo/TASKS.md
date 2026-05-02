@@ -5,7 +5,7 @@
 > Este arquivo acompanha execução, evidências e Definition of Done; mudanças
 > contratuais devem ser feitas primeiro no PRD/Backlog/Design Spec.
 
-**Atualizado em:** 2026-05-01
+**Atualizado em:** 2026-05-02
 **Versão alvo MVP:** `neo-webui-v0.1` ao final da Sprint 4
 **Branch de desenvolvimento atual:** `develop`
 **Branch de produção:** `main`
@@ -280,15 +280,19 @@ sem regressão das capacidades upstream.
 
 ### HU-02.5 — Erros e toasts em pt-BR
 
-**Status:** disponível
+**Status:** em andamento
 **Prioridade:** P0
 **Épico:** EP-02
 
 **Tasks**
 
-- [ ] Inventariar toasts e erros visíveis.
-- [ ] Cobrir mensagens novas Neo.
-- [ ] Validar login, settings, projetos e finanças.
+- [x] Inventariar toasts e erros visíveis.
+- [x] Cobrir mensagens novas Neo em chat, login e terminal.
+- [x] Criar teste automatizado para erros/toasts pt-BR.
+- [x] Registrar evidência técnica em `docs/neo/evidencias/HU-02.5/`.
+- [ ] Validar settings, projetos e finanças quando os painéis MVP estiverem disponíveis.
+
+**Evidência técnica:** [`docs/neo/evidencias/HU-02.5/README.md`](./evidencias/HU-02.5/README.md)
 
 ### Encerramento Sprint 1
 
@@ -333,14 +337,19 @@ ações rápidas, sidebar fixa de 240px e topbar contextual de 56px.
 
 ### HU-03.3 — Hero avatar humanoide + saudação
 
-**Status:** disponível
+**Status:** implementada com testes
 
 **Tasks**
 
-- [ ] Renderizar `neo-avatar.svg` na coluna direita.
-- [ ] Implementar saudação contextual pt-BR.
-- [ ] Exibir pill `STATUS: OPERACIONAL`.
-- [ ] Implementar animações `hover-float` e `pulse-glow`.
+- [x] Renderizar `neo-avatar.svg` na coluna direita.
+- [x] Implementar saudação contextual pt-BR.
+- [x] Exibir pill `STATUS: OPERACIONAL`.
+- [x] Implementar animações `hover-float` e `pulse-glow`.
+- [x] Criar teste automatizado para hero, i18n e CSS.
+- [x] Registrar evidência técnica em `docs/neo/evidencias/HU-03.3/`.
+- [ ] Anexar screenshots/homologação manual em runtime.
+
+**Evidência técnica:** [`docs/neo/evidencias/HU-03.3/README.md`](./evidencias/HU-03.3/README.md)
 
 ### HU-03.4 — 4 KPI cards com deltas
 

@@ -51,7 +51,7 @@ document.addEventListener('DOMContentLoaded', function () {
       if (res.ok && data.ok) {
         window.location.href = _safeNextPath();
       } else {
-        showErr(data.error || invalidPw);
+        showErr(res.status === 401 ? invalidPw : (data.error || invalidPw));
       }
     } catch (ex) {
       showErr(connFailed);
