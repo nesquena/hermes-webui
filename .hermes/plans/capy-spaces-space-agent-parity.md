@@ -9,12 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-02 03:44 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-02 04:58 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Research Harness now has direct metadata-only WebUI API routes for live progress updates and markdown artifact export readiness: `POST /api/spaces/research/progress` updates the plan/source/notes widgets, and `POST /api/spaces/research/artifact` marks the summary widget export-ready without returning raw report bodies or unsafe/generated/credential-like fields. Use `git log -1 --oneline` for the exact commit hash after commit; this status line intentionally avoids self-referential hashes because committing it changes the hash.
+Current latest known completed code slice: Research Harness demo parity smoke now exercises the vertical metadata-only path end-to-end: install Research Harness, advance plan/source/notes progress to summary, mark the markdown artifact PDF-export-ready, queue a `widget.export.pdf` event on `research-summary`, and show the action/queued-event count in the Spaces demo smoke UI. Use `git log -1 --oneline` for the exact commit hash after commit; this status line intentionally avoids self-referential hashes because committing it changes the hash.
 
 Recent completed slices:
 
+- `feat(spaces): request research demo PDF export`
+  - Added RED/GREEN backend and real-`static/spaces.js` regressions proving `demo_research_harness_pdf_export` advances Research Harness progress, records a safe artifact summary, queues a metadata-only PDF export event, and renders only safe smoke status metadata in the UI.
+  - Validation at completion: focused RED tests failed as expected before implementation (`action` still `installed`, UI omitted action/queued-event status); focused GREEN tests passed (`2 passed`), relevant Spaces demo/UI/foundation suites passed (`178 passed`), `py_compile api/spaces.py tests/test_spaces_demo_parity.py tests/test_spaces_ui_js_behaviour.py`, `node --check static/spaces.js`, and `git diff --check` passed. Browser QA used a `/tmp/capy-spaces-progress/` mock harness with screenshot artifact `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_4001ef5f03e14f19be7b79d8709fc8c4.png`.
 - `feat(spaces): expose research run routes`
   - Added RED/GREEN route regressions proving direct Research Harness progress/artifact HTTP routes update typed Capy Space metadata while omitting raw markdown, executable/generated fields, and credential-like values.
   - Validation at completion: focused RED route tests failed as expected before implementation; focused GREEN route tests passed (`2 passed`), Spaces foundation + demo parity suites passed (`107 passed`), `py_compile api/spaces.py api/routes.py tests/test_spaces_foundation.py` and `git diff --check` passed. Mock/status screenshot QA had empty `window.__harnessErrors` and no sensitive leak regex matches; artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_97724956191744c7bf5a81959b8968b3.png`.

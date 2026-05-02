@@ -82,6 +82,23 @@ def test_demo_parity_smoke_runner_launches_each_demo_metadata_only(monkeypatch, 
     _assert_safe_payload(results)
 
 
+def test_research_demo_smoke_advances_progress_artifact_and_pdf_export(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    result = spaces.space_demo_run("demo_research_harness_pdf_export")
+    events = spaces.list_widget_events(result["space"]["space_id"], "research-summary")
+
+    assert result["action"] == "pdf-export-requested"
+    assert result["queued_event_count"] == 1
+    assert result["research_progress"]["widgets"]["plan"]["metadata"]["status"]["phase"] == "summary"
+    assert result["research_artifact"]["artifact"]["metadata_summary"]["export_pdf"] == "ready-for-user-request"
+    assert events[0]["event_name"] == "widget.export.pdf"
+    assert events[0]["status"] == "queued"
+    assert events[0]["widget_id"] == "research-summary"
+    _assert_safe_payload(result)
+    _assert_safe_payload(events)
+
+
 def test_demo_parity_smoke_runner_exposes_tool_adapter_action(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 

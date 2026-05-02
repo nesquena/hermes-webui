@@ -116,10 +116,17 @@
     const persistence = data && data.persistence_checked ? 'checked' : 'not checked';
     const revisionCount = Number(data && data.revision_event_count || 0);
     const rollbackPoint = data && data.rollback_point ? 'yes' : 'no';
+    const action = data && data.action ? String(data.action) : '';
+    const queuedEventCount = Number(data && data.queued_event_count || 0);
+    const extraParts = [];
+    if (action) extraParts.push('Action: '+escapeHtml(action));
+    if (queuedEventCount) extraParts.push('Queued events: '+queuedEventCount);
+    const extraLine = extraParts.length ? '<div class="capy-spaces-muted">'+extraParts.join(' · ')+'</div>' : '';
     return '<div class="capy-spaces-card" role="status"><h3>Demo parity smoke passed</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(demo)+' · '+escapeHtml(data && data.mode || 'metadata-only-smoke')+'</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(spaceName)+'</strong>' +
-      '<div class="capy-spaces-muted">Space ID: '+escapeHtml(space.space_id || '')+' · Widgets: '+widgetCount+' · Persisted widgets: '+persistedWidgetCount+' · Persistence: '+escapeHtml(persistence)+' · Revisions: '+revisionCount+' · Rollback point: '+escapeHtml(rollbackPoint)+'</div></div></div></div></div>';
+      '<div class="capy-spaces-muted">Space ID: '+escapeHtml(space.space_id || '')+' · Widgets: '+widgetCount+' · Persisted widgets: '+persistedWidgetCount+' · Persistence: '+escapeHtml(persistence)+' · Revisions: '+revisionCount+' · Rollback point: '+escapeHtml(rollbackPoint)+'</div>' +
+      extraLine + '</div></div></div></div>';
   }
 
   function renderDemoSmokeSuiteResult(data){

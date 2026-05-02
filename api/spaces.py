@@ -919,6 +919,7 @@ def space_demo_run(name: str) -> dict[str, Any]:
     space_id = validate_space_id(_slugify(demo))
     installed = install_template(template, space_id=space_id)
     action = "installed"
+    extra: dict[str, Any] = {}
 
     if demo == "demo_time_travel_restore":
         before_patch = str(read_space(space_id).get("revision_event_id") or "")
@@ -933,8 +934,37 @@ def space_demo_run(name: str) -> dict[str, Any]:
         if widgets:
             disable_widget_for_recovery(space_id, widgets[0]["id"], reason="demo smoke recovery")
             action = "recovery-disabled"
+    elif demo == "demo_research_harness_pdf_export":
+        progress = set_research_progress(
+            space_id,
+            phase="summary",
+            message="Summary artifact ready for PDF export.",
+            sources=[{"title": "Demo research brief", "url": "https://example.test/research", "notes": "metadata-only smoke"}],
+            notes=["Research plan, source review, notes, and summary metadata completed."],
+        )
+        artifact = set_research_artifact(
+            space_id,
+            "Research Harness PDF export smoke",
+            "# Research Harness PDF export smoke\n\nMetadata-only demo artifact ready for export.",
+        )
+        queued = queue_widget_event(
+            space_id,
+            "research-summary",
+            "widget.export.pdf",
+            {"artifact": "research-summary", "format": "pdf", "demo": demo},
+            prompt="Export the ready research summary artifact as a PDF when approved.",
+        )
+        action = "pdf-export-requested"
+        extra = {
+            "research_progress": progress,
+            "research_artifact": artifact,
+            "queued_event": queued,
+            "queued_event_count": len(list_widget_events(space_id, "research-summary")),
+        }
 
-    return _space_demo_run_summary(demo, template, space_id, action=action)
+    summary = _space_demo_run_summary(demo, template, space_id, action=action)
+    summary.update(extra)
+    return summary
 
 
 def space_demo_run_all() -> dict[str, Any]:
