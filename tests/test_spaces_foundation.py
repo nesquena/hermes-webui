@@ -170,6 +170,55 @@ def test_space_tool_adapter_supports_source_style_current_and_spaces_aliases(mon
     assert "secret" not in serialized
 
 
+def test_space_tool_adapter_supports_source_camelcase_space_helpers(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    created_by_alias = spaces.run_space_tool(
+        "space.spaces.createSpace",
+        {
+            "space_id": "camelcase-lab",
+            "name": "CamelCase Lab",
+            "description": "Space Agent helper alias",
+            "widgets": [
+                {
+                    "id": "ignored-generated-widget",
+                    "renderer": "<script>steal()</script>",
+                    "api_key": "SECRET_VALUE_DO_NOT_LEAK",
+                }
+            ],
+        },
+    )
+    spaces.upsert_widget(
+        "camelcase-lab",
+        {
+            "id": "unsafe-widget",
+            "kind": "html",
+            "title": "Unsafe Widget",
+            "renderer": "<script>steal()</script>",
+            "data": {"api_key": "SECRET_VALUE_DO_NOT_LEAK"},
+        },
+    )
+
+    listed = spaces.run_space_tool("space.spaces.listSpaces", {"source": "<script>ignore()</script>"})
+    opened = spaces.run_space_tool("space.spaces.openSpace", {"space_id": "camelcase-lab", "token": "SECRET"})
+    serialized = json.dumps({"created_by_alias": created_by_alias, "listed": listed, "opened": opened}).lower()
+
+    assert created_by_alias["ok"] is True
+    assert created_by_alias["action"] == "space.spaces.createspace"
+    assert created_by_alias["space"]["space_id"] == "camelcase-lab"
+    assert created_by_alias["space"]["widget_count"] == 0
+    assert spaces.read_space("camelcase-lab")["widgets"][0]["id"] == "unsafe-widget"
+    assert listed["spaces"][0]["space_id"] == "camelcase-lab"
+    assert opened["space"]["space_id"] == "camelcase-lab"
+    assert opened["space"]["widgets"][0]["id"] == "unsafe-widget"
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert '"source":' not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
 def test_space_tool_adapter_exposes_widget_runtime_contract_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "runtime-lab", "name": "Runtime Lab"})

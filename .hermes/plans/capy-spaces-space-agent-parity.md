@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-02 14:17 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-02 15:24 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Space Agent-style `space.spaces.create` and `space.spaces.get` / `space.spaces.read` tool aliases now route through Capy's existing metadata-only space create/read primitives, ignoring supplied widget/generated bodies and preserving safe list/detail responses. Use `git log -1 --oneline` for the exact commit hash after commit.
+Current latest known completed code slice: Space Agent source-style camelCase helper aliases (`space.spaces.createSpace`, `space.spaces.listSpaces`, and `space.spaces.openSpace` / `getSpace` / `readSpace`) now route through Capy's existing metadata-only space create/list/detail primitives, ignoring supplied widget/generated bodies and preserving safe list/detail responses. Use `git log -1 --oneline` for the exact commit hash after commit.
 
 Recent completed slices:
+
+- `feat(spaces): support source camelcase space aliases`
+  - Added RED/GREEN backend coverage proving Space Agent source-style camelCase aliases `space.spaces.createSpace`, `space.spaces.listSpaces`, and `space.spaces.openSpace` / `getSpace` / `readSpace` route through Capy's safe metadata-only create/list/detail primitives while ignoring supplied generated/widget bodies.
+  - Validation at completion: focused RED failed before implementation with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`), full Spaces foundation suite passed (`106 passed`), `py_compile api/spaces.py tests/test_spaces_foundation.py`, and `git diff --check` passed. Mock/status screenshot QA captured the alias status with empty browser console and no visible secrets; screenshot artifact `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_1ed4676bfe3948889ecde8b01d1338b4.png`.
 
 - `feat(spaces): support source-style space create/get aliases`
   - Added RED/GREEN backend coverage proving `space.spaces.create` creates a safe metadata-only Space while ignoring supplied widget/generated bodies, and `space.spaces.get` reads safe detail metadata without exposing renderer/html/script/source/data fields or credential-like values.

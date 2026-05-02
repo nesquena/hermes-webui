@@ -1054,7 +1054,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     name = str(action or "").strip().lower()
     data = payload if isinstance(payload, dict) else {}
 
-    if name in {"space.list", "space.spaces", "space.spaces.list"}:
+    if name in {"space.list", "space.spaces", "space.spaces.list", "space.spaces.listspaces"}:
         return {"ok": True, "action": name, "spaces": list_spaces()}
     if name in {"space.demo.list", "space.demo.runs"}:
         return {"ok": True, "action": name, "demos": list_space_demo_runs()}
@@ -1129,12 +1129,12 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         export_format = "zip" if name.endswith(".zip") else "yaml" if name.endswith(".yaml") else data.get("format") or "yaml"
         result = export_space_agent_package(space_id, format=export_format)
         return {"ok": True, "action": name, **result}
-    if name in {"space.create", "space.spaces.create"}:
+    if name in {"space.create", "space.spaces.create", "space.spaces.createspace"}:
         created = create_space(_space_tool_create_payload(data))
         space = read_space_detail(created["space_id"])
         space["widget_count"] = len(space.get("widgets") or [])
         return {"ok": True, "action": name, "space": space}
-    if name in {"space.get", "space.spaces.get", "space.spaces.read"}:
+    if name in {"space.get", "space.spaces.get", "space.spaces.read", "space.spaces.getspace", "space.spaces.readspace", "space.spaces.openspace"}:
         space_id = validate_space_id(data.get("space_id"))
         return {"ok": True, "action": name, "space": read_space_detail(space_id)}
     if name in {"space.data.set", "space.current.data.set"}:
