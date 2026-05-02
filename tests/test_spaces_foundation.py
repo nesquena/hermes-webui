@@ -105,13 +105,23 @@ def test_space_tool_adapter_create_list_and_get_are_metadata_only(monkeypatch, t
 
 def test_space_tool_adapter_supports_source_style_current_and_spaces_aliases(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
-    created = spaces.create_space(
+    created_by_alias = spaces.run_space_tool(
+        "space.spaces.create",
         {
             "space_id": "source-style-lab",
             "name": "Source Style Lab",
             "description": "Expose Space Agent-style helper aliases safely",
-        }
+            "widgets": [
+                {
+                    "id": "ignored-generated-widget",
+                    "title": "Ignored Generated Widget",
+                    "renderer": "<script>steal()</script>",
+                    "api_key": "SECRET...LEAK",
+                }
+            ],
+        },
     )
+    created = spaces.read_space(created_by_alias["space"]["space_id"])
     spaces.upsert_widget(
         created["space_id"],
         {
@@ -125,20 +135,29 @@ def test_space_tool_adapter_supports_source_style_current_and_spaces_aliases(mon
     )
 
     spaces_list = spaces.run_space_tool("space.spaces.list", {"renderer": "<script>ignore()</script>"})
+    spaces_get = spaces.run_space_tool("space.spaces.get", {"space_id": created["space_id"], "api_key": "***"})
     current_space = spaces.run_space_tool("space.current.get", {"active_space_id": created["space_id"]})
     current_widgets = spaces.run_space_tool("space.current.widgets", {"space_id": created["space_id"]})
     no_current = spaces.run_space_tool("space.current.get", {})
     serialized = json.dumps(
         {
+            "created_by_alias": created_by_alias,
             "spaces_list": spaces_list,
+            "spaces_get": spaces_get,
             "current_space": current_space,
             "current_widgets": current_widgets,
             "no_current": no_current,
         }
     ).lower()
 
+    assert created_by_alias["ok"] is True
+    assert created_by_alias["action"] == "space.spaces.create"
+    assert created_by_alias["space"]["space_id"] == "source-style-lab"
+    assert created_by_alias["space"]["widget_count"] == 0
+    assert created["widgets"] == []
     assert spaces_list["ok"] is True
     assert spaces_list["spaces"][0]["space_id"] == created["space_id"]
+    assert spaces_get["space"]["space_id"] == created["space_id"]
     assert current_space["space"]["space_id"] == created["space_id"]
     assert current_widgets["widgets"][0]["id"] == "unsafe-widget"
     assert no_current == {"ok": True, "action": "space.current.get", "active_space_id": None, "space": None}

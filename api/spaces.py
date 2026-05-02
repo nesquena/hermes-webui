@@ -1129,12 +1129,12 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         export_format = "zip" if name.endswith(".zip") else "yaml" if name.endswith(".yaml") else data.get("format") or "yaml"
         result = export_space_agent_package(space_id, format=export_format)
         return {"ok": True, "action": name, **result}
-    if name == "space.create":
+    if name in {"space.create", "space.spaces.create"}:
         created = create_space(_space_tool_create_payload(data))
         space = read_space_detail(created["space_id"])
         space["widget_count"] = len(space.get("widgets") or [])
         return {"ok": True, "action": name, "space": space}
-    if name == "space.get":
+    if name in {"space.get", "space.spaces.get", "space.spaces.read"}:
         space_id = validate_space_id(data.get("space_id"))
         return {"ok": True, "action": name, "space": read_space_detail(space_id)}
     if name in {"space.data.set", "space.current.data.set"}:

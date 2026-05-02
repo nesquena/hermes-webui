@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-02 13:12 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-02 14:17 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Hermes-style/Space Agent-style widget tool aliases now support metadata-only `space.widget.see` / `space.current.widget.see` plus `space.widget.reload` / `space.current.widget.reload`, so agents can inspect a widget's safe detail/contract and queue a refresh without exposing generated bodies, raw source text, or secret-like fields. Use `git log -1 --oneline` for the exact commit hash after commit.
+Current latest known completed code slice: Space Agent-style `space.spaces.create` and `space.spaces.get` / `space.spaces.read` tool aliases now route through Capy's existing metadata-only space create/read primitives, ignoring supplied widget/generated bodies and preserving safe list/detail responses. Use `git log -1 --oneline` for the exact commit hash after commit.
 
 Recent completed slices:
+
+- `feat(spaces): support source-style space create/get aliases`
+  - Added RED/GREEN backend coverage proving `space.spaces.create` creates a safe metadata-only Space while ignoring supplied widget/generated bodies, and `space.spaces.get` reads safe detail metadata without exposing renderer/html/script/source/data fields or credential-like values.
+  - Validation at completion: focused RED failed before implementation with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`), full Spaces foundation suite passed (`105 passed`), `py_compile api/spaces.py tests/test_spaces_foundation.py`, and `git diff --check` passed. Mock-state browser QA captured the alias status with empty browser console and no visible secrets; screenshot artifact `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_155bd084d7654cf4841cf43e49f2e9d6.png`.
 
 - `feat(spaces): support widget see and reload aliases`
   - Added RED/GREEN backend coverage proving `space.widget.see` and `space.current.widget.see` return safe widget detail plus the sandbox runtime contract, and `space.current.widget.reload` queues a metadata-only `widget.refresh` event while omitting renderer/html/script/source/data fields and credential-like values from results/event inboxes.
