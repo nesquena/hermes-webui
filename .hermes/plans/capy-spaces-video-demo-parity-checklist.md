@@ -20,6 +20,7 @@ Recently landed:
 - The Research Harness demo smoke now drives the preferred vertical path through safe metadata only: live progress widgets, export-ready markdown artifact metadata, a queued `widget.export.pdf` event, and visible smoke-result status.
 - Widget details now surface the safe runtime sandbox/postMessage contract from the `space.widget.runtime_contract` tool route without displaying generated widget bodies or secret-like fields.
 - Runtime-contract details now include metadata-only network policy and approval checkpoints, clarifying that generated-code enablement, external navigation, and network fetches require explicit mediation/approval.
+- Widget tool aliases now include metadata-only `space.widget.see` / `space.current.widget.see` and reload/refresh aliases that queue bounded `widget.refresh` events instead of executing generated widget code directly.
 - Screenshot QA artifacts are expected for visually relevant Spaces work.
 
 Next checkpoint emphasis:

@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-02 10:50 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-02 13:12 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Space Agent package imports now surface safe warnings for unsupported `space.spaces.*` API references in addition to `space.current.*`, so imported YAML can be reviewed without copying generated bodies, raw source text, action maps, or secret-like fields into public responses or the DOM. Use `git log -1 --oneline` for the exact commit hash after commit.
+Current latest known completed code slice: Hermes-style/Space Agent-style widget tool aliases now support metadata-only `space.widget.see` / `space.current.widget.see` plus `space.widget.reload` / `space.current.widget.reload`, so agents can inspect a widget's safe detail/contract and queue a refresh without exposing generated bodies, raw source text, or secret-like fields. Use `git log -1 --oneline` for the exact commit hash after commit.
 
 Recent completed slices:
+
+- `feat(spaces): support widget see and reload aliases`
+  - Added RED/GREEN backend coverage proving `space.widget.see` and `space.current.widget.see` return safe widget detail plus the sandbox runtime contract, and `space.current.widget.reload` queues a metadata-only `widget.refresh` event while omitting renderer/html/script/source/data fields and credential-like values from results/event inboxes.
+  - Validation at completion: focused RED failed before implementation with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`), full Spaces foundation suite passed (`105 passed`), `py_compile api/spaces.py tests/test_spaces_foundation.py`, and `git diff --check` passed. Mock-state screenshot/status QA captured the new alias results with empty browser console and no visible secrets; screenshot artifact `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_0447bc8d55d54955938b6333fe8dc8ba.png`.
 
 - `feat(spaces): warn on imported space.spaces APIs`
   - Added RED/GREEN backend coverage proving imports report metadata-only warnings for unsupported Space Agent `space.spaces.*` references such as `space.spaces.create` and `space.spaces.list`, while preserving the existing `space.current.*` warning behavior and continuing to omit raw action maps, generated renderer/source fields, and credential-like values from import/export responses.

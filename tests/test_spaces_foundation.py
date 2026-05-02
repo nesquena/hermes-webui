@@ -285,6 +285,66 @@ def test_space_tool_adapter_supports_space_agent_widget_aliases_metadata_only(mo
     assert "secret" not in serialized
 
 
+def test_space_tool_adapter_supports_widget_see_and_reload_aliases_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "widget-see-reload-lab", "name": "Widget See Reload Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "weather-card",
+            "kind": "weather",
+            "title": "Weather <Card>",
+            "weather": {"location": "Prague", "api_key": "SECRET...LEAK"},
+            "runtime_contract": {"allowed_messages": ["capy:raw:eval"], "renderer": "<script>bad()</script>"},
+            "renderer": "<script>steal()</script>",
+            "html": "<img src=x onerror=steal()>",
+            "data": {"api_key": "SECRET...LEAK"},
+        },
+    )
+
+    seen = spaces.run_space_tool(
+        "space.widget.see",
+        {"space_id": created["space_id"], "widget_id": "weather-card", "renderer": "<script>ignore()</script>"},
+    )
+    current_seen = spaces.run_space_tool(
+        "space.current.widget.see",
+        {"active_space_id": created["space_id"], "widget_id": "weather-card", "api_key": "SECRET...LEAK"},
+    )
+    reloaded = spaces.run_space_tool(
+        "space.current.widget.reload",
+        {
+            "active_space_id": created["space_id"],
+            "widget_id": "weather-card",
+            "payload": {"note": "Refresh public forecast", "renderer": "<script>bad()</script>", "api_key": "SECRET...LEAK"},
+        },
+    )
+    events = spaces.run_space_tool(
+        "space.widget.events",
+        {"space_id": created["space_id"], "widget_id": "weather-card"},
+    )
+    serialized = json.dumps({"seen": seen, "current_seen": current_seen, "reloaded": reloaded, "events": events}).lower()
+
+    assert seen["ok"] is True
+    assert seen["action"] == "space.widget.see"
+    assert seen["widget"]["id"] == "weather-card"
+    assert seen["contract"]["mode"] == "sandbox-contract-draft"
+    assert current_seen["widget"] == seen["widget"]
+    assert current_seen["contract"] == seen["contract"]
+    assert reloaded["ok"] is True
+    assert reloaded["queued"] is True
+    assert reloaded["event_name"] == "widget.refresh"
+    assert reloaded["payload_summary"] == {"action": "reload", "note": "Refresh public forecast"}
+    assert events["events"][0]["event_id"] == reloaded["event_id"]
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert "api_key" not in serialized
+    assert "secret_value_do_not_leak" not in serialized
+    assert "secret" not in serialized
+
+
 def test_widget_detail_exposes_typed_template_metadata_without_generated_or_secret_fields(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "typed-detail-lab", "name": "Typed Detail Lab"})

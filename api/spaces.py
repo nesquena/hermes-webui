@@ -1085,6 +1085,18 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
         return {"ok": True, "action": name, "active_space_id": space_id, "widget": read_widget_detail(space_id, widget_id)}
+    if name in {"space.widget.see", "space.current.widget.see", "widget.see"}:
+        space_id = validate_space_id(_space_tool_current_id(data) if name.startswith("space.current.") else data.get("space_id"))
+        widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
+        widget = read_widget(space_id, widget_id)
+        return {
+            "ok": True,
+            "action": name,
+            "active_space_id": space_id,
+            "widget": read_widget_detail(space_id, widget_id),
+            "contract": _widget_runtime_contract_summary(widget),
+            "events": list_widget_events(space_id, widget_id, data.get("limit", 5)),
+        }
     if name in {"space.widget.runtime_contract", "space.current.widget.runtime_contract", "widget.runtime_contract"}:
         space_id = validate_space_id(_space_tool_current_id(data) if name.startswith("space.current.") else data.get("space_id"))
         widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
@@ -1210,6 +1222,24 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         space_id = validate_space_id(_space_tool_current_id(data) if name == "space.current.widget.patch" else data.get("space_id"))
         widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
         result = patch_widget(space_id, widget_id, data.get("patch") if isinstance(data.get("patch"), dict) else {})
+        return {"ok": True, "action": name, **result}
+    if name in {"widget.reload", "widget.refresh", "space.widget.reload", "space.widget.refresh", "space.current.widget.reload", "space.current.widget.refresh"}:
+        space_id = validate_space_id(_space_tool_current_id(data) if name.startswith("space.current.") else data.get("space_id"))
+        widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
+        payload = {"action": "reload"}
+        if isinstance(data.get("payload"), dict):
+            for key, value in data["payload"].items():
+                safe_key = str(key or "")
+                if safe_key != "action":
+                    payload[safe_key] = value
+        result = queue_widget_event(
+            space_id,
+            widget_id,
+            "widget.refresh",
+            payload,
+            prompt=data.get("prompt") or "",
+            session_id=data.get("session_id") or "",
+        )
         return {"ok": True, "action": name, **result}
     if name in {"widget.events", "widget.event.list", "space.widget.events", "space.widget.event.list", "space.current.widget.events", "space.current.widget.event.list"}:
         space_id = validate_space_id(_space_tool_current_id(data) if name.startswith("space.current.") else data.get("space_id"))
