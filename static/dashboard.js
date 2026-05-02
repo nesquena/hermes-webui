@@ -119,8 +119,11 @@ async function loadDashboardSummary() {
   }
 }
 
-function focusDashboardComposer() {
-  if (typeof switchPanel === 'function') switchPanel('dashboard');
+async function focusDashboardComposer() {
+  if (typeof switchPanel === 'function') {
+    const switched = await switchPanel('dashboard');
+    if (switched === false) return;
+  }
   setTimeout(() => {
     const input = document.getElementById('msg');
     if (input) input.focus();

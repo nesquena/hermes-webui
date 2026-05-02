@@ -2712,6 +2712,34 @@ main.main.showing-dashboard .main-view-content{max-width:none;height:100%;}
 .dashboard-chat-composer .composer-wrap{padding:10px 16px;background:transparent;}
 .dashboard-chat-composer .composer-wrap::before{display:none;}
 .dashboard-chat-composer .composer-box{max-width:none;border-radius:10px;background:var(--bg);}
+.dashboard-chat-composer .composer-footer{flex-wrap:wrap;align-items:center;gap:8px 10px;overflow:visible;}
+.dashboard-chat-composer .composer-left{flex:1 1 440px;max-width:100%;overflow-x:auto;overflow-y:hidden;}
+.dashboard-chat-composer .composer-right{flex:0 0 auto;margin-left:auto;min-width:max-content;}
+.dashboard-chat-composer .composer-profile-chip,
+.dashboard-chat-composer .composer-workspace-chip,
+.dashboard-chat-composer .composer-model-chip,
+.dashboard-chat-composer .composer-reasoning-chip{min-height:36px;}
+.dashboard-chat-composer .composer-workspace-group{max-width:min(284px,100%);}
+.dashboard-chat-composer .composer-terminal-panel{max-width:calc(100% - 32px);}
+
+@media(max-width:1100px){
+  .dashboard-chat-composer .composer-left{flex-basis:100%;}
+  .dashboard-chat-composer .composer-right{width:100%;justify-content:flex-end;}
+  .dashboard-chat-composer .composer-status{max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+}
+
+@media(max-width:760px){
+  .dashboard-chat-header{height:48px;padding:0 14px;}
+  .dashboard-chat-body .messages-inner{padding:14px 14px 22px;}
+  .dashboard-chat-composer .composer-wrap{padding:8px 10px;}
+  .dashboard-chat-composer .composer-footer{gap:7px;padding:6px 8px 8px!important;}
+  .dashboard-chat-composer .composer-left{gap:4px;}
+  .dashboard-chat-composer .composer-right{gap:6px;}
+  .dashboard-chat-composer .composer-profile-chip,
+  .dashboard-chat-composer .composer-model-chip,
+  .dashboard-chat-composer .composer-reasoning-chip,
+  .dashboard-chat-composer .composer-workspace-chip{max-width:44px;min-width:44px;min-height:44px;padding:6px;justify-content:center;gap:0;}
+}
 
 /* NEO HU-03.3: Hero card — avatar + status pill */
 .hero-card{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;height:220px;border:1px solid var(--border);border-radius:12px;padding:16px;overflow:hidden;background:var(--surface);}

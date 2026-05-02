@@ -385,11 +385,14 @@ ações rápidas, sidebar fixa de 240px e topbar contextual de 56px.
 - [x] Preservar seletor de reasoning/effort.
 - [x] Preservar menus auxiliares e demais controles já existentes no rodapé do chat.
 - [x] Aplicar apenas adaptação visual Neo ao container/composer: fundo, borda, radius, espaçamento, botão enviar cyan e responsividade.
-- [ ] Manter painel `chat` direto funcional.
-- [ ] Focar composer ao abrir Dashboard.
-- [ ] Testar troca de modelo, workspace, profile e effort dentro do Dashboard.
-- [ ] Testar envio com anexo dentro do Dashboard.
-- [ ] Validar mobile/tablet: toolstrip pode quebrar linha, mas não pode ocultar controles, cortar labels ou sobrepor elementos.
+- [x] Manter painel `chat` direto funcional.
+- [x] Focar composer ao abrir Dashboard.
+- [x] Testar troca de modelo, workspace, profile e effort dentro do Dashboard.
+- [x] Testar envio com anexo dentro do Dashboard.
+- [x] Validar mobile/tablet: toolstrip pode quebrar linha, mas não pode ocultar controles, cortar labels ou sobrepor elementos.
+- [ ] Anexar screenshots/homologação manual em runtime.
+
+**Evidência técnica:** `tests/test_neo_dashboard_chat_embed.py` valida contrato de DOM único do chat/composer, foco pós-montagem do Dashboard, handlers originais de seletores/anexos/envio e hardening responsivo do composer central.
 
 ### HU-03.6 — Topbar contextual
 
