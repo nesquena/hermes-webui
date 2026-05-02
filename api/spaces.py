@@ -947,6 +947,7 @@ def space_demo_run(name: str) -> dict[str, Any]:
             "Research Harness PDF export smoke",
             "# Research Harness PDF export smoke\n\nMetadata-only demo artifact ready for export.",
         )
+        rollback_event_id = str(artifact.get("revision_event_id") or "")
         queued = queue_widget_event(
             space_id,
             "research-summary",
@@ -954,12 +955,23 @@ def space_demo_run(name: str) -> dict[str, Any]:
             {"artifact": "research-summary", "format": "pdf", "demo": demo},
             prompt="Export the ready research summary artifact as a PDF when approved.",
         )
+        restored = restore_revision(space_id, rollback_event_id) if rollback_event_id else {"space": {"widgets": []}}
+        queued_events_after_restore = list_widget_events(space_id, "research-summary")
         action = "pdf-export-requested"
         extra = {
             "research_progress": progress,
             "research_artifact": artifact,
             "queued_event": queued,
-            "queued_event_count": len(list_widget_events(space_id, "research-summary")),
+            "queued_event_count": len(queued_events_after_restore),
+            "research_rollback_check": {
+                "verified": bool(restored.get("ok") is True and queued_events_after_restore),
+                "restored_event_id": rollback_event_id,
+                "restored_widget_count": len((restored.get("space") or {}).get("widgets") or []),
+                "replayed_after_restore": bool(
+                    queued_events_after_restore
+                    and queued_events_after_restore[0].get("event_id") == queued.get("event_id")
+                ),
+            },
         }
 
     summary = _space_demo_run_summary(demo, template, space_id, action=action)

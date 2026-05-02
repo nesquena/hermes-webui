@@ -118,9 +118,13 @@
     const rollbackPoint = data && data.rollback_point ? 'yes' : 'no';
     const action = data && data.action ? String(data.action) : '';
     const queuedEventCount = Number(data && data.queued_event_count || 0);
+    const rollbackCheck = data && data.research_rollback_check && typeof data.research_rollback_check === 'object'
+      ? data.research_rollback_check
+      : null;
     const extraParts = [];
     if (action) extraParts.push('Action: '+escapeHtml(action));
     if (queuedEventCount) extraParts.push('Queued events: '+queuedEventCount);
+    if (rollbackCheck && rollbackCheck.verified === true) extraParts.push('Rollback verified: yes');
     const extraLine = extraParts.length ? '<div class="capy-spaces-muted">'+extraParts.join(' · ')+'</div>' : '';
     return '<div class="capy-spaces-card" role="status"><h3>Demo parity smoke passed</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(demo)+' · '+escapeHtml(data && data.mode || 'metadata-only-smoke')+'</div>' +
