@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-02 04:58 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-02 08:30 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Research Harness demo parity smoke now exercises the vertical metadata-only path end-to-end: install Research Harness, advance plan/source/notes progress to summary, mark the markdown artifact PDF-export-ready, queue a `widget.export.pdf` event on `research-summary`, and show the action/queued-event count in the Spaces demo smoke UI. Use `git log -1 --oneline` for the exact commit hash after commit; this status line intentionally avoids self-referential hashes because committing it changes the hash.
+Current latest known completed code slice: Widget details now fetch and display the safe runtime sandbox contract from the Hermes-style Spaces tool route, making the generated-code-disabled/postMessage draft visible without rendering widget bodies or leaking secret-like fields. Use `git log -1 --oneline` for the exact commit hash after commit.
 
 Recent completed slices:
+
+- `feat(spaces): show widget runtime contract in details`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving the widget detail flow calls `space.widget.runtime_contract`, renders the metadata-only mode/execution/allowed/blocked message contract, and continues to omit generated renderer/html/data fields plus credential-like values from DOM.
+  - Validation at completion: focused RED test failed before implementation due to the missing `/api/spaces/tool` runtime-contract call; focused GREEN tests passed (`4 passed`), Spaces UI + foundation suites passed (`174 passed`), `node --check static/spaces.js`, `py_compile api/spaces.py tests/test_spaces_ui_js_behaviour.py tests/test_spaces_foundation.py`, and `git diff --check` passed.
 
 - `feat(spaces): request research demo PDF export`
   - Added RED/GREEN backend and real-`static/spaces.js` regressions proving `demo_research_harness_pdf_export` advances Research Harness progress, records a safe artifact summary, queues a metadata-only PDF export event, and renders only safe smoke status metadata in the UI.

@@ -479,7 +479,28 @@
       '</div></div>';
   }
 
-  function renderWidgetDetailPanel(spaceId, widget){
+  function renderWidgetRuntimeContract(contract){
+    const safeContract = contract && typeof contract === 'object' && !Array.isArray(contract) ? contract : {};
+    const mode = String(safeContract.mode || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+    const execution = String(safeContract.execution || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+    function safeMessageList(values){
+      if (!Array.isArray(values)) return '';
+      return values.slice(0, 8).map(function(value){
+        const text = String(value || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+        return /^capy:[a-z0-9:._-]+$/i.test(text) ? text : '';
+      }).filter(Boolean).join(', ');
+    }
+    const allowed = safeMessageList(safeContract.allowed_messages);
+    const blocked = safeMessageList(safeContract.blocked_messages);
+    if (!mode && !execution && !allowed && !blocked) return '';
+    return '<div class="capy-spaces-widget capy-spaces-runtime-contract"><div><strong>Runtime contract: '+escapeHtml(mode || 'metadata-only')+'</strong>' +
+      (execution ? '<div class="capy-spaces-muted">Execution: '+escapeHtml(execution)+'</div>' : '') +
+      (allowed ? '<div class="capy-spaces-muted">Allowed messages: '+escapeHtml(allowed)+'</div>' : '') +
+      (blocked ? '<div class="capy-spaces-muted">Blocked messages: '+escapeHtml(blocked)+'</div>' : '') +
+      '</div></div>';
+  }
+
+  function renderWidgetDetailPanel(spaceId, widget, runtimeContract){
     const safeWidget = widget && typeof widget === 'object' ? widget : {};
     const widgetId = safeWidget.id || '';
     const title = safeWidget.title || widgetId || 'Untitled widget';
@@ -505,6 +526,7 @@
       '<div class="capy-spaces-muted">Space ID: '+escapeHtml(spaceId || '')+' · '+escapeHtml(recoveryText)+revision+'</div>' +
       metadataRow +
       eventBridgeRow +
+      renderWidgetRuntimeContract(runtimeContract) +
       '</div>'+pdfExportAction+'</div></div></div>';
   }
 
@@ -900,7 +922,18 @@
       const root = document.getElementById('capySpacesRoot');
       if (!spaceId || !widgetId || !root) return;
       const data = await fetchSpacesJson('api/spaces/widget?space_id='+encodeURIComponent(spaceId)+'&widget_id='+encodeURIComponent(widgetId));
-      root.innerHTML = renderWidgetDetailPanel(spaceId, data && data.widget) + root.innerHTML;
+      let runtimeContract = null;
+      try {
+        const contractData = await postSpacesJson('api/spaces/tool', {
+          action: 'space.widget.runtime_contract',
+          space_id: spaceId,
+          widget_id: widgetId,
+        });
+        runtimeContract = contractData && contractData.contract;
+      } catch (contractErr) {
+        runtimeContract = null;
+      }
+      root.innerHTML = renderWidgetDetailPanel(spaceId, data && data.widget, runtimeContract) + root.innerHTML;
       return;
     }
     if (action === 'editWidget') {

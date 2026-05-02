@@ -172,6 +172,21 @@ global.fetch = async function(path, opts = {}) {
         api_key: 'UNTRUSTED_VALUE',
       });
     }
+    if (body.action === 'space.widget.runtime_contract') {
+      return response({
+        ok: true,
+        action: 'space.widget.runtime_contract',
+        contract: {
+          mode: 'sandbox-contract-draft',
+          widget_id: body.widget_id || 'weather',
+          execution: 'generated-code-disabled',
+          allowed_messages: ['capy:ready', 'capy:resize', 'capy:agent:prompt'],
+          blocked_messages: ['capy:raw:eval', 'capy:data:put'],
+          renderer: '<script>bad()</script>',
+          api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        },
+      });
+    }
   }
   if (path === 'api/spaces/recovery') {
     return response({
@@ -1141,6 +1156,12 @@ def test_spaces_ui_view_widget_details_fetches_and_renders_safe_metadata_only(dr
 
     assert "View details" in out["beforeHtml"]
     assert {"path": "api/spaces/widget?space_id=lab&widget_id=weather", "method": "GET", "body": ""} in out["calls"]
+    runtime_call = next(call for call in out["calls"] if call["path"] == "api/spaces/tool" and "runtime_contract" in call["body"])
+    assert json.loads(runtime_call["body"]) == {
+        "action": "space.widget.runtime_contract",
+        "space_id": "lab",
+        "widget_id": "weather",
+    }
     assert "Widget details" in out["rootHtml"]
     assert "Back to widgets" in out["rootHtml"]
     assert "data-capy-action=\"loadWidgets\"" in out["rootHtml"]
@@ -1152,6 +1173,10 @@ def test_spaces_ui_view_widget_details_fetches_and_renders_safe_metadata_only(dr
     assert "interaction: refresh" in out["rootHtml"]
     assert "permissions: network" in out["rootHtml"]
     assert "event_bridge: event_name, status" in out["rootHtml"]
+    assert "Runtime contract: sandbox-contract-draft" in out["rootHtml"]
+    assert "Execution: generated-code-disabled" in out["rootHtml"]
+    assert "Allowed messages: capy:ready, capy:resize, capy:agent:prompt" in out["rootHtml"]
+    assert "Blocked messages: capy:raw:eval, capy:data:put" in out["rootHtml"]
     assert "credential" not in out["rootHtml"].lower()
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
