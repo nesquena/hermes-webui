@@ -68,6 +68,8 @@ DEFAULT_PORT = int(os.getenv("HERMES_WEBUI_PORT", "8787"))
 # Set HERMES_WEBUI_SKIP_ONBOARDING=1 to bypass the first-run wizard when
 # the environment is already fully configured (e.g. managed hosting).
 
+SUPERVISOR_ENV_VARS = ("LAUNCHD_SOCKET", "INVOCATION_ID", "NOTIFY_SOCKET")
+
 
 def info(msg: str) -> None:
     print(f"[bootstrap] {msg}", flush=True)
@@ -194,7 +196,12 @@ def open_browser(url: str) -> None:
         info(f"Could not open browser automatically: {exc}")
 
 
-def parse_args() -> argparse.Namespace:
+def supervisor_env_present(environ: dict[str, str] | None = None) -> bool:
+    environ = environ or os.environ
+    return any(environ.get(name) for name in SUPERVISOR_ENV_VARS)
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Bootstrap Hermes Web UI onboarding.")
     parser.add_argument("port", nargs="?", type=int, default=DEFAULT_PORT)
     parser.add_argument("--host", default=DEFAULT_HOST)
@@ -208,7 +215,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Fail instead of attempting the official Hermes installer.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--foreground",
+        action="store_true",
+        help=(
+            "Run server.py in the current process for launchd/systemd-style "
+            "supervisors instead of spawning a detached child."
+        ),
+    )
+    return parser.parse_args(argv)
 
 
 def main() -> int:
@@ -239,6 +254,17 @@ def main() -> int:
         env["HERMES_WEBUI_AGENT_DIR"] = str(agent_dir)
 
     info(f"Starting Hermes Web UI on http://{args.host}:{args.port}")
+    if args.foreground or supervisor_env_present(env):
+        reason = "--foreground" if args.foreground else "supervisor environment detected"
+        info(f"Foreground mode enabled ({reason}); replacing bootstrap with server.py")
+        os.chdir(str(agent_dir or REPO_ROOT))
+        os.execve(
+            python_exe,
+            [python_exe, str(REPO_ROOT / "server.py")],
+            env,
+        )
+        raise RuntimeError("os.execve returned unexpectedly")
+
     with log_path.open("ab") as log_file:
         proc = subprocess.Popen(
             [python_exe, str(REPO_ROOT / "server.py")],
