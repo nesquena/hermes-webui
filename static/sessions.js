@@ -380,6 +380,9 @@ async function loadSession(sid){
   S.session=data.session;
   S.session._modelResolutionDeferred=true;
   S.lastUsage={...(data.session.last_usage||{})};
+  // Sync workspace display immediately so the chip label reflects the new session's workspace
+  // before any async message-loading begins (mirrors how model is handled).
+  if(typeof syncTopbar==='function') syncTopbar();
   _setSessionViewedCount(S.session.session_id, Number(data.session.message_count || 0));
   _clearSessionCompletionUnread(S.session.session_id);
   localStorage.setItem('hermes-webui-session',S.session.session_id);

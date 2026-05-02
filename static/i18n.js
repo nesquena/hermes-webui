@@ -120,6 +120,8 @@ const LOCALES = {
     model_search_placeholder: 'Search models…',
     model_search_no_results: 'No models found',
     model_group_configured: 'Configured',
+    ws_search_placeholder: 'Search workspaces…',
+    ws_no_results: 'No workspaces found',
     model_scope_advisory: 'Applies to this conversation from your next message.',
     model_scope_toast: 'Applies to this conversation from your next message.',
     // commands.js
@@ -998,6 +1000,8 @@ const LOCALES = {
     model_search_placeholder: 'モデルを検索…',
     model_search_no_results: 'モデルが見つかりません',
     model_group_configured: '設定済み',
+    ws_search_placeholder: 'ワークスペースを検索…',
+    ws_no_results: 'ワークスペースが見つかりません',
     model_scope_advisory: '次回のメッセージからこの会話に適用されます。',
     model_scope_toast: '次回のメッセージからこの会話に適用されます。',
     // commands.js
@@ -1922,6 +1926,8 @@ const LOCALES = {
     focus_label: 'Фокус',
     model_search_no_results: 'Модели не найдены',
     model_group_configured: 'Настроенные',
+    ws_search_placeholder: 'Поиск рабочих пространств…',
+    ws_no_results: 'Рабочие пространства не найдены',
     model_search_placeholder: 'Поиск моделей…',
     model_scope_advisory: 'Применяется к этой беседе со следующего сообщения.',
     session_toolsets: 'Session Toolsets', // TODO: translate
@@ -2670,6 +2676,8 @@ const LOCALES = {
     model_search_placeholder: 'Buscar modelos…',
     model_search_no_results: 'No se encontraron modelos',
     model_group_configured: 'Configurados',
+    ws_search_placeholder: 'Buscar espacios de trabajo…',
+    ws_no_results: 'No se encontraron espacios de trabajo',
     session_toolsets: 'Session Toolsets', // TODO: translate
     session_toolsets_desc: 'Restrict available tools for this session (blank = use global config)', // TODO: translate
     session_toolsets_global: 'Global (default)', // TODO: translate
@@ -3875,6 +3883,8 @@ const LOCALES = {
     model_search_placeholder: 'Modelle suchen…',
     model_search_no_results: 'Keine Modelle gefunden',
     model_group_configured: 'Konfiguriert',
+    ws_search_placeholder: 'Arbeitsbereiche suchen…',
+    ws_no_results: 'Keine Arbeitsbereiche gefunden',
     session_toolsets: 'Session Toolsets', // TODO: translate
     session_toolsets_desc: 'Restrict available tools for this session (blank = use global config)', // TODO: translate
     session_toolsets_global: 'Global (default)', // TODO: translate
@@ -4298,6 +4308,8 @@ const LOCALES = {
     model_search_placeholder: '\u641c\u7d22\u6a21\u578b\u2026',
     model_search_no_results: '\u672a\u627e\u5230\u6a21\u578b',
     model_group_configured: '已配置',
+    ws_search_placeholder: '搜索工作区…',
+    ws_no_results: '未找到工作区',
     session_toolsets: 'Session Toolsets', // TODO: translate
     session_toolsets_desc: 'Restrict available tools for this session (blank = use global config)', // TODO: translate
     session_toolsets_global: 'Global (default)', // TODO: translate
@@ -5532,6 +5544,8 @@ const LOCALES = {
     model_custom_placeholder: '\u4f8b\u5982 openai/gpt-5.4',
     model_search_no_results: '\u627e\u4e0d\u5230\u6a21\u578b',
     model_group_configured: '已設定',
+    ws_search_placeholder: '搜尋工作區…',
+    ws_no_results: '找不到工作區',
     model_search_placeholder: '\u641c\u5c0b\u6a21\u578b\u2026',
     session_toolsets: 'Session Toolsets', // TODO: translate
     session_toolsets_desc: 'Restrict available tools for this session (blank = use global config)', // TODO: translate
@@ -6011,6 +6025,8 @@ const LOCALES = {
     session_toolsets_failed: 'Failed to update toolsets: ', // TODO: translate
     model_search_no_results: 'Nenhum modelo encontrado',
     model_group_configured: 'Configurados',
+    ws_search_placeholder: 'Buscar espaços de trabalho…',
+    ws_no_results: 'Nenhum espaço de trabalho encontrado',
     // commands.js
     cmd_clear: 'Limpar mensagens da conversa',
     cmd_compress: 'Comprimir manualmente o contexto (uso: /compress [tópico])',
@@ -6768,6 +6784,8 @@ const LOCALES = {
     session_toolsets_failed: 'Failed to update toolsets: ', // TODO: translate
     model_search_no_results: 'No models found',
     model_group_configured: '구성됨',
+    ws_search_placeholder: '워크스페이스 검색…',
+    ws_no_results: '워크스페이스를 찾을 수 없습니다',
     model_scope_advisory: '다음 메시지부터 이 대화에 적용됩니다.',
     model_scope_toast: '다음 메시지부터 이 대화에 적용됩니다.',
     // commands.js
