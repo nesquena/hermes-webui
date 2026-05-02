@@ -91,24 +91,27 @@ global.fetch = async function(path, opts = {}) {
         ok: true,
         demos: [
           { demo: 'demo_weather_widget', template: 'weather', title: 'Weather answer → persistent widget', mode: 'metadata-only-smoke', renderer: '<script>bad()</script>', api_key: 'SECRET' },
+          { demo: 'demo_research_harness_pdf_export', template: 'research', title: 'Research harness PDF export', mode: 'metadata-only-smoke', source: 'SECRET_SOURCE' },
           { demo: 'demo_time_travel_restore', template: 'big-bang', title: 'Time travel rollback', mode: 'metadata-only-smoke', source: 'SECRET_SOURCE' },
         ],
       });
     }
     if (body.action === 'space.demo.run') {
+      const isResearchPdfDemo = body.demo === 'demo_research_harness_pdf_export';
       return response({
         ok: true,
-        action: 'space.demo.run',
+        action: isResearchPdfDemo ? 'pdf-export-requested' : 'space.demo.run',
         demo: body.demo || 'demo_weather_widget',
-        template: 'weather',
+        template: isResearchPdfDemo ? 'research' : 'weather',
         mode: 'metadata-only-smoke',
-        space: { space_id: 'demo-weather-widget', name: 'Weather Demo Smoke', widget_count: 1, revision_event_id: 'rev-demo', renderer: '<script>bad()</script>', api_key: 'SECRET' },
-        widgets: [{ id: 'weather-current', kind: 'weather', title: 'Weather in Prague', renderer: '<script>bad()</script>', api_key: 'SECRET' }],
-        widget_count: 1,
-        persisted_widget_count: 1,
+        space: { space_id: isResearchPdfDemo ? 'demo-research-harness-pdf-export' : 'demo-weather-widget', name: isResearchPdfDemo ? 'Research Harness' : 'Weather Demo Smoke', widget_count: isResearchPdfDemo ? 5 : 1, revision_event_id: 'rev-demo', renderer: '<script>bad()</script>', api_key: 'SECRET' },
+        widgets: isResearchPdfDemo ? [{ id: 'research-summary', kind: 'markdown', title: 'Summary report', renderer: '<script>bad()</script>', api_key: 'SECRET' }] : [{ id: 'weather-current', kind: 'weather', title: 'Weather in Prague', renderer: '<script>bad()</script>', api_key: 'SECRET' }],
+        widget_count: isResearchPdfDemo ? 5 : 1,
+        persisted_widget_count: isResearchPdfDemo ? 5 : 1,
         persistence_checked: true,
         revision_event_count: 2,
         rollback_point: true,
+        queued_event_count: isResearchPdfDemo ? 1 : 0,
       });
     }
     if (body.action === 'space.demo.run_all') {
@@ -574,6 +577,10 @@ async function click(action, dataset) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('runDemoSmoke', { demo: 'demo_weather_widget' });
+  } else if (scenario === 'runResearchDemoParitySmoke') {
+    await window.loadCapySpaces();
+    beforeHtml = root.innerHTML;
+    await click('runDemoSmoke', { demo: 'demo_research_harness_pdf_export' });
   } else if (scenario === 'runDemoParityAllSmokes') {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
@@ -1168,6 +1175,24 @@ def test_spaces_ui_runs_demo_parity_smoke_from_safe_catalog(driver_path):
     assert "Widgets: 1" in out["rootHtml"]
     assert "Persistence: checked" in out["rootHtml"]
     assert "Rollback point: yes" in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_research_demo_smoke_shows_pdf_export_progress_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "runResearchDemoParitySmoke")
+    run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/tool" and json.loads(call["body"]).get("action") == "space.demo.run" and json.loads(call["body"]).get("demo") == "demo_research_harness_pdf_export")
+
+    assert json.loads(run_post["body"]) == {"action": "space.demo.run", "demo": "demo_research_harness_pdf_export"}
+    assert "Research harness PDF export" in out["beforeHtml"]
+    assert "Demo parity smoke passed" in out["rootHtml"]
+    assert "demo_research_harness_pdf_export" in out["rootHtml"]
+    assert "Research Harness" in out["rootHtml"]
+    assert "Action: pdf-export-requested" in out["rootHtml"]
+    assert "Queued events: 1" in out["rootHtml"]
+    assert "Widgets: 5" in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()

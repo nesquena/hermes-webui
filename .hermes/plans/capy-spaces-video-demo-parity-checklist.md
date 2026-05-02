@@ -3,6 +3,29 @@
 Video reviewed: https://www.youtube.com/watch?v=F3ZzNgf-R7Y  
 Transcript duration: 46:51  
 Created: 2026-04-27
+Last implementation-status update: 2026-05-01
+
+## Current parity implementation notes
+
+Capy Spaces now has implemented foundation slices, so this checklist is no longer purely architectural. Keep status conservative: metadata-only demo smokes and UI affordances are useful progress, but they are not full Space Agent video parity until the acceptance criteria below pass end-to-end on Brendan's Mac Studio.
+
+Recently landed:
+
+- Recovery/safe-mode tool actions are exposed through safe metadata-only aliases.
+- Demo smoke routes exist and the Spaces UI uses direct `/api/spaces/demo/*` routes instead of generic demo tool actions.
+- Metadata shared data slots exist, show safe details, and can be deleted safely.
+- Queued widget events show safe event anchors and UTC timestamps in the UI.
+- Model/provider setup now appears in the metadata-only demo smoke catalog as `demo_provider_setup`, backed by the safe Model Provider Setup template.
+- Active-space revision and rollback tool aliases now support `space.current.revisions` / `space.current.history` and `space.current.rollback` / `space.current.restore` for metadata-only time-travel operations against the active Capy Space.
+- The Research Harness demo smoke now drives the preferred vertical path through safe metadata only: live progress widgets, export-ready markdown artifact metadata, a queued `widget.export.pdf` event, and visible smoke-result status.
+- Screenshot QA artifacts are expected for visually relevant Spaces work.
+
+Next checkpoint emphasis:
+
+1. Safe admin/recovery and rollback/time-travel before richer generated widgets or local-service dashboards.
+2. Research Harness as the preferred vertical demo: widget event → Capy run → live progress widgets → markdown artifact → PDF/export patch → rollback.
+3. Explicit sandbox/postMessage/event contract before trusted generated UI expands.
+4. Demo parity matrix in `capy-spaces-space-agent-parity.md` must stay current with fixture, route, UI-test, screenshot, and security status.
 
 ## Bottom line
 

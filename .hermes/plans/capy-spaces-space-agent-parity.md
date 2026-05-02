@@ -9,12 +9,25 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-01 23:21 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-02 04:58 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the safe recovery panel now includes metadata-only queued widget event status (`queued_event_count` plus `event_id|event_name|status`) for broken widgets, so Brendan/Capy can see whether a recovery repair request is already queued without exposing prompt text, payload summaries, generated renderer/html/script/data, or secret-looking values. Use `git log -1 --oneline` for the exact commit hash after commit; this status line intentionally avoids self-referential hashes because committing it changes the hash.
+Current latest known completed code slice: Research Harness demo parity smoke now exercises the vertical metadata-only path end-to-end: install Research Harness, advance plan/source/notes progress to summary, mark the markdown artifact PDF-export-ready, queue a `widget.export.pdf` event on `research-summary`, and show the action/queued-event count in the Spaces demo smoke UI. Use `git log -1 --oneline` for the exact commit hash after commit; this status line intentionally avoids self-referential hashes because committing it changes the hash.
 
 Recent completed slices:
 
+- `feat(spaces): request research demo PDF export`
+  - Added RED/GREEN backend and real-`static/spaces.js` regressions proving `demo_research_harness_pdf_export` advances Research Harness progress, records a safe artifact summary, queues a metadata-only PDF export event, and renders only safe smoke status metadata in the UI.
+  - Validation at completion: focused RED tests failed as expected before implementation (`action` still `installed`, UI omitted action/queued-event status); focused GREEN tests passed (`2 passed`), relevant Spaces demo/UI/foundation suites passed (`178 passed`), `py_compile api/spaces.py tests/test_spaces_demo_parity.py tests/test_spaces_ui_js_behaviour.py`, `node --check static/spaces.js`, and `git diff --check` passed. Browser QA used a `/tmp/capy-spaces-progress/` mock harness with screenshot artifact `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_4001ef5f03e14f19be7b79d8709fc8c4.png`.
+- `feat(spaces): expose research run routes`
+  - Added RED/GREEN route regressions proving direct Research Harness progress/artifact HTTP routes update typed Capy Space metadata while omitting raw markdown, executable/generated fields, and credential-like values.
+  - Validation at completion: focused RED route tests failed as expected before implementation; focused GREEN route tests passed (`2 passed`), Spaces foundation + demo parity suites passed (`107 passed`), `py_compile api/spaces.py api/routes.py tests/test_spaces_foundation.py` and `git diff --check` passed. Mock/status screenshot QA had empty `window.__harnessErrors` and no sensitive leak regex matches; artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_97724956191744c7bf5a81959b8968b3.png`.
+- `2f1f731 feat(spaces): update research harness progress`
+  - Added safe metadata-only helpers/tool actions for updating Research Harness plan/source/notes widgets from agent progress events without exposing generated or credential-like payloads.
+- `c3897f6 feat(spaces): mark research artifacts export-ready`
+  - Added safe markdown artifact metadata summaries and PDF-export readiness markers for the Research Harness summary widget.
+- `addd152 feat(spaces): preview revision restore targets`
+  - Added RED/GREEN backend and real-`static/spaces.js` UI regressions proving revision history exposes safe restore-preview metadata from snapshots while omitting generated renderer/script/source/data fields and secret-looking values.
+  - Validation at completion: focused RED tests failed as expected before implementation; focused GREEN tests passed (`2 passed`), full Spaces foundation + UI behavior suites passed (`167 passed`), relevant combined Spaces suites passed (`171 passed`), `node --check`, `py_compile`, and `git diff --check` passed, local WebUI health OK, mock-state browser QA screenshot captured at `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_4f53c64e33054c35bd9efaddef629a04.png` with empty harness errors and no DOM leak.
 - `feat(spaces): show recovery event status`
   - Added RED/GREEN backend and real-`static/spaces.js` UI regressions proving recovery metadata shows queued repair/event status while omitting prompt text, payload summaries, renderer/script fields, and secret-looking values.
   - Fixed the stale demo parity catalog test so the provider setup smoke added in the previous slice is counted in full-suite validation.
