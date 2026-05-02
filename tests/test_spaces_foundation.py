@@ -885,7 +885,7 @@ def test_space_tool_adapter_installs_templates_as_safe_metadata(monkeypatch, tmp
             "template": "game",
             "space_id": "tool-game-demo",
             "renderer": "<script>steal()</script>",
-            "api_key": "unsafe-value-marker",
+            "api_key": "unsafe...rker",
             "widgets": [{"id": "unsafe", "html": "<img src=x onerror=steal()>"}],
         },
     )
@@ -901,6 +901,44 @@ def test_space_tool_adapter_installs_templates_as_safe_metadata(monkeypatch, tmp
         "game-controls",
         "game-repair-notes",
     ]
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "unsafe-value-marker" not in serialized
+    assert "secret" not in serialized
+
+
+def test_space_tool_adapter_supports_source_install_example_alias_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    result = spaces.run_space_tool(
+        "space.spaces.installExampleSpace",
+        {
+            "id": "retro-arcade",
+            "name": "Retro Arcade Demo",
+            "space_id": "source-arcade-demo",
+            "sourcePath": "mod/_core/dashboard_welcome/examples/retro-arcade/space.yaml",
+            "renderer": "<script>steal()</script>",
+            "api_key": "unsafe...rker",
+            "widgets": [{"id": "unsafe", "html": "<img src=x onerror=steal()>"}],
+        },
+    )
+    serialized = json.dumps(result).lower()
+
+    assert result["ok"] is True
+    assert result["action"] == "space.spaces.installexamplespace"
+    assert result["template"] == "game"
+    assert result["space"]["space_id"] == "source-arcade-demo"
+    assert result["space"]["name"] == "Game Sandbox"
+    assert [widget["id"] for widget in result["installed_widgets"]] == [
+        "game-canvas",
+        "game-controls",
+        "game-repair-notes",
+    ]
+    assert "retro-arcade" not in serialized
+    assert "sourcepath" not in serialized
     assert "steal" not in serialized
     assert "<script" not in serialized
     assert "onerror" not in serialized

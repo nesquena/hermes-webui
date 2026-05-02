@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-02 16:35 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-02 17:38 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: editable Notes widget detail UI now shows a metadata-only Notes textarea for `notes`/notes-capable widgets and saves body edits through the existing safe `api/spaces/widget/patch` route without exposing generated renderer/html/script bodies or credential-like fields. Use `git log -1 --oneline` for the exact commit hash after commit.
+Current latest known completed code slice: source-style Space Agent example installer aliases now route `space.spaces.installExampleSpace` / `installTemplate` through Capy's safe template installer, including conservative mappings for bundled Space Agent examples such as `retro-arcade` → `game`, while omitting raw source paths, generated renderer/html/script bodies, and credential-like fields from responses. Use `git log -1 --oneline` for the exact commit hash after commit.
 
 Recent completed slices:
+
+- `feat(spaces): support source example installer alias`
+  - Added RED/GREEN backend coverage proving `space.spaces.installExampleSpace` accepts a Space Agent-style `{id, sourcePath}` payload for the `retro-arcade` example, maps it to Capy's safe metadata-only Game Sandbox template, and omits raw `sourcePath`, generated widget bodies, event handlers, and credential-like markers from serialized results.
+  - Validation at completion: focused RED failed before implementation with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`), full Spaces foundation suite passed (`107 passed`), `py_compile api/spaces.py tests/test_spaces_foundation.py`, and `git diff --check` passed. Mock/status screenshot QA captured the alias status with empty browser console and no visible secrets; screenshot artifact `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_94d12f4b68fc472ab410bfddfbdce16c.png`.
 
 - `feat(spaces): edit notes widgets from detail view`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the Notes widget detail view renders editable notes metadata, posts only `{notes: {body, format, updated_from}}` through the typed widget patch API, refreshes safe detail metadata, and omits generated/secret-like fields from DOM.

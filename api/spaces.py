@@ -1041,6 +1041,25 @@ def _space_tool_current_id(payload: dict[str, Any]) -> str:
     return str(raw or "").strip()
 
 
+def _space_tool_template_name(payload: dict[str, Any], default: str = "weather") -> str:
+    """Resolve a safe Capy template name from Hermes or Space Agent-style payloads."""
+    raw = payload.get("template") or payload.get("template_name") or payload.get("name") or payload.get("id") or ""
+    source_path = str(payload.get("sourcePath") or payload.get("source_path") or "").lower()
+    template_name = str(raw or "").strip().lower()
+    source_aliases = {
+        "daily-news": "dashboard",
+        "crypto-dashboard": "dashboard",
+        "retro-arcade": "game",
+        "agent-zero-videos": "service",
+    }
+    if template_name in source_aliases:
+        return source_aliases[template_name]
+    for alias, template in source_aliases.items():
+        if f"/{alias}/" in source_path or source_path.endswith(f"/{alias}/space.yaml"):
+            return template
+    return template_name or default
+
+
 def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     """Dispatch a safe, Hermes-tool-shaped Capy Spaces action.
 
@@ -1102,12 +1121,12 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
         widget = read_widget(space_id, widget_id)
         return {"ok": True, "action": name, "active_space_id": space_id, "contract": _widget_runtime_contract_summary(widget)}
-    if name in {"space.template.install", "space.templates.install", "template.install"}:
-        template_name = data.get("template") or data.get("name") or data.get("template_name") or "weather"
+    if name in {"space.template.install", "space.templates.install", "template.install", "space.spaces.installexamplespace", "space.spaces.installtemplate"}:
+        template_name = _space_tool_template_name(data, "weather")
         result = install_template(template_name, space_id=data.get("space_id") or None)
         return {"ok": True, "action": name, **result}
     if name in {"space.template.reset", "space.templates.reset", "template.reset"}:
-        template_name = data.get("template") or data.get("name") or data.get("template_name") or "big-bang"
+        template_name = _space_tool_template_name(data, "big-bang")
         result = reset_template(template_name, space_id=data.get("space_id") or None)
         return {"ok": True, "action": name, **result}
     if name in {"space.import", "space.package.import", "space.agent.import"}:
