@@ -38,6 +38,7 @@ const values = {
   '#capySpaceAgentImportSpaceYaml': 'id: imported-lab\nname: Imported Lab\ndescription: Imported safely\n',
   '#capySpaceAgentImportWidgetsJson': JSON.stringify({'widgets/weather.yaml': 'id: weather\ntitle: Weather\ntype: html\nrenderer: <script>bad()</script>\napi_key: SECRET'}, null, 2),
   '#capySpaceAgentImportZipB64': 'UEsDBBQAAAAIAAxTSFsAAAAAAAAAAAAAAAALAAAAc3BhY2UueWFtbA==',
+  '#capyWidgetNotesBody': 'Initial notes body',
 };
 const inputs = {};
 const elements = {};
@@ -257,6 +258,22 @@ global.fetch = async function(path, opts = {}) {
       renderer: '<script>bad()</script>',
       html: '<img src=x onerror=bad()>',
       data: { api_key: 'SECRET' },
+    } });
+  }
+  if (path === 'api/spaces/widget?space_id=lab&widget_id=notes-main') {
+    return response({ widget: {
+      id: 'notes-main',
+      kind: 'notes',
+      title: 'Daily Notes',
+      layout: { x: 0, y: 0, w: 12, h: 8, minimized: false },
+      recovery: { disabled: false },
+      revision_event_id: 'rev-notes-main',
+      metadata: {
+        notes: { body: 'Initial notes body', format: 'markdown', updated_by: 'Brendan' },
+        permissions: { network: 'none', token: 'SECRET_VALUE_DO_NOT_LEAK' },
+      },
+      renderer: '<script>bad()</script>',
+      api_key: 'SECRET_VALUE_DO_NOT_LEAK',
     } });
   }
   if (path === 'api/spaces/get?space_id=lab') {
@@ -582,6 +599,14 @@ async function click(action, dataset) {
     await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'weather' });
     beforeHtml = root.innerHTML;
     await click('requestWidgetPdfExport', { spaceId: 'lab', widgetId: 'weather', widgetTitle: '<Weather>' });
+  } else if (scenario === 'saveNotesWidget') {
+    if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
+    await window.loadCapySpaces();
+    await window.loadSpaceWidgets('lab');
+    await click('viewWidgetDetails', { spaceId: 'lab', widgetId: 'notes-main' });
+    beforeHtml = root.innerHTML;
+    values['#capyWidgetNotesBody'] = 'Updated real note\n\n- persists through widget patch';
+    await click('saveWidgetNotes', { spaceId: 'lab', widgetId: 'notes-main' });
   } else if (scenario === 'editWidgetSave') {
     if (typeof window.loadSpaceWidgets !== 'function') throw new Error('loadSpaceWidgets missing');
     await window.loadCapySpaces();
@@ -1204,6 +1229,32 @@ def test_spaces_ui_widget_detail_can_request_pdf_export_as_metadata_event(driver
         "payload": {"source": "widget-detail", "action": "export_pdf", "widget_title": "<Weather>"},
     }
     assert out["calls"][-1]["path"] == "api/spaces/widgets?space_id=lab"
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_notes_widget_detail_saves_real_editable_notes_via_patch(driver_path):
+    out = _run_spaces_scenario(driver_path, "saveNotesWidget")
+    post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/patch")
+
+    assert "Editable notes" in out["beforeHtml"]
+    assert "Initial notes body" in out["beforeHtml"]
+    assert "Save notes" in out["beforeHtml"]
+    assert post["method"] == "POST"
+    assert json.loads(post["body"]) == {
+        "space_id": "lab",
+        "widget_id": "notes-main",
+        "patch": {
+            "notes": {
+                "body": "Updated real note\n\n- persists through widget patch",
+                "format": "markdown",
+                "updated_from": "spaces-ui",
+            }
+        },
+    }
+    assert out["calls"][-1]["path"] == "api/spaces/widget?space_id=lab&widget_id=notes-main"
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()

@@ -527,6 +527,25 @@
       '</div></div>';
   }
 
+  function safeNotesBody(metadata){
+    const notes = metadata && metadata.notes && typeof metadata.notes === 'object' && !Array.isArray(metadata.notes) ? metadata.notes : {};
+    if (typeof notes.body === 'string') return notes.body.slice(0, 20000);
+    if (Array.isArray(notes.items)) return notes.items.map(function(item){ return String(item || '').slice(0, 500); }).join('\n');
+    return '';
+  }
+
+  function renderNotesEditor(spaceId, widgetId, kind, metadata){
+    const notes = metadata && metadata.notes && typeof metadata.notes === 'object' && !Array.isArray(metadata.notes) ? metadata.notes : {};
+    const notesCapable = ['notes', 'rich-text-editor'].indexOf(String(kind || '').toLowerCase()) !== -1 || Object.prototype.hasOwnProperty.call(metadata || {}, 'notes');
+    if (!notesCapable) return '';
+    const format = typeof notes.format === 'string' && /^[a-z0-9._-]{1,40}$/i.test(notes.format) ? notes.format : 'markdown';
+    return '<div class="capy-spaces-card capy-spaces-notes-editor"><h4>Editable notes</h4>' +
+      '<div class="capy-spaces-muted">Real note body editing is saved through the typed widget patch API and remains in Space revision history.</div>' +
+      '<label>Notes body<textarea id="capyWidgetNotesBody" rows="10" spellcheck="true">'+escapeHtml(safeNotesBody(metadata))+'</textarea></label>' +
+      '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="saveWidgetNotes" data-space-id="'+escapeHtml(spaceId || '')+'" data-widget-id="'+escapeHtml(widgetId || '')+'" data-notes-format="'+escapeHtml(format)+'">Save notes</button></div>' +
+      '</div>';
+  }
+
   function renderWidgetDetailPanel(spaceId, widget, runtimeContract){
     const safeWidget = widget && typeof widget === 'object' ? widget : {};
     const widgetId = safeWidget.id || '';
@@ -542,6 +561,7 @@
     const eventBridge = safeWidget.event_bridge && typeof safeWidget.event_bridge === 'object' && !Array.isArray(safeWidget.event_bridge) ? safeWidget.event_bridge : {};
     const eventBridgeText = formatRevisionDetails({event_bridge: eventBridge});
     const eventBridgeRow = eventBridgeText ? '<div class="capy-spaces-muted">'+escapeHtml(eventBridgeText)+'</div>' : '';
+    const notesEditor = renderNotesEditor(spaceId, widgetId, kind, metadata);
     const exportMeta = metadata.export && typeof metadata.export === 'object' && !Array.isArray(metadata.export) ? metadata.export : {};
     const pdfExportAction = exportMeta.pdf ? '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="requestWidgetPdfExport" data-space-id="'+escapeHtml(spaceId || '')+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-title="'+escapeHtml(title)+'">Request PDF export</button></div>' : '';
     return '<div class="capy-spaces-card" data-widget-detail-id="'+escapeHtml(widgetId)+'">' +
@@ -554,8 +574,9 @@
       metadataRow +
       eventBridgeRow +
       renderWidgetRuntimeContract(runtimeContract) +
-      '</div>'+pdfExportAction+'</div></div></div>';
+      '</div>'+pdfExportAction+'</div></div>' + notesEditor + '</div>';
   }
+
 
   function layoutNumber(value, fallback, min, max){
     const parsed = parseInt(value, 10);
@@ -1049,6 +1070,21 @@
         payload: {source: 'widget-detail', action: 'export_pdf', widget_title: widgetTitle},
       });
       await loadSpaceWidgets(spaceId);
+      return;
+    }
+    if (action === 'saveWidgetNotes') {
+      const widgetId = button.dataset.widgetId || '';
+      const root = document.getElementById('capySpacesRoot');
+      const notesInput = getRootInput(root, '#capyWidgetNotesBody');
+      const format = /^[a-z0-9._-]{1,40}$/i.test(String(button.dataset.notesFormat || '')) ? String(button.dataset.notesFormat || '') : 'markdown';
+      if (!spaceId || !widgetId || !notesInput || !root) return;
+      await postSpacesJson('api/spaces/widget/patch', {
+        space_id: spaceId,
+        widget_id: widgetId,
+        patch: {notes: {body: String(notesInput.value || ''), format: format, updated_from: 'spaces-ui'}},
+      });
+      const data = await fetchSpacesJson('api/spaces/widget?space_id='+encodeURIComponent(spaceId)+'&widget_id='+encodeURIComponent(widgetId));
+      root.innerHTML = renderWidgetDetailPanel(spaceId, data && data.widget, null) + root.innerHTML;
       return;
     }
     if (action === 'saveWidget') {

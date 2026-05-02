@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-02 15:24 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-02 16:35 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: Space Agent source-style camelCase helper aliases (`space.spaces.createSpace`, `space.spaces.listSpaces`, and `space.spaces.openSpace` / `getSpace` / `readSpace`) now route through Capy's existing metadata-only space create/list/detail primitives, ignoring supplied widget/generated bodies and preserving safe list/detail responses. Use `git log -1 --oneline` for the exact commit hash after commit.
+Current latest known completed code slice: editable Notes widget detail UI now shows a metadata-only Notes textarea for `notes`/notes-capable widgets and saves body edits through the existing safe `api/spaces/widget/patch` route without exposing generated renderer/html/script bodies or credential-like fields. Use `git log -1 --oneline` for the exact commit hash after commit.
 
 Recent completed slices:
+
+- `feat(spaces): edit notes widgets from detail view`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving the Notes widget detail view renders editable notes metadata, posts only `{notes: {body, format, updated_from}}` through the typed widget patch API, refreshes safe detail metadata, and omits generated/secret-like fields from DOM.
+  - Validation at completion: focused RED failed before implementation because no `api/spaces/widget/patch` request was sent; focused GREEN passed (`1 passed`), full Spaces UI behavior suite passed (`71 passed`), `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, and `git diff --check` passed. Mock-state browser QA captured widget manager and Notes detail/save states with empty `window.__harnessErrors` and visible leak regex false; screenshot artifacts `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_97ebdbc048a649a1b3c40b3430541d7a.png` and `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_612685d1fcee47ad932ccea2e5ceb2d7.png`.
 
 - `feat(spaces): support source camelcase space aliases`
   - Added RED/GREEN backend coverage proving Space Agent source-style camelCase aliases `space.spaces.createSpace`, `space.spaces.listSpaces`, and `space.spaces.openSpace` / `getSpace` / `readSpace` route through Capy's safe metadata-only create/list/detail primitives while ignoring supplied generated/widget bodies.
