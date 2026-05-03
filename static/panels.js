@@ -21,7 +21,7 @@ const APP_TITLEBAR_KEYS = {
   projects: 'tab_projects', finance: 'tab_finance', agents: 'tab_agents',
 };
 
-const NEO_SHELL_PANELS = new Set(['dashboard', 'projects', 'todos', 'profiles', 'finance', 'agents']);
+const NEO_SHELL_PANELS = new Set(['dashboard', 'projects', 'todos', 'profiles', 'finance', 'agents', 'settings']);
 
 const MAIN_VIEW_CLASS_BY_PANEL = {
   dashboard: 'showing-dashboard',
@@ -190,6 +190,7 @@ async function switchPanel(name, opts = {}) {
     });
   }
   if (nextPanel !== 'dashboard' && typeof restoreDashboardChat === 'function') restoreDashboardChat();
+  if (nextPanel !== 'settings' && typeof restoreDashboardSettings === 'function') restoreDashboardSettings();
   // Lazy-load panel data
   if (nextPanel === 'dashboard' && typeof loadDashboard === 'function') await loadDashboard();
   if (nextPanel === 'tasks') await loadCrons();
@@ -202,6 +203,7 @@ async function switchPanel(name, opts = {}) {
   }
   if (nextPanel === 'todos') loadTodos();
   if (nextPanel === 'settings') {
+    if (typeof mountDashboardSettings === 'function') mountDashboardSettings();
     switchSettingsSection(_currentSettingsSection);
     loadSettingsPanel();
   }

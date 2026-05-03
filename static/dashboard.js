@@ -111,6 +111,26 @@ function restoreDashboardChat() {
   if (composer && composer.parentNode === composerSlot) _insertAfter(chatComposerAnchor, composer);
 }
 
+let settingsMenuAnchor = null;
+
+function mountDashboardSettings() {
+  const menu = document.getElementById('settingsMenu');
+  const mainSettings = document.getElementById('mainSettings');
+  if (!menu || !mainSettings) return;
+  if (!settingsMenuAnchor && menu.parentNode) {
+    settingsMenuAnchor = document.createComment('settingsMenuAnchor');
+    menu.parentNode.insertBefore(settingsMenuAnchor, menu);
+  }
+  if (menu.parentNode !== mainSettings) mainSettings.insertBefore(menu, mainSettings.firstChild);
+}
+
+function restoreDashboardSettings() {
+  const menu = document.getElementById('settingsMenu');
+  const mainSettings = document.getElementById('mainSettings');
+  if (!menu || !mainSettings || menu.parentNode !== mainSettings) return;
+  if (settingsMenuAnchor) _insertAfter(settingsMenuAnchor, menu);
+}
+
 async function loadDashboardSummary() {
   try {
     const data = await api('/api/dashboard/summary');
