@@ -108,6 +108,40 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
             30.0,
         )
 
+    def test_does_not_override_configured_reasoning_extra_body(self):
+        """Regression: WebUI title generation must not disable configured auxiliary reasoning."""
+        from api.streaming import generate_title_raw_via_aux
+
+        mock_resp = types.SimpleNamespace(
+            choices=[
+                types.SimpleNamespace(
+                    message=types.SimpleNamespace(content='Reasoning Config Title'),
+                    finish_reason='stop',
+                )
+            ]
+        )
+        captured = {}
+
+        def fake_call_llm(**kwargs):
+            captured['extra_body'] = kwargs.get('extra_body')
+            return mock_resp
+
+        with _patch_tg_config({
+            'provider': 'main',
+            'model': '',
+            'base_url': '',
+            'extra_body': {'reasoning': {'effort': 'xhigh'}},
+        }):
+            with patch('agent.auxiliary_client.call_llm', side_effect=fake_call_llm, create=True):
+                result, status = generate_title_raw_via_aux(
+                    user_text='Check reasoning effort',
+                    assistant_text='The main response used xhigh.',
+                )
+
+        self.assertEqual(result, 'Reasoning Config Title')
+        self.assertEqual(status, 'llm_aux')
+        self.assertNotIn('reasoning', captured['extra_body'])
+
     def test_integer_timeout_from_config(self):
         """Config timeout as int is coerced to float."""
         self._run_with_config(

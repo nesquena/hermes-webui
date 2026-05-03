@@ -608,6 +608,26 @@ def test_streaming_bridge_accepts_current_tool_progress_callback_signature(clean
         "streaming.py must emit live tool completion SSE events"
 
 
+def test_streaming_reads_reasoning_effort_from_config_dict(cleanup_test_sessions):
+    """R17b: WebUI must read agent.reasoning_effort from the dict returned by get_config()."""
+    src = (REPO_ROOT / "api/streaming.py").read_text()
+    assert "_cfg.cfg" not in src, \
+        "get_config() returns a dict; accessing _cfg.cfg drops reasoning_config to None"
+    assert "_cfg.get('agent', {})" in src or '_cfg.get("agent", {})' in src, \
+        "streaming.py must read agent.reasoning_effort via the config dict"
+
+
+def test_streaming_agent_cache_signature_includes_reasoning_config(cleanup_test_sessions):
+    """R17c: changing reasoning effort must rebuild the cached per-session agent."""
+    src = (REPO_ROOT / "api/streaming.py").read_text()
+    start = src.find("_sig_blob = _json.dumps")
+    end = src.find("_agent_sig", start)
+    assert start >= 0 and end > start, "agent cache signature block not found"
+    sig_block = src[start:end]
+    assert "_reasoning_config" in sig_block, \
+        "agent cache signature must include reasoning_config so xhigh/medium changes take effect"
+
+
 def test_messages_js_supports_live_reasoning_and_tool_completion(cleanup_test_sessions):
     """R18: messages.js must render live reasoning and react to tool completion events.
     Without these handlers, the operator only sees generic Thinking… or nothing

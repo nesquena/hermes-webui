@@ -532,9 +532,9 @@ def generate_title_raw_via_aux(
         return None, 'missing_exchange'
     qa, prompts = _title_prompts(user_text, assistant_text)
     base_max_tokens = _title_completion_budget(provider, model, base_url)
-    reasoning_extra = {"reasoning": {"enabled": False}}
+    route_extra = {}
     if _is_minimax_route(provider, model, base_url):
-        reasoning_extra["reasoning_split"] = True
+        route_extra["reasoning_split"] = True
     try:
         _timeout = _aux_title_timeout()
         from agent.auxiliary_client import call_llm
@@ -556,7 +556,7 @@ def generate_title_raw_via_aux(
                         max_tokens=max_tokens,
                         temperature=0.2,
                         timeout=_timeout,
-                        extra_body=reasoning_extra,
+                        extra_body=route_extra,
                     )
                     raw, empty_status = _extract_title_response(resp, aux=True)
                     if raw:
@@ -1798,7 +1798,7 @@ def _run_agent_streaming(
             # the key is absent or invalid, pass None → agent uses its default.
             try:
                 from api.config import parse_reasoning_effort as _parse_reff
-                _effort_cfg = _cfg.cfg.get('agent', {}) if isinstance(_cfg.cfg, dict) else {}
+                _effort_cfg = _cfg.get('agent', {}) if isinstance(_cfg, dict) else {}
                 _effort_raw = _effort_cfg.get('reasoning_effort') if isinstance(_effort_cfg, dict) else None
                 _reasoning_config = _parse_reff(_effort_raw)
             except Exception:
@@ -1862,6 +1862,7 @@ def _run_agent_streaming(
                     resolved_base_url or '',
                     resolved_provider or '',
                     sorted(_toolsets) if _toolsets else [],
+                    _reasoning_config or {},
                 ], sort_keys=True)
                 _agent_sig = _hashlib.sha256(_sig_blob.encode()).hexdigest()[:16]
 
