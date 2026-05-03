@@ -456,6 +456,67 @@ def test_space_tool_adapter_supports_source_rearrange_widgets_metadata_only(monk
 
 
 
+def test_space_tool_adapter_supports_source_repair_layout_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "source-repair-layout-lab", "name": "Source Repair Layout Lab"})
+    for widget_id in ["weather-card", "notes-card"]:
+        spaces.upsert_widget(
+            created["space_id"],
+            {
+                "id": widget_id,
+                "kind": "weather" if widget_id == "weather-card" else "markdown",
+                "title": "Weather Card" if widget_id == "weather-card" else "Notes Card",
+                "layout": {"x": 0, "y": 0, "w": 4, "h": 3},
+                "renderer": "<script>stored()</script>",
+                "data": {"api_key": "***"},
+            },
+        )
+    spaces.run_space_tool(
+        "space.spaces.saveSpaceLayout",
+        {
+            "spaceId": created["space_id"],
+            "widgetIds": ["weather-card", "notes-card"],
+            "widgetPositions": {
+                "weather-card": {"x": -4, "y": 2, "renderer": "<script>steal()</script>"},
+                "notes-card": {"x": 6, "y": 7},
+            },
+            "widgetSizes": {
+                "weather-card": {"w": 99, "h": 5, "api_key": "***"},
+                "notes-card": {"w": 5, "h": 0},
+            },
+            "minimizedWidgetIds": ["notes-card"],
+            "source": "SECRET_SOURCE",
+            "token": "***",
+        },
+    )
+
+    repaired = spaces.run_space_tool(
+        "space.spaces.repairLayout",
+        {"spaceId": created["space_id"], "renderer": "<script>steal()</script>", "api_key": "***"},
+    )
+    persisted_widgets = {widget["id"]: widget for widget in spaces.list_widgets(created["space_id"])}
+    serialized = json.dumps({"repaired": repaired, "persisted_widgets": persisted_widgets}).lower()
+
+    assert repaired["ok"] is True
+    assert repaired["action"] == "space.spaces.repairlayout"
+    assert repaired["space_id"] == created["space_id"]
+    assert repaired["widget_count"] == 2
+    assert repaired["widgets"][0]["layout"] == {"x": 0, "y": 2, "w": 24, "h": 5, "minimized": False}
+    assert repaired["widgets"][1]["layout"] == {"x": 6, "y": 7, "w": 5, "h": 1, "minimized": True}
+    assert persisted_widgets["weather-card"]["layout"] == {"x": 0, "y": 2, "w": 24, "h": 5, "minimized": False}
+    assert persisted_widgets["notes-card"]["layout"] == {"x": 6, "y": 7, "w": 5, "h": 1, "minimized": True}
+    assert "steal" not in serialized
+    assert "stored" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert '"data":' not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+    assert '"source":' not in serialized
+
+
+
 def test_space_tool_adapter_supports_source_widget_upsert_helpers_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "source-widget-lab", "name": "Source Widget Lab"})

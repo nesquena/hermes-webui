@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-03 06:14 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-03 07:22 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: source runtime rearrange alias now supports Space Agent-style `space.spaces.rearrangeWidgets` calls while preserving Capy's metadata-only adapter boundary. The server-side adapter accepts bounded widget layout metadata (`position`/`size` or `col`/`row`/`cols`/`rows`), patches existing widgets through Capy's safe revisioned primitive, and omits generated/executable widget bodies plus credential-like markers. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: source layout repair alias now supports Space Agent-style `space.spaces.repairLayout` calls while preserving Capy's metadata-only adapter boundary. The server-side adapter applies saved source-style `saveSpaceLayout` metadata to existing widget layouts, clamps positions/sizes/minimized state through Capy's safe layout normalizer, records a revision event, and omits generated/executable widget bodies plus credential-like markers. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): support source repair layout alias`
+  - Added RED/GREEN backend coverage proving `space.spaces.repairLayout` accepts Space Agent-style camelCase `spaceId`, applies saved `widgetPositions`/`widgetSizes`/`minimizedWidgetIds` layout metadata to existing widgets, clamps unsafe/out-of-range layout values, persists the repaired metadata, and omits generated/executable fields plus credential-like markers.
+  - Validation at completion before screenshot/restart: focused RED failed before implementation with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`), full Spaces foundation suite passed (`119 passed`), `py_compile api/spaces.py tests/test_spaces_foundation.py`, and `git diff --check` passed.
 
 - `feat(spaces): support source rearrange widgets alias`
   - Added RED/GREEN backend coverage proving `space.spaces.rearrangeWidgets` accepts Space Agent-style camelCase `spaceId` plus widget layout payloads, maps source `position`/`size` and `col`/`row`/`cols`/`rows` fields into safe Capy widget layouts, persists those metadata-only layout changes, and omits generated/executable fields plus credential-like markers.

@@ -1238,6 +1238,58 @@ def save_space_layout_from_tool(payload: dict[str, Any]) -> dict[str, Any]:
     return {"space_id": saved["space_id"], "revision_event_id": saved["revision_event_id"], "space": read_space_detail(saved["space_id"])}
 
 
+
+def repair_space_layout_from_tool(payload: dict[str, Any]) -> dict[str, Any]:
+    """Apply saved source-style layout metadata to widgets safely."""
+    space_id = validate_space_id(_space_tool_space_id(payload))
+    space = read_space(space_id)
+    layout = space.get("layout") if isinstance(space.get("layout"), dict) else {}
+    widget_ids = [validate_widget_id(item) for item in (layout.get("widget_ids") or []) if item]
+    positions = layout.get("widget_positions") if isinstance(layout.get("widget_positions"), dict) else {}
+    sizes = layout.get("widget_sizes") if isinstance(layout.get("widget_sizes"), dict) else {}
+    minimized_ids = set(
+        validate_widget_id(item) for item in (layout.get("minimized_widget_ids") or []) if item
+    )
+    affected_ids = set(widget_ids) or set(positions) | set(sizes) | minimized_ids
+
+    widgets = list(space.get("widgets") or [])
+    repaired_ids: list[str] = []
+    for idx, widget in enumerate(widgets):
+        if not isinstance(widget, dict):
+            continue
+        widget_id = validate_widget_id(widget.get("id"))
+        if affected_ids and widget_id not in affected_ids:
+            continue
+        current_layout = _normalize_widget_layout(widget.get("layout"))
+        position = positions.get(widget_id) if isinstance(positions.get(widget_id), dict) else {}
+        size = sizes.get(widget_id) if isinstance(sizes.get(widget_id), dict) else {}
+        repaired_layout = _normalize_widget_layout(
+            {
+                "x": position.get("x", current_layout["x"]),
+                "y": position.get("y", current_layout["y"]),
+                "w": size.get("w", current_layout["w"]),
+                "h": size.get("h", current_layout["h"]),
+                "minimized": widget_id in minimized_ids if minimized_ids else current_layout["minimized"],
+            }
+        )
+        repaired_widget = dict(widget)
+        repaired_widget["layout"] = repaired_layout
+        widgets[idx] = _normalize_widget(repaired_widget)
+        repaired_ids.append(widget_id)
+
+    space["widgets"] = widgets
+    _space_tool_sanitize_widgets(space)
+    saved = _write_manifest(space, "space.layout.repaired", {"widget_ids": repaired_ids})
+    return {
+        "space_id": saved["space_id"],
+        "revision_event_id": saved["revision_event_id"],
+        "widgets": [widget for widget in list_widgets(saved["space_id"]) if widget["id"] in set(repaired_ids)],
+        "widget_count": len(repaired_ids),
+        "space": read_space_detail(saved["space_id"]),
+    }
+
+
+
 def _space_tool_template_name(payload: dict[str, Any], default: str = "weather") -> str:
     """Resolve a safe Capy template name from Hermes or Space Agent-style payloads."""
     raw = payload.get("template") or payload.get("template_name") or payload.get("name") or payload.get("id") or ""
@@ -1389,6 +1441,9 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         return {"ok": True, "action": name, **result}
     if name == "space.spaces.savespacelayout":
         result = save_space_layout_from_tool(data)
+        return {"ok": True, "action": name, **result}
+    if name == "space.spaces.repairlayout":
+        result = repair_space_layout_from_tool(data)
         return {"ok": True, "action": name, **result}
     if name == "space.spaces.rearrangewidgets":
         space_id = validate_space_id(_space_tool_current_id(data))

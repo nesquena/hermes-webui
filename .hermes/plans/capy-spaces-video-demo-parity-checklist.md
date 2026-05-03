@@ -34,6 +34,7 @@ Recently landed:
 - Current widget event bridge aliases now accept Space Agent-style camelCase `activeSpaceId`/`widgetId` payloads for `space.current.widget.event` and `space.current.widget.events`, while keeping queued/listed event responses metadata-only and redacted.
 - Source-style current-space viewport helper coverage now includes metadata-only `space.spaces.repositionCurrentSpace`, accepting `spaceId`/`resetCamera`/`viewport` payloads without executing browser movement or exposing generated/credential-like fields.
 - Source-style widget layout helper coverage now includes metadata-only `space.spaces.rearrangeWidgets`, accepting `spaceId` plus Space Agent-style widget `position`/`size` or `col`/`row`/`cols`/`rows` payloads and persisting safe Capy widget layouts without exposing generated/credential-like fields.
+- Source-style layout recovery helper coverage now includes metadata-only `space.spaces.repairLayout`, applying saved `saveSpaceLayout` widget positions/sizes/minimized metadata to existing widgets, clamping unsafe layout values, and persisting a revisioned safe layout repair without exposing generated/credential-like fields.
 - Screenshot QA artifacts are expected for visually relevant Spaces work.
 
 Next checkpoint emphasis:
