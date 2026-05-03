@@ -1095,6 +1095,71 @@ def _space_tool_widget_payload(widget: dict[str, Any]) -> dict[str, Any]:
     return clean
 
 
+def _space_tool_source_widget_layout(widget: dict[str, Any]) -> dict[str, Any]:
+    """Return a Capy layout from Space Agent widget size/position fields."""
+    if isinstance(widget.get("layout"), dict):
+        raw_layout = dict(widget["layout"])
+        if "cols" in raw_layout and "w" not in raw_layout:
+            raw_layout["w"] = raw_layout.get("cols")
+        if "rows" in raw_layout and "h" not in raw_layout:
+            raw_layout["h"] = raw_layout.get("rows")
+        if "col" in raw_layout and "x" not in raw_layout:
+            raw_layout["x"] = raw_layout.get("col")
+        if "row" in raw_layout and "y" not in raw_layout:
+            raw_layout["y"] = raw_layout.get("row")
+        return _normalize_widget_layout(raw_layout)
+    position = widget.get("position") if isinstance(widget.get("position"), dict) else {}
+    size = widget.get("size") if isinstance(widget.get("size"), dict) else {}
+    return _normalize_widget_layout(
+        {
+            "x": widget.get("x", widget.get("col", position.get("x", position.get("col", 0)))),
+            "y": widget.get("y", widget.get("row", position.get("y", position.get("row", 0)))),
+            "w": widget.get("w", widget.get("cols", size.get("w", size.get("cols", 6)))),
+            "h": widget.get("h", widget.get("rows", size.get("h", size.get("rows", 4)))),
+            "minimized": widget.get("minimized", False),
+        }
+    )
+
+
+
+def _space_tool_render_widget_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], int]:
+    """Convert source-style renderWidget input to safe quarantined metadata."""
+    widget = payload.get("widget") if isinstance(payload.get("widget"), dict) else payload
+    if not isinstance(widget, dict):
+        raise ValueError("widget must be an object")
+    clean = _space_tool_widget_payload(widget)
+    if isinstance(widget.get("metadata"), dict):
+        metadata = _payload_summary(widget.get("metadata"))
+        if isinstance(metadata, dict) and metadata:
+            clean["metadata"] = metadata
+    widget_id = _space_tool_widget_id(widget) or _slugify(str(widget.get("title") or widget.get("name") or "widget"))
+    clean["id"] = validate_widget_id(widget_id)
+    clean["layout"] = _space_tool_source_widget_layout(widget)
+
+    unsafe_payload = {
+        str(key): widget.get(key)
+        for key in widget
+        if str(key or "").strip().lower() != "metadata" and not _payload_key_is_safe(str(key))
+    }
+    omitted_count = len(unsafe_payload)
+    if omitted_count:
+        digest = hashlib.sha256(json.dumps(unsafe_payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+        clean["recovery"] = {
+            "disabled": True,
+            "disabled_reason": "generated code disabled pending sandbox review",
+        }
+        clean["content_status"] = {
+            "status": "quarantined",
+            "reason": "generated-code-disabled",
+            "sha256": digest,
+            "omitted_field_count": omitted_count,
+        }
+        permissions = clean.get("permissions") if isinstance(clean.get("permissions"), dict) else {}
+        clean["permissions"] = {**permissions, "generated_rendering": "disabled"}
+    return clean, omitted_count
+
+
+
 def _space_tool_widgets_payload(payload: dict[str, Any], *, bulk: bool) -> list[dict[str, Any]]:
     raw_widgets = payload.get("widgets") if bulk else [payload.get("widget") if isinstance(payload.get("widget"), dict) else payload]
     if bulk and not isinstance(raw_widgets, list):
@@ -1502,6 +1567,19 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             response["widget"] = saved_widgets[0]
             response["revision_event_id"] = revision_event_ids[-1]
         return response
+    if name == "space.spaces.renderwidget":
+        space_id = validate_space_id(_space_tool_current_id(data))
+        widget_payload, omitted_count = _space_tool_render_widget_payload(data)
+        result = upsert_widget(space_id, widget_payload)
+        widget_id = result["widget"]["id"]
+        return {
+            "ok": True,
+            "action": name,
+            "space_id": space_id,
+            "widget": read_widget_detail(space_id, widget_id),
+            "revision_event_id": result["revision_event_id"],
+            "render": {"mode": "metadata-only", "executed": False, "omitted_field_count": omitted_count},
+        }
     if name == "space.spaces.patchwidget":
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_id = validate_widget_id(_space_tool_widget_id(data))

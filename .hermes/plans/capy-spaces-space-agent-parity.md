@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-03 07:22 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-03 08:31 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: source layout repair alias now supports Space Agent-style `space.spaces.repairLayout` calls while preserving Capy's metadata-only adapter boundary. The server-side adapter applies saved source-style `saveSpaceLayout` metadata to existing widget layouts, clamps positions/sizes/minimized state through Capy's safe layout normalizer, records a revision event, and omits generated/executable widget bodies plus credential-like markers. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: source widget render alias now supports Space Agent-style `space.spaces.renderWidget` calls while preserving Capy's metadata-only adapter boundary. The server-side adapter converts source-style `widgetId`/`cols`/`rows`/`col`/`row` inputs into a safe Capy widget summary, stores generated/executable bodies only as omitted/quarantined metadata, disables generated-code execution pending sandbox review, and omits renderer/html/script/data/source plus credential-like markers from public responses. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): support source render widget alias`
+  - Added RED/GREEN backend coverage proving `space.spaces.renderWidget` accepts Space Agent-style camelCase `spaceId`/`widgetId` payloads, maps source layout size/position fields into safe Capy widget layout metadata, marks generated-body inputs quarantined/disabled, and omits executable fields plus credential-like markers from stored/public metadata.
+  - Validation at completion before screenshot/restart: focused RED failed before implementation with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`). Run `git log -1 --oneline` and the final report for the full validation bundle.
 
 - `feat(spaces): support source repair layout alias`
   - Added RED/GREEN backend coverage proving `space.spaces.repairLayout` accepts Space Agent-style camelCase `spaceId`, applies saved `widgetPositions`/`widgetSizes`/`minimizedWidgetIds` layout metadata to existing widgets, clamps unsafe/out-of-range layout values, persists the repaired metadata, and omits generated/executable fields plus credential-like markers.

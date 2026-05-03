@@ -517,6 +517,57 @@ def test_space_tool_adapter_supports_source_repair_layout_metadata_only(monkeypa
 
 
 
+def test_space_tool_adapter_supports_source_render_widget_helper_quarantines_generated_bodies(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "source-render-widget-lab", "name": "Source Render Widget Lab"})
+
+    rendered = spaces.run_space_tool(
+        "space.spaces.renderWidget",
+        {
+            "spaceId": created["space_id"],
+            "widgetId": "weather-card",
+            "name": "Weather Card",
+            "type": "weather",
+            "col": 2,
+            "row": 3,
+            "cols": 8,
+            "rows": 5,
+            "metadata": {"location": "Prague", "api_key": "***"},
+            "renderer": "async () => ({ html: '<script>steal()</script>' })",
+            "html": "<img src=x onerror=steal()>",
+            "data": {"token": "***"},
+            "source": "SECRET_SOURCE",
+        },
+    )
+    stored = spaces.read_widget(created["space_id"], "weather-card")
+    detail = spaces.read_widget_detail(created["space_id"], "weather-card")
+    serialized = json.dumps({"rendered": rendered, "stored": stored, "detail": detail}).lower()
+
+    assert rendered["ok"] is True
+    assert rendered["action"] == "space.spaces.renderwidget"
+    assert rendered["space_id"] == created["space_id"]
+    assert rendered["widget"]["id"] == "weather-card"
+    assert rendered["widget"]["kind"] == "weather"
+    assert rendered["widget"]["layout"] == {"x": 2, "y": 3, "w": 8, "h": 5, "minimized": False}
+    assert rendered["render"] == {"mode": "metadata-only", "executed": False, "omitted_field_count": 4}
+    assert stored["metadata"] == {"location": "Prague"}
+    assert stored["recovery"]["disabled"] is True
+    assert stored["content_status"]["status"] == "quarantined"
+    assert detail["recovery"]["disabled"] == "True"
+    assert detail["metadata"]["content_status"]["omitted_field_count"] == "4"
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert '"data":' not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+    assert '"source":' not in serialized
+
+
+
 def test_space_tool_adapter_supports_source_widget_upsert_helpers_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "source-widget-lab", "name": "Source Widget Lab"})
