@@ -3807,11 +3807,33 @@ async function deleteMcpServer(name){
       else{showToast((r&&r.error)||t('mcp_delete_failed'));}
     }).catch(()=>{showToast(t('mcp_delete_failed'));});
 }
+function loadGatewayStatus(){
+  const card=$('gatewayStatusCard');
+  if(!card) return;
+  api('/api/gateway/status').then(r=>{
+    if(!r) return;
+    if(!r.running){
+      card.innerHTML=`<div style="color:var(--muted);font-size:12px;display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:#ef4444;display:inline-block"></span>Gateway not running</div>`;
+      return;
+    }
+    const platformIcons={telegram:'💬',discord:'🎮',slack:'📝',web:'🌐',api:'🔌'};
+    let badges='';
+    if(r.platforms&&r.platforms.length){
+      badges=r.platforms.map(p=>{
+        const icon=platformIcons[p.name]||'📡';
+        return `<span style="display:inline-flex;align-items:center;gap:4px;padding:3px 10px;background:var(--code-bg);border:1px solid var(--border2);border-radius:12px;font-size:12px;font-weight:500">${icon} ${esc(p.label)}</span>`;
+      }).join(' ');
+    }
+    const lastActive=r.last_active?`<span style="font-size:11px;color:var(--muted)">Last active: ${esc(new Date(r.last_active).toLocaleString())}</span>`:'';
+    const sessionInfo=r.session_count?`<span style="font-size:11px;color:var(--muted)">${r.session_count} session${r.session_count!==1?'s':''}</span>`:'';
+    card.innerHTML=`<div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="width:8px;height:8px;border-radius:50%;background:#22c55e;display:inline-block"></span><span style="font-size:13px;font-weight:500;color:#22c55e">Running</span></div>${badges?`<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${badges}</div>`:''}<div style="display:flex;gap:12px">${sessionInfo}${lastActive}</div>`;
+  }).catch(()=>{card.innerHTML=`<div style="color:#ef4444;font-size:12px">Failed to load gateway status</div>`});
+}
 // Load MCP servers when system settings tab opens
 const _origSwitchSettings=switchSettingsSection;
 switchSettingsSection=function(name){
   _origSwitchSettings(name);
-  if(name==='system') loadMcpServers();
+  if(name==='system'){loadMcpServers();loadGatewayStatus();}
 };
 
 // ── Checkpoints / Rollback ──────────────────────────────────────────────────
