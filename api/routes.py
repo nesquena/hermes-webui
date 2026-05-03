@@ -233,6 +233,34 @@ from api.helpers import (
     _redact_text,
 )
 
+
+def _clear_stale_stream_state(session) -> bool:
+    """Clear persisted streaming flags when the in-memory stream no longer exists.
+
+    A server restart or worker crash can leave active_stream_id/pending_* in the
+    session JSON while STREAMS is empty. The frontend then keeps reconnecting to
+    a dead stream and shows a permanent running/thinking state.
+    """
+    stream_id = getattr(session, "active_stream_id", None)
+    if not stream_id:
+        return False
+    with STREAMS_LOCK:
+        stream_alive = stream_id in STREAMS
+    if stream_alive:
+        return False
+    session.active_stream_id = None
+    if hasattr(session, "pending_user_message"):
+        session.pending_user_message = None
+    if hasattr(session, "pending_attachments"):
+        session.pending_attachments = []
+    if hasattr(session, "pending_started_at"):
+        session.pending_started_at = None
+    try:
+        session.save()
+    except Exception:
+        pass
+    return True
+
 # ── CSRF: validate Origin/Referer on POST ────────────────────────────────────
 import re as _re
 
@@ -1309,6 +1337,7 @@ def handle_get(handler, parsed) -> bool:
         try:
             _t1 = _time.monotonic()
             s = get_session(sid, metadata_only=(not load_messages))
+            _clear_stale_stream_state(s)
             _t2 = _time.monotonic()
             effective_model = (
                 _resolve_effective_session_model_for_display(s)
@@ -1435,6 +1464,7 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "Missing session_id")
         try:
             from api.session_ops import session_status
+            _clear_stale_stream_state(get_session(sid, metadata_only=True))
             return j(handler, session_status(sid))
         except KeyError:
             return bad(handler, "Session not found", 404)
@@ -4265,7 +4295,7 @@ def _handle_chat_start(handler, body):
                 status=409,
             )
         # Stale stream id from a previous run; clear and continue.
-        s.active_stream_id = None
+        _clear_stale_stream_state(s)
     stream_id = uuid.uuid4().hex
     with _get_session_agent_lock(s.session_id):
         s.workspace = workspace

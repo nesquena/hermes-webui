@@ -387,6 +387,15 @@ async function loadSession(sid){
   _setActiveSessionUrl(S.session.session_id);
 
   const activeStreamId=S.session.active_stream_id||null;
+  // If the server says the session is idle, discard any browser-side inflight
+  // cache left behind by a crashed/restarted stream. Otherwise the UI can keep
+  // showing a permanent thinking/running state even though active_streams=0.
+  if(!activeStreamId&&INFLIGHT[sid]){
+    delete INFLIGHT[sid];
+    if(typeof clearInflightState==='function') clearInflightState(sid);
+    S.activeStreamId=null;
+    S.busy=false;
+  }
 
   // Phase 2a: If session is streaming, restore from INFLIGHT cache before
   // loading full messages (INFLIGHT state is self-contained and sufficient).

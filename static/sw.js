@@ -7,7 +7,7 @@
 
 // Cache version is injected by the server at request time (routes.py /sw.js handler).
 // Bumps automatically whenever the git commit changes — no manual edits needed.
-const CACHE_NAME = 'hermes-shell-__CACHE_VERSION__';
+const CACHE_NAME = 'hermes-shell-__CACHE_VERSION__-stale-stream-cleanup1';
 
 // Static assets that form the app shell.
 //
