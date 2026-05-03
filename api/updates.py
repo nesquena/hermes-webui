@@ -150,12 +150,21 @@ def _check_repo(path, name):
     current, _ = _run_git(['rev-parse', '--short', 'HEAD'], path)
     latest, _ = _run_git(['rev-parse', '--short', compare_ref], path)
 
+    # Get repo URL for "What's new?" link
+    remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)
+    # Convert SSH URLs (git@github.com:org/repo.git) to HTTPS
+    if remote_url and remote_url.startswith('git@'):
+        remote_url = remote_url.replace(':', '/', 1).replace('git@', 'https://', 1).rstrip('.git')
+    elif remote_url:
+        remote_url = remote_url.rstrip('.git')
+
     return {
         'name': name,
         'behind': behind,
         'current_sha': current,
         'latest_sha': latest,
         'branch': compare_ref,
+        'repo_url': remote_url,
     }
 
 
