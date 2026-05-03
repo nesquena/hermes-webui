@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-03 17:39 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-03 18:44 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: source current-space metadata/layout helper coverage now includes Space Agent-style `space.current.saveMeta` and `space.current.saveLayout` aliases while preserving Capy's metadata-only boundary. The helpers resolve `activeSpaceId`, save only safe Space metadata/layout fields, return compact current-space metadata, and omit generated/executable/source/API auth markers from serialized responses. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: source current-widget deletion helper coverage now includes Space Agent-style `space.current.deleteWidget` and `space.current.removeWidget` aliases while preserving Capy's metadata-only boundary. The helpers resolve `activeSpaceId`, delete only the requested widget through Capy's revisioned primitive, return compact current-space metadata, and omit generated/executable/source/API auth markers from serialized responses. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): support current widget delete aliases`
+  - Added RED/GREEN backend coverage proving `space.current.deleteWidget` and `space.current.removeWidget` accept Space Agent-style active-space and widget ids, delete through Capy's revisioned metadata-only primitive, include `active_space_id`, and omit renderer/html/source/API auth markers from serialized adapter responses.
+  - Validation at completion before screenshot/restart: focused RED failed before implementation with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`), full Spaces foundation suite passed (`129 passed`), `py_compile api/spaces.py tests/test_spaces_foundation.py`, and `git diff --check` passed.
 
 - `feat(spaces): support source current save helpers`
   - Added RED/GREEN backend coverage proving `space.current.saveMeta` and `space.current.saveLayout` accept Space Agent-style active-space payloads, save only safe metadata/layout fields, and omit renderer/html/source/API auth markers from serialized adapter responses and persisted manifests.

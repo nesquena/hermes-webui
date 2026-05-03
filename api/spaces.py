@@ -1722,11 +1722,14 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "widget_count": len(toggled_widgets),
             "revision_event_ids": revision_event_ids,
         }
-    if name in {"space.spaces.deletewidget", "space.spaces.removewidget"}:
+    if name in {"space.spaces.deletewidget", "space.spaces.removewidget", "space.current.deletewidget", "space.current.removewidget"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_id = validate_widget_id(_space_tool_widget_id(data))
         result = delete_widget(space_id, widget_id)
-        return {"ok": True, "action": name, **result}
+        response = {"ok": True, "action": name, **result}
+        if name.startswith("space.current."):
+            response["active_space_id"] = space_id
+        return response
     if name in {"space.spaces.removewidgets", "space.spaces.deletewidgets"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_ids = _space_tool_widget_ids(data)
