@@ -735,6 +735,8 @@
   .msg-body pre code{background:none;padding:0;border-radius:0;color:var(--pre-text);font-size:13px;line-height:1.6;}
   /* Keep original theme background — prevent prism-tomorrow from overriding --code-bg */
   .msg-body pre[class*="language-"],.msg-body pre code[class*="language-"]{background:var(--code-bg) !important;}
+  /* Fix #1463: Prism YAML grammar collapses newlines inside token spans — force pre */
+  .msg-body pre code.language-yaml .token{white-space:pre !important;}
   .pre-header{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:8px 16px 8px;background:var(--input-bg);border-radius:10px 10px 0 0;border:1px solid var(--border);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:6px;}
   .pre-header::before{content:'';width:8px;height:8px;border-radius:50%;background:var(--muted);opacity:.4;}
   .pre-header+pre{border-radius:0 0 10px 10px;border-top:none;margin-top:0;}
@@ -1128,6 +1130,8 @@
   .preview-md pre code{background:none;padding:0;color:var(--pre-text);font-size:11.5px;line-height:1.55;}
   /* Keep original theme background — prevent prism-tomorrow from overriding --code-bg */
   .preview-md pre[class*="language-"],.preview-md pre code[class*="language-"]{background:var(--code-bg) !important;}
+  /* Fix #1463: Prism YAML grammar collapses newlines inside token spans — force pre */
+  .preview-md pre code.language-yaml .token{white-space:pre !important;}
   .preview-md blockquote{border-left:3px solid var(--blue);padding-left:12px;color:var(--muted);font-style:italic;margin:8px 0;}
   .preview-md blockquote p{margin:0;}
   .preview-md strong{color:var(--strong);font-weight:600;}.preview-md em{color:var(--em);}
