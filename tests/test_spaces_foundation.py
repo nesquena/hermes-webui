@@ -645,6 +645,39 @@ def test_space_tool_adapter_supports_source_create_widget_source_helper_metadata
 
 
 
+def test_space_tool_adapter_supports_source_resolve_app_url_helper_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    home_url = spaces.run_space_tool("space.spaces.resolveAppUrl", {"logicalPath": "~", "api_key": "***"})
+    widget_url = spaces.run_space_tool(
+        "space.spaces.resolveAppUrl",
+        {"path": "~/spaces/weather/widgets/card.yaml", "source": "SECRET_SOURCE"},
+    )
+    app_url = spaces.run_space_tool("space.spaces.resolveAppUrl", {"path": "/app/L0/_all/mod/_core/spaces/view.html"})
+    layer_url = spaces.run_space_tool("space.spaces.resolveAppUrl", {"path": "L0/_all/mod/_core/spaces/store.js"})
+    serialized = json.dumps([home_url, widget_url, app_url, layer_url]).lower()
+
+    assert home_url == {"ok": True, "action": "space.spaces.resolveappurl", "url": "/~/", "resolve": {"mode": "metadata-only"}}
+    assert widget_url["url"] == "/~/spaces/weather/widgets/card.yaml"
+    assert app_url["url"] == "/L0/_all/mod/_core/spaces/view.html"
+    assert layer_url["url"] == "/L0/_all/mod/_core/spaces/store.js"
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+    assert '"source":' not in serialized
+
+    for unsafe_path in [
+        "javascript:alert(1)",
+        "https://example.com/app.js",
+        "../private/etc/passwd",
+        "/private/etc/passwd",
+        "L0/_all/mod/_core/spaces/view.html?api_key=SECRET",
+    ]:
+        with pytest.raises(ValueError, match="Unsupported app path") as exc:
+            spaces.run_space_tool("space.spaces.resolveAppUrl", {"path": unsafe_path, "token": "***"})
+        assert unsafe_path not in str(exc.value)
+
+
+
 def test_space_tool_adapter_supports_source_render_widget_helper_quarantines_generated_bodies(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "source-render-widget-lab", "name": "Source Render Widget Lab"})

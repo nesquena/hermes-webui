@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-03 10:48 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-03 13:03 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: source current-space lookup now supports Space Agent-style `space.spaces.getCurrentSpace` calls while preserving Capy's metadata-only adapter boundary. The server-side adapter accepts source-style `activeSpaceId` / current-space payloads, returns either safe current Space detail metadata or a null current-space response, and omits renderer/html/script/data/source plus credential-like markers from public responses. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: source logical app URL resolution now supports Space Agent-style `space.spaces.resolveAppUrl` calls while preserving Capy's metadata-only adapter boundary. The server-side adapter accepts source-style `logicalPath` / `logical_path` / `path` payloads, resolves only safe app-owned logical paths (`~`, `~/...`, `/~/...`, `/app/L0...`, `L0`/`L1`/`L2`), rejects external/dangerous filesystem/query/fragment paths without echoing raw input, and omits source/API auth markers from serialized responses. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): support source resolve app URL alias`
+  - Added RED/GREEN backend coverage proving `space.spaces.resolveAppUrl` accepts Space Agent-style logical app paths, returns safe app URLs for home, user-space assets, `/app/...` module paths, and `L0`/`L1`/`L2` module paths, rejects `javascript:`, external HTTPS, relative traversal, query-string credential markers, and private filesystem roots without echoing raw unsafe input, and omits source/API auth markers from serialized adapter results.
+  - Validation at completion: focused RED failed before implementation with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`). Run `git log -1 --oneline` and the final report for the full validation bundle.
 
 - `feat(spaces): support source get current space alias`
   - Added RED/GREEN backend coverage proving `space.spaces.getCurrentSpace` accepts Space Agent-style `activeSpaceId` payloads, returns safe current Space detail metadata, returns `{space: None}` when no active Space is supplied, and omits executable fields plus credential-like markers from serialized adapter results.

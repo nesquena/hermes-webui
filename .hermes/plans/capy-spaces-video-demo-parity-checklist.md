@@ -37,6 +37,7 @@ Recently landed:
 - Source-style layout recovery helper coverage now includes metadata-only `space.spaces.repairLayout`, applying saved `saveSpaceLayout` widget positions/sizes/minimized metadata to existing widgets, clamping unsafe layout values, and persisting a revisioned safe layout repair without exposing generated/credential-like fields.
 - Source-style widget visibility helper coverage now includes metadata-only `space.spaces.toggleWidgets`, accepting `spaceId`/`widgetIds` payloads and toggling target widget `layout.minimized` metadata without exposing generated/credential-like fields.
 - Source-style current-space lookup coverage now includes metadata-only `space.spaces.getCurrentSpace`, accepting `activeSpaceId`/current-space payloads and returning safe current Space detail metadata or a null current-space response without exposing generated/credential-like fields.
+- Source-style logical app URL helper coverage now includes metadata-only `space.spaces.resolveAppUrl`, accepting safe app-owned logical paths while rejecting external, traversal, query/fragment, and private filesystem paths without echoing raw unsafe input.
 - Screenshot QA artifacts are expected for visually relevant Spaces work.
 
 Next checkpoint emphasis:

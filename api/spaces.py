@@ -1370,6 +1370,32 @@ def repair_space_layout_from_tool(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 
+def _space_tool_resolve_app_url(payload: dict[str, Any]) -> str:
+    """Resolve a Space Agent-style logical app path without exposing raw unsafe inputs."""
+    raw = payload.get("logicalPath") or payload.get("logical_path") or payload.get("path") or ""
+    normalized_path = str(raw or "").strip()
+    if not normalized_path:
+        raise ValueError("A logical app path is required")
+    if any(marker in normalized_path for marker in ("?", "#", "\\", "\x00")):
+        raise ValueError("Unsupported app path")
+    if any(part == ".." for part in normalized_path.split("/")):
+        raise ValueError("Unsupported app path")
+    if normalized_path == "~":
+        return "/~/"
+    if normalized_path.startswith("~/"):
+        return f"/{normalized_path}"
+    if normalized_path.startswith("/app/"):
+        return _space_tool_resolve_app_url({"path": normalized_path[len("/app/") :]})
+    if normalized_path.startswith("/~/"):
+        return normalized_path
+    if re.match(r"^/(L0|L1|L2)/", normalized_path):
+        return normalized_path
+    if re.match(r"^(L0|L1|L2)/", normalized_path):
+        return f"/{normalized_path}"
+    raise ValueError("Unsupported app path")
+
+
+
 def _space_tool_template_name(payload: dict[str, Any], default: str = "weather") -> str:
     """Resolve a safe Capy template name from Hermes or Space Agent-style payloads."""
     raw = payload.get("template") or payload.get("template_name") or payload.get("name") or payload.get("id") or ""
@@ -1495,6 +1521,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {"space.spaces.reloadcurrentspace", "space.spaces.reloadspace"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         return {"ok": True, "action": name, "space_id": space_id, "space": read_space_detail(space_id)}
+    if name == "space.spaces.resolveappurl":
+        return {"ok": True, "action": name, "url": _space_tool_resolve_app_url(data), "resolve": {"mode": "metadata-only"}}
     if name in {"space.spaces.repositioncurrentspace", "space.current.reposition", "space.current.reposition_viewport"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         request = {
