@@ -1449,7 +1449,9 @@ function renderSessionListFromCache(){
   _syncSidebarExpansionForActiveSession(sessions, activeSidForSidebar);
   const archivedCount=projectFiltered.filter(s=>s.archived).length;
   const list=$('sessionList');list.innerHTML='';
-  // Batch select bar (when in select mode)
+  const controls=document.createElement('div');
+  controls.className='session-list-controls';
+  // Select mode entry/actions stay reachable in the sticky controls area.
   if(_sessionSelectMode){
     const selectBar=document.createElement('div');selectBar.className='session-select-bar';
     const exitBtn=document.createElement('button');exitBtn.className='batch-exit-btn';
@@ -1460,12 +1462,18 @@ function renderSessionListFromCache(){
     selectAllBtn.textContent=t('session_select_all');
     selectAllBtn.onclick=(e)=>{e.stopPropagation();selectAllSessions();};
     selectBar.appendChild(selectAllBtn);
-    list.appendChild(selectBar);
+    controls.appendChild(selectBar);
+  } else {
+    const toggleBtn=document.createElement('button');toggleBtn.className='session-select-toggle';
+    toggleBtn.type='button';
+    toggleBtn.textContent=t('session_select_mode');
+    toggleBtn.onclick=(e)=>{e.stopPropagation();toggleSessionSelectMode();};
+    controls.appendChild(toggleBtn);
   }
   // Ensure batch action bar exists in DOM
   let batchBar=$('batchActionBar');
   if(!batchBar){batchBar=document.createElement('div');batchBar.id='batchActionBar';batchBar.className='batch-action-bar';}
-  list.appendChild(batchBar);
+  controls.appendChild(batchBar);
   if(_sessionSelectMode&&_selectedSessions.size>0){batchBar.style.display='flex';_renderBatchActionBar();}
   else{batchBar.style.display='none';}
   // Project filter bar — show when there are real projects OR there are
@@ -1520,7 +1528,7 @@ function renderSessionListFromCache(){
     addBtn.title='New project';
     addBtn.onclick=(e)=>{e.stopPropagation();_startProjectCreate(bar,addBtn);};
     bar.appendChild(addBtn);
-    list.appendChild(bar);
+    controls.appendChild(bar);
   }
   // Profile filter toggle (show sessions from other profiles)
   const otherProfileCount=withMessages.filter(s=>s.profile&&s.profile!==S.activeProfile).length;
@@ -1602,13 +1610,7 @@ function renderSessionListFromCache(){
     wrapper.appendChild(body);
     list.appendChild(wrapper);
   }
-  // Select mode toggle button (only when NOT in select mode)
-  if(!_sessionSelectMode){
-    const toggleBtn=document.createElement('div');toggleBtn.className='session-select-toggle';
-    toggleBtn.textContent=t('session_select_mode');
-    toggleBtn.onclick=(e)=>{e.stopPropagation();toggleSessionSelectMode();};
-    list.appendChild(toggleBtn);
-  }
+  list.appendChild(controls);
   // Note: declared after the groups loop but available via function hoisting.
   function _renderOneSession(s, isPinnedGroup=false){
     const el=document.createElement('div');

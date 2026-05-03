@@ -414,8 +414,9 @@
   .session-date-header.pinned{color:var(--accent);}
 
   /* ── Batch select mode ── */
-  .session-select-toggle{font-size:11px;padding:6px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.6;transition:opacity .15s;user-select:none;margin-top:4px;border-radius:6px;}
-  .session-select-toggle:hover{opacity:1;background:var(--hover-bg);}
+  .session-list-controls{position:sticky;bottom:0;z-index:8;background:linear-gradient(to top,var(--sidebar-bg) 82%,transparent);padding:6px 8px 8px;margin-top:auto;display:flex;flex-direction:column;gap:4px;flex-shrink:0;}
+  .session-select-toggle{font-size:11px;padding:6px 10px;color:var(--muted);cursor:pointer;text-align:center;opacity:.8;transition:opacity .15s;user-select:none;border-radius:6px;border:1px solid var(--border2);background:var(--input-bg);}
+  .session-select-toggle:hover{opacity:1;background:var(--hover-bg);color:var(--accent);}
   .session-select-bar{display:flex;align-items:center;gap:6px;padding:6px 10px;margin-bottom:4px;flex-shrink:0;}
   .batch-exit-btn{width:22px;height:22px;border:none;border-radius:6px;background:transparent;color:var(--muted);cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:14px;padding:0;flex-shrink:0;}
   .batch-exit-btn:hover{background:var(--hover-bg);color:var(--text);}
@@ -2407,7 +2408,7 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 .mermaid-rendered svg{max-width:100%;height:auto;}
 
 /* ── Session projects ── */
-.project-bar{display:flex;gap:4px;padding:4px 10px 8px;flex-wrap:wrap;align-items:center;flex-shrink:0;}
+.project-bar{display:flex;gap:4px;padding:4px 0 0;flex-wrap:wrap;align-items:center;flex-shrink:0;}
 .project-chip{font-size:10px;font-weight:600;padding:3px 8px;border-radius:12px;cursor:pointer;border:1px solid var(--border2);background:var(--input-bg);color:var(--muted);transition:all .15s;white-space:nowrap;display:inline-flex;align-items:center;gap:4px;}
 .project-chip:hover{background:rgba(255,255,255,.08);color:var(--text);}
 .project-chip.active{background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent-bg);}

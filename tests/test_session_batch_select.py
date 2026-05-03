@@ -111,14 +111,46 @@ def test_batch_action_bar_is_sidebar_inline_not_global_footer():
         js = f.read()
     with open('static/style.css') as f:
         css = f.read()
-    assert "list.appendChild(batchBar)" in js, \
-        "Batch action bar should be rendered inside the session list"
+    assert "controls.appendChild(batchBar)" in js, \
+        "Batch action bar should be rendered inside the sidebar controls"
     assert "document.body.appendChild(batchBar)" not in js, \
         "Batch action bar must not be mounted as a global footer"
     assert ".batch-action-bar{display:none;margin:" in css, \
         "Batch action bar should use inline sidebar spacing"
     assert "position:fixed" not in css[css.find(".batch-action-bar{"):css.find(".batch-count{")], \
         "Batch action bar must not be fixed to the bottom of the viewport"
+
+
+def test_session_sidebar_controls_stay_accessible_on_long_lists():
+    """Select mode and project filters should remain reachable in long sidebars."""
+    with open('static/sessions.js') as f:
+        js = f.read()
+    with open('static/style.css') as f:
+        css = f.read()
+    assert "controls.className='session-list-controls'" in js, \
+        "Sidebar controls should be grouped into a dedicated controls container"
+    assert "controls.appendChild(toggleBtn)" in js, \
+        "Select mode entry should live in the sticky controls area, not after all sessions"
+    assert js.find("list.appendChild(controls)") > js.find("for(const g of groups)"), \
+        "Sticky bottom controls must be appended after session rows so they stay visible while scrolling"
+    assert ".session-list-controls{position:sticky;bottom:0;" in css, \
+        "Sidebar controls should remain reachable while the session list scrolls"
+
+
+def test_project_filters_include_unassigned_sessions():
+    """Users need a filter for sessions that have no project."""
+    with open('static/sessions.js') as f:
+        js = f.read()
+    with open('static/style.css') as f:
+        css = f.read()
+    assert "const NO_PROJECT_FILTER = '__none__';" in js, \
+        "Project filtering should have a stable sentinel for unassigned sessions"
+    assert "profileFiltered.filter(s=>!s.project_id)" in js, \
+        "No-project filter must show sessions without a project_id"
+    assert "noneChip.textContent='Unassigned'" in js, \
+        "Project chips should expose an Unassigned filter"
+    assert ".project-chip.no-project{border-style:dashed;}" in css, \
+        "Unassigned chip should have a distinct treatment"
 
 
 def test_batch_project_picker_is_anchored_to_batch_actions():
