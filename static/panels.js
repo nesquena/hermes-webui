@@ -3385,7 +3385,10 @@ async function _removeProviderKey(providerId){
     const res=await api('/api/providers/delete',{method:'POST',body:JSON.stringify({provider:providerId})});
     if(res.ok){
       showToast(res.provider+' key '+t('providers_key_removed').toLowerCase());
+      _clearLiveModelCache(providerId);
       await loadProvidersPanel(); // refresh list
+      if(typeof populateModelDropdown==='function') populateModelDropdown();
+      if(typeof renderModelDropdown==='function') renderModelDropdown();
     }else{
       showToast(res.error||'Failed to remove key');
       if(els.saveBtn){els.saveBtn.disabled=false;els.saveBtn.textContent=t('providers_save');}

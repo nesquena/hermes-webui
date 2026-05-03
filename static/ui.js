@@ -389,6 +389,15 @@ async function populateModelDropdown(){
 
 // Cache so we don't re-fetch on every page load
 const _liveModelCache={};
+
+/** Remove all cached model entries for a given provider. */
+function _clearLiveModelCache(providerId){
+  for(const key of Object.keys(_liveModelCache)){
+    if(key===providerId||key.startsWith(providerId+'/')){
+      delete _liveModelCache[key];
+    }
+  }
+}
 // Tracks providers for which a live-model fetch is in flight.
 // Used by syncTopbar() to defer model corrections until the fetch completes,
 // preventing premature fallback to the first static model (#1169).

@@ -2348,6 +2348,7 @@ def handle_post(handler, parsed) -> bool:
         result = remove_provider_key(provider_id)
         if not result.get("ok"):
             return bad(handler, result.get("error", "Unknown error"))
+        _clear_live_models_cache()
         return j(handler, result)
 
     if parsed.path == "/api/reasoning":
