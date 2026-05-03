@@ -846,6 +846,56 @@ def test_space_tool_adapter_supports_space_agent_widget_aliases_metadata_only(mo
     assert "secret" not in serialized
 
 
+def test_space_tool_adapter_supports_camelcase_current_widget_event_aliases_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "camel-event-lab", "name": "Camel Event Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "research-card",
+            "kind": "prompt",
+            "title": "Research Card",
+            "renderer": "<script>steal()</script>",
+            "data": {"api_key": "***", "token": "***"},
+        },
+    )
+
+    queued = spaces.run_space_tool(
+        "space.current.widget.event",
+        {
+            "activeSpaceId": created["space_id"],
+            "widgetId": "research-card",
+            "event_name": "agent.prompt",
+            "prompt": "Summarize this widget safely.",
+            "payload": {"query": "Claude Mythos", "renderer": "<script>bad()</script>", "api_key": "***", "token": "***"},
+        },
+    )
+    events = spaces.run_space_tool(
+        "space.current.widget.events",
+        {"activeSpaceId": created["space_id"], "widgetId": "research-card", "limit": 5},
+    )
+    serialized = json.dumps({"queued": queued, "events": events}).lower()
+
+    assert queued["ok"] is True
+    assert queued["action"] == "space.current.widget.event"
+    assert queued["space_id"] == created["space_id"]
+    assert queued["widget_id"] == "research-card"
+    assert queued["payload_summary"] == {"query": "Claude Mythos"}
+    assert events["ok"] is True
+    assert events["action"] == "space.current.widget.events"
+    assert events["active_space_id"] == created["space_id"]
+    assert events["events"][0]["widget_id"] == "research-card"
+    assert events["events"][0]["event_name"] == "agent.prompt"
+    assert events["events"][0]["payload_summary"] == {"query": "Claude Mythos"}
+    assert events["events"][0]["prompt_preview"] == "Summarize this widget safely."
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+
+
 def test_space_tool_adapter_supports_widget_see_and_reload_aliases_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "widget-see-reload-lab", "name": "Widget See Reload Lab"})

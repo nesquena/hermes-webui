@@ -1548,7 +1548,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         return {"ok": True, "action": name, **result}
     if name in {"widget.events", "widget.event.list", "space.widget.events", "space.widget.event.list", "space.current.widget.events", "space.current.widget.event.list"}:
         space_id = validate_space_id(_space_tool_current_id(data) if name.startswith("space.current.") else data.get("space_id"))
-        widget_id_raw = data.get("widget_id") or data.get("id") or None
+        widget_id_raw = _space_tool_widget_id(data) or None
         widget_id = validate_widget_id(widget_id_raw) if widget_id_raw else None
         return {
             "ok": True,
@@ -1558,7 +1558,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         }
     if name in {"widget.event", "space.widget.event", "space.current.widget.event"}:
         space_id = validate_space_id(_space_tool_current_id(data) if name == "space.current.widget.event" else data.get("space_id"))
-        widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
+        widget_id = validate_widget_id(_space_tool_widget_id(data))
         result = queue_widget_event(
             space_id,
             widget_id,
