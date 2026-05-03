@@ -1160,6 +1160,21 @@ def _space_tool_render_widget_payload(payload: dict[str, Any]) -> tuple[dict[str
 
 
 
+def _space_tool_preview_widget_detail(widget: dict[str, Any]) -> dict[str, Any]:
+    """Return public widget detail metadata for a non-persisted tool preview."""
+    detail = _widget_summary(widget)
+    metadata = _widget_detail_metadata(widget)
+    content_status = metadata.get("content_status") if isinstance(metadata.get("content_status"), dict) else None
+    if content_status:
+        content_status.pop("sha256", None)
+    if metadata:
+        detail["metadata"] = metadata
+    recovery = widget.get("recovery") if isinstance(widget.get("recovery"), dict) else {}
+    if recovery:
+        detail["recovery"] = _payload_summary(recovery)
+    return detail
+
+
 def _space_tool_widgets_payload(payload: dict[str, Any], *, bulk: bool) -> list[dict[str, Any]]:
     raw_widgets = payload.get("widgets") if bulk else [payload.get("widget") if isinstance(payload.get("widget"), dict) else payload]
     if bulk and not isinstance(raw_widgets, list):
@@ -1567,6 +1582,22 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             response["widget"] = saved_widgets[0]
             response["revision_event_id"] = revision_event_ids[-1]
         return response
+    if name == "space.spaces.createwidgetsource":
+        space_id = validate_space_id(_space_tool_current_id(data))
+        read_space_detail(space_id)
+        widget_payload, omitted_count = _space_tool_render_widget_payload(data)
+        return {
+            "ok": True,
+            "action": name,
+            "space_id": space_id,
+            "widget": _space_tool_preview_widget_detail(widget_payload),
+            "blueprint": {
+                "mode": "metadata-only",
+                "stored": False,
+                "executed": False,
+                "omitted_field_count": omitted_count,
+            },
+        }
     if name == "space.spaces.renderwidget":
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_payload, omitted_count = _space_tool_render_widget_payload(data)
