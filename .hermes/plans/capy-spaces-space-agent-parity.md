@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-03 13:03 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-03 14:12 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: source logical app URL resolution now supports Space Agent-style `space.spaces.resolveAppUrl` calls while preserving Capy's metadata-only adapter boundary. The server-side adapter accepts source-style `logicalPath` / `logical_path` / `path` payloads, resolves only safe app-owned logical paths (`~`, `~/...`, `/~/...`, `/app/L0...`, `L0`/`L1`/`L2`), rejects external/dangerous filesystem/query/fragment paths without echoing raw input, and omits source/API auth markers from serialized responses. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: source current-widget read helpers now support Space Agent-style `space.current.listWidgets`, `space.current.readWidget`, and `space.current.seeWidget` aliases while preserving Capy's metadata-only adapter boundary. The server-side adapter accepts `activeSpaceId`/`widgetId` payloads, returns safe widget summaries/details plus the existing sandbox contract/event metadata for `seeWidget`, and omits renderer/html/data/source/API auth markers from serialized responses. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): support source current widget aliases`
+  - Added RED/GREEN backend coverage proving `space.current.listWidgets`, `space.current.readWidget`, and `space.current.seeWidget` accept Space Agent-style active-space and widget ids, return safe widget summaries/details/contract/event metadata, and omit renderer/html/data/source bodies plus credential-like markers from serialized adapter results.
+  - Validation at completion before screenshot/restart: focused RED failed before implementation with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`), full Spaces foundation suite passed (`124 passed`), `py_compile api/spaces.py tests/test_spaces_foundation.py`, and `git diff --check` passed.
 
 - `feat(spaces): support source resolve app URL alias`
   - Added RED/GREEN backend coverage proving `space.spaces.resolveAppUrl` accepts Space Agent-style logical app paths, returns safe app URLs for home, user-space assets, `/app/...` module paths, and `L0`/`L1`/`L2` module paths, rejects `javascript:`, external HTTPS, relative traversal, query-string credential markers, and private filesystem roots without echoing raw unsafe input, and omits source/API auth markers from serialized adapter results.

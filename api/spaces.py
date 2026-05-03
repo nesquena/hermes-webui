@@ -1449,7 +1449,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             return {"ok": True, "action": name, "active_space_id": None, "context": ""}
         space_id = validate_space_id(current_id)
         return {"ok": True, "action": name, "active_space_id": space_id, "context": build_agent_context(space_id)}
-    if name in {"space.current.widgets", "space.current.widget.list"}:
+    if name in {"space.current.widgets", "space.current.widget.list", "space.current.listwidgets"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         return {"ok": True, "action": name, "active_space_id": space_id, "widgets": list_widgets(space_id)}
     if name in {"space.spaces.listwidgets", "space.spaces.widgets"}:
@@ -1462,13 +1462,13 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_id = validate_widget_id(_space_tool_widget_id(data))
         return {"ok": True, "action": name, "space_id": space_id, "widget": read_widget_detail(space_id, widget_id)}
-    if name in {"space.widget.read", "space.widget.get", "space.current.widget.read", "space.current.widget.get"}:
+    if name in {"space.widget.read", "space.widget.get", "space.current.widget.read", "space.current.widget.get", "space.current.readwidget", "space.current.getwidget"}:
         space_id = validate_space_id(_space_tool_current_id(data))
-        widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
+        widget_id = validate_widget_id(_space_tool_widget_id(data))
         return {"ok": True, "action": name, "active_space_id": space_id, "widget": read_widget_detail(space_id, widget_id)}
-    if name in {"space.widget.see", "space.current.widget.see", "widget.see"}:
+    if name in {"space.widget.see", "space.current.widget.see", "space.current.seewidget", "widget.see"}:
         space_id = validate_space_id(_space_tool_current_id(data) if name.startswith("space.current.") else data.get("space_id"))
-        widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
+        widget_id = validate_widget_id(_space_tool_widget_id(data))
         widget = read_widget(space_id, widget_id)
         return {
             "ok": True,
