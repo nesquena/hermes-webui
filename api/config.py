@@ -679,8 +679,10 @@ _PROVIDER_MODELS = {
         {"id": "gemini-2.5-flash",                  "label": "Gemini 2.5 Flash"},
     ],
     "deepseek": [
-        {"id": "deepseek-v4-flash", "label": "DeepSeek V4 Flash"},
         {"id": "deepseek-v4-pro", "label": "DeepSeek V4 Pro"},
+        {"id": "deepseek-v4-pro[1m]", "label": "DeepSeek V4 Pro (1M)"},
+        {"id": "deepseek-v4-flash", "label": "DeepSeek V4 Flash"},
+        {"id": "deepseek-v4-flash[1m]", "label": "DeepSeek V4 Flash (1M)"},
         {"id": "deepseek-chat-v3-0324", "label": "DeepSeek V3 (legacy)"},
         {"id": "deepseek-reasoner", "label": "DeepSeek Reasoner (legacy)"},
     ],
