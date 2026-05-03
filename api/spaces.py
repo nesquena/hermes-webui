@@ -1207,6 +1207,10 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {"space.get", "space.spaces.get", "space.spaces.read", "space.spaces.getspace", "space.spaces.readspace", "space.spaces.openspace"}:
         space_id = validate_space_id(data.get("space_id"))
         return {"ok": True, "action": name, "space": read_space_detail(space_id)}
+    if name in {"space.spaces.removespace", "space.spaces.deletespace"}:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        result = delete_space(space_id)
+        return {"ok": True, "action": name, **result}
     if name in {"space.spaces.upsertwidget", "space.spaces.upsertwidgets"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         widgets = _space_tool_widgets_payload(data, bulk=name.endswith("upsertwidgets"))

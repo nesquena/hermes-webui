@@ -404,6 +404,61 @@ def test_space_tool_adapter_supports_source_widget_delete_helper_metadata_only(m
     assert '"source":' not in serialized
 
 
+def test_space_tool_adapter_supports_source_space_delete_helpers_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    first = spaces.create_space({"space_id": "source-remove-space-lab", "name": "Source Remove Space Lab"})
+    second = spaces.create_space({"space_id": "source-delete-space-lab", "name": "Source Delete Space Lab"})
+    for created in [first, second]:
+        spaces.upsert_widget(
+            created["space_id"],
+            {
+                "id": "unsafe-widget",
+                "kind": "html",
+                "title": "Unsafe Widget",
+                "renderer": "<script>stored()</script>",
+                "html": "<img src=x onerror=stored()>",
+                "source": "SECRET_SOURCE",
+                "data": {"api_key": "***"},
+            },
+        )
+
+    removed = spaces.run_space_tool(
+        "space.spaces.removeSpace",
+        {
+            "spaceId": first["space_id"],
+            "renderer": "<script>steal()</script>",
+            "source": "SECRET_SOURCE",
+            "api_key": "***",
+        },
+    )
+    deleted = spaces.run_space_tool(
+        "space.spaces.deleteSpace",
+        {"spaceId": second["space_id"], "html": "<img src=x onerror=steal()>", "token": "***"},
+    )
+    serialized = json.dumps({"removed": removed, "deleted": deleted}).lower()
+
+    assert removed["ok"] is True
+    assert removed["action"] == "space.spaces.removespace"
+    assert removed["deleted"] is True
+    assert removed["space_id"] == first["space_id"]
+    assert removed["revision_event_id"]
+    assert deleted["ok"] is True
+    assert deleted["action"] == "space.spaces.deletespace"
+    assert deleted["deleted"] is True
+    assert deleted["space_id"] == second["space_id"]
+    assert spaces.list_spaces() == []
+    assert "steal" not in serialized
+    assert "stored" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+    assert '"source":' not in serialized
+
+
 def test_space_tool_adapter_supports_source_widget_bulk_delete_helpers_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "source-bulk-delete-lab", "name": "Source Bulk Delete Lab"})

@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-02 22:07 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-02 23:13 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: source-style Space Agent bulk widget removal aliases now route `space.spaces.removeWidgets` / `deleteWidgets` and `space.spaces.removeAllWidgets` / `deleteAllWidgets` through Capy's safe revisioned `delete_widget` primitive, accepting Space Agent-style `spaceId` plus `widgetIds` payloads where applicable while omitting generated/executable bodies and credential-like request fields from serialized tool responses. Use `git log -1 --oneline` for the exact commit hash after commit.
+Current latest known completed code slice: source-style Space Agent space deletion aliases now route `space.spaces.removeSpace` and `space.spaces.deleteSpace` through Capy's existing revisioned `delete_space` primitive, accepting Space Agent-style `spaceId` payloads while omitting generated/executable bodies and credential-like request fields from serialized tool responses. Local/tailnet WebUI health verified OK after LaunchAgent restart; use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): support source space delete aliases`
+  - Added RED/GREEN backend coverage proving `space.spaces.removeSpace` and `space.spaces.deleteSpace` accept Space Agent-style camelCase `spaceId` payloads, delete Spaces through Capy's revisioned primitive, and omit generated/executable bodies plus credential-like markers from serialized adapter results.
+  - Validation at completion: focused RED failed before implementation with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`), full Spaces foundation suite passed (`112 passed`), `py_compile api/spaces.py tests/test_spaces_foundation.py`, and `git diff --check` passed. Mock/status screenshot QA captured the alias status with empty browser console and a clean sensitive-marker DOM check; screenshot artifact `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_c25825dd57914d4fa087937684be2d44.png`.
 
 - `feat(spaces): support source bulk widget delete aliases`
   - Added RED/GREEN backend coverage proving `space.spaces.removeWidgets` accepts Space Agent-style camelCase `spaceId`/`widgetIds` payloads, `space.spaces.removeAllWidgets` removes all safe widget summaries for a Space, both routes delete through Capy's revisioned primitive, and responses omit generated/executable bodies plus credential-like markers.
