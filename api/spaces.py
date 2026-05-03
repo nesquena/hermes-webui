@@ -1586,6 +1586,28 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         patch_payload = data.get("patch") if isinstance(data.get("patch"), dict) else data
         result = patch_widget(space_id, widget_id, _space_tool_widget_payload(patch_payload))
         return {"ok": True, "action": name, **result, "widget": read_widget_detail(space_id, widget_id)}
+    if name == "space.spaces.togglewidgets":
+        space_id = validate_space_id(_space_tool_current_id(data))
+        widget_ids = _space_tool_widget_ids(data)
+        toggled_widgets: list[dict[str, Any]] = []
+        revision_event_ids: list[str] = []
+        for widget_id in widget_ids:
+            current = read_widget(space_id, widget_id)
+            layout = _normalize_widget_layout(current.get("layout"))
+            layout["minimized"] = not layout["minimized"]
+            result = patch_widget(space_id, widget_id, {"layout": layout})
+            revision_event_ids.append(result["revision_event_id"])
+            toggled_widgets.append(read_widget_detail(space_id, widget_id))
+        return {
+            "ok": True,
+            "action": name,
+            "space_id": space_id,
+            "space": read_space_detail(space_id),
+            "widget_ids": widget_ids,
+            "widgets": toggled_widgets,
+            "widget_count": len(toggled_widgets),
+            "revision_event_ids": revision_event_ids,
+        }
     if name in {"space.spaces.deletewidget", "space.spaces.removewidget"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_id = validate_widget_id(_space_tool_widget_id(data))

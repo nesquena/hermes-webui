@@ -35,6 +35,7 @@ Recently landed:
 - Source-style current-space viewport helper coverage now includes metadata-only `space.spaces.repositionCurrentSpace`, accepting `spaceId`/`resetCamera`/`viewport` payloads without executing browser movement or exposing generated/credential-like fields.
 - Source-style widget layout helper coverage now includes metadata-only `space.spaces.rearrangeWidgets`, accepting `spaceId` plus Space Agent-style widget `position`/`size` or `col`/`row`/`cols`/`rows` payloads and persisting safe Capy widget layouts without exposing generated/credential-like fields.
 - Source-style layout recovery helper coverage now includes metadata-only `space.spaces.repairLayout`, applying saved `saveSpaceLayout` widget positions/sizes/minimized metadata to existing widgets, clamping unsafe layout values, and persisting a revisioned safe layout repair without exposing generated/credential-like fields.
+- Source-style widget visibility helper coverage now includes metadata-only `space.spaces.toggleWidgets`, accepting `spaceId`/`widgetIds` payloads and toggling target widget `layout.minimized` metadata without exposing generated/credential-like fields.
 - Screenshot QA artifacts are expected for visually relevant Spaces work.
 
 Next checkpoint emphasis:

@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-03 08:31 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-03 09:39 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: source widget render alias now supports Space Agent-style `space.spaces.renderWidget` calls while preserving Capy's metadata-only adapter boundary. The server-side adapter converts source-style `widgetId`/`cols`/`rows`/`col`/`row` inputs into a safe Capy widget summary, stores generated/executable bodies only as omitted/quarantined metadata, disables generated-code execution pending sandbox review, and omits renderer/html/script/data/source plus credential-like markers from public responses. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: source widget visibility toggling now supports Space Agent-style `space.spaces.toggleWidgets` calls while preserving Capy's metadata-only adapter boundary. The server-side adapter accepts source-style `spaceId`/`widgetIds` payloads, toggles each target widget's safe layout `minimized` metadata, preserves stored generated artifacts internally via Capy's patch primitive, and omits renderer/html/script/data/source plus credential-like markers from public responses. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): support source toggle widgets alias`
+  - Added RED/GREEN backend coverage proving `space.spaces.toggleWidgets` accepts Space Agent-style camelCase `spaceId`/`widgetIds` payloads, flips target widgets' `layout.minimized` metadata in both directions, persists those metadata-only changes, and omits executable fields plus credential-like markers from serialized adapter results.
+  - Validation at completion before screenshot/restart: focused RED failed before implementation with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`), full Spaces foundation suite passed (`121 passed`), `py_compile api/spaces.py tests/test_spaces_foundation.py`, and `git diff --check` passed.
 
 - `feat(spaces): support source render widget alias`
   - Added RED/GREEN backend coverage proving `space.spaces.renderWidget` accepts Space Agent-style camelCase `spaceId`/`widgetId` payloads, maps source layout size/position fields into safe Capy widget layout metadata, marks generated-body inputs quarantined/disabled, and omits executable fields plus credential-like markers from stored/public metadata.

@@ -517,6 +517,68 @@ def test_space_tool_adapter_supports_source_repair_layout_metadata_only(monkeypa
 
 
 
+def test_space_tool_adapter_supports_source_toggle_widgets_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "source-toggle-widgets-lab", "name": "Source Toggle Widgets Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "weather-card",
+            "kind": "weather",
+            "title": "Weather Card",
+            "layout": {"x": 0, "y": 0, "w": 4, "h": 3, "minimized": False},
+            "renderer": "<script>stored()</script>",
+            "data": {"api_key": "***"},
+        },
+    )
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "notes-card",
+            "kind": "markdown",
+            "title": "Notes Card",
+            "layout": {"x": 4, "y": 0, "w": 4, "h": 3, "minimized": True},
+            "html": "<img src=x onerror=stored()>",
+            "source": "SECRET_SOURCE",
+        },
+    )
+
+    toggled = spaces.run_space_tool(
+        "space.spaces.toggleWidgets",
+        {
+            "spaceId": created["space_id"],
+            "widgetIds": ["weather-card", "notes-card"],
+            "renderer": "<script>steal()</script>",
+            "api_key": "***",
+            "token": "***",
+        },
+    )
+    persisted_widgets = {widget["id"]: widget for widget in spaces.list_widgets(created["space_id"])}
+    serialized = json.dumps({"toggled": toggled, "persisted_widgets": persisted_widgets}).lower()
+
+    assert toggled["ok"] is True
+    assert toggled["action"] == "space.spaces.togglewidgets"
+    assert toggled["space_id"] == created["space_id"]
+    assert toggled["widget_ids"] == ["weather-card", "notes-card"]
+    assert toggled["widget_count"] == 2
+    assert toggled["widgets"][0]["layout"] == {"x": 0, "y": 0, "w": 4, "h": 3, "minimized": True}
+    assert toggled["widgets"][1]["layout"] == {"x": 4, "y": 0, "w": 4, "h": 3, "minimized": False}
+    assert persisted_widgets["weather-card"]["layout"]["minimized"] is True
+    assert persisted_widgets["notes-card"]["layout"]["minimized"] is False
+    assert "steal" not in serialized
+    assert "stored" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert '"data":' not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+    assert '"source":' not in serialized
+
+
+
 def test_space_tool_adapter_supports_source_render_widget_helper_quarantines_generated_bodies(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "source-render-widget-lab", "name": "Source Render Widget Lab"})
