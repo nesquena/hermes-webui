@@ -17,11 +17,12 @@
 | [EP-02](#ep-02--localização-pt-br) | Localização pt-BR | P0 | Sprint 1 |
 | [EP-03](#ep-03--painel-dashboard) | Página Dashboard | P0 | Sprint 2 |
 | [EP-08](#ep-08--configurações-neo-embutidas-no-dashboard) | Configurações Neo (embutidas no dashboard) | P0 | Sprint 3 |
-| [EP-04](#ep-04--página-projetos-kanban) | Página Projetos (Kanban 4 colunas) | P0 | Sprint 4 |
-| [EP-05](#ep-05--ações-rápidas-e-integrações-locais) | Ações rápidas e integrações locais | P1 | Sprint 5 |
-| [EP-06](#ep-06--página-finanças) | Página Finanças (shell visual) | P0 | Sprint 5 |
+| [EP-09](#ep-09--skills-neo-embutidas-no-dashboard) | Skills Neo (embutidas no dashboard) | P0 | Sprint 4 |
+| [EP-04](#ep-04--página-projetos-kanban) | Página Projetos (Kanban 4 colunas) | P0 | Sprint 5 |
+| [EP-05](#ep-05--ações-rápidas-e-integrações-locais) | Ações rápidas e integrações locais | P1 | Sprint 6 |
+| [EP-06](#ep-06--página-finanças) | Página Finanças (shell visual) | P0 | Sprint 6 |
 | [EP-07](#ep-07--qualidade-testes-e-evidências) | Qualidade, testes e evidências | P0 | Transversal |
-| [EP-AG](#ep-ag--painel-agentes-futuro) | Painel Agentes (futuro) | P2 | Sprint 6+ |
+| [EP-AG](#ep-ag--painel-agentes-futuro) | Painel Agentes (futuro) | P2 | Sprint 7+ |
 
 ---
 
@@ -141,6 +142,36 @@ duplicar handlers. Esta sprint aplica o mesmo padrão a settings.
 **Risco:** `_beginSettingsPanelSession()` em `panels.js` precisa ser chamado
 pelo `mountDashboardSettings()` para ativar o dirty guard — requer atenção
 na integração com o fluxo de `switchPanel()`.
+
+---
+
+## EP-09 — Skills Neo (embutidas no dashboard)
+
+**Objetivo:** Ao clicar em "Skills" na sidebar Neo, o dashboard shell permanece
+ativo e exibe o painel de skills embutido — lista à esquerda (master) +
+detalhe à direita — com visual Neo, preservando 100% da lógica upstream:
+`GET /api/skills`, renderização por categoria, busca, criação e edição.
+
+**Por que aditivo:** `#panelSkills` (lista + busca) e `#mainSkills` (detalhe)
+já existem com toda a lógica implementada. O padrão de `mountDashboardSettings()`
+(Sprint 3) prova que mover o DOM da sidebar para dentro da main é seguro e
+mantém todos os handlers funcionando por `getElementById`. Skills é ainda
+mais simples: sem dirty guard, sem autosave, sem session state.
+
+### HUs
+
+| HU | Descrição | Prioridade |
+|---|---|---|
+| HU-09.1 | Como Júnior, quero que clicar em "Skills" mantenha o dashboard shell ativo e abra o painel embutido via `mountDashboardSkills()` — `#panelSkills` inteiro move para `#mainSkills` como coluna esquerda (260px) | P0 |
+| HU-09.2 | Como Júnior, quero o layout two-column no shell: lista de skills à esquerda com busca e botão "+ Nova", detalhe à direita — todos os handlers upstream preservados (`loadSkills`, `renderSkills`, `filterSkills`, `openSkillCreate`, edição e deleção) | P0 |
+| HU-09.3 | Como mantenedor, quero testes automáticos para mount/restore do painel de skills embutido, CSS Neo e preservação dos elementos DOM | P0 |
+
+**Dependências:** EP-03 (dashboard shell), EP-08 (padrão mount/restore).
+**Arquivos tocados:**
+- Aditivo: `static/panels.js` (`'skills'` em `NEO_SHELL_PANELS` + chamadas mount/restore)
+- Aditivo: `static/dashboard.js` (`mountDashboardSkills`, `restoreDashboardSkills`)
+- Aditivo: `static/style.css` (two-column layout no shell para `#mainSkills`)
+- Novo: `tests/test_neo_dashboard_skills.py`
 
 ---
 

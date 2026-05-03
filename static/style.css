@@ -2667,6 +2667,13 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
   body.dashboard-shell-mode main.main.showing-settings #mainSettings>#settingsMenu{width:190px;min-width:190px;flex-shrink:0;border-right:1px solid var(--border);padding:12px 8px;overflow-y:auto;background:var(--sidebar);}
   body.dashboard-shell-mode main.main.showing-settings #mainSettings>#settingsMenu::before{content:'CONFIGURAÇÕES';display:block;font-size:9px;font-weight:700;letter-spacing:.12em;color:var(--muted);padding:4px 10px 12px;}
   body.dashboard-shell-mode main.main.showing-settings #mainSettings>.settings-main{flex:1;min-width:0;overflow-y:auto;padding:24px;max-width:none;margin:0;}
+  body.dashboard-shell-mode main.main.showing-skills>#mainSkills{flex-direction:row;overflow:hidden;padding:0;}
+  body.dashboard-shell-mode main.main.showing-skills #mainSkills>#panelSkills{width:260px;min-width:260px;flex-shrink:0;border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;background:var(--sidebar);}
+  body.dashboard-shell-mode main.main.showing-skills #mainSkills>#panelSkills .panel-view{display:flex;flex-direction:column;flex:1;overflow:hidden;}
+  body.dashboard-shell-mode main.main.showing-skills #mainSkills .skills-list{flex:1;overflow-y:auto;}
+  body.dashboard-shell-mode main.main.showing-skills #mainSkills .main-view-header,
+  body.dashboard-shell-mode main.main.showing-skills #mainSkills .main-view-body,
+  body.dashboard-shell-mode main.main.showing-skills #mainSkills .main-view-empty{flex:1;min-width:0;}
 }
 main.main.showing-dashboard .main-view-body{overflow:hidden;padding:16px;}
 main.main.showing-dashboard .main-view-content{max-width:none;height:100%;}

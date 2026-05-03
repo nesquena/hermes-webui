@@ -131,6 +131,26 @@ function restoreDashboardSettings() {
   if (settingsMenuAnchor) _insertAfter(settingsMenuAnchor, menu);
 }
 
+let skillsPanelAnchor = null;
+
+function mountDashboardSkills() {
+  const panel = document.getElementById('panelSkills');
+  const mainSkills = document.getElementById('mainSkills');
+  if (!panel || !mainSkills) return;
+  if (!skillsPanelAnchor && panel.parentNode) {
+    skillsPanelAnchor = document.createComment('skillsPanelAnchor');
+    panel.parentNode.insertBefore(skillsPanelAnchor, panel);
+  }
+  if (panel.parentNode !== mainSkills) mainSkills.insertBefore(panel, mainSkills.firstChild);
+}
+
+function restoreDashboardSkills() {
+  const panel = document.getElementById('panelSkills');
+  const mainSkills = document.getElementById('mainSkills');
+  if (!panel || !mainSkills || panel.parentNode !== mainSkills) return;
+  if (skillsPanelAnchor) _insertAfter(skillsPanelAnchor, panel);
+}
+
 async function loadDashboardSummary() {
   try {
     const data = await api('/api/dashboard/summary');

@@ -21,7 +21,7 @@ const APP_TITLEBAR_KEYS = {
   projects: 'tab_projects', finance: 'tab_finance', agents: 'tab_agents',
 };
 
-const NEO_SHELL_PANELS = new Set(['dashboard', 'projects', 'todos', 'profiles', 'finance', 'agents', 'settings']);
+const NEO_SHELL_PANELS = new Set(['dashboard', 'projects', 'todos', 'profiles', 'finance', 'agents', 'settings', 'skills']);
 
 const MAIN_VIEW_CLASS_BY_PANEL = {
   dashboard: 'showing-dashboard',
@@ -191,10 +191,14 @@ async function switchPanel(name, opts = {}) {
   }
   if (nextPanel !== 'dashboard' && typeof restoreDashboardChat === 'function') restoreDashboardChat();
   if (nextPanel !== 'settings' && typeof restoreDashboardSettings === 'function') restoreDashboardSettings();
+  if (nextPanel !== 'skills' && typeof restoreDashboardSkills === 'function') restoreDashboardSkills();
   // Lazy-load panel data
   if (nextPanel === 'dashboard' && typeof loadDashboard === 'function') await loadDashboard();
   if (nextPanel === 'tasks') await loadCrons();
-  if (nextPanel === 'skills') await loadSkills();
+  if (nextPanel === 'skills') {
+    if (typeof mountDashboardSkills === 'function') mountDashboardSkills();
+    await loadSkills();
+  }
   if (nextPanel === 'memory') await loadMemory();
   if (nextPanel === 'workspaces') await loadWorkspacesPanel();
   if (nextPanel === 'profiles') {

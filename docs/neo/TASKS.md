@@ -6,7 +6,7 @@
 > contratuais devem ser feitas primeiro no PRD/Backlog/Design Spec.
 
 **Atualizado em:** 2026-05-02
-**Versão alvo MVP:** `neo-webui-v0.1` ao final da Sprint 5
+**Versão alvo MVP:** `neo-webui-v0.1` ao final da Sprint 6
 **Branch de desenvolvimento atual:** `develop`
 **Branch de produção:** `main`
 
@@ -33,11 +33,12 @@
 |---|---:|---:|---:|---:|---|
 | Sprint 1 | Rebrand visual/textual + locale pt-BR | 11 | 10 + 1 parcial | 0 | aguardando evidências/homologação |
 | Sprint 2 | Dashboard + sidebar/topbar Neo | 11 | 11 | 11 | concluída |
-| Sprint 3 | Configurações Neo (embutidas no dashboard) | 6 | 0 | 0 | disponível |
-| Sprint 4 | Projetos/Kanban 4 colunas | 10 | 0 | 0 | aguardando Sprint 3 |
-| Sprint 5 | Ações rápidas + Finanças shell visual | 13 | 0 | 0 | aguardando Sprint 4 |
+| Sprint 3 | Configurações Neo (embutidas no dashboard) | 6 | 6 | 6 | concluída |
+| Sprint 4 | Skills Neo (embutidas no dashboard) | 3 | 0 | 0 | disponível |
+| Sprint 5 | Projetos/Kanban 4 colunas | 10 | 0 | 0 | aguardando Sprint 4 |
+| Sprint 6 | Ações rápidas + Finanças shell visual | 13 | 0 | 0 | aguardando Sprint 5 |
 | Transversal | Qualidade, testes e evidências | 5 | 2 parciais | 0 | em andamento contínuo |
-| Sprint 6+ | Painel Agentes futuro | 5 | 0 | 0 | depende de PoC |
+| Sprint 7+ | Painel Agentes futuro | 5 | 0 | 0 | depende de PoC |
 
 ### Estado atual do worktree
 
@@ -590,14 +591,74 @@ Neo, preservando 100% dos handlers, guards e autosave do upstream.
 
 ---
 
-## Sprint 4 — Projetos (Kanban 4 colunas)
+## Sprint 4 — Skills Neo (embutidas no dashboard)
+
+**Meta:** ao clicar em "Skills" na sidebar Neo, o dashboard shell permanece ativo
+e exibe o painel de skills embutido em layout master-detail: lista à esquerda
+(260px) + detalhe à direita. Toda a lógica upstream preservada.
+
+### HU-09.1 — mountDashboardSkills + NEO_SHELL_PANELS
+
+**Status:** disponível
+**Prioridade:** P0
+**Épico:** EP-09
+
+**Tasks**
+
+- [ ] Adicionar `'skills'` a `NEO_SHELL_PANELS` em `static/panels.js`.
+- [ ] Adicionar chamada `mountDashboardSkills()` no bloco `nextPanel === 'skills'` de `switchPanel()`.
+- [ ] Adicionar chamada `restoreDashboardSkills()` na guard de saída (junto a `restoreDashboardSettings`).
+- [ ] Implementar `mountDashboardSkills()` em `static/dashboard.js`: move `#panelSkills` inteiro para `#mainSkills` como primeiro filho (anchor pattern).
+- [ ] Implementar `restoreDashboardSkills()`: devolve `#panelSkills` à posição original via anchor.
+- [ ] Registrar evidência técnica em `docs/neo/evidencias/HU-09.1/`.
+
+### HU-09.2 — Layout two-column + Neo styling
+
+**Status:** disponível
+**Prioridade:** P0
+**Épico:** EP-09
+
+**Tasks**
+
+- [ ] CSS: `body.dashboard-shell-mode main.main.showing-skills > #mainSkills` → `display:flex; flex-direction:row; overflow:hidden; padding:0`.
+- [ ] CSS: `#panelSkills` dentro do shell → `width:260px; flex-shrink:0; border-right:1px solid var(--border); display:flex; flex-direction:column; overflow:hidden`.
+- [ ] CSS: área de detalhe (`#skillDetailBody`, `#skillDetailEmpty`, header) → `flex:1; min-width:0`.
+- [ ] Confirmar que `loadSkills()`, `renderSkills()`, `filterSkills()`, `openSkillCreate()`, edição e deleção funcionam sem alteração.
+- [ ] Registrar evidência técnica em `docs/neo/evidencias/HU-09.2/`.
+
+### HU-09.3 — Testes automáticos
+
+**Status:** disponível
+**Prioridade:** P0
+**Épico:** EP-09
+
+**Tasks**
+
+- [ ] Criar `tests/test_neo_dashboard_skills.py`.
+- [ ] Testar: `'skills'` em `NEO_SHELL_PANELS` em `panels.js`.
+- [ ] Testar: `mountDashboardSkills` e `restoreDashboardSkills` definidos em `dashboard.js`.
+- [ ] Testar: CSS two-column presente em `style.css`.
+- [ ] Testar: `#panelSkills`, `#skillsList`, `#skillsSearch`, `#mainSkills` presentes em `index.html`.
+- [ ] Suite completa passa sem regressão.
+
+### Encerramento Sprint 4
+
+- [ ] HU-09.1 a HU-09.3 concluídas por DoD.
+- [ ] `pytest tests/test_neo_dashboard_skills.py -v` passa.
+- [ ] Suite completa Neo passa sem regressão.
+- [ ] Evidências em `docs/neo/evidencias/HU-09.*`.
+- [ ] Commit limpo em `develop`.
+
+---
+
+## Sprint 5 — Projetos (Kanban 4 colunas)
 
 **Meta:** página Projetos full-page com Kanban de 4 colunas, cards com chips,
 progresso, status pills e drag-and-drop persistido.
 
 ### HU-04.1 — Página Projetos com header
 
-**Status:** aguardando Sprint 3
+**Status:** aguardando Sprint 4
 
 **Tasks**
 
@@ -608,7 +669,7 @@ progresso, status pills e drag-and-drop persistido.
 
 ### HU-04.2 — Kanban 4 colunas
 
-**Status:** aguardando Sprint 3
+**Status:** aguardando Sprint 4
 
 **Tasks**
 
@@ -620,7 +681,7 @@ progresso, status pills e drag-and-drop persistido.
 
 ### HU-04.3 — Criar projeto via modal
 
-**Status:** aguardando Sprint 3
+**Status:** aguardando Sprint 4
 
 **Tasks**
 
@@ -705,14 +766,14 @@ progresso, status pills e drag-and-drop persistido.
 
 ---
 
-## Sprint 5 — Ações rápidas + Finanças
+## Sprint 6 — Ações rápidas + Finanças
 
 **Meta:** fechar o MVP com ações rápidas operacionais e página Finanças com
 shell visual completo, SVG vanilla e persistência local.
 
 ### HU-05.1 — Atalho "Salvar memória"
 
-**Status:** aguardando Sprint 4
+**Status:** aguardando Sprint 5
 
 **Tasks**
 
@@ -721,7 +782,7 @@ shell visual completo, SVG vanilla e persistência local.
 
 ### HU-05.2 — Atalho "Novo terminal"
 
-**Status:** aguardando Sprint 4
+**Status:** aguardando Sprint 5
 
 **Tasks**
 
@@ -730,7 +791,7 @@ shell visual completo, SVG vanilla e persistência local.
 
 ### HU-05.3 — Seletor "Executar skill"
 
-**Status:** aguardando Sprint 4
+**Status:** aguardando Sprint 5
 
 **Tasks**
 
@@ -739,7 +800,7 @@ shell visual completo, SVG vanilla e persistência local.
 
 ### HU-05.4 — Indicador de job cron concluído
 
-**Status:** aguardando Sprint 4
+**Status:** aguardando Sprint 5
 
 **Tasks**
 
@@ -748,7 +809,7 @@ shell visual completo, SVG vanilla e persistência local.
 
 ### HU-06.1 — Página Finanças com header
 
-**Status:** aguardando Sprint 4
+**Status:** aguardando Sprint 5
 **Prioridade:** P0
 
 **Tasks**
@@ -850,7 +911,7 @@ shell visual completo, SVG vanilla e persistência local.
 - [ ] Donut: 600ms ease-out.
 - [ ] Respeitar `prefers-reduced-motion`.
 
-### Encerramento Sprint 5
+### Encerramento Sprint 6
 
 - [ ] Todas as HUs MVP concluídas por DoD.
 - [ ] `docs/neo/CHANGELOG.md` criado com release `neo-webui-v0.1`.
@@ -894,7 +955,7 @@ shell visual completo, SVG vanilla e persistência local.
 
 ---
 
-## Sprint 6+ — Painel Agentes (futuro / P2)
+## Sprint 7+ — Painel Agentes (futuro / P2)
 
 > Não iniciar produção sem PoC de custo na VPS. Referência visual:
 > `pablodelucca/pixel-agents`, sem compromisso de reprodução 1:1.
@@ -936,5 +997,9 @@ _A preencher._
 _A preencher._
 
 ### Retro Sprint 5
+
+_A preencher._
+
+### Retro Sprint 6
 
 _A preencher._
