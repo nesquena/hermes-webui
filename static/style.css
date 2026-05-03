@@ -2430,6 +2430,25 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 }
 .session-pin-indicator svg{width:10px;height:10px;}
 
+/* ── Session branch indicator (fork/branch, for branched sessions #465) ── */
+.session-branch-indicator{
+  flex-shrink:0;
+  color:var(--accent);
+  font-size:11px;
+  font-weight:600;
+  line-height:1;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  margin:0 2px;
+  cursor:pointer;
+  user-select:none;
+  transition:opacity 0.2s;
+}
+.session-branch-indicator:hover{
+  opacity:0.7;
+}
+
 /* ── Cron alert badge ── */
 .cron-badge{position:absolute;top:2px;right:2px;background:#e53e3e;color:#fff;font-size:9px;font-weight:700;min-width:14px;height:14px;line-height:14px;text-align:center;border-radius:7px;padding:0 3px;}
 .cron-new-dot{width:7px;height:7px;border-radius:50%;background:var(--success,#22c55e);flex-shrink:0;animation:cron-dot-pulse 2s ease-in-out infinite;}
