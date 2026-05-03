@@ -1390,6 +1390,38 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name == "space.spaces.savespacelayout":
         result = save_space_layout_from_tool(data)
         return {"ok": True, "action": name, **result}
+    if name == "space.spaces.rearrangewidgets":
+        space_id = validate_space_id(_space_tool_current_id(data))
+        raw_widgets = data.get("widgets") or data.get("widgetLayouts") or data.get("widget_layouts") or []
+        if not isinstance(raw_widgets, list):
+            raise ValueError("widgets must be a list")
+        saved_widgets: list[dict[str, Any]] = []
+        revision_event_ids: list[str] = []
+        for raw_widget in raw_widgets:
+            if not isinstance(raw_widget, dict):
+                raise ValueError("widget layout must be an object")
+            widget_id = validate_widget_id(_space_tool_widget_id(raw_widget) or raw_widget.get("widgetId"))
+            position = raw_widget.get("position") if isinstance(raw_widget.get("position"), dict) else {}
+            size = raw_widget.get("size") if isinstance(raw_widget.get("size"), dict) else {}
+            layout = {
+                "x": raw_widget.get("x", raw_widget.get("col", position.get("x", 0))),
+                "y": raw_widget.get("y", raw_widget.get("row", position.get("y", 0))),
+                "w": raw_widget.get("w", raw_widget.get("cols", size.get("w", 6))),
+                "h": raw_widget.get("h", raw_widget.get("rows", size.get("h", 4))),
+                "minimized": raw_widget.get("minimized", False),
+            }
+            result = patch_widget(space_id, widget_id, {"layout": layout})
+            revision_event_ids.append(result["revision_event_id"])
+            saved_widgets.append(read_widget_detail(space_id, widget_id))
+        return {
+            "ok": True,
+            "action": name,
+            "space_id": space_id,
+            "space": read_space_detail(space_id),
+            "widgets": saved_widgets,
+            "widget_count": len(saved_widgets),
+            "revision_event_ids": revision_event_ids,
+        }
     if name in {"space.spaces.removespace", "space.spaces.deletespace"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         result = delete_space(space_id)

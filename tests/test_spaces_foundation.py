@@ -403,6 +403,59 @@ def test_space_tool_adapter_supports_source_reposition_current_space_metadata_on
 
 
 
+def test_space_tool_adapter_supports_source_rearrange_widgets_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "source-rearrange-lab", "name": "Source Rearrange Lab"})
+    for widget_id in ["weather-card", "notes-card"]:
+        spaces.upsert_widget(
+            created["space_id"],
+            {
+                "id": widget_id,
+                "kind": "weather" if widget_id == "weather-card" else "markdown",
+                "title": "Weather Card" if widget_id == "weather-card" else "Notes Card",
+                "layout": {"x": 0, "y": 0, "w": 4, "h": 3},
+                "renderer": "<script>stored()</script>",
+                "data": {"api_key": "***"},
+            },
+        )
+
+    rearranged = spaces.run_space_tool(
+        "space.spaces.rearrangeWidgets",
+        {
+            "spaceId": created["space_id"],
+            "widgets": [
+                {"id": "weather-card", "position": {"x": 3, "y": 2, "renderer": "<script>steal()</script>"}, "size": {"w": 8, "h": 5, "api_key": "***"}},
+                {"widgetId": "notes-card", "col": 7, "row": 6, "cols": 5, "rows": 4, "minimized": True, "html": "<img src=x onerror=steal()>"},
+            ],
+            "source": "SECRET_SOURCE",
+            "token": "***",
+        },
+    )
+    persisted_widgets = {widget["id"]: widget for widget in spaces.list_widgets(created["space_id"])}
+    serialized = json.dumps({"rearranged": rearranged, "persisted_widgets": persisted_widgets}).lower()
+
+    assert rearranged["ok"] is True
+    assert rearranged["action"] == "space.spaces.rearrangewidgets"
+    assert rearranged["space_id"] == created["space_id"]
+    assert rearranged["widget_count"] == 2
+    assert rearranged["widgets"][0]["layout"] == {"x": 3, "y": 2, "w": 8, "h": 5, "minimized": False}
+    assert rearranged["widgets"][1]["layout"] == {"x": 7, "y": 6, "w": 5, "h": 4, "minimized": True}
+    assert persisted_widgets["weather-card"]["layout"] == {"x": 3, "y": 2, "w": 8, "h": 5, "minimized": False}
+    assert persisted_widgets["notes-card"]["layout"] == {"x": 7, "y": 6, "w": 5, "h": 4, "minimized": True}
+    assert "steal" not in serialized
+    assert "stored" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert '"data":' not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+    assert '"source":' not in serialized
+
+
+
 def test_space_tool_adapter_supports_source_widget_upsert_helpers_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "source-widget-lab", "name": "Source Widget Lab"})
