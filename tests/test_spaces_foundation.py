@@ -516,6 +516,71 @@ def test_space_tool_adapter_supports_source_space_meta_and_layout_helpers_metada
 
 
 
+def test_space_tool_adapter_supports_source_current_space_meta_and_layout_helpers_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "current-layout-lab", "name": "Current Layout Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "notes-card",
+            "kind": "markdown",
+            "title": "Notes Card",
+            "renderer": "<script>stored()</script>",
+            "data": {"api_key": "***"},
+        },
+    )
+
+    saved_meta = spaces.run_space_tool(
+        "space.current.saveMeta",
+        {
+            "activeSpaceId": created["space_id"],
+            "name": "Current Metadata Space",
+            "specialInstructions": "Keep generated widget bodies quarantined.",
+            "renderer": "<script>steal()</script>",
+            "api_key": "***",
+        },
+    )
+    saved_layout = spaces.run_space_tool(
+        "space.current.saveLayout",
+        {
+            "activeSpaceId": created["space_id"],
+            "widgetIds": ["notes-card"],
+            "widgetPositions": {"notes-card": {"x": 2, "y": 3, "renderer": "<script>steal()</script>"}},
+            "widgetSizes": {"notes-card": {"w": 7, "h": 4, "token": "***"}},
+            "minimizedWidgetIds": ["notes-card"],
+            "source": "SECRET_SOURCE",
+        },
+    )
+    persisted = spaces.read_space(created["space_id"])
+    serialized = json.dumps({"saved_meta": saved_meta, "saved_layout": saved_layout, "persisted": persisted}).lower()
+
+    assert saved_meta["ok"] is True
+    assert saved_meta["action"] == "space.current.savemeta"
+    assert saved_meta["active_space_id"] == created["space_id"]
+    assert saved_meta["space"]["name"] == "Current Metadata Space"
+    assert saved_meta["space"]["agent_instructions"] == "Keep generated widget bodies quarantined."
+    assert saved_layout["ok"] is True
+    assert saved_layout["action"] == "space.current.savelayout"
+    assert saved_layout["active_space_id"] == created["space_id"]
+    assert saved_layout["space"]["layout"] == {
+        "widget_ids": ["notes-card"],
+        "widget_positions": {"notes-card": {"x": 2, "y": 3}},
+        "widget_sizes": {"notes-card": {"w": 7, "h": 4}},
+        "minimized_widget_ids": ["notes-card"],
+    }
+    assert persisted["name"] == "Current Metadata Space"
+    assert persisted["layout"] == saved_layout["space"]["layout"]
+    assert "steal" not in serialized
+    assert "stored" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+    assert '"source":' not in serialized
+
+
+
 def test_space_tool_adapter_supports_source_size_to_token_helper_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 

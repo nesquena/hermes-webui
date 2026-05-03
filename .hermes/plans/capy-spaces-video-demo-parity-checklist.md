@@ -40,6 +40,7 @@ Recently landed:
 - Source-style current-widget helper aliases now include metadata-only `space.current.listWidgets`, `space.current.readWidget`, and `space.current.seeWidget`, accepting `activeSpaceId`/`widgetId` payloads while returning only safe widget summaries/details plus sandbox-contract and queued-event metadata.
 - Source-style current-widget mutation aliases now include metadata-only `space.current.patchWidget` and `space.current.reloadWidget`, accepting `activeSpaceId`/`widgetId` payloads while applying only safe title/layout metadata patches or queuing bounded refresh-event metadata.
 - Source-style logical app URL helper coverage now includes metadata-only `space.spaces.resolveAppUrl`, accepting safe app-owned logical paths while rejecting external, traversal, query/fragment, and private filesystem paths without echoing raw unsafe input.
+- Source-style current-space metadata/layout helpers now include metadata-only `space.current.saveMeta` and `space.current.saveLayout`, accepting `activeSpaceId` payloads while saving only safe Capy Space metadata/layout fields and omitting generated/credential-like fields from responses.
 - Source-style widget size utility coverage now includes metadata-only `space.spaces.sizeToToken`, mirroring Space Agent preset/object/fallback size normalization and clamping without exposing generated/source/API auth markers.
 - Screenshot QA artifacts are expected for visually relevant Spaces work.
 

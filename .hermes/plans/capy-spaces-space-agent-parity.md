@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-03 16:28 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-03 17:39 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: source widget-size utility coverage now includes the Space Agent-style `space.spaces.sizeToToken` adapter while preserving Capy's metadata-only boundary. The helper accepts preset, object, tuple/list, and fallback size inputs, clamps unsafe dimensions, returns only normalized size metadata plus the compact size string, and omits generated/executable/source/API auth markers from serialized responses. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: source current-space metadata/layout helper coverage now includes Space Agent-style `space.current.saveMeta` and `space.current.saveLayout` aliases while preserving Capy's metadata-only boundary. The helpers resolve `activeSpaceId`, save only safe Space metadata/layout fields, return compact current-space metadata, and omit generated/executable/source/API auth markers from serialized responses. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): support source current save helpers`
+  - Added RED/GREEN backend coverage proving `space.current.saveMeta` and `space.current.saveLayout` accept Space Agent-style active-space payloads, save only safe metadata/layout fields, and omit renderer/html/source/API auth markers from serialized adapter responses and persisted manifests.
+  - Validation at completion before screenshot/restart: focused RED failed before implementation with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`). Run `git log -1 --oneline` and the final report for the full validation bundle.
 
 - `feat(spaces): support source widget size helper`
   - Added RED/GREEN backend coverage proving `space.spaces.sizeToToken` mirrors Space Agent-style widget size normalization for presets, bounded object sizes, and invalid sizes with safe fallbacks, while omitting renderer/html/source/API auth markers from serialized adapter responses.

@@ -1590,12 +1590,18 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         space = read_space_detail(result["space_id"])
         space["widget_count"] = len(space.get("widgets") or [])
         return {"ok": True, "action": name, **result, "space": space}
-    if name == "space.spaces.savespacemeta":
+    if name in {"space.spaces.savespacemeta", "space.current.savemeta"}:
         result = save_space_meta_from_tool(data)
-        return {"ok": True, "action": name, **result}
-    if name == "space.spaces.savespacelayout":
+        response = {"ok": True, "action": name, **result}
+        if name.startswith("space.current."):
+            response["active_space_id"] = result["space_id"]
+        return response
+    if name in {"space.spaces.savespacelayout", "space.current.savelayout"}:
         result = save_space_layout_from_tool(data)
-        return {"ok": True, "action": name, **result}
+        response = {"ok": True, "action": name, **result}
+        if name.startswith("space.current."):
+            response["active_space_id"] = result["space_id"]
+        return response
     if name == "space.spaces.repairlayout":
         result = repair_space_layout_from_tool(data)
         return {"ok": True, "action": name, **result}
