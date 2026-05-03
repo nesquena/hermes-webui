@@ -61,6 +61,38 @@ def _cleanup_stale_tmp_files() -> None:
         pass  # SESSION_DIR may not exist yet; that's fine
 
 
+def _session_id_from_path(path: Path) -> str:
+    """Return the canonical session id for a WebUI or Hermes Agent JSON file."""
+    stem = path.stem
+    if stem.startswith('session_'):
+        return stem[len('session_'):]
+    return stem
+
+
+def _session_file_id_set() -> set[str]:
+    """Return canonical session ids currently backed by JSON files."""
+    ids = set()
+    try:
+        for p in SESSION_DIR.glob('*.json'):
+            if p.name.startswith('_'):
+                continue
+            ids.add(_session_id_from_path(p))
+    except Exception:
+        pass
+    return ids
+
+
+def _index_needs_rebuild(index: list) -> bool:
+    """Detect stale/incomplete indexes after switching to shared agent storage."""
+    if not isinstance(index, list):
+        return True
+    disk_ids = _session_file_id_set()
+    if not disk_ids:
+        return False
+    indexed_ids = {str(e.get('session_id')) for e in index if isinstance(e, dict) and e.get('session_id')}
+    return bool(disk_ids - indexed_ids)
+
+
 def _index_entry_exists(session_id: str, in_memory_ids=None) -> bool:
     """Return True if an index entry still has backing state.
 
@@ -68,6 +100,9 @@ def _index_entry_exists(session_id: str, in_memory_ids=None) -> bool:
     in-memory Session object that has not been flushed yet.  This helper is used
     to prune stale `_index.json` rows left behind after session-id rotation or
     file removal.
+    
+    Note: Agent uses 'session_{id}.json' naming, web UI uses '{id}.json'.
+    We check both for compatibility.
     """
     if not session_id:
         return False
@@ -76,8 +111,13 @@ def _index_entry_exists(session_id: str, in_memory_ids=None) -> bool:
             in_memory_ids = set(SESSIONS.keys())
     if session_id in in_memory_ids:
         return True
+    # Check web UI naming convention first
     p = SESSION_DIR / f'{session_id}.json'
-    return p.exists()
+    if p.exists():
+        return True
+    # Check agent naming convention (session_{id}.json)
+    p_agent = SESSION_DIR / f'session_{session_id}.json'
+    return p_agent.exists()
 
 
 def _write_session_index(updates=None):
@@ -98,13 +138,18 @@ def _write_session_index(updates=None):
         if updates is None or not SESSION_INDEX_FILE.exists():
             _cleanup_stale_tmp_files()  # best-effort sweep on startup / first call
             entries = []
+            seen_ids = set()
             for p in SESSION_DIR.glob('*.json'):
                 if p.name.startswith('_'):
                     continue
                 try:
-                    s = Session.load(p.stem)
+                    sid = _session_id_from_path(p)
+                    if sid in seen_ids:
+                        continue
+                    s = Session.load(sid)
                     if s:
                         entries.append(s.compact())
+                        seen_ids.add(s.session_id)
                 except Exception:
                     logger.debug("Failed to load session from %s", p)
 
@@ -141,11 +186,7 @@ def _write_session_index(updates=None):
 
                 # Avoid N filesystem exists() checks under LOCK by collecting
                 # on-disk IDs once.
-                on_disk_ids = {
-                    p.stem
-                    for p in SESSION_DIR.glob('*.json')
-                    if not p.name.startswith('_')
-                }
+                on_disk_ids = _session_file_id_set()
 
                 existing = [
                     e for e in existing
@@ -362,6 +403,12 @@ class Session:
 
     @property
     def path(self):
+        # Use agent naming convention (session_{id}.json) if it exists,
+        # otherwise fall back to WebUI naming convention ({id}.json).
+        # This prevents duplicate files when agent and WebUI both write to the same session.
+        p_agent = SESSION_DIR / f'session_{self.session_id}.json'
+        if p_agent.exists():
+            return p_agent
         return SESSION_DIR / f'{self.session_id}.json'
 
     def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
@@ -411,10 +458,36 @@ class Session:
         # Validate session ID format to prevent path traversal
         if not sid or not all(c in '0123456789abcdefghijklmnopqrstuvwxyz_' for c in sid):
             return None
+        # Try web UI naming convention first
         p = SESSION_DIR / f'{sid}.json'
         if not p.exists():
+            # Fall back to agent naming convention (session_{id}.json)
+            p = SESSION_DIR / f'session_{sid}.json'
+        if not p.exists():
             return None
-        return cls(**json.loads(p.read_text(encoding='utf-8')))
+        data = json.loads(p.read_text(encoding='utf-8'))
+        # Normalize field names: agent uses session_start/last_updated, web UI uses created_at/updated_at
+        if 'session_start' in data and 'created_at' not in data:
+            ts = data.pop('session_start')
+            # Convert ISO string to epoch float if needed
+            if isinstance(ts, str):
+                from datetime import datetime
+                try:
+                    ts = datetime.fromisoformat(ts).timestamp()
+                except:
+                    ts = time.time()
+            data['created_at'] = ts
+        if 'last_updated' in data and 'updated_at' not in data:
+            ts = data.pop('last_updated')
+            # Convert ISO string to epoch float if needed
+            if isinstance(ts, str):
+                from datetime import datetime
+                try:
+                    ts = datetime.fromisoformat(ts).timestamp()
+                except:
+                    ts = time.time()
+            data['updated_at'] = ts
+        return cls(**data)
 
     @classmethod
     def load_metadata_only(cls, sid):
@@ -427,7 +500,11 @@ class Session:
         """
         if not sid or not all(c in '0123456789abcdefghijklmnopqrstuvwxyz_' for c in sid):
             return None
+        # Try web UI naming convention first
         p = SESSION_DIR / f'{sid}.json'
+        if not p.exists():
+            # Fall back to agent naming convention (session_{id}.json)
+            p = SESSION_DIR / f'session_{sid}.json'
         if not p.exists():
             return None
         try:
@@ -790,9 +867,17 @@ def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
 def all_sessions():
     active_stream_ids = _active_stream_ids()
     # Phase C: try index first for O(1) read; fall back to full scan
+    if not SESSION_INDEX_FILE.exists():
+        try:
+            _write_session_index(updates=None)
+        except Exception:
+            logger.debug("Failed to create session index, falling back to full scan")
     if SESSION_INDEX_FILE.exists():
         try:
             index = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
+            if _index_needs_rebuild(index):
+                _write_session_index(updates=None)
+                index = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
             index = [
                 s for s in index
                 if _index_entry_exists(s.get('session_id'))
@@ -851,11 +936,17 @@ def all_sessions():
             logger.debug("Failed to load session index, falling back to full scan")
     # Full scan fallback
     out = []
+    seen_ids = set()
     for p in SESSION_DIR.glob('*.json'):
         if p.name.startswith('_'): continue
         try:
-            s = Session.load(p.stem)
-            if s: out.append(s)
+            sid = _session_id_from_path(p)
+            if sid in seen_ids:
+                continue
+            s = Session.load(sid)
+            if s:
+                out.append(s)
+                seen_ids.add(s.session_id)
         except Exception:
             logger.debug("Failed to load session from %s", p)
     for s in SESSIONS.values():

@@ -43,7 +43,10 @@ STATE_DIR = (
     .resolve()
 )
 
-SESSION_DIR = STATE_DIR / "sessions"
+# Use agent's session directory so UI and agent share the same storage.
+# This fixes the session desync bug where agent writes to ~/.hermes/sessions
+# but UI was reading from ~/.hermes/webui/sessions.
+SESSION_DIR = HOME / ".hermes" / "sessions"
 WORKSPACES_FILE = STATE_DIR / "workspaces.json"
 SESSION_INDEX_FILE = SESSION_DIR / "_index.json"
 SETTINGS_FILE = STATE_DIR / "settings.json"
