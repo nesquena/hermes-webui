@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-02 18:45 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-02 19:51 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: source-style Space Agent widget upsert aliases now route `space.spaces.upsertWidget` / `upsertWidgets` through Capy's safe metadata-only widget upsert path, mapping Space Agent `type` to Capy `kind` while omitting generated/executable widget bodies and credential-like payloads from stored adapter metadata and serialized results. Use `git log -1 --oneline` for the exact commit hash after commit.
+Current latest known completed code slice: source-style Space Agent widget patch aliases now route `space.spaces.patchWidget` through Capy's safe metadata-only widget patch path, accepting camelCase `spaceId`/`widgetId` payloads while omitting renderer/html/script/source/data and credential-like values from serialized tool/detail responses. Use `git log -1 --oneline` for the exact commit hash after commit.
 
 Recent completed slices:
+
+- `feat(spaces): support source widget patch alias`
+  - Added RED/GREEN backend coverage proving `space.spaces.patchWidget` accepts Space Agent-style camelCase payloads, patches safe widget metadata such as title/layout/weather, and omits renderer/html/script/source/data plus credential-like markers from serialized adapter/detail results.
+  - Validation at completion: focused RED failed before implementation with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`), full Spaces foundation suite passed (`109 passed`), `py_compile api/spaces.py tests/test_spaces_foundation.py`, and `git diff --check` passed. Mock/status screenshot QA captured the alias status with empty browser console and a clean sensitive-marker DOM check; screenshot artifact `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_37d569344cad479bb44c2de17f28b573.png`.
 
 - `feat(spaces): support source widget upsert aliases`
   - Added RED/GREEN backend coverage proving `space.spaces.upsertWidget` and `space.spaces.upsertWidgets` accept Space Agent-style widget payloads, preserve bounded declarative metadata such as layout/weather/notes, map `type` to `kind`, and omit generated/executable bodies plus credential-like markers from stored adapter metadata and serialized results.

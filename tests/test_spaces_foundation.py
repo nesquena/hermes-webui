@@ -287,6 +287,64 @@ def test_space_tool_adapter_supports_source_widget_upsert_helpers_metadata_only(
     assert '"source":' not in serialized
 
 
+def test_space_tool_adapter_supports_source_widget_patch_helper_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "source-patch-lab", "name": "Source Patch Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "weather-card",
+            "kind": "weather",
+            "title": "Weather Card",
+            "layout": {"x": 1, "y": 1, "w": 4, "h": 3},
+            "weather": {"location": "Prague"},
+            "renderer": "<script>stored()</script>",
+            "html": "<img src=x onerror=stored()>",
+            "data": {"api_key": "***"},
+        },
+    )
+
+    patched = spaces.run_space_tool(
+        "space.spaces.patchWidget",
+        {
+            "spaceId": created["space_id"],
+            "widgetId": "weather-card",
+            "title": "Updated Weather",
+            "layout": {"x": 3, "y": 2, "w": 7, "h": 4},
+            "weather": {"location": "Berlin", "api_key": "***"},
+            "edits": [{"line": 1, "replace": "ignored renderer edit"}],
+            "renderer": "<script>steal()</script>",
+            "html": "<img src=x onerror=steal()>",
+            "script": "steal()",
+            "source": "SECRET_SOURCE",
+            "data": {"token": "***"},
+        },
+    )
+    stored = spaces.read_widget(created["space_id"], "weather-card")
+    public_detail = spaces.read_widget_detail(created["space_id"], "weather-card")
+    serialized = json.dumps({"patched": patched, "public_detail": public_detail}).lower()
+
+    assert patched["ok"] is True
+    assert patched["action"] == "space.spaces.patchwidget"
+    assert patched["widget"]["title"] == "Updated Weather"
+    assert patched["widget"]["layout"] == {"x": 3, "y": 2, "w": 7, "h": 4, "minimized": False}
+    assert patched["widget"]["metadata"]["weather"] == {"location": "Berlin"}
+    assert stored["title"] == "Updated Weather"
+    assert stored["weather"] == {"location": "Berlin"}
+    assert "steal" not in serialized
+    assert "stored" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert '"script":' not in serialized
+    assert '"data":' not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+    assert '"source":' not in serialized
+
+
 def test_space_tool_adapter_exposes_widget_runtime_contract_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "runtime-lab", "name": "Runtime Lab"})

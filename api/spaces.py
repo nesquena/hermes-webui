@@ -1067,8 +1067,21 @@ def _space_tool_widgets_payload(payload: dict[str, Any], *, bulk: bool) -> list[
 
 def _space_tool_current_id(payload: dict[str, Any]) -> str:
     """Return the optional current-space id from a tool payload."""
-    raw = payload.get("space_id") or payload.get("active_space_id") or payload.get("current_space_id") or ""
+    raw = (
+        payload.get("space_id")
+        or payload.get("spaceId")
+        or payload.get("active_space_id")
+        or payload.get("activeSpaceId")
+        or payload.get("current_space_id")
+        or payload.get("currentSpaceId")
+        or ""
+    )
     return str(raw or "").strip()
+
+
+def _space_tool_widget_id(payload: dict[str, Any]) -> str:
+    """Return a widget id from Hermes or Space Agent-style payloads."""
+    return str(payload.get("widget_id") or payload.get("widgetId") or payload.get("id") or "").strip()
 
 
 def _space_tool_template_name(payload: dict[str, Any], default: str = "weather") -> str:
@@ -1207,6 +1220,12 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             response["widget"] = saved_widgets[0]
             response["revision_event_id"] = revision_event_ids[-1]
         return response
+    if name == "space.spaces.patchwidget":
+        space_id = validate_space_id(_space_tool_current_id(data))
+        widget_id = validate_widget_id(_space_tool_widget_id(data))
+        patch_payload = data.get("patch") if isinstance(data.get("patch"), dict) else data
+        result = patch_widget(space_id, widget_id, _space_tool_widget_payload(patch_payload))
+        return {"ok": True, "action": name, **result, "widget": read_widget_detail(space_id, widget_id)}
     if name in {"space.data.set", "space.current.data.set"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         result = set_shared_data_slot(space_id, data.get("key"), data.get("value"), data.get("metadata"))

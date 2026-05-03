@@ -25,6 +25,7 @@ Recently landed:
 - Source-style camelCase helper aliases now include metadata-only `space.spaces.createSpace`, `space.spaces.listSpaces`, and `space.spaces.openSpace` / `getSpace` / `readSpace`, matching additional Space Agent runtime helper names without exposing generated widget bodies or credential-like fields.
 - Source-style example/template helper aliases now include metadata-only `space.spaces.installExampleSpace` / `installTemplate`, mapping bundled Space Agent demo ids such as `retro-arcade` onto safe Capy templates instead of copying or rendering untrusted source artifacts.
 - Source-style widget upsert helper aliases now include metadata-only `space.spaces.upsertWidget` / `upsertWidgets`, preserving bounded declarative widget metadata while omitting generated/executable bodies and credential-like payloads.
+- Source-style widget patch helper aliases now include metadata-only `space.spaces.patchWidget`, accepting Space Agent-style `spaceId`/`widgetId` payloads while applying only safe declarative metadata patches and omitting generated/executable bodies plus credential-like payloads from serialized results.
 - Screenshot QA artifacts are expected for visually relevant Spaces work.
 
 Next checkpoint emphasis:
