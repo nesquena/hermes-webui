@@ -2,7 +2,7 @@
 
 Covers:
 - manifest.json is valid JSON with required PWA fields
-- sw.js has the `__CACHE_VERSION__` placeholder the server replaces at request time
+- sw.js has the `__WEBUI_VERSION__` placeholder the server replaces at request time
 - sw.js offline-fallback uses a resolved promise (not `caches.match() || fallback`
   which is broken — Promise objects are always truthy in `||` checks, so the
   fallback Response would never be used)
@@ -52,8 +52,8 @@ class TestManifest:
 class TestServiceWorker:
     def test_sw_has_cache_version_placeholder(self):
         src = SW.read_text(encoding="utf-8")
-        assert "__CACHE_VERSION__" in src, (
-            "sw.js must contain __CACHE_VERSION__ placeholder for the server "
+        assert "__WEBUI_VERSION__" in src, (
+            "sw.js must contain __WEBUI_VERSION__ placeholder for the server "
             "handler at /sw.js to replace with WEBUI_VERSION at request time"
         )
 
@@ -117,8 +117,8 @@ class TestPWARoutes:
         idx = src.find('"/sw.js"')
         assert idx != -1, "routes.py must handle /sw.js"
         block = src[idx:idx + 1000]
-        assert "__CACHE_VERSION__" in block, (
-            "sw.js route must replace __CACHE_VERSION__ with the current WEBUI_VERSION"
+        assert "__WEBUI_VERSION__" in block, (
+            "sw.js route must replace __WEBUI_VERSION__ with the current WEBUI_VERSION"
         )
         assert "WEBUI_VERSION" in block, (
             "sw.js route must import and use WEBUI_VERSION for cache busting"

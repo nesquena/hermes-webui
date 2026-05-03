@@ -915,7 +915,7 @@ def handle_get(handler, parsed) -> bool:
             from api.updates import WEBUI_VERSION
             version_token = quote(WEBUI_VERSION, safe="")
             text = sw_path.read_text(encoding="utf-8").replace(
-                "__CACHE_VERSION__", version_token
+                "__WEBUI_VERSION__", version_token
             )
             data = text.encode("utf-8")
             handler.send_response(200)
