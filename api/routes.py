@@ -2183,6 +2183,43 @@ def handle_get(handler, parsed) -> bool:
             {"name": get_active_profile_name(), "path": str(get_active_hermes_home())},
         )
 
+    # ── Gateway Status (GET) ──
+    if parsed.path == "/api/gateway/status":
+        import datetime
+        identity_map = _load_gateway_session_identity_map()
+        sessions_path = _gateway_session_metadata_path()
+        running = bool(identity_map)
+        platforms_set: set[str] = set()
+        for meta in identity_map.values():
+            raw = meta.get("raw_source") or meta.get("platform") or ""
+            norm = _normalize_messaging_source(raw)
+            if norm:
+                platforms_set.add(norm)
+        _PLATFORM_LABELS = {
+            "telegram": "Telegram",
+            "discord": "Discord",
+            "slack": "Slack",
+            "web": "Web",
+            "api": "API",
+        }
+        platforms = sorted(
+            [{"name": p, "label": _PLATFORM_LABELS.get(p, p.title())} for p in platforms_set],
+            key=lambda x: x["label"],
+        )
+        last_active = ""
+        if running and sessions_path.exists():
+            try:
+                mtime = sessions_path.stat().st_mtime
+                last_active = datetime.datetime.fromtimestamp(mtime).isoformat()
+            except Exception:
+                pass
+        return j(handler, {
+            "running": running,
+            "platforms": platforms,
+            "last_active": last_active,
+            "session_count": len(identity_map),
+        })
+
     # ── MCP Servers (GET) ──
     if parsed.path == "/api/mcp/servers":
         return _handle_mcp_servers_list(handler)
