@@ -361,6 +361,92 @@ def test_space_tool_adapter_supports_source_current_widget_read_helpers_metadata
     assert "secret" not in serialized
 
 
+def test_space_tool_adapter_supports_source_current_patch_widget_alias_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "current-patch-lab", "name": "Current Patch Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "notes-card",
+            "kind": "markdown",
+            "title": "Notes Card",
+            "layout": {"x": 0, "y": 0, "w": 4, "h": 3},
+            "renderer": "<script>stored()</script>",
+            "data": {"api_key": "***"},
+        },
+    )
+
+    patched = spaces.run_space_tool(
+        "space.current.patchWidget",
+        {
+            "activeSpaceId": created["space_id"],
+            "widgetId": "notes-card",
+            "title": "Renamed Notes",
+            "position": {"x": 5, "y": 4, "renderer": "<script>steal()</script>"},
+            "size": {"w": 9, "h": 6, "api_key": "***"},
+            "html": "<img src=x onerror=steal()>",
+            "source": "SECRET_SOURCE",
+            "token": "***",
+        },
+    )
+    persisted = spaces.read_widget_detail(created["space_id"], "notes-card")
+    serialized = json.dumps({"patched": patched, "persisted": persisted}).lower()
+
+    assert patched["ok"] is True
+    assert patched["action"] == "space.current.patchwidget"
+    assert patched["active_space_id"] == created["space_id"]
+    assert patched["widget"]["id"] == "notes-card"
+    assert patched["widget"]["title"] == "Renamed Notes"
+    assert patched["widget"]["layout"] == {"x": 5, "y": 4, "w": 9, "h": 6, "minimized": False}
+    assert persisted["title"] == "Renamed Notes"
+    assert persisted["layout"] == patched["widget"]["layout"]
+    assert "stored" not in serialized
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert '"data":' not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+    assert '"source":' not in serialized
+
+
+def test_space_tool_adapter_supports_source_current_reload_widget_alias_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "current-reload-lab", "name": "Current Reload Lab"})
+    spaces.upsert_widget(created["space_id"], {"id": "weather-card", "kind": "weather", "title": "Weather Card"})
+
+    reloaded = spaces.run_space_tool(
+        "space.current.reloadWidget",
+        {
+            "activeSpaceId": created["space_id"],
+            "widgetId": "weather-card",
+            "payload": {"reason": "refresh visible metadata", "renderer": "<script>steal()</script>", "api_key": "***"},
+            "prompt": "Refresh the weather without leaking SECRET values",
+            "token": "***",
+        },
+    )
+    events = spaces.list_widget_events(created["space_id"], "weather-card")
+    serialized = json.dumps({"reloaded": reloaded, "events": events}).lower()
+
+    assert reloaded["ok"] is True
+    assert reloaded["action"] == "space.current.reloadwidget"
+    assert reloaded["space_id"] == created["space_id"]
+    assert reloaded["widget_id"] == "weather-card"
+    assert reloaded["event_name"] == "widget.refresh"
+    assert events[0]["event_name"] == "widget.refresh"
+    assert events[0]["payload_summary"] == {"action": "reload", "reason": "refresh visible metadata"}
+    assert "refresh the weather" not in serialized
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+
+
 def test_space_tool_adapter_supports_source_space_meta_and_layout_helpers_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "source-layout-lab", "name": "Source Layout Lab"})

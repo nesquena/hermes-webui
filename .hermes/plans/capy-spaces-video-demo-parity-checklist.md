@@ -38,6 +38,7 @@ Recently landed:
 - Source-style widget visibility helper coverage now includes metadata-only `space.spaces.toggleWidgets`, accepting `spaceId`/`widgetIds` payloads and toggling target widget `layout.minimized` metadata without exposing generated/credential-like fields.
 - Source-style current-space lookup coverage now includes metadata-only `space.spaces.getCurrentSpace`, accepting `activeSpaceId`/current-space payloads and returning safe current Space detail metadata or a null current-space response without exposing generated/credential-like fields.
 - Source-style current-widget helper aliases now include metadata-only `space.current.listWidgets`, `space.current.readWidget`, and `space.current.seeWidget`, accepting `activeSpaceId`/`widgetId` payloads while returning only safe widget summaries/details plus sandbox-contract and queued-event metadata.
+- Source-style current-widget mutation aliases now include metadata-only `space.current.patchWidget` and `space.current.reloadWidget`, accepting `activeSpaceId`/`widgetId` payloads while applying only safe title/layout metadata patches or queuing bounded refresh-event metadata.
 - Source-style logical app URL helper coverage now includes metadata-only `space.spaces.resolveAppUrl`, accepting safe app-owned logical paths while rejecting external, traversal, query/fragment, and private filesystem paths without echoing raw unsafe input.
 - Screenshot QA artifacts are expected for visually relevant Spaces work.
 

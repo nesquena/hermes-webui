@@ -1175,6 +1175,15 @@ def _space_tool_preview_widget_detail(widget: dict[str, Any]) -> dict[str, Any]:
     return detail
 
 
+def _space_tool_widget_patch_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return safe widget patch metadata from source-style helper payloads."""
+    clean = _space_tool_widget_payload(payload)
+    layout_fields = {"layout", "position", "size", "x", "y", "w", "h", "col", "row", "cols", "rows"}
+    if any(field in payload for field in layout_fields):
+        clean["layout"] = _space_tool_source_widget_layout(payload)
+    return clean
+
+
 def _space_tool_widgets_payload(payload: dict[str, Any], *, bulk: bool) -> list[dict[str, Any]]:
     raw_widgets = payload.get("widgets") if bulk else [payload.get("widget") if isinstance(payload.get("widget"), dict) else payload]
     if bulk and not isinstance(raw_widgets, list):
@@ -1639,12 +1648,15 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "revision_event_id": result["revision_event_id"],
             "render": {"mode": "metadata-only", "executed": False, "omitted_field_count": omitted_count},
         }
-    if name == "space.spaces.patchwidget":
+    if name in {"space.spaces.patchwidget", "space.current.patchwidget"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_id = validate_widget_id(_space_tool_widget_id(data))
         patch_payload = data.get("patch") if isinstance(data.get("patch"), dict) else data
-        result = patch_widget(space_id, widget_id, _space_tool_widget_payload(patch_payload))
-        return {"ok": True, "action": name, **result, "widget": read_widget_detail(space_id, widget_id)}
+        result = patch_widget(space_id, widget_id, _space_tool_widget_patch_payload(patch_payload))
+        response = {"ok": True, "action": name, **result, "widget": read_widget_detail(space_id, widget_id)}
+        if name.startswith("space.current."):
+            response["active_space_id"] = space_id
+        return response
     if name == "space.spaces.togglewidgets":
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_ids = _space_tool_widget_ids(data)
@@ -1797,6 +1809,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.widget.refresh",
         "space.current.widget.reload",
         "space.current.widget.refresh",
+        "space.current.reloadwidget",
         "space.spaces.reloadwidget",
         "space.spaces.refreshwidget",
     }:

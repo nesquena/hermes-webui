@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-03 14:12 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-03 15:19 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: source current-widget read helpers now support Space Agent-style `space.current.listWidgets`, `space.current.readWidget`, and `space.current.seeWidget` aliases while preserving Capy's metadata-only adapter boundary. The server-side adapter accepts `activeSpaceId`/`widgetId` payloads, returns safe widget summaries/details plus the existing sandbox contract/event metadata for `seeWidget`, and omits renderer/html/data/source/API auth markers from serialized responses. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: source current-widget mutation helpers now support Space Agent-style `space.current.patchWidget` and `space.current.reloadWidget` aliases while preserving Capy's metadata-only adapter boundary. The server-side adapter accepts `activeSpaceId`/`widgetId` payloads, applies safe title/layout patches from source-style position/size fields, queues bounded refresh events for reloads, and omits renderer/html/data/source/API auth markers from serialized responses/events. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): support source current widget mutation aliases`
+  - Added RED/GREEN backend coverage proving `space.current.patchWidget` accepts Space Agent-style active-space and widget ids, patches safe title/layout metadata from source-style `position`/`size` fields, and `space.current.reloadWidget` queues safe widget-refresh event metadata, with both responses omitting renderer/html/data/source bodies plus credential-like markers.
+  - Validation at completion before screenshot/restart: focused RED failed before implementation with `Unsupported Capy Spaces tool action`; focused GREEN passed (`2 passed`). Run `git log -1 --oneline` and the final report for the full validation bundle.
 
 - `feat(spaces): support source current widget aliases`
   - Added RED/GREEN backend coverage proving `space.current.listWidgets`, `space.current.readWidget`, and `space.current.seeWidget` accept Space Agent-style active-space and widget ids, return safe widget summaries/details/contract/event metadata, and omit renderer/html/data/source bodies plus credential-like markers from serialized adapter results.
