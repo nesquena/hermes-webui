@@ -30,6 +30,7 @@ Recently landed:
 - Source-style bulk widget removal aliases now include metadata-only `space.spaces.removeWidgets` / `deleteWidgets` and `space.spaces.removeAllWidgets` / `deleteAllWidgets`, accepting Space Agent-style `spaceId` plus `widgetIds` where applicable while deleting through Capy's revisioned primitive and returning bounded metadata only.
 - Source-style space removal aliases now include metadata-only `space.spaces.removeSpace` / `deleteSpace`, accepting Space Agent-style `spaceId` while deleting through Capy's revisioned primitive and returning bounded metadata only.
 - Source-style space duplication aliases now include metadata-only `space.spaces.duplicateSpace` / `cloneSpace`, accepting Space Agent-style `spaceId` while copying only safe Space metadata and widget summaries into a new persisted Space.
+- Source-style widget read helper aliases now include metadata-only `space.spaces.listWidgets`, `readWidget`, and `getWidget`, accepting Space Agent-style `spaceId`/`widgetId` payloads while returning only safe widget summaries/details.
 - Screenshot QA artifacts are expected for visually relevant Spaces work.
 
 Next checkpoint emphasis:

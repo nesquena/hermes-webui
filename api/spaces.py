@@ -1294,9 +1294,16 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {"space.current.widgets", "space.current.widget.list"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         return {"ok": True, "action": name, "active_space_id": space_id, "widgets": list_widgets(space_id)}
+    if name in {"space.spaces.listwidgets", "space.spaces.widgets"}:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        return {"ok": True, "action": name, "space_id": space_id, "widgets": list_widgets(space_id)}
     if name in {"space.widget.list", "space.widgets.list", "space.current.widgets.list"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         return {"ok": True, "action": name, "active_space_id": space_id, "widgets": list_widgets(space_id)}
+    if name in {"space.spaces.readwidget", "space.spaces.getwidget"}:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        widget_id = validate_widget_id(_space_tool_widget_id(data))
+        return {"ok": True, "action": name, "space_id": space_id, "widget": read_widget_detail(space_id, widget_id)}
     if name in {"space.widget.read", "space.widget.get", "space.current.widget.read", "space.current.widget.get"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))

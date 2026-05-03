@@ -219,6 +219,67 @@ def test_space_tool_adapter_supports_source_camelcase_space_helpers(monkeypatch,
     assert "secret" not in serialized
 
 
+def test_space_tool_adapter_supports_source_widget_list_and_read_helpers_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "source-widget-read-lab", "name": "Source Widget Read Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "notes-card",
+            "kind": "notes",
+            "title": "Notes Card",
+            "layout": {"x": 2, "y": 3, "w": 7, "h": 4},
+            "notes": {"body": "safe metadata note", "format": "markdown"},
+            "renderer": "<script>stored()</script>",
+            "html": "<img src=x onerror=steal()>",
+            "data": {"api_key": "SECRET...LEAK", "token": "SECRET_TOKEN"},
+        },
+    )
+
+    listed = spaces.run_space_tool(
+        "space.spaces.listWidgets",
+        {"spaceId": created["space_id"], "renderer": "<script>ignore()</script>", "api_key": "***"},
+    )
+    read_by_id = spaces.run_space_tool(
+        "space.spaces.readWidget",
+        {"spaceId": created["space_id"], "widgetId": "notes-card", "source": "SECRET_SOURCE"},
+    )
+    read_by_get_alias = spaces.run_space_tool(
+        "space.spaces.getWidget",
+        {"spaceId": created["space_id"], "widgetId": "notes-card", "token": "***"},
+    )
+    serialized = json.dumps({"listed": listed, "read_by_id": read_by_id, "read_by_get_alias": read_by_get_alias}).lower()
+
+    assert listed["ok"] is True
+    assert listed["action"] == "space.spaces.listwidgets"
+    assert listed["space_id"] == created["space_id"]
+    assert listed["widgets"] == [
+        {
+            "id": "notes-card",
+            "title": "Notes Card",
+            "kind": "notes",
+            "layout": {"x": 2, "y": 3, "w": 7, "h": 4, "minimized": False},
+        }
+    ]
+    assert read_by_id["ok"] is True
+    assert read_by_id["action"] == "space.spaces.readwidget"
+    assert read_by_id["space_id"] == created["space_id"]
+    assert read_by_id["widget"]["id"] == "notes-card"
+    assert read_by_id["widget"]["metadata"]["notes"] == {"body": "safe metadata note", "format": "markdown"}
+    assert read_by_get_alias["widget"] == read_by_id["widget"]
+    assert "stored" not in serialized
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert '"data":' not in serialized
+    assert '"source":' not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+
+
 def test_space_tool_adapter_supports_source_space_meta_and_layout_helpers_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "source-layout-lab", "name": "Source Layout Lab"})
