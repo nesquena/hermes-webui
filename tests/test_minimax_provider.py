@@ -92,10 +92,22 @@ def test_minimax_m2_7_highspeed_in_fallback_models():
 
 
 def test_minimax_fallback_provider_label():
-    """MiniMax fallback entries must use 'MiniMax' as the provider label."""
-    minimax_entries = [m for m in config._FALLBACK_MODELS if 'minimax' in m['id'].lower()]
-    assert minimax_entries, "No MiniMax entries found in _FALLBACK_MODELS"
-    for entry in minimax_entries:
+    """MiniMax fallback entries (direct API routing) must use 'MiniMax' as
+    the provider label.
+
+    NOTE: This filters by `minimax/` ID prefix to scope strictly to the
+    direct MiniMax provider routes — `minimax-X` is the canonical pattern
+    for hermes-agent routing to api.minimax.io. OpenRouter free-tier variants
+    that happen to contain 'minimax' in their ID (e.g.
+    `minimax/minimax-m2.5:free`) are routed via OpenRouter, not direct
+    MiniMax, and correctly carry provider='OpenRouter'. See #1426.
+    """
+    direct_minimax = [
+        m for m in config._FALLBACK_MODELS
+        if m['id'].startswith('minimax/') and ':free' not in m['id']
+    ]
+    assert direct_minimax, "No direct-MiniMax entries found in _FALLBACK_MODELS"
+    for entry in direct_minimax:
         assert entry['provider'] == 'MiniMax', (
             f"Expected provider='MiniMax', got '{entry['provider']}' for {entry['id']}"
         )

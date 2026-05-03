@@ -10,7 +10,9 @@ import logging
 import os
 import queue
 import re
+import platform
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -2181,6 +2183,43 @@ def handle_get(handler, parsed) -> bool:
             {"name": get_active_profile_name(), "path": str(get_active_hermes_home())},
         )
 
+    # ── Gateway Status (GET) ──
+    if parsed.path == "/api/gateway/status":
+        import datetime
+        identity_map = _load_gateway_session_identity_map()
+        sessions_path = _gateway_session_metadata_path()
+        running = bool(identity_map)
+        platforms_set: set[str] = set()
+        for meta in identity_map.values():
+            raw = meta.get("raw_source") or meta.get("platform") or ""
+            norm = _normalize_messaging_source(raw)
+            if norm:
+                platforms_set.add(norm)
+        _PLATFORM_LABELS = {
+            "telegram": "Telegram",
+            "discord": "Discord",
+            "slack": "Slack",
+            "web": "Web",
+            "api": "API",
+        }
+        platforms = sorted(
+            [{"name": p, "label": _PLATFORM_LABELS.get(p, p.title())} for p in platforms_set],
+            key=lambda x: x["label"],
+        )
+        last_active = ""
+        if running and sessions_path.exists():
+            try:
+                mtime = sessions_path.stat().st_mtime
+                last_active = datetime.datetime.fromtimestamp(mtime).isoformat()
+            except Exception:
+                pass
+        return j(handler, {
+            "running": running,
+            "platforms": platforms,
+            "last_active": last_active,
+            "session_count": len(identity_map),
+        })
+
     # ── MCP Servers (GET) ──
     if parsed.path == "/api/mcp/servers":
         return _handle_mcp_servers_list(handler)
@@ -2253,6 +2292,7 @@ def handle_post(handler, parsed) -> bool:
             model=model,
             model_provider=model_provider,
             profile=body.get("profile") or None,
+            project_id=body.get("project_id") or None,
         )
         return j(handler, {"session": s.compact() | {"messages": s.messages}})
 
@@ -2804,6 +2844,9 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/file/create-dir":
         return _handle_create_dir(handler, body)
+
+    if parsed.path == "/api/file/reveal":
+        return _handle_file_reveal(handler, body)
 
     # ── Workspace management (POST) ──
     if parsed.path == "/api/workspaces/add":
@@ -5150,6 +5193,34 @@ def _handle_create_dir(handler, body):
         return j(
             handler, {"ok": True, "path": str(target.relative_to(Path(s.workspace)))}
         )
+    except (ValueError, PermissionError, OSError) as e:
+        return bad(handler, _sanitize_error(e))
+
+
+def _handle_file_reveal(handler, body):
+    try:
+        require(body, "session_id", "path")
+    except ValueError as e:
+        return bad(handler, str(e))
+    try:
+        s = get_session(body["session_id"])
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    try:
+        target = safe_resolve(Path(s.workspace), body["path"])
+        if not target.exists():
+            return bad(handler, "File not found", 404)
+
+        system = platform.system()
+        if system == "Darwin":
+            subprocess.Popen(["open", "-R", str(target)])
+        elif system == "Windows":
+            subprocess.Popen(["explorer.exe", "/select," + str(target)])
+        else:
+            # Linux / other — open parent directory
+            subprocess.Popen(["xdg-open", str(target.parent)])
+
+        return j(handler, {"ok": True, "path": body["path"]})
     except (ValueError, PermissionError, OSError) as e:
         return bad(handler, _sanitize_error(e))
 

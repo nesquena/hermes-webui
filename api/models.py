@@ -542,11 +542,23 @@ def _apply_core_sync_or_error_marker(
         if require_stream_dead and session.active_stream_id in _active_stream_ids():
             return False
 
-    # When messages is already non-empty the core-sync overwrite and recovered
-    # user turn are skipped (we cannot clobber in-memory mutations), but the
-    # stuck pending fields MUST still be cleared and an error marker appended
-    # so the session isn't permanently left in stale-pending state.
+    # When messages is already non-empty, do not overwrite history from any core
+    # transcript. The pending user turn may still be the only durable copy of a
+    # prompt submitted just before a server restart, so materialize it before
+    # clearing runtime stream state.
     if len(session.messages) != 0:
+        _recovered_ts = int(time.time())
+        if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
+            _recovered_ts = int(session.pending_started_at)
+        recovered = {
+            'role': 'user',
+            'content': session.pending_user_message,
+            'timestamp': _recovered_ts,
+            '_recovered': True,
+        }
+        if session.pending_attachments:
+            recovered['attachments'] = list(session.pending_attachments)
+        session.messages.append(recovered)
         session.active_stream_id = None
         session.pending_user_message = None
         session.pending_attachments = []
@@ -559,7 +571,7 @@ def _apply_core_sync_or_error_marker(
         })
         session.save()
         logger.info(
-            "Session %s: pending cleared (messages non-empty), added error marker",
+            "Session %s: recovered pending user turn (messages non-empty), added error marker",
             sid,
         )
         return True
@@ -636,8 +648,7 @@ def _repair_stale_pending(session) -> bool:
     # _apply_core_sync_or_error_marker uses this to detect a rotated active_stream_id
     # (e.g. context compression) or a stream that came back alive.
     _seen_stream_id = session.active_stream_id
-    if (len(session.messages) != 0
-            or not session.pending_user_message
+    if (not session.pending_user_message
             or not _seen_stream_id
             or _seen_stream_id in _active_stream_ids()):
         return False
@@ -713,7 +724,7 @@ def get_session(sid, metadata_only=False):
         return s
     raise KeyError(sid)
 
-def new_session(workspace=None, model=None, profile=None, model_provider=None):
+def new_session(workspace=None, model=None, profile=None, model_provider=None, project_id=None):
     """Create a new in-memory session.
 
     The session lives in the SESSIONS dict only — no disk write happens until
@@ -749,6 +760,7 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None):
         model=effective_model,
         model_provider=model_provider,
         profile=profile,
+        project_id=project_id,
     )
     with LOCK:
         SESSIONS[s.session_id] = s
