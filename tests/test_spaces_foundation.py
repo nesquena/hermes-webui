@@ -459,6 +459,70 @@ def test_space_tool_adapter_supports_source_space_delete_helpers_metadata_only(m
     assert '"source":' not in serialized
 
 
+def test_space_tool_adapter_supports_source_space_duplicate_helper_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space(
+        {
+            "space_id": "source-duplicate-lab",
+            "name": "Source Duplicate Lab",
+            "description": "Safe source space metadata",
+            "agent_instructions": "Use safe metadata only.",
+            "template": "weather",
+            "layout": {"columns": 24, "note": "<script>stored()</script>", "api_key": "***"},
+            "widgets": [
+                {
+                    "id": "weather-card",
+                    "kind": "weather",
+                    "title": "Weather Card",
+                    "layout": {"x": 1, "y": 2, "w": 8, "h": 4},
+                    "weather": {"location": "Prague", "api_key": "***"},
+                    "renderer": "<script>stored()</script>",
+                    "html": "<img src=x onerror=stored()>",
+                    "source": "SECRET_SOURCE",
+                    "data": {"token": "***"},
+                }
+            ],
+        }
+    )
+
+    duplicated = spaces.run_space_tool(
+        "space.spaces.duplicateSpace",
+        {
+            "spaceId": created["space_id"],
+            "renderer": "<script>steal()</script>",
+            "html": "<img src=x onerror=steal()>",
+            "api_key": "***",
+        },
+    )
+    duplicated_space = duplicated["space"]
+    persisted_duplicate = spaces.read_space(duplicated_space["space_id"])
+    serialized = json.dumps({"duplicated": duplicated, "persisted_duplicate": persisted_duplicate}).lower()
+
+    assert duplicated["ok"] is True
+    assert duplicated["action"] == "space.spaces.duplicatespace"
+    assert duplicated["source_space_id"] == created["space_id"]
+    assert duplicated_space["space_id"] != created["space_id"]
+    assert duplicated_space["name"] == "Source Duplicate Lab Copy"
+    assert duplicated_space["template"] == "weather"
+    assert duplicated_space["layout"] == {"columns": 24}
+    assert duplicated_space["widget_count"] == 1
+    assert duplicated_space["widgets"][0]["id"] == "weather-card"
+    assert duplicated_space["widgets"][0]["layout"] == {"x": 1, "y": 2, "w": 8, "h": 4, "minimized": False}
+    assert duplicated["revision_event_id"]
+    assert spaces.read_widget_detail(duplicated_space["space_id"], "weather-card")["metadata"]["weather"]["location"] == "Prague"
+    assert "steal" not in serialized
+    assert "stored" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+    assert '"source":' not in serialized
+    assert '"data":' not in serialized
+
+
 def test_space_tool_adapter_supports_source_widget_bulk_delete_helpers_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "source-bulk-delete-lab", "name": "Source Bulk Delete Lab"})

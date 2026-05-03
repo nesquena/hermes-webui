@@ -645,6 +645,43 @@ def create_space_from_session_metadata(session: Any) -> dict[str, Any]:
     )
 
 
+def duplicate_space_metadata_only(space_id: str, *, target_space_id: str | None = None) -> dict[str, Any]:
+    """Duplicate a Space through Capy's metadata-only safety boundary."""
+    source_id = validate_space_id(space_id)
+    source = read_space(source_id)
+    source_name = _payload_text_summary(source.get("name") or source_id, 80)
+    if not source_name or source_name == "[REDACTED]":
+        source_name = "Untitled Space"
+    duplicate_name = source_name if source_name.lower().endswith(" copy") else f"{source_name} Copy"
+    source_layout = source.get("layout") if isinstance(source.get("layout"), dict) else {}
+    source_capabilities = source.get("capabilities") if isinstance(source.get("capabilities"), dict) else {}
+    safe_layout: dict[str, Any] = {}
+    for key, value in source_layout.items():
+        safe_key = str(key)
+        if not _payload_key_is_safe(safe_key):
+            continue
+        if isinstance(value, (int, float, bool)):
+            safe_layout[safe_key] = value
+        elif isinstance(value, str):
+            safe_value = _payload_text_summary(value, 120)
+            if safe_value and safe_value != "[REDACTED]":
+                safe_layout[safe_key] = safe_value
+    payload: dict[str, Any] = {
+        "space_id": validate_space_id(target_space_id) if target_space_id else _unique_space_id(duplicate_name),
+        "name": duplicate_name,
+        "description": _payload_text_summary(source.get("description") or "", 500),
+        "agent_instructions": _payload_text_summary(source.get("agent_instructions") or "", 500),
+        "template": _payload_text_summary(source.get("template") or "blank", 80) or "blank",
+        "layout": safe_layout,
+        "widgets": [],
+        "capabilities": _payload_summary(source_capabilities),
+    }
+    widgets = source.get("widgets") if isinstance(source.get("widgets"), list) else []
+    payload["widgets"] = [_space_tool_widget_payload(widget) for widget in widgets if isinstance(widget, dict)]
+    created = create_space(payload)
+    return {"source_space_id": source_id, "space_id": created["space_id"], "revision_event_id": created["revision_event_id"]}
+
+
 def read_space(space_id: str) -> dict[str, Any]:
     path = _manifest_path(space_id)
     if not path.exists():
@@ -1207,6 +1244,14 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {"space.get", "space.spaces.get", "space.spaces.read", "space.spaces.getspace", "space.spaces.readspace", "space.spaces.openspace"}:
         space_id = validate_space_id(data.get("space_id"))
         return {"ok": True, "action": name, "space": read_space_detail(space_id)}
+    if name in {"space.spaces.duplicatespace", "space.spaces.clonespace"}:
+        result = duplicate_space_metadata_only(
+            _space_tool_current_id(data),
+            target_space_id=data.get("target_space_id") or data.get("targetSpaceId") or None,
+        )
+        space = read_space_detail(result["space_id"])
+        space["widget_count"] = len(space.get("widgets") or [])
+        return {"ok": True, "action": name, **result, "space": space}
     if name in {"space.spaces.removespace", "space.spaces.deletespace"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         result = delete_space(space_id)

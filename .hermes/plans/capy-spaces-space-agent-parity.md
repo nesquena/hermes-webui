@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-02 23:13 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-03 00:20 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: source-style Space Agent space deletion aliases now route `space.spaces.removeSpace` and `space.spaces.deleteSpace` through Capy's existing revisioned `delete_space` primitive, accepting Space Agent-style `spaceId` payloads while omitting generated/executable bodies and credential-like request fields from serialized tool responses. Local/tailnet WebUI health verified OK after LaunchAgent restart; use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: source-style Space Agent space duplication aliases now route `space.spaces.duplicateSpace` / `cloneSpace` through Capy's metadata-only duplication boundary, copying safe Space metadata and widget summaries while omitting generated/executable bodies and credential-like fields from serialized tool responses and persisted duplicates. Local/tailnet WebUI health verified OK after LaunchAgent restart; use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): support source space duplicate alias`
+  - Added RED/GREEN backend coverage proving `space.spaces.duplicateSpace` accepts Space Agent-style camelCase `spaceId` payloads, creates a safe copied Space with widget summaries and metadata, and omits generated/executable bodies plus credential-like markers from serialized adapter results and the persisted duplicate.
+  - Validation at completion: focused RED failed before implementation with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`), full Spaces foundation suite passed (`113 passed`), `py_compile api/spaces.py tests/test_spaces_foundation.py`, and `git diff --check` passed. Mock/status screenshot QA captured the duplicate alias status with empty browser console and a clean sensitive-marker DOM check.
 
 - `feat(spaces): support source space delete aliases`
   - Added RED/GREEN backend coverage proving `space.spaces.removeSpace` and `space.spaces.deleteSpace` accept Space Agent-style camelCase `spaceId` payloads, delete Spaces through Capy's revisioned primitive, and omit generated/executable bodies plus credential-like markers from serialized adapter results.
