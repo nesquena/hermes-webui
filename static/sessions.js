@@ -1503,7 +1503,6 @@ function renderSessionListFromCache(){
     bar.appendChild(addBtn);
     controls.appendChild(bar);
   }
-  list.appendChild(controls);
   // Profile filter toggle (show sessions from other profiles)
   const otherProfileCount=withMessages.filter(s=>s.profile&&s.profile!==S.activeProfile).length;
   if(otherProfileCount>0&&!_showAllProfiles){
@@ -1584,6 +1583,7 @@ function renderSessionListFromCache(){
     wrapper.appendChild(body);
     list.appendChild(wrapper);
   }
+  list.appendChild(controls);
   // Note: declared after the groups loop but available via function hoisting.
   function _renderOneSession(s, isPinnedGroup=false){
     const el=document.createElement('div');

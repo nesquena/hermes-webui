@@ -131,6 +131,8 @@ def test_session_sidebar_controls_stay_accessible_on_long_lists():
         "Sidebar controls should be grouped into a dedicated controls container"
     assert "controls.appendChild(toggleBtn)" in js, \
         "Select mode entry should live in the sticky controls area, not after all sessions"
+    assert js.find("list.appendChild(controls)") > js.find("for(const g of groups)"), \
+        "Sticky bottom controls must be appended after session rows so they stay visible while scrolling"
     assert ".session-list-controls{position:sticky;bottom:0;" in css, \
         "Sidebar controls should remain reachable while the session list scrolls"
 
