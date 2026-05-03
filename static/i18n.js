@@ -316,6 +316,8 @@ const LOCALES = {
     rename_prompt: 'New name:',
     deleted: 'Deleted ',
     delete_failed: 'Delete failed: ',
+    reveal_in_finder: 'Reveal in File Manager',
+    reveal_failed: 'Failed to reveal: ',
     new_file_prompt: 'New file name (e.g. notes.md):',
     project_name_prompt: 'Project name:',
     created: 'Created ',

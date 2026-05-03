@@ -5329,6 +5329,15 @@ function _showFileContextMenu(e, item){
   renameItem.onclick=()=>{menu.remove();_inlineRenameFileItem(item);};
   menu.appendChild(renameItem);
 
+  // Reveal in File Manager
+  const revealItem=document.createElement('div');
+  revealItem.textContent=t('reveal_in_finder');
+  revealItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+  revealItem.onmouseenter=()=>revealItem.style.background='var(--hover)';
+  revealItem.onmouseleave=()=>revealItem.style.background='';
+  revealItem.onclick=async()=>{menu.remove();try{await api('/api/file/reveal',{method:'POST',body:JSON.stringify({session_id:S.session.session_id,path:item.path})});}catch(err){showToast(t('reveal_failed')+err.message);}};
+  menu.appendChild(revealItem);
+
   // Divider + Delete
   const sep=document.createElement('hr');
   sep.style.cssText='border:none;border-top:1px solid var(--border);margin:4px 0;';
