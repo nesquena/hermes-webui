@@ -38,6 +38,15 @@ def _read_auth_json():
     return {}
 
 
+def read_auth_json():
+    """Public wrapper for _read_auth_json.
+
+    Used by the streaming layer's credential self-heal logic (#1401) to
+    re-read credentials without coupling to the private helper.
+    """
+    return _read_auth_json()
+
+
 def _write_auth_json(data):
     """Atomically write auth.json via temp-file rename.
 

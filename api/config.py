@@ -1453,6 +1453,18 @@ def invalidate_models_cache():
     _delete_models_cache_on_disk()
 
 
+def invalidate_credential_pool_cache(provider_id: str):
+    """Invalidate the credential pool cache for a specific provider.
+
+    Used by the streaming layer's credential self-heal logic (#1401) to
+    force a fresh credential pool load after re-reading auth.json.
+    """
+    global _CREDENTIAL_POOL_CACHE
+    with _available_models_cache_lock:
+        _CREDENTIAL_POOL_CACHE.pop(provider_id, None)
+        _CREDENTIAL_POOL_CACHE.pop(_resolve_provider_alias(provider_id), None)
+
+
 def invalidate_provider_models_cache(provider_id: str):
     """Invalidate cached models for a single provider.
 
