@@ -470,14 +470,17 @@ window._micPendingSend=window._micPendingSend||false;
     try{ return localStorage.getItem('hermes-voice-mode-button')==='true'; }
     catch(_){ return false; }
   }
+  let _voiceModeActive=false;
+
   function _applyVoiceModePref(){
-    modeBtn.style.display = _voiceModePrefEnabled() ? '' : 'none';
+    const enabled = _voiceModePrefEnabled();
+    modeBtn.style.display = enabled ? '' : 'none';
+    if(!enabled && _voiceModeActive) _deactivate();
   }
   _applyVoiceModePref();
   // Expose so the settings pane can re-apply immediately on toggle.
   window._applyVoiceModePref = _applyVoiceModePref;
 
-  let _voiceModeActive=false;
   let _voiceModeState='idle'; // idle | listening | thinking | speaking
   let _recognition=null;
   let _silenceTimer=null;
