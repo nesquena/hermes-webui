@@ -536,6 +536,15 @@ _FALLBACK_MODELS = [
     {"provider": "Z.AI",      "id": "zai/glm-4.7",                      "label": "GLM-4.7"},
     {"provider": "Z.AI",      "id": "zai/glm-4.5",                      "label": "GLM-4.5"},
     {"provider": "Z.AI",      "id": "zai/glm-4.5-flash",                "label": "GLM-4.5 Flash"},
+    # OpenRouter free-tier models — must appear in fallback list so they
+    # are visible even when the tool-support filter in hermes_cli strips
+    # them out of the live catalog (see #1426).
+    {"provider": "OpenRouter", "id": "openrouter/elephant-alpha",                   "label": "Elephant Alpha (free)"},
+    {"provider": "OpenRouter", "id": "openrouter/owl-alpha",                        "label": "Owl Alpha (free)"},
+    {"provider": "OpenRouter", "id": "tencent/hy3-preview:free",                    "label": "Hy3 Preview (free)"},
+    {"provider": "OpenRouter", "id": "minimax/minimax-m2.5:free",                   "label": "MiniMax M2.5 (free)"},
+    {"provider": "OpenRouter", "id": "nvidia/nemotron-3-super-120b-a12b:free",      "label": "Nemotron 3 Super (free)"},
+    {"provider": "OpenRouter", "id": "arcee-ai/trinity-large-preview:free",         "label": "Trinity Large Preview (free)"},
 ]
 
 # Provider display names for known Hermes provider IDs
@@ -2109,14 +2118,94 @@ def get_available_models() -> dict:
                     continue
                 provider_name = _PROVIDER_DISPLAY.get(pid, pid.title())
                 if pid == "openrouter":
+                    # OpenRouter has two model surfaces:
+                    #   (1) curated tool-supporting catalog via hermes_cli.models.fetch_openrouter_models()
+                    #       — the canonical agent-ready list, applies a tool-support filter
+                    #       (Kilo-Org/kilocode#9068) that hides image/completion-only models
+                    #   (2) free-tier `:free` variants — newly-added models OpenRouter ships
+                    #       experimentally that may not yet advertise `tools` in supported_parameters
+                    #       (see #1426). These get filtered out of (1) but users want them visible.
+                    #
+                    # Strategy: take the live curated list as the base, then augment with a
+                    # separate live-fetch of OpenRouter's /v1/models filtered to free-tier-only.
+                    # Free-tier entries get a "(free)" label suffix so the picker is honest about
+                    # what the user is selecting. Falls back to the static _FALLBACK_MODELS list
+                    # when both live fetches fail (offline, transient API error, test env).
+                    raw_models = []
+                    seen_ids = set()
+                    try:
+                        from hermes_cli.models import (
+                            fetch_openrouter_models as _fetch_or_models,
+                        )
+                        live_curated = _fetch_or_models() or []
+                        for mid, _desc in live_curated:
+                            if mid and mid not in seen_ids:
+                                seen_ids.add(mid)
+                                raw_models.append({"id": mid, "label": mid})
+                    except Exception:
+                        logger.warning("Failed to load OpenRouter curated catalog from hermes_cli")
+
+                    # Free-tier live fetch — bypasses the tool-support filter so models
+                    # OpenRouter has flagged free but hasn't yet annotated with tools=[]
+                    # (or that have tools=[] but the user explicitly wants to try) appear.
+                    try:
+                        import urllib.request as _urlreq
+                        _req = _urlreq.Request(
+                            "https://openrouter.ai/api/v1/models",
+                            headers={"Accept": "application/json"},
+                        )
+                        with _urlreq.urlopen(_req, timeout=8.0) as _resp:
+                            _payload = json.loads(_resp.read().decode())
+                        _free_count = 0
+                        _free_cap = 30  # don't drown the picker — top 30 free tier
+                        for _item in _payload.get("data", []) or []:
+                            if not isinstance(_item, dict):
+                                continue
+                            _mid = str(_item.get("id") or "").strip()
+                            if not _mid or _mid in seen_ids:
+                                continue
+                            _pricing = _item.get("pricing") or {}
+                            try:
+                                _is_free = (
+                                    float(_pricing.get("prompt", "0") or "0") == 0
+                                    and float(_pricing.get("completion", "0") or "0") == 0
+                                )
+                            except (TypeError, ValueError):
+                                _is_free = False
+                            # Also include explicit `:free` suffix variants
+                            _is_free = _is_free or _mid.endswith(":free")
+                            if not _is_free:
+                                continue
+                            _name = (
+                                str(_item.get("name") or "").strip() or _mid
+                            )
+                            # Strip provider prefix from name for display, append (free)
+                            _label = _name.split("/")[-1] if "/" in _name else _name
+                            if "(free)" not in _label.lower():
+                                _label = f"{_label} (free)"
+                            seen_ids.add(_mid)
+                            raw_models.append({"id": _mid, "label": _label})
+                            _free_count += 1
+                            if _free_count >= _free_cap:
+                                break
+                    except Exception:
+                        logger.debug("OpenRouter free-tier live fetch unavailable; using fallback")
+
+                    if not raw_models:
+                        # Both live fetches failed — fall back to the curated static list.
+                        # Deepcopy so dedup/prefix mutation downstream does not bleed
+                        # into the module-level catalog.
+                        raw_models = [
+                            {"id": m["id"], "label": m["label"]}
+                            for m in _FALLBACK_MODELS
+                            if m.get("provider") == "OpenRouter"
+                        ]
+
                     groups.append(
                         {
                             "provider": "OpenRouter",
                             "provider_id": "openrouter",
-                            "models": [
-                                {"id": m["id"], "label": m["label"]}
-                                for m in _FALLBACK_MODELS
-                            ],
+                            "models": raw_models,
                         }
                     )
                 elif pid == "ollama-cloud":
