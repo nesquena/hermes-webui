@@ -349,6 +349,60 @@ def test_space_tool_adapter_supports_source_space_meta_and_layout_helpers_metada
 
 
 
+def test_space_tool_adapter_supports_source_reposition_current_space_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "source-reposition-lab", "name": "Source Reposition Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "weather-card",
+            "kind": "weather",
+            "title": "Weather Card",
+            "layout": {"x": 9, "y": 4, "w": 6, "h": 4},
+            "renderer": "<script>stored()</script>",
+            "data": {"api_key": "***"},
+        },
+    )
+
+    repositioned = spaces.run_space_tool(
+        "space.spaces.repositionCurrentSpace",
+        {
+            "spaceId": created["space_id"],
+            "resetCamera": True,
+            "viewport": {
+                "x": 42,
+                "y": -7,
+                "zoom": 1.25,
+                "renderer": "<script>steal()</script>",
+                "api_key": "***",
+            },
+            "source": "SECRET_SOURCE",
+        },
+    )
+    persisted = spaces.read_space(created["space_id"])
+    serialized = json.dumps(repositioned).lower()
+
+    assert repositioned["ok"] is True
+    assert repositioned["action"] == "space.spaces.repositioncurrentspace"
+    assert repositioned["space_id"] == created["space_id"]
+    assert repositioned["space"]["space_id"] == created["space_id"]
+    assert repositioned["reposition"] == {
+        "mode": "metadata-only",
+        "applied": False,
+        "request": {"resetCamera": True, "viewport": {"x": "42", "y": "-7", "zoom": "1.25"}},
+    }
+    assert persisted["layout"] == {}
+    assert "stored" not in serialized
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+    assert '"source":' not in serialized
+
+
+
 def test_space_tool_adapter_supports_source_widget_upsert_helpers_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "source-widget-lab", "name": "Source Widget Lab"})

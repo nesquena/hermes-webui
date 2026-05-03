@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-03 03:59 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-03 05:08 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: source runtime reload aliases now support Space Agent-style `space.spaces.reloadWidget` and `space.spaces.reloadCurrentSpace` calls while preserving Capy's metadata-only adapter boundary. Widget reload queues a bounded `widget.refresh` event with sanitized payload summaries; current-space reload returns safe space detail metadata without generated/executable bodies or credential-like fields. Local/tailnet WebUI health verified OK after LaunchAgent restart; use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: source runtime reposition alias now supports Space Agent-style `space.spaces.repositionCurrentSpace` calls while preserving Capy's metadata-only adapter boundary. The server-side adapter returns safe current Space metadata plus a bounded viewport-request summary, acknowledges that no browser viewport move was applied server-side, and omits generated/executable widget bodies plus credential-like markers. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): support source reposition alias`
+  - Added RED/GREEN backend coverage proving `space.spaces.repositionCurrentSpace` accepts Space Agent-style camelCase `spaceId`/`resetCamera`/`viewport` payloads, returns safe current Space detail metadata plus a sanitized reposition request summary, does not mutate stored layout, and omits generated/executable fields plus credential-like markers.
+  - Validation at completion: focused RED failed before implementation with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`), full Spaces foundation suite passed (`117 passed`), `py_compile api/spaces.py tests/test_spaces_foundation.py`, and mock/status screenshot QA captured the alias status with empty browser console, `window.__harnessErrors=[]`, visible leak check clean, and screenshot artifact `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_03e2e453fbba47e692e71bb07f5ecf4b.png`. Local/tailnet WebUI health should be verified after commit and LaunchAgent restart.
 
 - `feat(spaces): support source reload aliases`
   - Added RED/GREEN backend coverage proving `space.spaces.reloadWidget` accepts Space Agent-style camelCase `spaceId`/`widgetId`, queues safe refresh event metadata, and `space.spaces.reloadCurrentSpace` returns safe current Space detail metadata while omitting generated/executable fields plus credential-like markers.

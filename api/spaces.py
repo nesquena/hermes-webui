@@ -1363,6 +1363,19 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {"space.spaces.reloadcurrentspace", "space.spaces.reloadspace"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         return {"ok": True, "action": name, "space_id": space_id, "space": read_space_detail(space_id)}
+    if name in {"space.spaces.repositioncurrentspace", "space.current.reposition", "space.current.reposition_viewport"}:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        request = {
+            "resetCamera": bool(data.get("resetCamera") or data.get("reset_camera")),
+            "viewport": _payload_summary(data.get("viewport") if isinstance(data.get("viewport"), dict) else {}),
+        }
+        return {
+            "ok": True,
+            "action": name,
+            "space_id": space_id,
+            "space": read_space_detail(space_id),
+            "reposition": {"mode": "metadata-only", "applied": False, "request": request},
+        }
     if name in {"space.spaces.duplicatespace", "space.spaces.clonespace"}:
         result = duplicate_space_metadata_only(
             _space_tool_current_id(data),
