@@ -13,7 +13,7 @@ import threading
 import time
 from pathlib import Path
 
-from api.config import REPO_ROOT
+from api.config import REPO_ROOT, STREAMS, STREAMS_LOCK
 
 # Lazy -- may be None if agent not found
 try:
@@ -26,6 +26,32 @@ _cache_lock = threading.Lock()
 _check_in_progress = False
 _apply_lock = threading.Lock()   # prevents concurrent stash/pull/pop on same repo
 CACHE_TTL = 1800  # 30 minutes
+
+
+def _active_stream_count() -> int:
+    """Return the current in-memory chat stream count.
+
+    Self-update schedules an in-process re-exec after git pull/reset.  That is
+    restart-equivalent for live streams, even when systemd does not see a unit
+    restart.  Refuse update/force-update while a stream exists so a browser
+    update click cannot recreate the pending-message loss class fixed in #1543.
+    """
+    with STREAMS_LOCK:
+        return len(STREAMS)
+
+
+def _restart_blocked_response(target: str, active_streams: int) -> dict:
+    plural = "s" if active_streams != 1 else ""
+    return {
+        'ok': False,
+        'message': (
+            f'Cannot update {target} while {active_streams} active chat stream{plural} '
+            'is running. Wait for the response to finish, then retry the update.'
+        ),
+        'target': target,
+        'restart_blocked': True,
+        'active_streams': active_streams,
+    }
 
 
 def _run_git(args, cwd, timeout=10):
@@ -249,6 +275,10 @@ def apply_force_update(target: str) -> dict:
     response with ``conflict: True`` or ``diverged: True`` and the user
     has confirmed they want to discard local changes.
     """
+    active_streams = _active_stream_count()
+    if active_streams:
+        return _restart_blocked_response(target, active_streams)
+
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
     try:
@@ -299,6 +329,10 @@ def apply_force_update(target: str) -> dict:
 
 def apply_update(target):
     """Stash, pull --ff-only, pop for the given target repo."""
+    active_streams = _active_stream_count()
+    if active_streams:
+        return _restart_blocked_response(target, active_streams)
+
     if not _apply_lock.acquire(blocking=False):
         return {'ok': False, 'message': 'Update already in progress'}
     try:

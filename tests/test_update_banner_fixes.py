@@ -117,6 +117,66 @@ class TestScheduleRestart:
         assert execv_called, "_schedule_restart must eventually call os.execv"
 
 
+class TestApplyUpdateRestartSafety:
+    """Self-update must not re-exec while chat streams are active."""
+
+    def test_apply_update_refuses_when_stream_active(self, tmp_path, monkeypatch):
+        import queue
+        import api.updates as upd
+        from api.config import STREAMS, STREAMS_LOCK
+
+        (tmp_path / '.git').mkdir()
+        monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
+        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
+        called = []
+        monkeypatch.setattr(upd, '_run_git', lambda *a, **k: (called.append(a) or ('', True)))
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: (_ for _ in ()).throw(AssertionError('must not restart')))
+
+        with STREAMS_LOCK:
+            old = dict(STREAMS)
+            STREAMS.clear()
+            STREAMS['stream_active'] = queue.Queue()
+        try:
+            result = upd.apply_update('webui')
+        finally:
+            with STREAMS_LOCK:
+                STREAMS.clear()
+                STREAMS.update(old)
+
+        assert result['ok'] is False
+        assert result.get('active_streams') == 1
+        assert result.get('restart_blocked') is True
+        assert 'active chat stream' in result['message']
+        assert called == []
+
+    def test_force_update_refuses_when_stream_active(self, tmp_path, monkeypatch):
+        import queue
+        import api.updates as upd
+        from api.config import STREAMS, STREAMS_LOCK
+
+        (tmp_path / '.git').mkdir()
+        monkeypatch.setattr(upd, 'REPO_ROOT', tmp_path)
+        monkeypatch.setattr(upd, '_AGENT_DIR', tmp_path)
+        monkeypatch.setattr(upd, '_run_git', lambda *a, **k: (_ for _ in ()).throw(AssertionError('must not run git')))
+        monkeypatch.setattr(upd, '_schedule_restart', lambda delay=2.0: (_ for _ in ()).throw(AssertionError('must not restart')))
+
+        with STREAMS_LOCK:
+            old = dict(STREAMS)
+            STREAMS.clear()
+            STREAMS['stream_active'] = queue.Queue()
+        try:
+            result = upd.apply_force_update('agent')
+        finally:
+            with STREAMS_LOCK:
+                STREAMS.clear()
+                STREAMS.update(old)
+
+        assert result['ok'] is False
+        assert result.get('active_streams') == 1
+        assert result.get('restart_blocked') is True
+        assert 'active chat stream' in result['message']
+
+
 class TestSuccessfulUpdateReturnsRestartScheduled:
     """#814 — successful apply_update must return restart_scheduled: True."""
 
