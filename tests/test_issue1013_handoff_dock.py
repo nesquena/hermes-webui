@@ -78,13 +78,17 @@ def test_handoff_dock_reserves_transcript_space_like_terminal_dock():
 
 def test_handoff_dock_width_aligns_with_existing_slide_up_panels():
     assert ".handoff-hint-container{position:absolute;left:0;right:0;bottom:-2px;width:min(calc(100% - 112px),560px);" in STYLE_CSS
-    assert ".handoff-hint-container{bottom:-1px;width:calc(100% - 28px);}" in STYLE_CSS
+    assert ".handoff-hint-container{bottom:-2px;width:calc(100% - 28px);}" in STYLE_CSS
     start = STYLE_CSS.find(".handoff-hint-container")
     assert start != -1
     end = STYLE_CSS.find("}", start)
     assert end != -1
     handoff_hint_rule = STYLE_CSS[start:end+1]
     assert "width:min(calc(100% - 112px),560px)" in handoff_hint_rule
+    assert "border-bottom:none;border-radius:13px 13px 0 0" in STYLE_CSS
+    assert "padding:7px 12px 9px" in STYLE_CSS
+    assert ".handoff-hint-text{min-width:0;display:flex;align-items:center;gap:10px;color:var(--muted);font-size:12px;font-weight:700;line-height:1.2;" in STYLE_CSS
+    assert ".handoff-hint-action,.handoff-hint-dismiss{border:none;background:transparent;color:var(--muted);font:inherit;font-size:12px;font-weight:700;line-height:1.2;" in STYLE_CSS
     assert ".handoff-hint-dot{width:7px;height:7px;border-radius:999px;background:var(--success);" in STYLE_CSS
 
 
