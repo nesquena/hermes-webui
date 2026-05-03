@@ -23,7 +23,6 @@ healed automatically:
    normalises through ``_resolve_provider_alias``.
 """
 
-import re
 from pathlib import Path
 
 import pytest
@@ -49,25 +48,12 @@ class TestAutoDetectWritesCustom:
         )
 
     def test_auto_detect_branch_uses_custom(self):
-        """The else-branch in the auto-detect block resolves to ``custom``."""
-        src = Path(cfg.__file__).read_text(encoding="utf-8")
-        # Find the auto-detect block (host-keyword classifier).
-        m = re.search(
-            r'if "ollama" in host or "127\.0\.0\.1" in host or "localhost" in host:\s*\n'
-            r'\s*provider = "ollama"\s*\n'
-            r'\s*elif "lmstudio" in host or "lm-studio" in host:\s*\n'
-            r'\s*provider = "lmstudio"\s*\n'
-            r'\s*else:',
-            src,
-        )
-        assert m, "Auto-detect host-classifier block not found in api/config.py"
-        # Find the next provider assignment after the else.
-        tail = src[m.end() : m.end() + 1500]
-        provider_assign = re.search(r'provider = "([a-z-]+)"', tail)
-        assert provider_assign, "No provider assignment found after auto-detect else"
-        assert provider_assign.group(1) == "custom", (
-            f"Auto-detect else branch must assign provider = \"custom\", "
-            f"got {provider_assign.group(1)!r}"
+        """Unknown private/LAN endpoints still resolve to ``custom``."""
+        provider = cfg._fallback_provider_for_base_url("http://192.168.1.10:8000/v1")
+        assert provider == "custom", (
+            f"Unknown private endpoints must resolve to \"custom\" so the "
+            f"agent's auxiliary client takes the no-key-required "
+            f"OpenAI-compat path; got {provider!r}"
         )
 
 
