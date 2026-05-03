@@ -2253,6 +2253,7 @@ def handle_post(handler, parsed) -> bool:
             model=model,
             model_provider=model_provider,
             profile=body.get("profile") or None,
+            project_id=body.get("project_id") or None,
         )
         return j(handler, {"session": s.compact() | {"messages": s.messages}})
 

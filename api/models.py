@@ -724,7 +724,7 @@ def get_session(sid, metadata_only=False):
         return s
     raise KeyError(sid)
 
-def new_session(workspace=None, model=None, profile=None, model_provider=None):
+def new_session(workspace=None, model=None, profile=None, model_provider=None, project_id=None):
     """Create a new in-memory session.
 
     The session lives in the SESSIONS dict only — no disk write happens until
@@ -760,6 +760,7 @@ def new_session(workspace=None, model=None, profile=None, model_provider=None):
         model=effective_model,
         model_provider=model_provider,
         profile=profile,
+        project_id=project_id,
     )
     with LOCK:
         SESSIONS[s.session_id] = s
