@@ -1792,6 +1792,25 @@ def _run_agent_streaming(
             import inspect as _inspect
             _agent_params = set(_inspect.signature(_AIAgent.__init__).parameters)
 
+            # CLI-parity max output cap: read config.yaml's max_tokens and pass
+            # it to AIAgent when supported. Without this WebUI-created agents use
+            # provider-native output ceilings (e.g. Claude via OpenRouter can
+            # request 64k), which may turn an otherwise usable fallback into a
+            # 402 "more credits / fewer max_tokens" failure.
+            _max_tokens_cfg = None
+            try:
+                _raw_max_tokens = _cfg.get('max_tokens')
+                if _raw_max_tokens is None:
+                    _agent_cfg_for_tokens = _cfg.get('agent', {})
+                    if isinstance(_agent_cfg_for_tokens, dict):
+                        _raw_max_tokens = _agent_cfg_for_tokens.get('max_tokens')
+                if _raw_max_tokens is not None:
+                    _parsed_max_tokens = int(_raw_max_tokens)
+                    if _parsed_max_tokens > 0:
+                        _max_tokens_cfg = _parsed_max_tokens
+            except Exception:
+                _max_tokens_cfg = None
+
             # CLI-parity reasoning effort: read agent.reasoning_effort from the
             # active profile's config.yaml (the same key the CLI writes via
             # `/reasoning <level>`) and hand the parsed dict to AIAgent.  When
@@ -1830,6 +1849,8 @@ def _run_agent_streaming(
             # but guard defensively to avoid TypeError on an older agent build.
             if 'reasoning_config' in _agent_params and _reasoning_config is not None:
                 _agent_kwargs['reasoning_config'] = _reasoning_config
+            if 'max_tokens' in _agent_params and _max_tokens_cfg is not None:
+                _agent_kwargs['max_tokens'] = _max_tokens_cfg
             # Params added in newer hermes-agent — skip if not supported
             if 'api_mode' in _agent_params:
                 _agent_kwargs['api_mode'] = _rt.get('api_mode')
@@ -1861,6 +1882,8 @@ def _run_agent_streaming(
                     _hashlib.sha256((resolved_api_key or '').encode()).hexdigest()[:16],
                     resolved_base_url or '',
                     resolved_provider or '',
+                    _max_tokens_cfg or '',
+                    _fallback_resolved or {},
                     sorted(_toolsets) if _toolsets else [],
                 ], sort_keys=True)
                 _agent_sig = _hashlib.sha256(_sig_blob.encode()).hexdigest()[:16]
@@ -2098,6 +2121,9 @@ def _run_agent_streaming(
                         'insufficient credit' in _err_lower
                         or 'credit balance' in _err_lower
                         or 'credits exhausted' in _err_lower
+                        or 'more credits' in _err_lower
+                        or 'can only afford' in _err_lower
+                        or 'fewer max_tokens' in _err_lower
                         or 'quota_exceeded' in _err_lower
                         or 'quota exceeded' in _err_lower
                         or 'exceeded your current quota' in _err_lower
@@ -2433,6 +2459,9 @@ def _run_agent_streaming(
             'insufficient credit' in _exc_lower
             or 'credit balance' in _exc_lower
             or 'credits exhausted' in _exc_lower
+            or 'more credits' in _exc_lower
+            or 'can only afford' in _exc_lower
+            or 'fewer max_tokens' in _exc_lower
             or 'quota_exceeded' in _exc_lower
             or 'quota exceeded' in _exc_lower
             or 'exceeded your current quota' in _exc_lower
