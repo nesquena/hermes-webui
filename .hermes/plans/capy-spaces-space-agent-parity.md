@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-03 02:51 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-03 03:59 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: current widget event bridge aliases now accept Space Agent-style camelCase `activeSpaceId`/`widgetId` payloads for `space.current.widget.event` and `space.current.widget.events` while preserving bounded metadata-only event summaries and omitting generated/executable payload fields plus credential-like markers. Local/tailnet WebUI health verified OK after LaunchAgent restart; use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: source runtime reload aliases now support Space Agent-style `space.spaces.reloadWidget` and `space.spaces.reloadCurrentSpace` calls while preserving Capy's metadata-only adapter boundary. Widget reload queues a bounded `widget.refresh` event with sanitized payload summaries; current-space reload returns safe space detail metadata without generated/executable bodies or credential-like fields. Local/tailnet WebUI health verified OK after LaunchAgent restart; use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): support source reload aliases`
+  - Added RED/GREEN backend coverage proving `space.spaces.reloadWidget` accepts Space Agent-style camelCase `spaceId`/`widgetId`, queues safe refresh event metadata, and `space.spaces.reloadCurrentSpace` returns safe current Space detail metadata while omitting generated/executable fields plus credential-like markers.
+  - Validation at completion: focused RED failed before implementation with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`), full Spaces foundation suite passed (`116 passed`), `py_compile api/spaces.py tests/test_spaces_foundation.py`, and `git diff --check` passed. Mock/status screenshot QA captured the alias status with empty browser console, `window.__harnessErrors=[]`, visible leak check clean, and screenshot artifact `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_cc0ce4a71d044e1dafdc32b108955496.png`. Local/tailnet WebUI health verified OK after restart.
 
 - `feat(spaces): support camelcase widget event aliases`
   - Added RED/GREEN backend coverage proving `space.current.widget.event` and `space.current.widget.events` accept camelCase `activeSpaceId`/`widgetId`, queue/list safe widget event metadata, and omit generated/executable payload fields plus credential-like markers.

@@ -1360,6 +1360,9 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {"space.get", "space.spaces.get", "space.spaces.read", "space.spaces.getspace", "space.spaces.readspace", "space.spaces.openspace"}:
         space_id = validate_space_id(data.get("space_id"))
         return {"ok": True, "action": name, "space": read_space_detail(space_id)}
+    if name in {"space.spaces.reloadcurrentspace", "space.spaces.reloadspace"}:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        return {"ok": True, "action": name, "space_id": space_id, "space": read_space_detail(space_id)}
     if name in {"space.spaces.duplicatespace", "space.spaces.clonespace"}:
         result = duplicate_space_metadata_only(
             _space_tool_current_id(data),
@@ -1528,9 +1531,18 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
         result = patch_widget(space_id, widget_id, data.get("patch") if isinstance(data.get("patch"), dict) else {})
         return {"ok": True, "action": name, **result}
-    if name in {"widget.reload", "widget.refresh", "space.widget.reload", "space.widget.refresh", "space.current.widget.reload", "space.current.widget.refresh"}:
-        space_id = validate_space_id(_space_tool_current_id(data) if name.startswith("space.current.") else data.get("space_id"))
-        widget_id = validate_widget_id(data.get("widget_id") or data.get("id"))
+    if name in {
+        "widget.reload",
+        "widget.refresh",
+        "space.widget.reload",
+        "space.widget.refresh",
+        "space.current.widget.reload",
+        "space.current.widget.refresh",
+        "space.spaces.reloadwidget",
+        "space.spaces.refreshwidget",
+    }:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        widget_id = validate_widget_id(_space_tool_widget_id(data))
         payload = {"action": "reload"}
         if isinstance(data.get("payload"), dict):
             for key, value in data["payload"].items():

@@ -926,14 +926,35 @@ def test_space_tool_adapter_supports_widget_see_and_reload_aliases_metadata_only
         {
             "active_space_id": created["space_id"],
             "widget_id": "weather-card",
-            "payload": {"note": "Refresh public forecast", "renderer": "<script>bad()</script>", "api_key": "SECRET...LEAK"},
+            "payload": {"note": "Refresh public forecast", "renderer": "<script>bad()</script>", "api_key": "***"},
         },
+    )
+    source_reloaded = spaces.run_space_tool(
+        "space.spaces.reloadWidget",
+        {
+            "spaceId": created["space_id"],
+            "widgetId": "weather-card",
+            "payload": {"note": "Refresh via source runtime", "renderer": "<script>bad()</script>", "api_key": "***"},
+        },
+    )
+    source_current = spaces.run_space_tool(
+        "space.spaces.reloadCurrentSpace",
+        {"spaceId": created["space_id"], "renderer": "<script>ignore()</script>", "token": "***"},
     )
     events = spaces.run_space_tool(
         "space.widget.events",
         {"space_id": created["space_id"], "widget_id": "weather-card"},
     )
-    serialized = json.dumps({"seen": seen, "current_seen": current_seen, "reloaded": reloaded, "events": events}).lower()
+    serialized = json.dumps(
+        {
+            "seen": seen,
+            "current_seen": current_seen,
+            "reloaded": reloaded,
+            "source_reloaded": source_reloaded,
+            "source_current": source_current,
+            "events": events,
+        }
+    ).lower()
 
     assert seen["ok"] is True
     assert seen["action"] == "space.widget.see"
@@ -945,7 +966,16 @@ def test_space_tool_adapter_supports_widget_see_and_reload_aliases_metadata_only
     assert reloaded["queued"] is True
     assert reloaded["event_name"] == "widget.refresh"
     assert reloaded["payload_summary"] == {"action": "reload", "note": "Refresh public forecast"}
-    assert events["events"][0]["event_id"] == reloaded["event_id"]
+    assert source_reloaded["ok"] is True
+    assert source_reloaded["action"] == "space.spaces.reloadwidget"
+    assert source_reloaded["queued"] is True
+    assert source_reloaded["event_name"] == "widget.refresh"
+    assert source_reloaded["payload_summary"] == {"action": "reload", "note": "Refresh via source runtime"}
+    assert source_current["ok"] is True
+    assert source_current["action"] == "space.spaces.reloadcurrentspace"
+    assert source_current["space"]["widgets"][0]["id"] == "weather-card"
+    assert events["events"][0]["event_id"] == source_reloaded["event_id"]
+    assert events["events"][1]["event_id"] == reloaded["event_id"]
     assert "steal" not in serialized
     assert "<script" not in serialized
     assert "onerror" not in serialized
