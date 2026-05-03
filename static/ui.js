@@ -2832,6 +2832,17 @@ function _showUpdateBanner(data){
   const banner=$('updateBanner');
   if(banner) banner.classList.add('visible');
   window._updateData=data;
+  // Wire up "What's new?" link
+  const link=$('updateWhatsNew');
+  if(link && data.webui){
+    const repoUrl=data.webui.repo_url;
+    const curSha=data.webui.current_sha;
+    const newSha=data.webui.latest_sha;
+    if(repoUrl && curSha && newSha){
+      link.href=repoUrl+'/compare/'+curSha+'...'+newSha;
+      link.style.display='inline';
+    }
+  }
 }
 function dismissUpdate(){
   const b=$('updateBanner');if(b)b.classList.remove('visible');
