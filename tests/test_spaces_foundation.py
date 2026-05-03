@@ -404,6 +404,65 @@ def test_space_tool_adapter_supports_source_widget_delete_helper_metadata_only(m
     assert '"source":' not in serialized
 
 
+def test_space_tool_adapter_supports_source_widget_bulk_delete_helpers_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "source-bulk-delete-lab", "name": "Source Bulk Delete Lab"})
+    for widget_id in ["weather-card", "notes-card", "chart-card", "research-card"]:
+        spaces.upsert_widget(
+            created["space_id"],
+            {
+                "id": widget_id,
+                "kind": "weather" if widget_id == "weather-card" else "markdown",
+                "title": widget_id.replace("-", " ").title(),
+                "renderer": "<script>stored()</script>",
+                "html": "<img src=x onerror=stored()>",
+                "source": "SECRET_SOURCE",
+                "data": {"api_key": "***"},
+            },
+        )
+
+    removed_many = spaces.run_space_tool(
+        "space.spaces.removeWidgets",
+        {
+            "spaceId": created["space_id"],
+            "widgetIds": ["weather-card", "notes-card"],
+            "renderer": "<script>steal()</script>",
+            "source": "SECRET_SOURCE",
+            "api_key": "***",
+        },
+    )
+    assert removed_many["ok"] is True
+    assert removed_many["action"] == "space.spaces.removewidgets"
+    assert removed_many["deleted"] is True
+    assert removed_many["space_id"] == created["space_id"]
+    assert removed_many["widget_ids"] == ["weather-card", "notes-card"]
+    assert removed_many["deleted_count"] == 2
+    assert len(removed_many["revision_event_ids"]) == 2
+    assert [widget["id"] for widget in spaces.list_widgets(created["space_id"])] == ["chart-card", "research-card"]
+
+    removed_all = spaces.run_space_tool(
+        "space.spaces.removeAllWidgets",
+        {"spaceId": created["space_id"], "token": "***"},
+    )
+    serialized = json.dumps({"removed_many": removed_many, "removed_all": removed_all}).lower()
+
+    assert removed_all["ok"] is True
+    assert removed_all["action"] == "space.spaces.removeallwidgets"
+    assert removed_all["widget_ids"] == ["chart-card", "research-card"]
+    assert removed_all["deleted_count"] == 2
+    assert spaces.list_widgets(created["space_id"]) == []
+    assert "steal" not in serialized
+    assert "stored" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+    assert '"source":' not in serialized
+
+
 def test_space_tool_adapter_exposes_widget_runtime_contract_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "runtime-lab", "name": "Runtime Lab"})

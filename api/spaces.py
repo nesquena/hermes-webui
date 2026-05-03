@@ -1084,6 +1084,14 @@ def _space_tool_widget_id(payload: dict[str, Any]) -> str:
     return str(payload.get("widget_id") or payload.get("widgetId") or payload.get("id") or "").strip()
 
 
+def _space_tool_widget_ids(payload: dict[str, Any]) -> list[str]:
+    """Return widget ids from Hermes or Space Agent-style bulk payloads."""
+    raw = payload.get("widget_ids") or payload.get("widgetIds") or []
+    if not isinstance(raw, list):
+        raise ValueError("widget_ids must be a list")
+    return [validate_widget_id(item) for item in raw]
+
+
 def _space_tool_template_name(payload: dict[str, Any], default: str = "weather") -> str:
     """Resolve a safe Capy template name from Hermes or Space Agent-style payloads."""
     raw = payload.get("template") or payload.get("template_name") or payload.get("name") or payload.get("id") or ""
@@ -1231,6 +1239,38 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         widget_id = validate_widget_id(_space_tool_widget_id(data))
         result = delete_widget(space_id, widget_id)
         return {"ok": True, "action": name, **result}
+    if name in {"space.spaces.removewidgets", "space.spaces.deletewidgets"}:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        widget_ids = _space_tool_widget_ids(data)
+        revision_event_ids: list[str] = []
+        for widget_id in widget_ids:
+            result = delete_widget(space_id, widget_id)
+            revision_event_ids.append(result["revision_event_id"])
+        return {
+            "ok": True,
+            "action": name,
+            "deleted": True,
+            "space_id": space_id,
+            "widget_ids": widget_ids,
+            "deleted_count": len(widget_ids),
+            "revision_event_ids": revision_event_ids,
+        }
+    if name in {"space.spaces.removeallwidgets", "space.spaces.deleteallwidgets"}:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        widget_ids = [widget["id"] for widget in list_widgets(space_id)]
+        revision_event_ids = []
+        for widget_id in widget_ids:
+            result = delete_widget(space_id, widget_id)
+            revision_event_ids.append(result["revision_event_id"])
+        return {
+            "ok": True,
+            "action": name,
+            "deleted": True,
+            "space_id": space_id,
+            "widget_ids": widget_ids,
+            "deleted_count": len(widget_ids),
+            "revision_event_ids": revision_event_ids,
+        }
     if name in {"space.data.set", "space.current.data.set"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         result = set_shared_data_slot(space_id, data.get("key"), data.get("value"), data.get("metadata"))
