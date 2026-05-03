@@ -7,18 +7,18 @@
 
 // Cache version is injected by the server at request time (routes.py /sw.js handler).
 // Bumps automatically whenever the git commit changes — no manual edits needed.
-const CACHE_NAME = 'hermes-shell-__CACHE_VERSION__';
+const CACHE_NAME = 'hermes-shell-__WEBUI_VERSION__';
 
 // Static assets that form the app shell.
 //
-// Versioned assets (CSS + JS) include `?v=__CACHE_VERSION__` to match the
+// Versioned assets (CSS + JS) include `?v=__WEBUI_VERSION__` to match the
 // query string the page sends — see index.html. Without the version query
 // here, every cache lookup against `?v=...` URLs would miss and fall through
 // to network, defeating the pre-cache.
 //
 // Unversioned assets (`./`, manifest.json, favicons) are referenced from
 // index.html without a cache-bust query, so they stay unversioned here too.
-const VQ = '?v=__CACHE_VERSION__';
+const VQ = '?v=__WEBUI_VERSION__';
 const SHELL_ASSETS = [
   './',
   './static/style.css' + VQ,
