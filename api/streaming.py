@@ -2622,9 +2622,13 @@ def cancel_stream(stream_id: str) -> bool:
     and clears session.active_stream_id) so new /api/chat/start requests succeed
     immediately after cancel, even if the agent thread is still blocked.
 
-    The worker thread's finally block uses .pop(key, None), so the double-pop is
-    a safe no-op. Session cleanup runs outside STREAMS_LOCK to preserve lock
-    ordering (streaming thread does LOCK → STREAMS_LOCK; inverting would deadlock).
+    NOTE: cancel_stream calls get_session() (disk-backed) rather than reading
+    from the SESSIONS cache. This is intentional — the cached session may
+    contain stale in-memory state from a prior turn, while the disk copy
+    reflects the latest persisted checkpoint. On crash recovery we need the
+    most recently checkpointed state, not a potentially stale in-memory view.
+    Cache coherence for cancel is not a concern — both the streaming thread's
+    finally-block and the cancel path write through to disk via session.save().
     """
     from api import config as _live_config
 

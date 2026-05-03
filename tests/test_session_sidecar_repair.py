@@ -478,10 +478,8 @@ class TestEmptyMessagesGuard:
 
         assert result is True
         # Original message should be untouched
-        assert len(s.messages) == 2  # original + error marker
+        assert len(s.messages) == 1  # no error marker: non-empty messages
         assert s.messages[0]["content"] == "hello"
-        # Error marker appended
-        assert s.messages[1].get("_error") is True
         # Pending fields cleared
         assert s.pending_user_message is None
         assert s.active_stream_id is None
@@ -543,9 +541,10 @@ class TestNonEmptyMessagesPendingCleared:
 
         streaming._last_resort_sync_from_core(s, "stale_stream", agent_lock)
 
-        # Existing messages preserved untouched
-        assert len(s.messages) == 2, (
-            f"Expected 2 messages (original + error marker), got {len(s.messages)}"
+        # Existing messages preserved untouched — no error marker appended when
+        # messages are non-empty (partial was captured via WAL replay).
+        assert len(s.messages) == 1, (
+            f"Expected 1 message (original only), got {len(s.messages)}"
         )
         assert s.messages[0]["role"] == "user"
         assert s.messages[0]["content"] == "existing turn"
@@ -553,10 +552,9 @@ class TestNonEmptyMessagesPendingCleared:
             "Core transcript must NOT be synced when messages is non-empty"
         )
 
-        # Exactly one error marker
+        # No error marker when messages are non-empty
         error_msgs = [m for m in s.messages if m.get("_error")]
-        assert len(error_msgs) == 1
-        assert "Previous turn did not complete" in error_msgs[0]["content"]
+        assert len(error_msgs) == 0
 
         # No recovered user turn (messages is non-empty, so skip that)
         recovered_msgs = [m for m in s.messages if m.get("_recovered")]
