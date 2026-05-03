@@ -225,7 +225,7 @@ def test_sidebar_parent_indicator():
         "sessions.js should check parent_session_id"
     assert 'session-branch-indicator' in src, \
         "Should have session-branch-indicator class"
-    assert '\\u2482' in src, \
+    assert '\\u2442' in src, \
         "Should use ⑂ character for parent indicator"
 
 

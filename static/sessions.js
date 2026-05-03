@@ -1654,7 +1654,7 @@ function renderSessionListFromCache(){
     if(s.parent_session_id){
       const branchInd=document.createElement('span');
       branchInd.className='session-branch-indicator';
-      branchInd.textContent='\u2482'; // ⑂
+      branchInd.textContent='\u2442'; // ⑂
       branchInd.title=(typeof t==='function'?t('forked_from'):'Forked from')+' '+s.parent_session_id;
       branchInd.style.cursor='pointer';
       branchInd.onclick=(e)=>{
