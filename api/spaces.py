@@ -1226,6 +1226,11 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         patch_payload = data.get("patch") if isinstance(data.get("patch"), dict) else data
         result = patch_widget(space_id, widget_id, _space_tool_widget_payload(patch_payload))
         return {"ok": True, "action": name, **result, "widget": read_widget_detail(space_id, widget_id)}
+    if name in {"space.spaces.deletewidget", "space.spaces.removewidget"}:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        widget_id = validate_widget_id(_space_tool_widget_id(data))
+        result = delete_widget(space_id, widget_id)
+        return {"ok": True, "action": name, **result}
     if name in {"space.data.set", "space.current.data.set"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         result = set_shared_data_slot(space_id, data.get("key"), data.get("value"), data.get("metadata"))

@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-02 19:51 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-02 21:00 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: source-style Space Agent widget patch aliases now route `space.spaces.patchWidget` through Capy's safe metadata-only widget patch path, accepting camelCase `spaceId`/`widgetId` payloads while omitting renderer/html/script/source/data and credential-like values from serialized tool/detail responses. Use `git log -1 --oneline` for the exact commit hash after commit.
+Current latest known completed code slice: source-style Space Agent widget delete aliases now route `space.spaces.deleteWidget` and `space.spaces.removeWidget` through Capy's safe revisioned `delete_widget` primitive, accepting camelCase `spaceId`/`widgetId` payloads while omitting generated/executable bodies and credential-like request fields from serialized tool responses. Use `git log -1 --oneline` for the exact commit hash after commit.
 
 Recent completed slices:
+
+- `feat(spaces): support source widget delete aliases`
+  - Added RED/GREEN backend coverage proving `space.spaces.deleteWidget` and `space.spaces.removeWidget` accept Space Agent-style camelCase payloads, delete widgets through Capy's revisioned metadata-only primitive, and omit generated/executable bodies plus credential-like markers from serialized adapter results.
+  - Validation at completion: focused RED failed before implementation with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`). Mock/status screenshot QA captured the alias status with empty browser console and a clean sensitive-marker DOM check; screenshot artifact `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_c31ef34648784f41896352556399fa50.png`.
 
 - `feat(spaces): support source widget patch alias`
   - Added RED/GREEN backend coverage proving `space.spaces.patchWidget` accepts Space Agent-style camelCase payloads, patches safe widget metadata such as title/layout/weather, and omits renderer/html/script/source/data plus credential-like markers from serialized adapter/detail results.

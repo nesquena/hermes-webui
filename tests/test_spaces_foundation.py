@@ -345,6 +345,65 @@ def test_space_tool_adapter_supports_source_widget_patch_helper_metadata_only(mo
     assert '"source":' not in serialized
 
 
+
+def test_space_tool_adapter_supports_source_widget_delete_helper_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "source-delete-lab", "name": "Source Delete Lab"})
+    for widget_id in ["weather-card", "notes-card"]:
+        spaces.upsert_widget(
+            created["space_id"],
+            {
+                "id": widget_id,
+                "kind": "weather" if widget_id == "weather-card" else "markdown",
+                "title": "Weather Card" if widget_id == "weather-card" else "Notes Card",
+                "renderer": "<script>stored()</script>",
+                "html": "<img src=x onerror=stored()>",
+                "source": "SECRET_SOURCE",
+                "data": {"api_key": "***"},
+            },
+        )
+
+    deleted = spaces.run_space_tool(
+        "space.spaces.deleteWidget",
+        {
+            "spaceId": created["space_id"],
+            "widgetId": "weather-card",
+            "renderer": "<script>steal()</script>",
+            "html": "<img src=x onerror=steal()>",
+            "source": "SECRET_SOURCE",
+            "api_key": "***",
+            "token": "***",
+        },
+    )
+    removed = spaces.run_space_tool(
+        "space.spaces.removeWidget",
+        {"spaceId": created["space_id"], "widgetId": "notes-card", "api_key": "***"},
+    )
+    serialized = json.dumps({"deleted": deleted, "removed": removed}).lower()
+
+    assert deleted["ok"] is True
+    assert deleted["action"] == "space.spaces.deletewidget"
+    assert deleted["deleted"] is True
+    assert deleted["space_id"] == created["space_id"]
+    assert deleted["widget_id"] == "weather-card"
+    assert deleted["revision_event_id"]
+    assert removed["ok"] is True
+    assert removed["action"] == "space.spaces.removewidget"
+    assert removed["deleted"] is True
+    assert removed["widget_id"] == "notes-card"
+    assert spaces.list_widgets(created["space_id"]) == []
+    assert "steal" not in serialized
+    assert "stored" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+    assert '"source":' not in serialized
+
+
 def test_space_tool_adapter_exposes_widget_runtime_contract_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "runtime-lab", "name": "Runtime Lab"})
