@@ -9,14 +9,18 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-03 15:19 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-03 16:28 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: source current-widget mutation helpers now support Space Agent-style `space.current.patchWidget` and `space.current.reloadWidget` aliases while preserving Capy's metadata-only adapter boundary. The server-side adapter accepts `activeSpaceId`/`widgetId` payloads, applies safe title/layout patches from source-style position/size fields, queues bounded refresh events for reloads, and omits renderer/html/data/source/API auth markers from serialized responses/events. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: source widget-size utility coverage now includes the Space Agent-style `space.spaces.sizeToToken` adapter while preserving Capy's metadata-only boundary. The helper accepts preset, object, tuple/list, and fallback size inputs, clamps unsafe dimensions, returns only normalized size metadata plus the compact size string, and omits generated/executable/source/API auth markers from serialized responses. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
 
+- `feat(spaces): support source widget size helper`
+  - Added RED/GREEN backend coverage proving `space.spaces.sizeToToken` mirrors Space Agent-style widget size normalization for presets, bounded object sizes, and invalid sizes with safe fallbacks, while omitting renderer/html/source/API auth markers from serialized adapter responses.
+  - Validation at completion before screenshot/restart: focused RED failed before implementation with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`), full Spaces foundation suite passed (`127 passed`), `py_compile api/spaces.py tests/test_spaces_foundation.py`, and `git diff --check` passed.
+
 - `feat(spaces): support source current widget mutation aliases`
-  - Added RED/GREEN backend coverage proving `space.current.patchWidget` accepts Space Agent-style active-space and widget ids, patches safe title/layout metadata from source-style `position`/`size` fields, and `space.current.reloadWidget` queues safe widget-refresh event metadata, with both responses omitting renderer/html/data/source bodies plus credential-like markers.
+  - Added RED/GREEN backend coverage proving `space.current.patchWidget` accepts Space Agent-style active-space and widget ids, patches safe title/layout metadata from source-style position/size fields, and `space.current.reloadWidget` queues safe widget-refresh event metadata, with both responses omitting renderer/html/data/source bodies plus credential-like markers.
   - Validation at completion before screenshot/restart: focused RED failed before implementation with `Unsupported Capy Spaces tool action`; focused GREEN passed (`2 passed`). Run `git log -1 --oneline` and the final report for the full validation bundle.
 
 - `feat(spaces): support source current widget aliases`

@@ -59,6 +59,14 @@ _TRUSTED_SYSTEM_WIDGETS = {
     "memory": {"id": "system-memory", "title": "Memory"},
     "settings": {"id": "system-settings", "title": "Settings"},
 }
+_SOURCE_WIDGET_DEFAULT_SIZE = {"cols": 6, "rows": 3}
+_SOURCE_WIDGET_SIZE_PRESETS = {
+    "small": {"cols": 4, "rows": 2},
+    "medium": {"cols": 6, "rows": 3},
+    "large": {"cols": 8, "rows": 4},
+    "tall": {"cols": 4, "rows": 5},
+    "full": {"cols": 12, "rows": 4},
+}
 _SPACE_DEMO_RUNS = [
     {"demo": "demo_weather_widget", "template": "weather", "title": "Weather widget"},
     {"demo": "demo_daily_dashboard", "template": "dashboard", "title": "Daily dashboard"},
@@ -259,6 +267,33 @@ def _normalize_widget_layout(layout: Any) -> dict[str, Any]:
         "h": _clamped_int(raw.get("h"), 4, 1, 24),
         "minimized": _truthy_bool(raw.get("minimized")),
     }
+
+
+def _normalize_source_widget_size(size: Any, fallback: dict[str, int] | None = None) -> dict[str, int]:
+    """Normalize Space Agent-style widget size input for metadata-only helpers."""
+    fallback_size = dict(fallback or _SOURCE_WIDGET_DEFAULT_SIZE)
+    if isinstance(size, str):
+        normalized = size.strip().lower()
+        if normalized in _SOURCE_WIDGET_SIZE_PRESETS:
+            return dict(_SOURCE_WIDGET_SIZE_PRESETS[normalized])
+        match = re.match(r"^(\d+)\s*x\s*(\d+)$", normalized)
+        if match:
+            return _normalize_source_widget_size({"cols": match.group(1), "rows": match.group(2)}, fallback_size)
+        return fallback_size
+    if isinstance(size, (list, tuple)) and len(size) >= 2:
+        return _normalize_source_widget_size({"cols": size[0], "rows": size[1]}, fallback_size)
+    if isinstance(size, dict):
+        return {
+            "cols": _clamped_int(size.get("cols", size.get("width", size.get("w"))), fallback_size["cols"], 1, 24),
+            "rows": _clamped_int(size.get("rows", size.get("height", size.get("h"))), fallback_size["rows"], 1, 24),
+        }
+    return fallback_size
+
+
+def _space_tool_size_to_token(payload: dict[str, Any]) -> dict[str, Any]:
+    fallback = _normalize_source_widget_size(payload.get("fallback"), _SOURCE_WIDGET_DEFAULT_SIZE)
+    size = _normalize_source_widget_size(payload.get("size"), fallback)
+    return {"token": f"{size['cols']}x{size['rows']}", "size": size}
 
 
 def _normalize_widget(widget: dict[str, Any]) -> dict[str, Any]:
@@ -1532,6 +1567,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         return {"ok": True, "action": name, "space_id": space_id, "space": read_space_detail(space_id)}
     if name == "space.spaces.resolveappurl":
         return {"ok": True, "action": name, "url": _space_tool_resolve_app_url(data), "resolve": {"mode": "metadata-only"}}
+    if name == "space.spaces.sizetotoken":
+        return {"ok": True, "action": name, **_space_tool_size_to_token(data), "mode": "metadata-only"}
     if name in {"space.spaces.repositioncurrentspace", "space.current.reposition", "space.current.reposition_viewport"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         request = {

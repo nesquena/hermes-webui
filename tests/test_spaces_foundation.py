@@ -516,6 +516,44 @@ def test_space_tool_adapter_supports_source_space_meta_and_layout_helpers_metada
 
 
 
+def test_space_tool_adapter_supports_source_size_to_token_helper_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    from_preset = spaces.run_space_tool(
+        "space.spaces.sizeToToken",
+        {"size": "full", "renderer": "<script>steal()</script>", "api_key": "***"},
+    )
+    from_object = spaces.run_space_tool(
+        "space.spaces.sizeToToken",
+        {"size": {"cols": 99, "rows": 0, "token": "SECRET"}, "source": "SECRET_SOURCE"},
+    )
+    from_invalid_with_fallback = spaces.run_space_tool(
+        "space.spaces.sizeToToken",
+        {"size": "not-a-size", "fallback": "small", "html": "<img src=x onerror=steal()>"},
+    )
+    serialized = json.dumps([from_preset, from_object, from_invalid_with_fallback]).lower()
+
+    assert from_preset == {
+        "ok": True,
+        "action": "space.spaces.sizetotoken",
+        "token": f"{12}x{4}",
+        "size": {"cols": 12, "rows": 4},
+        "mode": "metadata-only",
+    }
+    assert from_object["token"] == f"{24}x{1}"
+    assert from_object["size"] == {"cols": 24, "rows": 1}
+    assert from_invalid_with_fallback["token"] == f"{4}x{2}"
+    assert from_invalid_with_fallback["size"] == {"cols": 4, "rows": 2}
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+    assert '"source":' not in serialized
+
+
+
 def test_space_tool_adapter_supports_source_reposition_current_space_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "source-reposition-lab", "name": "Source Reposition Lab"})
