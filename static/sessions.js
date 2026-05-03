@@ -674,6 +674,7 @@ const _selectedSessions = new Set();  // selected session IDs
 let _allProjects = [];  // cached project list
 let _activeProject = null;  // project_id filter (null = show all)
 let _showAllProfiles = false;  // false = filter to active profile only
+let _showNoneProject = false;  // show sessions without any project
 let _sessionActionMenu = null;
 let _sessionActionAnchor = null;
 let _sessionActionSessionId = null;
@@ -1429,8 +1430,8 @@ function renderSessionListFromCache(){
   // Server backfills profile='default' for legacy sessions, so every session has a profile.
   // Show only sessions tagged to the active profile; 'All profiles' toggle overrides.
   const profileFiltered=_showAllProfiles?withMessages:withMessages.filter(s=>s.is_cli_session||s.profile===S.activeProfile);
-  // Filter by active project
-  const projectFiltered=_activeProject?profileFiltered.filter(s=>s.project_id===_activeProject):profileFiltered;
+  // Filter by project: "All" (null) shows all projects, "None" shows sessions without project, other project shows only that project
+  const projectFiltered=_activeProject?profileFiltered.filter(s=>s.project_id===_activeProject):(_showNoneProject?profileFiltered.filter(s=>!s.project_id):profileFiltered);
   // Filter archived unless toggle is on
   const sessionsRaw=_showArchived?projectFiltered:projectFiltered.filter(s=>!s.archived);
   const sessions=_attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw);
@@ -1462,10 +1463,17 @@ function renderSessionListFromCache(){
     bar.className='project-bar';
     // "All" chip
     const allChip=document.createElement('span');
-    allChip.className='project-chip'+(!_activeProject?' active':'');
+    allChip.className='project-chip'+(!_activeProject&&!_showNoneProject?' active':'');
     allChip.textContent='All';
-    allChip.onclick=()=>{_activeProject=null;renderSessionListFromCache();};
+    allChip.onclick=()=>{_activeProject=null;_showNoneProject=false;renderSessionListFromCache();};
     bar.appendChild(allChip);
+    // "None" chip (sessions without any project)
+    const noneChip=document.createElement('span');
+    noneChip.className='project-chip'+(_showNoneProject?' active':'');
+    noneChip.textContent='None';
+    noneChip.onclick=()=>{_activeProject=null;_showNoneProject=true;renderSessionListFromCache();};
+    noneChip.oncontextmenu=(e)=>{e.preventDefault();_showProjectContextMenu(e, null, noneChip);};
+    bar.appendChild(noneChip);
     // Project chips
     for(const p of _allProjects){
       const chip=document.createElement('span');
