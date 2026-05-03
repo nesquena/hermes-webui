@@ -219,6 +219,75 @@ def test_space_tool_adapter_supports_source_camelcase_space_helpers(monkeypatch,
     assert "secret" not in serialized
 
 
+def test_space_tool_adapter_supports_source_space_meta_and_layout_helpers_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "source-layout-lab", "name": "Source Layout Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "weather-card",
+            "kind": "weather",
+            "title": "Weather Card",
+            "renderer": "<script>stored()</script>",
+            "data": {"api_key": "SECRET...LEAK"},
+        },
+    )
+
+    saved_meta = spaces.run_space_tool(
+        "space.spaces.saveSpaceMeta",
+        {
+            "id": created["space_id"],
+            "title": "Renamed Source Space",
+            "description": "Safe description",
+            "agentInstructions": "Prefer metadata-only widget patches.",
+            "renderer": "<script>steal()</script>",
+            "api_key": "SECRET...LEAK",
+        },
+    )
+    saved_layout = spaces.run_space_tool(
+        "space.spaces.saveSpaceLayout",
+        {
+            "id": created["space_id"],
+            "widgetIds": ["weather-card"],
+            "widgetPositions": {
+                "weather-card": {"x": 4, "y": 2, "renderer": "<script>steal()</script>"},
+            },
+            "widgetSizes": {
+                "weather-card": {"w": 8, "h": 5, "api_key": "SECRET...LEAK"},
+            },
+            "minimizedWidgetIds": ["weather-card"],
+            "source": "SECRET_SOURCE",
+        },
+    )
+    persisted = spaces.read_space(created["space_id"])
+    serialized = json.dumps({"saved_meta": saved_meta, "saved_layout": saved_layout, "persisted": persisted}).lower()
+
+    assert saved_meta["ok"] is True
+    assert saved_meta["action"] == "space.spaces.savespacemeta"
+    assert saved_meta["space"]["name"] == "Renamed Source Space"
+    assert saved_meta["space"]["description"] == "Safe description"
+    assert saved_meta["space"]["agent_instructions"] == "Prefer metadata-only widget patches."
+    assert saved_layout["ok"] is True
+    assert saved_layout["action"] == "space.spaces.savespacelayout"
+    assert saved_layout["space"]["layout"] == {
+        "widget_ids": ["weather-card"],
+        "widget_positions": {"weather-card": {"x": 4, "y": 2}},
+        "widget_sizes": {"weather-card": {"w": 8, "h": 5}},
+        "minimized_widget_ids": ["weather-card"],
+    }
+    assert persisted["name"] == "Renamed Source Space"
+    assert persisted["layout"] == saved_layout["space"]["layout"]
+    assert "steal" not in serialized
+    assert "stored" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+    assert '"source":' not in serialized
+
+
+
 def test_space_tool_adapter_supports_source_widget_upsert_helpers_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "source-widget-lab", "name": "Source Widget Lab"})

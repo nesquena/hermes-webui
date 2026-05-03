@@ -1129,6 +1129,115 @@ def _space_tool_widget_ids(payload: dict[str, Any]) -> list[str]:
     return [validate_widget_id(item) for item in raw]
 
 
+def _space_tool_space_id(payload: dict[str, Any]) -> str:
+    """Return a Space id from Hermes or source-style space helper payloads."""
+    return str(
+        payload.get("space_id")
+        or payload.get("spaceId")
+        or payload.get("current_space_id")
+        or payload.get("currentSpaceId")
+        or payload.get("active_space_id")
+        or payload.get("activeSpaceId")
+        or payload.get("id")
+        or ""
+    ).strip()
+
+
+def _space_tool_sanitize_widgets(space: dict[str, Any]) -> None:
+    """Keep manifests crossing source-style helpers metadata-only."""
+    widgets = space.get("widgets") if isinstance(space.get("widgets"), list) else []
+    space["widgets"] = [_space_tool_widget_payload(widget) for widget in widgets if isinstance(widget, dict)]
+
+
+def _space_tool_layout_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalize source-style Space layout fields without generated bodies."""
+    raw_widget_ids = payload.get("widget_ids") or payload.get("widgetIds") or []
+    if not isinstance(raw_widget_ids, list):
+        raise ValueError("widget_ids must be a list")
+    widget_ids = [validate_widget_id(item) for item in raw_widget_ids]
+
+    raw_positions = payload.get("widget_positions") or payload.get("widgetPositions") or {}
+    if not isinstance(raw_positions, dict):
+        raise ValueError("widget_positions must be an object")
+    widget_positions: dict[str, dict[str, int]] = {}
+    for widget_id, position in raw_positions.items():
+        wid = validate_widget_id(widget_id)
+        raw = position if isinstance(position, dict) else {}
+        widget_positions[wid] = {
+            "x": _clamped_int(raw.get("x"), 0, 0, 10_000),
+            "y": _clamped_int(raw.get("y"), 0, 0, 10_000),
+        }
+
+    raw_sizes = payload.get("widget_sizes") or payload.get("widgetSizes") or {}
+    if not isinstance(raw_sizes, dict):
+        raise ValueError("widget_sizes must be an object")
+    widget_sizes: dict[str, dict[str, int]] = {}
+    for widget_id, size in raw_sizes.items():
+        wid = validate_widget_id(widget_id)
+        raw = size if isinstance(size, dict) else {}
+        widget_sizes[wid] = {
+            "w": _clamped_int(raw.get("w"), 6, 1, 24),
+            "h": _clamped_int(raw.get("h"), 4, 1, 24),
+        }
+
+    raw_minimized = payload.get("minimized_widget_ids") or payload.get("minimizedWidgetIds") or []
+    if not isinstance(raw_minimized, list):
+        raise ValueError("minimized_widget_ids must be a list")
+    minimized_widget_ids = [validate_widget_id(item) for item in raw_minimized]
+
+    return {
+        "widget_ids": widget_ids,
+        "widget_positions": widget_positions,
+        "widget_sizes": widget_sizes,
+        "minimized_widget_ids": minimized_widget_ids,
+    }
+
+
+def save_space_meta_from_tool(payload: dict[str, Any]) -> dict[str, Any]:
+    """Save source-style Space metadata through Capy's safe metadata boundary."""
+    space_id = validate_space_id(_space_tool_space_id(payload))
+    space = read_space(space_id)
+    name = _payload_text_summary(payload.get("name") or payload.get("title"), 120)
+    if name and name != "[REDACTED]":
+        space["name"] = name
+    if "description" in payload:
+        description = _payload_text_summary(payload.get("description"), 500)
+        space["description"] = "" if description == "[REDACTED]" else description
+    instructions_raw = (
+        payload.get("agent_instructions")
+        or payload.get("agentInstructions")
+        or payload.get("specialInstructions")
+        or payload.get("instructions")
+    )
+    if instructions_raw is not None:
+        instructions = _payload_text_summary(instructions_raw, 800)
+        space["agent_instructions"] = "" if instructions == "[REDACTED]" else instructions
+    icon = _payload_text_summary(payload.get("icon"), 40)
+    if icon and icon != "[REDACTED]":
+        space["icon"] = icon
+    icon_color = _payload_text_summary(payload.get("icon_color") or payload.get("iconColor"), 40)
+    if icon_color and icon_color != "[REDACTED]":
+        space["icon_color"] = icon_color
+    _space_tool_sanitize_widgets(space)
+    saved = _write_manifest(
+        space,
+        "space.meta.updated",
+        {"fields": [key for key in ("name", "description", "agent_instructions", "icon", "icon_color") if key in space]},
+    )
+    return {"space_id": saved["space_id"], "revision_event_id": saved["revision_event_id"], "space": read_space_detail(saved["space_id"])}
+
+
+def save_space_layout_from_tool(payload: dict[str, Any]) -> dict[str, Any]:
+    """Save source-style Space layout metadata without executable/source fields."""
+    space_id = validate_space_id(_space_tool_space_id(payload))
+    space = read_space(space_id)
+    layout = _space_tool_layout_payload(payload)
+    space["layout"] = layout
+    _space_tool_sanitize_widgets(space)
+    saved = _write_manifest(space, "space.layout.updated", {"layout": _payload_summary(layout)})
+    return {"space_id": saved["space_id"], "revision_event_id": saved["revision_event_id"], "space": read_space_detail(saved["space_id"])}
+
+
 def _space_tool_template_name(payload: dict[str, Any], default: str = "weather") -> str:
     """Resolve a safe Capy template name from Hermes or Space Agent-style payloads."""
     raw = payload.get("template") or payload.get("template_name") or payload.get("name") or payload.get("id") or ""
@@ -1252,6 +1361,12 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         space = read_space_detail(result["space_id"])
         space["widget_count"] = len(space.get("widgets") or [])
         return {"ok": True, "action": name, **result, "space": space}
+    if name == "space.spaces.savespacemeta":
+        result = save_space_meta_from_tool(data)
+        return {"ok": True, "action": name, **result}
+    if name == "space.spaces.savespacelayout":
+        result = save_space_layout_from_tool(data)
+        return {"ok": True, "action": name, **result}
     if name in {"space.spaces.removespace", "space.spaces.deletespace"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         result = delete_space(space_id)
