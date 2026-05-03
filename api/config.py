@@ -2109,6 +2109,29 @@ def get_available_models() -> dict:
                                 "models": models,
                             }
                         )
+                elif pid == "nous":
+                    raw_models = []
+                    try:
+                        from hermes_cli.models import provider_model_ids as _provider_model_ids
+
+                        raw_models = [
+                            {"id": f"@nous:{mid}", "label": mid}
+                            for mid in (_provider_model_ids("nous") or [])
+                        ]
+                    except Exception:
+                        logger.warning("Failed to load Nous Portal models from hermes_cli")
+
+                    if not raw_models:
+                        raw_models = copy.deepcopy(_PROVIDER_MODELS.get("nous", []))
+
+                    models = _apply_provider_prefix(raw_models, pid, active_provider)
+                    groups.append(
+                        {
+                            "provider": provider_name,
+                            "provider_id": pid,
+                            "models": models,
+                        }
+                    )
                 elif pid in _PROVIDER_MODELS or pid in cfg.get("providers", {}):
                     raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
                     detected_models = auto_detected_models_by_provider.get(pid, [])
