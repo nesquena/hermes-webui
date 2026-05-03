@@ -1799,8 +1799,61 @@ def get_available_models() -> dict:
                 if _pid_key in _PROVIDER_MODELS or _pid_key in cfg.get("providers", {}):
                     detected_providers.add(_pid_key)
 
+        def _normalize_base_url_for_match(value: object) -> str:
+            url = str(value or "").strip().rstrip("/")
+            if not url:
+                return ""
+            parsed_url = urlparse(url if "://" in url else f"http://{url}")
+            scheme = (parsed_url.scheme or "http").lower()
+            netloc = (parsed_url.netloc or parsed_url.path).lower().rstrip("/")
+            path = parsed_url.path.rstrip("/")
+            if not parsed_url.netloc:
+                path = ""
+            return f"{scheme}://{netloc}{path}"
+
+        def _configured_provider_for_base_url(base_url: object) -> str:
+            target = _normalize_base_url_for_match(base_url)
+            if not target:
+                return ""
+
+            if isinstance(model_cfg, dict):
+                model_base_url = _normalize_base_url_for_match(model_cfg.get("base_url"))
+                if model_base_url == target:
+                    provider_hint = _resolve_provider_alias(model_cfg.get("provider"))
+                    if provider_hint:
+                        return str(provider_hint).strip().lower()
+
+            providers_cfg = cfg.get("providers", {})
+            if isinstance(providers_cfg, dict):
+                for provider_key, provider_cfg in providers_cfg.items():
+                    if not isinstance(provider_cfg, dict):
+                        continue
+                    provider_base_url = _normalize_base_url_for_match(
+                        provider_cfg.get("base_url")
+                    )
+                    if provider_base_url == target:
+                        provider_hint = _resolve_provider_alias(provider_key)
+                        if provider_hint:
+                            return str(provider_hint).strip().lower()
+
+            custom_providers_cfg = cfg.get("custom_providers", [])
+            if isinstance(custom_providers_cfg, list):
+                for entry in custom_providers_cfg:
+                    if not isinstance(entry, dict):
+                        continue
+                    entry_base_url = _normalize_base_url_for_match(entry.get("base_url"))
+                    if entry_base_url != target:
+                        continue
+                    entry_name = str(entry.get("name") or "").strip()
+                    if entry_name:
+                        return "custom:" + entry_name.lower().replace(" ", "-")
+                    return "custom"
+
+            return ""
+
         # 4. Fetch models from custom endpoint if base_url is configured
         auto_detected_models = []
+        auto_detected_models_by_provider: dict[str, list[dict]] = {}
         if cfg_base_url:
             try:
                 import ipaddress
@@ -1812,11 +1865,13 @@ def get_available_models() -> dict:
                 else:
                     endpoint_url = base_url.rstrip("/") + "/v1/models"
 
-                provider = "custom"
+                configured_provider = _configured_provider_for_base_url(base_url)
+                provider = configured_provider or "custom"
+                provider_from_config = bool(configured_provider)
                 parsed = urlparse(base_url if "://" in base_url else f"http://{base_url}")
                 host = (parsed.netloc or parsed.path).lower()
 
-                if parsed.hostname:
+                if parsed.hostname and not provider_from_config:
                     try:
                         addr = ipaddress.ip_address(parsed.hostname)
                         if addr.is_private or addr.is_loopback or addr.is_link_local:
@@ -1939,8 +1994,11 @@ def get_available_models() -> dict:
                     model_name = model.get("name", "") or model.get("model", "") or model_id
                     if model_id and model_name:
                         label = _format_ollama_label(model_id) if provider in ("ollama", "ollama-cloud") else model_name
-                        auto_detected_models.append({"id": model_id, "label": label})
-                        detected_providers.add(provider.lower())
+                        auto_model = {"id": model_id, "label": label}
+                        auto_detected_models.append(auto_model)
+                        provider_key = provider.lower()
+                        auto_detected_models_by_provider.setdefault(provider_key, []).append(auto_model)
+                        detected_providers.add(provider_key)
             except Exception:
                 logger.debug("Custom endpoint unreachable or misconfigured for provider: %s", provider)
 
@@ -2053,6 +2111,9 @@ def get_available_models() -> dict:
                         )
                 elif pid in _PROVIDER_MODELS or pid in cfg.get("providers", {}):
                     raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
+                    detected_models = auto_detected_models_by_provider.get(pid, [])
+                    if detected_models and not raw_models:
+                        raw_models = copy.deepcopy(detected_models)
 
                     provider_cfg = cfg.get("providers", {}).get(pid, {})
                     if isinstance(provider_cfg, dict) and "models" in provider_cfg:
@@ -2070,7 +2131,14 @@ def get_available_models() -> dict:
                         }
                     )
                 else:
-                    if auto_detected_models:
+                    detected_models = auto_detected_models_by_provider.get(pid)
+                    if detected_models:
+                        models_for_group = copy.deepcopy(detected_models)
+                    elif auto_detected_models:
+                        models_for_group = copy.deepcopy(auto_detected_models)
+                    else:
+                        models_for_group = []
+                    if models_for_group:
                         # Per-group deep copy so subsequent mutation by
                         # _deduplicate_model_ids() (which prefixes ids with
                         # @provider_id:) does not bleed into other groups
@@ -2084,7 +2152,7 @@ def get_available_models() -> dict:
                             {
                                 "provider": provider_name,
                                 "provider_id": pid,
-                                "models": copy.deepcopy(auto_detected_models),
+                                "models": models_for_group,
                             }
                         )
         else:
