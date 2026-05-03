@@ -27,6 +27,19 @@ class QuietHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 64
     
+    def server_bind(self):
+        """Set socket options to prevent TIME_WAIT and CLOSE-WAIT accumulation."""
+        # Enable address reuse to avoid "Address already in use" errors
+        self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Enable TCP keepalive to detect dead connections (Linux)
+        try:
+            self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60)   # Start probing after 60s idle
+            self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)  # Probe every 10s
+            self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)     # Drop after 3 failed probes
+        except (OSError, AttributeError):
+            pass  # TCP_KEEP* may not be available on all platforms
+        super().server_bind()
+    
     def handle_error(self, request, client_address):
         """Override to suppress logging for common client disconnect errors."""
         exc_type, exc_value, _ = sys.exc_info()
@@ -48,6 +61,21 @@ class QuietHTTPServer(ThreadingHTTPServer):
 
 class Handler(BaseHTTPRequestHandler):
     timeout = 30  # seconds — kills idle/incomplete connections to prevent thread exhaustion
+    
+    def setup(self):
+        """Set additional socket options for each connection."""
+        super().setup()
+        # Enable TCP keepalive on the connection socket (not just server socket)
+        try:
+            import socket
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)  # Disable Nagle's algorithm
+            # Aggressive keepalive: start after 10s idle, probe every 5s, drop after 3 failures
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 10)
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5)
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+            self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        except (OSError, AttributeError):
+            pass  # May not be available on all platforms
     _ver_suffix = WEBUI_VERSION.removeprefix('v')
     server_version = ('HermesWebUI/' + _ver_suffix) if _ver_suffix != 'unknown' else 'HermesWebUI'
     def log_message(self, fmt, *args): pass  # suppress default Apache-style log
