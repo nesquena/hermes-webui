@@ -1,6 +1,7 @@
 """Neo Dashboard visual shell: topbar, sidebar status and VPS resources."""
 
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -27,7 +28,6 @@ def test_dashboard_sidebar_status_and_vps_present():
     for marker in [
         'class="neo-dashboard-brand"',
         'class="neo-sidebar-status"',
-        'id="neoSidebarTalkNow"',
         'class="neo-vps-card"',
         'data-vps-metric="cpu"',
         'data-vps-metric="ram"',
@@ -35,6 +35,68 @@ def test_dashboard_sidebar_status_and_vps_present():
         'data-vps-metric="network"',
     ]:
         assert marker in INDEX_HTML
+    # "Conversar agora" button removed in visual refinement (HU-03.8 DoD update)
+    assert 'id="neoSidebarTalkNow"' not in INDEX_HTML
+
+
+def test_neo_sidebar_matches_required_navigation_order_and_targets():
+    block = INDEX_HTML.split('class="neo-dashboard-menu"', 1)[1].split('class="neo-dashboard-bottom"', 1)[0]
+    found = re.findall(
+        r'data-neo-menu-item\s+data-panel="([^"]+)".*?onclick="switchPanel\(\'([^\']+)\'\)".*?data-i18n="([^"]+)"',
+        block,
+        re.S,
+    )
+    assert found == [
+        ("dashboard", "dashboard", "tab_dashboard"),
+        ("projects", "projects", "tab_projects"),
+        ("todos", "todos", "tab_tasks"),
+        ("profiles", "profiles", "tab_profiles"),
+        ("finance", "finance", "tab_finance"),
+        ("agents", "agents", "tab_agents"),
+        ("skills", "skills", "tab_skills"),
+        ("tasks", "tasks", "tab_automation"),
+        ("settings", "settings", "tab_settings"),
+    ]
+
+
+def test_neo_sidebar_bottom_blocks_and_footer_are_anchored():
+    assert 'class="neo-dashboard-bottom"' in INDEX_HTML
+    assert 'class="neo-sidebar-footer"' in INDEX_HTML
+    assert 'data-i18n="sidebar_docs"' in INDEX_HTML
+    assert 'data-i18n="sidebar_support"' in INDEX_HTML
+    for selector in [
+        ".neo-dashboard-bottom",
+        "margin-top:auto",
+        ".neo-dashboard-menu{flex:1 1 auto",
+        "overflow-y:auto",
+        ".neo-dashboard-bottom{margin-top:auto;display:flex;flex-shrink:0",
+        ".neo-sidebar-footer",
+    ]:
+        assert selector in STYLE_CSS
+
+
+def test_neo_placeholder_panels_are_routable_from_sidebar():
+    for marker in [
+        'id="mainProjects"',
+        'id="mainTodos"',
+        'id="mainFinance"',
+        'id="mainAgents"',
+        "projects: 'showing-projects'",
+        "todos: 'showing-todos'",
+        "finance: 'showing-finance'",
+        "agents: 'showing-agents'",
+        "NEO_SHELL_PANELS",
+        "panelDashboard",
+    ]:
+        assert marker in (INDEX_HTML + PANELS_JS)
+    for selector in [
+        "main.main.showing-projects > #mainProjects",
+        "main.main.showing-todos > #mainTodos",
+        "main.main.showing-finance > #mainFinance",
+        "main.main.showing-agents > #mainAgents",
+        ".neo-placeholder-panel",
+    ]:
+        assert selector in STYLE_CSS
 
 
 def test_health_routes_and_dashboard_polling_present():
@@ -47,18 +109,38 @@ def test_health_routes_and_dashboard_polling_present():
     assert "focusDashboardComposer" in DASHBOARD_JS
 
 
+def test_dashboard_topbar_actions_have_final_behaviors():
+    for marker in [
+        "openDashboardSearch",
+        "openDashboardNotifications",
+        "openDashboardHelp",
+        "/api/sessions/search",
+        "loadSession(session.session_id)",
+        "Notification.requestPermission",
+        "notifications_enabled",
+        "cmdHelp",
+    ]:
+        assert marker in DASHBOARD_JS
+    assert "dashboard_topbar_placeholder" not in DASHBOARD_JS
+
+
 def test_dashboard_visual_shell_css_present():
     for selector in [
         ".dashboard-topbar",
         ".dashboard-topbar-status",
+        ".dashboard-topbar-panel",
+        ".dashboard-search-input",
+        ".dashboard-notification-status",
+        ".dashboard-help-actions",
         ".dashboard-shell-mode",
         ".neo-dashboard-brand",
         ".neo-sidebar-status",
-        ".neo-sidebar-talk",
         ".neo-vps-card",
         ".neo-vps-bar",
     ]:
         assert selector in STYLE_CSS
+    # .neo-sidebar-talk removed — "Conversar agora" button dropped in visual refinement
+    assert ".neo-sidebar-talk" not in STYLE_CSS
 
 
 def test_dashboard_uses_exclusive_desktop_shell():

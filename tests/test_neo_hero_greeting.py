@@ -115,12 +115,16 @@ def test_dashboard_js_has_greeting_logic():
 def test_hero_card_in_index_html():
     html = (STATIC / "index.html").read_text()
     assert 'class="hero-card"' in html
-    assert 'class="hero-avatar"' in html
+    assert 'static/brand/neo-hero.png' in html
+    assert 'class="hero-portrait"' in html
+    assert 'class="hero-card-code"' in html
     assert 'class="hero-status-pill"' in html
+    assert 'class="hero-status-dot"' in html
     assert 'id="heroGreetingTime"' in html
     assert 'class="hero-greeting-welcome"' in html
     assert 'class="hero-greeting-summary"' in html
-    assert "neo-avatar.svg" in html
+    # neo-avatar.svg replaced by neo-ico.png in empty state (visual refinement)
+    assert "neo-ico.png" in html
 
 
 # ── CSS ────────────────────────────────────────────────────────────────────
@@ -128,9 +132,34 @@ def test_hero_card_in_index_html():
 def test_hero_css_in_style():
     css = (STATIC / "style.css").read_text()
     assert ".hero-card" in css
-    assert ".hero-avatar" in css
+    assert ".hero-portrait" in css
+    assert ".hero-card-code" in css
     assert ".hero-status-pill" in css
     assert ".hero-greeting" in css
     assert "hover-float" in css
     assert "pulse-glow" in css
     assert "prefers-reduced-motion" in css
+
+
+def test_hero_visual_weight_matches_reference():
+    css = (STATIC / "style.css").read_text()
+    assert ".hero-card{position:relative;height:200px" in css
+    assert ".hero-portrait{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center 35%" in css
+    assert ".hero-status-pill{position:absolute;left:20px;right:20px;bottom:16px;z-index:3" in css
+    assert ".hero-greeting{display:flex;flex-direction:column;gap:4px;padding:12px 14px" in css
+
+
+def test_right_column_refinement_matches_reference():
+    css = (STATIC / "style.css").read_text()
+    assert ".dashboard-grid{display:grid;grid-template-columns:minmax(0,1fr) 280px" in css
+    assert ".hero-card{position:relative;height:200px;border:1px solid rgba(0,229,255,.35)" in css
+    assert ".hero-status-dot{width:5px;height:5px;border-radius:999px;background:var(--accent);box-shadow:0 0 8px rgba(0,229,255,1);animation:status-pulse" in css
+    assert ".hero-greeting{display:flex;flex-direction:column;gap:4px;padding:12px 14px;border:1px solid var(--border);border-radius:8px;background:var(--surface);}" in css
+    assert ".hero-greeting-time{display:none;}" in css
+    assert ".hero-greeting-welcome{font-size:15px;font-weight:700" in css
+
+
+def test_hero_png_asset_is_served_from_static_brand():
+    path = STATIC / "brand" / "neo-hero.png"
+    assert path.exists()
+    assert path.stat().st_size > 1_000_000

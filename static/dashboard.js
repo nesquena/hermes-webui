@@ -3,6 +3,7 @@ let chatMessagesAnchor = null;
 let chatComposerAnchor = null;
 let dashboardHealthPollTimer = null;
 let dashboardHealthCache = { at: 0, system: null, vps: null };
+let dashboardSearchTimer = null;
 
 const DASHBOARD_FALLBACK_KPIS = [
   { id: 'active_projects', label_key: 'kpi_active_projects', value: 0, delta_key: 'kpi_delta_this_month', delta_value: 0, panel: 'projects' },
@@ -156,6 +157,166 @@ function openComposerTerminal() {
   handleDashboardQuickAction('open_terminal');
 }
 
+function _dashboardEsc(value) {
+  return String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[ch]));
+}
+
+function _dashboardTopbarPanel() {
+  let panel = document.getElementById('dashboardTopbarPanel');
+  if (panel) return panel;
+  panel = document.createElement('div');
+  panel.id = 'dashboardTopbarPanel';
+  panel.className = 'dashboard-topbar-panel';
+  panel.hidden = true;
+  const actions = document.querySelector('.dashboard-topbar-actions');
+  if (actions) actions.appendChild(panel);
+  return panel;
+}
+
+function closeDashboardTopbarPanel() {
+  const panel = document.getElementById('dashboardTopbarPanel');
+  if (panel) panel.hidden = true;
+}
+
+function _renderDashboardTopbarPanel(kind, title, bodyHtml) {
+  const panel = _dashboardTopbarPanel();
+  panel.dataset.panelKind = kind;
+  panel.hidden = false;
+  panel.innerHTML = `
+    <div class="dashboard-topbar-panel-head">
+      <strong>${_dashboardEsc(title)}</strong>
+      <button type="button" aria-label="Close" onclick="closeDashboardTopbarPanel()">x</button>
+    </div>
+    <div class="dashboard-topbar-panel-body">${bodyHtml}</div>
+  `;
+  return panel;
+}
+
+async function _runDashboardSearch(query) {
+  const resultsEl = document.getElementById('dashboardSearchResults');
+  if (!resultsEl) return;
+  const q = String(query || '').trim();
+  if (!q) {
+    resultsEl.innerHTML = `<div class="dashboard-panel-empty">${_dashboardEsc(_t('dashboard_search_hint'))}</div>`;
+    return;
+  }
+  resultsEl.innerHTML = `<div class="dashboard-panel-empty">${_dashboardEsc(_t('loading'))}</div>`;
+  try {
+    const data = await api(`/api/sessions/search?q=${encodeURIComponent(q)}&content=1&depth=8`);
+    const sessions = Array.isArray(data && data.sessions) ? data.sessions.slice(0, 8) : [];
+    if (!sessions.length) {
+      resultsEl.innerHTML = `<div class="dashboard-panel-empty">${_dashboardEsc(_t('dashboard_search_no_results'))}</div>`;
+      return;
+    }
+    resultsEl.innerHTML = '';
+    sessions.forEach(session => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'dashboard-search-result';
+      btn.innerHTML = `<strong>${_dashboardEsc(session.title || 'Untitled')}</strong><span>${_dashboardEsc(session.match_type || 'title')}</span>`;
+      btn.addEventListener('click', async () => {
+        if (typeof loadSession === 'function') await loadSession(session.session_id);
+        closeDashboardTopbarPanel();
+        focusDashboardComposer();
+      });
+      resultsEl.appendChild(btn);
+    });
+  } catch (err) {
+    resultsEl.innerHTML = `<div class="dashboard-panel-empty">${_dashboardEsc((err && err.message) || _t('failed_colon'))}</div>`;
+  }
+}
+
+function openDashboardSearch() {
+  toggleDashboardAdminMenu(false);
+  const panel = _renderDashboardTopbarPanel('search', _t('topbar_search'), `
+    <input class="dashboard-search-input" id="dashboardSearchInput" type="search" autocomplete="off" placeholder="${_dashboardEsc(_t('filter_conversations'))}">
+    <div class="dashboard-search-results" id="dashboardSearchResults"></div>
+  `);
+  const input = panel.querySelector('#dashboardSearchInput');
+  if (input) {
+    input.addEventListener('input', () => {
+      clearTimeout(dashboardSearchTimer);
+      dashboardSearchTimer = setTimeout(() => _runDashboardSearch(input.value), 250);
+    });
+    setTimeout(() => input.focus(), 0);
+  }
+  _runDashboardSearch('');
+}
+
+async function openDashboardNotifications() {
+  toggleDashboardAdminMenu(false);
+  const supported = 'Notification' in window;
+  let permission = supported ? Notification.permission : 'unsupported';
+  let enabled = !!window._notificationsEnabled;
+  if (supported && permission === 'default') {
+    permission = await Notification.requestPermission();
+  }
+  if (supported && permission === 'granted') {
+    enabled = true;
+    window._notificationsEnabled = true;
+    const checkbox = document.getElementById('settingsNotificationsEnabled');
+    if (checkbox) checkbox.checked = true;
+    try {
+      await api('/api/settings', { method: 'POST', body: JSON.stringify({ notifications_enabled: true }) });
+    } catch (_) {}
+  }
+  const statusKey = !supported ? 'dashboard_notifications_unsupported'
+    : permission === 'granted' && enabled ? 'dashboard_notifications_enabled'
+    : permission === 'denied' ? 'dashboard_notifications_blocked'
+    : 'dashboard_notifications_disabled';
+  const panel = _renderDashboardTopbarPanel('notifications', _t('topbar_notifications'), `
+    <div class="dashboard-notification-status">${_dashboardEsc(_t(statusKey))}</div>
+    <button class="dashboard-panel-action" id="dashboardNotificationSettings" type="button">${_dashboardEsc(_t('tab_settings'))}</button>
+  `);
+  const settingsBtn = panel.querySelector('#dashboardNotificationSettings');
+  if (settingsBtn) {
+    settingsBtn.addEventListener('click', async () => {
+      closeDashboardTopbarPanel();
+      if (typeof switchPanel === 'function') await switchPanel('settings');
+      if (typeof switchSettingsSection === 'function') switchSettingsSection('preferences');
+    });
+  }
+}
+
+function openDashboardHelp() {
+  toggleDashboardAdminMenu(false);
+  const panel = _renderDashboardTopbarPanel('help', _t('topbar_help'), `
+    <div class="dashboard-help-actions">
+      <button class="dashboard-panel-action" id="dashboardHelpCommands" type="button">${_dashboardEsc(_t('available_commands'))}</button>
+      <button class="dashboard-panel-action" id="dashboardHelpSettings" type="button">${_dashboardEsc(_t('tab_settings'))}</button>
+      <button class="dashboard-panel-action" id="dashboardHelpChat" type="button">${_dashboardEsc(_t('tab_chat'))}</button>
+    </div>
+  `);
+  const commandsBtn = panel.querySelector('#dashboardHelpCommands');
+  if (commandsBtn) {
+    commandsBtn.addEventListener('click', () => {
+      closeDashboardTopbarPanel();
+      if (typeof cmdHelp === 'function') cmdHelp();
+      focusDashboardComposer();
+    });
+  }
+  const settingsBtn = panel.querySelector('#dashboardHelpSettings');
+  if (settingsBtn) {
+    settingsBtn.addEventListener('click', async () => {
+      closeDashboardTopbarPanel();
+      if (typeof switchPanel === 'function') await switchPanel('settings');
+    });
+  }
+  const chatBtn = panel.querySelector('#dashboardHelpChat');
+  if (chatBtn) {
+    chatBtn.addEventListener('click', () => {
+      closeDashboardTopbarPanel();
+      focusDashboardComposer();
+    });
+  }
+}
+
 function toggleDashboardAdminMenu(open) {
   const btn = document.getElementById('dashboardAdminBtn');
   const menu = document.getElementById('dashboardAdminMenu');
@@ -183,11 +344,22 @@ function handleDashboardAdminMenu(action) {
 
 function handleDashboardTopbarAction(action) {
   if (action === 'admin') {
+    closeDashboardTopbarPanel();
     toggleDashboardAdminMenu();
     return;
   }
   toggleDashboardAdminMenu(false);
-  if (typeof showToast === 'function') showToast(_t('dashboard_topbar_placeholder'), 2400, 'info');
+  if (action === 'search') {
+    openDashboardSearch();
+    return;
+  }
+  if (action === 'notifications') {
+    openDashboardNotifications();
+    return;
+  }
+  if (action === 'help') {
+    openDashboardHelp();
+  }
 }
 
 function bindDashboardAdminMenu() {
@@ -196,12 +368,18 @@ function bindDashboardAdminMenu() {
   document.addEventListener('click', event => {
     const menu = document.getElementById('dashboardAdminMenu');
     const btn = document.getElementById('dashboardAdminBtn');
+    const panel = document.getElementById('dashboardTopbarPanel');
+    if (panel && !panel.hidden && panel.contains(event.target)) return;
+    if (panel && !panel.hidden && !event.target.closest('.dashboard-topbar-icon')) closeDashboardTopbarPanel();
     if (!menu || !btn || menu.hidden) return;
     if (menu.contains(event.target) || btn.contains(event.target)) return;
     toggleDashboardAdminMenu(false);
   });
   document.addEventListener('keydown', event => {
-    if (event.key === 'Escape') toggleDashboardAdminMenu(false);
+    if (event.key === 'Escape') {
+      toggleDashboardAdminMenu(false);
+      closeDashboardTopbarPanel();
+    }
   });
 }
 

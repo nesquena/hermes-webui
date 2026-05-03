@@ -2626,7 +2626,7 @@ function _messageHasReasoningPayload(m){
 }
 function _assistantRoleHtml(tsTitle=''){
   const _bn=window._botName||'Hermes';
-  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant">${esc(_bn.charAt(0).toUpperCase())}</div><span style="font-size:12px">${esc(_bn)}</span></div>`;
+  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant"><img src="static/brand/neo-ico.png" alt="${esc(_bn)}" width="22" height="22" loading="lazy"></div><span style="font-size:12px">${esc(_bn)}</span></div>`;
 }
 function _createAssistantTurn(tsTitle=''){
   const row=document.createElement('div');

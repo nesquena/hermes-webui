@@ -32,7 +32,7 @@
 | Sprint | Tema | HUs | Implementadas no worktree | Concluídas por DoD | Status |
 |---|---:|---:|---:|---:|---|
 | Sprint 1 | Rebrand visual/textual + locale pt-BR | 11 | 10 + 1 parcial | 0 | aguardando evidências/homologação |
-| Sprint 2 | Dashboard + sidebar/topbar Neo | 11 | 9 + 2 parciais | 2 | em fechamento técnico |
+| Sprint 2 | Dashboard + sidebar/topbar Neo | 11 | 11 | 11 | concluída |
 | Sprint 3 | Projetos/Kanban 4 colunas | 10 | 0 | 0 | aguardando Sprint 2 |
 | Sprint 4 | Ações rápidas + Finanças shell visual | 13 | 0 | 0 | aguardando Sprint 3 |
 | Transversal | Qualidade, testes e evidências | 5 | 2 parciais | 0 | em andamento contínuo |
@@ -52,21 +52,23 @@ Estado registrado em 2026-05-02:
 - Validação recente em `develop`:
   - `node --check static/dashboard.js`
   - `.venv/bin/python -m py_compile api/dashboard.py api/health.py api/routes.py api/config.py`
-  - `.venv/bin/pytest tests/test_neo_font_ui_inter.py tests/test_neo_dashboard_kpis.py tests/test_neo_skin.py tests/test_neo_branding_assets.py tests/test_neo_pt_br_toasts.py tests/test_neo_dashboard_sprint2.py tests/test_neo_skin_localstorage_persistence.py tests/test_neo_hero_greeting.py tests/test_neo_dashboard_chat_embed.py tests/test_neo_dashboard_shell_visual.py tests/test_neo_dashboard_quick_actions.py tests/test_locale_parity_pt_br.py -q`
-    (`60 passed in 1.82s`)
+  - `node --check static/i18n.js`
+  - `.venv/bin/pytest tests/test_neo_font_ui_inter.py tests/test_neo_dashboard_kpis.py tests/test_neo_skin.py tests/test_neo_branding_assets.py tests/test_neo_pt_br_toasts.py tests/test_neo_dashboard_sprint2.py tests/test_neo_skin_localstorage_persistence.py tests/test_neo_hero_greeting.py tests/test_neo_dashboard_chat_embed.py tests/test_neo_dashboard_shell_visual.py tests/test_neo_dashboard_quick_actions.py tests/test_locale_parity_pt_br.py tests/test_neo_dashboard_admin_personal.py tests/test_neo_health_runtime.py -q`
+    (`67 passed in 1.99s`)
 - HU-01.2 e HU-01.5 foram implementadas após o merge da Sprint 1 com assets de
   marca, favicon/PWA e teste `tests/test_neo_branding_assets.py`.
-- Sprint 2 avançou além do corte inicial: HU-03.1, HU-03.2, HU-03.3, HU-03.4,
-  HU-03.5, HU-03.7, HU-03.8, HU-03.9 e HU-03.10 têm implementação/testes focados; HU-03.6 e
-  HU-03.11 seguem parciais com pendências específicas.
+- Sprint 2 avançou além do corte inicial: HU-03.1 a HU-03.11 têm
+  implementação/testes focados; HU-03.6 e HU-03.11 foram fechadas tecnicamente
+  com topbar operacional e métricas VPS em runtime.
 - Homologação visual manual de HU-03.1, HU-03.2, HU-03.3, HU-03.4, HU-03.5,
   HU-03.6, HU-03.7, HU-03.8 e HU-03.11 foi informada em 2026-05-02; anexos de
   screenshot permanecem como evidência complementar quando exigidos pelo release.
-- Próximos bloqueios de Sprint 2: busca/notificações/help com comportamento
-  final e validação real dos recursos VPS no host/container.
-- HU-03.9 e HU-03.10 foram homologadas visualmente e fechadas por DoD em
-  2026-05-02; demais HUs seguem com pendências de evidência visual/runtime ou
-  validação operacional específica.
+- Bloqueios técnicos de Sprint 2 removidos em 2026-05-02: busca,
+  notificações/help e métricas VPS têm implementação e testes.
+- HU-03.1, HU-03.2, HU-03.3, HU-03.4, HU-03.5, HU-03.6, HU-03.7, HU-03.8,
+  HU-03.9, HU-03.10 e HU-03.11 foram homologadas e fechadas por DoD em
+  2026-05-02; Sprint 2 encerrada com 11/11 HUs concluídas. Screenshots ficam
+  como evidência complementar pendente de release.
 
 ---
 
@@ -318,7 +320,7 @@ ações rápidas, sidebar fixa de 240px e topbar contextual de 56px.
 
 ### HU-03.1 — Painel "Dashboard" na sidebar
 
-**Status:** implementada sem DoD
+**Status:** concluída
 
 **Tasks**
 
@@ -327,11 +329,13 @@ ações rápidas, sidebar fixa de 240px e topbar contextual de 56px.
 - [x] Criar `static/dashboard.js`.
 - [x] Carregar `loadDashboard()` por feature detection.
 - [x] Registrar evidência técnica em `docs/neo/evidencias/HU-03.1/`.
-- [ ] Anexar screenshots/homologação manual em runtime.
+- [x] Homologação manual registrada em 2026-05-02.
+
+**Evidência técnica:** [`docs/neo/evidencias/HU-03.1/README.md`](./evidencias/HU-03.1/README.md)
 
 ### HU-03.2 — Dashboard como painel inicial
 
-**Status:** implementada sem DoD
+**Status:** concluída
 
 **Tasks**
 
@@ -340,11 +344,13 @@ ações rápidas, sidebar fixa de 240px e topbar contextual de 56px.
 - [x] Ler `HERMES_WEBUI_DEFAULT_PANEL` como default inicial quando não houver escolha local.
 - [x] Preservar default upstream (`chat`) sem env/setting.
 - [x] Registrar evidência técnica em `docs/neo/evidencias/HU-03.2/`.
-- [ ] Anexar screenshots/homologação manual em runtime.
+- [x] Homologação manual registrada em 2026-05-02.
+
+**Evidência técnica:** [`docs/neo/evidencias/HU-03.2/README.md`](./evidencias/HU-03.2/README.md)
 
 ### HU-03.3 — Hero avatar humanoide + saudação
 
-**Status:** implementada com testes
+**Status:** concluída
 
 **Tasks**
 
@@ -354,13 +360,13 @@ ações rápidas, sidebar fixa de 240px e topbar contextual de 56px.
 - [x] Implementar animações `hover-float` e `pulse-glow`.
 - [x] Criar teste automatizado para hero, i18n e CSS.
 - [x] Registrar evidência técnica em `docs/neo/evidencias/HU-03.3/`.
-- [ ] Anexar screenshots/homologação manual em runtime.
+- [x] Homologação manual registrada em 2026-05-02.
 
 **Evidência técnica:** [`docs/neo/evidencias/HU-03.3/README.md`](./evidencias/HU-03.3/README.md)
 
 ### HU-03.4 — 4 KPI cards com deltas
 
-**Status:** implementada com testes
+**Status:** concluída
 
 **Tasks**
 
@@ -371,13 +377,13 @@ ações rápidas, sidebar fixa de 240px e topbar contextual de 56px.
 - [x] Clicar em card navega para painel correspondente.
 - [x] Criar teste automatizado para resumo, rota, HTML, JS, CSS e i18n.
 - [x] Registrar evidência técnica em `docs/neo/evidencias/HU-03.4/`.
-- [ ] Anexar screenshots/homologação manual em runtime.
+- [x] Homologação manual registrada em 2026-05-02.
 
 **Evidência técnica:** [`docs/neo/evidencias/HU-03.4/README.md`](./evidencias/HU-03.4/README.md)
 
 ### HU-03.5 — Chat central no Dashboard
 
-**Status:** implementada com testes
+**Status:** concluída
 
 **Tasks**
 
@@ -397,25 +403,27 @@ ações rápidas, sidebar fixa de 240px e topbar contextual de 56px.
 - [x] Testar troca de modelo, workspace, profile e effort dentro do Dashboard.
 - [x] Testar envio com anexo dentro do Dashboard.
 - [x] Validar mobile/tablet: toolstrip pode quebrar linha, mas não pode ocultar controles, cortar labels ou sobrepor elementos.
-- [ ] Anexar screenshots/homologação manual em runtime.
+- [x] Homologação manual registrada em 2026-05-02.
 
-**Evidência técnica:** `tests/test_neo_dashboard_chat_embed.py` valida contrato de DOM único do chat/composer, foco pós-montagem do Dashboard, handlers originais de seletores/anexos/envio e hardening responsivo do composer central.
+**Evidência técnica:** [`docs/neo/evidencias/HU-03.5/README.md`](./evidencias/HU-03.5/README.md) — `tests/test_neo_dashboard_chat_embed.py` valida contrato de DOM único do chat/composer, foco pós-montagem do Dashboard, handlers originais de seletores/anexos/envio e hardening responsivo do composer central.
 
 ### HU-03.6 — Topbar contextual
 
-**Status:** em andamento com testes
+**Status:** concluída
 
 **Tasks**
 
 - [x] Criar `GET /api/health/system`.
 - [x] Exibir VPS Status, Uptime, Região, Versão.
 - [x] Adicionar botão Terminal SSH.
-- [ ] Adicionar busca/notificações/help/admin dropdown.
+- [x] Adicionar busca/notificações/help/admin dropdown.
 - [x] Poll a cada 30s com cache.
+
+**Evidência técnica:** [`docs/neo/evidencias/HU-03.6/README.md`](./evidencias/HU-03.6/README.md)
 
 ### HU-03.7 — Ações rápidas grid 2x3
 
-**Status:** implementada com testes
+**Status:** concluída
 
 **Tasks**
 
@@ -426,16 +434,22 @@ ações rápidas, sidebar fixa de 240px e topbar contextual de 56px.
 - [x] Renderizar Gerar Relatório.
 - [x] Renderizar Deploy Projeto.
 - [x] Definir comportamento de placeholders sem backend.
+- [x] Homologação visual manual registrada em 2026-05-02.
+
+**Evidência técnica:** [`docs/neo/evidencias/HU-03.7/README.md`](./evidencias/HU-03.7/README.md)
 
 ### HU-03.8 — Card de status Neo na sidebar
 
-**Status:** implementada com testes
+**Status:** concluída
 
 **Tasks**
 
-- [x] Exibir mark/avatar Neo.
+- [x] Exibir mark/avatar Neo (neo-ico.png circular).
 - [x] Exibir status ONLINE.
-- [x] Botão "Conversar agora" navega para Dashboard e foca composer.
+- [x] Botão "Conversar agora" removido no refinamento visual de 2026-05-02; navegação via item Dashboard na rail.
+- [x] Homologação visual manual registrada em 2026-05-02.
+
+**Evidência técnica:** [`docs/neo/evidencias/HU-03.8/README.md`](./evidencias/HU-03.8/README.md)
 
 ### HU-03.9 — Admin dropdown
 
@@ -464,14 +478,16 @@ ações rápidas, sidebar fixa de 240px e topbar contextual de 56px.
 
 ### HU-03.11 — Recursos VPS na sidebar
 
-**Status:** em andamento com testes
+**Status:** concluída
 
 **Tasks**
 
 - [x] Criar `GET /api/health/vps`.
 - [x] Exibir CPU/RAM/Disco/Rede com barras.
 - [x] Poll a cada 30s.
-- [ ] Validar leitura no host/container.
+- [x] Validar leitura no host/container.
+
+**Evidência técnica:** [`docs/neo/evidencias/HU-03.11/README.md`](./evidencias/HU-03.11/README.md)
 
 ---
 

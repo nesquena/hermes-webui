@@ -104,34 +104,42 @@
     <!-- Dashboard panel -->
     <div class="panel-view active" id="panelDashboard">
       <div class="neo-dashboard-brand">
-        <img src="static/brand/neo-avatar.svg" alt="" width="44" height="44">
+        <img src="static/brand/neo-ico.png" alt="Neo" width="32" height="32" style="border-radius:50%;object-fit:cover;">
         <div>
           <strong>NEO</strong>
           <span>AGENTE 24/7</span>
         </div>
       </div>
       <div class="neo-dashboard-menu">
-        <button class="neo-dashboard-menu-item active" onclick="switchPanel('dashboard')"><span>⌘</span><span data-i18n="tab_dashboard">Dashboard</span></button>
-        <button class="neo-dashboard-menu-item" onclick="switchPanel('projects')"><span>□</span><span data-i18n="tab_projects">Projetos</span></button>
-        <button class="neo-dashboard-menu-item" onclick="switchPanel('tasks')"><span>☑</span><span data-i18n="tab_tasks">Tarefas</span></button>
-        <button class="neo-dashboard-menu-item" onclick="switchPanel('profiles')"><span>♙</span><span data-i18n="tab_profiles">Pessoal</span></button>
-        <button class="neo-dashboard-menu-item" onclick="switchPanel('skills')"><span>⚙</span><span data-i18n="tab_skills">Skills</span></button>
-        <button class="neo-dashboard-menu-item" onclick="switchPanel('settings')"><span>⚙</span><span data-i18n="tab_settings">Configurações</span></button>
+        <button class="neo-dashboard-menu-item active" data-neo-menu-item data-panel="dashboard" onclick="switchPanel('dashboard')"><span aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg></span><span data-i18n="tab_dashboard">Dashboard</span></button>
+        <button class="neo-dashboard-menu-item" data-neo-menu-item data-panel="projects" onclick="switchPanel('projects')"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></span><span data-i18n="tab_projects">Projetos</span></button>
+        <button class="neo-dashboard-menu-item" data-neo-menu-item data-panel="todos" onclick="switchPanel('todos')"><span aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="m8 12 3 3 5-6"/></svg></span><span data-i18n="tab_tasks">Tarefas</span></button>
+        <button class="neo-dashboard-menu-item" data-neo-menu-item data-panel="profiles" onclick="switchPanel('profiles')"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></span><span data-i18n="tab_profiles">Pessoal</span></button>
+        <button class="neo-dashboard-menu-item" data-neo-menu-item data-panel="finance" onclick="switchPanel('finance')"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 2v20"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7H14a3.5 3.5 0 0 1 0 7H6"/></svg></span><span data-i18n="tab_finance">Finanças</span></button>
+        <button class="neo-dashboard-menu-item" data-neo-menu-item data-panel="agents" onclick="switchPanel('agents')"><span aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></svg></span><span data-i18n="tab_agents">Agentes</span></button>
+        <button class="neo-dashboard-menu-item" data-neo-menu-item data-panel="skills" onclick="switchPanel('skills')"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m13 2-8 12h7l-1 8 8-12h-7z"/></svg></span><span data-i18n="tab_skills">Skills</span></button>
+        <button class="neo-dashboard-menu-item" data-neo-menu-item data-panel="tasks" onclick="switchPanel('tasks')"><span aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3v4"/><path d="M12 17v4"/><path d="M3 12h4"/><path d="M17 12h4"/><path d="m5.6 5.6 2.8 2.8"/><path d="m15.6 15.6 2.8 2.8"/><path d="m18.4 5.6-2.8 2.8"/><path d="m8.4 15.6-2.8 2.8"/></svg></span><span data-i18n="tab_automation">Automação</span></button>
+        <button class="neo-dashboard-menu-item" data-neo-menu-item data-panel="settings" onclick="switchPanel('settings')"><span aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6h.09A1.65 1.65 0 0 0 10 3.09V3a2 2 0 0 1 4 0v.09A1.65 1.65 0 0 0 15 4.6h.09a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9v.09A1.65 1.65 0 0 0 20.91 10H21a2 2 0 0 1 0 4h-.09A1.65 1.65 0 0 0 19.4 15z"/></svg></span><span data-i18n="tab_settings">Configurações</span></button>
       </div>
-      <div class="neo-sidebar-status">
-        <div class="neo-sidebar-status-head">
-          <img src="static/brand/neo-avatar-mono.svg" alt="" width="30" height="30">
-          <div><strong>NEO</strong><span><i></i> ONLINE</span></div>
+      <div class="neo-dashboard-bottom">
+        <div class="neo-sidebar-status">
+          <div class="neo-sidebar-status-head">
+            <img src="static/brand/neo-ico.png" alt="Neo" width="28" height="28" style="border-radius:50%;object-fit:cover;">
+            <div><strong>NEO</strong><span><i></i> ONLINE</span></div>
+          </div>
+          <p>Ativo 24/7<br>Respondendo e executando tarefas.</p>
         </div>
-        <p>Ativo 24/7<br>Respondendo e executando tarefas.</p>
-        <button class="neo-sidebar-talk" id="neoSidebarTalkNow" onclick="focusDashboardComposer()">Conversar agora</button>
-      </div>
-      <div class="neo-vps-card">
-        <h3>RECURSOS VPS</h3>
-        <div class="neo-vps-row" data-vps-metric="cpu"><span>CPU</span><b>0%</b><div class="neo-vps-bar"><i></i></div></div>
-        <div class="neo-vps-row" data-vps-metric="ram"><span>RAM</span><b>0%</b><div class="neo-vps-bar"><i></i></div></div>
-        <div class="neo-vps-row" data-vps-metric="disk"><span>DISCO</span><b>0%</b><div class="neo-vps-bar"><i></i></div></div>
-        <div class="neo-vps-row" data-vps-metric="network"><span>REDE</span><b>0%</b><div class="neo-vps-bar"><i></i></div></div>
+        <div class="neo-vps-card">
+          <h3>RECURSOS VPS</h3>
+          <div class="neo-vps-row" data-vps-metric="cpu"><span>CPU</span><b>0%</b><div class="neo-vps-bar"><i></i></div></div>
+          <div class="neo-vps-row" data-vps-metric="ram"><span>RAM</span><b>0%</b><div class="neo-vps-bar"><i></i></div></div>
+          <div class="neo-vps-row" data-vps-metric="disk"><span>DISCO</span><b>0%</b><div class="neo-vps-bar"><i></i></div></div>
+          <div class="neo-vps-row" data-vps-metric="network"><span>REDE</span><b>0%</b><div class="neo-vps-bar"><i></i></div></div>
+        </div>
+        <div class="neo-sidebar-footer">
+          <a href="docs/neo/README.md" target="_blank" rel="noopener" data-i18n="sidebar_docs">Documentação</a>
+          <a href="docs/neo/HANDOFF.md" target="_blank" rel="noopener" data-i18n="sidebar_support">Suporte</a>
+        </div>
       </div>
     </div>
     <!-- Chat panel -->
@@ -281,11 +289,10 @@
             <aside class="dashboard-right">
               <!-- NEO HU-03.3: Hero card — avatar + status pill -->
               <div class="hero-card" aria-label="Neo agent status">
-                <div class="hero-card-stars"></div>
-                <div class="hero-avatar-wrap">
-                  <img src="static/brand/neo-avatar.svg" alt="Neo humanoid avatar" class="hero-avatar" width="160" height="160">
-                </div>
-                <div class="hero-status-pill" data-i18n="hero_status_online">STATUS: OPERACIONAL</div>
+                <img src="static/brand/neo-hero.png" alt="Neo humanoid avatar" class="hero-portrait" width="1402" height="1122">
+                <div class="hero-card-code" aria-hidden="true">input.stream: active · model: neo-core · cpu: optimize_code() · dashboard.render() · security: active</div>
+                <div class="hero-card-vignette" aria-hidden="true"></div>
+                <div class="hero-status-pill"><span class="hero-status-dot" aria-hidden="true"></span><span data-i18n="hero_status_online">STATUS: OPERACIONAL</span></div>
               </div>
               <!-- NEO HU-03.3: Greeting -->
               <div class="hero-greeting">
@@ -330,11 +337,73 @@
         </div>
       </div>
     </div>
+    <div id="mainProjects" class="main-view">
+      <div class="main-view-header">
+        <div>
+          <div class="main-view-title" data-i18n="projects_title">Projetos</div>
+          <div class="main-view-subtitle" data-i18n="projects_subtitle">Gerencie e acompanhe o progresso dos seus projetos</div>
+        </div>
+        <div class="main-view-actions">
+          <button class="dashboard-terminal-btn" type="button" data-i18n="projects_new">+ Novo Projeto</button>
+        </div>
+      </div>
+      <div class="main-view-body">
+        <div class="neo-placeholder-panel">
+          <div class="main-view-empty-title" data-i18n="projects_kanban">Kanban</div>
+          <div class="main-view-empty-sub" data-i18n="neo_projects_placeholder">O Kanban de 4 colunas entra na Sprint 3. Este link já reserva o painel correto no shell Neo.</div>
+        </div>
+      </div>
+    </div>
+    <div id="mainTodos" class="main-view">
+      <div class="main-view-header">
+        <div>
+          <div class="main-view-title" data-i18n="tab_tasks">Tarefas</div>
+          <div class="main-view-subtitle" data-i18n="neo_tasks_subtitle">Lista operacional de tarefas</div>
+        </div>
+      </div>
+      <div class="main-view-body">
+        <div class="neo-placeholder-panel">
+          <div class="main-view-empty-title" data-i18n="tab_tasks">Tarefas</div>
+          <div class="main-view-empty-sub" data-i18n="neo_tasks_placeholder">A visão consolidada de tarefas será conectada ao fluxo upstream de todos. Use Automação para jobs cron.</div>
+        </div>
+      </div>
+    </div>
+    <div id="mainFinance" class="main-view">
+      <div class="main-view-header">
+        <div>
+          <div class="main-view-title" data-i18n="finance_title">Finanças</div>
+          <div class="main-view-subtitle" data-i18n="finance_subtitle">Controle financeiro pessoal e empresarial</div>
+        </div>
+        <div class="main-view-actions">
+          <button class="dashboard-terminal-btn" type="button" data-i18n="finance_new">+ Nova Finança</button>
+        </div>
+      </div>
+      <div class="main-view-body">
+        <div class="neo-placeholder-panel">
+          <div class="main-view-empty-title" data-i18n="finance_empty_state">Adicione sua primeira transação</div>
+          <div class="main-view-empty-sub" data-i18n="neo_finance_placeholder">O shell visual de finanças entra na Sprint 4. Este link já reserva o painel correto no shell Neo.</div>
+        </div>
+      </div>
+    </div>
+    <div id="mainAgents" class="main-view">
+      <div class="main-view-header">
+        <div>
+          <div class="main-view-title" data-i18n="tab_agents">Agentes</div>
+          <div class="main-view-subtitle" data-i18n="neo_agents_subtitle">Mapa de subagentes ativos</div>
+        </div>
+      </div>
+      <div class="main-view-body">
+        <div class="neo-placeholder-panel">
+          <div class="main-view-empty-title" data-i18n="neo_agents_placeholder_title">Painel de agentes futuro</div>
+          <div class="main-view-empty-sub" data-i18n="neo_agents_placeholder">Este painel depende da PoC de runtime e custo descrita para Sprint 5+.</div>
+        </div>
+      </div>
+    </div>
     <div id="mainChat" class="main-view">
     <div class="messages" id="messages">
       <button id="scrollToBottomBtn" class="scroll-to-bottom-btn" aria-label="Scroll to bottom" onclick="scrollToBottom()" style="display:none">↓</button>
       <div class="empty-state" id="emptyState">
-        <div class="empty-logo"><img src="static/brand/neo-avatar.svg" width="64" height="64" alt="Avatar do agente Neo"></div>
+        <div class="empty-logo"><img src="static/brand/neo-ico.png" width="64" height="64" alt="Avatar do agente Neo" style="border-radius:50%;object-fit:cover;"></div>
         <h2 data-i18n="empty_title">What can I help with?</h2>
         <p data-i18n="empty_subtitle">Ask anything, run commands, explore files, or manage your scheduled tasks.</p>
         <div class="suggestion-grid">

@@ -18,10 +18,17 @@ const APP_TITLEBAR_KEYS = {
   chat: 'tab_chat', dashboard: 'tab_dashboard', tasks: 'tab_tasks', skills: 'tab_skills',
   memory: 'tab_memory', workspaces: 'tab_workspaces',
   profiles: 'tab_profiles', todos: 'tab_todos', settings: 'tab_settings',
+  projects: 'tab_projects', finance: 'tab_finance', agents: 'tab_agents',
 };
+
+const NEO_SHELL_PANELS = new Set(['dashboard', 'projects', 'todos', 'profiles', 'finance', 'agents']);
 
 const MAIN_VIEW_CLASS_BY_PANEL = {
   dashboard: 'showing-dashboard',
+  projects: 'showing-projects',
+  todos: 'showing-todos',
+  finance: 'showing-finance',
+  agents: 'showing-agents',
   settings: 'showing-settings',
   skills: 'showing-skills',
   memory: 'showing-memory',
@@ -164,12 +171,15 @@ async function switchPanel(name, opts = {}) {
   if (!opts.bypassSettingsGuard && !_beforePanelSwitch(nextPanel)) return false;
   if (prevPanel !== 'settings' && nextPanel === 'settings') _beginSettingsPanelSession();
   _currentPanel = nextPanel;
-  if (document.body) document.body.classList.toggle('dashboard-shell-mode', nextPanel === 'dashboard');
+  const useNeoShell = NEO_SHELL_PANELS.has(nextPanel);
+  if (document.body) document.body.classList.toggle('dashboard-shell-mode', useNeoShell);
   // Update nav tabs (rail + mobile sidebar-nav share data-panel)
   document.querySelectorAll('[data-panel]').forEach(t => t.classList.toggle('active', t.dataset.panel === nextPanel));
   // Update panel views
   document.querySelectorAll('.panel-view').forEach(p => p.classList.remove('active'));
-  const panelEl = $('panel' + nextPanel.charAt(0).toUpperCase() + nextPanel.slice(1));
+  const panelEl = useNeoShell
+    ? $('panelDashboard')
+    : $('panel' + nextPanel.charAt(0).toUpperCase() + nextPanel.slice(1));
   if (panelEl) panelEl.classList.add('active');
   // Toggle main content view. Each entry in MAIN_VIEW_PANELS gets a matching
   // showing-<name> class on <main>; no class means chat (the default).

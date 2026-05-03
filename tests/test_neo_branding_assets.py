@@ -56,6 +56,7 @@ def test_index_initial_chrome_uses_neo_assets():
     assert 'apple-mobile-web-app-title" content="Neo"' in INDEX_HTML
     assert 'href="static/apple-touch-icon.png"' in INDEX_HTML
     assert 'src="static/brand/neo-mark.svg"' in INDEX_HTML
-    assert 'src="static/brand/neo-avatar.svg"' in INDEX_HTML
+    # empty-state logo migrated from neo-avatar.svg to neo-ico.png (visual refinement)
+    assert 'src="static/brand/neo-ico.png"' in INDEX_HTML
     assert "Hermes caduceus" not in INDEX_HTML
     assert "Message Neo" in INDEX_HTML

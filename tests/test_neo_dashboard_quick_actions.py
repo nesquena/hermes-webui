@@ -57,6 +57,6 @@ def test_dashboard_quick_actions_css_and_i18n_present():
 
 def test_hu_03_7_task_tracking_updated():
     section = TASKS_MD.split("### HU-03.7", 1)[1].split("### HU-03.8", 1)[0]
-    assert "**Status:** implementada com testes" in section
+    assert "**Status:** concluída" in section
     assert "- [x] Renderizar Novo Projeto." in section
     assert "- [x] Definir comportamento de placeholders sem backend." in section
