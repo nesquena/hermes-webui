@@ -942,11 +942,6 @@ def _deduplicate_model_ids(groups: list[dict]) -> None:
             model = group["models"][mi]
             pid = group.get("provider_id", "")
             model["id"] = f"@{pid}:{original_id}"
-            provider_name = group.get("provider", pid)
-            if model.get("label") != original_id:
-                model["label"] = f"{model['label']} ({provider_name})"
-            else:
-                model["label"] = f"{original_id} ({provider_name})"
 
 
 def resolve_model_provider(model_id: str) -> tuple:
