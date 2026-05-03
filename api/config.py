@@ -536,6 +536,15 @@ _FALLBACK_MODELS = [
     {"provider": "Z.AI",      "id": "zai/glm-4.7",                      "label": "GLM-4.7"},
     {"provider": "Z.AI",      "id": "zai/glm-4.5",                      "label": "GLM-4.5"},
     {"provider": "Z.AI",      "id": "zai/glm-4.5-flash",                "label": "GLM-4.5 Flash"},
+    # OpenRouter free-tier models — must appear in fallback list so they
+    # are visible even when the tool-support filter in hermes_cli strips
+    # them out of the live catalog (see #1426).
+    {"provider": "OpenRouter", "id": "openrouter/elephant-alpha",                   "label": "Elephant Alpha (free)"},
+    {"provider": "OpenRouter", "id": "openrouter/owl-alpha",                        "label": "Owl Alpha (free)"},
+    {"provider": "OpenRouter", "id": "tencent/hy3-preview:free",                    "label": "Hy3 Preview (free)"},
+    {"provider": "OpenRouter", "id": "minimax/minimax-m2.5:free",                   "label": "MiniMax M2.5 (free)"},
+    {"provider": "OpenRouter", "id": "nvidia/nemotron-3-super-120b-a12b:free",      "label": "Nemotron 3 Super (free)"},
+    {"provider": "OpenRouter", "id": "arcee-ai/trinity-large-preview:free",         "label": "Trinity Large Preview (free)"},
 ]
 
 # Provider display names for known Hermes provider IDs
