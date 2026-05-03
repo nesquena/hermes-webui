@@ -1396,7 +1396,7 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         return {"action": name, **space_demo_run(demo_name)}
     if name in {"space.demo.run_all", "space.demo.run-all", "space_demo_run_all"}:
         return space_demo_run_all()
-    if name in {"space.current", "space.current.get"}:
+    if name in {"space.current", "space.current.get", "space.spaces.getcurrentspace"}:
         current_id = _space_tool_current_id(data)
         if not current_id:
             return {"ok": True, "action": name, "active_space_id": None, "space": None}

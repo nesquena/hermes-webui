@@ -200,8 +200,15 @@ def test_space_tool_adapter_supports_source_camelcase_space_helpers(monkeypatch,
     )
 
     listed = spaces.run_space_tool("space.spaces.listSpaces", {"source": "<script>ignore()</script>"})
-    opened = spaces.run_space_tool("space.spaces.openSpace", {"space_id": "camelcase-lab", "token": "SECRET"})
-    serialized = json.dumps({"created_by_alias": created_by_alias, "listed": listed, "opened": opened}).lower()
+    opened = spaces.run_space_tool("space.spaces.openSpace", {"space_id": "camelcase-lab", "token": "***"})
+    current = spaces.run_space_tool(
+        "space.spaces.getCurrentSpace",
+        {"activeSpaceId": "camelcase-lab", "renderer": "<script>ignore()</script>", "api_key": "***"},
+    )
+    no_current = spaces.run_space_tool("space.spaces.getCurrentSpace", {})
+    serialized = json.dumps(
+        {"created_by_alias": created_by_alias, "listed": listed, "opened": opened, "current": current, "no_current": no_current}
+    ).lower()
 
     assert created_by_alias["ok"] is True
     assert created_by_alias["action"] == "space.spaces.createspace"
@@ -211,6 +218,12 @@ def test_space_tool_adapter_supports_source_camelcase_space_helpers(monkeypatch,
     assert listed["spaces"][0]["space_id"] == "camelcase-lab"
     assert opened["space"]["space_id"] == "camelcase-lab"
     assert opened["space"]["widgets"][0]["id"] == "unsafe-widget"
+    assert current["ok"] is True
+    assert current["action"] == "space.spaces.getcurrentspace"
+    assert current["active_space_id"] == "camelcase-lab"
+    assert current["space"]["space_id"] == "camelcase-lab"
+    assert current["space"]["widgets"][0]["id"] == "unsafe-widget"
+    assert no_current == {"ok": True, "action": "space.spaces.getcurrentspace", "active_space_id": None, "space": None}
     assert "steal" not in serialized
     assert "<script" not in serialized
     assert "renderer" not in serialized
