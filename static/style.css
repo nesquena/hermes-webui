@@ -489,6 +489,18 @@
   .onboarding-field span{font-size:12px;font-weight:700;color:var(--text);}
   .onboarding-field input,.onboarding-field select{margin-bottom:0;padding:10px 12px;border-radius:10px;font-size:13px;background:var(--input-bg);border:1px solid var(--border2);color:var(--text);}
   .onboarding-copy{font-size:12px;color:var(--muted);line-height:1.7;}
+  /* Onboarding probe (#1499) — Test connection button + status banner */
+  .onboarding-probe-row{display:flex;justify-content:flex-end;margin-top:-2px;}
+  .onboarding-probe-btn{padding:6px 12px;font-size:12px;font-weight:600;border-radius:8px;background:var(--input-bg);border:1px solid var(--border2);color:var(--text);cursor:pointer;}
+  .onboarding-probe-btn:hover:not(:disabled){border-color:var(--accent);}
+  .onboarding-probe-btn:disabled{opacity:.55;cursor:wait;}
+  .onboarding-probe-banner{margin:6px 0 0;padding:8px 10px;border-radius:8px;border:1px solid var(--border2);background:var(--input-bg);}
+  .onboarding-probe-banner.onboarding-probe-ok{border-color:#1f8a4f;color:#9ce0b4;background:rgba(31,138,79,.12);}
+  .onboarding-probe-banner.onboarding-probe-probing{color:var(--muted);}
+  .onboarding-probe-banner.onboarding-probe-error{border-color:#9c3a3a;color:#f5a3a3;background:rgba(156,58,58,.12);}
+  /* Onboarding api-key keyless hint (#1499 third sub-bug) — subtle muted text */
+  /* sized below the input so it reads as inline help, not a banner. */
+  .onboarding-api-key-help{margin:4px 0 0;font-size:11px;color:var(--muted);font-style:italic;}
   .onboarding-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;}
   .onboarding-summary div{padding:14px;border-radius:14px;background:rgba(255,255,255,.03);border:1px solid var(--border);display:flex;flex-direction:column;gap:5px;}
   .onboarding-summary strong{font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);}
@@ -1698,8 +1710,8 @@ body.resizing{user-select:none;cursor:col-resize;}
 .tool-card.open .tool-card-detail{max-height:600px;opacity:1;padding:var(--space-2) var(--space-3);border-top-color:var(--border-subtle);overflow:auto;}
 .tool-card-args{margin-bottom:6px;}
 .tool-card-args div{font-size:var(--font-size-xs);line-height:1.6;}
-.tool-arg-key{color:var(--blue);font-family:'SF Mono',ui-monospace,monospace;font-size:var(--font-size-xs);}
-.tool-arg-val{color:var(--muted);font-family:'SF Mono',ui-monospace,monospace;font-size:var(--font-size-xs);word-break:break-all;}
+.tool-arg-key{color:var(--blue);font-family:'SF Mono',ui-monospace,monospace;font-size:var(--font-size-xs);display:block;margin-bottom:2px;}
+.tool-arg-val{color:var(--muted);font-family:'SF Mono',ui-monospace,monospace;font-size:var(--font-size-xs);white-space:pre-wrap;word-break:break-word;display:block;overflow-x:auto;}
 .tool-card-result pre{font-size:var(--font-size-xs);color:var(--muted);font-family:'SF Mono',ui-monospace,monospace;white-space:pre-wrap;word-break:break-word;max-height:240px;overflow-y:auto;margin:0;line-height:1.55;}
 
 /* ── Manual compression cards (transient transcript-local feedback) ── */
@@ -2400,6 +2412,10 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 .project-chip{font-size:10px;font-weight:600;padding:3px 8px;border-radius:12px;cursor:pointer;border:1px solid var(--border2);background:var(--input-bg);color:var(--muted);transition:all .15s;white-space:nowrap;display:inline-flex;align-items:center;gap:4px;}
 .project-chip:hover{background:rgba(255,255,255,.08);color:var(--text);}
 .project-chip.active{background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent-bg);}
+/* "Unassigned" filter chip — dashed border distinguishes it from real
+   project chips so it reads as a meta-filter ("things without a project")
+   rather than another project. Keeps full color treatment in the active
+   state so it's still obviously selected. */
 .project-chip.no-project{border-style:dashed;}
 .project-chip .color-dot{width:6px;height:6px;border-radius:50%;display:inline-block;flex-shrink:0;}
 .project-create-btn{font-size:10px;padding:3px 6px;border-radius:12px;cursor:pointer;border:1px dashed var(--border2);background:none;color:var(--muted);opacity:.6;transition:all .15s;}

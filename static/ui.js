@@ -1177,11 +1177,16 @@ window.addEventListener('resize',function(){
 // ── Scroll pinning ──────────────────────────────────────────────────────────
 // When streaming, auto-scroll only if the user hasn't manually scrolled up.
 // Once the user scrolls back to within 250px of the bottom, re-pin.
+// Uses a guard flag to avoid the race where programmatic scrolls (from
+// scrollIfPinned / scrollToBottom) re-set _scrollPinned=true, overriding
+// the user's explicit scroll-up.  Fixes #1469 / #1360.
 let _scrollPinned=true;
+let _programmaticScroll=false;
 (function(){
   const el=document.getElementById('messages');
   if(!el) return;
   el.addEventListener('scroll',()=>{
+    if(_programmaticScroll) return; // ignore scrolls we triggered ourselves
     const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<250;
     _scrollPinned=nearBottom;
     const btn=$('scrollToBottomBtn');
@@ -1394,12 +1399,12 @@ document.addEventListener('DOMContentLoaded',function(){
 function scrollIfPinned(){
   if(!_scrollPinned) return;
   const el=$('messages');
-  if(el) el.scrollTop=el.scrollHeight;
+  if(el){_programmaticScroll=true;el.scrollTop=el.scrollHeight;setTimeout(()=>{_programmaticScroll=false;},0);}
 }
 function scrollToBottom(){
   _scrollPinned=true;
   const el=$('messages');
-  if(el) el.scrollTop=el.scrollHeight;
+  if(el){_programmaticScroll=true;el.scrollTop=el.scrollHeight;setTimeout(()=>{_programmaticScroll=false;},0);}
   const btn=$('scrollToBottomBtn');
   if(btn) btn.style.display='none';
 }

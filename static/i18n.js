@@ -15,8 +15,12 @@ const LOCALES = {
     mic_no_speech: 'No speech detected. Try again.',
     mic_network: 'Speech recognition unavailable.',
     mic_error: 'Voice input error: ',
+    // Composer voice buttons (#1488 — distinct labels for dictation vs voice mode)
+    voice_dictate: 'Dictate',
+    voice_dictate_active: 'Stop dictation',
+    voice_mode_toggle: 'Voice mode',
+    voice_mode_toggle_active: 'Exit voice mode',
     // Turn-based voice mode (#1333)
-    voice_toggle: 'Voice input',
     voice_listening: 'Listening…',
     voice_speaking: 'Speaking…',
     voice_thinking: 'Thinking…',
@@ -347,6 +351,8 @@ const LOCALES = {
     session_duplicate_desc: 'Create a copy with the same workspace and model',
     session_duplicated: 'Session duplicated',
     session_duplicate_failed: 'Duplicate failed: ',
+    session_stop_response: 'Stop response',
+    session_stop_response_desc: 'Cancel the running response for this conversation',
     session_delete: 'Delete conversation',
     session_delete_desc: 'Permanently remove this conversation',
     session_select_mode: 'Select',
@@ -494,6 +500,9 @@ const LOCALES = {
     settings_desc_tts: "Show a speaker button on each assistant message to read it aloud using your browser's speech synthesis.",
     settings_label_tts_auto_read: 'Auto-read responses aloud',
     settings_desc_tts_auto_read: 'Automatically speak each new assistant response when it finishes. Pauses when you start typing.',
+    // Composer voice-mode pref (#1488)
+    settings_label_voice_mode: 'Hands-free voice mode button',
+    settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',
     settings_label_tts_voice: 'Voice',
     settings_desc_tts_voice: "Preferred voice. Populated from your browser's available voices.",
     settings_label_tts_rate: 'Speech rate',
@@ -613,6 +622,9 @@ const LOCALES = {
     provider_category_specialized: 'Specialized',
     onboarding_api_key_label: 'API key',
     onboarding_api_key_placeholder: 'Leave blank to keep an existing saved key',
+    onboarding_api_key_label_optional: 'API key (optional)',
+    onboarding_api_key_placeholder_optional: 'Leave blank for keyless servers',
+    onboarding_api_key_help_keyless: 'Most LM Studio / Ollama / vLLM installs run keyless — leave this blank if your server doesn\'t require authentication. Use the Test connection button to verify.',
     onboarding_api_key_help_prefix: 'Saved as a secret in your Hermes .env file using',
     onboarding_base_url_label: 'Base URL',
     onboarding_base_url_placeholder: 'https://your-endpoint.example/v1',
@@ -638,6 +650,19 @@ const LOCALES = {
     onboarding_error_choose_model: 'Choose a model before continuing.',
     onboarding_error_provider_required: 'Choose a setup mode before continuing.',
     onboarding_error_base_url_required: 'Base URL is required for custom endpoints.',
+    onboarding_probe_test_button: 'Test connection',
+    onboarding_probe_probing: 'Testing connection…',
+    onboarding_probe_ok: 'Connected. {n} model(s) available.',
+    onboarding_probe_error_generic: 'Could not reach the configured base URL.',
+    onboarding_probe_error_invalid_url: 'Base URL must start with http:// or https://.',
+    onboarding_probe_error_dns: 'Could not resolve the host. Check the URL or use the host\'s IP address.',
+    onboarding_probe_error_connect_refused: 'Connection refused — the server may not be running on that address. From inside Docker, try the host IP instead of localhost.',
+    onboarding_probe_error_timeout: 'The endpoint did not respond in time. Check that the server is running and the URL is correct.',
+    onboarding_probe_error_http_4xx: 'The endpoint returned a client error. Check authentication and the URL path (typically ends in /v1).',
+    onboarding_probe_error_http_5xx: 'The endpoint returned a server error. Check the LM Studio / Ollama server logs.',
+    onboarding_probe_error_parse: 'The endpoint did not return a model list in the expected shape. Verify the URL points to the OpenAI-compatible API root.',
+    onboarding_probe_error_unreachable: 'Could not reach the configured base URL.',
+    onboarding_error_probe_failed: 'Could not validate the configured base URL.',
     onboarding_error_workspace_required: 'Workspace is required.',
     onboarding_error_model_required: 'Model is required.',
     onboarding_complete: 'Onboarding complete',
@@ -887,7 +912,11 @@ const LOCALES = {
     mic_network: '音声認識を利用できません。',
     mic_error: '音声入力エラー: ',
     // Turn-based voice mode (#1333)
-    voice_toggle: '音声入力',
+    // Composer voice buttons (#1488)
+    voice_dictate: 'ディクテーション',
+    voice_dictate_active: 'ディクテーション停止',
+    voice_mode_toggle: '音声モード',
+    voice_mode_toggle_active: '音声モードを終了',
     voice_listening: '聞き取り中…',
     voice_speaking: '発話中…',
     voice_thinking: '考え中…',
@@ -1218,6 +1247,8 @@ const LOCALES = {
     session_duplicate_desc: '同じワークスペースとモデルでコピーを作成',
     session_duplicated: 'セッションを複製しました',
     session_duplicate_failed: '複製失敗: ',
+    session_stop_response: 'Stop response',
+    session_stop_response_desc: 'Cancel the running response for this conversation',
     session_delete: '会話を削除',
     session_delete_desc: 'この会話を完全に削除',
     session_select_mode: '選択',
@@ -1365,6 +1396,9 @@ const LOCALES = {
     settings_desc_tts: 'アシスタントの各メッセージにスピーカーボタンを表示し、ブラウザの音声合成で読み上げます。',
     settings_label_tts_auto_read: '応答を自動で読み上げ',
     settings_desc_tts_auto_read: '新しいアシスタント応答が完了するたびに自動で読み上げます。入力中は一時停止します。',
+    // Composer voice-mode pref (#1488)
+    settings_label_voice_mode: 'ハンズフリー音声モードのボタン',
+    settings_desc_voice_mode: '音声波形ボタンをディクテーションマイクの隣に表示します。発話の合間に自動送信し、返答を読み上げます。音声認識と TTS の両方をサポートするブラウザが必要です。',
     settings_label_tts_voice: '声',
     settings_desc_tts_voice: '優先する声。ブラウザで利用可能な声から選択されます。',
     settings_label_tts_rate: '読み上げ速度',
@@ -1484,6 +1518,9 @@ const LOCALES = {
     provider_category_specialized: '専門用途',
     onboarding_api_key_label: 'APIキー',
     onboarding_api_key_placeholder: '空欄で既存の保存済みキーを維持',
+    onboarding_api_key_label_optional: 'API key (optional)', // TODO: translate
+    onboarding_api_key_placeholder_optional: 'Leave blank for keyless servers', // TODO: translate
+    onboarding_api_key_help_keyless: 'Most LM Studio / Ollama / vLLM installs run keyless — leave this blank if your server doesn\'t require authentication. Use the Test connection button to verify.', // TODO: translate
     onboarding_api_key_help_prefix: 'Hermes の .env ファイルにシークレットとして保存されます — 使用変数:',
     onboarding_base_url_label: 'ベース URL',
     onboarding_base_url_placeholder: 'https://your-endpoint.example/v1',
@@ -1509,6 +1546,19 @@ const LOCALES = {
     onboarding_error_choose_model: '続行する前にモデルを選択してください。',
     onboarding_error_provider_required: '続行する前にセットアップモードを選択してください。',
     onboarding_error_base_url_required: 'カスタムエンドポイントにはベース URL が必要です。',
+    onboarding_probe_test_button: 'Test connection', // TODO: translate
+    onboarding_probe_probing: 'Testing connection…', // TODO: translate
+    onboarding_probe_ok: 'Connected. {n} model(s) available.', // TODO: translate
+    onboarding_probe_error_generic: 'Could not reach the configured base URL.', // TODO: translate
+    onboarding_probe_error_invalid_url: 'Base URL must start with http:// or https://.', // TODO: translate
+    onboarding_probe_error_dns: 'Could not resolve the host. Check the URL or use the host\'s IP address.', // TODO: translate
+    onboarding_probe_error_connect_refused: 'Connection refused — the server may not be running on that address. From inside Docker, try the host IP instead of localhost.', // TODO: translate
+    onboarding_probe_error_timeout: 'The endpoint did not respond in time. Check that the server is running and the URL is correct.', // TODO: translate
+    onboarding_probe_error_http_4xx: 'The endpoint returned a client error. Check authentication and the URL path (typically ends in /v1).', // TODO: translate
+    onboarding_probe_error_http_5xx: 'The endpoint returned a server error. Check the LM Studio / Ollama server logs.', // TODO: translate
+    onboarding_probe_error_parse: 'The endpoint did not return a model list in the expected shape. Verify the URL points to the OpenAI-compatible API root.', // TODO: translate
+    onboarding_probe_error_unreachable: 'Could not reach the configured base URL.', // TODO: translate
+    onboarding_error_probe_failed: 'Could not validate the configured base URL.', // TODO: translate
     onboarding_error_workspace_required: 'ワークスペースは必須です。',
     onboarding_error_model_required: 'モデルは必須です。',
     onboarding_complete: 'オンボーディング完了',
@@ -1756,7 +1806,11 @@ const LOCALES = {
     mic_no_speech: 'Речь не распознана. Попробуйте ещё раз.',
     mic_network: 'Распознавание речи недоступно.',
     mic_error: 'Ошибка ввода речи: ',
-    voice_toggle: 'Голосовой ввод',
+    // Composer voice buttons (#1488)
+    voice_dictate: 'Диктовка',
+    voice_dictate_active: 'Остановить диктовку',
+    voice_mode_toggle: 'Голосовой режим',
+    voice_mode_toggle_active: 'Выйти из голосового режима',
     voice_listening: 'Слушаю…',
     voice_speaking: 'Говорю…',
     voice_thinking: 'Думаю…',
@@ -2160,6 +2214,9 @@ const LOCALES = {
     provider_category_specialized: 'Специализированные',
     onboarding_api_key_label: 'Ключ API',
     onboarding_api_key_placeholder: 'Оставьте пустым, чтобы сохранить уже сохранённый ключ',
+    onboarding_api_key_label_optional: 'API key (optional)', // TODO: translate
+    onboarding_api_key_placeholder_optional: 'Leave blank for keyless servers', // TODO: translate
+    onboarding_api_key_help_keyless: 'Most LM Studio / Ollama / vLLM installs run keyless — leave this blank if your server doesn\'t require authentication. Use the Test connection button to verify.', // TODO: translate
     oauth_login_codex: 'Login with Codex (ChatGPT)', // TODO: translate
     oauth_codex_step1: 'Step 1: Visit this URL and enter the code', // TODO: translate
     oauth_codex_step2: 'Step 2: Enter this code on the page', // TODO: translate
@@ -2192,6 +2249,19 @@ const LOCALES = {
     onboarding_error_choose_model: 'Выберите модель перед продолжением.',
     onboarding_error_provider_required: 'Выберите режим настройки перед продолжением.',
     onboarding_error_base_url_required: 'Для собственных endpoint-ов требуется базовый URL.',
+    onboarding_probe_test_button: 'Test connection', // TODO: translate
+    onboarding_probe_probing: 'Testing connection…', // TODO: translate
+    onboarding_probe_ok: 'Connected. {n} model(s) available.', // TODO: translate
+    onboarding_probe_error_generic: 'Could not reach the configured base URL.', // TODO: translate
+    onboarding_probe_error_invalid_url: 'Base URL must start with http:// or https://.', // TODO: translate
+    onboarding_probe_error_dns: 'Could not resolve the host. Check the URL or use the host\'s IP address.', // TODO: translate
+    onboarding_probe_error_connect_refused: 'Connection refused — the server may not be running on that address. From inside Docker, try the host IP instead of localhost.', // TODO: translate
+    onboarding_probe_error_timeout: 'The endpoint did not respond in time. Check that the server is running and the URL is correct.', // TODO: translate
+    onboarding_probe_error_http_4xx: 'The endpoint returned a client error. Check authentication and the URL path (typically ends in /v1).', // TODO: translate
+    onboarding_probe_error_http_5xx: 'The endpoint returned a server error. Check the LM Studio / Ollama server logs.', // TODO: translate
+    onboarding_probe_error_parse: 'The endpoint did not return a model list in the expected shape. Verify the URL points to the OpenAI-compatible API root.', // TODO: translate
+    onboarding_probe_error_unreachable: 'Could not reach the configured base URL.', // TODO: translate
+    onboarding_error_probe_failed: 'Could not validate the configured base URL.', // TODO: translate
     onboarding_error_workspace_required: 'Рабочее пространство обязательно.',
     onboarding_error_model_required: 'Модель обязательна.',
     onboarding_complete: 'Первичная настройка завершена',
@@ -2400,6 +2470,8 @@ const LOCALES = {
     session_duplicate: 'Duplicate conversation',
     session_duplicate_desc: 'Create a copy with the same workspace and model',
     session_duplicate_failed: 'Duplicate failed: ',
+    session_stop_response: 'Stop response',
+    session_stop_response_desc: 'Cancel the running response for this conversation',
     session_duplicated: 'Session duplicated',
     session_move_project: 'Move to project',
     session_move_project_desc_has: 'Change the project for this conversation',
@@ -2517,6 +2589,9 @@ const LOCALES = {
     settings_desc_tts: 'Показать кнопку динамика на сообщениях ассистента',
     settings_label_tts_auto_read: 'Авто-чтение ответов',
     settings_desc_tts_auto_read: 'Автоматически озвучивать ответы ассистента',
+    // Composer voice-mode pref (#1488)
+    settings_label_voice_mode: 'Кнопка режима свободных рук',
+    settings_desc_voice_mode: 'Показывать кнопку голосового режима (аудиоволны) рядом с микрофоном диктовки. Hermes автоматически отправляет реплики после паузы и зачитывает ответы вслух. Требуется браузер с поддержкой распознавания речи и TTS.',
     settings_label_tts_voice: 'Голос',
     settings_desc_tts_voice: 'Выберите голос для синтеза речи',
     settings_label_tts_rate: 'Скорость речи',
@@ -2974,6 +3049,9 @@ const LOCALES = {
     provider_category_specialized: 'Especializados',
     onboarding_api_key_label: 'API key',
     onboarding_api_key_placeholder: 'Déjala en blanco para conservar una key ya guardada',
+    onboarding_api_key_label_optional: 'API key (optional)', // TODO: translate
+    onboarding_api_key_placeholder_optional: 'Leave blank for keyless servers', // TODO: translate
+    onboarding_api_key_help_keyless: 'Most LM Studio / Ollama / vLLM installs run keyless — leave this blank if your server doesn\'t require authentication. Use the Test connection button to verify.', // TODO: translate
     oauth_login_codex: 'Login with Codex (ChatGPT)', // TODO: translate
     oauth_codex_step1: 'Step 1: Visit this URL and enter the code', // TODO: translate
     oauth_codex_step2: 'Step 2: Enter this code on the page', // TODO: translate
@@ -3006,6 +3084,19 @@ const LOCALES = {
     onboarding_error_choose_model: 'Elige un modelo antes de continuar.',
     onboarding_error_provider_required: 'Elige un modo de configuración antes de continuar.',
     onboarding_error_base_url_required: 'La base URL es obligatoria para endpoints personalizados.',
+    onboarding_probe_test_button: 'Test connection', // TODO: translate
+    onboarding_probe_probing: 'Testing connection…', // TODO: translate
+    onboarding_probe_ok: 'Connected. {n} model(s) available.', // TODO: translate
+    onboarding_probe_error_generic: 'Could not reach the configured base URL.', // TODO: translate
+    onboarding_probe_error_invalid_url: 'Base URL must start with http:// or https://.', // TODO: translate
+    onboarding_probe_error_dns: 'Could not resolve the host. Check the URL or use the host\'s IP address.', // TODO: translate
+    onboarding_probe_error_connect_refused: 'Connection refused — the server may not be running on that address. From inside Docker, try the host IP instead of localhost.', // TODO: translate
+    onboarding_probe_error_timeout: 'The endpoint did not respond in time. Check that the server is running and the URL is correct.', // TODO: translate
+    onboarding_probe_error_http_4xx: 'The endpoint returned a client error. Check authentication and the URL path (typically ends in /v1).', // TODO: translate
+    onboarding_probe_error_http_5xx: 'The endpoint returned a server error. Check the LM Studio / Ollama server logs.', // TODO: translate
+    onboarding_probe_error_parse: 'The endpoint did not return a model list in the expected shape. Verify the URL points to the OpenAI-compatible API root.', // TODO: translate
+    onboarding_probe_error_unreachable: 'Could not reach the configured base URL.', // TODO: translate
+    onboarding_error_probe_failed: 'Could not validate the configured base URL.', // TODO: translate
     onboarding_error_workspace_required: 'El espacio de trabajo es obligatorio.',
     onboarding_error_model_required: 'El modelo es obligatorio.',
     onboarding_complete: 'Onboarding completado',
@@ -3199,6 +3290,8 @@ const LOCALES = {
     session_duplicate: 'Duplicate conversation',
     session_duplicate_desc: 'Create a copy with the same workspace and model',
     session_duplicate_failed: 'Duplicate failed: ',
+    session_stop_response: 'Stop response',
+    session_stop_response_desc: 'Cancel the running response for this conversation',
     session_duplicated: 'Session duplicated',
     session_move_project: 'Move to project',
     session_move_project_desc_has: 'Change the project for this conversation',
@@ -3316,6 +3409,9 @@ const LOCALES = {
     settings_desc_tts: 'Mostrar botón de altavoz en mensajes del asistente',
     settings_label_tts_auto_read: 'Leer respuestas automáticamente',
     settings_desc_tts_auto_read: 'Leer en voz alta las respuestas del asistente automáticamente',
+    // Composer voice-mode pref (#1488)
+    settings_label_voice_mode: 'Hands-free voice mode button',  // TODO: translate
+    settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',  // TODO: translate
     settings_label_tts_voice: 'Voz',
     settings_desc_tts_voice: 'Seleccionar voz para síntesis de voz',
     settings_label_tts_rate: 'Velocidad de voz',
@@ -3358,7 +3454,11 @@ const LOCALES = {
     voice_mode_off: 'Voice mode off',  // TODO: translate
     voice_speaking: 'Speaking…',  // TODO: translate
     voice_thinking: 'Thinking…',  // TODO: translate
-    voice_toggle: 'Voice input',  // TODO: translate
+    // Composer voice buttons (#1488)
+    voice_dictate: 'Dictate',  // TODO: translate
+    voice_dictate_active: 'Stop dictation',  // TODO: translate
+    voice_mode_toggle: 'Voice mode',  // TODO: translate
+    voice_mode_toggle_active: 'Exit voice mode',  // TODO: translate
     subagent_children: 'Subagent sessions',  // TODO: translate
   },
 
@@ -3756,6 +3856,8 @@ const LOCALES = {
     session_duplicate: 'Duplicate conversation',
     session_duplicate_desc: 'Create a copy with the same workspace and model',
     session_duplicate_failed: 'Duplicate failed: ',
+    session_stop_response: 'Stop response',
+    session_stop_response_desc: 'Cancel the running response for this conversation',
     session_duplicated: 'Session duplicated',
     session_move_project: 'Move to project',
     session_move_project_desc_has: 'Change the project for this conversation',
@@ -3920,6 +4022,9 @@ const LOCALES = {
     provider_category_specialized: 'Spezialisiert',
     onboarding_api_key_label: 'API-Schlüssel',
     onboarding_api_key_placeholder: 'sk-…',
+    onboarding_api_key_label_optional: 'API key (optional)', // TODO: translate
+    onboarding_api_key_placeholder_optional: 'Leave blank for keyless servers', // TODO: translate
+    onboarding_api_key_help_keyless: 'Most LM Studio / Ollama / vLLM installs run keyless — leave this blank if your server doesn\'t require authentication. Use the Test connection button to verify.', // TODO: translate
     oauth_login_codex: 'Login with Codex (ChatGPT)', // TODO: translate
     oauth_codex_step1: 'Step 1: Visit this URL and enter the code', // TODO: translate
     oauth_codex_step2: 'Step 2: Enter this code on the page', // TODO: translate
@@ -3948,6 +4053,19 @@ const LOCALES = {
     onboarding_error_choose_model: 'Bitte wählen Sie ein Modell.',
     onboarding_error_provider_required: 'Anbieter erforderlich.',
     onboarding_error_base_url_required: 'Base URL erforderlich.',
+    onboarding_probe_test_button: 'Test connection', // TODO: translate
+    onboarding_probe_probing: 'Testing connection…', // TODO: translate
+    onboarding_probe_ok: 'Connected. {n} model(s) available.', // TODO: translate
+    onboarding_probe_error_generic: 'Could not reach the configured base URL.', // TODO: translate
+    onboarding_probe_error_invalid_url: 'Base URL must start with http:// or https://.', // TODO: translate
+    onboarding_probe_error_dns: 'Could not resolve the host. Check the URL or use the host\'s IP address.', // TODO: translate
+    onboarding_probe_error_connect_refused: 'Connection refused — the server may not be running on that address. From inside Docker, try the host IP instead of localhost.', // TODO: translate
+    onboarding_probe_error_timeout: 'The endpoint did not respond in time. Check that the server is running and the URL is correct.', // TODO: translate
+    onboarding_probe_error_http_4xx: 'The endpoint returned a client error. Check authentication and the URL path (typically ends in /v1).', // TODO: translate
+    onboarding_probe_error_http_5xx: 'The endpoint returned a server error. Check the LM Studio / Ollama server logs.', // TODO: translate
+    onboarding_probe_error_parse: 'The endpoint did not return a model list in the expected shape. Verify the URL points to the OpenAI-compatible API root.', // TODO: translate
+    onboarding_probe_error_unreachable: 'Could not reach the configured base URL.', // TODO: translate
+    onboarding_error_probe_failed: 'Could not validate the configured base URL.', // TODO: translate
     onboarding_error_workspace_required: 'Arbeitsbereich erforderlich.',
     onboarding_error_model_required: 'Modell erforderlich.',
     onboarding_complete: 'Einrichtung abgeschlossen!',
@@ -4124,6 +4242,9 @@ const LOCALES = {
     settings_desc_tts: 'Lautsprecher-Symbol auf Assistenten-Nachrichten anzeigen',
     settings_label_tts_auto_read: 'Antworten automatisch vorlesen',
     settings_desc_tts_auto_read: 'Assistenten-Antworten automatisch vorlesen',
+    // Composer voice-mode pref (#1488)
+    settings_label_voice_mode: 'Hands-free voice mode button',  // TODO: translate
+    settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',  // TODO: translate
     settings_label_tts_voice: 'Stimme',
     settings_desc_tts_voice: 'Stimme für Sprachsynthese auswählen',
     settings_label_tts_rate: 'Sprechgeschwindigkeit',
@@ -4167,7 +4288,11 @@ const LOCALES = {
     voice_mode_off: 'Voice mode off',  // TODO: translate
     voice_speaking: 'Speaking…',  // TODO: translate
     voice_thinking: 'Thinking…',  // TODO: translate
-    voice_toggle: 'Voice input',  // TODO: translate
+    // Composer voice buttons (#1488)
+    voice_dictate: 'Dictate',  // TODO: translate
+    voice_dictate_active: 'Stop dictation',  // TODO: translate
+    voice_mode_toggle: 'Voice mode',  // TODO: translate
+    voice_mode_toggle_active: 'Exit voice mode',  // TODO: translate
     subagent_children: 'Subagent sessions',  // TODO: translate
   },
 
@@ -4586,6 +4711,9 @@ const LOCALES = {
     provider_category_specialized: '专业服务',
     onboarding_api_key_label: 'API key',
     onboarding_api_key_placeholder: '留空可保留已保存的 key',
+    onboarding_api_key_label_optional: 'API key (optional)', // TODO: translate
+    onboarding_api_key_placeholder_optional: 'Leave blank for keyless servers', // TODO: translate
+    onboarding_api_key_help_keyless: 'Most LM Studio / Ollama / vLLM installs run keyless — leave this blank if your server doesn\'t require authentication. Use the Test connection button to verify.', // TODO: translate
     oauth_login_codex: 'Login with Codex (ChatGPT)', // TODO: translate
     oauth_codex_step1: 'Step 1: Visit this URL and enter the code', // TODO: translate
     oauth_codex_step2: 'Step 2: Enter this code on the page', // TODO: translate
@@ -4618,6 +4746,19 @@ const LOCALES = {
     onboarding_error_choose_model: '继续前请先选择模型。',
     onboarding_error_provider_required: '继续前请先选择设置模式。',
     onboarding_error_base_url_required: '自定义端点必须填写 Base URL。',
+    onboarding_probe_test_button: 'Test connection', // TODO: translate
+    onboarding_probe_probing: 'Testing connection…', // TODO: translate
+    onboarding_probe_ok: 'Connected. {n} model(s) available.', // TODO: translate
+    onboarding_probe_error_generic: 'Could not reach the configured base URL.', // TODO: translate
+    onboarding_probe_error_invalid_url: 'Base URL must start with http:// or https://.', // TODO: translate
+    onboarding_probe_error_dns: 'Could not resolve the host. Check the URL or use the host\'s IP address.', // TODO: translate
+    onboarding_probe_error_connect_refused: 'Connection refused — the server may not be running on that address. From inside Docker, try the host IP instead of localhost.', // TODO: translate
+    onboarding_probe_error_timeout: 'The endpoint did not respond in time. Check that the server is running and the URL is correct.', // TODO: translate
+    onboarding_probe_error_http_4xx: 'The endpoint returned a client error. Check authentication and the URL path (typically ends in /v1).', // TODO: translate
+    onboarding_probe_error_http_5xx: 'The endpoint returned a server error. Check the LM Studio / Ollama server logs.', // TODO: translate
+    onboarding_probe_error_parse: 'The endpoint did not return a model list in the expected shape. Verify the URL points to the OpenAI-compatible API root.', // TODO: translate
+    onboarding_probe_error_unreachable: 'Could not reach the configured base URL.', // TODO: translate
+    onboarding_error_probe_failed: 'Could not validate the configured base URL.', // TODO: translate
     onboarding_error_workspace_required: '必须填写工作区。',
     onboarding_error_model_required: '必须填写模型。',
     onboarding_complete: '引导完成',
@@ -4810,6 +4951,8 @@ const LOCALES = {
     session_duplicate: 'Duplicate conversation',
     session_duplicate_desc: 'Create a copy with the same workspace and model',
     session_duplicate_failed: 'Duplicate failed: ',
+    session_stop_response: 'Stop response',
+    session_stop_response_desc: 'Cancel the running response for this conversation',
     session_duplicated: 'Session duplicated',
     session_move_project: 'Move to project',
     session_move_project_desc_has: 'Change the project for this conversation',
@@ -4928,6 +5071,9 @@ const LOCALES = {
     settings_desc_tts: '在助手消息上显示扬声器按钮',
     settings_label_tts_auto_read: '自动朗读回复',
     settings_desc_tts_auto_read: '自动朗读助手回复',
+    // Composer voice-mode pref (#1488)
+    settings_label_voice_mode: 'Hands-free voice mode button',  // TODO: translate
+    settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',  // TODO: translate
     settings_label_tts_voice: '语音',
     settings_desc_tts_voice: '选择语音合成声音',
     settings_label_tts_rate: '语速',
@@ -4970,7 +5116,11 @@ const LOCALES = {
     voice_mode_off: 'Voice mode off',  // TODO: translate
     voice_speaking: 'Speaking…',  // TODO: translate
     voice_thinking: 'Thinking…',  // TODO: translate
-    voice_toggle: 'Voice input',  // TODO: translate
+    // Composer voice buttons (#1488)
+    voice_dictate: 'Dictate',  // TODO: translate
+    voice_dictate_active: 'Stop dictation',  // TODO: translate
+    voice_mode_toggle: 'Voice mode',  // TODO: translate
+    voice_mode_toggle_active: 'Exit voice mode',  // TODO: translate
     subagent_children: 'Subagent sessions',  // TODO: translate
   },
 
@@ -5180,6 +5330,8 @@ const LOCALES = {
     session_duplicate_desc: '建立一個相同工作區與模型的副本',
     session_duplicated: '對話已複製',
     session_duplicate_failed: '複製失敗：',
+    session_stop_response: 'Stop response',
+    session_stop_response_desc: 'Cancel the running response for this conversation',
     session_delete: '刪除對話',
     session_delete_desc: '永久移除這個對話',
     session_select_mode: '選取',
@@ -5360,6 +5512,9 @@ const LOCALES = {
     onboarding_api_key_help_prefix: '\u900f\u904e\u4ee5\u4e0b\u65b9\u5f0f\u5132\u5b58\u70ba Hermes .env \u6a94\u6848\u4e2d\u7684\u6a5f\u5bc6',
     onboarding_api_key_label: 'API \u91d1\u9470',
     onboarding_api_key_placeholder: '\u7559\u7a7a\u4ee5\u4fdd\u7559\u5df2\u5132\u5b58\u7684\u91d1\u9470',
+    onboarding_api_key_label_optional: 'API key (optional)', // TODO: translate
+    onboarding_api_key_placeholder_optional: 'Leave blank for keyless servers', // TODO: translate
+    onboarding_api_key_help_keyless: 'Most LM Studio / Ollama / vLLM installs run keyless — leave this blank if your server doesn\'t require authentication. Use the Test connection button to verify.', // TODO: translate
     onboarding_back: '\u4e0a\u4e00\u6b65',
     onboarding_badge: '\u9996\u6b21\u57f7\u884c',
     onboarding_base_url_help: '\u7528\u65bc OpenAI \u76f8\u5bb9\u8def\u7531\u5668\u3001\u81ea\u67b6\u4f3a\u670d\u5668\u3001LiteLLM\u3001Ollama\u3001LM Studio\u3001vLLM \u7b49\u7aef\u9ede\u3002',
@@ -5383,6 +5538,19 @@ const LOCALES = {
     onboarding_custom_model_placeholder: 'your_model_name',
     onboarding_env_file: '.env \u6a94\u6848\uff1a',
     onboarding_error_base_url_required: '\u81ea\u8a02\u7aef\u9ede\u9700\u8981\u57fa\u790e URL\u3002',
+    onboarding_probe_test_button: 'Test connection', // TODO: translate
+    onboarding_probe_probing: 'Testing connection…', // TODO: translate
+    onboarding_probe_ok: 'Connected. {n} model(s) available.', // TODO: translate
+    onboarding_probe_error_generic: 'Could not reach the configured base URL.', // TODO: translate
+    onboarding_probe_error_invalid_url: 'Base URL must start with http:// or https://.', // TODO: translate
+    onboarding_probe_error_dns: 'Could not resolve the host. Check the URL or use the host\'s IP address.', // TODO: translate
+    onboarding_probe_error_connect_refused: 'Connection refused — the server may not be running on that address. From inside Docker, try the host IP instead of localhost.', // TODO: translate
+    onboarding_probe_error_timeout: 'The endpoint did not respond in time. Check that the server is running and the URL is correct.', // TODO: translate
+    onboarding_probe_error_http_4xx: 'The endpoint returned a client error. Check authentication and the URL path (typically ends in /v1).', // TODO: translate
+    onboarding_probe_error_http_5xx: 'The endpoint returned a server error. Check the LM Studio / Ollama server logs.', // TODO: translate
+    onboarding_probe_error_parse: 'The endpoint did not return a model list in the expected shape. Verify the URL points to the OpenAI-compatible API root.', // TODO: translate
+    onboarding_probe_error_unreachable: 'Could not reach the configured base URL.', // TODO: translate
+    onboarding_error_probe_failed: 'Could not validate the configured base URL.', // TODO: translate
     onboarding_error_choose_model: '\u8acb\u5148\u9078\u64c7\u6a21\u578b\u518d\u7e7c\u7e8c\u3002',
     onboarding_error_choose_workspace: '\u8acb\u5148\u9078\u64c7\u5de5\u4f5c\u5340\u518d\u7e7c\u7e8c\u3002',
     onboarding_error_model_required: '\u9700\u8981\u6a21\u578b\u3002',
@@ -5838,6 +6006,9 @@ const LOCALES = {
     settings_desc_tts: '在助手訊息上顯示喇叭按鈕',
     settings_label_tts_auto_read: '自動朗讀回覆',
     settings_desc_tts_auto_read: '自動朗讀助手回覆',
+    // Composer voice-mode pref (#1488)
+    settings_label_voice_mode: 'Hands-free voice mode button',  // TODO: translate
+    settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',  // TODO: translate
     settings_label_tts_voice: '語音',
     settings_desc_tts_voice: '選擇語音合成聲音',
     settings_label_tts_rate: '語速',
@@ -5881,7 +6052,11 @@ const LOCALES = {
     voice_mode_off: 'Voice mode off',  // TODO: translate
     voice_speaking: 'Speaking…',  // TODO: translate
     voice_thinking: 'Thinking…',  // TODO: translate
-    voice_toggle: 'Voice input',  // TODO: translate
+    // Composer voice buttons (#1488)
+    voice_dictate: 'Dictate',  // TODO: translate
+    voice_dictate_active: 'Stop dictation',  // TODO: translate
+    voice_mode_toggle: 'Voice mode',  // TODO: translate
+    voice_mode_toggle_active: 'Exit voice mode',  // TODO: translate
     subagent_children: 'Subagent sessions',  // TODO: translate
   },
 
@@ -6158,6 +6333,8 @@ const LOCALES = {
     session_duplicate_desc: 'Criar cópia com mesmo workspace e modelo',
     session_duplicated: 'Sessão duplicada',
     session_duplicate_failed: 'Falha ao duplicar: ',
+    session_stop_response: 'Stop response',
+    session_stop_response_desc: 'Cancel the running response for this conversation',
     session_delete: 'Excluir conversa',
     session_delete_desc: 'Remover permanentemente esta conversa',
     // settings panel
@@ -6376,6 +6553,9 @@ const LOCALES = {
     oauth_codex_error: 'OAuth login failed', // TODO: translate
     oauth_codex_expired: 'Code expired, please try again', // TODO: translate
     onboarding_api_key_placeholder: 'Deixe em branco para manter key existente',
+    onboarding_api_key_label_optional: 'API key (optional)', // TODO: translate
+    onboarding_api_key_placeholder_optional: 'Leave blank for keyless servers', // TODO: translate
+    onboarding_api_key_help_keyless: 'Most LM Studio / Ollama / vLLM installs run keyless — leave this blank if your server doesn\'t require authentication. Use the Test connection button to verify.', // TODO: translate
     onboarding_api_key_help_prefix: 'Salvo como segredo no .env do Hermes usando',
     onboarding_base_url_label: 'Base URL',
     onboarding_base_url_placeholder: 'https://seu-endpoint.exemplo/v1',
@@ -6401,6 +6581,19 @@ const LOCALES = {
     onboarding_error_choose_model: 'Escolha modelo antes de continuar.',
     onboarding_error_provider_required: 'Escolha modo de setup antes de continuar.',
     onboarding_error_base_url_required: 'Base URL é necessária para endpoints customizados.',
+    onboarding_probe_test_button: 'Test connection', // TODO: translate
+    onboarding_probe_probing: 'Testing connection…', // TODO: translate
+    onboarding_probe_ok: 'Connected. {n} model(s) available.', // TODO: translate
+    onboarding_probe_error_generic: 'Could not reach the configured base URL.', // TODO: translate
+    onboarding_probe_error_invalid_url: 'Base URL must start with http:// or https://.', // TODO: translate
+    onboarding_probe_error_dns: 'Could not resolve the host. Check the URL or use the host\'s IP address.', // TODO: translate
+    onboarding_probe_error_connect_refused: 'Connection refused — the server may not be running on that address. From inside Docker, try the host IP instead of localhost.', // TODO: translate
+    onboarding_probe_error_timeout: 'The endpoint did not respond in time. Check that the server is running and the URL is correct.', // TODO: translate
+    onboarding_probe_error_http_4xx: 'The endpoint returned a client error. Check authentication and the URL path (typically ends in /v1).', // TODO: translate
+    onboarding_probe_error_http_5xx: 'The endpoint returned a server error. Check the LM Studio / Ollama server logs.', // TODO: translate
+    onboarding_probe_error_parse: 'The endpoint did not return a model list in the expected shape. Verify the URL points to the OpenAI-compatible API root.', // TODO: translate
+    onboarding_probe_error_unreachable: 'Could not reach the configured base URL.', // TODO: translate
+    onboarding_error_probe_failed: 'Could not validate the configured base URL.', // TODO: translate
     onboarding_error_workspace_required: 'Workspace é necessário.',
     onboarding_error_model_required: 'Modelo é necessário.',
     onboarding_complete: 'Configuração completa',
@@ -6561,6 +6754,9 @@ const LOCALES = {
     settings_desc_tts: 'Mostrar botão de alto-falante nas mensagens do assistente',
     settings_label_tts_auto_read: 'Ler respostas automaticamente',
     settings_desc_tts_auto_read: 'Ler automaticamente as respostas do assistente',
+    // Composer voice-mode pref (#1488)
+    settings_label_voice_mode: 'Hands-free voice mode button',  // TODO: translate
+    settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',  // TODO: translate
     settings_label_tts_voice: 'Voz',
     settings_desc_tts_voice: 'Selecionar voz para síntese de voz',
     settings_label_tts_rate: 'Velocidade da fala',
@@ -6603,7 +6799,11 @@ const LOCALES = {
     voice_mode_off: 'Voice mode off',  // TODO: translate
     voice_speaking: 'Speaking…',  // TODO: translate
     voice_thinking: 'Thinking…',  // TODO: translate
-    voice_toggle: 'Voice input',  // TODO: translate
+    // Composer voice buttons (#1488)
+    voice_dictate: 'Dictate',  // TODO: translate
+    voice_dictate_active: 'Stop dictation',  // TODO: translate
+    voice_mode_toggle: 'Voice mode',  // TODO: translate
+    voice_mode_toggle_active: 'Exit voice mode',  // TODO: translate
     subagent_children: 'Subagent sessions',  // TODO: translate
     // login-flow keys (issue #1442)
     sign_out_failed: 'Falha ao sair: ',
@@ -6924,6 +7124,8 @@ const LOCALES = {
     session_duplicate_desc: 'Create a copy with the same workspace and model',
     session_duplicated: 'Session duplicated',
     session_duplicate_failed: 'Duplicate failed: ',
+    session_stop_response: 'Stop response',
+    session_stop_response_desc: 'Cancel the running response for this conversation',
     session_delete: 'Delete conversation',
     session_delete_desc: 'Permanently remove this conversation',
     session_select_mode: '선택',
@@ -7153,6 +7355,9 @@ const LOCALES = {
     oauth_codex_error: 'OAuth login failed', // TODO: translate
     oauth_codex_expired: 'Code expired, please try again', // TODO: translate
     onboarding_api_key_placeholder: 'Leave blank to keep an existing saved key',
+    onboarding_api_key_label_optional: 'API key (optional)', // TODO: translate
+    onboarding_api_key_placeholder_optional: 'Leave blank for keyless servers', // TODO: translate
+    onboarding_api_key_help_keyless: 'Most LM Studio / Ollama / vLLM installs run keyless — leave this blank if your server doesn\'t require authentication. Use the Test connection button to verify.', // TODO: translate
     onboarding_api_key_help_prefix: 'Saved as a secret in your Hermes .env file using',
     onboarding_base_url_label: 'Base URL',
     onboarding_base_url_placeholder: 'https://your-endpoint.example/v1',
@@ -7178,6 +7383,19 @@ const LOCALES = {
     onboarding_error_choose_model: 'Choose a model before continuing.',
     onboarding_error_provider_required: 'Choose a setup mode before continuing.',
     onboarding_error_base_url_required: 'Base URL is required for custom endpoints.',
+    onboarding_probe_test_button: 'Test connection', // TODO: translate
+    onboarding_probe_probing: 'Testing connection…', // TODO: translate
+    onboarding_probe_ok: 'Connected. {n} model(s) available.', // TODO: translate
+    onboarding_probe_error_generic: 'Could not reach the configured base URL.', // TODO: translate
+    onboarding_probe_error_invalid_url: 'Base URL must start with http:// or https://.', // TODO: translate
+    onboarding_probe_error_dns: 'Could not resolve the host. Check the URL or use the host\'s IP address.', // TODO: translate
+    onboarding_probe_error_connect_refused: 'Connection refused — the server may not be running on that address. From inside Docker, try the host IP instead of localhost.', // TODO: translate
+    onboarding_probe_error_timeout: 'The endpoint did not respond in time. Check that the server is running and the URL is correct.', // TODO: translate
+    onboarding_probe_error_http_4xx: 'The endpoint returned a client error. Check authentication and the URL path (typically ends in /v1).', // TODO: translate
+    onboarding_probe_error_http_5xx: 'The endpoint returned a server error. Check the LM Studio / Ollama server logs.', // TODO: translate
+    onboarding_probe_error_parse: 'The endpoint did not return a model list in the expected shape. Verify the URL points to the OpenAI-compatible API root.', // TODO: translate
+    onboarding_probe_error_unreachable: 'Could not reach the configured base URL.', // TODO: translate
+    onboarding_error_probe_failed: 'Could not validate the configured base URL.', // TODO: translate
     onboarding_error_workspace_required: 'Workspace is required.',
     onboarding_error_model_required: 'Model is required.',
     onboarding_complete: '설정 완료',
@@ -7421,6 +7639,9 @@ const LOCALES = {
     settings_desc_tts: '도움말 메시지에 스피커 버튼 표시',
     settings_label_tts_auto_read: '답변 자동 읽기',
     settings_desc_tts_auto_read: '도움말 답변을 자동으로 읽어줌',
+    // Composer voice-mode pref (#1488)
+    settings_label_voice_mode: 'Hands-free voice mode button',  // TODO: translate
+    settings_desc_voice_mode: 'Show the voice-mode button (audio waveform) next to the dictation mic. Lets you speak naturally — Hermes auto-sends after a pause and reads replies aloud. Requires a browser that supports both speech recognition and TTS.',  // TODO: translate
     settings_label_tts_voice: '음성',
     settings_desc_tts_voice: '음성 합성 음성 선택',
     settings_label_tts_rate: '말 속도',
@@ -7463,7 +7684,11 @@ const LOCALES = {
     voice_mode_off: 'Voice mode off',  // TODO: translate
     voice_speaking: 'Speaking…',  // TODO: translate
     voice_thinking: 'Thinking…',  // TODO: translate
-    voice_toggle: 'Voice input',  // TODO: translate
+    // Composer voice buttons (#1488)
+    voice_dictate: 'Dictate',  // TODO: translate
+    voice_dictate_active: 'Stop dictation',  // TODO: translate
+    voice_mode_toggle: 'Voice mode',  // TODO: translate
+    voice_mode_toggle_active: 'Exit voice mode',  // TODO: translate
     subagent_children: 'Subagent sessions',  // TODO: translate
   },
 };

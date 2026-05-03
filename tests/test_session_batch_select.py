@@ -147,10 +147,10 @@ def test_project_filters_include_unassigned_sessions():
         "Project filtering should have a stable sentinel for unassigned sessions"
     assert "profileFiltered.filter(s=>!s.project_id)" in js, \
         "No-project filter must show sessions without a project_id"
-    assert "noneChip.textContent='No project'" in js, \
-        "Project chips should expose a No project filter"
+    assert "noneChip.textContent='Unassigned'" in js, \
+        "Project chips should expose an Unassigned filter"
     assert ".project-chip.no-project{border-style:dashed;}" in css, \
-        "No project chip should have a distinct treatment"
+        "Unassigned chip should have a distinct treatment"
 
 
 def test_batch_project_picker_is_anchored_to_batch_actions():

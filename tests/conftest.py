@@ -305,6 +305,7 @@ def test_server():
         # causing onboarding writes (config.yaml, .env) to land in the production
         # ~/.hermes/profiles/webui/ and overwrite real API keys.
         "HERMES_BASE_HOME":               str(TEST_STATE_DIR),
+        "HERMES_WEBUI_PASSWORD":          "",
     })
 
     # Pass agent dir if discovered so server.py doesn't have to re-discover

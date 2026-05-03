@@ -2071,11 +2071,20 @@ def get_available_models() -> dict:
                     )
                 else:
                     if auto_detected_models:
+                        # Per-group deep copy so subsequent mutation by
+                        # _deduplicate_model_ids() (which prefixes ids with
+                        # @provider_id:) does not bleed into other groups
+                        # that also fall through to this branch (#1511 root
+                        # cause: multiple unconfigured providers all sharing
+                        # the same auto_detected_models list reference would
+                        # see every group's id rewritten to the FIRST
+                        # provider's prefix, and labels accumulated every
+                        # provider's name).
                         groups.append(
                             {
                                 "provider": provider_name,
                                 "provider_id": pid,
-                                "models": auto_detected_models,
+                                "models": copy.deepcopy(auto_detected_models),
                             }
                         )
         else:

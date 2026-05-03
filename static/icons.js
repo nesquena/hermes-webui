@@ -64,6 +64,8 @@ const LI_PATHS = {
   'git-branch':      '<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',
   // Audio / TTS
   'volume-2':        '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>',
+  // Voice-mode button — universal "two-way voice conversation" glyph (matches ChatGPT/Gemini)
+  'audio-lines':     '<path d="M2 10v4"/><path d="M6 6v12"/><path d="M10 3v18"/><path d="M14 8v8"/><path d="M18 5v14"/><path d="M22 10v4"/>',
   // Queue pill chevron (ui.js queue indicator)
   'chevron-up':      '<polyline points="18 15 12 9 6 15"/>',
   // Insights panel stat cards (panels.js)

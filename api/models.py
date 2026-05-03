@@ -6,6 +6,7 @@ import os
 import threading
 import time
 import uuid
+from contextlib import closing
 from pathlib import Path
 
 import api.config as _cfg
@@ -1040,6 +1041,16 @@ def get_cli_sessions() -> list:
                                     break
                     except Exception:
                         pass  # degrade gracefully
+            # If a WebUI JSON file exists for this session (e.g. previously
+            # imported or renamed in the sidebar), prefer its title over the
+            # state.db title.  This fixes rename-not-persisting for CLI sessions
+            # after compression chain extension (#1486).
+            try:
+                _webui_meta = Session.load_metadata_only(sid)
+                if _webui_meta and getattr(_webui_meta, 'title', None):
+                    _title = _webui_meta.title
+            except Exception:
+                pass
             _display_title = _title or f'{_source.title()} Session'
             cli_sessions.append({
                 'session_id': sid,
@@ -1101,7 +1112,7 @@ def get_cli_session_messages(sid) -> list:
         return []
 
     try:
-        with sqlite3.connect(str(db_path)) as conn:
+        with closing(sqlite3.connect(str(db_path))) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute("""
@@ -1142,7 +1153,7 @@ def delete_cli_session(sid) -> bool:
         return False
 
     try:
-        with sqlite3.connect(str(db_path)) as conn:
+        with closing(sqlite3.connect(str(db_path))) as conn:
             cur = conn.cursor()
             cur.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
             cur.execute("DELETE FROM sessions WHERE id = ?", (sid,))

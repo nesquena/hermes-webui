@@ -707,6 +707,7 @@ from api.onboarding import (
     apply_onboarding_setup,
     get_onboarding_status,
     complete_onboarding,
+    probe_provider_endpoint,
 )
 
 # Approval system (optional -- graceful fallback if agent not available)
@@ -1109,6 +1110,13 @@ def _handle_insights(handler, parsed) -> bool:
 
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
+
+    if parsed.path.startswith("/session/static/"):
+        # Strip the leading "/session" so _serve_static() sees a path that
+        # starts with "/static/" (its required prefix). _serve_static enforces
+        # its own path-traversal sandbox via Path.resolve()+relative_to().
+        stripped = parsed._replace(path=parsed.path[len("/session"):])
+        return _serve_static(handler, stripped)
 
     if parsed.path in ("/", "/index.html") or parsed.path.startswith("/session/"):
         from urllib.parse import quote
@@ -2569,6 +2577,36 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/onboarding/complete":
         return j(handler, complete_onboarding())
+
+    if parsed.path == "/api/onboarding/probe":
+        # Probe a self-hosted provider endpoint (#1499).  Validates the
+        # configured base URL is reachable + parses /models, returns the
+        # model catalog so the wizard can populate its dropdown.
+        # Read-only: no config.yaml or .env writes happen here.  Same local-
+        # network gate as /api/onboarding/setup (also writing-adjacent in
+        # spirit because it carries an api_key the user typed).
+        from api.auth import is_auth_enabled
+        import os as _os
+        if not is_auth_enabled() and not _os.getenv("HERMES_WEBUI_ONBOARDING_OPEN"):
+            import ipaddress
+            try:
+                _xff = handler.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+                _xri = handler.headers.get("X-Real-IP", "").strip()
+                _raw = handler.client_address[0]
+                _ip_str = _xff or _xri or _raw
+                addr = ipaddress.ip_address(_ip_str)
+                is_local = addr.is_loopback or addr.is_private
+            except ValueError:
+                is_local = False
+            if not is_local:
+                return bad(handler, "Onboarding probe is only available from local networks when auth is not enabled. To bypass this on a remote server, set HERMES_WEBUI_ONBOARDING_OPEN=1.", 403)
+        provider = str((body or {}).get("provider") or "").strip().lower()
+        base_url = str((body or {}).get("base_url") or "")
+        api_key = str((body or {}).get("api_key") or "").strip() or None
+        try:
+            return j(handler, probe_provider_endpoint(provider, base_url, api_key))
+        except Exception as e:
+            return bad(handler, f"probe failed: {e}", 500)
 
     # ── Session pin (POST) ──
     if parsed.path == "/api/session/pin":

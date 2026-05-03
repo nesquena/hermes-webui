@@ -124,14 +124,54 @@ def discover_launcher_python(agent_dir: Path | None) -> str:
     return shutil.which("python3") or shutil.which("python") or sys.executable
 
 
-def ensure_python_has_webui_deps(python_exe: str) -> str:
+def _python_can_run_webui_and_agent(python_exe: str, agent_dir: Path | None = None) -> bool:
+    script = "import yaml\nfrom run_agent import AIAgent\n"
+    env = os.environ.copy()
+    if agent_dir:
+        # PREPEND agent_dir to PYTHONPATH so an `agent_dir/run_agent.py` wins
+        # over any stale `run_agent` package in system site-packages (sys.path
+        # order: script-dir → PYTHONPATH entries → site-packages). The
+        # "if PYTHONPATH unset" branch avoids a leading os.pathsep, which
+        # CPython would interpret as "current directory" — a footgun.
+        env["PYTHONPATH"] = (
+            str(agent_dir)
+            if not env.get("PYTHONPATH")
+            else f"{agent_dir}{os.pathsep}{env['PYTHONPATH']}"
+        )
     check = subprocess.run(
-        [python_exe, "-c", "import yaml"],
+        [python_exe, "-c", script],
         capture_output=True,
         text=True,
+        env=env,
     )
-    if check.returncode == 0:
+    return check.returncode == 0
+
+
+def ensure_python_has_webui_deps(python_exe: str, agent_dir: Path | None = None) -> str:
+    """Return a Python executable that can run both WebUI and Hermes Agent.
+
+    The WebUI can be launched directly with its local .venv. That venv has the
+    WebUI dependencies (for example PyYAML), but may not have Hermes Agent on its
+    import path. In that case the server starts healthy, then chat fails later
+    with "AIAgent not available". Prefer the agent venv when it is usable, and
+    validate the final interpreter before starting the server.
+    """
+    if _python_can_run_webui_and_agent(python_exe, agent_dir):
         return python_exe
+
+    agent_candidates: list[Path] = []
+    if agent_dir:
+        for rel in (
+            "venv/bin/python",
+            "venv/Scripts/python.exe",
+            ".venv/bin/python",
+            ".venv/Scripts/python.exe",
+        ):
+            agent_candidates.append(agent_dir / rel)
+        for candidate in agent_candidates:
+            if str(candidate) != python_exe and candidate.exists():
+                if _python_can_run_webui_and_agent(str(candidate), agent_dir):
+                    return str(candidate)
 
     venv_dir = REPO_ROOT / ".venv"
     venv_python = venv_dir / (
@@ -158,7 +198,13 @@ def ensure_python_has_webui_deps(python_exe: str) -> str:
         ],
         check=True,
     )
-    return str(venv_python)
+    if _python_can_run_webui_and_agent(str(venv_python), agent_dir):
+        return str(venv_python)
+    raise RuntimeError(
+        "Python environment cannot import both WebUI dependencies and Hermes Agent. "
+        "Set HERMES_WEBUI_PYTHON to the Hermes Agent venv Python or install the "
+        "WebUI requirements into that environment."
+    )
 
 
 def hermes_command_exists() -> bool:
@@ -298,7 +344,7 @@ def main() -> int:
         install_hermes_agent()
         agent_dir = discover_agent_dir()
 
-    python_exe = ensure_python_has_webui_deps(discover_launcher_python(agent_dir))
+    python_exe = ensure_python_has_webui_deps(discover_launcher_python(agent_dir), agent_dir)
     state_dir = Path(
         os.getenv("HERMES_WEBUI_STATE_DIR", str(Path.home() / ".hermes" / "webui"))
     ).expanduser()

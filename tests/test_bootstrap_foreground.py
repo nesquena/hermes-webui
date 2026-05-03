@@ -235,7 +235,7 @@ class TestMainForegroundRouting:
         monkeypatch.setattr(bs, "discover_agent_dir", lambda: tmp_path / "agent")
         monkeypatch.setattr(bs, "hermes_command_exists", lambda: True)
         monkeypatch.setattr(bs, "discover_launcher_python", lambda *a: "/usr/bin/python3")
-        monkeypatch.setattr(bs, "ensure_python_has_webui_deps", lambda p: p)
+        monkeypatch.setattr(bs, "ensure_python_has_webui_deps", lambda *a, **kw: a[0])
         monkeypatch.setattr(bs, "wait_for_health", lambda *a, **kw: True)
         monkeypatch.setattr(bs, "open_browser", lambda *a, **kw: None)
         monkeypatch.setenv("HERMES_WEBUI_STATE_DIR", str(tmp_path / "state"))
@@ -354,7 +354,7 @@ class TestForegroundEnvAndCwd:
         monkeypatch.setattr(bs, "discover_agent_dir", lambda: agent_dir)
         monkeypatch.setattr(bs, "hermes_command_exists", lambda: True)
         monkeypatch.setattr(bs, "discover_launcher_python", lambda *a: "/usr/bin/python3")
-        monkeypatch.setattr(bs, "ensure_python_has_webui_deps", lambda p: p)
+        monkeypatch.setattr(bs, "ensure_python_has_webui_deps", lambda *a, **kw: a[0])
         monkeypatch.setattr(bs, "wait_for_health", lambda *a, **kw: True)
         monkeypatch.setattr(bs, "open_browser", lambda *a, **kw: None)
         # State-dir + every var we care about is captured.
@@ -437,7 +437,7 @@ class TestForegroundExecutabilityGuard:
         monkeypatch.setattr(bs, "discover_agent_dir", lambda: agent_dir)
         monkeypatch.setattr(bs, "hermes_command_exists", lambda: True)
         monkeypatch.setattr(bs, "discover_launcher_python", lambda *a: str(bad_python))
-        monkeypatch.setattr(bs, "ensure_python_has_webui_deps", lambda p: p)
+        monkeypatch.setattr(bs, "ensure_python_has_webui_deps", lambda *a, **kw: a[0])
         monkeypatch.setenv("HERMES_WEBUI_STATE_DIR", str(tmp_path / "state"))
         return bs
 

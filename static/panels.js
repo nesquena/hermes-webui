@@ -3083,6 +3083,17 @@ async function loadSettingsPanel(){
     if(ttsEnabledCb){ttsEnabledCb.checked=localStorage.getItem('hermes-tts-enabled')==='true';ttsEnabledCb.onchange=function(){localStorage.setItem('hermes-tts-enabled',this.checked?'true':'false');_applyTtsEnabled(this.checked);};}
     const ttsAutoReadCb=$('settingsTtsAutoRead');
     if(ttsAutoReadCb){ttsAutoReadCb.checked=localStorage.getItem('hermes-tts-auto-read')==='true';ttsAutoReadCb.onchange=function(){localStorage.setItem('hermes-tts-auto-read',this.checked?'true':'false');};}
+    // Voice-mode button visibility (#1488). localStorage-only; no server round-trip.
+    // Toggling re-applies immediately via the boot.js helper so the user sees
+    // the audio-waveform button appear/disappear without a reload.
+    const voiceModeCb=$('settingsVoiceModeEnabled');
+    if(voiceModeCb){
+      voiceModeCb.checked=localStorage.getItem('hermes-voice-mode-button')==='true';
+      voiceModeCb.onchange=function(){
+        localStorage.setItem('hermes-voice-mode-button',this.checked?'true':'false');
+        if(typeof window._applyVoiceModePref==='function') window._applyVoiceModePref();
+      };
+    }
     // Populate voice selector from speechSynthesis
     const ttsVoiceSel=$('settingsTtsVoice');
     if(ttsVoiceSel&&'speechSynthesis' in window){

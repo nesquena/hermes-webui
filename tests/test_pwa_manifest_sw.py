@@ -160,6 +160,63 @@ class TestIndexHtmlIntegration:
         assert "sw.js?v=__WEBUI_VERSION__" in src
         assert "static/ui.js?v=__WEBUI_VERSION__" in src
 
+    def test_index_versions_stylesheet(self):
+        """Regression for #1507: the `<link rel=stylesheet>` for style.css MUST
+        carry the same `?v=__WEBUI_VERSION__` cache-bust query as the JS files.
+
+        Without the version, a stale service worker controlling a tab across a
+        version upgrade would intercept `static/style.css`, find an exact URL
+        match in its old shell cache, and return OLD CSS — while the new JS
+        URLs (which DO carry `?v=`) miss the cache and load fresh. The mismatch
+        breaks the layout until a force-refresh bypasses the SW.
+        """
+        src = INDEX.read_text(encoding="utf-8")
+        assert "static/style.css?v=__WEBUI_VERSION__" in src, (
+            "static/style.css must carry ?v=__WEBUI_VERSION__ so an old service "
+            "worker controlling the tab across a version upgrade does not return "
+            "stale CSS — see #1507"
+        )
+        # And the unversioned form must NOT appear (defensive — catches accidental
+        # reverts that leave both lines).
+        assert 'href="static/style.css"' not in src, (
+            "unversioned static/style.css link found — must include "
+            "?v=__WEBUI_VERSION__ for cache busting"
+        )
+
+    def test_sw_shell_assets_match_versioned_asset_urls(self):
+        """The service worker's SHELL_ASSETS pre-cache list must use the same
+        `?v=__CACHE_VERSION__` suffix on JS+CSS that index.html sends, so that
+        the pre-cached entries actually serve when the page requests them.
+
+        Without this, every `cache.match()` for a versioned asset URL (e.g.
+        `static/style.css?v=vN`) would miss against the unversioned pre-cached
+        entry (`static/style.css`), defeating the pre-cache.
+        """
+        src = SW.read_text(encoding="utf-8")
+        # Versioned shell assets must include the cache version query.
+        for asset in (
+            "style.css",
+            "boot.js",
+            "ui.js",
+            "messages.js",
+            "sessions.js",
+            "panels.js",
+            "commands.js",
+            "icons.js",
+            "i18n.js",
+            "workspace.js",
+            "terminal.js",
+            "onboarding.js",
+        ):
+            # Either inline `?v=__CACHE_VERSION__` or via the VQ constant
+            # produces a URL string the cache lookup can match.
+            has_inline = f"{asset}?v=__CACHE_VERSION__" in src
+            has_concat = f"{asset}' + VQ" in src or f"{asset}\" + VQ" in src
+            assert has_inline or has_concat, (
+                f"sw.js SHELL_ASSETS entry for {asset} must carry "
+                "?v=__CACHE_VERSION__ to match the URL the page requests"
+            )
+
     def test_index_route_url_encodes_asset_version(self):
         src = ROUTES.read_text(encoding="utf-8")
         idx = src.find('parsed.path in ("/", "/index.html")')
@@ -170,6 +227,30 @@ class TestIndexHtmlIntegration:
         assert "quote(WEBUI_VERSION, safe=\"\")" in block, (
             "index route must URL-encode the cache-busting version token before "
             "injecting it into script src attributes and service worker registration"
+        )
+
+    def test_index_sw_registration_uses_relative_path(self):
+        """Regression: service worker registration MUST stay relative (no leading slash).
+
+        index.html sets a dynamic <base href> via script at the top of <head>.
+        All static asset paths must be relative so that installs behind a reverse
+        proxy at a subpath (e.g. /hermes/) resolve correctly.
+
+        An absolute '/sw.js' breaks subpath mounts because the browser requests
+        <origin>/sw.js — outside the proxy mount root.  A relative 'sw.js'
+        resolves to <origin><base>/sw.js, which is correct for both root and
+        subpath installs.  See issue #1481 review feedback.
+        """
+        src = INDEX.read_text(encoding="utf-8")
+        # Must contain the relative form
+        assert "'sw.js?v=" in src, (
+            "serviceWorker.register() must use relative 'sw.js' path, "
+            "not absolute '/sw.js' — subpath mounts depend on <base href> resolution"
+        )
+        # Must NOT contain the absolute form
+        assert "'/sw.js?v=" not in src, (
+            "serviceWorker.register() must NOT use absolute '/sw.js' path — "
+            "this breaks installs behind a reverse proxy at a subpath"
         )
 
     def test_index_has_ios_pwa_meta_tags(self):

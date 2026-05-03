@@ -1,6 +1,7 @@
 """Shared helpers for reading Hermes Agent sessions from state.db."""
 import logging
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -234,7 +235,7 @@ def read_importable_agent_session_rows(
         return []
 
     log = log or logger
-    with sqlite3.connect(str(db_path)) as conn:
+    with closing(sqlite3.connect(str(db_path))) as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
 
@@ -306,7 +307,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
         return {}
 
     try:
-        with sqlite3.connect(str(db_path)) as conn:
+        with closing(sqlite3.connect(str(db_path))) as conn:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             cur.execute("PRAGMA table_info(sessions)")
