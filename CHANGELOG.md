@@ -1,5 +1,46 @@
 # Hermes Web UI -- Changelog
 
+## [v0.50.283] — 2026-05-03
+
+### Fixed (8 PRs — full sweep batch — closes #1426, #1481, #1512, #1468, #1424, #1457, #1401)
+
+- **OpenRouter free-tier visibility — structural live fetch** (#1548 augmented from @bergeouss; closes #1426) — when LM Studio… (placeholder, replaced below)
+
+### Pull requests merged
+
+- **#1545** by @bergeouss (closes #1481) — remove phantom `/sw.js` from `PUBLIC_PATHS` whitelist. The /sw.js path is served via a dedicated route handler that doesn't need auth bypass; cleaning up the leftover whitelist entry tightens the auth surface (when auth is enabled, `/sw.js` correctly requires the session cookie).
+
+- **#1543** by @ai-ag2026 (follow-up to #1471) — recover pending user turn after stale stream restart. When `messages` is non-empty AND `pending_user_message` is set, the recovery path now materializes the pending user turn with `_recovered: true` BEFORE clearing runtime fields. Previously, on a server restart mid-turn, the user's just-submitted prompt was the only durable copy and was silently discarded along with the stale stream state. Adds 49 LOC of regression coverage in `tests/test_stale_stream_pending_recovery.py` covering the non-empty-session pending-recovery path.
+
+- **#1548** (augmented from @bergeouss; closes #1426) — OpenRouter free-tier model visibility via live fetch. The original PR added 6 hardcoded entries to `_FALLBACK_MODELS`; the merged version replaces the static slice with two live-fetches plus the static fallback for offline/test envs. (1) curated catalog via `hermes_cli.models.fetch_openrouter_models()` — applies the tool-support filter (Kilo-Org/kilocode#9068) that hides image/completion-only models. (2) free-tier live fetch — direct call to `https://openrouter.ai/api/v1/models`, filtered to free-tier-only (`pricing.prompt == 0` AND `pricing.completion == 0`, OR `:free` suffix), bypassing the tool-support filter so newly-added free variants appear even before OpenRouter annotates them with `tools`. Capped at 30 to keep the picker usable. Falls back to `_FALLBACK_MODELS[provider==OpenRouter]` (which retains @bergeouss's hardcoded list as defense-in-depth) when both live fetches fail. Dedup via `seen_ids` so a model in both surfaces appears once. 5 new tests in `tests/test_issue1426_openrouter_free_tier_live_fetch.py`. Pre-release Opus advisor verified no SSRF surface (URL is hardcoded literal, can't be config-redirected).
+
+- **#1549** by @bergeouss (closes #1512) — "What's new?" link in update banner. `api/updates.py:_check_repo` now returns `repo_url` (SSH→HTTPS conversion + `.git` strip); the update banner adds a small accent-colored anchor that points to `${repo_url}/compare/${current}...${latest}` so users can read release highlights in one click instead of going to GitHub manually.
+
+- **#1550** by @bergeouss (closes #1468) — auto-assign session to active project filter. When the user is filtering the sidebar by project X and clicks "+ New session", the new session inherits `project_id=X` instead of starting unassigned. Three-line `api/models.py:new_session` signature extension + matching frontend pass-through in `static/sessions.js`.
+
+- **#1551** by @bergeouss (closes #1424) — Reveal in File Manager workspace context menu. Cross-platform: macOS (`open -R`), Linux (`xdg-open` on parent dir), Windows (`explorer /select,<path>`). New `/api/workspace/reveal` POST handler validates the path through `safe_resolve` (verified by Opus advisor — blocks both absolute `/etc/passwd` injection and relative `../` traversal) and uses list-arg `subprocess.Popen` (no shell injection). Plus 2 new i18n keys (`reveal_in_finder`, `reveal_failed`) translated to all 7 non-English locales (ja, ru, es, de, zh, pt, ko) so the locale-parity tests stay green.
+
+- **#1552** by @bergeouss (closes #1457) — Gateway status card in Settings → System tab. New `/api/gateway/status` endpoint returns connected platforms (Telegram/Discord/Slack/Weixin), active session count, and last-active timestamp. Read-only display card; no behavior change to gateway internals.
+
+- **#1553** by @bergeouss (closes #1401) — silent credential self-heal on 401 errors. When auth.json drifts (file rewritten by another process, OAuth refresh elsewhere, env-var rotation) and the streaming layer hits an auth-only 401, the WebUI now re-reads auth.json, invalidates the credential pool cache via the new `invalidate_credential_pool_cache(provider_id)` export, and retries the request once with fresh credentials. Single retry only, auth-only trigger, thread-safe (acquires `_available_models_cache_lock` for cache mutation). Reverts to the original error emission if the retry also fails. ~263 LOC across `api/streaming.py`, `api/oauth.py`, `api/config.py`. Pre-release Opus flagged 4 non-blocking SHOULD-FIX code-quality items (retry-logic duplication between in-line and except paths, fragile `_assistant_added=True` flag pattern, `in dir()` vs `in locals()`, no `cancel_evt` check before retry) — deferred as follow-up since structural refactor is >20 LOC.
+
+### Tests
+
+3990 → **4019 passing** (+29 net: +5 from #1548 OpenRouter, +1 from #1543 recovery, +6 from #1551 i18n key parity assertions across 7 locales, +14 from PR #1544's earlier #1538/#1539 work, +3 from #1525's earlier work). 0 regressions. Full suite in 113s.
+
+### Pre-release verification
+
+- All 8 merges produced clean `ort` strategy results (no conflict markers).
+- Browser sanity (HTTP API checks against port 8789): 11 endpoints verified.
+- All modified JS files pass `node -c` syntax check.
+- Pre-release Opus advisor: SHIP AS-IS — all 5 verification questions cleared (merge consistency, NULL-pending guard, no-SSRF, thread-safe self-heal, path-traversal blocked).
+
+### Maintainer post-merge fixes
+
+- `static/i18n.js`: 7-locale translation parity for the new `reveal_in_finder` / `reveal_failed` keys (would have failed CI without — `test_chinese_locale.py`, `test_japanese_locale.py`, `test_korean_locale.py`, `test_russian_locale.py`, `test_spanish_locale.py` all assert key parity with English).
+- `tests/test_minimax_provider.py::test_minimax_fallback_provider_label` — scoped to direct-MiniMax routes only (`minimax/` prefix, `:free` excluded) since #1548's `minimax/minimax-m2.5:free` is correctly tagged `provider='OpenRouter'` (it routes via OpenRouter, not direct MiniMax).
+
+
 ## [v0.50.282] — 2026-05-03
 
 ### Fixed (1 PR — closes #1538, #1539)

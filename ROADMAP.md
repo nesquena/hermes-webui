@@ -2,7 +2,7 @@
 
 > Web companion to the Hermes Agent CLI. Same workflows, browser-native.
 >
-> Last updated: v0.50.282 (May 03, 2026) — 4018 tests collected
+> Last updated: v0.50.283 (May 03, 2026) — 4019 tests collected
 > Test source: `pytest tests/ --collect-only -q`
 > Per-version detail: see [CHANGELOG.md](./CHANGELOG.md)
 
