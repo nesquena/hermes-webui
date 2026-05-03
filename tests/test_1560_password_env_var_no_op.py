@@ -21,14 +21,40 @@ the silent-no-op UX bug.
 import io
 import json
 import os
-import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 
-# Force a clean state dir before importing api.config / api.auth — both modules
-# resolve STATE_DIR at import time. Mirrors the pattern in test_auth_sessions.py.
-_TEST_STATE = Path(tempfile.mkdtemp(prefix="hermes-test-1560-"))
-os.environ["HERMES_WEBUI_STATE_DIR"] = str(_TEST_STATE)
+import pytest
+
+
+# ── Settings-file isolation ──────────────────────────────────────────────────
+#
+# Several tests in this module write password_hash directly to the shared
+# settings.json (test_post_set_password_settings_hash_unchanged_after_409 seeds
+# a sentinel, test_post_set_password_succeeds_when_env_var_unset goes through
+# save_settings). Without isolation, those writes leak into TEST_STATE_DIR/
+# settings.json (the path the integration server subprocess started by
+# conftest.py reads from), which flips is_auth_enabled() to True for every
+# subsequent test in the session and cascades to 401 across test_clarify_unblock,
+# test_gateway_sync, etc.
+#
+# Snapshot-and-restore is preferred over redirecting SETTINGS_FILE because
+# load_settings() / save_settings() bind to the module-level Path object
+# captured at import time and the fixture must work regardless of import order.
+@pytest.fixture(autouse=True)
+def _restore_settings_file_after_test():
+    import api.config as cfg
+
+    original = (
+        cfg.SETTINGS_FILE.read_text(encoding="utf-8")
+        if cfg.SETTINGS_FILE.exists()
+        else None
+    )
+    yield
+    if original is not None:
+        cfg.SETTINGS_FILE.write_text(original, encoding="utf-8")
+    elif cfg.SETTINGS_FILE.exists():
+        cfg.SETTINGS_FILE.unlink()
 
 
 # ── FakeHandler that supports GET *and* POST body reading ─────────────────────
@@ -52,6 +78,14 @@ class _FakeHandler:
         }
         if cookie:
             self.headers["Cookie"] = cookie
+        # set_auth_cookie() probes handler.request.getpeercert / X-Forwarded-Proto
+        # to decide whether to emit the Secure flag. The default
+        # BaseHTTPRequestHandler exposes a `.request` socket; FakeHandler is
+        # transport-less, so expose a plain None — getattr(None, ...) is safe
+        # and the resulting cookie is plain (non-Secure), which is what tests
+        # care about. Without this attribute, save_settings → set_auth_cookie
+        # raises AttributeError on the success path of `_set_password`.
+        self.request = None
 
     def send_response(self, status):
         self.status = status
