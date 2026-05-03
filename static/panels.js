@@ -1647,13 +1647,63 @@ function _positionProfileDropdown(){
 function renderWorkspaceDropdownInto(dd, workspaces, currentWs){
   if(!dd)return;
   dd.innerHTML='';
-  for(const w of workspaces){
-    const opt=document.createElement('div');
-    opt.className='ws-opt'+(w.path===currentWs?' active':'');
-    opt.innerHTML=`<span class="ws-opt-name">${esc(w.name)}</span><span class="ws-opt-path">${esc(w.path)}</span>`;
-    opt.onclick=()=>switchToWorkspace(w.path,w.name);
-    dd.appendChild(opt);
+
+  // ── Search row ──────────────────────────────────────────────────────────
+  const searchRow=document.createElement('div');
+  searchRow.className='ws-search-row';
+  searchRow.innerHTML=`<input class="ws-search-input" type="text" placeholder="${esc(t('ws_search_placeholder')||'Search workspaces…')}" spellcheck="false" autocomplete="off"><button class="ws-search-clear" title="Clear search">${li('x',10)}</button>`;
+  const si=searchRow.querySelector('.ws-search-input');
+  const sc=searchRow.querySelector('.ws-search-clear');
+  dd.appendChild(searchRow);
+
+  // ── Workspace list ──────────────────────────────────────────────────────
+  // Sort alphabetically by name (case-insensitive) before rendering.
+  const sorted=[...workspaces].sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  const listContainer=document.createElement('div');
+  listContainer.className='ws-list-container';
+  dd.appendChild(listContainer);
+
+  // Pre-create noResults element so filterWs can reference it safely from the start.
+  const noResults=document.createElement('div');
+  noResults.className='ws-no-results';
+  noResults.textContent=t('ws_no_results')||'No workspaces found';
+  noResults.style.display='none';
+
+  function filterWs(term){
+    term=(term||'').trim().toLowerCase();
+    let visible=0;
+    const opts=listContainer.querySelectorAll('.ws-opt');
+    for(const opt of opts){
+      const name=(opt.dataset.name||'').toLowerCase();
+      const path=(opt.dataset.path||'').toLowerCase();
+      const show=!term||name.includes(term)||path.includes(term);
+      opt.style.display=show?'':'none';
+      if(show) visible++;
+    }
+    noResults.style.display=visible?'':'none';
   }
+
+  function renderList(){
+    listContainer.innerHTML='';
+    for(const w of sorted){
+      const opt=document.createElement('div');
+      opt.className='ws-opt'+(w.path===currentWs?' active':'');
+      opt.dataset.name=w.name||'';
+      opt.dataset.path=w.path||'';
+      opt.innerHTML=`<span class="ws-opt-name">${esc(w.name)}</span><span class="ws-opt-path">${esc(w.path)}</span>`;
+      opt.onclick=()=>switchToWorkspace(w.path,w.name);
+      listContainer.appendChild(opt);
+    }
+    listContainer.appendChild(noResults);
+  }
+
+  renderList();
+  filterWs('');
+
+  si.addEventListener('input',()=>{ filterWs(si.value); });
+  sc.addEventListener('click',()=>{ si.value=''; filterWs(''); si.focus(); });
+
+  // ── Footer actions ────────────────────────────────────────────────────────
   dd.appendChild(document.createElement('div')).className='ws-divider';
   dd.appendChild(_renderWorkspaceAction(
     t('workspace_choose_path'),
