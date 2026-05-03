@@ -9,13 +9,16 @@ import json
 import logging
 import os
 import queue
+import re
 import shutil
 import sys
 import threading
 import time
 import uuid
+import re
 from pathlib import Path
 from urllib.parse import parse_qs
+from api.agent_sessions import MESSAGING_SOURCES
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +41,88 @@ _RUNNING_CRON_JOBS: dict[str, float] = {}  # job_id → start_timestamp
 _RUNNING_CRON_LOCK = threading.Lock()
 _CRON_OUTPUT_CONTENT_LIMIT = 8000
 _CRON_OUTPUT_HEADER_CONTEXT = 200
+_MESSAGING_RAW_SOURCES = {str(s).strip().lower() for s in MESSAGING_SOURCES}
+_MESSAGING_SESSION_METADATA_CACHE: dict[str, object] = {
+    "path": None,
+    "mtime": None,
+    "identity": {},
+}
+_MESSAGING_SESSION_METADATA_LOCK = threading.Lock()
+_STALE_MESSAGING_END_REASONS = {"session_reset", "session_switch"}
+
+
+def _normalize_messaging_source(raw_source) -> str:
+    return str(raw_source or "").strip().lower()
+
+
+def _is_known_messaging_source(raw_source) -> bool:
+    return _normalize_messaging_source(raw_source) in _MESSAGING_RAW_SOURCES
+
+
+def _safe_first(*values):
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _gateway_session_metadata_path():
+    try:
+        from api.profiles import get_active_hermes_home
+        hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
+    except Exception:
+        hermes_home = Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser().resolve()
+    return hermes_home / "sessions" / "sessions.json"
+
+
+def _load_gateway_session_identity_map() -> dict[str, dict]:
+    path = _gateway_session_metadata_path()
+    if not path.exists():
+        return {}
+
+    try:
+        st = path.stat()
+        cache = _MESSAGING_SESSION_METADATA_CACHE
+        with _MESSAGING_SESSION_METADATA_LOCK:
+            if cache["path"] == str(path) and cache["mtime"] == st.st_mtime:
+                return cache["identity"].copy()
+    except Exception:
+        return {}
+
+    try:
+        raw_sessions = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as _json_err:
+        logger.debug("Failed to parse gateway sessions metadata from %s: %s", path, _json_err)
+        return {}
+
+    mapping: dict[str, dict] = {}
+    if isinstance(raw_sessions, dict):
+        for _entry in raw_sessions.values():
+            if not isinstance(_entry, dict):
+                continue
+            session_id = _safe_first(_entry.get("session_id"))
+            if not session_id:
+                continue
+            origin = _entry.get("origin") if isinstance(_entry.get("origin"), dict) else {}
+            platform = _safe_first(origin.get("platform"), _entry.get("platform"))
+            mapping[session_id] = {
+                "session_key": _safe_first(_entry.get("session_key"), _entry.get("key")),
+                "chat_id": _safe_first(origin.get("chat_id"), _entry.get("chat_id")),
+                "thread_id": _safe_first(origin.get("thread_id"), _entry.get("thread_id")),
+                "chat_type": _safe_first(origin.get("chat_type"), _entry.get("chat_type")),
+                "user_id": _safe_first(origin.get("user_id"), _entry.get("user_id")),
+                "platform": platform,
+                "raw_source": platform,
+            }
+
+    with _MESSAGING_SESSION_METADATA_LOCK:
+        _MESSAGING_SESSION_METADATA_CACHE["path"] = str(path)
+        _MESSAGING_SESSION_METADATA_CACHE["mtime"] = st.st_mtime
+        _MESSAGING_SESSION_METADATA_CACHE["identity"] = mapping
+    return mapping.copy()
 
 
 def _mark_cron_running(job_id: str):
@@ -636,7 +721,6 @@ def _resolve_effective_session_model_for_display(session) -> str:
     )
     return effective_model or original_model
 
-
 def _resolve_effective_session_model_provider_for_display(session) -> str | None:
     original_model = getattr(session, "model", None) or ""
     _model, provider, _changed = _resolve_compatible_session_model_state(
@@ -668,6 +752,275 @@ def _session_model_state_from_request(
             provider,
         )
     return model_value, provider
+
+
+def _lookup_gateway_session_identity(session_id: str) -> dict:
+    if not session_id:
+        return {}
+    metadata = _load_gateway_session_identity_map().get(str(session_id))
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _lookup_cli_session_metadata(session_id: str) -> dict:
+    if not session_id:
+        return {}
+    try:
+        for row in get_cli_sessions():
+            if row.get("session_id") == session_id:
+                return row
+    except Exception:
+        return {}
+    return {}
+
+
+def _messaging_session_identity(session: dict, raw_source: str) -> str:
+    metadata = _lookup_gateway_session_identity(session.get("session_id"))
+    session_key = _safe_first(
+        metadata.get("session_key"),
+        session.get("session_key"),
+        session.get("gateway_session_key"),
+    )
+    if session_key:
+        return f"{raw_source}|session_key:{session_key}"
+
+    chat_id = _safe_first(
+        metadata.get("chat_id"),
+        session.get("chat_id"),
+        session.get("origin_chat_id"),
+    )
+    thread_id = _safe_first(metadata.get("thread_id"), session.get("thread_id"))
+    chat_type = _safe_first(metadata.get("chat_type"), session.get("chat_type"))
+    user_id = _safe_first(
+        metadata.get("user_id"),
+        session.get("user_id"),
+        session.get("origin_user_id"),
+    )
+
+    identity_parts = []
+    if chat_type:
+        identity_parts.append(f"chat_type:{chat_type}")
+    if chat_id:
+        identity_parts.append(f"chat_id:{chat_id}")
+    if thread_id:
+        identity_parts.append(f"thread_id:{thread_id}")
+    if user_id:
+        identity_parts.append(f"user_id:{user_id}")
+
+    if identity_parts:
+        return f"{raw_source}|" + "|".join(identity_parts)
+    return raw_source
+
+
+def _session_messaging_raw_source(session: dict) -> str:
+    raw = _safe_first(
+        session.get("raw_source"),
+        session.get("source_tag"),
+        session.get("source"),
+        session.get("platform"),
+    )
+    if not raw:
+        raw = session.get("source_label") or "messaging"
+    return _normalize_messaging_source(raw)
+
+
+def _has_durable_messaging_identity(session: dict) -> bool:
+    metadata = _lookup_gateway_session_identity(session.get("session_id"))
+    return bool(_safe_first(
+        metadata.get("session_key"),
+        session.get("session_key"),
+        session.get("gateway_session_key"),
+        metadata.get("chat_id"),
+        session.get("chat_id"),
+        session.get("origin_chat_id"),
+        metadata.get("thread_id"),
+        session.get("thread_id"),
+    ))
+
+
+def _numeric_count(value) -> int:
+    try:
+        return int(float(_safe_first(value, 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _should_hide_stale_messaging_session(
+    session: dict,
+    active_gateway_session_ids: set[str],
+    active_gateway_sources: set[str],
+) -> bool:
+    """Hide stale Gateway-owned internal rows after an external chat moved on.
+
+    Hermes Gateway keeps the external conversation identity in sessions.json.
+    Compression/session-reset can leave old Agent state.db rows behind; those
+    rows are implementation segments, not distinct conversations users chose.
+    Only apply this aggressive hiding when Gateway is currently advertising an
+    active session for the same messaging source. Without that source-of-truth
+    file we keep the old fallback behavior.
+    """
+    raw_source = _session_messaging_raw_source(session)
+    if not _is_known_messaging_source(raw_source):
+        return False
+    if not active_gateway_session_ids or raw_source not in active_gateway_sources:
+        return False
+
+    sid = _safe_first(session.get("session_id"))
+    if sid and sid in active_gateway_session_ids:
+        return False
+
+    if _safe_first(session.get("end_reason")) in _STALE_MESSAGING_END_REASONS:
+        return True
+
+    if not _has_durable_messaging_identity(session):
+        return True
+
+    if session.get("parent_session_id"):
+        return True
+
+    message_count = _numeric_count(session.get("message_count"))
+    actual_count = _numeric_count(session.get("actual_message_count"))
+    if message_count <= 0 and actual_count <= 0:
+        return True
+
+    return False
+
+
+def _is_messaging_session_record(session) -> bool:
+    """Return true for sessions backed by external messaging channels."""
+    if not session:
+        return False
+    if (
+        (getattr(session, "session_source", None) if not isinstance(session, dict) else session.get("session_source")) == "messaging"
+    ):
+        return True
+    raw = _safe_first(
+        getattr(session, "raw_source", None) if not isinstance(session, dict) else session.get("raw_source"),
+        getattr(session, "source_tag", None) if not isinstance(session, dict) else session.get("source_tag"),
+        getattr(session, "source", None) if not isinstance(session, dict) else session.get("source"),
+        session.get("source_label") if isinstance(session, dict) else None,
+    )
+    return _is_known_messaging_source(raw)
+
+
+def _is_messaging_session_id(sid: str) -> bool:
+    """Detect messaging-backed sessions from WebUI metadata or Agent rows."""
+    try:
+        session = Session.load(sid)
+        if _is_messaging_session_record(session):
+            return True
+    except Exception:
+        pass
+    return _is_messaging_session_record(_lookup_cli_session_metadata(sid))
+
+
+def _session_sort_timestamp(session: dict) -> float:
+    return float(
+        _safe_first(
+            session.get("last_message_at"),
+            session.get("updated_at"),
+            session.get("created_at"),
+            session.get("started_at"),
+            0,
+        ) or 0
+    ) or 0.0
+
+
+def _merge_cli_sidebar_metadata(ui_session: dict, cli_meta: dict) -> dict:
+    """Merge source-of-truth CLI metadata into a sidebar session row.
+
+    Preserve UI-owned state (archived/pinned) while replacing metadata that can
+    legitimately drift in WebUI snapshots.
+    """
+    if not ui_session:
+        return ui_session
+    if not cli_meta:
+        return dict(ui_session)
+    merged = dict(ui_session)
+    merged["is_cli_session"] = True
+    for key in (
+        "source_tag",
+        "raw_source",
+        "session_source",
+        "source_label",
+        "user_id",
+        "chat_id",
+        "chat_type",
+        "thread_id",
+        "session_key",
+        "platform",
+        "parent_session_id",
+        "end_reason",
+        "actual_message_count",
+        "_lineage_root_id",
+        "_lineage_tip_id",
+        "_compression_segment_count",
+    ):
+        value = _safe_first(cli_meta.get(key))
+        if value:
+            merged[key] = value
+
+    if cli_meta.get("created_at") is not None:
+        merged["created_at"] = cli_meta["created_at"]
+    if cli_meta.get("updated_at") is not None:
+        merged["updated_at"] = cli_meta["updated_at"]
+    if cli_meta.get("last_message_at") is not None:
+        merged["last_message_at"] = cli_meta["last_message_at"]
+    if cli_meta.get("message_count") is not None:
+        merged["message_count"] = cli_meta["message_count"]
+    elif cli_meta.get("actual_message_count") is not None:
+        merged["message_count"] = cli_meta["actual_message_count"]
+
+    if cli_meta.get("title"):
+        current_title = merged.get("title")
+        if not current_title or current_title == "Untitled":
+            merged["title"] = cli_meta["title"]
+
+    if cli_meta.get("model"):
+        if not merged.get("model") or merged.get("model") == "unknown":
+            merged["model"] = cli_meta["model"]
+    return merged
+
+
+def _messaging_source_key(session: dict) -> str | None:
+    raw = _session_messaging_raw_source(session)
+    if not _is_known_messaging_source(raw):
+        return None
+    return _messaging_session_identity(session, raw)
+
+
+def _keep_latest_messaging_session_per_source(sessions: list[dict]) -> list[dict]:
+    """Keep only the newest sidebar row per messaging session identity."""
+    gateway_metadata = _load_gateway_session_identity_map()
+    active_gateway_session_ids = {str(sid) for sid in gateway_metadata.keys() if sid}
+    active_gateway_sources = {
+        _normalize_messaging_source(_safe_first(meta.get("raw_source"), meta.get("platform")))
+        for meta in gateway_metadata.values()
+        if isinstance(meta, dict)
+    }
+    active_gateway_sources = {source for source in active_gateway_sources if _is_known_messaging_source(source)}
+
+    kept_sources: set[str] = set()
+    best_by_source: dict[str, dict] = {}
+    kept: list[dict] = []
+    for session in sessions:
+        key = _messaging_source_key(session)
+        if not key:
+            kept.append(session)
+            continue
+        if _should_hide_stale_messaging_session(session, active_gateway_session_ids, active_gateway_sources):
+            continue
+        if key in kept_sources:
+            kept_sources.add(key)
+            current = best_by_source.get(key)
+            if current is None or _session_sort_timestamp(session) > _session_sort_timestamp(current):
+                best_by_source[key] = session
+            continue
+        kept_sources.add(key)
+        best_by_source[key] = session
+
+    kept.extend(best_by_source.values())
+    kept.sort(key=_session_sort_timestamp, reverse=True)
+    return kept
 
 
 from api.models import (
@@ -1309,6 +1662,11 @@ def handle_get(handler, parsed) -> bool:
         try:
             _t1 = _time.monotonic()
             s = get_session(sid, metadata_only=(not load_messages))
+            cli_meta = _lookup_cli_session_metadata(sid)
+            is_messaging_session = _is_messaging_session_record(s) or _is_messaging_session_record(cli_meta)
+            cli_messages = []
+            if is_messaging_session:
+                cli_messages = get_cli_session_messages(sid)
             _t2 = _time.monotonic()
             effective_model = (
                 _resolve_effective_session_model_for_display(s)
@@ -1321,7 +1679,13 @@ def handle_get(handler, parsed) -> bool:
                 else None
             )
             _t3 = _time.monotonic()
-            _all_msgs = s.messages if load_messages else []
+            if load_messages:
+                if is_messaging_session and cli_messages:
+                    _all_msgs = cli_messages
+                else:
+                    _all_msgs = s.messages
+            else:
+                _all_msgs = []
             if load_messages:
                 if msg_before is not None:
                     # Scroll-to-top paging: msg_before is a 0-based index into
@@ -1366,6 +1730,8 @@ def handle_get(handler, parsed) -> bool:
                 "threshold_tokens": getattr(s, "threshold_tokens", 0) or 0,
                 "last_prompt_tokens": getattr(s, "last_prompt_tokens", 0) or 0,
             }
+            if cli_meta and _is_messaging_session_record(cli_meta):
+                raw = _merge_cli_sidebar_metadata(raw, cli_meta)
             # Signal to the frontend that older messages were omitted.
             # For msg_before paging, compare against the filtered set,
             # not the full list — otherwise we signal truncation even when
@@ -1401,13 +1767,9 @@ def handle_get(handler, parsed) -> bool:
             return resp
         except KeyError:
             # Not a WebUI session -- try CLI store
+            cli_meta = _lookup_cli_session_metadata(sid)
             msgs = get_cli_session_messages(sid)
             if msgs:
-                cli_meta = None
-                for cs in get_cli_sessions():
-                    if cs["session_id"] == sid:
-                        cli_meta = cs
-                        break
                 sess = {
                     "session_id": sid,
                     "title": (cli_meta or {}).get("title", "CLI Session"),
@@ -1417,15 +1779,21 @@ def handle_get(handler, parsed) -> bool:
                     "created_at": (cli_meta or {}).get("created_at", 0),
                     "updated_at": (cli_meta or {}).get("updated_at", 0),
                     "last_message_at": (cli_meta or {}).get("last_message_at")
-                    or (cli_meta or {}).get("updated_at", 0),
+                    or (cli_meta or {}).get("updated_at", 0)
+                    or (msgs[-1] if msgs else {"timestamp": 0}).get("timestamp", 0),
                     "pinned": False,
                     "archived": False,
                     "project_id": None,
                     "profile": (cli_meta or {}).get("profile"),
                     "is_cli_session": True,
+                    "source_tag": (cli_meta or {}).get("source_tag"),
+                    "raw_source": (cli_meta or {}).get("raw_source"),
+                    "session_source": (cli_meta or {}).get("session_source"),
+                    "source_label": (cli_meta or {}).get("source_label"),
                     "messages": msgs,
                     "tool_calls": [],
                 }
+                sess = _merge_cli_sidebar_metadata(sess, cli_meta)
                 return j(handler, {"session": redact_session_data(sess)})
             return bad(handler, "Session not found", 404)
 
@@ -1467,6 +1835,19 @@ def handle_get(handler, parsed) -> bool:
         settings = load_settings()
         if settings.get("show_cli_sessions"):
             cli = get_cli_sessions()
+            cli_by_id = {s["session_id"]: s for s in cli}
+            for s in webui_sessions:
+                meta = cli_by_id.get(s.get("session_id"))
+                if not meta:
+                    continue
+                if _is_messaging_session_record(meta):
+                    s.update(_merge_cli_sidebar_metadata(s, meta))
+                    if s.get("session_id") != meta.get("session_id"):
+                        s["session_id"] = meta.get("session_id")
+                else:
+                    for key in ("source_tag", "raw_source", "session_source", "source_label"):
+                        if not s.get(key) and meta.get(key):
+                            s[key] = meta[key]
             webui_ids = {s["session_id"] for s in webui_sessions}
             from api.models import _hide_from_default_sidebar as _cron_hide
             deduped_cli = [s for s in cli
@@ -1479,6 +1860,7 @@ def handle_get(handler, parsed) -> bool:
             key=lambda s: s.get("last_message_at") or s.get("updated_at", 0) or 0,
             reverse=True,
         )
+        merged = _keep_latest_messaging_session_per_source(merged)
         safe_merged = []
         for s in merged:
             item = dict(s)
@@ -2110,9 +2492,14 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "session_id is required")
         if not all(c in '0123456789abcdefghijklmnopqrstuvwxyz_' for c in sid):
             return bad(handler, "Invalid session_id", 400)
+        is_messaging_session = _is_messaging_session_id(sid)
         # Delete from WebUI session store
         with LOCK:
             SESSIONS.pop(sid, None)
+        try:
+            SESSION_INDEX_FILE.unlink(missing_ok=True)
+        except Exception:
+            logger.debug("Failed to unlink session index")
         # Evict cached agent so turn count doesn't leak into a recycled session
         from api.config import _evict_session_agent
         _evict_session_agent(sid)
@@ -2130,21 +2517,19 @@ def handle_post(handler, parsed) -> bool:
         with SESSION_AGENT_LOCKS_LOCK:
             SESSION_AGENT_LOCKS.pop(sid, None)
         try:
-            SESSION_INDEX_FILE.unlink(missing_ok=True)
-        except Exception:
-            logger.debug("Failed to unlink session index")
-        try:
             from api.terminal import close_terminal
             close_terminal(sid)
         except Exception:
             logger.debug("Failed to close workspace terminal for deleted session %s", sid)
-        # Also delete from CLI state.db (for CLI sessions shown in sidebar)
-        try:
-            from api.models import delete_cli_session
+        # Also delete from CLI state.db for CLI sessions shown in sidebar,
+        # but never erase external messaging channel memory via WebUI delete.
+        if not is_messaging_session:
+            try:
+                from api.models import delete_cli_session
 
-            delete_cli_session(sid)
-        except Exception:
-            logger.debug("Failed to delete CLI session %s", sid)
+                delete_cli_session(sid)
+            except Exception:
+                logger.debug("Failed to delete CLI session %s", sid)
         return j(handler, {"ok": True})
 
     if parsed.path == "/api/session/clear":
@@ -2262,6 +2647,12 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/session/compress":
         return _handle_session_compress(handler, body)
+
+    if parsed.path == "/api/session/conversation-rounds":
+        return _handle_conversation_rounds(handler, body)
+
+    if parsed.path == "/api/session/handoff-summary":
+        return _handle_handoff_summary(handler, body)
 
     if parsed.path == "/api/session/retry":
         try:
@@ -2629,13 +3020,62 @@ def handle_post(handler, parsed) -> bool:
             require(body, "session_id")
         except ValueError as e:
             return bad(handler, str(e))
+        sid = body["session_id"]
         try:
-            s = get_session(body["session_id"])
+            s = get_session(sid)
         except KeyError:
-            return bad(handler, "Session not found", 404)
-        with _get_session_agent_lock(body["session_id"]):
+            cli_meta = _lookup_cli_session_metadata(sid)
+            if not cli_meta:
+                return bad(handler, "Session not found", 404)
+            if _is_messaging_session_record(cli_meta):
+                s = Session(
+                    session_id=sid,
+                    title=cli_meta.get("title") or title_from(get_cli_session_messages(sid), "CLI Session"),
+                    workspace=get_last_workspace(),
+                    messages=[],
+                    model=cli_meta.get("model") or "unknown",
+                    created_at=cli_meta.get("created_at"),
+                    updated_at=cli_meta.get("updated_at"),
+                )
+                s.is_cli_session = True
+                s.source_tag = cli_meta.get("source_tag")
+                s.raw_source = cli_meta.get("raw_source") or cli_meta.get("source_tag")
+                s.session_source = cli_meta.get("session_source")
+                s.source_label = cli_meta.get("source_label")
+                s.user_id = cli_meta.get("user_id")
+                s.chat_id = cli_meta.get("chat_id")
+                s.chat_type = cli_meta.get("chat_type")
+                s.thread_id = cli_meta.get("thread_id")
+                s.session_key = cli_meta.get("session_key")
+                s.platform = cli_meta.get("platform")
+                s.save(touch_updated_at=False)
+            else:
+                msgs = get_cli_session_messages(sid)
+                if not msgs:
+                    return bad(handler, "Session not found", 404)
+                s = import_cli_session(
+                    sid,
+                    cli_meta.get("title") or title_from(msgs, "CLI Session"),
+                    msgs,
+                    cli_meta.get("model") or "unknown",
+                    profile=cli_meta.get("profile"),
+                    created_at=cli_meta.get("created_at"),
+                    updated_at=cli_meta.get("updated_at"),
+                )
+                s.is_cli_session = True
+                s.source_tag = cli_meta.get("source_tag")
+                s.raw_source = cli_meta.get("raw_source") or cli_meta.get("source_tag")
+                s.session_source = cli_meta.get("session_source")
+                s.source_label = cli_meta.get("source_label")
+                s.user_id = cli_meta.get("user_id")
+                s.chat_id = cli_meta.get("chat_id")
+                s.chat_type = cli_meta.get("chat_type")
+                s.thread_id = cli_meta.get("thread_id")
+                s.session_key = cli_meta.get("session_key")
+                s.platform = cli_meta.get("platform")
+        with _get_session_agent_lock(sid):
             s.archived = bool(body.get("archived", True))
-            s.save()
+            s.save(touch_updated_at=False)
         return j(handler, {"ok": True, "session": s.compact()})
 
     # ── Session move to project (POST) ──
@@ -5118,6 +5558,659 @@ def _handle_session_compress(handler, body):
         return bad(handler, f"Compression failed: {_sanitize_error(e)}")
 
 
+def _handle_conversation_rounds(handler, body):
+    """Return conversation-round count for a gateway session.
+
+    Request body::
+
+        { "session_id": "...", "since": <unix_ts_or_iso> }
+
+    Response::
+
+        { "ok": true, "rounds": 12, "threshold": 10, "should_show": true }
+    """
+    try:
+        require(body, "session_id")
+    except ValueError as e:
+        return bad(handler, str(e))
+
+    sid = str(body.get("session_id") or "").strip()
+    if not sid:
+        return bad(handler, "session_id is required")
+
+    since = body.get("since")
+    if since is not None:
+        try:
+            since = float(since)
+        except (TypeError, ValueError):
+            return bad(handler, "since must be a unix timestamp (number)")
+
+    from api.models import count_conversation_rounds, CONVERSATION_ROUND_THRESHOLD
+
+    rounds = count_conversation_rounds(sid, since=since)
+    return j(handler, {
+        "ok": True,
+        "rounds": rounds,
+        "threshold": CONVERSATION_ROUND_THRESHOLD,
+        "should_show": rounds >= CONVERSATION_ROUND_THRESHOLD,
+    })
+
+
+def _build_handoff_summary_tool_message(
+    sid: str,
+    summary: str,
+    channel: str | None,
+    rounds: int | None = None,
+    fallback: bool = False,
+) -> dict:
+    """Build a compact tool-role transcript marker for persistence."""
+    now = time.time()
+    return {
+        "role": "tool",
+        # Keep this intentionally empty so API-history sanitization drops it from
+        # model context (it is display-only data).
+        "tool_call_id": "",
+        "name": "handoff_summary",
+        "timestamp": now,
+        "_ts": now,
+        "content": json.dumps({
+            "_handoff_summary_card": True,
+            "session_id": sid,
+            "summary": str(summary or "").strip(),
+            "channel": (str(channel or "").strip() or None),
+            "rounds": rounds,
+            "fallback": bool(fallback),
+            "generated_at": now,
+        }, ensure_ascii=False),
+    }
+
+
+def _extract_handoff_summary_payload(message: dict) -> dict | None:
+    """Return a normalized handoff-summary payload if *message* is a tool marker."""
+    if not isinstance(message, dict):
+        return None
+    if message.get("role") != "tool" or message.get("name") != "handoff_summary":
+        return None
+
+    content = message.get("content")
+    if isinstance(content, dict):
+        payload = content
+    else:
+        try:
+            payload = json.loads(content or "")
+        except Exception:
+            return None
+
+    if not isinstance(payload, dict) or not payload.get("_handoff_summary_card"):
+        return None
+    if payload.get("session_id") is None:
+        return None
+    return {
+        "session_id": str(payload.get("session_id")),
+        "summary": str(payload.get("summary", "")),
+        "channel": payload.get("channel"),
+        "rounds": payload.get("rounds"),
+        "fallback": bool(payload.get("fallback")),
+        "_handoff_summary_card": True,
+    }
+
+
+def _is_matching_handoff_summary_message(existing: dict, target: dict) -> bool:
+    """Return True when two message payloads represent the same handoff summary."""
+    existing_payload = _extract_handoff_summary_payload(existing)
+    target_payload = _extract_handoff_summary_payload(target)
+    if not existing_payload or not target_payload:
+        return False
+    return (
+        existing_payload.get("session_id") == target_payload.get("session_id") and
+        existing_payload.get("summary") == target_payload.get("summary") and
+        existing_payload.get("channel") == target_payload.get("channel") and
+        existing_payload.get("rounds") == target_payload.get("rounds") and
+        existing_payload.get("fallback") == target_payload.get("fallback") and
+        existing_payload.get("_handoff_summary_card") == target_payload.get("_handoff_summary_card")
+    )
+
+
+def _is_matching_handoff_summary_content(content: object, target_payload: dict | None) -> bool:
+    """Return True if DB content JSON matches an expected handoff summary payload."""
+    if target_payload is None:
+        return False
+    try:
+        payload = json.loads(content or "")
+    except Exception:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("session_id") is None:
+        return False
+    return (
+        payload.get("_handoff_summary_card") is True and
+        str(payload.get("session_id")) == str(target_payload.get("session_id")) and
+        str(payload.get("summary", "")) == str(target_payload.get("summary", "")) and
+        payload.get("channel") == target_payload.get("channel") and
+        payload.get("rounds") == target_payload.get("rounds") and
+        bool(payload.get("fallback")) == bool(target_payload.get("fallback"))
+    )
+
+
+def _persist_handoff_summary_locally(sid: str, message: dict) -> bool:
+    """Persist a handoff summary marker into a local WebUI session file."""
+    try:
+        from api.models import get_session
+
+        s = get_session(sid)
+    except KeyError:
+        return False
+
+    try:
+        if s.messages and _is_matching_handoff_summary_message(s.messages[-1], message):
+            return True
+        s.messages.append(message)
+        s.save()
+        return True
+    except Exception as e:
+        logger.warning("Failed to persist handoff summary marker in local session %s: %s", sid, e)
+        return False
+
+
+def _persist_handoff_summary_to_state_db(sid: str, message: dict) -> bool:
+    """Persist a handoff summary marker into CLI sessions state.db.
+
+    This keeps summary cards available after hard-refresh for imported gateway
+    sessions that are not in local session JSON yet.
+    """
+    import os
+
+    try:
+        import sqlite3
+    except ImportError:
+        return False
+
+    try:
+        from api.profiles import get_active_hermes_home
+
+        hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
+    except Exception:
+        hermes_home = Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser().resolve()
+
+    db_path = hermes_home / "state.db"
+    if not db_path.exists():
+        return False
+
+    ts = message.get("timestamp", time.time())
+    content = message.get("content", "")
+    if not isinstance(content, str):
+        content = json.dumps(content, ensure_ascii=False)
+
+    marker_payload = _extract_handoff_summary_payload(message)
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            try:
+                if marker_payload is not None:
+                    cur = conn.execute(
+                        "SELECT content FROM messages WHERE session_id = ? AND role = 'tool' "
+                        "ORDER BY rowid DESC LIMIT 1",
+                        (sid,),
+                    )
+                    row = cur.fetchone()
+                    if row is not None and _is_matching_handoff_summary_content(row[0], marker_payload):
+                        return True
+            except Exception:
+                # If tail-read fails, continue with a best-effort write.
+                logger.debug("Unable to read tail handoff marker from state.db for %s", sid)
+
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp) "
+                "VALUES (?, 'tool', ?, ?)",
+                (sid, content, ts),
+            )
+            # Keep session row message_count/last-activity aligned with displayed
+            # transcript length. session rows are optional in some test DBs, so
+            # this update is best-effort.
+            conn.execute(
+                "UPDATE sessions SET message_count = COALESCE(message_count, 0) + 1 "
+                "WHERE id = ?",
+                (sid,),
+            )
+            conn.commit()
+        return True
+    except Exception as e:
+        logger.warning("Failed to persist handoff summary marker in state.db for %s: %s", sid, e)
+        return False
+
+
+def _persist_handoff_summary(sid: str, summary: str, channel: str | None, rounds: int | None, fallback: bool = False) -> dict:
+    """Persist a handoff summary marker across local/session backends."""
+    marker = _build_handoff_summary_tool_message(sid, summary, channel, rounds, fallback)
+    is_messaging_session = _is_messaging_session_id(sid)
+    if is_messaging_session:
+        _persist_handoff_summary_to_state_db(sid, marker)
+        _persist_handoff_summary_locally(sid, marker)
+        return marker
+    persisted_local = _persist_handoff_summary_locally(sid, marker)
+    if persisted_local:
+        return marker
+    return marker if _persist_handoff_summary_to_state_db(sid, marker) else marker
+
+
+def _handle_handoff_summary(handler, body):
+    """Generate an on-demand handoff summary for a gateway session.
+
+    Request body::
+
+        { "session_id": "...", "since": <unix_ts_or_iso> }
+
+    Uses the session's configured model to produce a concise summary of
+    recent conversation activity.  Returns the summary text so the caller
+    can display it in a tool-card.
+    """
+    try:
+        require(body, "session_id")
+    except ValueError as e:
+        return bad(handler, str(e))
+
+    sid = str(body.get("session_id") or "").strip()
+    if not sid:
+        return bad(handler, "session_id is required")
+
+    since = body.get("since")
+    if since is not None:
+        try:
+            since = float(since)
+        except (TypeError, ValueError):
+            return bad(handler, "since must be a unix timestamp (number)")
+
+    from api.models import get_cli_session_messages, count_conversation_rounds, CONVERSATION_ROUND_THRESHOLD
+
+    rounds = count_conversation_rounds(sid, since=since)
+    if rounds < CONVERSATION_ROUND_THRESHOLD:
+        return bad(handler, "Not enough conversation rounds to generate a summary.", 400)
+
+    # Filter messages by ``since``.
+    all_msgs = get_cli_session_messages(sid)
+    if since is not None:
+        import datetime as _dt
+        filtered = []
+        for m in all_msgs:
+            ts_raw = m.get("timestamp")
+            if ts_raw is None:
+                continue
+            try:
+                if isinstance(ts_raw, (int, float)):
+                    ts_val = float(ts_raw)
+                else:
+                    ts_val = _dt.datetime.fromisoformat(
+                        str(ts_raw).replace("Z", "+00:00")
+                    ).timestamp()
+                if ts_val > since:
+                    filtered.append(m)
+            except Exception:
+                pass
+        msgs = filtered
+    else:
+        msgs = all_msgs
+
+    # Cap to last 50 messages.
+    msgs = msgs[-50:]
+
+    if len(msgs) < 2:
+        return bad(handler, "Not enough messages to summarize.", 400)
+
+    def _extract_handoff_text(raw_content):
+        if isinstance(raw_content, list):
+            return " ".join(
+                str(p.get("text") or p.get("content") or "")
+                for p in raw_content
+                if isinstance(p, dict)
+            ).strip()
+        return str(raw_content or "").strip()
+
+    def _contains_chinese(text):
+        return any("\u4e00" <= ch <= "\u9fff" for ch in str(text))
+
+    transcript_is_chinese = any(
+        _contains_chinese(_extract_handoff_text(m.get("content")))
+        for m in msgs
+    )
+    # Build a lightweight conversation transcript for the LLM.
+    lines = []
+    for m in msgs:
+        role = m.get("role", "")
+        content = _extract_handoff_text(m.get("content"))
+        content = str(content or "").strip()[:1000]
+        if role in ("user", "assistant") and content:
+            lines.append(content)
+    transcript = "\n".join(lines)
+
+    def _fallback_handoff_summary(items):
+        """Return a deterministic summary when LLM summary generation is unavailable."""
+        user_points = []
+        assistant_points = []
+
+        def _summarize_snippet(raw_text, max_len=78):
+            text = " ".join(str(raw_text or "").split()).strip()
+            if not text:
+                return ""
+            if len(text) <= max_len:
+                return text
+            return text[: max_len - 1].rstrip() + "…"
+
+        for m in items:
+            role = m.get("role", "")
+            content = _summarize_snippet(_extract_handoff_text(m.get("content")), 82)
+            if role in ("user", "assistant") and content:
+                if role == "user":
+                    user_points.append(content)
+                else:
+                    assistant_points.append(content)
+        if not user_points and not assistant_points:
+            return (
+                "近期可读文本不足，无法生成更完整的交接摘要，请补充一条消息后重试。"
+                if transcript_is_chinese
+                else "Not enough readable text to create a useful handoff summary; please send one more message and retry."
+            )
+
+        if transcript_is_chinese:
+            bullets = []
+            if user_points:
+                bullets.append(f"- 你刚讨论了：{user_points[-1]}。")
+            if assistant_points:
+                bullets.append(f"- 助手已回复：{assistant_points[-1]}。")
+            if len(user_points) + len(assistant_points) >= 2:
+                bullets.append("- 当前对话存在尚未确认的后续动作。")
+            else:
+                bullets.append("- 当前信息偏少，建议补充关键点后再切换。")
+            return "\n".join(bullets)
+
+        bullets = []
+        if user_points:
+            bullets.append(f"- You asked: {user_points[-1]}.")
+        if assistant_points:
+            bullets.append(f"- The assistant responded: {assistant_points[-1]}.")
+        if len(user_points) + len(assistant_points) >= 2:
+            bullets.append("- There is pending context to continue next.")
+        else:
+            bullets.append("- The conversation is still short; add one more turn before summarizing.")
+        return "\n".join(bullets)
+
+    def _summary_output_incomplete(text):
+        """Best-effort guard for truncated summaries when LLM signals are unavailable."""
+        if not isinstance(text, str):
+            text = str(text or "")
+        text = text.strip()
+        if not text:
+            return True
+        if text.endswith("...") or text.endswith("…"):
+            return True
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            return True
+        last_line = lines[-1]
+        if re.search(r"[。！？；!?.；]$", last_line):
+            return False
+        if len(last_line) >= 56 and not re.search(r"\b(and|or|so|then|because|if|when|but|so|as)\b$", last_line, re.IGNORECASE):
+            return True
+        return bool(re.search(r"\b(and|or|but|so|because|if|when)$", last_line, re.IGNORECASE))
+
+    def _agent_summary_incomplete(summary_result):
+        if not isinstance(summary_result, dict):
+            return True
+        reason = (summary_result.get("finish_reason") or "").strip().lower()
+        if reason == "length":
+            return True
+        stop_reason = (summary_result.get("stop_reason") or "").strip().lower()
+        if stop_reason in {"max_tokens", "length"}:
+            return True
+        return _summary_output_incomplete(summary_result.get("text", ""))
+
+    def _resolve_handoff_channel_label():
+        channel_label = None
+        try:
+            from api.models import get_session as _get_session, get_cli_sessions
+
+            session_meta = _get_session(sid)
+            channel_label = (
+                session_meta.source_label
+                or session_meta.raw_source
+                or session_meta.source_tag
+                or session_meta.session_source
+            )
+            if not channel_label:
+                for candidate in get_cli_sessions():
+                    if candidate.get("session_id") == sid:
+                        channel_label = (
+                            candidate.get("source_label")
+                            or candidate.get("raw_source")
+                            or candidate.get("source_tag")
+                            or candidate.get("source")
+                        )
+                        break
+        except Exception:
+            pass
+        return channel_label
+
+    def _agent_text_completion(agent, system_prompt, user_text, max_tokens=700):
+        """Use the current Hermes Agent transport without mutating conversation history."""
+        api_messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_text},
+        ]
+        result = {
+            "text": "",
+            "finish_reason": None,
+            "stop_reason": None,
+            "incomplete": True,
+        }
+        disabled_reasoning = {"enabled": False}
+        previous_reasoning = getattr(agent, "reasoning_config", None)
+        try:
+            agent.reasoning_config = disabled_reasoning
+            if getattr(agent, "api_mode", "") == "codex_responses":
+                codex_kwargs = agent._build_api_kwargs(api_messages)
+                codex_kwargs.pop("tools", None)
+                codex_kwargs["max_output_tokens"] = max_tokens
+                resp = agent._run_codex_stream(codex_kwargs)
+                assistant_message, _ = agent._normalize_codex_response(resp)
+                result["text"] = str((assistant_message.content or "") if assistant_message else "").strip()
+                result["incomplete"] = _summary_output_incomplete(result["text"])
+                return result
+
+            if getattr(agent, "api_mode", "") == "anthropic_messages":
+                from agent.anthropic_adapter import build_anthropic_kwargs, normalize_anthropic_response
+
+                ant_kwargs = build_anthropic_kwargs(
+                    model=agent.model,
+                    messages=api_messages,
+                    tools=None,
+                    max_tokens=max_tokens,
+                    reasoning_config=disabled_reasoning,
+                    is_oauth=getattr(agent, "_is_anthropic_oauth", False),
+                    preserve_dots=agent._anthropic_preserve_dots(),
+                    base_url=getattr(agent, "_anthropic_base_url", None),
+                )
+                resp = agent._anthropic_messages_create(ant_kwargs)
+                assistant_message, _ = normalize_anthropic_response(
+                    resp,
+                    strip_tool_prefix=getattr(agent, "_is_anthropic_oauth", False),
+                )
+                result["text"] = str((assistant_message.content or "") if assistant_message else "").strip()
+                result["incomplete"] = _summary_output_incomplete(result["text"])
+                return result
+
+            api_kwargs = agent._build_api_kwargs(api_messages)
+            api_kwargs.pop("tools", None)
+            api_kwargs["temperature"] = 0.2
+            api_kwargs["timeout"] = 30.0
+            if "max_completion_tokens" in api_kwargs:
+                api_kwargs["max_completion_tokens"] = max_tokens
+            else:
+                api_kwargs["max_tokens"] = max_tokens
+            resp = agent._ensure_primary_openai_client(reason="handoff_summary").chat.completions.create(
+                **api_kwargs,
+            )
+            choice = (getattr(resp, "choices", None) or [None])[0]
+            msg = getattr(choice, "message", None) if choice is not None else None
+            result["text"] = str(getattr(msg, "content", "") or "").strip()
+            result["finish_reason"] = getattr(choice, "finish_reason", None)
+            result["stop_reason"] = getattr(choice, "stop_reason", None)
+            result["incomplete"] = _agent_summary_incomplete(result)
+            return result
+        finally:
+            agent.reasoning_config = previous_reasoning
+
+        # Call LLM for summary.
+    try:
+        import api.config as _cfg
+        import hermes_cli.runtime_provider as _runtime_provider
+        import run_agent as _run_agent
+
+        # Try to resolve model from an existing session, fall back to default.
+        resolved_model = None
+        resolved_provider = None
+        resolved_base_url = None
+        try:
+            from api.models import get_session
+            s_obj = get_session(sid)
+            resolved_model = getattr(s_obj, "model", None)
+        except Exception:
+            pass
+
+        resolved_model, resolved_provider, resolved_base_url = _cfg.resolve_model_provider(resolved_model)
+
+        resolved_api_key = None
+        try:
+            _rt = _runtime_provider.resolve_runtime_provider(requested=resolved_provider)
+            resolved_api_key = _rt.get("api_key")
+            if not resolved_provider:
+                resolved_provider = _rt.get("provider")
+            if not resolved_base_url:
+                resolved_base_url = _rt.get("base_url")
+        except Exception as _e:
+            logger.warning("resolve_runtime_provider failed for handoff summary: %s", _e)
+
+        if not resolved_api_key:
+            summary_text = _fallback_handoff_summary(msgs)
+            try:
+                _persist_handoff_summary(
+                    sid,
+                    summary_text,
+                    _resolve_handoff_channel_label(),
+                    rounds,
+                    fallback=True,
+                )
+            except Exception:
+                pass
+            return j(handler, {
+                "ok": True,
+                "summary": summary_text,
+                "message_count": len(msgs),
+                "rounds": rounds,
+                "fallback": True,
+            })
+
+        agent = _run_agent.AIAgent(
+            model=resolved_model,
+            provider=resolved_provider,
+            base_url=resolved_base_url,
+            api_key=resolved_api_key,
+            platform="webui",
+            quiet_mode=True,
+            enabled_toolsets=[],
+            session_id=sid,
+        )
+
+        summary_system_prompt = (
+            "You are summarizing an external-channel conversation so a Web UI reader "
+            "can quickly catch up after switching contexts.\n\n"
+            "Only use the latest messages, and never copy raw transcript lines.\n"
+            "Do not output role labels (no “你:” / “assistant:” / “user:” / “assistant”).\n"
+            "Use direct 2–5 bullet points in the conversation language.\n"
+            "English: speak using “you”.\n"
+            "中文: 使用“你”。\n\n"
+            "Focus on:\n"
+            "- Unfinished tasks or action items\n"
+            "- Pending questions that need replies\n"
+            "- Key decisions made\n"
+            "- Open disagreements or TBD items\n\n"
+            "If the conversation is purely casual with no actionable items, "
+            "say so in one sentence."
+        )
+        summary_user_text = f"Conversation transcript:\n{transcript}"
+
+        try:
+            first_pass = _agent_text_completion(
+                agent,
+                summary_system_prompt,
+                summary_user_text,
+                max_tokens=700,
+            )
+            summary_text = first_pass.get("text") if isinstance(first_pass, dict) else ""
+            if _agent_summary_incomplete(first_pass):
+                second_pass = _agent_text_completion(
+                    agent,
+                    summary_system_prompt,
+                    summary_user_text,
+                    max_tokens=1400,
+                )
+                summary_text = second_pass.get("text") if isinstance(second_pass, dict) else ""
+                if _agent_summary_incomplete(second_pass):
+                    summary_text = _fallback_handoff_summary(msgs)
+                    fallback = True
+                else:
+                    fallback = False
+            else:
+                fallback = False
+        finally:
+            try:
+                agent.release_clients()
+            except Exception:
+                pass
+        if not summary_text:
+            summary_text = _fallback_handoff_summary(msgs)
+            fallback = True
+        elif _summary_output_incomplete(summary_text):
+            if not fallback:
+                fallback = True
+
+        channel_label = _resolve_handoff_channel_label()
+        _persist_handoff_summary(
+            sid,
+            summary_text,
+            channel_label,
+            rounds,
+            fallback=fallback,
+        )
+
+        return j(handler, {
+            "ok": True,
+            "summary": summary_text,
+            "message_count": len(msgs),
+            "rounds": rounds,
+            "fallback": fallback,
+        })
+    except Exception as e:
+        logger.warning("Handoff summary generation failed: %s", e)
+        summary_text = _fallback_handoff_summary(msgs)
+        try:
+            _persist_handoff_summary(
+                sid,
+                summary_text,
+                _resolve_handoff_channel_label(),
+                rounds,
+                fallback=True,
+            )
+        except Exception:
+            pass
+        return j(handler, {
+            "ok": True,
+            "summary": summary_text,
+            "message_count": len(msgs),
+            "rounds": rounds,
+            "fallback": True,
+            "warning": f"Summary generation used local fallback: {_sanitize_error(e)}",
+        })
+
+
 def _handle_skill_save(handler, body):
     try:
         require(body, "name", "content")
@@ -5185,6 +6278,40 @@ def _handle_memory_write(handler, body):
     return j(handler, {"ok": True, "section": section, "path": str(target)})
 
 
+def _normalize_message_for_import_refresh(message: object) -> object:
+    """Normalize message payloads for import refresh prefix checks.
+
+    The strict dict comparison previously failed when existing messages held
+    integer timestamps while refreshed messages held floating-point timestamps.
+    Strip timing keys before comparison so we can safely treat semantic
+    prefixes as equivalent.
+    """
+    if not isinstance(message, dict):
+        return message
+    normalized = dict(message)
+    normalized.pop("timestamp", None)
+    normalized.pop("_ts", None)
+    return normalized
+
+
+def _is_messages_refresh_prefix_match(existing_messages: list, fresh_messages: list) -> bool:
+    """Return True when existing_messages is a prefix of fresh_messages by value.
+
+    This is a semantic comparison intended for import refresh, not deep
+    structural equality. It intentionally ignores timing fields that may differ
+    in type/precision between storage layers.
+    """
+    if not isinstance(existing_messages, list) or not isinstance(fresh_messages, list):
+        return False
+    if len(existing_messages) > len(fresh_messages):
+        return False
+    for idx, existing_message in enumerate(existing_messages):
+        fresh_message = fresh_messages[idx]
+        if _normalize_message_for_import_refresh(existing_message) != _normalize_message_for_import_refresh(fresh_message):
+            return False
+    return True
+
+
 def _handle_session_import_cli(handler, body):
     """Import a single CLI session into the WebUI store."""
     try:
@@ -5198,13 +6325,33 @@ def _handle_session_import_cli(handler, body):
     existing = Session.load(sid)
     if existing:
         fresh_msgs = get_cli_session_messages(sid)
+        changed = False
+        cli_meta = None
+        for cs in list(get_cli_sessions()):
+            if cs["session_id"] == sid:
+                cli_meta = cs
+                break
         if fresh_msgs and len(fresh_msgs) > len(existing.messages):
             # Prefix-equality guard: only extend if existing messages are a prefix of
             # the fresh CLI messages. Prevents silently dropping WebUI-added messages
             # on hybrid sessions (user sent messages via WebUI while CLI continued).
-            if existing.messages == fresh_msgs[:len(existing.messages)]:
+            if _is_messages_refresh_prefix_match(existing.messages, fresh_msgs):
                 existing.messages = fresh_msgs
-                existing.save(touch_updated_at=False)
+                changed = True
+        if cli_meta:
+            updates = {
+                "is_cli_session": True,
+                "source_tag": existing.source_tag or cli_meta.get("source_tag"),
+                "raw_source": existing.raw_source or cli_meta.get("raw_source") or cli_meta.get("source_tag"),
+                "session_source": existing.session_source or cli_meta.get("session_source"),
+                "source_label": existing.source_label or cli_meta.get("source_label"),
+            }
+            for attr, value in updates.items():
+                if getattr(existing, attr, None) != value:
+                    setattr(existing, attr, value)
+                    changed = True
+        if changed:
+            existing.save(touch_updated_at=False)
         return j(
             handler,
             {
@@ -5229,6 +6376,15 @@ def _handle_session_import_cli(handler, body):
     cli_title = None
     cli_source_tag = None
     model = "unknown"
+    cli_raw_source = None
+    cli_session_source = None
+    cli_source_label = None
+    cli_user_id = None
+    cli_chat_id = None
+    cli_chat_type = None
+    cli_thread_id = None
+    cli_session_key = None
+    cli_platform = None
     for cs in get_cli_sessions():
         if cs["session_id"] == sid:
             profile = cs.get("profile")
@@ -5237,6 +6393,15 @@ def _handle_session_import_cli(handler, body):
             updated_at = cs.get("updated_at")
             cli_title = cs.get("title")
             cli_source_tag = cs.get("source_tag")
+            cli_raw_source = cs.get("raw_source")
+            cli_session_source = cs.get("session_source")
+            cli_source_label = cs.get("source_label")
+            cli_user_id = cs.get("user_id")
+            cli_chat_id = cs.get("chat_id")
+            cli_chat_type = cs.get("chat_type")
+            cli_thread_id = cs.get("thread_id")
+            cli_session_key = cs.get("session_key")
+            cli_platform = cs.get("platform")
             break
 
     # Use the CLI session title if available (e.g., cron job name), otherwise derive from messages
@@ -5259,6 +6424,16 @@ def _handle_session_import_cli(handler, body):
     if cron_project_id:
         s.project_id = cron_project_id
     s.is_cli_session = True
+    s.source_tag = cli_source_tag
+    s.raw_source = cli_raw_source or cli_source_tag
+    s.session_source = cli_session_source
+    s.source_label = cli_source_label
+    s.user_id = cli_user_id
+    s.chat_id = cli_chat_id
+    s.chat_type = cli_chat_type
+    s.thread_id = cli_thread_id
+    s.session_key = cli_session_key
+    s.platform = cli_platform
     s._cli_origin = sid
     s.save(touch_updated_at=False)
     return j(

@@ -87,6 +87,14 @@ def _ensure_state_db():
         );
     """)
     for column, ddl in (
+        ('user_id', 'ALTER TABLE sessions ADD COLUMN user_id TEXT'),
+        ('chat_id', 'ALTER TABLE sessions ADD COLUMN chat_id TEXT'),
+        ('chat_type', 'ALTER TABLE sessions ADD COLUMN chat_type TEXT'),
+        ('thread_id', 'ALTER TABLE sessions ADD COLUMN thread_id TEXT'),
+        ('session_key', 'ALTER TABLE sessions ADD COLUMN session_key TEXT'),
+        ('origin_chat_id', 'ALTER TABLE sessions ADD COLUMN origin_chat_id TEXT'),
+        ('origin_user_id', 'ALTER TABLE sessions ADD COLUMN origin_user_id TEXT'),
+        ('platform', 'ALTER TABLE sessions ADD COLUMN platform TEXT'),
         ('parent_session_id', 'ALTER TABLE sessions ADD COLUMN parent_session_id TEXT'),
         ('ended_at', 'ALTER TABLE sessions ADD COLUMN ended_at REAL'),
         ('end_reason', 'ALTER TABLE sessions ADD COLUMN end_reason TEXT'),
@@ -100,13 +108,34 @@ def _ensure_state_db():
 
 def _insert_gateway_session(conn, session_id='20260401_120000_abcdefgh', source='telegram',
                              title='Telegram Chat', model='anthropic/claude-sonnet-4-5',
-                             started_at=None, message_count=2):
+                             started_at=None, message_count=2, user_id=None, chat_id=None,
+                             chat_type=None, thread_id=None, session_key=None, origin_chat_id=None,
+                             origin_user_id=None, platform=None):
     """Insert a gateway session into state.db."""
     conn.execute(
-        "INSERT OR REPLACE INTO sessions (id, source, title, model, started_at, message_count) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (session_id, source, title, model, started_at or time.time(), message_count)
+        "INSERT OR REPLACE INTO sessions (id, source, user_id, title, model, started_at, message_count) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (session_id, source, user_id, title, model, started_at or time.time(), message_count)
     )
+    updates = []
+    params = []
+    for key, value in (
+        ("chat_id", chat_id),
+        ("chat_type", chat_type),
+        ("thread_id", thread_id),
+        ("session_key", session_key),
+        ("origin_chat_id", origin_chat_id),
+        ("origin_user_id", origin_user_id),
+        ("platform", platform),
+    ):
+        if value is not None:
+            updates.append(f"{key} = ?")
+            params.append(value)
+    if updates:
+        conn.execute(
+            f"UPDATE sessions SET {', '.join(updates)} WHERE id = ?",
+            [*params, session_id]
+        )
     # Delete any existing messages for this session (idempotent re-insert)
     conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
     # Insert some messages
@@ -181,6 +210,13 @@ def _cleanup_state_db():
             p.unlink(missing_ok=True)
         except Exception:
             pass
+
+
+def _insert_message(conn, sid, role, content, timestamp):
+    conn.execute(
+        "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+        (sid, role, content, timestamp),
+    )
 
 
 # ── Tests ──────────────────────────────────────────────────────────────────
@@ -754,6 +790,476 @@ def test_imported_cli_session_metadata_survives_compact(cleanup_test_sessions):
     assert compact['source_label'] == 'Telegram'
 
 
+def test_import_cli_preserves_messaging_source_metadata(cleanup_test_sessions):
+    """Importing a messaging agent session should keep source metadata for WebUI policy."""
+    conn = _ensure_state_db()
+    sid = 'gw_import_weixin_meta_001'
+    cleanup_test_sessions.append(sid)
+    try:
+        _insert_gateway_session(conn, session_id=sid, source='weixin', title='Weixin Session')
+
+        data, status = post('/api/session/import_cli', {'session_id': sid})
+        assert status == 200
+        session = data.get('session', {})
+        assert session.get('is_cli_session') is True
+        assert session.get('source_tag') == 'weixin'
+        assert session.get('raw_source') == 'weixin'
+        assert session.get('session_source') == 'messaging'
+        assert session.get('source_label') == 'Weixin'
+    finally:
+        try:
+            _remove_test_sessions(conn, sid)
+            conn.close()
+        except Exception:
+            pass
+
+
+def test_sessions_response_backfills_imported_messaging_source_metadata(cleanup_test_sessions):
+    """Old imported messaging sessions should still expose source metadata in /api/sessions."""
+    from api.models import Session
+
+    conn = _ensure_state_db()
+    sid = 'gw_legacy_import_weixin_001'
+    cleanup_test_sessions.append(sid)
+    try:
+        _insert_gateway_session(conn, session_id=sid, source='weixin', title='Weixin Session')
+        s = Session(
+            session_id=sid,
+            title='Legacy Imported Weixin',
+            messages=[{'role': 'user', 'content': 'hello', 'timestamp': time.time()}],
+            model='openai/gpt-5',
+        )
+        s.is_cli_session = True
+        s.save(touch_updated_at=False)
+        post('/api/settings', {'show_cli_sessions': True})
+
+        data, status = get('/api/sessions')
+        assert status == 200
+        session = next(item for item in data.get('sessions', []) if item.get('session_id') == sid)
+        assert session.get('source_tag') == 'weixin'
+        assert session.get('raw_source') == 'weixin'
+        assert session.get('session_source') == 'messaging'
+        assert session.get('source_label') == 'Weixin'
+    finally:
+        try:
+            post('/api/settings', {'show_cli_sessions': False})
+            _remove_test_sessions(conn, sid)
+            conn.close()
+        except Exception:
+            pass
+
+
+def test_sessions_response_keeps_only_latest_messaging_session_per_source(cleanup_test_sessions):
+    """Sidebar should keep messaging sessions by stable identity, not source-wide."""
+    from api.models import Session
+
+    conn = _ensure_state_db()
+    old_sid = 'gw_old_weixin_visible_001'
+    new_sid = 'gw_new_weixin_visible_001'
+    cleanup_test_sessions.extend([old_sid, new_sid])
+    try:
+        _insert_gateway_session(conn, session_id=old_sid, source='weixin', title='Old Weixin', started_at=time.time() - 100)
+        _insert_gateway_session(conn, session_id=new_sid, source='weixin', title='New Weixin', started_at=time.time())
+
+        old = Session(
+            session_id=old_sid,
+            title='Old Imported Weixin',
+            messages=[{'role': 'user', 'content': 'old', 'timestamp': time.time() - 100}],
+            model='openai/gpt-5',
+        )
+        old.is_cli_session = True
+        old.save(touch_updated_at=False)
+        post('/api/settings', {'show_cli_sessions': True})
+
+        data, status = get('/api/sessions')
+        assert status == 200
+        ids = {item.get('session_id') for item in data.get('sessions', [])}
+        assert new_sid in ids
+        assert old_sid not in ids
+    finally:
+        try:
+            post('/api/settings', {'show_cli_sessions': False})
+            _remove_test_sessions(conn, old_sid, new_sid)
+            conn.close()
+        except Exception:
+            pass
+
+
+def test_sessions_response_keeps_distinct_messaging_sessions_for_distinct_users(cleanup_test_sessions):
+    """Messaging collapse should survive for different users on the same platform."""
+    conn = _ensure_state_db()
+    sid_a = 'gw_tg_distinct_user_a'
+    sid_b = 'gw_tg_distinct_user_b'
+    cleanup_test_sessions.extend([sid_a, sid_b])
+    try:
+        _insert_gateway_session(
+            conn,
+            session_id=sid_a,
+            source='telegram',
+            title='TG User A',
+            user_id='1143399746',
+            started_at=time.time() - 20,
+        )
+        _insert_gateway_session(
+            conn,
+            session_id=sid_b,
+            source='telegram',
+            title='TG User B',
+            user_id='9988776655',
+            started_at=time.time(),
+        )
+
+        post('/api/settings', {'show_cli_sessions': True})
+        data, status = get('/api/sessions')
+        assert status == 200
+        ids = {s['session_id'] for s in data.get('sessions', []) if s.get('session_id') in {sid_a, sid_b}}
+        assert ids == {sid_a, sid_b}, f"Expected both Telegram sessions to remain, got {ids}"
+    finally:
+        try:
+            post('/api/settings', {'show_cli_sessions': False})
+            _remove_test_sessions(conn, sid_a, sid_b)
+            conn.close()
+        except Exception:
+            pass
+
+
+def test_sessions_response_distinguishes_same_user_different_chat_identity_from_gateway_metadata(cleanup_test_sessions):
+    """Same user_id sessions should stay separate when gateway metadata exposes chat identity."""
+    conn = _ensure_state_db()
+    sid_dm = 'gw_tg_same_user_dm'
+    sid_group = 'gw_tg_same_user_group'
+    cleanup_test_sessions.extend([sid_dm, sid_group])
+    sessions_file = _get_test_state_dir() / 'sessions' / 'sessions.json'
+    original_sessions_json = None
+    if sessions_file.exists():
+        original_sessions_json = sessions_file.read_text()
+    sessions_file.parent.mkdir(parents=True, exist_ok=True)
+    sessions_payload = {
+        "agent:main:telegram:dm:1143399746": {
+            "session_key": "agent:main:telegram:dm:1143399746",
+            "session_id": sid_dm,
+            "origin": {
+                "platform": "telegram",
+                "chat_type": "dm",
+                "chat_id": "1143399746",
+                "user_id": "1143399746",
+            },
+        },
+        "agent:main:telegram:group:chat_42:1143399746": {
+            "session_key": "agent:main:telegram:group:chat_42:1143399746",
+            "session_id": sid_group,
+            "origin": {
+                "platform": "telegram",
+                "chat_type": "group",
+                "chat_id": "chat_42",
+                "user_id": "1143399746",
+            },
+        },
+    }
+    try:
+        sessions_file.write_text(json.dumps(sessions_payload), encoding='utf-8')
+        _insert_gateway_session(conn, session_id=sid_dm, source='telegram', title='DM Same User', user_id='1143399746', started_at=time.time() - 40)
+        _insert_gateway_session(conn, session_id=sid_group, source='telegram', title='Group Same User', user_id='1143399746', started_at=time.time())
+
+        post('/api/settings', {'show_cli_sessions': True})
+        data, status = get('/api/sessions')
+        assert status == 200
+        ids = {s['session_id'] for s in data.get('sessions', []) if s.get('session_id') in {sid_dm, sid_group}}
+        assert ids == {sid_dm, sid_group}, f"Expected both DM/group Telegram sessions, got {ids}"
+    finally:
+        try:
+            post('/api/settings', {'show_cli_sessions': False})
+            _remove_test_sessions(conn, sid_dm, sid_group)
+            if original_sessions_json is None:
+                sessions_file.unlink(missing_ok=True)
+            else:
+                sessions_file.write_text(original_sessions_json, encoding='utf-8')
+            conn.close()
+        except Exception:
+            pass
+
+
+def test_messaging_projection_hides_stale_gateway_internal_segments(monkeypatch):
+    """Active Gateway identity should hide old reset rows and internal child segments."""
+    from api import routes
+
+    monkeypatch.setattr(
+        routes,
+        "_load_gateway_session_identity_map",
+        lambda: {
+            "weixin_current_sid": {
+                "session_key": "agent:main:weixin:dm:user_1",
+                "raw_source": "weixin",
+                "platform": "weixin",
+                "chat_type": "dm",
+                "chat_id": "user_1",
+                "user_id": "user_1",
+            },
+        },
+    )
+    sessions = [
+        {
+            "session_id": "weixin_current_sid",
+            "raw_source": "weixin",
+            "title": "Current Weixin",
+            "updated_at": 100,
+            "message_count": 8,
+        },
+        {
+            "session_id": "weixin_internal_child_sid",
+            "raw_source": "weixin",
+            "title": "Internal Weixin Segment",
+            "parent_session_id": "weixin_current_sid",
+            "updated_at": 120,
+            "message_count": 4,
+        },
+        {
+            "session_id": "weixin_reset_sid",
+            "raw_source": "weixin",
+            "title": "Old Weixin Reset",
+            "end_reason": "session_reset",
+            "updated_at": 90,
+            "message_count": 6,
+        },
+        {
+            "session_id": "weixin_legacy_fallback_sid",
+            "raw_source": "weixin",
+            "title": "Legacy Weixin Fallback",
+            "updated_at": 95,
+            "message_count": 3,
+            "user_id": "user_1",
+        },
+        {
+            "session_id": "webui_sid",
+            "title": "Regular WebUI",
+            "updated_at": 80,
+            "message_count": 2,
+        },
+    ]
+
+    kept = routes._keep_latest_messaging_session_per_source(sessions)
+    ids = {session.get("session_id") for session in kept}
+
+    assert "weixin_current_sid" in ids
+    assert "webui_sid" in ids
+    assert "weixin_internal_child_sid" not in ids
+    assert "weixin_reset_sid" not in ids
+    assert "weixin_legacy_fallback_sid" not in ids
+
+
+def test_messaging_projection_keeps_distinct_active_gateway_conversations(monkeypatch):
+    """Telegram DM and group chats must not collapse just because source matches."""
+    from api import routes
+
+    monkeypatch.setattr(
+        routes,
+        "_load_gateway_session_identity_map",
+        lambda: {
+            "telegram_dm_sid": {
+                "session_key": "agent:main:telegram:dm:user_1",
+                "raw_source": "telegram",
+                "platform": "telegram",
+                "chat_type": "dm",
+                "chat_id": "user_1",
+                "user_id": "user_1",
+            },
+            "telegram_group_sid": {
+                "session_key": "agent:main:telegram:group:group_1:user_1",
+                "raw_source": "telegram",
+                "platform": "telegram",
+                "chat_type": "group",
+                "chat_id": "group_1",
+                "user_id": "user_1",
+            },
+        },
+    )
+    sessions = [
+        {
+            "session_id": "telegram_dm_sid",
+            "raw_source": "telegram",
+            "title": "Telegram DM",
+            "updated_at": 100,
+            "message_count": 4,
+        },
+        {
+            "session_id": "telegram_group_sid",
+            "raw_source": "telegram",
+            "title": "Telegram Group",
+            "updated_at": 110,
+            "message_count": 4,
+        },
+    ]
+
+    kept = routes._keep_latest_messaging_session_per_source(sessions)
+    ids = {session.get("session_id") for session in kept}
+
+    assert ids == {"telegram_dm_sid", "telegram_group_sid"}
+
+
+def test_messaging_projection_does_not_aggressively_hide_without_gateway_metadata(monkeypatch):
+    """Without sessions.json as source of truth, keep fallback behavior."""
+    from api import routes
+
+    monkeypatch.setattr(routes, "_load_gateway_session_identity_map", lambda: {})
+    sessions = [
+        {
+            "session_id": "weixin_reset_sid",
+            "raw_source": "weixin",
+            "title": "Old Weixin Reset",
+            "end_reason": "session_reset",
+            "updated_at": 90,
+            "message_count": 6,
+        },
+    ]
+
+    kept = routes._keep_latest_messaging_session_per_source(sessions)
+
+    assert [session.get("session_id") for session in kept] == ["weixin_reset_sid"]
+
+
+def test_sessions_response_distinguishes_same_platform_same_group_chat_different_users_without_session_key(cleanup_test_sessions):
+    """Group sessions with same chat_id but different users should not collapse without session_key."""
+    conn = _ensure_state_db()
+    sid_u1 = 'gw_tg_group_chat_001'
+    sid_u2 = 'gw_tg_group_chat_002'
+    cleanup_test_sessions.extend([sid_u1, sid_u2])
+    try:
+        _insert_gateway_session(
+            conn,
+            session_id=sid_u1,
+            source='telegram',
+            title='TG Group Same Chat User1',
+            user_id='2001001',
+            chat_id='tg_group_42',
+            chat_type='group',
+            started_at=time.time() - 20,
+        )
+        _insert_gateway_session(
+            conn,
+            session_id=sid_u2,
+            source='telegram',
+            title='TG Group Same Chat User2',
+            user_id='2001002',
+            chat_id='tg_group_42',
+            chat_type='group',
+            started_at=time.time(),
+        )
+
+        post('/api/settings', {'show_cli_sessions': True})
+        data, status = get('/api/sessions')
+        assert status == 200
+        ids = {s['session_id'] for s in data.get('sessions', []) if s.get('session_id') in {sid_u1, sid_u2}}
+        assert ids == {sid_u1, sid_u2}, (
+            f"Expected both group sessions in same chat to stay visible without session_key, got {ids}"
+        )
+    finally:
+        try:
+            post('/api/settings', {'show_cli_sessions': False})
+            _remove_test_sessions(conn, sid_u1, sid_u2)
+            conn.close()
+        except Exception:
+            pass
+
+
+def test_sessions_response_distinguishes_same_user_different_thread_without_session_key(cleanup_test_sessions):
+    """Same user_id but different thread context should remain separate without session_key."""
+    conn = _ensure_state_db()
+    sid_t1 = 'gw_tg_thread_001'
+    sid_t2 = 'gw_tg_thread_002'
+    cleanup_test_sessions.extend([sid_t1, sid_t2])
+    try:
+        _insert_gateway_session(
+            conn,
+            session_id=sid_t1,
+            source='telegram',
+            title='TG Thread A',
+            user_id='5550007',
+            chat_id='tg_group_42',
+            chat_type='thread',
+            thread_id='thread_a',
+            started_at=time.time() - 20,
+        )
+        _insert_gateway_session(
+            conn,
+            session_id=sid_t2,
+            source='telegram',
+            title='TG Thread B',
+            user_id='5550007',
+            chat_id='tg_group_42',
+            chat_type='thread',
+            thread_id='thread_b',
+            started_at=time.time(),
+        )
+
+        post('/api/settings', {'show_cli_sessions': True})
+        data, status = get('/api/sessions')
+        assert status == 200
+        ids = {s['session_id'] for s in data.get('sessions', []) if s.get('session_id') in {sid_t1, sid_t2}}
+        assert ids == {sid_t1, sid_t2}, (
+            f"Expected both thread-scoped Telegram sessions to stay visible without session_key, got {ids}"
+        )
+    finally:
+        try:
+            post('/api/settings', {'show_cli_sessions': False})
+            _remove_test_sessions(conn, sid_t1, sid_t2)
+            conn.close()
+        except Exception:
+            pass
+
+
+def test_archiving_raw_messaging_session_imports_without_erasing_agent_memory(cleanup_test_sessions):
+    """Archive should be the safe hide path for raw messaging sessions."""
+    conn = _ensure_state_db()
+    sid = 'gw_archive_weixin_001'
+    cleanup_test_sessions.append(sid)
+    try:
+        _insert_gateway_session(conn, session_id=sid, source='weixin', title='Weixin Session')
+
+        data, status = post('/api/session/archive', {'session_id': sid, 'archived': True})
+        assert status == 200
+        session = data.get('session', {})
+        assert session.get('archived') is True
+        assert session.get('session_source') == 'messaging'
+
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ?",
+            (sid,),
+        ).fetchone()[0]
+        assert remaining == 2
+    finally:
+        try:
+            _remove_test_sessions(conn, sid)
+            conn.close()
+        except Exception:
+            pass
+
+
+def test_delete_imported_messaging_session_preserves_agent_memory(cleanup_test_sessions):
+    """WebUI delete must not delete Hermes Agent memory for external channels."""
+    conn = _ensure_state_db()
+    sid = 'gw_delete_weixin_safe_001'
+    cleanup_test_sessions.append(sid)
+    try:
+        _insert_gateway_session(conn, session_id=sid, source='weixin', title='Weixin Session')
+        _, import_status = post('/api/session/import_cli', {'session_id': sid})
+        assert import_status == 200
+
+        _, delete_status = post('/api/session/delete', {'session_id': sid})
+        assert delete_status == 200
+
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ?",
+            (sid,),
+        ).fetchone()[0]
+        assert remaining == 2
+    finally:
+        try:
+            _remove_test_sessions(conn, sid)
+            conn.close()
+        except Exception:
+            pass
+
+
 def test_imported_cron_sessions_hidden_from_sidebar_by_default(cleanup_test_sessions):
     """Cron sessions already imported into the WebUI store should stay hidden from the sidebar."""
     from api.models import Session
@@ -891,6 +1397,176 @@ def test_gateway_session_messages_readable():
         except Exception:
             pass
         post('/api/settings', {'show_cli_sessions': False})
+
+
+def test_session_prefers_state_db_messages_over_stale_local_snapshot(cleanup_test_sessions):
+    """Stale local JSON for messaging sessions should not mask newer state.db messages."""
+    from api.models import Session
+
+    conn = _ensure_state_db()
+    sid = 'gw_masking_regression_001'
+    cleanup_test_sessions.append(sid)
+    base_ts = time.time() - 120
+    stale_messages = [
+        ("user", "Old local user", base_ts + 1),
+        ("assistant", "Old local assistant", base_ts + 2),
+    ]
+    fresh_messages = [
+        ("user", "Fresh user 1", base_ts + 10),
+        ("assistant", "Fresh assistant 1", base_ts + 11),
+        ("user", "Fresh user 2", base_ts + 12),
+        ("assistant", "Fresh assistant 2", base_ts + 13),
+    ]
+    expected_tail = fresh_messages[-1][1]
+    expected_total = len(stale_messages) + len(fresh_messages)
+    try:
+        _insert_gateway_session(
+            conn,
+            session_id=sid,
+            source='telegram',
+            title='Regression Telegram Chat',
+            message_count=expected_total,
+            started_at=base_ts + 1,
+        )
+        # Replace the two auto-inserted starter messages with a controlled sequence
+        # so we can assert ordering across local+state updates.
+        conn.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
+        for role, content, ts in stale_messages + fresh_messages:
+            _insert_message(conn, sid, role, content, ts)
+        conn.execute(
+            "UPDATE sessions SET message_count = ? WHERE id = ?",
+            (expected_total, sid),
+        )
+        conn.commit()
+
+        s = Session(
+            session_id=sid,
+            title='Legacy Local Telegram Snapshot',
+            workspace=str(pathlib.Path.home() / '.hermes'),
+            model='openai/gpt-5',
+            messages=[{"role": r, "content": c, "timestamp": t} for r, c, t in stale_messages],
+        )
+        s.is_cli_session = True
+        s.session_source = 'messaging'
+        s.source_tag = 'telegram'
+        s.raw_source = 'telegram'
+        s.source_label = 'Telegram'
+        s.save(touch_updated_at=False)
+
+        post('/api/settings', {'show_cli_sessions': True})
+        data, status = get(f'/api/session?session_id={sid}')
+        assert status == 200, data
+        session = data.get('session', {})
+        msgs = session.get('messages', [])
+        assert len(msgs) == expected_total, f"Expected {expected_total} messages, got {len(msgs)}"
+        assert msgs[-1].get('content') == expected_tail
+        assert session.get('message_count') == expected_total
+    finally:
+        try:
+            _remove_test_sessions(conn, sid)
+            conn.close()
+        except Exception:
+            pass
+        try:
+            post('/api/settings', {'show_cli_sessions': False})
+        except Exception:
+            pass
+
+
+def test_sessions_prefers_state_db_metadata_for_messaging_overlap(cleanup_test_sessions):
+    """Sidebar metadata for messaging sessions should come from state.db, not local JSON snapshots."""
+    conn = _ensure_state_db()
+    sid = 'gw_sidebar_metadata_regression_001'
+    cleanup_test_sessions.append(sid)
+    now = time.time()
+    rows = [
+        ("user", "Hello", now - 30),
+        ("assistant", "Welcome", now - 29),
+        ("user", "Need details", now - 5),
+    ]
+    try:
+        _insert_gateway_session(conn, session_id=sid, source='weixin', title='Live metadata chat', message_count=len(rows), started_at=now - 30)
+        conn.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
+        for role, content, ts in rows:
+            _insert_message(conn, sid, role, content, ts)
+        conn.commit()
+
+        stale = [
+            {"role": "user", "content": "stale one", "timestamp": now - 100},
+            {"role": "assistant", "content": "stale two", "timestamp": now - 99},
+        ]
+        from api.models import Session
+        local = Session(
+            session_id=sid,
+            title='Stale Sidebar',
+            messages=stale,
+            model='openai/gpt-4',
+        )
+        local.is_cli_session = True
+        local.session_source = 'messaging'
+        local.source_tag = 'weixin'
+        local.raw_source = 'weixin'
+        local.source_label = 'Weixin'
+        local.save(touch_updated_at=False)
+
+        post('/api/settings', {'show_cli_sessions': True})
+        data, status = get('/api/sessions')
+        assert status == 200, data
+        session = next(item for item in data.get('sessions', []) if item.get('session_id') == sid)
+        assert session.get('message_count') == len(rows)
+        expected_updated = max(ts for _, _, ts in rows)
+        assert abs(float(session.get('updated_at') or 0) - expected_updated) < 1.0
+    finally:
+        try:
+            post('/api/settings', {'show_cli_sessions': False})
+            _remove_test_sessions(conn, sid)
+            conn.close()
+        except Exception:
+            pass
+
+
+def test_archiving_messaging_session_keeps_state_db_history(cleanup_test_sessions):
+    """Archiving a messaging session should persist metadata without importing full transcript."""
+    from api.models import Session
+
+    conn = _ensure_state_db()
+    sid = 'gw_archive_metadata_only_001'
+    cleanup_test_sessions.append(sid)
+    try:
+        _insert_gateway_session(
+            conn,
+            session_id=sid,
+            source='discord',
+            title='Archive Safe',
+            message_count=2,
+            started_at=time.time() - 20,
+        )
+        # Do not create a local session first; archive should create minimal metadata only.
+        data, status = post('/api/session/archive', {'session_id': sid, 'archived': True})
+        assert status == 200, data
+        archived = data.get('session', {})
+        assert archived.get('archived') is True
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ?",
+            (sid,),
+        ).fetchone()[0]
+        assert remaining >= 2
+
+        local = Session.load(sid)
+        assert local is not None
+        assert local.messages == [], "Archive should not import historical messages into local JSON"
+        assert local.archived is True
+
+        session_data, session_status = get(f'/api/session?session_id={sid}')
+        assert session_status == 200, session_data
+        assert session_data.get('session', {}).get('archived') is True
+        assert session_data.get('session', {}).get('message_count') == 2
+    finally:
+        try:
+            _remove_test_sessions(conn, sid)
+            conn.close()
+        except Exception:
+            pass
 
 
 def test_importing_older_gateway_session_preserves_original_timestamps_and_order():

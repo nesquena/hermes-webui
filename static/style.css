@@ -559,6 +559,7 @@
   /* Terminal flyout reserves transcript space so recent messages stay readable above it. */
   .messages.terminal-open{padding-bottom:var(--terminal-card-height,320px);scroll-padding-bottom:var(--terminal-card-height,320px);transition:padding-bottom .26s cubic-bezier(.2,.8,.2,1);}
   .messages.terminal-collapsed{padding-bottom:var(--terminal-dock-height,72px);scroll-padding-bottom:var(--terminal-dock-height,72px);transition:padding-bottom .22s cubic-bezier(.2,.8,.2,1);}
+  .messages.handoff-dock-visible{padding-bottom:var(--handoff-dock-height,72px);scroll-padding-bottom:var(--handoff-dock-height,72px);transition:padding-bottom .22s cubic-bezier(.2,.8,.2,1);}
   .messages.terminal-expanding-from-dock{transition:none!important;}
   .queue-card-inner{background:var(--surface);border:1px solid var(--border);border-bottom:none;border-radius:14px 14px 0 0;contain:paint;transform:translateY(100%);opacity:0;transition:transform .35s cubic-bezier(.32,.72,.16,1),opacity .2s ease;overflow:hidden;max-height:240px;overflow-y:auto;padding-bottom:4px;}
   .queue-card.visible .queue-card-inner{transform:translateY(0);opacity:1;}
@@ -1035,6 +1036,21 @@
   .composer-terminal-dock[hidden]{display:none!important;}
   .composer-terminal-dock-title{min-width:0;display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12px;font-weight:700;letter-spacing:.02em;text-transform:uppercase;}
   .composer-terminal-dock-dot{width:7px;height:7px;border-radius:999px;background:var(--success);box-shadow:0 0 0 3px color-mix(in srgb,var(--success) 16%,transparent);flex:0 0 auto;}
+
+  /* ── Handoff hint bar ── */
+  .handoff-hint-container{position:absolute;left:0;right:0;bottom:-2px;width:min(calc(100% - 112px),560px);margin:0 auto;box-sizing:border-box;overflow:visible;pointer-events:none;z-index:3;}
+  .handoff-hint-container.is-visible{pointer-events:auto;}
+  .handoff-hint-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:42px;border:1px solid var(--border);border-radius:13px;background:color-mix(in srgb,var(--surface) 86%,transparent);box-shadow:0 8px 22px rgba(0,0,0,.16);backdrop-filter:blur(10px);padding:7px 12px;cursor:pointer;transform:translateY(100%);opacity:0;transition:transform .32s cubic-bezier(.32,.72,.16,1),opacity .2s ease,background .15s ease,border-color .15s ease;}
+  .handoff-hint-container.is-visible .handoff-hint-bar{transform:translateY(0);opacity:.94;}
+  .handoff-hint-bar:hover{background:color-mix(in srgb,var(--surface) 92%,transparent);border-color:color-mix(in srgb,var(--border) 70%,var(--accent));}
+  .handoff-hint-bar[hidden]{display:none!important;}
+  .handoff-hint-text{min-width:0;display:flex;align-items:center;gap:10px;color:var(--muted);font-size:12px;font-weight:700;letter-spacing:.02em;text-transform:uppercase;}
+  .handoff-hint-dot{width:7px;height:7px;border-radius:999px;background:var(--success);box-shadow:0 0 0 3px color-mix(in srgb,var(--success) 16%,transparent);flex:0 0 auto;}
+  .handoff-hint-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);text-transform:none;letter-spacing:0;font-weight:700;font-size:12px;}
+  .handoff-hint-meta{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);text-transform:none;letter-spacing:0;font-weight:600;font-size:12px;}
+  .handoff-hint-actions{display:flex;align-items:center;gap:8px;flex:0 0 auto;}
+  .handoff-hint-action,.handoff-hint-dismiss{border:none;background:transparent;color:var(--muted);font:inherit;font-size:12px;font-weight:700;padding:4px 6px;border-radius:8px;cursor:pointer;transition:background .15s ease,color .15s ease;}
+  .handoff-hint-action:hover,.handoff-hint-dismiss:hover{background:color-mix(in srgb,var(--muted) 12%,transparent);color:var(--text);}
   #terminalDockWorkspaceLabel{min-width:0;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);text-transform:none;letter-spacing:0;font-weight:600;}
   .composer-terminal-resize-handle{height:12px;display:flex;align-items:center;justify-content:center;flex:0 0 auto;cursor:ns-resize;touch-action:none;background:linear-gradient(to bottom,rgba(255,255,255,.04),transparent);}
   .composer-terminal-resize-handle::before{content:"";width:52px;height:4px;border-radius:999px;background:var(--border2);opacity:.72;transition:opacity .15s,background .15s;}
@@ -1314,6 +1330,7 @@
     .ctx-tooltip{right:-4px;min-width:190px;max-width:220px;}
     .composer-terminal-panel{width:calc(100% - 20px);}
     .composer-terminal-panel.is-collapsed{bottom:-1px;width:calc(100% - 28px);}
+    .handoff-hint-container{bottom:-1px;width:calc(100% - 28px);}
     .composer-terminal-inner{height:var(--composer-terminal-height,190px);min-height:140px;max-height:min(300px,44vh);border-radius:12px;padding-bottom:28px;}
     .composer-terminal-dock{min-height:40px;padding:6px 7px 6px 10px;border-radius:12px;gap:8px;}
     .composer-terminal-dock-title{font-size:11px;}
@@ -1779,6 +1796,52 @@ body.resizing{user-select:none;cursor:col-resize;}
 }
 .tool-card-compress-reference .tool-card-name{
   color:var(--blue);
+}
+.tool-card-handoff-summary{
+  background:rgba(124,185,255,.04);
+  border-color:rgba(124,185,255,.18);
+}
+.tool-card-handoff-summary .tool-card-name{
+  color:var(--blue);
+}
+.tool-card-handoff-summary .tool-card-preview{
+  margin-left:10px;
+}
+.handoff-summary-fallback-note{
+  margin:10px 0 0;
+  color:var(--muted);
+  font-size:11px;
+  line-height:1.5;
+  font-style:normal;
+}
+.handoff-summary-body{
+  color:var(--text);
+  font-size:var(--font-size-sm);
+  line-height:1.65;
+}
+.handoff-summary-body p{
+  margin:0 0 8px;
+}
+.handoff-summary-body p:last-child{
+  margin-bottom:0;
+}
+.handoff-summary-body ul,
+.handoff-summary-body ol{
+  margin:4px 0 4px 20px;
+}
+.handoff-summary-body li{
+  margin:3px 0;
+}
+.handoff-summary-body strong{
+  color:var(--strong);
+}
+.handoff-summary-body code{
+  font-family:'SF Mono',ui-monospace,monospace;
+  font-size:.92em;
+  background:var(--code-inline-bg);
+  color:var(--code-text);
+  padding:1px 5px;
+  border-radius:4px;
 }
 
 .compression-row{

@@ -67,3 +67,105 @@ def test_import_cli_passes_model_to_import_helper():
     assert "model" in call_block, (
         "import_cli_session() call should still receive the `model` argument."
     )
+
+
+def test_session_import_cli_refresh_matches_messages_despite_timestamp_type_differences(monkeypatch):
+    """Refreshing an imported session should still extend when timestamps differ only by type.
+
+    Existing WebUI messages can use integer timestamps while CLI refresh returns
+    floating-point timestamps for the same turns. This test verifies the handler
+    accepts that as semantic equality and replaces with the longer, fresher tail.
+    """
+    import api.routes as routes
+
+    session_id = "ts_type_diff_001"
+
+    class FakeSession:
+        def __init__(self):
+            self.messages = [
+                {"role": "user", "content": "hello", "timestamp": 1710000000},
+                {"role": "assistant", "content": "working", "timestamp": 1710000001},
+            ]
+            self.source_tag = "weixin"
+            self.raw_source = "weixin"
+            self.session_source = "messaging"
+            self.source_label = "WeChat"
+
+        def compact(self):
+            return {"session_id": session_id, "title": "Imported"}
+
+        def save(self, touch_updated_at=False):
+            save_calls.append(touch_updated_at)
+
+    save_calls = []
+    existing = FakeSession()
+    fresh = [
+        {"role": "user", "content": "hello", "timestamp": 1710000000.0},
+        {"role": "assistant", "content": "working", "timestamp": 1710000001.0},
+        {"role": "assistant", "content": "next", "timestamp": 1710000002.0},
+    ]
+
+    monkeypatch.setattr(routes.Session, "load", classmethod(lambda _cls, sid: existing if sid == session_id else None))
+    monkeypatch.setattr(routes, "require", lambda body, *keys: None)
+    monkeypatch.setattr(routes, "bad", lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status})
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
+    monkeypatch.setattr(routes, "get_cli_session_messages", lambda sid: fresh if sid == session_id else [])
+    monkeypatch.setattr(routes, "get_cli_sessions", lambda: [{"session_id": session_id, "source_tag": "weixin", "raw_source": "weixin", "session_source": "messaging", "source_label": "WeChat"}])
+
+    response = routes._handle_session_import_cli(object(), {"session_id": session_id})
+
+    assert response["imported"] is False
+    assert response["session"]["messages"] == fresh
+    assert existing.messages == fresh
+    assert save_calls == [False]
+
+
+def test_session_import_cli_refresh_rejects_prefix_if_non_timing_content_diverges(monkeypatch):
+    """Only true prefixes should be treated as unchanged history during refresh.
+
+    If the refreshed message body diverges, we should keep the existing in-memory
+    transcript instead of replacing it with potentially older content.
+    """
+    import api.routes as routes
+
+    session_id = "ts_type_diverge_001"
+
+    class FakeSession:
+        def __init__(self):
+            self.messages = [
+                {"role": "user", "content": "old-prefix", "timestamp": 1710000000},
+                {"role": "assistant", "content": "from local", "timestamp": 1710000001},
+            ]
+            self.source_tag = "telegram"
+            self.raw_source = "telegram"
+            self.session_source = "messaging"
+            self.source_label = "Telegram"
+            self.is_cli_session = True
+
+        def compact(self):
+            return {"session_id": session_id, "title": "Imported"}
+
+        def save(self, touch_updated_at=False):
+            save_calls.append(touch_updated_at)
+
+    save_calls = []
+    existing = FakeSession()
+    fresh = [
+        {"role": "user", "content": "different-prefix", "timestamp": 1710000000.0},
+        {"role": "assistant", "content": "from cli", "timestamp": 1710000001.0},
+        {"role": "assistant", "content": "next", "timestamp": 1710000002.0},
+    ]
+
+    monkeypatch.setattr(routes.Session, "load", classmethod(lambda _cls, sid: existing if sid == session_id else None))
+    monkeypatch.setattr(routes, "require", lambda body, *keys: None)
+    monkeypatch.setattr(routes, "bad", lambda _handler, msg, status=400: {"ok": False, "error": msg, "status": status})
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
+    monkeypatch.setattr(routes, "get_cli_session_messages", lambda sid: fresh if sid == session_id else [])
+    monkeypatch.setattr(routes, "get_cli_sessions", lambda: [{"session_id": session_id, "source_tag": "telegram", "raw_source": "telegram", "session_source": "messaging", "source_label": "Telegram"}])
+
+    response = routes._handle_session_import_cli(object(), {"session_id": session_id})
+
+    assert response["imported"] is False
+    assert response["session"]["messages"] == existing.messages
+    assert existing.messages[0]["content"] == "old-prefix"
+    assert save_calls == []

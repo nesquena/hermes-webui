@@ -3291,6 +3291,48 @@ function _compressionCardsNode(state){
   wrap.innerHTML=`<div class="compression-turn-blocks">${_compressionCardsHtml(state)}</div>`;
   return wrap;
 }
+function _isHandoffSummaryToolPayload(value){
+  if(!value||typeof value!=='object'||Array.isArray(value)) return false;
+  return value._handoff_summary_card === true;
+}
+function _parseHandoffSummaryPayload(content){
+  if(!content) return null;
+  if(typeof content==='object' && !Array.isArray(content)) return _isHandoffSummaryToolPayload(content)?content:null;
+  if(typeof content!=='string') return null;
+  try {
+    const parsed=JSON.parse(content);
+    return _isHandoffSummaryToolPayload(parsed)?parsed:null;
+  } catch (e) {
+    return null;
+  }
+}
+function _handoffSummaryStateFromMessage(m){
+  if(!m||m.role!=='tool') return null;
+  const payload = _parseHandoffSummaryPayload(m.content);
+  if(!payload) return null;
+  if(String(payload.session_id||'') && S.session && String(m.session_id||'') && String(payload.session_id)!==String(S.session.session_id||'')) {
+    return null;
+  }
+  const summary = String(payload.summary||'').trim();
+  if(!summary) return null;
+  return {
+    phase: 'done',
+    channel: payload.channel || null,
+    rounds: Number.isFinite(payload.rounds)?payload.rounds:null,
+    summary,
+    fallback: !!payload.fallback,
+    generatedAt: Number(payload.generated_at) || null,
+  };
+}
+function _collectHandoffSummaryStates(messages){
+  const states=[];
+  if(!Array.isArray(messages)) return states;
+  for(let i=0;i<messages.length;i++){
+    const state=_handoffSummaryStateFromMessage(messages[i]);
+    if(state) states.push({state, rawIdx:i});
+  }
+  return states;
+}
 function _isContextCompactionMessage(m){
   if(!m||!m.role||m.role==='tool') return false;
   const text=msgContent(m)||String(m.content||'');
@@ -3425,6 +3467,73 @@ function _compressionStatusCardHtml({
       ${bodyHtml}
     </div>`;
 }
+function _handoffStateForCurrentSession(){
+  const state=window._handoffUi;
+  if(!state||!S.session||state.sessionId!==S.session.session_id) return null;
+  return state;
+}
+function clearHandoffUi(){
+  window._handoffUi=null;
+  renderMessages();
+}
+function setHandoffUi(state){
+  if(!state){
+    clearHandoffUi();
+    return;
+  }
+  window._handoffUi={...state};
+  renderMessages();
+}
+function _handoffCardsHtml(state){
+  if(!state) return '';
+  const channel=String(state.channel||'').trim();
+  const label=channel?`${channel} handoff summary`:'Handoff summary';
+  const isError=state.phase==='error';
+  const isDone=state.phase==='done';
+  const isFallback=!!state.fallback;
+  const detail=isError
+    ? String(state.errorText||'Could not generate summary. Please try again.')
+    : isDone
+      ? String(state.summary||'')
+      : 'Generating handoff summary...';
+  const meta=typeof state.rounds==='number'
+    ? `${state.rounds} external conversation rounds`
+    : '';
+  const icon=isError
+    ? li('x',13)
+    : isDone
+      ? li('check',13)
+      : '<span class="tool-card-running-dot"></span>';
+  const bodyHtml=isDone&&!isError
+    ? (
+      `${renderMd(detail)}${
+        isFallback
+          ? '<p class="handoff-summary-fallback-note">Fallback summary generated from recent turns; no model-based rewrite was used.</p>'
+          : ''
+      }`
+    )
+    : `<p>${esc(detail)}</p>`;
+  return `
+    <div class="tool-card-row compression-card-row handoff-card-row" data-compression-card="1" data-handoff-card="1">
+      <div class="tool-card tool-card-handoff-summary${isError?' tool-card-compress-error':''} open">
+        <div class="tool-card-header" onclick="this.closest('.tool-card').classList.toggle('open')">
+          ${icon}
+          <span class="tool-card-name">${esc(label)}</span>
+          ${meta?`<span class="tool-card-preview">${esc(meta)}</span>`:''}
+          <span class="tool-card-toggle">${li('chevron-right',12)}</span>
+        </div>
+        <div class="tool-card-detail">
+          <div class="tool-card-result handoff-summary-body">${bodyHtml}</div>
+        </div>
+      </div>
+    </div>`;
+}
+function _handoffCardsNode(state){
+  const wrap=document.createElement('div');
+  wrap.className='compression-turn handoff-turn';
+  wrap.innerHTML=`<div class="compression-turn-blocks">${_handoffCardsHtml(state)}</div>`;
+  return wrap;
+}
 function _contextCompactionMessageHtml(m, tsTitle='', preservedMessages=[]){
   const text=msgContent(m)||String(m.content||'');
   return `<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(text, false, tsTitle)}${_preservedCompressionTaskListCardsHtml(preservedMessages)}</div></div>`;
@@ -3455,13 +3564,20 @@ function renderMessages(){
   const inner=$('msgInner');
   const sid=S.session?S.session.session_id:null;
   const msgCount=S.messages.length;
+  const hasTransientTranscriptUi=!!(
+    (window._compressionUi&&(!window._compressionUi.sessionId||window._compressionUi.sessionId===sid)) ||
+    (window._handoffUi&&(!window._handoffUi.sessionId||window._handoffUi.sessionId===sid))
+  );
 
   // Fast path: switching back to a previously rendered session with same count.
   // Guard: sid !== _sessionHtmlCacheSid ensures in-session updates (edits,
   // new messages, tool_complete) always get a fresh rebuild.
   // Skip cache if this session is still streaming — the live smd parser writes
   // into a DOM node inside the cached subtree; serving cached HTML detaches it.
-  if(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]){
+  // Also skip cache for transient transcript cards such as /compress and
+  // cross-channel handoff summaries; otherwise the cached transcript returns
+  // before those cards can be inserted.
+  if(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){
     const cached=_sessionHtmlCache.get(sid);
     if(cached&&cached.msgCount===msgCount){
       inner.innerHTML=cached.html;
@@ -3477,6 +3593,8 @@ function renderMessages(){
 
   const compressionState=_compressionStateForCurrentSession();
   if(window._compressionUi && !compressionState) clearCompressionUi();
+  const handoffState=_handoffStateForCurrentSession();
+  if(window._handoffUi && !handoffState) window._handoffUi=null;
   const sessionCompressionAnchor=(
     S.session && typeof S.session.compression_anchor_visible_idx==='number'
   ) ? S.session.compression_anchor_visible_idx : null;
@@ -3699,16 +3817,61 @@ function renderMessages(){
     }
     inner.appendChild(node);
   }
+  function _insertCompressionLikeNodeByRawIdx(node, rawIdx){
+    if(!node) return;
+    if(!visWithIdx.length){
+      inner.appendChild(node);
+      return;
+    }
+    let anchorIdx=null;
+    for(let i=0;i<visWithIdx.length;i++){
+      if(visWithIdx[i].rawIdx > rawIdx){
+        anchorIdx=i;
+        break;
+      }
+    }
+    if(anchorIdx===null){
+      inner.appendChild(node);
+      return;
+    }
+    const anchorRawIdx=visWithIdx[anchorIdx].rawIdx;
+    const anchorSeg=assistantSegments.get(anchorRawIdx);
+    if(anchorSeg){
+      const turn=anchorSeg.closest('.assistant-turn');
+      const blocks=_assistantTurnBlocks(turn);
+      if(blocks){
+        blocks.appendChild(node);
+        return;
+      }
+      const turnParent=turn && turn.parentElement;
+      if(turnParent){
+        turnParent.insertBefore(node, turn);
+        return;
+      }
+    }
+    const userRow=userRows.get(anchorRawIdx);
+    if(userRow && userRow.parentElement){
+      userRow.parentElement.insertBefore(node, userRow);
+      return;
+    }
+    inner.appendChild(node);
+  }
   const preservedOnlyNode=(!preservedCompressionTaskCardsAttached&&(!referenceMessage||compressionState)&&preservedCompressionTaskMessages.length)
     ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
     : null;
   const preservedOnlyAnchor=preservedCompressionRawIdxs.length
     ? (()=>{let idx=null;for(let i=0;i<visWithIdx.length;i++){if(visWithIdx[i].rawIdx<preservedCompressionRawIdxs[0]) idx=i;}return idx;})()
     : null;
+  const handoffSummaryStates=_collectHandoffSummaryStates(S.messages);
 
   _insertCompressionLikeNode(compressionNode);
   _insertCompressionLikeNode(referenceNode);
   _insertCompressionLikeNode(preservedOnlyNode, preservedOnlyAnchor);
+  _insertCompressionLikeNode(handoffState?_handoffCardsNode(handoffState):null, visWithIdx.length?visWithIdx.length-1:null);
+  for(const entry of handoffSummaryStates){
+    if(!entry||!entry.state) continue;
+    _insertCompressionLikeNodeByRawIdx(_handoffCardsNode(entry.state), entry.rawIdx);
+  }
   renderCompressionUi();
   // Insert settled tool call cards (history view only).
   // During live streaming, tool cards are rendered in #liveToolCards by the
@@ -3904,7 +4067,7 @@ function renderMessages(){
   if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(inner);
   // Populate session cache so switching back here skips a full rebuild.
   _sessionHtmlCacheSid=sid;
-  if(sid){
+  if(sid&&!hasTransientTranscriptUi){
     const _html=inner.innerHTML;
     // Only cache sessions with <300KB rendered HTML; evict oldest beyond 8 sessions.
     if(_html.length<300_000){

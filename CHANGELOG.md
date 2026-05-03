@@ -311,6 +311,9 @@ This release is the first under the May 2 2026 auto-rebase + auto-fix policy: co
 - **`popstate` handler refuses to switch sessions mid-stream** — Opus pre-release follow-up. Mirrors the same `S.busy` guard the cross-tab storage handler had. A user mid-stream who absent-mindedly hits browser Back used to lose their active turn (PR #1392 introduced the popstate listener without the guard). Now shows a toast and stays on the current session. 1 regression test in `test_v050254_opus_followups.py`. (`static/sessions.js`)
 
 
+### Added
+- **Messaging sessions get a WebUI handoff path without exposing every raw channel segment** — Weixin and Telegram sessions imported from Hermes Agent are now treated as messaging-source conversations: sidebar results keep only the latest visible session per channel, preserve source metadata through compact/import paths, and avoid destructive/duplicating menu actions that would imply WebUI owns the external channel history. Messaging sessions with enough external conversation rounds show a composer-docked handoff prompt; clicking it generates a transcript card summary for the user without inserting a fake command bubble. This is PR2 for the #1013 channel-handoff direction and intentionally does not cover the separate CLI Session follow-up. (`api/models.py`, `api/routes.py`, `static/index.html`, `static/messages.js`, `static/sessions.js`, `static/style.css`, `static/ui.js`, `tests/test_gateway_sync.py`, `tests/test_issue1013_handoff_dock.py`) @franksong2702 — refs #1013
+
 ## [v0.50.253] — 2026-05-01
 
 ### Added
