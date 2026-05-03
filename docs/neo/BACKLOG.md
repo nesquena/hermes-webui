@@ -16,11 +16,12 @@
 | [EP-01](#ep-01--rebrand-visual-e-textual) | Rebrand visual e textual | P0 | Sprint 1 |
 | [EP-02](#ep-02--localização-pt-br) | Localização pt-BR | P0 | Sprint 1 |
 | [EP-03](#ep-03--painel-dashboard) | Página Dashboard | P0 | Sprint 2 |
-| [EP-04](#ep-04--página-projetos-kanban) | Página Projetos (Kanban 4 colunas) | P0 | Sprint 3 |
-| [EP-05](#ep-05--ações-rápidas-e-integrações-locais) | Ações rápidas e integrações locais | P1 | Sprint 4 |
-| [EP-06](#ep-06--página-finanças) | Página Finanças (shell visual) | P0 | Sprint 4 |
+| [EP-08](#ep-08--configurações-neo-embutidas-no-dashboard) | Configurações Neo (embutidas no dashboard) | P0 | Sprint 3 |
+| [EP-04](#ep-04--página-projetos-kanban) | Página Projetos (Kanban 4 colunas) | P0 | Sprint 4 |
+| [EP-05](#ep-05--ações-rápidas-e-integrações-locais) | Ações rápidas e integrações locais | P1 | Sprint 5 |
+| [EP-06](#ep-06--página-finanças) | Página Finanças (shell visual) | P0 | Sprint 5 |
 | [EP-07](#ep-07--qualidade-testes-e-evidências) | Qualidade, testes e evidências | P0 | Transversal |
-| [EP-AG](#ep-ag--painel-agentes-futuro) | Painel Agentes (futuro) | P2 | Sprint 5+ |
+| [EP-AG](#ep-ag--painel-agentes-futuro) | Painel Agentes (futuro) | P2 | Sprint 6+ |
 
 ---
 
@@ -105,6 +106,44 @@ chat ativo com o Neo, estado dos projetos, atalhos rápidos. Conforme
 
 ---
 
+## EP-08 — Configurações Neo (embutidas no dashboard)
+
+**Objetivo:** Ao clicar em "Configurações" (sidebar ou admin dropdown), o
+dashboard shell permanece ativo e exibe a UI de settings embutida: nav lateral
+com seções (Conversa / Aparência / Preferências / Provedores / Sistema) +
+conteúdo à direita. Toda a semântica de rotas, handlers, localStorage e guards
+de unsaved changes do upstream são preservados; muda apenas a moldura visual —
+que passa a usar o padrão Neo estabelecido na Sprint 2.
+
+**Por que aditivo:** o DOM do `#panelSettings` + `#mainSettings` já existe com
+toda a lógica implementada. O padrão de `mountDashboardChat()` / `restoreDashboardChat()`
+(Sprint 2) prova que é possível reposicionar DOM existente dentro do shell sem
+duplicar handlers. Esta sprint aplica o mesmo padrão a settings.
+
+### HUs
+
+| HU | Descrição | Prioridade |
+|---|---|---|
+| HU-08.1 | Como Júnior, quero que clicar em "Configurações" mantenha o dashboard shell ativo e abra settings embutido via `mountDashboardSettings()` — mesma abordagem de `mountDashboardChat()` | P0 |
+| HU-08.2 | Como Júnior, quero a seção "Conversa" com exportar transcript/JSON, importar e clear — handlers upstream preservados, Neo-skinned | P0 |
+| HU-08.3 | Como Júnior, quero a seção "Aparência" com seletor de tema (dark/light/system), skin picker (Neo selecionável e ativo por padrão), tamanho de fonte — live preview e autosave preservados | P0 |
+| HU-08.4 | Como Júnior, quero as seções "Preferências", "Provedores" e "Sistema" — panes upstream reaproveitados, Neo-skinned | P0 |
+| HU-08.5 | Como Júnior, quero que o dirty guard e o autosave de aparência (`_settingsDirty`, `_beginSettingsPanelSession`) continuem funcionando dentro do settings embutido | P0 |
+| HU-08.6 | Como mantenedor, quero testes automáticos para mount/restore do settings embutido, CSS Neo e preservação dos handlers | P0 |
+
+**Dependências:** EP-03 (dashboard shell e padrão mount/restore).
+**Arquivos tocados:**
+- Aditivo: `static/dashboard.js` (`mountDashboardSettings`, `restoreDashboardSettings`, interceptação do admin menu e sidebar)
+- Aditivo: `static/style.css` (overrides Neo para `.dashboard-shell-mode .settings-*`, nav lateral settings dentro do shell)
+- Mínimo: `static/index.html` (ajuste de slot ou wrapper se necessário)
+- Novo: `tests/test_neo_dashboard_settings.py`
+
+**Risco:** `_beginSettingsPanelSession()` em `panels.js` precisa ser chamado
+pelo `mountDashboardSettings()` para ativar o dirty guard — requer atenção
+na integração com o fluxo de `switchPanel()`.
+
+---
+
 ## EP-04 — Página Projetos (Kanban)
 
 **Objetivo:** Página dedicada full-page com Kanban de **4 colunas** (Backlog /
@@ -127,7 +166,7 @@ cards com chips de categoria/prioridade e barra de progresso. Conforme
 | HU-04.9 | Como Júnior, quero arquivar projetos concluídos (filtro "Mostrar arquivados") | P1 |
 | HU-04.10 | Como Júnior, no mobile quero Kanban empilhado em 1 coluna com tabs no topo | P1 |
 
-**Dependências:** EP-01, EP-02. Reaproveita modelo `Session.project` existente.
+**Dependências:** EP-01, EP-02, EP-08. Reaproveita modelo `Session.project` existente.
 **Arquivos tocados:**
 - Novo: `static/kanban.js`, `api/projects.py` (novo módulo, CRUD de projetos)
 - Persistência: `~/.hermes/webui/projects.json`

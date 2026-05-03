@@ -6,7 +6,7 @@
 > contratuais devem ser feitas primeiro no PRD/Backlog/Design Spec.
 
 **Atualizado em:** 2026-05-02
-**Versão alvo MVP:** `neo-webui-v0.1` ao final da Sprint 4
+**Versão alvo MVP:** `neo-webui-v0.1` ao final da Sprint 5
 **Branch de desenvolvimento atual:** `develop`
 **Branch de produção:** `main`
 
@@ -33,10 +33,11 @@
 |---|---:|---:|---:|---:|---|
 | Sprint 1 | Rebrand visual/textual + locale pt-BR | 11 | 10 + 1 parcial | 0 | aguardando evidências/homologação |
 | Sprint 2 | Dashboard + sidebar/topbar Neo | 11 | 11 | 11 | concluída |
-| Sprint 3 | Projetos/Kanban 4 colunas | 10 | 0 | 0 | aguardando Sprint 2 |
-| Sprint 4 | Ações rápidas + Finanças shell visual | 13 | 0 | 0 | aguardando Sprint 3 |
+| Sprint 3 | Configurações Neo (embutidas no dashboard) | 6 | 0 | 0 | disponível |
+| Sprint 4 | Projetos/Kanban 4 colunas | 10 | 0 | 0 | aguardando Sprint 3 |
+| Sprint 5 | Ações rápidas + Finanças shell visual | 13 | 0 | 0 | aguardando Sprint 4 |
 | Transversal | Qualidade, testes e evidências | 5 | 2 parciais | 0 | em andamento contínuo |
-| Sprint 5+ | Painel Agentes futuro | 5 | 0 | 0 | depende de PoC |
+| Sprint 6+ | Painel Agentes futuro | 5 | 0 | 0 | depende de PoC |
 
 ### Estado atual do worktree
 
@@ -491,14 +492,112 @@ ações rápidas, sidebar fixa de 240px e topbar contextual de 56px.
 
 ---
 
-## Sprint 3 — Projetos (Kanban 4 colunas)
+## Sprint 3 — Configurações Neo (embutidas no dashboard)
+
+**Meta:** ao clicar em "Configurações", o dashboard shell permanece ativo e
+exibe a UI de settings embutida — nav lateral + conteúdo à direita — com visual
+Neo, preservando 100% dos handlers, guards e autosave do upstream.
+
+### HU-08.1 — mountDashboardSettings + interceptação de navegação
+
+**Status:** disponível
+**Prioridade:** P0
+**Épico:** EP-08
+
+**Tasks**
+
+- [ ] Implementar `mountDashboardSettings()` em `static/dashboard.js` (move `#panelSettings` side-menu e `#mainSettings` para slots do shell, equivalente a `mountDashboardChat()`).
+- [ ] Implementar `restoreDashboardSettings()` para restaurar DOM ao sair.
+- [ ] Interceptar `handleDashboardAdminMenu('settings')` para chamar `mountDashboardSettings()` em vez de `switchPanel('settings')`.
+- [ ] Interceptar botão "Configurações" da sidebar Neo (`data-panel="settings"`) para o mesmo fluxo.
+- [ ] Garantir que `dashboard-shell-mode` permanece ativo durante settings.
+- [ ] Registrar evidência técnica em `docs/neo/evidencias/HU-08.1/`.
+
+### HU-08.2 — Seção "Conversa" Neo-skinned
+
+**Status:** disponível
+**Prioridade:** P0
+**Épico:** EP-08
+
+**Tasks**
+
+- [ ] Verificar que `#settingsPaneConversation` (transcript, JSON, import, clear) renderiza corretamente dentro do shell.
+- [ ] Aplicar estilo Neo ao pane: fundo `var(--surface)`, borda `var(--border)`, botões com `.settings-action-btn` Neo.
+- [ ] Confirmar que handlers `btnDownload`, `btnExportJSON`, `btnImportJSON`, `btnClearConvModal` funcionam no contexto embutido.
+- [ ] Registrar evidência técnica em `docs/neo/evidencias/HU-08.2/`.
+
+### HU-08.3 — Seção "Aparência" Neo-skinned (live preview preservado)
+
+**Status:** disponível
+**Prioridade:** P0
+**Épico:** EP-08
+
+**Tasks**
+
+- [ ] Verificar que `#settingsPaneAppearance` (tema, skin picker, font-size) renderiza no shell.
+- [ ] Confirmar live preview de tema/skin e autosave timer (`_settingsAppearanceAutosaveTimer`) intactos.
+- [ ] Confirmar skin Neo aparece selecionado por padrão.
+- [ ] Aplicar CSS Neo ao skin picker e theme toggle dentro do shell.
+- [ ] Registrar evidência técnica em `docs/neo/evidencias/HU-08.3/`.
+
+### HU-08.4 — Seções "Preferências", "Provedores" e "Sistema" Neo-skinned
+
+**Status:** disponível
+**Prioridade:** P0
+**Épico:** EP-08
+
+**Tasks**
+
+- [ ] Verificar renderização de `#settingsPanePreferences`, `#settingsPaneProviders`, `#settingsPaneSystem` no shell.
+- [ ] Aplicar CSS Neo consistente às três seções.
+- [ ] Confirmar que cada seção é acessível via `switchSettingsSection()` dentro do contexto embutido.
+- [ ] Registrar evidência técnica em `docs/neo/evidencias/HU-08.4/`.
+
+### HU-08.5 — Dirty guard e autosave preservados
+
+**Status:** disponível
+**Prioridade:** P0
+**Épico:** EP-08
+
+**Tasks**
+
+- [ ] Garantir que `mountDashboardSettings()` chama `_beginSettingsPanelSession()` (ou equivalente via `switchPanel` interno) para ativar `_settingsDirty`.
+- [ ] Testar fluxo: editar skin → tentar navegar para outro painel → guard de unsaved deve aparecer.
+- [ ] Testar fluxo: editar skin → confirmar discard → painel troca sem alerta.
+- [ ] Garantir que `restoreDashboardSettings()` chama `_revertSettingsPreview()` quando dirty.
+
+### HU-08.6 — Testes automáticos de settings embutido
+
+**Status:** disponível
+**Prioridade:** P0
+**Épico:** EP-08
+
+**Tasks**
+
+- [ ] Criar `tests/test_neo_dashboard_settings.py`.
+- [ ] Testar: `dashboard.js` contém `mountDashboardSettings` e `restoreDashboardSettings`.
+- [ ] Testar: CSS Neo presente para `.dashboard-shell-mode .settings-main`, `.dashboard-shell-mode .side-menu-item`.
+- [ ] Testar: `index.html` mantém `#panelSettings`, `#mainSettings`, `#settingsPaneAppearance` e outros panes existentes.
+- [ ] Testar: i18n contém chaves de settings em pt-BR e en.
+
+### Encerramento Sprint 3
+
+- [ ] HU-08.1 a HU-08.6 concluídas por DoD.
+- [ ] `pytest tests/test_neo_dashboard_settings.py -v` passa.
+- [ ] Suite completa Neo passa sem regressão.
+- [ ] Evidências em `docs/neo/evidencias/HU-08.*`.
+- [ ] Commit limpo em `develop`.
+
+---
+
+## Sprint 4 — Projetos (Kanban 4 colunas)
 
 **Meta:** página Projetos full-page com Kanban de 4 colunas, cards com chips,
 progresso, status pills e drag-and-drop persistido.
 
 ### HU-04.1 — Página Projetos com header
 
-**Status:** aguardando Sprint 2
+**Status:** aguardando Sprint 3
 
 **Tasks**
 
@@ -509,7 +608,7 @@ progresso, status pills e drag-and-drop persistido.
 
 ### HU-04.2 — Kanban 4 colunas
 
-**Status:** aguardando Sprint 2
+**Status:** aguardando Sprint 3
 
 **Tasks**
 
@@ -521,7 +620,7 @@ progresso, status pills e drag-and-drop persistido.
 
 ### HU-04.3 — Criar projeto via modal
 
-**Status:** aguardando Sprint 2
+**Status:** aguardando Sprint 3
 
 **Tasks**
 
@@ -606,14 +705,14 @@ progresso, status pills e drag-and-drop persistido.
 
 ---
 
-## Sprint 4 — Ações rápidas + Finanças
+## Sprint 5 — Ações rápidas + Finanças
 
 **Meta:** fechar o MVP com ações rápidas operacionais e página Finanças com
 shell visual completo, SVG vanilla e persistência local.
 
 ### HU-05.1 — Atalho "Salvar memória"
 
-**Status:** aguardando Dashboard
+**Status:** aguardando Sprint 4
 
 **Tasks**
 
@@ -622,7 +721,7 @@ shell visual completo, SVG vanilla e persistência local.
 
 ### HU-05.2 — Atalho "Novo terminal"
 
-**Status:** aguardando Dashboard
+**Status:** aguardando Sprint 4
 
 **Tasks**
 
@@ -631,7 +730,7 @@ shell visual completo, SVG vanilla e persistência local.
 
 ### HU-05.3 — Seletor "Executar skill"
 
-**Status:** aguardando Dashboard
+**Status:** aguardando Sprint 4
 
 **Tasks**
 
@@ -640,7 +739,7 @@ shell visual completo, SVG vanilla e persistência local.
 
 ### HU-05.4 — Indicador de job cron concluído
 
-**Status:** aguardando Dashboard
+**Status:** aguardando Sprint 4
 
 **Tasks**
 
@@ -649,7 +748,7 @@ shell visual completo, SVG vanilla e persistência local.
 
 ### HU-06.1 — Página Finanças com header
 
-**Status:** aguardando Sprint 2
+**Status:** aguardando Sprint 4
 **Prioridade:** P0
 
 **Tasks**
@@ -751,7 +850,7 @@ shell visual completo, SVG vanilla e persistência local.
 - [ ] Donut: 600ms ease-out.
 - [ ] Respeitar `prefers-reduced-motion`.
 
-### Encerramento Sprint 4
+### Encerramento Sprint 5
 
 - [ ] Todas as HUs MVP concluídas por DoD.
 - [ ] `docs/neo/CHANGELOG.md` criado com release `neo-webui-v0.1`.
@@ -795,7 +894,7 @@ shell visual completo, SVG vanilla e persistência local.
 
 ---
 
-## Sprint 5+ — Painel Agentes (futuro / P2)
+## Sprint 6+ — Painel Agentes (futuro / P2)
 
 > Não iniciar produção sem PoC de custo na VPS. Referência visual:
 > `pablodelucca/pixel-agents`, sem compromisso de reprodução 1:1.
@@ -833,5 +932,9 @@ _A preencher._
 _A preencher._
 
 ### Retro Sprint 4
+
+_A preencher._
+
+### Retro Sprint 5
 
 _A preencher._
