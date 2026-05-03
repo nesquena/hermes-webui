@@ -3291,6 +3291,48 @@ function _compressionCardsNode(state){
   wrap.innerHTML=`<div class="compression-turn-blocks">${_compressionCardsHtml(state)}</div>`;
   return wrap;
 }
+function _isHandoffSummaryToolPayload(value){
+  if(!value||typeof value!=='object'||Array.isArray(value)) return false;
+  return value._handoff_summary_card === true;
+}
+function _parseHandoffSummaryPayload(content){
+  if(!content) return null;
+  if(typeof content==='object' && !Array.isArray(content)) return _isHandoffSummaryToolPayload(content)?content:null;
+  if(typeof content!=='string') return null;
+  try {
+    const parsed=JSON.parse(content);
+    return _isHandoffSummaryToolPayload(parsed)?parsed:null;
+  } catch (e) {
+    return null;
+  }
+}
+function _handoffSummaryStateFromMessage(m){
+  if(!m||m.role!=='tool') return null;
+  const payload = _parseHandoffSummaryPayload(m.content);
+  if(!payload) return null;
+  if(String(payload.session_id||'') && S.session && String(m.session_id||'') && String(payload.session_id)!==String(S.session.session_id||'')) {
+    return null;
+  }
+  const summary = String(payload.summary||'').trim();
+  if(!summary) return null;
+  return {
+    phase: 'done',
+    channel: payload.channel || null,
+    rounds: Number.isFinite(payload.rounds)?payload.rounds:null,
+    summary,
+    fallback: !!payload.fallback,
+    generatedAt: Number(payload.generated_at) || null,
+  };
+}
+function _collectHandoffSummaryStates(messages){
+  const states=[];
+  if(!Array.isArray(messages)) return states;
+  for(let i=0;i<messages.length;i++){
+    const state=_handoffSummaryStateFromMessage(messages[i]);
+    if(state) states.push({state, rawIdx:i});
+  }
+  return states;
+}
 function _isContextCompactionMessage(m){
   if(!m||!m.role||m.role==='tool') return false;
   const text=msgContent(m)||String(m.content||'');
@@ -3448,6 +3490,7 @@ function _handoffCardsHtml(state){
   const label=channel?`${channel} handoff summary`:'Handoff summary';
   const isError=state.phase==='error';
   const isDone=state.phase==='done';
+  const isFallback=!!state.fallback;
   const detail=isError
     ? String(state.errorText||'Could not generate summary. Please try again.')
     : isDone
@@ -3462,7 +3505,13 @@ function _handoffCardsHtml(state){
       ? li('check',13)
       : '<span class="tool-card-running-dot"></span>';
   const bodyHtml=isDone&&!isError
-    ? renderMd(detail)
+    ? (
+      `${renderMd(detail)}${
+        isFallback
+          ? '<p class="handoff-summary-fallback-note">Fallback summary generated from recent turns; no model-based rewrite was used.</p>'
+          : ''
+      }`
+    )
     : `<p>${esc(detail)}</p>`;
   return `
     <div class="tool-card-row compression-card-row handoff-card-row" data-compression-card="1" data-handoff-card="1">
@@ -3768,17 +3817,61 @@ function renderMessages(){
     }
     inner.appendChild(node);
   }
+  function _insertCompressionLikeNodeByRawIdx(node, rawIdx){
+    if(!node) return;
+    if(!visWithIdx.length){
+      inner.appendChild(node);
+      return;
+    }
+    let anchorIdx=null;
+    for(let i=0;i<visWithIdx.length;i++){
+      if(visWithIdx[i].rawIdx > rawIdx){
+        anchorIdx=i;
+        break;
+      }
+    }
+    if(anchorIdx===null){
+      inner.appendChild(node);
+      return;
+    }
+    const anchorRawIdx=visWithIdx[anchorIdx].rawIdx;
+    const anchorSeg=assistantSegments.get(anchorRawIdx);
+    if(anchorSeg){
+      const turn=anchorSeg.closest('.assistant-turn');
+      const blocks=_assistantTurnBlocks(turn);
+      if(blocks){
+        blocks.appendChild(node);
+        return;
+      }
+      const turnParent=turn && turn.parentElement;
+      if(turnParent){
+        turnParent.insertBefore(node, turn);
+        return;
+      }
+    }
+    const userRow=userRows.get(anchorRawIdx);
+    if(userRow && userRow.parentElement){
+      userRow.parentElement.insertBefore(node, userRow);
+      return;
+    }
+    inner.appendChild(node);
+  }
   const preservedOnlyNode=(!preservedCompressionTaskCardsAttached&&(!referenceMessage||compressionState)&&preservedCompressionTaskMessages.length)
     ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
     : null;
   const preservedOnlyAnchor=preservedCompressionRawIdxs.length
     ? (()=>{let idx=null;for(let i=0;i<visWithIdx.length;i++){if(visWithIdx[i].rawIdx<preservedCompressionRawIdxs[0]) idx=i;}return idx;})()
     : null;
+  const handoffSummaryStates=_collectHandoffSummaryStates(S.messages);
 
   _insertCompressionLikeNode(compressionNode);
   _insertCompressionLikeNode(referenceNode);
   _insertCompressionLikeNode(preservedOnlyNode, preservedOnlyAnchor);
   _insertCompressionLikeNode(handoffState?_handoffCardsNode(handoffState):null, visWithIdx.length?visWithIdx.length-1:null);
+  for(const entry of handoffSummaryStates){
+    if(!entry||!entry.state) continue;
+    _insertCompressionLikeNodeByRawIdx(_handoffCardsNode(entry.state), entry.rawIdx);
+  }
   renderCompressionUi();
   // Insert settled tool call cards (history view only).
   // During live streaming, tool cards are rendered in #liveToolCards by the
