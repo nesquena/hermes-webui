@@ -10,7 +10,9 @@ import logging
 import os
 import queue
 import re
+import platform
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -2806,6 +2808,9 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/file/create-dir":
         return _handle_create_dir(handler, body)
 
+    if parsed.path == "/api/file/reveal":
+        return _handle_file_reveal(handler, body)
+
     # ── Workspace management (POST) ──
     if parsed.path == "/api/workspaces/add":
         return _handle_workspace_add(handler, body)
@@ -5151,6 +5156,34 @@ def _handle_create_dir(handler, body):
         return j(
             handler, {"ok": True, "path": str(target.relative_to(Path(s.workspace)))}
         )
+    except (ValueError, PermissionError, OSError) as e:
+        return bad(handler, _sanitize_error(e))
+
+
+def _handle_file_reveal(handler, body):
+    try:
+        require(body, "session_id", "path")
+    except ValueError as e:
+        return bad(handler, str(e))
+    try:
+        s = get_session(body["session_id"])
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    try:
+        target = safe_resolve(Path(s.workspace), body["path"])
+        if not target.exists():
+            return bad(handler, "File not found", 404)
+
+        system = platform.system()
+        if system == "Darwin":
+            subprocess.Popen(["open", "-R", str(target)])
+        elif system == "Windows":
+            subprocess.Popen(["explorer.exe", "/select," + str(target)])
+        else:
+            # Linux / other — open parent directory
+            subprocess.Popen(["xdg-open", str(target.parent)])
+
+        return j(handler, {"ok": True, "path": body["path"]})
     except (ValueError, PermissionError, OSError) as e:
         return bad(handler, _sanitize_error(e))
 
