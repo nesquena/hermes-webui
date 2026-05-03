@@ -3163,11 +3163,33 @@ async function loadSettingsPanel(){
     // Password field: always blank (we don't send hash back)
     const pwField=$('settingsPassword');
     if(pwField){pwField.value='';pwField.addEventListener('input',_markSettingsDirty,{once:false});}
+    // #1560: when HERMES_WEBUI_PASSWORD env var is set, the settings password
+    // field silently no-ops. Disable it + reveal the lock banner so the UI
+    // tells the truth before a user tries (and the backend now also returns
+    // 409 as defense-in-depth).
+    const pwEnvLocked=!!settings.password_env_var;
+    const pwLockBanner=$('settingsPasswordEnvLock');
+    if(pwField){
+      pwField.disabled=pwEnvLocked;
+      if(pwEnvLocked){
+        pwField.value='';
+        pwField.placeholder=t('password_env_var_locked_placeholder')||pwField.placeholder;
+      }
+    }
+    if(pwLockBanner) pwLockBanner.style.display=pwEnvLocked?'block':'none';
     // Show auth buttons only when auth is active
     try{
       const authStatus=await api('/api/auth/status');
       _setSettingsAuthButtonsVisible(!!authStatus.auth_enabled);
     }catch(e){}
+    // #1560: env-var-locked password also disables the Disable Auth button —
+    // clearing settings.password_hash is silent no-op when the env var is set,
+    // and the backend now returns 409 anyway, so don't offer the action.
+    // Sign Out remains available since it only clears the session cookie.
+    if(pwEnvLocked){
+      const disableBtn=$('btnDisableAuth');
+      if(disableBtn) disableBtn.style.display='none';
+    }
     _syncHermesPanelSessionActions();
     loadProvidersPanel(); // load provider cards in background
     switchSettingsSection(_settingsSection);

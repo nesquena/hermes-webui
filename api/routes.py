@@ -1631,6 +1631,13 @@ def handle_get(handler, parsed) -> bool:
         settings = load_settings()
         # Never expose the stored password hash to clients
         settings.pop("password_hash", None)
+        # Surface env-var precedence so the UI can disable the password field
+        # instead of silently no-oping the save (#1560). The setting takes
+        # precedence in api.auth.get_password_hash(), but until now the UI
+        # had no way to know — see issue #1139 / #1560.
+        settings["password_env_var"] = bool(
+            os.getenv("HERMES_WEBUI_PASSWORD", "").strip()
+        )
         # Inject the running version so the UI badge stays in sync with git tags
         # without any manual release step.
         try:
@@ -2975,6 +2982,21 @@ def handle_post(handler, parsed) -> bool:
             isinstance(body.get("_set_password"), str)
             and body.get("_set_password", "").strip()
         )
+        requested_clear_password = bool(body.get("_clear_password"))
+
+        # #1560: HERMES_WEBUI_PASSWORD env var takes precedence in
+        # api.auth.get_password_hash(), so writing password_hash to settings.json
+        # has no effect on auth. Refuse loudly with 409 instead of silently
+        # succeeding — the previous behaviour returned 200 + a green save toast
+        # while every subsequent login still required the env-var password.
+        if requested_password or requested_clear_password:
+            if os.getenv("HERMES_WEBUI_PASSWORD", "").strip():
+                return bad(
+                    handler,
+                    "HERMES_WEBUI_PASSWORD env var is set — it overrides the settings password. "
+                    "Unset the env var and restart the server before changing the password here.",
+                    409,
+                )
 
         saved = save_settings(body)
         saved.pop("password_hash", None)  # never expose hash to client
