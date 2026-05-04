@@ -363,6 +363,28 @@ def _space_tool_position_to_token(payload: dict[str, Any]) -> dict[str, Any]:
     return {"token": f"{position['col']},{position['row']}", "position": position}
 
 
+def _space_tool_parse_widget_position_token(payload: dict[str, Any]) -> dict[str, Any]:
+    """Parse a Space Agent widget-position token without echoing unsafe payload fields."""
+    position = _normalize_source_widget_position(
+        payload.get("value", payload.get("token", payload.get("position", ""))),
+        payload.get("fallback"),
+    )
+    return {"token": f"{position['col']},{position['row']}", "position": position}
+
+
+def _space_tool_clamp_widget_position(payload: dict[str, Any]) -> dict[str, Any]:
+    """Clamp a Space Agent-style position so rendered widget bounds stay inside the source grid."""
+    size = _normalize_source_widget_size(payload.get("size"), _SOURCE_WIDGET_DEFAULT_SIZE)
+    position = _normalize_source_widget_position(payload.get("position"), payload.get("fallback"))
+    max_col = _SOURCE_GRID_COORD_MAX - size["cols"] + 1
+    max_row = _SOURCE_GRID_COORD_MAX - size["rows"] + 1
+    clamped = {
+        "col": min(max_col, max(_SOURCE_GRID_COORD_MIN, position["col"])),
+        "row": min(max_row, max(_SOURCE_GRID_COORD_MIN, position["row"])),
+    }
+    return {"token": f"{clamped['col']},{clamped['row']}", "position": clamped, "size": size}
+
+
 def _space_tool_get_rendered_widget_size(payload: dict[str, Any]) -> dict[str, Any]:
     fallback = _normalize_source_widget_size(payload.get("fallback"), _SOURCE_WIDGET_DEFAULT_SIZE)
     size = _normalize_source_widget_size(payload.get("size"), fallback)
@@ -1746,8 +1768,15 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         return {"ok": True, "action": name, **_space_tool_size_to_token(data), "mode": "metadata-only"}
     if name == "space.spaces.parsewidgetsizetoken":
         return {"ok": True, "action": name, **_space_tool_parse_widget_size_token(data), "mode": "metadata-only"}
+    if name == "space.spaces.defaultwidgetposition":
+        position = dict(_SOURCE_WIDGET_DEFAULT_POSITION)
+        return {"ok": True, "action": name, "token": f"{position['col']},{position['row']}", "position": position, "mode": "metadata-only"}
     if name in {"space.spaces.normalizewidgetposition", "space.spaces.positiontotoken"}:
         return {"ok": True, "action": name, **_space_tool_position_to_token(data), "mode": "metadata-only"}
+    if name == "space.spaces.parsewidgetpositiontoken":
+        return {"ok": True, "action": name, **_space_tool_parse_widget_position_token(data), "mode": "metadata-only"}
+    if name == "space.spaces.clampwidgetposition":
+        return {"ok": True, "action": name, **_space_tool_clamp_widget_position(data), "mode": "metadata-only"}
     if name == "space.spaces.getrenderedwidgetsize":
         return {"ok": True, "action": name, **_space_tool_get_rendered_widget_size(data), "mode": "metadata-only"}
     if name in {"space.spaces.repositioncurrentspace", "space.current.reposition", "space.current.reposition_viewport"}:

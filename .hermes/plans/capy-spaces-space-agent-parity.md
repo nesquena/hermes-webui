@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-04 04:46 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-04 07:08 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: source-style widget size SDK helper coverage now lets Space Agent-style adapter calls read `defaultWidgetSize`, normalize arbitrary widget sizes, and parse widget-size tokens without executing or exposing generated/source/credential-like request fields. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: source-style widget position SDK helper coverage now lets Space Agent-style adapter calls read the default widget position, parse widget-position tokens, and clamp widget positions to rendered source-grid bounds without executing or exposing generated/source/credential-like request fields. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): support source widget position SDK helpers`
+  - Added RED/GREEN backend coverage proving `space.spaces.defaultWidgetPosition`, `space.spaces.parseWidgetPositionToken`, and `space.spaces.clampWidgetPosition` return metadata-only position/token/size results with Space Agent-compatible defaults, token parsing, size-aware clamping, and safe fallbacks while omitting renderer/html/source/API auth markers from serialized adapter responses.
+  - Validation at completion before screenshot/restart: focused RED failed with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`), focused position/size adapter regression set passed (`3 passed`). Continue with `git log -1 --oneline` and the final sprint report for the exact validation bundle.
 
 - `feat(spaces): support source widget size SDK helpers`
   - Added RED/GREEN backend coverage proving `space.spaces.defaultWidgetSize`, `space.spaces.normalizeWidgetSize`, and `space.spaces.parseWidgetSizeToken` return metadata-only widget size/token results with Space Agent-compatible defaults, clamping, token parsing, and safe fallbacks while omitting renderer/html/source/API auth markers from serialized adapter responses.

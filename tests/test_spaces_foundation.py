@@ -917,6 +917,67 @@ def test_space_tool_adapter_supports_source_position_layout_helpers_metadata_onl
 
 
 
+def test_space_tool_adapter_supports_source_position_sdk_helpers_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    default_position = spaces.run_space_tool(
+        "space.spaces.defaultWidgetPosition",
+        {"renderer": "<script>steal()</script>", "api_key": "***"},
+    )
+    parsed = spaces.run_space_tool(
+        "space.spaces.parseWidgetPositionToken",
+        {"value": " 17 , -9999 ", "html": "<img src=x onerror=steal()>"},
+    )
+    fallback = spaces.run_space_tool(
+        "space.spaces.parseWidgetPositionToken",
+        {"token": "not-a-position", "fallback": [9, -9999], "token_secret": "***"},
+    )
+    clamped = spaces.run_space_tool(
+        "space.spaces.clampWidgetPosition",
+        {
+            "position": {"col": 4096, "row": 4096},
+            "size": {"cols": 24, "rows": 3},
+            "source": "SECRET_SOURCE",
+        },
+    )
+    serialized = json.dumps([default_position, parsed, fallback, clamped]).lower()
+
+    assert default_position == {
+        "ok": True,
+        "action": "space.spaces.defaultwidgetposition",
+        "token": "0,0",
+        "position": {"col": 0, "row": 0},
+        "mode": "metadata-only",
+    }
+    assert parsed == {
+        "ok": True,
+        "action": "space.spaces.parsewidgetpositiontoken",
+        "token": "17,-4096",
+        "position": {"col": 17, "row": -4096},
+        "mode": "metadata-only",
+    }
+    assert fallback["token"] == "9,-4096"
+    assert fallback["position"] == {"col": 9, "row": -4096}
+    assert clamped == {
+        "ok": True,
+        "action": "space.spaces.clampwidgetposition",
+        "token": "4073,4094",
+        "position": {"col": 4073, "row": 4094},
+        "size": {"cols": 24, "rows": 3},
+        "mode": "metadata-only",
+    }
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+    assert '"source":' not in serialized
+
+
+
+
 def test_space_tool_adapter_supports_source_reposition_current_space_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "source-reposition-lab", "name": "Source Reposition Lab"})
