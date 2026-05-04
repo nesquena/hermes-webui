@@ -2329,6 +2329,11 @@ def get_available_models() -> dict:
             for pid in sorted(detected_providers):
                 if pid.startswith("custom:") and pid in _named_custom_groups:
                     _nc_display, _nc_models = _named_custom_groups[pid]
+                    # If all named-group models were deduped (already auto-detected
+                    # from base_url /v1/models), fall back to auto-detected models
+                    # instead of silently dropping the group (issue #1619).
+                    if not _nc_models:
+                        _nc_models = auto_detected_models_by_provider.get(pid, [])
                     if _nc_models:
                         groups.append({"provider": _nc_display, "provider_id": pid, "models": _nc_models})
                     continue

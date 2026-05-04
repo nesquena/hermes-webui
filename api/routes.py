@@ -4509,11 +4509,12 @@ def _handle_live_models(handler, parsed):
             ids = []
 
         if not ids:
-            # For 'custom' provider, provider_model_ids() returns [] because
-            # 'custom' isn't a real endpoint.  Fall back to the custom_providers
-            # entries from config.yaml so the live-model enrichment step can
-            # add any models that weren't already in the static list.
-            if provider == "custom":
+            # For 'custom' and 'custom:*' providers, provider_model_ids()
+            # returns [] because they aren't real hermes_cli endpoints.
+            # Fall back to the custom_providers entries from config.yaml so
+            # the live-model enrichment step can add any models that weren't
+            # already in the static list (issue #1619).
+            if provider == "custom" or provider.startswith("custom:"):
                 try:
                     _cp_entries = cfg.get("custom_providers", [])
                     if isinstance(_cp_entries, list):
@@ -4525,8 +4526,8 @@ def _handle_live_models(handler, parsed):
                 except Exception:
                     pass
             
-            # If still no ids, try fetching from model.base_url directly (OpenAI-compat endpoint)
-            if not ids and provider == "custom":
+            # If still no ids, try fetching from base_url directly (OpenAI-compat endpoint)
+            if not ids and (provider == "custom" or provider.startswith("custom:")):
                 _base_url = cfg.get("model", {}).get("base_url")
                 _api_key = cfg.get("model", {}).get("api_key")
                 if _base_url and _api_key:

@@ -1191,21 +1191,35 @@ window.addEventListener('resize',function(){
 // Uses a guard flag to avoid the race where programmatic scrolls (from
 // scrollIfPinned / scrollToBottom) re-set _scrollPinned=true, overriding
 // the user's explicit scroll-up.  Fixes #1469 / #1360.
+// rAF-debounced scroll listener (issue #1360): on macOS WKWebView, trackpad
+// momentum scrolling fires scroll events that interleave with the
+// _programmaticScroll setTimeout(0) guard. A mid-momentum scroll event can
+// either get swallowed (_programmaticScroll still true) or falsely report
+// nearBottom (momentum hasn't settled). rAF defers the nearBottom check to
+// the next paint frame when the browser's scroll position has settled.
+// A hysteresis counter requires two consecutive near-bottom samples before
+// re-pinning, preventing accidental re-pin during initial deceleration.
 let _scrollPinned=true;
 let _programmaticScroll=false;
+let _nearBottomCount=0;
 (function(){
   const el=document.getElementById('messages');
   if(!el) return;
+  let _scrollRaf=0;
   el.addEventListener('scroll',()=>{
     if(_programmaticScroll) return; // ignore scrolls we triggered ourselves
-    const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<250;
-    _scrollPinned=nearBottom;
-    const btn=$('scrollToBottomBtn');
-    if(btn) btn.style.display=_scrollPinned?'none':'flex';
-    // Load older messages when scrolled near the top
-    if(el.scrollTop<80 && typeof _messagesTruncated!=='undefined' && _messagesTruncated && typeof _loadOlderMessages==='function'){
-      _loadOlderMessages();
-    }
+    cancelAnimationFrame(_scrollRaf);
+    _scrollRaf=requestAnimationFrame(()=>{
+      const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<250;
+      _nearBottomCount=nearBottom?_nearBottomCount+1:0;
+      _scrollPinned=_nearBottomCount>=2;
+      const btn=$('scrollToBottomBtn');
+      if(btn) btn.style.display=_scrollPinned?'none':'flex';
+      // Load older messages when scrolled near the top
+      if(el.scrollTop<80 && typeof _messagesTruncated!=='undefined' && _messagesTruncated && typeof _loadOlderMessages==='function'){
+        _loadOlderMessages();
+      }
+    });
   });
 })();
 function _fmtTokens(n){if(!n||n<0)return'0';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'k';return String(n);}
