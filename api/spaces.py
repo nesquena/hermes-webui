@@ -12,6 +12,7 @@ import hashlib
 import io
 import ipaddress
 import json
+import math
 import os
 import re
 import shutil
@@ -71,6 +72,7 @@ _SOURCE_WIDGET_SIZE_PRESETS = {
 }
 _SOURCE_GRID_COORD_MIN = -4096
 _SOURCE_GRID_COORD_MAX = 4096
+_SOURCE_PACKING_VIEWPORT_HEADROOM_COLS = 2
 _SOURCE_SPACES_ROOT_PATH = "~/spaces/"
 _SOURCE_SPACE_MANIFEST_FILE = "space.yaml"
 _SOURCE_SPACE_WIDGETS_DIR = "widgets/"
@@ -397,6 +399,196 @@ def _space_tool_size_to_token(payload: dict[str, Any]) -> dict[str, Any]:
     fallback = _normalize_source_widget_size(payload.get("fallback"), _SOURCE_WIDGET_DEFAULT_SIZE)
     size = _normalize_source_widget_size(payload.get("size"), fallback)
     return {"token": f"{size['cols']}x{size['rows']}", "size": size}
+
+
+def _source_create_rect(widget_id: str, position: dict[str, int], size: dict[str, int]) -> dict[str, Any]:
+    clamped = _space_tool_clamp_widget_position({"position": position, "size": size})["position"]
+    return {
+        "bottom": clamped["row"] + size["rows"] - 1,
+        "left": clamped["col"],
+        "right": clamped["col"] + size["cols"] - 1,
+        "top": clamped["row"],
+        "widget_id": widget_id,
+    }
+
+
+def _source_rects_overlap(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    return not (
+        left["right"] < right["left"]
+        or left["left"] > right["right"]
+        or left["bottom"] < right["top"]
+        or left["top"] > right["bottom"]
+    )
+
+
+def _source_can_place_rect(position: dict[str, int], size: dict[str, int], occupied_rects: list[dict[str, Any]]) -> bool:
+    candidate = _source_create_rect("", position, size)
+    return all(not _source_rects_overlap(candidate, occupied) for occupied in occupied_rects)
+
+
+def _source_build_packing_entries(widget_ids: Any, widget_sizes: Any) -> list[dict[str, Any]]:
+    ids = widget_ids if isinstance(widget_ids, list) else []
+    sizes = widget_sizes if isinstance(widget_sizes, dict) else {}
+    entries = []
+    for index, raw_widget_id in enumerate(ids):
+        widget_id = validate_widget_id(raw_widget_id)
+        size = _normalize_source_widget_size(sizes.get(widget_id), _SOURCE_WIDGET_DEFAULT_SIZE)
+        entries.append({"area": size["cols"] * size["rows"], "index": index, "size": size, "widget_id": widget_id})
+    return entries
+
+
+def _source_sort_packing_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(entries, key=lambda entry: (-entry["area"], -entry["size"]["cols"], -entry["size"]["rows"], entry["index"]))
+
+
+def _source_viewport_cols(value: Any, fallback: int = 0) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = fallback
+    return max(0, parsed)
+
+
+def _source_packing_width_threshold(entries: list[dict[str, Any]], viewport_cols: Any = 0, *, cap_to_total_width: bool = True) -> int:
+    if not entries:
+        return 1
+    max_widget_width = max(entry["size"]["cols"] for entry in entries)
+    total_width = sum(entry["size"]["cols"] for entry in entries)
+    viewport = _source_viewport_cols(viewport_cols)
+    normalized_viewport = max(1, viewport - _SOURCE_PACKING_VIEWPORT_HEADROOM_COLS) if viewport > 0 else total_width
+    if not cap_to_total_width:
+        return max(max_widget_width, normalized_viewport)
+    return max(max_widget_width, min(total_width, max(max_widget_width, normalized_viewport)))
+
+
+def _source_scan_cell_occupied(position: dict[str, int], occupied_rects: list[dict[str, Any]]) -> bool:
+    return not _source_can_place_rect(position, {"cols": 1, "rows": 1}, occupied_rects)
+
+
+def _source_find_physically_fitting_entry(
+    entries: list[dict[str, Any]],
+    position: dict[str, int],
+    width_threshold: int,
+    occupied_rects: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    for entry in entries:
+        if position["col"] + entry["size"]["cols"] > width_threshold:
+            continue
+        if not _source_can_place_rect(position, entry["size"], occupied_rects):
+            continue
+        return entry
+    return None
+
+
+def _source_build_first_fit_packed_positions(
+    entries: list[dict[str, Any]],
+    width_threshold: int,
+    *,
+    occupied_rects: list[dict[str, Any]] | None = None,
+    start_row: int = 0,
+) -> dict[str, dict[str, int]]:
+    occupied = list(occupied_rects or [])
+    positions: dict[str, dict[str, int]] = {}
+    remaining = _source_sort_packing_entries(entries)
+    row = max(0, int(start_row or 0))
+    while remaining:
+        for col in range(0, max(1, width_threshold)):
+            candidate = {"col": col, "row": row}
+            if _source_scan_cell_occupied(candidate, occupied):
+                continue
+            matching = _source_find_physically_fitting_entry(remaining, candidate, width_threshold, occupied)
+            if not matching:
+                continue
+            positions[matching["widget_id"]] = candidate
+            occupied.append(_source_create_rect(matching["widget_id"], candidate, matching["size"]))
+            remaining.remove(matching)
+        row += 1
+    return positions
+
+
+def _source_packed_bounds(positions: dict[str, dict[str, int]], sizes: dict[str, dict[str, int]]) -> dict[str, int]:
+    bounds = {"min_col": 0, "max_col": 0, "min_row": 0, "max_row": 0, "width": 0, "height": 0}
+    has_positions = False
+    for widget_id, position in positions.items():
+        size = _normalize_source_widget_size(sizes.get(widget_id), _SOURCE_WIDGET_DEFAULT_SIZE)
+        right = position["col"] + size["cols"]
+        bottom = position["row"] + size["rows"]
+        if not has_positions:
+            bounds.update({"min_col": position["col"], "max_col": right, "min_row": position["row"], "max_row": bottom})
+            has_positions = True
+            continue
+        bounds["min_col"] = min(bounds["min_col"], position["col"])
+        bounds["max_col"] = max(bounds["max_col"], right)
+        bounds["min_row"] = min(bounds["min_row"], position["row"])
+        bounds["max_row"] = max(bounds["max_row"], bottom)
+    if has_positions:
+        bounds["width"] = bounds["max_col"] - bounds["min_col"]
+        bounds["height"] = bounds["max_row"] - bounds["min_row"]
+    return bounds
+
+
+def _space_tool_build_centered_first_fit_layout(payload: dict[str, Any]) -> dict[str, Any]:
+    sizes = payload.get("widgetSizes") or payload.get("widget_sizes") or {}
+    sizes = sizes if isinstance(sizes, dict) else {}
+    entries = _source_build_packing_entries(payload.get("widgetIds") or payload.get("widget_ids") or [], sizes)
+    if not entries:
+        return {"positions": {}}
+    width_threshold = _source_packing_width_threshold(entries, payload.get("viewportCols", payload.get("viewport_cols")))
+    positions = _source_build_first_fit_packed_positions(entries, width_threshold)
+    bounds = _source_packed_bounds(positions, sizes)
+    shift_col = -math.floor(bounds["width"] / 2) - bounds["min_col"]
+    shift_row = -math.floor(bounds["height"] / 2) - bounds["min_row"]
+    if shift_col or shift_row:
+        positions = {
+            widget_id: {"col": position["col"] + shift_col, "row": position["row"] + shift_row}
+            for widget_id, position in positions.items()
+        }
+    return {"positions": positions}
+
+
+def _source_occupied_rects(
+    widget_positions: Any,
+    widget_sizes: Any,
+    offset: dict[str, int],
+) -> list[dict[str, Any]]:
+    positions = widget_positions if isinstance(widget_positions, dict) else {}
+    sizes = widget_sizes if isinstance(widget_sizes, dict) else {}
+    rects = []
+    for widget_id, raw_position in positions.items():
+        safe_widget_id = validate_widget_id(widget_id)
+        position = _normalize_source_widget_position(raw_position, _SOURCE_WIDGET_DEFAULT_POSITION)
+        size = _normalize_source_widget_size(sizes.get(safe_widget_id), _SOURCE_WIDGET_DEFAULT_SIZE)
+        rects.append(
+            _source_create_rect(
+                safe_widget_id,
+                {"col": position["col"] - offset["col"], "row": position["row"] - offset["row"]},
+                size,
+            )
+        )
+    return rects
+
+
+def _space_tool_find_first_fit_widget_placement(payload: dict[str, Any]) -> dict[str, Any]:
+    widget_size = _normalize_source_widget_size(payload.get("widgetSize", payload.get("widget_size")), _SOURCE_WIDGET_DEFAULT_SIZE)
+    existing_positions = payload.get("existingWidgetPositions") or payload.get("existing_widget_positions") or {}
+    existing_sizes = payload.get("existingWidgetSizes") or payload.get("existing_widget_sizes") or {}
+    existing_positions = existing_positions if isinstance(existing_positions, dict) else {}
+    existing_sizes = existing_sizes if isinstance(existing_sizes, dict) else {}
+    bounds = _source_packed_bounds(
+        {widget_id: _normalize_source_widget_position(position, _SOURCE_WIDGET_DEFAULT_POSITION) for widget_id, position in existing_positions.items()},
+        existing_sizes,
+    )
+    offset = {"col": bounds["min_col"], "row": bounds["min_row"]} if existing_positions else {"col": 0, "row": 0}
+    entry = {"area": widget_size["cols"] * widget_size["rows"], "index": 0, "size": widget_size, "widget_id": "__candidate__"}
+    width_threshold = _source_packing_width_threshold([entry], payload.get("viewportCols", payload.get("viewport_cols")), cap_to_total_width=False)
+    local_positions = _source_build_first_fit_packed_positions(
+        [entry],
+        width_threshold,
+        occupied_rects=_source_occupied_rects(existing_positions, existing_sizes, offset),
+    )
+    local_position = local_positions.get("__candidate__", dict(_SOURCE_WIDGET_DEFAULT_POSITION))
+    position = {"col": local_position["col"] + offset["col"], "row": local_position["row"] + offset["row"]}
+    return {"position": position, "token": f"{position['col']},{position['row']}", "size": widget_size}
 
 
 def _space_tool_parse_widget_size_token(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1779,6 +1971,10 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         return {"ok": True, "action": name, **_space_tool_clamp_widget_position(data), "mode": "metadata-only"}
     if name == "space.spaces.getrenderedwidgetsize":
         return {"ok": True, "action": name, **_space_tool_get_rendered_widget_size(data), "mode": "metadata-only"}
+    if name == "space.spaces.buildcenteredfirstfitlayout":
+        return {"ok": True, "action": name, **_space_tool_build_centered_first_fit_layout(data), "mode": "metadata-only"}
+    if name == "space.spaces.findfirstfitwidgetplacement":
+        return {"ok": True, "action": name, **_space_tool_find_first_fit_widget_placement(data), "mode": "metadata-only"}
     if name in {"space.spaces.repositioncurrentspace", "space.current.reposition", "space.current.reposition_viewport"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         request = {

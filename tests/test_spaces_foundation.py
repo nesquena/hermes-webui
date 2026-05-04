@@ -978,6 +978,66 @@ def test_space_tool_adapter_supports_source_position_sdk_helpers_metadata_only(m
 
 
 
+def test_space_tool_adapter_supports_source_first_fit_layout_helpers_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    centered = spaces.run_space_tool(
+        "space.spaces.buildCenteredFirstFitLayout",
+        {
+            "widgetIds": ["wide-card", "small-card", "tall-card"],
+            "widgetSizes": {
+                "wide-card": {"cols": 6, "rows": 2},
+                "small-card": {"cols": 2, "rows": 2, "api_key": "***"},
+                "tall-card": {"cols": 3, "rows": 4},
+            },
+            "viewportCols": 10,
+            "renderer": "<script>steal()</script>",
+        },
+    )
+    placement = spaces.run_space_tool(
+        "space.spaces.findFirstFitWidgetPlacement",
+        {
+            "existingWidgetPositions": centered["positions"],
+            "existingWidgetSizes": {
+                "wide-card": {"cols": 6, "rows": 2},
+                "small-card": {"cols": 2, "rows": 2},
+                "tall-card": {"cols": 3, "rows": 4},
+            },
+            "widgetSize": {"cols": 2, "rows": 2, "token": "***"},
+            "viewportCols": 10,
+            "source": "SECRET_SOURCE",
+        },
+    )
+    serialized = json.dumps([centered, placement]).lower()
+
+    assert centered == {
+        "ok": True,
+        "action": "space.spaces.buildcenteredfirstfitlayout",
+        "positions": {
+            "wide-card": {"col": -4, "row": -3},
+            "small-card": {"col": 2, "row": -3},
+            "tall-card": {"col": -4, "row": -1},
+        },
+        "mode": "metadata-only",
+    }
+    assert placement == {
+        "ok": True,
+        "action": "space.spaces.findfirstfitwidgetplacement",
+        "position": {"col": -1, "row": -1},
+        "token": "-1,-1",
+        "size": {"cols": 2, "rows": 2},
+        "mode": "metadata-only",
+    }
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+    assert "token" in serialized  # returned position token is safe metadata
+    assert '"source":' not in serialized
+
+
+
 def test_space_tool_adapter_supports_source_reposition_current_space_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "source-reposition-lab", "name": "Source Reposition Lab"})
