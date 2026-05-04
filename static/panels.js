@@ -988,13 +988,93 @@ async function loadKanban(animate){
 
 function filterKanban(){ _kanbanRenderBoard(); }
 
+function _kanbanFormatDetailValue(value){
+  if (value === undefined || value === null || value === '') return '';
+  if (typeof value === 'object') {
+    try { return JSON.stringify(value, null, 2); } catch(e) { return String(value); }
+  }
+  return String(value);
+}
+
+function _kanbanDetailSection(cls, title, inner, emptyKey){
+  const content = inner || `<div class="kanban-detail-empty">${esc(t(emptyKey))}</div>`;
+  return `<section class="kanban-detail-section ${cls}">
+    <h3>${esc(title)}</h3>
+    ${content}
+  </section>`;
+}
+
+function _kanbanCommentHtml(comment){
+  const body = comment.body || comment.text || comment.content || '';
+  const by = comment.author || comment.created_by || comment.actor || '';
+  const at = comment.created_at || comment.ts || '';
+  return `<div class="kanban-detail-row">
+    <div class="kanban-detail-row-main">${esc(body)}</div>
+    <div class="kanban-detail-row-meta">${esc([by, at].filter(Boolean).join(' · '))}</div>
+  </div>`;
+}
+
+function _kanbanEventHtml(event){
+  const kind = event.kind || event.type || 'event';
+  const at = event.created_at || event.ts || '';
+  const payload = _kanbanFormatDetailValue(event.payload || event.data || '');
+  return `<div class="kanban-detail-row">
+    <div class="kanban-detail-row-main">${esc(kind)}</div>
+    ${payload ? `<pre class="kanban-detail-pre">${esc(payload)}</pre>` : ''}
+    <div class="kanban-detail-row-meta">${esc(at)}</div>
+  </div>`;
+}
+
+function _kanbanRunHtml(run){
+  const status = run.status || run.state || run.result || '';
+  const label = run.run_id || run.id || run.worker || t('kanban_task');
+  const started = run.started_at || run.created_at || '';
+  const finished = run.finished_at || run.completed_at || '';
+  const detail = run.error || run.summary || run.log_tail || '';
+  return `<div class="kanban-detail-row">
+    <div class="kanban-detail-row-main">${esc(label)}${status ? ` · ${esc(status)}` : ''}</div>
+    ${detail ? `<pre class="kanban-detail-pre">${esc(_kanbanFormatDetailValue(detail))}</pre>` : ''}
+    <div class="kanban-detail-row-meta">${esc([started, finished].filter(Boolean).join(' → '))}</div>
+  </div>`;
+}
+
+function _kanbanLinksHtml(links){
+  const parents = (links && links.parents) || [];
+  const children = (links && links.children) || [];
+  if (!parents.length && !children.length) return '';
+  const item = id => `<code>${esc(id)}</code>`;
+  return `<div class="kanban-detail-links-grid">
+    <div><strong>${esc(t('kanban_parents'))}</strong><div>${parents.length ? parents.map(item).join(' ') : esc(t('kanban_empty'))}</div></div>
+    <div><strong>${esc(t('kanban_children'))}</strong><div>${children.length ? children.map(item).join(' ') : esc(t('kanban_empty'))}</div></div>
+  </div>`;
+}
+
+function _kanbanRenderTaskDetail(data){
+  const task = data.task || {};
+  const title = _kanbanTaskTitle(task);
+  const body = _kanbanTaskBody(task) || t('kanban_no_description');
+  const meta = _kanbanTaskMeta(task);
+  const comments = data.comments || [];
+  const events = data.events || [];
+  const links = data.links || {};
+  const runs = data.runs || [];
+  return `<div class="kanban-task-preview-title">${esc(title)}</div>
+    <div class="kanban-task-preview-body">${esc(body)}</div>
+    ${meta.length ? `<div class="kanban-meta">${esc(meta.join(' · '))}</div>` : ''}
+    <div class="kanban-detail-grid">
+      ${_kanbanDetailSection('kanban-detail-comments', String(t('kanban_comments_count')).replace('{0}', comments.length), comments.map(_kanbanCommentHtml).join(''), 'kanban_no_comments')}
+      ${_kanbanDetailSection('kanban-detail-events', String(t('kanban_events_count')).replace('{0}', events.length), events.map(_kanbanEventHtml).join(''), 'kanban_no_events')}
+      ${_kanbanDetailSection('kanban-detail-links', t('kanban_links'), _kanbanLinksHtml(links), 'kanban_empty')}
+      ${_kanbanDetailSection('kanban-detail-runs', String(t('kanban_runs_count')).replace('{0}', runs.length), runs.map(_kanbanRunHtml).join(''), 'kanban_no_runs')}
+    </div>`;
+}
+
 async function loadKanbanTask(taskId){
   if (!taskId) return;
   try {
     const data = await api('/api/kanban/tasks/' + encodeURIComponent(taskId));
     const task = data.task || {};
     const title = _kanbanTaskTitle(task);
-    const body = _kanbanTaskBody(task) || t('kanban_no_description');
     const board = $('kanbanBoard');
     if (board) {
       board.querySelectorAll('.kanban-card').forEach(card => card.classList.remove('selected'));
@@ -1002,11 +1082,8 @@ async function loadKanbanTask(taskId){
     }
     const preview = $('kanbanTaskPreview');
     if (preview) {
-      const meta = _kanbanTaskMeta(task);
       preview.style.display = '';
-      preview.innerHTML = `<div class="kanban-task-preview-title">${esc(title)}</div>
-        <div class="kanban-task-preview-body">${esc(body)}</div>
-        ${meta.length ? `<div class="kanban-meta">${esc(meta.join(' · '))}</div>` : ''}`;
+      preview.innerHTML = _kanbanRenderTaskDetail(data);
     }
     showToast(`${t('kanban_task')}: ${title}`);
   } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
