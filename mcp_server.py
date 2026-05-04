@@ -3,8 +3,9 @@
 Hermes WebUI MCP Server — exposes project and session management
 as MCP tools for any MCP-compatible agent.
 
-Uses the same JSON state files as the Hermes WebUI.
-No HTTP, no auth — filesystem only. Works even when the webapp is off.
+Reads state from JSON files (fast, no auth needed).
+Mutations (rename, move) go through the authenticated HTTP API
+to keep the webui server's in-memory SESSIONS cache in sync.
 
     pip install mcp       # one-time setup
     python3 mcp_server.py # start via stdio
@@ -12,8 +13,10 @@ No HTTP, no auth — filesystem only. Works even when the webapp is off.
 MCP config for Hermes Agent (add to config.yaml):
     mcp_servers:
       hermes-webui:
-        command: "python3"
-        args: ["/path/to/hermes-webui/mcp_server.py"]
+        command: /path/to/venv/bin/python3
+        args: [/path/to/hermes-webui/mcp_server.py]
+        env:
+          HERMES_WEBUI_PASSWORD: your_password
 """
 
 import json
@@ -36,14 +39,18 @@ PROJECTS_FILE = STATE_DIR / "projects.json"
 SESSION_DIR = STATE_DIR / "sessions"
 SESSION_INDEX = SESSION_DIR / "_index.json"
 
+# ── API auth state ─────────────────────────────────────────────────────────
+WEBUI_URL = "http://127.0.0.1:8788"
+_auth_cookie: str | None = None
+_auth_expires: float = 0  # unix timestamp after which we re-auth
+
 server = Server("hermes-webui")
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Helpers
+#  Helpers — filesystem (read-only + project CRUD)
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _load_projects() -> list:
-    """Load project list from disk. Returns list of project dicts."""
     if not PROJECTS_FILE.exists():
         return []
     try:
@@ -53,7 +60,6 @@ def _load_projects() -> list:
 
 
 def _save_projects(projects: list) -> None:
-    """Atomically write project list to disk."""
     tmp = PROJECTS_FILE.with_suffix(".tmp")
     try:
         tmp.write_text(
@@ -66,7 +72,6 @@ def _save_projects(projects: list) -> None:
 
 
 def _load_index() -> list:
-    """Load session index. Falls back to empty list."""
     if not SESSION_INDEX.exists():
         return []
     try:
@@ -76,60 +81,10 @@ def _load_index() -> list:
 
 
 def _validate_session_id(sid: str) -> bool:
-    """Reject obviously invalid session IDs (path traversal guard)."""
     return bool(sid and all(c in "0123456789abcdefghijklmnopqrstuvwxyz_-" for c in sid))
 
 
-def _read_session_json(sid: str) -> dict | None:
-    """Read a session JSON file. Returns None on any error."""
-    if not _validate_session_id(sid):
-        return None
-    path = SESSION_DIR / f"{sid}.json"
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-
-
-def _write_session_json(sid: str, data: dict) -> None:
-    """Atomically write a session JSON file."""
-    if not _validate_session_id(sid):
-        raise ValueError(f"Invalid session ID: {sid}")
-    path = SESSION_DIR / f"{sid}.json"
-    tmp = path.with_suffix(".tmp")
-    try:
-        tmp.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        os.replace(tmp, path)
-    except Exception:
-        tmp.unlink(missing_ok=True)
-        raise
-
-
-def _patch_index_entry(sid: str, updates: dict) -> None:
-    """Update project_id and title in the session index so list_sessions stays current."""
-    index = _load_index()
-    for s in index:
-        if s.get("session_id") == sid:
-            for k, v in updates.items():
-                s[k] = v
-            tmp = SESSION_INDEX.with_suffix(".tmp")
-            try:
-                tmp.write_text(
-                    json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8"
-                )
-                os.replace(tmp, SESSION_INDEX)
-            except Exception:
-                tmp.unlink(missing_ok=True)
-            return
-    # Entry not in index — nothing to patch (will appear on next index rebuild)
-
-
 def _session_compact(row: dict) -> dict:
-    """Extract the fields the agent cares about from an index row."""
     return {
         "session_id": row.get("session_id"),
         "title": row.get("title"),
@@ -143,46 +98,112 @@ def _session_compact(row: dict) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Tools
+#  Helpers — HTTP API (for mutations that need cache sync)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _api_password() -> str | None:
+    """Return the webui password, or None if auth is disabled."""
+    pw = os.environ.get("HERMES_WEBUI_PASSWORD", "").strip()
+    if not pw:
+        # Also check settings.json fallback
+        settings_file = STATE_DIR / "settings.json"
+        if settings_file.exists():
+            try:
+                settings = json.loads(settings_file.read_text(encoding="utf-8"))
+                pw = (settings.get("password_hash") or "").strip()
+            except Exception:
+                pass
+    return pw or None
+
+
+def _api_auth() -> str | None:
+    """Authenticate and return cookie value, or None if auth disabled/fails."""
+    global _auth_cookie, _auth_expires
+
+    pw = _api_password()
+    if not pw:
+        return None  # auth not enabled — API calls will fail anyway
+
+    # Reuse cookie if still valid (25 days — server issues 30-day cookies)
+    if _auth_cookie and time.time() < _auth_expires:
+        return _auth_cookie
+
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(
+            f"{WEBUI_URL}/api/auth/login",
+            data=json.dumps({"password": pw}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        resp = urllib.request.urlopen(req, timeout=5)
+        cookie = resp.headers.get("Set-Cookie", "")
+        if cookie:
+            _auth_cookie = cookie.split(";")[0]  # "hermes_session=VALUE; ..."
+            _auth_expires = time.time() + 25 * 86400  # 25 days
+            return _auth_cookie
+    except Exception:
+        _auth_cookie = None
+    return None
+
+
+def _api_post(endpoint: str, body: dict) -> dict:
+    """POST to webui API with auth cookie. Returns parsed JSON response."""
+    import urllib.request
+    import urllib.error
+
+    cookie = _api_auth()
+    headers = {"Content-Type": "application/json"}
+    if cookie:
+        headers["Cookie"] = cookie
+
+    try:
+        req = urllib.request.Request(
+            f"{WEBUI_URL}{endpoint}",
+            data=json.dumps(body).encode(),
+            headers=headers,
+            method="POST",
+        )
+        resp = urllib.request.urlopen(req, timeout=5)
+        return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        err_body = json.loads(e.read())
+        return {"error": f"API {e.code}: {err_body.get('error', 'unknown')}"}
+    except Exception as e:
+        return {"error": f"API unreachable: {e}"}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Tool handlers — read-only (filesystem)
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def handle_list_projects(_arguments: dict) -> list[TextContent]:
-    """List all projects with session counts."""
     projects = _load_projects()
     index = _load_index()
-
-    # Count sessions per project
     counts: dict[str, int] = {}
     for s in index:
         pid = s.get("project_id")
         if pid:
             counts[pid] = counts.get(pid, 0) + 1
-
     result = []
     for p in projects:
         entry = dict(p)
         entry["session_count"] = counts.get(p["project_id"], 0)
         result.append(entry)
-
     return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
 
 async def handle_create_project(arguments: dict) -> list[TextContent]:
-    """Create a new project."""
     name = arguments.get("name", "").strip()[:128]
     if not name:
         return [TextContent(type="text", text=json.dumps({"error": "name is required"}, ensure_ascii=False))]
-
     color = arguments.get("color")
     if color and not re.match(r"^#[0-9a-fA-F]{3,8}$", color):
         return [TextContent(type="text", text=json.dumps({"error": "Invalid color format (use #RGB, #RRGGBB, or #RRGGBBAA)"}, ensure_ascii=False))]
-
     projects = _load_projects()
-
-    # Reject duplicate names
     if any(p.get("name", "").lower() == name.lower() for p in projects):
         return [TextContent(type="text", text=json.dumps({"error": f"Project '{name}' already exists"}, ensure_ascii=False))]
-
     proj = {
         "project_id": uuid.uuid4().hex[:12],
         "name": name,
@@ -191,53 +212,40 @@ async def handle_create_project(arguments: dict) -> list[TextContent]:
     }
     projects.append(proj)
     _save_projects(projects)
-
     proj["session_count"] = 0
     return [TextContent(type="text", text=json.dumps(proj, ensure_ascii=False, indent=2))]
 
 
 async def handle_rename_project(arguments: dict) -> list[TextContent]:
-    """Rename a project and optionally change its color."""
     project_id = arguments.get("project_id")
     name = arguments.get("name", "").strip()[:128]
-
     if not project_id or not name:
         return [TextContent(type="text", text=json.dumps({"error": "project_id and name are required"}, ensure_ascii=False))]
-
     color = arguments.get("color")
     if color and not re.match(r"^#[0-9a-fA-F]{3,8}$", color):
         return [TextContent(type="text", text=json.dumps({"error": "Invalid color format"}, ensure_ascii=False))]
-
     projects = _load_projects()
     proj = next((p for p in projects if p["project_id"] == project_id), None)
     if not proj:
         return [TextContent(type="text", text=json.dumps({"error": "Project not found"}, ensure_ascii=False))]
-
     proj["name"] = name
     if color is not None:
         proj["color"] = color
     _save_projects(projects)
-
     return [TextContent(type="text", text=json.dumps(proj, ensure_ascii=False, indent=2))]
 
 
 async def handle_delete_project(arguments: dict) -> list[TextContent]:
-    """Delete a project and unassign its sessions."""
     project_id = arguments.get("project_id")
     if not project_id:
         return [TextContent(type="text", text=json.dumps({"error": "project_id is required"}, ensure_ascii=False))]
-
     projects = _load_projects()
     proj = next((p for p in projects if p["project_id"] == project_id), None)
     if not proj:
         return [TextContent(type="text", text=json.dumps({"error": "Project not found"}, ensure_ascii=False))]
-
-    # Remove project
     projects = [p for p in projects if p["project_id"] != project_id]
     _save_projects(projects)
-
-    # Unassign sessions from this project (read JSON files directly — the
-    # index may be stale since move_session doesn't update it)
+    # Unassign sessions — use API if auth available, filesystem otherwise
     unassigned = 0
     if SESSION_DIR.exists():
         for p in SESSION_DIR.glob("*.json"):
@@ -246,13 +254,20 @@ async def handle_delete_project(arguments: dict) -> list[TextContent]:
             try:
                 session_data = json.loads(p.read_text(encoding="utf-8"))
                 if session_data.get("project_id") == project_id:
-                    session_data["project_id"] = None
-                    _write_session_json(p.stem, session_data)
-                    _patch_index_entry(p.stem, {"project_id": None})
-                    unassigned += 1
+                    sid = p.stem
+                    if _api_password():
+                        result = _api_post("/api/session/move", {"session_id": sid, "project_id": None})
+                        if "ok" in result:
+                            unassigned += 1
+                    else:
+                        # Filesystem fallback (may be overwritten by server cache)
+                        session_data["project_id"] = None
+                        tmp = p.with_suffix(".tmp")
+                        tmp.write_text(json.dumps(session_data, ensure_ascii=False, indent=2), encoding="utf-8")
+                        os.replace(tmp, p)
+                        unassigned += 1
             except Exception:
                 pass
-
     return [TextContent(type="text", text=json.dumps({
         "ok": True,
         "deleted": proj["name"],
@@ -260,54 +275,64 @@ async def handle_delete_project(arguments: dict) -> list[TextContent]:
     }, ensure_ascii=False))]
 
 
-async def handle_move_session(arguments: dict) -> list[TextContent]:
-    """Assign a session to a project (or unassign with null project_id)."""
-    session_id = arguments.get("session_id")
-    project_id = arguments.get("project_id")  # None / null means unassign
-
-    if not session_id:
-        return [TextContent(type="text", text=json.dumps({"error": "session_id is required"}, ensure_ascii=False))]
-
-    # If project_id is explicitly provided, verify it exists
-    if project_id is not None:
-        projects = _load_projects()
-        if not any(p["project_id"] == project_id for p in projects):
-            return [TextContent(type="text", text=json.dumps({"error": "Project not found"}, ensure_ascii=False))]
-
-    session_data = _read_session_json(session_id)
-    if session_data is None:
-        return [TextContent(type="text", text=json.dumps({"error": "Session not found"}, ensure_ascii=False))]
-
-    session_data["project_id"] = project_id
-    _write_session_json(session_id, session_data)
-    _patch_index_entry(session_id, {"project_id": project_id})
-
-    return [TextContent(type="text", text=json.dumps({
-        "ok": True,
-        "session_id": session_id,
-        "project_id": project_id,
-        "title": session_data.get("title"),
-    }, ensure_ascii=False))]
-
-
 async def handle_list_sessions(arguments: dict) -> list[TextContent]:
-    """List sessions, optionally filtered by project or unassigned."""
     project_id = arguments.get("project_id")
     unassigned = arguments.get("unassigned", False)
     limit = max(1, min(500, arguments.get("limit", 50)))
-
     index = _load_index()
     sessions = [_session_compact(s) for s in index if s.get("session_id")]
-
-    # Filter
     if unassigned:
         sessions = [s for s in sessions if not s["project_id"]]
     elif project_id:
         sessions = [s for s in sessions if s["project_id"] == project_id]
-
     sessions = sessions[:limit]
-
     return [TextContent(type="text", text=json.dumps(sessions, ensure_ascii=False, indent=2))]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Tool handlers — mutations (HTTP API with auth)
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def handle_rename_session(arguments: dict) -> list[TextContent]:
+    """Rename a session via the authenticated webui API."""
+    session_id = arguments.get("session_id")
+    title = arguments.get("title", "").strip()[:80]
+    if not session_id or not title:
+        return [TextContent(type="text", text=json.dumps({"error": "session_id and title are required"}, ensure_ascii=False))]
+    result = _api_post("/api/session/rename", {"session_id": session_id, "title": title})
+    if "error" in result:
+        return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
+    session = result.get("session", {})
+    return [TextContent(type="text", text=json.dumps({
+        "ok": True,
+        "session_id": session_id,
+        "title": session.get("title", title),
+        "method": "api",
+    }, ensure_ascii=False, indent=2))]
+
+
+async def handle_move_session(arguments: dict) -> list[TextContent]:
+    """Assign a session to a project via the authenticated webui API."""
+    session_id = arguments.get("session_id")
+    project_id = arguments.get("project_id")  # None/null = unassign
+    if not session_id:
+        return [TextContent(type="text", text=json.dumps({"error": "session_id is required"}, ensure_ascii=False))]
+    # If project_id is provided, verify it exists
+    if project_id is not None:
+        projects = _load_projects()
+        if not any(p["project_id"] == project_id for p in projects):
+            return [TextContent(type="text", text=json.dumps({"error": "Project not found"}, ensure_ascii=False))]
+    result = _api_post("/api/session/move", {"session_id": session_id, "project_id": project_id})
+    if "error" in result:
+        return [TextContent(type="text", text=json.dumps(result, ensure_ascii=False))]
+    session = result.get("session", {})
+    return [TextContent(type="text", text=json.dumps({
+        "ok": True,
+        "session_id": session_id,
+        "project_id": project_id,
+        "title": session.get("title"),
+        "method": "api",
+    }, ensure_ascii=False, indent=2))]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -357,8 +382,20 @@ TOOLS = [
         },
     ),
     Tool(
+        name="rename_session",
+        description="Rename a session (updates sidebar via authenticated API).",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string", "description": "Session ID"},
+                "title": {"type": "string", "description": "New title (max 80 chars)"},
+            },
+            "required": ["session_id", "title"],
+        },
+    ),
+    Tool(
         name="move_session",
-        description="Assign a session to a project. Pass project_id=null to unassign.",
+        description="Assign a session to a project. Pass project_id=null to unassign. Uses authenticated API for cache safety.",
         inputSchema={
             "type": "object",
             "properties": {
@@ -388,6 +425,7 @@ HANDLERS = {
     "create_project": handle_create_project,
     "rename_project": handle_rename_project,
     "delete_project": handle_delete_project,
+    "rename_session": handle_rename_session,
     "move_session": handle_move_session,
     "list_sessions": handle_list_sessions,
 }
