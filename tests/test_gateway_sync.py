@@ -508,6 +508,51 @@ def test_compression_chain_with_all_empty_segments_is_hidden():
         post('/api/settings', {'show_cli_sessions': False})
 
 
+def test_default_title_cli_compression_chain_is_kept_by_lineage():
+    """Default-titled CLI compression chains are meaningful even with a short tip."""
+    conn = _ensure_state_db()
+    ids_to_remove = ('cli_default_compress_root_001', 'cli_default_compress_tip_001')
+    t0 = time.time() - 430
+    try:
+        _insert_agent_session_row(
+            conn,
+            'cli_default_compress_root_001',
+            source='cli',
+            title='Cli Session',
+            started_at=t0,
+            ended_at=t0 + 100,
+            end_reason='compression',
+            messages=1,
+        )
+        _insert_agent_session_row(
+            conn,
+            'cli_default_compress_tip_001',
+            source='cli',
+            title='Cli Session',
+            started_at=t0 + 101,
+            parent_session_id='cli_default_compress_root_001',
+            messages=1,
+        )
+
+        post('/api/settings', {'show_cli_sessions': True})
+        data, status = get('/api/sessions')
+        assert status == 200
+        ids = {s.get('session_id') for s in data.get('sessions', [])}
+
+        assert 'cli_default_compress_tip_001' in ids
+        assert 'cli_default_compress_root_001' not in ids
+        tip = next(s for s in data.get('sessions', []) if s.get('session_id') == 'cli_default_compress_tip_001')
+        assert tip.get('_compression_segment_count') == 2
+        assert tip.get('_lineage_root_id') == 'cli_default_compress_root_001'
+    finally:
+        try:
+            _remove_test_sessions(conn, *ids_to_remove)
+            conn.close()
+        except Exception:
+            pass
+        post('/api/settings', {'show_cli_sessions': False})
+
+
 def test_non_compression_child_is_not_collapsed_into_parent():
     """Parent/child relationships that are not compression continuations stay flat."""
     conn = _ensure_state_db()
