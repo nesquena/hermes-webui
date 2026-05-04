@@ -1038,6 +1038,60 @@ def test_space_tool_adapter_supports_source_first_fit_layout_helpers_metadata_on
 
 
 
+def test_space_tool_adapter_supports_source_resolve_space_layout_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    layout = spaces.run_space_tool(
+        "space.spaces.resolveSpaceLayout",
+        {
+            "widgetIds": ["weather-card", "notes-card", "status-card"],
+            "widgetPositions": {
+                "weather-card": {"col": 0, "row": 0},
+                "notes-card": {"col": 0, "row": 0, "renderer": "<script>steal()</script>"},
+                "status-card": {"col": 6, "row": 0},
+            },
+            "widgetSizes": {
+                "weather-card": {"cols": 4, "rows": 3},
+                "notes-card": {"cols": 4, "rows": 3, "api_key": "***"},
+                "status-card": {"cols": 2, "rows": 2},
+            },
+            "minimizedWidgetIds": ["notes-card"],
+            "anchorWidgetId": "notes-card",
+            "anchorPosition": {"col": 1, "row": 0},
+            "anchorSize": {"cols": 8, "rows": 5, "source": "SECRET_SOURCE"},
+            "anchorMinimized": True,
+            "html": "<img src=x onerror=steal()>",
+        },
+    )
+    serialized = json.dumps(layout).lower()
+
+    assert layout == {
+        "ok": True,
+        "action": "space.spaces.resolvespacelayout",
+        "positions": {
+            "notes-card": {"col": 1, "row": 0},
+            "weather-card": {"col": -3, "row": 0},
+            "status-card": {"col": 9, "row": 0},
+        },
+        "renderedSizes": {
+            "notes-card": {"cols": 8, "rows": 1},
+            "weather-card": {"cols": 4, "rows": 3},
+            "status-card": {"cols": 2, "rows": 2},
+        },
+        "minimizedMap": {"notes-card": True, "weather-card": False, "status-card": False},
+        "mode": "metadata-only",
+    }
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+    assert '"source":' not in serialized
+
+
+
 def test_space_tool_adapter_supports_source_reposition_current_space_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "source-reposition-lab", "name": "Source Reposition Lab"})

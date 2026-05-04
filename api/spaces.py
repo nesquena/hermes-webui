@@ -426,6 +426,48 @@ def _source_can_place_rect(position: dict[str, int], size: dict[str, int], occup
     return all(not _source_rects_overlap(candidate, occupied) for occupied in occupied_rects)
 
 
+
+def _source_column_search_order(start_col: int, radius: int) -> list[int]:
+    columns = [start_col]
+    for offset in range(1, radius + 1):
+        columns.extend([start_col + offset, start_col - offset])
+    ordered: list[int] = []
+    seen: set[int] = set()
+    for column in columns:
+        if column in seen:
+            continue
+        ordered.append(column)
+        seen.add(column)
+    return ordered
+
+
+
+def _source_find_first_available_position(
+    size: dict[str, int],
+    occupied_rects: list[dict[str, Any]],
+    preferred_position: dict[str, int] | None = None,
+) -> dict[str, int]:
+    normalized_size = _normalize_source_widget_size(size, _SOURCE_WIDGET_DEFAULT_SIZE)
+    normalized_position = _space_tool_clamp_widget_position(
+        {"position": preferred_position or _SOURCE_WIDGET_DEFAULT_POSITION, "size": normalized_size}
+    )["position"]
+    min_col = _SOURCE_GRID_COORD_MIN
+    max_col = _SOURCE_GRID_COORD_MAX - normalized_size["cols"] + 1
+    max_row = _SOURCE_GRID_COORD_MAX - normalized_size["rows"] + 1
+    start_col = min(max_col, max(min_col, normalized_position["col"]))
+    column_order = _source_column_search_order(start_col, _SOURCE_GRID_COORD_MAX - _SOURCE_GRID_COORD_MIN)
+
+    for row in range(normalized_position["row"], max_row + 1):
+        for col in column_order:
+            if col < min_col or col > max_col:
+                continue
+            position = {"col": col, "row": row}
+            if _source_can_place_rect(position, normalized_size, occupied_rects):
+                return position
+    return dict(normalized_position)
+
+
+
 def _source_build_packing_entries(widget_ids: Any, widget_sizes: Any) -> list[dict[str, Any]]:
     ids = widget_ids if isinstance(widget_ids, list) else []
     sizes = widget_sizes if isinstance(widget_sizes, dict) else {}
@@ -525,6 +567,77 @@ def _source_packed_bounds(positions: dict[str, dict[str, int]], sizes: dict[str,
         bounds["width"] = bounds["max_col"] - bounds["min_col"]
         bounds["height"] = bounds["max_row"] - bounds["min_row"]
     return bounds
+
+
+
+def _space_tool_resolve_space_layout(payload: dict[str, Any]) -> dict[str, Any]:
+    raw_ids = payload.get("widgetIds") or payload.get("widget_ids") or []
+    widget_ids = [validate_widget_id(widget_id) for widget_id in raw_ids] if isinstance(raw_ids, list) else []
+    widget_positions = payload.get("widgetPositions") or payload.get("widget_positions") or {}
+    widget_positions = widget_positions if isinstance(widget_positions, dict) else {}
+    widget_sizes = payload.get("widgetSizes") or payload.get("widget_sizes") or {}
+    widget_sizes = widget_sizes if isinstance(widget_sizes, dict) else {}
+    minimized_raw = payload.get("minimizedWidgetIds") or payload.get("minimized_widget_ids") or []
+    minimized_set = {validate_widget_id(widget_id) for widget_id in minimized_raw} if isinstance(minimized_raw, list) else set()
+    anchor_widget_id = ""
+    raw_anchor_widget_id = payload.get("anchorWidgetId") or payload.get("anchor_widget_id") or ""
+    if raw_anchor_widget_id:
+        anchor_widget_id = validate_widget_id(raw_anchor_widget_id)
+    has_anchor_minimized = "anchorMinimized" in payload or "anchor_minimized" in payload
+    anchor_minimized = _truthy_bool(payload.get("anchorMinimized", payload.get("anchor_minimized")))
+    anchor_position_supplied = "anchorPosition" in payload or "anchor_position" in payload
+    anchor_position = payload.get("anchorPosition", payload.get("anchor_position"))
+    anchor_size_supplied = "anchorSize" in payload or "anchor_size" in payload
+    anchor_size = payload.get("anchorSize", payload.get("anchor_size"))
+
+    entries: list[dict[str, Any]] = []
+    for index, widget_id in enumerate(widget_ids):
+        stored_position = _normalize_source_widget_position(widget_positions.get(widget_id), _SOURCE_WIDGET_DEFAULT_POSITION)
+        preferred_position = (
+            _normalize_source_widget_position(anchor_position, widget_positions.get(widget_id) or _SOURCE_WIDGET_DEFAULT_POSITION)
+            if widget_id == anchor_widget_id and anchor_position_supplied
+            else stored_position
+        )
+        minimized = anchor_minimized if widget_id == anchor_widget_id and has_anchor_minimized else widget_id in minimized_set
+        stored_size = (
+            _normalize_source_widget_size(anchor_size, _normalize_source_widget_size(widget_sizes.get(widget_id), _SOURCE_WIDGET_DEFAULT_SIZE))
+            if widget_id == anchor_widget_id and anchor_size_supplied
+            else _normalize_source_widget_size(widget_sizes.get(widget_id), _SOURCE_WIDGET_DEFAULT_SIZE)
+        )
+        rendered_size = dict(stored_size)
+        if minimized:
+            rendered_size["rows"] = 1
+        entries.append(
+            {
+                "index": index,
+                "minimized": minimized,
+                "preferred_position": preferred_position,
+                "rendered_size": rendered_size,
+                "stored_size": stored_size,
+                "widget_id": widget_id,
+            }
+        )
+
+    entries.sort(
+        key=lambda entry: (
+            0 if entry["widget_id"] == anchor_widget_id else 1,
+            entry["preferred_position"]["row"],
+            entry["preferred_position"]["col"],
+            entry["index"],
+        )
+    )
+    positions: dict[str, dict[str, int]] = {}
+    rendered_sizes: dict[str, dict[str, int]] = {}
+    minimized_map: dict[str, bool] = {}
+    occupied_rects: list[dict[str, Any]] = []
+    for entry in entries:
+        position = _source_find_first_available_position(entry["rendered_size"], occupied_rects, entry["preferred_position"])
+        positions[entry["widget_id"]] = position
+        rendered_sizes[entry["widget_id"]] = entry["rendered_size"]
+        minimized_map[entry["widget_id"]] = bool(entry["minimized"])
+        occupied_rects.append(_source_create_rect(entry["widget_id"], position, entry["rendered_size"]))
+    return {"positions": positions, "renderedSizes": rendered_sizes, "minimizedMap": minimized_map}
+
 
 
 def _space_tool_build_centered_first_fit_layout(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1975,6 +2088,8 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         return {"ok": True, "action": name, **_space_tool_build_centered_first_fit_layout(data), "mode": "metadata-only"}
     if name == "space.spaces.findfirstfitwidgetplacement":
         return {"ok": True, "action": name, **_space_tool_find_first_fit_widget_placement(data), "mode": "metadata-only"}
+    if name == "space.spaces.resolvespacelayout":
+        return {"ok": True, "action": name, **_space_tool_resolve_space_layout(data), "mode": "metadata-only"}
     if name in {"space.spaces.repositioncurrentspace", "space.current.reposition", "space.current.reposition_viewport"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         request = {

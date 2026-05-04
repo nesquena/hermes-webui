@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-04 07:08 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-04 09:21 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: source-style widget position SDK helper coverage now lets Space Agent-style adapter calls read the default widget position, parse widget-position tokens, and clamp widget positions to rendered source-grid bounds without executing or exposing generated/source/credential-like request fields. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: source-style `resolveSpaceLayout` adapter coverage now mirrors Space Agent's collision-safe layout resolution for preferred positions, anchor overrides, minimized widgets, rendered sizes, and minimized maps without executing or exposing generated/source/credential-like request fields. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): support source resolve layout helper`
+  - Added RED/GREEN backend coverage proving `space.spaces.resolveSpaceLayout` returns metadata-only resolved positions, rendered sizes, and minimized maps using Space Agent-style collision search, anchor sizing/position/minimized overrides, and safe payload omission.
+  - Validation at completion before screenshot/restart: focused RED failed with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`), focused first-fit/resolve layout regression set passed (`2 passed`), Spaces foundation + demo parity suites passed (`147 passed`), `py_compile api/spaces.py tests/test_spaces_foundation.py`, and `git diff --check` passed.
 
 - `feat(spaces): support source widget position SDK helpers`
   - Added RED/GREEN backend coverage proving `space.spaces.defaultWidgetPosition`, `space.spaces.parseWidgetPositionToken`, and `space.spaces.clampWidgetPosition` return metadata-only position/token/size results with Space Agent-compatible defaults, token parsing, size-aware clamping, and safe fallbacks while omitting renderer/html/source/API auth markers from serialized adapter responses.
