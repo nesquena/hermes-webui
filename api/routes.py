@@ -198,14 +198,10 @@ def _run_cron_tracked(job, profile_home=None):
     # (threads have no TLS, so get_active_hermes_home() can't resolve).
     ctx = None
     if profile_home is not None:
-        try:
-            from api.profiles import cron_profile_context_for_home
+        from api.profiles import cron_profile_context_for_home
 
-            ctx = cron_profile_context_for_home(profile_home)
-            ctx.__enter__()
-        except Exception:
-            logger.exception("Failed to pin profile %s for cron run", profile_home)
-            ctx = None
+        ctx = cron_profile_context_for_home(profile_home)
+        ctx.__enter__()
 
     try:
         success, output, final_response, error = run_job(job)

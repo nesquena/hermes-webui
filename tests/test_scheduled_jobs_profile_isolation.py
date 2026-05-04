@@ -197,3 +197,33 @@ def test_cron_run_does_not_silently_swallow_profile_resolution_errors():
         "HERMES_HOME. Let the exception propagate (500 the request) rather "
         "than corrupt cross-profile state silently."
     )
+
+
+def test_cron_worker_does_not_silently_fall_back_on_profile_context_failure():
+    """_run_cron_tracked must NOT silently set ctx=None when
+    cron_profile_context_for_home(...).__enter__() raises.
+
+    A silent fallback in the worker thread would leave the job running
+    unpinned against process-global HERMES_HOME, silently corrupting
+    cross-profile state — the same class of bug as #1573. We'd rather
+    let the exception propagate and kill the worker thread than risk
+    that.
+
+    Source-level assertion to catch any future re-introduction of the
+    over-broad except clause around the context setup.
+    """
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "api" / "routes.py").read_text(encoding="utf-8")
+
+    idx = src.find("def _run_cron_tracked(job, profile_home=None):")
+    assert idx != -1, "_run_cron_tracked not found"
+    body = src[idx : idx + 2000]
+
+    # The profile-context setup must NOT be wrapped in try/except that
+    # silently falls back to ctx=None.
+    assert "except Exception" not in body[:body.find("run_job(job)")], (
+        "_run_cron_tracked silently falls back to ctx=None when "
+        "cron_profile_context_for_home(...).__enter__() raises. That leaves "
+        "the worker thread unpinned against process-global HERMES_HOME. "
+        "Let the exception propagate rather than corrupt cross-profile state."
+    )
