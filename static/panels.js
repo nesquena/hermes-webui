@@ -3606,8 +3606,13 @@ async function checkUpdatesNow(){
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
     } else {
       const parts=[];
-      if(data.webui&&data.webui.behind>0) parts.push('WebUI: '+data.webui.behind);
-      if(data.agent&&data.agent.behind>0) parts.push('Agent: '+data.agent.behind);
+      const formatUpdatePart=(typeof _formatUpdateTargetStatus==='function')
+        ? _formatUpdateTargetStatus
+        : ((label,info)=>info&&info.behind>0?label+': '+info.behind:null);
+      const webuiPart=formatUpdatePart('WebUI',data.webui);
+      const agentPart=formatUpdatePart('Agent',data.agent);
+      if(webuiPart) parts.push(webuiPart);
+      if(agentPart) parts.push(agentPart);
       if(parts.length){
         if(status){status.textContent=t('settings_updates_available').replace('{count}',parts.join(', '));status.style.color='var(--accent)';}
         // Also trigger the update banner
