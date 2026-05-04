@@ -251,6 +251,16 @@ global.fetch = async function(path, opts = {}) {
       metadata: {
         content_status: 'agent-managed-empty',
         export: { pdf: 'planned' },
+        weather: {
+          location: 'Prague',
+          country: 'CZ',
+          units: 'metric',
+          status: 'observation-ready',
+          current: { condition: 'partly cloudy', temperature_c: '18', feels_like_c: '17' },
+          summary: 'Partly cloudy in Prague; refreshed through agent-mediated weather metadata.',
+          renderer: '<script>bad()</script>',
+          api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        },
         interaction: { refresh: 'agent-mediated', dangerous_html: '<script>bad()</script>' },
         permissions: { network: 'agent-mediated', token: 'SECRET_VALUE_DO_NOT_LEAK', credential: 'SECRET_VALUE_DO_NOT_LEAK' },
       },
@@ -1197,6 +1207,10 @@ def test_spaces_ui_view_widget_details_fetches_and_renders_safe_metadata_only(dr
     assert "markdown" in out["rootHtml"]
     assert "x12 y3 · 5×4" in out["rootHtml"]
     assert "content_status: agent-managed-empty" in out["rootHtml"]
+    assert "weather: location, country, units, status, current" in out["rootHtml"]
+    assert "location: Prague" in out["rootHtml"]
+    assert "current: condition, temperature_c, feels_like_c" in out["rootHtml"]
+    assert "temperature_c: 18" in out["rootHtml"]
     assert "export: pdf" in out["rootHtml"]
     assert "interaction: refresh" in out["rootHtml"]
     assert "permissions: network" in out["rootHtml"]

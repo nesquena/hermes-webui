@@ -82,6 +82,26 @@ def test_demo_parity_smoke_runner_launches_each_demo_metadata_only(monkeypatch, 
     _assert_safe_payload(results)
 
 
+def test_weather_demo_smoke_records_visible_weather_observation(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    result = spaces.space_demo_run("demo_weather_widget")
+    detail = spaces.read_widget_detail(result["space"]["space_id"], "weather-current")
+
+    assert result["action"] == "weather-observation-recorded"
+    assert result["weather_observation"]["widget"]["metadata"]["weather"]["status"] == "observation-ready"
+    assert result["weather_observation"]["widget"]["metadata"]["weather"]["current"] == {
+        "condition": "partly cloudy",
+        "temperature_c": "18",
+        "feels_like_c": "17",
+    }
+    assert detail["metadata"]["weather"]["location"] == "Prague"
+    assert detail["metadata"]["weather"]["current"]["temperature_c"] == "18"
+    assert detail["metadata"]["weather"]["summary"] == "Partly cloudy in Prague; refreshed through agent-mediated weather metadata."
+    _assert_safe_payload(result)
+    _assert_safe_payload(detail)
+
+
 def test_research_demo_smoke_advances_progress_artifact_pdf_export_and_rollback_check(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 

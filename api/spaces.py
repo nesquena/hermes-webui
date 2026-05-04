@@ -1462,7 +1462,23 @@ def space_demo_run(name: str) -> dict[str, Any]:
     action = "installed"
     extra: dict[str, Any] = {}
 
-    if demo == "demo_time_travel_restore":
+    if demo == "demo_weather_widget":
+        weather_patch = {
+            "location": "Prague",
+            "country": "CZ",
+            "units": "metric",
+            "status": "observation-ready",
+            "current": {
+                "condition": "partly cloudy",
+                "temperature_c": "18",
+                "feels_like_c": "17",
+            },
+            "summary": "Partly cloudy in Prague; refreshed through agent-mediated weather metadata.",
+        }
+        patch_widget(space_id, "weather-current", {"weather": weather_patch})
+        action = "weather-observation-recorded"
+        extra = {"weather_observation": {"widget": read_widget_detail(space_id, "weather-current")}}
+    elif demo == "demo_time_travel_restore":
         before_patch = str(read_space(space_id).get("revision_event_id") or "")
         widgets = installed.get("installed_widgets") or []
         if widgets and before_patch:

@@ -390,10 +390,29 @@
       if (value && typeof value === 'object') return Object.keys(value).filter(keyIsSafe).slice(0, 5).join(', ');
       return textValueSummary(value);
     }
-    return Object.keys(details).filter(keyIsSafe).slice(0, 6).map(function(key){
+    function nestedSummaries(value, depth){
+      if (!value || typeof value !== 'object' || Array.isArray(value) || depth > 2) return [];
+      const rows = [];
+      Object.keys(value).filter(keyIsSafe).slice(0, 5).forEach(function(key){
+        const child = value[key];
+        const summary = valueSummary(child);
+        if (summary) rows.push(String(key)+': '+summary);
+        if (child && typeof child === 'object' && !Array.isArray(child)) {
+          nestedSummaries(child, depth + 1).forEach(function(row){ rows.push(row); });
+        }
+      });
+      return rows;
+    }
+    const rows = [];
+    Object.keys(details).filter(keyIsSafe).slice(0, 6).forEach(function(key){
       const value = valueSummary(details[key]);
-      return value ? String(key)+': '+value : String(key);
-    }).filter(Boolean).join(' · ');
+      if (value) rows.push(String(key)+': '+value);
+      else rows.push(String(key));
+      if (details[key] && typeof details[key] === 'object' && !Array.isArray(details[key])) {
+        nestedSummaries(details[key], 1).forEach(function(row){ rows.push(row); });
+      }
+    });
+    return rows.filter(Boolean).slice(0, 18).join(' · ');
   }
 
   function formatRestorePreview(preview){
