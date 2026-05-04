@@ -486,6 +486,13 @@ const LOCALES = {
     insights_input_tokens: 'Input',
     insights_output_tokens: 'Output',
     insights_total: 'Total',
+    insights_daily_tokens: 'Daily Tokens',
+    insights_model_name: 'Model',
+    insights_model_sessions: 'Sessions',
+    insights_model_tokens: 'Tokens',
+    insights_model_cost: 'Cost',
+    insights_model_share: 'Share',
+    insights_no_usage_data: 'No usage data yet',
     insights_footer: 'Showing data from the last {days} days',
     workspace_desc: 'Add and switch workspaces for your sessions.',
     session_meta_messages: (n) => `${n} msg${n === 1 ? '' : 's'}`,
@@ -1388,6 +1395,13 @@ const LOCALES = {
     insights_input_tokens: '入力',
     insights_output_tokens: '出力',
     insights_total: '合計',
+    insights_daily_tokens: '日別トークン',
+    insights_model_name: 'モデル',
+    insights_model_sessions: 'セッション',
+    insights_model_tokens: 'トークン',
+    insights_model_cost: 'コスト',
+    insights_model_share: 'シェア',
+    insights_no_usage_data: '使用データはまだありません',
     insights_footer: '直近 {days} 日間のデータを表示',
     workspace_desc: 'セッション用のワークスペースを追加・切り替えします。',
     session_meta_messages: (n) => `${n} 件`,
@@ -2633,6 +2647,13 @@ const LOCALES = {
     insights_activity_by_day: 'Activity by Day',  // TODO: translate
     insights_activity_by_hour: 'Activity by Hour',  // TODO: translate
     insights_cost: 'Estimated Cost',  // TODO: translate
+    insights_daily_tokens: 'Daily Tokens',
+    insights_model_name: 'Model',
+    insights_model_sessions: 'Sessions',
+    insights_model_tokens: 'Tokens',
+    insights_model_cost: 'Cost',
+    insights_model_share: 'Share',
+    insights_no_usage_data: 'No usage data yet',
     insights_footer: 'Showing data from the last {days} days',  // TODO: translate
     insights_input_tokens: 'Input',  // TODO: translate
     insights_messages: 'Messages',  // TODO: translate
@@ -3458,6 +3479,13 @@ const LOCALES = {
     insights_activity_by_day: 'Activity by Day',  // TODO: translate
     insights_activity_by_hour: 'Activity by Hour',  // TODO: translate
     insights_cost: 'Estimated Cost',  // TODO: translate
+    insights_daily_tokens: 'Daily Tokens',
+    insights_model_name: 'Model',
+    insights_model_sessions: 'Sessions',
+    insights_model_tokens: 'Tokens',
+    insights_model_cost: 'Cost',
+    insights_model_share: 'Share',
+    insights_no_usage_data: 'No usage data yet',
     insights_footer: 'Showing data from the last {days} days',  // TODO: translate
     insights_input_tokens: 'Input',  // TODO: translate
     insights_messages: 'Messages',  // TODO: translate
@@ -4298,6 +4326,13 @@ const LOCALES = {
     insights_activity_by_day: 'Activity by Day',  // TODO: translate
     insights_activity_by_hour: 'Activity by Hour',  // TODO: translate
     insights_cost: 'Estimated Cost',  // TODO: translate
+    insights_daily_tokens: 'Daily Tokens',
+    insights_model_name: 'Model',
+    insights_model_sessions: 'Sessions',
+    insights_model_tokens: 'Tokens',
+    insights_model_cost: 'Cost',
+    insights_model_share: 'Share',
+    insights_no_usage_data: 'No usage data yet',
     insights_footer: 'Showing data from the last {days} days',  // TODO: translate
     insights_input_tokens: 'Input',  // TODO: translate
     insights_messages: 'Messages',  // TODO: translate
@@ -5132,6 +5167,13 @@ const LOCALES = {
     insights_activity_by_day: 'Activity by Day',  // TODO: translate
     insights_activity_by_hour: 'Activity by Hour',  // TODO: translate
     insights_cost: 'Estimated Cost',  // TODO: translate
+    insights_daily_tokens: 'Daily Tokens',
+    insights_model_name: 'Model',
+    insights_model_sessions: 'Sessions',
+    insights_model_tokens: 'Tokens',
+    insights_model_cost: 'Cost',
+    insights_model_share: 'Share',
+    insights_no_usage_data: 'No usage data yet',
     insights_footer: 'Showing data from the last {days} days',  // TODO: translate
     insights_input_tokens: 'Input',  // TODO: translate
     insights_messages: 'Messages',  // TODO: translate
@@ -6074,6 +6116,13 @@ const LOCALES = {
     insights_activity_by_day: 'Activity by Day',  // TODO: translate
     insights_activity_by_hour: 'Activity by Hour',  // TODO: translate
     insights_cost: 'Estimated Cost',  // TODO: translate
+    insights_daily_tokens: 'Daily Tokens',
+    insights_model_name: 'Model',
+    insights_model_sessions: 'Sessions',
+    insights_model_tokens: 'Tokens',
+    insights_model_cost: 'Cost',
+    insights_model_share: 'Share',
+    insights_no_usage_data: 'No usage data yet',
     insights_footer: 'Showing data from the last {days} days',  // TODO: translate
     insights_input_tokens: 'Input',  // TODO: translate
     insights_messages: 'Messages',  // TODO: translate
@@ -7718,6 +7767,13 @@ const LOCALES = {
     insights_activity_by_day: 'Activity by Day',  // TODO: translate
     insights_activity_by_hour: 'Activity by Hour',  // TODO: translate
     insights_cost: 'Estimated Cost',  // TODO: translate
+    insights_daily_tokens: '일별 토큰',
+    insights_model_name: '모델',
+    insights_model_sessions: '세션',
+    insights_model_tokens: '토큰',
+    insights_model_cost: '비용',
+    insights_model_share: '비율',
+    insights_no_usage_data: '아직 사용 데이터가 없습니다',
     insights_footer: 'Showing data from the last {days} days',  // TODO: translate
     insights_input_tokens: 'Input',  // TODO: translate
     insights_messages: 'Messages',  // TODO: translate

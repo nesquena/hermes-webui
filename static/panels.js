@@ -914,9 +914,15 @@ async function loadInsights(animate) {
 }
 
 function _renderInsights(d, box) {
-  const fmtNum = n => n.toLocaleString();
-  const fmtCost = c => c > 0 ? '$' + c.toFixed(4) : t('insights_no_cost');
-  const fmtTokens = n => n >= 1e6 ? (n/1e6).toFixed(1) + 'M' : n >= 1e3 ? (n/1e3).toFixed(1) + 'K' : fmtNum(n);
+  const fmtNum = n => Number(n || 0).toLocaleString();
+  const fmtCost = c => {
+    const value = Number(c || 0);
+    return value > 0 ? '$' + value.toFixed(value < 1 ? 4 : 2) : t('insights_no_cost');
+  };
+  const fmtTokens = n => {
+    const value = Number(n || 0);
+    return value >= 1e6 ? (value/1e6).toFixed(1) + 'M' : value >= 1e3 ? (value/1e3).toFixed(1) + 'K' : fmtNum(value);
+  };
 
   // Overview cards
   const overviewCards = [
@@ -926,16 +932,39 @@ function _renderInsights(d, box) {
     { label: t('insights_cost'), value: fmtCost(d.total_cost), icon: li('dollar-sign', 18) },
   ];
 
+  // Daily token trend
+  const dailyTokens = Array.isArray(d.daily_tokens) ? d.daily_tokens : [];
+  let dailyHtml = '';
+  if (dailyTokens.length) {
+    const maxDailyTokens = Math.max(...dailyTokens.map(r => Number(r.input_tokens || 0) + Number(r.output_tokens || 0)), 1);
+    const labelEvery = Math.max(Math.ceil(dailyTokens.length / 7), 1);
+    dailyHtml = `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_daily_tokens'))}</div><div class="insights-daily-token-chart">` +
+      dailyTokens.map((r, idx) => {
+        const input = Number(r.input_tokens || 0);
+        const output = Number(r.output_tokens || 0);
+        const inputPct = Math.max((input / maxDailyTokens) * 100, input ? 2 : 0).toFixed(1);
+        const outputPct = Math.max((output / maxDailyTokens) * 100, output ? 2 : 0).toFixed(1);
+        const showLabel = idx === 0 || idx === dailyTokens.length - 1 || idx % labelEvery === 0;
+        const title = `${r.date} · ${fmtTokens(input)} ${t('insights_input_tokens')} · ${fmtTokens(output)} ${t('insights_output_tokens')} · ${fmtCost(r.cost)} · ${fmtNum(r.sessions)} ${t('insights_sessions')}`;
+        return `<div class="insights-daily-bar" title="${esc(title)}"><div class="insights-daily-stack" aria-label="${esc(title)}"><div class="insights-daily-bar-output" style="height:${outputPct}%"></div><div class="insights-daily-bar-input" style="height:${inputPct}%"></div></div><span>${showLabel ? esc(String(r.date).slice(5)) : ''}</span></div>`;
+      }).join('') +
+      `</div><div class="insights-daily-legend"><span><i class="insights-daily-legend-input"></i>${esc(t('insights_input_tokens'))}</span><span><i class="insights-daily-legend-output"></i>${esc(t('insights_output_tokens'))}</span></div></div>`;
+  } else {
+    dailyHtml = `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_daily_tokens'))}</div><div class="insights-empty">${esc(t('insights_no_usage_data'))}</div></div>`;
+  }
+
   // Models table
   let modelsHtml = '';
   if (d.models && d.models.length) {
-    const totalSess = d.models.reduce((a, m) => a + m.sessions, 0) || 1;
-    modelsHtml = `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_models'))}</div><div class="insights-table"><div class="insights-table-head"><span>Model</span><span>Sessions</span><span>Share</span></div>` +
+    modelsHtml = `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_models'))}</div><div class="insights-table insights-model-table"><div class="insights-table-head"><span>${esc(t('insights_model_name'))}</span><span>${esc(t('insights_model_sessions'))}</span><span>${esc(t('insights_model_tokens'))}</span><span>${esc(t('insights_model_cost'))}</span><span>${esc(t('insights_model_share'))}</span></div>` +
       d.models.map(m => {
-        const pct = ((m.sessions / totalSess) * 100).toFixed(0);
-        return `<div class="insights-table-row"><span class="insights-model-name" title="${esc(m.model)}">${esc(m.model)}</span><span>${m.sessions}</span><span>${pct}%</span></div>`;
+        const share = Number(m.cost_share || m.token_share || m.session_share || 0);
+        const title = `${m.model} · ${fmtTokens(m.input_tokens)} ${t('insights_input_tokens')} · ${fmtTokens(m.output_tokens)} ${t('insights_output_tokens')}`;
+        return `<div class="insights-table-row"><span class="insights-model-name" title="${esc(m.model)}">${esc(m.model)}</span><span>${fmtNum(m.sessions)}</span><span class="insights-model-tokens" title="${esc(title)}">${fmtTokens(m.total_tokens || 0)}</span><span class="insights-model-cost">${fmtCost(m.cost)}</span><span>${share}%</span></div>`;
       }).join('') +
       `</div></div>`;
+  } else {
+    modelsHtml = `<div class="insights-card"><div class="insights-card-title">${esc(t('insights_models'))}</div><div class="insights-empty">${esc(t('insights_no_usage_data'))}</div></div>`;
   }
 
   // Activity by day of week
@@ -986,6 +1015,7 @@ function _renderInsights(d, box) {
     <div class="insights-grid">
       ${overviewCards.map(c => `<div class="insights-stat"><div class="insights-stat-icon">${c.icon}</div><div class="insights-stat-info"><div class="insights-stat-value">${c.value}</div><div class="insights-stat-label">${esc(c.label)}</div></div></div>`).join('')}
     </div>
+    ${dailyHtml}
     <div class="insights-row">
       ${tokenCards}
       ${modelsHtml}

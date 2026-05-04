@@ -1576,7 +1576,32 @@ def _handle_insights(handler, parsed) -> bool:
         days = 30
 
     now = _time.time()
-    cutoff = now - (days * 86400)
+    today = _time.localtime(now)
+    today_midnight = _time.mktime((today.tm_year, today.tm_mon, today.tm_mday, 0, 0, 0, today.tm_wday, today.tm_yday, today.tm_isdst))
+    day_secs = 86400
+    first_day_ts = today_midnight - ((days - 1) * day_secs)
+    cutoff = first_day_ts
+
+    def _safe_usage_int(value) -> int:
+        try:
+            return max(int(float(value or 0)), 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _safe_cost_float(value) -> float:
+        if value is None:
+            return 0.0
+        try:
+            if isinstance(value, str):
+                value = value.strip().replace("$", "").replace(",", "")
+                if not value:
+                    return 0.0
+            return max(float(value), 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _session_usage_ts(session: dict) -> float:
+        return session.get("updated_at", session.get("created_at", 0)) or session.get("created_at", 0) or 0
 
     # Walk session index (fast, no full JSON parse)
     sessions_data = []
@@ -1592,7 +1617,7 @@ def _handle_insights(handler, parsed) -> bool:
     for entry in idx:
         created = entry.get("created_at", 0) or 0
         updated = entry.get("updated_at", 0) or 0
-        # Session is relevant if it was created or updated within the window
+        # Session is relevant if it was created or updated within the calendar window.
         if max(created, updated) < cutoff:
             continue
         sessions_data.append(entry)
@@ -1603,39 +1628,91 @@ def _handle_insights(handler, parsed) -> bool:
     total_input_tokens = 0
     total_output_tokens = 0
     total_cost = 0.0
-    model_counts = collections.Counter()
+    model_stats: dict[str, dict] = {}
+    daily_tokens: dict[str, dict] = {}
     # Activity by day of week (0=Mon .. 6=Sun)
     dow_activity = collections.Counter()
     # Activity by hour of day (0-23)
     hod_activity = collections.Counter()
 
     for s in sessions_data:
-        total_messages += max(s.get("message_count", 0) or 0, 0)
-        total_input_tokens += max(s.get("input_tokens", 0) or 0, 0)
-        total_output_tokens += max(s.get("output_tokens", 0) or 0, 0)
-        cost = s.get("estimated_cost")
-        if cost is not None:
-            try:
-                total_cost += float(cost)
-            except (ValueError, TypeError):
-                pass
+        input_tokens = _safe_usage_int(s.get("input_tokens"))
+        output_tokens = _safe_usage_int(s.get("output_tokens"))
+        cost_value = _safe_cost_float(s.get("estimated_cost"))
+        total_messages += _safe_usage_int(s.get("message_count"))
+        total_input_tokens += input_tokens
+        total_output_tokens += output_tokens
+        total_cost += cost_value
+
         model = s.get("model") or "unknown"
-        if model:
-            model_counts[model] += 1
+        bucket = model_stats.setdefault(model, {
+            "sessions": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cost": 0.0,
+        })
+        bucket["sessions"] += 1
+        bucket["input_tokens"] += input_tokens
+        bucket["output_tokens"] += output_tokens
+        bucket["cost"] += cost_value
+
         # Activity patterns
-        ts = s.get("updated_at", s.get("created_at", 0)) or 0
+        ts = _session_usage_ts(s)
         if ts:
             try:
                 dt = _time.localtime(ts)
+                day_key = _time.strftime("%Y-%m-%d", dt)
+                daily_bucket = daily_tokens.setdefault(day_key, {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "sessions": 0,
+                    "cost": 0.0,
+                })
+                daily_bucket["input_tokens"] += input_tokens
+                daily_bucket["output_tokens"] += output_tokens
+                daily_bucket["sessions"] += 1
+                daily_bucket["cost"] += cost_value
                 dow_activity[dt.tm_wday] += 1
                 hod_activity[dt.tm_hour] += 1
             except Exception:
                 pass
 
     # Build model breakdown
+    total_tokens = total_input_tokens + total_output_tokens
     models_breakdown = []
-    for model, count in model_counts.most_common():
-        models_breakdown.append({"model": model, "sessions": count})
+    for model, stats in model_stats.items():
+        row_total_tokens = stats["input_tokens"] + stats["output_tokens"]
+        row_cost = round(stats["cost"], 6)
+        models_breakdown.append({
+            "model": model,
+            "sessions": stats["sessions"],
+            "input_tokens": stats["input_tokens"],
+            "output_tokens": stats["output_tokens"],
+            "total_tokens": row_total_tokens,
+            "cost": row_cost,
+            "session_share": int(round((stats["sessions"] / total_sessions) * 100)) if total_sessions else 0,
+            "token_share": int(round((row_total_tokens / total_tokens) * 100)) if total_tokens else 0,
+            "cost_share": int(round((row_cost / total_cost) * 100)) if total_cost else 0,
+        })
+    models_breakdown.sort(key=lambda r: (-r["cost"], -r["sessions"], r["model"]))
+
+    daily_series = []
+    for i in range(days):
+        day_ts = first_day_ts + (i * day_secs)
+        day_key = _time.strftime("%Y-%m-%d", _time.localtime(day_ts))
+        bucket = daily_tokens.get(day_key, {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "sessions": 0,
+            "cost": 0.0,
+        })
+        daily_series.append({
+            "date": day_key,
+            "input_tokens": bucket["input_tokens"],
+            "output_tokens": bucket["output_tokens"],
+            "sessions": bucket["sessions"],
+            "cost": round(bucket["cost"], 6),
+        })
 
     # Day-of-week labels
     dow_labels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -1650,9 +1727,10 @@ def _handle_insights(handler, parsed) -> bool:
         "total_messages": total_messages,
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,
-        "total_tokens": total_input_tokens + total_output_tokens,
+        "total_tokens": total_tokens,
         "total_cost": round(total_cost, 6),
         "models": models_breakdown,
+        "daily_tokens": daily_series,
         "activity_by_day": dow_data,
         "activity_by_hour": hod_data,
     })
