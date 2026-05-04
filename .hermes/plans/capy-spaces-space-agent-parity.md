@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-04 09:21 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-04 10:30 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: source-style `resolveSpaceLayout` adapter coverage now mirrors Space Agent's collision-safe layout resolution for preferred positions, anchor overrides, minimized widgets, rendered sizes, and minimized maps without executing or exposing generated/source/credential-like request fields. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: source SDK `space.api.health` adapter coverage now returns a Capy Spaces metadata-only service health payload for Space Agent-style tooling without echoing generated/source/API auth request fields. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): expose source API health helper`
+  - Added RED/GREEN backend coverage proving `space.api.health` returns safe Capy Spaces service metadata (`name`, browser panel URL, metadata-only mode, schema version, enabled state, Space count, and high-level responsibilities) while omitting request-supplied generated/source/API auth markers.
+  - Validation at completion before commit: focused RED failed with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`), full Spaces foundation suite passed (`143 passed`), `py_compile api/spaces.py tests/test_spaces_foundation.py`, and `git diff --check` passed. Mock/status screenshot QA showed empty `window.__harnessErrors`, visible leak check false, and screenshot artifact `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_5370d28343ff4130ab57616e4db6fc90.png`.
 
 - `feat(spaces): support source resolve layout helper`
   - Added RED/GREEN backend coverage proving `space.spaces.resolveSpaceLayout` returns metadata-only resolved positions, rendered sizes, and minimized maps using Space Agent-style collision search, anchor sizing/position/minimized overrides, and safe payload omission.

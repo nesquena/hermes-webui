@@ -1923,6 +1923,23 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     name = str(action or "").strip().lower()
     data = payload if isinstance(payload, dict) else {}
 
+    if name in {"space.api.health", "space.health"}:
+        return {
+            "ok": True,
+            "action": name,
+            "name": "Capy Spaces",
+            "browserAppUrl": "/?panel=capy-spaces",
+            "mode": "metadata-only",
+            "schema_version": SCHEMA_VERSION,
+            "enabled": True,
+            "space_count": len(list_spaces()),
+            "responsibilities": [
+                "metadata-only space and widget manifests",
+                "revision history and safe recovery",
+                "agent-mediated widget events",
+            ],
+        }
+
     if name in {"space.list", "space.spaces", "space.spaces.list", "space.spaces.listspaces"}:
         return {"ok": True, "action": name, "spaces": list_spaces()}
     if name in {"space.spaces.items", "space.spaces.all"}:

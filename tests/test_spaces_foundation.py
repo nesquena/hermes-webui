@@ -862,6 +862,47 @@ def test_space_tool_adapter_supports_source_widget_size_sdk_helpers_metadata_onl
 
 
 
+def test_space_tool_adapter_supports_source_api_health_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    spaces.create_space({"space_id": "health-lab", "name": "Health Lab"})
+    spaces.install_template("weather", space_id="weather-health")
+
+    health = spaces.run_space_tool(
+        "space.api.health",
+        {
+            "renderer": "<script>steal()</script>",
+            "source": "SECRET_SOURCE",
+            "api_key": "***",
+            "authorization": "Bearer should-not-leak",
+        },
+    )
+    serialized = json.dumps(health).lower()
+
+    assert health == {
+        "ok": True,
+        "action": "space.api.health",
+        "name": "Capy Spaces",
+        "browserAppUrl": "/?panel=capy-spaces",
+        "mode": "metadata-only",
+        "schema_version": spaces.SCHEMA_VERSION,
+        "enabled": True,
+        "space_count": 2,
+        "responsibilities": [
+            "metadata-only space and widget manifests",
+            "revision history and safe recovery",
+            "agent-mediated widget events",
+        ],
+    }
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert '"source":' not in serialized
+    assert "api_key" not in serialized
+    assert "authorization" not in serialized
+    assert "secret" not in serialized
+
+
+
 def test_space_tool_adapter_supports_source_position_layout_helpers_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
