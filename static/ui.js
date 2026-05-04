@@ -1911,7 +1911,7 @@ function renderMd(raw){
   // with <br>. Token \x00E (next free after B D F G L M C O A).
   // Fixes #745: code blocks collapse to single line when not preceded by blank line.
   const _pre_stash=[];
-  s=s.replace(/(<div class="pre-header">[\s\S]*?<\/div>)?<pre>[\s\S]*?<\/pre>|<div class="(mermaid-block|katex-block)"[\s\S]*?<\/div>/g,m=>{
+  s=s.replace(/(<div class="pre-header">[\s\S]*?<\/div>)?<pre[^>]*>[\s\S]*?<\/pre>|<div class="(mermaid-block|katex-block)"[\s\S]*?<\/div>/g,m=>{
     _pre_stash.push(m);
     return '\x00E'+(_pre_stash.length-1)+'\x00';
   });
