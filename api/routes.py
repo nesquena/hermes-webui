@@ -1775,6 +1775,11 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/insights":
         return _handle_insights(handler, parsed)
 
+    if parsed.path.startswith("/api/kanban/"):
+        from api.kanban_bridge import handle_kanban_get
+
+        return handle_kanban_get(handler, parsed)
+
     if parsed.path == "/health":
         with STREAMS_LOCK:
             n_streams = len(STREAMS)
