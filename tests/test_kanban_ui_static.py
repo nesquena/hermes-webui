@@ -1,0 +1,87 @@
+from pathlib import Path
+import re
+
+ROOT = Path(__file__).resolve().parents[1]
+INDEX = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+PANELS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+STYLE = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
+I18N = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+COMPACT_INDEX = re.sub(r"\s+", "", INDEX)
+COMPACT_PANELS = re.sub(r"\s+", "", PANELS)
+COMPACT_STYLE = re.sub(r"\s+", "", STYLE)
+
+
+def test_kanban_has_native_sidebar_rail_and_mobile_tab():
+    assert 'data-panel="kanban"' in INDEX
+    assert 'data-i18n-title="tab_kanban"' in INDEX
+    assert 'onclick="switchPanel(\'kanban\')"' in INDEX
+    assert 'data-label="Kanban"' in INDEX
+    kanban_section = INDEX[INDEX.find('id="mainKanban"'):INDEX.find('id="mainWorkspaces"')]
+    assert "<iframe" not in kanban_section.lower()
+
+
+def test_kanban_has_sidebar_panel_and_main_board_mounts():
+    assert '<div class="panel-view" id="panelKanban">' in INDEX
+    assert 'id="kanbanSearch"' in INDEX
+    assert 'id="kanbanAssigneeFilter"' in INDEX
+    assert 'id="kanbanTenantFilter"' in INDEX
+    assert 'id="kanbanIncludeArchived"' in INDEX
+    assert 'id="kanbanList"' in INDEX
+    assert '<div id="mainKanban" class="main-view">' in INDEX
+    assert 'id="kanbanBoard"' in INDEX
+    assert 'id="kanbanTaskPreview"' in INDEX
+
+
+def test_switch_panel_lazy_loads_kanban_and_toggles_main_view():
+    assert "'kanban'" in re.search(r"\[[^\]]+\]\.forEach\(p => \{\s*mainEl\.classList", PANELS).group(0)
+    assert "if (nextPanel === 'kanban') await loadKanban();" in PANELS
+    assert "if (_currentPanel === 'kanban') await loadKanban();" in PANELS
+
+
+def test_kanban_frontend_uses_read_only_relative_api_endpoints():
+    assert "'/api/kanban/board" in PANELS
+    assert "api('/api/kanban/tasks/" in PANELS
+    assert "api('/api/kanban/config" in PANELS
+    assert "fetch('/api/kanban" not in PANELS
+    assert "method: 'POST'" not in PANELS[PANELS.find("async function loadKanban"):PANELS.find("async function loadKanbanTask")]
+    assert "kanban-readonly" in PANELS
+    assert "kanbanTaskPreview" in PANELS
+    assert "classList.add('selected')" in PANELS
+
+
+def test_kanban_board_has_native_css_classes():
+    for selector in (
+        ".kanban-board",
+        ".kanban-column",
+        ".kanban-card",
+        ".kanban-card-title",
+        ".kanban-meta",
+        ".kanban-readonly",
+    ):
+        assert selector in STYLE
+    assert "overflow-x:auto" in COMPACT_STYLE
+
+
+def test_kanban_i18n_keys_exist_in_every_locale_block():
+    locale_blocks = re.findall(r"\n\s*([a-z]{2}(?:-[A-Z]{2})?): \{(.*?)\n\s*\},", I18N, flags=re.S)
+    assert len(locale_blocks) >= 8
+    required_keys = [
+        "tab_kanban",
+        "kanban_board",
+        "kanban_search_tasks",
+        "kanban_all_assignees",
+        "kanban_all_tenants",
+        "kanban_include_archived",
+        "kanban_visible_tasks",
+        "kanban_no_matching_tasks",
+        "kanban_unavailable",
+        "kanban_read_only",
+        "kanban_empty",
+    ]
+    missing = [
+        f"{locale}:{key}"
+        for locale, body in locale_blocks
+        for key in required_keys
+        if re.search(rf"\b{re.escape(key)}\s*:", body) is None
+    ]
+    assert missing == []

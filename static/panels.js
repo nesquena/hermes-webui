@@ -1,5 +1,7 @@
 let _currentPanel = 'chat';
 let _renamingAppTitlebar = false;  // guard against re-entrant rename
+let _kanbanBoard = null;
+let _kanbanLatestEventId = 0;
 let _skillsData = null; // cached skills list
 let _cronList = null; // cached cron jobs (array)
 let _currentCronDetail = null; // full cron job object
@@ -164,12 +166,13 @@ async function switchPanel(name, opts = {}) {
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
   if (mainEl) {
-    ['settings','skills','memory','tasks','workspaces','profiles','insights'].forEach(p => {
+    ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights'].forEach(p => {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
   }
   // Lazy-load panel data
   if (nextPanel === 'tasks') await loadCrons();
+  if (nextPanel === 'kanban') await loadKanban();
   if (nextPanel === 'skills') await loadSkills();
   if (nextPanel === 'memory') await loadMemory();
   if (nextPanel === 'workspaces') await loadWorkspacesPanel();
@@ -855,6 +858,159 @@ async function cronResume(id) {
 }
 
 let _editingCronId = null;
+
+// ── Kanban panel (read-only) ──
+function _kanbanColumnLabel(name){ return t('kanban_status_' + name) || name; }
+function _kanbanTaskTitle(task){ return task.title || task.summary || task.id || t('kanban_task'); }
+function _kanbanTaskBody(task){ return task.body || task.description || task.prompt || ''; }
+function _kanbanTaskMeta(task){
+  const bits = [];
+  if (task.assignee) bits.push(task.assignee);
+  if (task.tenant) bits.push(task.tenant);
+  if (task.priority !== undefined && task.priority !== null) bits.push('P' + task.priority);
+  if (task.comment_count) bits.push('💬 ' + task.comment_count);
+  if (task.link_counts && task.link_counts.children) bits.push('↳ ' + task.link_counts.children);
+  return bits;
+}
+
+function _kanbanCurrentFilters(){
+  const q = $('kanbanSearch') ? $('kanbanSearch').value.trim().toLowerCase() : '';
+  const assignee = $('kanbanAssigneeFilter') ? $('kanbanAssigneeFilter').value : '';
+  const tenant = $('kanbanTenantFilter') ? $('kanbanTenantFilter').value : '';
+  const includeArchived = !!($('kanbanIncludeArchived') && $('kanbanIncludeArchived').checked);
+  return {q, assignee, tenant, includeArchived};
+}
+
+function _kanbanSetSelectOptions(el, values, allLabelKey){
+  if (!el) return;
+  const current = el.value;
+  const opts = [`<option value="">${esc(t(allLabelKey))}</option>`]
+    .concat((values || []).map(v => `<option value="${esc(v)}">${esc(v)}</option>`));
+  el.innerHTML = opts.join('');
+  if ([...el.options].some(o => o.value === current)) el.value = current;
+}
+
+function _kanbanVisibleTasks(){
+  const filters = _kanbanCurrentFilters();
+  const columns = (_kanbanBoard && _kanbanBoard.columns) || [];
+  return columns.map(col => {
+    const tasks = (col.tasks || []).filter(task => {
+      if (!filters.q) return true;
+      const haystack = [task.id, _kanbanTaskTitle(task), _kanbanTaskBody(task), task.assignee, task.tenant]
+        .filter(Boolean).join(' ').toLowerCase();
+      return haystack.includes(filters.q);
+    });
+    return {...col, tasks};
+  });
+}
+
+function _kanbanRenderSidebar(columns){
+  const list = $('kanbanList');
+  if (!list) return;
+  const tasks = columns.flatMap(col => (col.tasks || []).map(task => ({...task, status: task.status || col.name})));
+  if (!tasks.length) {
+    list.innerHTML = `<div class="kanban-empty" data-i18n="kanban_no_matching_tasks">${esc(t('kanban_no_matching_tasks'))}</div>`;
+    return;
+  }
+  list.innerHTML = tasks.map(task => {
+    const meta = _kanbanTaskMeta(task);
+    return `<button class="kanban-list-item" onclick="loadKanbanTask('${esc(task.id)}')">
+      <span class="kanban-list-status">${esc(_kanbanColumnLabel(task.status))}</span>
+      <span class="kanban-list-title">${esc(_kanbanTaskTitle(task))}</span>
+      ${meta.length ? `<span class="kanban-meta">${esc(meta.join(' · '))}</span>` : ''}
+    </button>`;
+  }).join('');
+}
+
+function _kanbanRenderBoard(){
+  const board = $('kanbanBoard');
+  if (!board) return;
+  if (!_kanbanBoard || !_kanbanBoard.columns) {
+    board.innerHTML = `<div class="main-view-empty"><div class="main-view-empty-title">${esc(t('kanban_no_data'))}</div></div>`;
+    return;
+  }
+  const columns = _kanbanVisibleTasks();
+  const total = columns.reduce((n, col) => n + (col.tasks || []).length, 0);
+  if ($('kanbanSummary')) $('kanbanSummary').textContent = String(t('kanban_visible_tasks')).replace('{0}', total);
+  _kanbanRenderSidebar(columns);
+  board.innerHTML = columns.map(col => `
+    <section class="kanban-column" data-status="${esc(col.name)}">
+      <div class="kanban-column-head">
+        <span>${esc(_kanbanColumnLabel(col.name))}</span>
+        <span class="kanban-count">${(col.tasks || []).length}</span>
+      </div>
+      <div class="kanban-column-body">
+        ${(col.tasks || []).length ? col.tasks.map(task => _kanbanCard(task, col.name)).join('') : `<div class="kanban-empty">${esc(t('kanban_empty'))}</div>`}
+      </div>
+    </section>
+  `).join('');
+}
+
+function _kanbanCard(task, status){
+  const meta = _kanbanTaskMeta(task);
+  const body = _kanbanTaskBody(task);
+  return `<article class="kanban-card" data-kanban-task-id="${esc(task.id)}" onclick="loadKanbanTask('${esc(task.id)}')" tabindex="0" role="button">
+    <div class="kanban-card-title">${esc(_kanbanTaskTitle(task))}</div>
+    ${body ? `<div class="kanban-card-body">${esc(body)}</div>` : ''}
+    ${meta.length ? `<div class="kanban-meta">${esc(meta.join(' · '))}</div>` : ''}
+    <div class="kanban-readonly">${esc(t('kanban_read_only'))}</div>
+  </article>`;
+}
+
+async function loadKanban(animate){
+  const board = $('kanbanBoard');
+  const list = $('kanbanList');
+  try {
+    if (animate && board) board.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:13px">${esc(t('loading'))}</div>`;
+    const filters = _kanbanCurrentFilters();
+    const params = new URLSearchParams();
+    if (filters.assignee) params.set('assignee', filters.assignee);
+    if (filters.tenant) params.set('tenant', filters.tenant);
+    if (filters.includeArchived) params.set('include_archived', '1');
+    const path = '/api/kanban/board' + (params.toString() ? '?' + params.toString() : '');
+    const config = await api('/api/kanban/config');
+    const data = await api(path);
+    if (data && data.changed === false && _kanbanBoard) { _kanbanRenderBoard(); return; }
+    _kanbanBoard = data || {columns: []};
+    if ((!_kanbanBoard.columns || !_kanbanBoard.columns.length) && config && config.columns) {
+      _kanbanBoard.columns = config.columns.map(name => ({name, tasks: []}));
+    }
+    _kanbanLatestEventId = Number(_kanbanBoard.latest_event_id || 0);
+    _kanbanSetSelectOptions($('kanbanAssigneeFilter'), _kanbanBoard.assignees, 'kanban_all_assignees');
+    _kanbanSetSelectOptions($('kanbanTenantFilter'), _kanbanBoard.tenants, 'kanban_all_tenants');
+    _kanbanRenderBoard();
+  } catch(e) {
+    const msg = `${esc(t('kanban_unavailable'))}: ${esc(e.message || e)}`;
+    if (board) board.innerHTML = `<div class="main-view-empty"><div class="main-view-empty-title">${msg}</div></div>`;
+    if (list) list.innerHTML = `<div class="kanban-empty">${msg}</div>`;
+  }
+}
+
+function filterKanban(){ _kanbanRenderBoard(); }
+
+async function loadKanbanTask(taskId){
+  if (!taskId) return;
+  try {
+    const data = await api('/api/kanban/tasks/' + encodeURIComponent(taskId));
+    const task = data.task || {};
+    const title = _kanbanTaskTitle(task);
+    const body = _kanbanTaskBody(task) || t('kanban_no_description');
+    const board = $('kanbanBoard');
+    if (board) {
+      board.querySelectorAll('.kanban-card').forEach(card => card.classList.remove('selected'));
+      Array.from(board.querySelectorAll('.kanban-card')).find(card => card.dataset.kanbanTaskId === taskId)?.classList.add('selected');
+    }
+    const preview = $('kanbanTaskPreview');
+    if (preview) {
+      const meta = _kanbanTaskMeta(task);
+      preview.style.display = '';
+      preview.innerHTML = `<div class="kanban-task-preview-title">${esc(title)}</div>
+        <div class="kanban-task-preview-body">${esc(body)}</div>
+        ${meta.length ? `<div class="kanban-meta">${esc(meta.join(' · '))}</div>` : ''}`;
+    }
+    showToast(`${t('kanban_task')}: ${title}`);
+  } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
+}
 
 function loadTodos() {
   const panel = $('todoPanel');
@@ -2548,6 +2704,7 @@ async function switchToProfile(name) {
     if (_currentPanel === 'skills') await loadSkills();
     if (_currentPanel === 'memory') await loadMemory();
     if (_currentPanel === 'tasks') await loadCrons();
+    if (_currentPanel === 'kanban') await loadKanban();
     if (_currentPanel === 'profiles') await loadProfilesPanel();
     if (_currentPanel === 'workspaces') await loadWorkspacesPanel();
 
