@@ -607,6 +607,13 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
 
     try:
         import yaml as _yaml
+        from api import config as _config_mod
+
+        # Resolve via api.config at call time so tests and runtime profile switches
+        # that monkeypatch/configure the active config path are respected.
+        config_path = _config_mod._get_config_path()
+        if not config_path.exists():
+            return
 
         changed = False
 

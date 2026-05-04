@@ -3021,8 +3021,9 @@ function _saveCustomThemeFromUi(){
   _scheduleAppearanceAutosave();
 }
 
-function _confirmDeleteCustomTheme(id){
-  if(confirm('Delete this custom theme?')) _deleteCustomThemeFromUi(id);
+async function _confirmDeleteCustomTheme(id){
+  const ok=await showConfirmDialog({title:'Delete custom theme?',message:'This will remove the saved custom theme from Appearance.',confirmLabel:'Delete',danger:true,focusCancel:true});
+  if(ok) _deleteCustomThemeFromUi(id);
 }
 
 function _deleteCustomThemeFromUi(id){

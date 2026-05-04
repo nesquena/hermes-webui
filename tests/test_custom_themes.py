@@ -158,7 +158,7 @@ def test_custom_theme_picker_is_card_based_and_editor_is_collapsed_until_add():
 def test_custom_theme_cards_have_delete_confirmation_and_no_static_custom_pick_button():
     assert 'data-theme-val="custom"' not in INDEX_HTML
     assert 'function _confirmDeleteCustomTheme' in PANELS_JS
-    assert 'confirm(' in PANELS_JS
+    assert 'showConfirmDialog' in re.search(r"function _confirmDeleteCustomTheme\(.*?\).*?\n\}", PANELS_JS, re.S).group(0)
     assert 'data-delete-custom-theme' in PANELS_JS
     assert '_deleteCustomThemeFromUi(id)' in PANELS_JS
 
