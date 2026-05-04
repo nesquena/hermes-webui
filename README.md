@@ -109,6 +109,18 @@ Or keep using the shell launcher:
 ./start.sh
 ```
 
+For self-hosted VM or homelab installs, `ctl.sh` wraps the common daemon lifecycle commands without requiring `fuser` or `pkill`:
+
+```bash
+./ctl.sh start              # background daemon, PID at ~/.hermes/webui.pid
+./ctl.sh status             # PID, uptime, bound host/port, log path, /health
+./ctl.sh logs --lines 100   # tail ~/.hermes/webui.log
+./ctl.sh restart
+./ctl.sh stop
+```
+
+`ctl.sh start` runs the bootstrap in foreground/no-browser mode behind the daemon wrapper, writes logs to `~/.hermes/webui.log`, and respects `.env` plus inline overrides such as `HERMES_WEBUI_HOST=0.0.0.0 ./ctl.sh start`.
+
 The bootstrap will:
 
 1. Detect Hermes Agent and, if missing, attempt the official installer (`curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash`).
