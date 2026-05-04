@@ -2055,7 +2055,7 @@ def _run_agent_streaming(
             _pending_started_at = getattr(s, 'pending_started_at', None)
             # Normal chat-start sets pending_started_at before spawning this thread;
             # fallback to now only for recovered/legacy flows where that marker is absent.
-            _turn_started_at = _pending_started_at if _pending_started_at is not None else time.time()
+            _turn_started_at = _pending_started_at if _pending_started_at else time.time()
             _previous_messages = list(s.messages or [])
             _previous_context_messages = list(_session_context_messages(s))
             _pre_compression_count = getattr(
