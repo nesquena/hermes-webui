@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -2876,8 +2877,10 @@ _SETTINGS_DEFAULTS = {
     "show_cli_sessions": False,  # merge CLI sessions from state.db into the sidebar
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
     "check_for_updates": True,  # check if webui/agent repos are behind upstream
-    "theme": "dark",  # light | dark | system
-    "skin": "default",  # accent color skin: default | ares | mono | slate | poseidon | sisyphus | charizard
+    "theme": "dark",  # light | dark | system | custom
+    "skin": "default",  # accent color skin: default | ares | mono | slate | poseidon | sisyphus | charizard | sienna
+    "custom_theme_id": None,  # id of the active user-defined theme when theme == custom
+    "custom_themes": [],  # list of validated user-defined theme token bundles
     "font_size": "default",  # small | default | large
     "language": "en",  # UI locale code; must match a key in static/i18n.js LOCALES
     "bot_name": os.getenv(
@@ -2894,7 +2897,7 @@ _SETTINGS_DEFAULTS = {
     "password_hash": None,  # PBKDF2-HMAC-SHA256 hash; None = auth disabled
 }
 _SETTINGS_LEGACY_DROP_KEYS = {"assistant_language", "bubble_layout", "default_model"}
-_SETTINGS_THEME_VALUES = {"light", "dark", "system"}
+_SETTINGS_THEME_VALUES = {"light", "dark", "system", "custom"}
 _SETTINGS_SKIN_VALUES = {
     "default",
     "ares",
@@ -2903,6 +2906,7 @@ _SETTINGS_SKIN_VALUES = {
     "poseidon",
     "sisyphus",
     "charizard",
+    "sienna",
 }
 _SETTINGS_LEGACY_THEME_MAP = {
     # Legacy full themes now map onto the closest supported theme + accent skin pair.
@@ -2952,6 +2956,108 @@ def _normalize_appearance(theme, skin) -> tuple[str, str]:
     return next_theme, next_skin
 
 
+_CUSTOM_THEME_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
+_CUSTOM_THEME_COLOR_RE = re.compile(
+    r"^(#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?(?:[0-9a-fA-F]{2})?|rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}(?:\s*,\s*(?:0|1|0?\.\d+))?\s*\))$"
+)
+_CUSTOM_THEME_TOKEN_KEYS = {
+    "bg",
+    "sidebar",
+    "surface",
+    "main_bg",
+    "topbar_bg",
+    "text",
+    "muted",
+    "strong",
+    "em",
+    "accent",
+    "accent_hover",
+    "accent_bg",
+    "accent_bg_strong",
+    "accent_text",
+    "border",
+    "border2",
+    "border_subtle",
+    "border_muted",
+    "code_bg",
+    "code_text",
+    "code_inline_bg",
+    "pre_text",
+    "input_bg",
+    "hover_bg",
+    "focus_ring",
+    "focus_glow",
+    "blue",
+    "gold",
+    "success",
+    "warning",
+    "error",
+    "info",
+}
+
+
+def _sanitize_custom_theme_token_value(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if len(value) > 80 or not _CUSTOM_THEME_COLOR_RE.match(value):
+        return None
+    if value.lower().startswith(("rgb(", "rgba(")):
+        nums = re.findall(r"\d+(?:\.\d+)?", value)
+        if len(nums) < 3:
+            return None
+        rgb = [int(float(n)) for n in nums[:3]]
+        if any(n < 0 or n > 255 for n in rgb):
+            return None
+        if len(nums) >= 4:
+            alpha = float(nums[3])
+            if alpha < 0 or alpha > 1:
+                return None
+    return value
+
+
+def _sanitize_custom_theme(theme: object) -> dict | None:
+    if not isinstance(theme, dict):
+        return None
+    theme_id = str(theme.get("id") or "").strip().lower()
+    if not _CUSTOM_THEME_ID_RE.match(theme_id):
+        return None
+    raw_name = str(theme.get("name") or theme_id).strip()
+    name = raw_name[:60] or theme_id
+    mode = str(theme.get("mode") or "dark").strip().lower()
+    if mode not in {"light", "dark"}:
+        mode = "dark"
+    raw_tokens = theme.get("tokens")
+    if not isinstance(raw_tokens, dict):
+        return None
+    tokens = {}
+    for key, value in raw_tokens.items():
+        token_key = str(key).strip().lower().replace("-", "_")
+        if token_key not in _CUSTOM_THEME_TOKEN_KEYS:
+            return None
+        clean = _sanitize_custom_theme_token_value(value)
+        if clean is None:
+            return None
+        tokens[token_key] = clean
+    required = {"bg", "surface", "text", "accent"}
+    if not required.issubset(tokens):
+        return None
+    return {"id": theme_id, "name": name, "mode": mode, "tokens": tokens}
+
+
+def _sanitize_custom_themes(themes: object) -> list[dict]:
+    if not isinstance(themes, list):
+        return []
+    clean = []
+    seen = set()
+    for theme in themes[:20]:
+        sanitized = _sanitize_custom_theme(theme)
+        if sanitized and sanitized["id"] not in seen:
+            clean.append(sanitized)
+            seen.add(sanitized["id"])
+    return clean
+
+
 def load_settings() -> dict:
     """Load settings from disk, merging with defaults for any missing keys."""
     settings = dict(_SETTINGS_DEFAULTS)
@@ -2980,6 +3086,21 @@ def load_settings() -> dict:
         stored.get("theme") if isinstance(stored, dict) else settings.get("theme"),
         stored.get("skin") if isinstance(stored, dict) else settings.get("skin"),
     )
+    settings["custom_themes"] = _sanitize_custom_themes(
+        stored.get("custom_themes") if isinstance(stored, dict) else settings.get("custom_themes")
+    )
+    custom_theme_ids = {theme["id"] for theme in settings["custom_themes"]}
+    custom_theme_id = (
+        str(stored.get("custom_theme_id") or "").strip().lower()
+        if isinstance(stored, dict)
+        else ""
+    )
+    if settings["theme"] == "custom" and custom_theme_id in custom_theme_ids:
+        settings["custom_theme_id"] = custom_theme_id
+    else:
+        if settings["theme"] == "custom":
+            settings["theme"], settings["skin"] = "dark", "default"
+        settings["custom_theme_id"] = None
     settings["default_model"] = get_effective_default_model()
     return settings
 
@@ -3040,6 +3161,12 @@ def save_settings(settings: dict) -> dict:
                     pending_skin = v
                     skin_was_explicit = True
                 continue
+            if k == "custom_themes":
+                current["custom_themes"] = _sanitize_custom_themes(v)
+                continue
+            if k == "custom_theme_id":
+                current["custom_theme_id"] = str(v or "").strip().lower() or None
+                continue
             # Validate enum-constrained keys
             if k in _SETTINGS_ENUM_VALUES and v not in _SETTINGS_ENUM_VALUES[k]:
                 continue
@@ -3059,6 +3186,15 @@ def save_settings(settings: dict) -> dict:
         if raw_theme not in _SETTINGS_THEME_VALUES:
             skin_value = None
     current["theme"], current["skin"] = _normalize_appearance(theme_value, skin_value)
+    current["custom_themes"] = _sanitize_custom_themes(current.get("custom_themes"))
+    custom_theme_ids = {theme["id"] for theme in current["custom_themes"]}
+    custom_theme_id = str(current.get("custom_theme_id") or "").strip().lower()
+    if current["theme"] == "custom" and custom_theme_id in custom_theme_ids:
+        current["custom_theme_id"] = custom_theme_id
+    else:
+        if current["theme"] == "custom":
+            current["theme"], current["skin"] = "dark", "default"
+        current["custom_theme_id"] = None
 
     current["default_workspace"] = str(
         resolve_default_workspace(current.get("default_workspace"))

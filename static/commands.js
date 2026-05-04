@@ -499,7 +499,7 @@ async function cmdUsage(){
 }
 
 async function cmdTheme(args){
-  const themes=['system','dark','light'];
+  const themes=['system','dark','light','custom'];
   const skins=(_SKINS||[]).map(s=>s.name.toLowerCase());
   const legacyThemes=Object.keys(_LEGACY_THEME_MAP||{});
   const val=(args||'').toLowerCase().trim();

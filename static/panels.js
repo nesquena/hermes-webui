@@ -2848,11 +2848,195 @@ function _applyTtsEnabled(enabled){
 }
 
 function _appearancePayloadFromUi(){
-  return {
+  const payload={
     theme: ($('settingsTheme')||{}).value || localStorage.getItem('hermes-theme') || 'dark',
     skin: ($('settingsSkin')||{}).value || localStorage.getItem('hermes-skin') || 'default',
     font_size: ($('settingsFontSize')||{}).value || localStorage.getItem('hermes-font-size') || 'default',
   };
+  try{
+    payload.custom_themes=JSON.parse(localStorage.getItem('hermes-custom-themes')||'[]');
+    payload.custom_theme_id=localStorage.getItem('hermes-custom-theme-id')||null;
+  }catch(e){ payload.custom_themes=[]; payload.custom_theme_id=null; }
+  return payload;
+}
+
+const _CUSTOM_THEME_FIELDS=[
+  ['bg','Background'],['sidebar','Sidebar'],['surface','Surface'],['text','Text'],
+  ['muted','Muted text'],['accent','Accent / buttons'],['border','Border'],['input_bg','Input background'],
+  ['hover_bg','Hover'],['success','Success'],['warning','Warning'],['error','Error']
+];
+const _CUSTOM_THEME_DEFAULT_TOKENS={
+  bg:'#101815',sidebar:'#17231F',surface:'#1E2E28',text:'#E8F2EA',muted:'#9DB7A8',
+  accent:'#8FBF9F',border:'#31463D',input_bg:'#24352F',hover_bg:'#2B4038',
+  success:'#86C08B',warning:'#E0B15D',error:'#F87171'
+};
+let _customThemeEditingId=null;
+
+function _customThemeSlug(name){
+  return String(name||'custom-theme').toLowerCase().replace(/[^a-z0-9_-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,40)||'custom-theme';
+}
+
+function _getCustomThemes(){
+  try{return JSON.parse(localStorage.getItem('hermes-custom-themes')||'[]')||[];}catch(e){return [];}
+}
+
+function _setCustomThemeStatus(msg){const el=$('customThemeStatus');if(el)el.textContent=msg||'';}
+
+function _ensureCustomThemePickerStyles(){
+  if(document.getElementById('customThemePickerStyles')) return;
+  const style=document.createElement('style');
+  style.id='customThemePickerStyles';
+  style.textContent='.custom-color-row{display:grid;grid-template-columns:34px 1fr auto;gap:10px;align-items:center;padding:10px;border:1px solid var(--border-subtle);border-radius:10px;background:linear-gradient(180deg,var(--surface-subtle),transparent);box-shadow:0 1px 0 var(--border-subtle);cursor:pointer;transition:border-color .15s,background .15s}.custom-color-row:hover{border-color:var(--border2);background:var(--surface-subtle-hover)}.custom-color-label{font-size:12px;font-weight:600;color:var(--text);line-height:1.2}.custom-color-meta{font-size:10px;color:var(--muted);margin-top:2px}.custom-color-chip{display:inline-flex;align-items:center;gap:8px}.custom-color-swatch{width:30px;height:30px;border-radius:9px;border:1px solid var(--border2);box-shadow:inset 0 0 0 1px rgba(255,255,255,.08)}.custom-color-value{font-family:var(--font-ui);font-size:11px;color:var(--muted);padding:3px 6px;border:1px solid var(--border-subtle);border-radius:999px;background:var(--input-bg);text-transform:uppercase}.custom-color-input{width:34px;height:30px;padding:0;border:0;background:transparent;cursor:pointer}.custom-color-input::-webkit-color-swatch-wrapper{padding:0}.custom-color-input::-webkit-color-swatch{border:0;border-radius:9px}.custom-color-input::-moz-color-swatch{border:0;border-radius:9px}';
+  document.head.appendChild(style);
+}
+
+function _renderCustomThemeCards(){
+  const add=$('customThemeAddCard');
+  const grid=$('themePickerGrid');
+  if(!add||!grid) return;
+  grid.querySelectorAll('[data-custom-theme-card]').forEach(el=>el.remove());
+  const activeId=localStorage.getItem('hermes-custom-theme-id')||'';
+  for(const theme of _getCustomThemes()){
+    if(!theme||!theme.id) continue;
+    const tokens=theme.tokens||{};
+    const card=document.createElement('button');
+    card.type='button';
+    card.className='theme-pick-btn';
+    card.dataset.themeVal='custom:'+theme.id;
+    card.dataset.customThemeCard=theme.id;
+    card.style.cssText='position:relative;border:1px solid var(--border2);border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;background:none;transition:all .15s';
+    card.onclick=()=>_pickCustomTheme(theme.id);
+    card.innerHTML=`<span role="button" tabindex="0" data-edit-custom-theme="${esc(theme.id)}" aria-label="Edit ${esc(theme.name||'custom theme')}" title="Edit" style="position:absolute;top:4px;left:4px;height:20px;padding:0 7px;border-radius:999px;border:1px solid var(--border2);background:var(--surface);color:var(--text);cursor:pointer;line-height:18px;font-size:11px;font-weight:600">Edit</span><span role="button" tabindex="0" data-delete-custom-theme="${esc(theme.id)}" aria-label="Delete ${esc(theme.name||'custom theme')}" title="Delete" style="position:absolute;top:4px;right:4px;width:18px;height:18px;border-radius:50%;border:1px solid var(--border2);background:var(--surface);color:var(--muted);cursor:pointer;line-height:16px;font-size:12px">×</span><div style="width:100%;height:40px;border-radius:6px;background:linear-gradient(135deg,${esc(tokens.bg||'#101815')},${esc(tokens.surface||'#1E2E28')},${esc(tokens.accent||'#8FBF9F')});border:1px solid ${esc(tokens.border||'var(--border2)')};margin-bottom:6px"></div><span style="font-size:12px;font-weight:500;color:var(--text)">${esc(theme.name||theme.id)}</span>`;
+    const edit=card.querySelector('[data-edit-custom-theme]');
+    if(edit){
+      edit.onclick=(ev)=>{ev.preventDefault();ev.stopPropagation();_editCustomTheme(theme.id);};
+      edit.onkeydown=(ev)=>{if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();ev.stopPropagation();_editCustomTheme(theme.id);}};
+    }
+    const del=card.querySelector('[data-delete-custom-theme]');
+    if(del){
+      del.onclick=(ev)=>{ev.preventDefault();ev.stopPropagation();_confirmDeleteCustomTheme(theme.id);};
+      del.onkeydown=(ev)=>{if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();ev.stopPropagation();_confirmDeleteCustomTheme(theme.id);}};
+    }
+    card.classList.toggle('active',activeId===theme.id && localStorage.getItem('hermes-theme')==='custom');
+    grid.insertBefore(card,add);
+  }
+}
+
+function _editCustomTheme(id){
+  const theme=_getCustomThemes().find(t=>t&&t.id===id);
+  if(!theme) return;
+  _pickCustomTheme(theme.id);
+  _openCustomThemeEditor(theme.id);
+}
+
+function _openCustomThemeEditor(themeId){
+  _customThemeEditingId=themeId||null;
+  const editor=$('customThemeEditor');
+  if(editor) editor.hidden=false;
+  _renderCustomThemeEditor();
+  _updateCustomThemePreview();
+}
+
+function _closeCustomThemeEditor(){
+  const editor=$('customThemeEditor');
+  if(editor) editor.hidden=true;
+  _customThemeEditingId=null;
+  _setCustomThemeStatus('');
+}
+
+function _renderCustomThemeEditor(){
+  const grid=$('customThemeColorGrid');
+  if(!grid) return;
+  _ensureCustomThemePickerStyles();
+  const themeId=_customThemeEditingId;
+  const themes=_getCustomThemes();
+  const existing=themeId?themes.find(t=>t&&t.id===themeId):null;
+  const active=existing||{name:'My theme',mode:'dark',tokens:_CUSTOM_THEME_DEFAULT_TOKENS};
+  const name=$('customThemeName'); if(name) name.value=active.name;
+  const mode=$('customThemeMode'); if(mode){ mode.value=active.mode==='light'?'light':'dark'; mode.onchange=()=>{_updateCustomThemePreview(); if(typeof _applyCustomThemeTokens==='function') _applyCustomThemeTokens(_previewCustomThemeFromUi());}; }
+  const saveButton=document.querySelector('#customThemeEditor button[onclick="_saveCustomThemeFromUi()"]');
+  if(saveButton) saveButton.textContent=existing?'Save changes':'Create theme';
+  grid.innerHTML='';
+  for(const [key,label] of _CUSTOM_THEME_FIELDS){
+    const value=(active.tokens&&active.tokens[key])||_CUSTOM_THEME_DEFAULT_TOKENS[key]||'#000000';
+    const row=document.createElement('label');
+    row.className='custom-color-row';
+    row.innerHTML=`<span class="custom-color-swatch" style="background:${esc(value)}"></span><span><span class="custom-color-label">${esc(label)}</span><span class="custom-color-meta">Theme token: --${esc(key.replace(/_/g,'-'))}</span></span><span class="custom-color-chip"><span class="custom-color-value">${esc(value)}</span><input class="custom-color-input" type="color" data-custom-token-hex="${key}" data-custom-token="${key}" value="${esc(value)}" aria-label="${esc(label)} color"></span>`;
+    const input=row.querySelector('input');
+    input.oninput=()=>{const valueLabel=row.querySelector('.custom-color-value'); if(valueLabel) valueLabel.textContent=input.value; const swatch=row.querySelector('.custom-color-swatch'); if(swatch) swatch.style.background=input.value; _updateCustomThemePreview(); if(typeof _applyCustomThemeTokens==='function') _applyCustomThemeTokens(_previewCustomThemeFromUi());};
+    grid.appendChild(row);
+  }
+}
+
+function _previewCustomThemeFromUi(){
+  const tokens={};
+  document.querySelectorAll('[data-custom-token]').forEach(input=>{tokens[input.dataset.customToken]=input.value.trim();});
+  return {id:_customThemeEditingId||_customThemeSlug(($('customThemeName')||{}).value||'My theme'),name:(($('customThemeName')||{}).value||'My theme').trim()||'My theme',mode:(($('customThemeMode')||{}).value==='light'?'light':'dark'),tokens};
+}
+
+function _updateCustomThemePreview(){
+  const theme=_previewCustomThemeFromUi();
+  const t=theme.tokens||{};
+  const preview=$('customThemePreview');
+  if(!preview) return;
+  preview.style.background=t.bg||'#101815';
+  preview.querySelectorAll('[data-preview-sidebar]').forEach(el=>{el.style.background=t.sidebar||'#17231F';el.style.borderColor=t.border||'#31463D';});
+  preview.querySelectorAll('[data-preview-surface]').forEach(el=>{el.style.background=t.surface||'#1E2E28';});
+  preview.querySelectorAll('[data-preview-text]').forEach(el=>{el.style.color=t.text||'#E8F2EA';});
+  preview.querySelectorAll('[data-preview-muted]').forEach(el=>{el.style.color=t.muted||'#9DB7A8';});
+  preview.querySelectorAll('[data-preview-accent], .custom-theme-preview-swatch').forEach(el=>{el.style.background=t.accent||'#8FBF9F';});
+}
+
+function _customThemeFromUi(){
+  return _previewCustomThemeFromUi();
+}
+
+function _pickCustomTheme(id){
+  const theme=_getCustomThemes().find(t=>t&&t.id===id);
+  if(!theme) return;
+  localStorage.setItem('hermes-custom-theme-id',theme.id);
+  localStorage.setItem('hermes-custom-theme-tokens',JSON.stringify(theme));
+  localStorage.setItem('hermes-theme','custom');
+  const hidden=$('settingsTheme'); if(hidden) hidden.value='custom';
+  if(typeof _applyCustomThemeTokens==='function') _applyCustomThemeTokens(theme);
+  if(typeof _syncThemePicker==='function') _syncThemePicker('custom:'+theme.id);
+  _renderCustomThemeCards();
+  _scheduleAppearanceAutosave();
+}
+
+function _saveCustomThemeFromUi(){
+  const theme=_customThemeFromUi();
+  const themes=_getCustomThemes().filter(t=>t&&t.id!==theme.id);
+  themes.push(theme);
+  localStorage.setItem('hermes-custom-themes',JSON.stringify(themes));
+  localStorage.setItem('hermes-custom-theme-id',theme.id);
+  localStorage.setItem('hermes-custom-theme-tokens',JSON.stringify(theme));
+  localStorage.setItem('hermes-theme','custom');
+  const hidden=$('settingsTheme'); if(hidden) hidden.value='custom';
+  if(typeof _applyCustomThemeTokens==='function') _applyCustomThemeTokens(theme);
+  if(typeof _syncThemePicker==='function') _syncThemePicker('custom:'+theme.id);
+  _renderCustomThemeCards();
+  _closeCustomThemeEditor();
+  _setCustomThemeStatus('Saved locally — syncing…');
+  _scheduleAppearanceAutosave();
+}
+
+function _confirmDeleteCustomTheme(id){
+  if(confirm('Delete this custom theme?')) _deleteCustomThemeFromUi(id);
+}
+
+function _deleteCustomThemeFromUi(id){
+  const target=id||localStorage.getItem('hermes-custom-theme-id')||'';
+  const themes=_getCustomThemes().filter(t=>t&&t.id!==target);
+  localStorage.setItem('hermes-custom-themes',JSON.stringify(themes));
+  if(localStorage.getItem('hermes-custom-theme-id')===target){
+    localStorage.removeItem('hermes-custom-theme-id');
+    localStorage.removeItem('hermes-custom-theme-tokens');
+    if(($('settingsTheme')||{}).value==='custom') _pickTheme('dark');
+  }
+  _renderCustomThemeCards();
+  _closeCustomThemeEditor();
+  _scheduleAppearanceAutosave();
 }
 
 function _setAppearanceAutosaveStatus(state){
@@ -2899,6 +3083,16 @@ async function _autosaveAppearanceSettings(payload){
     if(saved&&saved.font_size){
       localStorage.setItem('hermes-font-size',saved.font_size);
     }
+    if(saved&&Array.isArray(saved.custom_themes)){
+      localStorage.setItem('hermes-custom-themes',JSON.stringify(saved.custom_themes));
+      if(saved.custom_theme_id) localStorage.setItem('hermes-custom-theme-id',saved.custom_theme_id);
+      else localStorage.removeItem('hermes-custom-theme-id');
+      const active=saved.custom_themes.find(t=>t&&t.id===saved.custom_theme_id);
+      if(active) localStorage.setItem('hermes-custom-theme-tokens',JSON.stringify(active));
+      else localStorage.removeItem('hermes-custom-theme-tokens');
+      _renderCustomThemeCards();
+    }
+    _setCustomThemeStatus(saved&&saved.theme==='custom'?'Custom theme synced':'');
     _setAppearanceAutosaveStatus('saved');
   }catch(e){
     console.warn('[settings] appearance autosave failed', e);
@@ -3032,12 +3226,19 @@ async function loadSettingsPanel(){
       const agentVersion = (settings.agent_version || 'not detected').toString().trim() || 'not detected';
       agentBadge.textContent = `Agent: ${agentVersion}`;
     }
+    if(Array.isArray(settings.custom_themes)) localStorage.setItem('hermes-custom-themes',JSON.stringify(settings.custom_themes));
+    if(settings.custom_theme_id) localStorage.setItem('hermes-custom-theme-id',settings.custom_theme_id);
+    else localStorage.removeItem('hermes-custom-theme-id');
+    const activeCustom=(settings.custom_themes||[]).find(t=>t&&t.id===settings.custom_theme_id);
+    if(activeCustom) localStorage.setItem('hermes-custom-theme-tokens',JSON.stringify(activeCustom));
+    else if((settings.theme||'')!=='custom') localStorage.removeItem('hermes-custom-theme-tokens');
+    _renderCustomThemeCards();
     // Hydrate appearance controls first so a slow /api/models request
     // cannot overwrite an in-progress theme/skin selection.
     const themeSel=$('settingsTheme');
     const themeVal=settings.theme||'dark';
     if(themeSel) themeSel.value=themeVal;
-    if(typeof _syncThemePicker==='function') _syncThemePicker(themeVal);
+    if(typeof _syncThemePicker==='function') _syncThemePicker(themeVal==='custom'&&settings.custom_theme_id?'custom:'+settings.custom_theme_id:themeVal);
     const skinVal=(settings.skin||'default').toLowerCase();
     const skinSel=$('settingsSkin');
     if(skinSel) skinSel.value=skinVal;
@@ -3666,6 +3867,10 @@ async function saveSettings(andClose){
   body.theme=theme;
   body.skin=skin;
   body.font_size=fontSize;
+  try{
+    body.custom_themes=JSON.parse(localStorage.getItem('hermes-custom-themes')||'[]');
+    body.custom_theme_id=localStorage.getItem('hermes-custom-theme-id')||null;
+  }catch(e){ body.custom_themes=[]; body.custom_theme_id=null; }
   body.language=language;
   body.show_token_usage=showTokenUsage;
   body.simplified_tool_calling=!!($('settingsSimplifiedToolCalling')||{}).checked;

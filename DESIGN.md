@@ -154,6 +154,14 @@ Same visual family as tool-call metadata. They should be quieter than assistant 
 
 The composer is the command surface. Keep it legible and focused: modest radius, subtle border, transparent inactive chips, no theatrical hover scaling.
 
+## Custom themes
+
+The global CSS variable surface in `static/style.css` is the contract for user-defined themes. Custom themes should override named tokens such as `--bg`, `--sidebar`, `--surface`, `--text`, `--muted`, `--accent`, `--border`, and state colors rather than introducing separate per-component color rules.
+
+User-defined themes are persisted through `/api/settings` as `custom_themes` plus the active `custom_theme_id`. The client caches the active token bundle in localStorage for first paint so a custom theme can render before the settings request completes.
+
+The custom theme editor should stay compact: show an add card in the Appearance theme grid, expand the editor only while creating or editing, provide a live preview, and keep native color inputs visually wrapped in Hermes-styled controls.
+
 ## Do's and Don'ts
 
 Do:

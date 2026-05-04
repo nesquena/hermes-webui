@@ -1050,6 +1050,7 @@ const _THEMES=[
   {name:'Light', value:'light', colors:['#FEFCF7','#FAF7F0','#B8860B']},
   {name:'Dark', value:'dark', colors:['#0D0D1A','#141425','#FFD700']},
   {name:'System', value:'system', colors:['#FEFCF7','#0D0D1A','#B8860B']},
+  {name:'Custom', value:'custom', colors:['var(--accent)','#1E2E28','#E8F2EA']},
 ];
 const _SKINS=[
   {name:'Default',  colors:['#FFD700','#FFBF00','#CD7F32']},
@@ -1060,6 +1061,12 @@ const _SKINS=[
   {name:'Sisyphus', colors:['#A78BFA','#8B5CF6','#7C3AED']},
   {name:'Charizard',colors:['#FB923C','#F97316','#EA580C']},
   {name:'Sienna',   colors:['#D97757','#C06A49','#9A523A']},
+];
+const _CUSTOM_THEME_TOKEN_KEYS=[
+  'bg','sidebar','surface','main-bg','topbar-bg','text','muted','strong','em',
+  'accent','accent-hover','accent-bg','accent-bg-strong','accent-text','border','border2',
+  'border-subtle','border-muted','code-bg','code-text','code-inline-bg','pre-text',
+  'input-bg','hover-bg','focus-ring','focus-glow','blue','gold','success','warning','error','info'
 ];
 const _VALID_THEMES=new Set((_THEMES||[]).map(t=>t.value));
 const _VALID_SKINS=new Set((_SKINS||[]).map(s=>s.name.toLowerCase()));
@@ -1094,9 +1101,40 @@ function _setResolvedTheme(isDark){
   if(link.href!==want){ link.integrity=''; link.href=want; }
 }
 
+function _clearCustomThemeTokens(){
+  for(const key of _CUSTOM_THEME_TOKEN_KEYS){
+    document.documentElement.style.removeProperty('--'+key);
+  }
+}
+
+function _activeCustomTheme(){
+  try{
+    const id=localStorage.getItem('hermes-custom-theme-id')||'';
+    const themes=JSON.parse(localStorage.getItem('hermes-custom-themes')||'[]');
+    return (themes||[]).find(t=>t&&t.id===id)||null;
+  }catch(e){ return null; }
+}
+
+function _applyCustomThemeTokens(theme){
+  const active=theme||_activeCustomTheme();
+  if(!active||!active.tokens){ return false; }
+  document.documentElement.dataset.theme='custom';
+  _setResolvedTheme((active.mode||'dark')!=='light');
+  _clearCustomThemeTokens();
+  for(const [rawKey,value] of Object.entries(active.tokens||{})){
+    const key=String(rawKey).replace(/_/g,'-');
+    if(_CUSTOM_THEME_TOKEN_KEYS.includes(key) && typeof value==='string'){
+      document.documentElement.style.setProperty('--'+key,value);
+    }
+  }
+  localStorage.setItem('hermes-custom-theme-tokens',JSON.stringify(active));
+  return true;
+}
+
 function _applyTheme(name){
   const normalized=_normalizeAppearance(name,'default');
   delete document.documentElement.dataset.theme;
+  if(normalized.theme!=='custom') _clearCustomThemeTokens();
   if(_systemThemeMq&&_onSystemThemeChange){
     _systemThemeMq.removeEventListener('change',_onSystemThemeChange);
     _systemThemeMq=null;
@@ -1107,6 +1145,10 @@ function _applyTheme(name){
     _onSystemThemeChange=()=>_setResolvedTheme(_systemThemeMq.matches);
     _setResolvedTheme(_systemThemeMq.matches);
     _systemThemeMq.addEventListener('change',_onSystemThemeChange);
+    return;
+  }
+  if(normalized.theme==='custom'){
+    if(!_applyCustomThemeTokens()) _setResolvedTheme(true);
     return;
   }
   _setResolvedTheme(normalized.theme==='dark');
@@ -1250,6 +1292,11 @@ function applyBotName(){
     // Persist default workspace so the blank new-chat page can show it
     // and workspace actions (New file/folder) work before the first session (#804).
     if(s.default_workspace) S._profileDefaultWorkspace=s.default_workspace;
+    if(Array.isArray(s.custom_themes)) localStorage.setItem('hermes-custom-themes',JSON.stringify(s.custom_themes));
+    if(s.custom_theme_id) localStorage.setItem('hermes-custom-theme-id',s.custom_theme_id);
+    else localStorage.removeItem('hermes-custom-theme-id');
+    const activeCustom=(s.custom_themes||[]).find(t=>t&&t.id===s.custom_theme_id);
+    if(activeCustom) localStorage.setItem('hermes-custom-theme-tokens',JSON.stringify(activeCustom));
     const appearance=_normalizeAppearance(s.theme,s.skin);
     localStorage.setItem('hermes-theme',appearance.theme);
     _applyTheme(appearance.theme);

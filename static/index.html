@@ -15,7 +15,7 @@
 <link rel="apple-touch-icon" sizes="512x512" href="static/apple-touch-icon.png">
 <!-- base href enables subpath mount support; all static paths must stay relative (no leading slash) -->
 <script>(function(){var path=location.pathname,marker='/session/',i=path.indexOf(marker),p;i>=0?p=(path.slice(0,i+1)||'/'):p=(path.endsWith('/')?path:(path.replace(/\/[^\/]*$/,'/')||'/'));document.write('<base href="'+location.origin+p+'">');})()</script>
-<script>(function(){var themes={light:1,dark:1,system:1},skins={default:1,ares:1,mono:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark'),skin=skins[s]?s:(m?m[1]:'default');localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;})()</script>
+<script>(function(){var themes={light:1,dark:1,system:1,custom:1},skins={default:1,ares:1,mono:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark'),skin=skins[s]?s:(m?m[1]:'default');localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='custom'){try{var c=JSON.parse(localStorage.getItem('hermes-custom-theme-tokens')||'null'),ks=['bg','sidebar','surface','main_bg','topbar_bg','text','muted','strong','em','accent','accent_hover','accent_bg','accent_bg_strong','accent_text','border','border2','border_subtle','border_muted','code_bg','code_text','code_inline_bg','pre_text','input_bg','hover_bg','focus_ring','focus_glow','blue','gold','success','warning','error','info'];document.documentElement.dataset.theme='custom';if(!c||c.mode!=='light')document.documentElement.classList.add('dark');if(c&&c.tokens)ks.forEach(function(k){var v=c.tokens[k];if(typeof v==='string')document.documentElement.style.setProperty('--'+k.replace(/_/g,'-'),v);});}catch(e){document.documentElement.classList.add('dark');}}else if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;})()</script>
 <script>(function(){var fs=localStorage.getItem('hermes-font-size');if(fs&&fs!=='default')document.documentElement.dataset.fontSize=fs;})()</script>
 <script>(function(){try{document.documentElement.dataset.workspacePanel=localStorage.getItem('hermes-webui-workspace-panel')==='open'?'open':'closed';}catch(e){document.documentElement.dataset.workspacePanel='closed';}})()</script>
 <link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__">
@@ -701,8 +701,31 @@
                   </div>
                   <span style="font-size:12px;font-weight:500;color:var(--text)">System</span>
                 </button>
+                <button type="button" id="customThemeAddCard" onclick="_openCustomThemeEditor()" class="theme-pick-btn" style="border:1px dashed var(--border2);border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;background:var(--surface-subtle);transition:all .15s">
+                  <div style="width:100%;height:40px;border-radius:6px;border:1px dashed var(--border2);margin-bottom:6px;display:flex;align-items:center;justify-content:center;color:var(--accent)">
+                    <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+                  </div>
+                  <span style="font-size:12px;font-weight:500;color:var(--text)">Add theme</span>
+                </button>
               </div>
               <input type="hidden" id="settingsTheme" value="dark">
+            </div>
+            <div class="settings-field" id="customThemeEditor" hidden style="border:1px solid var(--border);border-radius:12px;padding:12px;background:var(--surface-subtle);margin-top:10px">
+              <label for="customThemeName">Custom theme</label>
+              <div style="display:grid;grid-template-columns:1fr auto;gap:8px;margin-top:6px">
+                <input id="customThemeName" placeholder="My theme" style="padding:8px;background:var(--input-bg);color:var(--text);border:1px solid var(--border2);border-radius:8px">
+                <select id="customThemeMode" style="padding:8px;background:var(--input-bg);color:var(--text);border:1px solid var(--border2);border-radius:8px"><option value="dark">Dark</option><option value="light">Light</option></select>
+              </div>
+              <div id="customThemePreview" style="border:1px solid var(--border);border-radius:10px;overflow:hidden;margin-top:10px;background:var(--bg)">
+                <div data-preview-sidebar style="background:var(--sidebar);padding:8px;border-bottom:1px solid var(--border);display:flex;gap:6px;align-items:center"><span class="custom-theme-preview-swatch" style="width:12px;height:12px;border-radius:50%;background:var(--accent)"></span><span data-preview-text style="color:var(--text);font-size:12px;font-weight:600">Preview menu</span></div>
+                <div data-preview-surface style="background:var(--surface);padding:10px;display:grid;gap:8px"><div data-preview-text style="color:var(--text);font-size:13px">Conversation surface</div><div data-preview-muted style="color:var(--muted);font-size:11px">Muted metadata and helper text</div><button data-preview-accent style="justify-self:start;background:var(--accent);color:#fff;border:0;border-radius:7px;padding:6px 10px;font-size:12px">Primary button</button></div>
+              </div>
+              <div id="customThemeColorGrid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;margin-top:10px"></div>
+              <div style="display:flex;gap:8px;margin-top:10px;align-items:center">
+                <button type="button" onclick="_saveCustomThemeFromUi()" style="padding:7px 12px;border:0;border-radius:8px;background:var(--accent);color:#fff;font-weight:600;cursor:pointer">Save custom theme</button>
+                <button type="button" onclick="_closeCustomThemeEditor()" style="padding:7px 12px;border:1px solid var(--border2);border-radius:8px;background:transparent;color:var(--muted);cursor:pointer">Cancel</button>
+                <span id="customThemeStatus" style="font-size:11px;color:var(--muted)"></span>
+              </div>
             </div>
             <div class="settings-field">
               <label data-i18n="settings_label_skin">Skin</label>
