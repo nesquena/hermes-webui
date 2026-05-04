@@ -1541,6 +1541,11 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
 
     if name in {"space.list", "space.spaces", "space.spaces.list", "space.spaces.listspaces"}:
         return {"ok": True, "action": name, "spaces": list_spaces()}
+    if name in {"space.spaces.items", "space.spaces.all"}:
+        return {"ok": True, "action": name, "spaces": list_spaces()}
+    if name == "space.spaces.byid":
+        spaces = list_spaces()
+        return {"ok": True, "action": name, "spaces_by_id": {space["space_id"]: space for space in spaces}}
     if name in {"space.demo.list", "space.demo.runs"}:
         return {"ok": True, "action": name, "demos": list_space_demo_runs()}
     if name in {"space.demo.run", "space_demo_run"}:
@@ -1548,12 +1553,16 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         return {"action": name, **space_demo_run(demo_name)}
     if name in {"space.demo.run_all", "space.demo.run-all", "space_demo_run_all"}:
         return space_demo_run_all()
-    if name in {"space.current", "space.current.get", "space.spaces.getcurrentspace"}:
+    if name in {"space.current", "space.current.get", "space.spaces.current", "space.spaces.getcurrentspace"}:
         current_id = _space_tool_current_id(data)
         if not current_id:
             return {"ok": True, "action": name, "active_space_id": None, "space": None}
         space_id = validate_space_id(current_id)
         return {"ok": True, "action": name, "active_space_id": space_id, "space": read_space_detail(space_id)}
+    if name == "space.spaces.currentid":
+        current_id = _space_tool_current_id(data)
+        space_id = validate_space_id(current_id) if current_id else None
+        return {"ok": True, "action": name, "active_space_id": space_id, "current_id": space_id}
     if name in {"space.current.context", "space.context", "space.current.prompt_context"}:
         current_id = _space_tool_current_id(data)
         if not current_id:
@@ -1563,6 +1572,15 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {"space.current.widgets", "space.current.widget.list", "space.current.listwidgets"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         return {"ok": True, "action": name, "active_space_id": space_id, "widgets": list_widgets(space_id)}
+    if name in {"space.current.byid", "space.current.widgetsbyid"}:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        widgets = list_widgets(space_id)
+        return {"ok": True, "action": name, "active_space_id": space_id, "widgets_by_id": {widget["id"]: widget for widget in widgets}}
+    if name in {"space.current.agentinstructions", "space.current.specialinstructions"}:
+        space_id = validate_space_id(_space_tool_current_id(data))
+        instructions = read_space_detail(space_id).get("agent_instructions", "")
+        key = "agent_instructions" if name.endswith("agentinstructions") else "special_instructions"
+        return {"ok": True, "action": name, "active_space_id": space_id, key: instructions}
     if name in {"space.spaces.listwidgets", "space.spaces.widgets"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         return {"ok": True, "action": name, "space_id": space_id, "widgets": list_widgets(space_id)}

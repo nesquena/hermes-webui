@@ -232,6 +232,75 @@ def test_space_tool_adapter_supports_source_camelcase_space_helpers(monkeypatch,
     assert "secret" not in serialized
 
 
+def test_space_tool_adapter_supports_source_collection_property_aliases_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({
+        "space_id": "source-collections-lab",
+        "name": "Source Collections Lab",
+        "agent_instructions": "Use only safe metadata.",
+    })
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "unsafe-widget",
+            "kind": "html",
+            "title": "Unsafe Widget",
+            "renderer": "<script>stored()</script>",
+            "html": "<img src=x onerror=steal()>",
+            "source": "SECRET_SOURCE",
+            "data": {"api_key": "***", "token": "***"},
+        },
+    )
+
+    items = spaces.run_space_tool("space.spaces.items", {"renderer": "<script>ignore()</script>", "api_key": "***"})
+    all_spaces = spaces.run_space_tool("space.spaces.all", {"source": "SECRET_SOURCE", "token": "***"})
+    by_id = spaces.run_space_tool("space.spaces.byId", {"html": "<img src=x onerror=steal()>", "api_key": "***"})
+    current = spaces.run_space_tool("space.spaces.current", {"activeSpaceId": created["space_id"], "renderer": "<script>ignore()</script>"})
+    current_id = spaces.run_space_tool("space.spaces.currentId", {"activeSpaceId": created["space_id"], "token": "***"})
+    current_by_id = spaces.run_space_tool("space.current.byId", {"activeSpaceId": created["space_id"], "source": "SECRET_SOURCE"})
+    current_instructions = spaces.run_space_tool(
+        "space.current.agentInstructions",
+        {"activeSpaceId": created["space_id"], "api_key": "***"},
+    )
+    legacy_instructions = spaces.run_space_tool(
+        "space.current.specialInstructions",
+        {"activeSpaceId": created["space_id"], "token": "***"},
+    )
+    serialized = json.dumps(
+        {
+            "items": items,
+            "all_spaces": all_spaces,
+            "by_id": by_id,
+            "current": current,
+            "current_id": current_id,
+            "current_by_id": current_by_id,
+            "current_instructions": current_instructions,
+            "legacy_instructions": legacy_instructions,
+        }
+    ).lower()
+
+    assert items["ok"] is True
+    assert items["spaces"][0]["space_id"] == created["space_id"]
+    assert all_spaces["spaces"] == items["spaces"]
+    assert by_id["spaces_by_id"][created["space_id"]]["space_id"] == created["space_id"]
+    assert current["active_space_id"] == created["space_id"]
+    assert current["space"]["widgets"][0]["id"] == "unsafe-widget"
+    assert current_id["current_id"] == created["space_id"]
+    assert current_by_id["widgets_by_id"]["unsafe-widget"]["id"] == "unsafe-widget"
+    assert current_instructions["agent_instructions"] == "Use only safe metadata."
+    assert legacy_instructions["special_instructions"] == "Use only safe metadata."
+    assert "stored" not in serialized
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert '"source":' not in serialized
+    assert '"data":' not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+
+
 def test_space_tool_adapter_supports_source_open_alias_and_camelcase_space_id_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "source-open-lab", "name": "Source Open Lab"})
