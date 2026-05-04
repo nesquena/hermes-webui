@@ -396,6 +396,24 @@ class TestUiJsUpdateBanner:
         )
 
 
+class TestUpdateBannerUx:
+    def test_update_banner_includes_repo_branch_labels(self):
+        src = read('static/ui.js')
+        assert 'function _formatUpdateTargetStatus' in src
+        assert 'info.branch' in src
+        assert "_formatUpdateTargetStatus('WebUI',data.webui)" in src
+        assert "_formatUpdateTargetStatus('Agent',data.agent)" in src
+
+    def test_settings_update_check_uses_same_repo_branch_formatter(self):
+        src = read('static/panels.js')
+        m = re.search(r'async function checkUpdatesNow\b.*?\n\}', src, re.DOTALL)
+        assert m, "checkUpdatesNow() not found"
+        fn = m.group(0)
+        assert '_formatUpdateTargetStatus' in fn
+        assert "formatUpdatePart('WebUI',data.webui)" in fn
+        assert "formatUpdatePart('Agent',data.agent)" in fn
+
+
 # ── static/index.html ─────────────────────────────────────────────────────────
 
 class TestIndexHtmlBanner:

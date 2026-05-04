@@ -2844,10 +2844,17 @@ async function refreshSession() {
   } catch(e) { setStatus('Refresh failed: ' + e.message); }
 }
 // ── Update banner ──
+function _formatUpdateTargetStatus(label,info){
+  if(!info||!(info.behind>0)) return null;
+  const branch=info.branch?` (${info.branch})`:'';
+  return `${label}${branch}: ${info.behind} update${info.behind>1?'s':''}`;
+}
 function _showUpdateBanner(data){
   const parts=[];
-  if(data.webui&&data.webui.behind>0) parts.push(`WebUI: ${data.webui.behind} update${data.webui.behind>1?'s':''}`);
-  if(data.agent&&data.agent.behind>0) parts.push(`Agent: ${data.agent.behind} update${data.agent.behind>1?'s':''}`);
+  const webuiPart=_formatUpdateTargetStatus('WebUI',data.webui);
+  const agentPart=_formatUpdateTargetStatus('Agent',data.agent);
+  if(webuiPart) parts.push(webuiPart);
+  if(agentPart) parts.push(agentPart);
   if(!parts.length)return;
   const msg=$('updateMsg');
   if(msg) msg.textContent='\u2B06 '+parts.join(', ')+' available';
