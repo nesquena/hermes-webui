@@ -232,6 +232,55 @@ def test_space_tool_adapter_supports_source_camelcase_space_helpers(monkeypatch,
     assert "secret" not in serialized
 
 
+def test_space_tool_adapter_supports_source_open_alias_and_camelcase_space_id_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "source-open-lab", "name": "Source Open Lab"})
+    spaces.upsert_widget(
+        created["space_id"],
+        {
+            "id": "unsafe-widget",
+            "kind": "html",
+            "title": "Unsafe Widget",
+            "renderer": "<script>stored()</script>",
+            "source": "SECRET_SOURCE",
+            "data": {"api_key": "SECRET...LEAK", "token": "SECRET_TOKEN"},
+        },
+    )
+
+    opened = spaces.run_space_tool(
+        "space.spaces.open",
+        {"spaceId": created["space_id"], "renderer": "<script>ignore()</script>", "token": "***"},
+    )
+    read_by_camelcase_id = spaces.run_space_tool(
+        "space.spaces.read",
+        {"spaceId": created["space_id"], "source": "SECRET_SOURCE", "api_key": "***"},
+    )
+    get_by_camelcase_id = spaces.run_space_tool(
+        "space.spaces.get",
+        {"spaceId": created["space_id"], "html": "<img src=x onerror=steal()>", "token": "***"},
+    )
+    serialized = json.dumps(
+        {"opened": opened, "read_by_camelcase_id": read_by_camelcase_id, "get_by_camelcase_id": get_by_camelcase_id}
+    ).lower()
+
+    assert opened["ok"] is True
+    assert opened["action"] == "space.spaces.open"
+    assert opened["space"]["space_id"] == created["space_id"]
+    assert opened["space"]["widgets"][0]["id"] == "unsafe-widget"
+    assert read_by_camelcase_id["space"] == opened["space"]
+    assert get_by_camelcase_id["space"] == opened["space"]
+    assert "stored" not in serialized
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert '"source":' not in serialized
+    assert '"data":' not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+
+
 def test_space_tool_adapter_supports_source_widget_list_and_read_helpers_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "source-widget-read-lab", "name": "Source Widget Read Lab"})

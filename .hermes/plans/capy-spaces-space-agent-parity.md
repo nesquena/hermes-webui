@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-03 22:13 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-03 23:13 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: source normalization helper coverage now includes Space Agent-style `space.spaces.normalizeSpaceId` and `space.spaces.normalizeWidgetId` aliases while preserving Capy's metadata-only boundary. The helpers mirror Space Agent slug behavior for diacritics, underscores, punctuation, and fallback ids, and omit generated/executable/source/API auth markers from serialized responses. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: source open/get helper coverage now includes the Space Agent-style `space.spaces.open` alias and camelCase `spaceId` payload support for `space.spaces.get` / `read` / `open`, while preserving Capy's metadata-only boundary. The helpers return safe Space detail metadata and omit generated/executable/source/API auth markers from serialized responses. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): support source open helper alias`
+  - Added RED/GREEN backend coverage proving `space.spaces.open` accepts Space Agent-style `spaceId` payloads, and existing source-style `space.spaces.get` / `read` helpers now accept camelCase ids while omitting renderer/html/source/data/API auth markers from serialized adapter responses.
+  - Validation at completion before screenshot/restart: focused RED failed before implementation with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`), full Spaces foundation suite passed (`133 passed`), `py_compile api/spaces.py tests/test_spaces_foundation.py`, and `git diff --check` passed.
 
 - `feat(spaces): support source normalize id helpers`
   - Added RED/GREEN backend coverage proving `space.spaces.normalizeSpaceId` and `space.spaces.normalizeWidgetId` accept source-style id/name/value payloads, normalize ids compatibly with Space Agent slug semantics, use safe fallback ids, and omit renderer/html/source/API auth markers from serialized adapter responses.

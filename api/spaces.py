@@ -1615,8 +1615,16 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         space = read_space_detail(created["space_id"])
         space["widget_count"] = len(space.get("widgets") or [])
         return {"ok": True, "action": name, "space": space}
-    if name in {"space.get", "space.spaces.get", "space.spaces.read", "space.spaces.getspace", "space.spaces.readspace", "space.spaces.openspace"}:
-        space_id = validate_space_id(data.get("space_id"))
+    if name in {
+        "space.get",
+        "space.spaces.get",
+        "space.spaces.read",
+        "space.spaces.open",
+        "space.spaces.getspace",
+        "space.spaces.readspace",
+        "space.spaces.openspace",
+    }:
+        space_id = validate_space_id(_space_tool_space_id(data))
         return {"ok": True, "action": name, "space": read_space_detail(space_id)}
     if name in {"space.spaces.reloadcurrentspace", "space.spaces.reloadspace"}:
         space_id = validate_space_id(_space_tool_current_id(data))
