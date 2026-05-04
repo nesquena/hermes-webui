@@ -3041,6 +3041,34 @@ STREAM_REASONING_TEXT: dict = {}  # stream_id -> reasoning trace accumulated dur
 STREAM_LIVE_TOOL_CALLS: dict = {}  # stream_id -> live tool calls accumulated during streaming (#1361 §B)
 SERVER_START_TIME = time.time()
 
+# Request-path liveness diagnostics (#1458 Bug #3).  Process supervisors can
+# see that the Python process is alive and the port is listening, but they need
+# a counter that advances only when the HTTP server actually accepts a request.
+_HTTP_REQUEST_HEARTBEAT_LOCK = threading.Lock()
+_HTTP_REQUEST_HEARTBEAT_COUNT = 0
+_HTTP_REQUEST_HEARTBEAT_LAST_AT = SERVER_START_TIME
+
+
+def record_http_request_heartbeat() -> None:
+    """Record that the HTTP accept/request path advanced once."""
+    global _HTTP_REQUEST_HEARTBEAT_COUNT, _HTTP_REQUEST_HEARTBEAT_LAST_AT
+    now = time.time()
+    with _HTTP_REQUEST_HEARTBEAT_LOCK:
+        _HTTP_REQUEST_HEARTBEAT_COUNT += 1
+        _HTTP_REQUEST_HEARTBEAT_LAST_AT = now
+
+
+def get_http_request_heartbeat() -> dict:
+    """Return request-path liveness counters safe for /health output."""
+    with _HTTP_REQUEST_HEARTBEAT_LOCK:
+        count = _HTTP_REQUEST_HEARTBEAT_COUNT
+        last_at = _HTTP_REQUEST_HEARTBEAT_LAST_AT
+    return {
+        "count": count,
+        "last_at": last_at,
+        "last_age_seconds": round(max(0.0, time.time() - last_at), 3),
+    }
+
 # Agent cache: reuse AIAgent across messages in the same WebUI session so that
 # _user_turn_count survives between turns.  This mirrors the gateway's
 # _agent_cache pattern and is required for injectionFrequency: "first-turn".

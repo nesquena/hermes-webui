@@ -14,7 +14,14 @@ from urllib.parse import urlparse
 logger = logging.getLogger(__name__)
 
 from api.auth import check_auth
-from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
+from api.config import (
+    HOST,
+    PORT,
+    STATE_DIR,
+    SESSION_DIR,
+    DEFAULT_WORKSPACE,
+    record_http_request_heartbeat,
+)
 from api.helpers import j, get_profile_cookie
 from api.profiles import set_request_profile, clear_request_profile
 from api.routes import handle_get, handle_post
@@ -26,7 +33,14 @@ class QuietHTTPServer(ThreadingHTTPServer):
     """Custom HTTP server that silently handles common network errors."""
     daemon_threads = True
     request_queue_size = 64
-    
+
+    def _handle_request_noblock(self):
+        # Issue #1458 Bug #3: expose an accept/request heartbeat so watchdogs
+        # can tell whether request handling is still advancing, not merely
+        # whether the process is alive and the socket is listening.
+        record_http_request_heartbeat()
+        return super()._handle_request_noblock()
+
     def handle_error(self, request, client_address):
         """Override to suppress logging for common client disconnect errors."""
         exc_type, exc_value, _ = sys.exc_info()

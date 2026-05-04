@@ -363,6 +363,7 @@ def _clear_live_models_cache() -> None:
 from api.config import (
     STATE_DIR,
     SESSION_DIR,
+    SESSION_INDEX_FILE,
     DEFAULT_WORKSPACE,
     DEFAULT_MODEL,
     SESSIONS,
@@ -393,6 +394,7 @@ from api.config import (
     set_reasoning_effort,
     create_stream_channel,
     get_webui_session_save_mode,
+    get_http_request_heartbeat,
 )
 from api.helpers import (
     require,
@@ -1658,6 +1660,84 @@ def _handle_insights(handler, parsed) -> bool:
 # ── GET routes ────────────────────────────────────────────────────────────────
 
 
+def _read_active_streams_bounded(timeout_seconds: float = 0.1) -> dict:
+    """Read STREAMS under a bounded lock attempt for deep health probes.
+
+    A wedged STREAMS_LOCK should make /health?deep=1 fail fast with useful
+    diagnostics instead of causing the watchdog probe itself to hang.
+    """
+    started = time.monotonic()
+    acquired = STREAMS_LOCK.acquire(timeout=timeout_seconds)
+    wait_ms = round((time.monotonic() - started) * 1000, 3)
+    if not acquired:
+        return {
+            "ok": False,
+            "acquired": False,
+            "active_streams": None,
+            "wait_ms": wait_ms,
+            "error": "STREAMS_LOCK acquisition timed out",
+        }
+    try:
+        return {
+            "ok": True,
+            "acquired": True,
+            "active_streams": len(STREAMS),
+            "wait_ms": wait_ms,
+        }
+    finally:
+        STREAMS_LOCK.release()
+
+
+def _session_store_health() -> dict:
+    """Exercise the session-store path without exposing session contents."""
+    result = {
+        "ok": True,
+        "path_exists": SESSION_DIR.exists(),
+        "index_exists": SESSION_INDEX_FILE.exists(),
+        "index_readable": None,
+        "session_file_count": 0,
+    }
+    try:
+        if not result["path_exists"]:
+            raise FileNotFoundError(str(SESSION_DIR))
+        result["session_file_count"] = sum(
+            1 for p in SESSION_DIR.glob("*.json") if not p.name.startswith("_")
+        )
+        if result["index_exists"]:
+            json.loads(SESSION_INDEX_FILE.read_text(encoding="utf-8") or "[]")
+            result["index_readable"] = True
+        else:
+            result["index_readable"] = False
+    except Exception as exc:
+        result["ok"] = False
+        result["error"] = type(exc).__name__
+    return result
+
+
+def _health_payload(*, deep: bool = False) -> tuple[dict, int]:
+    streams = _read_active_streams_bounded(timeout_seconds=0.1)
+    payload = {
+        "status": "ok" if streams["ok"] else "degraded",
+        "sessions": len(SESSIONS),
+        "active_streams": streams["active_streams"],
+        "uptime_seconds": round(time.time() - SERVER_START_TIME, 1),
+        "request_heartbeat": get_http_request_heartbeat(),
+    }
+    status = 200 if streams["ok"] else 503
+
+    if deep:
+        session_store = _session_store_health()
+        payload["deep"] = True
+        payload["diagnostics"] = {
+            "session_store": session_store,
+            "streams_lock": streams,
+        }
+        if not session_store["ok"]:
+            payload["status"] = "degraded"
+            status = 503
+    return payload, status
+
+
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
 
@@ -1776,17 +1856,10 @@ def handle_get(handler, parsed) -> bool:
         return _handle_insights(handler, parsed)
 
     if parsed.path == "/health":
-        with STREAMS_LOCK:
-            n_streams = len(STREAMS)
-        return j(
-            handler,
-            {
-                "status": "ok",
-                "sessions": len(SESSIONS),
-                "active_streams": n_streams,
-                "uptime_seconds": round(time.time() - SERVER_START_TIME, 1),
-            },
-        )
+        query = parse_qs(parsed.query)
+        deep = str(query.get("deep", [""])[0]).strip().lower() in ("1", "true", "yes", "on")
+        payload, status = _health_payload(deep=deep)
+        return j(handler, payload, status=status)
 
     if parsed.path == "/api/models":
         return j(handler, get_available_models())
