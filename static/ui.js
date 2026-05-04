@@ -50,7 +50,6 @@ function _setCompressionSessionLock(sid){
   window._compressionLockSid=sid||null;
 }
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-
 /**
  * Render fenced code blocks inside user messages.
  * Extracts ```…``` fences, replaces them with placeholders,
@@ -58,6 +57,7 @@ const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
  * with the same <pre><code> pipeline used by renderMd().
  * All non-fenced text stays escaped (no bold/italic/link interpretation).
  */
+
 function _renderUserFencedBlocks(text){
   const stash=[];
   let s=String(text||'');
@@ -88,6 +88,31 @@ function _renderUserFencedBlocks(text){
   // Restore stashed code blocks
   s=s.replace(/\x00UF(\d+)\x00/g,(_,i)=>stash[+i]);
   return s;
+}
+function _statusCardHtml(card){
+  card=card||{};
+  const rows=Array.isArray(card.rows)?card.rows:[];
+  const sessionId=String(card.sessionId||'');
+  const shortSessionId=sessionId.length>22?`${sessionId.slice(0,10)}…${sessionId.slice(-8)}`:sessionId;
+  const copyIcon=(typeof li==='function')?li('copy',13):'Copy';
+  const copyBtn=sessionId
+    ? `<button class="status-card-session-copy" type="button" data-copy-status-session="${esc(card.sessionId||'')}" title="${esc(t('copy'))}" onclick="copyStatusSessionId(this);event.stopPropagation()"><span>${esc(shortSessionId)}</span>${copyIcon}</button>`
+    : '';
+  const rowHtml=rows.map(row=>`
+    <div class="status-card-row">
+      <span class="status-card-label">${esc(row.label||'')}</span>
+      <span class="status-card-value">${esc(row.value||'')}</span>
+    </div>`).join('');
+  return `<div class="status-card" data-status-card="1">
+    <div class="status-card-head">
+      <div class="status-card-title-wrap">
+        <div class="status-card-title">${esc(card.title||t('status_heading'))}</div>
+        <div class="status-card-subtitle">${esc(card.subtitle||'')}</div>
+      </div>
+      ${copyBtn}
+    </div>
+    <div class="status-card-grid">${rowHtml}</div>
+  </div>`;
 }
 
 /* ── Image lightbox — click any .msg-media-img to enlarge ─────────────────── */
@@ -2668,6 +2693,16 @@ function _fallbackCopy(text){
     finally{document.body.removeChild(ta);}
   });
 }
+function copyStatusSessionId(btn){
+  const text=btn&&btn.getAttribute('data-copy-status-session');
+  if(!text)return;
+  _copyText(text).then(()=>{
+    const orig=btn.innerHTML;
+    btn.innerHTML=(typeof li==='function')?li('check',13):t('copied');
+    btn.classList.add('copied');
+    setTimeout(()=>{btn.innerHTML=orig;btn.classList.remove('copied');},1500);
+  }).catch(()=>showToast(t('copy_failed')));
+}
 function copyMsg(btn){
   const row=btn.closest('[data-raw-text]');
   const text=row?row.dataset.rawText:'';
@@ -3712,7 +3747,7 @@ function renderMessages(){
       const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
       if(hasTc||hasTu||_messageHasReasoningPayload(m)) return true;
     }
-    return msgContent(m)||m.attachments?.length;
+    return m._statusCard||msgContent(m)||m.attachments?.length;
   });
   $('emptyState').style.display=(vis.length||preservedCompressionTaskMessages.length)?'none':'';
   inner.innerHTML='';
@@ -3740,7 +3775,7 @@ function renderMessages(){
     if(_isPreservedCompressionTaskListMessage(m)){preservedCompressionRawIdxs.push(rawIdx);rawIdx++;continue;}
     const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
     const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
-    if(msgContent(m)||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)))) visWithIdx.push({m,rawIdx});
+    if(msgContent(m)||m._statusCard||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)))) visWithIdx.push({m,rawIdx});
     rawIdx++;
   }
   let lastUserRawIdx=-1;
@@ -3821,6 +3856,7 @@ function renderMessages(){
       }).join('')}</div>`;
     }
     const bodyHtml = isUser ? _renderUserFencedBlocks(content) : renderMd(_stripXmlToolCallsDisplay(String(content)));
+    const statusHtml = (!isUser&&m._statusCard) ? _statusCardHtml(m._statusCard) : '';
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
     const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
@@ -3886,8 +3922,10 @@ function renderMessages(){
       if(isSimplifiedToolCalling()) assistantThinking.set(rawIdx, thinkingText);
       else if(window._showThinking!==false) seg.insertAdjacentHTML('beforeend', _thinkingCardHtml(thinkingText));
     }
-    const hasVisibleBody=!!(String(content||'').trim()||filesHtml);
-    if(hasVisibleBody){
+    const hasVisibleBody=!!(String(content||'').trim()||filesHtml||statusHtml);
+    if(statusHtml){
+      seg.insertAdjacentHTML('beforeend', statusHtml);
+    }else if(hasVisibleBody){
       seg.insertAdjacentHTML('beforeend', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
     }else if(!(thinkingText&&window._showThinking!==false&&!isSimplifiedToolCalling())){
       seg.classList.add('assistant-segment-anchor');

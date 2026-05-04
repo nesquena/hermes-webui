@@ -2635,6 +2635,21 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 .msg-body:empty { display: none; }
 .assistant-turn { width: 100%; }
 .assistant-turn-blocks { display: flex; flex-direction: column; }
+.status-card{margin:8px 0 8px var(--msg-rail);max-width:min(var(--msg-max),760px);border:1px solid var(--border-subtle);background:var(--surface-subtle);border-radius:var(--radius-card);box-shadow:0 10px 24px rgba(0,0,0,.05);overflow:hidden;}
+.status-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid var(--border-subtle);background:linear-gradient(180deg,var(--surface-subtle-hover),var(--surface-subtle));}
+.status-card-title-wrap{min-width:0;}
+.status-card-title{font-weight:650;color:var(--text);font-size:14px;letter-spacing:.01em;}
+.status-card-subtitle{font-size:12px;color:var(--muted);margin-top:3px;}
+.status-card-session-copy{display:inline-flex;align-items:center;gap:7px;min-height:28px;padding:5px 9px;border:1px solid var(--border-subtle);border-radius:999px;background:var(--surface);color:var(--muted);font-size:12px;font-family:var(--font-mono);cursor:pointer;max-width:230px;}
+.status-card-session-copy span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.status-card-session-copy:hover,.status-card-session-copy.copied{color:var(--accent-text);border-color:var(--accent-bg-strong);background:var(--accent-bg);}
+.status-card-grid{display:grid;grid-template-columns:minmax(120px,180px) minmax(0,1fr);gap:0;border-top:0;}
+.status-card-row{display:contents;}
+.status-card-label,.status-card-value{padding:9px 16px;border-top:1px solid var(--border-subtle);font-size:13px;line-height:1.4;}
+.status-card-row:first-child .status-card-label,.status-card-row:first-child .status-card-value{border-top:0;}
+.status-card-label{color:var(--muted);font-weight:550;background:rgba(0,0,0,.015);}
+.status-card-value{color:var(--text);word-break:break-word;font-family:var(--font-mono);}
+@media (max-width:700px){.status-card{margin-left:0;}.status-card-head{flex-direction:column;}.status-card-session-copy{max-width:100%;}.status-card-grid{grid-template-columns:1fr;}.status-card-label{padding-bottom:2px;border-top:1px solid var(--border-subtle);}.status-card-value{padding-top:2px;border-top:0;}}
 .assistant-segment-anchor { display: none; }
 
 /* ── Classic conversation layout: user right, half-width; assistant left ── */
