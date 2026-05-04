@@ -118,6 +118,7 @@ The bootstrap will:
 5. Drop you into a first-run onboarding wizard inside the WebUI.
 
 > Native Windows is not supported for this bootstrap yet. Use Linux, macOS, or WSL2.
+> For Windows / WSL auto-start at login, see [`docs/wsl-autostart.md`](docs/wsl-autostart.md).
 
 If provider setup is still incomplete after install, the onboarding wizard will point you to finish it with `hermes model` instead of trying to replicate the full CLI setup in-browser.
 
