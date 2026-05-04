@@ -43,6 +43,8 @@ _RUNNING_CRON_JOBS: dict[str, float] = {}  # job_id → start_timestamp
 _RUNNING_CRON_LOCK = threading.Lock()
 _CRON_OUTPUT_CONTENT_LIMIT = 8000
 _CRON_OUTPUT_HEADER_CONTEXT = 200
+# ✅ New: default chunk size for paginated output retrieval
+_CRON_OUTPUT_CHUNK_SIZE = 8192
 _MESSAGING_RAW_SOURCES = {str(s).strip().lower() for s in MESSAGING_SOURCES}
 _MESSAGING_SESSION_METADATA_CACHE: dict[str, object] = {
     "path": None,
@@ -2242,6 +2244,13 @@ def handle_get(handler, parsed) -> bool:
 
         with cron_profile_context():
             return _handle_cron_status(handler, parsed)
+
+    # ✅ New: Support chunked/paginated retrieval of large cron outputs
+    if parsed.path == "/api/crons/chunk":
+        from api.profiles import cron_profile_context
+
+        with cron_profile_context():
+            return _handle_cron_output_chunk(handler, parsed)
 
     # ── Skills API (GET) ──
     if parsed.path == "/api/skills":
@@ -4637,6 +4646,14 @@ def _cron_output_snippet(text: str, limit: int = 600) -> str:
 
 
 def _handle_cron_output(handler, parsed):
+    """Get recent cron outputs with truncation metadata.
+    
+    ✅ Now returns: 
+    - content: truncated output (as before for backward compatibility)
+    - total_size: actual size of full output
+    - is_truncated: whether content was truncated
+    - full_output_url: link to view full output
+    """
     from cron.jobs import OUTPUT_DIR as CRON_OUT
 
     qs = parse_qs(parsed.query)
@@ -4651,7 +4668,15 @@ def _handle_cron_output(handler, parsed):
         for f in files:
             try:
                 txt = f.read_text(encoding="utf-8", errors="replace")
-                outputs.append({"filename": f.name, "content": _cron_output_content_window(txt)})
+                truncated_content = _cron_output_content_window(txt)
+                is_truncated = len(txt) > len(truncated_content)
+                outputs.append({
+                    "filename": f.name,
+                    "content": truncated_content,
+                    "total_size": len(txt),  # ✅ New
+                    "is_truncated": is_truncated,  # ✅ New
+                    "full_output_url": f"/api/crons/run?job_id={job_id}&filename={f.name}",  # ✅ New
+                })
             except Exception:
                 logger.debug("Failed to read cron output file %s", f)
     return j(handler, {"job_id": job_id, "outputs": outputs})
@@ -4668,6 +4693,68 @@ def _handle_cron_status(handler, parsed):
     with _RUNNING_CRON_LOCK:
         all_running = {jid: round(time.time() - t, 1) for jid, t in _RUNNING_CRON_JOBS.items()}
     return j(handler, {"running": all_running})
+
+
+# ✅ New: Paginated/chunked retrieval for large cron outputs
+def _handle_cron_output_chunk(handler, parsed):
+    """Stream cron output in chunks for large files.
+    
+    Params:
+    - job_id: cron job ID (required)
+    - filename: output filename (required)
+    - offset: start position in bytes (optional, default 0)
+    - chunk_size: max bytes to return (optional, default 8192)
+    """
+    from cron.jobs import OUTPUT_DIR as CRON_OUT
+    import re as _re
+
+    qs = parse_qs(parsed.query)
+    job_id = qs.get("job_id", [""])[0]
+    filename = qs.get("filename", [""])[0]
+    
+    if not job_id or not filename:
+        return j(handler, {"error": "job_id and filename required"}, status=400)
+    
+    # Validate job_id shape (defense-in-depth)
+    if not _re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.-]{0,63}", job_id) or job_id in (".", ".."):
+        return j(handler, {"error": "invalid job_id"}, status=400)
+    
+    try:
+        offset = max(0, int(qs.get("offset", ["0"])[0]))
+        chunk_size = min(65536, max(1024, int(qs.get("chunk_size", [str(_CRON_OUTPUT_CHUNK_SIZE)])[0])))
+    except (ValueError, TypeError):
+        return j(handler, {"error": "offset and chunk_size must be integers"}, status=400)
+    
+    # Prevent path traversal
+    fpath = (CRON_OUT / job_id / filename).resolve()
+    if not fpath.is_relative_to(CRON_OUT.resolve()):
+        return j(handler, {"error": "invalid filename"}, status=400)
+    
+    if not fpath.exists():
+        return j(handler, {"error": "output file not found"}, status=404)
+    
+    try:
+        total_size = fpath.stat().st_size
+        
+        # Read chunk
+        with open(fpath, 'r', encoding='utf-8', errors='replace') as f:
+            f.seek(offset)
+            chunk = f.read(chunk_size)
+        
+        has_more = (offset + len(chunk)) < total_size
+        
+        return j(handler, {
+            "job_id": job_id,
+            "filename": filename,
+            "offset": offset,
+            "chunk_size": len(chunk),
+            "total_size": total_size,
+            "chunk": chunk,
+            "has_more": has_more,
+        })
+    except Exception as e:
+        logger.error("Failed to read cron output chunk: %s", e)
+        return j(handler, {"error": str(e)}, status=500)
 
 
 def _handle_cron_recent(handler, parsed):
