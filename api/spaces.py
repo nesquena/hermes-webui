@@ -1768,6 +1768,23 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             response["widget"] = saved_widgets[0]
             response["revision_event_id"] = revision_event_ids[-1]
         return response
+    if name == "space.spaces.definewidget":
+        space_id = validate_space_id(_space_tool_current_id(data))
+        read_space_detail(space_id)
+        definition = data.get("definition") if isinstance(data.get("definition"), dict) else data
+        widget_payload, omitted_count = _space_tool_render_widget_payload({"widget": definition})
+        return {
+            "ok": True,
+            "action": name,
+            "space_id": space_id,
+            "widget": _space_tool_preview_widget_detail(widget_payload),
+            "blueprint": {
+                "mode": "metadata-only",
+                "stored": False,
+                "executed": False,
+                "omitted_field_count": omitted_count,
+            },
+        }
     if name == "space.spaces.createwidgetsource":
         space_id = validate_space_id(_space_tool_current_id(data))
         read_space_detail(space_id)

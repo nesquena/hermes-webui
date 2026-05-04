@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-04 00:28 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-04 02:35 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: source-style positional helper coverage now lets Space Agent-style adapter calls provide ordered `args` for common Space and widget helpers such as `space.spaces.openSpace`, `space.spaces.listWidgets`, and `space.spaces.readWidget`, while preserving Capy's metadata-only boundary. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: source-style `defineWidget` helper coverage now lets Space Agent-style adapter calls preview widget definitions as non-persisted metadata-only blueprints, while preserving Capy's generated-body quarantine and safe inspection boundary. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): support source define widget alias`
+  - Added RED/GREEN backend coverage proving `space.spaces.defineWidget` accepts a nested Space Agent-style `{definition}` payload, returns a non-persisted safe widget blueprint with normalized layout/kind/title metadata, and omits renderer/html/script/data/source bodies plus credential-like markers from serialized adapter responses.
+  - Validation at completion before commit: focused RED failed with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`), focused source widget adapter regression set passed (`3 passed`), full Spaces foundation suite passed (`136 passed`), `py_compile api/spaces.py tests/test_spaces_foundation.py`, and `git diff --check` passed.
 
 - `feat(spaces): support source positional helper args`
   - Added RED/GREEN backend coverage proving source-style `args` payloads resolve Space ids and widget ids for open/list/read helper aliases while omitting generated/executable/source/API auth markers from serialized adapter responses.
