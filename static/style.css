@@ -2448,6 +2448,29 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 }
 .session-pin-indicator svg{width:10px;height:10px;}
 
+/* ── Fork lineage indicator (inline, subtle until row focus/hover) ── */
+.session-branch-indicator{
+  flex-shrink:0;
+  width:12px;
+  height:12px;
+  color:var(--muted);
+  line-height:1;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  opacity:.35;
+  pointer-events:none;
+  transition:opacity .15s ease,color .15s ease;
+}
+.session-branch-indicator svg{width:12px;height:12px;}
+.session-item:hover .session-branch-indicator,
+.session-item:focus-within .session-branch-indicator,
+.session-item.menu-open .session-branch-indicator{
+  opacity:.85;
+  color:var(--text);
+}
+.session-item.active .session-branch-indicator{color:var(--accent-text);}
+
 /* ── Cron alert badge ── */
 .cron-badge{position:absolute;top:2px;right:2px;background:#e53e3e;color:#fff;font-size:9px;font-weight:700;min-width:14px;height:14px;line-height:14px;text-align:center;border-radius:7px;padding:0 3px;}
 .cron-new-dot{width:7px;height:7px;border-radius:50%;background:var(--success,#22c55e);flex-shrink:0;animation:cron-dot-pulse 2s ease-in-out infinite;}

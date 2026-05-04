@@ -1692,6 +1692,21 @@ function _sidebarLineageKeyForRow(s){
   return s._lineage_key||s._lineage_root_id||s.lineage_root_id||s.parent_session_id||s.session_id||null;
 }
 
+function _truncatedSessionId(sid){
+  sid=String(sid||'').trim();
+  if(!sid) return '';
+  if(sid.length<=16) return sid;
+  return sid.slice(0,12)+'...';
+}
+
+function _sessionTitleForForkParent(parentSid){
+  if(!parentSid||!Array.isArray(_allSessions)) return '';
+  const parent=_allSessions.find(item=>item&&item.session_id===parentSid);
+  const title=parent&&String(parent.title||'').trim();
+  if(!title||title==='Untitled') return '';
+  return title;
+}
+
 function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions){
   const rows=(collapsedRows||[]).filter(s=>!_isChildSession(s)).map(s=>({...s}));
   const visibleBySid=new Map();
@@ -2069,13 +2084,9 @@ function renderSessionListFromCache(){
     if(s.parent_session_id){
       const branchInd=document.createElement('span');
       branchInd.className='session-branch-indicator';
-      branchInd.textContent='\u2442'; // ⑂
-      branchInd.title=(typeof t==='function'?t('forked_from'):'Forked from')+' '+s.parent_session_id;
-      branchInd.style.cursor='pointer';
-      branchInd.onclick=(e)=>{
-        e.stopPropagation();
-        if(typeof loadSession==='function') loadSession(s.parent_session_id);
-      };
+      branchInd.innerHTML=li('git-branch',12);
+      const parentLabel=_sessionTitleForForkParent(s.parent_session_id)||_truncatedSessionId(s.parent_session_id);
+      branchInd.title=(typeof t==='function'?t('forked_from'):'Forked from')+' '+parentLabel;
       titleRow.appendChild(branchInd);
     }
     const title=document.createElement('span');

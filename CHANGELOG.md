@@ -1,5 +1,11 @@
 # Hermes Web UI -- Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Forked session sidebar indicator is now recognizable and less noisy** (#1613) — replaced the permanent `⑂` OCR glyph with the existing `git-branch` SVG icon, made the indicator subtle until row hover/focus, changed the tooltip to prefer the parent session title with a truncated-id fallback, and removed the hidden click-to-parent behavior from the sidebar row. The `/branch` command and fork data model are unchanged.
+
 ## [v0.50.291] — 2026-05-04
 
 ### Fixed (1 PR — "What's new?" link 404 — closes #1579)

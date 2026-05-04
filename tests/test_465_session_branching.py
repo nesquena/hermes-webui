@@ -6,7 +6,7 @@ Verifies:
   3. Frontend /branch slash command is registered
   4. forkFromMessage function exists in commands.js
   5. Fork button (git-branch icon) is rendered in ui.js message actions
-  6. Parent session indicator (⑂) is rendered in sessions.js sidebar
+  6. Parent session indicator uses a subtle git-branch icon in sessions.js sidebar
   7. i18n keys exist for all branch-related strings
   8. git-branch icon exists in icons.js
 """
@@ -228,12 +228,14 @@ def test_sidebar_parent_indicator():
         "sessions.js should check parent_session_id"
     assert 'session-branch-indicator' in src, \
         "Should have session-branch-indicator class"
-    assert '\\u2442' in src, \
-        "Should use ⑂ character for parent indicator"
+    assert "li('git-branch',12)" in src, \
+        "Sidebar parent indicator should use the git-branch icon"
+    assert '\\u2442' not in src, \
+        "Sidebar parent indicator should not use the opaque OCR double-backslash glyph"
 
 
-def test_parent_indicator_clickable():
-    """Verify parent indicator navigates to parent session on click."""
+def test_parent_indicator_not_clickable():
+    """Verify parent indicator is informational, not hidden navigation."""
     with open('static/sessions.js') as f:
         src = f.read()
     # Find the parent indicator block
@@ -243,8 +245,34 @@ def test_parent_indicator_clickable():
     )
     assert parent_block, "Could not find parent indicator block"
     block = parent_block.group(0)
-    assert 'loadSession(' in block, \
-        "Parent indicator should call loadSession on click"
+    assert 'loadSession(' not in block, \
+        "Parent indicator should not navigate to the parent from the sidebar"
+    assert 'onclick' not in block, \
+        "Parent indicator should not register a hidden click target"
+
+
+def test_parent_indicator_tooltip_uses_parent_title_fallback():
+    """Tooltip should prefer a parent title and only fall back to a short id."""
+    with open('static/sessions.js') as f:
+        src = f.read()
+    assert 'function _sessionTitleForForkParent' in src, \
+        "sessions.js should resolve a user-facing parent title"
+    assert 'function _truncatedSessionId' in src, \
+        "sessions.js should fall back to a truncated id, not raw session_id"
+    assert "_sessionTitleForForkParent(s.parent_session_id)||_truncatedSessionId(s.parent_session_id)" in src, \
+        "parent indicator tooltip must prefer title and fall back to truncated id"
+
+
+def test_parent_indicator_hover_only_style():
+    """The sidebar lineage indicator should be visually subdued until row hover/focus."""
+    with open('static/style.css') as f:
+        src = f.read()
+    assert '.session-branch-indicator' in src, \
+        "Missing session branch indicator CSS"
+    assert 'opacity:.35' in src, \
+        "Fork lineage indicator should be subdued at rest"
+    assert '.session-item:hover .session-branch-indicator' in src, \
+        "Fork lineage indicator should become visible on row hover"
 
 
 # ── Frontend: i18n keys ────────────────────────────────────────────────────────
