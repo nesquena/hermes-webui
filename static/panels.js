@@ -4,6 +4,7 @@ let _kanbanBoard = null;
 let _kanbanLatestEventId = 0;
 let _kanbanPollTimer = null;
 let _kanbanCurrentTaskId = null;
+let _kanbanLanesByProfile = false;
 let _skillsData = null; // cached skills list
 let _cronList = null; // cached cron jobs (array)
 let _currentCronDetail = null; // full cron job object
@@ -890,6 +891,7 @@ function _kanbanApplyConfigDefaults(config){
   if (!config || _kanbanConfigApplied) return;
   if ($('kanbanTenantFilter') && config.default_tenant) $('kanbanTenantFilter').dataset.defaultValue = config.default_tenant;
   if ($('kanbanIncludeArchived') && config.include_archived_by_default === true) $('kanbanIncludeArchived').checked = true;
+  if (config.lane_by_profile === true) _kanbanLanesByProfile = true;
   _kanbanConfigApplied = true;
 }
 let _kanbanConfigApplied = false;
@@ -935,6 +937,109 @@ function _kanbanRenderSidebar(columns){
   }).join('');
 }
 
+
+function _kanbanRenderMarkdownInline(escaped){
+  return String(escaped || '')
+    .replace(/`([^`\n]+)`/g, (_m, code) => `<code>${code}</code>`)
+    .replace(/\*\*([^*\n]+)\*\*/g, (_m, text) => `<strong>${text}</strong>`)
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, (_m, prefix, text) => `${prefix}<em>${text}</em>`)
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+|mailto:[^\s)]+)\)/g, (_m, text, href) => `<a href="${href}" target="_blank" rel="noopener noreferrer">${text}</a>`);
+}
+
+function _kanbanRenderMarkdown(source){
+  if (!source) return '';
+  return `<div class="hermes-kanban-md">${esc(source).split(/\r?\n/).map(line => line.trim() ? `<p>${_kanbanRenderMarkdownInline(line)}</p>` : '').join('')}</div>`;
+}
+
+function _kanbanFormatDuration(seconds){
+  const n = Number(seconds);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  if (n < 60) return Math.round(n) + 's';
+  if (n < 3600) return Math.round(n / 60) + 'm';
+  if (n < 86400) return Math.round(n / 3600) + 'h';
+  return Math.round(n / 86400) + 'd';
+}
+
+function _kanbanTaskAge(task){
+  const age = task && (task.age_seconds || task.age);
+  if (Number.isFinite(Number(age))) return _kanbanFormatDuration(age);
+  return '';
+}
+
+function _kanbanCardStalenessClass(task){
+  const age = Number(task && (task.age_seconds || task.age));
+  const status = task && task.status;
+  if (!Number.isFinite(age)) return '';
+  if ((status === 'running' && age > 3600) || (status === 'blocked' && age > 86400)) return 'kanban-card-stale-red';
+  if ((status === 'running' && age > 600) || (status === 'ready' && age > 3600) || (status === 'blocked' && age > 3600)) return 'kanban-card-stale-amber';
+  return '';
+}
+
+function _kanbanCardQuickActions(task){
+  const id = esc(task.id || '');
+  const status = task.status || '';
+  const start = status !== 'running' && status !== 'done' && status !== 'archived' ? `<button type="button" class="kanban-card-action" onclick="quickKanbanCardAction(event,'${id}','running')">${esc(t('kanban_card_start'))}</button>` : '';
+  const complete = status !== 'done' && status !== 'archived' ? `<button type="button" class="kanban-card-action" onclick="quickKanbanCardAction(event,'${id}','done')">${esc(t('kanban_card_complete'))}</button>` : '';
+  const archive = status !== 'archived' ? `<button type="button" class="kanban-card-action danger" onclick="quickKanbanCardAction(event,'${id}','archived')">${esc(t('kanban_card_archive'))}</button>` : '';
+  return `<div class="kanban-card-actions" onclick="event.stopPropagation()">${start}${complete}${archive}</div>`;
+}
+
+async function quickKanbanCardAction(event, taskId, status){
+  if (event) event.stopPropagation();
+  return updateKanbanTask(taskId, {status});
+}
+
+function dragKanbanTask(event, taskId){
+  if (!event.dataTransfer) return;
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('text/plain', taskId);
+}
+
+function allowKanbanDrop(event){
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+}
+
+function clearKanbanDrop(event){
+  if (event && event.currentTarget) event.currentTarget.classList.remove('drop-target');
+}
+
+async function dropKanbanTask(event, status){
+  event.preventDefault();
+  clearKanbanDrop(event);
+  const taskId = event.dataTransfer ? event.dataTransfer.getData('text/plain') : '';
+  if (taskId && status) await updateKanbanTask(taskId, {status});
+}
+
+function _kanbanLaneNames(columns){
+  const names = new Set();
+  columns.forEach(col => (col.tasks || []).forEach(task => names.add(task.assignee || t('kanban_unassigned'))));
+  return Array.from(names).sort((a, b) => String(a).localeCompare(String(b)));
+}
+
+function _kanbanRenderColumn(col){
+  const tasks = col.tasks || [];
+  return `<section class="kanban-column" data-status="${esc(col.name)}" data-kanban-status="${esc(col.name)}" ondragover="allowKanbanDrop(event)" ondragenter="event.currentTarget.classList.add('drop-target')" ondragleave="clearKanbanDrop(event)" ondrop="dropKanbanTask(event, '${esc(col.name)}')">
+      <div class="kanban-column-head">
+        <span>${esc(_kanbanColumnLabel(col.name))}</span>
+        <span class="kanban-count">${tasks.length}</span>
+      </div>
+      <div class="kanban-column-body">
+        ${tasks.length ? tasks.map(task => _kanbanCard(task, col.name)).join('') : `<div class="kanban-empty">${esc(t('kanban_empty'))}</div>`}
+      </div>
+    </section>`;
+}
+
+function _kanbanRenderProfileLanes(columns){
+  const lanes = _kanbanLaneNames(columns);
+  if (!lanes.length) return columns.map(_kanbanRenderColumn).join('');
+  return `<div class="kanban-profile-lanes">${lanes.map(lane => {
+    const laneCols = columns.map(col => ({...col, tasks: (col.tasks || []).filter(task => (task.assignee || t('kanban_unassigned')) === lane)}));
+    const count = laneCols.reduce((sum, col) => sum + (col.tasks || []).length, 0);
+    return `<section class="kanban-profile-lane" data-kanban-lane="${esc(lane)}"><header class="kanban-profile-lane-head"><span>${esc(lane)}</span><span class="kanban-count">${count}</span></header><div class="kanban-board kanban-board-in-lane">${laneCols.map(_kanbanRenderColumn).join('')}</div></section>`;
+  }).join('')}</div>`;
+}
+
 function _kanbanRenderBoard(){
   const board = $('kanbanBoard');
   if (!board) return;
@@ -946,27 +1051,24 @@ function _kanbanRenderBoard(){
   const total = columns.reduce((n, col) => n + (col.tasks || []).length, 0);
   if ($('kanbanSummary')) $('kanbanSummary').textContent = String(t('kanban_visible_tasks')).replace('{0}', total);
   _kanbanRenderSidebar(columns);
-  board.innerHTML = columns.map(col => `
-    <section class="kanban-column" data-status="${esc(col.name)}">
-      <div class="kanban-column-head">
-        <span>${esc(_kanbanColumnLabel(col.name))}</span>
-        <span class="kanban-count">${(col.tasks || []).length}</span>
-      </div>
-      <div class="kanban-column-body">
-        ${(col.tasks || []).length ? col.tasks.map(task => _kanbanCard(task, col.name)).join('') : `<div class="kanban-empty">${esc(t('kanban_empty'))}</div>`}
-      </div>
-    </section>
-  `).join('');
+  board.innerHTML = _kanbanLanesByProfile ? _kanbanRenderProfileLanes(columns) : columns.map(_kanbanRenderColumn).join('');
 }
 
 function _kanbanCard(task, status){
-  const meta = _kanbanTaskMeta(task);
+  const priority = Number(task.priority || 0);
+  const links = task.link_counts || {};
+  const linkTotal = Number(links.parents || 0) + Number(links.children || 0);
+  const comments = Number(task.comment_count || 0);
+  const age = _kanbanTaskAge(task);
+  const stale = _kanbanCardStalenessClass(task);
   const body = _kanbanTaskBody(task);
-  return `<article class="kanban-card" data-kanban-task-id="${esc(task.id)}" onclick="loadKanbanTask('${esc(task.id)}')" tabindex="0" role="button">
+  const assignee = task.assignee ? `<span class="kanban-card-assignee">@${esc(task.assignee)}</span>` : `<span class="kanban-card-unassigned">${esc(t('kanban_unassigned'))}</span>`;
+  return `<article class="kanban-card ${esc(stale)}" data-kanban-task-id="${esc(task.id)}" draggable="true" ondragstart="dragKanbanTask(event, '${esc(task.id)}')" onclick="loadKanbanTask('${esc(task.id)}')" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();loadKanbanTask('${esc(task.id)}')}">
+    <div class="kanban-card-topline"><span class="kanban-card-id">${esc(task.id || '')}</span>${priority ? `<span class="kanban-badge priority">P${priority}</span>` : ''}${task.tenant ? `<span class="kanban-badge tenant">${esc(task.tenant)}</span>` : ''}</div>
     <div class="kanban-card-title">${esc(_kanbanTaskTitle(task))}</div>
-    ${body ? `<div class="kanban-card-body">${esc(body)}</div>` : ''}
-    ${meta.length ? `<div class="kanban-meta">${esc(meta.join(' · '))}</div>` : ''}
-    <div class="kanban-readonly">${esc(t('kanban_read_only'))}</div>
+    ${body ? `<div class="kanban-card-body">${_kanbanRenderMarkdown(body)}</div>` : ''}
+    <div class="kanban-card-meta">${assignee}${comments ? `<span class="kanban-card-metric">💬 ${comments}</span>` : ''}${linkTotal ? `<span class="kanban-card-metric">↔ ${linkTotal}</span>` : ''}${age ? `<span class="kanban-card-age">${esc(age)}</span>` : ''}</div>
+    ${_kanbanCardQuickActions(task)}
   </article>`;
 }
 

@@ -165,3 +165,54 @@ def test_kanban_dashboard_parity_i18n_keys_exist():
         if re.search(rf"\b{re.escape(key)}\s*:", body) is None
     ]
     assert missing == []
+
+
+
+def test_kanban_ui_parity_polish_adds_card_metadata_quick_actions_and_swimlanes():
+    for symbol in (
+        "function _kanbanRenderProfileLanes",
+        "function _kanbanCardQuickActions",
+        "function quickKanbanCardAction",
+        "function _kanbanRenderMarkdown",
+        "function _kanbanCardStalenessClass",
+        "function dragKanbanTask",
+        "function dropKanbanTask",
+    ):
+        assert symbol in PANELS
+    for token in (
+        "kanban-profile-lanes",
+        "kanban-card-topline",
+        "kanban-card-actions",
+        "kanban-card-id",
+        "kanban-card-assignee",
+        "draggable=\"true\"",
+        "ondrop=\"dropKanbanTask",
+        "onkeydown=\"if(event.key==='Enter'||event.key===' ')",
+    ):
+        assert token in PANELS
+    assert "target=\"_blank\" rel=\"noopener noreferrer\"" in PANELS
+    assert "javascript:" not in PANELS.lower()
+
+
+def test_kanban_ui_parity_polish_css_and_i18n_exist():
+    for selector in (
+        ".kanban-profile-lanes",
+        ".kanban-profile-lane",
+        ".kanban-card-actions",
+        ".kanban-card-action",
+        ".kanban-card-topline",
+        ".kanban-card-stale-amber",
+        ".kanban-card-stale-red",
+        ".kanban-column.drop-target",
+        ".hermes-kanban-md",
+    ):
+        assert selector in STYLE
+    locale_blocks = re.findall(r"\n\s*([a-z]{2}(?:-[A-Z]{2})?): \{(.*?)\n\s*\},", I18N, flags=re.S)
+    required_keys = ["kanban_lanes_by_profile", "kanban_card_start", "kanban_card_complete", "kanban_card_archive", "kanban_unassigned"]
+    missing = [
+        f"{locale}:{key}"
+        for locale, body in locale_blocks
+        for key in required_keys
+        if re.search(rf"\b{re.escape(key)}\s*:", body) is None
+    ]
+    assert missing == []

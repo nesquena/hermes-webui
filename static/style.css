@@ -3167,3 +3167,23 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .kanban-stats{font-size:12px;color:var(--muted);padding:2px 0}
 .kanban-bulk-bar{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
 .kanban-bulk-bar select{flex:1;min-width:96px;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 6px;font-size:12px}
+
+.kanban-profile-lanes{display:flex;flex-direction:column;gap:18px;min-width:100%}
+.kanban-profile-lane{border:1px solid var(--border);border-radius:12px;background:rgba(255,255,255,.02);padding:10px}
+.kanban-profile-lane-head{display:flex;justify-content:space-between;align-items:center;color:var(--text);font-size:13px;font-weight:600;margin-bottom:8px}
+.kanban-board-in-lane{min-height:0;overflow-x:auto}
+.kanban-card-topline{display:flex;gap:6px;align-items:center;margin-bottom:4px;font-size:10px;color:var(--muted)}
+.kanban-card-id{font-family:var(--mono);opacity:.8}
+.kanban-badge{border:1px solid var(--border);border-radius:999px;padding:1px 6px;font-size:10px;color:var(--muted)}
+.kanban-badge.priority{color:var(--accent)}
+.kanban-badge.tenant{color:var(--text)}
+.kanban-card-meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;font-size:11px;color:var(--muted);margin-top:6px}
+.kanban-card-assignee{color:var(--accent)}
+.kanban-card-unassigned{opacity:.75}
+.kanban-card-actions{display:flex;gap:4px;margin-top:8px;opacity:.85;flex-wrap:wrap}
+.kanban-card-action{border:1px solid var(--border);background:var(--input-bg);color:var(--text);border-radius:6px;padding:2px 6px;font-size:10px;cursor:pointer}
+.kanban-card-action.danger{color:var(--danger)}
+.kanban-card-stale-amber{border-color:rgba(245,197,66,.55)}
+.kanban-card-stale-red{border-color:rgba(255,95,95,.65)}
+.kanban-column.drop-target{outline:2px solid var(--accent);outline-offset:-2px}
+.hermes-kanban-md p{margin:0 0 4px}.hermes-kanban-md code{font-family:var(--mono);font-size:.95em}
