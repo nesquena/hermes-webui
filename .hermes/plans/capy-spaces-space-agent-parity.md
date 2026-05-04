@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-04 03:40 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-04 04:46 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: source-style `widgetApiVersion` runtime property coverage now lets Space Agent-style adapter calls read Capy's metadata-only widget API compatibility version without executing or exposing generated/source/credential-like request fields. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: source-style widget size SDK helper coverage now lets Space Agent-style adapter calls read `defaultWidgetSize`, normalize arbitrary widget sizes, and parse widget-size tokens without executing or exposing generated/source/credential-like request fields. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): support source widget size SDK helpers`
+  - Added RED/GREEN backend coverage proving `space.spaces.defaultWidgetSize`, `space.spaces.normalizeWidgetSize`, and `space.spaces.parseWidgetSizeToken` return metadata-only widget size/token results with Space Agent-compatible defaults, clamping, token parsing, and safe fallbacks while omitting renderer/html/source/API auth markers from serialized adapter responses.
+  - Validation at completion before screenshot/restart: focused RED failed with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`), focused size/reposition adapter regression set passed (`3 passed`), Spaces foundation + demo parity suites passed (`143 passed`), `py_compile api/spaces.py tests/test_spaces_foundation.py`, and `git diff --check` passed.
 
 - `feat(spaces): expose source widget API version`
   - Added RED/GREEN backend coverage proving `space.spaces.widgetApiVersion` returns metadata-only widget API version `1`, matching Space Agent's runtime namespace property, while omitting renderer/source/API auth markers from serialized adapter responses.

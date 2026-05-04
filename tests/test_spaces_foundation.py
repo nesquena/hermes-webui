@@ -783,7 +783,7 @@ def test_space_tool_adapter_supports_source_size_to_token_helper_metadata_only(m
     )
     from_object = spaces.run_space_tool(
         "space.spaces.sizeToToken",
-        {"size": {"cols": 99, "rows": 0, "token": "SECRET"}, "source": "SECRET_SOURCE"},
+        {"size": {"cols": 99, "rows": 0, "token": "***"}, "source": "SECRET_SOURCE"},
     )
     from_invalid_with_fallback = spaces.run_space_tool(
         "space.spaces.sizeToToken",
@@ -804,6 +804,56 @@ def test_space_tool_adapter_supports_source_size_to_token_helper_metadata_only(m
     assert from_invalid_with_fallback["size"] == {"cols": 4, "rows": 2}
     assert "steal" not in serialized
     assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+    assert '"source":' not in serialized
+
+
+
+def test_space_tool_adapter_supports_source_widget_size_sdk_helpers_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    default_size = spaces.run_space_tool(
+        "space.spaces.defaultWidgetSize",
+        {"renderer": "<script>steal()</script>", "api_key": "***"},
+    )
+    normalized = spaces.run_space_tool(
+        "space.spaces.normalizeWidgetSize",
+        {"size": ["9", "999"], "fallback": {"cols": 2, "rows": 7}, "source": "SECRET_SOURCE"},
+    )
+    parsed = spaces.run_space_tool(
+        "space.spaces.parseWidgetSizeToken",
+        {"value": " 17 x 6 ", "html": "<img src=x onerror=steal()>"},
+    )
+    invalid_with_fallback = spaces.run_space_tool(
+        "space.spaces.parseWidgetSizeToken",
+        {"token": "not-a-token", "fallback": "tall", "token_secret": "***"},
+    )
+    serialized = json.dumps([default_size, normalized, parsed, invalid_with_fallback]).lower()
+
+    assert default_size == {
+        "ok": True,
+        "action": "space.spaces.defaultwidgetsize",
+        "token": "6x3",
+        "size": {"cols": 6, "rows": 3},
+        "mode": "metadata-only",
+    }
+    assert normalized == {
+        "ok": True,
+        "action": "space.spaces.normalizewidgetsize",
+        "token": "9x24",
+        "size": {"cols": 9, "rows": 24},
+        "mode": "metadata-only",
+    }
+    assert parsed["token"] == "17x6"
+    assert parsed["size"] == {"cols": 17, "rows": 6}
+    assert invalid_with_fallback["token"] == "4x5"
+    assert invalid_with_fallback["size"] == {"cols": 4, "rows": 5}
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
     assert "renderer" not in serialized
     assert '"html":' not in serialized
     assert "api_key" not in serialized

@@ -329,6 +329,15 @@ def _space_tool_size_to_token(payload: dict[str, Any]) -> dict[str, Any]:
     return {"token": f"{size['cols']}x{size['rows']}", "size": size}
 
 
+def _space_tool_parse_widget_size_token(payload: dict[str, Any]) -> dict[str, Any]:
+    """Parse a Space Agent widget-size token without echoing unsafe payload fields."""
+    fallback = _normalize_source_widget_size(payload.get("fallback"), _SOURCE_WIDGET_DEFAULT_SIZE)
+    raw = payload.get("value", payload.get("token", payload.get("size", "")))
+    match = re.match(r"^(\d+)\s*x\s*(\d+)$", str(raw or "").strip().lower())
+    size = _normalize_source_widget_size({"cols": match.group(1), "rows": match.group(2)}, fallback) if match else fallback
+    return {"token": f"{size['cols']}x{size['rows']}", "size": size}
+
+
 def _space_tool_build_source_path(name: str, payload: dict[str, Any]) -> str:
     """Build Space Agent-style logical storage paths without touching storage."""
     space_id = validate_space_id(_space_tool_current_id(payload))
@@ -1682,6 +1691,13 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         return {"ok": True, "action": name, "url": _space_tool_resolve_app_url(data), "resolve": {"mode": "metadata-only"}}
     if name == "space.spaces.sizetotoken":
         return {"ok": True, "action": name, **_space_tool_size_to_token(data), "mode": "metadata-only"}
+    if name == "space.spaces.defaultwidgetsize":
+        size = dict(_SOURCE_WIDGET_DEFAULT_SIZE)
+        return {"ok": True, "action": name, "token": f"{size['cols']}x{size['rows']}", "size": size, "mode": "metadata-only"}
+    if name == "space.spaces.normalizewidgetsize":
+        return {"ok": True, "action": name, **_space_tool_size_to_token(data), "mode": "metadata-only"}
+    if name == "space.spaces.parsewidgetsizetoken":
+        return {"ok": True, "action": name, **_space_tool_parse_widget_size_token(data), "mode": "metadata-only"}
     if name in {"space.spaces.repositioncurrentspace", "space.current.reposition", "space.current.reposition_viewport"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         request = {
