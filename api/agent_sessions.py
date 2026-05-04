@@ -313,7 +313,7 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         # touched standalone sessions — exactly the inverse of what a user
         # expects from "Show agent sessions" sorted by activity.
         for key in (
-            'id', 'model', 'message_count', 'actual_message_count',
+            'id', 'model', 'message_count', 'actual_message_count', 'actual_user_message_count',
             'ended_at', 'end_reason', 'last_activity',
         ):
             if key in tip:
@@ -367,6 +367,8 @@ def read_importable_agent_session_rows(
         # source column we cannot safely distinguish WebUI rows from agent rows.
         cur.execute("PRAGMA table_info(sessions)")
         session_cols = {row[1] for row in cur.fetchall()}
+        cur.execute("PRAGMA table_info(messages)")
+        message_cols = {row[1] for row in cur.fetchall()}
         if 'source' not in session_cols:
             log.warning(
                 "agent session listing skipped: state.db at %s has no 'source' column "
@@ -387,6 +389,11 @@ def read_importable_agent_session_rows(
         origin_chat_id_expr = _optional_col('origin_chat_id', session_cols)
         origin_user_id_expr = _optional_col('origin_user_id', session_cols)
         platform_expr = _optional_col('platform', session_cols)
+        user_message_count_expr = (
+            "COUNT(CASE WHEN LOWER(m.role) = 'user' THEN 1 END)"
+            if 'role' in message_cols
+            else "COUNT(m.id)"
+        )
 
         where_clauses = ["s.source IS NOT NULL"]
         params: list[str] = []
@@ -413,7 +420,7 @@ def read_importable_agent_session_rows(
                    {ended_expr},
                    {end_reason_expr},
                    COUNT(m.id) AS actual_message_count,
-                   COUNT(CASE WHEN LOWER(m.role) = 'user' THEN 1 END) AS actual_user_message_count,
+                   {user_message_count_expr} AS actual_user_message_count,
                    MAX(m.timestamp) AS last_activity
             FROM sessions s
             LEFT JOIN messages m ON m.session_id = s.id

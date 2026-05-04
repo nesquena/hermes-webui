@@ -224,6 +224,12 @@ def _last_message_timestamp(messages):
     return None
 
 
+def _message_role(message):
+    if not isinstance(message, dict):
+        return ''
+    return str(message.get('role', '')).strip().lower()
+
+
 def _find_top_level_json_key(text, key):
     """Return the byte offset of a top-level JSON object key, if present."""
     depth = 0
@@ -536,11 +542,6 @@ class Session:
         last_message_at = _last_message_timestamp(self.messages) or self.updated_at
         if has_pending_user_message and self.pending_started_at:
             last_message_at = self.pending_started_at
-
-        def _role(message):
-            if not isinstance(message, dict):
-                return ""
-            return str(message.get('role', '')).strip().lower()
         return {
             'session_id': self.session_id,
             'title': self.title,
@@ -558,9 +559,6 @@ class Session:
             'input_tokens': self.input_tokens,
             'output_tokens': self.output_tokens,
             'estimated_cost': self.estimated_cost,
-            'user_message_count': sum(
-                1 for message in self.messages if _role(message) == 'user'
-            ) if isinstance(self.messages, list) else 0,
             'personality': self.personality,
             'compression_anchor_visible_idx': self.compression_anchor_visible_idx,
             'compression_anchor_message_key': self.compression_anchor_message_key,
@@ -570,6 +568,9 @@ class Session:
             # Only emit 'parent_session_id' when set (the /branch fork link, #1342).
             # Sessions without a fork must not leak None — see test_session_lineage_metadata_api.
             **({'parent_session_id': self.parent_session_id} if self.parent_session_id else {}),
+            'user_message_count': sum(
+                1 for message in self.messages if _message_role(message) == 'user'
+            ) if isinstance(self.messages, list) else 0,
             'active_stream_id': self.active_stream_id,
             'pending_user_message': self.pending_user_message,
             'has_pending_user_message': has_pending_user_message,
