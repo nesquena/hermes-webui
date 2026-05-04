@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-04 02:35 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-04 03:40 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: source-style `defineWidget` helper coverage now lets Space Agent-style adapter calls preview widget definitions as non-persisted metadata-only blueprints, while preserving Capy's generated-body quarantine and safe inspection boundary. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: source-style `widgetApiVersion` runtime property coverage now lets Space Agent-style adapter calls read Capy's metadata-only widget API compatibility version without executing or exposing generated/source/credential-like request fields. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): expose source widget API version`
+  - Added RED/GREEN backend coverage proving `space.spaces.widgetApiVersion` returns metadata-only widget API version `1`, matching Space Agent's runtime namespace property, while omitting renderer/source/API auth markers from serialized adapter responses.
+  - Validation at completion before commit: focused RED failed with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`). Run `git log -1 --oneline` and the final report for the full validation bundle.
 
 - `feat(spaces): support source define widget alias`
   - Added RED/GREEN backend coverage proving `space.spaces.defineWidget` accepts a nested Space Agent-style `{definition}` payload, returns a non-persisted safe widget blueprint with normalized layout/kind/title metadata, and omits renderer/html/script/data/source bodies plus credential-like markers from serialized adapter responses.

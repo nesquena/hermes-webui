@@ -301,6 +301,35 @@ def test_space_tool_adapter_supports_source_collection_property_aliases_metadata
     assert "secret" not in serialized
 
 
+def test_space_tool_adapter_supports_source_widget_api_version_property_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    version = spaces.run_space_tool(
+        "space.spaces.widgetApiVersion",
+        {
+            "renderer": "<script>ignore()</script>",
+            "source": "SECRET_SOURCE",
+            "api_key": "***",
+            "token": "***",
+        },
+    )
+    serialized = json.dumps(version).lower()
+
+    assert version == {
+        "ok": True,
+        "action": "space.spaces.widgetapiversion",
+        "widget_api_version": 1,
+        "runtime": {"mode": "metadata-only", "executed": False},
+    }
+    assert "ignore" not in serialized
+    assert "<script" not in serialized
+    assert "renderer" not in serialized
+    assert '"source":' not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+
+
 def test_space_tool_adapter_supports_source_open_alias_and_camelcase_space_id_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "source-open-lab", "name": "Source Open Lab"})

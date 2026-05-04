@@ -1543,6 +1543,13 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         return {"ok": True, "action": name, "spaces": list_spaces()}
     if name in {"space.spaces.items", "space.spaces.all"}:
         return {"ok": True, "action": name, "spaces": list_spaces()}
+    if name == "space.spaces.widgetapiversion":
+        return {
+            "ok": True,
+            "action": name,
+            "widget_api_version": 1,
+            "runtime": {"mode": "metadata-only", "executed": False},
+        }
     if name == "space.spaces.byid":
         spaces = list_spaces()
         return {"ok": True, "action": name, "spaces_by_id": {space["space_id"]: space for space in spaces}}

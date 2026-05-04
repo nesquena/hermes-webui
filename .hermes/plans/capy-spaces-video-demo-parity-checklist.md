@@ -11,6 +11,7 @@ Capy Spaces now has implemented foundation slices, so this checklist is no longe
 
 Recent safe adapter progress:
 
+- Source runtime property coverage now includes metadata-only `space.spaces.widgetApiVersion`, matching Space Agent's widget API version surface with Capy's current compatibility value while omitting generated/source/credential-like request markers.
 - Source open/get helper coverage now includes metadata-only `space.spaces.open` and camelCase `spaceId` payload support for `space.spaces.get` / `read` / `open`, matching another common Space Agent navigation helper without echoing generated or credential-like payload fields.
 - Source normalization helper coverage now includes metadata-only `space.spaces.normalizeSpaceId` / `normalizeWidgetId`, matching Space Agent slug behavior for diacritics, underscores, punctuation, and fallback ids without echoing generated or credential-like payload fields.
 
