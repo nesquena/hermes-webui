@@ -38,13 +38,11 @@ def test_switch_panel_lazy_loads_kanban_and_toggles_main_view():
     assert "if (_currentPanel === 'kanban') await loadKanban();" in PANELS
 
 
-def test_kanban_frontend_uses_read_only_relative_api_endpoints():
+def test_kanban_frontend_uses_relative_api_endpoints():
     assert "'/api/kanban/board" in PANELS
     assert "api('/api/kanban/tasks/" in PANELS
     assert "api('/api/kanban/config" in PANELS
     assert "fetch('/api/kanban" not in PANELS
-    assert "method: 'POST'" not in PANELS[PANELS.find("async function loadKanban"):PANELS.find("async function loadKanbanTask")]
-    assert "kanban-readonly" in PANELS
     assert "kanbanTaskPreview" in PANELS
     assert "classList.add('selected')" in PANELS
 
@@ -62,6 +60,20 @@ def test_kanban_task_detail_renders_read_only_sections():
     ):
         assert section_class in PANELS
     assert "method: 'POST'" not in PANELS[PANELS.find("async function loadKanbanTask"):PANELS.find("function loadTodos")]
+
+
+
+def test_kanban_write_mvp_has_native_controls_and_api_calls():
+    assert 'id="kanbanNewTaskBtn"' in INDEX
+    assert "async function createKanbanTask" in PANELS
+    assert "async function updateKanbanTask" in PANELS
+    assert "async function addKanbanComment" in PANELS
+    assert "api('/api/kanban/tasks'," in PANELS
+    assert "method: 'POST'" in PANELS
+    assert "'/api/kanban/tasks/' + encodeURIComponent(taskId) + '/patch'" in PANELS
+    assert "'/api/kanban/tasks/' + encodeURIComponent(taskId) + '/comments'" in PANELS
+    assert "kanban-status-actions" in PANELS
+    assert "kanban-comment-form" in PANELS
 
 
 def test_kanban_board_has_native_css_classes():
@@ -99,6 +111,8 @@ def test_kanban_i18n_keys_exist_in_every_locale_block():
         "kanban_no_comments",
         "kanban_no_events",
         "kanban_no_runs",
+        "kanban_new_task",
+        "kanban_add_comment",
     ]
     missing = [
         f"{locale}:{key}"

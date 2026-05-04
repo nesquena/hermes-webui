@@ -2627,6 +2627,11 @@ def handle_post(handler, parsed) -> bool:
 
     body = read_body(handler)
 
+    if parsed.path.startswith("/api/kanban/"):
+        from api.kanban_bridge import handle_kanban_post
+
+        return handle_kanban_post(handler, parsed, body)
+
     if parsed.path == "/api/session/new":
         try:
             workspace = str(resolve_trusted_workspace(body.get("workspace"))) if body.get("workspace") else None

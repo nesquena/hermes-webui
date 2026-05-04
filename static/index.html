@@ -137,6 +137,7 @@
       <div class="panel-head">
         <span data-i18n="tab_kanban">Kanban</span>
         <div class="panel-head-actions">
+          <button class="panel-head-btn" id="kanbanNewTaskBtn" onclick="createKanbanTask()" title="New task" data-i18n-title="kanban_new_task" aria-label="New task"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
           <button class="panel-head-btn" id="kanbanRefreshBtn" onclick="loadKanban(true)" title="Refresh" data-i18n-title="kanban_refresh" aria-label="Refresh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
         </div>
       </div>
@@ -145,6 +146,10 @@
         <select id="kanbanAssigneeFilter" onchange="loadKanban(true)" aria-label="Assignee filter"></select>
         <select id="kanbanTenantFilter" onchange="loadKanban(true)" aria-label="Tenant filter"></select>
         <label class="kanban-check"><input id="kanbanIncludeArchived" type="checkbox" onchange="loadKanban(true)"> <span data-i18n="kanban_include_archived">Include archived</span></label>
+        <div class="kanban-new-task-row">
+          <input id="kanbanNewTaskTitle" placeholder="New task" data-i18n-placeholder="kanban_new_task" onkeydown="if(event.key==='Enter')createKanbanTask()">
+          <button class="btn secondary" onclick="createKanbanTask()" data-i18n="kanban_new_task">New task</button>
+        </div>
       </div>
       <div class="kanban-summary" id="kanbanSummary"></div>
       <div class="kanban-list" id="kanbanList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>

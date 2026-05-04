@@ -3142,9 +3142,15 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .kanban-readonly{font-size:11px;color:var(--muted);margin-top:6px;}
 .kanban-empty{padding:12px;color:var(--muted);font-size:12px;text-align:center;border:1px dashed var(--border);border-radius:8px;}
 
+.kanban-new-task-row{display:flex;gap:6px;align-items:center;}
+.kanban-new-task-row input{flex:1;min-width:0;background:var(--input-bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:7px 8px;font:inherit;font-size:12px;}
 .kanban-task-preview{padding:12px 16px;border-bottom:1px solid var(--border);background:var(--panel);}
 .kanban-task-preview-title{font-size:14px;font-weight:650;color:var(--text);margin-bottom:6px;}
 .kanban-task-preview-body{font-size:12px;color:var(--muted);line-height:1.45;white-space:pre-wrap;margin-bottom:6px;}
+.kanban-status-actions{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px;}
+.kanban-status-actions .btn{font-size:11px;padding:4px 8px;}
+.kanban-comment-form{display:flex;gap:8px;align-items:flex-end;margin-top:12px;}
+.kanban-comment-form textarea{flex:1;min-height:42px;resize:vertical;background:var(--input-bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:8px;font:inherit;font-size:12px;}
 
 .kanban-detail-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-top:12px;}
 .kanban-detail-section{border:1px solid var(--border);border-radius:8px;background:var(--bg);padding:10px;min-width:0;}

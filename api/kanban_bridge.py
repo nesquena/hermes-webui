@@ -162,6 +162,152 @@ def _board_payload(parsed):
         }
 
 
+
+def _validate_status(status: str) -> str:
+    value = str(status or "").strip().lower()
+    allowed = set(BOARD_COLUMNS) | {"archived"}
+    if value not in allowed:
+        raise ValueError(f"invalid status: {value}")
+    return value
+
+
+def _create_task_payload(body: dict):
+    title = str(body.get("title") or "").strip()
+    if not title:
+        raise ValueError("title is required")
+    try:
+        priority = int(body.get("priority") or 0)
+    except (TypeError, ValueError):
+        raise ValueError("priority must be an integer")
+    kb = _kb()
+    requested_status = body.get("status")
+    with _conn() as conn:
+        task_id = kb.create_task(
+            conn,
+            title=title,
+            body=body.get("body") or None,
+            assignee=body.get("assignee") or None,
+            created_by=body.get("created_by") or "webui",
+            tenant=body.get("tenant") or None,
+            priority=priority,
+            parents=body.get("parents") or (),
+            triage=bool(body.get("triage") or False),
+            workspace_kind=body.get("workspace_kind") or "scratch",
+            workspace_path=body.get("workspace_path") or None,
+            idempotency_key=body.get("idempotency_key") or None,
+            max_runtime_seconds=body.get("max_runtime_seconds") or None,
+            skills=body.get("skills") or None,
+        )
+        if requested_status:
+            _patch_task(conn, task_id, {"status": requested_status})
+        return {"task": _task_dict(kb.get_task(conn, task_id)), "read_only": False}
+
+
+def _patch_task(conn, task_id: str, body: dict):
+    kb = _kb()
+    task = kb.get_task(conn, task_id)
+    if not task:
+        raise LookupError("task not found")
+
+    updates = {}
+    if "title" in body:
+        title = str(body.get("title") or "").strip()
+        if not title:
+            raise ValueError("title is required")
+        updates["title"] = title
+    if "body" in body:
+        updates["body"] = body.get("body") or None
+    if "tenant" in body:
+        updates["tenant"] = body.get("tenant") or None
+    if "priority" in body:
+        try:
+            updates["priority"] = int(body.get("priority") or 0)
+        except (TypeError, ValueError):
+            raise ValueError("priority must be an integer")
+
+    for field, value in updates.items():
+        if hasattr(task, field):
+            try:
+                setattr(task, field, value)
+            except Exception:
+                pass
+    if updates:
+        assignments = ", ".join(f"{field} = ?" for field in updates)
+        conn.execute(f"UPDATE tasks SET {assignments} WHERE id = ?", [*updates.values(), task_id])
+        if hasattr(kb, "_append_event"):
+            kb._append_event(conn, task_id, "updated", {"fields": list(updates), "source": "webui"})
+
+    if "assignee" in body:
+        if not kb.assign_task(conn, task_id, body.get("assignee") or None):
+            raise LookupError("task not found")
+
+    if "status" not in body or body.get("status") in (None, ""):
+        return
+    status = _validate_status(body.get("status"))
+    if status == "done":
+        if not kb.complete_task(conn, task_id, result=body.get("result"), summary=body.get("summary")):
+            raise LookupError("task not found")
+    elif status == "blocked":
+        if not kb.block_task(conn, task_id, reason=body.get("block_reason") or body.get("reason")):
+            raise LookupError("task not found")
+    elif status == "archived":
+        if not kb.archive_task(conn, task_id):
+            raise LookupError("task not found")
+    else:
+        task = kb.get_task(conn, task_id)
+        if not task:
+            raise LookupError("task not found")
+        try:
+            setattr(task, "status", status)
+        except Exception:
+            pass
+        conn.execute("UPDATE tasks SET status = ? WHERE id = ?", (status, task_id))
+        if hasattr(kb, "_append_event"):
+            kb._append_event(conn, task_id, "status", {"status": status, "source": "webui"})
+
+
+def _patch_task_payload(task_id: str, body: dict):
+    task_id = str(task_id or "").strip()
+    if not task_id:
+        raise ValueError("task_id is required")
+    kb = _kb()
+    with _conn() as conn:
+        _patch_task(conn, task_id, body)
+        return {"task": _task_dict(kb.get_task(conn, task_id)), "read_only": False}
+
+
+def _comment_payload(task_id: str, body: dict):
+    task_id = str(task_id or "").strip()
+    comment_body = str(body.get("body") or "").strip()
+    if not task_id:
+        raise ValueError("task_id is required")
+    if not comment_body:
+        raise ValueError("body is required")
+    kb = _kb()
+    with _conn() as conn:
+        if not kb.get_task(conn, task_id):
+            raise LookupError("task not found")
+        comment_id = kb.add_comment(conn, task_id, body.get("author") or "webui", comment_body)
+        return {"ok": True, "comment_id": comment_id, "read_only": False}
+
+
+def _link_tasks_payload(body: dict, *, unlink: bool = False):
+    parent_id = str(body.get("parent_id") or "").strip()
+    child_id = str(body.get("child_id") or "").strip()
+    if not parent_id or not child_id:
+        raise ValueError("parent_id and child_id are required")
+    kb = _kb()
+    with _conn() as conn:
+        if not kb.get_task(conn, parent_id):
+            raise LookupError("parent task not found")
+        if not kb.get_task(conn, child_id):
+            raise LookupError("child task not found")
+        if unlink:
+            changed = kb.unlink_tasks(conn, parent_id, child_id)
+            return {"ok": True, "changed": bool(changed), "parent_id": parent_id, "child_id": child_id, "read_only": False}
+        kb.link_tasks(conn, parent_id, child_id)
+        return {"ok": True, "parent_id": parent_id, "child_id": child_id, "read_only": False}
+
 def _links_for(conn, task_id: str) -> dict:
     kb = _kb()
     return {
@@ -237,4 +383,25 @@ def handle_kanban_get(handler, parsed) -> bool:
         if payload is None:
             return bad(handler, "task not found", status=404)
         return j(handler, payload) or True
+    return False
+
+def handle_kanban_post(handler, parsed, body) -> bool:
+    path = parsed.path
+    try:
+        if path == "/api/kanban/tasks":
+            return j(handler, _create_task_payload(body)) or True
+        if path == "/api/kanban/links":
+            return j(handler, _link_tasks_payload(body)) or True
+        if path == "/api/kanban/links/delete":
+            return j(handler, _link_tasks_payload(body, unlink=True)) or True
+        if path.startswith(_TASK_PREFIX) and path.endswith("/comments"):
+            task_id = path[len(_TASK_PREFIX):-len("/comments")].strip("/")
+            return j(handler, _comment_payload(task_id, body)) or True
+        if path.startswith(_TASK_PREFIX) and path.endswith("/patch"):
+            task_id = path[len(_TASK_PREFIX):-len("/patch")].strip("/")
+            return j(handler, _patch_task_payload(task_id, body)) or True
+    except LookupError as exc:
+        return bad(handler, str(exc), status=404)
+    except ValueError as exc:
+        return bad(handler, str(exc))
     return False
