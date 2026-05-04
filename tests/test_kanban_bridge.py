@@ -63,6 +63,20 @@ class FakeConn:
             return SimpleNamespace(fetchall=lambda: [])
         if "FROM task_comments" in sql:
             return SimpleNamespace(fetchall=lambda: [])
+        if "SELECT status, assignee, COUNT(*) AS n FROM tasks" in sql:
+            rows = []
+            grouped = {}
+            for task in self.tasks:
+                if task.status == "archived":
+                    continue
+                key = (task.status, task.assignee)
+                grouped[key] = grouped.get(key, 0) + 1
+            for (status, assignee), n in grouped.items():
+                rows.append(FakeRow(status=status, assignee=assignee, n=n))
+            return SimpleNamespace(fetchall=lambda: rows)
+        if "SELECT DISTINCT assignee FROM tasks" in sql:
+            rows = [FakeRow(assignee=a) for a in sorted({t.assignee for t in self.tasks if t.assignee})]
+            return SimpleNamespace(fetchall=lambda: rows)
         if "FROM task_events WHERE id >" in sql:
             since, limit = params
             rows = [
@@ -92,8 +106,8 @@ class FakeConn:
 class FakeKanbanDB:
     def __init__(self):
         self.tasks = [
-            FakeTask("t_1", "Read-only board target", "ready", "webui-test"),
-            FakeTask("t_2", "Blocked target", "blocked", "other"),
+            FakeTask("t_1", "Read-only board target", "ready", "webui-test", tenant="webui"),
+            FakeTask("t_2", "Blocked target", "blocked", "other", tenant="ops"),
         ]
         self.events = [FakeEvent(7, "t_1", None, "created", {"status": "ready"}, 123)]
         self.comments = []
@@ -190,6 +204,38 @@ class FakeKanbanDB:
         task.status = "archived"
         self._event(task_id, "archived", {})
         return True
+
+    def unblock_task(self, conn, task_id):
+        task = self.get_task(conn, task_id)
+        if not task:
+            return False
+        task.status = "ready"
+        self._event(task_id, "unblocked", {})
+        return True
+
+    def known_assignees(self, conn):
+        return sorted({task.assignee for task in conn.tasks if task.assignee})
+
+    def board_stats(self, conn):
+        by_status = {}
+        by_assignee = {}
+        for task in conn.tasks:
+            if task.status == "archived":
+                continue
+            by_status[task.status] = by_status.get(task.status, 0) + 1
+            assignee = task.assignee or "unassigned"
+            by_assignee[assignee] = by_assignee.get(assignee, 0) + 1
+        return {"by_status": by_status, "by_assignee": by_assignee}
+
+    def read_worker_log(self, task_id, tail_bytes=None):
+        return f"worker log for {task_id}"
+
+    def worker_log_path(self, task_id):
+        from pathlib import Path
+        return Path(f"/tmp/hermes-kanban/{task_id}.log")
+
+    def dispatch_once(self, conn, dry_run=False, max_spawn=8):
+        return {"dry_run": dry_run, "max_spawn": max_spawn, "spawned": []}
 
     def add_comment(self, conn, task_id, author, body):
         self.comments.append(SimpleNamespace(id=len(self.comments) + 1, task_id=task_id, author=author, body=body))
@@ -329,3 +375,39 @@ def test_routes_dispatches_api_kanban_post_to_bridge():
     src = open("api/routes.py", encoding="utf-8").read()
     assert 'parsed.path.startswith("/api/kanban/")' in src
     assert "handle_kanban_post(handler, parsed, body)" in src
+
+
+
+def test_kanban_dashboard_core_api_exposes_stats_assignees_config_and_logs(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+
+    stats = bridge._stats_payload()
+    assignees = bridge._assignees_payload()
+    config = bridge._config_payload()
+    log = bridge._task_log_payload(_parsed(path="/api/kanban/tasks/t_1/log", query="tail=64"), "t_1")
+
+    assert stats["by_status"]["ready"] == 1
+    assert "webui-test" in assignees["assignees"]
+    assert config["columns"]
+    assert {"default_tenant", "lane_by_profile", "include_archived_by_default", "render_markdown", "assignees"} <= set(config)
+    assert log["task_id"] == "t_1"
+    assert log["content"] == "worker log for t_1"
+
+
+def test_kanban_only_mine_bulk_dispatch_and_block_unblock(monkeypatch):
+    bridge = _load_bridge(monkeypatch)
+    monkeypatch.setattr("api.profiles.get_active_profile_name", lambda: "webui-test", raising=False)
+
+    mine = bridge._board_payload(_parsed(query="only_mine=1"))
+    visible_ids = [task["id"] for col in mine["columns"] for task in col["tasks"]]
+    bulk = bridge._bulk_tasks_payload({"ids": ["t_1", "t_2"], "status": "done", "priority": 3})
+    blocked = bridge._task_action_payload("t_1", {"reason": "waiting"}, "block")
+    unblocked = bridge._task_action_payload("t_1", {}, "unblock")
+    dispatch = bridge._dispatch_payload(_parsed(path="/api/kanban/dispatch", query="dry_run=1&max=2"))
+
+    assert visible_ids == ["t_1"]
+    assert [row["ok"] for row in bulk["results"]] == [True, True]
+    assert blocked["task"]["status"] == "blocked"
+    assert unblocked["task"]["status"] == "ready"
+    assert dispatch["dry_run"] is True
+    assert dispatch["max_spawn"] == 2
