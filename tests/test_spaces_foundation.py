@@ -935,6 +935,55 @@ def test_space_tool_adapter_supports_source_resolve_app_url_helper_metadata_only
 
 
 
+def test_space_tool_adapter_supports_source_path_helpers_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    root = spaces.run_space_tool(
+        "space.spaces.buildSpaceRootPath",
+        {"spaceId": "path-lab", "renderer": "<script>steal()</script>", "api_key": "***"},
+    )
+    manifest = spaces.run_space_tool(
+        "space.spaces.buildSpaceManifestPath",
+        {"spaceId": "path-lab", "source": "SECRET_SOURCE"},
+    )
+    widgets = spaces.run_space_tool("space.spaces.buildSpaceWidgetsPath", {"spaceId": "path-lab"})
+    widget_file = spaces.run_space_tool(
+        "space.spaces.buildSpaceWidgetFilePath",
+        {"spaceId": "path-lab", "widgetId": "weather-card", "html": "<img src=x onerror=steal()>"},
+    )
+    data_path = spaces.run_space_tool("space.spaces.buildSpaceDataPath", {"spaceId": "path-lab", "token": "***"})
+    assets = spaces.run_space_tool("space.spaces.buildSpaceAssetsPath", {"spaceId": "path-lab"})
+    scripts = spaces.run_space_tool("space.spaces.buildSpaceScriptsPath", {"spaceId": "path-lab"})
+    serialized = json.dumps([root, manifest, widgets, widget_file, data_path, assets, scripts]).lower()
+
+    assert root == {"ok": True, "action": "space.spaces.buildspacerootpath", "path": "~/spaces/path-lab/", "paths": {"mode": "metadata-only"}}
+    assert manifest["path"] == "~/spaces/path-lab/space.yaml"
+    assert widgets["path"] == "~/spaces/path-lab/widgets/"
+    assert widget_file["path"] == "~/spaces/path-lab/widgets/weather-card.yaml"
+    assert data_path["path"] == "~/spaces/path-lab/data/"
+    assert assets["path"] == "~/spaces/path-lab/assets/"
+    assert scripts["path"] == "~/spaces/path-lab/scripts/"
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+    assert '"source":' not in serialized
+
+    for unsafe_payload in [
+        {},
+        {"spaceId": "../private", "widgetId": "weather-card"},
+        {"spaceId": "path-lab", "widgetId": "../weather-card"},
+    ]:
+        with pytest.raises(ValueError) as exc:
+            spaces.run_space_tool("space.spaces.buildSpaceWidgetFilePath", unsafe_payload)
+        assert "../" not in str(exc.value)
+
+
+
 def test_space_tool_adapter_supports_source_render_widget_helper_quarantines_generated_bodies(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
     created = spaces.create_space({"space_id": "source-render-widget-lab", "name": "Source Render Widget Lab"})

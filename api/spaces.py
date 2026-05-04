@@ -67,6 +67,13 @@ _SOURCE_WIDGET_SIZE_PRESETS = {
     "tall": {"cols": 4, "rows": 5},
     "full": {"cols": 12, "rows": 4},
 }
+_SOURCE_SPACES_ROOT_PATH = "~/spaces/"
+_SOURCE_SPACE_MANIFEST_FILE = "space.yaml"
+_SOURCE_SPACE_WIDGETS_DIR = "widgets/"
+_SOURCE_SPACE_WIDGET_FILE_EXTENSION = ".yaml"
+_SOURCE_SPACE_DATA_DIR = "data/"
+_SOURCE_SPACE_ASSETS_DIR = "assets/"
+_SOURCE_SPACE_SCRIPTS_DIR = "scripts/"
 _SPACE_DEMO_RUNS = [
     {"demo": "demo_weather_widget", "template": "weather", "title": "Weather widget"},
     {"demo": "demo_daily_dashboard", "template": "dashboard", "title": "Daily dashboard"},
@@ -294,6 +301,29 @@ def _space_tool_size_to_token(payload: dict[str, Any]) -> dict[str, Any]:
     fallback = _normalize_source_widget_size(payload.get("fallback"), _SOURCE_WIDGET_DEFAULT_SIZE)
     size = _normalize_source_widget_size(payload.get("size"), fallback)
     return {"token": f"{size['cols']}x{size['rows']}", "size": size}
+
+
+def _space_tool_build_source_path(name: str, payload: dict[str, Any]) -> str:
+    """Build Space Agent-style logical storage paths without touching storage."""
+    space_id = validate_space_id(_space_tool_current_id(payload))
+    root_path = f"{_SOURCE_SPACES_ROOT_PATH}{space_id}/"
+    if name == "space.spaces.buildspacerootpath":
+        return root_path
+    if name == "space.spaces.buildspacemanifestpath":
+        return f"{root_path}{_SOURCE_SPACE_MANIFEST_FILE}"
+    if name == "space.spaces.buildspacewidgetspath":
+        return f"{root_path}{_SOURCE_SPACE_WIDGETS_DIR}"
+    if name == "space.spaces.buildspacewidgetfilepath":
+        widget_id = validate_widget_id(_space_tool_widget_id(payload))
+        return f"{root_path}{_SOURCE_SPACE_WIDGETS_DIR}{widget_id}{_SOURCE_SPACE_WIDGET_FILE_EXTENSION}"
+    if name == "space.spaces.buildspacedatapath":
+        return f"{root_path}{_SOURCE_SPACE_DATA_DIR}"
+    if name == "space.spaces.buildspaceassetspath":
+        return f"{root_path}{_SOURCE_SPACE_ASSETS_DIR}"
+    if name == "space.spaces.buildspacescriptspath":
+        return f"{root_path}{_SOURCE_SPACE_SCRIPTS_DIR}"
+    raise ValueError("Unsupported Capy Spaces path helper")
+
 
 
 def _normalize_widget(widget: dict[str, Any]) -> dict[str, Any]:
@@ -1565,6 +1595,16 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
     if name in {"space.spaces.reloadcurrentspace", "space.spaces.reloadspace"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         return {"ok": True, "action": name, "space_id": space_id, "space": read_space_detail(space_id)}
+    if name in {
+        "space.spaces.buildspacerootpath",
+        "space.spaces.buildspacemanifestpath",
+        "space.spaces.buildspacewidgetspath",
+        "space.spaces.buildspacewidgetfilepath",
+        "space.spaces.buildspacedatapath",
+        "space.spaces.buildspaceassetspath",
+        "space.spaces.buildspacescriptspath",
+    }:
+        return {"ok": True, "action": name, "path": _space_tool_build_source_path(name, data), "paths": {"mode": "metadata-only"}}
     if name == "space.spaces.resolveappurl":
         return {"ok": True, "action": name, "url": _space_tool_resolve_app_url(data), "resolve": {"mode": "metadata-only"}}
     if name == "space.spaces.sizetotoken":
