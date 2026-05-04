@@ -49,6 +49,21 @@ def test_kanban_frontend_uses_read_only_relative_api_endpoints():
     assert "classList.add('selected')" in PANELS
 
 
+def test_kanban_task_detail_renders_read_only_sections():
+    assert "function _kanbanRenderTaskDetail" in PANELS
+    for payload_key in ("data.comments", "data.events", "data.links", "data.runs"):
+        assert payload_key in PANELS
+    for section_class in (
+        "kanban-detail-section",
+        "kanban-detail-comments",
+        "kanban-detail-events",
+        "kanban-detail-links",
+        "kanban-detail-runs",
+    ):
+        assert section_class in PANELS
+    assert "method: 'POST'" not in PANELS[PANELS.find("async function loadKanbanTask"):PANELS.find("function loadTodos")]
+
+
 def test_kanban_board_has_native_css_classes():
     for selector in (
         ".kanban-board",
@@ -77,6 +92,13 @@ def test_kanban_i18n_keys_exist_in_every_locale_block():
         "kanban_unavailable",
         "kanban_read_only",
         "kanban_empty",
+        "kanban_comments_count",
+        "kanban_events_count",
+        "kanban_links",
+        "kanban_runs_count",
+        "kanban_no_comments",
+        "kanban_no_events",
+        "kanban_no_runs",
     ]
     missing = [
         f"{locale}:{key}"
