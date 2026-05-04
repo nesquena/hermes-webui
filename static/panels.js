@@ -1049,6 +1049,47 @@ function _kanbanLinksHtml(links){
   </div>`;
 }
 
+async function createKanbanTask(){
+  const input = document.getElementById('kanbanNewTaskTitle');
+  const title = input ? input.value.trim() : '';
+  if (!title) return;
+  try {
+    const created = await api('/api/kanban/tasks', {
+      method: 'POST',
+      body: JSON.stringify({title}),
+    });
+    if (input) input.value = '';
+    await loadKanban(true);
+    if (created && created.task && created.task.id) await loadKanbanTask(created.task.id);
+  } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
+}
+
+async function updateKanbanTask(taskId, patch){
+  if (!taskId || !patch) return;
+  try {
+    const updated = await api('/api/kanban/tasks/' + encodeURIComponent(taskId) + '/patch', {
+      method: 'POST',
+      body: JSON.stringify(patch),
+    });
+    await loadKanban(true);
+    await loadKanbanTask((updated && updated.task && updated.task.id) || taskId);
+  } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
+}
+
+async function addKanbanComment(taskId){
+  const input = document.getElementById('kanbanCommentInput');
+  const body = input ? input.value.trim() : '';
+  if (!taskId || !body) return;
+  try {
+    await api('/api/kanban/tasks/' + encodeURIComponent(taskId) + '/comments', {
+      method: 'POST',
+      body: JSON.stringify({body}),
+    });
+    if (input) input.value = '';
+    await loadKanbanTask(taskId);
+  } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
+}
+
 function _kanbanRenderTaskDetail(data){
   const task = data.task || {};
   const title = _kanbanTaskTitle(task);
@@ -1058,14 +1099,22 @@ function _kanbanRenderTaskDetail(data){
   const events = data.events || [];
   const links = data.links || {};
   const runs = data.runs || [];
+  const statusButtons = ['triage', 'todo', 'ready', 'running', 'blocked', 'done', 'archived'].map(status =>
+    `<button class="btn secondary" onclick="updateKanbanTask('${esc(task.id)}',{status:'${status}'})">${esc(_kanbanColumnLabel(status))}</button>`
+  ).join('');
   return `<div class="kanban-task-preview-title">${esc(title)}</div>
     <div class="kanban-task-preview-body">${esc(body)}</div>
     ${meta.length ? `<div class="kanban-meta">${esc(meta.join(' · '))}</div>` : ''}
+    <div class="kanban-status-actions">${statusButtons}</div>
     <div class="kanban-detail-grid">
       ${_kanbanDetailSection('kanban-detail-comments', String(t('kanban_comments_count')).replace('{0}', comments.length), comments.map(_kanbanCommentHtml).join(''), 'kanban_no_comments')}
       ${_kanbanDetailSection('kanban-detail-events', String(t('kanban_events_count')).replace('{0}', events.length), events.map(_kanbanEventHtml).join(''), 'kanban_no_events')}
       ${_kanbanDetailSection('kanban-detail-links', t('kanban_links'), _kanbanLinksHtml(links), 'kanban_empty')}
       ${_kanbanDetailSection('kanban-detail-runs', String(t('kanban_runs_count')).replace('{0}', runs.length), runs.map(_kanbanRunHtml).join(''), 'kanban_no_runs')}
+    </div>
+    <div class="kanban-comment-form">
+      <textarea id="kanbanCommentInput" rows="2" placeholder="${esc(t('kanban_add_comment'))}"></textarea>
+      <button class="btn primary" onclick="addKanbanComment('${esc(task.id)}')">${esc(t('kanban_add_comment'))}</button>
     </div>`;
 }
 
