@@ -172,8 +172,35 @@ def _check_repo(path, name):
     out, ok = _run_git(['rev-list', '--count', f'HEAD..{compare_ref}'], path)
     behind = int(out) if ok and out.isdigit() else 0
 
-    # Get short SHAs for display
-    current, _ = _run_git(['rev-parse', '--short', 'HEAD'], path)
+    # Get short SHAs for display.
+    #
+    # latest_sha = upstream tip (compare_ref). Always exists on github.com
+    # because it is literally the commit `git fetch` just pulled.
+    #
+    # current_sha is trickier. The intuitive choice — local HEAD — breaks
+    # the "What's new?" compare URL whenever HEAD is not a public commit:
+    # unpushed work, dirty stage branches, forks, in-flight rebases, or
+    # release-time merge commits whose SHA only lives in the maintainer's
+    # checkout. We saw exactly this in #1579: a banner reporting "17 updates"
+    # linked to /compare/<localHEAD>...<upstream> and 404'd because <localHEAD>
+    # was never pushed to the canonical repo.
+    #
+    # The right base is the merge-base between HEAD and the upstream ref —
+    # that's the most recent commit both sides agree on, and (because
+    # `git fetch` succeeded above) it is guaranteed to be present upstream.
+    # If a user is 17 commits behind with no local-only commits, merge-base
+    # equals local HEAD and the URL is identical to what we shipped before;
+    # if they ARE ahead with local-only commits, the URL still resolves to
+    # the public history they share with upstream. If merge-base fails for
+    # any reason (e.g. shallow clone where the bases diverge before the
+    # cutoff), fall back to None so the JS link guard suppresses the link
+    # rather than emitting a known-broken URL.
+    mb_full, mb_ok = _run_git(['merge-base', 'HEAD', compare_ref], path)
+    if mb_ok and mb_full:
+        short, ok = _run_git(['rev-parse', '--short', mb_full], path)
+        current = short if (ok and short) else None
+    else:
+        current = None
     latest, _ = _run_git(['rev-parse', '--short', compare_ref], path)
 
     # Get repo URL for "What's new?" link

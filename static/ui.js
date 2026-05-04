@@ -2854,15 +2854,24 @@ function _showUpdateBanner(data){
   const banner=$('updateBanner');
   if(banner) banner.classList.add('visible');
   window._updateData=data;
-  // Wire up "What's new?" link
+  // Wire up "What's new?" link.
+  //
+  // Reset display:none + clear the href on every render — otherwise a stale
+  // link from a prior update banner can stay visible after we've moved past
+  // a state where the new payload no longer carries usable SHAs (#1579 case
+  // when the local HEAD diverges from upstream and the compare URL would 404).
   const link=$('updateWhatsNew');
-  if(link && data.webui){
-    const repoUrl=data.webui.repo_url;
-    const curSha=data.webui.current_sha;
-    const newSha=data.webui.latest_sha;
-    if(repoUrl && curSha && newSha){
-      link.href=repoUrl+'/compare/'+curSha+'...'+newSha;
-      link.style.display='inline';
+  if(link){
+    link.style.display='none';
+    link.removeAttribute('href');
+    if(data.webui){
+      const repoUrl=data.webui.repo_url;
+      const curSha=data.webui.current_sha;
+      const newSha=data.webui.latest_sha;
+      if(repoUrl && curSha && newSha){
+        link.href=repoUrl+'/compare/'+curSha+'...'+newSha;
+        link.style.display='inline';
+      }
     }
   }
 }
