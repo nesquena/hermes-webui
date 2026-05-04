@@ -1282,6 +1282,14 @@ def _space_tool_widgets_payload(payload: dict[str, Any], *, bulk: bool) -> list[
     return [_space_tool_widget_payload(widget) for widget in raw_widgets]
 
 
+def _space_tool_arg(payload: dict[str, Any], index: int) -> Any:
+    """Return a source-style positional helper argument when present."""
+    args = payload.get("args")
+    if isinstance(args, (list, tuple)) and 0 <= index < len(args):
+        return args[index]
+    return ""
+
+
 def _space_tool_current_id(payload: dict[str, Any]) -> str:
     """Return the optional current-space id from a tool payload."""
     raw = (
@@ -1291,6 +1299,7 @@ def _space_tool_current_id(payload: dict[str, Any]) -> str:
         or payload.get("activeSpaceId")
         or payload.get("current_space_id")
         or payload.get("currentSpaceId")
+        or _space_tool_arg(payload, 0)
         or ""
     )
     return str(raw or "").strip()
@@ -1298,7 +1307,8 @@ def _space_tool_current_id(payload: dict[str, Any]) -> str:
 
 def _space_tool_widget_id(payload: dict[str, Any]) -> str:
     """Return a widget id from Hermes or Space Agent-style payloads."""
-    return str(payload.get("widget_id") or payload.get("widgetId") or payload.get("id") or "").strip()
+    raw = payload.get("widget_id") or payload.get("widgetId") or payload.get("id") or _space_tool_arg(payload, 1) or _space_tool_arg(payload, 0)
+    return str(raw or "").strip()
 
 
 def _space_tool_widget_ids(payload: dict[str, Any]) -> list[str]:
@@ -1319,6 +1329,7 @@ def _space_tool_space_id(payload: dict[str, Any]) -> str:
         or payload.get("active_space_id")
         or payload.get("activeSpaceId")
         or payload.get("id")
+        or _space_tool_arg(payload, 0)
         or ""
     ).strip()
 

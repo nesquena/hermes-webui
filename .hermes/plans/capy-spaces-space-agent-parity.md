@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-03 23:13 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-04 00:28 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: source open/get helper coverage now includes the Space Agent-style `space.spaces.open` alias and camelCase `spaceId` payload support for `space.spaces.get` / `read` / `open`, while preserving Capy's metadata-only boundary. The helpers return safe Space detail metadata and omit generated/executable/source/API auth markers from serialized responses. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: source-style positional helper coverage now lets Space Agent-style adapter calls provide ordered `args` for common Space and widget helpers such as `space.spaces.openSpace`, `space.spaces.listWidgets`, and `space.spaces.readWidget`, while preserving Capy's metadata-only boundary. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): support source positional helper args`
+  - Added RED/GREEN backend coverage proving source-style `args` payloads resolve Space ids and widget ids for open/list/read helper aliases while omitting generated/executable/source/API auth markers from serialized adapter responses.
+  - Validation at completion before commit: focused RED failed with `Invalid space_id`; focused GREEN passed (`1 passed`), focused adapter regression set passed (`3 passed`), full Spaces foundation suite passed (`134 passed`), `py_compile api/spaces.py tests/test_spaces_foundation.py`, and `git diff --check` passed. Mock/status screenshot QA showed empty `window.__harnessErrors`, clean visible leak check, and screenshot artifact `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_c9cf074201a24679aeb9a7a01f8dc01e.png`. Local health returned OK on attempt 2 after LaunchAgent restart and tailnet `/health` returned OK.
 
 - `feat(spaces): support source open helper alias`
   - Added RED/GREEN backend coverage proving `space.spaces.open` accepts Space Agent-style `spaceId` payloads, and existing source-style `space.spaces.get` / `read` helpers now accept camelCase ids while omitting renderer/html/source/data/API auth markers from serialized adapter responses.
@@ -200,13 +204,14 @@ Recent completed slices:
 
 Last known validation bundle:
 
-- RED check for research direct routes: progress/artifact route tests failed as expected before implementation (missing routes produced no JSON response).
-- Focused research route regressions: passed (`2 passed`).
-- Spaces foundation + demo parity suites: passed (`107 passed`).
-- `py_compile api/spaces.py api/routes.py tests/test_spaces_foundation.py`: passed.
+- RED check for source positional helper args: new regression failed as expected before implementation with `Invalid space_id` because source-style positional `args` were not resolved.
+- Focused source positional helper regression: passed (`1 passed`).
+- Focused adapter regression set: passed (`3 passed`).
+- Full Spaces foundation suite: passed (`134 passed`).
+- `py_compile api/spaces.py tests/test_spaces_foundation.py`: passed.
 - `git diff --check`: passed.
-- Browser QA: mock/status screenshot page rendered the two new routes and validation status, `window.__harnessErrors` was empty, and leak regex for `<script>|renderer|SECRET|api_key|token` against visible text was false. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_97724956191744c7bf5a81959b8968b3.png`.
-- WebUI local/tailnet health: verify after commit and LaunchAgent restart.
+- Browser QA: mock/status screenshot page rendered the positional helper slice and validation status, `window.__harnessErrors` was empty, and the visible leak check was clean. Screenshot artifact: `/Users/bschmidy10/.hermes/cache/screenshots/browser_screenshot_c9cf074201a24679aeb9a7a01f8dc01e.png`.
+- WebUI local/tailnet health: local `/health` returned OK on attempt 2 after LaunchAgent restart, tailnet `/health` returned OK, gateway service was loaded/running, and Tailscale Serve still points `https://capy.tail9c6e3.ts.net/` to `http://127.0.0.1:8787`.
 
 Known warning: unknown `pytest.mark.integration` in `tests/test_onboarding_network.py`.
 
