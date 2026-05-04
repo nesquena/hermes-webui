@@ -3161,9 +3161,12 @@ function _formatTurnTps(value){
   const fixed=n>=100?Math.round(n).toLocaleString():n>=10?n.toFixed(1):n.toFixed(1);
   return `${fixed} t/s`;
 }
+function isTpsDisplayEnabled(){
+  return window._showTps===true;
+}
 function _assistantRoleHtml(tsTitle='', tpsText=''){
   const _bn=window._botName||'Hermes';
-  const tps=tpsText?`<span class="msg-tps-inline" title="Tokens per second">${esc(tpsText)}</span>`:'';
+  const tps=(isTpsDisplayEnabled()&&tpsText)?`<span class="msg-tps-inline" title="Tokens per second">${esc(tpsText)}</span>`:'';
   return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant">${esc(_bn.charAt(0).toUpperCase())}</div><span style="font-size:12px">${esc(_bn)}</span>${tps}</div>`;
 }
 function _setAssistantTurnTps(turn, tpsText=''){
@@ -3182,7 +3185,7 @@ function _setAssistantTurnTps(turn, tpsText=''){
   chip.textContent=text;
 }
 function _setLiveAssistantTps(value){
-  _setAssistantTurnTps($('liveAssistantTurn'), _formatTurnTps(value));
+  _setAssistantTurnTps($('liveAssistantTurn'), isTpsDisplayEnabled()?_formatTurnTps(value):'');
 }
 function _createAssistantTurn(tsTitle='', tpsText=''){
   const row=document.createElement('div');
@@ -3838,7 +3841,7 @@ function renderMessages(){
     }
 
     if(!currentAssistantTurn){
-      currentAssistantTurn=_createAssistantTurn(tsTitle, _formatTurnTps(m._turnTps));
+      currentAssistantTurn=_createAssistantTurn(tsTitle, isTpsDisplayEnabled()?_formatTurnTps(m._turnTps):'');
       inner.appendChild(currentAssistantTurn);
     }
     const seg=document.createElement('div');

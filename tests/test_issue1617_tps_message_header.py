@@ -8,8 +8,12 @@ Product decision:
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+CONFIG_PY = (REPO / "api" / "config.py").read_text(encoding="utf-8")
 STREAMING_PY = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
+BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
+PANELS_JS = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
 UI_JS = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
 CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 
@@ -56,4 +60,55 @@ def test_backend_marks_streaming_metering_availability_explicitly():
     assert "estimated" in STREAMING_PY, "metering SSE payloads must explicitly distinguish estimated readings"
     assert "record_token(stream_id, len(STREAM_PARTIAL_TEXT[stream_id]))" not in STREAMING_PY, (
         "live TPS must not be derived from streamed character count / byte-size estimates"
+    )
+
+
+def test_tps_display_setting_is_default_off_and_persisted():
+    assert '"show_tps": False' in CONFIG_PY, "TPS display should be disabled by default"
+    assert '"show_tps"' in CONFIG_PY and "_SETTINGS_BOOL_KEYS" in CONFIG_PY, (
+        "TPS display should be a persisted boolean WebUI setting"
+    )
+    assert "settingsShowTps" in INDEX_HTML, "Preferences needs a user-facing TPS display toggle"
+    assert "payload.show_tps=showTpsCb.checked" in PANELS_JS, (
+        "Preferences autosave should persist the TPS display toggle through /api/settings"
+    )
+    assert "showTpsCb.checked=!!settings.show_tps" in PANELS_JS, (
+        "Settings panel should hydrate the TPS toggle from persisted settings"
+    )
+    assert "window._showTps=!!s.show_tps" in BOOT_JS, (
+        "Boot should hydrate show_tps into a runtime flag"
+    )
+    assert "window._showTps=false" in BOOT_JS, (
+        "Boot fallback should keep TPS hidden when settings cannot load"
+    )
+
+
+def test_tps_display_hot_applies_when_preferences_autosave():
+    fn_start = PANELS_JS.find("async function _autosavePreferencesSettings")
+    assert fn_start != -1, "preferences autosave function should exist"
+    fn_end = PANELS_JS.find("function _retryPreferencesAutosave", fn_start)
+    assert fn_end != -1, "retry function should follow preferences autosave"
+    fn = PANELS_JS[fn_start:fn_end]
+    assert "payload&&payload.show_tps!==undefined" in fn, (
+        "TPS preference autosave must detect the show_tps field specifically"
+    )
+    assert "window._showTps=!!(saved&&saved.show_tps)" in fn, (
+        "TPS preference autosave should update the runtime flag from the saved response"
+    )
+    assert "clearMessageRenderCache" in fn and "renderMessages" in fn, (
+        "TPS preference autosave should re-render the open transcript without refresh"
+    )
+
+
+def test_tps_header_rendering_respects_display_setting():
+    assert "function isTpsDisplayEnabled()" in UI_JS, "TPS visibility should be centralized"
+    assert "return window._showTps===true" in UI_JS, "TPS should only render when explicitly enabled"
+    assert "const tps=(isTpsDisplayEnabled()&&tpsText)" in UI_JS, (
+        "settled assistant headers must suppress TPS when the setting is off"
+    )
+    assert "isTpsDisplayEnabled()?_formatTurnTps(value):''" in UI_JS, (
+        "live TPS updates must remove/suppress the chip when the setting is off"
+    )
+    assert "isTpsDisplayEnabled()?_formatTurnTps(m._turnTps):''" in UI_JS, (
+        "reloaded assistant messages must not render persisted TPS while disabled"
     )
