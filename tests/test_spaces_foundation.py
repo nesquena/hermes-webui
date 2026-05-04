@@ -935,6 +935,43 @@ def test_space_tool_adapter_supports_source_resolve_app_url_helper_metadata_only
 
 
 
+def test_space_tool_adapter_supports_source_normalize_id_helpers_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    space_id = spaces.run_space_tool(
+        "space.spaces.normalizeSpaceId",
+        {"value": " Crème Weather_Widget!! ", "renderer": "<script>steal()</script>", "api_key": "***"},
+    )
+    widget_id = spaces.run_space_tool(
+        "space.spaces.normalizeWidgetId",
+        {"widgetId": " Notes Widget #1 ", "source": "SECRET_SOURCE"},
+    )
+    fallback_space = spaces.run_space_tool(
+        "space.spaces.normalizeSpaceId",
+        {"value": "  ", "fallback": "Untitled Space", "token": "***"},
+    )
+    fallback_widget = spaces.run_space_tool(
+        "space.spaces.normalizeWidgetId",
+        {"id": "!!!", "fallback": "Fallback Widget", "html": "<img src=x onerror=steal()>"},
+    )
+    serialized = json.dumps([space_id, widget_id, fallback_space, fallback_widget]).lower()
+
+    assert space_id == {"ok": True, "action": "space.spaces.normalizespaceid", "id": "creme-weather-widget", "normalize": {"mode": "metadata-only"}}
+    assert widget_id["id"] == "notes-widget-1"
+    assert fallback_space["id"] == "untitled-space"
+    assert fallback_widget["id"] == "fallback-widget"
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+    assert '"source":' not in serialized
+
+
+
 def test_space_tool_adapter_supports_source_path_helpers_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 

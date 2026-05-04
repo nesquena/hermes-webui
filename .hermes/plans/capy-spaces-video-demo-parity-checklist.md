@@ -3,11 +3,15 @@
 Video reviewed: https://www.youtube.com/watch?v=F3ZzNgf-R7Y
 Transcript duration: 46:51
 Created: 2026-04-27
-Last implementation-status update: 2026-05-02
+Last implementation-status update: 2026-05-03
 
 ## Current parity implementation notes
 
 Capy Spaces now has implemented foundation slices, so this checklist is no longer purely architectural. Keep status conservative: metadata-only demo smokes and UI affordances are useful progress, but they are not full Space Agent video parity until the acceptance criteria below pass end-to-end on Brendan's Mac Studio.
+
+Recent safe adapter progress:
+
+- Source normalization helper coverage now includes metadata-only `space.spaces.normalizeSpaceId` / `normalizeWidgetId`, matching Space Agent slug behavior for diacritics, underscores, punctuation, and fallback ids without echoing generated or credential-like payload fields.
 
 Recently landed:
 

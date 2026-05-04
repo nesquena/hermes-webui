@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import time
+import unicodedata
 import uuid
 import zipfile
 from pathlib import Path
@@ -137,6 +138,31 @@ def _slugify(value: str) -> str:
     value = re.sub(r"[^a-z0-9_-]+", "-", value)
     value = re.sub(r"-+", "-", value).strip("-_")
     return value[:64] or "space"
+
+
+def _source_slugify_segment(value: Any, fallback: str = "item") -> str:
+    normalized = unicodedata.normalize("NFKD", str(value or "").strip()).lower()
+    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    slug = re.sub(r"[^a-z0-9]+", "-", normalized)
+    slug = re.sub(r"^-+|-+$", "", slug)
+    return slug or fallback
+
+
+def _space_tool_normalize_id_payload(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+    default_fallback = "space" if kind == "space" else "widget"
+    fallback = _source_slugify_segment(payload.get("fallback"), default_fallback)
+    raw_value = (
+        payload.get("value")
+        or payload.get("spaceId")
+        or payload.get("space_id")
+        or payload.get("widgetId")
+        or payload.get("widget_id")
+        or payload.get("id")
+        or payload.get("name")
+        or payload.get("title")
+        or ""
+    )
+    return {"id": _source_slugify_segment(raw_value, fallback), "normalize": {"mode": "metadata-only"}}
 
 
 def validate_space_id(space_id: str) -> str:
@@ -1605,6 +1631,9 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         "space.spaces.buildspacescriptspath",
     }:
         return {"ok": True, "action": name, "path": _space_tool_build_source_path(name, data), "paths": {"mode": "metadata-only"}}
+    if name in {"space.spaces.normalizespaceid", "space.spaces.normalizewidgetid"}:
+        kind = "space" if name.endswith("spaceid") else "widget"
+        return {"ok": True, "action": name, **_space_tool_normalize_id_payload(kind, data)}
     if name == "space.spaces.resolveappurl":
         return {"ok": True, "action": name, "url": _space_tool_resolve_app_url(data), "resolve": {"mode": "metadata-only"}}
     if name == "space.spaces.sizetotoken":
