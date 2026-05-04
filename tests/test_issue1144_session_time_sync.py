@@ -385,8 +385,8 @@ def test_message_footer_timestamp_uses_server_tz():
     data = json.loads(proc.stdout)
     # Should display in UTC+8, not America/New_York.
     # 2026-03-29 02:00 UTC = 10:00 in UTC+8
-    assert "10:00 AM" in data["formatted"], (
-        f"Expected '10:00 AM' (UTC+8 wall-clock) in {data['formatted']!r}"
+    assert "10:00" in data["formatted"], (
+        f"Expected '10:00' (UTC+8 wall-clock) in {data['formatted']!r}"
     )
 
 

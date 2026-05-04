@@ -52,7 +52,7 @@ class TestQuotaDetection:
     def test_js_quota_label_present(self):
         """messages.js renders a 'quota_exhausted' apperror with a distinct label."""
         assert "quota_exhausted" in messages_js_src
-        assert "Out of credits" in messages_js_src
+        assert "chat_out_of_credits" in messages_js_src
 
 
 # ── #739: Error persistence across reload ─────────────────────────────────────

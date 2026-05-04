@@ -192,8 +192,8 @@
   :root.dark[data-skin="neo"] .new-chat-btn{background:var(--accent);border-color:var(--accent);color:#04101A;font-weight:600;}
   :root[data-skin="neo"] .new-chat-btn:hover,
   :root.dark[data-skin="neo"] .new-chat-btn:hover{background:var(--accent-hover);border-color:var(--accent-hover);color:#04101A;}
-  :root.dark[data-skin="neo"] button.send-btn{box-shadow:0 0 12px rgba(0,229,255,0.35);}
-  :root.dark[data-skin="neo"] button.send-btn:hover{box-shadow:0 0 18px rgba(0,229,255,0.55);}
+  :root.dark[data-skin="neo"] button.send-btn {box-shadow:0 0 12px rgba(0,229,255,0.35);}
+  :root.dark[data-skin="neo"] button.send-btn:hover {box-shadow:0 0 18px rgba(0,229,255,0.55);}
   :root.dark[data-skin="neo"] .session-item.active{border-left:2px solid var(--accent);}
 
   /* #594: app-dialog light mode overrides — base styles use hardcoded dark gradients */

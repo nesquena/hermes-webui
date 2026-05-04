@@ -59,13 +59,13 @@ class TestSilentErrorDetection:
         # Check for either the variable name or the inlined check pattern
         has_no_reply_guard = (
             "hasAssistantReply" in MESSAGES_JS
-            or ("role==='assistant'" in MESSAGES_JS and "No response received" in MESSAGES_JS)
+            or ("role==='assistant'" in MESSAGES_JS and "chat_no_response_received" in MESSAGES_JS)
         )
         assert has_no_reply_guard, (
             "messages.js done handler must detect zero assistant replies (#373)"
         )
-        assert "No response received" in MESSAGES_JS, (
-            "messages.js must show 'No response received' inline message (#373)"
+        assert "chat_no_response_received" in MESSAGES_JS, (
+            "messages.js must show no-response label (#373)"
         )
 
     def test_messages_js_handles_no_response_apperror_type(self):
@@ -76,8 +76,8 @@ class TestSilentErrorDetection:
 
     def test_messages_js_no_response_label(self):
         """messages.js must show a distinct label for no_response errors."""
-        assert "No response received" in MESSAGES_JS, (
-            "messages.js must display 'No response received' label for no_response errors (#373)"
+        assert "chat_no_response_received" in MESSAGES_JS, (
+            "messages.js must reference no-response i18n key for no_response errors (#373)"
         )
 
 

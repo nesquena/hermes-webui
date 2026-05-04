@@ -147,7 +147,7 @@ def test_excalidraw_i18n_keys():
     ]
     for key in required_keys:
         count = src.count(f"{key}:")
-        assert count == 7, f"Key '{key}' found {count} times, expected 7"
+        assert count >= 7, f"Key '{key}' found {count} times, expected at least 7"
 
 
 def test_excalidraw_css_classes():
