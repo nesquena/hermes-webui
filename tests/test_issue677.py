@@ -120,7 +120,9 @@ class TestScrollPinningFix:
         """Scroll listener must hide the button when user is near the bottom (#677)."""
         scroll_listener_start = UI_JS.find("el.addEventListener('scroll'")
         assert scroll_listener_start != -1, "scroll event listener not found"
-        listener_block = UI_JS[scroll_listener_start:scroll_listener_start + 300]
+        # After #1360 fix, the nearBottom + btn logic lives inside an rAF
+        # callback — extend search window to cover the full listener block.
+        listener_block = UI_JS[scroll_listener_start:scroll_listener_start + 600]
         assert "scrollToBottomBtn" in listener_block, (
             "Scroll listener must show/hide scrollToBottomBtn based on _scrollPinned (#677)"
         )
