@@ -707,19 +707,28 @@ function renderModelDropdown(){
     }
     // Add remaining models matching filter
     let _lastGroup=null;
+    // Count models per group for heading labels (#1425)
+    const _groupCounts={};
+    for(const m of _modelData){
+      if(configuredIds.has(m.value)) continue;
+      if(m.group) _groupCounts[m.group]=(_groupCounts[m.group]||0)+1;
+    }
     for(const m of _modelData){
       if(configuredIds.has(m.value)||!matches(m)) continue;
       if(m.group&&m.group!==_lastGroup){
         const heading=document.createElement('div');
         heading.className='model-group';
-        heading.textContent=m.group;
+        const count=_groupCounts[m.group]||0;
+        heading.textContent=count>1?`${m.group} (${count})`:m.group;
         dd.appendChild(heading);
         _lastGroup=m.group;
       }
       const row=document.createElement('div');
       row.className='model-opt'+(m.value===sel.value?' active':'');
       const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
-      row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}</div><span class="model-opt-id">${m.id}</span>`;
+      // Inline provider chip on every row that has a group (#1425)
+      const providerChip=m.group?`<span class="model-opt-provider">${esc(m.group)}</span>`:'';
+      row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${m.id}</span>`;
       row.onclick=()=>selectModelFromDropdown(m.value);
       dd.appendChild(row);
     }
