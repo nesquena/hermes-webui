@@ -1665,7 +1665,6 @@ function renderMd(raw){
   s=s.replace(/<i>([\s\S]*?)<\/i>/gi,(_,t)=>'*'+t+'*');
   s=s.replace(/<code>([^<]*?)<\/code>/gi,(_,t)=>'`'+t+'`');
   s=s.replace(/<br\s*\/?>/gi,'\n');
-  s=s.replace(/\x00R(\d+)\x00/g,(_,i)=>rawPreStash[+i]);
   // ── Glued-bold-heading lift (issue #1446) ────────────────────────────────
   // LLMs in thinking/reasoning mode frequently emit a "section header" glued
   // to the end of the previous paragraph with no whitespace, like:
@@ -1797,6 +1796,9 @@ function renderMd(raw){
   s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>)/g,m=>{_a_stash.push(m);return `\x00A${_a_stash.length-1}\x00`;});
   s=s.replace(/\[([^\]]+)\]\((https?:\/\/[^\)]+)\)/g,(_,label,url)=>`<a href="${url.replace(/"/g,'%22')}" target="_blank" rel="noopener">${esc(label)}</a>`);
   s=s.replace(/\x00A(\d+)\x00/g,(_,i)=>_a_stash[+i]);
+  // Restore raw <pre> only after markdown rewrites so literal preformatted
+  // content stays placeholder-protected, then let the sanitizer normalize tags.
+  s=s.replace(/\x00R(\d+)\x00/g,(_,i)=>rawPreStash[+i]);
   // Sanitize any remaining HTML tags.  The renderer intentionally returns
   // HTML and inserts it with innerHTML later, so tag names alone are not enough:
   // raw/model-provided HTML like <img onerror=...> or <a href="javascript:...">
