@@ -2233,6 +2233,26 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
                 "omitted_field_count": omitted_count,
             },
         }
+    if name == "space.spaces.previewwidgetrecord":
+        space_id = validate_space_id(_space_tool_current_id(data))
+        read_space_detail(space_id)
+        widget_payload, omitted_count = _space_tool_render_widget_payload(data)
+        widget_detail = _space_tool_preview_widget_detail(widget_payload)
+        preview_metadata = widget_payload.get("metadata") if isinstance(widget_payload.get("metadata"), dict) else {}
+        if preview_metadata:
+            widget_detail.setdefault("metadata", {})["preview_metadata"] = preview_metadata
+        return {
+            "ok": True,
+            "action": name,
+            "space_id": space_id,
+            "widget": widget_detail,
+            "preview": {
+                "mode": "metadata-only",
+                "stored": False,
+                "executed": False,
+                "omitted_field_count": omitted_count,
+            },
+        }
     if name == "space.spaces.renderwidget":
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_payload, omitted_count = _space_tool_render_widget_payload(data)

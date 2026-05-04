@@ -1416,6 +1416,59 @@ def test_space_tool_adapter_supports_source_create_widget_source_helper_metadata
 
 
 
+def test_space_tool_adapter_supports_source_preview_widget_record_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+    created = spaces.create_space({"space_id": "source-preview-widget-lab", "name": "Source Preview Widget Lab"})
+
+    previewed = spaces.run_space_tool(
+        "space.spaces.previewWidgetRecord",
+        {
+            "spaceId": created["space_id"],
+            "widgetId": "preview-card",
+            "title": "Preview Card",
+            "type": "markdown",
+            "position": {"col": 4, "row": 2},
+            "size": {"cols": 10, "rows": 6},
+            "metadata": {"summary": "safe preview metadata", "api_key": "***"},
+            "renderer": "async () => ({ html: '<script>steal()</script>' })",
+            "html": "<img src=x onerror=steal()>",
+            "script": "steal()",
+            "data": {"token": "***"},
+            "source": "SECRET_SOURCE",
+        },
+    )
+    persisted_widgets = spaces.list_widgets(created["space_id"])
+    serialized = json.dumps({"previewed": previewed, "persisted_widgets": persisted_widgets}).lower()
+
+    assert previewed["ok"] is True
+    assert previewed["action"] == "space.spaces.previewwidgetrecord"
+    assert previewed["space_id"] == created["space_id"]
+    assert previewed["widget"]["id"] == "preview-card"
+    assert previewed["widget"]["kind"] == "markdown"
+    assert previewed["widget"]["title"] == "Preview Card"
+    assert previewed["widget"]["layout"] == {"x": 4, "y": 2, "w": 10, "h": 6, "minimized": False}
+    assert previewed["preview"] == {
+        "mode": "metadata-only",
+        "stored": False,
+        "executed": False,
+        "omitted_field_count": 5,
+    }
+    assert persisted_widgets == []
+    assert "safe preview metadata" in serialized
+    assert "steal" not in serialized
+    assert "<script" not in serialized
+    assert "onerror" not in serialized
+    assert "renderer" not in serialized
+    assert '"html":' not in serialized
+    assert '"script":' not in serialized
+    assert '"data":' not in serialized
+    assert "api_key" not in serialized
+    assert "token" not in serialized
+    assert "secret" not in serialized
+    assert '"source":' not in serialized
+
+
+
 def test_space_tool_adapter_supports_source_resolve_app_url_helper_metadata_only(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
