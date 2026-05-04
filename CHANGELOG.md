@@ -1,5 +1,11 @@
 # Hermes Web UI -- Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Project-filter-aware session creation** (#1468) — when creating a new conversation, `/api/session/new` now receives `project_id` derived from the current sidebar project filter (`_activeProject`) so filtered project views create conversations in that same project by default. The all-projects state (`_activeProject === null`) and unassigned view (`NO_PROJECT_FILTER`) now pass `null`, preventing accidental project assignment. Archived-only visibility does not override an active project filter.
+
 ## [v0.50.292] — 2026-05-04
 
 ### Fixed (12 PRs — multi-tab SSE + subpath routes + cross-source lineage + paste UX + 3 follow-ups)

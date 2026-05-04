@@ -287,13 +287,14 @@ async function newSession(flash){
   const newModelState=(canQualify&&typeof _modelStateForSelect==='function')
     ? _modelStateForSelect(modelSel,selectedDefaultModel)
     : {model:selectedDefaultModel,model_provider:null};
+  const activeProjectId=_activeProject===NO_PROJECT_FILTER ? null : _activeProject;
   const reqBody={
     model:newModelState.model,
     model_provider:newModelState.model_provider||null,
     workspace:inheritWs,
     profile:S.activeProfile||'default',
+    project_id:activeProjectId||null,
   };
-  if(_activeProject&&_activeProject!==NO_PROJECT_FILTER) reqBody.project_id=_activeProject;
   const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
   S.session=data.session;S.messages=data.session.messages||[];
   S.lastUsage={...(data.session.last_usage||{})};
