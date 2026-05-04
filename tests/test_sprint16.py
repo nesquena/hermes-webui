@@ -69,9 +69,9 @@ def render_md(raw):
     s = re.sub(r"<i>([\s\S]*?)</i>",            lambda m: "*"  + m.group(1) + "*",  s, flags=re.I)
     s = re.sub(r"<code>([^<]*?)</code>",         lambda m: "`"  + m.group(1) + "`",  s, flags=re.I)
     s = re.sub(r"<br\s*/?>", "\n", s, flags=re.I)
-    # Glued-bold-heading lift (issue #1446) — must mirror static/ui.js position:
-    # after raw <pre> restore, before fence_stash restore. Lifts a sentence-glued
-    # bold "stub heading" out into its own paragraph when followed by a blank line.
+    # Glued-bold-heading lift (issue #1446) — must mirror static/ui.js behavior:
+    # protected code/pre placeholders stay hidden while a sentence-glued bold
+    # "stub heading" is lifted into its own paragraph when followed by a blank line.
     s = re.sub(r"([.!?])\*\*([^*\n]{1,80})\*\*\n\n", r"\1\n\n**\2**\n\n", s)
     s = re.sub(r"\x00F(\d+)\x00", lambda m: fence_stash[int(m.group(1))], s)
 
