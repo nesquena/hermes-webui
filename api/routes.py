@@ -22,7 +22,11 @@ import re
 from pathlib import Path
 from contextlib import closing
 from urllib.parse import parse_qs
-from api.agent_sessions import MESSAGING_SOURCES
+from api.agent_sessions import (
+    MESSAGING_SOURCES,
+    is_cli_session_row,
+    is_cli_session_row_visible,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1118,6 +1122,44 @@ def _session_sort_timestamp(session: dict) -> float:
     ) or 0.0
 
 
+def _is_cli_session_for_settings(session: dict) -> bool:
+    """Return True for importable CLI sessions that are safe to classify for settings."""
+    if not isinstance(session, dict):
+        return False
+    if is_cli_session_row(session):
+        return True
+
+    # Fallback for legacy local copies that had weak/empty metadata:
+    # keep this conservative so messaging sessions do not collapse incorrectly.
+    if not session.get("is_cli_session"):
+        return False
+    source = str(session.get("source") or "").strip().lower()
+    if source in MESSAGING_SOURCES:
+        return False
+    title = str(session.get("title") or "").strip().lower()
+    return title in ("", "untitled", "cli", "cli session") or title.endswith(" session") and (
+        not source or source == "cli"
+    )
+
+
+CLI_VISIBLE_SESSION_CAP = 20
+
+
+def _cap_recent_cli_sessions(sessions: list[dict], cli_cap: int = CLI_VISIBLE_SESSION_CAP) -> list[dict]:
+    """Keep only the most recent CLI-visible sessions after filtering."""
+    if cli_cap <= 0:
+        return sessions
+    kept = []
+    cli_seen = 0
+    for session in sessions:
+        if _is_cli_session_for_settings(session):
+            cli_seen += 1
+            if cli_seen > cli_cap:
+                continue
+        kept.append(session)
+    return kept
+
+
 def _merge_cli_sidebar_metadata(ui_session: dict, cli_meta: dict) -> dict:
     """Merge source-of-truth CLI metadata into a sidebar session row.
 
@@ -2166,7 +2208,8 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/sessions":
         webui_sessions = all_sessions()
         settings = load_settings()
-        if settings.get("show_cli_sessions"):
+        show_cli_sessions = bool(settings.get("show_cli_sessions"))
+        if show_cli_sessions:
             cli = get_cli_sessions()
             cli_by_id = {s["session_id"]: s for s in cli}
             for s in webui_sessions:
@@ -2181,12 +2224,14 @@ def handle_get(handler, parsed) -> bool:
                     for key in ("source_tag", "raw_source", "session_source", "source_label"):
                         if not s.get(key) and meta.get(key):
                             s[key] = meta[key]
+            # Apply the same CLI visibility semantics to imported local copies so
+            # low-value imported artifacts do not leak into the sidebar.
+            webui_sessions = [s for s in webui_sessions if is_cli_session_row_visible(s)]
             webui_ids = {s["session_id"] for s in webui_sessions}
             from api.models import _hide_from_default_sidebar as _cron_hide
-            deduped_cli = [s for s in cli
-                           if s["session_id"] not in webui_ids
-                           and not _cron_hide(s)]
+            deduped_cli = [s for s in cli if s["session_id"] not in webui_ids and is_cli_session_row_visible(s) and not _cron_hide(s)]
         else:
+            webui_sessions = [s for s in webui_sessions if not _is_cli_session_for_settings(s)]
             deduped_cli = []
         merged = webui_sessions + deduped_cli
         merged.sort(
@@ -2218,6 +2263,8 @@ def handle_get(handler, parsed) -> bool:
                       if _profiles_match(s.get("profile"), active_profile)]
             other_profile_count = len(merged) - len(scoped)
         scoped = _keep_latest_messaging_session_per_source(scoped)
+        if show_cli_sessions:
+            scoped = _cap_recent_cli_sessions(scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
         safe_merged = []
         for s in scoped:
             item = dict(s)

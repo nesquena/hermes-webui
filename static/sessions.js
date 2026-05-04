@@ -576,6 +576,24 @@ function _isMessagingSession(session) {
   return _MESSAGING_RAW_SOURCES.has(raw);
 }
 
+function _isCliSession(session) {
+  if (!session) return false;
+  // session_source is set by upstream normalization for CLI sessions as 'cli'
+  if (session.session_source === 'cli') return true;
+  // Legacy payloads often use raw/source tags to convey the source.
+  const raw = (
+    session.raw_source
+    || session.source_tag
+    || session.source
+    || session.source_label
+    || ''
+  ).toLowerCase();
+  if (raw === 'cli') return true;
+  // If messaging-like, don't classify as legacy CLI even when is_cli_session is true.
+  if (_isMessagingSession(session)) return false;
+  return session.is_cli_session === true;
+}
+
 function _normalizeMessageForCliImportComparison(message) {
   if (!message || typeof message !== 'object') return message;
   const clone = { ...message };
@@ -1262,6 +1280,8 @@ function _openSessionActionMenu(session, anchorEl){
   }
   closeSessionActionMenu();
   const isMessagingSession = _isMessagingSession(session);
+  const isCliSession = _isCliSession(session);
+  const isExternalSession = isMessagingSession || isCliSession;
   const menu=document.createElement('div');
   menu.className='session-action-menu open';
   menu.appendChild(_buildSessionAction(
@@ -1304,7 +1324,7 @@ function _openSessionActionMenu(session, anchorEl){
       }catch(err){showToast(t('session_archive_failed')+err.message);}
     }
   ));
-  if(!isMessagingSession){
+  if(!isExternalSession){
     _appendSessionDuplicateAction(menu, session);
   }
   if(session.active_stream_id){
@@ -1319,7 +1339,7 @@ function _openSessionActionMenu(session, anchorEl){
       }
     ));
   }
-  if(!isMessagingSession){
+  if(!isExternalSession){
     menu.appendChild(_buildSessionAction(
       t('session_delete'),
       t('session_delete_desc'),

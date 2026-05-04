@@ -1,5 +1,11 @@
 # Hermes Web UI -- Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Show Agent Sessions: keep CLI imports meaningful and conservative** — source-normalized CLI sessions are now filtered before sidebar display so empty/default one-off CLI rows no longer flood the session list, while titled sessions and compression-lineage sessions remain visible. CLI-origin session menus now use the same conservative external-session action set as messaging imports: pin, move, and archive remain available, while duplicate/delete are hidden to avoid implying WebUI owns the original Hermes Agent CLI history. This is the CLI-focused follow-up slice for #1013 after the messaging-channel handoff work.
+
 ## [v0.50.297] — 2026-05-04
 
 ### Fixed (3 PRs — closes #1658; refs #1458, #1652)
@@ -48,7 +54,6 @@
 ### Note on closed-as-superseded
 
 PR #1656 (also @Michaelyklam) was closed as superseded by #1657. Both target #1458 Bug #3, both add accept-loop heartbeat + `/health?deep=1` + 503-on-degraded. #1657 adds beyond #1656: state.db connectivity check, projects state check, FD soft-limit raise, and `docs/supervisor.md` watchdog recipe. Same author iterated; the second PR was the keeper.
-
 ## [v0.50.296] — 2026-05-04
 
 ### Fixed (3 PRs — closes #1406, #1617; refs #1362)
@@ -313,7 +318,6 @@ Two stale source-string assertions were broken by #1591's compact() and messages
 - **PR rebase verified** (REBASE-DEFAULT rule): #1586/#1590/#1591/#1592 all on current master (bf7bc6b4 = v0.50.289), zero commits behind. #1464 was 124 commits behind (forked at v0.50.275); rebased cleanly onto master.
 - **Auto-fix on #1464:** ternary inversion + regression test, with `Co-authored-by: Josh Jameson` preserved.
 - **Auto-fix on stage:** widened source-string anchors in two pre-existing brittle tests broken by #1591's structural changes.
-
 
 ## [v0.50.289] — 2026-05-03
 
