@@ -185,8 +185,9 @@ _PROVIDER_CATEGORIES = [
 ]
 
 _UNSUPPORTED_PROVIDER_NOTE = (
-    "OAuth and advanced provider flows such as Nous Portal, OpenAI Codex, and GitHub "
-    "Copilot are still terminal-first. Use `hermes model` for those flows."
+    "Advanced provider flows such as Nous Portal and GitHub Copilot are still "
+    "terminal-first. OpenAI Codex can be authenticated in this onboarding flow "
+    "when your Hermes config selects the openai-codex provider."
 )
 
 
