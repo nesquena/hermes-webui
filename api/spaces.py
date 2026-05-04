@@ -3216,6 +3216,11 @@ def _weather_demo_widget() -> dict[str, Any]:
             "status": "ready-for-agent-refresh",
         },
         "permissions": {"network": "agent-mediated"},
+        "event_bridge": {"event_name": "widget.refresh", "status": "ready-for-user-confirmation"},
+        "prompt": {
+            "placeholder": "Ask Capy to refresh or explain the Prague weather widget",
+            "suggested_event": "widget.refresh",
+        },
     }
 
 
