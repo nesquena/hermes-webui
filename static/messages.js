@@ -903,6 +903,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             if(typeof d.usage.duration_seconds==='number'){
               lastAsst._turnDuration=d.usage.duration_seconds;
             }
+            if(typeof d.usage.tps==='number'&&d.usage.tps>0){
+              lastAsst._turnTps=d.usage.tps;
+            }
           }
         }
         if(d.session.tool_calls&&d.session.tool_calls.length){
@@ -984,16 +987,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     });
 
     source.addEventListener('metering',e=>{
-      // TPS + HIGH/LOW stats for the header chip — emitted at 1 Hz during a stream,
-      // silenced entirely when no sessions are active (ticker exits when idle).
       try{
         const d=JSON.parse(e.data||'{}');
-        const el=$('tpsStat');
-        if(!el) return;
-        const tps=typeof d.tps==='number'?d.tps.toFixed(1):'0.0';
-        const high=typeof d.high==='number' && d.high>=0?d.high.toFixed(1)+' high':'—';
-        const low=typeof d.low==='number' && d.low>=0?d.low.toFixed(1)+' low':'';
-        el.textContent=`${tps} t/s · ${high}${low?' · '+low:''}`;
+        if((d.session_id||activeSid)!==activeSid) return;
+        if(d.estimated===true||d.tps_available!==true||typeof d.tps!=='number'||d.tps<=0){
+          if(typeof _setLiveAssistantTps==='function') _setLiveAssistantTps(null);
+          return;
+        }
+        if(typeof _setLiveAssistantTps==='function') _setLiveAssistantTps(d.tps);
       }catch(_){}
     });
 

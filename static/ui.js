@@ -3155,15 +3155,40 @@ function _messageHasReasoningPayload(m){
   if(Array.isArray(m.content)) return m.content.some(p=>p&&(p.type==='thinking'||p.type==='reasoning'));
   return /<think>[\s\S]*?<\/think>|<\|channel>thought\n[\s\S]*?<channel\|>|<\|turn\|>thinking\n[\s\S]*?<turn\|>/.test(String(m.content||''));
 }
-function _assistantRoleHtml(tsTitle=''){
-  const _bn=window._botName||'Hermes';
-  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant">${esc(_bn.charAt(0).toUpperCase())}</div><span style="font-size:12px">${esc(_bn)}</span></div>`;
+function _formatTurnTps(value){
+  const n=Number(value);
+  if(!Number.isFinite(n)||n<=0) return '';
+  const fixed=n>=100?Math.round(n).toLocaleString():n>=10?n.toFixed(1):n.toFixed(1);
+  return `${fixed} t/s`;
 }
-function _createAssistantTurn(tsTitle=''){
+function _assistantRoleHtml(tsTitle='', tpsText=''){
+  const _bn=window._botName||'Hermes';
+  const tps=tpsText?`<span class="msg-tps-inline" title="Tokens per second">${esc(tpsText)}</span>`:'';
+  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant">${esc(_bn.charAt(0).toUpperCase())}</div><span style="font-size:12px">${esc(_bn)}</span>${tps}</div>`;
+}
+function _setAssistantTurnTps(turn, tpsText=''){
+  if(!turn) return;
+  const role=turn.querySelector('.msg-role.assistant');
+  if(!role) return;
+  let chip=role.querySelector('.msg-tps-inline');
+  const text=String(tpsText||'').trim();
+  if(!text){if(chip) chip.remove();return;}
+  if(!chip){
+    chip=document.createElement('span');
+    chip.className='msg-tps-inline';
+    chip.title='Tokens per second';
+    role.appendChild(chip);
+  }
+  chip.textContent=text;
+}
+function _setLiveAssistantTps(value){
+  _setAssistantTurnTps($('liveAssistantTurn'), _formatTurnTps(value));
+}
+function _createAssistantTurn(tsTitle='', tpsText=''){
   const row=document.createElement('div');
   row.className='msg-row assistant-turn';
   row.dataset.role='assistant';
-  row.innerHTML=`${_assistantRoleHtml(tsTitle)}<div class="assistant-turn-blocks"></div>`;
+  row.innerHTML=`${_assistantRoleHtml(tsTitle, tpsText)}<div class="assistant-turn-blocks"></div>`;
   return row;
 }
 function _assistantTurnBlocks(turn){
@@ -3813,7 +3838,7 @@ function renderMessages(){
     }
 
     if(!currentAssistantTurn){
-      currentAssistantTurn=_createAssistantTurn(tsTitle);
+      currentAssistantTurn=_createAssistantTurn(tsTitle, _formatTurnTps(m._turnTps));
       inner.appendChild(currentAssistantTurn);
     }
     const seg=document.createElement('div');
