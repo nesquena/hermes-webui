@@ -60,6 +60,7 @@ _TRUSTED_SYSTEM_WIDGETS = {
     "memory": {"id": "system-memory", "title": "Memory"},
     "settings": {"id": "system-settings", "title": "Settings"},
 }
+_SOURCE_WIDGET_DEFAULT_POSITION = {"col": 0, "row": 0}
 _SOURCE_WIDGET_DEFAULT_SIZE = {"cols": 6, "rows": 3}
 _SOURCE_WIDGET_SIZE_PRESETS = {
     "small": {"cols": 4, "rows": 2},
@@ -68,6 +69,8 @@ _SOURCE_WIDGET_SIZE_PRESETS = {
     "tall": {"cols": 4, "rows": 5},
     "full": {"cols": 12, "rows": 4},
 }
+_SOURCE_GRID_COORD_MIN = -4096
+_SOURCE_GRID_COORD_MAX = 4096
 _SOURCE_SPACES_ROOT_PATH = "~/spaces/"
 _SOURCE_SPACE_MANIFEST_FILE = "space.yaml"
 _SOURCE_SPACE_WIDGETS_DIR = "widgets/"
@@ -321,6 +324,51 @@ def _normalize_source_widget_size(size: Any, fallback: dict[str, int] | None = N
             "rows": _clamped_int(size.get("rows", size.get("height", size.get("h"))), fallback_size["rows"], 1, 24),
         }
     return fallback_size
+
+
+def _coerce_source_widget_position(position: Any, fallback: dict[str, int]) -> dict[str, int]:
+    if isinstance(position, str):
+        match = re.match(r"^(-?\d+)\s*,\s*(-?\d+)$", position.strip())
+        if match:
+            return _coerce_source_widget_position({"col": match.group(1), "row": match.group(2)}, fallback)
+        return dict(fallback)
+    if isinstance(position, (list, tuple)) and len(position) >= 2:
+        return _coerce_source_widget_position({"col": position[0], "row": position[1]}, fallback)
+    if isinstance(position, dict):
+        return {
+            "col": _clamped_int(
+                position.get("col", position.get("x")),
+                fallback["col"],
+                _SOURCE_GRID_COORD_MIN,
+                _SOURCE_GRID_COORD_MAX,
+            ),
+            "row": _clamped_int(
+                position.get("row", position.get("y")),
+                fallback["row"],
+                _SOURCE_GRID_COORD_MIN,
+                _SOURCE_GRID_COORD_MAX,
+            ),
+        }
+    return dict(fallback)
+
+
+def _normalize_source_widget_position(position: Any, fallback: Any = None) -> dict[str, int]:
+    """Normalize Space Agent-style widget position input for metadata-only helpers."""
+    fallback_position = _coerce_source_widget_position(fallback, _SOURCE_WIDGET_DEFAULT_POSITION)
+    return _coerce_source_widget_position(position, fallback_position)
+
+
+def _space_tool_position_to_token(payload: dict[str, Any]) -> dict[str, Any]:
+    position = _normalize_source_widget_position(payload.get("position", payload.get("value")), payload.get("fallback"))
+    return {"token": f"{position['col']},{position['row']}", "position": position}
+
+
+def _space_tool_get_rendered_widget_size(payload: dict[str, Any]) -> dict[str, Any]:
+    fallback = _normalize_source_widget_size(payload.get("fallback"), _SOURCE_WIDGET_DEFAULT_SIZE)
+    size = _normalize_source_widget_size(payload.get("size"), fallback)
+    if _truthy_bool(payload.get("minimized")):
+        size["rows"] = 1
+    return {"token": f"{size['cols']}x{size['rows']}", "size": size}
 
 
 def _space_tool_size_to_token(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1698,6 +1746,10 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         return {"ok": True, "action": name, **_space_tool_size_to_token(data), "mode": "metadata-only"}
     if name == "space.spaces.parsewidgetsizetoken":
         return {"ok": True, "action": name, **_space_tool_parse_widget_size_token(data), "mode": "metadata-only"}
+    if name in {"space.spaces.normalizewidgetposition", "space.spaces.positiontotoken"}:
+        return {"ok": True, "action": name, **_space_tool_position_to_token(data), "mode": "metadata-only"}
+    if name == "space.spaces.getrenderedwidgetsize":
+        return {"ok": True, "action": name, **_space_tool_get_rendered_widget_size(data), "mode": "metadata-only"}
     if name in {"space.spaces.repositioncurrentspace", "space.current.reposition", "space.current.reposition_viewport"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         request = {
