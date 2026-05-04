@@ -126,11 +126,18 @@
     if (queuedEventCount) extraParts.push('Queued events: '+queuedEventCount);
     if (rollbackCheck && rollbackCheck.verified === true) extraParts.push('Rollback verified: yes');
     const extraLine = extraParts.length ? '<div class="capy-spaces-muted">'+extraParts.join(' · ')+'</div>' : '';
+    const weatherObservation = data && data.weather_observation && typeof data.weather_observation === 'object' && !Array.isArray(data.weather_observation)
+      ? data.weather_observation
+      : {};
+    const weatherWidget = weatherObservation.widget && typeof weatherObservation.widget === 'object' && !Array.isArray(weatherObservation.widget)
+      ? weatherObservation.widget
+      : {};
+    const weatherPreview = renderWeatherObservation(weatherWidget.metadata || {});
     return '<div class="capy-spaces-card" role="status"><h3>Demo parity smoke passed</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(demo)+' · '+escapeHtml(data && data.mode || 'metadata-only-smoke')+'</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(spaceName)+'</strong>' +
       '<div class="capy-spaces-muted">Space ID: '+escapeHtml(space.space_id || '')+' · Widgets: '+widgetCount+' · Persisted widgets: '+persistedWidgetCount+' · Persistence: '+escapeHtml(persistence)+' · Revisions: '+revisionCount+' · Rollback point: '+escapeHtml(rollbackPoint)+'</div>' +
-      extraLine + '</div></div></div></div>';
+      extraLine + '</div></div></div>'+weatherPreview+'</div>';
   }
 
   function renderDemoSmokeSuiteResult(data){

@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-04 10:30 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-04 16:06 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: source SDK `space.api.health` adapter coverage now returns a Capy Spaces metadata-only service health payload for Space Agent-style tooling without echoing generated/source/API auth request fields. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the Weather Demo smoke result now surfaces the safe current-weather observation directly in the visible demo-passed card, keeping generated/source/API auth markers out of the DOM. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): show weather smoke observation result`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving `demo_weather_widget` smoke results display Prague observation metadata (`18 °C`, condition, status, summary) directly in the demo-passed card while hostile `renderer`/`<script>`/API-auth markers from the mocked response stay absent from rendered DOM.
+  - Validation at completion before commit: focused RED failed because `Current weather observation` was absent from the smoke result; focused GREEN passed (`1 passed`), Spaces UI JS behavior + demo parity suites passed (`79 passed`), `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, and `git diff --check` passed.
 
 - `feat(spaces): expose source API health helper`
   - Added RED/GREEN backend coverage proving `space.api.health` returns safe Capy Spaces service metadata (`name`, browser panel URL, metadata-only mode, schema version, enabled state, Space count, and high-level responsibilities) while omitting request-supplied generated/source/API auth markers.

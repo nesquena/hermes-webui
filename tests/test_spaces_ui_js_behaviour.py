@@ -105,6 +105,7 @@ global.fetch = async function(path, opts = {}) {
       mode: 'metadata-only-smoke',
       space: { space_id: body.demo === 'demo_research_harness_pdf_export' ? 'demo-research-harness-pdf-export' : 'demo-weather-widget', name: body.demo === 'demo_research_harness_pdf_export' ? 'Research Harness' : 'Weather Demo Smoke', widget_count: body.demo === 'demo_research_harness_pdf_export' ? 5 : 1, revision_event_id: 'rev-demo', renderer: '<script>bad()</script>', api_key: 'SECRET' },
       widgets: body.demo === 'demo_research_harness_pdf_export' ? [{ id: 'research-summary', kind: 'markdown', title: 'Summary report', renderer: '<script>bad()</script>', api_key: 'SECRET' }] : [{ id: 'weather-current', kind: 'weather', title: 'Weather in Prague', renderer: '<script>bad()</script>', api_key: 'SECRET' }],
+      weather_observation: body.demo === 'demo_weather_widget' ? { widget: { id: 'weather-current', kind: 'weather', title: 'Weather in Prague', metadata: { weather: { location: 'Prague', country: 'CZ', status: 'observation-ready', current: { condition: 'partly cloudy', temperature_c: '18', feels_like_c: '17' }, summary: 'Partly cloudy in Prague; refreshed through agent-mediated weather metadata.', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } }, renderer: '<script>bad()</script>', api_key: 'SECRET' } } : undefined,
       widget_count: body.demo === 'demo_research_harness_pdf_export' ? 5 : 1,
       persisted_widget_count: body.demo === 'demo_research_harness_pdf_export' ? 5 : 1,
       persistence_checked: true,
@@ -1588,6 +1589,12 @@ def test_spaces_ui_runs_demo_parity_smoke_from_safe_catalog(driver_path):
     assert "Widgets: 1" in out["rootHtml"]
     assert "Persistence: checked" in out["rootHtml"]
     assert "Rollback point: yes" in out["rootHtml"]
+    assert "Current weather observation" in out["rootHtml"]
+    assert "Prague, CZ" in out["rootHtml"]
+    assert "18 °C" in out["rootHtml"]
+    assert "partly cloudy" in out["rootHtml"]
+    assert "Observation status: observation-ready" in out["rootHtml"]
+    assert "Partly cloudy in Prague; refreshed through agent-mediated weather metadata." in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()
