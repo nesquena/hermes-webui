@@ -232,7 +232,24 @@ global.fetch = async function(path, opts = {}) {
   }
   if (path === 'api/spaces/widgets?space_id=lab') {
     const minimized = scenario === 'restoreWidget';
-    return response({ widgets: [{ id: 'weather', kind: 'markdown', title: '<Weather>', layout: { x: 12, y: 3, w: 5, h: 4, minimized: minimized }, renderer: '<script>bad()</script>' }] });
+    return response({ widgets: [{
+      id: 'weather',
+      kind: 'weather',
+      title: '<Weather>',
+      layout: { x: 12, y: 3, w: 5, h: 4, minimized: minimized },
+      metadata: {
+        weather: {
+          location: 'Prague',
+          country: 'CZ',
+          status: 'observation-ready',
+          current: { condition: 'partly cloudy', temperature_c: '18', feels_like_c: '17' },
+          summary: 'Partly cloudy in Prague; refreshed through agent-mediated weather metadata.',
+          renderer: '<script>bad()</script>',
+          api_key: 'SECRET_VALUE_DO_NOT_LEAK',
+        },
+      },
+      renderer: '<script>bad()</script>',
+    }] });
   }
   if (path === 'api/spaces/widget/events?space_id=lab') {
     return response({ events: [
@@ -1007,10 +1024,26 @@ def test_spaces_ui_lists_widgets_without_rendering_widget_code(driver_path):
 
     assert "Weather" in out["rootHtml"]
     assert "&lt;Weather&gt;" in out["rootHtml"]
-    assert "x12 y3 · 5×4" in out["rootHtml"]
+    assert "weather · weather · x12 y3 · 5×4" in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert {"path": "api/spaces/widgets?space_id=lab", "method": "GET", "body": ""} in out["calls"]
+
+
+def test_spaces_ui_widget_manager_shows_weather_observation_preview(driver_path):
+    out = _run_spaces_scenario(driver_path, "list")
+
+    assert "Current weather observation" in out["rootHtml"]
+    assert "Prague, CZ" in out["rootHtml"]
+    assert "18 °C" in out["rootHtml"]
+    assert "Feels like 17 °C" in out["rootHtml"]
+    assert "partly cloudy" in out["rootHtml"]
+    assert "Observation status: observation-ready" in out["rootHtml"]
+    assert "Partly cloudy in Prague; refreshed through agent-mediated weather metadata." in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
 
 
 def test_spaces_ui_widget_manager_shows_safe_queued_event_inbox(driver_path):

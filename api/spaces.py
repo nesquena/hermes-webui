@@ -2927,7 +2927,12 @@ def list_widgets(space_id: str) -> list[dict[str, Any]]:
     summaries: list[dict[str, Any]] = []
     for widget in widgets:
         if isinstance(widget, dict):
-            summaries.append(_widget_summary(widget))
+            summary = _widget_summary(widget)
+            if isinstance(widget.get("weather"), dict) and isinstance(widget["weather"].get("current"), dict):
+                weather = _payload_summary(widget.get("weather"))
+                if weather not in ({}, [], ""):
+                    summary["metadata"] = {"weather": weather}
+            summaries.append(summary)
     return summaries
 
 

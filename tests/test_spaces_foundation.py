@@ -3925,6 +3925,32 @@ def test_weather_template_install_route_returns_safe_metadata(monkeypatch, tmp_p
     assert "secret" not in serialized
 
 
+def test_weather_demo_widget_list_exposes_safe_observation_preview(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    result = spaces.space_demo_run("demo_weather_widget")
+    widgets = spaces.list_widgets(result["space"]["space_id"])
+
+    assert widgets[0]["metadata"]["weather"] == {
+        "location": "Prague",
+        "country": "CZ",
+        "units": "metric",
+        "status": "observation-ready",
+        "current": {
+            "condition": "partly cloudy",
+            "temperature_c": "18",
+            "feels_like_c": "17",
+        },
+        "summary": "Partly cloudy in Prague; refreshed through agent-mediated weather metadata.",
+    }
+    serialized = json.dumps(widgets).lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
 def test_install_research_template_creates_safe_harness_widgets(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 
