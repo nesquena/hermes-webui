@@ -361,3 +361,16 @@ Community-requested enhancements tracked from GitHub issues. All shipped.
 | Multi-profile support | #28 | Done | Sprint 22 |
 | Mobile responsive UI | #21 | Done | Sprint 21 |
 | Profile creation in Docker | #44 | Done | v0.27 |
+
+---
+
+## MCP Integration
+
+Agent-controlled session management via MCP (Model Context Protocol).
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| MCP server (`mcp_server.py`) | ✅ Done | 6 tools: list/create/rename/delete projects, move/list sessions |
+| Filesystem-based (no auth needed) | ✅ Done | Reads/writes same JSON state as webapp |
+| Optional `mcp` dependency | ✅ Done | Commented in requirements.txt |
+| Session summaries for project routing | 🔮 Planned | Phase 2 — use compaction model for auto-summaries |

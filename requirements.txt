@@ -2,3 +2,4 @@
 # The server uses only stdlib + pyyaml.
 # All heavy ML/agent deps live in the Hermes agent venv.
 pyyaml>=6.0
+# mcp>=1.0  # optional: only needed for mcp_server.py (MCP tools for external agents)

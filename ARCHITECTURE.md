@@ -48,6 +48,8 @@ actions. The topbar remains focused on conversation context and the workspace/fi
     bootstrap.py           One-shot launcher: optional agent install, deps, health wait, browser open.
     start.sh               Thin wrapper around bootstrap.py for shell-based startup.
     Dockerfile             python:3.12-slim container image (~23 lines)
+    mcp_server.py          MCP server exposing project/session management (~150 lines)
+                           Stdio transport, filesystem-based. Optional dependency (mcp).
     docker-compose.yml     Compose config with named volume and optional auth (~22 lines)
     .dockerignore          Excludes .git, tests/, .env* from Docker builds
     api/
