@@ -2729,24 +2729,25 @@ let _settingsPreferencesAutosaveTimer = null;
 let _settingsPreferencesAutosaveRetryPayload = null;
 
 function switchSettingsSection(name){
-  const section=(name==='appearance'||name==='preferences'||name==='providers'||name==='system')?name:'conversation';
+  const section=(name==='appearance'||name==='preferences'||name==='providers'||name==='plugins'||name==='system')?name:'conversation';
   _settingsSection=section;
   _currentSettingsSection=section;
-  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',system:'System'};
+  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',plugins:'Plugins',system:'System'};
   // Sidebar menu items
   document.querySelectorAll('#settingsMenu .side-menu-item').forEach(it=>{
     it.classList.toggle('active', it.dataset.settingsSection===section);
   });
   // Panes in main
-  ['conversation','appearance','preferences','providers','system'].forEach(key=>{
+  ['conversation','appearance','preferences','providers','plugins','system'].forEach(key=>{
     const pane=$('settingsPane'+map[key]);
     if(pane) pane.classList.toggle('active', key===section);
   });
   // Sync mobile dropdown
   const dd=$('settingsSectionDropdown');
   if(dd && dd.value!==section) dd.value=section;
-  // Lazy-load providers when the tab is opened
+  // Lazy-load integration panels when their tabs are opened
   if(section==='providers') loadProvidersPanel();
+  if(section==='plugins') loadPluginsPanel();
 }
 
 function _syncHermesPanelSessionActions(){
@@ -3263,10 +3264,65 @@ async function loadSettingsPanel(){
     }
     _syncHermesPanelSessionActions();
     loadProvidersPanel(); // load provider cards in background
+    loadPluginsPanel(); // load plugin/hook visibility in background
     switchSettingsSection(_settingsSection);
   }catch(e){
     showToast(t('settings_load_failed')+e.message);
   }
+}
+
+
+// ── Plugins panel (read-only plugin/hook visibility) ───────────────────────
+
+async function loadPluginsPanel(){
+  const list=$('pluginsList');
+  const empty=$('pluginsEmpty');
+  if(!list) return;
+  try{
+    const data=await api('/api/plugins');
+    const plugins=Array.isArray((data||{}).plugins)?data.plugins:[];
+    list.innerHTML='';
+    if(plugins.length===0){
+      list.style.display='none';
+      if(empty) empty.style.display='';
+      return;
+    }
+    if(empty) empty.style.display='none';
+    list.style.display='';
+    for(const plugin of plugins){
+      list.appendChild(_buildPluginCard(plugin));
+    }
+  }catch(e){
+    list.innerHTML='<div style="color:var(--error);padding:12px;font-size:13px">Failed to load plugins: '+esc(e.message||String(e))+'</div>';
+  }
+}
+
+function _buildPluginCard(plugin){
+  const card=document.createElement('div');
+  card.className='provider-card plugin-card';
+  card.dataset.plugin=(plugin&&plugin.key)||'';
+  const hooks=Array.isArray(plugin&&plugin.hooks)?plugin.hooks:[];
+  const hookHtml=hooks.length
+    ? hooks.map(h=>`<span class="plugin-hook-badge">${esc(h)}</span>`).join('')
+    : '<span class="plugin-hook-empty">No registered lifecycle hooks</span>';
+  const version=(plugin&&plugin.version)?` · v${esc(plugin.version)}`:'';
+  const desc=(plugin&&plugin.description)?esc(plugin.description):'No description provided.';
+  const enabled=plugin&&plugin.enabled!==false;
+  card.innerHTML=`
+    <div class="provider-card-header plugin-card-header">
+      <div class="provider-card-info">
+        <div class="provider-card-name">${esc((plugin&&plugin.name)||'Unnamed plugin')}</div>
+        <div class="provider-card-meta">${esc((plugin&&plugin.key)||'plugin')}${version}</div>
+      </div>
+      <span class="provider-card-badge ${enabled?'':'plugin-card-badge-disabled'}">${enabled?'Enabled':'Disabled'}</span>
+    </div>
+    <div class="provider-card-body plugin-card-body">
+      <div class="provider-card-hint">${desc}</div>
+      <div class="provider-card-label">Registered hooks</div>
+      <div class="plugin-hook-list">${hookHtml}</div>
+    </div>
+  `;
+  return card;
 }
 
 // ── Providers panel ───────────────────────────────────────────────────────

@@ -2405,6 +2405,17 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
   background:color-mix(in srgb, var(--error) 10%, transparent);
 }
 
+
+/* ── Plugin visibility cards ── */
+#pluginsList{gap:12px;}
+.plugin-card .provider-card-body{display:block;}
+.plugin-card-header{cursor:default;}
+.plugin-card-header:hover{background:transparent;}
+.plugin-card-badge-disabled{background:var(--surface);color:var(--muted);}
+.plugin-hook-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;}
+.plugin-hook-badge{display:inline-flex;align-items:center;border:1px solid var(--border2);background:var(--code-bg);color:var(--text);border-radius:999px;padding:3px 8px;font-size:11px;font-family:var(--font-mono);}
+.plugin-hook-empty{font-size:12px;color:var(--muted);font-style:italic;}
+
 /* ── Provider model tags ── */
 .provider-card-models{
   margin-bottom:10px;

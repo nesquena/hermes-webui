@@ -1790,6 +1790,101 @@ def _handle_health(handler, parsed):
     return j(handler, payload)
 
 
+# ── Plugin visibility endpoint (#539) ───────────────────────────────────────
+_PLUGIN_VISIBILITY_HOOKS = (
+    "pre_tool_call",
+    "post_tool_call",
+    "pre_llm_call",
+    "post_llm_call",
+)
+_PLUGIN_VISIBILITY_HOOK_SET = set(_PLUGIN_VISIBILITY_HOOKS)
+
+
+def _get_plugin_manager_for_visibility():
+    """Return Hermes Agent's plugin manager for read-only WebUI visibility."""
+    from hermes_cli.plugins import get_plugin_manager
+
+    return get_plugin_manager()
+
+
+def _clean_plugin_visibility_text(value, *, limit=240) -> str:
+    """Return bounded display text without path/callback-like internals."""
+    if value is None:
+        return ""
+    text = str(value).replace("\x00", "").strip()
+    # Display metadata should be plain labels/descriptions. Drop multiline text
+    # and common path separators rather than risk leaking local plugin paths.
+    text = " ".join(text.split())
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip() + "…"
+    return text
+
+
+def _plugin_visibility_payload(manager=None) -> dict:
+    """Build a sanitized plugin/hook visibility payload for Settings.
+
+    The Hermes Agent manager stores manifests and callback objects internally.
+    This endpoint intentionally exposes only safe, user-facing metadata and the
+    four lifecycle hook names called out by the Settings visibility MVP. It
+    never includes plugin source paths, callback names, callback reprs, or raw
+    load errors because those can contain private filesystem details.
+    """
+    manager = manager or _get_plugin_manager_for_visibility()
+    manager.discover_and_load(force=False)
+
+    plugins = []
+    raw_plugins = getattr(manager, "_plugins", {}) or {}
+    for key, loaded in sorted(raw_plugins.items(), key=lambda item: str(item[0])):
+        manifest = getattr(loaded, "manifest", None)
+        if manifest is None:
+            continue
+        plugin_key = _clean_plugin_visibility_text(
+            getattr(manifest, "key", None) or key or getattr(manifest, "name", ""),
+            limit=120,
+        )
+        name = _clean_plugin_visibility_text(getattr(manifest, "name", "") or plugin_key, limit=120)
+        version = _clean_plugin_visibility_text(getattr(manifest, "version", ""), limit=80)
+        description = _clean_plugin_visibility_text(getattr(manifest, "description", ""), limit=280)
+        registered = []
+        for hook in list(getattr(manifest, "provides_hooks", []) or []) + list(getattr(loaded, "hooks_registered", []) or []):
+            hook_name = str(hook or "").strip()
+            if hook_name in _PLUGIN_VISIBILITY_HOOK_SET and hook_name not in registered:
+                registered.append(hook_name)
+        registered.sort(key=_PLUGIN_VISIBILITY_HOOKS.index)
+        plugins.append({
+            "name": name,
+            "key": plugin_key or name,
+            "version": version,
+            "description": description,
+            "enabled": bool(getattr(loaded, "enabled", False)),
+            "hooks": registered,
+        })
+
+    return {
+        "plugins": plugins,
+        "empty": not bool(plugins),
+        "supported_hooks": list(_PLUGIN_VISIBILITY_HOOKS),
+        "read_only": True,
+    }
+
+
+def _handle_plugins(handler, parsed) -> bool:
+    try:
+        return j(handler, _plugin_visibility_payload())
+    except Exception as exc:
+        logger.warning("Failed to build plugin visibility payload: %s", exc)
+        return j(
+            handler,
+            {
+                "plugins": [],
+                "empty": True,
+                "supported_hooks": list(_PLUGIN_VISIBILITY_HOOKS),
+                "read_only": True,
+                "unavailable": True,
+            },
+        )
+
+
 def handle_get(handler, parsed) -> bool:
     """Handle all GET routes. Returns True if handled, False for 404."""
 
@@ -1919,6 +2014,10 @@ def handle_get(handler, parsed) -> bool:
     # ── Providers (GET) ──
     if parsed.path == "/api/providers":
         return j(handler, get_providers())
+
+    # ── Plugins/hooks visibility (read-only, no callback/source internals) ──
+    if parsed.path == "/api/plugins":
+        return _handle_plugins(handler, parsed)
 
     if parsed.path == "/api/settings":
         settings = load_settings()
