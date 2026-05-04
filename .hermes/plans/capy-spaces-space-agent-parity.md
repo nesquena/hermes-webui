@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-03 18:44 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-03 19:49 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: source current-widget deletion helper coverage now includes Space Agent-style `space.current.deleteWidget` and `space.current.removeWidget` aliases while preserving Capy's metadata-only boundary. The helpers resolve `activeSpaceId`, delete only the requested widget through Capy's revisioned primitive, return compact current-space metadata, and omit generated/executable/source/API auth markers from serialized responses. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: source current-widget bulk deletion helper coverage now includes Space Agent-style `space.current.removeWidgets`, `space.current.deleteWidgets`, `space.current.removeAllWidgets`, and `space.current.deleteAllWidgets` aliases while preserving Capy's metadata-only boundary. The helpers resolve `activeSpaceId`, delete through Capy's revisioned primitive, include `active_space_id`, and omit generated/executable/source/API auth markers from serialized responses. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): support current bulk widget delete aliases`
+  - Added RED/GREEN backend coverage proving `space.current.removeWidgets` and `space.current.removeAllWidgets` accept Space Agent-style active-space and widget ids, delete selected/all widgets through Capy's revisioned metadata-only primitive, include `active_space_id`, and omit renderer/html/source/API auth markers from serialized adapter responses.
+  - Validation at completion before screenshot/restart: focused RED failed before implementation with `Unsupported Capy Spaces tool action`; focused GREEN passed (`1 passed`), current/source delete regression set passed (`3 passed`), full Spaces foundation suite passed (`130 passed`), `py_compile api/spaces.py tests/test_spaces_foundation.py`, and `git diff --check` passed.
 
 - `feat(spaces): support current widget delete aliases`
   - Added RED/GREEN backend coverage proving `space.current.deleteWidget` and `space.current.removeWidget` accept Space Agent-style active-space and widget ids, delete through Capy's revisioned metadata-only primitive, include `active_space_id`, and omit renderer/html/source/API auth markers from serialized adapter responses.

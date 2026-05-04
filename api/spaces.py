@@ -1730,14 +1730,19 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
         if name.startswith("space.current."):
             response["active_space_id"] = space_id
         return response
-    if name in {"space.spaces.removewidgets", "space.spaces.deletewidgets"}:
+    if name in {
+        "space.spaces.removewidgets",
+        "space.spaces.deletewidgets",
+        "space.current.removewidgets",
+        "space.current.deletewidgets",
+    }:
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_ids = _space_tool_widget_ids(data)
         revision_event_ids: list[str] = []
         for widget_id in widget_ids:
             result = delete_widget(space_id, widget_id)
             revision_event_ids.append(result["revision_event_id"])
-        return {
+        response = {
             "ok": True,
             "action": name,
             "deleted": True,
@@ -1746,14 +1751,22 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "deleted_count": len(widget_ids),
             "revision_event_ids": revision_event_ids,
         }
-    if name in {"space.spaces.removeallwidgets", "space.spaces.deleteallwidgets"}:
+        if name.startswith("space.current."):
+            response["active_space_id"] = space_id
+        return response
+    if name in {
+        "space.spaces.removeallwidgets",
+        "space.spaces.deleteallwidgets",
+        "space.current.removeallwidgets",
+        "space.current.deleteallwidgets",
+    }:
         space_id = validate_space_id(_space_tool_current_id(data))
         widget_ids = [widget["id"] for widget in list_widgets(space_id)]
         revision_event_ids = []
         for widget_id in widget_ids:
             result = delete_widget(space_id, widget_id)
             revision_event_ids.append(result["revision_event_id"])
-        return {
+        response = {
             "ok": True,
             "action": name,
             "deleted": True,
@@ -1762,6 +1775,9 @@ def run_space_tool(action: str, payload: dict[str, Any] | None = None) -> dict[s
             "deleted_count": len(widget_ids),
             "revision_event_ids": revision_event_ids,
         }
+        if name.startswith("space.current."):
+            response["active_space_id"] = space_id
+        return response
     if name in {"space.data.set", "space.current.data.set"}:
         space_id = validate_space_id(_space_tool_current_id(data))
         result = set_shared_data_slot(space_id, data.get("key"), data.get("value"), data.get("metadata"))
