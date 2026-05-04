@@ -284,15 +284,32 @@ function _renderOnboardingBody(){
           ${_renderOnboardingBaseUrlField(showBaseUrl)}
           <p class="onboarding-copy">${keyHelp}</p>`;
       } else {
-        _setOnboardingNotice(t('onboarding_notice_setup_required'),'warn');
+        const isCodexOauth=currentProviderName.toLowerCase()==='openai-codex';
+        _setOnboardingNotice(isCodexOauth?'Use the Codex OAuth login below to authenticate without leaving the Web UI.':t('onboarding_notice_setup_required'),'warn');
+        const pendingOauthBody=isCodexOauth
+          ? `This instance is configured to use <strong>${providerLabel}</strong>. Start the Codex OAuth login below, then enter the displayed code at OpenAI to finish authentication.`
+          : t('onboarding_oauth_provider_not_ready_body').replace('{provider}',providerLabel);
+        const codexLogin=isCodexOauth?`
+          <div class="onboarding-oauth-card" id="codexOAuthCard" style="margin-top:12px">
+            <div class="onboarding-oauth-icon">🔑</div>
+            <div style="flex:1">
+              <strong>${t('oauth_login_codex')}</strong>
+              <p style="margin:6px 0 0;font-size:13px;color:var(--muted);line-height:1.5">
+                ${t('onboarding_oauth_switch_hint')}
+              </p>
+            </div>
+            <button class="sm-btn" id="codexOAuthBtn" onclick="startCodexOAuth()" style="margin-left:auto;flex-shrink:0">${t('oauth_login_codex')}</button>
+          </div>
+          <div id="codexOAuthFlow" style="display:none;margin-top:12px"></div>`:'';
         body.innerHTML=`
           <div class="onboarding-oauth-card onboarding-oauth-pending">
             <div class="onboarding-oauth-icon">⚠</div>
             <div>
               <strong>${t('onboarding_oauth_provider_not_ready_title')}</strong>
-              <p>${t('onboarding_oauth_provider_not_ready_body').replace('{provider}',providerLabel)}</p>
+              <p>${pendingOauthBody}</p>
             </div>
           </div>
+          ${codexLogin}
           <p class="onboarding-copy" style="margin-top:20px">${t('onboarding_oauth_switch_hint')}</p>
           <label class="onboarding-field">
             <span>${t('onboarding_provider_label')}</span>
@@ -551,24 +568,112 @@ async function nextOnboardingStep(){
   }
 }
 
-/* ── Codex OAuth device-code flow ── */
-let _codexOAuthSSE=null;
+/* ── Codex OAuth server-owned polling flow ── */
+let _codexOAuthPollingToken=null;
+let _codexOAuthPollTimer=null;
+
+function _clearCodexOAuthPoll(){
+  if(_codexOAuthPollTimer){clearTimeout(_codexOAuthPollTimer);_codexOAuthPollTimer=null;}
+}
+
+function _renderCodexOAuthError(flowDiv,message,expired=false){
+  flowDiv.innerHTML=`
+    <div class="onboarding-oauth-card" style="border-color:var(--error,#e55)">
+      <div class="onboarding-oauth-icon">❌</div>
+      <div><strong>${expired?t('oauth_codex_expired'):t('oauth_codex_error')}</strong><p>${esc(message||'Unknown error')}</p></div>
+    </div>`;
+}
+
+async function copyCodexOAuthCode(){
+  const code=((document.querySelector('[data-codex-oauth-user-code]')||{}).textContent||'').trim();
+  if(!code)return;
+  try{
+    if(navigator.clipboard&&navigator.clipboard.writeText){
+      await navigator.clipboard.writeText(code);
+    }else{
+      const ta=document.createElement('textarea');
+      ta.value=code;ta.setAttribute('readonly','');ta.style.position='fixed';ta.style.opacity='0';
+      document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);
+    }
+    showToast('Copied');
+  }catch(e){showToast(e.message||String(e));}
+}
+
+async function cancelCodexOAuth(){
+  const flowDiv=$('codexOAuthFlow');
+  const btn=$('codexOAuthBtn');
+  const polling_token=_codexOAuthPollingToken;
+  _clearCodexOAuthPoll();
+  _codexOAuthPollingToken=null;
+  if(polling_token){
+    try{await api('/api/onboarding/oauth/cancel',{method:'POST',body:JSON.stringify({polling_token})});}catch(e){}
+  }
+  if(flowDiv){
+    flowDiv.innerHTML=`
+      <div class="onboarding-oauth-card onboarding-oauth-pending">
+        <div class="onboarding-oauth-icon">⏹</div>
+        <div><strong>${t('oauth_codex_error')}</strong><p>OAuth login cancelled.</p></div>
+      </div>`;
+  }
+  if(btn){btn.disabled=false;btn.textContent=t('oauth_login_codex');}
+}
+
+async function _pollCodexOAuth(polling_token,flowDiv,btn,intervalMs){
+  _clearCodexOAuthPoll();
+  if(!polling_token||polling_token!==_codexOAuthPollingToken)return;
+  try{
+    const data=await api('/api/onboarding/oauth/poll',{method:'POST',body:JSON.stringify({polling_token})});
+    if(data.error) throw new Error(data.error);
+    if(data.status==='pending'){
+      _codexOAuthPollTimer=setTimeout(()=>_pollCodexOAuth(polling_token,flowDiv,btn,intervalMs),intervalMs);
+      return;
+    }
+    _codexOAuthPollingToken=null;
+    if(data.status==='success'){
+      flowDiv.innerHTML=`
+        <div class="onboarding-oauth-card onboarding-oauth-ready">
+          <div class="onboarding-oauth-icon">✅</div>
+          <div><strong>${t('oauth_codex_success')}</strong>
+          <p>Token saved to auth.json. You can now use Codex as a provider.</p></div>
+        </div>`;
+      if(btn){btn.disabled=false;btn.textContent=t('oauth_login_codex');}
+      showToast(t('oauth_codex_success'));
+      await loadOnboardingWizard().catch(()=>{});
+      return;
+    }
+    if(data.status==='expired'){
+      _renderCodexOAuthError(flowDiv,t('oauth_codex_expired'),true);
+    }else if(data.status==='cancelled'){
+      _renderCodexOAuthError(flowDiv,'OAuth login cancelled.');
+    }else{
+      _renderCodexOAuthError(flowDiv,data.error||t('oauth_codex_error'));
+    }
+    if(btn){btn.disabled=false;btn.textContent=t('oauth_login_codex');}
+  }catch(e){
+    _codexOAuthPollingToken=null;
+    _renderCodexOAuthError(flowDiv,e.message||String(e));
+    if(btn){btn.disabled=false;btn.textContent=t('oauth_login_codex');}
+  }
+}
 
 async function startCodexOAuth(){
   const flowDiv=$('codexOAuthFlow');
   const btn=$('codexOAuthBtn');
   if(!flowDiv)return;
+  _clearCodexOAuthPoll();
+  _codexOAuthPollingToken=null;
   if(btn){btn.disabled=true;btn.textContent='...';}
   flowDiv.style.display='block';
-  flowDiv.innerHTML=`<div class="onboarding-oauth-card onboarding-oauth-pending"><div class="onboarding-oauth-icon">⏳</div><div><strong>${t('oauth_codex_polling')}</strong><p>Starting device-code flow…</p></div></div>`;
+  flowDiv.innerHTML=`<div class="onboarding-oauth-card onboarding-oauth-pending"><div class="onboarding-oauth-icon">⏳</div><div><strong>${t('oauth_codex_polling')}</strong><p>Starting OAuth flow…</p></div></div>`;
   try{
-    const resp=await api('/api/oauth/codex/start',{method:'POST'});
+    const resp=await api('/api/onboarding/oauth/start',{method:'POST',body:JSON.stringify({provider:'openai-codex'})});
     if(resp.error) throw new Error(resp.error);
-    const{device_code,user_code,verification_uri}=resp;
-    if(!device_code||!user_code||!verification_uri) throw new Error('Invalid OAuth response');
-    // Open verification URI in new tab
-    window.open(verification_uri,'_blank');
-    // Show user code prominently
+    const polling_token=resp.polling_token;
+    const user_code=resp.user_code;
+    const verification_uri=resp.verification_uri||resp.verification_url;
+    if(!polling_token||!user_code||!verification_uri) throw new Error('Invalid OAuth response');
+    _codexOAuthPollingToken=polling_token;
+    const intervalMs=Math.max(1000,Number(resp.interval||2)*1000);
     flowDiv.innerHTML=`
       <div class="onboarding-oauth-card onboarding-oauth-pending">
         <div class="onboarding-oauth-icon">📋</div>
@@ -576,60 +681,18 @@ async function startCodexOAuth(){
           <strong>${t('oauth_codex_step1')}</strong>
           <p><a href="${esc(verification_uri)}" target="_blank" rel="noopener" style="color:var(--accent);word-break:break-all">${esc(verification_uri)}</a></p>
           <p style="margin-top:8px"><strong>${t('oauth_codex_step2')}</strong></p>
-          <code style="display:inline-block;font-size:18px;letter-spacing:0.1em;background:rgba(255,255,255,.08);padding:6px 14px;border-radius:8px;margin-top:4px;user-select:all">${esc(user_code)}</code>
+          <code data-codex-oauth-user-code style="display:inline-block;font-size:18px;letter-spacing:0.1em;background:rgba(255,255,255,.08);padding:6px 14px;border-radius:8px;margin-top:4px;user-select:all">${esc(user_code)}</code>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+            <button type="button" class="sm-btn" onclick="copyCodexOAuthCode()">Copy code</button>
+            <button type="button" class="sm-btn" onclick="cancelCodexOAuth()">Cancel</button>
+          </div>
           <p style="margin-top:8px;color:var(--muted);font-size:13px">${t('oauth_codex_polling')}</p>
         </div>
       </div>`;
-    // Connect to SSE poll endpoint
-    const pollUrl=new URL('api/oauth/codex/poll?device_code='+encodeURIComponent(device_code),location.href);
-    if(_codexOAuthSSE){_codexOAuthSSE.close();_codexOAuthSSE=null;}
-    _codexOAuthSSE=new EventSource(pollUrl.href);
-    _codexOAuthSSE.onmessage=function(ev){
-      let data;
-      try{data=JSON.parse(ev.data);}catch(e){return;}
-      if(data.status==='success'){
-        if(_codexOAuthSSE){_codexOAuthSSE.close();_codexOAuthSSE=null;}
-        flowDiv.innerHTML=`
-          <div class="onboarding-oauth-card onboarding-oauth-ready">
-            <div class="onboarding-oauth-icon">✅</div>
-            <div><strong>${t('oauth_codex_success')}</strong>
-            <p>Token saved to credential pool. You can now use Codex as a provider.</p></div>
-          </div>`;
-        if(btn){btn.disabled=false;btn.textContent=t('oauth_login_codex');}
-        showToast(t('oauth_codex_success'));
-        // Refresh onboarding status in background
-        loadOnboardingWizard().catch(()=>{});
-      }else if(data.status==='error'){
-        if(_codexOAuthSSE){_codexOAuthSSE.close();_codexOAuthSSE=null;}
-        const isExpired=(data.error||'').includes('expired');
-        flowDiv.innerHTML=`
-          <div class="onboarding-oauth-card" style="border-color:var(--error,#e55)">
-            <div class="onboarding-oauth-icon">❌</div>
-            <div><strong>${isExpired?t('oauth_codex_expired'):t('oauth_codex_error')}</strong>
-            <p>${esc(data.error||'Unknown error')}</p></div>
-          </div>`;
-        if(btn){btn.disabled=false;btn.textContent=t('oauth_login_codex');}
-      }
-      // 'polling' status — keep waiting
-    };
-    _codexOAuthSSE.onerror=function(){
-      if(_codexOAuthSSE){_codexOAuthSSE.close();_codexOAuthSSE=null;}
-      if(btn){btn.disabled=false;btn.textContent=t('oauth_login_codex');}
-      // Don't overwrite if already showing success/error
-      if(!flowDiv.querySelector('.onboarding-oauth-ready')&&!flowDiv.querySelector('[style*="error"]')){
-        flowDiv.innerHTML=`
-          <div class="onboarding-oauth-card" style="border-color:var(--error,#e55)">
-            <div class="onboarding-oauth-icon">❌</div>
-            <div><strong>${t('oauth_codex_error')}</strong><p>Connection lost. Please try again.</p></div>
-          </div>`;
-      }
-    };
+    _pollCodexOAuth(polling_token,flowDiv,btn,intervalMs);
   }catch(e){
-    flowDiv.innerHTML=`
-      <div class="onboarding-oauth-card" style="border-color:var(--error,#e55)">
-        <div class="onboarding-oauth-icon">❌</div>
-        <div><strong>${t('oauth_codex_error')}</strong><p>${esc(e.message||String(e))}</p></div>
-      </div>`;
+    _codexOAuthPollingToken=null;
+    _renderCodexOAuthError(flowDiv,e.message||String(e));
     if(btn){btn.disabled=false;btn.textContent=t('oauth_login_codex');}
   }
 }

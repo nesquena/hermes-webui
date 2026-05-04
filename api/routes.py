@@ -2279,39 +2279,6 @@ def handle_get(handler, parsed) -> bool:
             return j(handler, {"error": "not found"}, status=404)
         return _handle_clarify_inject(handler, parsed)
 
-    # ── OAuth (Codex device-code) ──
-    if parsed.path == "/api/oauth/codex/start":
-        """Start Codex device-code OAuth flow. Returns user_code + verification_uri."""
-        try:
-            from api.oauth import start_codex_device_code
-            result = start_codex_device_code()
-            return j(handler, result)
-        except Exception as e:
-            return j(handler, {"error": str(e)}, status=500)
-
-    if parsed.path == "/api/oauth/codex/poll":
-        """SSE endpoint for polling Codex OAuth token."""
-        qs = parse_qs(parsed.query)
-        device_code = qs.get("device_code", [""])[0]
-        if not device_code:
-            return j(handler, {"error": "device_code required"}, status=400)
-        handler.send_response(200)
-        handler.send_header("Content-Type", "text/event-stream")
-        handler.send_header("Cache-Control", "no-cache")
-        handler.send_header("Connection", "keep-alive")
-        handler.end_headers()
-        try:
-            from api.oauth import poll_codex_token
-            for event in poll_codex_token(device_code):
-                handler.wfile.write(f"data: {json.dumps(event)}\n\n".encode())
-                handler.wfile.flush()
-                if event.get("status") in ("success", "error"):
-                    break
-        except Exception as e:
-            handler.wfile.write(f"data: {json.dumps({'status': 'error', 'error': str(e)})}\n\n".encode())
-            handler.wfile.flush()
-        return  # SSE handled, no JSON response
-
     # ── Cron API (GET) ──
     # All cron handlers touch cron.jobs which resolves HERMES_HOME from
     # os.environ (process-global) at call time. Wrap in cron_profile_context
@@ -3313,6 +3280,39 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/onboarding/complete":
         return j(handler, complete_onboarding())
+
+    if parsed.path == "/api/onboarding/oauth/start":
+        provider = str((body or {}).get("provider") or "").strip().lower()
+        try:
+            from api.oauth import start_oauth_flow
+            return j(handler, start_oauth_flow(provider))
+        except ValueError as e:
+            return bad(handler, str(e), 400)
+        except Exception as e:
+            logger.warning("Onboarding OAuth start failed: %s", e)
+            return bad(handler, "OAuth login could not be started. Please try again.", 500)
+
+    if parsed.path == "/api/onboarding/oauth/poll":
+        polling_token = str((body or {}).get("polling_token") or "").strip()
+        try:
+            from api.oauth import poll_oauth_flow
+            return j(handler, poll_oauth_flow(polling_token))
+        except ValueError as e:
+            return bad(handler, str(e), 400)
+        except Exception as e:
+            logger.warning("Onboarding OAuth poll failed: %s", e)
+            return bad(handler, "OAuth login status could not be checked. Please try again.", 500)
+
+    if parsed.path == "/api/onboarding/oauth/cancel":
+        polling_token = str((body or {}).get("polling_token") or "").strip()
+        try:
+            from api.oauth import cancel_oauth_flow
+            return j(handler, cancel_oauth_flow(polling_token))
+        except ValueError as e:
+            return bad(handler, str(e), 400)
+        except Exception as e:
+            logger.warning("Onboarding OAuth cancel failed: %s", e)
+            return bad(handler, "OAuth login could not be cancelled. Please try again.", 500)
 
     if parsed.path == "/api/onboarding/probe":
         # Probe a self-hosted provider endpoint (#1499).  Validates the
