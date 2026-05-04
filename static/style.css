@@ -2872,6 +2872,8 @@ main.main.showing-profiles > #mainProfiles{display:flex;}
 /* ── Day-change separator ── */
 .load-older-indicator{cursor:pointer;color:var(--accent-text,var(--blue));font-size:13px;padding:10px 0;text-align:center;user-select:none;}
 .load-older-indicator:hover{opacity:.75;}
+.message-window-load-earlier{align-self:center;margin:4px auto 14px;padding:7px 14px;border:1px solid var(--border);border-radius:999px;background:var(--surface);box-shadow:var(--shadow-sm);}
+.message-window-load-earlier:hover{background:var(--hover-bg);border-color:var(--accent);}
 .msg-date-sep {
   display: flex; align-items: center; gap: 10px;
   margin: 22px 0 10px; padding: 0 var(--msg-rail);

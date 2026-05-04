@@ -90,6 +90,54 @@ function _renderUserFencedBlocks(text){
   return s;
 }
 
+const MESSAGE_RENDER_WINDOW_DEFAULT=50;
+let _messageRenderWindowSid=null;
+let _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
+function _resetMessageRenderWindow(sid){
+  _messageRenderWindowSid=sid||null;
+  _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
+}
+function _currentMessageRenderWindowSize(){
+  return Math.max(
+    MESSAGE_RENDER_WINDOW_DEFAULT,
+    Number(_messageRenderWindowSize)||MESSAGE_RENDER_WINDOW_DEFAULT
+  );
+}
+function _messageRenderableMessageCount(){
+  let count=0;
+  for(const m of (S.messages||[])){
+    if(!m||!m.role||m.role==='tool') continue;
+    if(_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)) continue;
+    const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
+    const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
+    if(msgContent(m)||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)))) count++;
+  }
+  return count;
+}
+function _messageHiddenBeforeCount(){
+  return Math.max(0,_messageRenderableMessageCount()-_currentMessageRenderWindowSize());
+}
+function _wireMessageWindowLoadEarlierButton(){
+  const indicator=$('loadOlderIndicator');
+  if(!indicator) return;
+  indicator.onclick=()=>{
+    if(_messageHiddenBeforeCount()>0) _showEarlierRenderedMessages();
+    else if(typeof _loadOlderMessages==='function') _loadOlderMessages();
+  };
+}
+function _showEarlierRenderedMessages(){
+  const container=$('messages');
+  const prevScrollH=container?container.scrollHeight:0;
+  const prevScrollTop=container?container.scrollTop:0;
+  _messageRenderWindowSize=_currentMessageRenderWindowSize()+MESSAGE_RENDER_WINDOW_DEFAULT;
+  renderMessages();
+  if(container){
+    const newScrollH=container.scrollHeight;
+    container.scrollTop=prevScrollTop+(newScrollH-prevScrollH);
+  }
+  _scrollPinned=false;
+}
+
 /* ── Image lightbox — click any .msg-media-img to enlarge ─────────────────── */
 function _openImgLightbox(src, alt) {
   const lb = document.createElement('div');
@@ -3665,6 +3713,8 @@ function renderMessages(){
   const inner=$('msgInner');
   const sid=S.session?S.session.session_id:null;
   const msgCount=S.messages.length;
+  if(sid!==_messageRenderWindowSid) _resetMessageRenderWindow(sid);
+  const renderWindowSize=_currentMessageRenderWindowSize();
   const hasTransientTranscriptUi=!!(
     (window._compressionUi&&(!window._compressionUi.sessionId||window._compressionUi.sessionId===sid)) ||
     (window._handoffUi&&(!window._handoffUi.sessionId||window._handoffUi.sessionId===sid))
@@ -3680,9 +3730,10 @@ function renderMessages(){
   // before those cards can be inserted.
   if(sid&&sid!==_sessionHtmlCacheSid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){
     const cached=_sessionHtmlCache.get(sid);
-    if(cached&&cached.msgCount===msgCount){
+    if(cached&&cached.msgCount===msgCount&&cached.renderWindowSize===renderWindowSize){
       inner.innerHTML=cached.html;
       _sessionHtmlCacheSid=sid;
+      _wireMessageWindowLoadEarlierButton();
       if(S.activeStreamId){scrollIfPinned();}else{scrollToBottom();}
       requestAnimationFrame(()=>{highlightCode();addCopyButtons();loadDiffInline();loadCsvInline();loadExcalidrawInline();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
       requestAnimationFrame(()=>{highlightCode();addCopyButtons();initTreeViews();loadPdfInline();loadHtmlInline();renderMermaidBlocks();renderKatexBlocks();});
@@ -3716,15 +3767,6 @@ function renderMessages(){
   });
   $('emptyState').style.display=(vis.length||preservedCompressionTaskMessages.length)?'none':'';
   inner.innerHTML='';
-  // Show "load older" indicator when older messages are available
-  if(typeof _messagesTruncated!=='undefined' && _messagesTruncated && S.messages.length>0){
-    const indicator=document.createElement('div');
-    indicator.id='loadOlderIndicator';
-    indicator.className='load-older-indicator';
-    indicator.textContent=typeof t==='function'?t('load_older_messages'):'↑ Scroll up or click to load older messages';
-    indicator.onclick=()=>{if(typeof _loadOlderMessages==='function') _loadOlderMessages();};
-    inner.appendChild(indicator);
-  }
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
   const referenceMessage=S.messages.find(m=>_isContextCompactionMessage(m));
   const referenceText=referenceMessage?msgContent(referenceMessage)||String(referenceMessage.content||''):'';
@@ -3743,6 +3785,30 @@ function renderMessages(){
     if(msgContent(m)||m.attachments?.length||(m.role==='assistant'&&(hasTc||hasTu||_messageHasReasoningPayload(m)))) visWithIdx.push({m,rawIdx});
     rawIdx++;
   }
+  // Show a top affordance when earlier transcript content exists either in
+  // memory (DOM windowing) or on the server (paginated session fetch).
+  // Prefer expanding the local render window first so a fully loaded long
+  // session can reduce DOM nodes without losing in-memory transcript data.
+  const windowStart=Math.max(0, visWithIdx.length-renderWindowSize);
+  const hiddenBeforeCount=windowStart;
+  const renderVisWithIdx=visWithIdx.slice(windowStart);
+  const firstRenderedRawIdx=renderVisWithIdx.length?renderVisWithIdx[0].rawIdx:Infinity;
+  const hasServerOlder=!!(typeof _messagesTruncated!=='undefined' && _messagesTruncated && S.messages.length>0);
+  if(hiddenBeforeCount>0 || hasServerOlder){
+    const indicator=document.createElement('button');
+    indicator.type='button';
+    indicator.id='loadOlderIndicator';
+    indicator.className='load-older-indicator message-window-load-earlier';
+    indicator.textContent=hiddenBeforeCount>0
+      ? `Load earlier messages (${hiddenBeforeCount} hidden)`
+      : (typeof t==='function'?t('load_older_messages'):'Load earlier messages');
+    indicator.onclick=()=>{
+      if(hiddenBeforeCount>0) _showEarlierRenderedMessages();
+      else if(typeof _loadOlderMessages==='function') _loadOlderMessages();
+    };
+    inner.appendChild(indicator);
+    _wireMessageWindowLoadEarlierButton();
+  }
   let lastUserRawIdx=-1;
   for(let i=visWithIdx.length-1;i>=0;i--){
     if(visWithIdx[i].m&&visWithIdx[i].m.role==='user'){
@@ -3751,7 +3817,7 @@ function renderMessages(){
     }
   }
   const insertionAnchor=_compressionAnchorIndex(
-    visWithIdx,
+    renderVisWithIdx,
     compressionState ? compressionState.anchorMessageKey : sessionCompressionAnchorKey,
     compressionState
       ? (typeof compressionState.anchorVisibleIdx==='number' ? compressionState.anchorVisibleIdx : compressionState.anchorRawIdx)
@@ -3762,8 +3828,10 @@ function renderMessages(){
   const assistantSegments=new Map();
   const assistantThinking=new Map();
   const userRows=new Map();
-  for(let vi=0;vi<visWithIdx.length;vi++){
-    const {m,rawIdx}=visWithIdx[vi];
+  // Windowed render loop replaces the legacy full loop:
+  // for(let vi=0;vi<visWithIdx.length;vi++)
+  for(let vi=0;vi<renderVisWithIdx.length;vi++){
+    const {m,rawIdx}=renderVisWithIdx[vi];
     const _tsSep=m._ts||m.timestamp;
     if(_tsSep){
       const _d=new Date(_tsSep*1000);
@@ -3807,7 +3875,7 @@ function renderMessages(){
       }
     }
     const isUser=m.role==='user';
-    const isLastAssistant=!isUser&&vi===visWithIdx.length-1;
+    const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1;
     let filesHtml='';
     if(m.attachments&&m.attachments.length){
       // Static regression tests intentionally look for msg-media-img/msg-file-badge near this branch.
@@ -3899,8 +3967,8 @@ function renderMessages(){
   function _insertCompressionLikeNode(node, anchorIndex){
     if(!node) return;
     const anchorIdx=anchorIndex===undefined?insertionAnchor:anchorIndex;
-    if(anchorIdx!==null && visWithIdx[anchorIdx]){
-      const anchorRawIdx=visWithIdx[anchorIdx].rawIdx;
+    if(anchorIdx!==null && renderVisWithIdx[anchorIdx]){
+      const anchorRawIdx=renderVisWithIdx[anchorIdx].rawIdx;
       const anchorSeg=assistantSegments.get(anchorRawIdx);
       if(anchorSeg){
         const turn=anchorSeg.closest('.assistant-turn');
@@ -3920,13 +3988,13 @@ function renderMessages(){
   }
   function _insertCompressionLikeNodeByRawIdx(node, rawIdx){
     if(!node) return;
-    if(!visWithIdx.length){
+    if(!renderVisWithIdx.length){
       inner.appendChild(node);
       return;
     }
     let anchorIdx=null;
-    for(let i=0;i<visWithIdx.length;i++){
-      if(visWithIdx[i].rawIdx > rawIdx){
+    for(let i=0;i<renderVisWithIdx.length;i++){
+      if(renderVisWithIdx[i].rawIdx > rawIdx){
         anchorIdx=i;
         break;
       }
@@ -3935,7 +4003,7 @@ function renderMessages(){
       inner.appendChild(node);
       return;
     }
-    const anchorRawIdx=visWithIdx[anchorIdx].rawIdx;
+    const anchorRawIdx=renderVisWithIdx[anchorIdx].rawIdx;
     const anchorSeg=assistantSegments.get(anchorRawIdx);
     if(anchorSeg){
       const turn=anchorSeg.closest('.assistant-turn');
@@ -3961,16 +4029,17 @@ function renderMessages(){
     ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
     : null;
   const preservedOnlyAnchor=preservedCompressionRawIdxs.length
-    ? (()=>{let idx=null;for(let i=0;i<visWithIdx.length;i++){if(visWithIdx[i].rawIdx<preservedCompressionRawIdxs[0]) idx=i;}return idx;})()
+    ? (()=>{let idx=null;for(let i=0;i<renderVisWithIdx.length;i++){if(renderVisWithIdx[i].rawIdx<preservedCompressionRawIdxs[0]) idx=i;}return idx;})()
     : null;
   const handoffSummaryStates=_collectHandoffSummaryStates(S.messages);
 
   _insertCompressionLikeNode(compressionNode);
   _insertCompressionLikeNode(referenceNode);
   _insertCompressionLikeNode(preservedOnlyNode, preservedOnlyAnchor);
-  _insertCompressionLikeNode(handoffState?_handoffCardsNode(handoffState):null, visWithIdx.length?visWithIdx.length-1:null);
+  _insertCompressionLikeNode(handoffState?_handoffCardsNode(handoffState):null, renderVisWithIdx.length?renderVisWithIdx.length-1:null);
   for(const entry of handoffSummaryStates){
     if(!entry||!entry.state) continue;
+    if(entry.rawIdx<firstRenderedRawIdx) continue;
     _insertCompressionLikeNodeByRawIdx(_handoffCardsNode(entry.state), entry.rawIdx);
   }
   renderCompressionUi();
@@ -4064,6 +4133,7 @@ function renderMessages(){
         const cards=byAssistant[aIdx]||[];
         let anchorRow=assistantSegments.get(aIdx)||null;
         if(!anchorRow&&assistantIdxs.length){
+          if(aIdx<assistantIdxs[0]) continue;
           const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
           anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
         }
@@ -4088,6 +4158,7 @@ function renderMessages(){
         const aIdx = parseInt(key);
         let anchorRow=assistantSegments.get(aIdx)||null;
         if(!anchorRow&&assistantIdxs.length){
+          if(aIdx<assistantIdxs[0]) continue;
           const fallbackIdx=[...assistantIdxs].reverse().find(idx=>idx<=aIdx);
           anchorRow=fallbackIdx!==undefined?assistantSegments.get(fallbackIdx):assistantSegments.get(assistantIdxs[assistantIdxs.length-1]);
         }
@@ -4126,25 +4197,26 @@ function renderMessages(){
   }
   // Render per-turn duration and optional token usage on assistant messages.
   // Duration stays visible even when token usage is disabled, because it answers
-  // the basic "how long did that turn take?" UX question.
+  // the basic "how long did that turn take?" UX question. Only walk rendered
+  // assistant segments so hidden messages above the DOM window cannot skew the
+  // footer-to-message mapping.
   {
-    const asstRows=inner.querySelectorAll('.assistant-turn');
-    let ai=0; // assistant-only index for DOM rows
-    for(let mi=0;mi<S.messages.length;mi++){
-      const msg=S.messages[mi];
-      if(msg.role!=='assistant'){continue;}
+    const renderedAssistantIdxs=[...assistantSegments.keys()].sort((a,b)=>a-b);
+    for(const mi of renderedAssistantIdxs){
+      const msg=S.messages[mi]||{};
+      if(msg.role!=='assistant') continue;
       const hasTurnUsage=!!msg._turnUsage;
       const compactActivityForMessage=isSimplifiedToolCalling()&&(
         assistantThinking.has(mi)||
         (S.toolCalls||[]).some(tc=>tc&&(tc.assistant_msg_idx!==undefined?tc.assistant_msg_idx:-1)===mi)
       );
       const durationText=compactActivityForMessage?'':_formatTurnDuration(msg._turnDuration);
-      if(!hasTurnUsage&&!durationText){ai++;continue;}
-      if(ai>=asstRows.length) continue;
-      const row=asstRows[ai];
-      const footerRows=row.querySelectorAll('.msg-foot');
+      if(!hasTurnUsage&&!durationText) continue;
+      const seg=assistantSegments.get(mi);
+      const row=seg?seg.closest('.assistant-turn'):null;
+      const footerRows=row?row.querySelectorAll('.msg-foot'):[];
       const targetFoot=footerRows.length?footerRows[footerRows.length-1]:null;
-      if(!targetFoot||targetFoot.querySelector('.msg-usage-inline,.msg-duration-inline')){ai++;continue;}
+      if(!targetFoot||targetFoot.querySelector('.msg-usage-inline,.msg-duration-inline')) continue;
       const fragments=[];
       if(durationText){
         const duration=document.createElement('span');
@@ -4167,7 +4239,6 @@ function renderMessages(){
         targetFoot.classList.add('msg-foot-with-usage');
         for(let i=fragments.length-1;i>=0;i--) targetFoot.insertBefore(fragments[i], targetFoot.firstChild);
       }
-      ai++;
     }
   }
   // Only force-scroll when not actively streaming — mid-stream re-renders
@@ -4193,7 +4264,7 @@ function renderMessages(){
     const _html=inner.innerHTML;
     // Only cache sessions with <300KB rendered HTML; evict oldest beyond 8 sessions.
     if(_html.length<300_000){
-      _sessionHtmlCache.set(sid,{html:_html,msgCount});
+      _sessionHtmlCache.set(sid,{html:_html,msgCount,renderWindowSize});
       if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
     }
   }
