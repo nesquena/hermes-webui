@@ -1359,7 +1359,14 @@ window.addEventListener('resize',()=>{
   if(_sessionActionMenu && _sessionActionAnchor) _positionSessionActionMenu(_sessionActionAnchor);
 });
 
+// Generation counter to discard stale API responses (issue #1430).
+// Multiple callers (message send, rename, session switch) fire renderSessionList()
+// concurrently. Without this guard, a slower older response can overwrite _allSessions
+// with stale data, causing sessions to vanish from the sidebar.
+let _renderSessionListGen = 0;
+
 async function renderSessionList(){
+  const _gen = ++_renderSessionListGen;
   try{
     if(!($('sessionSearch').value||'').trim()) _contentSearchResults = [];
     const allProfilesQS = _showAllProfiles ? '?all_profiles=1' : '';
@@ -1367,6 +1374,8 @@ async function renderSessionList(){
       api('/api/sessions' + allProfilesQS),
       api('/api/projects' + allProfilesQS),
     ]);
+    // Discard stale response — a newer renderSessionList() call superseded us.
+    if (_gen !== _renderSessionListGen) return;
     // Server's other_profile_count tells us how many sessions exist outside the
     // active profile so the "Show N from other profiles" toggle can render
     // without a second round-trip. Stashed on the module for renderSessionListFromCache.

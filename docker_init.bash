@@ -188,8 +188,24 @@ if [ "A${whoami}" == "Ahermeswebuitoo" ]; then
   # We are altering the UID/GID of the hermeswebui user to the desired ones and restarting as that user
   # using usermod for the already create hermeswebui user, knowing it is not already in use
   # per usermod manual: "You must make certain that the named user is not executing any processes when this command is being executed"
-  sudo groupmod -o -g ${WANTED_GID} hermeswebui || error_exit "Failed to set GID of hermeswebui user"
-  sudo usermod -o -u ${WANTED_UID} hermeswebui || error_exit "Failed to set UID of hermeswebui user"
+  # Guard for read-only root filesystem (podman with read_only=true, issue #1470).
+  _readonly_root=false
+  if [ ! -w /etc/group ] || [ ! -w /etc/passwd ]; then
+    _readonly_root=true
+    echo "  !! Detected read-only root filesystem — /etc/group or /etc/passwd is not writable"
+  fi
+  if [ "A${_readonly_root}" == "Atrue" ]; then
+    _current_hermeswebui_gid=$(id -g hermeswebui 2>/dev/null || echo "")
+    _current_hermeswebui_uid=$(id -u hermeswebui 2>/dev/null || echo "")
+    if [ "A${_current_hermeswebui_gid}" == "A${WANTED_GID}" ] && [ "A${_current_hermeswebui_uid}" == "A${WANTED_UID}" ]; then
+      echo "  -- Skipping groupmod/usermod — hermeswebui already has UID ${WANTED_UID} GID ${WANTED_GID} and root fs is read-only"
+    else
+      error_exit "Cannot modify /etc/group or /etc/passwd (read-only root fs). Set UID=${_current_hermeswebui_uid} and GID=${_current_hermeswebui_gid} to match, or run without read_only=true. See issue #1470."
+    fi
+  else
+    sudo groupmod -o -g ${WANTED_GID} hermeswebui || error_exit "Failed to set GID of hermeswebui user"
+    sudo usermod -o -u ${WANTED_UID} hermeswebui || error_exit "Failed to set UID of hermeswebui user"
+  fi
   sudo chown -R ${WANTED_UID}:${WANTED_GID} /home/hermeswebui || error_exit "Failed to set owner of /home/hermeswebui"
   save_env /tmp/hermeswebuitoo_env.txt  
   # restart the script as hermeswebui set with the correct UID/GID this time
