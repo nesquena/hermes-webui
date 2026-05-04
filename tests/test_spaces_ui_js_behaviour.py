@@ -1229,6 +1229,22 @@ def test_spaces_ui_view_widget_details_fetches_and_renders_safe_metadata_only(dr
     assert "SECRET" not in out["rootHtml"]
 
 
+def test_spaces_ui_widget_detail_shows_visible_weather_observation_without_generated_body(driver_path):
+    out = _run_spaces_scenario(driver_path, "viewWidgetDetails")
+
+    assert "Current weather observation" in out["rootHtml"]
+    assert "Prague, CZ" in out["rootHtml"]
+    assert "18 °C" in out["rootHtml"]
+    assert "Feels like 17 °C" in out["rootHtml"]
+    assert "partly cloudy" in out["rootHtml"]
+    assert "Observation status: observation-ready" in out["rootHtml"]
+    assert "Partly cloudy in Prague; refreshed through agent-mediated weather metadata." in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+
+
 def test_spaces_ui_widget_detail_can_request_pdf_export_as_metadata_event(driver_path):
     out = _run_spaces_scenario(driver_path, "requestWidgetPdfExport")
     post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/event")

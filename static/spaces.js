@@ -565,6 +565,34 @@
       '</div>';
   }
 
+  function safeWeatherText(value, limit){
+    const text = String(value == null ? '' : value).replace(/\s+/g, ' ').trim().slice(0, limit || 160);
+    if (!text || /(api[_-]?key|apikey|authorization|bearer|cookie|credential|credentials|password|secret|token|<script|<\/script|javascript:|onerror|onload|renderer|html|script|source)/i.test(text)) return '';
+    return text;
+  }
+
+  function renderWeatherObservation(metadata){
+    const weather = metadata && metadata.weather && typeof metadata.weather === 'object' && !Array.isArray(metadata.weather) ? metadata.weather : {};
+    if (!Object.keys(weather).length) return '';
+    const current = weather.current && typeof weather.current === 'object' && !Array.isArray(weather.current) ? weather.current : {};
+    const location = [safeWeatherText(weather.location, 80), safeWeatherText(weather.country, 20)].filter(Boolean).join(', ');
+    const condition = safeWeatherText(current.condition, 80);
+    const temp = safeWeatherText(current.temperature_c, 20);
+    const feelsLike = safeWeatherText(current.feels_like_c, 20);
+    const status = safeWeatherText(weather.status, 80);
+    const summary = safeWeatherText(weather.summary, 240);
+    const rows = [];
+    if (location) rows.push('<div class="capy-spaces-muted">'+escapeHtml(location)+'</div>');
+    if (temp) rows.push('<div><strong>'+escapeHtml(temp)+' °C</strong>'+(feelsLike ? '<span class="capy-spaces-muted"> · Feels like '+escapeHtml(feelsLike)+' °C</span>' : '')+'</div>');
+    if (condition) rows.push('<div class="capy-spaces-muted">'+escapeHtml(condition)+'</div>');
+    if (status) rows.push('<div class="capy-spaces-muted">Observation status: '+escapeHtml(status)+'</div>');
+    if (summary) rows.push('<div class="capy-spaces-muted">'+escapeHtml(summary)+'</div>');
+    if (!rows.length) return '';
+    return '<div class="capy-spaces-card capy-spaces-weather-observation"><h4>Current weather observation</h4>' +
+      '<div class="capy-spaces-muted">Visible metadata-only demo widget state. Network refresh remains agent-mediated.</div>' +
+      '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div>'+rows.join('')+'</div></div></div></div>';
+  }
+
   function renderWidgetDetailPanel(spaceId, widget, runtimeContract){
     const safeWidget = widget && typeof widget === 'object' ? widget : {};
     const widgetId = safeWidget.id || '';
@@ -593,7 +621,7 @@
       metadataRow +
       eventBridgeRow +
       renderWidgetRuntimeContract(runtimeContract) +
-      '</div>'+pdfExportAction+'</div></div>' + notesEditor + '</div>';
+      '</div>'+pdfExportAction+'</div></div>' + renderWeatherObservation(metadata) + notesEditor + '</div>';
   }
 
 
