@@ -121,3 +121,47 @@ def test_kanban_i18n_keys_exist_in_every_locale_block():
         if re.search(rf"\b{re.escape(key)}\s*:", body) is None
     ]
     assert missing == []
+
+
+
+def test_kanban_dashboard_parity_core_controls_are_native():
+    assert 'id="kanbanOnlyMine"' in INDEX
+    assert 'id="kanbanBulkBar"' in INDEX
+    assert 'id="kanbanStats"' in INDEX
+    assert "async function nudgeKanbanDispatcher" in PANELS
+    assert "async function bulkUpdateKanban" in PANELS
+    assert "async function refreshKanbanEvents" in PANELS
+    for endpoint in (
+        "'/api/kanban/stats'",
+        "'/api/kanban/assignees'",
+        "'/api/kanban/events'",
+        "'/api/kanban/dispatch'",
+        "'/api/kanban/tasks/bulk'",
+        "'/api/kanban/tasks/' + encodeURIComponent(taskId) + '/log'",
+        "'/api/kanban/tasks/' + encodeURIComponent(taskId) + '/block'",
+        "'/api/kanban/tasks/' + encodeURIComponent(taskId) + '/unblock'",
+    ):
+        assert endpoint in PANELS
+    assert "setInterval(refreshKanbanEvents" in PANELS
+    assert "prompt(" not in PANELS
+    assert "confirm(" not in PANELS
+
+
+def test_kanban_dashboard_parity_i18n_keys_exist():
+    locale_blocks = re.findall(r"\n\s*([a-z]{2}(?:-[A-Z]{2})?): \{(.*?)\n\s*\},", I18N, flags=re.S)
+    required_keys = [
+        "kanban_only_mine",
+        "kanban_bulk_action",
+        "kanban_nudge_dispatcher",
+        "kanban_stats",
+        "kanban_worker_log",
+        "kanban_block",
+        "kanban_unblock",
+    ]
+    missing = [
+        f"{locale}:{key}"
+        for locale, body in locale_blocks
+        for key in required_keys
+        if re.search(rf"\b{re.escape(key)}\s*:", body) is None
+    ]
+    assert missing == []

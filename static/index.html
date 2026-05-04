@@ -146,6 +146,13 @@
         <select id="kanbanAssigneeFilter" onchange="loadKanban(true)" aria-label="Assignee filter"></select>
         <select id="kanbanTenantFilter" onchange="loadKanban(true)" aria-label="Tenant filter"></select>
         <label class="kanban-check"><input id="kanbanIncludeArchived" type="checkbox" onchange="loadKanban(true)"> <span data-i18n="kanban_include_archived">Include archived</span></label>
+        <label class="kanban-check"><input id="kanbanOnlyMine" type="checkbox" onchange="loadKanban(true)"> <span data-i18n="kanban_only_mine">Only mine</span></label>
+        <div id="kanbanStats" class="kanban-stats" aria-live="polite"></div>
+        <div id="kanbanBulkBar" class="kanban-bulk-bar">
+          <select id="kanbanBulkStatus" aria-label="Bulk status"><option value="">Status</option><option value="ready">Ready</option><option value="running">Running</option><option value="blocked">Blocked</option><option value="done">Done</option><option value="archived">Archived</option></select>
+          <button class="btn secondary" onclick="bulkUpdateKanban()" data-i18n="kanban_bulk_action">Bulk action</button>
+          <button class="btn secondary" onclick="nudgeKanbanDispatcher()" data-i18n="kanban_nudge_dispatcher">Nudge dispatcher</button>
+        </div>
         <div class="kanban-new-task-row">
           <input id="kanbanNewTaskTitle" placeholder="New task" data-i18n-placeholder="kanban_new_task" onkeydown="if(event.key==='Enter')createKanbanTask()">
           <button class="btn secondary" onclick="createKanbanTask()" data-i18n="kanban_new_task">New task</button>
@@ -642,6 +649,9 @@
         <div>
           <div class="main-view-title" data-i18n="kanban_board">Board</div>
           <div class="kanban-readonly" data-i18n="kanban_read_only">Read-only view</div>
+        </div>
+        <div class="main-view-actions">
+          <button class="panel-head-btn" onclick="nudgeKanbanDispatcher()" title="Nudge dispatcher" data-i18n-title="kanban_nudge_dispatcher" aria-label="Nudge dispatcher">▶</button>
         </div>
       </div>
       <div class="kanban-task-preview" id="kanbanTaskPreview" style="display:none"></div>

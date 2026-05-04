@@ -2,6 +2,8 @@ let _currentPanel = 'chat';
 let _renamingAppTitlebar = false;  // guard against re-entrant rename
 let _kanbanBoard = null;
 let _kanbanLatestEventId = 0;
+let _kanbanPollTimer = null;
+let _kanbanCurrentTaskId = null;
 let _skillsData = null; // cached skills list
 let _cronList = null; // cached cron jobs (array)
 let _currentCronDetail = null; // full cron job object
@@ -875,15 +877,26 @@ function _kanbanTaskMeta(task){
 
 function _kanbanCurrentFilters(){
   const q = $('kanbanSearch') ? $('kanbanSearch').value.trim().toLowerCase() : '';
-  const assignee = $('kanbanAssigneeFilter') ? $('kanbanAssigneeFilter').value : '';
-  const tenant = $('kanbanTenantFilter') ? $('kanbanTenantFilter').value : '';
+  const assigneeEl = $('kanbanAssigneeFilter');
+  const tenantEl = $('kanbanTenantFilter');
+  const assignee = assigneeEl ? (assigneeEl.value || assigneeEl.dataset.defaultValue || '') : '';
+  const tenant = tenantEl ? (tenantEl.value || tenantEl.dataset.defaultValue || '') : '';
   const includeArchived = !!($('kanbanIncludeArchived') && $('kanbanIncludeArchived').checked);
-  return {q, assignee, tenant, includeArchived};
+  const onlyMine = !!($('kanbanOnlyMine') && $('kanbanOnlyMine').checked);
+  return {q, assignee, tenant, includeArchived, onlyMine};
 }
+
+function _kanbanApplyConfigDefaults(config){
+  if (!config || _kanbanConfigApplied) return;
+  if ($('kanbanTenantFilter') && config.default_tenant) $('kanbanTenantFilter').dataset.defaultValue = config.default_tenant;
+  if ($('kanbanIncludeArchived') && config.include_archived_by_default === true) $('kanbanIncludeArchived').checked = true;
+  _kanbanConfigApplied = true;
+}
+let _kanbanConfigApplied = false;
 
 function _kanbanSetSelectOptions(el, values, allLabelKey){
   if (!el) return;
-  const current = el.value;
+  const current = el.value || el.dataset.defaultValue || '';
   const opts = [`<option value="">${esc(t(allLabelKey))}</option>`]
     .concat((values || []).map(v => `<option value="${esc(v)}">${esc(v)}</option>`));
   el.innerHTML = opts.join('');
@@ -962,13 +975,17 @@ async function loadKanban(animate){
   const list = $('kanbanList');
   try {
     if (animate && board) board.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:13px">${esc(t('loading'))}</div>`;
+    const config = await api('/api/kanban/config');
+    let assignees = null;
+    try { assignees = await api('/api/kanban/assignees'); } catch(e) { assignees = null; }
+    _kanbanApplyConfigDefaults(config);
     const filters = _kanbanCurrentFilters();
     const params = new URLSearchParams();
     if (filters.assignee) params.set('assignee', filters.assignee);
     if (filters.tenant) params.set('tenant', filters.tenant);
     if (filters.includeArchived) params.set('include_archived', '1');
+    if (filters.onlyMine) params.set('only_mine', '1');
     const path = '/api/kanban/board' + (params.toString() ? '?' + params.toString() : '');
-    const config = await api('/api/kanban/config');
     const data = await api(path);
     if (data && data.changed === false && _kanbanBoard) { _kanbanRenderBoard(); return; }
     _kanbanBoard = data || {columns: []};
@@ -976,8 +993,10 @@ async function loadKanban(animate){
       _kanbanBoard.columns = config.columns.map(name => ({name, tasks: []}));
     }
     _kanbanLatestEventId = Number(_kanbanBoard.latest_event_id || 0);
-    _kanbanSetSelectOptions($('kanbanAssigneeFilter'), _kanbanBoard.assignees, 'kanban_all_assignees');
+    _kanbanSetSelectOptions($('kanbanAssigneeFilter'), _kanbanBoard.assignees || (assignees && assignees.assignees) || (config && config.assignees), 'kanban_all_assignees');
     _kanbanSetSelectOptions($('kanbanTenantFilter'), _kanbanBoard.tenants, 'kanban_all_tenants');
+    await loadKanbanStats();
+    _kanbanStartPolling();
     _kanbanRenderBoard();
   } catch(e) {
     const msg = `${esc(t('kanban_unavailable'))}: ${esc(e.message || e)}`;
@@ -987,6 +1006,76 @@ async function loadKanban(animate){
 }
 
 function filterKanban(){ _kanbanRenderBoard(); }
+
+async function loadKanbanStats(){
+  try {
+    const stats = await api('/api/kanban/stats');
+    const el = $('kanbanStats');
+    if (!el) return;
+    const byStatus = (stats && stats.by_status) || {};
+    const total = Object.values(byStatus).reduce((a, b) => a + Number(b || 0), 0);
+    el.textContent = `${t('kanban_stats')}: ${total}`;
+  } catch(e) { /* stats are best-effort */ }
+}
+
+async function refreshKanbanEvents(){
+  if (_currentPanel !== 'kanban' || !_kanbanLatestEventId) return;
+  try {
+    const eventsEndpoint = '/api/kanban/events';
+    const events = await api(eventsEndpoint + '?since=' + encodeURIComponent(_kanbanLatestEventId));
+    if (events && Array.isArray(events.events) && events.events.length) {
+      _kanbanLatestEventId = Number(events.latest_event_id || events.cursor || _kanbanLatestEventId);
+      await loadKanban(true);
+      if (_kanbanCurrentTaskId && events.events.some(ev => ev.task_id === _kanbanCurrentTaskId)) await loadKanbanTask(_kanbanCurrentTaskId);
+    }
+  } catch(e) { /* polling should not spam toasts */ }
+}
+
+function _kanbanStartPolling(){
+  if (_kanbanPollTimer) return;
+  _kanbanPollTimer = setInterval(refreshKanbanEvents, 30000);
+}
+
+async function nudgeKanbanDispatcher(){
+  try {
+    const dispatchEndpoint = '/api/kanban/dispatch';
+    await api(dispatchEndpoint + '?dry_run=1&max=1', {method: 'POST'});
+    showToast(t('kanban_nudge_dispatcher'));
+    await loadKanban(true);
+  } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
+}
+
+function _kanbanSelectedTaskIds(){
+  const selected = Array.from(document.querySelectorAll('.kanban-card.selected')).map(card => card.dataset.kanbanTaskId).filter(Boolean);
+  return selected.length ? selected : (_kanbanCurrentTaskId ? [_kanbanCurrentTaskId] : []);
+}
+
+async function bulkUpdateKanban(){
+  const ids = _kanbanSelectedTaskIds();
+  const status = $('kanbanBulkStatus') ? $('kanbanBulkStatus').value : '';
+  if (!ids.length || !status) return;
+  try {
+    await api('/api/kanban/tasks/bulk', {method: 'POST', body: JSON.stringify({ids, status})});
+    showToast(t('kanban_bulk_action'));
+    await loadKanban(true);
+  } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
+}
+
+async function blockKanbanTask(taskId){
+  try {
+    await api('/api/kanban/tasks/' + encodeURIComponent(taskId) + '/block', {method: 'POST', body: JSON.stringify({reason: 'blocked from WebUI'})});
+    await loadKanbanTask(taskId);
+    await loadKanban(true);
+  } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
+}
+
+async function unblockKanbanTask(taskId){
+  try {
+    await api('/api/kanban/tasks/' + encodeURIComponent(taskId) + '/unblock', {method: 'POST', body: JSON.stringify({})});
+    await loadKanbanTask(taskId);
+    await loadKanban(true);
+  } catch(e) { showToast(t('kanban_unavailable') + ': ' + (e.message || e), 'error'); }
+}
 
 function _kanbanFormatDetailValue(value){
   if (value === undefined || value === null || value === '') return '';
@@ -1101,7 +1190,7 @@ function _kanbanRenderTaskDetail(data){
   const runs = data.runs || [];
   const statusButtons = ['triage', 'todo', 'ready', 'running', 'blocked', 'done', 'archived'].map(status =>
     `<button class="btn secondary" onclick="updateKanbanTask('${esc(task.id)}',{status:'${status}'})">${esc(_kanbanColumnLabel(status))}</button>`
-  ).join('');
+  ).join('') + `<button class="btn secondary" onclick="blockKanbanTask('${esc(task.id)}')">${esc(t('kanban_block'))}</button><button class="btn secondary" onclick="unblockKanbanTask('${esc(task.id)}')">${esc(t('kanban_unblock'))}</button>`;
   return `<div class="kanban-task-preview-title">${esc(title)}</div>
     <div class="kanban-task-preview-body">${esc(body)}</div>
     ${meta.length ? `<div class="kanban-meta">${esc(meta.join(' · '))}</div>` : ''}
@@ -1111,6 +1200,7 @@ function _kanbanRenderTaskDetail(data){
       ${_kanbanDetailSection('kanban-detail-events', String(t('kanban_events_count')).replace('{0}', events.length), events.map(_kanbanEventHtml).join(''), 'kanban_no_events')}
       ${_kanbanDetailSection('kanban-detail-links', t('kanban_links'), _kanbanLinksHtml(links), 'kanban_empty')}
       ${_kanbanDetailSection('kanban-detail-runs', String(t('kanban_runs_count')).replace('{0}', runs.length), runs.map(_kanbanRunHtml).join(''), 'kanban_no_runs')}
+      ${_kanbanDetailSection('kanban-detail-log', t('kanban_worker_log'), log.content ? `<pre class="kanban-detail-pre">${esc(log.content)}</pre>` : '', 'kanban_empty')}
     </div>
     <div class="kanban-comment-form">
       <textarea id="kanbanCommentInput" rows="2" placeholder="${esc(t('kanban_add_comment'))}"></textarea>
@@ -1122,6 +1212,9 @@ async function loadKanbanTask(taskId){
   if (!taskId) return;
   try {
     const data = await api('/api/kanban/tasks/' + encodeURIComponent(taskId));
+    const logEndpoint = '/api/kanban/tasks/' + encodeURIComponent(taskId) + '/log';
+    try { data.log = await api(logEndpoint + '?tail=65536'); } catch(e) { data.log = {}; }
+    _kanbanCurrentTaskId = taskId;
     const task = data.task || {};
     const title = _kanbanTaskTitle(task);
     const board = $('kanbanBoard');

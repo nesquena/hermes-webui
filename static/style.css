@@ -3163,3 +3163,7 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .kanban-detail-empty{font-size:12px;color:var(--muted);}
 .kanban-detail-links-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;color:var(--muted);}
 .kanban-detail-links-grid code{display:inline-block;margin:4px 4px 0 0;padding:2px 5px;border-radius:5px;background:var(--input-bg);border:1px solid var(--border);color:var(--text);}
+
+.kanban-stats{font-size:12px;color:var(--muted);padding:2px 0}
+.kanban-bulk-bar{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.kanban-bulk-bar select{flex:1;min-width:96px;background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 6px;font-size:12px}

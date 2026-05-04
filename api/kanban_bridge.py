@@ -116,7 +116,17 @@ def _board_payload(parsed):
     tenant = _str_query(parsed, "tenant")
     assignee = _str_query(parsed, "assignee")
     include_archived = _bool_query(parsed, "include_archived", False)
+    only_mine = _bool_query(parsed, "only_mine", False)
     since = _int_query(parsed, "since", None, minimum=0)
+    profile = None
+    if only_mine and not assignee:
+        try:
+            from api.profiles import get_active_profile_name
+
+            profile = get_active_profile_name() or "default"
+        except Exception:
+            profile = "default"
+        assignee = profile
 
     with _conn() as conn:
         latest_event_id = _latest_event_id(conn)
@@ -158,6 +168,8 @@ def _board_payload(parsed):
                 "tenant": tenant,
                 "assignee": assignee,
                 "include_archived": include_archived,
+                "only_mine": only_mine,
+                "profile": profile,
             },
         }
 
@@ -364,7 +376,162 @@ def _events_payload(parsed):
 
 
 def _config_payload():
-    return {"columns": BOARD_COLUMNS, "read_only": True}
+    kb = _kb()
+    try:
+        with _conn() as conn:
+            try:
+                assignees = list(kb.known_assignees(conn))
+            except Exception:
+                assignees = []
+    except Exception:
+        assignees = []
+    try:
+        from hermes_cli.config import load_config
+
+        cfg = load_config() or {}
+    except Exception:
+        cfg = {}
+    k_cfg = ((cfg.get("dashboard") or {}).get("kanban") or {})
+    return {
+        "columns": BOARD_COLUMNS,
+        "assignees": assignees,
+        "default_tenant": k_cfg.get("default_tenant") or "",
+        "lane_by_profile": bool(k_cfg.get("lane_by_profile", True)),
+        "include_archived_by_default": bool(k_cfg.get("include_archived_by_default", False)),
+        "render_markdown": bool(k_cfg.get("render_markdown", True)),
+        "read_only": False,
+    }
+
+
+def _stats_payload():
+    kb = _kb()
+    with _conn() as conn:
+        if hasattr(kb, "board_stats"):
+            return kb.board_stats(conn)
+        rows = conn.execute(
+            "SELECT status, assignee, COUNT(*) AS n FROM tasks WHERE status != 'archived' GROUP BY status, assignee"
+        ).fetchall()
+        by_status = {}
+        by_assignee = {}
+        for row in rows:
+            n = int(row["n"] or 0)
+            by_status[row["status"]] = by_status.get(row["status"], 0) + n
+            assignee = row["assignee"] or "unassigned"
+            by_assignee[assignee] = by_assignee.get(assignee, 0) + n
+        return {"by_status": by_status, "by_assignee": by_assignee}
+
+
+def _assignees_payload():
+    kb = _kb()
+    with _conn() as conn:
+        try:
+            assignees = list(kb.known_assignees(conn))
+        except Exception:
+            rows = conn.execute(
+                "SELECT DISTINCT assignee FROM tasks WHERE assignee IS NOT NULL AND assignee != '' ORDER BY assignee"
+            ).fetchall()
+            assignees = [row["assignee"] for row in rows]
+    return {"assignees": assignees}
+
+
+def _task_log_payload(parsed, task_id: str):
+    kb = _kb()
+    tail = _int_query(parsed, "tail", None, minimum=1, maximum=2_000_000)
+    with _conn() as conn:
+        if not kb.get_task(conn, task_id):
+            return None
+    if not hasattr(kb, "read_worker_log"):
+        return {"task_id": task_id, "path": "", "exists": False, "size_bytes": 0, "content": "", "truncated": False}
+    content = kb.read_worker_log(task_id, tail_bytes=tail)
+    log_path = kb.worker_log_path(task_id) if hasattr(kb, "worker_log_path") else None
+    try:
+        size = log_path.stat().st_size if log_path and log_path.exists() else 0
+    except OSError:
+        size = 0
+    return {
+        "task_id": task_id,
+        "path": str(log_path or ""),
+        "exists": content is not None,
+        "size_bytes": size,
+        "content": content or "",
+        "truncated": bool(tail and size > tail),
+    }
+
+
+def _bulk_tasks_payload(body: dict):
+    ids = [str(i).strip() for i in (body.get("ids") or []) if str(i).strip()]
+    if not ids:
+        raise ValueError("ids is required")
+    results = []
+    kb = _kb()
+    with _conn() as conn:
+        for task_id in ids:
+            entry = {"id": task_id, "ok": True}
+            try:
+                if not kb.get_task(conn, task_id):
+                    entry.update(ok=False, error="not found")
+                    results.append(entry)
+                    continue
+                if body.get("archive"):
+                    if not kb.archive_task(conn, task_id):
+                        entry.update(ok=False, error="archive refused")
+                elif body.get("status") is not None:
+                    _patch_task(conn, task_id, {"status": body.get("status")})
+                if body.get("assignee") is not None:
+                    if not kb.assign_task(conn, task_id, body.get("assignee") or None):
+                        entry.update(ok=False, error="assign refused")
+                if body.get("priority") is not None:
+                    try:
+                        priority = int(body.get("priority"))
+                    except (TypeError, ValueError):
+                        entry.update(ok=False, error="priority must be an integer")
+                    else:
+                        conn.execute("UPDATE tasks SET priority = ? WHERE id = ?", (priority, task_id))
+                        if hasattr(kb, "_append_event"):
+                            kb._append_event(conn, task_id, "reprioritized", {"priority": priority, "source": "webui"})
+            except Exception as exc:
+                entry.update(ok=False, error=str(exc))
+            results.append(entry)
+    return {"results": results, "read_only": False}
+
+
+def _dispatch_payload(parsed):
+    kb = _kb()
+    dry_run = _bool_query(parsed, "dry_run", False)
+    max_spawn = _int_query(parsed, "max", 8, minimum=1, maximum=100)
+    if not hasattr(kb, "dispatch_once"):
+        raise ValueError("dispatcher is unavailable")
+    with _conn() as conn:
+        result = kb.dispatch_once(conn, dry_run=dry_run, max_spawn=max_spawn)
+    if isinstance(result, dict):
+        return result
+    try:
+        return asdict(result)
+    except TypeError:
+        return {"result": str(result)}
+
+
+def _task_action_payload(task_id: str, body: dict, action: str):
+    kb = _kb()
+    task_id = str(task_id or "").strip()
+    if not task_id:
+        raise ValueError("task_id is required")
+    with _conn() as conn:
+        if not kb.get_task(conn, task_id):
+            raise LookupError("task not found")
+        if action == "block":
+            ok = kb.block_task(conn, task_id, reason=body.get("reason") or body.get("block_reason"))
+        elif action == "unblock":
+            if hasattr(kb, "unblock_task"):
+                ok = kb.unblock_task(conn, task_id)
+            else:
+                _patch_task(conn, task_id, {"status": "ready"})
+                ok = True
+        else:
+            raise ValueError(f"invalid action: {action}")
+        if not ok:
+            raise RuntimeError(f"{action} refused")
+        return {"task": _task_dict(kb.get_task(conn, task_id)), "read_only": False}
 
 
 def handle_kanban_get(handler, parsed) -> bool:
@@ -373,8 +540,20 @@ def handle_kanban_get(handler, parsed) -> bool:
         return j(handler, _board_payload(parsed)) or True
     if path == "/api/kanban/config":
         return j(handler, _config_payload()) or True
+    if path == "/api/kanban/stats":
+        return j(handler, _stats_payload()) or True
+    if path == "/api/kanban/assignees":
+        return j(handler, _assignees_payload()) or True
     if path == "/api/kanban/events":
         return j(handler, _events_payload(parsed)) or True
+    if path.startswith(_TASK_PREFIX) and path.endswith("/log"):
+        task_id = unquote(path[len(_TASK_PREFIX):-len("/log")]).strip("/")
+        if not task_id or "/" in task_id:
+            return False
+        payload = _task_log_payload(parsed, task_id)
+        if payload is None:
+            return bad(handler, "task not found", status=404)
+        return j(handler, payload) or True
     if path.startswith(_TASK_PREFIX):
         task_id = unquote(path[len(_TASK_PREFIX):]).strip("/")
         if not task_id or "/" in task_id:
@@ -388,6 +567,10 @@ def handle_kanban_get(handler, parsed) -> bool:
 def handle_kanban_post(handler, parsed, body) -> bool:
     path = parsed.path
     try:
+        if path == "/api/kanban/dispatch":
+            return j(handler, _dispatch_payload(parsed)) or True
+        if path == "/api/kanban/tasks/bulk":
+            return j(handler, _bulk_tasks_payload(body)) or True
         if path == "/api/kanban/tasks":
             return j(handler, _create_task_payload(body)) or True
         if path == "/api/kanban/links":
@@ -397,6 +580,10 @@ def handle_kanban_post(handler, parsed, body) -> bool:
         if path.startswith(_TASK_PREFIX) and path.endswith("/comments"):
             task_id = path[len(_TASK_PREFIX):-len("/comments")].strip("/")
             return j(handler, _comment_payload(task_id, body)) or True
+        for suffix, action in (("/block", "block"), ("/unblock", "unblock")):
+            if path.startswith(_TASK_PREFIX) and path.endswith(suffix):
+                task_id = path[len(_TASK_PREFIX):-len(suffix)].strip("/")
+                return j(handler, _task_action_payload(task_id, body, action)) or True
         if path.startswith(_TASK_PREFIX) and path.endswith("/patch"):
             task_id = path[len(_TASK_PREFIX):-len("/patch")].strip("/")
             return j(handler, _patch_task_payload(task_id, body)) or True
@@ -404,4 +591,6 @@ def handle_kanban_post(handler, parsed, body) -> bool:
         return bad(handler, str(exc), status=404)
     except ValueError as exc:
         return bad(handler, str(exc))
+    except RuntimeError as exc:
+        return bad(handler, str(exc), status=409)
     return False
