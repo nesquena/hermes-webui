@@ -133,11 +133,16 @@
       ? weatherObservation.widget
       : {};
     const weatherPreview = renderWeatherObservation(weatherWidget.metadata || {});
+    const demoSpaceId = space.space_id ? String(space.space_id) : '';
+    const manageLabel = weatherPreview ? 'Manage weather widget' : 'Manage demo widgets';
+    const demoActions = demoSpaceId
+      ? '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="openSpace" data-space-id="'+escapeHtml(demoSpaceId)+'">Open demo Space</button><button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(demoSpaceId)+'">'+escapeHtml(manageLabel)+'</button></div>'
+      : '';
     return '<div class="capy-spaces-card" role="status"><h3>Demo parity smoke passed</h3>' +
       '<div class="capy-spaces-muted">'+escapeHtml(demo)+' · '+escapeHtml(data && data.mode || 'metadata-only-smoke')+'</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(spaceName)+'</strong>' +
       '<div class="capy-spaces-muted">Space ID: '+escapeHtml(space.space_id || '')+' · Widgets: '+widgetCount+' · Persisted widgets: '+persistedWidgetCount+' · Persistence: '+escapeHtml(persistence)+' · Revisions: '+revisionCount+' · Rollback point: '+escapeHtml(rollbackPoint)+'</div>' +
-      extraLine + '</div></div></div>'+weatherPreview+'</div>';
+      extraLine + '</div>'+demoActions+'</div></div>'+weatherPreview+'</div>';
   }
 
   function renderDemoSmokeSuiteResult(data){

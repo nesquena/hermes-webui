@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-04 16:06 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-04 17:14 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the Weather Demo smoke result now surfaces the safe current-weather observation directly in the visible demo-passed card, keeping generated/source/API auth markers out of the DOM. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the Weather Demo smoke result now links directly from the visible smoke-passed card into the persisted demo Space and widget manager, so the metadata-only weather observation can be inspected without returning to the Spaces list. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): link weather smoke to demo widgets`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving `demo_weather_widget` smoke results expose `Open demo Space` and `Manage weather widget` actions for the created demo Space, while non-weather smoke results use a generic `Manage demo widgets` label and still omit hostile `renderer`/`<script>`/API-auth markers from DOM.
+  - Validation at completion before commit: focused weather RED failed because `Open demo Space` was absent; focused research RED failed because the generic manage label was absent. Focused GREEN passed (`2 passed`), Spaces UI JS behavior + demo parity suites passed (`79 passed`), `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, and `git diff --check` passed.
 
 - `feat(spaces): show weather smoke observation result`
   - Added RED/GREEN real-`static/spaces.js` coverage proving `demo_weather_widget` smoke results display Prague observation metadata (`18 °C`, condition, status, summary) directly in the demo-passed card while hostile `renderer`/`<script>`/API-auth markers from the mocked response stay absent from rendered DOM.
