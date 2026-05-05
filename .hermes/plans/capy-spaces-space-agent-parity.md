@@ -9,11 +9,15 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-05 04:45 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-05 05:47 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: installing the Browser Surface demo from the visible Spaces list now leaves a safe status card with direct `Open browser surface` and `Manage browser widgets` actions, continuing the visible demo-vertical work after Weather, Notes, Kanban, Research, and Daily Dashboard. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: installing the Stock Chart demo from the visible Spaces list now leaves a safe status card with direct `Open stock chart` and `Manage stock widgets` actions, continuing the visible demo-vertical work after Weather, Notes, Kanban, Research, Daily Dashboard, and Browser Surface. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): show stock chart install status actions`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving `Install stock chart` posts `{template: "stock"}`, refreshes the Spaces list, prepends a safe `Stock chart installed` status card with direct open/manage actions, and keeps hostile `renderer`/`<script>`/API-auth markers out of DOM.
+  - Validation at completion before commit: focused RED failed because `Stock chart installed` was absent; focused GREEN passed (`1 passed`), Spaces UI JS behavior plus stock template regressions passed (`77 passed`), `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, and `git diff --check` passed. Mock-state screenshot QA captured initial and installed states with empty browser console and a clean DOM leak check.
 
 - `feat(spaces): show browser surface install status actions`
   - Added RED/GREEN real-`static/spaces.js` coverage proving `Install browser surface` posts `{template: "browser"}`, refreshes the Spaces list, prepends a safe `Browser surface installed` status card with direct open/manage actions, and keeps hostile `renderer`/`<script>`/API-auth markers out of DOM.
