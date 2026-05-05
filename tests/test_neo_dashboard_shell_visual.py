@@ -39,6 +39,20 @@ def test_dashboard_sidebar_status_and_vps_present():
     assert 'id="neoSidebarTalkNow"' not in INDEX_HTML
 
 
+def test_dashboard_left_sidebar_matches_reference_spacing():
+    for rule in [
+        "body.dashboard-shell-mode .sidebar{width:220px!important;min-width:220px;max-width:220px;flex:0 0 220px;overflow:hidden;}",
+        ".neo-dashboard-brand{display:flex;align-items:center;gap:10px;padding:16px 20px 28px;border-bottom:0;}",
+        ".neo-dashboard-brand img{width:40px;height:40px;filter:drop-shadow(0 0 10px var(--accent));}",
+        ".neo-dashboard-menu{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;gap:3px;padding:10px;overflow-y:auto;overscroll-behavior:contain;}",
+        ".neo-dashboard-menu-item{display:flex;align-items:center;gap:10px;width:100%;min-height:36px;padding:7px 10px;",
+        ".neo-sidebar-status{margin:0 10px;padding:10px;border:1px solid rgba(0,229,255,.2);",
+        ".neo-sidebar-status p{margin:8px 0 0;font-size:10px;line-height:1.4;color:var(--muted);}",
+        ".neo-vps-card{margin:0 10px;padding:10px 12px;",
+    ]:
+        assert rule in STYLE_CSS
+
+
 def test_neo_sidebar_matches_required_navigation_order_and_targets():
     block = INDEX_HTML.split('class="neo-dashboard-menu"', 1)[1].split('class="neo-dashboard-bottom"', 1)[0]
     found = re.findall(
