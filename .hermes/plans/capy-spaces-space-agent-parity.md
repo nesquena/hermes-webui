@@ -9,11 +9,14 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-05 01:22 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-05 04:45 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: installing the Daily Dashboard demo from the visible Spaces list now leaves a safe status card with direct `Open dashboard demo` and `Manage dashboard widgets` actions, continuing the visible demo-vertical work after Weather, Notes, Kanban, and Research. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: installing the Browser Surface demo from the visible Spaces list now leaves a safe status card with direct `Open browser surface` and `Manage browser widgets` actions, continuing the visible demo-vertical work after Weather, Notes, Kanban, Research, and Daily Dashboard. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): show browser surface install status actions`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving `Install browser surface` posts `{template: "browser"}`, refreshes the Spaces list, prepends a safe `Browser surface installed` status card with direct open/manage actions, and keeps hostile `renderer`/`<script>`/API-auth markers out of DOM.
 
 - `feat(spaces): show dashboard install status actions`
   - Added RED/GREEN real-`static/spaces.js` coverage proving `Install dashboard demo` posts `{template: "dashboard"}`, refreshes the Spaces list, prepends a safe `Dashboard demo installed` status card with direct open/manage actions, and keeps hostile `renderer`/`<script>`/API-auth markers out of DOM.
