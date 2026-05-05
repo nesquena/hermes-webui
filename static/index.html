@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Neo</title>
-<link rel="icon" type="image/svg+xml" href="static/favicon.svg">
+<link rel="icon" type="image/png" sizes="16x16" href="static/favicon-16.png">
 <link rel="icon" type="image/png" sizes="32x32" href="static/favicon-32.png">
 <link rel="shortcut icon" href="static/favicon.ico">
 <link rel="manifest" href="manifest.json" crossorigin="use-credentials">
@@ -338,20 +338,365 @@
       </div>
     </div>
     <div id="mainProjects" class="main-view">
-      <div class="main-view-header">
+      <div class="main-view-header projects-header">
         <div>
           <div class="main-view-title" data-i18n="projects_title">Projetos</div>
           <div class="main-view-subtitle" data-i18n="projects_subtitle">Gerencie e acompanhe o progresso dos seus projetos</div>
         </div>
-        <div class="main-view-actions">
-          <button class="dashboard-terminal-btn" type="button" data-i18n="projects_new">+ Novo Projeto</button>
+        <div class="main-view-actions projects-actions">
+          <div class="projects-view-toggle" role="tablist" aria-label="Projects view">
+            <button type="button" class="projects-view-btn active" data-view="kanban" role="tab" aria-selected="true">
+              <span data-i18n="projects_kanban">Kanban</span>
+            </button>
+            <button type="button" class="projects-view-btn" data-view="list" role="tab" aria-selected="false">
+              <span data-i18n="projects_list">Lista</span>
+            </button>
+          </div>
+          <div class="projects-filters-anchor">
+            <button class="projects-filter-btn" type="button" id="projectsFiltersBtn" aria-expanded="false" aria-haspopup="dialog" aria-controls="projectsFiltersPopover">
+              <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M4 5h16M7 12h10M10 19h4" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/></svg>
+              <span data-i18n="projects_filters">Filtros</span>
+              <span class="projects-filter-btn-badge" id="projectsFiltersBtnBadge" hidden>0</span>
+            </button>
+            <div class="projects-filters-popover" id="projectsFiltersPopover" role="dialog" aria-modal="false" aria-labelledby="projectsFiltersPopoverTitle" hidden>
+              <header class="projects-filters-popover-header">
+                <div class="projects-filters-popover-title">
+                  <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M4 5h16M7 12h10M10 19h4" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/></svg>
+                  <span id="projectsFiltersPopoverTitle" data-i18n="projects_filters">Filtros</span>
+                  <span class="projects-filters-popover-count" id="projectsFiltersPopoverCount" hidden>0</span>
+                </div>
+                <div class="projects-filters-popover-tools">
+                  <button type="button" class="projects-filters-clear" id="projectsFiltersClear" hidden data-i18n="projects_filters_clear_all">Limpar tudo</button>
+                  <button type="button" class="projects-filters-popover-close" id="projectsFiltersPopoverClose" aria-label="Close" data-projects-filters-close>×</button>
+                </div>
+              </header>
+              <div class="projects-filters-search">
+                <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><circle cx="11" cy="11" r="6" stroke="currentColor" stroke-width="2" fill="none"/><path d="M20 20l-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                <input type="search" id="projectsFilterText" data-i18n-placeholder="projects_filter_search_placeholder" placeholder="Buscar tarefa por título, código ou tag…" autocomplete="off">
+                <button type="button" class="projects-filters-search-clear" id="projectsFiltersSearchClear" aria-label="Clear search" hidden>×</button>
+              </div>
+              <div class="projects-filters-grid">
+                <fieldset class="projects-filters-dim" data-filter-dim="status">
+                  <legend data-i18n="projects_filter_dim_status">Status</legend>
+                  <div class="projects-filters-options" id="projectsFilterDimStatus"></div>
+                </fieldset>
+                <fieldset class="projects-filters-dim" data-filter-dim="project_id">
+                  <legend data-i18n="projects_filter_dim_projects">Projetos</legend>
+                  <div class="projects-filters-options" id="projectsFilterDimProjects"></div>
+                </fieldset>
+                <fieldset class="projects-filters-dim" data-filter-dim="priority">
+                  <legend data-i18n="projects_filter_dim_priorities">Prioridades</legend>
+                  <div class="projects-filters-options" id="projectsFilterDimPriorities"></div>
+                </fieldset>
+                <fieldset class="projects-filters-dim" data-filter-dim="source">
+                  <legend data-i18n="projects_filter_dim_sources">Fontes</legend>
+                  <div class="projects-filters-options" id="projectsFilterDimSources"></div>
+                </fieldset>
+                <fieldset class="projects-filters-dim" data-filter-dim="owner">
+                  <legend data-i18n="projects_filter_dim_owners">Responsáveis</legend>
+                  <div class="projects-filters-options" id="projectsFilterDimOwners"></div>
+                </fieldset>
+                <fieldset class="projects-filters-dim" data-filter-dim="due">
+                  <legend data-i18n="projects_filter_due_label">Prazo</legend>
+                  <select class="projects-filter-select" id="projectsFilterDue" aria-label="Due date filter">
+                    <option value="" data-i18n="projects_filter_due_any">Qualquer prazo</option>
+                    <option value="overdue" data-i18n="projects_filter_due_overdue">Atrasadas</option>
+                    <option value="week" data-i18n="projects_filter_due_week">Próximos 7 dias</option>
+                    <option value="none" data-i18n="projects_filter_due_none">Sem prazo</option>
+                  </select>
+                </fieldset>
+              </div>
+              <footer class="projects-filters-popover-footer">
+                <label class="projects-filters-archived-toggle" for="projectsFilterShowArchived">
+                  <input type="checkbox" id="projectsFilterShowArchived">
+                  <span data-i18n="projects_show_archived">Mostrar arquivados</span>
+                </label>
+                <button type="button" class="projects-filters-apply" id="projectsFiltersApply" data-i18n="projects_filters_apply">Aplicar filtros</button>
+              </footer>
+            </div>
+          </div>
+          <button class="projects-new-btn" type="button" id="projectsNewProjectBtn">
+            <span data-i18n="projects_new">+ Novo Projeto</span>
+          </button>
         </div>
       </div>
-      <div class="main-view-body">
-        <div class="neo-placeholder-panel">
-          <div class="main-view-empty-title" data-i18n="projects_kanban">Kanban</div>
-          <div class="main-view-empty-sub" data-i18n="neo_projects_placeholder">O Kanban de 4 colunas entra na Sprint 3. Este link já reserva o painel correto no shell Neo.</div>
+      <div class="projects-status-pills" id="projectsStatusPills" role="toolbar" aria-label="Project status filters">
+        <button type="button" class="projects-pill active" data-status-filter="all">
+          <span class="projects-pill-label" data-i18n="projects_total">Total</span>
+          <span class="projects-pill-count" data-count="all">0</span>
+        </button>
+        <button type="button" class="projects-pill" data-status-filter="backlog">
+          <span class="projects-pill-dot" data-status-dot="backlog"></span>
+          <span class="projects-pill-label" data-i18n="projects_col_backlog">Backlog</span>
+          <span class="projects-pill-count" data-count="backlog">0</span>
+        </button>
+        <button type="button" class="projects-pill" data-status-filter="em_andamento">
+          <span class="projects-pill-dot" data-status-dot="em_andamento"></span>
+          <span class="projects-pill-label" data-i18n="projects_col_in_progress">Em Andamento</span>
+          <span class="projects-pill-count" data-count="em_andamento">0</span>
+        </button>
+        <button type="button" class="projects-pill" data-status-filter="em_revisao">
+          <span class="projects-pill-dot" data-status-dot="em_revisao"></span>
+          <span class="projects-pill-label" data-i18n="projects_col_in_review">Em Revisão</span>
+          <span class="projects-pill-count" data-count="em_revisao">0</span>
+        </button>
+        <button type="button" class="projects-pill" data-status-filter="concluido">
+          <span class="projects-pill-dot" data-status-dot="concluido"></span>
+          <span class="projects-pill-label" data-i18n="projects_col_completed">Concluído</span>
+          <span class="projects-pill-count" data-count="concluido">0</span>
+        </button>
+      </div>
+      <div class="main-view-body projects-body">
+        <div class="projects-empty" id="projectsEmptyState" hidden>
+          <div class="main-view-empty-title" data-i18n="projects_empty_title">Nenhum projeto ainda</div>
+          <div class="main-view-empty-sub" data-i18n="projects_empty_sub">Crie um projeto para começar a organizar tarefas e acompanhar progresso.</div>
+          <button type="button" class="projects-new-btn" id="projectsEmptyCta" data-i18n="projects_new">+ Novo Projeto</button>
         </div>
+        <div class="projects-kanban" id="projectsKanban" data-view="kanban">
+          <div class="kanban-column" data-status="backlog">
+            <header class="kanban-column-header">
+              <span class="kanban-column-title" data-i18n="projects_col_backlog">Backlog</span>
+              <span class="kanban-column-count" data-count="backlog">0</span>
+            </header>
+            <div class="kanban-column-list" data-drop-target="backlog" aria-label="Backlog column"></div>
+            <button type="button" class="kanban-add-task-btn" data-add-status="backlog">
+              <span data-i18n="projects_add_task">+ Adicionar tarefa</span>
+            </button>
+          </div>
+          <div class="kanban-column" data-status="em_andamento">
+            <header class="kanban-column-header">
+              <span class="kanban-column-title" data-i18n="projects_col_in_progress">Em Andamento</span>
+              <span class="kanban-column-count" data-count="em_andamento">0</span>
+            </header>
+            <div class="kanban-column-list" data-drop-target="em_andamento" aria-label="In progress column"></div>
+            <button type="button" class="kanban-add-task-btn" data-add-status="em_andamento">
+              <span data-i18n="projects_add_task">+ Adicionar tarefa</span>
+            </button>
+          </div>
+          <div class="kanban-column" data-status="em_revisao">
+            <header class="kanban-column-header">
+              <span class="kanban-column-title" data-i18n="projects_col_in_review">Em Revisão</span>
+              <span class="kanban-column-count" data-count="em_revisao">0</span>
+            </header>
+            <div class="kanban-column-list" data-drop-target="em_revisao" aria-label="In review column"></div>
+            <button type="button" class="kanban-add-task-btn" data-add-status="em_revisao">
+              <span data-i18n="projects_add_task">+ Adicionar tarefa</span>
+            </button>
+          </div>
+          <div class="kanban-column" data-status="concluido">
+            <header class="kanban-column-header">
+              <span class="kanban-column-title" data-i18n="projects_col_completed">Concluído</span>
+              <span class="kanban-column-count" data-count="concluido">0</span>
+            </header>
+            <div class="kanban-column-list" data-drop-target="concluido" aria-label="Completed column"></div>
+            <button type="button" class="kanban-add-task-btn" data-add-status="concluido">
+              <span data-i18n="projects_add_task">+ Adicionar tarefa</span>
+            </button>
+          </div>
+        </div>
+        <div class="projects-list" id="projectsList" data-view="list" hidden>
+          <div class="projects-list-table-wrap">
+          <table class="projects-list-table" aria-label="Projects task list">
+            <thead>
+              <tr>
+                <th class="projects-list-sortable" data-sort-key="task_id" scope="col" aria-sort="none"><span data-i18n="projects_list_id">ID</span><span class="projects-list-sort-indicator" aria-hidden="true"></span></th>
+                <th class="projects-list-sortable" data-sort-key="title" scope="col" aria-sort="none"><span data-i18n="projects_list_task">Tarefa</span><span class="projects-list-sort-indicator" aria-hidden="true"></span></th>
+                <th class="projects-list-sortable" data-sort-key="project" scope="col" aria-sort="none"><span data-i18n="projects_list_project">Projeto</span><span class="projects-list-sort-indicator" aria-hidden="true"></span></th>
+                <th class="projects-list-sortable" data-sort-key="priority" scope="col" aria-sort="none"><span data-i18n="projects_list_priority">Prioridade</span><span class="projects-list-sort-indicator" aria-hidden="true"></span></th>
+                <th class="projects-list-sortable" data-sort-key="owner" scope="col" aria-sort="none"><span data-i18n="projects_list_owner">Responsável</span><span class="projects-list-sort-indicator" aria-hidden="true"></span></th>
+                <th class="projects-list-sortable" data-sort-key="status" scope="col" aria-sort="none"><span data-i18n="projects_list_status">Status</span><span class="projects-list-sort-indicator" aria-hidden="true"></span></th>
+                <th class="projects-list-sortable" data-sort-key="source" scope="col" aria-sort="none"><span data-i18n="projects_list_source">Fonte</span><span class="projects-list-sort-indicator" aria-hidden="true"></span></th>
+              </tr>
+            </thead>
+            <tbody id="projectsListBody"></tbody>
+          </table>
+          </div>
+          <footer class="projects-list-pager" id="projectsListPager" hidden>
+            <div class="projects-list-pager-info">
+              <span id="projectsListPagerSummary"></span>
+            </div>
+            <div class="projects-list-pager-controls">
+              <label class="projects-list-pager-size">
+                <span data-i18n="projects_list_per_page">Por página</span>
+                <select id="projectsListPageSize" aria-label="Page size">
+                  <option value="10">10</option>
+                  <option value="25" selected>25</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                </select>
+              </label>
+              <div class="projects-list-pager-nav" role="group" aria-label="Pagination">
+                <button type="button" class="projects-list-pager-btn" id="projectsListPagerPrev" aria-label="Previous page">‹</button>
+                <span class="projects-list-pager-page" id="projectsListPagerPage">1 / 1</span>
+                <button type="button" class="projects-list-pager-btn" id="projectsListPagerNext" aria-label="Next page">›</button>
+              </div>
+            </div>
+          </footer>
+        </div>
+      </div>
+    </div>
+
+    <!-- NEO Sprint 5: Project create modal -->
+    <div class="projects-modal" id="projectsProjectModal" hidden role="dialog" aria-modal="true" aria-labelledby="projectsProjectModalTitle">
+      <div class="projects-modal-backdrop" data-projects-modal-close></div>
+      <div class="projects-modal-card">
+        <header class="projects-modal-header">
+          <h2 id="projectsProjectModalTitle" data-i18n="projects_create_title">Novo Projeto</h2>
+          <button type="button" class="projects-modal-close" data-projects-modal-close aria-label="Close">×</button>
+        </header>
+        <form class="projects-modal-form" id="projectsProjectForm" novalidate>
+          <label class="projects-modal-field">
+            <span data-i18n="projects_create_name">Nome</span>
+            <input name="name" type="text" required maxlength="128" autocomplete="off">
+          </label>
+          <label class="projects-modal-field">
+            <span data-i18n="projects_create_description">Descrição</span>
+            <textarea name="description" rows="3" maxlength="1000"></textarea>
+          </label>
+          <div class="projects-modal-row">
+            <label class="projects-modal-field">
+              <span data-i18n="projects_create_domain">Domínio</span>
+              <input name="domain" type="text" maxlength="64" placeholder="projetos">
+            </label>
+            <label class="projects-modal-field projects-modal-field-color">
+              <span data-i18n="projects_create_color">Cor</span>
+              <input name="color" type="color" value="#00E5FF">
+            </label>
+          </div>
+          <label class="projects-modal-field">
+            <span data-i18n="projects_create_default_source">Fonte externa padrão (opcional)</span>
+            <input name="default_source_id" type="text" maxlength="64" placeholder="ex: jira_300, github_brabus">
+          </label>
+          <input type="hidden" name="project_id">
+          <div class="projects-modal-error" data-error-target hidden></div>
+          <footer class="projects-modal-footer">
+            <button type="button" class="projects-modal-btn danger" id="projectsProjectArchiveBtn" data-i18n="projects_archive_project" hidden>Arquivar projeto</button>
+            <div class="projects-modal-footer-spacer"></div>
+            <button type="button" class="projects-modal-btn ghost" data-projects-modal-close data-i18n="cancel">Cancelar</button>
+            <button type="submit" class="projects-modal-btn primary" id="projectsProjectSubmitBtn" data-i18n="projects_create_submit">Criar</button>
+          </footer>
+        </form>
+      </div>
+    </div>
+
+    <!-- NEO Sprint 5: Task create/edit modal -->
+    <div class="projects-modal" id="projectsTaskModal" hidden role="dialog" aria-modal="true" aria-labelledby="projectsTaskModalTitle">
+      <div class="projects-modal-backdrop" data-projects-modal-close></div>
+      <div class="projects-modal-card">
+        <header class="projects-modal-header">
+          <h2 id="projectsTaskModalTitle" data-i18n="projects_task_create_title">Nova Tarefa</h2>
+          <button type="button" class="projects-modal-close" data-projects-modal-close aria-label="Close">×</button>
+        </header>
+        <form class="projects-modal-form" id="projectsTaskForm" novalidate>
+          <input type="hidden" name="task_id">
+          <label class="projects-modal-field">
+            <span data-i18n="projects_task_title">Título</span>
+            <input name="title" type="text" required maxlength="180" autocomplete="off">
+          </label>
+          <div class="projects-modal-row">
+            <label class="projects-modal-field">
+              <span data-i18n="projects_task_project">Projeto</span>
+              <select name="project_id" required></select>
+            </label>
+            <label class="projects-modal-field">
+              <span data-i18n="projects_task_status">Status</span>
+              <select name="status">
+                <option value="backlog" data-i18n="projects_col_backlog">Backlog</option>
+                <option value="em_andamento" data-i18n="projects_col_in_progress">Em Andamento</option>
+                <option value="em_revisao" data-i18n="projects_col_in_review">Em Revisão</option>
+                <option value="concluido" data-i18n="projects_col_completed">Concluído</option>
+              </select>
+            </label>
+          </div>
+          <div class="projects-modal-row">
+            <label class="projects-modal-field">
+              <span data-i18n="projects_task_category">Categoria</span>
+              <select name="category">
+                <option value="Design" data-i18n="projects_category_design">Design</option>
+                <option value="Frontend" data-i18n="projects_category_frontend">Frontend</option>
+                <option value="Backend" data-i18n="projects_category_backend">Backend</option>
+                <option value="Database" data-i18n="projects_category_database">Database</option>
+                <option value="Infra" data-i18n="projects_category_infra">Infra</option>
+                <option value="DevOps" data-i18n="projects_category_devops">DevOps</option>
+                <option value="Docs" data-i18n="projects_category_docs" selected>Docs</option>
+                <option value="QA" data-i18n="projects_category_qa">QA</option>
+                <option value="Segurança" data-i18n="projects_category_security">Segurança</option>
+              </select>
+            </label>
+            <label class="projects-modal-field">
+              <span data-i18n="projects_task_priority">Prioridade</span>
+              <select name="priority">
+                <option value="baixa" data-i18n="projects_priority_low">Baixa</option>
+                <option value="media" data-i18n="projects_priority_medium" selected>Média</option>
+                <option value="alta" data-i18n="projects_priority_high">Alta</option>
+              </select>
+            </label>
+          </div>
+          <div class="projects-modal-row">
+            <label class="projects-modal-field">
+              <span data-i18n="projects_task_owner">Responsável</span>
+              <input name="owner" type="text" maxlength="64" value="jr">
+            </label>
+            <label class="projects-modal-field">
+              <span data-i18n="projects_task_due">Prazo</span>
+              <input name="due_date" type="date">
+            </label>
+          </div>
+          <label class="projects-modal-field">
+            <span data-i18n="projects_task_progress">Progresso (0-100)</span>
+            <input name="progress" type="number" min="0" max="100" step="5" value="0">
+          </label>
+          <fieldset class="projects-modal-fieldset">
+            <legend data-i18n="projects_task_external_ref">Referência externa (opcional)</legend>
+            <div class="projects-modal-row">
+              <label class="projects-modal-field">
+                <span data-i18n="projects_task_ref_type">Tipo</span>
+                <select name="ext_type">
+                  <option value="" data-i18n="projects_task_ref_none">Nenhum</option>
+                  <option value="jira">Jira</option>
+                  <option value="github">GitHub</option>
+                  <option value="obsidian">Obsidian</option>
+                  <option value="local">Local</option>
+                </select>
+              </label>
+              <label class="projects-modal-field">
+                <span data-i18n="projects_task_ref_key">Chave</span>
+                <input name="ext_key" type="text" maxlength="64" placeholder="KAN-123">
+              </label>
+            </div>
+            <label class="projects-modal-field">
+              <span data-i18n="projects_task_ref_url">URL</span>
+              <input name="ext_url" type="url" placeholder="https://…">
+            </label>
+          </fieldset>
+          <label class="projects-modal-field">
+            <span data-i18n="projects_task_description">Descrição</span>
+            <textarea name="description" rows="3" maxlength="2000"></textarea>
+          </label>
+          <fieldset class="projects-modal-fieldset projects-task-refs" id="projectsTaskRefsFieldset" hidden>
+            <legend data-i18n="projects_task_links">Vínculos</legend>
+            <div class="projects-task-refs-group" data-ref-group="sessions" hidden>
+              <span class="projects-task-refs-label" data-i18n="projects_task_refs_sessions">Sessões</span>
+              <div class="projects-task-refs-list" data-ref-list="sessions"></div>
+            </div>
+            <div class="projects-task-refs-group" data-ref-group="github" hidden>
+              <span class="projects-task-refs-label" data-i18n="projects_task_refs_github">GitHub</span>
+              <div class="projects-task-refs-list" data-ref-list="github"></div>
+            </div>
+            <div class="projects-task-refs-group" data-ref-group="obsidian" hidden>
+              <span class="projects-task-refs-label" data-i18n="projects_task_refs_obsidian">Obsidian</span>
+              <div class="projects-task-refs-list" data-ref-list="obsidian"></div>
+            </div>
+            <p class="projects-task-refs-empty" id="projectsTaskRefsEmpty" data-i18n="projects_task_refs_empty">Nenhum vínculo registrado.</p>
+          </fieldset>
+          <div class="projects-modal-error" data-error-target hidden></div>
+          <footer class="projects-modal-footer">
+            <button type="button" class="projects-modal-btn danger" id="projectsTaskArchiveBtn" data-i18n="projects_archive" hidden>Arquivar</button>
+            <div class="projects-modal-footer-spacer"></div>
+            <button type="button" class="projects-modal-btn ghost" data-projects-modal-close data-i18n="cancel">Cancelar</button>
+            <button type="submit" class="projects-modal-btn primary" data-i18n="projects_task_save">Salvar</button>
+          </footer>
+        </form>
       </div>
     </div>
     <div id="mainTodos" class="main-view">
@@ -690,23 +1035,18 @@
     </div>
     <div id="mainTasks" class="main-view">
       <div class="main-view-header">
-        <div class="main-view-title" id="taskDetailTitle"></div>
-        <div class="main-view-actions">
-          <button id="btnRunTaskDetail" class="panel-head-btn" title="Run now" data-i18n-title="cron_run_now" onclick="runCurrentCron()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/></svg></button>
-          <button id="btnPauseTaskDetail" class="panel-head-btn" title="Pause" data-i18n-title="cron_pause" onclick="pauseCurrentCron()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg></button>
-          <button id="btnResumeTaskDetail" class="panel-head-btn" title="Resume" data-i18n-title="cron_resume" onclick="resumeCurrentCron()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/><line x1="22" y1="4" x2="22" y2="20"/></svg></button>
-          <button id="btnEditTaskDetail" class="panel-head-btn" title="Edit" data-i18n-title="edit" onclick="editCurrentCron()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
-          <button id="btnDuplicateTaskDetail" class="panel-head-btn" title="Duplicate" data-i18n-title="cron_duplicate" onclick="duplicateCurrentCron()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
-          <button id="btnDeleteTaskDetail" class="panel-head-btn" title="Delete" data-i18n-title="delete_title" onclick="deleteCurrentCron()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
-          <button id="btnCancelTaskDetail" class="panel-head-btn" title="Cancel" data-i18n-title="cancel" onclick="cancelCronForm()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
-          <button id="btnSaveTaskDetail" class="panel-head-btn primary" title="Save" data-i18n-title="save" onclick="saveCronForm()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></button>
-        </div>
+        <div class="main-view-title" id="taskDetailTitle" data-i18n="tab_automation">Automação</div>
+        <div class="main-view-actions"></div>
       </div>
-      <div class="main-view-body" id="taskDetailBody" style="display:none"></div>
-      <div class="main-view-empty" id="taskDetailEmpty">
-        <svg class="main-view-empty-icon" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-        <div class="main-view-empty-title" data-i18n="tasks_empty_title">Select a scheduled job</div>
-        <div class="main-view-empty-sub" data-i18n="tasks_empty_sub">Pick a job from the sidebar to view its details and runs, or create a new one.</div>
+      <div class="main-view-body">
+        <div class="neo-development-panel">
+          <div class="neo-development-badge" data-i18n="development_badge">Em desenvolvimento</div>
+          <svg class="main-view-empty-icon" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v4"/><path d="M12 17v4"/><path d="M3 12h4"/><path d="M17 12h4"/><path d="m5.6 5.6 2.8 2.8"/><path d="m15.6 15.6 2.8 2.8"/><path d="m18.4 5.6-2.8 2.8"/><path d="m8.4 15.6-2.8 2.8"/></svg>
+          <div class="main-view-empty-title" data-i18n="automation_development_title">Automação está sendo migrada</div>
+          <div class="main-view-empty-sub" data-i18n="automation_development_sub">Este painel ainda não foi adaptado ao shell Neo. Mantivemos você dentro da nova interface enquanto a experiência final fica pronta.</div>
+          <div class="neo-development-note" data-i18n="automation_development_note">Padrão adotado: rotas em progresso permanecem navegáveis, sinalizadas e sem redirecionar para experiências legadas.</div>
+          <button class="dashboard-terminal-btn" type="button" onclick="switchPanel('dashboard')" data-i18n="back_to_dashboard">Voltar ao Dashboard</button>
+        </div>
       </div>
     </div>
     <div id="mainWorkspaces" class="main-view">
@@ -1161,6 +1501,7 @@
 <script src="static/commands.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/messages.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/dashboard.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/kanban.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/boot.js?v=__WEBUI_VERSION__" defer></script>

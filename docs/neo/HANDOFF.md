@@ -30,7 +30,7 @@ Todas as edições em arquivos upstream estão marcadas com comentário `// NEO:
 | **HU-02.1** | 🟡 **interrompida** — i18n.js já tem locale `pt` (linha 4577–5226) com 623 chaves; `en` tem 698; **faltam 151 chaves no `pt`** | (1) Adicionar bloco `'pt-BR': { ...LOCALES.pt, /* 151 keys traduzidas */ }` logo após o bloco `pt`. Lista em [`_pt-BR-missing-keys.txt`](./_pt-BR-missing-keys.txt). (2) Ler valores em `en` para cada chave faltante e traduzir para PT-BR. (3) Adicionar `'pt-BR'` ao seletor de Settings em `panels.js`/`index.html`. (4) Resolver já lida com fallback `pt-BR → pt` (ver `i18n.js:6044`); usuário já vê parcial pt-BR funcionando hoje. |
 | HU-02.2 | 🟡 **estrutura pronta**, falta validar | `HERMES_WEBUI_LOCALE` já lido em `config.py`; `__NEO_DEFAULT_LOCALE__` já injeta no HTML. Após HU-02.1, validar fluxo `localStorage.clear()` + reload → carrega pt-BR sem flicker. |
 | HU-01.2 | 🔵 não iniciada | Logo NEO orb (asset `static/brand/neo-orb.svg` + hook em `boot.js applyBotName()` para trocar SVG quando `_botName` ≠ Hermes). Caduceu hoje em `index.html:65-75` e `:212`. |
-| HU-01.5 | 🔵 não iniciada | Substituir `static/favicon.svg`, `favicon-32.png`, `favicon.ico`, `apple-touch-icon.png`, ajustar `manifest.json`. Depende da arte do orb (HU-01.2). |
+| HU-01.5 | 🔵 não iniciada | Remover favicon SVG ativo; substituir `favicon-16.png`, `favicon-32.png`, `favicon.ico`, `apple-touch-icon.png`, `favicon-192.png`, `favicon-512.png`; ajustar `manifest.json`. Depende da arte do orb (HU-01.2). |
 
 ## Arquivos modificados (estado atual no working tree)
 

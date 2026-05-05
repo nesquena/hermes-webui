@@ -6,14 +6,17 @@ Data: 2026-05-01
 
 Arquivos atualizados/criados:
 
-- `static/favicon.svg`
+- `static/favicon-16.png`
 - `static/favicon-32.png`
+- `static/favicon-192.png`
+- `static/favicon-512.png`
 - `static/favicon.ico`
 - `static/apple-touch-icon.png`
 - `static/manifest.json`
 
 O manifest agora declara a identidade `Neo WebUI`, tema cyan `#00E5FF` e
-inclui o Apple touch icon.
+inclui apenas ícones raster derivados de `static/brand/neo-ico.png`; o favicon
+SVG foi removido para evitar que o navegador priorize o asset vetorial antigo.
 
 ## Validação
 

@@ -24,8 +24,11 @@ const SHELL_ASSETS = [
   './static/workspace.js',
   './static/terminal.js',
   './static/onboarding.js',
-  './static/favicon.svg',
+  './static/favicon-16.png',
   './static/favicon-32.png',
+  './static/favicon-192.png',
+  './static/favicon-512.png',
+  './static/apple-touch-icon.png',
   './manifest.json',
 ];
 

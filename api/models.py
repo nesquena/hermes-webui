@@ -877,17 +877,50 @@ def title_from(messages, fallback: str='Untitled'):
 
 # ── Project helpers ──────────────────────────────────────────────────────────
 
+# NEO Sprint 5: projects.json migrated from a flat list to a v2 dict shape
+# ({schema_version, projects, tasks, sources, activity}). These helpers keep
+# legacy callers (ensure_cron_project, /api/projects/* upstream routes) working
+# transparently against either layout.
+
 def load_projects() -> list:
-    """Load project list from disk. Returns list of project dicts."""
+    """Load project list from disk. Returns list of project dicts.
+
+    Tolerates both the legacy flat-list layout and the Neo v2 dict layout,
+    always returning a flat list of project dicts to upstream callers.
+    """
     if not PROJECTS_FILE.exists():
         return []
     try:
-        return json.loads(PROJECTS_FILE.read_text(encoding='utf-8'))
+        raw = json.loads(PROJECTS_FILE.read_text(encoding='utf-8'))
     except Exception:
         return []
+    if isinstance(raw, list):
+        return raw
+    if isinstance(raw, dict):
+        projects = raw.get('projects')
+        return projects if isinstance(projects, list) else []
+    return []
 
 def save_projects(projects) -> None:
-    """Write project list to disk."""
+    """Write project list to disk, preserving v2 sidecars when present.
+
+    When projects.json already follows the v2 shape (i.e. it has tasks/sources/
+    activity siblings), delegate to api.projects so we never silently drop the
+    new fields. Otherwise keep the legacy flat-list layout for backward compat.
+    """
+    raw = None
+    if PROJECTS_FILE.exists():
+        try:
+            raw = json.loads(PROJECTS_FILE.read_text(encoding='utf-8'))
+        except Exception:
+            raw = None
+    if isinstance(raw, dict) and ('schema_version' in raw or 'tasks' in raw or 'sources' in raw):
+        try:
+            from api.projects import legacy_save_project_list
+            legacy_save_project_list(projects)
+            return
+        except Exception:
+            logger.debug("v2 legacy_save_project_list failed; falling back to flat list write")
     PROJECTS_FILE.write_text(json.dumps(projects, ensure_ascii=False, indent=2), encoding='utf-8')
 
 

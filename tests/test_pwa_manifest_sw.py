@@ -43,7 +43,7 @@ class TestManifest:
             if src.startswith("http"):
                 continue  # external icon, skip
             # Paths are relative to the app root (where manifest is served)
-            # 'static/favicon.svg' or './static/favicon.svg' both valid
+            # 'static/favicon-32.png' or './static/favicon-32.png' both valid
             clean = src.lstrip("./")
             p = ROOT / clean
             assert p.exists(), f"manifest.json references missing icon: {src}"

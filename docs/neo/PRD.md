@@ -13,8 +13,9 @@
 Transformar o Hermes WebUI em uma interface web personalizada do **Neo**, agente
 pessoal/executivo de Júnior Melo. A interface é composta por **3 páginas
 principais** — **Dashboard** (chat + hero + KPIs + ações rápidas), **Projetos**
-(Kanban full-page com 4 colunas) e **Finanças** (KPIs + gráficos SVG +
-transações) — unificadas por uma **sidebar fixa de 240px** com 9 itens de
+(command center local-first com Kanban + Lista para tarefas de projetos e
+referências externas) e **Finanças** (KPIs + gráficos SVG + transações) —
+unificadas por uma **sidebar fixa de 240px** com 9 itens de
 navegação e uma **topbar contextual** com status da VPS em tempo real.
 
 A identidade visual segue o skin "neo" (paleta cyan/azul-neon escuro,
@@ -53,10 +54,13 @@ subagentes futuro).
 2. **Foco em projeto.** Abrir um projeto no Kanban (ex: Brabus, FinanPy,
    Obreiro Virtual), ver tasks por coluna (Em Andamento / Em Revisão /
    Concluído), conversar com o Neo nesse contexto.
-3. **Delegação visual (futuro).** Ver subagentes que o Neo está orquestrando
+3. **Operação de projeto.** Pedir ao Neo no chat para implementar algo em um
+   projeto, acompanhar a tarefa no painel Projetos e, em sprint futura, criar
+   ou sincronizar a KAN/issue no Jira correto.
+4. **Delegação visual (futuro).** Ver subagentes que o Neo está orquestrando
    em paralelo, com domínio, profile, status — análogo à proposta do
    `pixel-agents` (https://github.com/pablodelucca/pixel-agents).
-4. **Operação rápida.** Salvar uma nota no vault Obsidian, abrir terminal,
+5. **Operação rápida.** Salvar uma nota no vault Obsidian, abrir terminal,
    executar uma skill — tudo sem sair da WebUI.
 
 ---
@@ -93,7 +97,7 @@ Júnior, falta:
 |---|---|---|
 | O1 | Rebrand completo Hermes → Neo, sem regredir capacidades | Suíte `pytest tests/` continua passando (3309 testes); 0 referências a "Hermes" no chrome visível ao usuário (logo, título, placeholder, notificações) |
 | O2 | Dashboard executivo funcional como tela inicial | Tempo até primeira ação útil ≤ 3s após login; cards exibem dados reais (sessões, cron, projetos) com auto-refresh |
-| O3 | Kanban de projetos com 4 colunas integrado a sessões e tasks | Drag-and-drop persistido server-side; 4 colunas (Backlog / Em Andamento / Em Revisão / Concluído); cards com chips de categoria/prioridade e barra de progresso |
+| O3 | Command Center de projetos com Kanban + Lista integrado a sessões, tarefas e refs externas | Drag-and-drop persistido server-side; 4 colunas (Backlog / Em Andamento / Em Revisão / Concluído); Lista agrupada por status; filtros por projeto/status/prioridade/fonte/responsável/data; tasks com `external_ref` preparado para Jira/GitHub/Obsidian |
 | O4 | Localização pt-BR completa | 100% das chaves do `i18n.js` traduzidas para `pt-BR`; lint de paridade de chaves passa |
 | O5 | Manutenibilidade do fork preservada | Merge upstream `nesquena/hermes-webui` em < 30 min para releases minor; conflitos isolados a arquivos Neo-only |
 | O6 | Skin "neo" como tema oficial e default no ambiente Neo | `HERMES_WEBUI_DEFAULT_SKIN=neo` ativa skin sem flicker; alternar skin em `/skin neo` funciona |
@@ -129,9 +133,10 @@ Júnior, falta:
    Terminal SSH, busca, notificações, admin dropdown.
 5. **Página Dashboard** (chat central SSE + hero avatar holográfico + KPIs
    com deltas + ações rápidas grid 2×3).
-6. **Página Projetos (Kanban full-page)** com **4 colunas** (Backlog / Em
-   Andamento / Em Revisão / Concluído), status pills, cards com chips de
-   categoria/prioridade e barra de progresso, drag-and-drop.
+6. **Página Projetos (Command Center local-first)** com **Kanban de 4 colunas**
+   (Backlog / Em Andamento / Em Revisão / Concluído), vista Lista, filtros
+   operacionais, cards com chips de categoria/prioridade/fonte externa,
+   barra de progresso, drag-and-drop e persistência local com `external_ref`.
 7. **Página Finanças (shell visual)** com 4 KPI cards (Receitas / Despesas /
    Saldo Líquido / Investimentos), gráfico de linha SVG vanilla, donut de
    gastos por categoria, coluna lateral (Orçamentos / Transações Recentes /
@@ -147,7 +152,10 @@ Júnior, falta:
     prova de conceito de custo de runtime.
 11. **Backend financeiro real** — integração com FinanPy API, OFX import,
     sincronização de bancos.
-12. **Refinamentos** identificados em homologação.
+12. **Sincronização Jira / fontes externas** — múltiplos Jiras, criação de KAN
+    a partir do chat, importação de issues, sync de status, refs GitHub e
+    Obsidian.
+13. **Refinamentos** identificados em homologação.
 
 ### Out-of-scope (esta iniciativa)
 
@@ -170,10 +178,10 @@ Júnior, falta:
 | RF-03 | Locale pt-BR disponível e selecionável; chaves cobrem 100% do que o `en` cobre hoje | P0 |
 | RF-04 | Painel "Dashboard" carrega como tela inicial quando `?panel=dashboard` ou quando `settings.default_panel="dashboard"` | P0 |
 | RF-05 | Dashboard exibe: chat central (mesmo SSE da sessão ativa), hero avatar holográfico, 4 KPI cards com deltas (Projetos Ativos / Tarefas em Andamento / Concluídas / Agentes Online), ações rápidas grid 2×3 (6 botões). O chat do Dashboard deve preservar o composer completo do Hermes WebUI, incluindo anexos, microfone/voz quando disponível, seletor de profile, workspace, modelo configurado, reasoning/effort e demais controles atuais do rodapé do chat | P0 |
-| RF-06 | Painel "Projetos" exibe um Kanban full-page com **4 colunas**: `backlog`, `em_andamento`, `em_revisao`, `concluido` | P0 |
-| RF-07 | Cada card de projeto exibe: título, chip de categoria (Design/Frontend/Backend/Database/Infra/DevOps/Docs/QA/Segurança), chip de prioridade (Baixa/Média/Alta), barra de progresso com percentual | P0 |
-| RF-08 | Drag-and-drop entre colunas atualiza status e persiste via `POST /api/projects/{id}` com `{ status: "backlog|em_andamento|em_revisao|concluido" }` | P0 |
-| RF-09 | Criar/editar/arquivar projeto via UI; um projeto pode ser vinculado a sessões existentes via `session.project_id` (campo já presente em `models.py`) | P1 |
+| RF-06 | Painel "Projetos" exibe Kanban full-page com **4 colunas**: `backlog`, `em_andamento`, `em_revisao`, `concluido`, e vista Lista agrupada por status | P0 |
+| RF-07 | Cada card de tarefa exibe: título, chip de categoria (Design/Frontend/Backend/Database/Infra/DevOps/Docs/QA/Segurança), chip de prioridade (Baixa/Média/Alta), fonte externa quando houver, barra de progresso com percentual | P0 |
+| RF-08 | Drag-and-drop entre colunas atualiza status da tarefa e persiste via `PATCH /api/project-tasks/{task_id}` com `{ status: "backlog|em_andamento|em_revisao|concluido" }` | P0 |
+| RF-09 | Criar/editar/arquivar projeto e tarefa via UI; projeto/tarefa pode ser vinculado a sessões existentes via `session.project_id` e refs locais | P1 |
 | RF-10 | Locale pt-BR cobre Dashboard, Kanban e Finanças (chaves novas) | P0 |
 | RF-11 | Painel Agentes (BACKLOG): rota `/api/agents/active` enumera subagentes ativos pelo runtime; UI lista cards animados estilo "pixel-agents" | P2 |
 | RF-12 | Sidebar fixa (240px) com 9 itens de navegação (Dashboard, Projetos, Tarefas, Pessoal, Finanças, Agentes, Skills, Automação, Configurações), card de status do Neo com botão "Conversar agora", recursos VPS (CPU/RAM/Disco/Rede com barras de progresso, poll 30s via `GET /api/health/vps`), footer com links Documentação/Suporte | P0 |
@@ -182,6 +190,7 @@ Júnior, falta:
 | RF-15 | Persistência financeira em `~/.hermes/webui/finance.json` (Neo-only); endpoints `GET/POST /api/finance/*` | P0 |
 | RF-16 | Barra de status (pills) na página Projetos com contadores clicáveis: Total, Backlog, Em Andamento, Revisão, Concluído | P0 |
 | RF-17 | Avatar humanoide Neo em SVG (wireframe holográfico cyan) com 3 variantes: hero (240×220), mark (40×40), mono (favicon). Animações CSS: hover-float 4s, pulse-glow 3s | P0 |
+| RF-18 | Tarefas de projeto persistem `external_ref` opcional (`type`, `source_id`, `key`, `url`, `status`, `synced_at`) sem chamar APIs externas na Sprint 5 | P0 |
 
 ### Não-funcionais (RNF)
 

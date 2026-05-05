@@ -478,10 +478,13 @@ Cada botão:
 
 ---
 
-## 7. Página **Projetos** (Kanban full-page)
+## 7. Página **Projetos** (Command Center)
 
 Página dedicada acessada via sidebar → Projetos. Substitui o que era o "bloco
-Kanban" do Dashboard na v1/v2 do spec.
+Kanban" do Dashboard na v1/v2 do spec. A página é uma central de comando para
+acompanhar projetos e tarefas operados pelo Neo, com referências a Jira, GitHub,
+Obsidian e sessões. Não é um clone de Jira: o MVP é local-first e guarda
+`external_ref`, mas não sincroniza com APIs externas na Sprint 5.
 
 ### 7.1. Header da página
 
@@ -491,7 +494,7 @@ Bloco de 80px de altura, padding bottom 16px, border-bottom `--border` (margin-b
 - **Subtítulo** "Gerencie e acompanhe todos os seus projetos" 13px/400 `--muted`
 - À direita (alinhado verticalmente com o título):
   - Botão **Filtros** — outline `--border`, padding 8px 12px, ícone `sliders-horizontal` 14x14 + label 12px/500 `--text`. Clique: abre dropdown de filtros (categoria, prioridade, prazo, atribuído a).
-  - Dropdown **Kanban ▾** — outline `--border`, padding 8px 12px. Alterna entre vistas: Kanban (default), Lista, Timeline (placeholder).
+  - Segmented control **Kanban / Lista** — outline `--border`, padding 8px 12px. Kanban é default; Lista usa o mesmo dataset em tabela agrupada por status.
   - Botão **+ Novo Projeto** — primário sólido `--accent`, padding 8px 14px, texto `--bg` 12px/600. Clique: abre modal de criar projeto.
 
 ### 7.2. Barra de status (pills)
@@ -506,6 +509,20 @@ Cada pill:
 - "Concluído **12**" — bullet verde 8x8 + label + número
 
 Pills são **clicáveis** e funcionam como atalho de filtro (clique em "Em Andamento" → mostra só essa coluna em destaque, ou filtra a vista de lista).
+
+### 7.2.1. Filtros
+
+O botão **Filtros** abre dropdown/painel compacto com:
+
+- texto livre (busca por título, ID externo e descrição)
+- projeto
+- status
+- prioridade
+- fonte externa (`local`, `jira`, `github`, `obsidian`)
+- responsável
+- data/prazo
+
+Filtros afetam Kanban e Lista com o mesmo estado.
 
 ### 7.3. Kanban — 4 colunas equilibradas
 
@@ -526,7 +543,7 @@ Grid `repeat(4, 1fr)` com gap 16px, margin-top 16px.
 - Em Revisão → `#2196F3` (blue)
 - Concluído → `#22C55E` (green)
 
-### 7.4. Card de projeto (Kanban)
+### 7.4. Card de tarefa (Kanban)
 
 Container: padding 12px, fundo `--surface-2`, border `--border`, border-radius 10px. Hover: `transform: translateY(-2px)`, box-shadow `0 4px 12px rgba(0,229,255,0.12)`, borda `--accent-bg-strong`.
 
@@ -538,13 +555,14 @@ Estrutura interna (vertical, gap 8px):
      padding 2px 8px, border-radius 4px, 10px/500, cor de texto e fundo conforme tabela §2.
    - Chip de **prioridade** (Baixa / Média / Alta) ou **status concluído** (✓ Concluído):
      mesmo estilo, cores conforme tabela §2.
+   - Chip de **fonte externa** quando houver `external_ref`, por exemplo `Jira KAN-123`, discreto e clicável no detalhe.
 3. **Barra de progresso** (somente colunas que não são Concluído):
    - Track: 4px height, fundo `--border`, border-radius 2px
    - Fill: cor da coluna (amber / blue), com percentual à direita 10px/500 `--muted` ("75%")
 4. **Para coluna Concluído:** **sem** barra de progresso. A chip de status verde "✓ Concluído" basta.
 5. **(Opcional)** Avatares 16x16 dos colaboradores no canto inferior direito quando houver.
 
-**Cards de exemplo (mockup):**
+**Cards de exemplo (mockup visual; não usar como dados reais persistidos):**
 
 | Coluna | Cards |
 |---|---|
@@ -553,19 +571,47 @@ Estrutura interna (vertical, gap 8px):
 | **Revisão** | • Componente de UI (Design / Média) — 90% • Correção de Bugs (Backend / Alta) — 80% • Testes Automatizados (QA / Média) — 70% |
 | **Concluído** | • Setup do Projeto (Infra / ✓ Concluído) • Modelagem do Banco (Database / ✓ Concluído) • Configuração de CI/CD (DevOps / ✓ Concluído) |
 
-### 7.5. Drag-and-drop (RF-08)
+### 7.5. Vista Lista
+
+Tabela densa agrupada por status, aderente ao mockup `neo_projetos_lista.png`.
+
+Colunas:
+
+- checkbox de seleção
+- ID local/externo (`PRJ-001`, `KAN-123`, etc.)
+- tarefa + chip de categoria/fonte
+- prioridade
+- responsável
+- estado
+
+Grupos: Backlog, Em Andamento, Revisão, Concluído. Cada grupo mostra contagem e
+usa bullet da cor do status. A lista respeita os mesmos filtros do Kanban.
+
+### 7.6. Drag-and-drop (RF-08)
 
 - Card arrastável muda cursor para `grab` no hover do título
 - Durante drag: card ganha `box-shadow: 0 8px 24px rgba(0,229,255,0.25)`, leve `rotate: 2deg`, opacidade 0.9
 - Coluna alvo destaca borda inteira em `--accent` enquanto o card está sobre ela
-- Drop persiste via `POST /api/projects/{id}` com `{ status: "em_andamento" }` (status: `backlog | em_andamento | em_revisao | concluido`)
+- Drop persiste via `PATCH /api/project-tasks/{task_id}` com `{ status: "em_andamento" }` (status: `backlog | em_andamento | em_revisao | concluido`)
 
-### 7.6. Estado vazio
+### 7.7. Estado vazio
 
 Quando não há projetos:
 - Ilustração centralizada do orb com mensagem "Nenhum projeto ainda."
 - Sub-linha "Crie seu primeiro projeto para começar." 12px `--muted`
 - CTA centralizado: botão **+ Novo Projeto** (mesmo estilo da §7.1)
+
+### 7.8. Referências externas
+
+Cada tarefa pode guardar:
+
+- `external_ref`: origem principal (`jira`, `github`, `obsidian`, `local`), chave, URL, status remoto e `synced_at`.
+- `refs.github`: issues, PRs, branches ou commits relacionados.
+- `refs.obsidian`: notas do vault relacionadas.
+- `refs.sessions`: sessões Neo relacionadas.
+
+Na Sprint 5 esses campos são persistidos e exibidos; sincronização automática
+fica para o épico futuro de fontes externas.
 
 ---
 
@@ -830,10 +876,11 @@ Manter `stroke-linecap=round`, `stroke-linejoin=round`.
 | Página Projetos — header | **NOVO** página dedicada | HU-04.1 |
 | Página Projetos — Kanban 4 colunas | **NOVO** com `backlog` adicionado | HU-04.2 |
 | Página Projetos — modal de criação | **NOVO** modal + persistência inicial | HU-04.3 |
-| Página Projetos — drag-and-drop entre colunas | persistir via `POST /api/projects/{id}` | HU-04.4 |
-| Página Projetos — card com chips e progresso | **NOVO** componente | HU-04.5 |
-| Página Projetos — status pills | contadores clicáveis Total / Backlog / Em Andamento / Revisão / Concluído | HU-04.6 |
-| Página Projetos — adicionar tarefa por coluna | botão `+ Adicionar tarefa` no footer de cada coluna | HU-04.7 |
+| Página Projetos — criar tarefa com refs | **NOVO** tarefa local-first com `external_ref` opcional | HU-04.4 |
+| Página Projetos — drag-and-drop entre colunas | persistir via `PATCH /api/project-tasks/{task_id}` | HU-04.5 |
+| Página Projetos — card com chips e progresso | **NOVO** componente | HU-04.6 |
+| Página Projetos — status pills | contadores clicáveis Total / Backlog / Em Andamento / Revisão / Concluído | HU-04.7 |
+| Página Projetos — Lista e filtros | **NOVO** view lista agrupada por status + filtros operacionais | HU-04.8 |
 | Página Finanças — header + KPI cards | **NOVO** página dedicada | HU-06.1, HU-06.2 |
 | Página Finanças — gráfico de linha (SVG vanilla) | **NOVO** módulo `static/finance.js` | HU-06.3 |
 | Página Finanças — Gastos por Categoria (donut) | **NOVO** | HU-06.4 |

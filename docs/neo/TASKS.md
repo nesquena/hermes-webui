@@ -5,7 +5,7 @@
 > Este arquivo acompanha execução, evidências e Definition of Done; mudanças
 > contratuais devem ser feitas primeiro no PRD/Backlog/Design Spec.
 
-**Atualizado em:** 2026-05-02
+**Atualizado em:** 2026-05-05
 **Versão alvo MVP:** `neo-webui-v0.1` ao final da Sprint 6
 **Branch de desenvolvimento atual:** `develop`
 **Branch de produção:** `main`
@@ -34,15 +34,15 @@
 | Sprint 1 | Rebrand visual/textual + locale pt-BR | 11 | 10 + 1 parcial | 0 | aguardando evidências/homologação |
 | Sprint 2 | Dashboard + sidebar/topbar Neo | 11 | 11 | 11 | concluída |
 | Sprint 3 | Configurações Neo (embutidas no dashboard) | 6 | 6 | 6 | concluída |
-| Sprint 4 | Skills Neo (embutidas no dashboard) | 3 | 0 | 0 | disponível |
-| Sprint 5 | Projetos/Kanban 4 colunas | 10 | 0 | 0 | aguardando Sprint 4 |
+| Sprint 4 | Skills Neo (embutidas no dashboard) | 3 | 3 | 3 | concluída |
+| Sprint 5 | Projetos Command Center | 10 | 8 + 2 parciais | 8 | implementada; P1 mobile/refs parcial |
 | Sprint 6 | Ações rápidas + Finanças shell visual | 13 | 0 | 0 | aguardando Sprint 5 |
 | Transversal | Qualidade, testes e evidências | 5 | 2 parciais | 0 | em andamento contínuo |
 | Sprint 7+ | Painel Agentes futuro | 5 | 0 | 0 | depende de PoC |
 
 ### Estado atual do worktree
 
-Estado registrado em 2026-05-02:
+Estado registrado em 2026-05-05:
 
 - Branch local ativa: `develop`, rastreando `origin/develop`.
 - Sprint 1 foi incorporada em `develop` por fast-forward a partir de
@@ -71,6 +71,21 @@ Estado registrado em 2026-05-02:
   HU-03.9, HU-03.10 e HU-03.11 foram homologadas e fechadas por DoD em
   2026-05-02; Sprint 2 encerrada com 11/11 HUs concluídas. Screenshots ficam
   como evidência complementar pendente de release.
+- Sprint 4 foi reconciliada documentalmente em 2026-05-05: `skills` já está
+  em `NEO_SHELL_PANELS`, `mountDashboardSkills()`/`restoreDashboardSkills()`
+  existem em `static/dashboard.js`, o painel `#panelSkills` é movido para
+  `#mainSkills` no dashboard shell, e `tests/test_neo_dashboard_skills.py`
+  cobre o contrato estático.
+- Validação de fechamento da Sprint 4 em 2026-05-05:
+  - `node --check static/dashboard.js`
+  - `node --check static/panels.js`
+  - `node --check static/i18n.js`
+  - `.venv/bin/pytest tests/test_neo_dashboard_skills.py -q`
+  - `.venv/bin/pytest tests/test_neo_font_ui_inter.py tests/test_neo_dashboard_kpis.py tests/test_neo_skin.py tests/test_neo_branding_assets.py tests/test_neo_pt_br_toasts.py tests/test_neo_dashboard_sprint2.py tests/test_neo_skin_localstorage_persistence.py tests/test_neo_hero_greeting.py tests/test_neo_dashboard_chat_embed.py tests/test_neo_dashboard_shell_visual.py tests/test_neo_dashboard_quick_actions.py tests/test_locale_parity_pt_br.py tests/test_neo_dashboard_admin_personal.py tests/test_neo_health_runtime.py tests/test_neo_dashboard_settings.py tests/test_neo_dashboard_skills.py -q`
+    (`109 passed in 2.47s`)
+- Coleta completa em 2026-05-05: `.venv/bin/pytest tests/ --collect-only -q`
+  encontrou `3601 tests collected`; ambiente local sem `hermes-agent`, então
+  25 testes dependentes do agente seriam pulados numa execução completa.
 
 ---
 
@@ -81,8 +96,8 @@ Estado registrado em 2026-05-02:
 | I-01 | O `TASKS.md` anterior dizia Sprint 4 = "Ações rápidas + Polimento" e Sprint 5+ = Agentes, mas o PRD/Backlog colocam **Finanças** como EP-06 P0 na Sprint 4. | Sprint 4 passa a conter EP-05 + EP-06. Agentes fica Sprint 5+ / P2. |
 | I-02 | O `TASKS.md` anterior especificava Kanban com **3 colunas**; PRD, Backlog e Design Spec exigem **4 colunas**: Backlog / Em Andamento / Em Revisão / Concluído. | Todas as tasks de Projetos foram atualizadas para 4 colunas e status `backlog`. |
 | I-03 | O handoff marca HU-01.1, HU-01.3, HU-01.4 e HU-01.6 como validadas visualmente, mas PRD §10 exige testes, evidências e homologação para concluir. | Essas HUs ficam como **implementadas sem DoD** até evidências/testes serem anexados. |
-| I-04 | `DESIGN-SPEC.md §12` mapeava drag-and-drop de Projetos para `HU-04.7`, mas o Backlog define drag-and-drop como `HU-04.4` e `HU-04.7` como "+ Adicionar tarefa". | Corrigido no Design Spec em 2026-05-01. Este TASKS segue o Backlog: drag-and-drop = HU-04.4; adicionar tarefa = HU-04.7. |
-| I-05 | PRD RF-08 exige `POST /api/projects/{id}`, enquanto o upstream atual já tem rotas `/api/projects/create`, `/rename`, `/delete`. | Implementar rota Neo compatível com RF-08 ou documentar adapter; não reutilizar somente `/rename` para mudança de status. |
+| I-04 | O Backlog original mapeava drag-and-drop como HU-04.4, mas a revisão aprovada em 2026-05-05 adicionou criação de tarefas com `external_ref` antes do drag. | Este TASKS segue o desenho Sprint 5 Command Center: HU-04.4 = criar tarefas com refs; HU-04.5 = drag-and-drop persistido. |
+| I-05 | PRD RF-08 exigia `POST /api/projects/{id}` para status, enquanto o novo modelo separa projeto de tarefa. | Sprint 5 passa a persistir status de tarefa via `PATCH /api/project-tasks/{task_id}`; rotas antigas `/api/projects/create`, `/rename`, `/delete` permanecem como compatibilidade upstream/adapters. |
 | I-06 | PRD RF-15 pede persistência financeira em `finance.json`, enquanto o texto de não-objetivos fala em "backend financeiro real pós-MVP". | Interpretação: `finance.json` + endpoints locais são P0 do MVP; integrações bancárias/FinanPy/OFX são pós-MVP. |
 | I-07 | `DESIGN-SPEC.md §13` listava "Backlog no Kanban" como pendência para atualizar RF-06, mas o PRD já está atualizado com 4 colunas. | Pendência removida do Design Spec em 2026-05-01; PRD/Backlog/TASKS permanecem em 4 colunas. |
 | I-08 | A análise inicial indicava risco de `docs/neo/` ignorado no `.gitignore`. | Resolvido na Sprint 1: `docs/neo/` está versionado e `.gitignore` não ignora a documentação Neo. |
@@ -196,8 +211,11 @@ sem regressão das capacidades upstream.
 
 **Tasks**
 
-- [x] Substituir `static/favicon.svg`.
+- [x] Remover `static/favicon.svg` do favicon ativo.
+- [x] Criar `static/favicon-16.png`.
 - [x] Substituir `static/favicon-32.png`.
+- [x] Criar `static/favicon-192.png`.
+- [x] Criar `static/favicon-512.png`.
 - [x] Substituir `static/favicon.ico`.
 - [x] Criar/atualizar `static/apple-touch-icon.png`.
 - [x] Atualizar `static/manifest.json`.
@@ -501,7 +519,7 @@ Neo, preservando 100% dos handlers, guards e autosave do upstream.
 
 ### HU-08.1 — mountDashboardSettings + interceptação de navegação
 
-**Status:** disponível
+**Status:** concluída
 **Prioridade:** P0
 **Épico:** EP-08
 
@@ -599,170 +617,222 @@ e exibe o painel de skills embutido em layout master-detail: lista à esquerda
 
 ### HU-09.1 — mountDashboardSkills + NEO_SHELL_PANELS
 
-**Status:** disponível
+**Status:** concluída
 **Prioridade:** P0
 **Épico:** EP-09
 
 **Tasks**
 
-- [ ] Adicionar `'skills'` a `NEO_SHELL_PANELS` em `static/panels.js`.
-- [ ] Adicionar chamada `mountDashboardSkills()` no bloco `nextPanel === 'skills'` de `switchPanel()`.
-- [ ] Adicionar chamada `restoreDashboardSkills()` na guard de saída (junto a `restoreDashboardSettings`).
-- [ ] Implementar `mountDashboardSkills()` em `static/dashboard.js`: move `#panelSkills` inteiro para `#mainSkills` como primeiro filho (anchor pattern).
-- [ ] Implementar `restoreDashboardSkills()`: devolve `#panelSkills` à posição original via anchor.
-- [ ] Registrar evidência técnica em `docs/neo/evidencias/HU-09.1/`.
+- [x] Adicionar `'skills'` a `NEO_SHELL_PANELS` em `static/panels.js`.
+- [x] Adicionar chamada `mountDashboardSkills()` no bloco `nextPanel === 'skills'` de `switchPanel()`.
+- [x] Adicionar chamada `restoreDashboardSkills()` na guard de saída (junto a `restoreDashboardSettings`).
+- [x] Implementar `mountDashboardSkills()` em `static/dashboard.js`: move `#panelSkills` inteiro para `#mainSkills` como primeiro filho (anchor pattern).
+- [x] Implementar `restoreDashboardSkills()`: devolve `#panelSkills` à posição original via anchor.
+- [x] Registrar evidência técnica em `docs/neo/evidencias/HU-09.1/`.
+
+**Evidência técnica:** [`docs/neo/evidencias/HU-09.1/README.md`](./evidencias/HU-09.1/README.md)
 
 ### HU-09.2 — Layout two-column + Neo styling
 
-**Status:** disponível
+**Status:** concluída
 **Prioridade:** P0
 **Épico:** EP-09
 
 **Tasks**
 
-- [ ] CSS: `body.dashboard-shell-mode main.main.showing-skills > #mainSkills` → `display:flex; flex-direction:row; overflow:hidden; padding:0`.
-- [ ] CSS: `#panelSkills` dentro do shell → `width:260px; flex-shrink:0; border-right:1px solid var(--border); display:flex; flex-direction:column; overflow:hidden`.
-- [ ] CSS: área de detalhe (`#skillDetailBody`, `#skillDetailEmpty`, header) → `flex:1; min-width:0`.
-- [ ] Confirmar que `loadSkills()`, `renderSkills()`, `filterSkills()`, `openSkillCreate()`, edição e deleção funcionam sem alteração.
-- [ ] Registrar evidência técnica em `docs/neo/evidencias/HU-09.2/`.
+- [x] CSS: `body.dashboard-shell-mode main.main.showing-skills > #mainSkills` -> `display:flex; flex-direction:row; overflow:hidden; padding:0`.
+- [x] CSS: `#panelSkills` dentro do shell -> `width:260px; flex-shrink:0; border-right:1px solid var(--border); display:flex; flex-direction:column; overflow:hidden`.
+- [x] CSS: área de detalhe (`#skillDetailBody`, `#skillDetailEmpty`, header) -> `flex:1; min-width:0`.
+- [x] Confirmar que `loadSkills()`, `renderSkills()`, `filterSkills()`, `openSkillCreate()`, edição e deleção funcionam sem alteração.
+- [x] Registrar evidência técnica em `docs/neo/evidencias/HU-09.2/`.
+
+**Evidência técnica:** [`docs/neo/evidencias/HU-09.2/README.md`](./evidencias/HU-09.2/README.md)
 
 ### HU-09.3 — Testes automáticos
 
-**Status:** disponível
+**Status:** concluída
 **Prioridade:** P0
 **Épico:** EP-09
 
 **Tasks**
 
-- [ ] Criar `tests/test_neo_dashboard_skills.py`.
-- [ ] Testar: `'skills'` em `NEO_SHELL_PANELS` em `panels.js`.
-- [ ] Testar: `mountDashboardSkills` e `restoreDashboardSkills` definidos em `dashboard.js`.
-- [ ] Testar: CSS two-column presente em `style.css`.
-- [ ] Testar: `#panelSkills`, `#skillsList`, `#skillsSearch`, `#mainSkills` presentes em `index.html`.
-- [ ] Suite completa passa sem regressão.
+- [x] Criar `tests/test_neo_dashboard_skills.py`.
+- [x] Testar: `'skills'` em `NEO_SHELL_PANELS` em `panels.js`.
+- [x] Testar: `mountDashboardSkills` e `restoreDashboardSkills` definidos em `dashboard.js`.
+- [x] Testar: CSS two-column presente em `style.css`.
+- [x] Testar: `#panelSkills`, `#skillsList`, `#skillsSearch`, `#mainSkills` presentes em `index.html`.
+- [x] Suite Neo focada passa sem regressão; coleta completa registrada separadamente.
+
+**Evidência técnica:** [`docs/neo/evidencias/HU-09.3/README.md`](./evidencias/HU-09.3/README.md)
 
 ### Encerramento Sprint 4
 
-- [ ] HU-09.1 a HU-09.3 concluídas por DoD.
-- [ ] `pytest tests/test_neo_dashboard_skills.py -v` passa.
-- [ ] Suite completa Neo passa sem regressão.
-- [ ] Evidências em `docs/neo/evidencias/HU-09.*`.
+- [x] HU-09.1 a HU-09.3 concluídas por DoD.
+- [x] `pytest tests/test_neo_dashboard_skills.py -v` passa.
+- [x] Suite Neo focada passa sem regressão.
+- [x] Evidências em `docs/neo/evidencias/HU-09.*`.
 - [ ] Commit limpo em `develop`.
 
 ---
 
-## Sprint 5 — Projetos (Kanban 4 colunas)
+## Sprint 5 — Projetos Command Center
 
-**Meta:** página Projetos full-page com Kanban de 4 colunas, cards com chips,
-progresso, status pills e drag-and-drop persistido.
+**Meta:** página Projetos full-page como central de comando local-first:
+Kanban de 4 colunas, vista Lista, filtros operacionais, persistência local e
+campos `external_ref` preparados para Jira/GitHub/Obsidian. A sincronização
+real com Jira fica documentada no EP-10 e não entra nesta sprint.
 
 ### HU-04.1 — Página Projetos com header
 
-**Status:** aguardando Sprint 4
+**Status:** disponível
 
 **Tasks**
 
-- [ ] Adicionar item Projetos na sidebar.
-- [ ] Criar painel `projects`.
-- [ ] Criar `static/kanban.js`.
-- [ ] Header: título, subtítulo, Filtros, Kanban, + Novo Projeto.
+- [x] Adicionar item Projetos na sidebar.
+- [x] Criar painel `projects`.
+- [x] Criar `static/kanban.js`.
+- [x] Header: título, subtítulo, Filtros, Kanban, Lista, + Novo Projeto.
+- [x] Carregar `static/kanban.js` em `index.html`.
+
+**Evidência técnica:** [`docs/neo/evidencias/HU-04.1/README.md`](./evidencias/HU-04.1/README.md)
 
 ### HU-04.2 — Kanban 4 colunas
 
-**Status:** aguardando Sprint 4
+**Status:** concluída
 
 **Tasks**
 
-- [ ] Implementar colunas `backlog`, `em_andamento`, `em_revisao`, `concluido`.
-- [ ] Aplicar top-border slate/amber/blue/green.
-- [ ] Contagem por coluna.
-- [ ] Mobile: 1 coluna com tabs.
-- [ ] Tablet: scroll horizontal interno.
+- [x] Implementar colunas `backlog`, `em_andamento`, `em_revisao`, `concluido`.
+- [x] Aplicar top-border slate/amber/blue/green.
+- [x] Contagem por coluna.
+- [x] Mobile: 1 coluna com tabs/filtro por status no topo.
+- [x] Tablet: scroll horizontal interno/layout em 2 colunas.
+
+**Evidência técnica:** [`docs/neo/evidencias/HU-04.2/README.md`](./evidencias/HU-04.2/README.md)
 
 ### HU-04.3 — Criar projeto via modal
 
-**Status:** aguardando Sprint 4
+**Status:** concluída
 
 **Tasks**
 
-- [ ] Criar `api/projects.py` Neo-only ou adapter de rotas.
-- [ ] `POST /api/projects` cria item.
-- [ ] Persistir em `~/.hermes/webui/projects.json`.
-- [ ] Campos: nome, categoria, prioridade, descrição, status.
+- [x] Criar `api/projects.py` Neo-only.
+- [x] Migrar formato antigo de `projects.json` (lista simples) para schema v2 tolerante.
+- [x] `GET /api/projects` retorna `{projects, tasks, sources, counts}`.
+- [x] `POST /api/projects` cria projeto.
+- [x] `PATCH /api/projects/{project_id}` edita projeto.
+- [x] Persistir em `~/.hermes/webui/projects.json`.
+- [x] Campos: nome, descrição, domínio, cor, fonte externa padrão opcional.
 
-### HU-04.4 — Drag-and-drop persistido
+**Evidência técnica:** [`docs/neo/evidencias/HU-04.3/README.md`](./evidencias/HU-04.3/README.md)
 
-**Status:** aguardando HU-04.2
+### HU-04.4 — Criar tarefas com `external_ref`
 
-**Tasks**
-
-- [ ] Implementar HTML5 drag-and-drop sem libs.
-- [ ] `POST /api/projects/{id}` atualiza `{ status }`.
-- [ ] UI otimista com rollback em erro.
-- [ ] Visual drag: glow cyan, rotate 2deg, drop target destacado.
-
-### HU-04.5 — Cards com chips e progresso
-
-**Status:** aguardando HU-04.2
+**Status:** concluída
 
 **Tasks**
 
-- [ ] Chips de categoria: Design, Frontend, Backend, Database, Infra, DevOps, Docs, QA, Segurança.
-- [ ] Chips de prioridade: Baixa, Média, Alta.
-- [ ] Barra de progresso nas colunas não concluídas.
-- [ ] Chip verde `Concluído` sem barra na coluna concluído.
+- [x] `POST /api/project-tasks` cria tarefa vinculada a projeto.
+- [x] `PATCH /api/project-tasks/{task_id}` edita tarefa.
+- [x] Campos: título, descrição, status, categoria, prioridade, responsável, prazo, progresso.
+- [x] Persistir `external_ref` opcional (`type`, `source_id`, `key`, `url`, `status`, `synced_at`).
+- [x] Persistir refs opcionais (`github`, `obsidian`, `sessions`).
 
-### HU-04.6 — Status pills clicáveis
+**Evidência técnica:** [`docs/neo/evidencias/HU-04.4/README.md`](./evidencias/HU-04.4/README.md)
 
-**Status:** aguardando HU-04.2
+### HU-04.5 — Drag-and-drop persistido
 
-**Tasks**
-
-- [ ] Total, Backlog, Em Andamento, Revisão, Concluído.
-- [ ] Clique filtra/destaca a coluna.
-- [ ] Contadores sincronizados após drag/criação.
-
-### HU-04.7 — "+ Adicionar tarefa" por coluna
-
-**Status:** aguardando HU-04.2
+**Status:** concluída
 
 **Tasks**
 
-- [ ] Botão dashed no footer de cada coluna.
-- [ ] Criar card inline no status da coluna.
-- [ ] Persistir com o mesmo endpoint de criação.
+- [x] Implementar HTML5 drag-and-drop sem libs.
+- [x] `PATCH /api/project-tasks/{task_id}` atualiza `{ status }`.
+- [x] UI otimista com rollback em erro.
+- [x] Visual drag: glow cyan, rotate 2deg, drop target destacado.
 
-### HU-04.8 — Vincular sessão existente a projeto
+**Evidência técnica:** [`docs/neo/evidencias/HU-04.5/README.md`](./evidencias/HU-04.5/README.md)
 
-**Status:** aguardando HU-04.3
+### HU-04.6 — Cards com chips e progresso
+
+**Status:** concluída
+
+**Tasks**
+
+- [x] Chips de categoria: Design, Frontend, Backend, Database, Infra, DevOps, Docs, QA, Segurança.
+- [x] Chips de prioridade: Baixa, Média, Alta.
+- [x] Barra de progresso nas colunas não concluídas.
+- [x] Chip verde `Concluído` sem barra na coluna concluído.
+- [x] Mostrar chip discreto de fonte externa quando `external_ref` existir.
+
+**Evidência técnica:** [`docs/neo/evidencias/HU-04.6/README.md`](./evidencias/HU-04.6/README.md)
+
+### HU-04.7 — Status pills clicáveis
+
+**Status:** concluída
+
+**Tasks**
+
+- [x] Total, Backlog, Em Andamento, Revisão, Concluído.
+- [x] Clique filtra/destaca a coluna.
+- [x] Contadores sincronizados após drag/criação.
+
+**Evidência técnica:** [`docs/neo/evidencias/HU-04.7/README.md`](./evidencias/HU-04.7/README.md)
+
+### HU-04.8 — Vista Lista + filtros
+
+**Status:** concluída
+
+**Tasks**
+
+- [x] Alternar Kanban/List sem recarregar a página.
+- [x] Lista agrupada por status com colunas ID, tarefa, prioridade, responsável e estado.
+- [x] Filtros por texto, projeto, status, prioridade, fonte externa, responsável e data/prazo.
+- [x] Botão dashed `+ Adicionar tarefa` no footer de cada coluna.
+- [x] Persistir nova tarefa com o endpoint de criação.
+
+**Evidência técnica:** [`docs/neo/evidencias/HU-04.8/README.md`](./evidencias/HU-04.8/README.md)
+
+### HU-04.9 — Vincular sessão e refs externas
+
+**Status:** parcial
 **Prioridade:** P1
 
 **Tasks**
 
-- [ ] Usar `session.project_id` já existente.
-- [ ] UI para atribuir sessão a projeto.
-- [ ] Exibir vínculo no detalhe do projeto.
+- [x] Usar `session.project_id` já existente.
+- [ ] UI para atribuir sessão Neo a tarefa/projeto.
+- [x] Campos persistidos para refs GitHub e Obsidian sem sync automática.
+- [x] Exibir vínculos no detalhe da tarefa quando já existirem.
 
-### HU-04.9 — Arquivar projetos concluídos
+**Evidência técnica:** [`docs/neo/evidencias/HU-04.9/README.md`](./evidencias/HU-04.9/README.md)
 
-**Status:** aguardando HU-04.3
+### HU-04.10 — Arquivar e mobile
+
+**Status:** parcial
 **Prioridade:** P1
 
 **Tasks**
 
-- [ ] Status/filtro `arquivado`.
-- [ ] Toggle "Mostrar arquivados".
-- [ ] Não contar arquivados em Projetos Ativos.
-
-### HU-04.10 — Mobile com tabs
-
-**Status:** aguardando HU-04.2
-**Prioridade:** P1
-
-**Tasks**
-
-- [ ] Tabs por status no topo.
+- [x] Status/filtro `arquivado`.
+- [x] Toggle "Mostrar arquivados".
+- [x] Não contar arquivados em Projetos Ativos.
+- [x] Tabs/filtro por status no topo.
 - [ ] Drag fallback via menu "Mover para".
+
+**Evidência técnica:** [`docs/neo/evidencias/HU-04.10/README.md`](./evidencias/HU-04.10/README.md)
+
+### Backlog pós-Sprint 5 — Sincronização Jira
+
+**Status:** documentado em EP-10
+
+**Tasks futuras**
+
+- [ ] Cadastrar múltiplos Jiras.
+- [ ] Criar issue Jira a partir do chat e gravar `external_ref`.
+- [ ] Importar issues existentes.
+- [ ] Sincronizar status remoto/local com mapeamento por fonte.
+- [ ] Reconciliar conflitos sem sobrescrita silenciosa.
 
 ---
 
