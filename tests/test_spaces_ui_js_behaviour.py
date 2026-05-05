@@ -1096,6 +1096,20 @@ def test_spaces_ui_widget_manager_shows_safe_queued_event_inbox(driver_path):
     assert "Bearer" not in out["rootHtml"]
 
 
+def test_spaces_ui_widget_manager_shows_inline_agent_bridge_status(driver_path):
+    out = _run_spaces_scenario(driver_path, "list")
+
+    assert "Agent bridge: 2 queued" in out["rootHtml"]
+    assert "Latest: widget.refresh · queued" in out["rootHtml"]
+    assert "Event: evt-refresh" in out["rootHtml"]
+    assert "Use token" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+    assert "Bearer" not in out["rootHtml"]
+
+
 def test_spaces_ui_save_widget_posts_to_upsert_and_refreshes_widgets(driver_path):
     out = _run_spaces_scenario(driver_path, "save")
     post = next(call for call in out["calls"] if call["path"] == "api/spaces/widget/upsert")

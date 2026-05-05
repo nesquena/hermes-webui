@@ -526,6 +526,22 @@
       '<div class="capy-spaces-widget-list">'+rows+'</div></div>';
   }
 
+  function renderWidgetAgentBridgeStatus(widgetId, events){
+    const safeWidgetId = String(widgetId || '').trim();
+    if (!safeWidgetId || !Array.isArray(events)) return '';
+    const widgetEvents = events.filter(function(event){ return event && String(event.widget_id || '') === safeWidgetId; });
+    if (!widgetEvents.length) return '';
+    const queuedCount = widgetEvents.filter(function(event){ return String(event.status || 'queued').toLowerCase() === 'queued'; }).length;
+    const latest = widgetEvents[0] || {};
+    const eventName = safeWeatherText(latest.event_name, 80);
+    const status = safeWeatherText(latest.status || 'queued', 40);
+    const eventId = safeWeatherText(latest.event_id, 120);
+    const parts = ['Agent bridge: '+(queuedCount || widgetEvents.length)+' queued'];
+    if (eventName || status) parts.push('Latest: '+[eventName, status].filter(Boolean).join(' · '));
+    if (eventId) parts.push('Event: '+eventId);
+    return '<div class="capy-spaces-muted capy-spaces-agent-bridge-status">'+escapeHtml(parts.join(' · '))+'</div>';
+  }
+
   function renderWidgetManager(spaceId, widgets, events){
     const widgetCards = widgets.length ? widgets.map(function(w){
       const widgetId = w.id || '';
@@ -535,7 +551,7 @@
       return '<div class="capy-spaces-widget" data-widget-id="'+escapeHtml(widgetId)+'">' +
         '<div><strong>'+escapeHtml(title)+'</strong>' +
         '<div class="capy-spaces-muted">'+escapeHtml(kind)+' · '+escapeHtml(widgetId)+' · '+escapeHtml(formatWidgetLayout(layout))+'</div>' +
-        renderWeatherObservation(w.metadata || {}) + '</div>' +
+        renderWeatherObservation(w.metadata || {}) + renderWidgetAgentBridgeStatus(widgetId, events || []) + '</div>' +
         '<div class="capy-spaces-actions">' +
         '<button type="button" class="capy-spaces-btn" data-capy-action="askWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-title="'+escapeHtml(title)+'">Ask Capy</button>' +
         '<button type="button" class="capy-spaces-btn" data-capy-action="refreshWidget" data-space-id="'+escapeHtml(spaceId)+'" data-widget-id="'+escapeHtml(widgetId)+'" data-widget-title="'+escapeHtml(title)+'">Refresh</button>' +
