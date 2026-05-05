@@ -143,17 +143,18 @@ def test_hero_css_in_style():
 
 def test_hero_visual_weight_matches_reference():
     css = (STATIC / "style.css").read_text()
-    assert ".hero-card{position:relative;height:200px" in css
-    assert ".hero-portrait{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center 35%" in css
-    assert ".hero-status-pill{position:absolute;left:20px;right:20px;bottom:16px;z-index:3" in css
+    assert ".hero-card{position:relative;height:clamp(300px,34vh,330px)" in css
+    assert ".hero-portrait{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center 43%" in css
+    assert ".hero-status-pill{position:absolute;left:18px;right:18px;bottom:22px;z-index:3" in css
     assert ".hero-greeting{display:flex;flex-direction:column;gap:4px;padding:12px 14px" in css
 
 
 def test_right_column_refinement_matches_reference():
     css = (STATIC / "style.css").read_text()
     assert ".dashboard-grid{display:grid;grid-template-columns:minmax(0,1fr) 280px" in css
-    assert ".hero-card{position:relative;height:200px;border:1px solid rgba(0,229,255,.35)" in css
-    assert ".hero-status-dot{width:5px;height:5px;border-radius:999px;background:var(--accent);box-shadow:0 0 8px rgba(0,229,255,1);animation:status-pulse" in css
+    assert ".dashboard-right{display:flex;flex-direction:column;gap:12px;min-height:0;height:100%;overflow:hidden;}" in css
+    assert ".hero-card{position:relative;height:clamp(300px,34vh,330px);flex:0 0 auto;border:1px solid rgba(0,229,255,.42)" in css
+    assert ".hero-status-dot{width:7px;height:7px;border-radius:999px;background:var(--accent);box-shadow:0 0 10px rgba(0,229,255,1),0 0 18px rgba(0,229,255,.72);animation:hero-status-pulse" in css
     assert ".hero-greeting{display:flex;flex-direction:column;gap:4px;padding:12px 14px;border:1px solid var(--border);border-radius:8px;background:var(--surface);}" in css
     assert ".hero-greeting-time{display:none;}" in css
     assert ".hero-greeting-welcome{font-size:15px;font-weight:700" in css

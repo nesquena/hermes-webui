@@ -166,6 +166,24 @@ def test_dashboard_visual_shell_css_present():
     assert ".neo-sidebar-talk" not in STYLE_CSS
 
 
+def test_dashboard_right_sidebar_hero_has_reference_proportions():
+    for rule in [
+        ".dashboard-right{display:flex;flex-direction:column;gap:12px;min-height:0;height:100%;overflow:hidden;}",
+        ".hero-card{position:relative;height:clamp(300px,34vh,330px);",
+        ".hero-portrait{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center 43%;",
+        ".hero-status-pill{position:absolute;left:18px;right:18px;bottom:22px;",
+        "min-height:30px;font-size:9.5px;",
+        ".hero-status-dot{width:7px;height:7px;",
+        "animation:hero-status-pulse 1.05s ease-in-out infinite;",
+        ".dashboard-quick-actions{display:flex;flex:1 1 auto;min-height:0;",
+    ]:
+        assert rule in STYLE_CSS
+    assert ".hero-card{height:300px;}" in STYLE_CSS
+    assert "@media (max-height: 760px) and (min-width: 901px)" in STYLE_CSS
+    assert ".hero-card{height:250px;}" in STYLE_CSS
+    assert "@keyframes hero-status-pulse" in STYLE_CSS
+
+
 def test_dashboard_uses_exclusive_desktop_shell():
     assert "dashboard-shell-mode" in PANELS_JS
     assert "document.body.classList.toggle" in PANELS_JS
