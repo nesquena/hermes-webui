@@ -794,7 +794,17 @@
     const confirmMsg = wantArchive
       ? _t('projects_archive_project_confirm', 'Arquivar este projeto? Ele e suas tarefas saem das contagens ativas.')
       : _t('projects_unarchive_project_confirm', 'Desarquivar este projeto?');
-    if (typeof confirm === 'function' && !confirm(confirmMsg)) return;
+    if (typeof showConfirmDialog === 'function') {
+      const ok = await showConfirmDialog({
+        message: confirmMsg,
+        confirmLabel: wantArchive
+          ? _t('projects_archive_project', 'Arquivar projeto')
+          : _t('projects_unarchive_project', 'Desarquivar projeto'),
+        danger: wantArchive,
+        focusCancel: true,
+      });
+      if (!ok) return;
+    }
     try {
       // Backend interprets status="arquivado" / "ativo" as archive flip.
       const body = { status: wantArchive ? 'arquivado' : 'ativo' };
