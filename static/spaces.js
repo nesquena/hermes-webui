@@ -158,9 +158,14 @@
       ? data.notes_artifact
       : {};
     const notesPreview = renderNotesSmokePreview(notesArtifact);
+    const kanbanBoard = data && data.kanban_board && typeof data.kanban_board === 'object' && !Array.isArray(data.kanban_board)
+      ? data.kanban_board
+      : {};
+    const kanbanPreview = renderKanbanSmokePreview(kanbanBoard);
     const demoSpaceId = space.space_id ? String(space.space_id) : '';
     const hasNotesPreview = !!notesPreview;
-    const manageLabel = weatherPreview ? 'Manage weather widget' : (hasNotesPreview ? 'Manage notes widgets' : 'Manage demo widgets');
+    const hasKanbanPreview = !!kanbanPreview;
+    const manageLabel = weatherPreview ? 'Manage weather widget' : (hasNotesPreview ? 'Manage notes widgets' : (hasKanbanPreview ? 'Manage kanban widgets' : 'Manage demo widgets'));
     const demoActions = demoSpaceId
       ? '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="openSpace" data-space-id="'+escapeHtml(demoSpaceId)+'">Open demo Space</button><button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(demoSpaceId)+'">'+escapeHtml(manageLabel)+'</button></div>'
       : '';
@@ -168,7 +173,7 @@
       '<div class="capy-spaces-muted">'+escapeHtml(demo)+' · '+escapeHtml(data && data.mode || 'metadata-only-smoke')+'</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(spaceName)+'</strong>' +
       '<div class="capy-spaces-muted">Space ID: '+escapeHtml(space.space_id || '')+' · Widgets: '+widgetCount+' · Persisted widgets: '+persistedWidgetCount+' · Persistence: '+escapeHtml(persistence)+' · Revisions: '+revisionCount+' · Rollback point: '+escapeHtml(rollbackPoint)+'</div>' +
-      extraLine + '</div>'+demoActions+'</div></div>'+weatherPreview+notesPreview+'</div>';
+      extraLine + '</div>'+demoActions+'</div></div>'+weatherPreview+notesPreview+kanbanPreview+'</div>';
   }
 
   function renderDemoSmokeSuiteResult(data){
@@ -653,6 +658,32 @@
     return '<div class="capy-spaces-card capy-spaces-notes-smoke"><h4>Saved notes preview</h4>' +
       '<div class="capy-spaces-muted">Visible metadata-only notes demo state. Rich editing and attachments remain agent-mediated.</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div>'+rows.join('')+'</div></div></div></div>';
+  }
+
+  function renderKanbanSmokePreview(kanbanBoard){
+    const board = kanbanBoard && typeof kanbanBoard === 'object' && !Array.isArray(kanbanBoard) ? kanbanBoard : {};
+    const columns = Array.isArray(board.columns) ? board.columns : [];
+    const status = safeWeatherText(board.status, 80);
+    const columnCount = Number(board.column_count || columns.length || 0);
+    const columnRows = columns.slice(0, 8).map(function(column){
+      const meta = column && column.metadata && typeof column.metadata === 'object' && !Array.isArray(column.metadata) ? column.metadata : {};
+      const kanban = meta.kanban && typeof meta.kanban === 'object' && !Array.isArray(meta.kanban) ? meta.kanban : {};
+      const label = safeWeatherText(kanban.column || (column && column.title), 80);
+      const cards = Array.isArray(kanban.cards) ? kanban.cards : [];
+      const cardRows = cards.slice(0, 6).map(function(card){
+        const title = safeWeatherText(card && card.title, 120);
+        const cardStatus = safeWeatherText(card && card.status, 40);
+        if (!title) return '';
+        return '<div class="capy-spaces-muted">• '+escapeHtml(title)+(cardStatus ? ' · '+escapeHtml(cardStatus) : '')+'</div>';
+      }).filter(Boolean).join('');
+      if (!label && !cardRows) return '';
+      return '<div class="capy-spaces-widget"><div><strong>'+escapeHtml(label || 'Column')+'</strong>'+cardRows+'</div></div>';
+    }).filter(Boolean).join('');
+    if (!status && !columnRows) return '';
+    return '<div class="capy-spaces-card capy-spaces-kanban-smoke"><h4>Kanban board preview</h4>' +
+      '<div class="capy-spaces-muted">Visible metadata-only board state. Drag/drop and card edits remain typed API operations.</div>' +
+      '<div class="capy-spaces-muted">Status: '+escapeHtml(status || 'board-ready')+' · Columns: '+columnCount+'</div>' +
+      '<div class="capy-spaces-widget-list">'+columnRows+'</div></div>';
   }
 
   function renderWidgetDetailPanel(spaceId, widget, runtimeContract){

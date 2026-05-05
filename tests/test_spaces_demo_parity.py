@@ -119,6 +119,36 @@ def test_notes_demo_smoke_saves_editable_note_preview_metadata_only(monkeypatch,
     _assert_safe_payload(preview)
 
 
+def test_kanban_demo_smoke_records_visible_board_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    result = spaces.space_demo_run("demo_kanban_board")
+    backlog = spaces.read_widget_detail(result["space"]["space_id"], "kanban-backlog")
+    doing = spaces.read_widget_detail(result["space"]["space_id"], "kanban-doing")
+    done = spaces.read_widget_detail(result["space"]["space_id"], "kanban-done")
+
+    assert result["action"] == "kanban-board-seeded"
+    assert result["kanban_board"]["status"] == "board-ready"
+    assert result["kanban_board"]["column_count"] == 3
+    assert [column["metadata"]["kanban"]["column"] for column in result["kanban_board"]["columns"]] == [
+        "Backlog",
+        "Doing",
+        "Done",
+    ]
+    assert backlog["metadata"]["kanban"]["cards"] == [
+        {"id": "card-plan", "title": "Plan the first task", "status": "todo"}
+    ]
+    assert doing["metadata"]["kanban"]["cards"] == [
+        {"id": "card-build", "title": "Build metadata-only board preview", "status": "doing"}
+    ]
+    assert done["metadata"]["kanban"]["cards"] == [
+        {"id": "card-install", "title": "Install board template", "status": "done"}
+    ]
+    assert backlog["metadata"]["kanban"]["interaction"] == {"drag_drop": "planned", "edit_cards": "metadata-only"}
+    _assert_safe_payload(result)
+    _assert_safe_payload({"backlog": backlog, "doing": doing, "done": done})
+
+
 def test_research_demo_smoke_advances_progress_artifact_pdf_export_and_rollback_check(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 

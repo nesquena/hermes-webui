@@ -91,6 +91,7 @@ global.fetch = async function(path, opts = {}) {
       demos: [
         { demo: 'demo_weather_widget', template: 'weather', title: 'Weather answer → persistent widget', mode: 'metadata-only-smoke', renderer: '<script>bad()</script>', api_key: 'SECRET' },
         { demo: 'demo_notes_app', template: 'notes', title: 'Notes app', mode: 'metadata-only-smoke', renderer: '<script>bad()</script>', api_key: 'SECRET' },
+        { demo: 'demo_kanban_board', template: 'kanban', title: 'Kanban board', mode: 'metadata-only-smoke', renderer: '<script>bad()</script>', api_key: 'SECRET' },
         { demo: 'demo_research_harness_pdf_export', template: 'research', title: 'Research harness PDF export', mode: 'metadata-only-smoke', source: 'SECRET_SOURCE' },
         { demo: 'demo_time_travel_restore', template: 'big-bang', title: 'Time travel rollback', mode: 'metadata-only-smoke', source: 'SECRET_SOURCE' },
       ],
@@ -101,25 +102,32 @@ global.fetch = async function(path, opts = {}) {
     const demo = body.demo || 'demo_weather_widget';
     const isResearch = demo === 'demo_research_harness_pdf_export';
     const isNotes = demo === 'demo_notes_app';
+    const isKanban = demo === 'demo_kanban_board';
+    const kanbanColumns = [
+      { id: 'kanban-backlog', kind: 'kanban-column', title: 'Backlog', metadata: { kanban: { status: 'board-ready', column: 'Backlog', color: 'blue', cards: [{ id: 'card-plan', title: 'Plan the first task', status: 'todo' }], interaction: { drag_drop: 'planned', edit_cards: 'metadata-only' }, renderer: '<script>bad()</script>', api_key: 'SECRET' } }, renderer: '<script>bad()</script>', api_key: 'SECRET' },
+      { id: 'kanban-doing', kind: 'kanban-column', title: 'Doing', metadata: { kanban: { status: 'board-ready', column: 'Doing', color: 'amber', cards: [{ id: 'card-build', title: 'Build metadata-only board preview', status: 'doing' }], interaction: { drag_drop: 'planned', edit_cards: 'metadata-only' } } } },
+      { id: 'kanban-done', kind: 'kanban-column', title: 'Done', metadata: { kanban: { status: 'board-ready', column: 'Done', color: 'green', cards: [{ id: 'card-install', title: 'Install board template', status: 'done' }], interaction: { drag_drop: 'planned', edit_cards: 'metadata-only' } } } },
+    ];
     return response({
       ok: true,
-      action: isResearch ? 'pdf-export-requested' : (isNotes ? 'notes-draft-saved' : 'space.demo.run'),
+      action: isResearch ? 'pdf-export-requested' : (isNotes ? 'notes-draft-saved' : (isKanban ? 'kanban-board-seeded' : 'space.demo.run')),
       demo: demo,
-      template: isResearch ? 'research' : (isNotes ? 'notes' : 'weather'),
+      template: isResearch ? 'research' : (isNotes ? 'notes' : (isKanban ? 'kanban' : 'weather')),
       mode: 'metadata-only-smoke',
       space: {
-        space_id: isResearch ? 'demo-research-harness-pdf-export' : (isNotes ? 'demo-notes-app' : 'demo-weather-widget'),
-        name: isResearch ? 'Research Harness' : (isNotes ? 'Notes App Smoke' : 'Weather Demo Smoke'),
-        widget_count: isResearch ? 5 : (isNotes ? 4 : 1),
+        space_id: isResearch ? 'demo-research-harness-pdf-export' : (isNotes ? 'demo-notes-app' : (isKanban ? 'demo-kanban-board' : 'demo-weather-widget')),
+        name: isResearch ? 'Research Harness' : (isNotes ? 'Notes App Smoke' : (isKanban ? 'Kanban Board Smoke' : 'Weather Demo Smoke')),
+        widget_count: isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : 1)),
         revision_event_id: 'rev-demo',
         renderer: '<script>bad()</script>',
         api_key: 'SECRET',
       },
-      widgets: isResearch ? [{ id: 'research-summary', kind: 'markdown', title: 'Summary report', renderer: '<script>bad()</script>', api_key: 'SECRET' }] : (isNotes ? [{ id: 'notes-editor', kind: 'rich-text-editor', title: 'Editor', renderer: '<script>bad()</script>', api_key: 'SECRET' }] : [{ id: 'weather-current', kind: 'weather', title: 'Weather in Prague', renderer: '<script>bad()</script>', api_key: 'SECRET' }]),
+      widgets: isResearch ? [{ id: 'research-summary', kind: 'markdown', title: 'Summary report', renderer: '<script>bad()</script>', api_key: 'SECRET' }] : (isNotes ? [{ id: 'notes-editor', kind: 'rich-text-editor', title: 'Editor', renderer: '<script>bad()</script>', api_key: 'SECRET' }] : (isKanban ? kanbanColumns : [{ id: 'weather-current', kind: 'weather', title: 'Weather in Prague', renderer: '<script>bad()</script>', api_key: 'SECRET' }])),
       weather_observation: demo === 'demo_weather_widget' ? { widget: { id: 'weather-current', kind: 'weather', title: 'Weather in Prague', metadata: { weather: { location: 'Prague', country: 'CZ', status: 'observation-ready', current: { condition: 'partly cloudy', temperature_c: '18', feels_like_c: '17' }, summary: 'Partly cloudy in Prague; refreshed through agent-mediated weather metadata.', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } }, renderer: '<script>bad()</script>', api_key: 'SECRET' } } : undefined,
       notes_artifact: isNotes ? { editor: { id: 'notes-editor', kind: 'rich-text-editor', title: 'Editor', metadata: { notes: { status: 'draft-saved', format: 'markdown', body: 'Demo note draft saved through typed Capy Spaces metadata.', renderer: '<script>bad()</script>', api_key: 'SECRET' } }, renderer: '<script>bad()</script>' }, preview: { id: 'notes-preview', kind: 'markdown', title: 'Markdown preview', metadata: { notes: { format: 'markdown', body: '# Demo note\n\nThis markdown preview was saved as metadata-only state.', source: 'SECRET_SOURCE' } } } } : undefined,
-      widget_count: isResearch ? 5 : (isNotes ? 4 : 1),
-      persisted_widget_count: isResearch ? 5 : (isNotes ? 4 : 1),
+      kanban_board: isKanban ? { status: 'board-ready', column_count: 3, columns: kanbanColumns, renderer: '<script>bad()</script>', api_key: 'SECRET' } : undefined,
+      widget_count: isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : 1)),
+      persisted_widget_count: isResearch ? 5 : (isNotes ? 4 : (isKanban ? 4 : 1)),
       persistence_checked: true,
       revision_event_count: 2,
       rollback_point: true,
@@ -766,6 +774,10 @@ async function click(action, dataset) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('runDemoSmoke', { demo: 'demo_notes_app' });
+  } else if (scenario === 'runKanbanDemoParitySmoke') {
+    await window.loadCapySpaces();
+    beforeHtml = root.innerHTML;
+    await click('runDemoSmoke', { demo: 'demo_kanban_board' });
   } else if (scenario === 'runDemoParityAllSmokes') {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
@@ -1680,6 +1692,33 @@ def test_spaces_ui_notes_demo_smoke_shows_saved_note_preview_metadata_only(drive
     assert "Demo note draft saved through typed Capy Spaces metadata." in out["rootHtml"]
     assert "This markdown preview was saved as metadata-only state." in out["rootHtml"]
     assert "Manage notes widgets" in out["rootHtml"]
+    assert "Manage demo widgets" not in out["rootHtml"]
+    assert "Manage weather widget" not in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_kanban_demo_smoke_shows_board_preview_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "runKanbanDemoParitySmoke")
+    run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
+
+    assert json.loads(run_post["body"]) == {"demo": "demo_kanban_board"}
+    assert "Kanban board" in out["beforeHtml"]
+    assert "Demo parity smoke passed" in out["rootHtml"]
+    assert "demo_kanban_board" in out["rootHtml"]
+    assert "Kanban Board Smoke" in out["rootHtml"]
+    assert "Action: kanban-board-seeded" in out["rootHtml"]
+    assert "Widgets: 4" in out["rootHtml"]
+    assert "Kanban board preview" in out["rootHtml"]
+    assert "Backlog" in out["rootHtml"]
+    assert "Plan the first task" in out["rootHtml"]
+    assert "Doing" in out["rootHtml"]
+    assert "Build metadata-only board preview" in out["rootHtml"]
+    assert "Done" in out["rootHtml"]
+    assert "Install board template" in out["rootHtml"]
+    assert "Manage kanban widgets" in out["rootHtml"]
     assert "Manage demo widgets" not in out["rootHtml"]
     assert "Manage weather widget" not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]

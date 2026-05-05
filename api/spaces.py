@@ -113,6 +113,7 @@ _WIDGET_DETAIL_METADATA_FIELDS = (
     "chart",
     "table",
     "notes",
+    "kanban",
 )
 
 
@@ -1495,6 +1496,56 @@ def space_demo_run(name: str) -> dict[str, Any]:
             "notes_artifact": {
                 "editor": read_widget_detail(space_id, "notes-editor"),
                 "preview": read_widget_detail(space_id, "notes-preview"),
+            }
+        }
+    elif demo == "demo_kanban_board":
+        board_columns = [
+            (
+                "kanban-backlog",
+                {
+                    "status": "board-ready",
+                    "column": "Backlog",
+                    "color": "blue",
+                    "cards": [{"id": "card-plan", "title": "Plan the first task", "status": "todo"}],
+                    "interaction": {"drag_drop": "planned", "edit_cards": "metadata-only"},
+                },
+            ),
+            (
+                "kanban-doing",
+                {
+                    "status": "board-ready",
+                    "column": "Doing",
+                    "color": "amber",
+                    "cards": [
+                        {
+                            "id": "card-build",
+                            "title": "Build metadata-only board preview",
+                            "status": "doing",
+                        }
+                    ],
+                    "interaction": {"drag_drop": "planned", "edit_cards": "metadata-only"},
+                },
+            ),
+            (
+                "kanban-done",
+                {
+                    "status": "board-ready",
+                    "column": "Done",
+                    "color": "green",
+                    "cards": [{"id": "card-install", "title": "Install board template", "status": "done"}],
+                    "interaction": {"drag_drop": "planned", "edit_cards": "metadata-only"},
+                },
+            ),
+        ]
+        for widget_id, kanban_metadata in board_columns:
+            patch_widget(space_id, widget_id, {"kanban": kanban_metadata})
+        columns = [read_widget_detail(space_id, widget_id) for widget_id, _ in board_columns]
+        action = "kanban-board-seeded"
+        extra = {
+            "kanban_board": {
+                "status": "board-ready",
+                "column_count": len(columns),
+                "columns": columns,
             }
         }
     elif demo == "demo_time_travel_restore":
