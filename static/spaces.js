@@ -50,9 +50,9 @@
     const spaceName = space.name || spaceId || 'Demo Space';
     const widgetCount = widgets.length || Number(space.widget_count || 0);
     const widgetLabel = widgetCount === 1 ? '1 widget' : widgetCount+' widgets';
-    const title = template === 'weather' ? 'Weather demo installed' : 'Template installed';
-    const openLabel = template === 'weather' ? 'Open weather demo' : 'Open Space';
-    const manageLabel = template === 'weather' ? 'Manage weather widget' : 'Manage widgets';
+    const title = template === 'weather' ? 'Weather demo installed' : (template === 'notes' ? 'Notes app installed' : 'Template installed');
+    const openLabel = template === 'weather' ? 'Open weather demo' : (template === 'notes' ? 'Open notes app' : 'Open Space');
+    const manageLabel = template === 'weather' ? 'Manage weather widget' : (template === 'notes' ? 'Manage notes widgets' : 'Manage widgets');
     const widgetItems = widgets.slice(0, 6).map(function(w){
       return '<li>'+escapeHtml(w.title || w.id || 'Widget')+'</li>';
     }).join('');
@@ -159,7 +159,8 @@
       : {};
     const notesPreview = renderNotesSmokePreview(notesArtifact);
     const demoSpaceId = space.space_id ? String(space.space_id) : '';
-    const manageLabel = weatherPreview ? 'Manage weather widget' : 'Manage demo widgets';
+    const hasNotesPreview = !!notesPreview;
+    const manageLabel = weatherPreview ? 'Manage weather widget' : (hasNotesPreview ? 'Manage notes widgets' : 'Manage demo widgets');
     const demoActions = demoSpaceId
       ? '<div class="capy-spaces-actions"><button type="button" class="capy-spaces-btn" data-capy-action="openSpace" data-space-id="'+escapeHtml(demoSpaceId)+'">Open demo Space</button><button type="button" class="capy-spaces-btn" data-capy-action="loadWidgets" data-space-id="'+escapeHtml(demoSpaceId)+'">'+escapeHtml(manageLabel)+'</button></div>'
       : '';
@@ -978,8 +979,10 @@
       return;
     }
     if (action === 'installNotesTemplate') {
-      await postSpacesJson('api/spaces/templates/install', {template: 'notes'});
+      const result = await postSpacesJson('api/spaces/templates/install', {template: 'notes'});
       await loadCapySpaces();
+      const root = document.getElementById('capySpacesRoot');
+      if (root) root.innerHTML = renderTemplateInstallStatus(result || {}) + root.innerHTML;
       return;
     }
     if (action === 'installBrowserTemplate') {

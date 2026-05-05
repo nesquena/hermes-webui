@@ -9,11 +9,16 @@ Research targets:
 
 ## Current Implementation Status
 
-Last updated: 2026-05-04 19:29 CDT on branch `feat/capy-spaces-foundation`.
+Last updated: 2026-05-04 21:53 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: installing the Weather Demo from the visible Spaces list now leaves a safe status card with direct `Open weather demo` and `Manage weather widget` actions, so the first weather vertical has an obvious end-to-end path even before running the demo smoke. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: installing the Notes App from the visible Spaces list now leaves a safe status card with direct `Open notes app` and `Manage notes widgets` actions, and the `demo_notes_app` smoke result now routes directly to notes widget management instead of the generic demo label. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): show notes demo status actions`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving `Install notes app` posts `{template: "notes"}`, refreshes the Spaces list, prepends a safe `Notes app installed` status card with direct open/manage actions, and keeps hostile `renderer`/`<script>`/API-auth markers out of DOM.
+  - Added RED/GREEN coverage proving `demo_notes_app` smoke results show `Manage notes widgets` while preserving the saved-notes metadata preview and continuing to omit generated/source/API-auth markers.
+  - Validation at completion before commit: focused RED failed because `Notes app installed` and `Manage notes widgets` were absent; focused GREEN passed (`2 passed`), focused install/smoke regressions passed (`4 passed`), Spaces UI JS behavior + demo parity suites passed (`81 passed`), `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, and `git diff --check` passed.
 
 - `feat(spaces): show weather install status actions`
   - Added RED/GREEN real-`static/spaces.js` coverage proving `Install weather demo` posts `{template: "weather"}`, refreshes the Spaces list, and prepends a safe status card with the installed Space name/widget count plus direct `Open weather demo` and `Manage weather widget` actions while omitting hostile `renderer`/`<script>`/API-auth markers from DOM.
