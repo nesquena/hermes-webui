@@ -3928,6 +3928,24 @@ def test_weather_template_includes_agent_refresh_bridge_metadata(monkeypatch, tm
     assert "secret" not in serialized
 
 
+def test_weather_template_public_detail_exposes_safe_prompt_metadata(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    installed = spaces.install_template("weather")
+    detail = spaces.read_widget_detail(installed["space"]["space_id"], "weather-current")
+
+    assert detail["metadata"]["prompt"] == {
+        "placeholder": "Ask Capy to refresh or explain the Prague weather widget",
+        "suggested_event": "widget.refresh",
+    }
+    serialized = json.dumps(detail).lower()
+    assert "renderer" not in serialized
+    assert "html" not in serialized
+    assert "<script" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
 def test_weather_template_install_route_returns_safe_metadata(monkeypatch, tmp_path):
     _load_spaces(monkeypatch, tmp_path, enabled=True)
 

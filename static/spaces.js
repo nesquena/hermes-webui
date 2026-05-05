@@ -661,6 +661,22 @@
     return text;
   }
 
+  function renderWidgetPrompt(metadata){
+    const prompt = metadata && metadata.prompt && typeof metadata.prompt === 'object' && !Array.isArray(metadata.prompt) ? metadata.prompt : {};
+    if (!Object.keys(prompt).length) return '';
+    const placeholder = safeWeatherText(prompt.placeholder, 180);
+    const suggestedEvent = safeWeatherText(prompt.suggested_event, 80);
+    if (!placeholder && !suggestedEvent) return '';
+    const eventRow = suggestedEvent ? '<div class="capy-spaces-muted">Suggested event: '+escapeHtml(suggestedEvent)+'</div>' : '';
+    const promptRow = placeholder ? '<div>'+escapeHtml(placeholder)+'</div>' : '';
+    return '<div class="capy-spaces-card capy-weather-card">' +
+      '<h4>Suggested prompt</h4>' +
+      promptRow +
+      eventRow +
+      '<div class="capy-spaces-muted">Metadata-only prompt hint. Generated widget bodies stay disabled.</div>' +
+      '</div>';
+  }
+
   function renderWeatherObservation(metadata){
     const weather = metadata && metadata.weather && typeof metadata.weather === 'object' && !Array.isArray(metadata.weather) ? metadata.weather : {};
     if (!Object.keys(weather).length) return '';
@@ -760,7 +776,7 @@
       metadataRow +
       eventBridgeRow +
       renderWidgetRuntimeContract(runtimeContract) +
-      '</div>'+pdfExportAction+'</div></div>' + renderWeatherObservation(metadata) + notesEditor + '</div>';
+      '</div>'+pdfExportAction+'</div></div>' + renderWidgetPrompt(metadata) + renderWeatherObservation(metadata) + notesEditor + '</div>';
   }
 
 

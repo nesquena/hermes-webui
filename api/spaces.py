@@ -114,6 +114,7 @@ _WIDGET_DETAIL_METADATA_FIELDS = (
     "table",
     "notes",
     "kanban",
+    "prompt",
 )
 
 
