@@ -1033,6 +1033,12 @@ let _sessionActionMenu = null;
 let _sessionActionAnchor = null;
 let _sessionActionSessionId = null;
 const _expandedChildSessionKeys = new Set();
+let _sessionVisibleSidebarIds = [];
+const SESSION_VIRTUAL_ROW_HEIGHT = 52;
+const SESSION_VIRTUAL_BUFFER_ROWS = 12;
+const SESSION_VIRTUAL_THRESHOLD_ROWS = 80;
+let _sessionVirtualScrollList = null;
+let _sessionVirtualScrollRaf = 0;
 
 function _sessionIdFromLocation(){
   if(typeof window==='undefined'||!window.location) return null;
@@ -1100,9 +1106,13 @@ function setSessionSelected(sid, selected){
 }
 function selectAllSessions(){
   _selectedSessions.clear();
+  const ids=Array.isArray(_sessionVisibleSidebarIds)&&_sessionVisibleSidebarIds.length
+    ? _sessionVisibleSidebarIds
+    : Array.from(document.querySelectorAll('.session-select-cb')).map(cb=>cb.dataset.sid).filter(Boolean);
+  ids.forEach(sid=>_selectedSessions.add(sid));
   document.querySelectorAll('.session-select-cb').forEach(cb=>{
     const sid=cb.dataset.sid;
-    if(sid){_selectedSessions.add(sid);cb.checked=true;const item=cb.closest('.session-item');if(item)item.classList.add('selected');}
+    if(sid){cb.checked=_selectedSessions.has(sid);const item=cb.closest('.session-item');if(item)item.classList.toggle('selected',_selectedSessions.has(sid));}
   });
   _updateBatchActionBar();
 }
@@ -1855,6 +1865,60 @@ function clearOptimisticSessionStreaming(sid){
   renderSessionListFromCache();
 }
 
+
+function _sessionVirtualWindow(opts){
+  const total=Math.max(0, Number(opts&&opts.total)||0);
+  const threshold=Math.max(1, Number(opts&&opts.threshold)||SESSION_VIRTUAL_THRESHOLD_ROWS);
+  const itemHeight=Math.max(1, Number(opts&&opts.itemHeight)||SESSION_VIRTUAL_ROW_HEIGHT);
+  const buffer=Math.max(0, Number(opts&&opts.buffer)||SESSION_VIRTUAL_BUFFER_ROWS);
+  const viewportHeight=Math.max(itemHeight, Number(opts&&opts.viewportHeight)||itemHeight*10);
+  const visibleRows=Math.max(1, Math.ceil(viewportHeight/itemHeight));
+  if(total<=threshold){
+    return {virtualized:false,start:0,end:total,topPad:0,bottomPad:0,itemHeight,total};
+  }
+  let start=Math.floor((Number(opts&&opts.scrollTop)||0)/itemHeight)-buffer;
+  start=Math.max(0, Math.min(start, Math.max(0,total-visibleRows)));
+  let end=Math.min(total, start+visibleRows+(buffer*2));
+  const activeIndex=Number.isFinite(Number(opts&&opts.activeIndex))?Number(opts.activeIndex):-1;
+  if(activeIndex>=0&&activeIndex<total&&(activeIndex<start||activeIndex>=end)){
+    start=Math.max(0, Math.min(activeIndex-buffer, Math.max(0,total-visibleRows-(buffer*2))));
+    end=Math.min(total, start+visibleRows+(buffer*2));
+  }
+  return {
+    virtualized:true,
+    start,
+    end,
+    topPad:start*itemHeight,
+    bottomPad:Math.max(0,(total-end)*itemHeight),
+    itemHeight,
+    total,
+  };
+}
+
+function _sessionVirtualSpacer(height, where){
+  const spacer=document.createElement('div');
+  spacer.className='session-virtual-spacer';
+  spacer.dataset.virtualSpacer=where||'gap';
+  spacer.setAttribute('aria-hidden','true');
+  spacer.style.height=Math.max(0,Math.round(height||0))+'px';
+  spacer.style.flex='0 0 auto';
+  return spacer;
+}
+
+function _scheduleSessionVirtualizedRender(){
+  if(_renamingSid||_sessionVirtualScrollRaf) return;
+  _sessionVirtualScrollRaf=requestAnimationFrame(()=>{_sessionVirtualScrollRaf=0;renderSessionListFromCache();});
+}
+
+function _ensureSessionVirtualScrollHandler(list){
+  if(!list||_sessionVirtualScrollList===list) return;
+  if(_sessionVirtualScrollList){
+    _sessionVirtualScrollList.removeEventListener('scroll', _scheduleSessionVirtualizedRender);
+  }
+  _sessionVirtualScrollList=list;
+  list.addEventListener('scroll', _scheduleSessionVirtualizedRender, {passive:true});
+}
+
 function renderSessionListFromCache(){
   // Don't re-render while user is actively renaming a session (would destroy the input)
   if(_renamingSid) return;
@@ -1897,7 +1961,9 @@ function renderSessionListFromCache(){
   const sessions=_attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw);
   _syncSidebarExpansionForActiveSession(sessions, activeSidForSidebar);
   const archivedCount=projectFiltered.filter(s=>s.archived).length;
-  const list=$('sessionList');list.innerHTML='';
+  const list=$('sessionList');
+  const listScrollTopBeforeRender=list.scrollTop||0;
+  list.innerHTML='';
   // Batch select bar (when in select mode)
   if(_sessionSelectMode){
     const selectBar=document.createElement('div');selectBar.className='session-select-bar';
@@ -2028,7 +2094,44 @@ function renderSessionListFromCache(){
     } else { curItems.push(s); }
   }
   if(curItems.length) groups.push({label:curLabel,items:curItems});
-  // Render groups with collapsible headers
+  const flatSessionRows=[];
+  for(const g of groups){
+    if(_groupCollapsed[g.label]) continue;
+    for(const s of g.items){ flatSessionRows.push({group:g,session:s}); }
+  }
+  _sessionVisibleSidebarIds=flatSessionRows.map(row=>row.session&&row.session.session_id).filter(Boolean);
+  _ensureSessionVirtualScrollHandler(list);
+  const activeIndex=flatSessionRows.findIndex(row=>_sessionLineageContainsSession(row.session,activeSidForSidebar));
+  const shouldAnchorActive=activeSidForSidebar&&activeIndex>=0&&(
+    list.dataset.sessionVirtualActiveAnchor!==activeSidForSidebar||
+    list.dataset.sessionVirtualFilter!==q
+  );
+  let virtualWindow=_sessionVirtualWindow({
+    total:flatSessionRows.length,
+    scrollTop:listScrollTopBeforeRender,
+    viewportHeight:list.clientHeight||520,
+    itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,
+    buffer:SESSION_VIRTUAL_BUFFER_ROWS,
+    threshold:SESSION_VIRTUAL_THRESHOLD_ROWS,
+    activeIndex:shouldAnchorActive?activeIndex:-1,
+  });
+  let virtualAnchorScrollTop=null;
+  if(shouldAnchorActive&&virtualWindow.virtualized){
+    list.dataset.sessionVirtualActiveAnchor=activeSidForSidebar;
+    virtualAnchorScrollTop=virtualWindow.topPad;
+  }else if(activeSidForSidebar){
+    list.dataset.sessionVirtualActiveAnchor=activeSidForSidebar;
+  }else{
+    delete list.dataset.sessionVirtualActiveAnchor;
+  }
+  list.dataset.sessionVirtualTotal=String(flatSessionRows.length);
+  list.dataset.sessionVirtualFilter=q;
+  list.dataset.sessionVirtualStart=String(virtualWindow.start);
+  list.dataset.sessionVirtualEnd=String(virtualWindow.end);
+  // Render groups with collapsible headers. Large sidebars render only the
+  // current session-row window plus top/bottom spacers inside each group body;
+  // headers remain real DOM so pin/archive/date grouping and clicks survive.
+  let globalSessionRowIndex=0;
   for(const g of groups){
     const wrapper=document.createElement('div');
     wrapper.className='session-date-group';
@@ -2042,18 +2145,36 @@ function renderSessionListFromCache(){
     hdr.appendChild(caret);hdr.appendChild(label);
     const body=document.createElement('div');
     body.className='session-date-body';
-    if(_groupCollapsed[g.label]){body.style.display='none';caret.classList.add('collapsed');}
+    const isGroupCollapsed=Boolean(_groupCollapsed[g.label]);
+    if(isGroupCollapsed){body.style.display='none';caret.classList.add('collapsed');}
     hdr.onclick=()=>{
       const isCollapsed=body.style.display==='none';
       body.style.display=isCollapsed?'':'none';
       caret.classList.toggle('collapsed',!isCollapsed);
       _groupCollapsed[g.label]=!isCollapsed;
       _saveCollapsed();
+      renderSessionListFromCache();
     };
     wrapper.appendChild(hdr);
-    for(const s of g.items){ body.appendChild(_renderOneSession(s, Boolean(g.isPinned))); }
+    let groupTopPad=0;
+    let groupBottomPad=0;
+    for(const s of g.items){
+      if(isGroupCollapsed) continue;
+      const rowIndex=globalSessionRowIndex++;
+      const inWindow=!virtualWindow.virtualized||(rowIndex>=virtualWindow.start&&rowIndex<virtualWindow.end);
+      if(inWindow){ body.appendChild(_renderOneSession(s, Boolean(g.isPinned))); }
+      else if(rowIndex<virtualWindow.start){ groupTopPad+=virtualWindow.itemHeight; }
+      else { groupBottomPad+=virtualWindow.itemHeight; }
+    }
+    if(groupTopPad>0){ body.insertBefore(_sessionVirtualSpacer(groupTopPad,'before'), body.firstChild); }
+    if(groupBottomPad>0){ body.appendChild(_sessionVirtualSpacer(groupBottomPad,'after')); }
     wrapper.appendChild(body);
     list.appendChild(wrapper);
+  }
+  if(virtualAnchorScrollTop!==null){
+    list.scrollTop=virtualAnchorScrollTop;
+  }else if(virtualWindow.virtualized){
+    list.scrollTop=listScrollTopBeforeRender;
   }
   // Select mode toggle button (only when NOT in select mode)
   if(!_sessionSelectMode){
