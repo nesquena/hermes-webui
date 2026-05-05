@@ -950,42 +950,9 @@
             <!-- MCP Servers Section -->
             <div class="settings-field" style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
               <label data-i18n="mcp_servers_title">MCP Servers</label>
-              <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="mcp_servers_desc">Manage Model Context Protocol servers configured in config.yaml.</div>
+              <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="mcp_servers_desc">View Model Context Protocol servers configured in config.yaml.</div>
               <div id="mcpServerList"></div>
-              <button class="sm-btn" onclick="showMcpAddForm()" style="margin-top:8px;width:100%;padding:7px;font-weight:600" data-i18n="mcp_add_server">+ Add Server</button>
-            </div>
-            <div id="mcpAddFormWrap" style="display:none;margin-top:10px">
-              <div class="settings-field">
-                <label data-i18n="mcp_field_name">Server Name</label>
-                <input type="text" id="mcpName" placeholder="my-server" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
-              </div>
-              <div class="settings-field">
-                <label data-i18n="mcp_transport_label">Transport Type</label>
-                <select id="mcpTransport" onchange="mcpTransportChanged()" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
-                  <option value="stdio">stdio (local command)</option>
-                  <option value="http">HTTP (remote URL)</option>
-                </select>
-              </div>
-              <div class="settings-field" id="mcpCommandField">
-                <label data-i18n="mcp_field_command">Command</label>
-                <input type="text" id="mcpCommand" placeholder="npx" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
-              </div>
-              <div class="settings-field" id="mcpArgsField">
-                <label data-i18n="mcp_field_args">Arguments (comma-separated)</label>
-                <input type="text" id="mcpArgs" placeholder="-y, @modelcontextprotocol/server-filesystem" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
-              </div>
-              <div class="settings-field" id="mcpUrlField" style="display:none">
-                <label data-i18n="mcp_field_url">URL</label>
-                <input type="text" id="mcpUrl" placeholder="https://my-mcp-server.example.com/mcp" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
-              </div>
-              <div class="settings-field" id="mcpTimeoutField">
-                <label data-i18n="mcp_field_timeout">Timeout (seconds)</label>
-                <input type="number" id="mcpTimeout" value="120" min="10" max="600" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">
-              </div>
-              <div style="display:flex;gap:8px;margin-top:8px">
-                <button class="sm-btn" onclick="saveMcpServer()" style="flex:1;padding:7px;font-weight:600" data-i18n="mcp_save">Save</button>
-                <button class="sm-btn" onclick="hideMcpAddForm()" style="flex:1;padding:7px;color:var(--muted)" data-i18n="mcp_cancel">Cancel</button>
-              </div>
+              <div class="mcp-restart-hint" data-i18n="mcp_restart_hint">Server changes are read-only here for now. Edit config.yaml and restart Hermes for changes to take effect.</div>
             </div>
             <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600" data-i18n="settings_save_btn">Save Settings</button>
           </div>
