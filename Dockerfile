@@ -25,6 +25,8 @@ RUN apt-get update -y --fix-missing --no-install-recommends \
     curl \
     rsync \
     openssh-client \
+    git \
+    xz-utils \
     && apt-get upgrade -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
@@ -45,11 +47,11 @@ WORKDIR /apptoo
 RUN echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
 
 # Create a new group for the hermeswebui and hermeswebuitoo users
-RUN groupadd -g 1024 hermeswebui \ 
+RUN groupadd -g 1024 hermeswebui \
     && groupadd -g 1025 hermeswebuitoo
 
-# The hermeswebui (resp. hermeswebuitoo) user will have UID 1024 (resp. 1025), 
-# be part of the hermeswebui (resp. hermeswebuitoo) and users groups and be sudo capable (passwordless) 
+# The hermeswebui (resp. hermeswebuitoo) user will have UID 1024 (resp. 1025),
+# be part of the hermeswebui (resp. hermeswebuitoo) and users groups and be sudo capable (passwordless)
 RUN useradd -u 1024 -d /home/hermeswebui -g hermeswebui -s /bin/bash -m hermeswebui \
     && usermod -G users hermeswebui \
     && adduser hermeswebui sudo
@@ -60,24 +62,45 @@ RUN chown -R hermeswebuitoo:hermeswebuitoo /apptoo
 
 USER root
 
-COPY --chmod=555 docker_init.bash /hermeswebui_init.bash
+# Pre-install uv system-wide so the container doesn't need internet access at runtime.
+# Installing as root places uv in /usr/local/bin, available to all users.
+# The init script will skip the download when uv is already on PATH.
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 
+# Install Node.js 22 LTS (for browser tools)
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "x86_64" ]; then NODE_ARCH="x64"; \
+    elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then NODE_ARCH="arm64"; \
+    else echo "Unsupported architecture: $ARCH" && exit 1; fi && \
+    INDEX_URL="https://nodejs.org/dist/latest-v22.x/" && \
+    TARBALL=$(curl -fsSL "$INDEX_URL" | grep -oE "node-v22\.[0-9]+\.[0-9]+-linux-${NODE_ARCH}\.tar\.xz" | head -1) && \
+    [ -n "$TARBALL" ] || { echo "Could not find Node.js tarball"; exit 1; } && \
+    curl -fsSL "${INDEX_URL}${TARBALL}" -o /tmp/node.tar.xz && \
+    tar -C /usr/local --strip-components=1 -xJf /tmp/node.tar.xz && \
+    rm /tmp/node.tar.xz && \
+    node --version && npm --version
+
+# Pre-bake the Hermes Agent source into the image to avoid runtime network installs.
+# Use /opt/hermes which is not affected by the mounted .hermes volume.
+COPY hermes-agent-desktop/hermes-agent /opt/hermes/
+
+# Tell the WebUI where to find the agent (used by bootstrap if manually invoked)
+ENV HERMES_WEBUI_AGENT_DIR=/opt/hermes
+
+# Copy the init script (must be before using it as CMD)
+COPY --chmod=555 hermes-webui/docker_init.bash /hermeswebui_init.bash
+
+# Marker that we're inside a container
 RUN touch /.within_container
 
 # Remove APT proxy configuration and clean up APT downloaded files
 RUN rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/01proxy \
     && apt-get clean
 
-USER root
-
-# Pre-install uv system-wide so the container doesn't need internet access at runtime.
-# Installing as root places uv in /usr/local/bin, available to all users.
-# The init script will skip the download when uv is already on PATH.
-RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
-
 USER hermeswebuitoo
 
-COPY --chown=hermeswebuitoo:hermeswebuitoo . /apptoo
+# Copy the WebUI application code
+COPY --chown=hermeswebuitoo:hermeswebuitoo hermes-webui/ /apptoo/
 
 # Bake the git version tag into the image so the settings badge works even
 # when .git is not present (it is excluded by .dockerignore).
@@ -96,4 +119,3 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -f http://localhost:8787/health || exit 1
 
 CMD ["/hermeswebui_init.bash"]
-
