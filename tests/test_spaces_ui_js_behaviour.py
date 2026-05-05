@@ -1632,11 +1632,18 @@ def test_spaces_ui_install_music_sequencer_posts_template_and_refreshes_without_
     assert "SECRET" not in out["rootHtml"]
 
 
-def test_spaces_ui_install_local_service_dashboard_posts_template_and_refreshes_without_widget_code(driver_path):
+def test_spaces_ui_install_local_service_dashboard_posts_template_and_shows_safe_open_manage_status(driver_path):
     out = _run_spaces_scenario(driver_path, "installLocalServiceDashboard")
     post = next(call for call in out["calls"] if call["path"] == "api/spaces/templates/install")
 
     assert "Install local service dashboard" in out["rootHtml"]
+    assert "Local service dashboard installed" in out["rootHtml"]
+    assert "Local Service Dashboard" in out["rootHtml"]
+    assert "4 widgets" in out["rootHtml"]
+    assert "Open local service dashboard" in out["rootHtml"]
+    assert "Manage service widgets" in out["rootHtml"]
+    assert 'data-capy-action="openSpace" data-space-id="local-service-dashboard"' in out["rootHtml"]
+    assert 'data-capy-action="loadWidgets" data-space-id="local-service-dashboard"' in out["rootHtml"]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"template": "service"}
     assert out["calls"][-1]["path"] == "api/spaces"

@@ -11,9 +11,12 @@ Research targets:
 
 Last updated: 2026-05-05 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: installing the Camera Dashboard demo from the visible Spaces list now leaves a safe status card with direct `Open camera dashboard` and `Manage camera widgets` actions, continuing the visible demo-vertical work after Weather, Notes, Kanban, Research, Daily Dashboard, Browser Surface, and Stock Chart. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: installing the Local Service Dashboard demo from the visible Spaces list now leaves a safe status card with direct `Open local service dashboard` and `Manage service widgets` actions, continuing the visible demo-vertical work after Weather, Notes, Kanban, Research, Daily Dashboard, Browser Surface, Stock Chart, and Camera Dashboard. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): show local service install status actions`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving `Install local service dashboard` posts `{template: "service"}`, refreshes the Spaces list, prepends a safe `Local service dashboard installed` status card with direct open/manage actions, and keeps hostile `renderer`/`<script>`/API-auth markers out of DOM.
 
 - `feat(spaces): show camera dashboard install status actions`
   - Added RED/GREEN real-`static/spaces.js` coverage proving `Install camera dashboard` posts `{template: "camera"}`, refreshes the Spaces list, prepends a safe `Camera dashboard installed` status card with direct open/manage actions, and keeps hostile `renderer`/`<script>`/API-auth markers out of DOM.

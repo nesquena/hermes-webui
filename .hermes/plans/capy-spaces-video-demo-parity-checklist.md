@@ -53,6 +53,7 @@ Recently landed:
 - Source-style current-space metadata/layout helpers now include metadata-only `space.current.saveMeta` and `space.current.saveLayout`, accepting `activeSpaceId` payloads while saving only safe Capy Space metadata/layout fields and omitting generated/credential-like fields from responses.
 - Source-style widget size utility coverage now includes metadata-only `space.spaces.sizeToToken`, mirroring Space Agent preset/object/fallback size normalization and clamping without exposing generated/source/API auth markers.
 - Source-style runtime collection property coverage now includes metadata-only `space.spaces.items`, `space.spaces.all`, `space.spaces.byId`, `space.spaces.current`, `space.spaces.currentId`, `space.current.byId`, `space.current.agentInstructions`, and `space.current.specialInstructions`, matching another Space Agent runtime namespace shape without exposing generated widget bodies or credential-like request fields.
+- The Local Service Dashboard install flow now produces a visible metadata-only completion card with direct open/manage actions for the Agent Zero/local-service dashboard demo path, without exposing generated renderer or credential-like fields.
 - Screenshot QA artifacts are expected for visually relevant Spaces work.
 
 Next checkpoint emphasis:
