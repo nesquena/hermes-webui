@@ -87,8 +87,14 @@ def test_weather_demo_smoke_records_visible_weather_observation(monkeypatch, tmp
 
     result = spaces.space_demo_run("demo_weather_widget")
     detail = spaces.read_widget_detail(result["space"]["space_id"], "weather-current")
+    events = spaces.list_widget_events(result["space"]["space_id"], "weather-current")
 
     assert result["action"] == "weather-observation-recorded"
+    assert result["queued_event_count"] == 1
+    assert events[0]["event_name"] == "widget.refresh"
+    assert events[0]["status"] == "queued"
+    assert events[0]["widget_id"] == "weather-current"
+    assert events[0]["payload_summary"] == {"demo": "demo_weather_widget", "location": "Prague", "units": "metric"}
     assert result["prompt_flow"] == {
         "blank_space": True,
         "query": "What is the weather in Prague?",

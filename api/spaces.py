@@ -1477,8 +1477,18 @@ def space_demo_run(name: str) -> dict[str, Any]:
             "summary": "Partly cloudy in Prague; refreshed through agent-mediated weather metadata.",
         }
         patch_widget(space_id, "weather-current", {"weather": weather_patch})
+        queued = queue_widget_event(
+            space_id,
+            "weather-current",
+            "widget.refresh",
+            {"demo": demo, "location": "Prague", "units": "metric"},
+            prompt="Refresh Prague weather metadata through the agent-mediated bridge.",
+        )
+        queued_events = list_widget_events(space_id, "weather-current")
         action = "weather-observation-recorded"
         extra = {
+            "queued_event": queued,
+            "queued_event_count": len(queued_events),
             "weather_observation": {"widget": read_widget_detail(space_id, "weather-current")},
             "prompt_flow": {
                 "blank_space": True,

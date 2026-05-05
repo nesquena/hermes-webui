@@ -11,9 +11,12 @@ Research targets:
 
 Last updated: 2026-05-05 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: installing the Local Service Dashboard demo from the visible Spaces list now leaves a safe status card with direct `Open local service dashboard` and `Manage service widgets` actions, continuing the visible demo-vertical work after Weather, Notes, Kanban, Research, Daily Dashboard, Browser Surface, Stock Chart, and Camera Dashboard. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the Weather demo smoke now queues a safe `widget.refresh` event for the persistent weather widget and surfaces that queued bridge count in the visible demo-smoke status, making the prompt → widget flow a clearer metadata-only end-to-end acceptance checkpoint. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): queue weather demo refresh event`
+  - Added RED/GREEN backend coverage proving `demo_weather_widget` records the Prague weather observation, queues one safe `widget.refresh` event against `weather-current`, exposes `queued_event_count` for the visible smoke card, and keeps generated/source/API-auth markers out of the serialized result.
 
 - `feat(spaces): show local service install status actions`
   - Added RED/GREEN real-`static/spaces.js` coverage proving `Install local service dashboard` posts `{template: "service"}`, refreshes the Spaces list, prepends a safe `Local service dashboard installed` status card with direct open/manage actions, and keeps hostile `renderer`/`<script>`/API-auth markers out of DOM.
