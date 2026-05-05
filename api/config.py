@@ -1963,6 +1963,65 @@ def _get_label_for_model(model_id: str, existing_groups: list) -> str:
     )
 
 
+def _read_live_provider_model_ids(provider_id: str) -> list[str]:
+    """Return live model IDs from Hermes CLI for a provider, or [] on failure.
+
+    WebUI's static ``_PROVIDER_MODELS`` table is only a fallback.  The agent CLI
+    owns the provider registry and catalog-discovery logic, so ordinary picker
+    groups should ask ``hermes_cli.models.provider_model_ids()`` first (#1240).
+    Provider aliases are tried as a secondary lookup because WebUI keeps a few
+    display-facing IDs (for example ``google`` / ``x-ai``) that Hermes CLI may
+    normalize internally.
+    """
+    pid = str(provider_id or "").strip()
+    if not pid:
+        return []
+    try:
+        from hermes_cli.models import provider_model_ids as _provider_model_ids
+    except Exception:
+        return []
+
+    candidates = [pid]
+    try:
+        alias = _resolve_provider_alias(pid)
+    except Exception:
+        alias = ""
+    if alias and alias not in candidates:
+        candidates.append(alias)
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            live_ids = _provider_model_ids(candidate) or []
+        except Exception:
+            logger.debug("Failed to load %s models from hermes_cli", candidate)
+            continue
+        result: list[str] = []
+        for mid in live_ids:
+            mid_s = str(mid or "").strip()
+            if mid_s and mid_s not in seen:
+                seen.add(mid_s)
+                result.append(mid_s)
+        if result:
+            return result
+    return []
+
+
+def _models_from_live_provider_ids(provider_id: str, live_ids: list[str]) -> list[dict]:
+    """Convert Hermes CLI model ids into WebUI picker model entries."""
+    formatter = _format_ollama_label if provider_id in ("ollama", "ollama-cloud") else None
+    models: list[dict] = []
+    seen: set[str] = set()
+    for mid in live_ids:
+        mid_s = str(mid or "").strip()
+        if not mid_s or mid_s in seen:
+            continue
+        seen.add(mid_s)
+        label = formatter(mid_s) if formatter else _get_label_for_model(mid_s, [])
+        models.append({"id": mid_s, "label": label})
+    return models
+
+
 def _read_visible_codex_cache_model_ids() -> list[str]:
     """Return visible model slugs from Codex's local models_cache.json.
 
@@ -2912,18 +2971,33 @@ def get_available_models() -> dict:
                             group_entry["extra_models"] = extras
                         groups.append(group_entry)
                 elif pid in _PROVIDER_MODELS or pid in cfg.get("providers", {}):
-                    raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
-                    detected_models = auto_detected_models_by_provider.get(pid, [])
-                    if detected_models and not raw_models:
-                        raw_models = copy.deepcopy(detected_models)
-
                     provider_cfg = cfg.get("providers", {}).get(pid, {})
+                    raw_models = []
+
+                    # User-configured model allowlists are explicit local
+                    # source-of-truth and should still beat auto-discovery.
+                    # Otherwise, ask Hermes CLI first so WebUI tracks the same
+                    # live catalog as the agent/CLI picker; WebUI's static
+                    # _PROVIDER_MODELS table is now a fallback only (#1240).
                     if isinstance(provider_cfg, dict) and "models" in provider_cfg:
                         cfg_models = provider_cfg["models"]
                         if isinstance(cfg_models, dict):
                             raw_models = [{"id": k, "label": k} for k in cfg_models.keys()]
                         elif isinstance(cfg_models, list):
                             raw_models = [{"id": k, "label": k} for k in cfg_models]
+
+                    if not raw_models:
+                        raw_models = _models_from_live_provider_ids(
+                            pid,
+                            _read_live_provider_model_ids(pid),
+                        )
+
+                    if not raw_models:
+                        raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
+
+                    detected_models = auto_detected_models_by_provider.get(pid, [])
+                    if detected_models and not raw_models:
+                        raw_models = copy.deepcopy(detected_models)
                     models = _apply_provider_prefix(raw_models, pid, active_provider)
                     groups.append(
                         {
