@@ -2563,7 +2563,8 @@ main.main.showing-logs > #mainLogs{display:flex;}
 /* ── Session tags ── */
 .session-tag{display:inline-block;font-size:9px;font-weight:600;padding:1px 5px;margin-left:4px;border-radius:3px;background:rgba(99,179,237,.2);color:#63b3ed;cursor:pointer;vertical-align:middle;}
 .session-tag:hover{background:rgba(99,179,237,.35);}
-.session-origin-chip{display:inline-flex;align-items:center;max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid var(--border2);border-radius:999px;background:rgba(99,102,241,.12);color:var(--muted);font-size:9px;font-weight:600;line-height:1;padding:2px 5px;cursor:pointer;flex-shrink:0;}
+.session-sidebar-chip{display:inline-flex;align-items:center;max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid var(--border2);border-radius:999px;color:var(--muted);font-size:9px;font-weight:600;line-height:1;padding:2px 5px;cursor:pointer;flex-shrink:0;}
+.session-origin-chip{background:rgba(99,102,241,.12);}
 .session-origin-chip:hover{background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent-bg);}
 .session-item.active .session-origin-chip{border-color:color-mix(in srgb,var(--accent-text) 32%,transparent);color:var(--accent-text);background:rgba(255,255,255,.12);}
 

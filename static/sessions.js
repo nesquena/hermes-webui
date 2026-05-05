@@ -1889,6 +1889,21 @@ function _filterBySessionOriginTag(label){
   searchBox.value=String(label||'').trim();
   filterSessions();
 }
+function _guardSessionSidebarChipEvent(e){
+  if(e) e.stopPropagation();
+}
+function _createSessionSidebarChip({label='',title='',className='session-sidebar-chip',onClick=null}={}){
+  const chip=document.createElement('button');
+  chip.type='button';
+  chip.className=className;
+  chip.textContent=label;
+  chip.title=title||label;
+  ['pointerdown','pointerup','click'].forEach(ev=>chip.addEventListener(ev,_guardSessionSidebarChipEvent));
+  if(typeof onClick==='function'){
+    chip.onclick=(e)=>{_guardSessionSidebarChipEvent(e);onClick(e);};
+  }
+  return chip;
+}
 
 function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=Date.now()}={}){
   if(!S.session||!S.session.session_id) return;
@@ -2379,13 +2394,12 @@ function renderSessionListFromCache(){
     }
     const originTags=_sessionOriginTagsForDisplay(s);
     for(const originTag of originTags){
-      const originChip=document.createElement('button');
-      originChip.type='button';
-      originChip.className='session-origin-chip';
-      originChip.textContent=originTag;
-      originChip.title=s.origin_detail||s.origin_label||('Filter by '+originTag);
-      ['pointerdown','pointerup','click'].forEach(ev=>originChip.addEventListener(ev,e=>e.stopPropagation()));
-      originChip.onclick=(e)=>{e.stopPropagation();_filterBySessionOriginTag(originTag);};
+      const originChip=_createSessionSidebarChip({
+        label:originTag,
+        title:s.origin_detail||s.origin_label||('Filter by '+originTag),
+        className:'session-sidebar-chip session-origin-chip',
+        onClick:()=>_filterBySessionOriginTag(originTag),
+      });
       titleRow.appendChild(originChip);
     }
     titleRow.appendChild(ts);

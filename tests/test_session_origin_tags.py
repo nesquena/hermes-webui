@@ -189,4 +189,8 @@ def test_sidebar_search_uses_origin_terms():
 def test_sidebar_renders_origin_chips():
     assert "session-origin-chip" in SESSIONS_JS
     assert "_sessionOriginTagsForDisplay" in SESSIONS_JS
+    assert "function _createSessionSidebarChip" in SESSIONS_JS
+    assert "session-sidebar-chip session-origin-chip" in SESSIONS_JS
+    assert "function _guardSessionSidebarChipEvent(e)" in SESSIONS_JS
+    assert ".session-sidebar-chip" in STYLE_CSS
     assert ".session-origin-chip" in STYLE_CSS
