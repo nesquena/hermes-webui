@@ -1468,16 +1468,24 @@ def test_spaces_ui_install_research_harness_posts_template_and_shows_safe_open_m
     assert "SECRET" not in out["rootHtml"]
 
 
-def test_spaces_ui_install_dashboard_demo_posts_template_and_refreshes_without_widget_code(driver_path):
+def test_spaces_ui_install_dashboard_demo_posts_template_and_shows_safe_open_manage_status(driver_path):
     out = _run_spaces_scenario(driver_path, "installDashboardDemo")
     post = next(call for call in out["calls"] if call["path"] == "api/spaces/templates/install")
 
     assert "Install dashboard demo" in out["rootHtml"]
+    assert "Dashboard demo installed" in out["rootHtml"]
+    assert "Daily Dashboard" in out["rootHtml"]
+    assert "2 widgets" in out["rootHtml"]
+    assert "Open dashboard demo" in out["rootHtml"]
+    assert "Manage dashboard widgets" in out["rootHtml"]
+    assert 'data-capy-action="openSpace" data-space-id="daily-dashboard"' in out["rootHtml"]
+    assert 'data-capy-action="loadWidgets" data-space-id="daily-dashboard"' in out["rootHtml"]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"template": "dashboard"}
     assert out["calls"][-1]["path"] == "api/spaces"
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
     assert "SECRET" not in out["rootHtml"]
 
 

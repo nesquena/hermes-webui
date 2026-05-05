@@ -11,9 +11,12 @@ Research targets:
 
 Last updated: 2026-05-05 01:22 CDT on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: installing the Research Harness from the visible Spaces list now leaves a safe status card with direct `Open research harness` and `Manage research widgets` actions, continuing the visible demo-vertical work after Weather, Notes, and Kanban. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: installing the Daily Dashboard demo from the visible Spaces list now leaves a safe status card with direct `Open dashboard demo` and `Manage dashboard widgets` actions, continuing the visible demo-vertical work after Weather, Notes, Kanban, and Research. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): show dashboard install status actions`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving `Install dashboard demo` posts `{template: "dashboard"}`, refreshes the Spaces list, prepends a safe `Dashboard demo installed` status card with direct open/manage actions, and keeps hostile `renderer`/`<script>`/API-auth markers out of DOM.
 
 - `feat(spaces): show research install status actions`
   - Added RED/GREEN real-`static/spaces.js` coverage proving `Install research harness` posts `{template: "research"}`, refreshes the Spaces list, prepends a safe `Research harness installed` status card with direct open/manage actions, and keeps hostile `renderer`/`<script>`/API-auth markers out of DOM.
