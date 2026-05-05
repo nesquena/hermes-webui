@@ -2794,12 +2794,24 @@ main.main.showing-logs > #mainLogs{display:flex;}
   gap: 8px;
 }
 .msg-usage-inline,
-.msg-duration-inline {
+.msg-duration-inline,
+.msg-gateway-inline,
+.gateway-failover-inline,
+.msg-model-warning-inline {
   font-size: 11px;
   color: var(--muted);
   opacity: .7;
   flex: 0 0 auto;
   font-variant-numeric: tabular-nums;
+}
+.gateway-failover-inline {
+  color: var(--accent);
+  opacity: .9;
+}
+.msg-model-warning-inline {
+  color: var(--error);
+  opacity: .95;
+  font-weight: 600;
 }
 .msg-foot-with-usage .msg-time,
 .msg-foot-with-usage .msg-actions {

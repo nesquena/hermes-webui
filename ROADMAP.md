@@ -238,6 +238,7 @@ Remaining gaps and forward work live in [Forward Work](#forward-work) below.
 - [x] Transcript-summary card at 10+ rounds
 - [x] Sidebar dedup keying on per-conversation identity (distinct chats from same platform stay separate)
 - [x] Gateway session sync skips dup / delete options for external sessions
+- [x] LLM Gateway routing metadata display — assistant turns and session metadata show the served model/provider, failover path, and model-switch warnings when response metadata includes `used_provider`, `used_model`, or `routing` (#732)
 
 ### MCP integration
 - [x] MCP server management UI (System Settings → MCP Servers)
@@ -284,7 +285,6 @@ Remaining gaps and forward work live in [Forward Work](#forward-work) below.
 
 - **Insights / monitoring suite** — agent heartbeat + alerts (#716), quota / rate-limit display (#706), data tabs (#722), monitor dashboard concepts (#766, #721)
 - **Native MCP server expose** — Hermes WebUI as an MCP server for direct agent integration (#733)
-- **Provider failover status** — show active provider per model + LLM Gateway failover state (#732)
 - **Teams / agents management panel** — editable names, roles, assignments (#719)
 - **Web UI profile model alignment with Hermes runtime** — design parity (#749)
 - **DOM windowing / message virtualization** — for sessions with hundreds of messages (#734)

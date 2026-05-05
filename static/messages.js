@@ -910,6 +910,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             if(typeof d.usage.tps==='number'&&d.usage.tps>0){
               lastAsst._turnTps=d.usage.tps;
             }
+            if(d.usage.gateway_routing){
+              lastAsst._gatewayRouting=d.usage.gateway_routing;
+              if(S.session)S.session.gateway_routing=d.usage.gateway_routing;
+              if(S.session&&Array.isArray(S.session.gateway_routing_history))S.session.gateway_routing_history.push(d.usage.gateway_routing);
+              else if(S.session)S.session.gateway_routing_history=[d.usage.gateway_routing];
+            }
           }
         }
         if(d.session.tool_calls&&d.session.tool_calls.length){

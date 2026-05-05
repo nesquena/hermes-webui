@@ -25,6 +25,15 @@ let _sessionObservedStreaming = null;
 const _sessionStreamingById = new Map();
 const _sessionListSnapshotById = new Map();
 
+function _formatSessionModelWithGateway(s){
+  if(!s||!s.model)return'';
+  const routing=(typeof _latestGatewayRoutingForSession==='function')?_latestGatewayRoutingForSession(s):(s.gateway_routing||null);
+  if(typeof _formatGatewayModelLabel==='function'){
+    return _formatGatewayModelLabel(s.model,s.model,routing)||s.model;
+  }
+  return s.model;
+}
+
 function _getSessionViewedCounts() {
   if (_sessionViewedCounts !== null) return _sessionViewedCounts;
   try {
@@ -2338,7 +2347,8 @@ function renderSessionListFromCache(){
         : `${msgCount} msg${msgCount===1?'':'s'}`;
       metaBits.push(msgLabel);
       if(childCount>0) metaBits.push(t('session_meta_children', childCount));
-      if(s.model) metaBits.push(s.model);
+      const modelMeta=_formatSessionModelWithGateway(s);
+      if(modelMeta) metaBits.push(modelMeta);
       const sourceLabel=_getChannelLabel(s);
       if(s.is_cli_session&&sourceLabel) metaBits.push(sourceLabel);
       if(readOnly) metaBits.push('read-only');

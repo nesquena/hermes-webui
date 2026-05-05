@@ -739,9 +739,11 @@ function syncModelChip(){
   }
   const opt=_selectedModelOption();
   const text=opt?opt.textContent:getModelLabel(sel.value||'');
-  label.textContent=text;
-  if(mobileLabel) mobileLabel.textContent=text;
-  chip.title=sel.value||'Conversation model';
+  const gatewayRouting=_latestGatewayRoutingForSession(S.session);
+  const displayText=_formatGatewayModelLabel(sel.value||'',text,gatewayRouting)||text;
+  label.textContent=displayText;
+  if(mobileLabel) mobileLabel.textContent=displayText;
+  chip.title=gatewayRouting?`${sel.value||'Conversation model'} ${_gatewayRoutingLabel(gatewayRouting)}`:(sel.value||'Conversation model');
   chip.classList.toggle('active',!!(dd&&dd.classList.contains('open')));
   if(mobileAction) mobileAction.classList.toggle('active',!!(dd&&dd.classList.contains('open')));
 }
@@ -1645,6 +1647,47 @@ function getModelLabel(modelId){
     return ollamaLabel;
   }
   return _last || 'Unknown';
+}
+
+function _gatewayProviderName(provider){
+  const text=String(provider||'').trim();
+  if(!text)return'';
+  return text.replace(/^custom:/,'').replace(/[-_]/g,' ').replace(/\b\w/g,c=>c.toUpperCase());
+}
+function _gatewayRoutingLabel(routing){
+  if(!routing)return'';
+  const provider=_gatewayProviderName(routing.used_provider||routing.provider);
+  return provider?`via ${provider}`:'';
+}
+function _formatGatewayModelLabel(modelId,labelText,routing){
+  if(!routing)return'';
+  const usedModel=String(routing.used_model||'').trim();
+  const base=usedModel?getModelLabel(usedModel):(labelText||getModelLabel(modelId));
+  const via=_gatewayRoutingLabel(routing);
+  return via?`${base} ${via}`:base;
+}
+function _gatewayRoutingFailoverText(routing){
+  if(!routing||!routing.has_failover)return'';
+  const attempts=Array.isArray(routing.routing)?routing.routing:[];
+  const providers=attempts.map(a=>_gatewayProviderName(a&&a.provider)).filter(Boolean);
+  const unique=[];providers.forEach(p=>{if(!unique.includes(p))unique.push(p);});
+  if(unique.length>=2)return`Failover: ${unique[0]} → ${unique[unique.length-1]}`;
+  const from=_gatewayProviderName(routing.requested_provider);
+  const to=_gatewayProviderName(routing.used_provider);
+  if(from&&to&&from!==to)return`Failover: ${from} → ${to}`;
+  return'Gateway failover detected';
+}
+function _gatewayModelWarningText(routing){
+  if(!routing||!routing.model_changed)return'';
+  const requested=getModelLabel(routing.requested_model||'requested model');
+  const used=getModelLabel(routing.used_model||'served model');
+  return`Model switched: ${requested} → ${used}`;
+}
+function _latestGatewayRoutingForSession(session){
+  if(!session)return null;
+  if(session.gateway_routing)return session.gateway_routing;
+  const history=Array.isArray(session.gateway_routing_history)?session.gateway_routing_history:[];
+  return history.length?history[history.length-1]:null;
 }
 
 function _stripXmlToolCallsDisplay(s){
@@ -4345,19 +4388,41 @@ function renderMessages(){
     for(const mi of renderedAssistantIdxs){
       const msg=S.messages[mi]||{};
       if(msg.role!=='assistant') continue;
+      const routing=msg._gatewayRouting||null;
+      const gatewayText=_formatGatewayModelLabel(S.session&&S.session.model||'', '', routing);
+      const failoverText=_gatewayRoutingFailoverText(routing);
+      const modelWarningText=_gatewayModelWarningText(routing);
       const hasTurnUsage=!!msg._turnUsage;
       const compactActivityForMessage=isSimplifiedToolCalling()&&(
         assistantThinking.has(mi)||
         (S.toolCalls||[]).some(tc=>tc&&(tc.assistant_msg_idx!==undefined?tc.assistant_msg_idx:-1)===mi)
       );
       const durationText=compactActivityForMessage?'':_formatTurnDuration(msg._turnDuration);
-      if(!hasTurnUsage&&!durationText) continue;
+      if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText) continue;
       const seg=assistantSegments.get(mi);
       const row=seg?seg.closest('.assistant-turn'):null;
       const footerRows=row?row.querySelectorAll('.msg-foot'):[];
       const targetFoot=footerRows.length?footerRows[footerRows.length-1]:null;
-      if(!targetFoot||targetFoot.querySelector('.msg-usage-inline,.msg-duration-inline')) continue;
+      if(!targetFoot||targetFoot.querySelector('.msg-usage-inline,.msg-duration-inline,.msg-gateway-inline,.gateway-failover-inline,.msg-model-warning-inline')) continue;
       const fragments=[];
+      if(modelWarningText){
+        const warning=document.createElement('span');
+        warning.className='msg-model-warning-inline';
+        warning.textContent=modelWarningText;
+        fragments.push(warning);
+      }
+      if(failoverText){
+        const failover=document.createElement('span');
+        failover.className='gateway-failover-inline';
+        failover.textContent=failoverText;
+        fragments.push(failover);
+      }
+      if(gatewayText){
+        const gateway=document.createElement('span');
+        gateway.className='msg-gateway-inline';
+        gateway.textContent=gatewayText;
+        fragments.push(gateway);
+      }
       if(durationText){
         const duration=document.createElement('span');
         duration.className='msg-duration-inline';
