@@ -3065,6 +3065,94 @@ function dismissReconnect() {
   clearInflight();
 }
 
+// ── Live host resource health panel (#693) ──
+const SYSTEM_HEALTH_INTERVAL_MS=5000;
+let _systemHealthTimer=null;
+function _systemHealthPercent(metric){
+  const percent=Number(metric&&metric.percent);
+  if(!Number.isFinite(percent)) return null;
+  return Math.max(0,Math.min(100,Math.round(percent*10)/10));
+}
+function _formatSystemHealthPercent(percent){
+  if(percent == null) return '—';
+  return `${percent.toFixed(percent%1?1:0)}%`;
+}
+function _formatSystemHealthBytes(metric){
+  if(!metric||!metric.used_bytes||!metric.total_bytes) return '';
+  const units=['B','KB','MB','GB','TB'];
+  const fmt=(bytes)=>{
+    let value=Number(bytes)||0, idx=0;
+    while(value>=1024&&idx<units.length-1){value/=1024;idx++;}
+    return `${value.toFixed(value>=10||idx===0?0:1)} ${units[idx]}`;
+  };
+  return `${fmt(metric.used_bytes)} / ${fmt(metric.total_bytes)}`;
+}
+function _updateSystemHealthMetric(name,metric){
+  const row=document.querySelector(`[data-system-health-metric="${name}"]`);
+  if(!row) return;
+  const rawPercent=_systemHealthPercent(metric);
+  const percent=rawPercent == null ? 0 : rawPercent;
+  const label=row.querySelector('[data-system-health-value]');
+  const bar=row.querySelector('.system-health-bar');
+  const fill=row.querySelector('.system-health-bar-fill');
+  const text=_formatSystemHealthPercent(rawPercent);
+  if(label){
+    label.textContent=text;
+    const bytes=(name==='memory'||name==='disk')?_formatSystemHealthBytes(metric):'';
+    label.title=bytes||text;
+  }
+  if(bar) bar.setAttribute('aria-valuenow',String(percent));
+  if(fill) fill.style.width=`${percent}%`;
+}
+function setSystemHealthUnavailable(message){
+  const panel=$('systemHealthPanel');
+  const status=$('systemHealthStatus');
+  if(!panel) return;
+  panel.classList.remove('loading');
+  panel.classList.add('unavailable');
+  if(status) status.textContent=message||'Unavailable';
+  ['cpu','memory','disk'].forEach(name=>_updateSystemHealthMetric(name,null));
+}
+function renderSystemHealth(payload){
+  const panel=$('systemHealthPanel');
+  const status=$('systemHealthStatus');
+  if(!panel) return;
+  if(!payload||payload.available===false){
+    setSystemHealthUnavailable('Unavailable');
+    return;
+  }
+  panel.classList.remove('loading','unavailable');
+  if(status) status.textContent=payload.status==='partial'?'Partial':'Live';
+  _updateSystemHealthMetric('cpu',payload.cpu);
+  _updateSystemHealthMetric('memory',payload.memory);
+  _updateSystemHealthMetric('disk',payload.disk);
+}
+async function pollSystemHealth(){
+  if(document.visibilityState !== 'visible') return;
+  try{
+    const payload=await api('/api/system/health');
+    renderSystemHealth(payload);
+  }catch(_){
+    setSystemHealthUnavailable('Unavailable');
+  }
+}
+function startSystemHealthMonitor(){
+  if(document.visibilityState !== 'visible') return;
+  if(_systemHealthTimer) return;
+  void pollSystemHealth();
+  _systemHealthTimer=setInterval(pollSystemHealth,SYSTEM_HEALTH_INTERVAL_MS);
+}
+function stopSystemHealthMonitor(){
+  if(_systemHealthTimer){clearInterval(_systemHealthTimer);_systemHealthTimer=null;}
+}
+function _syncSystemHealthMonitorVisibility(){
+  if(document.visibilityState === 'visible') startSystemHealthMonitor();
+  else stopSystemHealthMonitor();
+}
+document.addEventListener('visibilitychange',_syncSystemHealthMonitorVisibility);
+if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',startSystemHealthMonitor);
+else startSystemHealthMonitor();
+
 // ── Hermes agent/gateway heartbeat alert (#716) ──
 const AGENT_HEALTH_INTERVAL_MS=30000;
 const AGENT_HEALTH_DISMISSED_KEY='agent-health-dismissed';

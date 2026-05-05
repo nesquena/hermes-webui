@@ -480,6 +480,7 @@ from api.helpers import (
     _redact_text,
 )
 from api.agent_health import build_agent_health_payload
+from api.system_health import build_system_health_payload
 
 
 def _clear_stale_stream_state(session) -> bool:
@@ -2490,6 +2491,10 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/api/health/agent":
         return j(handler, build_agent_health_payload())
+
+    if parsed.path == "/api/system/health":
+        j(handler, build_system_health_payload())
+        return True
 
     if parsed.path == "/api/models":
         return j(handler, get_available_models())
