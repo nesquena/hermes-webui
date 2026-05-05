@@ -647,10 +647,21 @@
     <div id="mainKanban" class="main-view">
       <div class="main-view-header">
         <div>
-          <div class="main-view-title" data-i18n="kanban_board">Board</div>
+          <div class="main-view-title-row">
+            <div class="main-view-title" data-i18n="kanban_board">Board</div>
+            <div class="kanban-board-switcher" id="kanbanBoardSwitcher" hidden>
+              <button type="button" class="kanban-board-switcher-toggle" id="kanbanBoardSwitcherToggle" onclick="toggleKanbanBoardMenu(event)" aria-haspopup="menu" aria-expanded="false">
+                <span class="kanban-board-switcher-icon" id="kanbanBoardSwitcherIcon" aria-hidden="true"></span>
+                <span class="kanban-board-switcher-name" id="kanbanBoardSwitcherName">Default</span>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+              </button>
+              <div class="kanban-board-switcher-menu" id="kanbanBoardSwitcherMenu" role="menu" hidden></div>
+            </div>
+          </div>
           <div class="kanban-readonly" data-i18n="kanban_read_only" style="display:none">Read-only view</div>
         </div>
         <div class="main-view-actions">
+          <button class="panel-head-btn" id="btnKanbanCreateBoard" onclick="openKanbanCreateBoard()" title="New board" data-i18n-title="kanban_new_board" aria-label="New board"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><line x1="17.5" y1="14" x2="17.5" y2="21"/><line x1="14" y1="17.5" x2="21" y2="17.5"/></svg></button>
           <button class="panel-head-btn" onclick="nudgeKanbanDispatcher()" title="Nudge dispatcher" data-i18n-title="kanban_nudge_dispatcher" aria-label="Nudge dispatcher">▶</button>
         </div>
       </div>
@@ -1128,5 +1139,41 @@
 <script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/boot.js?v=__WEBUI_VERSION__" defer></script>
+
+<!-- Kanban: create/rename board modal — used for both flows. -->
+<div class="kanban-modal-overlay" id="kanbanBoardModal" hidden onclick="if(event.target===this)closeKanbanBoardModal()">
+  <div class="kanban-modal" role="dialog" aria-modal="true" aria-labelledby="kanbanBoardModalTitle">
+    <h3 id="kanbanBoardModalTitle" data-i18n="kanban_new_board">New board</h3>
+    <input type="hidden" id="kanbanBoardModalMode" value="create">
+    <input type="hidden" id="kanbanBoardModalSlug" value="">
+    <div class="kanban-modal-row">
+      <label for="kanbanBoardModalName" data-i18n="kanban_board_name">Name</label>
+      <input type="text" id="kanbanBoardModalName" maxlength="64" placeholder="e.g. Experiments" autocomplete="off">
+    </div>
+    <div class="kanban-modal-row" id="kanbanBoardModalSlugRow">
+      <label for="kanbanBoardModalSlugInput" data-i18n="kanban_board_slug">Slug (lowercase, hyphens)</label>
+      <input type="text" id="kanbanBoardModalSlugInput" maxlength="48" placeholder="experiments" autocomplete="off">
+    </div>
+    <div class="kanban-modal-row">
+      <label for="kanbanBoardModalDesc" data-i18n="kanban_board_description">Description (optional)</label>
+      <textarea id="kanbanBoardModalDesc" maxlength="200"></textarea>
+    </div>
+    <div class="kanban-modal-row-inline">
+      <div class="kanban-modal-row">
+        <label for="kanbanBoardModalIcon" data-i18n="kanban_board_icon">Icon (emoji, optional)</label>
+        <input type="text" id="kanbanBoardModalIcon" maxlength="4" placeholder="📋" autocomplete="off">
+      </div>
+      <div class="kanban-modal-row">
+        <label for="kanbanBoardModalColor" data-i18n="kanban_board_color">Color (optional)</label>
+        <input type="color" id="kanbanBoardModalColor" value="#7aa2ff">
+      </div>
+    </div>
+    <div class="kanban-modal-error" id="kanbanBoardModalError" aria-live="polite"></div>
+    <div class="kanban-modal-actions">
+      <button type="button" class="btn secondary" onclick="closeKanbanBoardModal()" data-i18n="cancel">Cancel</button>
+      <button type="button" class="btn primary" id="kanbanBoardModalSubmit" onclick="submitKanbanBoardModal()" data-i18n="save">Save</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>

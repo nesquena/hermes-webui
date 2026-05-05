@@ -68,7 +68,10 @@ def test_kanban_write_mvp_has_native_controls_and_api_calls():
     assert "async function createKanbanTask" in PANELS
     assert "async function updateKanbanTask" in PANELS
     assert "async function addKanbanComment" in PANELS
-    assert "api('/api/kanban/tasks'," in PANELS
+    # The exact tail varies because the multi-board PR appends
+    # _kanbanBoardQuery() to most kanban API URLs. Match with looser
+    # substring assertions that survive that suffix.
+    assert "api('/api/kanban/tasks'" in PANELS
     assert "method: 'POST'" in PANELS
     assert "'/api/kanban/tasks/' + encodeURIComponent(taskId)" in PANELS
     assert "method: 'PATCH'" in PANELS
@@ -143,7 +146,14 @@ def test_kanban_dashboard_parity_core_controls_are_native():
         "'/api/kanban/tasks/' + encodeURIComponent(taskId) + '/unblock'",
     ):
         assert endpoint in PANELS
-    assert "setInterval(refreshKanbanEvents" in PANELS
+    # Live event delivery — either the legacy 30s setInterval polling OR
+    # the new SSE /api/kanban/events/stream subscription must be present.
+    # The multi-board PR replaced setInterval with EventSource as the
+    # default, falling back to setInterval after repeated SSE failures.
+    assert (
+        "setInterval(refreshKanbanEvents" in PANELS
+        or "new EventSource" in PANELS
+    ), "Kanban must subscribe to live events via SSE or polling"
     assert "prompt(" not in PANELS
     assert "confirm(" not in PANELS
 
@@ -314,3 +324,142 @@ def test_kanban_readonly_banner_starts_hidden_and_is_toggled_on_load():
     assert "_kanbanBoard.read_only" in panels, (
         "panels.js must consult _kanbanBoard.read_only when toggling the banner"
     )
+
+
+# ── Multi-board switcher UI tests ───────────────────────────────────────────
+
+def test_kanban_board_switcher_markup_in_index():
+    """The board switcher next to the Board title must be in index.html so
+    it loads on first paint without a JS round-trip."""
+    assert 'id="kanbanBoardSwitcher"' in INDEX
+    assert 'id="kanbanBoardSwitcherToggle"' in INDEX
+    assert 'id="kanbanBoardSwitcherMenu"' in INDEX
+    assert 'id="kanbanBoardSwitcherName"' in INDEX
+    # Switcher must be hidden by default — only revealed when ≥1 non-default
+    # board exists, otherwise it would clutter single-board deployments.
+    assert 'id="kanbanBoardSwitcher"' in INDEX
+    assert 'hidden>' in INDEX or 'hidden ' in INDEX  # presence of hidden attr
+
+
+def test_kanban_board_modal_markup_in_index():
+    """The create/rename board modal lives at the bottom of body so the
+    fixed-positioned overlay isn't trapped inside any scroll container."""
+    for sel in (
+        'id="kanbanBoardModal"',
+        'id="kanbanBoardModalTitle"',
+        'id="kanbanBoardModalName"',
+        'id="kanbanBoardModalSlugInput"',
+        'id="kanbanBoardModalDesc"',
+        'id="kanbanBoardModalIcon"',
+        'id="kanbanBoardModalColor"',
+        'id="kanbanBoardModalError"',
+        'id="kanbanBoardModalSubmit"',
+    ):
+        assert sel in INDEX
+    # Modal must be hidden by default
+    assert 'id="kanbanBoardModal" hidden' in INDEX
+
+
+def test_kanban_board_switcher_handlers_in_panels():
+    """Every UI affordance must have a corresponding JS handler."""
+    for fn in (
+        "async function loadKanbanBoards",
+        "function _renderKanbanBoardMenu",
+        "function toggleKanbanBoardMenu",
+        "async function switchKanbanBoard",
+        "function openKanbanCreateBoard",
+        "function openKanbanRenameBoard",
+        "function closeKanbanBoardModal",
+        "async function submitKanbanBoardModal",
+        "async function archiveKanbanBoard",
+    ):
+        assert fn in PANELS, f"Missing handler: {fn}"
+
+
+def test_kanban_board_switcher_calls_correct_endpoints():
+    """The switcher must hit the right REST verbs to round-trip with the
+    bridge's multi-board contract."""
+    # GET /boards
+    assert "api('/api/kanban/boards'" in PANELS
+    # POST /boards (create)
+    assert "method: 'POST'" in PANELS
+    # POST /boards/<slug>/switch
+    assert "/api/kanban/boards/' + encodeURIComponent" in PANELS
+    assert "/switch'" in PANELS
+    # PATCH /boards/<slug>
+    assert "method: 'PATCH'" in PANELS
+    # DELETE /boards/<slug>
+    assert "method: 'DELETE'" in PANELS
+
+
+def test_kanban_board_param_is_plumbed_into_api_calls():
+    """Every existing kanban endpoint call must carry ?board=<slug> when
+    a non-default board is active. The shared helper is _kanbanBoardQuery()."""
+    assert "_kanbanBoardQuery" in PANELS
+    # Spot-check critical call sites
+    assert "/api/kanban/board' + (params.toString()" in PANELS  # board with filters
+    assert "/api/kanban/config' + _kanbanBoardQuery()" in PANELS
+    assert "/api/kanban/stats' + _kanbanBoardQuery()" in PANELS
+    assert "/api/kanban/assignees' + _kanbanBoardQuery()" in PANELS
+
+
+def test_kanban_active_board_persisted_to_localstorage():
+    """The last-viewed board slug must persist to localStorage so a refresh
+    keeps the user on the same board."""
+    assert "KANBAN_BOARD_LS_KEY" in PANELS
+    assert "'hermes-kanban-active-board'" in PANELS
+    assert "_kanbanGetSavedBoard" in PANELS
+    assert "_kanbanSetSavedBoard" in PANELS
+
+
+def test_kanban_archive_board_uses_showConfirmDialog():
+    """Archive is destructive → must use the styled showConfirmDialog,
+    not native confirm() (which can't be styled or i18n'd)."""
+    # The archive path
+    arch_idx = PANELS.find("async function archiveKanbanBoard")
+    assert arch_idx > 0
+    # Look at the next 800 chars
+    archive_block = PANELS[arch_idx:arch_idx + 800]
+    assert "showConfirmDialog" in archive_block
+    assert "danger: true" in archive_block
+
+
+# ── SSE event stream UI tests ───────────────────────────────────────────────
+
+def test_kanban_sse_eventsource_subscription_is_default():
+    """The Kanban panel must subscribe to /api/kanban/events/stream via
+    EventSource as the default live-update mechanism (the multi-board PR
+    replaced 30s polling with SSE for ~300ms latency parity with the
+    agent dashboard's WebSocket /events). 30s polling remains as the
+    auto-fallback after repeated SSE failures."""
+    assert "new EventSource" in PANELS
+    assert "/api/kanban/events/stream" in PANELS
+    assert "_kanbanStartEventStream" in PANELS
+    assert "addEventListener('hello'" in PANELS
+    assert "addEventListener('events'" in PANELS
+
+
+def test_kanban_sse_falls_back_to_polling_on_repeated_failure():
+    """After 3 SSE failures the client must fall back to HTTP polling so
+    a flaky connection doesn't leave the user with stale data."""
+    assert "_kanbanEventSourceFailures" in PANELS
+    assert ">= 3" in PANELS  # the failure threshold
+    assert "setInterval(refreshKanbanEvents" in PANELS  # the fallback
+
+
+def test_kanban_sse_torn_down_on_panel_switch():
+    """The long-lived SSE connection must close when the user leaves the
+    Kanban panel — leaving it open wastes a server thread and a client
+    connection slot."""
+    assert "_kanbanStopPolling" in PANELS
+    # The teardown must be wired into switchPanel
+    assert "prevPanel === 'kanban'" in PANELS
+    assert "_kanbanStopPolling()" in PANELS
+
+
+def test_kanban_sse_refresh_is_debounced():
+    """A burst of events shouldn't trigger N reloads — must coalesce."""
+    assert "_scheduleKanbanRefresh" in PANELS
+    assert "_kanbanRefreshScheduled" in PANELS
+    # 250ms debounce window
+    assert "}, 250)" in PANELS

@@ -25,10 +25,57 @@ def _kb():
     return kb
 
 
-def _conn():
+def _resolve_board(parsed):
+    """Validate and normalise a ?board=<slug> query param.
+
+    Returns the normalised slug, or ``None`` when the caller omitted the
+    param. Raises ValueError on a malformed slug so the bridge surfaces a
+    clean 400 instead of a 500 from deeper in the library.
+    """
+    raw = (parse_qs(parsed.query or "").get("board") or [None])[0]
+    return _normalise_board_or_raise(raw)
+
+
+def _resolve_board_from_body(body):
+    """Same contract as :func:`_resolve_board` but reads ``board`` from a
+    parsed JSON body (POST / PATCH / DELETE handlers receive a dict, not
+    a parsed URL). Returns ``None`` when the body did not specify a board.
+    """
+    if not isinstance(body, dict):
+        return None
+    raw = body.get("board")
+    if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+        return None
+    return _normalise_board_or_raise(raw)
+
+
+def _normalise_board_or_raise(raw):
+    """Shared normalisation + existence check for board slugs."""
+    if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+        return None
     kb = _kb()
-    kb.init_db()
-    return kb.connect()
+    try:
+        normed = kb._normalize_board_slug(raw)
+    except (ValueError, AttributeError) as exc:
+        raise ValueError(f"invalid board slug: {raw!r}") from exc
+    if not normed:
+        return None
+    # Allow the default board even if it has not been materialised yet
+    # (kb.init_db will create it lazily). For non-default boards, require
+    # the directory exists or _conn would fail with a confusing OperationalError.
+    try:
+        default_slug = getattr(kb, "DEFAULT_BOARD", "default")
+    except Exception:
+        default_slug = "default"
+    if normed != default_slug and not kb.board_exists(normed):
+        raise LookupError(f"board {normed!r} does not exist")
+    return normed
+
+
+def _conn(board=None):
+    kb = _kb()
+    kb.init_db(board=board)
+    return kb.connect(board=board)
 
 
 def _obj_dict(value):
@@ -113,6 +160,7 @@ def _comment_counts(conn):
 
 
 def _board_payload(parsed):
+    board = _resolve_board(parsed)
     kb = _kb()
     tenant = _str_query(parsed, "tenant")
     assignee = _str_query(parsed, "assignee")
@@ -129,10 +177,10 @@ def _board_payload(parsed):
             profile = "default"
         assignee = profile
 
-    with _conn() as conn:
+    with _conn(board=board) as conn:
         latest_event_id = _latest_event_id(conn)
         if since is not None and since >= latest_event_id:
-            return {"changed": False, "latest_event_id": latest_event_id, "read_only": True}
+            return {"changed": False, "latest_event_id": latest_event_id, "read_only": False}
 
         tasks = kb.list_tasks(
             conn,
@@ -164,7 +212,7 @@ def _board_payload(parsed):
             "assignees": sorted({task.assignee for task in tasks if getattr(task, "assignee", None)}),
             "latest_event_id": latest_event_id,
             "changed": True,
-            "read_only": True,
+            "read_only": False,
             "filters": {
                 "tenant": tenant,
                 "assignee": assignee,
@@ -250,7 +298,7 @@ def _set_status_direct(conn, task_id: str, new_status: str) -> bool:
     return True
 
 
-def _create_task_payload(body: dict):
+def _create_task_payload(body: dict, *, board=None):
     title = str(body.get("title") or "").strip()
     if not title:
         raise ValueError("title is required")
@@ -260,7 +308,7 @@ def _create_task_payload(body: dict):
         raise ValueError("priority must be an integer")
     kb = _kb()
     requested_status = body.get("status")
-    with _conn() as conn:
+    with _conn(board=board) as conn:
         task_id = kb.create_task(
             conn,
             title=title,
@@ -371,17 +419,17 @@ def _patch_task(conn, task_id: str, body: dict):
         raise ValueError(f"unknown status: {status}")
 
 
-def _patch_task_payload(task_id: str, body: dict):
+def _patch_task_payload(task_id: str, body: dict, *, board=None):
     task_id = str(task_id or "").strip()
     if not task_id:
         raise ValueError("task_id is required")
     kb = _kb()
-    with _conn() as conn:
+    with _conn(board=board) as conn:
         _patch_task(conn, task_id, body)
         return {"task": _task_dict(kb.get_task(conn, task_id)), "read_only": False}
 
 
-def _comment_payload(task_id: str, body: dict):
+def _comment_payload(task_id: str, body: dict, *, board=None):
     task_id = str(task_id or "").strip()
     comment_body = str(body.get("body") or "").strip()
     if not task_id:
@@ -389,20 +437,20 @@ def _comment_payload(task_id: str, body: dict):
     if not comment_body:
         raise ValueError("body is required")
     kb = _kb()
-    with _conn() as conn:
+    with _conn(board=board) as conn:
         if not kb.get_task(conn, task_id):
             raise LookupError("task not found")
         comment_id = kb.add_comment(conn, task_id, body.get("author") or "webui", comment_body)
         return {"ok": True, "comment_id": comment_id, "read_only": False}
 
 
-def _link_tasks_payload(body: dict, *, unlink: bool = False):
+def _link_tasks_payload(body: dict, *, unlink: bool = False, board=None):
     parent_id = str(body.get("parent_id") or "").strip()
     child_id = str(body.get("child_id") or "").strip()
     if not parent_id or not child_id:
         raise ValueError("parent_id and child_id are required")
     kb = _kb()
-    with _conn() as conn:
+    with _conn(board=board) as conn:
         if not kb.get_task(conn, parent_id):
             raise LookupError("parent task not found")
         if not kb.get_task(conn, child_id):
@@ -421,9 +469,9 @@ def _links_for(conn, task_id: str) -> dict:
     }
 
 
-def _task_detail_payload(task_id: str):
+def _task_detail_payload(task_id: str, *, board=None):
     kb = _kb()
-    with _conn() as conn:
+    with _conn(board=board) as conn:
         task = kb.get_task(conn, task_id)
         if not task:
             return None
@@ -433,14 +481,15 @@ def _task_detail_payload(task_id: str):
             "events": [_obj_dict(e) for e in kb.list_events(conn, task_id)],
             "links": _links_for(conn, task_id),
             "runs": [_obj_dict(r) for r in kb.list_runs(conn, task_id)],
-            "read_only": True,
+            "read_only": False,
         }
 
 
 def _events_payload(parsed):
+    board = _resolve_board(parsed)
     since = _int_query(parsed, "since", 0, minimum=0)
     limit = _int_query(parsed, "limit", 200, minimum=1, maximum=200)
-    with _conn() as conn:
+    with _conn(board=board) as conn:
         rows = conn.execute(
             "SELECT id, task_id, run_id, kind, payload, created_at "
             "FROM task_events WHERE id > ? ORDER BY id ASC LIMIT ?",
@@ -465,13 +514,13 @@ def _events_payload(parsed):
         latest = _latest_event_id(conn)
         if not events:
             cursor = latest if since >= latest else since
-        return {"events": events, "cursor": cursor, "latest_event_id": cursor, "read_only": True}
+        return {"events": events, "cursor": cursor, "latest_event_id": cursor, "read_only": False}
 
 
-def _config_payload():
+def _config_payload(*, board=None):
     kb = _kb()
     try:
-        with _conn() as conn:
+        with _conn(board=board) as conn:
             try:
                 assignees = list(kb.known_assignees(conn))
             except Exception:
@@ -496,9 +545,9 @@ def _config_payload():
     }
 
 
-def _stats_payload():
+def _stats_payload(*, board=None):
     kb = _kb()
-    with _conn() as conn:
+    with _conn(board=board) as conn:
         if hasattr(kb, "board_stats"):
             return kb.board_stats(conn)
         rows = conn.execute(
@@ -514,9 +563,9 @@ def _stats_payload():
         return {"by_status": by_status, "by_assignee": by_assignee}
 
 
-def _assignees_payload():
+def _assignees_payload(*, board=None):
     kb = _kb()
-    with _conn() as conn:
+    with _conn(board=board) as conn:
         try:
             assignees = list(kb.known_assignees(conn))
         except Exception:
@@ -528,9 +577,10 @@ def _assignees_payload():
 
 
 def _task_log_payload(parsed, task_id: str):
+    board = _resolve_board(parsed)
     kb = _kb()
     tail = _int_query(parsed, "tail", None, minimum=1, maximum=2_000_000)
-    with _conn() as conn:
+    with _conn(board=board) as conn:
         if not kb.get_task(conn, task_id):
             return None
     if not hasattr(kb, "read_worker_log"):
@@ -551,13 +601,13 @@ def _task_log_payload(parsed, task_id: str):
     }
 
 
-def _bulk_tasks_payload(body: dict):
+def _bulk_tasks_payload(body: dict, *, board=None):
     ids = [str(i).strip() for i in (body.get("ids") or []) if str(i).strip()]
     if not ids:
         raise ValueError("ids is required")
     results = []
     kb = _kb()
-    with _conn() as conn:
+    with _conn(board=board) as conn:
         for task_id in ids:
             entry = {"id": task_id, "ok": True}
             try:
@@ -589,12 +639,13 @@ def _bulk_tasks_payload(body: dict):
 
 
 def _dispatch_payload(parsed):
+    board = _resolve_board(parsed)
     kb = _kb()
     dry_run = _bool_query(parsed, "dry_run", False)
     max_spawn = _int_query(parsed, "max", 8, minimum=1, maximum=100)
     if not hasattr(kb, "dispatch_once"):
         raise ValueError("dispatcher is unavailable")
-    with _conn() as conn:
+    with _conn(board=board) as conn:
         result = kb.dispatch_once(conn, dry_run=dry_run, max_spawn=max_spawn)
     if isinstance(result, dict):
         return result
@@ -604,12 +655,12 @@ def _dispatch_payload(parsed):
         return {"result": str(result)}
 
 
-def _task_action_payload(task_id: str, body: dict, action: str):
+def _task_action_payload(task_id: str, body: dict, action: str, *, board=None):
     kb = _kb()
     task_id = str(task_id or "").strip()
     if not task_id:
         raise ValueError("task_id is required")
-    with _conn() as conn:
+    with _conn(board=board) as conn:
         if not kb.get_task(conn, task_id):
             raise LookupError("task not found")
         if action == "block":
@@ -627,19 +678,379 @@ def _task_action_payload(task_id: str, body: dict, action: str):
         return {"task": _task_dict(kb.get_task(conn, task_id)), "read_only": False}
 
 
+# ---------------------------------------------------------------------------
+# Multi-board management
+# ---------------------------------------------------------------------------
+# These endpoints operate on the on-disk board collection itself rather than
+# on the tasks of a single board. They mirror the agent dashboard plugin's
+# /boards surface (plugins/kanban/dashboard/plugin_api.py) so that the
+# CLI / gateway / dashboard / WebUI all share the same active-board pointer.
+
+def _board_meta_dict(meta):
+    """Coerce the library's board metadata dict into a JSON-serialisable
+    form. ``list_boards`` returns dicts with Path values for ``directory``;
+    json.dumps would refuse those without help."""
+    if not isinstance(meta, dict):
+        return meta
+    out = dict(meta)
+    for key in ("directory", "db_path", "path"):
+        if key in out and out[key] is not None:
+            out[key] = str(out[key])
+    return out
+
+
+def _board_counts_for_slug(slug):
+    """Per-status task counts for a board, used to populate the board
+    switcher with a live "12 tasks" badge. Mirrors the agent dashboard's
+    ``_board_counts`` helper. Best-effort — empty dict if the board's
+    sqlite is missing (which can happen on a freshly-created board before
+    the first task is added)."""
+    kb = _kb()
+    try:
+        conn = kb.connect(board=slug)
+    except Exception:
+        return {}
+    try:
+        rows = conn.execute(
+            "SELECT status, COUNT(*) AS n FROM tasks "
+            "WHERE status != 'archived' GROUP BY status"
+        ).fetchall()
+        return {row["status"]: int(row["n"] or 0) for row in rows}
+    except Exception:
+        return {}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _list_boards_payload(parsed):
+    """GET /api/kanban/boards — return all boards on disk + active slug.
+
+    Each entry includes per-status counts and an ``is_current`` flag so the
+    UI can render the switcher in a single round-trip.
+    """
+    kb = _kb()
+    include_archived = _bool_query(parsed, "include_archived", False)
+    boards = kb.list_boards(include_archived=include_archived)
+    try:
+        current = kb.get_current_board()
+    except Exception:
+        current = "default"
+    out = []
+    for raw_meta in boards:
+        meta = _board_meta_dict(raw_meta)
+        slug = meta.get("slug")
+        if slug is None:
+            continue
+        meta["is_current"] = (slug == current)
+        meta["counts"] = _board_counts_for_slug(slug)
+        meta["total"] = sum(meta["counts"].values()) if meta["counts"] else 0
+        out.append(meta)
+    return {"boards": out, "current": current, "read_only": False}
+
+
+def _create_board_payload(body):
+    """POST /api/kanban/boards — create a new board.
+
+    Body fields: ``slug`` (required), ``name``, ``description``, ``icon``,
+    ``color``, ``switch`` (bool — set as active after creation, default false).
+    Idempotent on slug — repeating returns the existing board metadata.
+    """
+    kb = _kb()
+    if not isinstance(body, dict):
+        raise ValueError("body must be a JSON object")
+    slug = str(body.get("slug") or "").strip()
+    if not slug:
+        raise ValueError("slug is required")
+    try:
+        meta = kb.create_board(
+            slug,
+            name=body.get("name") or None,
+            description=body.get("description") or None,
+            icon=body.get("icon") or None,
+            color=body.get("color") or None,
+        )
+    except (ValueError, AttributeError) as exc:
+        raise ValueError(str(exc)) from exc
+    if body.get("switch"):
+        try:
+            kb.set_current_board(meta["slug"])
+        except (ValueError, AttributeError) as exc:
+            raise ValueError(str(exc)) from exc
+    try:
+        current = kb.get_current_board()
+    except Exception:
+        current = "default"
+    return {"board": _board_meta_dict(meta), "current": current, "read_only": False}
+
+
+def _update_board_payload(slug, body):
+    """PATCH /api/kanban/boards/<slug> — update a board's display metadata.
+
+    The slug itself is immutable (changing it would mean moving the on-disk
+    directory and re-pointing every saved active-board cookie). Only
+    ``name``, ``description``, ``icon``, ``color``, and ``archived`` are
+    mutable here; the slug travels in the URL path.
+    """
+    kb = _kb()
+    if not isinstance(body, dict):
+        raise ValueError("body must be a JSON object")
+    try:
+        normed = kb._normalize_board_slug(slug)
+    except (ValueError, AttributeError) as exc:
+        raise ValueError(f"invalid board slug: {slug!r}") from exc
+    if not normed or not kb.board_exists(normed):
+        raise LookupError(f"board {slug!r} does not exist")
+    archived = body.get("archived")
+    if isinstance(archived, str):
+        archived = archived.strip().lower() in {"1", "true", "yes", "on"}
+    meta = kb.write_board_metadata(
+        normed,
+        name=body.get("name"),
+        description=body.get("description"),
+        icon=body.get("icon"),
+        color=body.get("color"),
+        archived=archived if isinstance(archived, bool) else None,
+    )
+    return {"board": _board_meta_dict(meta), "read_only": False}
+
+
+def _delete_board_payload(slug, parsed):
+    """DELETE /api/kanban/boards/<slug> — archive (default) or hard-delete.
+
+    ``?delete=1`` is required to actually remove on-disk artefacts; without
+    it the board is just marked archived in its metadata and remains
+    enumerable via ``?include_archived=1`` on /boards.
+    """
+    kb = _kb()
+    hard_delete = _bool_query(parsed, "delete", False)
+    try:
+        normed = kb._normalize_board_slug(slug)
+    except (ValueError, AttributeError) as exc:
+        raise ValueError(f"invalid board slug: {slug!r}") from exc
+    if not normed or not kb.board_exists(normed):
+        raise LookupError(f"board {slug!r} does not exist")
+    # Refuse to delete the default board — that would leave the system
+    # without a fallback active board on next CLI / dashboard call.
+    try:
+        default_slug = getattr(kb, "DEFAULT_BOARD", "default")
+    except Exception:
+        default_slug = "default"
+    if normed == default_slug:
+        raise ValueError("cannot remove the default board")
+    res = kb.remove_board(normed, archive=not hard_delete)
+    try:
+        current = kb.get_current_board()
+    except Exception:
+        current = "default"
+    # If we just removed the active board, the library auto-falls-back to
+    # default on the next get_current_board() — surface that explicitly so
+    # the UI can re-fetch /board on the new active slug.
+    return {
+        "result": _board_meta_dict(res) if isinstance(res, dict) else res,
+        "current": current,
+        "read_only": False,
+    }
+
+
+def _switch_board_payload(slug):
+    """POST /api/kanban/boards/<slug>/switch — set this board as active.
+
+    The active-board pointer is stored on disk under ``<root>/kanban/current``
+    and is shared by the CLI, gateway, dashboard, and WebUI — switching
+    here switches everywhere. The UI also keeps a localStorage hint so
+    that opening a fresh tab doesn't always have to round-trip to discover
+    the active slug, but the on-disk pointer is the source of truth.
+    """
+    kb = _kb()
+    try:
+        normed = kb._normalize_board_slug(slug)
+    except (ValueError, AttributeError) as exc:
+        raise ValueError(f"invalid board slug: {slug!r}") from exc
+    if not normed or not kb.board_exists(normed):
+        raise LookupError(f"board {slug!r} does not exist")
+    kb.set_current_board(normed)
+    return {"current": normed, "read_only": False}
+
+
+# ---------------------------------------------------------------------------
+# SSE event stream
+# ---------------------------------------------------------------------------
+# Server-Sent Events let the UI react to task transitions in real time
+# without the 30s HTTP polling tax. The agent dashboard uses WebSockets
+# for the same purpose; we use SSE because the WebUI's existing transport
+# is a synchronous BaseHTTPServer and SSE is the right tool for
+# unidirectional server-pushed event streams. The wire-level UX is
+# identical from the client's perspective: events arrive within ~300ms
+# of being committed to task_events.
+
+# Polling interval matches the agent dashboard's _EVENT_POLL_SECONDS so
+# write-to-receive latency is identical between the two surfaces.
+_KANBAN_SSE_POLL_SECONDS = 0.3
+# Heartbeat keeps proxies/CDNs from reaping the connection on idle boards.
+# Identical to the approval/clarify SSE heartbeat.
+_KANBAN_SSE_HEARTBEAT_SECONDS = 15.0
+# Hard cap on a single SSE batch so a board with thousands of historical
+# events doesn't ship them all in one frame. Same as the dashboard.
+_KANBAN_SSE_BATCH_LIMIT = 200
+
+
+def _kanban_sse_fetch_new(board, cursor):
+    """Read events with id > cursor from the given board's task_events
+    table. Returns ``(new_cursor, events_list)``. Best-effort — returns
+    the input cursor and an empty list on any DB error so the SSE loop
+    self-heals on transient sqlite contention rather than dropping the
+    client."""
+    kb = _kb()
+    # Guard against a board that's been archived/removed mid-stream:
+    # kb.connect(board=<slug>) auto-materialises the directory + DB on
+    # first call, which would silently un-archive a board that was just
+    # removed. Skip the fetch when the board no longer exists.
+    if board is not None:
+        try:
+            default_slug = getattr(kb, "DEFAULT_BOARD", "default")
+        except Exception:
+            default_slug = "default"
+        if board != default_slug and not kb.board_exists(board):
+            return cursor, []
+    try:
+        conn = kb.connect(board=board)
+    except Exception:
+        return cursor, []
+    try:
+        rows = conn.execute(
+            "SELECT id, task_id, run_id, kind, payload, created_at "
+            "FROM task_events WHERE id > ? ORDER BY id ASC LIMIT ?",
+            (int(cursor), _KANBAN_SSE_BATCH_LIMIT),
+        ).fetchall()
+    except Exception:
+        return cursor, []
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    out = []
+    new_cursor = cursor
+    for r in rows:
+        payload = None
+        try:
+            raw = r["payload"]
+            if raw:
+                payload = json.loads(raw)
+        except Exception:
+            payload = None
+        out.append({
+            "id": int(r["id"]),
+            "task_id": r["task_id"],
+            "run_id": r["run_id"],
+            "kind": r["kind"],
+            "payload": payload,
+            "created_at": int(r["created_at"]) if r["created_at"] is not None else None,
+        })
+        new_cursor = int(r["id"])
+    return new_cursor, out
+
+
+def _handle_events_sse_stream(handler, parsed):
+    """GET /api/kanban/events/stream — long-lived SSE feed of task events.
+
+    Query params:
+      since=<int>   Resume from this event id. Defaults to 0 (full backlog
+                    on first connect — the client should pass the latest
+                    id it knows about so it does not re-receive historical
+                    events.) Capped to the most recent _KANBAN_SSE_BATCH_LIMIT.
+      board=<slug>  Pin the stream to a specific board. Switching boards
+                    requires the client to close and re-open the stream.
+
+    Mirrors the agent dashboard's WebSocket /events contract event-for-event
+    so a client that handles one can handle the other with only the
+    transport swapped.
+    """
+    import socket as _socket
+    try:
+        board = _resolve_board(parsed)
+    except (ValueError, LookupError) as exc:
+        return bad(handler, str(exc), status=400 if isinstance(exc, ValueError) else 404)
+
+    qs = parse_qs(parsed.query or "")
+    try:
+        cursor = int((qs.get("since") or ["0"])[0])
+    except (TypeError, ValueError):
+        cursor = 0
+    if cursor < 0:
+        cursor = 0
+
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+    handler.send_header("Cache-Control", "no-cache")
+    handler.send_header("X-Accel-Buffering", "no")
+    handler.send_header("Connection", "keep-alive")
+    handler.end_headers()
+
+    # Send an initial frame so the client knows the connection is open
+    # and learns the current cursor (in case the server already had a
+    # backlog when the client first connected).
+    try:
+        handler.wfile.write(
+            f"event: hello\ndata: {json.dumps({'cursor': cursor, 'board': board})}\n\n".encode("utf-8")
+        )
+        handler.wfile.flush()
+    except (BrokenPipeError, ConnectionResetError, ValueError, OSError):
+        return True
+
+    last_heartbeat = time.monotonic()
+    try:
+        while True:
+            cursor, events = _kanban_sse_fetch_new(board, cursor)
+            if events:
+                payload = json.dumps({"events": events, "cursor": cursor})
+                try:
+                    handler.wfile.write(f"event: events\ndata: {payload}\n\n".encode("utf-8"))
+                    handler.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError, ValueError, OSError):
+                    return True
+                last_heartbeat = time.monotonic()
+            else:
+                # Heartbeat keeps reverse proxies and the browser from
+                # closing an idle stream. SSE comments (lines starting
+                # with `:`) are ignored by EventSource.
+                if (time.monotonic() - last_heartbeat) >= _KANBAN_SSE_HEARTBEAT_SECONDS:
+                    try:
+                        handler.wfile.write(b": keepalive\n\n")
+                        handler.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError, ValueError, OSError):
+                        return True
+                    last_heartbeat = time.monotonic()
+            time.sleep(_KANBAN_SSE_POLL_SECONDS)
+    except Exception:
+        # Any other unexpected exception in the SSE loop should not bubble
+        # up to the request handler (which would 500 a long-lived stream).
+        return True
+
+
 def handle_kanban_get(handler, parsed) -> bool:
     path = parsed.path
     try:
+        # Multi-board management endpoints — these do NOT take a board arg
+        # because they operate on the on-disk board collection itself, not
+        # on a single board's tasks.
+        if path == "/api/kanban/boards":
+            return j(handler, _list_boards_payload(parsed)) or True
         if path == "/api/kanban/board":
             return j(handler, _board_payload(parsed)) or True
         if path == "/api/kanban/config":
-            return j(handler, _config_payload()) or True
+            return j(handler, _config_payload(board=_resolve_board(parsed))) or True
         if path == "/api/kanban/stats":
-            return j(handler, _stats_payload()) or True
+            return j(handler, _stats_payload(board=_resolve_board(parsed))) or True
         if path == "/api/kanban/assignees":
-            return j(handler, _assignees_payload()) or True
+            return j(handler, _assignees_payload(board=_resolve_board(parsed))) or True
         if path == "/api/kanban/events":
             return j(handler, _events_payload(parsed)) or True
+        if path == "/api/kanban/events/stream":
+            return _handle_events_sse_stream(handler, parsed)
         if path.startswith(_TASK_PREFIX) and path.endswith("/log"):
             task_id = unquote(path[len(_TASK_PREFIX):-len("/log")]).strip("/")
             if not task_id or "/" in task_id:
@@ -652,7 +1063,7 @@ def handle_kanban_get(handler, parsed) -> bool:
             task_id = unquote(path[len(_TASK_PREFIX):]).strip("/")
             if not task_id or "/" in task_id:
                 return False
-            payload = _task_detail_payload(task_id)
+            payload = _task_detail_payload(task_id, board=_resolve_board(parsed))
             if payload is None:
                 return bad(handler, "task not found", status=404)
             return j(handler, payload) or True
@@ -673,26 +1084,43 @@ def handle_kanban_get(handler, parsed) -> bool:
 def handle_kanban_post(handler, parsed, body) -> bool:
     path = parsed.path
     try:
+        # Multi-board management endpoints — `_create_board_payload` and
+        # `_switch_board_payload` operate on the on-disk board collection,
+        # not on a single board's tasks.
+        if path == "/api/kanban/boards":
+            return j(handler, _create_board_payload(body)) or True
+        # POST /api/kanban/boards/<slug>/switch — set active board
+        _BOARDS_PREFIX = "/api/kanban/boards/"
+        if path.startswith(_BOARDS_PREFIX) and path.endswith("/switch"):
+            slug = unquote(path[len(_BOARDS_PREFIX):-len("/switch")]).strip("/")
+            if not slug or "/" in slug:
+                return False
+            return j(handler, _switch_board_payload(slug)) or True
+        # All board-scoped writes accept a ?board=<slug> query param OR a
+        # `board` field in the JSON body. Query takes precedence.
+        board_q = _resolve_board(parsed)
+        board_b = _resolve_board_from_body(body)
+        board = board_q if board_q is not None else board_b
         if path == "/api/kanban/dispatch":
             return j(handler, _dispatch_payload(parsed)) or True
         if path == "/api/kanban/tasks/bulk":
-            return j(handler, _bulk_tasks_payload(body)) or True
+            return j(handler, _bulk_tasks_payload(body, board=board)) or True
         if path == "/api/kanban/tasks":
-            return j(handler, _create_task_payload(body)) or True
+            return j(handler, _create_task_payload(body, board=board)) or True
         if path == "/api/kanban/links":
-            return j(handler, _link_tasks_payload(body)) or True
+            return j(handler, _link_tasks_payload(body, board=board)) or True
         if path == "/api/kanban/links/delete":
-            return j(handler, _link_tasks_payload(body, unlink=True)) or True
+            return j(handler, _link_tasks_payload(body, unlink=True, board=board)) or True
         if path.startswith(_TASK_PREFIX) and path.endswith("/comments"):
             task_id = path[len(_TASK_PREFIX):-len("/comments")].strip("/")
-            return j(handler, _comment_payload(task_id, body)) or True
+            return j(handler, _comment_payload(task_id, body, board=board)) or True
         for suffix, action in (("/block", "block"), ("/unblock", "unblock")):
             if path.startswith(_TASK_PREFIX) and path.endswith(suffix):
                 task_id = path[len(_TASK_PREFIX):-len(suffix)].strip("/")
-                return j(handler, _task_action_payload(task_id, body, action)) or True
+                return j(handler, _task_action_payload(task_id, body, action, board=board)) or True
         if path.startswith(_TASK_PREFIX) and path.endswith("/patch"):
             task_id = path[len(_TASK_PREFIX):-len("/patch")].strip("/")
-            return j(handler, _patch_task_payload(task_id, body)) or True
+            return j(handler, _patch_task_payload(task_id, body, board=board)) or True
     except ImportError as exc:
         return bad(handler, f"kanban unavailable: {exc}", status=503)
     except LookupError as exc:
@@ -707,11 +1135,21 @@ def handle_kanban_post(handler, parsed, body) -> bool:
 def handle_kanban_patch(handler, parsed, body) -> bool:
     path = parsed.path
     try:
+        board_q = _resolve_board(parsed)
+        board_b = _resolve_board_from_body(body)
+        board = board_q if board_q is not None else board_b
+        # PATCH /api/kanban/boards/<slug> — update board metadata
+        _BOARDS_PREFIX = "/api/kanban/boards/"
+        if path.startswith(_BOARDS_PREFIX):
+            slug = unquote(path[len(_BOARDS_PREFIX):]).strip("/")
+            if not slug or "/" in slug:
+                return False
+            return j(handler, _update_board_payload(slug, body)) or True
         if path.startswith(_TASK_PREFIX):
             task_id = unquote(path[len(_TASK_PREFIX):]).strip("/")
             if not task_id or "/" in task_id:
                 return False
-            return j(handler, _patch_task_payload(task_id, body)) or True
+            return j(handler, _patch_task_payload(task_id, body, board=board)) or True
     except ImportError as exc:
         return bad(handler, f"kanban unavailable: {exc}", status=503)
     except LookupError as exc:
@@ -726,8 +1164,18 @@ def handle_kanban_patch(handler, parsed, body) -> bool:
 def handle_kanban_delete(handler, parsed, body) -> bool:
     path = parsed.path
     try:
+        board_q = _resolve_board(parsed)
+        board_b = _resolve_board_from_body(body)
+        board = board_q if board_q is not None else board_b
+        # DELETE /api/kanban/boards/<slug> — archive (default) or hard-delete
+        _BOARDS_PREFIX = "/api/kanban/boards/"
+        if path.startswith(_BOARDS_PREFIX):
+            slug = unquote(path[len(_BOARDS_PREFIX):]).strip("/")
+            if not slug or "/" in slug:
+                return False
+            return j(handler, _delete_board_payload(slug, parsed)) or True
         if path == "/api/kanban/links":
-            return j(handler, _link_tasks_payload(body, unlink=True)) or True
+            return j(handler, _link_tasks_payload(body, unlink=True, board=board)) or True
     except ImportError as exc:
         return bad(handler, f"kanban unavailable: {exc}", status=503)
     except LookupError as exc:

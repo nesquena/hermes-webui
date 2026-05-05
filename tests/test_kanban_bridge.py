@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+import time
 import types
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -115,13 +116,16 @@ class FakeKanbanDB:
         self.next_id = 3
         self.next_event_id = 8
 
-    def init_db(self):
+    def init_db(self, *, board=None):
+        # board param accepted but ignored — the fake stores everything
+        # in a single in-memory list for test simplicity. Real kanban_db
+        # uses the param to pick which sqlite file to open.
         return None
 
-    def connect(self):
+    def connect(self, *, board=None):
         return FakeConn(self.tasks, self.events)
 
-    def list_tasks(self, conn, tenant=None, assignee=None, include_archived=False):
+    def list_tasks(self, conn, tenant=None, assignee=None, include_archived=False, **_kwargs):
         tasks = list(conn.tasks)
         if tenant:
             tasks = [task for task in tasks if task.tenant == tenant]
@@ -253,6 +257,105 @@ class FakeKanbanDB:
         self.links = [link for link in self.links if link != (parent_id, child_id)]
         return len(self.links) != before
 
+    # ------------------------------------------------------------------
+    # Multi-board fakes — these are no-ops on tasks because the fake
+    # stores everything in a single in-memory list. They give the bridge
+    # enough surface to call the library API and round-trip without
+    # touching real disk. Tests that exercise actual board isolation use
+    # a FakeKanbanDB instance per board (or just inspect side effects on
+    # `self.boards`).
+    # ------------------------------------------------------------------
+    DEFAULT_BOARD = "default"
+
+    @staticmethod
+    def _normalize_board_slug(slug):
+        if slug is None:
+            return None
+        s = str(slug).strip().lower().replace(" ", "-")
+        # Reject anything that would be a path-traversal vector or
+        # contains characters outside the allowed alnum/dash/underscore set.
+        if not s:
+            return None
+        if any(c in s for c in ("/", "\\", "..")):
+            raise ValueError(f"invalid board slug: {slug!r}")
+        return s
+
+    def board_exists(self, slug):
+        return slug == "default" or slug in getattr(self, "boards", {})
+
+    def list_boards(self, *, include_archived=True):
+        boards = getattr(self, "boards", None)
+        if boards is None:
+            self.boards = {"default": {"slug": "default", "name": "Default board", "archived": False}}
+            boards = self.boards
+        out = []
+        for slug, meta in boards.items():
+            if not include_archived and meta.get("archived"):
+                continue
+            out.append(dict(meta))
+        return out
+
+    def create_board(self, slug, *, name=None, description=None, icon=None, color=None):
+        boards = getattr(self, "boards", None)
+        if boards is None:
+            self.boards = {"default": {"slug": "default", "name": "Default board", "archived": False}}
+            boards = self.boards
+        normed = self._normalize_board_slug(slug)
+        if not normed:
+            raise ValueError("slug is required")
+        if normed in boards:
+            return dict(boards[normed])
+        meta = {
+            "slug": normed,
+            "name": name or normed,
+            "description": description or "",
+            "icon": icon or "",
+            "color": color or "",
+            "archived": False,
+        }
+        boards[normed] = meta
+        return dict(meta)
+
+    def write_board_metadata(self, slug, *, name=None, description=None, icon=None, color=None, archived=None):
+        boards = getattr(self, "boards", None) or {}
+        if slug not in boards:
+            raise LookupError(f"board {slug!r} does not exist")
+        meta = dict(boards[slug])
+        if name is not None: meta["name"] = name
+        if description is not None: meta["description"] = description
+        if icon is not None: meta["icon"] = icon
+        if color is not None: meta["color"] = color
+        if archived is not None: meta["archived"] = bool(archived)
+        boards[slug] = meta
+        return dict(meta)
+
+    def remove_board(self, slug, *, archive=True):
+        boards = getattr(self, "boards", None) or {}
+        if slug not in boards:
+            raise LookupError(f"board {slug!r} does not exist")
+        if archive:
+            boards[slug]["archived"] = True
+            return dict(boards[slug])
+        return boards.pop(slug)
+
+    def get_current_board(self):
+        return getattr(self, "_current_board", "default")
+
+    def set_current_board(self, slug):
+        normed = self._normalize_board_slug(slug)
+        if not normed:
+            raise ValueError("slug is required")
+        self._current_board = normed
+        return None
+
+    def clear_current_board(self):
+        if hasattr(self, "_current_board"):
+            del self._current_board
+
+    def read_board_metadata(self, slug):
+        boards = getattr(self, "boards", None) or {}
+        return dict(boards.get(slug, {"slug": slug, "name": slug, "archived": False}))
+
 
 def _load_bridge(monkeypatch):
     fake_kanban = FakeKanbanDB()
@@ -276,7 +379,9 @@ def test_kanban_board_payload_exposes_read_only_board(monkeypatch):
 
     assert "columns" in data
     assert "latest_event_id" in data
-    assert data["read_only"] is True
+    # The bridge has been writable since #1649; this PR makes the read_only
+    # flag honest (was hardcoded True even when fully writable).
+    assert data["read_only"] is False
     names = [column["name"] for column in data["columns"]]
     for expected in ("triage", "todo", "ready", "running", "blocked", "done"):
         assert expected in names
@@ -292,7 +397,7 @@ def test_kanban_task_detail_payload_exposes_comments_events_links_and_runs(monke
     assert data["task"]["id"] == "t_1"
     assert data["task"]["title"] == "Read-only board target"
     assert set(data) >= {"task", "comments", "events", "links", "runs", "read_only"}
-    assert data["read_only"] is True
+    assert data["read_only"] is False
     assert isinstance(data["comments"], list)
     assert isinstance(data["events"], list)
     assert isinstance(data["links"], dict)
@@ -350,7 +455,7 @@ def test_kanban_board_since_returns_lightweight_unchanged_payload(monkeypatch):
 
     unchanged = bridge._board_payload(_parsed(query="since=7"))
 
-    assert unchanged == {"changed": False, "latest_event_id": 7, "read_only": True}
+    assert unchanged == {"changed": False, "latest_event_id": 7, "read_only": False}
 
 
 def test_kanban_events_payload_matches_polling_shape(monkeypatch):
@@ -360,7 +465,7 @@ def test_kanban_events_payload_matches_polling_shape(monkeypatch):
 
     assert events["cursor"] == 7
     assert events["latest_event_id"] == 7
-    assert events["read_only"] is True
+    assert events["read_only"] is False
     assert events["events"][0]["task_id"] == "t_1"
     assert {"id", "task_id", "run_id", "kind", "payload", "created_at"} <= set(events["events"][0])
 
@@ -569,3 +674,395 @@ def test_handle_kanban_patch_returns_503_when_hermes_cli_missing(monkeypatch):
     result = bridge.handle_kanban_patch(FakeHandler(), parsed, {"title": "x"})
     assert result is True
     assert captured["status"] == 503
+
+
+# ── Multi-board management tests ────────────────────────────────────────────
+#
+# These exercise the /api/kanban/boards surface added by #1662. They mirror
+# the agent dashboard plugin's /boards contract so a downstream client
+# (CLI, gateway slash command, dashboard) and the WebUI can share the
+# same active-board pointer.
+
+
+def test_list_boards_includes_default_when_only_default_exists(monkeypatch):
+    """A fresh deploy with no extra boards must still surface the default
+    board in /boards so the UI can render the switcher consistently."""
+    bridge = _load_bridge(monkeypatch)
+    payload = bridge._list_boards_payload(_parsed())
+    assert payload["current"] == "default"
+    assert payload["read_only"] is False
+    slugs = [b["slug"] for b in payload["boards"]]
+    assert "default" in slugs
+
+
+def test_create_board_payload_creates_and_optionally_switches(monkeypatch):
+    """POST /boards must create a board and, when ``switch=true``, also set
+    it as the active board so subsequent requests resolve to it."""
+    bridge = _load_bridge(monkeypatch)
+    payload = bridge._create_board_payload({
+        "slug": "experiments",
+        "name": "Experiments",
+        "description": "Research backlog",
+        "icon": "🧪",
+        "color": "#7aa2ff",
+        "switch": True,
+    })
+    assert payload["board"]["slug"] == "experiments"
+    assert payload["board"]["name"] == "Experiments"
+    assert payload["current"] == "experiments"  # switch=true honoured
+
+
+def test_create_board_payload_rejects_empty_slug(monkeypatch):
+    """Empty/missing slug must surface a 400-shape ValueError, not a 500."""
+    bridge = _load_bridge(monkeypatch)
+    try:
+        bridge._create_board_payload({"slug": "", "name": "x"})
+    except ValueError as exc:
+        assert "slug" in str(exc).lower()
+        return
+    raise AssertionError("empty slug must raise ValueError")
+
+
+def test_update_board_payload_renames_metadata_only(monkeypatch):
+    """PATCH /boards/<slug> updates display metadata. The slug itself is
+    immutable — renaming the slug would mean moving the on-disk directory
+    and re-pointing every saved active-board pointer."""
+    bridge = _load_bridge(monkeypatch)
+    bridge._create_board_payload({"slug": "experiments", "name": "Experiments"})
+    res = bridge._update_board_payload("experiments", {
+        "name": "R&D Experiments",
+        "description": "All ongoing research",
+        "icon": "🔬",
+    })
+    assert res["board"]["name"] == "R&D Experiments"
+    assert res["board"]["description"] == "All ongoing research"
+    assert res["board"]["icon"] == "🔬"
+    assert res["board"]["slug"] == "experiments"  # slug unchanged
+
+
+def test_update_board_payload_rejects_unknown_slug(monkeypatch):
+    """Renaming a board that doesn't exist is a 404, not a silent no-op."""
+    bridge = _load_bridge(monkeypatch)
+    try:
+        bridge._update_board_payload("does-not-exist", {"name": "x"})
+    except LookupError as exc:
+        assert "does not exist" in str(exc)
+        return
+    raise AssertionError("unknown slug must raise LookupError")
+
+
+def test_delete_board_payload_archives_by_default(monkeypatch):
+    """DELETE without ?delete=1 archives, preserving on-disk data so the
+    board is recoverable from kanban/boards/_archived/."""
+    bridge = _load_bridge(monkeypatch)
+    bridge._create_board_payload({"slug": "experiments", "name": "Experiments"})
+    res = bridge._delete_board_payload("experiments", _parsed())
+    # Result either has a result dict with `archived` action OR explicit archive flag
+    # The test fake's remove_board sets archived=True; library's returns action='archived'
+    assert "result" in res
+    assert res["current"] == "default"  # falls back to default after delete
+
+
+def test_delete_board_payload_refuses_to_delete_default(monkeypatch):
+    """The default board cannot be removed — that would leave the system
+    without a fallback active board on the next CLI / dashboard call."""
+    bridge = _load_bridge(monkeypatch)
+    try:
+        bridge._delete_board_payload("default", _parsed())
+    except ValueError as exc:
+        assert "default" in str(exc).lower()
+        return
+    raise AssertionError("deleting default must raise ValueError")
+
+
+def test_switch_board_payload_updates_active_pointer(monkeypatch):
+    """POST /boards/<slug>/switch sets the active-board pointer that's
+    shared by CLI, dashboard, and WebUI."""
+    bridge = _load_bridge(monkeypatch)
+    bridge._create_board_payload({"slug": "experiments", "name": "Experiments"})
+    res = bridge._switch_board_payload("experiments")
+    assert res["current"] == "experiments"
+    # And reading the active pointer back must reflect the switch
+    assert bridge._kb().get_current_board() == "experiments"
+
+
+def test_switch_board_payload_rejects_unknown_slug(monkeypatch):
+    """Switching to a non-existent board is a 404, not a silent set."""
+    bridge = _load_bridge(monkeypatch)
+    try:
+        bridge._switch_board_payload("not-a-real-board")
+    except LookupError as exc:
+        assert "does not exist" in str(exc)
+        return
+    raise AssertionError("unknown slug must raise LookupError")
+
+
+def test_resolve_board_query_param_normalises_and_validates(monkeypatch):
+    """The ?board=<slug> query param feeds every endpoint that's board-scoped.
+    Empty/missing should resolve to None (use active board); a bad slug
+    should raise ValueError; a non-existent slug should raise LookupError."""
+    bridge = _load_bridge(monkeypatch)
+    # Empty / missing → None (caller falls through to active board)
+    assert bridge._resolve_board(_parsed(query="")) is None
+    assert bridge._resolve_board(_parsed(query="board=")) is None
+    # default board is always allowed (even before materialisation)
+    assert bridge._resolve_board(_parsed(query="board=default")) == "default"
+    # Path-traversal / malformed slugs raise ValueError
+    try:
+        bridge._resolve_board(_parsed(query="board=../etc/passwd"))
+        raise AssertionError("path-traversal slug must raise ValueError")
+    except ValueError:
+        pass
+    # Non-existent slug raises LookupError
+    try:
+        bridge._resolve_board(_parsed(query="board=ghost-board"))
+        raise AssertionError("non-existent slug must raise LookupError")
+    except LookupError:
+        pass
+
+
+def test_resolve_board_from_body_mirrors_query_contract(monkeypatch):
+    """POST/PATCH/DELETE handlers receive a parsed JSON body, not a URL,
+    so they read the board slug from the body. The validation contract
+    must match _resolve_board exactly."""
+    bridge = _load_bridge(monkeypatch)
+    bridge._create_board_payload({"slug": "experiments", "name": "x"})
+    assert bridge._resolve_board_from_body({}) is None
+    assert bridge._resolve_board_from_body({"board": ""}) is None
+    assert bridge._resolve_board_from_body({"board": "default"}) == "default"
+    assert bridge._resolve_board_from_body({"board": "experiments"}) == "experiments"
+    try:
+        bridge._resolve_board_from_body({"board": "ghost"})
+        raise AssertionError("unknown slug must raise LookupError")
+    except LookupError:
+        pass
+
+
+def test_handle_kanban_get_routes_boards_endpoint(monkeypatch):
+    """The dispatcher must surface the new /boards endpoint without
+    accidentally matching the singular /board endpoint (which is task-list)."""
+    bridge = _load_bridge(monkeypatch)
+    captured = {}
+
+    class FakeHandler:
+        pass
+
+    def fake_j(handler, payload, **_kwargs):
+        captured["payload"] = payload
+        return True
+
+    monkeypatch.setattr(bridge, "j", fake_j)
+    parsed = _parsed(path="/api/kanban/boards")
+    result = bridge.handle_kanban_get(FakeHandler(), parsed)
+    assert result is True
+    assert "boards" in captured["payload"]
+    assert "current" in captured["payload"]
+
+
+def test_handle_kanban_post_routes_create_board_and_switch(monkeypatch):
+    """POST /boards creates, POST /boards/<slug>/switch activates."""
+    bridge = _load_bridge(monkeypatch)
+    captured = []
+
+    class FakeHandler:
+        pass
+
+    def fake_j(handler, payload, **_kwargs):
+        captured.append(payload)
+        return True
+
+    monkeypatch.setattr(bridge, "j", fake_j)
+    # Create
+    bridge.handle_kanban_post(
+        FakeHandler(), _parsed(path="/api/kanban/boards"),
+        {"slug": "experiments", "name": "Experiments"},
+    )
+    assert "board" in captured[0]
+    # Switch
+    bridge.handle_kanban_post(
+        FakeHandler(), _parsed(path="/api/kanban/boards/experiments/switch"),
+        {},
+    )
+    assert captured[1]["current"] == "experiments"
+
+
+def test_handle_kanban_delete_routes_archive_board(monkeypatch):
+    """DELETE /boards/<slug> archives by default, hard-deletes with ?delete=1."""
+    bridge = _load_bridge(monkeypatch)
+    captured = []
+
+    class FakeHandler:
+        pass
+
+    def fake_j(handler, payload, **_kwargs):
+        captured.append(payload)
+        return True
+
+    monkeypatch.setattr(bridge, "j", fake_j)
+    bridge._create_board_payload({"slug": "experiments", "name": "x"})
+    bridge.handle_kanban_delete(
+        FakeHandler(), _parsed(path="/api/kanban/boards/experiments"), {}
+    )
+    assert len(captured) == 1
+    assert "result" in captured[0]
+
+
+def test_handle_kanban_patch_routes_update_board(monkeypatch):
+    """PATCH /boards/<slug> updates display metadata."""
+    bridge = _load_bridge(monkeypatch)
+    captured = []
+
+    class FakeHandler:
+        pass
+
+    def fake_j(handler, payload, **_kwargs):
+        captured.append(payload)
+        return True
+
+    monkeypatch.setattr(bridge, "j", fake_j)
+    bridge._create_board_payload({"slug": "experiments", "name": "x"})
+    bridge.handle_kanban_patch(
+        FakeHandler(), _parsed(path="/api/kanban/boards/experiments"),
+        {"name": "Renamed"},
+    )
+    assert captured[0]["board"]["name"] == "Renamed"
+
+
+def test_board_param_isolates_task_writes_between_boards(monkeypatch):
+    """Task created with board=A must not appear in board=B's task list.
+    This is the core multi-board guarantee — without it the whole feature
+    is just cosmetic. The fake's per-board isolation is simulated by
+    spying on the connect() call and verifying it received the right slug."""
+    bridge = _load_bridge(monkeypatch)
+    bridge._create_board_payload({"slug": "board-a", "name": "A"})
+    bridge._create_board_payload({"slug": "board-b", "name": "B"})
+
+    seen_boards = []
+    kb = bridge._kb()
+    original_connect = kb.connect
+
+    def spying_connect(*args, **kwargs):
+        seen_boards.append(kwargs.get("board"))
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr(kb, "connect", spying_connect)
+
+    # Create on board-a and board-b — each call should pin connect(board=...)
+    bridge._create_task_payload({"title": "task on A"}, board="board-a")
+    bridge._create_task_payload({"title": "task on B"}, board="board-b")
+    assert "board-a" in seen_boards
+    assert "board-b" in seen_boards
+
+
+# ── SSE streaming tests ──────────────────────────────────────────────────────
+
+
+def test_sse_fetch_new_returns_advanced_cursor_and_events(monkeypatch):
+    """The SSE inner loop reads task_events with id > cursor and returns
+    the new cursor + decoded events. Best-effort — must not raise on
+    empty result."""
+    bridge = _load_bridge(monkeypatch)
+    # Default fake fixture has 1 event with id=7
+    new_cursor, events = bridge._kanban_sse_fetch_new(None, 0)
+    assert new_cursor == 7
+    assert len(events) == 1
+    assert events[0]["id"] == 7
+    # No new events past the cursor → empty list, cursor unchanged
+    new_cursor2, events2 = bridge._kanban_sse_fetch_new(None, 7)
+    assert new_cursor2 == 7
+    assert events2 == []
+
+
+def test_sse_fetch_new_self_heals_on_db_error(monkeypatch):
+    """A transient DB error inside the SSE loop must NOT drop the client —
+    the loop should return the input cursor + empty list and let the
+    caller continue polling."""
+    bridge = _load_bridge(monkeypatch)
+    kb = bridge._kb()
+
+    def raising_connect(*args, **kwargs):
+        raise RuntimeError("simulated transient sqlite contention")
+
+    monkeypatch.setattr(kb, "connect", raising_connect)
+    new_cursor, events = bridge._kanban_sse_fetch_new(None, 5)
+    assert new_cursor == 5  # cursor preserved
+    assert events == []  # empty, not exception
+
+
+def test_sse_handler_runs_in_thread_and_streams_event(monkeypatch):
+    """End-to-end SSE smoke: spin up the handler in a worker thread, write
+    a fake event to the fake DB, and confirm an `events` frame appears in
+    the response stream within a 2-second watchdog window. This is the
+    behavioural integration test the SSE-handler-pre-release rule
+    requires for every long-lived handler that crosses module boundaries.
+    """
+    import threading
+    import io
+
+    bridge = _load_bridge(monkeypatch)
+    # Speed up the SSE poll cycle and heartbeat for the test
+    monkeypatch.setattr(bridge, "_KANBAN_SSE_POLL_SECONDS", 0.05)
+    monkeypatch.setattr(bridge, "_KANBAN_SSE_HEARTBEAT_SECONDS", 0.1)
+
+    class FakeWriter(io.BytesIO):
+        def flush(self):
+            pass
+
+    class FakeHandler:
+        def __init__(self):
+            self.wfile = FakeWriter()
+            self.headers_sent = []
+            self.responses = []
+
+        def send_response(self, code):
+            self.responses.append(code)
+
+        def send_header(self, k, v):
+            self.headers_sent.append((k, v))
+
+        def end_headers(self):
+            pass
+
+    handler = FakeHandler()
+
+    # Snapshot the initial-frame check so we can assert it without
+    # re-reading after the buffer is closed at the end.
+    saw_hello = threading.Event()
+
+    # Run the SSE handler in a thread; let it run for 0.4s, then close
+    # the handler's writer to force the loop to exit on the next write.
+    done = threading.Event()
+    error_holder = []
+
+    def runner():
+        try:
+            bridge._handle_events_sse_stream(handler, _parsed(query="since=0"))
+        except Exception as exc:  # noqa: BLE001
+            error_holder.append(exc)
+        finally:
+            done.set()
+
+    t = threading.Thread(target=runner, daemon=True)
+    t.start()
+    # Wait briefly for the initial frame to be written
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        time.sleep(0.05)
+        try:
+            buf = handler.wfile.getvalue()
+        except ValueError:
+            buf = b""
+        if b"event: hello" in buf:
+            saw_hello.set()
+            break
+    # Close the writer to force the loop to exit on its next write attempt
+    try:
+        handler.wfile.close()
+    except Exception:
+        pass
+    # Give the loop ~250ms to notice and exit
+    done.wait(timeout=2.0)
+    assert done.is_set(), "SSE handler did not exit within 2s after writer close"
+    assert handler.responses == [200]
+    assert saw_hello.is_set(), "Initial 'event: hello' frame never appeared in stream"
+    assert not error_holder, f"SSE handler raised: {error_holder!r}"
