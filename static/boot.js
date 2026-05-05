@@ -42,6 +42,17 @@ async function cancelSessionStream(session){
   if(typeof renderSessionList==='function') renderSessionList();
 }
 
+async function _savedSessionShouldStaySidebarOnly(sid){
+  if(!sid) return false;
+  try{
+    const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
+    const session = data&&data.session;
+    return !!(session&&(session.active_stream_id||session.pending_user_message));
+  }catch(e){
+    return false;
+  }
+}
+
 // ── Mobile navigation ──────────────────────────────────────────────────────
 let _workspacePanelMode='closed'; // 'closed' | 'browse' | 'preview'
 
@@ -1346,9 +1357,18 @@ function applyBotName(){
   // Initialize reasoning chip on boot (fixes #1103 — chip hidden until session load)
   if(typeof fetchReasoningChip==='function') fetchReasoningChip();
   const urlSession=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
-  const saved=urlSession||localStorage.getItem('hermes-webui-session');
+  const savedLocal=localStorage.getItem('hermes-webui-session');
+  const saved=urlSession||savedLocal;
   if(saved){
     try{
+      if(!urlSession&&savedLocal&&await _savedSessionShouldStaySidebarOnly(savedLocal)){
+        S.session=null; S.messages=[]; S.activeStreamId=null; S.busy=false;
+        S._bootReady=true;
+        syncTopbar();syncWorkspacePanelState();
+        $('emptyState').style.display='';
+        await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();
+        return;
+      }
       await loadSession(saved);
       // If the restored session has no messages it is an ephemeral scratch pad —
       // treat the page as a fresh start rather than resuming a blank conversation.
