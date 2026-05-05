@@ -1478,6 +1478,25 @@ def space_demo_run(name: str) -> dict[str, Any]:
         patch_widget(space_id, "weather-current", {"weather": weather_patch})
         action = "weather-observation-recorded"
         extra = {"weather_observation": {"widget": read_widget_detail(space_id, "weather-current")}}
+    elif demo == "demo_notes_app":
+        editor_notes = {
+            "status": "draft-saved",
+            "format": "markdown",
+            "body": "Demo note draft saved through typed Capy Spaces metadata.",
+        }
+        preview_notes = {
+            "format": "markdown",
+            "body": "# Demo note\n\nThis markdown preview was saved as metadata-only state.",
+        }
+        patch_widget(space_id, "notes-editor", {"notes": editor_notes})
+        patch_widget(space_id, "notes-preview", {"notes": preview_notes})
+        action = "notes-draft-saved"
+        extra = {
+            "notes_artifact": {
+                "editor": read_widget_detail(space_id, "notes-editor"),
+                "preview": read_widget_detail(space_id, "notes-preview"),
+            }
+        }
     elif demo == "demo_time_travel_restore":
         before_patch = str(read_space(space_id).get("revision_event_id") or "")
         widgets = installed.get("installed_widgets") or []

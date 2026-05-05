@@ -90,6 +90,7 @@ global.fetch = async function(path, opts = {}) {
       ok: true,
       demos: [
         { demo: 'demo_weather_widget', template: 'weather', title: 'Weather answer → persistent widget', mode: 'metadata-only-smoke', renderer: '<script>bad()</script>', api_key: 'SECRET' },
+        { demo: 'demo_notes_app', template: 'notes', title: 'Notes app', mode: 'metadata-only-smoke', renderer: '<script>bad()</script>', api_key: 'SECRET' },
         { demo: 'demo_research_harness_pdf_export', template: 'research', title: 'Research harness PDF export', mode: 'metadata-only-smoke', source: 'SECRET_SOURCE' },
         { demo: 'demo_time_travel_restore', template: 'big-bang', title: 'Time travel rollback', mode: 'metadata-only-smoke', source: 'SECRET_SOURCE' },
       ],
@@ -97,22 +98,33 @@ global.fetch = async function(path, opts = {}) {
   }
   if (path === 'api/spaces/demo/run') {
     const body = opts.body ? JSON.parse(opts.body) : {};
+    const demo = body.demo || 'demo_weather_widget';
+    const isResearch = demo === 'demo_research_harness_pdf_export';
+    const isNotes = demo === 'demo_notes_app';
     return response({
       ok: true,
-      action: body.demo === 'demo_research_harness_pdf_export' ? 'pdf-export-requested' : 'space.demo.run',
-      demo: body.demo || 'demo_weather_widget',
-      template: body.demo === 'demo_research_harness_pdf_export' ? 'research' : 'weather',
+      action: isResearch ? 'pdf-export-requested' : (isNotes ? 'notes-draft-saved' : 'space.demo.run'),
+      demo: demo,
+      template: isResearch ? 'research' : (isNotes ? 'notes' : 'weather'),
       mode: 'metadata-only-smoke',
-      space: { space_id: body.demo === 'demo_research_harness_pdf_export' ? 'demo-research-harness-pdf-export' : 'demo-weather-widget', name: body.demo === 'demo_research_harness_pdf_export' ? 'Research Harness' : 'Weather Demo Smoke', widget_count: body.demo === 'demo_research_harness_pdf_export' ? 5 : 1, revision_event_id: 'rev-demo', renderer: '<script>bad()</script>', api_key: 'SECRET' },
-      widgets: body.demo === 'demo_research_harness_pdf_export' ? [{ id: 'research-summary', kind: 'markdown', title: 'Summary report', renderer: '<script>bad()</script>', api_key: 'SECRET' }] : [{ id: 'weather-current', kind: 'weather', title: 'Weather in Prague', renderer: '<script>bad()</script>', api_key: 'SECRET' }],
-      weather_observation: body.demo === 'demo_weather_widget' ? { widget: { id: 'weather-current', kind: 'weather', title: 'Weather in Prague', metadata: { weather: { location: 'Prague', country: 'CZ', status: 'observation-ready', current: { condition: 'partly cloudy', temperature_c: '18', feels_like_c: '17' }, summary: 'Partly cloudy in Prague; refreshed through agent-mediated weather metadata.', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } }, renderer: '<script>bad()</script>', api_key: 'SECRET' } } : undefined,
-      widget_count: body.demo === 'demo_research_harness_pdf_export' ? 5 : 1,
-      persisted_widget_count: body.demo === 'demo_research_harness_pdf_export' ? 5 : 1,
+      space: {
+        space_id: isResearch ? 'demo-research-harness-pdf-export' : (isNotes ? 'demo-notes-app' : 'demo-weather-widget'),
+        name: isResearch ? 'Research Harness' : (isNotes ? 'Notes App Smoke' : 'Weather Demo Smoke'),
+        widget_count: isResearch ? 5 : (isNotes ? 4 : 1),
+        revision_event_id: 'rev-demo',
+        renderer: '<script>bad()</script>',
+        api_key: 'SECRET',
+      },
+      widgets: isResearch ? [{ id: 'research-summary', kind: 'markdown', title: 'Summary report', renderer: '<script>bad()</script>', api_key: 'SECRET' }] : (isNotes ? [{ id: 'notes-editor', kind: 'rich-text-editor', title: 'Editor', renderer: '<script>bad()</script>', api_key: 'SECRET' }] : [{ id: 'weather-current', kind: 'weather', title: 'Weather in Prague', renderer: '<script>bad()</script>', api_key: 'SECRET' }]),
+      weather_observation: demo === 'demo_weather_widget' ? { widget: { id: 'weather-current', kind: 'weather', title: 'Weather in Prague', metadata: { weather: { location: 'Prague', country: 'CZ', status: 'observation-ready', current: { condition: 'partly cloudy', temperature_c: '18', feels_like_c: '17' }, summary: 'Partly cloudy in Prague; refreshed through agent-mediated weather metadata.', renderer: '<script>bad()</script>', api_key: 'SECRET_VALUE_DO_NOT_LEAK' } }, renderer: '<script>bad()</script>', api_key: 'SECRET' } } : undefined,
+      notes_artifact: isNotes ? { editor: { id: 'notes-editor', kind: 'rich-text-editor', title: 'Editor', metadata: { notes: { status: 'draft-saved', format: 'markdown', body: 'Demo note draft saved through typed Capy Spaces metadata.', renderer: '<script>bad()</script>', api_key: 'SECRET' } }, renderer: '<script>bad()</script>' }, preview: { id: 'notes-preview', kind: 'markdown', title: 'Markdown preview', metadata: { notes: { format: 'markdown', body: '# Demo note\n\nThis markdown preview was saved as metadata-only state.', source: 'SECRET_SOURCE' } } } } : undefined,
+      widget_count: isResearch ? 5 : (isNotes ? 4 : 1),
+      persisted_widget_count: isResearch ? 5 : (isNotes ? 4 : 1),
       persistence_checked: true,
       revision_event_count: 2,
       rollback_point: true,
-      queued_event_count: body.demo === 'demo_research_harness_pdf_export' ? 1 : 0,
-      research_rollback_check: body.demo === 'demo_research_harness_pdf_export' ? { verified: true, restored_event_id: 'rev-before-export', restored_widget_count: 5, replayed_after_restore: true, renderer: '<script>bad()</script>', api_key: '***' } : undefined,
+      queued_event_count: isResearch ? 1 : 0,
+      research_rollback_check: isResearch ? { verified: true, restored_event_id: 'rev-before-export', restored_widget_count: 5, replayed_after_restore: true, renderer: '<script>bad()</script>', api_key: '***' } : undefined,
     });
   }
   if (path === 'api/spaces/demo/run-all') {
@@ -750,6 +762,10 @@ async function click(action, dataset) {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
     await click('runDemoSmoke', { demo: 'demo_research_harness_pdf_export' });
+  } else if (scenario === 'runNotesDemoParitySmoke') {
+    await window.loadCapySpaces();
+    beforeHtml = root.innerHTML;
+    await click('runDemoSmoke', { demo: 'demo_notes_app' });
   } else if (scenario === 'runDemoParityAllSmokes') {
     await window.loadCapySpaces();
     beforeHtml = root.innerHTML;
@@ -1628,6 +1644,28 @@ def test_spaces_ui_research_demo_smoke_shows_pdf_export_progress_metadata_only(d
     assert "Queued events: 1" in out["rootHtml"]
     assert "Rollback verified: yes" in out["rootHtml"]
     assert "Widgets: 5" in out["rootHtml"]
+    assert "<script>" not in out["rootHtml"]
+    assert "renderer" not in out["rootHtml"]
+    assert "api_key" not in out["rootHtml"].lower()
+    assert "SECRET" not in out["rootHtml"]
+
+
+def test_spaces_ui_notes_demo_smoke_shows_saved_note_preview_metadata_only(driver_path):
+    out = _run_spaces_scenario(driver_path, "runNotesDemoParitySmoke")
+    run_post = next(call for call in out["calls"] if call["path"] == "api/spaces/demo/run")
+
+    assert json.loads(run_post["body"]) == {"demo": "demo_notes_app"}
+    assert "Notes app" in out["beforeHtml"]
+    assert "Demo parity smoke passed" in out["rootHtml"]
+    assert "demo_notes_app" in out["rootHtml"]
+    assert "Notes App Smoke" in out["rootHtml"]
+    assert "Action: notes-draft-saved" in out["rootHtml"]
+    assert "Widgets: 4" in out["rootHtml"]
+    assert "Saved notes preview" in out["rootHtml"]
+    assert "Demo note draft saved through typed Capy Spaces metadata." in out["rootHtml"]
+    assert "This markdown preview was saved as metadata-only state." in out["rootHtml"]
+    assert "Manage demo widgets" in out["rootHtml"]
+    assert "Manage weather widget" not in out["rootHtml"]
     assert "<script>" not in out["rootHtml"]
     assert "renderer" not in out["rootHtml"]
     assert "api_key" not in out["rootHtml"].lower()

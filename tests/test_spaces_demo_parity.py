@@ -102,6 +102,23 @@ def test_weather_demo_smoke_records_visible_weather_observation(monkeypatch, tmp
     _assert_safe_payload(detail)
 
 
+def test_notes_demo_smoke_saves_editable_note_preview_metadata_only(monkeypatch, tmp_path):
+    spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
+
+    result = spaces.space_demo_run("demo_notes_app")
+    editor = spaces.read_widget_detail(result["space"]["space_id"], "notes-editor")
+    preview = spaces.read_widget_detail(result["space"]["space_id"], "notes-preview")
+
+    assert result["action"] == "notes-draft-saved"
+    assert result["notes_artifact"]["editor"]["metadata"]["notes"]["status"] == "draft-saved"
+    assert result["notes_artifact"]["preview"]["metadata"]["notes"]["format"] == "markdown"
+    assert editor["metadata"]["notes"]["body"] == "Demo note draft saved through typed Capy Spaces metadata."
+    assert preview["metadata"]["notes"]["body"] == "# Demo note This markdown preview was saved as metadata-only state."
+    _assert_safe_payload(result)
+    _assert_safe_payload(editor)
+    _assert_safe_payload(preview)
+
+
 def test_research_demo_smoke_advances_progress_artifact_pdf_export_and_rollback_check(monkeypatch, tmp_path):
     spaces = _load_spaces(monkeypatch, tmp_path, enabled=True)
 

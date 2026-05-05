@@ -154,6 +154,10 @@
       ? weatherObservation.widget
       : {};
     const weatherPreview = renderWeatherObservation(weatherWidget.metadata || {});
+    const notesArtifact = data && data.notes_artifact && typeof data.notes_artifact === 'object' && !Array.isArray(data.notes_artifact)
+      ? data.notes_artifact
+      : {};
+    const notesPreview = renderNotesSmokePreview(notesArtifact);
     const demoSpaceId = space.space_id ? String(space.space_id) : '';
     const manageLabel = weatherPreview ? 'Manage weather widget' : 'Manage demo widgets';
     const demoActions = demoSpaceId
@@ -163,7 +167,7 @@
       '<div class="capy-spaces-muted">'+escapeHtml(demo)+' · '+escapeHtml(data && data.mode || 'metadata-only-smoke')+'</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div><strong>'+escapeHtml(spaceName)+'</strong>' +
       '<div class="capy-spaces-muted">Space ID: '+escapeHtml(space.space_id || '')+' · Widgets: '+widgetCount+' · Persisted widgets: '+persistedWidgetCount+' · Persistence: '+escapeHtml(persistence)+' · Revisions: '+revisionCount+' · Rollback point: '+escapeHtml(rollbackPoint)+'</div>' +
-      extraLine + '</div>'+demoActions+'</div></div>'+weatherPreview+'</div>';
+      extraLine + '</div>'+demoActions+'</div></div>'+weatherPreview+notesPreview+'</div>';
   }
 
   function renderDemoSmokeSuiteResult(data){
@@ -624,6 +628,29 @@
     if (!rows.length) return '';
     return '<div class="capy-spaces-card capy-spaces-weather-observation"><h4>Current weather observation</h4>' +
       '<div class="capy-spaces-muted">Visible metadata-only demo widget state. Network refresh remains agent-mediated.</div>' +
+      '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div>'+rows.join('')+'</div></div></div></div>';
+  }
+
+  function renderNotesSmokePreview(notesArtifact){
+    const artifact = notesArtifact && typeof notesArtifact === 'object' && !Array.isArray(notesArtifact) ? notesArtifact : {};
+    const editor = artifact.editor && typeof artifact.editor === 'object' && !Array.isArray(artifact.editor) ? artifact.editor : {};
+    const preview = artifact.preview && typeof artifact.preview === 'object' && !Array.isArray(artifact.preview) ? artifact.preview : {};
+    const editorMeta = editor.metadata && typeof editor.metadata === 'object' && !Array.isArray(editor.metadata) ? editor.metadata : {};
+    const previewMeta = preview.metadata && typeof preview.metadata === 'object' && !Array.isArray(preview.metadata) ? preview.metadata : {};
+    const editorNotes = editorMeta.notes && typeof editorMeta.notes === 'object' && !Array.isArray(editorMeta.notes) ? editorMeta.notes : {};
+    const previewNotes = previewMeta.notes && typeof previewMeta.notes === 'object' && !Array.isArray(previewMeta.notes) ? previewMeta.notes : {};
+    const status = safeWeatherText(editorNotes.status, 80);
+    const editorBody = safeWeatherText(editorNotes.body, 360);
+    const previewBody = safeWeatherText(previewNotes.body, 360);
+    const format = safeWeatherText(previewNotes.format || editorNotes.format, 40);
+    const rows = [];
+    if (status) rows.push('<div class="capy-spaces-muted">Draft status: '+escapeHtml(status)+'</div>');
+    if (format) rows.push('<div class="capy-spaces-muted">Format: '+escapeHtml(format)+'</div>');
+    if (editorBody) rows.push('<div>'+escapeHtml(editorBody)+'</div>');
+    if (previewBody) rows.push('<div class="capy-spaces-muted">Preview: '+escapeHtml(previewBody)+'</div>');
+    if (!rows.length) return '';
+    return '<div class="capy-spaces-card capy-spaces-notes-smoke"><h4>Saved notes preview</h4>' +
+      '<div class="capy-spaces-muted">Visible metadata-only notes demo state. Rich editing and attachments remain agent-mediated.</div>' +
       '<div class="capy-spaces-widget-list"><div class="capy-spaces-widget"><div>'+rows.join('')+'</div></div></div></div>';
   }
 
