@@ -5056,93 +5056,50 @@ function dismissErrorBanner(){
 
 
 // ── MCP Server Management ──
+function _mcpStatusLabel(status){
+  const key={
+    active:'mcp_status_active',
+    configured:'mcp_status_configured',
+    disabled:'mcp_status_disabled',
+    invalid_config:'mcp_status_invalid_config',
+  }[status]||'mcp_status_unknown';
+  return t(key);
+}
 function loadMcpServers(){
   const list=$('mcpServerList');
   if(!list) return;
+  list.innerHTML=`<div style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t('loading'))}</div>`;
   api('/api/mcp/servers').then(r=>{
-    if(!r||!r.servers) return;
+    if(!r||!Array.isArray(r.servers)) return;
     if(!r.servers.length){
-      list.innerHTML=`<div style="color:var(--muted);font-size:12px;padding:6px 0">${t('mcp_no_servers')}</div>`;
+      list.innerHTML=`<div class="mcp-empty-state" style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t('mcp_no_servers'))}</div>`;
       return;
     }
+    const toggleNote=r.toggle_supported?'':'<div class="mcp-readonly-note">'+esc(t('mcp_toggle_followup'))+'</div>';
     list.innerHTML=r.servers.map(s=>{
-      const transportLabel=s.transport==='http'?'HTTP':s.transport==='stdio'?'stdio':(''+s.transport);
+      const transportLabel=s.transport==='http'?'HTTP':s.transport==='stdio'?'stdio':(''+(s.transport||'unknown'));
       const transportClass=s.transport==='http'?'mcp-http':s.transport==='stdio'?'mcp-stdio':'mcp-unknown';
-      const badge=`<span class="mcp-transport-badge ${transportClass}">${esc(transportLabel)}</span>`;
-      const detail=s.transport==='http'?s.url:`${s.command} ${s.args?s.args.join(' '):''}`;
+      const transportBadge=`<span class="mcp-transport-badge ${transportClass}">${esc(transportLabel)}</span>`;
+      const status=s.status||'configured';
+      const statusBadge=`<span class="mcp-status-badge mcp-status-${esc(status)}">${esc(_mcpStatusLabel(status))}</span>`;
+      const toolCount=s.tool_count===null||typeof s.tool_count==='undefined'?'—':String(s.tool_count);
+      const detail=s.transport==='http'
+        ? (s.url||'')
+        : (s.transport==='stdio'?`${s.command||''} ${Array.isArray(s.args)?s.args.join(' '):''}`:t('mcp_status_invalid_config'));
       const envInfo=s.env?Object.entries(s.env).map(([k,v])=>`${k}=${v}`).join(', '):'';
+      const headersInfo=s.headers?Object.entries(s.headers).map(([k,v])=>`${k}=${v}`).join(', '):'';
+      const secretInfo=[envInfo,headersInfo].filter(Boolean).join(' | ');
       return `<div class="mcp-server-row">
-        <div style="display:flex;align-items:center;gap:8px">
-          <span class="mcp-server-name">${esc(s.name)}</span>${badge}
+        <div class="mcp-server-row-head">
+          <span class="mcp-server-name">${esc(s.name)}</span>
+          ${transportBadge}
+          ${statusBadge}
         </div>
-        <div class="mcp-server-detail">${esc(detail)}${envInfo?' | '+esc(envInfo):''}</div>
-        <button class="mcp-delete-btn" data-mcp-name="${esc(s.name)}" title="Delete">&times;</button>
+        <div class="mcp-server-detail">${esc(detail)}${secretInfo?' | '+esc(secretInfo):''}</div>
+        <div class="mcp-server-meta"><span class="mcp-tool-count">${esc(t('mcp_tool_count',toolCount))}</span><span>${esc(t(s.enabled===false?'mcp_enabled_no':'mcp_enabled_yes'))}</span></div>
       </div>`;
-    }).join('');
-  }).catch(()=>{list.innerHTML=`<div style="color:#ef4444;font-size:12px;padding:6px 0">${t('mcp_load_failed')}</div>`});
-  // Delegate delete-button clicks — uses data-mcp-name to avoid inline onclick XSS
-  if(list&&!list._mcpDeleteBound){
-    list._mcpDeleteBound=true;
-    list.addEventListener('click',function(e){
-      const btn=e.target.closest('.mcp-delete-btn');
-      if(!btn) return;
-      const name=btn.getAttribute('data-mcp-name');
-      if(name) deleteMcpServer(name);
-    });
-  }
-}
-
-function showMcpAddForm(){
-  const wrap=$('mcpAddFormWrap');
-  if(wrap) wrap.style.display='block';
-}
-function hideMcpAddForm(){
-  const wrap=$('mcpAddFormWrap');
-  if(wrap) wrap.style.display='none';
-  ['mcpName','mcpCommand','mcpArgs','mcpUrl','mcpTimeout'].forEach(id=>{
-    const el=$(id);if(el)el.value=id==='mcpTimeout'?'120':'';
-  });
-  const tr=$('mcpTransport');if(tr)tr.value='stdio';
-  mcpTransportChanged();
-}
-function mcpTransportChanged(){
-  const tr=$('mcpTransport');
-  const isHttp=tr&&tr.value==='http';
-  const cmdF=$('mcpCommandField');if(cmdF)cmdF.style.display=isHttp?'none':'';
-  const argsF=$('mcpArgsField');if(argsF)argsF.style.display=isHttp?'none':'';
-  const urlF=$('mcpUrlField');if(urlF)urlF.style.display=isHttp?'block':'none';
-}
-function saveMcpServer(){
-  const name=($('mcpName')||{}).value||'';
-  if(!name.trim()){showToast(t('mcp_name_required'));return;}
-  const tr=($('mcpTransport')||{}).value||'stdio';
-  const timeout=parseInt(($('mcpTimeout')||{}).value)||120;
-  const body={timeout};
-  if(tr==='http'){
-    body.url=($('mcpUrl')||{}).value||'';
-    if(!body.url.trim()){showToast(t('mcp_url_required'));return;}
-  }else{
-    body.command=($('mcpCommand')||{}).value||'';
-    if(!body.command.trim()){showToast(t('mcp_command_required'));return;}
-    const argsStr=($('mcpArgs')||{}).value||'';
-    if(argsStr.trim()) body.args=argsStr.split(',').map(a=>a.trim()).filter(Boolean);
-  }
-  const encName=encodeURIComponent(name.trim());
-  api(`/api/mcp/servers/${encName}`,{method:'PUT',body:JSON.stringify(body)})
-    .then(r=>{
-      if(r&&r.ok){showToast(t('mcp_saved'));hideMcpAddForm();loadMcpServers();}
-      else{showToast((r&&r.error)||t('mcp_save_failed'));}
-    }).catch(()=>{showToast(t('mcp_save_failed'));});
-}
-async function deleteMcpServer(name){
-  const _ok=await showConfirmDialog({title:t('mcp_delete_confirm_title'),message:t('mcp_delete_confirm_message',name),confirmLabel:t('delete_title'),danger:true,focusCancel:true});
-  if(!_ok) return;
-  const encName=encodeURIComponent(name);
-  api(`/api/mcp/servers/${encName}`,{method:'DELETE'})
-    .then(r=>{
-      if(r&&r.ok){showToast(t('mcp_deleted'));loadMcpServers();}
-      else{showToast((r&&r.error)||t('mcp_delete_failed'));}
-    }).catch(()=>{showToast(t('mcp_delete_failed'));});
+    }).join('')+toggleNote;
+  }).catch(()=>{list.innerHTML=`<div class="mcp-error-state" style="color:#ef4444;font-size:12px;padding:6px 0">${esc(t('mcp_load_failed'))}</div>`});
 }
 function loadGatewayStatus(){
   const card=$('gatewayStatusCard');

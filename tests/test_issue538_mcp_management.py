@@ -6,6 +6,7 @@ from api.routes import (
     _handle_mcp_server_update,
     _handle_mcp_server_delete,
     _mask_secrets,
+    _parse_mcp_enabled,
     _server_summary,
     _strip_masked_values,
 )
@@ -16,6 +17,11 @@ def _make_handler():
     h.path = '/api/mcp/servers'
     h.command = 'GET'
     return h
+
+
+def _json_payload(handler):
+    body = handler.wfile.write.call_args[0][0]
+    return json.loads(body.decode('utf-8'))
 
 
 SAMPLE_MCP = {
@@ -52,6 +58,43 @@ class TestMcpList:
         assert h.send_response.called
         status = h.send_response.call_args[0][0]
         assert status == 200
+        payload = _json_payload(h)
+        assert payload['servers'] == []
+        assert payload['toggle_supported'] is False
+        assert payload['reload_required'] is True
+
+    @patch('api.routes._mcp_runtime_status_by_name')
+    @patch('api.routes.get_config')
+    def test_list_payload_includes_status_tool_counts_and_safe_invalid_config(self, mock_cfg, mock_runtime):
+        mock_cfg.return_value = {
+            'mcp_servers': {
+                'searxng': {'command': 'mcp-searxng', 'args': ['--port', '8888']},
+                'web-reader': {
+                    'url': 'http://localhost:3001/mcp',
+                    'headers': {'Authorization': 'Bearer secret123'},
+                },
+                'disabled': {'command': 'disabled-cmd', 'enabled': 0},
+                'broken': 'not-a-dict',
+            }
+        }
+        mock_runtime.return_value = {
+            'searxng': {'connected': True, 'tools': 3},
+            'web-reader': {'connected': False, 'tools': 0},
+        }
+        h = _make_handler()
+        _handle_mcp_servers_list(h)
+        payload = _json_payload(h)
+        by_name = {s['name']: s for s in payload['servers']}
+        assert by_name['searxng']['status'] == 'active'
+        assert by_name['searxng']['active'] is True
+        assert by_name['searxng']['tool_count'] == 3
+        assert by_name['web-reader']['status'] == 'configured'
+        assert '••••' in by_name['web-reader']['headers']['Authorization']
+        assert by_name['disabled']['enabled'] is False
+        assert by_name['disabled']['active'] is False
+        assert by_name['disabled']['status'] == 'disabled'
+        assert by_name['broken']['transport'] == 'invalid'
+        assert by_name['broken']['status'] == 'invalid_config'
 
     def test_secrets_are_masked(self):
         """_mask_secrets hides API keys in headers and env."""
@@ -74,6 +117,10 @@ class TestMcpList:
     def test_server_summary_default_timeout(self):
         summary = _server_summary('minimal', {'command': 'x'})
         assert summary['timeout'] == 120
+
+    def test_numeric_zero_enabled_flag_is_disabled(self):
+        """YAML numeric false-y values should not show a disabled server as enabled."""
+        assert _parse_mcp_enabled(0) is False
 
 
 class TestMcpSave:

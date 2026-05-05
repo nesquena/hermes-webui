@@ -7459,33 +7459,111 @@ def _mask_secrets(obj):
     return masked
 
 
-def _server_summary(name, cfg):
+def _parse_mcp_enabled(value) -> bool:
+    """Parse Hermes MCP ``enabled`` values without raising on bad config."""
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    return True
+
+
+def _mcp_runtime_status_by_name() -> dict[str, dict]:
+    """Return already-known MCP runtime status without starting servers.
+
+    ``tools.mcp_tool.get_mcp_status()`` only reads the existing MCP registry and
+    configuration; it does not probe or spawn MCP subprocesses. If Hermes Agent
+    is unavailable, fall back to an empty map so the API remains safe.
+    """
+    try:
+        from tools.mcp_tool import get_mcp_status
+        statuses = get_mcp_status()
+    except Exception:
+        return {}
+    if not isinstance(statuses, list):
+        return {}
+    return {
+        str(entry.get("name")): entry
+        for entry in statuses
+        if isinstance(entry, dict) and entry.get("name")
+    }
+
+
+def _server_summary(name, cfg, runtime_status=None):
     """Return a safe summary of an MCP server config."""
+    runtime_status = runtime_status if isinstance(runtime_status, dict) else {}
     out = {"name": name}
+    if not isinstance(cfg, dict):
+        out.update({
+            "transport": "invalid",
+            "timeout": 120,
+            "connect_timeout": 60,
+            "enabled": False,
+            "active": False,
+            "status": "invalid_config",
+            "tool_count": None,
+        })
+        return out
+
+    enabled = _parse_mcp_enabled(cfg.get("enabled", True))
+    connected = bool(runtime_status.get("connected")) if enabled else False
     if "url" in cfg:
         out["transport"] = "http"
         # Mask auth headers
         if "headers" in cfg:
             out["headers"] = _mask_secrets(cfg["headers"])
         out["url"] = cfg["url"]
-    else:
+    elif "command" in cfg:
         out["transport"] = "stdio"
         out["command"] = cfg.get("command", "")
         out["args"] = cfg.get("args", [])
         if "env" in cfg:
             out["env"] = _mask_secrets(cfg["env"])
+    else:
+        out["transport"] = "invalid"
+        enabled = False
+        connected = False
+
     out["timeout"] = cfg.get("timeout", 120)
+    out["connect_timeout"] = cfg.get("connect_timeout", 60)
+    out["enabled"] = enabled
+    out["active"] = connected
+    if out["transport"] == "invalid":
+        out["status"] = "invalid_config"
+    elif not enabled:
+        out["status"] = "disabled"
+    elif connected:
+        out["status"] = "active"
+    else:
+        out["status"] = "configured"
+    out["tool_count"] = runtime_status.get("tools") if runtime_status else None
     return out
 
 
 def _handle_mcp_servers_list(handler):
-    """List all configured MCP servers."""
+    """List configured MCP servers with safe, read-only runtime visibility."""
     cfg = get_config()
     servers = cfg.get("mcp_servers", {})
     if not isinstance(servers, dict):
         servers = {}
-    result = [_server_summary(name, scfg) for name, scfg in servers.items()]
-    return j(handler, {"servers": result})
+    runtime = _mcp_runtime_status_by_name()
+    result = [
+        _server_summary(name, scfg, runtime.get(str(name)))
+        for name, scfg in servers.items()
+    ]
+    return j(handler, {
+        "servers": result,
+        "toggle_supported": False,
+        "reload_required": True,
+    })
 
 
 def _handle_mcp_server_delete(handler, name):
