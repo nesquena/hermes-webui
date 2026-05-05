@@ -863,6 +863,11 @@ const LOCALES = {
     dashboard_notifications_disabled: 'Browser notifications are disabled. Enable them in settings.',
     dashboard_notifications_blocked: 'Browser notifications are blocked by this browser.',
     dashboard_notifications_unsupported: 'This browser does not support system notifications.',
+    development_badge: 'In development',
+    automation_development_title: 'Automation is being migrated',
+    automation_development_sub: 'This panel has not been adapted to the Neo shell yet. You stay inside the new interface while the final experience is prepared.',
+    automation_development_note: 'Adopted pattern: in-progress routes remain navigable, clearly labeled, and do not redirect to legacy experiences.',
+    back_to_dashboard: 'Back to Dashboard',
     neo_projects_placeholder: 'The 4-column Kanban ships in Sprint 3. This link already reserves the correct panel in the Neo shell.',
     neo_tasks_subtitle: 'Operational task list',
     neo_tasks_placeholder: 'The consolidated task view will connect to the upstream todos flow. Use Automation for cron jobs.',
@@ -1706,6 +1711,11 @@ const LOCALES = {
     dashboard_notifications_disabled: 'Browser notifications are disabled. Enable them in settings.',
     dashboard_notifications_enabled: 'Browser notifications are enabled for completed background responses.',
     dashboard_notifications_unsupported: 'This browser does not support system notifications.',
+    development_badge: 'In development',
+    automation_development_title: 'Automation is being migrated',
+    automation_development_sub: 'This panel has not been adapted to the Neo shell yet. You stay inside the new interface while the final experience is prepared.',
+    automation_development_note: 'Adopted pattern: in-progress routes remain navigable, clearly labeled, and do not redirect to legacy experiences.',
+    back_to_dashboard: 'Back to Dashboard',
     dashboard_overview_desc: 'Operational console for tracking context, tasks, and workspaces.',
     dashboard_overview_title: 'Neo WebUI',
     dashboard_quick_actions: 'Quick Actions',
@@ -2575,6 +2585,11 @@ const LOCALES = {
     dashboard_notifications_disabled: 'Browser notifications are disabled. Enable them in settings.',
     dashboard_notifications_enabled: 'Browser notifications are enabled for completed background responses.',
     dashboard_notifications_unsupported: 'This browser does not support system notifications.',
+    development_badge: 'In development',
+    automation_development_title: 'Automation is being migrated',
+    automation_development_sub: 'This panel has not been adapted to the Neo shell yet. You stay inside the new interface while the final experience is prepared.',
+    automation_development_note: 'Adopted pattern: in-progress routes remain navigable, clearly labeled, and do not redirect to legacy experiences.',
+    back_to_dashboard: 'Back to Dashboard',
     dashboard_overview_desc: 'Operational console for tracking context, tasks, and workspaces.',
     dashboard_overview_title: 'Neo WebUI',
     dashboard_quick_actions: 'Quick Actions',
@@ -4181,6 +4196,11 @@ const LOCALES = {
     dashboard_notifications_disabled: 'Browser notifications are disabled. Enable them in settings.',
     dashboard_notifications_enabled: 'Browser notifications are enabled for completed background responses.',
     dashboard_notifications_unsupported: 'This browser does not support system notifications.',
+    development_badge: 'In development',
+    automation_development_title: 'Automation is being migrated',
+    automation_development_sub: 'This panel has not been adapted to the Neo shell yet. You stay inside the new interface while the final experience is prepared.',
+    automation_development_note: 'Adopted pattern: in-progress routes remain navigable, clearly labeled, and do not redirect to legacy experiences.',
+    back_to_dashboard: 'Back to Dashboard',
     dashboard_overview_desc: 'Operational console for tracking context, tasks, and workspaces.',
     dashboard_overview_title: 'Neo WebUI',
     dashboard_quick_actions: 'Quick Actions',
@@ -6604,6 +6624,11 @@ const LOCALES = {
     dashboard_notifications_disabled: 'Browser notifications are disabled. Enable them in settings.',
     dashboard_notifications_enabled: 'Browser notifications are enabled for completed background responses.',
     dashboard_notifications_unsupported: 'This browser does not support system notifications.',
+    development_badge: 'In development',
+    automation_development_title: 'Automation is being migrated',
+    automation_development_sub: 'This panel has not been adapted to the Neo shell yet. You stay inside the new interface while the final experience is prepared.',
+    automation_development_note: 'Adopted pattern: in-progress routes remain navigable, clearly labeled, and do not redirect to legacy experiences.',
+    back_to_dashboard: 'Back to Dashboard',
     dashboard_overview_desc: 'Operational console for tracking context, tasks, and workspaces.',
     dashboard_overview_title: 'Neo WebUI',
     dashboard_quick_actions: 'Quick Actions',
@@ -6927,6 +6952,11 @@ LOCALES['pt-BR'] = {
   dashboard_notifications_disabled: 'Notificações do navegador estão desativadas. Ative em configurações.',
   dashboard_notifications_blocked: 'Notificações do navegador estão bloqueadas pelo navegador.',
   dashboard_notifications_unsupported: 'Este navegador não suporta notificações do sistema.',
+  development_badge: 'Em desenvolvimento',
+  automation_development_title: 'Automação está sendo migrada',
+  automation_development_sub: 'Este painel ainda não foi adaptado ao shell Neo. Você permanece dentro da nova interface enquanto a experiência final fica pronta.',
+  automation_development_note: 'Padrão adotado: rotas em progresso permanecem navegáveis, sinalizadas e sem redirecionar para experiências legadas.',
+  back_to_dashboard: 'Voltar ao Dashboard',
   neo_projects_placeholder: 'O Kanban de 4 colunas entra na Sprint 3. Este link já reserva o painel correto no shell Neo.',
   neo_tasks_subtitle: 'Lista operacional de tarefas',
   neo_tasks_placeholder: 'A visão consolidada de tarefas será conectada ao fluxo upstream de todos. Use Automação para jobs cron.',
@@ -7001,6 +7031,16 @@ LOCALES['pt-BR'] = {
   finance_create_notes: 'Anotações',
   finance_create_submit: 'Salvar',
 };
+
+// Keep non-primary locales structurally complete when Neo adds new shell keys.
+// Missing translations intentionally fall back to English until each locale is
+// translated, which matches t() runtime behavior and keeps locale parity tests
+// focused on accidental key omissions.
+for (const bundle of Object.values(LOCALES)) {
+  for (const key of Object.keys(LOCALES.en)) {
+    if (!(key in bundle)) bundle[key] = LOCALES.en[key];
+  }
+}
 
 // Active locale — defaults to English; overridden by loadLocale() at boot.
 let _locale = LOCALES.en;

@@ -99,6 +99,29 @@ def test_neo_placeholder_panels_are_routable_from_sidebar():
         assert selector in STYLE_CSS
 
 
+def test_automation_uses_neo_development_escape_page():
+    line = next(l for l in PANELS_JS.splitlines() if "NEO_SHELL_PANELS" in l and "new Set" in l)
+    assert "tasks" in line, "Automation/tasks must stay inside the Neo shell"
+    assert "NEO_DEVELOPMENT_PANELS" in PANELS_JS
+    assert "NEO_DEVELOPMENT_PANELS.has(nextPanel)" in PANELS_JS
+    assert "nextPanel === 'tasks' && !NEO_DEVELOPMENT_PANELS.has(nextPanel)" in PANELS_JS
+    for marker in [
+        'id="mainTasks"',
+        'class="neo-development-panel"',
+        'data-i18n="automation_development_title"',
+        'data-i18n="automation_development_sub"',
+        'data-i18n="development_badge"',
+    ]:
+        assert marker in INDEX_HTML
+    for key in [
+        "automation_development_title",
+        "automation_development_sub",
+        "automation_development_note",
+        "development_badge",
+    ]:
+        assert key in (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+
+
 def test_health_routes_and_dashboard_polling_present():
     assert 'parsed.path == "/api/health/system"' in ROUTES_PY
     assert 'parsed.path == "/api/health/vps"' in ROUTES_PY

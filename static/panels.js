@@ -15,13 +15,14 @@ let _pendingSettingsTargetPanel = null; // destination selected while settings h
 
 // Map of panel names → i18n keys for the app titlebar label.
 const APP_TITLEBAR_KEYS = {
-  chat: 'tab_chat', dashboard: 'tab_dashboard', tasks: 'tab_tasks', skills: 'tab_skills',
+  chat: 'tab_chat', dashboard: 'tab_dashboard', tasks: 'tab_automation', skills: 'tab_skills',
   memory: 'tab_memory', workspaces: 'tab_workspaces',
   profiles: 'tab_profiles', todos: 'tab_todos', settings: 'tab_settings',
   projects: 'tab_projects', finance: 'tab_finance', agents: 'tab_agents',
 };
 
-const NEO_SHELL_PANELS = new Set(['dashboard', 'projects', 'todos', 'profiles', 'finance', 'agents', 'settings', 'skills']);
+const NEO_SHELL_PANELS = new Set(['dashboard', 'projects', 'todos', 'profiles', 'finance', 'agents', 'settings', 'skills', 'tasks']);
+const NEO_DEVELOPMENT_PANELS = new Set(['tasks']);
 
 const MAIN_VIEW_CLASS_BY_PANEL = {
   dashboard: 'showing-dashboard',
@@ -194,7 +195,7 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel !== 'skills' && typeof restoreDashboardSkills === 'function') restoreDashboardSkills();
   // Lazy-load panel data
   if (nextPanel === 'dashboard' && typeof loadDashboard === 'function') await loadDashboard();
-  if (nextPanel === 'tasks') await loadCrons();
+  if (nextPanel === 'tasks' && !NEO_DEVELOPMENT_PANELS.has(nextPanel)) await loadCrons();
   if (nextPanel === 'skills') {
     if (typeof mountDashboardSkills === 'function') mountDashboardSkills();
     await loadSkills();

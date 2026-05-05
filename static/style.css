@@ -2755,6 +2755,9 @@ main.main.showing-dashboard .main-view-content{max-width:none;height:100%;}
 .neo-sidebar-footer a{font-size:11px;font-weight:500;color:var(--muted);text-decoration:none;}
 .neo-sidebar-footer a:hover{color:var(--accent);}
 .neo-placeholder-panel{min-height:320px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;border:1px solid var(--border);border-radius:12px;background:var(--surface);text-align:center;}
+.neo-development-panel{min-height:360px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;border:1px dashed var(--border2);border-radius:12px;background:linear-gradient(180deg,color-mix(in srgb,var(--surface) 86%,var(--accent-bg)),var(--surface));text-align:center;padding:32px;}
+.neo-development-badge{display:inline-flex;align-items:center;height:24px;padding:0 9px;border:1px solid var(--accent-bg-strong);border-radius:999px;background:var(--accent-bg);color:var(--accent);font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;}
+.neo-development-note{max-width:520px;margin:2px 0 6px;color:var(--muted);font-size:12px;line-height:1.55;}
 .dashboard-chat-panel{display:flex;flex-direction:column;min-height:0;height:100%;border:1px solid var(--border);border-radius:12px;background:var(--surface);overflow:hidden;}
 .dashboard-chat-header{height:56px;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:0 18px;border-bottom:1px solid var(--border);flex-shrink:0;}
 .dashboard-chat-title{font-size:14px;font-weight:700;line-height:1.2;color:var(--text);}

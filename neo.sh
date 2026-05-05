@@ -26,6 +26,13 @@ Examples:
 EOF
 }
 
+if [[ -f "${REPO_ROOT}/.env" ]]; then
+  set -a
+  # shellcheck source=/dev/null
+  source "${REPO_ROOT}/.env"
+  set +a
+fi
+
 HOST="${HERMES_WEBUI_HOST:-127.0.0.1}"
 PORT="${HERMES_WEBUI_PORT:-8787}"
 ISOLATED=0
@@ -73,13 +80,6 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
-
-if [[ -f "${REPO_ROOT}/.env" ]]; then
-  set -a
-  # shellcheck source=/dev/null
-  source "${REPO_ROOT}/.env"
-  set +a
-fi
 
 PYTHON="${HERMES_WEBUI_PYTHON:-}"
 if [[ -z "${PYTHON}" ]]; then
