@@ -88,7 +88,7 @@ class GatewayWatcher:
         watcher.stop()
     """
 
-    POLL_INTERVAL = 5  # seconds between polls
+    POLL_INTERVAL = 30  # seconds between polls
     SUBSCRIBER_TIMEOUT = 30  # seconds before sending keepalive comment
 
     def __init__(self):
