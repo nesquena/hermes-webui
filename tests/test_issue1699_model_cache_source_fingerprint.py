@@ -6,10 +6,13 @@ provider outside WebUI, the browser can keep seeing the previous provider's
 PRIMARY badge until the cache is manually cleared or expires.
 """
 
+import copy
 import json
 import sys
 import time
 import types
+
+import pytest
 
 import api.config as config
 
@@ -22,6 +25,20 @@ def _reset_memory_cache() -> None:
             config._available_models_cache_source_fingerprint = None
         config._cache_build_in_progress = False
         config._cache_build_cv.notify_all()
+
+
+@pytest.fixture(autouse=True)
+def _restore_config_module_state():
+    """Keep temp config/auth source tests from leaking into later test modules."""
+    original_cfg = copy.deepcopy(config.cfg)
+    original_cfg_mtime = config._cfg_mtime
+    original_cache_path = config._models_cache_path
+    yield
+    _reset_memory_cache()
+    config.cfg.clear()
+    config.cfg.update(original_cfg)
+    config._cfg_mtime = original_cfg_mtime
+    config._models_cache_path = original_cache_path
 
 
 def _valid_models_cache(provider_id: str, model_id: str) -> dict:
