@@ -1849,6 +1849,47 @@ function _activeSessionIdForSidebar(){
   return null;
 }
 
+function _sessionOriginTerms(s){
+  if(!s) return '';
+  const parts=[];
+  const add=(v)=>{ if(v!==undefined&&v!==null&&String(v).trim()) parts.push(String(v).trim()); };
+  add(s.origin_label);
+  add(s.origin_detail);
+  add(s.origin_filter_text);
+  add(s.source_label);
+  add(s.session_source);
+  add(s.raw_source||s.source_tag||s.source);
+  if(Array.isArray(s.origin_tags)){
+    for(const tag of s.origin_tags) add(tag);
+  }
+  return parts.join(' ').toLowerCase();
+}
+function _sessionMatchesQuery(s,q){
+  const query=String(q||'').toLowerCase().trim();
+  if(!query) return true;
+  const title=(s&&s.title||'Untitled').toLowerCase();
+  return title.includes(query)||_sessionOriginTerms(s).includes(query);
+}
+function _sessionOriginTagsForDisplay(s){
+  if(!s||!Array.isArray(s.origin_tags)) return [];
+  const seen=new Set();
+  const out=[];
+  for(const raw of s.origin_tags){
+    const label=String(raw||'').trim();
+    if(!label||seen.has(label)) continue;
+    seen.add(label);
+    out.push(label);
+    if(out.length>=3) break;
+  }
+  return out;
+}
+function _filterBySessionOriginTag(label){
+  const searchBox=$('sessionSearch');
+  if(!searchBox) return;
+  searchBox.value=String(label||'').trim();
+  filterSessions();
+}
+
 function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=Date.now()}={}){
   if(!S.session||!S.session.session_id) return;
   const sid=S.session.session_id;
@@ -1973,8 +2014,8 @@ function renderSessionListFromCache(){
   closeSessionActionMenu();
   const q=($('sessionSearch').value||'').toLowerCase();
   const activeSidForSidebar=_activeSessionIdForSidebar();
-  const titleMatches=q?_allSessions.filter(s=>(s.title||'Untitled').toLowerCase().includes(q)):_allSessions;
-  // Merge content matches (deduped): content matches appended after title matches
+  const titleMatches=q?_allSessions.filter(s=>_sessionMatchesQuery(s,q)):_allSessions;
+  // Merge content matches (deduped): content matches appended after title/origin matches
   const titleIds=new Set(titleMatches.map(s=>s.session_id));
   const allMatched=q?[...titleMatches,..._contentSearchResults.filter(s=>!titleIds.has(s.session_id))]:titleMatches;
   // Never surface ephemeral 0-message sessions in the sidebar — they only become
@@ -2335,6 +2376,17 @@ function renderSessionListFromCache(){
         dot.title=proj.name;
         titleRow.appendChild(dot);
       }
+    }
+    const originTags=_sessionOriginTagsForDisplay(s);
+    for(const originTag of originTags){
+      const originChip=document.createElement('button');
+      originChip.type='button';
+      originChip.className='session-origin-chip';
+      originChip.textContent=originTag;
+      originChip.title=s.origin_detail||s.origin_label||('Filter by '+originTag);
+      ['pointerdown','pointerup','click'].forEach(ev=>originChip.addEventListener(ev,e=>e.stopPropagation()));
+      originChip.onclick=(e)=>{e.stopPropagation();_filterBySessionOriginTag(originTag);};
+      titleRow.appendChild(originChip);
     }
     titleRow.appendChild(ts);
     sessionText.appendChild(titleRow);

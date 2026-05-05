@@ -1220,6 +1220,139 @@ def is_cron_session(session_id: str, source_tag: str = None) -> bool:
     return sid.startswith('cron_')
 
 
+def _cron_job_id_from_session_id(session_id: str | None) -> str | None:
+    """Extract the job id from Hermes cron session ids.
+
+    Cron sessions are created as ``cron_<job_id>_<YYYYMMDD>_<HHMMSS>``.  A
+    delegated child spawned by cron may have its own non-cron id but still point
+    at a cron parent, so callers should try both the row id and parent ids.
+    """
+    sid = str(session_id or '')
+    if not sid.startswith('cron_'):
+        return None
+    parts = sid.split('_')
+    if len(parts) < 3:
+        return None
+    return parts[1] or None
+
+
+def _load_cron_jobs_by_id(hermes_home: Path) -> dict:
+    """Return cron/jobs.json indexed by job id, degrading to an empty map."""
+    try:
+        jobs_path = hermes_home / 'cron' / 'jobs.json'
+        if not jobs_path.exists():
+            return {}
+        payload = json.loads(jobs_path.read_text(encoding='utf-8'))
+        raw_jobs = payload.get('jobs', []) if isinstance(payload, dict) else payload
+        if not isinstance(raw_jobs, list):
+            return {}
+        return {
+            str(job.get('id')): job
+            for job in raw_jobs
+            if isinstance(job, dict) and job.get('id')
+        }
+    except Exception:
+        return {}
+
+
+def _normalize_origin_tag(value) -> str | None:
+    text = str(value or '').strip()
+    if not text:
+        return None
+    # Keep chips compact; the full label/detail remains searchable via
+    # origin_filter_text.
+    return text if len(text) <= 32 else text[:29].rstrip() + '...'
+
+
+def _append_unique_tag(tags: list[str], value) -> None:
+    tag = _normalize_origin_tag(value)
+    if tag and tag not in tags:
+        tags.append(tag)
+
+
+def _cron_job_for_session(row: dict, jobs_by_id: dict) -> tuple[str | None, dict | None]:
+    """Find cron job metadata for a row or its cron parent/root ids."""
+    candidate_ids = (
+        row.get('id'),
+        row.get('parent_session_id'),
+        row.get('_parent_lineage_root_id'),
+        row.get('_lineage_root_id'),
+    )
+    for candidate in candidate_ids:
+        job_id = _cron_job_id_from_session_id(candidate)
+        if job_id:
+            return job_id, jobs_by_id.get(job_id)
+    return None, None
+
+
+def _origin_metadata_for_agent_row(row: dict, jobs_by_id: dict) -> dict:
+    """Build compact sidebar origin metadata for cron/subagent rows.
+
+    The UI renders ``origin_tags`` as small clickable chips and searches
+    ``origin_filter_text`` so users can filter by cron job, skill, or parent
+    agent without those strings being baked into the visible title.
+    """
+    tags: list[str] = []
+    filter_terms: list[str] = []
+    labels: list[str] = []
+
+    is_child = row.get('relationship_type') == 'child_session'
+    source = str(row.get('source') or '').strip().lower()
+    job_id, job = _cron_job_for_session(row, jobs_by_id)
+    job_name = str((job or {}).get('name') or '').strip()
+    skills = (job or {}).get('skills') or []
+    if isinstance(skills, str):
+        skills = [skills]
+    elif not isinstance(skills, list):
+        skills = []
+
+    if is_child:
+        _append_unique_tag(tags, 'Subagent')
+        parent_title = str(row.get('parent_title') or '').strip()
+        parent_id = str(row.get('parent_session_id') or '').strip()
+        parent_label = parent_title or (parent_id[:12] + '...' if len(parent_id) > 16 else parent_id)
+        if parent_label:
+            filter_terms.append(parent_label)
+            labels.append(f'Subagent: {parent_label}')
+
+    if source == 'cron' or job_id:
+        _append_unique_tag(tags, 'Cron')
+        if job_name:
+            filter_terms.append(job_name)
+            if is_child:
+                labels.append(f'from Cron: {job_name}')
+            else:
+                labels.append(f'Cron: {job_name}')
+        for skill in skills:
+            _append_unique_tag(tags, skill)
+            filter_terms.append(str(skill))
+
+    if not tags:
+        return {}
+
+    label = ' '.join(labels).strip()
+    if is_child and (source == 'cron' or job_id) and job_name:
+        # Prefer a concise combined label for cron-spawned subagents; the
+        # parent id/title remains in origin_detail/filter text below.
+        label = f'Subagent from Cron: {job_name}'
+    detail_parts = []
+    if job_name:
+        detail_parts.append(f'Cron job: {job_name}')
+    if skills:
+        detail_parts.append('Skills: ' + ', '.join(str(s) for s in skills if s))
+    if is_child and row.get('parent_title'):
+        detail_parts.append(f'Parent agent: {row.get("parent_title")}')
+    origin_filter_text = ' '.join(
+        str(part) for part in [label, *tags, *filter_terms, *detail_parts] if part
+    )
+    return {
+        'origin_tags': tags,
+        'origin_label': label or ' · '.join(tags),
+        'origin_detail': ' · '.join(detail_parts),
+        'origin_filter_text': origin_filter_text,
+    }
+
+
 
 def import_cli_session(
     session_id: str,
@@ -1522,6 +1655,8 @@ def get_cli_sessions() -> list:
             _cron_pid_cache[0] = ensure_cron_project()
         return _cron_pid_cache[0]
 
+    cron_jobs_by_id = _load_cron_jobs_by_id(hermes_home)
+
     try:
         for row in read_importable_agent_session_rows(
             db_path,
@@ -1537,23 +1672,9 @@ def get_cli_sessions() -> list:
 
             _source = row['source'] or 'cli'
             _title = row['title']
-            if not _title and _source == 'cron' and sid.startswith('cron_'):
-                # Extract job_id from session ID (cron_{job_id}_{timestamp})
-                # and look up the human-friendly job name from jobs.json
-                parts = sid.split('_')
-                if len(parts) >= 3:
-                    _job_id = parts[1]
-                    try:
-                        _jobs_path = hermes_home / 'cron' / 'jobs.json'
-                        if _jobs_path.exists():
-                            import json as _json
-                            _jobs_data = _json.loads(_jobs_path.read_text())
-                            for _j in _jobs_data.get('jobs', []):
-                                if _j.get('id') == _job_id:
-                                    _title = _j.get('name') or _title
-                                    break
-                    except Exception:
-                        pass  # degrade gracefully
+            _job_id, _job = _cron_job_for_session(row, cron_jobs_by_id)
+            if not _title and _source == 'cron' and _job:
+                _title = _job.get('name') or _title
             # If a WebUI JSON file exists for this session (e.g. previously
             # imported or renamed in the sidebar), prefer its title over the
             # state.db title.  This fixes rename-not-persisting for CLI sessions
@@ -1565,6 +1686,7 @@ def get_cli_sessions() -> list:
             except Exception:
                 pass
             _display_title = _title or f'{_source.title()} Session'
+            _origin_meta = _origin_metadata_for_agent_row(row, cron_jobs_by_id)
             cli_sessions.append({
                 'session_id': sid,
                 'title': _display_title,
@@ -1599,6 +1721,7 @@ def get_cli_sessions() -> list:
                 '_lineage_tip_id': row.get('_lineage_tip_id'),
                 '_compression_segment_count': row.get('_compression_segment_count'),
                 'is_cli_session': True,
+                **_origin_meta,
             })
     except Exception as _cli_err:
         # DB schema changed, locked, or corrupted -- log warning so admins can diagnose.

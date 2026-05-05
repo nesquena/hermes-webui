@@ -2,6 +2,7 @@
 import json
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -14,13 +15,21 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
 
 def _run_node(source: str) -> str:
-    result = subprocess.run(
-        [NODE, "-e", source],
-        cwd=str(REPO_ROOT),
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
+    # sessions.js is large enough that embedding it in `node -e <source>` can
+    # exceed ARG_MAX on some platforms. Execute a temporary script file instead.
+    with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as handle:
+        handle.write(source)
+        script_path = Path(handle.name)
+    try:
+        result = subprocess.run(
+            [NODE, str(script_path)],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    finally:
+        script_path.unlink(missing_ok=True)
     if result.returncode != 0:
         raise RuntimeError(result.stderr)
     return result.stdout.strip()

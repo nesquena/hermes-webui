@@ -1257,10 +1257,15 @@ def _merge_cli_sidebar_metadata(ui_session: dict, cli_meta: dict) -> dict:
         "_lineage_root_id",
         "_lineage_tip_id",
         "_compression_segment_count",
+        "origin_label",
+        "origin_detail",
+        "origin_filter_text",
     ):
         value = _safe_first(cli_meta.get(key))
         if value:
             merged[key] = value
+    if isinstance(cli_meta.get("origin_tags"), list) and cli_meta.get("origin_tags"):
+        merged["origin_tags"] = cli_meta["origin_tags"]
 
     if cli_meta.get("created_at") is not None:
         merged["created_at"] = cli_meta["created_at"]
@@ -2784,7 +2789,10 @@ def handle_get(handler, parsed) -> bool:
                     if s.get("session_id") != meta.get("session_id"):
                         s["session_id"] = meta.get("session_id")
                 else:
-                    for key in ("source_tag", "raw_source", "session_source", "source_label"):
+                    for key in (
+                        "source_tag", "raw_source", "session_source", "source_label",
+                        "origin_tags", "origin_label", "origin_detail", "origin_filter_text",
+                    ):
                         if not s.get(key) and meta.get(key):
                             s[key] = meta[key]
             # Apply the same CLI visibility semantics to imported local copies so
