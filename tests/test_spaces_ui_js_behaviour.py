@@ -1534,8 +1534,10 @@ def test_spaces_ui_install_kanban_board_posts_template_and_shows_safe_open_manag
     assert "2 widgets" in out["rootHtml"]
     assert "Open kanban board" in out["rootHtml"]
     assert "Manage kanban widgets" in out["rootHtml"]
+    assert "Run kanban smoke" in out["rootHtml"]
     assert 'data-capy-action="openSpace" data-space-id="kanban-board"' in out["rootHtml"]
     assert 'data-capy-action="loadWidgets" data-space-id="kanban-board"' in out["rootHtml"]
+    assert 'data-capy-action="runDemoSmoke" data-demo="demo_kanban_board"' in out["rootHtml"]
     assert post["method"] == "POST"
     assert json.loads(post["body"]) == {"template": "kanban"}
     assert out["calls"][-1]["path"] == "api/spaces"

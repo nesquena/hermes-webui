@@ -11,9 +11,13 @@ Research targets:
 
 Last updated: 2026-05-05 on branch `feat/capy-spaces-foundation`.
 
-Current latest known completed code slice: the Notes app install completion card now includes a visible `Run notes smoke` action that immediately exercises the metadata-only notes app acceptance path from the installed demo card, while preserving safe open/manage actions and generated/source/API-auth redaction. Use `git log -1 --oneline` for the exact commit hash.
+Current latest known completed code slice: the Kanban board install completion card now includes a visible `Run kanban smoke` action that immediately exercises the metadata-only kanban board acceptance path from the installed demo card, while preserving safe open/manage actions and generated/source/API-auth redaction. Use `git log -1 --oneline` for the exact commit hash.
 
 Recent completed slices:
+
+- `feat(spaces): link kanban install card to smoke`
+  - Added RED/GREEN real-`static/spaces.js` coverage proving the Kanban board install status includes a `Run kanban smoke` action wired to the existing `demo_kanban_board` smoke route, while preserving `Open kanban board` / `Manage kanban widgets` actions and omitting hostile renderer/script/API-auth markers from DOM.
+  - Validation at completion before commit: focused RED failed because `Run kanban smoke` was absent; focused GREEN passed (`1 passed`), focused install/smoke regressions passed (`3 passed`), Spaces UI behavior + demo parity suites passed (`84 passed`), `node --check static/spaces.js`, `py_compile tests/test_spaces_ui_js_behaviour.py`, and `git diff --check` passed.
 
 - `feat(spaces): link notes install card to smoke`
   - Added RED/GREEN real-`static/spaces.js` coverage proving the Notes app install status includes a `Run notes smoke` action wired to the existing `demo_notes_app` smoke route, while preserving `Open notes app` / `Manage notes widgets` actions and omitting hostile renderer/script/API-auth markers from DOM.
