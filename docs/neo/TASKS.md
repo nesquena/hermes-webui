@@ -5,7 +5,7 @@
 > Este arquivo acompanha execução, evidências e Definition of Done; mudanças
 > contratuais devem ser feitas primeiro no PRD/Backlog/Design Spec.
 
-**Atualizado em:** 2026-05-02
+**Atualizado em:** 2026-05-05
 **Versão alvo MVP:** `neo-webui-v0.1` ao final da Sprint 6
 **Branch de desenvolvimento atual:** `develop`
 **Branch de produção:** `main`
@@ -34,7 +34,7 @@
 | Sprint 1 | Rebrand visual/textual + locale pt-BR | 11 | 10 + 1 parcial | 0 | aguardando evidências/homologação |
 | Sprint 2 | Dashboard + sidebar/topbar Neo | 11 | 11 | 11 | concluída |
 | Sprint 3 | Configurações Neo (embutidas no dashboard) | 6 | 6 | 6 | concluída |
-| Sprint 4 | Skills Neo (embutidas no dashboard) | 3 | 0 | 0 | disponível |
+| Sprint 4 | Skills Neo (embutidas no dashboard) | 3 | 3 | 3 | concluída |
 | Sprint 5 | Projetos/Kanban 4 colunas | 10 | 0 | 0 | aguardando Sprint 4 |
 | Sprint 6 | Ações rápidas + Finanças shell visual | 13 | 0 | 0 | aguardando Sprint 5 |
 | Transversal | Qualidade, testes e evidências | 5 | 2 parciais | 0 | em andamento contínuo |
@@ -42,7 +42,7 @@
 
 ### Estado atual do worktree
 
-Estado registrado em 2026-05-02:
+Estado registrado em 2026-05-05:
 
 - Branch local ativa: `develop`, rastreando `origin/develop`.
 - Sprint 1 foi incorporada em `develop` por fast-forward a partir de
@@ -71,6 +71,21 @@ Estado registrado em 2026-05-02:
   HU-03.9, HU-03.10 e HU-03.11 foram homologadas e fechadas por DoD em
   2026-05-02; Sprint 2 encerrada com 11/11 HUs concluídas. Screenshots ficam
   como evidência complementar pendente de release.
+- Sprint 4 foi reconciliada documentalmente em 2026-05-05: `skills` já está
+  em `NEO_SHELL_PANELS`, `mountDashboardSkills()`/`restoreDashboardSkills()`
+  existem em `static/dashboard.js`, o painel `#panelSkills` é movido para
+  `#mainSkills` no dashboard shell, e `tests/test_neo_dashboard_skills.py`
+  cobre o contrato estático.
+- Validação de fechamento da Sprint 4 em 2026-05-05:
+  - `node --check static/dashboard.js`
+  - `node --check static/panels.js`
+  - `node --check static/i18n.js`
+  - `.venv/bin/pytest tests/test_neo_dashboard_skills.py -q`
+  - `.venv/bin/pytest tests/test_neo_font_ui_inter.py tests/test_neo_dashboard_kpis.py tests/test_neo_skin.py tests/test_neo_branding_assets.py tests/test_neo_pt_br_toasts.py tests/test_neo_dashboard_sprint2.py tests/test_neo_skin_localstorage_persistence.py tests/test_neo_hero_greeting.py tests/test_neo_dashboard_chat_embed.py tests/test_neo_dashboard_shell_visual.py tests/test_neo_dashboard_quick_actions.py tests/test_locale_parity_pt_br.py tests/test_neo_dashboard_admin_personal.py tests/test_neo_health_runtime.py tests/test_neo_dashboard_settings.py tests/test_neo_dashboard_skills.py -q`
+    (`109 passed in 2.47s`)
+- Coleta completa em 2026-05-05: `.venv/bin/pytest tests/ --collect-only -q`
+  encontrou `3601 tests collected`; ambiente local sem `hermes-agent`, então
+  25 testes dependentes do agente seriam pulados numa execução completa.
 
 ---
 
@@ -599,54 +614,60 @@ e exibe o painel de skills embutido em layout master-detail: lista à esquerda
 
 ### HU-09.1 — mountDashboardSkills + NEO_SHELL_PANELS
 
-**Status:** disponível
+**Status:** concluída
 **Prioridade:** P0
 **Épico:** EP-09
 
 **Tasks**
 
-- [ ] Adicionar `'skills'` a `NEO_SHELL_PANELS` em `static/panels.js`.
-- [ ] Adicionar chamada `mountDashboardSkills()` no bloco `nextPanel === 'skills'` de `switchPanel()`.
-- [ ] Adicionar chamada `restoreDashboardSkills()` na guard de saída (junto a `restoreDashboardSettings`).
-- [ ] Implementar `mountDashboardSkills()` em `static/dashboard.js`: move `#panelSkills` inteiro para `#mainSkills` como primeiro filho (anchor pattern).
-- [ ] Implementar `restoreDashboardSkills()`: devolve `#panelSkills` à posição original via anchor.
-- [ ] Registrar evidência técnica em `docs/neo/evidencias/HU-09.1/`.
+- [x] Adicionar `'skills'` a `NEO_SHELL_PANELS` em `static/panels.js`.
+- [x] Adicionar chamada `mountDashboardSkills()` no bloco `nextPanel === 'skills'` de `switchPanel()`.
+- [x] Adicionar chamada `restoreDashboardSkills()` na guard de saída (junto a `restoreDashboardSettings`).
+- [x] Implementar `mountDashboardSkills()` em `static/dashboard.js`: move `#panelSkills` inteiro para `#mainSkills` como primeiro filho (anchor pattern).
+- [x] Implementar `restoreDashboardSkills()`: devolve `#panelSkills` à posição original via anchor.
+- [x] Registrar evidência técnica em `docs/neo/evidencias/HU-09.1/`.
+
+**Evidência técnica:** [`docs/neo/evidencias/HU-09.1/README.md`](./evidencias/HU-09.1/README.md)
 
 ### HU-09.2 — Layout two-column + Neo styling
 
-**Status:** disponível
+**Status:** concluída
 **Prioridade:** P0
 **Épico:** EP-09
 
 **Tasks**
 
-- [ ] CSS: `body.dashboard-shell-mode main.main.showing-skills > #mainSkills` → `display:flex; flex-direction:row; overflow:hidden; padding:0`.
-- [ ] CSS: `#panelSkills` dentro do shell → `width:260px; flex-shrink:0; border-right:1px solid var(--border); display:flex; flex-direction:column; overflow:hidden`.
-- [ ] CSS: área de detalhe (`#skillDetailBody`, `#skillDetailEmpty`, header) → `flex:1; min-width:0`.
-- [ ] Confirmar que `loadSkills()`, `renderSkills()`, `filterSkills()`, `openSkillCreate()`, edição e deleção funcionam sem alteração.
-- [ ] Registrar evidência técnica em `docs/neo/evidencias/HU-09.2/`.
+- [x] CSS: `body.dashboard-shell-mode main.main.showing-skills > #mainSkills` -> `display:flex; flex-direction:row; overflow:hidden; padding:0`.
+- [x] CSS: `#panelSkills` dentro do shell -> `width:260px; flex-shrink:0; border-right:1px solid var(--border); display:flex; flex-direction:column; overflow:hidden`.
+- [x] CSS: área de detalhe (`#skillDetailBody`, `#skillDetailEmpty`, header) -> `flex:1; min-width:0`.
+- [x] Confirmar que `loadSkills()`, `renderSkills()`, `filterSkills()`, `openSkillCreate()`, edição e deleção funcionam sem alteração.
+- [x] Registrar evidência técnica em `docs/neo/evidencias/HU-09.2/`.
+
+**Evidência técnica:** [`docs/neo/evidencias/HU-09.2/README.md`](./evidencias/HU-09.2/README.md)
 
 ### HU-09.3 — Testes automáticos
 
-**Status:** disponível
+**Status:** concluída
 **Prioridade:** P0
 **Épico:** EP-09
 
 **Tasks**
 
-- [ ] Criar `tests/test_neo_dashboard_skills.py`.
-- [ ] Testar: `'skills'` em `NEO_SHELL_PANELS` em `panels.js`.
-- [ ] Testar: `mountDashboardSkills` e `restoreDashboardSkills` definidos em `dashboard.js`.
-- [ ] Testar: CSS two-column presente em `style.css`.
-- [ ] Testar: `#panelSkills`, `#skillsList`, `#skillsSearch`, `#mainSkills` presentes em `index.html`.
-- [ ] Suite completa passa sem regressão.
+- [x] Criar `tests/test_neo_dashboard_skills.py`.
+- [x] Testar: `'skills'` em `NEO_SHELL_PANELS` em `panels.js`.
+- [x] Testar: `mountDashboardSkills` e `restoreDashboardSkills` definidos em `dashboard.js`.
+- [x] Testar: CSS two-column presente em `style.css`.
+- [x] Testar: `#panelSkills`, `#skillsList`, `#skillsSearch`, `#mainSkills` presentes em `index.html`.
+- [x] Suite Neo focada passa sem regressão; coleta completa registrada separadamente.
+
+**Evidência técnica:** [`docs/neo/evidencias/HU-09.3/README.md`](./evidencias/HU-09.3/README.md)
 
 ### Encerramento Sprint 4
 
-- [ ] HU-09.1 a HU-09.3 concluídas por DoD.
-- [ ] `pytest tests/test_neo_dashboard_skills.py -v` passa.
-- [ ] Suite completa Neo passa sem regressão.
-- [ ] Evidências em `docs/neo/evidencias/HU-09.*`.
+- [x] HU-09.1 a HU-09.3 concluídas por DoD.
+- [x] `pytest tests/test_neo_dashboard_skills.py -v` passa.
+- [x] Suite Neo focada passa sem regressão.
+- [x] Evidências em `docs/neo/evidencias/HU-09.*`.
 - [ ] Commit limpo em `develop`.
 
 ---
