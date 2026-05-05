@@ -465,7 +465,7 @@ async function _saveOnboardingDefaults(){
   if(ONBOARDING.status){
     ONBOARDING.status.settings={...(ONBOARDING.status.settings||{}),password_enabled:!!saved.auth_enabled};
   }
-  localStorage.setItem('hermes-webui-model',model);
+  try{localStorage.setItem('hermes-webui-model',model)}catch{}
   if($('modelSelect')) _applyModelToDropdown(model,$('modelSelect'));
 }
 

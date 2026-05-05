@@ -815,7 +815,7 @@ $('modelSelect').onchange=async()=>{
     : {model:selectedModel,model_provider:null};
   if(typeof closeModelDropdown==='function') closeModelDropdown();
   if(typeof _writePersistedModelState==='function') _writePersistedModelState(modelState.model,modelState.model_provider);
-  else localStorage.setItem('hermes-webui-model', modelState.model);
+  else try{localStorage.setItem('hermes-webui-model',modelState.model)}catch{}
   await api('/api/session/update',{method:'POST',body:JSON.stringify({
     session_id:S.session.session_id,
     workspace:S.session.workspace,
