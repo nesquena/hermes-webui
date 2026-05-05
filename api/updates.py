@@ -150,6 +150,25 @@ WEBUI_VERSION: str = _detect_webui_version()
 AGENT_VERSION: str = _detect_agent_version()
 
 
+def _normalize_remote_url(remote_url):
+    """Return the browser-facing repository URL for update compare links.
+
+    Git remotes may be HTTPS or SSH and may include a literal ``.git`` suffix.
+    Strip only that literal suffix — never use ``str.rstrip('.git')`` because it
+    treats the argument as a character set and can truncate ``hermes-webui`` to
+    ``hermes-webu``.
+    """
+    if not remote_url:
+        return remote_url
+    remote_url = remote_url.strip()
+    if remote_url.startswith('git@'):
+        remote_url = remote_url.replace(':', '/', 1).replace('git@', 'https://', 1)
+    remote_url = remote_url.rstrip('/')
+    if remote_url.endswith('.git'):
+        remote_url = remote_url[:-4]
+    return remote_url.rstrip('/')
+
+
 def _split_remote_ref(ref):
     """Split 'origin/branch-name' into ('origin', 'branch-name').
 
@@ -234,11 +253,7 @@ def _check_repo(path, name):
 
     # Get repo URL for "What's new?" link
     remote_url, _ = _run_git(['remote', 'get-url', 'origin'], path)
-    # Convert SSH URLs (git@github.com:org/repo.git) to HTTPS
-    if remote_url and remote_url.startswith('git@'):
-        remote_url = remote_url.replace(':', '/', 1).replace('git@', 'https://', 1)
-    if remote_url and remote_url.endswith('.git'):
-        remote_url = remote_url[:-4]
+    remote_url = _normalize_remote_url(remote_url)
 
     return {
         'name': name,

@@ -938,7 +938,12 @@ def _fallback_title_from_exchange(user_text: str, assistant_text: str) -> Option
         'need', 'needs', 'want', 'wants', 'user', 'assistant', 'could', 'would',
         'should', 'about', 'there', 'here', 'test', 'testing', 'title', 'summary',
     }
-    tokens = re.findall(r'[A-Za-z0-9][A-Za-z0-9_./+-]*', head)
+    # Unicode-aware Latin tokenization: keep the old "no leading underscore"
+    # and non-Latin placeholder behavior while allowing letters such as ä/ö/ü/ß.
+    # The previous ASCII-only pattern turned "führe" into "f" + "hre"; the short
+    # "f" was filtered and the broken "hre" became part of the title.
+    latin_word = r'A-Za-z0-9À-ÖØ-öø-ÿ'
+    tokens = re.findall(rf'[{latin_word}][{latin_word}_./+-]*', head)
     if not tokens:
         return 'Conversation topic'
 
@@ -1092,8 +1097,12 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
                     return
                 s.title = next_title
                 s.llm_title_generated = True
-                s.save(touch_updated_at=False)
                 effective_title = s.title
+            # Session.save() calls _write_session_index(), which acquires LOCK.
+            # Keep the per-session agent lock for mutation serialization, but
+            # release the global session LOCK before persisting to avoid a
+            # self-deadlock in the background title-refresh thread.
+            s.save(touch_updated_at=False)
         _put_title_status(put_event, session_id, 'refreshed', llm_status, effective_title, raw_preview)
         put_event('title', {'session_id': session_id, 'title': effective_title})
         logger.info("Adaptive title refresh: session=%s new_title=%r", session_id, effective_title)

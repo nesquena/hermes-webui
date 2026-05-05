@@ -1,5 +1,40 @@
 # Hermes Web UI -- Changelog
 
+## [v0.51.4] — 2026-05-05 — 10-PR full-sweep batch
+
+### Added
+
+- **PR #1685** by @Michaelyklam — Surface Codex spark models in `/api/models` (closes #1680). New `_read_visible_codex_cache_model_ids()` reads visible non-hidden slugs from `CODEX_HOME/models_cache.json`. The OpenAI Codex group now layers three sources: `hermes_cli.models.provider_model_ids("openai-codex")` first, visible cache slugs second, static `_PROVIDER_MODELS` fallback last. Users see newly available Codex models (including `gpt-5.3-codex-spark`) without waiting for WebUI catalog updates.
+- **PR #1644** by @bergeouss — Inline provider chip + group model count in composer model picker (closes #1425). Same-name models across providers are now visually distinguishable: per-row provider chip on every model option, count `(N)` next to group headings when more than one model matches, subtle border-top divider between provider groups. 13 LOC total — pattern-extension within existing dropdown.
+- **PR #1684** by @Michaelyklam — Clarify update network failures (closes #1321). Frontend detects raw fetch failures (`Failed to fetch`, `NetworkError`, `Load failed`) on `POST /api/updates/apply` and replaces the cryptic browser text with recovery-oriented guidance ("the WebUI may have restarted or the connection was interrupted; wait, reload, and check the server if needed"). Added an in-flight guard so repeated Update Now clicks don't send duplicate apply requests during restart-race windows.
+
+### Fixed
+
+- **PR #1689** by @Michaelyklam — Normalize named profile base homes (refs #749). Prevents the doubled `/base/profiles/foo/profiles/foo` path that occurred when both `HERMES_BASE_HOME=/base/profiles/foo` and the browser cookie `hermes_profile=foo` were set. New `_unwrap_profile_home_to_base()` helper normalizes either env-var path through the same base-home resolver, then routes active-profile and explicit per-request lookups through one shared profile-home resolver. Doesn't touch the broader profile UX umbrella.
+- **PR #1693** by @ai-ag2026 — Avoid adaptive title refresh session lock deadlock. `_run_background_title_refresh()` previously updated a session title while holding the global session `LOCK`, then called `Session.save()` — which itself updates the session index via `_write_session_index()` requiring the same non-reentrant `LOCK` (self-deadlock). Now the in-memory title mutation stays under `LOCK`, but `Session.save()` runs with the global lock released and only the per-session agent lock held. Plus Latin-Unicode-aware fallback title tokenization so `führe` no longer becomes `f` + `hre`.
+- **PR #1701** by @Michaelyklam — Normalize update banner repository URLs (closes #1691). The "What's new?" link previously pointed at `https://github.com/nesquena/hermes-webu/` instead of `hermes-webui`. Root cause: `.git` was treated as a character set (`[.git]`) instead of a literal suffix, and trailing slashes prevented suffix removal. New `_normalize_remote_url()` in `api/updates.py` centralizes the normalization with regression coverage on the edge case.
+- **PR #1703** by @Michaelyklam — Invalidate models cache on auth-store drift (closes #1699). When a user runs `hermes setup` in a terminal and the auth store switches the active provider outside WebUI, the in-memory + disk model caches could keep showing the previous provider's PRIMARY badge for up to the 24h TTL. New non-secret source fingerprint covers `config.yaml` and `auth.json` path/mtime/size; cache rebuilds when either changes outside WebUI. Disk cache schema bumped to reject older cache files cleanly.
+- **PR #1702** by @Michaelyklam — Fix workspace tree double-click rename (closes #1698). The right workspace panel advertised double-click rename on file names, but file-name single-click bubbled to the row's preview handler before the dblclick rename path could take over. Added a `nameEl.onclick` propagation guard before the existing `nameEl.ondblclick` handler in `static/ui.js` while leaving row/icon/whitespace clicks available for preview. Right-click context-menu rename remains as before.
+- **PR #1704** by @Michaelyklam — Honor markdown fence lengths (closes #1696). The `renderMd()` regex hard-coded triple-backtick closers, so 4/5-backtick markdown examples closed at inner triple fences. Updated fenced-code matching to capture `{3,}` backtick opener runs and require the same character + at least as many backticks on close (per CommonMark §4.5). Same fence-length rule applied to user-message fenced rendering and to the blockquote pre-pass fence-state walker. Empty-fence handling unchanged.
+- **PR #1706** by @Michaelyklam — Paste multiple images at once attaches all of them (closes #1697). `static/boot.js` paste handler called `Date.now()` inside a synchronous `.map()` callback over `imageItems`. All N synthesized `File` objects ended up with identical filenames (same millisecond), and `addFiles()` deduped by name and silently dropped images 2..N. Fix captures `pasteTs = Date.now()` once outside the map and adds deterministic `-1`, `-2`, … suffixes only when the paste contains multiple images. Single-image paste filename shape unchanged for compatibility. Functional Node-driven test extracts and executes the real paste handler.
+
+### Tests
+
+4477 → **4503 passing** (+26 regression tests across the 10 PRs). 0 regressions. Full suite ~135s.
+
+### Pre-release verification
+
+- Stage-301 build: 10 PRs merged with zero conflicts (each rebased clean against current master).
+- All JS files syntax-clean (`node -c static/boot.js && node -c static/ui.js`).
+- All Python files syntax-clean (py_compile on every changed file).
+- Live browser walkthrough on port 8789: model picker chip + group count rendering, all `/api/wiki/status`, `/api/logs`, `/api/provider/quota`, `/api/health/agent` endpoints respond 200, sidebar scroll fix preserved, `boot.js` PR #1706 fix verified live (pasteTs captured outside map, index parameter present, Date.now() removed from inside .map()).
+- Opus advisor pass on 9-PR variant (with #1705 in slot 10): SHIP, 7/7 verification questions resolved cleanly. Late swap to #1706 keeps identical fix shape (same `pasteTs` outside map + index suffix); Opus's verification answers carry over because the production diff is unchanged.
+
+### Notes on the 1705 → 1706 swap
+
+@Michaelyklam filed PR #1706 with a functional Node-driven regression test (extracts the real paste handler and asserts two pasted image items become two pending attachments) replacing my own #1705 which used static-source-string assertions. Same code fix, better test approach. Closed #1705 and absorbed #1706 into stage-301.
+
+
 ## [v0.51.3] — 2026-05-04 — 3-PR follow-up batch (#1671, #1673, #1676) + test-fragility fix
 
 ### Added

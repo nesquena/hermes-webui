@@ -50,6 +50,15 @@ function _setCompressionSessionLock(sid){
   window._compressionLockSid=sid||null;
 }
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function _matchBacktickFenceLine(line){
+  const m=String(line||'').match(/^[ ]{0,3}(`{3,})([^`]*)$/);
+  if(!m) return null;
+  return {fence:m[1],len:m[1].length,info:(m[2]||'').trim()};
+}
+function _isBacktickFenceClose(line,minLen){
+  const m=String(line||'').match(/^[ ]{0,3}(`{3,})[ \t]*$/);
+  return !!(m&&m[1].length>=minLen);
+}
 /**
  * Render fenced code blocks inside user messages.
  * Extracts ```…``` fences, replaces them with placeholders,
@@ -62,9 +71,12 @@ function _renderUserFencedBlocks(text){
   const stash=[];
   let s=String(text||'');
   // Extract fenced code blocks → stash, replace with null-token placeholder
-  // CommonMark line-anchored fence (fixes #1438): inner ``` inside content no longer truncates the block.
-  s=s.replace(/(^|\n)[ ]{0,3}```([a-zA-Z0-9_+-]*)\n(?:([\s\S]*?)\n)?[ ]{0,3}```(?=\n|$)/g,(_,lead,lang,code)=>{
-    lang=(lang||'').trim().toLowerCase();
+  // CommonMark §4.5 line-anchored fence: the closing run must use at least
+  // as many backticks as the opener, so inner triple-backtick fences remain content.
+  s=s.replace(/(^|\n)[ ]{0,3}(`{3,})([^\n`]*)\n(?:([\s\S]*?)\n)?[ ]{0,3}\2`*[ \t]*(?=\n|$)/g,(_,lead,_fence,info,code)=>{
+    const langInfo=(info||'').trim();
+    const langMatch=langInfo.match(/^(\w[\w+-]*)$/);
+    let lang=langMatch?(langMatch[1]||'').trim().toLowerCase():'';
     code=code||'';
     // Remove one trailing newline if present (the fence consumes its own)
     if(code.endsWith('\n')) code=code.slice(0,-1);
@@ -872,19 +884,28 @@ function renderModelDropdown(){
     }
     // Add remaining models matching filter
     let _lastGroup=null;
+    // Count models per group for heading labels (#1425)
+    const _groupCounts={};
+    for(const m of _modelData){
+      if(configuredIds.has(m.value)) continue;
+      if(m.group) _groupCounts[m.group]=(_groupCounts[m.group]||0)+1;
+    }
     for(const m of _modelData){
       if(configuredIds.has(m.value)||!matches(m)) continue;
       if(m.group&&m.group!==_lastGroup){
         const heading=document.createElement('div');
         heading.className='model-group';
-        heading.textContent=m.group;
+        const count=_groupCounts[m.group]||0;
+        heading.textContent=count>1?`${m.group} (${count})`:m.group;
         dd.appendChild(heading);
         _lastGroup=m.group;
       }
       const row=document.createElement('div');
       row.className='model-opt'+(m.value===sel.value?' active':'');
       const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
-      row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}</div><span class="model-opt-id">${m.id}</span>`;
+      // Inline provider chip on every row that has a group (#1425)
+      const providerChip=m.group?`<span class="model-opt-provider">${esc(m.group)}</span>`:'';
+      row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${m.id}</span>`;
       row.onclick=()=>selectModelFromDropdown(m.value);
       dd.appendChild(row);
     }
@@ -1736,7 +1757,8 @@ function renderMd(raw){
   s=(function _applyBlockquotes(input){
     const lines=input.split('\n');
     const out=[];
-    let inFence=false;     // inside a non-blockquote ```...``` fence
+    let inFence=false;     // inside a non-blockquote backtick fence
+    let fenceLen=0;
     let bqStart=-1;
     const flush=(end)=>{
       if(bqStart<0) return;
@@ -1759,13 +1781,15 @@ function renderMd(raw){
       const line=lines[i];
       if(inFence){
         out.push(line);
-        if(/^```/.test(line)) inFence=false;
+        if(_isBacktickFenceClose(line,fenceLen)){inFence=false;fenceLen=0;}
         continue;
       }
-      if(/^```/.test(line)){
+      const fenceOpen=_matchBacktickFenceLine(line);
+      if(fenceOpen){
         flush(i);
         out.push(line);
         inFence=true;
+        fenceLen=fenceOpen.len;
         continue;
       }
       if(/^>/.test(line)){
@@ -1809,14 +1833,16 @@ function renderMd(raw){
   const _preBlock_stash=[];
   const fence_stash=[];
   // CommonMark §4.5: opening fence must start a line (with up to 3 spaces of indent)
-  // and closing fence must also start a line. Without line anchoring, a literal ``` inside
-  // a code block (e.g. a regex pattern with ``` in a lookbehind, a script that documents
-  // fences) terminates the outer block at the wrong place, leaking content into the
-  // markdown stream where bold/italic/inline-code passes corrupt it. Fixes #1438.
-  s=s.replace(/(^|\n)[ ]{0,3}```(?:([\s\S]*?)\n)?[ ]{0,3}```(?=\n|$)/g,(_,lead,raw)=>{
-    const m=raw.match(/^(\w[\w+-]*)\n?([\s\S]*)$/);
-    const lang=m?(m[1]||'').trim().toLowerCase():'';
-    const code=m?m[2]:raw.replace(/^\n?/,'');
+  // and closing fence must start a line with the same backtick char and at least
+  // as many backticks as the opener. Without line/fence-length anchoring, a literal
+  // ``` inside a code block (e.g. a nested markdown example) terminates the outer
+  // block at the wrong place, leaking content into the markdown stream where
+  // bold/italic/inline-code passes corrupt it. Fixes #1438 and #1696.
+  s=s.replace(/(^|\n)[ ]{0,3}(`{3,})([^\n`]*)\n(?:([\s\S]*?)\n)?[ ]{0,3}\2`*[ \t]*(?=\n|$)/g,(_,lead,_fence,info,code)=>{
+    const langInfo=(info||'').trim();
+    const langMatch=langInfo.match(/^(\w[\w+-]*)$/);
+    const lang=langMatch?(langMatch[1]||'').trim().toLowerCase():'';
+    code=code||'';
     const codeLines=code.split('\n');
     const firstCodeLine=codeLines.find(line=>line.trim())||'';
     const firstMermaidLine=codeLines.map(line=>line.trim()).find(line=>line&&!line.startsWith('%%'))||'';
@@ -3202,8 +3228,30 @@ function dismissUpdate(){
   const b=$('updateBanner');if(b)b.classList.remove('visible');
   sessionStorage.setItem('hermes-update-dismissed','1');
 }
+function _isUpdateApplyNetworkError(error){
+  if(error && error.status) return false;
+  const message=(error&&error.message)||String(error||'');
+  return /Failed to fetch|NetworkError|Load failed/i.test(message);
+}
+function _formatUpdateApplyExceptionMessage(error){
+  if(_isUpdateApplyNetworkError(error)){
+    return 'Update failed: could not reach the WebUI server. It may have restarted or the connection was interrupted. Please wait a few seconds, reload the page, then check the server if it still does not come back.';
+  }
+  const message=(error&&error.message)||String(error||'unknown error');
+  return 'Update failed: '+message;
+}
 async function applyUpdates(){
+  if(window._updateApplyInFlight) return;
+  window._updateApplyInFlight=true;
   const btn=$('btnApplyUpdate');
+  const resetApplyButton=(delayMs)=>{
+    const reset=()=>{
+      window._updateApplyInFlight=false;
+      if(btn){btn.disabled=false;btn.textContent='Update Now';}
+    };
+    if(delayMs>0) setTimeout(reset,delayMs);
+    else reset();
+  };
   if(btn){btn.disabled=true;btn.textContent='Updating\u2026';}
   const errEl=$('updateError');
   if(errEl){errEl.style.display='none';errEl.textContent='';}
@@ -3219,7 +3267,7 @@ async function applyUpdates(){
       const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify({target})});
       if(!res.ok){
         _showUpdateError(target,res);
-        if(btn){btn.disabled=false;btn.textContent='Update Now';}
+        resetApplyButton(0);
         return;
       }
     }
@@ -3228,9 +3276,10 @@ async function applyUpdates(){
     sessionStorage.removeItem('hermes-update-dismissed');
     _waitForServerThenReload();
   }catch(e){
-    if(errEl){errEl.textContent='Update failed: '+e.message;errEl.style.display='block';}
-    else showToast('Update failed: '+e.message);
-    if(btn){btn.disabled=false;btn.textContent='Update Now';}
+    const msg=_formatUpdateApplyExceptionMessage(e);
+    if(errEl){errEl.textContent=msg;errEl.style.display='block';}
+    else showToast(msg);
+    resetApplyButton(_isUpdateApplyNetworkError(e)?5000:0);
   }
 }
 function _showUpdateError(target,res){
@@ -5653,6 +5702,7 @@ function _renderTreeItems(container, entries, depth){
     // Name
     const nameEl=document.createElement('span');
     nameEl.className='file-name';nameEl.textContent=item.name;nameEl.title=t('double_click_rename');
+    nameEl.onclick=(e)=>e.stopPropagation();
     nameEl.ondblclick=(e)=>{
       e.stopPropagation();
       // For directories, double-click navigates (breadcrumb view)

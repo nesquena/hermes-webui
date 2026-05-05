@@ -1585,6 +1585,7 @@ def set_hermes_default_model(model_id: str) -> dict:
 # ── TTL cache for get_available_models() ─────────────────────────────────────
 _available_models_cache: dict | None = None
 _available_models_cache_ts: float = 0.0
+_available_models_cache_source_fingerprint: dict | None = None
 _AVAILABLE_MODELS_CACHE_TTL: float = 86400.0  # 24 hours
 _available_models_cache_lock = threading.RLock()  # must be RLock: cold path refactoring moved slow work inside this lock, requiring re-entry
 _cache_build_cv = threading.Condition(_available_models_cache_lock)  # shares underlying RLock so notify_all() is safe inside with _available_models_cache_lock
@@ -1641,10 +1642,46 @@ def _current_webui_version() -> str | None:
 # guarantees that even if a future release accidentally reuses the same
 # WebUI version string (or a debug build doesn't have a version), a structural
 # change still invalidates the cache.
-_MODELS_CACHE_SCHEMA_VERSION = 2
+_MODELS_CACHE_SCHEMA_VERSION = 3
 
 
 _models_cache_path = STATE_DIR / "models_cache.json"
+
+
+def _get_auth_store_path() -> Path:
+    """Return the auth.json path for the active Hermes profile."""
+    try:
+        from api.profiles import get_active_hermes_home as _gah
+
+        return _gah() / "auth.json"
+    except ImportError:
+        return HOME / ".hermes" / "auth.json"
+
+
+def _models_cache_file_fingerprint(path: Path) -> dict:
+    """Return non-secret identity metadata for a cache dependency file.
+
+    The /api/models response depends on config.yaml (model/provider defaults)
+    and auth.json (active_provider + credential_pool).  The cache only needs
+    cheap invalidation signals here, not file contents; never include secrets.
+    """
+    fingerprint = {"path": str(Path(path).expanduser())}
+    try:
+        st = Path(path).stat()
+    except OSError:
+        fingerprint["missing"] = True
+        return fingerprint
+    fingerprint["mtime_ns"] = st.st_mtime_ns
+    fingerprint["size"] = st.st_size
+    return fingerprint
+
+
+def _models_cache_source_fingerprint() -> dict:
+    """Return the current config/auth-store fingerprint for /api/models cache."""
+    return {
+        "config_yaml": _models_cache_file_fingerprint(_get_config_path()),
+        "auth_json": _models_cache_file_fingerprint(_get_auth_store_path()),
+    }
 
 
 def _delete_models_cache_on_disk() -> None:
@@ -1717,6 +1754,15 @@ def _is_loadable_disk_cache(cache: object) -> bool:
                 cached_version, runtime_version,
             )
             return False
+    cached_sources = cache.get("_source_fingerprint")
+    runtime_sources = _models_cache_source_fingerprint()
+    if cached_sources != runtime_sources:
+        logger.debug(
+            "models cache rejected: source_fingerprint=%r vs runtime=%r",
+            cached_sources,
+            runtime_sources,
+        )
+        return False
     return True
 
 
@@ -1772,6 +1818,7 @@ def _save_models_cache_to_disk(cache: dict) -> None:
             return
         payload = {
             "_schema_version": _MODELS_CACHE_SCHEMA_VERSION,
+            "_source_fingerprint": _models_cache_source_fingerprint(),
             "active_provider": cache["active_provider"],
             "default_model": cache["default_model"],
             "configured_model_badges": cache["configured_model_badges"],
@@ -1790,15 +1837,27 @@ def _save_models_cache_to_disk(cache: dict) -> None:
 
 def _get_fresh_memory_models_cache(now: float) -> dict | None:
     """Return a valid fresh in-memory /api/models cache, or clear stale shapes."""
-    global _available_models_cache, _available_models_cache_ts
+    global _available_models_cache, _available_models_cache_ts, _available_models_cache_source_fingerprint
     if _available_models_cache is None:
         return None
     if (now - _available_models_cache_ts) >= _AVAILABLE_MODELS_CACHE_TTL:
+        return None
+    current_sources = _models_cache_source_fingerprint()
+    if _available_models_cache_source_fingerprint != current_sources:
+        logger.debug(
+            "models memory cache rejected: source_fingerprint=%r vs runtime=%r",
+            _available_models_cache_source_fingerprint,
+            current_sources,
+        )
+        _available_models_cache = None
+        _available_models_cache_ts = 0.0
+        _available_models_cache_source_fingerprint = None
         return None
     if _is_valid_models_cache(_available_models_cache):
         return copy.deepcopy(_available_models_cache)
     _available_models_cache = None
     _available_models_cache_ts = 0.0
+    _available_models_cache_source_fingerprint = None
     return None
 
 
@@ -1816,10 +1875,11 @@ def invalidate_models_cache():
     result from the disk cache because the disk hit is checked before the memory
     cache rebuild runs.
     """
-    global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts, _cache_build_cv
+    global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts, _available_models_cache_source_fingerprint, _cache_build_cv
     with _available_models_cache_lock:
         _available_models_cache = None
         _available_models_cache_ts = 0.0
+        _available_models_cache_source_fingerprint = None
         _cache_build_in_progress = False
         _cache_build_cv.notify_all()
         # Clear the credential pool cache too. The cache key is provider_id
@@ -1856,10 +1916,11 @@ def invalidate_provider_models_cache(provider_id: str):
     Args:
         provider_id: canonical provider id (e.g. 'openai', 'anthropic', 'custom:my-key')
     """
-    global _available_models_cache, _available_models_cache_ts, _CREDENTIAL_POOL_CACHE
+    global _available_models_cache, _available_models_cache_ts, _available_models_cache_source_fingerprint, _CREDENTIAL_POOL_CACHE
     with _available_models_cache_lock:
         _available_models_cache = None
         _available_models_cache_ts = 0.0
+        _available_models_cache_source_fingerprint = None
         _provider_models_invalidated_ts[provider_id] = time.time()
         # Also evict the credential pool so the next cold path re-loads it.
         # Must evict both the original key and its canonical form (load_pool
@@ -1902,6 +1963,47 @@ def _get_label_for_model(model_id: str, existing_groups: list) -> str:
     )
 
 
+def _read_visible_codex_cache_model_ids() -> list[str]:
+    """Return visible model slugs from Codex's local models_cache.json.
+
+    The agent's provider_model_ids('openai-codex') intentionally filters IDs
+    with ``supported_in_api: false``. Codex CLI still lists some of those models
+    in its picker (notably ``gpt-5.3-codex-spark`` from #1680), so the WebUI
+    merges this visible local catalog to stay in sync with Codex itself.
+    """
+    codex_home = Path(os.getenv("CODEX_HOME", "").strip() or (HOME / ".codex")).expanduser()
+    cache_path = codex_home / "models_cache.json"
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    entries = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        return []
+
+    sortable: list[tuple[int, str]] = []
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        slug = item.get("slug")
+        if not isinstance(slug, str) or not slug.strip():
+            continue
+        visibility = item.get("visibility", "")
+        if isinstance(visibility, str) and visibility.strip().lower() in ("hide", "hidden"):
+            continue
+        priority = item.get("priority")
+        rank = int(priority) if isinstance(priority, (int, float)) else 10_000
+        sortable.append((rank, slug.strip()))
+
+    sortable.sort(key=lambda item: (item[0], item[1]))
+    ordered: list[str] = []
+    for _, slug in sortable:
+        if slug not in ordered:
+            ordered.append(slug)
+    return ordered
+
+
 def get_available_models() -> dict:
     """
     Return available models grouped by provider.
@@ -1918,7 +2020,7 @@ def get_available_models() -> dict:
         'groups': [{'provider': str, 'models': [{'id': str, 'label': str}]}]
     }
     """
-    global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts, _cache_build_cv
+    global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts, _available_models_cache_source_fingerprint, _cache_build_cv
     # Config mtime check — must come before any config reads.
     # (Test #585 verifies _current_mtime appears before active_provider = None)
     try:
@@ -2053,12 +2155,7 @@ def get_available_models() -> dict:
 
         # 2. Read auth store (active_provider fallback + credential_pool inspection)
         auth_store = {}
-        try:
-            from api.profiles import get_active_hermes_home as _gah
-
-            auth_store_path = _gah() / "auth.json"
-        except ImportError:
-            auth_store_path = HOME / ".hermes" / "auth.json"
+        auth_store_path = _get_auth_store_path()
         if auth_store_path.exists():
             try:
                 import json as _j
@@ -2680,6 +2777,43 @@ def get_available_models() -> dict:
                                 "models": models,
                             }
                         )
+                elif pid == "openai-codex":
+                    # Codex account catalogs drift faster than WebUI releases
+                    # (for example gpt-5.3-codex-spark in #1680). Ask the
+                    # agent's Codex resolver first so /api/models inherits the
+                    # live Codex API / local ~/.codex cache / static fallback
+                    # chain instead of freezing the picker to WebUI's curated
+                    # _PROVIDER_MODELS snapshot.
+                    raw_models = []
+                    codex_ids = []
+                    try:
+                        from hermes_cli.models import provider_model_ids as _provider_model_ids
+
+                        codex_ids = [mid for mid in (_provider_model_ids("openai-codex") or []) if mid]
+                    except Exception:
+                        logger.warning("Failed to load OpenAI Codex models from hermes_cli")
+
+                    for mid in _read_visible_codex_cache_model_ids():
+                        if mid not in codex_ids:
+                            codex_ids.append(mid)
+
+                    raw_models = [
+                        {"id": mid, "label": _get_label_for_model(mid, [])}
+                        for mid in codex_ids
+                    ]
+
+                    if not raw_models:
+                        raw_models = copy.deepcopy(_PROVIDER_MODELS.get("openai-codex", []))
+
+                    if raw_models:
+                        models = _apply_provider_prefix(raw_models, pid, active_provider)
+                        groups.append(
+                            {
+                                "provider": provider_name,
+                                "provider_id": pid,
+                                "models": models,
+                            }
+                        )
                 elif pid == "nous":
                     # Nous Portal exposes a curated catalog (~30 models on most
                     # accounts, up to several hundred for enterprise tiers) via
@@ -2939,6 +3073,7 @@ def get_available_models() -> dict:
             reload_config()
             _available_models_cache = None
             _available_models_cache_ts = 0.0
+            _available_models_cache_source_fingerprint = None
             disk_groups = None
 
         # Serve from memory cache if fresh
@@ -2951,6 +3086,7 @@ def get_available_models() -> dict:
         if disk_groups is not None:
             _available_models_cache = disk_groups
             _available_models_cache_ts = now
+            _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
             _save_models_cache_to_disk(disk_groups)
             return copy.deepcopy(disk_groups)
 
@@ -2968,6 +3104,7 @@ def get_available_models() -> dict:
         with _cache_build_cv:
             _available_models_cache = result
             _available_models_cache_ts = time.monotonic()
+            _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
             _cache_build_in_progress = False
             _cache_build_cv.notify_all()
         _save_models_cache_to_disk(result)

@@ -145,6 +145,8 @@ function extractFunc(name) {
   }
   return src.slice(start, i);
 }
+eval(extractFunc('_matchBacktickFenceLine'));
+eval(extractFunc('_isBacktickFenceClose'));
 eval(extractFunc('renderMd'));
 
 let buf = '';

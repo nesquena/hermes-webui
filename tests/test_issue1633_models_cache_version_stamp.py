@@ -214,6 +214,7 @@ def test_load_skips_version_check_when_runtime_unknown(isolated_cache, monkeypat
     # Write a cache that's correct except has no _webui_version
     cache = {
         "_schema_version": config._MODELS_CACHE_SCHEMA_VERSION,
+        "_source_fingerprint": config._models_cache_source_fingerprint(),
         # no _webui_version
         **_shape_cache(),
     }
@@ -268,6 +269,7 @@ def test_is_loadable_disk_cache_checks_versions(with_runtime_version):
     good = {
         "_schema_version": config._MODELS_CACHE_SCHEMA_VERSION,
         "_webui_version": "v0.50.293",
+        "_source_fingerprint": config._models_cache_source_fingerprint(),
         **_shape_cache(),
     }
     assert config._is_loadable_disk_cache(good) is True

@@ -37,6 +37,13 @@ _loaded_profile_env_keys: set[str] = set()
 # process-global _active_profile.
 _tls = threading.local()
 
+def _unwrap_profile_home_to_base(home: Path) -> Path:
+    """Return the base Hermes home when *home* is already a named profile dir."""
+    if home.parent.name == 'profiles':
+        return home.parent.parent
+    return home
+
+
 def _resolve_base_hermes_home() -> Path:
     """Return the BASE ~/.hermes directory — the root that contains profiles/.
 
@@ -56,20 +63,22 @@ def _resolve_base_hermes_home() -> Path:
     reading it here would make _DEFAULT_HERMES_HOME point to that subdir,
     causing switch_profile('webui') to look for
     /home/user/.hermes/profiles/webui/profiles/webui — which doesn't exist.
+
+    HERMES_BASE_HOME normally points at the base home already, but isolated
+    single-profile WebUI deployments can provide /base/profiles/<name> there as
+    well.  Normalize both env vars through the same helper so active-profile
+    and per-request resolution share one base-root contract (#749).
     """
     # Explicit override for tests or unusual setups
     base_override = os.getenv('HERMES_BASE_HOME', '').strip()
     if base_override:
-        return Path(base_override).expanduser()
+        return _unwrap_profile_home_to_base(Path(base_override).expanduser())
 
     hermes_home = os.getenv('HERMES_HOME', '').strip()
     if hermes_home:
         p = Path(hermes_home).expanduser()
         # If HERMES_HOME points to a profiles/ subdir, walk up two levels to the base
-        if p.parent.name == 'profiles':
-            return p.parent.parent
-        # Otherwise trust it (e.g. test isolation sets HERMES_HOME to TEST_STATE_DIR)
-        return p
+        return _unwrap_profile_home_to_base(p)
 
     return Path.home() / '.hermes'
 
@@ -193,19 +202,29 @@ def clear_request_profile() -> None:
     _tls.profile = None
 
 
+def _resolve_profile_home_for_name(name: str) -> Path:
+    """Resolve a logical profile name to its Hermes home path.
+
+    Root/default aliases resolve to _DEFAULT_HERMES_HOME.  Valid named profiles
+    resolve to _DEFAULT_HERMES_HOME/profiles/<name> even when the directory has
+    not been created yet; the agent layer may create it on first use.  Invalid
+    names fall back to the base home so traversal-shaped cookie values cannot
+    influence filesystem paths.
+    """
+    if not name or _is_root_profile(name):
+        return _DEFAULT_HERMES_HOME
+    if not _PROFILE_ID_RE.fullmatch(name):
+        return _DEFAULT_HERMES_HOME
+    return _resolve_named_profile_home(name)
+
+
 def get_active_hermes_home() -> Path:
     """Return the HERMES_HOME path for the currently active profile.
 
     Uses get_active_profile_name() so per-request TLS context (issue #798)
     is respected, not just the process-level global.
     """
-    name = get_active_profile_name()
-    if _is_root_profile(name):
-        return _DEFAULT_HERMES_HOME
-    profile_dir = _DEFAULT_HERMES_HOME / 'profiles' / name
-    if profile_dir.is_dir():
-        return profile_dir
-    return _DEFAULT_HERMES_HOME
+    return _resolve_profile_home_for_name(get_active_profile_name())
 
 
 
@@ -393,12 +412,7 @@ def get_hermes_home_for_profile(name: str) -> Path:
     empty, 'default', or does not match the profile-name format (rejects path
     traversal such as '../../etc').
     """
-    if not name or _is_root_profile(name):
-        return _DEFAULT_HERMES_HOME
-    if not _PROFILE_ID_RE.fullmatch(name):
-        return _DEFAULT_HERMES_HOME
-    profile_dir = _DEFAULT_HERMES_HOME / 'profiles' / name
-    return profile_dir
+    return _resolve_profile_home_for_name(name)
 
 
 _TERMINAL_ENV_MAPPINGS = {

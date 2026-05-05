@@ -79,6 +79,31 @@ class TestUpdateChecker:
 
         assert result['repo_url'] == 'https://github.com/NousResearch/hermes-agent'
 
+    def test_repo_url_strips_dot_git_before_trailing_slashes(self, tmp_path, monkeypatch):
+        import api.updates as upd
+
+        (tmp_path / '.git').mkdir()
+
+        def fake_run(args, cwd, timeout=10):
+            if args[0] == 'fetch':
+                return '', True
+            if args[:2] == ['rev-parse', '--abbrev-ref']:
+                return 'origin/master', True
+            if args[:2] == ['rev-list', '--count']:
+                return '2', True
+            if args[0] == 'merge-base':
+                return 'abcdef1234567890', True
+            if args[:2] == ['rev-parse', '--short']:
+                return 'abcdef1', True
+            if args[:2] == ['remote', 'get-url']:
+                return 'https://github.com/nesquena/hermes-webui.git/', True
+            return '', True
+
+        monkeypatch.setattr(upd, '_run_git', fake_run)
+        result = upd._check_repo(tmp_path, 'webui')
+
+        assert result['repo_url'] == 'https://github.com/nesquena/hermes-webui'
+
 
 class TestConflictError:
     """#813 — conflict error must include flag + recovery command."""
