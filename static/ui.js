@@ -50,6 +50,15 @@ function _setCompressionSessionLock(sid){
   window._compressionLockSid=sid||null;
 }
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function _matchBacktickFenceLine(line){
+  const m=String(line||'').match(/^[ ]{0,3}(`{3,})([^`]*)$/);
+  if(!m) return null;
+  return {fence:m[1],len:m[1].length,info:(m[2]||'').trim()};
+}
+function _isBacktickFenceClose(line,minLen){
+  const m=String(line||'').match(/^[ ]{0,3}(`{3,})[ \t]*$/);
+  return !!(m&&m[1].length>=minLen);
+}
 /**
  * Render fenced code blocks inside user messages.
  * Extracts ```…``` fences, replaces them with placeholders,
@@ -62,9 +71,12 @@ function _renderUserFencedBlocks(text){
   const stash=[];
   let s=String(text||'');
   // Extract fenced code blocks → stash, replace with null-token placeholder
-  // CommonMark line-anchored fence (fixes #1438): inner ``` inside content no longer truncates the block.
-  s=s.replace(/(^|\n)[ ]{0,3}```([a-zA-Z0-9_+-]*)\n(?:([\s\S]*?)\n)?[ ]{0,3}```(?=\n|$)/g,(_,lead,lang,code)=>{
-    lang=(lang||'').trim().toLowerCase();
+  // CommonMark §4.5 line-anchored fence: the closing run must use at least
+  // as many backticks as the opener, so inner triple-backtick fences remain content.
+  s=s.replace(/(^|\n)[ ]{0,3}(`{3,})([^\n`]*)\n(?:([\s\S]*?)\n)?[ ]{0,3}\2`*[ \t]*(?=\n|$)/g,(_,lead,_fence,info,code)=>{
+    const langInfo=(info||'').trim();
+    const langMatch=langInfo.match(/^(\w[\w+-]*)$/);
+    let lang=langMatch?(langMatch[1]||'').trim().toLowerCase():'';
     code=code||'';
     // Remove one trailing newline if present (the fence consumes its own)
     if(code.endsWith('\n')) code=code.slice(0,-1);
@@ -1736,7 +1748,8 @@ function renderMd(raw){
   s=(function _applyBlockquotes(input){
     const lines=input.split('\n');
     const out=[];
-    let inFence=false;     // inside a non-blockquote ```...``` fence
+    let inFence=false;     // inside a non-blockquote backtick fence
+    let fenceLen=0;
     let bqStart=-1;
     const flush=(end)=>{
       if(bqStart<0) return;
@@ -1759,13 +1772,15 @@ function renderMd(raw){
       const line=lines[i];
       if(inFence){
         out.push(line);
-        if(/^```/.test(line)) inFence=false;
+        if(_isBacktickFenceClose(line,fenceLen)){inFence=false;fenceLen=0;}
         continue;
       }
-      if(/^```/.test(line)){
+      const fenceOpen=_matchBacktickFenceLine(line);
+      if(fenceOpen){
         flush(i);
         out.push(line);
         inFence=true;
+        fenceLen=fenceOpen.len;
         continue;
       }
       if(/^>/.test(line)){
@@ -1809,14 +1824,16 @@ function renderMd(raw){
   const _preBlock_stash=[];
   const fence_stash=[];
   // CommonMark §4.5: opening fence must start a line (with up to 3 spaces of indent)
-  // and closing fence must also start a line. Without line anchoring, a literal ``` inside
-  // a code block (e.g. a regex pattern with ``` in a lookbehind, a script that documents
-  // fences) terminates the outer block at the wrong place, leaking content into the
-  // markdown stream where bold/italic/inline-code passes corrupt it. Fixes #1438.
-  s=s.replace(/(^|\n)[ ]{0,3}```(?:([\s\S]*?)\n)?[ ]{0,3}```(?=\n|$)/g,(_,lead,raw)=>{
-    const m=raw.match(/^(\w[\w+-]*)\n?([\s\S]*)$/);
-    const lang=m?(m[1]||'').trim().toLowerCase():'';
-    const code=m?m[2]:raw.replace(/^\n?/,'');
+  // and closing fence must start a line with the same backtick char and at least
+  // as many backticks as the opener. Without line/fence-length anchoring, a literal
+  // ``` inside a code block (e.g. a nested markdown example) terminates the outer
+  // block at the wrong place, leaking content into the markdown stream where
+  // bold/italic/inline-code passes corrupt it. Fixes #1438 and #1696.
+  s=s.replace(/(^|\n)[ ]{0,3}(`{3,})([^\n`]*)\n(?:([\s\S]*?)\n)?[ ]{0,3}\2`*[ \t]*(?=\n|$)/g,(_,lead,_fence,info,code)=>{
+    const langInfo=(info||'').trim();
+    const langMatch=langInfo.match(/^(\w[\w+-]*)$/);
+    const lang=langMatch?(langMatch[1]||'').trim().toLowerCase():'';
+    code=code||'';
     const codeLines=code.split('\n');
     const firstCodeLine=codeLines.find(line=>line.trim())||'';
     const firstMermaidLine=codeLines.map(line=>line.trim()).find(line=>line&&!line.startsWith('%%'))||'';
