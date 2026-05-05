@@ -1229,9 +1229,13 @@ def import_cli_session(
     profile=None,
     created_at=None,
     updated_at=None,
+    parent_session_id=None,
 ):
-    """Create a new WebUI session populated with CLI messages.
-    Returns the Session object.
+    """Create a new WebUI session populated with CLI/agent messages.
+
+    Preserve parent_session_id from state.db so imported continuation segments
+    keep their lineage in the WebUI store and sidebar instead of reappearing as
+    detached orphan chats.
     """
     s = Session(
         session_id=session_id,
@@ -1242,6 +1246,7 @@ def import_cli_session(
         profile=profile,
         created_at=created_at,
         updated_at=updated_at,
+        parent_session_id=parent_session_id,
     )
     s.save(touch_updated_at=False)
     return s

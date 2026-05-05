@@ -1270,9 +1270,15 @@ def _merge_cli_sidebar_metadata(ui_session: dict, cli_meta: dict) -> dict:
     if cli_meta.get("last_message_at") is not None:
         merged["last_message_at"] = cli_meta["last_message_at"]
     if cli_meta.get("message_count") is not None:
-        merged["message_count"] = cli_meta["message_count"]
+        merged["message_count"] = max(
+            _numeric_count(merged.get("message_count")),
+            _numeric_count(cli_meta.get("message_count")),
+        )
     elif cli_meta.get("actual_message_count") is not None:
-        merged["message_count"] = cli_meta["actual_message_count"]
+        merged["message_count"] = max(
+            _numeric_count(merged.get("message_count")),
+            _numeric_count(cli_meta.get("actual_message_count")),
+        )
 
     if cli_meta.get("title"):
         current_title = merged.get("title")
@@ -2622,7 +2628,13 @@ def handle_get(handler, parsed) -> bool:
             _t3 = _time.monotonic()
             if load_messages:
                 if is_messaging_session and cli_messages:
-                    _all_msgs = cli_messages
+                    sidecar_messages = getattr(s, "messages", []) or []
+                    # Recovery/aggregate sidecars can intentionally contain a
+                    # longer visible conversation than the single state.db
+                    # segment for this messaging session id. Prefer the longer
+                    # sidecar so repaired WebUI history is not hidden behind the
+                    # canonical per-segment transcript.
+                    _all_msgs = sidecar_messages if len(sidecar_messages) > len(cli_messages) else cli_messages
                 else:
                     _all_msgs = s.messages
             else:
@@ -7661,6 +7673,7 @@ def _handle_session_import_cli(handler, body):
                 "raw_source": existing.raw_source or cli_meta.get("raw_source") or cli_meta.get("source_tag"),
                 "session_source": existing.session_source or cli_meta.get("session_source"),
                 "source_label": existing.source_label or cli_meta.get("source_label"),
+                "parent_session_id": existing.parent_session_id or cli_meta.get("parent_session_id"),
             }
             for attr, value in updates.items():
                 if getattr(existing, attr, None) != value:
@@ -7702,6 +7715,7 @@ def _handle_session_import_cli(handler, body):
     cli_thread_id = None
     cli_session_key = None
     cli_platform = None
+    cli_parent_session_id = None
     cli_read_only = False
     for cs in get_cli_sessions():
         if cs["session_id"] == sid:
@@ -7720,6 +7734,7 @@ def _handle_session_import_cli(handler, body):
             cli_thread_id = cs.get("thread_id")
             cli_session_key = cs.get("session_key")
             cli_platform = cs.get("platform")
+            cli_parent_session_id = cs.get("parent_session_id")
             cli_read_only = bool(cs.get("read_only"))
             break
 
@@ -7750,6 +7765,7 @@ def _handle_session_import_cli(handler, body):
             "raw_source": cli_raw_source or cli_source_tag,
             "session_source": cli_session_source,
             "source_label": cli_source_label,
+            "parent_session_id": cli_parent_session_id,
             "read_only": True,
             "messages": msgs,
             "tool_calls": [],
@@ -7764,6 +7780,7 @@ def _handle_session_import_cli(handler, body):
         profile=profile,
         created_at=created_at,
         updated_at=updated_at,
+        parent_session_id=cli_parent_session_id,
     )
     if cron_project_id:
         s.project_id = cron_project_id
